@@ -572,8 +572,9 @@ impl Request {
             .zip(0u64..)
             .map(|((path, unit, size), order)| {
                 // `preload_script_in_shared_memory` persists each file.
-                self.shared.units.persist_names(&path, &unit);
-                Arc::new(Held::preloaded(unit, path, size, order))
+                let name = self.shared.units.name(&path);
+                self.shared.units.persist_names(&unit);
+                Arc::new(Held::preloaded(unit, (name, path), size, order))
             })
             .collect();
         Some(Preloaded {

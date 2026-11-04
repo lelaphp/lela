@@ -80,16 +80,41 @@ pub(crate) type EarlyBound = Arc<[Option<crate::api::values::ClassId>]>;
 /// path, and beside it the path as written, `accel_make_persistent_key`.
 /// The file's stamp is on the [`Held`] file and not in the name, so one
 /// path holds one file.
+///
+/// A name is borrowed while it is looked up and owned once it is filed,
+/// as `accel_make_persistent_key` hands an absolute path back as it was
+/// written and copies nothing until `zend_accel_add_key` interns it: the
+/// cache's names are `UnitKey<'static>`, and a lookup by a borrowed one
+/// hashes its bytes as the owned one's are hashed (`Borrow<[u8]>`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct UnitKey(Vec<u8>);
+pub(crate) struct UnitKey<'a>(Cow<'a, [u8]>);
 
-impl UnitKey {
+impl std::borrow::Borrow<[u8]> for UnitKey<'_> {
+    fn borrow(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<'a> UnitKey<'a> {
     /// The name of the file at the full path `path`, which is also an
-    /// absolute path as written.
-    pub(crate) fn full(path: &[u8]) -> UnitKey {
-        UnitKey(path.to_vec())
+    /// absolute path as written, borrowed from `path`.
+    pub(crate) fn full(path: &'a [u8]) -> UnitKey<'a> {
+        UnitKey(Cow::Borrowed(path))
     }
 
+    /// The name's bytes.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// The name as the cache files it, its bytes copied where they were
+    /// borrowed.
+    pub(crate) fn into_owned(self) -> UnitKey<'static> {
+        UnitKey(Cow::Owned(self.0.into_owned()))
+    }
+}
+
+impl UnitKey<'static> {
     /// `accel_make_persistent_key` for a relative path as written: the
     /// path with what resolves it beside it, the working directory `cwd`,
     /// the `include_path` and the directory of the file `including` it,
@@ -99,7 +124,7 @@ impl UnitKey {
         cwd: &[u8],
         include_path: &[u8],
         including: Option<&[u8]>,
-    ) -> UnitKey {
+    ) -> UnitKey<'static> {
         let mut key = [written, cwd, include_path].join(&0);
         if let Some(file) = including {
             let dir = file
@@ -109,7 +134,7 @@ impl UnitKey {
             key.push(0);
             key.extend_from_slice(dir);
         }
-        UnitKey(key)
+        UnitKey(Cow::Owned(key))
     }
 }
 
@@ -191,6 +216,12 @@ pub(crate) struct Held {
     pub(crate) early: EarlyBound,
     /// The full path, php's `script.filename`.
     pub(crate) path: Vec<u8>,
+    /// The full path as the engine's interned string, hashed before the
+    /// file was held ([`UnitCache::name`]), which `EG(included_files)`
+    /// is handed for a hit as `persistent_compile_file` hands it
+    /// `script.filename`: no string made and no hash taken. A null where
+    /// the engine's table had no room for it.
+    name: php_heap::Zval,
     /// The file as it was compiled; none for one held under
     /// [`Validation::Never`], php's zero timestamp, which a window never
     /// validates and nothing else finds fresh.
@@ -238,11 +269,18 @@ impl Held {
     /// One of the preload's saved scripts, `preload_script_in_shared_memory`'s:
     /// held with no stamp, which nothing validates, and never served
     /// before, `last_used` zero.
-    pub(crate) fn preloaded(unit: PublishedUnit, path: Vec<u8>, size: u64, order: u64) -> Held {
+    /// Its full path is `path`, interned as `name` ([`UnitCache::name`]).
+    pub(crate) fn preloaded(
+        unit: PublishedUnit,
+        (name, path): (php_heap::Zval, Vec<u8>),
+        size: u64,
+        order: u64,
+    ) -> Held {
         Held {
             unit,
             early: Arc::new([]),
             path,
+            name,
             stamp: None,
             size,
             order,
@@ -251,6 +289,12 @@ impl Held {
             revalidate: AtomicI64::new(0),
             discarded: AtomicBool::new(false),
         }
+    }
+
+    /// The engine's interned string for its full path, `script.filename`,
+    /// its hash cached; none where the engine's table had no room for it.
+    pub(crate) fn name(&self) -> Option<php_heap::Str> {
+        self.name.as_str()
     }
 
     /// What a hit under `validation` at the request time `now` is due.
@@ -374,7 +418,7 @@ fn table_keys(unit: &Unit) -> Vec<Vec<u8>> {
 /// file's early-bound classes are rows of its epoch's arena, so a request
 /// finds only the files its own epoch held.
 pub(crate) struct Files {
-    held: Cache<UnitKey, Held>,
+    held: Cache<UnitKey<'static>, Held>,
     /// How many names the files may be held under.
     capacity: usize,
     /// `ZCSG(hits)`: files served from the cache.
@@ -490,7 +534,7 @@ pub(crate) enum Levels<'a> {
 pub(crate) struct Asked<'a> {
     pub(crate) path: &'a [u8],
     pub(crate) source: Option<&'a [u8]>,
-    pub(crate) written: Option<UnitKey>,
+    pub(crate) written: Option<UnitKey<'a>>,
     pub(crate) opened: bool,
     pub(crate) validation: Validation,
     pub(crate) protection: u32,
@@ -904,47 +948,56 @@ impl UnitCache {
     /// written: a saved file of the preload first, as php's hash holds
     /// them; none for a discarded one, which php's lookups pass over
     /// (`!persistent_script->corrupted`).
-    pub(crate) fn find(&self, files: &Files, key: &UnitKey) -> Option<Arc<Held>> {
+    pub(crate) fn find(&self, files: &Files, key: &UnitKey<'_>) -> Option<Arc<Held>> {
         if let Some(held) = self
             .preloaded()
-            .and_then(|preloaded| preloaded.script(&key.0))
+            .and_then(|preloaded| preloaded.script(key.bytes()))
         {
             return Some(Arc::clone(held));
         }
-        files.held.get(key).filter(|held| !held.discarded())
+        files.held.get(key.bytes()).filter(|held| !held.discarded())
     }
 
     /// `zend_accel_add_key`: `key` filed beside the names `held` is held
     /// under in `files`, where it names nothing yet, a discarded copy
     /// being something.
-    pub(crate) fn add_key(&self, files: &Files, key: UnitKey, held: &Arc<Held>) {
-        if files.held.get(&key).is_none() {
+    pub(crate) fn add_key(&self, files: &Files, key: UnitKey<'_>, held: &Arc<Held>) {
+        if files.held.get(key.bytes()).is_none() {
             self.update_key(files, key, held);
         }
     }
 
     /// `zend_accel_hash_update` of `key` to `held`'s entry: in place of
     /// what it names, or filed anew where the names are not full.
-    fn update_key(&self, files: &Files, key: UnitKey, held: &Arc<Held>) {
-        match files.held.get(&key) {
+    fn update_key(&self, files: &Files, key: UnitKey<'_>, held: &Arc<Held>) {
+        match files.held.get(key.bytes()) {
             Some(found) if Arc::ptr_eq(&found, held) => return,
             None if self.hash_full(files) => return,
             _ => {}
         }
         // `accel_new_interned_key`: the name as written is one of the
         // buffer's strings from here.
-        php_heap::Intern::intern(&mut *self.interned.strings(), &key.0).ok();
-        files.held.alias(key, held);
+        php_heap::Intern::intern(&mut *self.interned.strings(), key.bytes()).ok();
+        files.held.alias(key.into_owned(), held);
+    }
+
+    /// The first name `zend_accel_script_persist` interns of a unit it
+    /// persists: its `filename`, the full path `path`, hashed as the
+    /// engine's table takes it, which the [`Held`] file keeps; a null
+    /// where the table has no room for it. A unit served without being
+    /// held is persisted by nothing, and names none.
+    pub(crate) fn name(&self, path: &[u8]) -> php_heap::Zval {
+        let mut strings = self.interned.strings();
+        php_heap::Intern::intern(&mut *strings, path)
+            .map_or(php_heap::Zval::null(), php_heap::Zval::string)
     }
 
     /// The names `zend_accel_script_persist` interns beside the strings
-    /// of a unit it persists, once the unit is held under `path`: its
-    /// `filename`, the full path, and the keys of its `function_table`
-    /// and `class_table` ([`table_keys`]). A unit served without being
-    /// held is persisted by nothing, and names none.
-    pub(crate) fn persist_names(&self, path: &[u8], unit: &Unit) {
+    /// of a unit it persists, after its filename ([`UnitCache::name`]):
+    /// the keys of its `function_table` and `class_table`
+    /// ([`table_keys`]).
+    pub(crate) fn persist_names(&self, unit: &Unit) {
         let mut strings = self.interned.strings();
-        php_heap::Intern::intern(&mut *strings, path).ok();
         for key in table_keys(unit) {
             php_heap::Intern::intern(&mut *strings, &key).ok();
         }
@@ -1086,8 +1139,12 @@ impl UnitCache {
         // path for the file cache to read the file by, as
         // `do_validate_timestamps` gives its resolved path back
         // (`Z/ext/opcache/ZendAccelerator.c:1157-1160`, `zend_file_cache.c:1901`).
-        let keyed = (written.as_ref())
-            .is_some_and(|key| files.held.get(key).is_some_and(|held| held.discarded()));
+        let keyed = (written.as_ref()).is_some_and(|key| {
+            files
+                .held
+                .get(key.bytes())
+                .is_some_and(|held| held.discarded())
+        });
         if memory
             && !keyed
             && let Some(hit) = self.held_hit(caller, files, path, written.as_ref(), validation, now)
@@ -1207,7 +1264,7 @@ impl UnitCache {
         };
         // Not a `phar://` name, which may hold an alias the archive
         // keeps for the request alone (`ZendAccelerator.c:1669-1672`).
-        if let Some(written) = written.filter(|key| !key.0.starts_with(b"phar://")) {
+        if let Some(written) = written.filter(|key| !key.bytes().starts_with(b"phar://")) {
             self.update_key(files, written, &held);
         }
         answered_by(&held, Filed::Held)
@@ -1245,7 +1302,7 @@ impl UnitCache {
         &self,
         files: &Files,
         held: &Arc<Held>,
-        written: Option<UnitKey>,
+        written: Option<UnitKey<'_>>,
         validation: Validation,
         observed: Option<Stamp>,
         now: i64,
@@ -1270,7 +1327,7 @@ impl UnitCache {
         stat: &mut dyn Stat,
         files: &Files,
         path: &[u8],
-        written: Option<&UnitKey>,
+        written: Option<&UnitKey<'_>>,
         validation: Validation,
         now: i64,
     ) -> Option<Arc<Held>> {
@@ -1286,10 +1343,7 @@ impl UnitCache {
             }
             return Some(Arc::clone(held));
         }
-        let stale = files
-            .held
-            .get(&UnitKey::full(path))
-            .filter(|held| !held.discarded())?;
+        let stale = files.held.get(path).filter(|held| !held.discarded())?;
         if stale.validated(validation, now, stat) {
             files.hit(&stale, validation, now);
             if let Some(written) = written {
@@ -1329,10 +1383,15 @@ impl UnitCache {
             Validation::Window { seconds } => now.saturating_add(i64::from(seconds)),
             Validation::Never | Validation::EveryHit => 0,
         };
+        // Interned before the file is held, so its string is hashed before
+        // any request can read it; a copy another request held meanwhile
+        // had it interned by that request already.
+        let name = self.name(path);
         let mut built = false;
-        let held = files
-            .held
-            .insert_over(UnitKey::full(path), Held::discarded, |replaced| {
+        let held = files.held.insert_over(
+            UnitKey::full(path).into_owned(),
+            Held::discarded,
+            |replaced| {
                 built = true;
                 // `zend_accel_hash_update` puts the file in a discarded copy's
                 // entry, where that stands in its bucket's chain.
@@ -1341,6 +1400,7 @@ impl UnitCache {
                     unit,
                     early,
                     path: path.to_vec(),
+                    name,
                     stamp,
                     size,
                     order: replaced.map_or_else(next, |was| was.order),
@@ -1349,13 +1409,14 @@ impl UnitCache {
                     revalidate: AtomicI64::new(revalidate),
                     discarded: AtomicBool::new(false),
                 }
-            });
+            },
+        );
         if !built {
             return Holding::Found(held);
         }
         files.used.fetch_add(size, Ordering::Relaxed);
         files.funcs.publish(&held.unit, laid);
-        self.persist_names(path, &held.unit);
+        self.persist_names(&held.unit);
         Holding::Built(held)
     }
 
@@ -1367,15 +1428,15 @@ impl UnitCache {
     pub(crate) fn discard(
         &self,
         files: &Files,
-        key: &UnitKey,
+        key: &UnitKey<'_>,
         force: bool,
         stat: &mut dyn Stat,
     ) -> bool {
-        let Some(held) = files.held.get(key).filter(|held| !held.discarded()) else {
+        let Some(held) = files.held.get(key.bytes()).filter(|held| !held.discarded()) else {
             return false;
         };
         let changed = force
-            || key.0 != held.path
+            || key.bytes() != held.path
             || held.stamp.is_none_or(|was| {
                 stat.stamp(&held.path).map(Stamp::seconds) != Some(was.seconds())
             });
@@ -1508,7 +1569,7 @@ impl UnitCache {
                 .is_none_or(|preloaded| preloaded.script(&held.path).is_none())
         });
         let mut keys = u64::try_from(held.len()).unwrap_or(u64::MAX);
-        held.retain(|(key, held)| key.0 == held.path);
+        held.retain(|(key, held)| key.bytes() == held.path);
         held.sort_by_key(|(_, held)| held.order);
         let listed = |held: &Held| CachedFile {
             path: held.path.clone(),
