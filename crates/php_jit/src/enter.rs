@@ -830,11 +830,23 @@ kernels! {
 /// so it is refused as the internal error it is.
 ///
 /// The frame is found by its room ([`found`]) and stood at `at` by the
-/// step itself.
+/// step itself, and a step that went on in the frame it served, the
+/// common one, is answered from the room compiled code handed and the
+/// op array it named, with no frame looked for again (#4087): a frame
+/// never moves while it stands on the stack, and a handler that goes on
+/// in its frame neither pops it nor puts another at its place.
 fn step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
-    let (frame, _) = found(req, on.room)?;
+    let (frame, room) = found(req, on.room)?;
     let (held, epoch) = held(on, func)?;
     match tier::step_held(req, frame, on.at, held, epoch)? {
+        Stepped::Same(at) if at == frame => {
+            debug_assert_eq!(
+                tier::room(req, frame),
+                Some(room),
+                "a step that went on in its frame left the frame at the room compiled code handed"
+            );
+            Ok(stood_in(req, (frame, room), Some(func), on.holding))
+        }
         Stepped::Done if req.unwinding() => Err(internal(
             "a step that ended the serving a trace runs in left it unwinding",
         )),
