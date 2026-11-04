@@ -77,8 +77,8 @@ fn a_file_the_cache_holds_nowhere_moves_the_engine_s_map_pointer_count_by_nothin
 /// holds one with `opcache.validate_timestamps=0`.
 fn preloading(script: &Path) -> Extension {
     let entry = php_unit::decl::IniDecl {
-        name: Name(b"t.preload"[..].into()),
-        default: Some(b""[..].into()),
+        name: b"t.preload",
+        default: Some(b""),
         user: false,
         per_dir: false,
         system: true,
@@ -186,8 +186,8 @@ fn a_restart_keeps_the_preloads_rows_at_their_numbers() {
 /// and names a file cache from an ini entry of its own.
 fn file_caching(dir: &Path) -> Extension {
     let entry = php_unit::decl::IniDecl {
-        name: Name(b"t.file_cache"[..].into()),
-        default: Some(b""[..].into()),
+        name: b"t.file_cache",
+        default: Some(b""),
         user: false,
         per_dir: false,
         system: true,
@@ -304,8 +304,8 @@ fn the_dump_before_the_optimizer_is_the_op_arrays_under_the_ini_bit_and_nothing_
     // The entry is opcache's, and php has none without it.
     let opcache = || {
         let entry = php_unit::decl::IniDecl {
-            name: Name(b"opcache.opt_debug_level"[..].into()),
-            default: Some(b"0"[..].into()),
+            name: b"opcache.opt_debug_level",
+            default: Some(b"0"),
             user: false,
             per_dir: false,
             system: true,

@@ -430,8 +430,8 @@ impl ObjectHandlers for Incomplete {
 /// ```
 pub(crate) fn ini() -> Vec<php_ext::decl::IniDecl> {
     vec![php_ext::decl::IniDecl {
-        name: php_ext::decl::Name(b"unserialize_max_depth".as_slice().into()),
-        default: Some(b"4096".as_slice().into()),
+        name: b"unserialize_max_depth",
+        default: Some(b"4096"),
         user: true,
         per_dir: true,
         system: true,

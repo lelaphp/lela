@@ -53,7 +53,7 @@ mod write;
 mod zip;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IniStage};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{InfoRow, Ini, Request, Streams as _};
 
@@ -101,9 +101,9 @@ const CACHE_LIST: &str = "phar.cache_list";
 /// bool(false)
 /// ```
 pub fn extension() -> Extension {
-    let ini = |name: &str, default: &str, user: bool| IniDecl {
-        name: Name(name.as_bytes().into()),
-        default: Some(default.as_bytes().into()),
+    let ini = |name: &'static str, default: &'static str, user: bool| IniDecl {
+        name: name.as_bytes(),
+        default: Some(default.as_bytes()),
         user,
         per_dir: user,
         system: true,
@@ -154,7 +154,7 @@ fn master(req: &Request, name: &str) -> bool {
     req.ini()
         .extension_ini(id)
         .into_iter()
-        .find(|e| e.decl.name.0.as_ref() == name.as_bytes())
+        .find(|e| e.decl.name == name.as_bytes())
         .is_none_or(|e| Ini::parse_bool(e.master.as_deref().unwrap_or_default()))
 }
 
@@ -296,9 +296,7 @@ fn info(req: &mut Request) {
     let rows: Vec<[String; 3]> = [READONLY, REQUIRE_HASH, CACHE_LIST]
         .iter()
         .map(|name| {
-            let entry = entries
-                .iter()
-                .find(|e| e.decl.name.0.as_ref() == name.as_bytes());
+            let entry = entries.iter().find(|e| e.decl.name == name.as_bytes());
             let local = entry.and_then(|e| e.value.as_deref()).unwrap_or_default();
             let master = entry.and_then(|e| e.master.as_deref()).unwrap_or_default();
             [(*name).to_string(), shown(name, local), shown(name, master)]

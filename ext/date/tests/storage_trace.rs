@@ -8,7 +8,7 @@ use std::any::Any;
 use std::fmt::Write as _;
 
 use php_ext::abi::{ExtensionBuilder, IniStage};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{Allocation, AllocationObserverId, Ini, ObserveAllocations, Request};
 use php_ext::test::{Capture, Engine};
@@ -93,8 +93,8 @@ fn receipt_of(source: &str) -> String {
     let observer = ExtensionBuilder::default()
         .request_state::<Trace>()
         .ini(vec![IniDecl {
-            name: Name(SWITCH.into()),
-            default: Some(b"0".as_slice().into()),
+            name: SWITCH,
+            default: Some(b"0"),
             user: true,
             per_dir: false,
             system: false,

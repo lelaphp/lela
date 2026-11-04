@@ -7,7 +7,7 @@
 
 use php_ext::abi::{ExtensionBuilder, FileCache, IniStage, LongHandler};
 use php_ext::coerce::atoi;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Thrown, warning};
 use php_ext::request::{Ini, Request, TierStatus, Zone};
 
@@ -97,7 +97,7 @@ const MAX_TRACE_LENGTH: i64 = 1024;
 
 /// The entries in registration order, which is the order `php --re`
 /// and `ini_get_all()` list them.
-pub(crate) const ENTRIES: [Entry; 54] = [
+pub(crate) static ENTRIES: [Entry; 54] = [
     entry("opcache.enable", "1", ALL, Kind::Enable),
     entry("opcache.use_cwd", "1", SYSTEM, Kind::Bool),
     entry("opcache.validate_timestamps", "1", ALL, Kind::Bool),
@@ -199,8 +199,8 @@ pub(crate) fn declared() -> Vec<IniDecl> {
     ENTRIES
         .iter()
         .map(|entry| IniDecl {
-            name: Name(entry.name.as_bytes().into()),
-            default: entry.default.map(|default| default.as_bytes().into()),
+            name: entry.name.as_bytes(),
+            default: entry.default.map(str::as_bytes),
             user: entry.all,
             per_dir: entry.all,
             system: true,
@@ -793,7 +793,7 @@ fn master(req: &mut Request, name: &str) -> Vec<u8> {
     req.ini()
         .extension_ini(me)
         .into_iter()
-        .find(|held| held.decl.name.0.as_ref() == name.as_bytes())
+        .find(|held| held.decl.name == name.as_bytes())
         .and_then(|held| held.master)
         .map(<[u8]>::into_vec)
         .unwrap_or_default()
@@ -933,7 +933,26 @@ fn shape(at: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::shape;
+    use super::{ENTRIES, declared, shape};
+
+    /// Each declaration names its entry and holds its default by the
+    /// bytes [`ENTRIES`] spells them with, as php's `zend_ini_entry_def`
+    /// points at its `const char *`s: none is a copy, and the engine's
+    /// table borrows them as they stand.
+    #[test]
+    fn a_declaration_is_the_bytes_its_entry_spells() {
+        let declared = declared();
+        assert_eq!(declared.len(), ENTRIES.len());
+        for (decl, entry) in declared.iter().zip(&ENTRIES) {
+            assert_eq!(decl.name.as_ptr(), entry.name.as_ptr(), "{}", entry.name);
+            assert_eq!(
+                decl.default.map(<[u8]>::as_ptr),
+                entry.default.map(str::as_ptr),
+                "{}",
+                entry.name
+            );
+        }
+    }
 
     #[test]
     fn asctime_s_shape_is_c_s() {

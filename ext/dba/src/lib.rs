@@ -43,7 +43,7 @@ mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Lent, ObjectHandlers, Pool, Refusals};
 use php_ext::attr::php_class;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, TypeTag, Value};
@@ -93,8 +93,8 @@ pub fn extension() -> Extension {
         .deactivate(deactivate)
         .engine_end(engine_end)
         .ini(vec![IniDecl {
-            name: Name(DEFAULT_HANDLER.into()),
-            default: Some(b"flatfile".as_slice().into()),
+            name: DEFAULT_HANDLER,
+            default: Some(b"flatfile"),
             user: true,
             per_dir: true,
             system: true,

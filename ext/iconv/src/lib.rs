@@ -31,7 +31,7 @@ mod mime;
 use ffi::{Cd, Errno};
 use php_ext::abi::{Extension, ExtensionBuilder, IniStage, OrFalse, Union};
 use php_ext::attr::{php_const, php_function};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::{
     BufferHandler, ContentType, HandlerCall, HandlerStatus, Request, Streams as _,
@@ -96,8 +96,12 @@ impl Kind {
     }
 
     /// The `iconv.*` entry.
-    fn entry(self) -> String {
-        format!("iconv.{}", self.name())
+    fn entry(self) -> &'static str {
+        match self {
+            Kind::Input => "iconv.input_encoding",
+            Kind::Output => "iconv.output_encoding",
+            Kind::Internal => "iconv.internal_encoding",
+        }
     }
 
     /// `$type`, as php's `strcasecmp` reads it.
@@ -149,8 +153,8 @@ impl Kind {
 /// ```
 pub fn extension() -> Extension {
     let ini = |kind: Kind| IniDecl {
-        name: Name(kind.entry().into_bytes().into()),
-        default: Some(Box::new([])),
+        name: kind.entry().as_bytes(),
+        default: Some(b""),
         user: true,
         per_dir: true,
         system: true,
@@ -220,9 +224,8 @@ fn info(req: &mut Request) {
         &["iconv implementation", ffi::linked::IMPL],
         &["iconv library version", &version],
     ]);
-    let names = Kind::ALL.map(Kind::entry);
     req.ini_mut()
-        .info_ini_entries(&names.each_ref().map(String::as_bytes));
+        .info_ini_entries(&Kind::ALL.map(|kind| kind.entry().as_bytes()));
 }
 
 /// `OnUpdateInputEncoding`, `OnUpdateOutputEncoding` and

@@ -45,7 +45,7 @@ mod weakmap;
 use std::io::Write as _;
 
 use php_ext::abi::{Extension, ExtensionBuilder, LongHandler};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Emalloc, Owner, PhpObject, ResourceType, Value};
@@ -153,8 +153,8 @@ impl Entry {
             Modifiable::User => (true, false, false),
         };
         IniDecl {
-            name: Name(self.name.into()),
-            default: Some(self.default.into()),
+            name: self.name,
+            default: Some(self.default),
             user,
             per_dir,
             system,
@@ -375,7 +375,7 @@ fn info(req: &mut Request) {
         .filter_map(|held| {
             let entry = tables
                 .clone()
-                .find(|entry| *entry.name == *held.decl.name.0)?;
+                .find(|entry| *entry.name == *held.decl.name)?;
             let local = held.value.as_deref().unwrap_or_default();
             let master = held.master.as_deref().unwrap_or_default();
             let name = String::from_utf8_lossy(entry.name).into_owned();

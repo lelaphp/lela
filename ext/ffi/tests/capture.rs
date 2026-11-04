@@ -73,7 +73,7 @@ fn a_failed_preload_refuses_startup() {
 #[test]
 fn ffi_load_refuses_in_the_preload_served_as_the_preload_user() {
     use php_ext::abi::{ExtensionBuilder, PostStartup, PreloadThread};
-    use php_ext::decl::{IniDecl, Name};
+    use php_ext::decl::IniDecl;
     let files = Files::new(
         "ffi-preload-as-user",
         &[(
@@ -84,8 +84,8 @@ fn ffi_load_refuses_in_the_preload_served_as_the_preload_user() {
     let script = files.path().join("preload.php");
     let preloading = ExtensionBuilder::default()
         .ini(vec![IniDecl {
-            name: Name(b"t.preload"[..].into()),
-            default: Some(b""[..].into()),
+            name: b"t.preload",
+            default: Some(b""),
             user: false,
             per_dir: false,
             system: true,

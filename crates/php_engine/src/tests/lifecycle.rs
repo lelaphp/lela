@@ -622,9 +622,9 @@ fn records_startup_ini(start: &Start) -> Result<(), Refusal> {
 /// second with an `on_modify` that takes every value, whose engine start
 /// records what its startup ini holds for each.
 fn starts_from_ini() -> Extension {
-    let entry = |name: &str| php_unit::decl::IniDecl {
-        name: php_unit::decl::Name(name.as_bytes().into()),
-        default: Some(b"default"[..].into()),
+    let entry = |name: &'static str| php_unit::decl::IniDecl {
+        name: name.as_bytes(),
+        default: Some(b"default"),
         user: false,
         per_dir: false,
         system: true,

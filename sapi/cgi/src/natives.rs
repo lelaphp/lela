@@ -11,7 +11,7 @@
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_function;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Owner, PhpArray, PhpString};
@@ -73,8 +73,8 @@ impl Row {
     /// The row as the engine declares it.
     fn decl(&self) -> IniDecl {
         IniDecl {
-            name: Name(self.name.as_bytes().into()),
-            default: self.default.map(|default| default.as_bytes().into()),
+            name: self.name.as_bytes(),
+            default: self.default.map(str::as_bytes),
             user: self.user,
             per_dir: self.user,
             system: true,
@@ -126,7 +126,7 @@ fn info(req: &mut Request) {
         .filter_map(|row| {
             let entry = entries
                 .iter()
-                .find(|entry| entry.decl.name.0.as_ref() == row.name.as_bytes())?;
+                .find(|entry| entry.decl.name == row.name.as_bytes())?;
             Some([
                 row.name.to_owned(),
                 shown(row, entry.value.as_deref()),

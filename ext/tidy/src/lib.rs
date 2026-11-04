@@ -33,7 +33,7 @@ mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_const;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::Emalloc;
@@ -406,15 +406,15 @@ pub fn extension() -> Extension {
     let builder = ExtensionBuilder::default()
         .ini(vec![
             IniDecl {
-                name: Name(DEFAULT_CONFIG.as_bytes().into()),
-                default: Some(b"".as_slice().into()),
+                name: DEFAULT_CONFIG.as_bytes(),
+                default: Some(b""),
                 user: false,
                 per_dir: false,
                 system: true,
             },
             IniDecl {
-                name: Name(CLEAN_OUTPUT.as_bytes().into()),
-                default: Some(b"0".as_slice().into()),
+                name: CLEAN_OUTPUT.as_bytes(),
+                default: Some(b"0"),
                 user: true,
                 per_dir: false,
                 system: false,

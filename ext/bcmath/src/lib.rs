@@ -29,7 +29,7 @@ mod throwables;
 use php_ext::abi::{Extension, ExtensionBuilder, Instance};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::read_prop;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Thrown, argument_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
@@ -79,8 +79,8 @@ pub fn extension() -> Extension {
         .request_state::<number::Shared>()
         .engine_state(Throwables::start)
         .ini(vec![IniDecl {
-            name: Name(SCALE.into()),
-            default: Some(b"0".as_slice().into()),
+            name: SCALE,
+            default: Some(b"0"),
             user: true,
             per_dir: true,
             system: true,

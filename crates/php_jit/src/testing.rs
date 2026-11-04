@@ -12,7 +12,7 @@ use php_engine::test::{Capture, Engine, Served};
 use php_engine::tier::{
     self, Extension, ExtensionBuilder, Flow, FrameRef, Request, Site, Started, StartupIni, Tier,
 };
-use php_unit::decl::{IniDecl, Name};
+use php_unit::decl::IniDecl;
 
 use crate::policy::{Policy, Setting};
 
@@ -157,11 +157,11 @@ pub(crate) fn stdout(served: &Served) -> String {
 /// System ini entries a test tier declares, each unset by default, so a
 /// value the engine's builder sets reaches its engine start; `opcache.jit`
 /// and `opcache.jit_debug` a request may set too, as php's `PHP_INI_ALL`.
-pub(crate) fn declared(names: &[&str]) -> Vec<IniDecl> {
+pub(crate) fn declared(names: &[&'static str]) -> Vec<IniDecl> {
     names
         .iter()
         .map(|name| IniDecl {
-            name: Name::from(*name),
+            name: name.as_bytes(),
             default: None,
             user: matches!(*name, "opcache.jit" | "opcache.jit_debug"),
             per_dir: false,

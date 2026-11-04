@@ -45,7 +45,7 @@ mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::request::{Ini, Request};
 use php_ext_pdo_sqlite::ffi;
 
@@ -96,8 +96,8 @@ pub fn extension() -> Extension {
         .ini(
             INI.iter()
                 .map(|(name, default, user)| IniDecl {
-                    name: Name(name.as_bytes().into()),
-                    default: default.map(|d| d.as_bytes().into()),
+                    name: name.as_bytes(),
+                    default: default.map(str::as_bytes),
                     user: *user,
                     per_dir: false,
                     system: !*user,
@@ -152,7 +152,7 @@ fn sqlite3_info(req: &mut Request) {
         .filter_map(|(name, _, _)| {
             let entry = entries
                 .iter()
-                .find(|entry| entry.decl.name.0.as_ref() == name.as_bytes())?;
+                .find(|entry| entry.decl.name == name.as_bytes())?;
             Some([
                 (*name).to_owned(),
                 shown(name, entry.value.as_deref().unwrap_or_default()),

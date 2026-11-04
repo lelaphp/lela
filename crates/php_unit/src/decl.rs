@@ -1496,10 +1496,16 @@ pub struct ConstDecl {
 /// default is `None` where php registers the entry with no value at all,
 /// `NULL`, which `ini_get()` reads as the empty string and an entry's
 /// `on_modify` is handed apart from it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// php's `zend_ini_entry_def`, which an extension spells as data in its
+/// binary (`PHP_INI_BEGIN()`) and whose `const char *`s
+/// `zend_register_ini_entries_ex` points at: the name and the default
+/// are the bytes the extension's source spells, and the engine's table
+/// borrows them and copies none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IniDecl {
-    pub name: Name,
-    pub default: Option<Box<[u8]>>,
+    pub name: &'static [u8],
+    pub default: Option<&'static [u8]>,
     pub user: bool,
     pub per_dir: bool,
     pub system: bool,

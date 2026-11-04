@@ -45,7 +45,7 @@ pub use regex::Regex;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Union};
 use php_ext::attr::{php_const, php_function};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString};
@@ -348,8 +348,8 @@ pub fn extension() -> Extension {
         .ini(
             INI.iter()
                 .map(|(name, default)| IniDecl {
-                    name: Name(name.as_bytes().into()),
-                    default: Some(default.as_bytes().into()),
+                    name: name.as_bytes(),
+                    default: Some(default.as_bytes()),
                     user: true,
                     per_dir: true,
                     system: true,

@@ -539,9 +539,7 @@ pub(crate) fn info_ini(req: &mut Request) {
     let rows: Vec<[String; 3]> = [COMPRESSION, LEVEL, HANDLER]
         .iter()
         .map(|name| {
-            let entry = entries
-                .iter()
-                .find(|e| e.decl.name.0.as_ref() == name.as_bytes());
+            let entry = entries.iter().find(|e| e.decl.name == name.as_bytes());
             let local = entry.and_then(|e| e.value.as_deref()).unwrap_or_default();
             let master = entry.and_then(|e| e.master.as_deref()).unwrap_or_default();
             [(*name).to_string(), shown(name, local), shown(name, master)]

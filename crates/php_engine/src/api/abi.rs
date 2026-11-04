@@ -1144,7 +1144,7 @@ pub(crate) struct ExtensionEntry {
     /// What [`ExtensionBuilder::interned`] was handed.
     pub(crate) interned: Vec<&'static [u8]>,
     pub(crate) ini: Vec<IniDecl>,
-    pub(crate) on_modify: Vec<(Vec<u8>, IniHandler)>,
+    pub(crate) on_modify: Vec<(&'static [u8], IniHandler)>,
     pub(crate) dependencies: Vec<Dependency>,
     pub(crate) request_state: Option<StateBuilder>,
     pub(crate) process_state: Option<ProcessStateBuilder>,
@@ -1494,10 +1494,10 @@ impl ExtensionBuilder {
     /// own, served whenever a program changes it with `ini_set()`, and
     /// once over the value the host set as the engine is built.
     #[must_use]
-    pub fn on_modify(mut self, name: &[u8], handler: OnModify) -> ExtensionBuilder {
+    pub fn on_modify(mut self, name: &'static [u8], handler: OnModify) -> ExtensionBuilder {
         self.entry
             .on_modify
-            .push((name.to_vec(), IniHandler::Written(handler)));
+            .push((name, IniHandler::Written(handler)));
         self
     }
 
@@ -1507,10 +1507,8 @@ impl ExtensionBuilder {
     /// handler would be. The extension reads the value with
     /// [`Ini::long`].
     #[must_use]
-    pub fn on_update_long(mut self, name: &[u8], handler: LongHandler) -> ExtensionBuilder {
-        self.entry
-            .on_modify
-            .push((name.to_vec(), IniHandler::Long(handler)));
+    pub fn on_update_long(mut self, name: &'static [u8], handler: LongHandler) -> ExtensionBuilder {
+        self.entry.on_modify.push((name, IniHandler::Long(handler)));
         self
     }
 

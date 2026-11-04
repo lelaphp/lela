@@ -302,7 +302,7 @@ fn display_ini_entries(req: &mut Request) {
         .extension_ini(me)
         .into_iter()
         .map(|held| {
-            let name = &held.decl.name.0;
+            let name = held.decl.name;
             [
                 String::from_utf8_lossy(name).into_owned(),
                 shown(name, held.value.as_deref().unwrap_or_default()),

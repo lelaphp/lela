@@ -14,13 +14,17 @@ use crate::api::abi::{ExtensionEntry, IniHandler};
 use crate::api::request::ExtensionId;
 
 /// One entry, php's `zend_ini_entry` as every request starts with it.
-/// A core entry's name and default are the core table's, borrowed and
-/// not copied, as `zend_register_ini_entries_ex` interns a `const char *`
-/// of a static `zend_ini_entry_def`, which opcache then moves into the
-/// one buffer every interned string shares; an extension's are copied
-/// from its declaration, and a value the host set is the host's.
+/// Its name and default are its declaration's, the core table's or an
+/// extension's [`php_unit::decl::IniDecl`], borrowed and not copied, as
+/// `zend_register_ini_entries_ex` interns the `const char *` of a static
+/// `zend_ini_entry_def`, which opcache then moves into the one buffer
+/// every interned string shares, and keeps the definition as `def`; a
+/// value the host set is the host's.
 pub(crate) struct Directive {
-    pub(crate) name: Bytes,
+    pub(crate) name: &'static [u8],
+    /// The declared default, `def->value`, `None` where the entry has
+    /// none.
+    pub(crate) default: Option<&'static [u8]>,
     /// The master value, `None` where it has none (php's `NULL`).
     pub(crate) value: Option<Bytes>,
     /// The declaration of an extension's entry: the extension,
@@ -33,7 +37,7 @@ pub(crate) struct Directive {
 
 impl Named for Directive {
     fn name(&self) -> &[u8] {
-        &self.name
+        self.name
     }
 }
 
@@ -59,13 +63,11 @@ impl IniTable {
         extensions: &[ExtensionEntry],
     ) -> IniTable {
         let numbered = || (1..).map(ExtensionId::at).zip(extensions);
-        let borrowed = |text: &'static str| Bytes::borrowed(text.as_bytes());
-        let core = (core.iter()).map(|&(name, value)| (borrowed(name), value.map(borrowed), None));
+        let core =
+            (core.iter()).map(|&(name, value)| (name.as_bytes(), value.map(str::as_bytes), None));
         let declared = numbered().flat_map(|(extension, entry)| {
-            (entry.ini.iter().enumerate()).map(move |(at, decl)| {
-                let value = decl.default.as_deref().map(Bytes::from);
-                (decl.name.0.clone(), value, Some((extension, at)))
-            })
+            (entry.ini.iter().enumerate())
+                .map(move |(at, decl)| (decl.name, decl.default, Some((extension, at))))
         });
         // Laid at the length it ends at: Core's rows, then each
         // extension's.
@@ -73,9 +75,10 @@ impl IniTable {
         let mut rows: Vec<Directive> = Vec::with_capacity(count);
         rows.extend(
             core.chain(declared)
-                .map(|(name, value, declared)| Directive {
+                .map(|(name, default, declared)| Directive {
                     name,
-                    value,
+                    default,
+                    value: default.map(Bytes::borrowed),
                     declared,
                     on_modify: None,
                 }),

@@ -304,7 +304,7 @@ pub(crate) fn minfo(req: &mut Request) {
         .extension_ini(me)
         .into_iter()
         .map(|entry| {
-            let name: &[u8] = &entry.decl.name.0;
+            let name: &[u8] = entry.decl.name;
             let boolean = booleans.contains(&name);
             let shown = |value: &[u8]| match boolean {
                 true if Ini::parse_bool(value) => String::from("On"),
@@ -1577,7 +1577,7 @@ fn ini_get_all(
         } else {
             ini_value(req, entry.value.as_deref())?
         };
-        all.set_symtable_str(req, &entry.decl.name.0, value)?;
+        all.set_symtable_str(req, entry.decl.name, value)?;
     }
     Ok(OrFalse::Value(all))
 }

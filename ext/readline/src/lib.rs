@@ -33,7 +33,7 @@ use php_ext::abi::{Callable, Extension, ExtensionBuilder, OrFalse, Path, Shell, 
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::call;
 use php_ext::coerce::{to_long, with_string};
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Thrown, leave_pending};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -124,10 +124,10 @@ pub fn extension() -> Extension {
 }
 
 /// `STD_PHP_INI_ENTRY(name, default, PHP_INI_ALL, OnUpdateString, ..)`.
-fn ini(name: &str, default: &[u8]) -> IniDecl {
+fn ini(name: &'static str, default: &'static [u8]) -> IniDecl {
     IniDecl {
-        name: Name(name.as_bytes().into()),
-        default: Some(default.into()),
+        name: name.as_bytes(),
+        default: Some(default),
         user: true,
         per_dir: true,
         system: true,

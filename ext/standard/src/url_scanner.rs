@@ -21,7 +21,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::attr::php_function;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerStatus, OutputOp, Request, StartHandler,
@@ -47,9 +47,9 @@ use crate::string::Decimal;
 /// string(32) "a=href,area=href,frame=src,form="
 /// ```
 pub(crate) fn ini() -> Vec<IniDecl> {
-    let entry = |name: &[u8], default: &[u8]| IniDecl {
-        name: Name(name.into()),
-        default: Some(default.into()),
+    let entry = |name: &'static [u8], default: &'static [u8]| IniDecl {
+        name,
+        default: Some(default),
         user: true,
         per_dir: true,
         system: true,

@@ -49,7 +49,7 @@ mod header {
 
 use php_ext::abi::{Extension, ExtensionBuilder, LongHandler};
 use php_ext::attr::php_const;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Streams as _};
 
@@ -128,9 +128,9 @@ struct State {
 /// bool(true)
 /// ```
 pub fn extension() -> Extension {
-    let ini = |name: &str, default: &str| IniDecl {
-        name: Name(name.as_bytes().into()),
-        default: Some(default.as_bytes().into()),
+    let ini = |name: &'static str, default: &'static str| IniDecl {
+        name: name.as_bytes(),
+        default: Some(default.as_bytes()),
         user: true,
         per_dir: true,
         system: true,

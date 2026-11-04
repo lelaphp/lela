@@ -134,7 +134,7 @@ use std::time::Duration;
 
 use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::decl::{IniDecl, Name};
+use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
 use php_ext::request::{
     FdStream, Handshake, Request, SocketOptions, Stream, Streams as _, Xport, XportFailure,
@@ -169,8 +169,8 @@ type Out = Ref<Untyped<Value>>;
 /// ```
 pub(crate) fn ini() -> Vec<IniDecl> {
     vec![IniDecl {
-        name: Name(b"default_socket_timeout".as_slice().into()),
-        default: Some(b"60".as_slice().into()),
+        name: b"default_socket_timeout",
+        default: Some(b"60"),
         user: true,
         per_dir: true,
         system: true,
