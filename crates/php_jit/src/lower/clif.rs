@@ -30,6 +30,7 @@
 //! declaration, are [`Kernel::Step`]; compiled code follows the frame
 //! chain by the [`Stood`] each writes.
 
+use std::collections::HashSet;
 use std::mem::offset_of;
 
 use cranelift_codegen::entity::EntityRef;
@@ -870,6 +871,10 @@ struct Emit<'a> {
     fuzz: Option<Fuzz>,
     /// How many of them the guards met so far took.
     fuzzed_sites: usize,
+    /// The registers a memory phi's back edge brings that their op writes
+    /// to their slot as it defines them, php's `ZREG_STORE`, so they need
+    /// live no further than their last read ([`stored_at_def`]).
+    stored_at_def: HashSet<ValueId>,
     /// Its number's address and its link (`doors`).
     joins: Joins,
     /// Per exit, the block a failed guard leaves it through where the
@@ -939,6 +944,7 @@ impl<'a> Emit<'a> {
             running: Frame::ROOT,
             fuzz: None,
             fuzzed_sites: 0,
+            stored_at_def: stored_at_def(ir),
             joins: Joins {
                 number: 0,
                 escapes: None,
@@ -1063,7 +1069,7 @@ impl<'a> Emit<'a> {
             self.enter_body(entry, block)?;
             self.b.seal_block(block);
         }
-        self.exit_blocks()
+        self.cold(Self::exit_blocks)
     }
 
     /// Where the frame stands as the trace enters, from its entry, held
@@ -1328,7 +1334,10 @@ impl<'a> Emit<'a> {
                 continue;
             };
             let brought = self.value(back)?;
-            if value.home == Home::Memory && brought.home == Home::Register {
+            if value.home == Home::Memory
+                && brought.home == Home::Register
+                && !self.stored_at_def.contains(&back)
+            {
                 let held = self.register(back)?;
                 self.store(brought.slot, held)?;
             }
@@ -1732,22 +1741,20 @@ impl<'a> Emit<'a> {
     /// jump the guard did not expect went, and a refused call, whose exit
     /// is right only where nothing was pushed.
     fn leave_where(&mut self, cond: Value, exit: ExitId) -> Result<(), Abort> {
-        let (to, args) = self.guard_exit(exit)?;
-        let on = self.b.create_block();
+        let (out, on) = (self.b.create_block(), self.b.create_block());
+        self.b.set_cold_block(out);
+        self.b.ins().brif(cond, out, &[], on, &[]);
+        self.b.switch_to_block(out);
+        self.b.seal_block(out);
+        // What the way out takes is made on it, the guard's own way an
+        // ordinary compare and branch: the number kept in registers written
+        // where the exit's opline reads it, and what a door is handed.
         if let Some(kept) = self.kept {
-            // The number kept in registers written where the exit's
-            // opline reads it, on the way out only.
-            let writes = self.b.create_block();
-            self.b.set_cold_block(writes);
-            self.b.ins().brif(cond, writes, &[], on, &[]);
-            self.b.switch_to_block(writes);
-            self.b.seal_block(writes);
             let (room, at) = self.place(kept.slot)?;
             self.write_num(room, at, kept.num);
-            self.b.ins().jump(to, &args);
-        } else {
-            self.b.ins().brif(cond, to, &args, on, &[]);
         }
+        let (to, args) = self.guard_exit(exit)?;
+        self.b.ins().jump(to, &args);
         self.b.switch_to_block(on);
         self.b.seal_block(on);
         Ok(())
@@ -3755,32 +3762,60 @@ impl<'a> Emit<'a> {
             return Err(mismatch("an assignment to no variable"));
         };
         let slot = self.value(target)?.slot;
-        let old = match line.unwind {
-            Some(_) => {
-                let (room, at) = self.place(slot)?;
-                let word = self.b.ins().load(I64, trusted(), room, at);
-                let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
-                Some((word, info))
-            }
+        let held = match self.scalar_kind(line.op2)? {
+            Some(_) => Some(self.scalar(at, line.op2)?),
             None => None,
         };
-        if self.scalar_kind(line.op2)?.is_some() {
-            let held = self.scalar(at, line.op2)?;
-            if let Some(def) = line.op1_def {
-                self.define(def, held)?;
-                if old.is_some() && self.value(def)?.home == Home::Register {
-                    self.store(slot, held)?;
-                }
-            }
-            if let Some(out) = line.out {
-                self.define(out, held)?;
-            }
-        } else {
-            let into = self.place(slot)?;
-            self.copy_operand(line.frame, line.op2, into)?;
+        if line.unwind.is_none() {
+            return self.assigned(line, slot, held);
         }
-        if let Some((word, info)) = old {
-            self.release(line, word, info, Dtor::Gc)?;
+        let (room, place) = self.place(slot)?;
+        let info = self.b.ins().load(I32, trusted(), room, place + TYPE_AT);
+        let counted = self.b.ins().band_imm_u(info, COUNTED);
+        let (plain, owning, done) = (
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+        );
+        self.b.set_cold_block(owning);
+        self.b.ins().brif(counted, owning, &[], plain, &[]);
+        self.b.switch_to_block(plain);
+        self.b.seal_block(plain);
+        self.assigned(line, slot, held)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(owning);
+        self.b.seal_block(owning);
+        self.cold(|emit| {
+            let word = emit.b.ins().load(I64, trusted(), room, place);
+            emit.assigned(line, slot, held)?;
+            // Nothing the last owner's destructor reads holds a value
+            // given up: a register's value is written over it.
+            if let (Some(held), Some(def)) = (held, line.op1_def)
+                && emit.value(def)?.home == Home::Register
+            {
+                emit.store(slot, held)?;
+            }
+            emit.release(line, word, info, Dtor::Gc)?;
+            emit.b.ins().jump(done, &[]);
+            Ok(())
+        })?;
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
+    }
+
+    /// `line`'s assignment made: the scalar `held` given to the values the
+    /// op defines, or the value no scalar copied whole to `slot`.
+    fn assigned(&mut self, line: &Line, slot: Slot, held: Option<Scalar>) -> Result<(), Abort> {
+        let Some(held) = held else {
+            let into = self.place(slot)?;
+            return self.copy_operand(line.frame, line.op2, into);
+        };
+        if let Some(def) = line.op1_def {
+            self.define(def, held)?;
+        }
+        if let Some(out) = line.out {
+            self.define(out, held)?;
         }
         Ok(())
     }
@@ -4141,10 +4176,14 @@ impl<'a> Emit<'a> {
         line: &Line,
         (handled, done): (Block, Block),
     ) -> Result<(), Abort> {
+        self.b.set_cold_block(handled);
         self.b.switch_to_block(handled);
         self.b.seal_block(handled);
-        self.stepped(at, line)?;
-        self.b.ins().jump(done, &[]);
+        self.cold(|emit| {
+            emit.stepped(at, line)?;
+            emit.b.ins().jump(done, &[]);
+            Ok(())
+        })?;
         self.b.switch_to_block(done);
         self.b.seal_block(done);
         Ok(())
@@ -4158,6 +4197,28 @@ impl<'a> Emit<'a> {
     /// the bitwise operators; to `handled` where it is anything else, and
     /// where `raises` and `by` is a divisor of zero or a negative shift,
     /// whose throw is the handler's.
+    ///
+    /// A double written with a double takes no type word, and a long
+    /// beside it, written by the same op on its cold way, takes one, an
+    /// overflow's among them:
+    ///
+    /// ```php
+    /// function f($a, $n, $by) { for ($i = 0; $i < $n; $i++) { $a[$i % 3] -= $by; } return json_encode($a); }
+    /// echo f([1.5, 2.5, 3.5], 9, 0.5), f([1, 2.5, 3], 9, 0.5), f([1.5, 2, 3], 9, 1), f([PHP_INT_MIN, 2.5, 3], 3, 1), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [0,1,2][-0.5,1,1.5][-1.5,-1,0][-9.223372036854776e+18,1.5,2]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function f($a, $n, $by) { for ($i = 0; $i < $n; $i++) { $a[$i % 3] -= $by; } return json_encode($a); }
+    /// echo f([1.5, 2.5, 3.5], 9, 0.5), f([1, 2.5, 3], 9, 0.5), f([1.5, 2, 3], 9, 1), f([PHP_INT_MIN, 2.5, 3], 3, 1), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [0,1,2][-0.5,1,1.5][-1.5,-1,0][-9.223372036854776e+18,1.5,2]
+    /// ```
     fn compound_at(
         &mut self,
         (zval, kind): (Value, Value),
@@ -4165,34 +4226,45 @@ impl<'a> Emit<'a> {
         (handled, done): (Block, Block),
     ) -> Result<(), Abort> {
         let numbers = matches!(op, Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div);
-        let is_long = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Long));
-        let long = self.b.create_block();
-        let not_long = self.b.create_block();
-        self.b.ins().brif(is_long, long, &[], not_long, &[]);
-        self.b.switch_to_block(not_long);
-        self.b.seal_block(not_long);
-        let mut kinds = vec![(long, Kind::Long)];
-        if numbers {
-            let is_double = self
-                .b
-                .ins()
-                .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Double));
-            let double = self.b.create_block();
-            self.b.ins().brif(is_double, double, &[], handled, &[]);
-            kinds.push((double, Kind::Double));
-        } else {
-            self.b.ins().jump(handled, &[]);
+        // The kind `by` is first, the other on its cold way.
+        let tried: &[(ZvalType, Kind)] = match (numbers, by) {
+            (false, _) => &[(ZvalType::Long, Kind::Long)],
+            (true, Scalar::Double(_)) => &[
+                (ZvalType::Double, Kind::Double),
+                (ZvalType::Long, Kind::Long),
+            ],
+            (true, _) => &[
+                (ZvalType::Long, Kind::Long),
+                (ZvalType::Double, Kind::Double),
+            ],
+        };
+        let mut ways = Vec::with_capacity(tried.len());
+        for (at, &(zval_type, of)) in tried.iter().enumerate() {
+            let (way, other) = (self.b.create_block(), self.b.create_block());
+            if at > 0 {
+                self.b.set_cold_block(way);
+            }
+            self.b.set_cold_block(other);
+            let is = self.b.ins().icmp_imm_s(IntCC::Equal, kind, tag(zval_type));
+            self.b.ins().brif(is, way, &[], other, &[]);
+            self.b.switch_to_block(other);
+            self.b.seal_block(other);
+            ways.push((way, of));
         }
+        self.b.ins().jump(handled, &[]);
         let refuse = raises.then_some(Refuse::To(handled));
-        for (block, kind) in kinds {
-            self.b.switch_to_block(block);
-            self.b.seal_block(block);
-            let x = self.read(zval, 0, kind);
-            let num = self.binary(op, x, by, refuse)?;
-            self.write_num(zval, 0, num);
+        for (way, of) in ways {
+            self.b.switch_to_block(way);
+            self.b.seal_block(way);
+            let x = self.read(zval, 0, of);
+            match self.binary(op, x, by, refuse)? {
+                // A double stays one: its type word stands, as php's
+                // `zend_jit_math_helper` leaves one its `res_use_info` holds.
+                Num::Double(x) if of == Kind::Double => {
+                    self.b.ins().store(trusted(), x, zval, 0);
+                }
+                num => self.write_num(zval, 0, num),
+            }
             self.b.ins().jump(done, &[]);
         }
         Ok(())
@@ -5510,13 +5582,14 @@ impl<'a> Emit<'a> {
         match (kind, held) {
             (Kind::Long, Scalar::Long(x))
             | (Kind::Double, Scalar::Double(x))
-            | (Kind::Bool, Scalar::Bool(x)) => {
-                self.b.def_var(var, x);
-                Ok(())
-            }
-            (Kind::Null, Scalar::Null) | (Kind::False | Kind::True, Scalar::Bool(_)) => Ok(()),
-            _ => Err(mismatch("a register written with another kind")),
+            | (Kind::Bool, Scalar::Bool(x)) => self.b.def_var(var, x),
+            (Kind::Null, Scalar::Null) | (Kind::False | Kind::True, Scalar::Bool(_)) => {}
+            _ => return Err(mismatch("a register written with another kind")),
         }
+        if self.stored_at_def.contains(&value) {
+            self.store(target.slot, held)?;
+        }
+        Ok(())
     }
 
     /// The value `value` an arithmetic writes, as `num`: one that may be
@@ -5595,6 +5668,49 @@ impl<'a> Emit<'a> {
             }
         }
     }
+}
+
+/// The values [`Emit::define`] writes to their slot as it defines them:
+/// what a memory phi's back edge brings from a register an op defines,
+/// as php's allocator marks such a use `ZREG_STORE`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:3339-3345`). The rest,
+/// [`Emit::store_brought`] writes at the back edge.
+///
+/// A loop left between the write and the back edge, the slot written
+/// already, and read from a callee that sees the frame:
+///
+/// ```php
+/// function f($n) { $x = 7; $y = 0.5; for ($j = 0; $j < $n; $j++) { $x = $j * 1.5; $y = $x + 1; if ($j == 3) { break; } } return [$x, $y, get_defined_vars()['x']]; }
+/// echo json_encode(f(9)), json_encode(f(2)), json_encode(f(0)), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// [4.5,5.5,4.5][1.5,2.5,1.5][7,0.5,7]
+/// ```
+///
+/// The same where every guard fails once:
+///
+/// ```php
+/// function f($n) { $x = 7; $y = 0.5; for ($j = 0; $j < $n; $j++) { $x = $j * 1.5; $y = $x + 1; if ($j == 3) { break; } } return [$x, $y, get_defined_vars()['x']]; }
+/// echo json_encode(f(9)), json_encode(f(2)), json_encode(f(0)), "\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// [4.5,5.5,4.5][1.5,2.5,1.5][7,0.5,7]
+/// ```
+fn stored_at_def(ir: &TraceIr) -> HashSet<ValueId> {
+    let brought = |value: &crate::types::Value| {
+        let Def::Phi { back, .. } = value.def else {
+            return None;
+        };
+        let held = ir.values.get(back.0 as usize)?;
+        let carried = matches!(
+            Kind::of(held.types),
+            Some(Kind::Long | Kind::Double | Kind::Bool)
+        );
+        let made = matches!(held.def, Def::Op(_));
+        (value.home == Home::Memory && held.home == Home::Register && made && carried)
+            .then_some(back)
+    };
+    ir.values.iter().filter_map(brought).collect()
 }
 
 /// Where slot `var` is in its frame's room: past php's
