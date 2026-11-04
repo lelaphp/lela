@@ -218,6 +218,8 @@ impl JitRequest {
             landings: crate::enter::Landings::default(),
             #[cfg(test)]
             escapes_crossed: Cell::new(0),
+            #[cfg(test)]
+            landings_visited: Cell::new(0),
         }
     }
 }
