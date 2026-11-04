@@ -3860,8 +3860,7 @@ pub(crate) fn do_fcall_by_name<T: Tier>(
     if let Some(edge) = inline_enter(req, (frame, at), op, true) {
         return edge;
     }
-    req.vm_mut().stand(frame, at);
-    do_call(req, frame, DoCall::of(op), "ZEND_DO_FCALL_BY_NAME")
+    inline_path::past_the_push(req, (frame, at), op, "ZEND_DO_FCALL_BY_NAME")
 }
 
 /// `ZEND_DO_FCALL`: serve the callee an `INIT_STATIC_METHOD_CALL`, an
@@ -3894,8 +3893,7 @@ pub(crate) fn do_fcall<T: Tier>(
     if let Some(edge) = inline_enter(req, (frame, at), op, true) {
         return edge;
     }
-    req.vm_mut().stand(frame, at);
-    do_call(req, frame, DoCall::of(op), "ZEND_DO_FCALL")
+    inline_path::past_the_push(req, (frame, at), op, "ZEND_DO_FCALL")
 }
 
 /// `ZEND_INCLUDE_OR_EVAL` (`Z/Zend/zend_vm_def.h:6545`), the four file
@@ -4385,8 +4383,7 @@ pub(crate) fn do_ucall<T: Tier>(
     if let Some(edge) = inline_enter(req, (frame, at), op, false) {
         return edge;
     }
-    req.vm_mut().stand(frame, at);
-    do_call(req, frame, DoCall::of(op), "ZEND_DO_UCALL")
+    inline_path::past_the_push(req, (frame, at), op, "ZEND_DO_UCALL")
 }
 
 /// The inline path of `DO_UCALL`, and of `DO_FCALL` and
@@ -4404,8 +4401,7 @@ fn inline_enter(
     op: &Opline,
     flagged: bool,
 ) -> Option<Edge> {
-    let returns_to = (op.out_type != OperandKind::Unused).then_some(op.out);
-    let callee = req.enter_call(returns_to, (frame, at), flagged)?;
+    let callee = inline_path::enter(req, frame, op, at, flagged)?;
     Some(Ok(Stepped::Pushed(callee).into()))
 }
 
@@ -28039,6 +28035,42 @@ pub(crate) mod inline_path {
     use crate::tier::Inline;
     #[cfg(not(dispatch = "tailcall"))]
     use crate::tier::Tier;
+
+    /// The push of [`super::inline_enter`], `DO_UCALL`'s and, where
+    /// `flagged`, `DO_FCALL`'s and `DO_FCALL_BY_NAME`'s, with the request
+    /// in hand: the callee's frame, entered, or `None`, with nothing
+    /// touched, for a call the handler serves. The loop's arm of each of
+    /// those handlers serves it first and reads the callee as the push
+    /// itself, so the loop goes from the push to its take-up of the
+    /// callee with no answer made and read again (#3995).
+    #[inline(always)] // in the loop's arms of the calls and in their handlers
+    pub(crate) fn enter(
+        req: &mut crate::api::request::Request,
+        frame: php_heap::FrameRef,
+        op: &Opline,
+        at: u32,
+        flagged: bool,
+    ) -> Option<php_heap::FrameRef> {
+        let returns_to = (op.out_type != OperandKind::Unused).then_some(op.out);
+        req.enter_call(returns_to, (frame, at), flagged)
+    }
+
+    /// `DO_UCALL`, `DO_FCALL` and `DO_FCALL_BY_NAME`, `opcode` naming
+    /// which, past the push [`enter`] stood aside for: the caller stood at
+    /// `at` (`SAVE_OPLINE()`) and the call served by [`super::do_call`].
+    /// The loop's arm of each serves the push first and this after it, as
+    /// the handler does, so a call the push stands aside for, a native's
+    /// among them, is looked at once.
+    #[inline(always)] // in the three handlers and the loop's arms of them
+    pub(crate) fn past_the_push(
+        req: &mut crate::api::request::Request,
+        (frame, at): (php_heap::FrameRef, u32),
+        op: &Opline,
+        opcode: &str,
+    ) -> super::Edge {
+        req.vm_mut().stand(frame, at);
+        super::do_call(req, frame, super::DoCall::of(op), opcode)
+    }
 
     /// An inline path's answer served with the request in hand, as its
     /// handler serves it ([`super::inlined`]): where the loop that holds

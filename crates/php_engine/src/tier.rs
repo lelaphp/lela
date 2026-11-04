@@ -760,7 +760,25 @@ impl Next {
 
 /// What the loop takes up after an edge that let the frame's slots go
 /// (`serve_held`): the slots of the frame it goes on in, or, where the
-/// edge went into another frame, its position with them.
+/// edge went into another frame, its position with them, each read off
+/// the frame table where the edge left it, never where the frame stood
+/// before the edge. A return into a frame on a page below the callee's,
+/// a call whose arguments outgrew its page and moved to one of its own,
+/// and a generator's frame, which stands apart from the pages, each go
+/// on over their own slots:
+///
+/// ```php
+/// function d($n) { $k = $n * 2; return $n ? d($n - 1) + $k - $n * 2 + 1 : 0; }
+/// function h($x) { return $x + 1; }
+/// function v(...$a) { $c = count($a); $s = h($c); return $s + h($a[19999]) + $c; }
+/// function g() { $x = h(1); yield $x; $y = d(3000) + h($x); yield $y; }
+/// echo d(20000), " ", v(...range(1, 20000)), " ";
+/// foreach (g() as $y) { echo $y, " "; }
+/// echo "\n";
+/// ```
+/// ```expect
+/// 20000 60002 2 3003
+/// ```
 #[derive(Clone, Copy)]
 enum Took {
     Slots,
@@ -811,6 +829,11 @@ pub(crate) enum Dispatched {
     Inline(Inline),
     /// Served with the request in hand: the handler's answer.
     Cold(Result<Next, Fatal>),
+    /// Served with the request in hand by a call edge's handler, a push
+    /// or a pop: its answer read as a way in the arm, where each path
+    /// through the handler makes it a constant, so the loop goes from the
+    /// handler straight to its take-up of the frame the edge went into.
+    Way(Way),
 }
 
 impl From<Stepped> for Next {
@@ -1504,6 +1527,11 @@ fn serve_held<'u, T: Tier, D: Telling>(
                         req.sensed_after(body, op)?;
                         next.way()
                     }
+                    Dispatched::Way(way) => {
+                        #[cfg(debug_assertions)]
+                        req.sensed_after(body, op)?;
+                        way
+                    }
                 }
             };
             #[cfg(dispatch = "tailcall")]
@@ -1574,6 +1602,12 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     let received = false;
                     if received {
                         // At its entry, or where it was pushed past it.
+                        // The slots are taken up where the arms meet:
+                        // carried from the look at the frame above, they
+                        // were one more value at the meeting, and every
+                        // inline arm took one more instruction to the
+                        // loop's head, mandelbrot's oplines 1.7% more
+                        // (#3995).
                         at = start.max(called.entry);
                         Took::Slots
                     } else {
