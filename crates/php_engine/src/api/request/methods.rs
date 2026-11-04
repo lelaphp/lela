@@ -209,7 +209,7 @@ impl Request {
     pub(super) fn method_function(&self, class: ClassId, at: u32) -> Option<Function> {
         let at = usize::try_from(at).ok()?;
         let functions = match self.native_class_at(class) {
-            Some(native) => self.shared.method_functions.get(native)?,
+            Some(native) => self.shared.method_functions.row(native)?,
             None => &self.declared_row(class)?.bound.functions,
         };
         functions.get(at).copied().flatten()
