@@ -511,6 +511,12 @@ pub struct Request {
     /// arrays is the body: a `Function` of the request's own counts into
     /// this list (design §5.6, §5.14).
     user_functions: PinnedRows<UserFunction>,
+    /// The row each closure declaration took, by its unit's address and
+    /// its place among the unit's `dynamic_func_defs`: php's
+    /// `dynamic_func_defs[op2.num]`, which the request cannot write on
+    /// the shared unit. A row holds a share of its unit, so an address
+    /// keyed here is no other unit's while the row stands.
+    closure_rows: WordMap<(usize, u32), Function>,
     /// The callees of the functions no table holds one for, a
     /// class's native and a trampoline, each made the first time a
     /// frame serves it ([`Request::callee_at`]).
@@ -1040,13 +1046,16 @@ pub(crate) struct PropertyInfo {
 pub(crate) type WordMap<K, V> =
     std::collections::HashMap<K, V, std::hash::BuildHasherDefault<WordHasher>>;
 
-/// [`WordMap`]'s hash: the key's word times the golden ratio's.
+/// [`WordMap`]'s hash: the key's word times the golden ratio's, turned
+/// so its high bits, where a multiply gathers them, are the low bits the
+/// table places a key by: unturned, every key an aligned address, a
+/// unit's, stood in places side by side, and a lookup walked them all.
 #[derive(Default)]
 pub(crate) struct WordHasher(u64);
 
 impl std::hash::Hasher for WordHasher {
     fn finish(&self) -> u64 {
-        self.0
+        self.0.rotate_left(26)
     }
 
     fn write(&mut self, bytes: &[u8]) {
@@ -1061,6 +1070,10 @@ impl std::hash::Hasher for WordHasher {
 
     fn write_u64(&mut self, word: u64) {
         self.0 = (self.0 ^ word).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+
+    fn write_usize(&mut self, word: usize) {
+        self.write_u64(word as u64);
     }
 }
 
@@ -1264,6 +1277,7 @@ impl Request {
             buckets,
             aliases: tables.aliases,
             user_functions: PinnedRows::default(),
+            closure_rows: WordMap::default(),
             named_callees: std::collections::HashMap::new(),
             unit_strings: unit_strings::UnitStrings::default(),
             compiler_stacks: memory::CompilerStacks::default(),
@@ -1956,6 +1970,37 @@ mod tests {
             String::from_utf8_lossy(&request.take_body()),
             "\nFatal error: Attempt to destruct pending exception in Unknown on line 0\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod closure_rows {
+    use php_unit::PublishedUnit;
+
+    use crate::api::call::Function;
+    use crate::exec::Body;
+
+    /// A closure's declaration created again gets the `Function` it got
+    /// first, with a class's method rows laid between the two, and one
+    /// row stands for it however many closures it made.
+    #[test]
+    fn a_declaration_created_again_is_the_same_function() {
+        let mut req = crate::test::request();
+        let code = b"function make() { return function () {}; } $a = make(); \
+                     class C { function m() {} function n() {} } \
+                     $b = make(); $c = function () {};";
+        assert!(req.code_mut().eval_stringl(code, b"closures").is_ok());
+        let rows: Vec<(usize, u32, PublishedUnit)> = (req.user_functions.iter().enumerate())
+            .filter_map(|(row, user)| match user.body {
+                Body::Dynamic(at) => Some((row, at, PublishedUnit::clone(&user.unit))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 2, "one row for each declaration of the two");
+        for (row, at, unit) in &rows {
+            assert_eq!(req.closure_function(unit, *at), Function::local(*row));
+        }
+        assert_eq!(req.closure_rows.len(), 2);
     }
 }
 

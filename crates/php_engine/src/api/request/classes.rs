@@ -1631,16 +1631,7 @@ impl Request {
             let message = self.function_redeclaration(earlier, &decl.name.0);
             return Err(crate::api::raising::fatal(self, &message));
         }
-        let declared = Function::local(self.user_functions.len());
-        let observed = crate::observer::observing(self);
-        let unit_of = PublishedUnit::clone(unit);
-        (self.user_functions).push(UserFunction::of(
-            unit_of,
-            exec::Body::Dynamic(at),
-            None,
-            decl,
-            observed,
-        ));
+        let declared = self.lay_function(unit, exec::Body::Dynamic(at), decl);
         // `do_bind_function`'s `zend_observer_function_declared_notify`
         // (`Z/Zend/zend_compile.c:1300`).
         if let Some(declared) = declared {
@@ -1661,26 +1652,43 @@ impl Request {
     /// and what differs between two closures of it — the receiver, the
     /// scope and the bound variables — is the object's payload. The
     /// name is no entry of the function table under a callable name: a
-    /// closure is reached through its object and never by name.
+    /// closure is reached through its object and never by name. A
+    /// declaration found again costs one lookup, however many rows the
+    /// request laid, as php's `dynamic_func_defs[op2.num]` costs one load.
+    /// Two closures of one declaration are one op array's, each with the
+    /// statics of its own:
+    ///
+    /// ```php
+    /// function make() { return function () { static $n = 0; return ++$n; }; }
+    /// $a = make(); $b = make();
+    /// echo $a(), $a(), $b(), "\n";
+    /// ```
+    /// ```expect
+    /// 121
+    /// ```
     pub(crate) fn closure_function(&mut self, unit: &PublishedUnit, at: u32) -> Option<Function> {
-        let (decl, _) = unit.dynamic.get(usize::try_from(at).ok()?)?;
-        let body = exec::Body::Dynamic(at);
-        if let Some(position) = self
-            .user_functions
-            .iter()
-            .position(|user| user.body == body && PublishedUnit::ptr_eq(&user.unit, unit))
-        {
-            return Function::local(position);
+        let row = (PublishedUnit::as_ptr(unit).addr(), at);
+        if let Some(function) = self.closure_rows.get(&row) {
+            return Some(*function);
         }
+        let (decl, _) = unit.dynamic.get(usize::try_from(at).ok()?)?;
+        let function = self.lay_function(unit, exec::Body::Dynamic(at), decl)?;
+        self.closure_rows.insert(row, function);
+        Some(function)
+    }
+
+    /// The row of `body` of `unit`, declared as `decl`, laid among the
+    /// request's: the `Function` it is, none where no number is left.
+    fn lay_function(
+        &mut self,
+        unit: &PublishedUnit,
+        body: exec::Body,
+        decl: &FunctionDecl,
+    ) -> Option<Function> {
         let function = Function::local(self.user_functions.len())?;
         let observed = crate::observer::observing(self);
-        (self.user_functions).push(UserFunction::of(
-            PublishedUnit::clone(unit),
-            body,
-            None,
-            decl,
-            observed,
-        ));
+        let unit = PublishedUnit::clone(unit);
+        (self.user_functions).push(UserFunction::of(unit, body, None, decl, observed));
         Some(function)
     }
 
@@ -2019,17 +2027,9 @@ impl Request {
             self.end_in_compile_time(level, &message, &file, decl.line);
             return None;
         }
-        let Some(declared) = Function::local(self.user_functions.len()) else {
+        let Some(declared) = self.lay_function(unit, body, decl) else {
             return Some(false);
         };
-        let observed = crate::observer::observing(self);
-        (self.user_functions).push(UserFunction::of(
-            PublishedUnit::clone(unit),
-            body,
-            None,
-            decl,
-            observed,
-        ));
         self.functions.push(&decl.name.0, declared);
         Some(true)
     }
