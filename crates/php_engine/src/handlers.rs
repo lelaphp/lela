@@ -26825,7 +26825,7 @@ fn step_hold(
     ]
 }
 
-/// What a step through a reference typed properties stepping comes to
+/// What a step through a reference typed properties hold comes to
 /// ([`step_through_typed_ref`]).
 enum RefStep {
     /// The value to store in the cell: the step, or the conversion the
