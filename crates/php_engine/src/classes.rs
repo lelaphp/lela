@@ -2330,6 +2330,27 @@ fn throwable_property<T: FromArgument>(
 /// NULL
 /// NULL
 /// ```
+///
+/// A scope named by a string is looked up as `zend_lookup_class` looks
+/// it up, so an autoloader serves a class not loaded yet, and what the
+/// autoloader threw follows php's warning.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Bad') throw new Exception("no $c"); eval("class $c { public static \$p = '$c'; }"); });
+/// var_dump(Closure::bind(fn () => self::$p, null, 'Lazy')());
+/// var_dump((fn () => self::$p)->bindTo(null, 'Lazier')());
+/// try { Closure::bind(fn () => 1, null, 'Bad'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// load Lazy
+/// string(4) "Lazy"
+/// load Lazier
+/// string(6) "Lazier"
+/// load Bad
+///
+/// Warning: Class "Bad" not found in %s on line 5
+/// no Bad
+/// ```
 fn do_closure_bind(
     req: &mut Request,
     closure: PhpObject,
@@ -2344,10 +2365,13 @@ fn do_closure_bind(
         Some(Union::A(object)) => Some(object.class()),
         Some(Union::B(name)) if name.as_bytes() == b"static" => info.scope,
         Some(Union::B(name)) => {
-            let Some(class) = req.class_named(Bare::of(name.as_bytes())) else {
+            // `zend_lookup_class`, which autoloads; what an autoloader
+            // threw stands behind php's warning.
+            let looked = crate::api::call::autoload(req, name.as_bytes());
+            let Ok(Some(class)) = looked else {
                 let shown = String::from_utf8_lossy(name.as_bytes());
                 warning(req, &format!("Class \"{shown}\" not found"));
-                return Ok(None);
+                return looked.map(|_| None);
             };
             Some(class)
         }
