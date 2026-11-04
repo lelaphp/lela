@@ -69,6 +69,19 @@ impl Bytes {
         self.tagged & BORROWED != 0
     }
 
+    /// The binary's bytes this value borrows, `None` where it owns them
+    /// or they are a block's: what a `const` names the same bytes again
+    /// by, as no `Clone` runs in one.
+    #[must_use]
+    pub const fn as_borrowed(&self) -> Option<&'static [u8]> {
+        if self.tagged & BORROWED == 0 {
+            return None;
+        }
+        // SAFETY: a borrowed value's pointer and length are the
+        // `&'static [u8]` `borrowed` took them from.
+        Some(unsafe { std::slice::from_raw_parts(self.at.as_ptr(), self.tagged & !BORROWED) })
+    }
+
     /// Whether the bytes are laid in a block, which only a 64-bit target
     /// lays them in.
     fn is_laid(&self) -> bool {
@@ -281,7 +294,12 @@ mod tests {
         let borrowed = Bytes::borrowed(SPELLED);
         assert_eq!(borrowed.as_ptr(), SPELLED.as_ptr());
         assert_eq!(borrowed.clone().as_ptr(), SPELLED.as_ptr());
+        assert_eq!(
+            borrowed.as_borrowed().map(<[u8]>::as_ptr),
+            Some(SPELLED.as_ptr())
+        );
         let owned = Bytes::from(SPELLED);
+        assert_eq!(owned.as_borrowed(), None);
         assert_ne!(owned.as_ptr(), SPELLED.as_ptr());
         let copy = owned.clone();
         assert_ne!(copy.as_ptr(), owned.as_ptr());

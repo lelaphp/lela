@@ -43,7 +43,7 @@ mod tests {
 
     fn declared(name: &'static str, frameless: &[u32]) -> FunctionDecl {
         FunctionDecl {
-            frameless: frameless.to_vec(),
+            frameless: frameless.to_vec().into(),
             ..native_function(name.as_bytes())
         }
     }

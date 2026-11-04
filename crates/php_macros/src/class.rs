@@ -175,7 +175,7 @@ fn flags(keys: &Keys) -> syn::Result<(Tokens, Tokens)> {
     let mut attributes = expr::attributes(keys)?;
     if dynamic.as_deref() == Some("allowed") {
         let php = bytes("AllowDynamicProperties");
-        attributes.insert(0, quote!(#root::__private::attribute(#php, Vec::new())));
+        attributes.insert(0, quote!(#root::__private::attribute(#php, &[])));
     }
     let flags = class_flags(
         &[
@@ -224,7 +224,6 @@ struct Entry {
     aliases: Vec<Tokens>,
     backing: Tokens,
     constants: Vec<Tokens>,
-    properties: Vec<Tokens>,
     attributes: Tokens,
     object_size: Tokens,
     object_beside: Tokens,
@@ -244,7 +243,6 @@ fn header_impl(ident: &Ident, entry: &Entry) -> Tokens {
         aliases,
         backing,
         constants,
-        properties,
         attributes,
         object_size,
         object_beside,
@@ -258,12 +256,11 @@ fn header_impl(ident: &Ident, entry: &Entry) -> Tokens {
                     kind: #root::decl::ClassKind::#kind,
                     flags: #flags,
                     parent: #parent,
-                    interfaces: &[#(#interfaces),*],
-                    implementors: &[#(#implementors),*],
-                    aliases: &[#(#aliases),*],
+                    interfaces: &[#(#root::decl::Name::borrowed(#interfaces)),*],
+                    implementors: &[#(#root::decl::Name::borrowed(#implementors)),*],
+                    aliases: &[#(#root::decl::Name::borrowed(#aliases)),*],
                     backing: #root::decl::EnumBacking::#backing,
                     constants: &[#(#constants),*],
-                    properties: &[#(#properties),*],
                     attributes: #attributes,
                     object_size: #object_size,
                     object_beside: &[#object_beside],
@@ -365,7 +362,6 @@ fn header(attribute: Tokens, item: &ItemStruct) -> syn::Result<Tokens> {
             aliases,
             backing: quote!(Pure),
             constants: Vec::new(),
-            properties: Vec::new(),
             attributes,
             object_size: keys.eq("size").cloned().unwrap_or_else(|| quote!(0)),
             object_beside: keys.list("beside").cloned().unwrap_or_default(),
@@ -467,20 +463,6 @@ fn enumeration(attribute: Tokens, mut item: ItemEnum) -> syn::Result<Tokens> {
         Some(_) => return Err(error(keys.span("backed"), "`backed` is `string` or `int`")),
     };
     let (table, cases) = cases(&mut item, backing, &php)?;
-    let readonly = |name: &str, ty: Tokens| {
-        let name = bytes(name);
-        quote!(#root::__private::NativeProperty {
-            name: #name,
-            visibility: #root::decl::Visibility::Public,
-            is_instance: true,
-            is_readonly: true,
-            is_virtual: false,
-            ty: || Some(#root::decl::Type::#ty),
-            default: None,
-            attributes: &[],
-        })
-    };
-    let mut properties = vec![readonly("name", quote!(String))];
     let mut interfaces = Vec::new();
     let backing = match backing {
         Backing::Pure => quote!(Pure),
@@ -490,7 +472,6 @@ fn enumeration(attribute: Tokens, mut item: ItemEnum) -> syn::Result<Tokens> {
             } else {
                 quote!(Int)
             };
-            properties.push(readonly("value", ty.clone()));
             interfaces.push(bytes("BackedEnum").into_token_stream());
             ty
         }
@@ -513,15 +494,13 @@ fn enumeration(attribute: Tokens, mut item: ItemEnum) -> syn::Result<Tokens> {
             aliases: Vec::new(),
             backing,
             constants: cases,
-            properties,
             attributes,
             object_size: quote!(0),
             object_beside: Tokens::new(),
             objects: quote!(None),
         },
     );
-    let declared =
-        quote!(Some(#root::decl::Type::Named(#root::decl::Name(#class_name.as_slice().into()))));
+    let declared = quote!(Some(#root::decl::Type::Named(#root::decl::Name::borrowed(#class_name))));
     Ok(quote! {
         #[derive(Clone, Copy, PartialEq)]
         #item
@@ -531,7 +510,7 @@ fn enumeration(attribute: Tokens, mut item: ItemEnum) -> syn::Result<Tokens> {
         }
         impl #root::abi::FromArgument for #ident {
             const MASK: u32 = 0;
-            fn declared() -> Option<#root::decl::Type> { #declared }
+            const DECLARED: Option<#root::decl::Type> = #declared;
             fn accepts(value: &#root::values::Value) -> bool {
                 matches!(value.as_ref(), #root::values::ValueRef::Object(_))
             }
@@ -544,7 +523,7 @@ fn enumeration(attribute: Tokens, mut item: ItemEnum) -> syn::Result<Tokens> {
         }
         impl #root::abi::IntoReturn for #ident {
             const MASK: u32 = 0;
-            fn declared() -> Option<#root::decl::Type> { #declared }
+            const DECLARED: Option<#root::decl::Type> = #declared;
             fn into_return(
                 self,
                 request: &mut #root::request::Request,
@@ -748,7 +727,7 @@ fn constant_decl(class: &Ident, (constant, ty, keys, cfg): &Constant) -> syn::Re
         visibility: #visibility,
         is_final: #is_final,
         is_case: false,
-        ty: <#ty as #root::abi::IntoConst>::declared,
+        ty: || <#ty as #root::abi::IntoConst>::DECLARED,
         value: || #root::abi::IntoConst::value(&#class::#constant),
         attributes: #attributes,
     }))
@@ -857,7 +836,7 @@ fn property_decl(
         is_instance: #instance,
         is_readonly: #readonly,
         is_virtual: #is_virtual,
-        ty: <#ty as #root::abi::FromArgument>::declared,
+        ty: || <#ty as #root::abi::FromArgument>::DECLARED,
         default: #default,
         attributes: #attributes,
     }))
@@ -961,7 +940,7 @@ fn method_pieces(
     let return_type = if structor {
         quote!(|| None)
     } else {
-        quote!(<#signature_output as #root::abi::IntoReturn>::declared)
+        quote!(|| <#signature_output as #root::abi::IntoReturn>::DECLARED)
     };
     let visibility = visibility(&method.keys);
     let is_instance = method.signature.this.is_some();

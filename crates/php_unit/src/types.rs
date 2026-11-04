@@ -112,24 +112,27 @@ mod tests {
 
     #[test]
     fn the_builtins_are_written_in_php_s_order_after_the_names() {
-        let ty = Type::Union(vec![
-            Type::Int,
-            named("T"),
-            Type::Iterable,
-            Type::Object,
-            Type::Null,
-        ]);
+        let ty = Type::Union(
+            vec![
+                Type::Int,
+                named("T"),
+                Type::Iterable,
+                Type::Object,
+                Type::Null,
+            ]
+            .into(),
+        );
         assert_eq!(type_to_string(&ty), "T|Traversable|object|array|int|null");
     }
 
     #[test]
     fn null_beside_one_name_is_a_question_mark() {
         assert_eq!(
-            type_to_string(&Type::Union(vec![Type::Int, Type::Null])),
+            type_to_string(&Type::Union(vec![Type::Int, Type::Null].into())),
             "?int"
         );
         assert_eq!(
-            type_to_string(&Type::Nullable(Box::new(Type::Iterable))),
+            type_to_string(&Type::Nullable(Box::new(Type::Iterable).into())),
             "Traversable|array|null"
         );
         assert_eq!(type_to_string(&Type::Null), "null");
@@ -139,19 +142,19 @@ mod tests {
 
     #[test]
     fn static_is_the_called_scope_where_one_is_named() {
-        let ty = Type::Union(vec![Type::CalledClass, Type::Null]);
+        let ty = Type::Union(vec![Type::CalledClass, Type::Null].into());
         assert_eq!(type_to_string(&ty), "?static");
         assert_eq!(type_to_string_called(&ty, "B"), "?B");
-        let ty = Type::Union(vec![named("A"), Type::CalledClass, Type::Int]);
+        let ty = Type::Union(vec![named("A"), Type::CalledClass, Type::Int].into());
         assert_eq!(type_to_string_called(&ty, "B"), "A|B|int");
     }
 
     #[test]
     fn an_intersection_is_bracketed_only_inside_a_union() {
-        let ab = Type::Intersection(vec![named("A"), named("B")]);
+        let ab = Type::Intersection(vec![named("A"), named("B")].into());
         assert_eq!(type_to_string(&ab), "A&B");
         assert_eq!(
-            type_to_string(&Type::Union(vec![ab, Type::Null])),
+            type_to_string(&Type::Union(vec![ab, Type::Null].into())),
             "(A&B)|null"
         );
     }

@@ -1067,9 +1067,8 @@ struct Imported(PhpObject);
 
 impl FromArgument for Imported {
     const MASK: u32 = <Option<Instance<crate::modern::Node>> as FromArgument>::MASK;
-    fn declared() -> Option<Type> {
-        <Option<Instance<crate::modern::Node>> as FromArgument>::declared()
-    }
+    const DECLARED: Option<Type> =
+        <Option<Instance<crate::modern::Node>> as FromArgument>::DECLARED;
     fn accepts(value: &Value) -> bool {
         <Option<Instance<crate::modern::Node>> as FromArgument>::accepts(value)
     }

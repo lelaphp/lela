@@ -454,7 +454,7 @@ fn a_natives_names_are_its_entries_bytes_and_no_copy() {
             }],
             return_type: || None,
             frameless: &[],
-            attributes: &[|| crate::api::__private::attribute(MARK, Vec::new())],
+            attributes: &[crate::api::__private::attribute(MARK, &[])],
             entry: crate::api::__private::abstract_entry,
         }];
     const CONSTANTS: &[crate::api::__private::NativeConst] =

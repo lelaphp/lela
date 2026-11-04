@@ -6862,12 +6862,12 @@ fn closure_invoke(req: &mut Request, closure: Option<Function>) -> Option<Linked
         return_type: None,
         returns_by_ref: false,
         is_generator: false,
-        attributes: Vec::new(),
+        attributes: Vec::new().into(),
         doc_comment: None,
         file: Name::default(),
         line: 0,
         end_line: 0,
-        frameless: Vec::new(),
+        frameless: Vec::new().into(),
     };
     let mut function = closure
         .and_then(|closure| req.symbols().function_decl(closure).cloned())
