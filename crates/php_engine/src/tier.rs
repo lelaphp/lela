@@ -1611,8 +1611,19 @@ fn serve_held<'u, T: Tier, D: Telling>(
                         at = start.max(called.entry);
                         Took::Slots
                     } else {
-                        if let Err(other) = entered::<T, D>(req, callee, body, entry, declared)? {
-                            break other;
+                        match entered::<T, D>(req, callee, body, entry, declared)? {
+                            Ok(_) => {}
+                            // A tier's `Resume`: `Same` as the arm below takes it.
+                            Err(resumed @ Stepped::Same(to)) => {
+                                kept.forget();
+                                let Some(code) = held::taken_up(req, &mut kept, scope, to) else {
+                                    break resumed;
+                                };
+                                frame = to;
+                                body = code;
+                                oplines = &*body.oplines;
+                            }
+                            Err(other) => break other,
                         }
                         Took::Standing
                     }
@@ -1773,11 +1784,48 @@ fn serve_scope<T: Tier, D: Telling>(
 /// ([`exec::entry_of`]), and then its activation, the interrupt check
 /// and `Site::Entry`. The answer is the opline the loop goes on at in
 /// the callee, as php's `ZEND_VM_ENTER` loads `opline` once it has
-/// entered: where the tier answered `Continue`, the one the prologue
-/// left it at, which the loop's first entry of a frame takes as it
-/// stands; read off the frame only where a prologue was served or a
-/// tier resumed the callee itself. Any other edge, `Threw` of the callee
-/// where a `RECV` raised, is the `Err`.
+/// entered: the one the prologue left it at, which the loop's first
+/// entry of a frame takes as it stands; read off the frame only where a
+/// prologue was served. Any other edge is the `Err`: `Threw` of the
+/// callee where a `RECV` raised, or what a tier that did not answer
+/// `Continue` left the loop with, which goes on along the edge a
+/// `Resume` takes everywhere else. Even where it names the callee's
+/// number, that is no proof of the callee: a trace entered here may
+/// leave the callee and its caller's next call take its place on the
+/// stack, so the frame is taken up by what it serves now, and neither
+/// `code` nor a frame the loop kept is read past a tier that ran. So
+/// `hot` is not served with `quiet`'s op array, past `quiet`'s `RETURN`,
+/// where the trace `quiet`'s activation entered runs back into `$main`,
+/// on into `hot`, and leaves it for the interpreter at a guard that
+/// fails once:
+///
+/// ```php
+/// function quiet($n) { return $n <= 0 ? 0 : quiet($n - 1) + 1; }
+/// for ($i = 0; $i < 2000; $i++) { $s = quiet(5); }
+/// function hot() { for ($i = 0; $i < 3000; $i++) { $s = quiet(5); } echo "end i=$i s=$s\n"; }
+/// hot();
+/// echo "back\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// end i=3000 s=5
+/// back
+/// ```
+///
+/// And `s` is not served with `up`'s op array, a `SEND_*` of its own read
+/// as `up`'s, with no call under way:
+///
+/// ```php
+/// class P { function up($n) { return $n == 0 ? 0 : $this->up($n - 1) + 1; } function s($x) { return str_repeat("a", $x % 3); } }
+/// function keep($a, $b) { return $a + $b; }
+/// function id($x) { return $x; }
+/// function gone($x) { return "x$x"; }
+/// $p = new P; $t = 0;
+/// for ($i = 0; $i < 40; $i++) { gone($i); $t += keep(id($i), id($i + 1)); $p->s($i); $t += $p->up(15000); }
+/// echo $t, "\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// 601600
+/// ```
 #[inline(always)] // once per call edge, in the loop
 fn entered<T: Tier, D: Telling>(
     req: &mut Request,
@@ -1810,12 +1858,7 @@ fn entered<T: Tier, D: Telling>(
     }
     match T::safepoint(req, callee, Site::Entry, Held::of(code)) {
         Flow::Continue => Ok(Ok(at)),
-        flow => match answered(req, flow, callee)? {
-            // A tier that resumed the callee itself, at a trace's end or
-            // a recording's start (#3077), stood it where it goes on.
-            Stepped::Same(to) if to == callee => Ok(Ok(req.vm().opline(callee))),
-            other => Ok(Err(other)),
-        },
+        flow => answered(req, flow, callee).map(Err),
     }
 }
 

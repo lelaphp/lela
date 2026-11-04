@@ -915,6 +915,245 @@ impl Emit<'_> {
     /// prologue it does on every pass. The interrupt is not tested here, as
     /// php's trace tests none at a `DO_UCALL` (`:10456`): what is raised is
     /// read at the loop's header, past a door and at the next exit.
+    ///
+    /// A generator's frame and a fiber's make their calls in place as any
+    /// frame does, under force and where every guard fails once: one that
+    /// yields, is sent to, thrown into and destroyed between its calls, and
+    /// one that suspends below them, is thrown into and abandoned:
+    ///
+    /// ```php
+    /// $fin = 0;
+    /// function add($a, $b) { return $a + $b; }
+    /// function deep($n) { return $n <= 0 ? 0 : add($n, deep($n - 1)); }
+    /// function g($n) {
+    ///     try {
+    ///         for ($i = 0; $i < $n; $i++) {
+    ///             $got = yield $i => deep($i % 7);
+    ///             if ($got) { echo "got $got\n"; }
+    ///         }
+    ///         return deep(5);
+    ///     } finally { $GLOBALS['fin']++; }
+    /// }
+    /// function outer($n) { $r = yield from g($n); yield 'r' => $r; return add($r, 1); }
+    /// function sum($n) { $s = 0; foreach (outer($n) as $k => $v) { $s = add($s, $v); } return $s; }
+    /// for ($i = 0; $i < 200; $i++) { $t = sum(50); }
+    /// echo $t, "\n";
+    /// $g = g(4000);
+    /// $s = 0;
+    /// foreach ($g as $k => $v) { $s = add($s, $v); if ($k == 3000) { break; } }
+    /// echo $s, "\n";
+    /// try { $g->throw(new Exception("into gen")); } catch (Exception $e) { echo get_class($e), ':', $e->getMessage(), ':', $e->getLine(), "\n"; }
+    /// function thrower($n) { if ($n == 777) { throw new RuntimeException("in gen call"); } return $n; }
+    /// function gt() { for ($i = 0; ; $i++) { yield thrower($i); } }
+    /// function run() { $s = 0; foreach (gt() as $v) { $s = add($s, $v); } return $s; }
+    /// try { run(); } catch (RuntimeException $e) { echo $e->getMessage(), ' ', count($e->getTrace()), "\n"; }
+    /// $h = g(3); $h->current(); $h->send("x"); unset($h); echo "unset done\n";
+    /// $c = (function () { $x = yield 1; while (true) { $x = yield deep($x % 9); } })();
+    /// $c->current(); for ($i = 0; $i < 5000; $i++) { $v = $c->send($i); } echo $v, "\n";
+    /// echo $fin, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 407
+    /// 23988
+    /// Exception:into gen:22
+    /// in gen call 3
+    /// got x
+    /// unset done
+    /// 10
+    /// 202
+    /// ```
+    ///
+    /// ```php
+    /// $fin = 0;
+    /// function add($a, $b) { return $a + $b; }
+    /// function deep($n) { return $n <= 0 ? 0 : add($n, deep($n - 1)); }
+    /// function g($n) {
+    ///     try {
+    ///         for ($i = 0; $i < $n; $i++) {
+    ///             $got = yield $i => deep($i % 7);
+    ///             if ($got) { echo "got $got\n"; }
+    ///         }
+    ///         return deep(5);
+    ///     } finally { $GLOBALS['fin']++; }
+    /// }
+    /// function outer($n) { $r = yield from g($n); yield 'r' => $r; return add($r, 1); }
+    /// function sum($n) { $s = 0; foreach (outer($n) as $k => $v) { $s = add($s, $v); } return $s; }
+    /// for ($i = 0; $i < 200; $i++) { $t = sum(50); }
+    /// echo $t, "\n";
+    /// $g = g(4000);
+    /// $s = 0;
+    /// foreach ($g as $k => $v) { $s = add($s, $v); if ($k == 3000) { break; } }
+    /// echo $s, "\n";
+    /// try { $g->throw(new Exception("into gen")); } catch (Exception $e) { echo get_class($e), ':', $e->getMessage(), ':', $e->getLine(), "\n"; }
+    /// function thrower($n) { if ($n == 777) { throw new RuntimeException("in gen call"); } return $n; }
+    /// function gt() { for ($i = 0; ; $i++) { yield thrower($i); } }
+    /// function run() { $s = 0; foreach (gt() as $v) { $s = add($s, $v); } return $s; }
+    /// try { run(); } catch (RuntimeException $e) { echo $e->getMessage(), ' ', count($e->getTrace()), "\n"; }
+    /// $h = g(3); $h->current(); $h->send("x"); unset($h); echo "unset done\n";
+    /// $c = (function () { $x = yield 1; while (true) { $x = yield deep($x % 9); } })();
+    /// $c->current(); for ($i = 0; $i < 5000; $i++) { $v = $c->send($i); } echo $v, "\n";
+    /// echo $fin, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 407
+    /// 23988
+    /// Exception:into gen:22
+    /// in gen call 3
+    /// got x
+    /// unset done
+    /// 10
+    /// 202
+    /// ```
+    ///
+    /// ```php
+    /// function add($a, $b) { return $a + $b; }
+    /// function susp($n) { if ($n <= 0) { return Fiber::suspend(add(1, 2)); } return add(susp($n - 1), 1); }
+    /// class D { public function __construct(public $n) {} public function __destruct() { echo "dtor {$this->n}\n"; } }
+    /// function hot($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s = add($s, susp($i % 5)); } return $s; }
+    /// $f = new Fiber(function () { return hot(3000); });
+    /// $v = $f->start(); $n = 0;
+    /// while (!$f->isTerminated()) { $n++; $v = $f->resume($n); }
+    /// echo $n, ' ', $f->getReturn(), "\n";
+    /// $f = new Fiber(function () { $d = new D("in fiber"); try { hot(3000); } catch (Exception $e) { echo "caught ", $e->getMessage(), " ", count($e->getTrace()), "\n"; throw $e; } finally { echo "fiber finally\n"; } });
+    /// $f->start();
+    /// for ($i = 0; $i < 1500; $i++) { $f->resume($i); }
+    /// try { $f->throw(new Exception("into fiber")); } catch (Exception $e) { echo "out ", $e->getMessage(), "\n"; }
+    /// $f = new Fiber(function () { $d = new D("abandoned"); hot(3000); });
+    /// $f->start(); for ($i = 0; $i < 100; $i++) { $f->resume($i); }
+    /// unset($f); gc_collect_cycles(); echo "abandoned done\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 3000 4507500
+    /// caught into fiber 0
+    /// fiber finally
+    /// dtor in fiber
+    /// out into fiber
+    /// dtor abandoned
+    /// abandoned done
+    /// ```
+    ///
+    /// ```php
+    /// function add($a, $b) { return $a + $b; }
+    /// function susp($n) { if ($n <= 0) { return Fiber::suspend(add(1, 2)); } return add(susp($n - 1), 1); }
+    /// class D { public function __construct(public $n) {} public function __destruct() { echo "dtor {$this->n}\n"; } }
+    /// function hot($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s = add($s, susp($i % 5)); } return $s; }
+    /// $f = new Fiber(function () { return hot(3000); });
+    /// $v = $f->start(); $n = 0;
+    /// while (!$f->isTerminated()) { $n++; $v = $f->resume($n); }
+    /// echo $n, ' ', $f->getReturn(), "\n";
+    /// $f = new Fiber(function () { $d = new D("in fiber"); try { hot(3000); } catch (Exception $e) { echo "caught ", $e->getMessage(), " ", count($e->getTrace()), "\n"; throw $e; } finally { echo "fiber finally\n"; } });
+    /// $f->start();
+    /// for ($i = 0; $i < 1500; $i++) { $f->resume($i); }
+    /// try { $f->throw(new Exception("into fiber")); } catch (Exception $e) { echo "out ", $e->getMessage(), "\n"; }
+    /// $f = new Fiber(function () { $d = new D("abandoned"); hot(3000); });
+    /// $f->start(); for ($i = 0; $i < 100; $i++) { $f->resume($i); }
+    /// unset($f); gc_collect_cycles(); echo "abandoned done\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 3000 4507500
+    /// caught into fiber 0
+    /// fiber finally
+    /// dtor in fiber
+    /// out into fiber
+    /// dtor abandoned
+    /// abandoned done
+    /// ```
+    ///
+    /// `exit` below such calls leaves every frame as php's unwind exit does,
+    /// each frame's destructors served and no `finally` entered: from a
+    /// plain frame, from a fiber and from a generator:
+    ///
+    /// ```php
+    /// class D { public function __construct(public $n) {} public function __destruct() { echo "dtor {$this->n}\n"; } }
+    /// function add($a, $b) { return $a + $b; }
+    /// register_shutdown_function(function () { echo "shutdown\n"; });
+    /// function e($n, $at) { $d = new D("frame $n"); if ($n == $at) { try { exit(3); } finally { echo "never\n"; } } return add(e($n + 1, $at), 1); }
+    /// function quiet($n) { return $n <= 0 ? 0 : add(quiet($n - 1), 1); }
+    /// for ($i = 0; $i < 20000; $i++) { $s = quiet(30); }
+    /// echo $s, "\n";
+    /// $keep = new D("global");
+    /// function hot() { for ($i = 0; $i < 30000; $i++) { $s = quiet(5); if ($i == 25000) { try { e(0, 3); } catch (Throwable $t) { echo "no catch\n"; } } } }
+    /// hot();
+    /// ```
+    /// ```expect exit=3 regime=jit-force process
+    /// 30
+    /// dtor frame 3
+    /// dtor frame 2
+    /// dtor frame 1
+    /// dtor frame 0
+    /// shutdown
+    /// dtor global
+    /// ```
+    ///
+    /// ```php
+    /// class D { public function __construct(public $n) {} public function __destruct() { echo "dtor {$this->n}\n"; } }
+    /// function add($a, $b) { return $a + $b; }
+    /// register_shutdown_function(function () { echo "shutdown\n"; });
+    /// function e($n, $at) { $d = new D("frame $n"); if ($n == $at) { try { exit(3); } finally { echo "never\n"; } } return add(e($n + 1, $at), 1); }
+    /// function quiet($n) { return $n <= 0 ? 0 : add(quiet($n - 1), 1); }
+    /// for ($i = 0; $i < 20000; $i++) { $s = quiet(30); }
+    /// echo $s, "\n";
+    /// $keep = new D("global");
+    /// function hot() { for ($i = 0; $i < 30000; $i++) { $s = quiet(5); if ($i == 25000) { try { e(0, 3); } catch (Throwable $t) { echo "no catch\n"; } } } }
+    /// hot();
+    /// ```
+    /// ```expect exit=3 regime=jit-exit-fuzz process
+    /// 30
+    /// dtor frame 3
+    /// dtor frame 2
+    /// dtor frame 1
+    /// dtor frame 0
+    /// shutdown
+    /// dtor global
+    /// ```
+    ///
+    /// ```php
+    /// function add($a, $b) { return $a + $b; }
+    /// function s($n) { if ($n == 2) { echo "exit in fiber\n"; exit(0); } return Fiber::suspend(add($n, 1)); }
+    /// register_shutdown_function(function () { echo "shutdown\n"; });
+    /// $f = new Fiber(function () { for ($i = 0; ; $i++) { s($i % 5000 == 4999 ? 2 : 1); } });
+    /// $f->start(); for ($i = 0; $i < 6000; $i++) { $f->resume(1); }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// exit in fiber
+    /// shutdown
+    /// ```
+    ///
+    /// ```php
+    /// function add($a, $b) { return $a + $b; }
+    /// function s($n) { if ($n == 2) { echo "exit in fiber\n"; exit(0); } return Fiber::suspend(add($n, 1)); }
+    /// register_shutdown_function(function () { echo "shutdown\n"; });
+    /// $f = new Fiber(function () { for ($i = 0; ; $i++) { s($i % 5000 == 4999 ? 2 : 1); } });
+    /// $f->start(); for ($i = 0; $i < 6000; $i++) { $f->resume(1); }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// exit in fiber
+    /// shutdown
+    /// ```
+    ///
+    /// ```php
+    /// function add($a, $b) { return $a + $b; }
+    /// function x($n) { if ($n == 4000) { echo "exit in gen\n"; exit(7); } return add($n, 1); }
+    /// function g() { try { for ($i = 0; ; $i++) { yield x($i); } } finally { echo "never\n"; } }
+    /// register_shutdown_function(function () { echo "shutdown\n"; });
+    /// foreach (g() as $v) { $s = $v; }
+    /// ```
+    /// ```expect exit=7 regime=jit-force process
+    /// exit in gen
+    /// shutdown
+    /// ```
+    ///
+    /// ```php
+    /// function add($a, $b) { return $a + $b; }
+    /// function x($n) { if ($n == 4000) { echo "exit in gen\n"; exit(7); } return add($n, 1); }
+    /// function g() { try { for ($i = 0; ; $i++) { yield x($i); } } finally { echo "never\n"; } }
+    /// register_shutdown_function(function () { echo "shutdown\n"; });
+    /// foreach (g() as $v) { $s = $v; }
+    /// ```
+    /// ```expect exit=7 regime=jit-exit-fuzz process
+    /// exit in gen
+    /// shutdown
+    /// ```
     pub(super) fn make_in_place(
         &mut self,
         id: OpId,
