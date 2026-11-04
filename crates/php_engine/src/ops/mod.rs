@@ -5444,6 +5444,22 @@ pub(crate) fn read_offset(
 /// write's `GC_DELREF(ht) != 1` to test, and the throw where one is
 /// pending, `if (EG(exception)) return IS_NULL`. An immutable array is
 /// never held, as php's `IS_ARRAY_IMMUTABLE` test says ([`Left`]).
+///
+/// A write tests what is left, so a handler that takes an owner of the
+/// table leaves the write nowhere to land, where a read goes on:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["c"] = $GLOBALS["a"]; return true; });
+/// $a = [str_repeat("x", 3)]; $a[$u] = 1; var_dump(count($a), count($c));
+/// $a = [1 => str_repeat("x", 3)]; var_dump($a[1.5]);
+/// ```
+/// ```expect
+/// [Undefined variable $u]
+/// int(1)
+/// int(1)
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// string(3) "xxx"
+/// ```
 pub(crate) fn array_held<T>(
     req: &mut Request,
     array: PhpArray,
