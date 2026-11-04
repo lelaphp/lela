@@ -17,6 +17,9 @@ pub(super) const MAX_ARG_FLAG_NUM: u32 = 12;
 const FETCH_LOCAL: u32 = 1 << 2;
 /// php's `ZEND_ISEMPTY`.
 pub(super) const ISEMPTY: u32 = 1 << 0;
+/// php's `MAY_BE_RESOURCE`, `1 << IS_RESOURCE`, the mask a `TYPE_CHECK`
+/// for `is_resource()` names.
+pub(super) const MAY_BE_RESOURCE: u32 = 1 << ZvalType::Resource as u32;
 /// php's `ZEND_BIND_REF` and `ZEND_ARRAY_ELEMENT_REF`.
 const BY_REF: u32 = 1 << 0;
 /// The functions that read their caller's variables by name, php's
@@ -1243,9 +1246,8 @@ fn traced(
         Opcode::TypeCheck => {
             // php's `MAY_BE_RESOURCE` is no exact check; guards only for
             // exact ones, "to avoid code duplication".
-            let resource = 1 << 9;
             match k1 {
-                Some(k) if op.extended_value != resource => {
+                Some(k) if op.extended_value != MAY_BE_RESOURCE => {
                     let bit = 1u32 << (k as u8);
                     if op.extended_value == bit || op.extended_value == 0x3fe - bit {
                         vec![Op1]
@@ -1280,9 +1282,10 @@ pub(super) fn checked_order(opcode: Opcode) -> [Site; 3] {
 
 /// The operands php's code generator holds the recorded type of where its
 /// inference adds no guard (`CHECK_OP_TRACE_TYPE` in
-/// `zend_jit_trace.c`'s cases): a concatenation's two, a rope part's, and
-/// an arithmetic's where the recording saw a number, in the order it holds
-/// them; it holds one only where the operand's inference is marked
+/// `zend_jit_trace.c`'s cases): a concatenation's two, a rope part's, an
+/// arithmetic's where the recording saw a number, and a `TYPE_CHECK`'s
+/// that asks for another type than the recording saw, in the order it
+/// holds them; it holds one only where the operand's inference is marked
 /// `MAY_BE_GUARD` ([`guard_sites`] elsewhere).
 pub(super) fn check_sites(op: &Opline, samples: [Option<Sample>; 3]) -> Vec<Site> {
     use Site::{Op1, Op2};
@@ -1299,6 +1302,7 @@ pub(super) fn check_sites(op: &Opline, samples: [Option<Sample>; 3]) -> Vec<Site
             .into_iter()
             .filter_map(|(site, at)| number(at).then_some(site))
             .collect(),
+        Opcode::TypeCheck if op.extended_value != MAY_BE_RESOURCE => vec![Op1],
         _ => vec![],
     }
 }
