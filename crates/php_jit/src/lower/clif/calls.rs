@@ -12,8 +12,8 @@
 //! where the interpreter stands as it reads it after a kernel. Each falls
 //! back to that kernel where the engine's own path would refuse the plain
 //! case: the page's end, where no stack check holds it, or a full frame
-//! table at the push; the interrupt raised, or a callee's cache not yet
-//! laid down, at the call; and at the leave a frame that holds a receiver, a closure, an annex or arguments
+//! table at the push; a callee's cache not yet laid down at the call; and
+//! at the leave a frame that holds a receiver, a closure, an annex or arguments
 //! past its parameters, one a native's call made, one off the top page,
 //! or a caller's slot that holds a counted value. None takes an exit of
 //! its own: php's code takes none there.
@@ -900,10 +900,11 @@ impl Emit<'_> {
     /// the slot of the caller's that takes the return and the caller
     /// written over the pushed header, the caller stood at the call,
     /// php's `SET_EX_OPLINE`, and the arguments checked before the opline
-    /// is written ([`Emit::verify_args`]). Where the interrupt is raised, which the
-    /// callee's activation tests, or the callee's cache is not laid down,
-    /// [`Kernel::Call`] makes the call; where the callee serves a prologue
-    /// it does on every pass.
+    /// is written ([`Emit::verify_args`]). Where the callee's cache is not
+    /// laid down [`Kernel::Call`] makes the call; where the callee serves a
+    /// prologue it does on every pass. The interrupt is not tested here, as
+    /// php's trace tests none at a `DO_UCALL` (`:10456`): what is raised is
+    /// read at the loop's header, past a door and at the next exit.
     pub(super) fn make_in_place(
         &mut self,
         id: OpId,
@@ -923,17 +924,10 @@ impl Emit<'_> {
             return self.stepped(id, line);
         };
         let stack = self.stack()?;
-        let cx = self
-            .cx
-            .ok_or_else(|| mismatch("a call made before the entry"))?;
-        let interrupt = self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT);
-        let raised = self.b.ins().load(I8, trusted(), interrupt, 0);
-        let raised = self.b.ins().icmp_imm_s(IntCC::NotEqual, raised, 0);
         let unready = self.unready()?;
-        let refused = self.b.ins().bor(raised, unready);
         let room = self.b.use_var(var);
         let (slow, join) = self.split();
-        self.divert_if(refused, slow);
+        self.divert_if(unready, slow);
         self.copy_defaults(room, defaults)?;
         let flags = self.b.ins().load(I32, trusted(), room, at(L.info()));
         let kept = self.b.ins().band_imm_u(flags, i64::from(activation.keep()));

@@ -70,46 +70,46 @@ function u0:0(i64, i64, i64, i64, i64, i64) -> i32 tail {
                                 block14:
 @0000                               jump block3(v41, v40, v47)
 
-                                block3(v51: i64, v153: i64, v171: i64):
+                                block3(v51: i64, v153: i64, v166: i64):
                                     v122 -> v51
-                                    v176 -> v51
+                                    v171 -> v51
+                                    v588 -> v51
                                     v593 -> v51
-                                    v598 -> v51
-                                    v604 -> v51
-                                    v648 -> v51
-                                    v649 -> v51
-                                    v661 -> v51
-                                    v662 -> v51
-                                    v672 -> v51
+                                    v599 -> v51
+                                    v643 -> v51
+                                    v644 -> v51
+                                    v656 -> v51
+                                    v657 -> v51
+                                    v667 -> v51
+                                    v714 -> v51
+                                    v715 -> v51
+                                    v716 -> v51
+                                    v717 -> v51
+                                    v718 -> v51
                                     v719 -> v51
                                     v720 -> v51
-                                    v721 -> v51
-                                    v722 -> v51
-                                    v723 -> v51
-                                    v724 -> v51
-                                    v725 -> v51
                                     v152 -> v153
                                     v154 -> v153
+                                    v505 -> v153
+                                    v506 -> v153
+                                    v507 -> v153
+                                    v508 -> v153
+                                    v509 -> v153
                                     v510 -> v153
                                     v511 -> v153
                                     v512 -> v153
                                     v513 -> v153
                                     v514 -> v153
                                     v515 -> v153
-                                    v516 -> v153
-                                    v517 -> v153
-                                    v518 -> v153
-                                    v519 -> v153
-                                    v520 -> v153
-                                    v592 -> v153
-                                    v603 -> v153
-                                    v646 -> v153
-                                    v647 -> v153
-                                    v659 -> v153
-                                    v660 -> v153
-                                    v718 -> v153
-                                    v170 -> v171
-                                    v172 -> v171
+                                    v587 -> v153
+                                    v598 -> v153
+                                    v641 -> v153
+                                    v642 -> v153
+                                    v654 -> v153
+                                    v655 -> v153
+                                    v713 -> v153
+                                    v165 -> v166
+                                    v167 -> v166
 @0001                               v52 = load.i64 notrap aligned v51+80
 @0001                               v53 = stack_addr.i64 ss0
 @0001                               v54 = load.i64 notrap aligned v53+32
@@ -265,502 +265,497 @@ function u0:0(i64, i64, i64, i64, i64, i64) -> i32 tail {
 @0003                               store.i64 notrap aligned v153, v151+80
 @0003                               v155 = iconst.i32 4
 @0003                               store notrap aligned v155, v151+88  ; v155 = 4
-@0004                               v156 = load.i64 notrap aligned v0+8
-@0004                               v157 = load.i8 notrap aligned v156
-@0004                               v158 = iconst.i8 0
-@0004                               v159 = icmp ne v157, v158  ; v158 = 0
-@0004                               v160 = stack_addr.i64 ss0
-@0004                               v161 = load.i8 notrap aligned v160+40
-@0004                               v162 = bor v159, v161
-@0004                               brif v162, block29, block31
+@0004                               v156 = stack_addr.i64 ss0
+@0004                               v157 = load.i8 notrap aligned v156+40
+@0004                               brif v157, block29, block31
 
                                 block31:
-@0004                               v163 = load.i32 notrap aligned v151+44
-@0004                               v164 = iconst.i32 -33555001
-@0004                               v165 = band v163, v164  ; v164 = -33555001
-@0004                               v166 = iconst.i32 0
-@0004                               v167 = bor v165, v166  ; v166 = 0
-@0004                               store notrap aligned v167, v151+44
-@0004                               v168 = iconst.i32 4
-@0004                               store notrap aligned v168, v151+60  ; v168 = 4
-@0004                               v169 = iconst.i32 7
-@0004                               store notrap aligned v169, v151+68  ; v169 = 7
-@0004                               v173 = ireduce.i32 v171
+@0004                               v158 = load.i32 notrap aligned v151+44
+@0004                               v159 = iconst.i32 -33555001
+@0004                               v160 = band v158, v159  ; v159 = -33555001
+@0004                               v161 = iconst.i32 0
+@0004                               v162 = bor v160, v161  ; v161 = 0
+@0004                               store notrap aligned v162, v151+44
+@0004                               v163 = iconst.i32 4
+@0004                               store notrap aligned v163, v151+60  ; v163 = 4
+@0004                               v164 = iconst.i32 7
+@0004                               store notrap aligned v164, v151+68  ; v164 = 7
+@0004                               v168 = ireduce.i32 v166
+@0004                               v169 = iconst.i32 1
+@0004                               v170 = iadd v168, v169  ; v169 = 1
+@0004                               store notrap aligned v170, v151+64
+@0004                               v172 = iconst.i32 7
+@0004                               store notrap aligned v172, v51+40  ; v172 = 7
+@0004                               v173 = iconst.i32 4
 @0004                               v174 = iconst.i32 1
-@0004                               v175 = iadd v173, v174  ; v174 = 1
-@0004                               store notrap aligned v175, v151+64
-@0004                               v177 = iconst.i32 7
-@0004                               store notrap aligned v177, v51+40  ; v177 = 7
-@0004                               v178 = iconst.i32 4
-@0004                               v179 = iconst.i32 1
-@0004                               store notrap aligned v179, v151+40  ; v179 = 1
-@0004                               v180 = iconst.i64 0
-@0004                               v181 = iconst.i64 0
-@0004                               v182 = iconst.i64 0
-@0004                               v183 = isub v182, v181  ; v182 = 0, v181 = 0
-@0004                               v184 = uextend.i64 v178  ; v178 = 4
-@0004                               v185 = uextend.i64 v179  ; v179 = 1
-@0004                               jump block30(v184, v185, v151)
+@0004                               store notrap aligned v174, v151+40  ; v174 = 1
+@0004                               v175 = iconst.i64 0
+@0004                               v176 = iconst.i64 0
+@0004                               v177 = iconst.i64 0
+@0004                               v178 = isub v177, v176  ; v177 = 0, v176 = 0
+@0004                               v179 = uextend.i64 v173  ; v173 = 4
+@0004                               v180 = uextend.i64 v174  ; v174 = 1
+@0004                               jump block30(v179, v180, v151)
 
                                 block29 cold:
-@0004                               v186 = iconst.i32 7
-@0004                               v187 = iconst.i32 1
-@0004                               v188 = iconst.i32 4
-@0004                               v189 = stack_addr.i64 ss0
-@0004                               v190 = iconst.i64 0x7000_0200
-@0004                               v191 = call_indirect sig1, v190(v0, v176, v186, v187, v188, v189)  ; v190 = 0x7000_0200, v186 = 7, v187 = 1, v188 = 4
-@0004                               brif v191, block24, block32
+@0004                               v181 = iconst.i32 7
+@0004                               v182 = iconst.i32 1
+@0004                               v183 = iconst.i32 4
+@0004                               v184 = stack_addr.i64 ss0
+@0004                               v185 = iconst.i64 0x7000_0200
+@0004                               v186 = call_indirect sig1, v185(v0, v171, v181, v182, v183, v184)  ; v185 = 0x7000_0200, v181 = 7, v182 = 1, v183 = 4
+@0004                               brif v186, block24, block32
 
                                 block32:
-@0004                               v192 = stack_addr.i64 ss0
-@0004                               v193 = load.i64 notrap v192
-@0004                               v194 = stack_addr.i64 ss0+8
-@0004                               v195 = load.i64 notrap v194
-@0004                               v196 = stack_addr.i64 ss0+16
-@0004                               v197 = load.i32 notrap v196
-@0004                               v198 = stack_addr.i64 ss0+20
-@0004                               v199 = load.i32 notrap v198
-@0004                               v200 = stack_addr.i64 ss0+24
-@0004                               v201 = load.i64 notrap v200
-@0004                               v202 = uextend.i64 v197
-@0004                               v203 = uextend.i64 v199
-@0004                               jump block30(v202, v203, v193)
+@0004                               v187 = stack_addr.i64 ss0
+@0004                               v188 = load.i64 notrap v187
+@0004                               v189 = stack_addr.i64 ss0+8
+@0004                               v190 = load.i64 notrap v189
+@0004                               v191 = stack_addr.i64 ss0+16
+@0004                               v192 = load.i32 notrap v191
+@0004                               v193 = stack_addr.i64 ss0+20
+@0004                               v194 = load.i32 notrap v193
+@0004                               v195 = stack_addr.i64 ss0+24
+@0004                               v196 = load.i64 notrap v195
+@0004                               v197 = uextend.i64 v192
+@0004                               v198 = uextend.i64 v194
+@0004                               jump block30(v197, v198, v188)
 
-                                block30(v204: i64, v206: i64, v213: i64):
-                                    v256 -> v213
-                                    v268 -> v213
-                                    v290 -> v213
-                                    v302 -> v213
-                                    v309 -> v213
-                                    v363 -> v213
-                                    v456 -> v213
-@0004                               v205 = ireduce.i32 v204
-@0004                               v207 = ireduce.i32 v206
-@0004                               v208 = iconst.i32 4
-@0004                               v209 = icmp ne v205, v208  ; v208 = 4
-@0004                               v210 = iconst.i32 1
-@0004                               v211 = icmp ne v207, v210  ; v210 = 1
-@0004                               v212 = bor v209, v211
-@0004                               brif v212, block33, block34
+                                block30(v199: i64, v201: i64, v208: i64):
+                                    v251 -> v208
+                                    v263 -> v208
+                                    v285 -> v208
+                                    v297 -> v208
+                                    v304 -> v208
+                                    v358 -> v208
+                                    v451 -> v208
+@0004                               v200 = ireduce.i32 v199
+@0004                               v202 = ireduce.i32 v201
+@0004                               v203 = iconst.i32 4
+@0004                               v204 = icmp ne v200, v203  ; v203 = 4
+@0004                               v205 = iconst.i32 1
+@0004                               v206 = icmp ne v202, v205  ; v205 = 1
+@0004                               v207 = bor v204, v206
+@0004                               brif v207, block33, block34
 
                                 block34:
-@0005                               v214 = load.i64 notrap aligned v7+80
-@0005                               v215 = iconst.i64 -1
-@0005                               v216 = iadd v214, v215  ; v215 = -1
-                                    v269 -> v216
-                                    v270 -> v216
-                                    v303 -> v216
-                                    v304 -> v216
-                                    v317 -> v216
-@0006                               v217 = load.i64 notrap aligned v213+16
-@0006                               v218 = stack_addr.i64 ss0
-@0006                               v219 = load.i64 notrap aligned v218+32
-@0006                               v220 = load.i64 notrap aligned v219+16
-@0006                               v221 = load.i32 notrap aligned v220
-@0006                               v222 = iconst.i32 7
-@0006                               v223 = icmp ne v221, v222  ; v222 = 7
-@0006                               brif v223, block35, block36
+@0005                               v209 = load.i64 notrap aligned v7+80
+@0005                               v210 = iconst.i64 -1
+@0005                               v211 = iadd v209, v210  ; v210 = -1
+                                    v264 -> v211
+                                    v265 -> v211
+                                    v298 -> v211
+                                    v299 -> v211
+                                    v312 -> v211
+@0006                               v212 = load.i64 notrap aligned v208+16
+@0006                               v213 = stack_addr.i64 ss0
+@0006                               v214 = load.i64 notrap aligned v213+32
+@0006                               v215 = load.i64 notrap aligned v214+16
+@0006                               v216 = load.i32 notrap aligned v215
+@0006                               v217 = iconst.i32 7
+@0006                               v218 = icmp ne v216, v217  ; v217 = 7
+@0006                               brif v218, block35, block36
 
                                 block36:
-@0006                               v224 = load.i32 notrap aligned v220+4
-@0006                               v225 = load.i32 notrap aligned v217+16
-@0006                               v226 = icmp ne v224, v225
-@0006                               brif v226, block35, block37
+@0006                               v219 = load.i32 notrap aligned v215+4
+@0006                               v220 = load.i32 notrap aligned v212+16
+@0006                               v221 = icmp ne v219, v220
+@0006                               brif v221, block35, block37
 
                                 block37:
-@0006                               v227 = load.i8 notrap aligned v220+8
-@0006                               v228 = iconst.i8 0
-@0006                               v229 = icmp ne v227, v228  ; v228 = 0
-@0006                               brif v229, block35, block38
+@0006                               v222 = load.i8 notrap aligned v215+8
+@0006                               v223 = iconst.i8 0
+@0006                               v224 = icmp ne v222, v223  ; v223 = 0
+@0006                               brif v224, block35, block38
 
                                 block38:
-@0006                               v230 = uload32.i64 notrap aligned v220+12
-@0006                               v231 = iconst.i64 16
-@0006                               v232 = imul v230, v231  ; v231 = 16
-@0006                               v233 = iadd.i64 v217, v232
-@0006                               v234 = iconst.i64 40
-@0006                               v235 = iadd v233, v234  ; v234 = 40
-@0006                               v236 = load.i8 notrap aligned v235+8
-@0006                               v237 = iconst.i8 0
-@0006                               v238 = icmp eq v236, v237  ; v237 = 0
-@0006                               brif v238, block35, block39
+@0006                               v225 = uload32.i64 notrap aligned v215+12
+@0006                               v226 = iconst.i64 16
+@0006                               v227 = imul v225, v226  ; v226 = 16
+@0006                               v228 = iadd.i64 v212, v227
+@0006                               v229 = iconst.i64 40
+@0006                               v230 = iadd v228, v229  ; v229 = 40
+@0006                               v231 = load.i8 notrap aligned v230+8
+@0006                               v232 = iconst.i8 0
+@0006                               v233 = icmp eq v231, v232  ; v232 = 0
+@0006                               brif v233, block35, block39
 
                                 block39:
-@0006                               v239 = load.i8 notrap aligned v235+8
-@0006                               v240 = iconst.i8 10
-@0006                               v241 = icmp eq v239, v240  ; v240 = 10
-@0006                               brif v241, block40, block41
+@0006                               v234 = load.i8 notrap aligned v230+8
+@0006                               v235 = iconst.i8 10
+@0006                               v236 = icmp eq v234, v235  ; v235 = 10
+@0006                               brif v236, block40, block41
 
                                 block41:
-@0006                               v243 = load.i32 notrap aligned v235+8
-@0006                               v244 = iconst.i32 255
-@0006                               v245 = band v243, v244  ; v244 = 255
-@0006                               v246 = iconst.i32 4
-@0006                               v247 = icmp ne v245, v246  ; v246 = 4
-@0006                               brif v247, block43, block44
+@0006                               v238 = load.i32 notrap aligned v230+8
+@0006                               v239 = iconst.i32 255
+@0006                               v240 = band v238, v239  ; v239 = 255
+@0006                               v241 = iconst.i32 4
+@0006                               v242 = icmp ne v240, v241  ; v241 = 4
+@0006                               brif v242, block43, block44
 
                                 block43 cold:
-@0006                               v248 = load.i8 notrap aligned v235+8
-@0006                               v249 = iconst.i8 10
-@0006                               v250 = icmp eq v248, v249  ; v249 = 10
-@0006                               brif v250, block45, block46(v235)
+@0006                               v243 = load.i8 notrap aligned v230+8
+@0006                               v244 = iconst.i8 10
+@0006                               v245 = icmp eq v243, v244  ; v244 = 10
+@0006                               brif v245, block45, block46(v230)
 
                                 block45:
-@0006                               v252 = load.i64 notrap aligned v235
-@0006                               v253 = iconst.i64 8
-@0006                               v254 = iadd v252, v253  ; v253 = 8
-@0006                               jump block46(v254)
+@0006                               v247 = load.i64 notrap aligned v230
+@0006                               v248 = iconst.i64 8
+@0006                               v249 = iadd v247, v248  ; v248 = 8
+@0006                               jump block46(v249)
 
-                                block46(v251: i64):
-@0006                               v255 = load.i32 notrap aligned v251+8
-@0006                               v257 = load.i64 notrap aligned v251
-@0006                               store notrap aligned v257, v213+96
-@0006                               store notrap aligned v255, v213+104
-@0006                               v258 = iconst.i32 256
-@0006                               v259 = band v255, v258  ; v258 = 256
-@0006                               brif v259, block47, block48
+                                block46(v246: i64):
+@0006                               v250 = load.i32 notrap aligned v246+8
+@0006                               v252 = load.i64 notrap aligned v246
+@0006                               store notrap aligned v252, v208+96
+@0006                               store notrap aligned v250, v208+104
+@0006                               v253 = iconst.i32 256
+@0006                               v254 = band v250, v253  ; v253 = 256
+@0006                               brif v254, block47, block48
 
                                 block47:
-@0006                               v260 = load.i32 notrap aligned v257
-@0006                               v261 = iconst.i32 0x7fff_ffff
-@0006                               v262 = band v260, v261  ; v261 = 0x7fff_ffff
-@0006                               v263 = iconst.i32 0x7fff_ffff
-@0006                               v264 = icmp ne v262, v263  ; v263 = 0x7fff_ffff
-@0006                               v265 = uextend.i32 v264
-@0006                               v266 = iadd v260, v265
-@0006                               store notrap aligned v266, v257
+@0006                               v255 = load.i32 notrap aligned v252
+@0006                               v256 = iconst.i32 0x7fff_ffff
+@0006                               v257 = band v255, v256  ; v256 = 0x7fff_ffff
+@0006                               v258 = iconst.i32 0x7fff_ffff
+@0006                               v259 = icmp ne v257, v258  ; v258 = 0x7fff_ffff
+@0006                               v260 = uextend.i32 v259
+@0006                               v261 = iadd v255, v260
+@0006                               store notrap aligned v261, v252
 @0006                               jump block48
 
                                 block48:
-@0006                               v267 = iconst.i64 0
-@0006                               jump block49(v267, v213, v216)  ; v267 = 0
+@0006                               v262 = iconst.i64 0
+@0006                               jump block49(v262, v208, v211)  ; v262 = 0
 
                                 block44:
-@0006                               jump block42(v235)
+@0006                               jump block42(v230)
 
                                 block40:
-@0006                               v274 = load.i64 notrap aligned v235
-@0006                               v275 = iconst.i64 8
-@0006                               v276 = iadd v274, v275  ; v275 = 8
-@0006                               v277 = load.i32 notrap aligned v276+8
-@0006                               v278 = iconst.i32 255
-@0006                               v279 = band v277, v278  ; v278 = 255
-@0006                               v280 = iconst.i32 4
-@0006                               v281 = icmp ne v279, v280  ; v280 = 4
-@0006                               brif v281, block50, block51
+@0006                               v269 = load.i64 notrap aligned v230
+@0006                               v270 = iconst.i64 8
+@0006                               v271 = iadd v269, v270  ; v270 = 8
+@0006                               v272 = load.i32 notrap aligned v271+8
+@0006                               v273 = iconst.i32 255
+@0006                               v274 = band v272, v273  ; v273 = 255
+@0006                               v275 = iconst.i32 4
+@0006                               v276 = icmp ne v274, v275  ; v275 = 4
+@0006                               brif v276, block50, block51
 
                                 block50 cold:
-@0006                               v282 = load.i8 notrap aligned v276+8
-@0006                               v283 = iconst.i8 10
-@0006                               v284 = icmp eq v282, v283  ; v283 = 10
-@0006                               brif v284, block52, block53(v276)
+@0006                               v277 = load.i8 notrap aligned v271+8
+@0006                               v278 = iconst.i8 10
+@0006                               v279 = icmp eq v277, v278  ; v278 = 10
+@0006                               brif v279, block52, block53(v271)
 
                                 block52:
-@0006                               v286 = load.i64 notrap aligned v276
-@0006                               v287 = iconst.i64 8
-@0006                               v288 = iadd v286, v287  ; v287 = 8
-@0006                               jump block53(v288)
+@0006                               v281 = load.i64 notrap aligned v271
+@0006                               v282 = iconst.i64 8
+@0006                               v283 = iadd v281, v282  ; v282 = 8
+@0006                               jump block53(v283)
 
-                                block53(v285: i64):
-@0006                               v289 = load.i32 notrap aligned v285+8
-@0006                               v291 = load.i64 notrap aligned v285
-@0006                               store notrap aligned v291, v213+96
-@0006                               store notrap aligned v289, v213+104
-@0006                               v292 = iconst.i32 256
-@0006                               v293 = band v289, v292  ; v292 = 256
-@0006                               brif v293, block54, block55
+                                block53(v280: i64):
+@0006                               v284 = load.i32 notrap aligned v280+8
+@0006                               v286 = load.i64 notrap aligned v280
+@0006                               store notrap aligned v286, v208+96
+@0006                               store notrap aligned v284, v208+104
+@0006                               v287 = iconst.i32 256
+@0006                               v288 = band v284, v287  ; v287 = 256
+@0006                               brif v288, block54, block55
 
                                 block54:
-@0006                               v294 = load.i32 notrap aligned v291
-@0006                               v295 = iconst.i32 0x7fff_ffff
-@0006                               v296 = band v294, v295  ; v295 = 0x7fff_ffff
-@0006                               v297 = iconst.i32 0x7fff_ffff
-@0006                               v298 = icmp ne v296, v297  ; v297 = 0x7fff_ffff
-@0006                               v299 = uextend.i32 v298
-@0006                               v300 = iadd v294, v299
-@0006                               store notrap aligned v300, v291
+@0006                               v289 = load.i32 notrap aligned v286
+@0006                               v290 = iconst.i32 0x7fff_ffff
+@0006                               v291 = band v289, v290  ; v290 = 0x7fff_ffff
+@0006                               v292 = iconst.i32 0x7fff_ffff
+@0006                               v293 = icmp ne v291, v292  ; v292 = 0x7fff_ffff
+@0006                               v294 = uextend.i32 v293
+@0006                               v295 = iadd v289, v294
+@0006                               store notrap aligned v295, v286
 @0006                               jump block55
 
                                 block55:
-@0006                               v301 = iconst.i64 0
-@0006                               jump block56(v301, v213, v216)  ; v301 = 0
+@0006                               v296 = iconst.i64 0
+@0006                               jump block56(v296, v208, v211)  ; v296 = 0
 
                                 block51:
-@0006                               jump block42(v276)
+@0006                               jump block42(v271)
 
-                                block42(v242: i64):
-@0006                               v308 = load.i64 notrap aligned v242
-@0007                               v310 = load.i64 notrap aligned v213+80
-@0007                               v311, v312 = sadd_overflow v308, v310
-                                    v455 -> v311
-@0007                               v313 = fcvt_from_sint.f64 v308
-@0007                               v314 = fcvt_from_sint.f64 v310
-@0007                               v315 = fadd v313, v314
-@0007                               v316 = iconst.i64 0
-@0007                               brif v312, block57(v316, v309, v216), block58  ; v316 = 0
+                                block42(v237: i64):
+@0006                               v303 = load.i64 notrap aligned v237
+@0007                               v305 = load.i64 notrap aligned v208+80
+@0007                               v306, v307 = sadd_overflow v303, v305
+                                    v450 -> v306
+@0007                               v308 = fcvt_from_sint.f64 v303
+@0007                               v309 = fcvt_from_sint.f64 v305
+@0007                               v310 = fadd v308, v309
+@0007                               v311 = iconst.i64 0
+@0007                               brif v307, block57(v311, v304, v211), block58  ; v311 = 0
 
                                 block58:
-@0008                               v321 = load.i32 notrap aligned v309+64
-@0008                               v322 = uextend.i64 v321
-@0008                               v323 = iconst.i64 0x7fff_ffff
-@0008                               v324 = band v322, v323  ; v323 = 0x7fff_ffff
-@0008                               v325 = iconst.i64 -1
-@0008                               v326 = iadd v324, v325  ; v325 = -1
-                                    v476 -> v326
-                                    v477 -> v326
-                                    v478 -> v326
-                                    v479 -> v326
-                                    v480 -> v326
-                                    v481 -> v326
-                                    v482 -> v326
-                                    v530 -> v326
-                                    v531 -> v326
-@0008                               v327 = load.i32 notrap aligned v309+44
-@0008                               v328 = iconst.i32 0x1000_0208
-@0008                               v329 = band v327, v328  ; v328 = 0x1000_0208
-@0008                               brif v329, block59, block61
+@0008                               v316 = load.i32 notrap aligned v304+64
+@0008                               v317 = uextend.i64 v316
+@0008                               v318 = iconst.i64 0x7fff_ffff
+@0008                               v319 = band v317, v318  ; v318 = 0x7fff_ffff
+@0008                               v320 = iconst.i64 -1
+@0008                               v321 = iadd v319, v320  ; v320 = -1
+                                    v471 -> v321
+                                    v472 -> v321
+                                    v473 -> v321
+                                    v474 -> v321
+                                    v475 -> v321
+                                    v476 -> v321
+                                    v477 -> v321
+                                    v525 -> v321
+                                    v526 -> v321
+@0008                               v322 = load.i32 notrap aligned v304+44
+@0008                               v323 = iconst.i32 0x1000_0208
+@0008                               v324 = band v322, v323  ; v323 = 0x1000_0208
+@0008                               brif v324, block59, block61
 
                                 block61:
-@0008                               v330 = load.i64 notrap aligned v309+24
-@0008                               brif v330, block59, block62
+@0008                               v325 = load.i64 notrap aligned v304+24
+@0008                               brif v325, block59, block62
 
                                 block62:
-@0008                               v331 = ireduce.i32 v322
-@0008                               v332 = iconst.i32 -1
-@0008                               v333 = iadd v331, v332  ; v332 = -1
-@0008                               v334 = iconst.i32 0
-@0008                               v335 = icmp slt v333, v334  ; v334 = 0
-@0008                               brif v335, block59, block63
+@0008                               v326 = ireduce.i32 v317
+@0008                               v327 = iconst.i32 -1
+@0008                               v328 = iadd v326, v327  ; v327 = -1
+@0008                               v329 = iconst.i32 0
+@0008                               v330 = icmp slt v328, v329  ; v329 = 0
+@0008                               brif v330, block59, block63
 
                                 block63:
-@0008                               v336 = load.i64 notrap aligned v7+80
-@0008                               v337 = load.i64 notrap aligned v7+72
-                                    v428 -> v337
-@0008                               v338 = iconst.i64 -1
-@0008                               v339 = iadd v336, v338  ; v338 = -1
-@0008                               v340 = iconst.i64 32
-@0008                               v341 = imul v339, v340  ; v340 = 32
-@0008                               v342 = iadd v337, v341
-@0008                               v343 = load.i8 notrap aligned v342+16
-@0008                               v344 = iconst.i8 0
-@0008                               v345 = icmp ne v343, v344  ; v344 = 0
-@0008                               brif v345, block59, block64
+@0008                               v331 = load.i64 notrap aligned v7+80
+@0008                               v332 = load.i64 notrap aligned v7+72
+                                    v423 -> v332
+@0008                               v333 = iconst.i64 -1
+@0008                               v334 = iadd v331, v333  ; v333 = -1
+@0008                               v335 = iconst.i64 32
+@0008                               v336 = imul v334, v335  ; v335 = 32
+@0008                               v337 = iadd v332, v336
+@0008                               v338 = load.i8 notrap aligned v337+16
+@0008                               v339 = iconst.i8 0
+@0008                               v340 = icmp ne v338, v339  ; v339 = 0
+@0008                               brif v340, block59, block64
 
                                 block64:
-@0008                               v346 = iconst.i64 32
-@0008                               v347 = imul.i64 v326, v346  ; v346 = 32
-@0008                               v348 = iadd.i64 v337, v347
-@0008                               v349 = load.i64 notrap aligned v348
-                                    v430 -> v349
-@0008                               v350 = load.i32 notrap aligned v309+68
-@0008                               v351 = uextend.i64 v350
-@0008                               v352 = iconst.i64 -1
-@0008                               v353 = iadd v351, v352  ; v352 = -1
-@0008                               v354 = iconst.i64 16
-@0008                               v355 = imul v353, v354  ; v354 = 16
-@0008                               v356 = iadd v349, v355
-                                    v432 -> v356
-@0008                               v357 = iconst.i64 0
-@0008                               v358 = icmp ne v351, v357  ; v357 = 0
-@0008                               v359 = load.i32 notrap aligned v356+8
-@0008                               v360 = iconst.i32 256
-@0008                               v361 = band v359, v360  ; v360 = 256
-@0008                               brif v361, block66, block65
+@0008                               v341 = iconst.i64 32
+@0008                               v342 = imul.i64 v321, v341  ; v341 = 32
+@0008                               v343 = iadd.i64 v332, v342
+@0008                               v344 = load.i64 notrap aligned v343
+                                    v425 -> v344
+@0008                               v345 = load.i32 notrap aligned v304+68
+@0008                               v346 = uextend.i64 v345
+@0008                               v347 = iconst.i64 -1
+@0008                               v348 = iadd v346, v347  ; v347 = -1
+@0008                               v349 = iconst.i64 16
+@0008                               v350 = imul v348, v349  ; v349 = 16
+@0008                               v351 = iadd v344, v350
+                                    v427 -> v351
+@0008                               v352 = iconst.i64 0
+@0008                               v353 = icmp ne v346, v352  ; v352 = 0
+@0008                               v354 = load.i32 notrap aligned v351+8
+@0008                               v355 = iconst.i32 256
+@0008                               v356 = band v354, v355  ; v355 = 256
+@0008                               brif v356, block66, block65
 
                                 block66 cold:
-@0008                               brif.i32 v350, block59, block65
+@0008                               brif.i32 v345, block59, block65
 
                                 block65:
-@0008                               v362 = iconst.i32 0
-                                    v426 -> v362
-@0008                               v364 = iconst.i32 3
-@0008                               v365 = load.i64 notrap aligned v309+16
-@0008                               brif v365, block67, block72(v362, v337, v349, v356)  ; v362 = 0
+@0008                               v357 = iconst.i32 0
+                                    v421 -> v357
+@0008                               v359 = iconst.i32 3
+@0008                               v360 = load.i64 notrap aligned v304+16
+@0008                               brif v360, block67, block72(v357, v332, v344, v351)  ; v357 = 0
 
                                 block67:
-@0008                               v366 = load.i32 notrap aligned v309+44
-@0008                               v367 = iconst.i32 1
-@0008                               v368 = band v366, v367  ; v367 = 1
-@0008                               brif v368, block68, block69
+@0008                               v361 = load.i32 notrap aligned v304+44
+@0008                               v362 = iconst.i32 1
+@0008                               v363 = band v361, v362  ; v362 = 1
+@0008                               brif v363, block68, block69
 
                                 block68:
-@0008                               v369 = load.i32 notrap aligned v365
-@0008                               v370 = iconst.i32 8
-@0008                               v371 = iconst.i32 0x7fff_ffff
-@0008                               v372 = band v369, v371  ; v371 = 0x7fff_ffff
-@0008                               v373 = iconst.i32 1
-@0008                               v374 = icmp ule v372, v373  ; v373 = 1
-@0008                               v375 = iconst.i32 255
-@0008                               v376 = band v370, v375  ; v370 = 8, v375 = 255
-@0008                               v377 = iconst.i32 10
-@0008                               v378 = icmp eq v376, v377  ; v377 = 10
-@0008                               v379 = load.i32 notrap aligned v365+4
-@0008                               v380 = iconst.i32 -1008
-@0008                               v381 = band v379, v380  ; v380 = -1008
-@0008                               v382 = iconst.i32 0
-@0008                               v383 = icmp eq v381, v382  ; v382 = 0
-@0008                               v384 = bor v374, v378
-@0008                               v385 = bor v384, v383
-@0008                               v386 = iconst.i32 -1
-@0008                               v387 = iadd v369, v386  ; v386 = -1
-@0008                               brif v385, block71, block70(v387, v365)
+@0008                               v364 = load.i32 notrap aligned v360
+@0008                               v365 = iconst.i32 8
+@0008                               v366 = iconst.i32 0x7fff_ffff
+@0008                               v367 = band v364, v366  ; v366 = 0x7fff_ffff
+@0008                               v368 = iconst.i32 1
+@0008                               v369 = icmp ule v367, v368  ; v368 = 1
+@0008                               v370 = iconst.i32 255
+@0008                               v371 = band v365, v370  ; v365 = 8, v370 = 255
+@0008                               v372 = iconst.i32 10
+@0008                               v373 = icmp eq v371, v372  ; v372 = 10
+@0008                               v374 = load.i32 notrap aligned v360+4
+@0008                               v375 = iconst.i32 -1008
+@0008                               v376 = band v374, v375  ; v375 = -1008
+@0008                               v377 = iconst.i32 0
+@0008                               v378 = icmp eq v376, v377  ; v377 = 0
+@0008                               v379 = bor v369, v373
+@0008                               v380 = bor v379, v378
+@0008                               v381 = iconst.i32 -1
+@0008                               v382 = iadd v364, v381  ; v381 = -1
+@0008                               brif v380, block71, block70(v382, v360)
 
                                 block69:
-@0008                               v388 = load.i32 notrap aligned v365+12
-@0008                               v389 = iconst.i32 0x3fff_ffff
-@0008                               v390 = band v388, v389  ; v389 = 0x3fff_ffff
-@0008                               v391 = load.i32 notrap aligned v365
-@0008                               v392 = iconst.i32 0x7fff_ffff
-@0008                               v393 = band v391, v392  ; v392 = 0x7fff_ffff
+@0008                               v383 = load.i32 notrap aligned v360+12
+@0008                               v384 = iconst.i32 0x3fff_ffff
+@0008                               v385 = band v383, v384  ; v384 = 0x3fff_ffff
+@0008                               v386 = load.i32 notrap aligned v360
+@0008                               v387 = iconst.i32 0x7fff_ffff
+@0008                               v388 = band v386, v387  ; v387 = 0x7fff_ffff
+@0008                               v389 = iconst.i32 0
+@0008                               v390 = icmp eq v388, v389  ; v389 = 0
+@0008                               v391 = iconst.i32 1
+@0008                               v392 = icmp ule v385, v391  ; v391 = 1
+@0008                               v393 = band v390, v392
 @0008                               v394 = iconst.i32 0
-@0008                               v395 = icmp eq v393, v394  ; v394 = 0
-@0008                               v396 = iconst.i32 1
-@0008                               v397 = icmp ule v390, v396  ; v396 = 1
-@0008                               v398 = band v395, v397
-@0008                               v399 = iconst.i32 0
-@0008                               v400 = icmp eq v390, v399  ; v399 = 0
-@0008                               v401 = bor v398, v400
-@0008                               v402 = iconst.i32 -1
-@0008                               v403 = iadd v388, v402  ; v402 = -1
-@0008                               v404 = iconst.i64 12
-@0008                               v405 = iadd.i64 v365, v404  ; v404 = 12
-@0008                               brif v401, block71, block70(v403, v405)
+@0008                               v395 = icmp eq v385, v394  ; v394 = 0
+@0008                               v396 = bor v393, v395
+@0008                               v397 = iconst.i32 -1
+@0008                               v398 = iadd v383, v397  ; v397 = -1
+@0008                               v399 = iconst.i64 12
+@0008                               v400 = iadd.i64 v360, v399  ; v399 = 12
+@0008                               brif v396, block71, block70(v398, v400)
 
-                                block70(v406: i32, v407: i64):
-@0008                               store notrap aligned v406, v407
-@0008                               jump block72(v362, v337, v349, v356)  ; v362 = 0
+                                block70(v401: i32, v402: i64):
+@0008                               store notrap aligned v401, v402
+@0008                               jump block72(v357, v332, v344, v351)  ; v357 = 0
 
                                 block71 cold:
-@0008                               v408 = iconst.i64 0x7000_1000
-@0008                               v409 = call_indirect sig2, v408(v0, v309, v364)  ; v408 = 0x7000_1000, v364 = 3
-@0008                               v410 = iconst.i32 1
-@0008                               v411 = icmp ugt v409, v410  ; v410 = 1
-@0008                               brif v411, block24, block73
+@0008                               v403 = iconst.i64 0x7000_1000
+@0008                               v404 = call_indirect sig2, v403(v0, v304, v359)  ; v403 = 0x7000_1000, v359 = 3
+@0008                               v405 = iconst.i32 1
+@0008                               v406 = icmp ugt v404, v405  ; v405 = 1
+@0008                               brif v406, block24, block73
 
                                 block73:
-@0008                               v412 = iconst.i32 1
-@0008                               v413 = icmp.i32 eq v409, v412  ; v412 = 1
-@0008                               v414 = uextend.i32 v413
-@0008                               v415 = load.i64 notrap aligned v7+72
-@0008                               v416 = iconst.i64 32
-@0008                               v417 = imul.i64 v326, v416  ; v416 = 32
-@0008                               v418 = iadd v415, v417
-@0008                               v419 = load.i64 notrap aligned v418
-@0008                               v420 = iconst.i64 -1
-@0008                               v421 = iadd.i64 v351, v420  ; v420 = -1
-@0008                               v422 = iconst.i64 16
-@0008                               v423 = imul v421, v422  ; v422 = 16
-@0008                               v424 = iadd v419, v423
-@0008                               jump block72(v414, v415, v419, v424)
+@0008                               v407 = iconst.i32 1
+@0008                               v408 = icmp.i32 eq v404, v407  ; v407 = 1
+@0008                               v409 = uextend.i32 v408
+@0008                               v410 = load.i64 notrap aligned v7+72
+@0008                               v411 = iconst.i64 32
+@0008                               v412 = imul.i64 v321, v411  ; v411 = 32
+@0008                               v413 = iadd v410, v412
+@0008                               v414 = load.i64 notrap aligned v413
+@0008                               v415 = iconst.i64 -1
+@0008                               v416 = iadd.i64 v346, v415  ; v415 = -1
+@0008                               v417 = iconst.i64 16
+@0008                               v418 = imul v416, v417  ; v417 = 16
+@0008                               v419 = iadd v414, v418
+@0008                               jump block72(v409, v410, v414, v419)
 
-                                block72(v425: i32, v427: i64, v429: i64, v431: i64):
-@0008                               brif.i8 v358, block74, block75
+                                block72(v420: i32, v422: i64, v424: i64, v426: i64):
+@0008                               brif.i8 v353, block74, block75
 
                                 block74:
-@0008                               store.i64 notrap aligned v311, v431
-@0008                               v433 = iconst.i32 4
-@0008                               store notrap aligned v433, v431+8  ; v433 = 4
+@0008                               store.i64 notrap aligned v306, v426
+@0008                               v428 = iconst.i32 4
+@0008                               store notrap aligned v428, v426+8  ; v428 = 4
 @0008                               jump block75
 
                                 block75:
-@0008                               store.i64 notrap aligned v339, v7+80
-@0008                               v434 = load.i64 notrap aligned v309
-@0008                               store notrap aligned v434, v7+96
-@0008                               store.i64 notrap aligned v309, v7+56
-@0008                               v435 = iconst.i64 -80
-@0008                               v436 = iadd.i64 v429, v435  ; v435 = -80
-@0008                               v437 = uload32 notrap aligned v436+40
-@0008                               v438 = iconst.i64 1
-@0008                               v439 = iadd v437, v438  ; v438 = 1
-@0008                               v440 = select v425, v437, v439
-@0008                               istore32 notrap aligned v440, v436+40
-@0008                               v441 = iconst.i64 -2
-@0008                               v442 = iadd.i64 v336, v441  ; v441 = -2
-@0008                               v443 = iconst.i64 32
-@0008                               v444 = imul v442, v443  ; v443 = 32
-@0008                               v445 = iadd.i64 v427, v444
-@0008                               v446 = iconst.i64 0
-@0008                               v447 = iconst.i64 -80
-@0008                               v448 = iadd v446, v447  ; v446 = 0, v447 = -80
-@0008                               v449 = icmp eq v442, v326
-@0008                               v450 = iconst.i64 0
-@0008                               v451 = select v449, v450, v448  ; v450 = 0
-@0008                               v452 = iconst.i64 0
-@0008                               v453 = iconst.i64 0
-@0008                               v454 = isub v453, v309  ; v453 = 0
-@0008                               brif.i32 v425, block24, block60(v436)
+@0008                               store.i64 notrap aligned v334, v7+80
+@0008                               v429 = load.i64 notrap aligned v304
+@0008                               store notrap aligned v429, v7+96
+@0008                               store.i64 notrap aligned v304, v7+56
+@0008                               v430 = iconst.i64 -80
+@0008                               v431 = iadd.i64 v424, v430  ; v430 = -80
+@0008                               v432 = uload32 notrap aligned v431+40
+@0008                               v433 = iconst.i64 1
+@0008                               v434 = iadd v432, v433  ; v433 = 1
+@0008                               v435 = select v420, v432, v434
+@0008                               istore32 notrap aligned v435, v431+40
+@0008                               v436 = iconst.i64 -2
+@0008                               v437 = iadd.i64 v331, v436  ; v436 = -2
+@0008                               v438 = iconst.i64 32
+@0008                               v439 = imul v437, v438  ; v438 = 32
+@0008                               v440 = iadd.i64 v422, v439
+@0008                               v441 = iconst.i64 0
+@0008                               v442 = iconst.i64 -80
+@0008                               v443 = iadd v441, v442  ; v441 = 0, v442 = -80
+@0008                               v444 = icmp eq v437, v321
+@0008                               v445 = iconst.i64 0
+@0008                               v446 = select v444, v445, v443  ; v445 = 0
+@0008                               v447 = iconst.i64 0
+@0008                               v448 = iconst.i64 0
+@0008                               v449 = isub v448, v304  ; v448 = 0
+@0008                               brif.i32 v420, block24, block60(v431)
 
                                 block59 cold:
-@0008                               store.i64 notrap aligned v311, v213+112
-@0008                               v457 = iconst.i32 4
-@0008                               store notrap aligned v457, v213+120  ; v457 = 4
-@0008                               v458 = iconst.i32 3
-@0008                               v459 = iconst.i32 4
-@0008                               v460 = stack_addr.i64 ss0
-@0008                               v461 = iconst.i64 0x7000_0000
-@0008                               v462 = call_indirect sig0, v461(v0, v456, v458, v459, v460)  ; v461 = 0x7000_0000, v458 = 3, v459 = 4
-@0008                               brif v462, block24, block76
+@0008                               store.i64 notrap aligned v306, v208+112
+@0008                               v452 = iconst.i32 4
+@0008                               store notrap aligned v452, v208+120  ; v452 = 4
+@0008                               v453 = iconst.i32 3
+@0008                               v454 = iconst.i32 4
+@0008                               v455 = stack_addr.i64 ss0
+@0008                               v456 = iconst.i64 0x7000_0000
+@0008                               v457 = call_indirect sig0, v456(v0, v451, v453, v454, v455)  ; v456 = 0x7000_0000, v453 = 3, v454 = 4
+@0008                               brif v457, block24, block76
 
                                 block76:
-@0008                               v463 = stack_addr.i64 ss0
-@0008                               v464 = load.i64 notrap v463
-@0008                               v465 = stack_addr.i64 ss0+8
-@0008                               v466 = load.i64 notrap v465
-@0008                               v467 = stack_addr.i64 ss0+16
-@0008                               v468 = load.i32 notrap v467
-@0008                               v469 = stack_addr.i64 ss0+20
-@0008                               v470 = load.i32 notrap v469
-@0008                               v471 = stack_addr.i64 ss0+24
-@0008                               v472 = load.i64 notrap v471
-@0008                               v473 = uextend.i64 v468
-@0008                               v474 = uextend.i64 v470
-@0008                               jump block60(v464)
+@0008                               v458 = stack_addr.i64 ss0
+@0008                               v459 = load.i64 notrap v458
+@0008                               v460 = stack_addr.i64 ss0+8
+@0008                               v461 = load.i64 notrap v460
+@0008                               v462 = stack_addr.i64 ss0+16
+@0008                               v463 = load.i32 notrap v462
+@0008                               v464 = stack_addr.i64 ss0+20
+@0008                               v465 = load.i32 notrap v464
+@0008                               v466 = stack_addr.i64 ss0+24
+@0008                               v467 = load.i64 notrap v466
+@0008                               v468 = uextend.i64 v463
+@0008                               v469 = uextend.i64 v465
+@0008                               jump block60(v459)
 
-                                block60(v475: i64):
-                                    v528 -> v475
-                                    v529 -> v475
-@000a                               v483 = load.i64 notrap aligned v475+112
-@000a                               v484 = load.i32 notrap aligned v475+120
-@000a                               v485 = load.i64 notrap aligned v475+176
-                                    v683 -> v485
-                                    v684 -> v485
-@000a                               store notrap aligned v485, v475+112
-@000a                               v486 = iconst.i32 4
-@000a                               store notrap aligned v486, v475+120  ; v486 = 4
-@000a                               v487 = iconst.i32 256
-@000a                               v488 = band v484, v487  ; v487 = 256
-@000a                               v489 = iconst.i32 8
-@000a                               brif v488, block77, block78
+                                block60(v470: i64):
+                                    v523 -> v470
+                                    v524 -> v470
+@000a                               v478 = load.i64 notrap aligned v470+112
+@000a                               v479 = load.i32 notrap aligned v470+120
+@000a                               v480 = load.i64 notrap aligned v470+176
+                                    v678 -> v480
+                                    v679 -> v480
+@000a                               store notrap aligned v480, v470+112
+@000a                               v481 = iconst.i32 4
+@000a                               store notrap aligned v481, v470+120  ; v481 = 4
+@000a                               v482 = iconst.i32 256
+@000a                               v483 = band v479, v482  ; v482 = 256
+@000a                               v484 = iconst.i32 8
+@000a                               brif v483, block77, block78
 
                                 block77:
-@000a                               v490 = load.i32 notrap aligned v483
-@000a                               v491 = iconst.i32 0x7fff_ffff
-@000a                               v492 = band v490, v491  ; v491 = 0x7fff_ffff
-@000a                               v493 = iconst.i32 1
-@000a                               v494 = icmp ule v492, v493  ; v493 = 1
-@000a                               v495 = iconst.i32 255
-@000a                               v496 = band.i32 v484, v495  ; v495 = 255
-@000a                               v497 = iconst.i32 10
-@000a                               v498 = icmp eq v496, v497  ; v497 = 10
-@000a                               v499 = load.i32 notrap aligned v483+4
-@000a                               v500 = iconst.i32 -1008
-@000a                               v501 = band v499, v500  ; v500 = -1008
-@000a                               v502 = iconst.i32 0
-@000a                               v503 = icmp eq v501, v502  ; v502 = 0
-@000a                               v504 = bor v494, v498
-@000a                               v505 = bor v504, v503
-@000a                               brif v505, block79, block80
+@000a                               v485 = load.i32 notrap aligned v478
+@000a                               v486 = iconst.i32 0x7fff_ffff
+@000a                               v487 = band v485, v486  ; v486 = 0x7fff_ffff
+@000a                               v488 = iconst.i32 1
+@000a                               v489 = icmp ule v487, v488  ; v488 = 1
+@000a                               v490 = iconst.i32 255
+@000a                               v491 = band.i32 v479, v490  ; v490 = 255
+@000a                               v492 = iconst.i32 10
+@000a                               v493 = icmp eq v491, v492  ; v492 = 10
+@000a                               v494 = load.i32 notrap aligned v478+4
+@000a                               v495 = iconst.i32 -1008
+@000a                               v496 = band v494, v495  ; v495 = -1008
+@000a                               v497 = iconst.i32 0
+@000a                               v498 = icmp eq v496, v497  ; v497 = 0
+@000a                               v499 = bor v489, v493
+@000a                               v500 = bor v499, v498
+@000a                               brif v500, block79, block80
 
                                 block80:
-@000a                               v506 = iconst.i32 -1
-@000a                               v507 = iadd.i32 v490, v506  ; v506 = -1
-@000a                               store notrap aligned v507, v483
+@000a                               v501 = iconst.i32 -1
+@000a                               v502 = iadd.i32 v485, v501  ; v501 = -1
+@000a                               store notrap aligned v502, v478
 @000a                               jump block81
 
                                 block79 cold:
-@000a                               v508 = iconst.i64 0x7000_0300
-@000a                               v509 = call_indirect sig3, v508(v0, v475, v489, v483, v484)  ; v508 = 0x7000_0300, v489 = 8
-@000a                               brif v509, block82, block83
+@000a                               v503 = iconst.i64 0x7000_0300
+@000a                               v504 = call_indirect sig3, v503(v0, v470, v484, v478, v479)  ; v503 = 0x7000_0300, v484 = 8
+@000a                               brif v504, block82, block83
 
                                 block83:
 @000a                               jump block81
@@ -769,361 +764,361 @@ function u0:0(i64, i64, i64, i64, i64, i64) -> i32 tail {
 @000a                               jump block78
 
                                 block78:
-@000b                               v521 = iconst.i64 1
-@000b                               v522, v523 = sadd_overflow.i64 v153, v521  ; v521 = 1
-@000b                               v524 = fcvt_from_sint.f64 v153
-@000b                               v525 = f64const 0x1.0000000000000p0
-@000b                               v526 = fadd v524, v525  ; v525 = 0x1.0000000000000p0
-@000b                               v527 = iconst.i64 0
-@000b                               brif v523, block85, block86
+@000b                               v516 = iconst.i64 1
+@000b                               v517, v518 = sadd_overflow.i64 v153, v516  ; v516 = 1
+@000b                               v519 = fcvt_from_sint.f64 v153
+@000b                               v520 = f64const 0x1.0000000000000p0
+@000b                               v521 = fadd v519, v520  ; v520 = 0x1.0000000000000p0
+@000b                               v522 = iconst.i64 0
+@000b                               brif v518, block85, block86
 
                                 block85 cold:
-@000b                               v535 = f64const 0x1.0000000000000p63
-@000b                               store notrap aligned v535, v528+128  ; v535 = 0x1.0000000000000p63
-@000b                               v536 = iconst.i32 5
-@000b                               store notrap aligned v536, v528+136  ; v536 = 5
-@000b                               jump block84(v527, v475, v326)  ; v527 = 0
+@000b                               v530 = f64const 0x1.0000000000000p63
+@000b                               store notrap aligned v530, v523+128  ; v530 = 0x1.0000000000000p63
+@000b                               v531 = iconst.i32 5
+@000b                               store notrap aligned v531, v523+136  ; v531 = 5
+@000b                               jump block84(v522, v470, v321)  ; v522 = 0
 
                                 block86:
-@000b                               jump block10(v522, v528, v530)
+@000b                               jump block10(v517, v523, v525)
 
                                 block1:
-                                    v537 = load.i8 notrap aligned v1+88
-                                    v538 = iconst.i8 1
-                                    v539 = iconst.i8 8
-                                    v540 = icmp ne v537, v539  ; v539 = 8
-                                    v541 = band v538, v540  ; v538 = 1
-                                    brif v541, block87, block88
+                                    v532 = load.i8 notrap aligned v1+88
+                                    v533 = iconst.i8 1
+                                    v534 = iconst.i8 8
+                                    v535 = icmp ne v532, v534  ; v534 = 8
+                                    v536 = band v533, v535  ; v533 = 1
+                                    brif v536, block87, block88
 
                                 block88:
-                                    v542 = load.i8 notrap aligned v1+104
+                                    v537 = load.i8 notrap aligned v1+104
+                                    v538 = iconst.i8 1
+                                    v539 = iconst.i8 4
+                                    v540 = icmp ne v537, v539  ; v539 = 4
+                                    v541 = band v538, v540  ; v538 = 1
+                                    brif v541, block87, block89
+
+                                block89:
+                                    v542 = load.i8 notrap aligned v1+136
                                     v543 = iconst.i8 1
                                     v544 = iconst.i8 4
                                     v545 = icmp ne v542, v544  ; v544 = 4
                                     v546 = band v543, v545  ; v543 = 1
-                                    brif v546, block87, block89
+                                    brif v546, block87, block90
 
-                                block89:
-                                    v547 = load.i8 notrap aligned v1+136
+                                block90:
+                                    v547 = load.i8 notrap aligned v1+104
                                     v548 = iconst.i8 1
                                     v549 = iconst.i8 4
                                     v550 = icmp ne v547, v549  ; v549 = 4
                                     v551 = band v548, v550  ; v548 = 1
-                                    brif v551, block87, block90
-
-                                block90:
-                                    v552 = load.i8 notrap aligned v1+104
-                                    v553 = iconst.i8 1
-                                    v554 = iconst.i8 4
-                                    v555 = icmp ne v552, v554  ; v554 = 4
-                                    v556 = band v553, v555  ; v553 = 1
-                                    brif v556, block87, block91
+                                    brif v551, block87, block91
 
                                 block91:
-                                    v557 = load.i8 notrap aligned v1+120
-                                    v558 = iconst.i8 1
-                                    v559 = iconst.i8 1
-                                    v560 = icmp ne v557, v559  ; v559 = 1
-                                    v561 = band v558, v560  ; v558 = 1
-                                    v562 = iconst.i8 2
-                                    v563 = icmp ne v557, v562  ; v562 = 2
-                                    v564 = band v561, v563
-                                    v565 = iconst.i8 3
-                                    v566 = icmp ne v557, v565  ; v565 = 3
-                                    v567 = band v564, v566
-                                    v568 = iconst.i8 4
-                                    v569 = icmp ne v557, v568  ; v568 = 4
-                                    v570 = band v567, v569
-                                    v571 = iconst.i8 5
-                                    v572 = icmp ne v557, v571  ; v571 = 5
-                                    v573 = band v570, v572
-                                    v574 = iconst.i8 6
-                                    v575 = icmp ne v557, v574  ; v574 = 6
-                                    v576 = band v573, v575
-                                    v577 = iconst.i8 7
-                                    v578 = icmp ne v557, v577  ; v577 = 7
-                                    v579 = band v576, v578
-                                    v580 = iconst.i8 8
-                                    v581 = icmp ne v557, v580  ; v580 = 8
-                                    v582 = band v579, v581
-                                    v583 = iconst.i8 9
-                                    v584 = icmp ne v557, v583  ; v583 = 9
-                                    v585 = band v582, v584
-                                    brif v585, block87, block92
+                                    v552 = load.i8 notrap aligned v1+120
+                                    v553 = iconst.i8 1
+                                    v554 = iconst.i8 1
+                                    v555 = icmp ne v552, v554  ; v554 = 1
+                                    v556 = band v553, v555  ; v553 = 1
+                                    v557 = iconst.i8 2
+                                    v558 = icmp ne v552, v557  ; v557 = 2
+                                    v559 = band v556, v558
+                                    v560 = iconst.i8 3
+                                    v561 = icmp ne v552, v560  ; v560 = 3
+                                    v562 = band v559, v561
+                                    v563 = iconst.i8 4
+                                    v564 = icmp ne v552, v563  ; v563 = 4
+                                    v565 = band v562, v564
+                                    v566 = iconst.i8 5
+                                    v567 = icmp ne v552, v566  ; v566 = 5
+                                    v568 = band v565, v567
+                                    v569 = iconst.i8 6
+                                    v570 = icmp ne v552, v569  ; v569 = 6
+                                    v571 = band v568, v570
+                                    v572 = iconst.i8 7
+                                    v573 = icmp ne v552, v572  ; v572 = 7
+                                    v574 = band v571, v573
+                                    v575 = iconst.i8 8
+                                    v576 = icmp ne v552, v575  ; v575 = 8
+                                    v577 = band v574, v576
+                                    v578 = iconst.i8 9
+                                    v579 = icmp ne v552, v578  ; v578 = 9
+                                    v580 = band v577, v579
+                                    brif v580, block87, block92
 
                                 block92:
-                                    v586 = load.i8 notrap aligned v1+136
-                                    v587 = iconst.i8 1
-                                    v588 = iconst.i8 4
-                                    v589 = icmp ne v586, v588  ; v588 = 4
-                                    v590 = band v587, v589  ; v587 = 1
-                                    brif v590, block87, block93
+                                    v581 = load.i8 notrap aligned v1+136
+                                    v582 = iconst.i8 1
+                                    v583 = iconst.i8 4
+                                    v584 = icmp ne v581, v583  ; v583 = 4
+                                    v585 = band v582, v584  ; v582 = 1
+                                    brif v585, block87, block93
 
                                 block93:
-                                    v591 = load.i64 notrap aligned v1+128
-                                    jump block3(v1, v591, v9)
+                                    v586 = load.i64 notrap aligned v1+128
+                                    jump block3(v1, v586, v9)
 
                                 block26 cold:
                                     store.i64 notrap aligned v153, v51+128
+                                    v589 = iconst.i32 4
+                                    store notrap aligned v589, v51+136  ; v589 = 4
+                                    v590 = iconst.i32 4
+                                    v591 = iconst.i64 0x6000_0000
+                                    v592 = load.i32 notrap aligned v591  ; v591 = 0x6000_0000
+                                    store notrap aligned v592, v0+28
+                                    return v590  ; v590 = 4
+
+                                block33 cold:
+                                    store.i64 notrap aligned v511, v51+128
                                     v594 = iconst.i32 4
                                     store notrap aligned v594, v51+136  ; v594 = 4
-                                    v595 = iconst.i32 4
+                                    v595 = iconst.i32 5
                                     v596 = iconst.i64 0x6000_0000
                                     v597 = load.i32 notrap aligned v596  ; v596 = 0x6000_0000
                                     store notrap aligned v597, v0+28
-                                    return v595  ; v595 = 4
-
-                                block33 cold:
-                                    store.i64 notrap aligned v516, v51+128
-                                    v599 = iconst.i32 4
-                                    store notrap aligned v599, v51+136  ; v599 = 4
-                                    v600 = iconst.i32 5
-                                    v601 = iconst.i64 0x6000_0000
-                                    v602 = load.i32 notrap aligned v601  ; v601 = 0x6000_0000
-                                    store notrap aligned v602, v0+28
-                                    return v600  ; v600 = 5
+                                    return v595  ; v595 = 5
 
                                 block35 cold:
                                     store.i64 notrap aligned v153, v51+128
-                                    v605 = iconst.i32 4
-                                    store notrap aligned v605, v51+136  ; v605 = 4
-                                    v606 = iconst.i32 6
-                                    v607 = iconst.i64 0x6000_0000
-                                    v608 = load.i32 notrap aligned v607  ; v607 = 0x6000_0000
-                                    store notrap aligned v608, v0+28
-                                    return v606  ; v606 = 6
+                                    v600 = iconst.i32 4
+                                    store notrap aligned v600, v51+136  ; v600 = 4
+                                    v601 = iconst.i32 6
+                                    v602 = iconst.i64 0x6000_0000
+                                    v603 = load.i32 notrap aligned v602  ; v602 = 0x6000_0000
+                                    store notrap aligned v603, v0+28
+                                    return v601  ; v601 = 6
 
                                 block11 cold:
                                     store.i64 notrap aligned v40, v41+128
-                                    v609 = iconst.i32 4
-                                    store notrap aligned v609, v41+136  ; v609 = 4
-                                    v610 = iconst.i32 11
-                                    v611 = iconst.i64 0x6000_0000
-                                    v612 = load.i32 notrap aligned v611  ; v611 = 0x6000_0000
-                                    store notrap aligned v612, v0+28
-                                    return v610  ; v610 = 11
+                                    v604 = iconst.i32 4
+                                    store notrap aligned v604, v41+136  ; v604 = 4
+                                    v605 = iconst.i32 11
+                                    v606 = iconst.i64 0x6000_0000
+                                    v607 = load.i32 notrap aligned v606  ; v606 = 0x6000_0000
+                                    store notrap aligned v607, v0+28
+                                    return v605  ; v605 = 11
 
                                 block4(v21: i64, v22: i64, v23: i64) cold:
-                                    v613 = iconst.i64 0x000a_0000_0001
-                                    v614 = iconst.i32 10
-                                    v615 = stack_addr.i64 ss0
-                                    v616 = load.i64 notrap aligned v615+32
-                                    v617 = load.i64 notrap aligned v616+32
-                                    v618 = iconst.i64 0
-                                    v619 = icmp eq v617, v618  ; v618 = 0
-                                    brif v619, block94, block95
+                                    v608 = iconst.i64 0x000a_0000_0001
+                                    v609 = iconst.i32 10
+                                    v610 = stack_addr.i64 ss0
+                                    v611 = load.i64 notrap aligned v610+32
+                                    v612 = load.i64 notrap aligned v611+32
+                                    v613 = iconst.i64 0
+                                    v614 = icmp eq v612, v613  ; v613 = 0
+                                    brif v614, block94, block95
 
                                 block95:
-                                    v620 = load.i64 notrap aligned v616+40
-                                    store.i32 notrap aligned v614, v22+40  ; v614 = 10
-                                    return_call_indirect.i64 sig4, v617(v0, v22, v23, v620, v21, v613)  ; v613 = 0x000a_0000_0001
+                                    v615 = load.i64 notrap aligned v611+40
+                                    store.i32 notrap aligned v609, v22+40  ; v609 = 10
+                                    return_call_indirect.i64 sig4, v612(v0, v22, v23, v615, v21, v608)  ; v608 = 0x000a_0000_0001
 
                                 block6(v28: i64, v29: i64, v30: i64) cold:
-                                    v621 = iconst.i64 0x000a_0000_0001
-                                    v622 = iconst.i32 10
-                                    v623 = stack_addr.i64 ss0
-                                    v624 = load.i64 notrap aligned v623+32
-                                    v625 = load.i64 notrap aligned v624+56
-                                    v626 = iconst.i64 0
-                                    v627 = icmp eq v625, v626  ; v626 = 0
-                                    brif v627, block96, block97
+                                    v616 = iconst.i64 0x000a_0000_0001
+                                    v617 = iconst.i32 10
+                                    v618 = stack_addr.i64 ss0
+                                    v619 = load.i64 notrap aligned v618+32
+                                    v620 = load.i64 notrap aligned v619+56
+                                    v621 = iconst.i64 0
+                                    v622 = icmp eq v620, v621  ; v621 = 0
+                                    brif v622, block96, block97
 
                                 block97:
-                                    v628 = load.i64 notrap aligned v624+64
-                                    store.i32 notrap aligned v622, v29+40  ; v622 = 10
-                                    return_call_indirect.i64 sig5, v625(v0, v29, v30, v628, v28, v621)  ; v621 = 0x000a_0000_0001
+                                    v623 = load.i64 notrap aligned v619+64
+                                    store.i32 notrap aligned v617, v29+40  ; v617 = 10
+                                    return_call_indirect.i64 sig5, v620(v0, v29, v30, v623, v28, v616)  ; v616 = 0x000a_0000_0001
 
                                 block8(v35: i64, v36: i64, v37: i64) cold:
-                                    v629 = iconst.i64 0x000a_0000_0001
-                                    v630 = iconst.i32 10
-                                    v631 = stack_addr.i64 ss0
-                                    v632 = load.i64 notrap aligned v631+32
-                                    v633 = load.i64 notrap aligned v632+80
-                                    v634 = iconst.i64 0
-                                    v635 = icmp eq v633, v634  ; v634 = 0
-                                    brif v635, block98, block99
+                                    v624 = iconst.i64 0x000a_0000_0001
+                                    v625 = iconst.i32 10
+                                    v626 = stack_addr.i64 ss0
+                                    v627 = load.i64 notrap aligned v626+32
+                                    v628 = load.i64 notrap aligned v627+80
+                                    v629 = iconst.i64 0
+                                    v630 = icmp eq v628, v629  ; v629 = 0
+                                    brif v630, block98, block99
 
                                 block99:
-                                    v636 = load.i64 notrap aligned v632+88
-                                    store.i32 notrap aligned v630, v36+40  ; v630 = 10
-                                    return_call_indirect.i64 sig6, v633(v0, v36, v37, v636, v35, v629)  ; v629 = 0x000a_0000_0001
+                                    v631 = load.i64 notrap aligned v627+88
+                                    store.i32 notrap aligned v625, v36+40  ; v625 = 10
+                                    return_call_indirect.i64 sig6, v628(v0, v36, v37, v631, v35, v624)  ; v624 = 0x000a_0000_0001
 
                                 block13(v48: i64, v49: i64, v50: i64) cold:
                                     store.i64 notrap aligned v40, v41+128
-                                    v637 = iconst.i32 4
-                                    store notrap aligned v637, v41+136  ; v637 = 4
-                                    v638 = iconst.i64 0x000c_0000_0001
-                                    v639 = iconst.i32 12
-                                    v640 = stack_addr.i64 ss0
-                                    v641 = load.i64 notrap aligned v640+32
-                                    v642 = load.i64 notrap aligned v641+104
-                                    v643 = iconst.i64 0
-                                    v644 = icmp eq v642, v643  ; v643 = 0
-                                    brif v644, block100, block101
+                                    v632 = iconst.i32 4
+                                    store notrap aligned v632, v41+136  ; v632 = 4
+                                    v633 = iconst.i64 0x000c_0000_0001
+                                    v634 = iconst.i32 12
+                                    v635 = stack_addr.i64 ss0
+                                    v636 = load.i64 notrap aligned v635+32
+                                    v637 = load.i64 notrap aligned v636+104
+                                    v638 = iconst.i64 0
+                                    v639 = icmp eq v637, v638  ; v638 = 0
+                                    brif v639, block100, block101
 
                                 block101:
-                                    v645 = load.i64 notrap aligned v641+112
-                                    store.i32 notrap aligned v639, v49+40  ; v639 = 12
-                                    return_call_indirect.i64 sig7, v642(v0, v49, v50, v645, v48, v638)  ; v638 = 0x000c_0000_0001
+                                    v640 = load.i64 notrap aligned v636+112
+                                    store.i32 notrap aligned v634, v49+40  ; v634 = 12
+                                    return_call_indirect.i64 sig7, v637(v0, v49, v50, v640, v48, v633)  ; v633 = 0x000c_0000_0001
 
-                                block49(v271: i64, v272: i64, v273: i64) cold:
+                                block49(v266: i64, v267: i64, v268: i64) cold:
                                     store.i64 notrap aligned v153, v51+128
-                                    v650 = iconst.i32 4
-                                    store notrap aligned v650, v51+136  ; v650 = 4
-                                    v651 = iconst.i64 0x0002_0000_0004
-                                    v652 = iconst.i32 2
-                                    v653 = stack_addr.i64 ss0
-                                    v654 = load.i64 notrap aligned v653+32
-                                    v655 = load.i64 notrap aligned v654+128
-                                    v656 = iconst.i64 0
-                                    v657 = icmp eq v655, v656  ; v656 = 0
-                                    brif v657, block102, block103
+                                    v645 = iconst.i32 4
+                                    store notrap aligned v645, v51+136  ; v645 = 4
+                                    v646 = iconst.i64 0x0002_0000_0004
+                                    v647 = iconst.i32 2
+                                    v648 = stack_addr.i64 ss0
+                                    v649 = load.i64 notrap aligned v648+32
+                                    v650 = load.i64 notrap aligned v649+128
+                                    v651 = iconst.i64 0
+                                    v652 = icmp eq v650, v651  ; v651 = 0
+                                    brif v652, block102, block103
 
                                 block103:
-                                    v658 = load.i64 notrap aligned v654+136
-                                    store.i32 notrap aligned v652, v272+40  ; v652 = 2
-                                    return_call_indirect.i64 sig8, v655(v0, v272, v273, v658, v271, v651)  ; v651 = 0x0002_0000_0004
+                                    v653 = load.i64 notrap aligned v649+136
+                                    store.i32 notrap aligned v647, v267+40  ; v647 = 2
+                                    return_call_indirect.i64 sig8, v650(v0, v267, v268, v653, v266, v646)  ; v646 = 0x0002_0000_0004
 
-                                block56(v305: i64, v306: i64, v307: i64) cold:
+                                block56(v300: i64, v301: i64, v302: i64) cold:
                                     store.i64 notrap aligned v153, v51+128
-                                    v663 = iconst.i32 4
-                                    store notrap aligned v663, v51+136  ; v663 = 4
-                                    v664 = iconst.i64 0x0002_0000_0004
-                                    v665 = iconst.i32 2
-                                    v666 = stack_addr.i64 ss0
-                                    v667 = load.i64 notrap aligned v666+32
-                                    v668 = load.i64 notrap aligned v667+152
-                                    v669 = iconst.i64 0
-                                    v670 = icmp eq v668, v669  ; v669 = 0
-                                    brif v670, block104, block105
+                                    v658 = iconst.i32 4
+                                    store notrap aligned v658, v51+136  ; v658 = 4
+                                    v659 = iconst.i64 0x0002_0000_0004
+                                    v660 = iconst.i32 2
+                                    v661 = stack_addr.i64 ss0
+                                    v662 = load.i64 notrap aligned v661+32
+                                    v663 = load.i64 notrap aligned v662+152
+                                    v664 = iconst.i64 0
+                                    v665 = icmp eq v663, v664  ; v664 = 0
+                                    brif v665, block104, block105
 
                                 block105:
-                                    v671 = load.i64 notrap aligned v667+160
-                                    store.i32 notrap aligned v665, v306+40  ; v665 = 2
-                                    return_call_indirect.i64 sig9, v668(v0, v306, v307, v671, v305, v664)  ; v664 = 0x0002_0000_0004
+                                    v666 = load.i64 notrap aligned v662+160
+                                    store.i32 notrap aligned v660, v301+40  ; v660 = 2
+                                    return_call_indirect.i64 sig9, v663(v0, v301, v302, v666, v300, v659)  ; v659 = 0x0002_0000_0004
 
-                                block57(v318: i64, v319: i64, v320: i64) cold:
-                                    store.i64 notrap aligned v515, v51+128
-                                    v673 = iconst.i32 4
-                                    store notrap aligned v673, v51+136  ; v673 = 4
-                                    store.i64 notrap aligned v308, v309+96
-                                    v674 = iconst.i32 4
-                                    store notrap aligned v674, v309+104  ; v674 = 4
-                                    v675 = iconst.i64 0x0002_0000_0004
-                                    v676 = iconst.i32 2
-                                    v677 = stack_addr.i64 ss0
-                                    v678 = load.i64 notrap aligned v677+32
-                                    v679 = load.i64 notrap aligned v678+176
-                                    v680 = iconst.i64 0
-                                    v681 = icmp eq v679, v680  ; v680 = 0
-                                    brif v681, block106, block107
+                                block57(v313: i64, v314: i64, v315: i64) cold:
+                                    store.i64 notrap aligned v510, v51+128
+                                    v668 = iconst.i32 4
+                                    store notrap aligned v668, v51+136  ; v668 = 4
+                                    store.i64 notrap aligned v303, v304+96
+                                    v669 = iconst.i32 4
+                                    store notrap aligned v669, v304+104  ; v669 = 4
+                                    v670 = iconst.i64 0x0002_0000_0004
+                                    v671 = iconst.i32 2
+                                    v672 = stack_addr.i64 ss0
+                                    v673 = load.i64 notrap aligned v672+32
+                                    v674 = load.i64 notrap aligned v673+176
+                                    v675 = iconst.i64 0
+                                    v676 = icmp eq v674, v675  ; v675 = 0
+                                    brif v676, block106, block107
 
                                 block107:
-                                    v682 = load.i64 notrap aligned v678+184
-                                    store.i32 notrap aligned v676, v319+40  ; v676 = 2
-                                    return_call_indirect.i64 sig10, v679(v0, v319, v320, v682, v318, v675)  ; v675 = 0x0002_0000_0004
+                                    v677 = load.i64 notrap aligned v673+184
+                                    store.i32 notrap aligned v671, v314+40  ; v671 = 2
+                                    return_call_indirect.i64 sig10, v674(v0, v314, v315, v677, v313, v670)  ; v670 = 0x0002_0000_0004
 
-                                block84(v532: i64, v533: i64, v534: i64) cold:
-                                    store.i64 notrap aligned v485, v528+112
-                                    v685 = iconst.i32 4
-                                    store notrap aligned v685, v528+120  ; v685 = 4
-                                    v686 = iconst.i64 0x000a_0000_0001
-                                    v687 = iconst.i32 10
-                                    v688 = stack_addr.i64 ss0
-                                    v689 = load.i64 notrap aligned v688+32
-                                    v690 = load.i64 notrap aligned v689+200
-                                    v691 = iconst.i64 0
-                                    v692 = icmp eq v690, v691  ; v691 = 0
-                                    brif v692, block108, block109
+                                block84(v527: i64, v528: i64, v529: i64) cold:
+                                    store.i64 notrap aligned v480, v523+112
+                                    v680 = iconst.i32 4
+                                    store notrap aligned v680, v523+120  ; v680 = 4
+                                    v681 = iconst.i64 0x000a_0000_0001
+                                    v682 = iconst.i32 10
+                                    v683 = stack_addr.i64 ss0
+                                    v684 = load.i64 notrap aligned v683+32
+                                    v685 = load.i64 notrap aligned v684+200
+                                    v686 = iconst.i64 0
+                                    v687 = icmp eq v685, v686  ; v686 = 0
+                                    brif v687, block108, block109
 
                                 block109:
-                                    v693 = load.i64 notrap aligned v689+208
-                                    store.i32 notrap aligned v687, v533+40  ; v687 = 10
-                                    return_call_indirect.i64 sig11, v690(v0, v533, v534, v693, v532, v686)  ; v686 = 0x000a_0000_0001
+                                    v688 = load.i64 notrap aligned v684+208
+                                    store.i32 notrap aligned v682, v528+40  ; v682 = 10
+                                    return_call_indirect.i64 sig11, v685(v0, v528, v529, v688, v527, v681)  ; v681 = 0x000a_0000_0001
 
                                 block94 cold:
-                                    v694 = iconst.i32 0
-                                    v695 = iconst.i64 0x6000_0000
-                                    v696 = load.i32 notrap aligned v695  ; v695 = 0x6000_0000
-                                    store notrap aligned v696, v0+28
-                                    return v694  ; v694 = 0
+                                    v689 = iconst.i32 0
+                                    v690 = iconst.i64 0x6000_0000
+                                    v691 = load.i32 notrap aligned v690  ; v690 = 0x6000_0000
+                                    store notrap aligned v691, v0+28
+                                    return v689  ; v689 = 0
 
                                 block96 cold:
-                                    v697 = iconst.i32 1
-                                    v698 = iconst.i64 0x6000_0000
-                                    v699 = load.i32 notrap aligned v698  ; v698 = 0x6000_0000
-                                    store notrap aligned v699, v0+28
-                                    return v697  ; v697 = 1
+                                    v692 = iconst.i32 1
+                                    v693 = iconst.i64 0x6000_0000
+                                    v694 = load.i32 notrap aligned v693  ; v693 = 0x6000_0000
+                                    store notrap aligned v694, v0+28
+                                    return v692  ; v692 = 1
 
                                 block98 cold:
-                                    v700 = iconst.i32 2
-                                    v701 = iconst.i64 0x6000_0000
-                                    v702 = load.i32 notrap aligned v701  ; v701 = 0x6000_0000
-                                    store notrap aligned v702, v0+28
-                                    return v700  ; v700 = 2
+                                    v695 = iconst.i32 2
+                                    v696 = iconst.i64 0x6000_0000
+                                    v697 = load.i32 notrap aligned v696  ; v696 = 0x6000_0000
+                                    store notrap aligned v697, v0+28
+                                    return v695  ; v695 = 2
 
                                 block100 cold:
-                                    v703 = iconst.i32 3
-                                    v704 = iconst.i64 0x6000_0000
-                                    v705 = load.i32 notrap aligned v704  ; v704 = 0x6000_0000
-                                    store notrap aligned v705, v0+28
-                                    return v703  ; v703 = 3
+                                    v698 = iconst.i32 3
+                                    v699 = iconst.i64 0x6000_0000
+                                    v700 = load.i32 notrap aligned v699  ; v699 = 0x6000_0000
+                                    store notrap aligned v700, v0+28
+                                    return v698  ; v698 = 3
 
                                 block102 cold:
-                                    v706 = iconst.i32 7
-                                    v707 = iconst.i64 0x6000_0000
-                                    v708 = load.i32 notrap aligned v707  ; v707 = 0x6000_0000
-                                    store notrap aligned v708, v0+28
-                                    return v706  ; v706 = 7
+                                    v701 = iconst.i32 7
+                                    v702 = iconst.i64 0x6000_0000
+                                    v703 = load.i32 notrap aligned v702  ; v702 = 0x6000_0000
+                                    store notrap aligned v703, v0+28
+                                    return v701  ; v701 = 7
 
                                 block104 cold:
-                                    v709 = iconst.i32 8
-                                    v710 = iconst.i64 0x6000_0000
-                                    v711 = load.i32 notrap aligned v710  ; v710 = 0x6000_0000
-                                    store notrap aligned v711, v0+28
-                                    return v709  ; v709 = 8
+                                    v704 = iconst.i32 8
+                                    v705 = iconst.i64 0x6000_0000
+                                    v706 = load.i32 notrap aligned v705  ; v705 = 0x6000_0000
+                                    store notrap aligned v706, v0+28
+                                    return v704  ; v704 = 8
 
                                 block106 cold:
-                                    v712 = iconst.i32 9
-                                    v713 = iconst.i64 0x6000_0000
-                                    v714 = load.i32 notrap aligned v713  ; v713 = 0x6000_0000
-                                    store notrap aligned v714, v0+28
-                                    return v712  ; v712 = 9
+                                    v707 = iconst.i32 9
+                                    v708 = iconst.i64 0x6000_0000
+                                    v709 = load.i32 notrap aligned v708  ; v708 = 0x6000_0000
+                                    store notrap aligned v709, v0+28
+                                    return v707  ; v707 = 9
 
                                 block108 cold:
-                                    v715 = iconst.i32 10
-                                    v716 = iconst.i64 0x6000_0000
-                                    v717 = load.i32 notrap aligned v716  ; v716 = 0x6000_0000
-                                    store notrap aligned v717, v0+28
-                                    return v715  ; v715 = 10
+                                    v710 = iconst.i32 10
+                                    v711 = iconst.i64 0x6000_0000
+                                    v712 = load.i32 notrap aligned v711  ; v711 = 0x6000_0000
+                                    store notrap aligned v712, v0+28
+                                    return v710  ; v710 = 10
 
                                 block24 cold:
                                     store.i64 notrap aligned v153, v51+128
+                                    v721 = iconst.i32 4
+                                    store notrap aligned v721, v51+136  ; v721 = 4
+                                    v722 = iconst.i32 -2
+                                    v723 = iconst.i64 0x6000_0000
+                                    v724 = load.i32 notrap aligned v723  ; v723 = 0x6000_0000
+                                    store notrap aligned v724, v0+28
+                                    return v722  ; v722 = -2
+
+                                block82 cold:
+                                    store.i64 notrap aligned v480, v470+112
+                                    v725 = iconst.i32 4
+                                    store notrap aligned v725, v470+120  ; v725 = 4
+                                    store.i64 notrap aligned v506, v470+128
                                     v726 = iconst.i32 4
-                                    store notrap aligned v726, v51+136  ; v726 = 4
+                                    store notrap aligned v726, v470+136  ; v726 = 4
                                     v727 = iconst.i32 -2
                                     v728 = iconst.i64 0x6000_0000
                                     v729 = load.i32 notrap aligned v728  ; v728 = 0x6000_0000
                                     store notrap aligned v729, v0+28
                                     return v727  ; v727 = -2
 
-                                block82 cold:
-                                    store.i64 notrap aligned v485, v475+112
-                                    v730 = iconst.i32 4
-                                    store notrap aligned v730, v475+120  ; v730 = 4
-                                    store.i64 notrap aligned v511, v475+128
-                                    v731 = iconst.i32 4
-                                    store notrap aligned v731, v475+136  ; v731 = 4
-                                    v732 = iconst.i32 -2
-                                    v733 = iconst.i64 0x6000_0000
-                                    v734 = load.i32 notrap aligned v733  ; v733 = 0x6000_0000
-                                    store notrap aligned v734, v0+28
-                                    return v732  ; v732 = -2
-
                                 block87 cold:
-                                    v735 = iconst.i32 -4
-                                    v736 = iconst.i64 0x6000_0000
-                                    v737 = load.i32 notrap aligned v736  ; v736 = 0x6000_0000
-                                    store notrap aligned v737, v0+28
-                                    return v735  ; v735 = -4
+                                    v730 = iconst.i32 -4
+                                    v731 = iconst.i64 0x6000_0000
+                                    v732 = load.i32 notrap aligned v731  ; v731 = 0x6000_0000
+                                    store notrap aligned v732, v0+28
+                                    return v730  ; v730 = -4
 }
