@@ -1,6 +1,6 @@
 function u0:0(i64, i64) -> i32 tail {
     ss0 = explicit_slot 32, align = 8
-    sig0 = (i64, i64, i32, i32, i32, i32, i64, i32, i64, i32, i64, i32, i64) -> i32 system_v
+    sig0 = (i64, i64, i32, i32, i32, i32, i64, i64, i32, i64, i32, i64, i32, i64) -> i32 system_v
     sig1 = (i64, i64, i32) -> i32 system_v
     sig2 = (i64, i64, i32, i32) -> i32 system_v
     sig3 = (i64, i64, i32, i32, i64) -> i32 system_v
@@ -62,10 +62,10 @@ function u0:0(i64, i64) -> i32 tail {
                                 block14:
 @0000                               jump block3(v31, v32, v38, v246)
 
-                                block3(v42: i64, v45: i64, v58: i64, v188: i64):
+                                block3(v42: i64, v45: i64, v57: i64, v188: i64):
                                     v79 -> v42
                                     v85 -> v45
-                                    v117 -> v58
+                                    v116 -> v57
                                     v187 -> v188
 @0001                               v43 = iconst.i64 1
 @0001                               v44 = band v42, v43  ; v43 = 1
@@ -79,17 +79,18 @@ function u0:0(i64, i64) -> i32 tail {
 @0002                               v50 = load.i64 notrap aligned v49  ; v49 = constant#0
 @0002                               v51 = load.i32 notrap aligned v49+8  ; v49 = constant#0
 @0002                               v52 = iconst.i32 4
-@0002                               v53 = iconst.i32 0
-@0002                               store notrap aligned v53, v45+216  ; v53 = 0
-@0002                               v54 = iconst.i64 0
-@0002                               v55 = iconst.i32 0
-@0002                               v56 = iconst.i64 224
-@0002                               v57 = iadd v45, v56  ; v56 = 224
-@0002                               v59 = ireduce.i32 v58
-@0002                               v60 = iconst.i32 2
-@0002                               v61 = iconst.i32 513
+@0002                               store notrap aligned v44, v45+208
+@0002                               store notrap aligned v52, v45+216  ; v52 = 4
+@0002                               v53 = iconst.i64 0
+@0002                               v54 = iconst.i32 0
+@0002                               v55 = iconst.i64 224
+@0002                               v56 = iadd v45, v55  ; v55 = 224
+@0002                               v58 = ireduce.i32 v57
+@0002                               v59 = iconst.i32 2
+@0002                               v60 = iconst.i32 513
+@0002                               v61 = iconst.i64 0x0100_0000
 @0002                               v62 = iconst.i64 0x7000_0f00
-@0002                               v63 = call_indirect sig0, v62(v0, v45, v47, v59, v60, v61, v50, v51, v44, v52, v54, v55, v57)  ; v62 = 0x7000_0f00, v47 = 7, v60 = 2, v61 = 513, v52 = 4, v54 = 0, v55 = 0
+@0002                               v63 = call_indirect sig0, v62(v0, v45, v47, v58, v59, v60, v61, v50, v51, v44, v52, v53, v54, v56)  ; v62 = 0x7000_0f00, v47 = 7, v59 = 2, v60 = 513, v61 = 0x0100_0000, v52 = 4, v53 = 0, v54 = 0
 @0002                               brif v63, block17(v188, v45, v42), block18
 
                                 block18:
@@ -112,13 +113,13 @@ function u0:0(i64, i64) -> i32 tail {
 @0002                               jump block20(v73)
 
                                 block20(v74: i8):
-@0002                               brif v74, block17(v187, v85, v79), block16(v42, v45, v58, v188)
+@0002                               brif v74, block17(v187, v85, v79), block16(v42, v45, v57, v188)
 
                                 block15 cold:
                                     v190 = iconst.i64 0
                                     v189 -> v190
-                                    v119 = iconst.i64 0
-                                    v118 -> v119
+                                    v118 = iconst.i64 0
+                                    v117 -> v118
                                     v87 = iconst.i64 0
                                     v86 -> v87
                                     v81 = iconst.i64 0
@@ -128,15 +129,15 @@ function u0:0(i64, i64) -> i32 tail {
 @0002                               brif v76, block17(v189, v86, v80), block22  ; v189 = 0, v86 = 0, v80 = 0
 
                                 block22:
-@0002                               jump block16(v81, v87, v119, v190)  ; v81 = 0, v87 = 0, v119 = 0, v190 = 0
+@0002                               jump block16(v81, v87, v118, v190)  ; v81 = 0, v87 = 0, v118 = 0, v190 = 0
 
-                                block16(v78: i64, v84: i64, v116: i64, v186: i64):
+                                block16(v78: i64, v84: i64, v115: i64, v186: i64):
                                     v204 -> v78
                                     v205 -> v78
                                     v107 -> v84
                                     v140 -> v84
-                                    v115 -> v116
-                                    v148 -> v116
+                                    v114 -> v115
+                                    v148 -> v115
                                     v184 -> v186
                                     v185 -> v186
 @0002                               v77 = iconst.i32 8
@@ -174,17 +175,16 @@ function u0:0(i64, i64) -> i32 tail {
 @0005                               v106 = load.i32 notrap aligned v101+8
 @0005                               v108 = load.i64 notrap aligned v84+256
 @0005                               v109 = load.i32 notrap aligned v84+264
-@0005                               v110 = iconst.i32 0
-@0005                               store notrap aligned v110, v107+264  ; v110 = 0
-@0005                               v111 = iconst.i64 0
-@0005                               v112 = iconst.i32 0
-@0005                               v113 = iconst.i64 272
-@0005                               v114 = iadd.i64 v107, v113  ; v113 = 272
-@0005                               v120 = ireduce.i32 v116
-@0005                               v121 = iconst.i32 0
-@0005                               v122 = iconst.i32 520
+@0005                               v110 = iconst.i64 0
+@0005                               v111 = iconst.i32 0
+@0005                               v112 = iconst.i64 272
+@0005                               v113 = iadd.i64 v107, v112  ; v112 = 272
+@0005                               v119 = ireduce.i32 v115
+@0005                               v120 = iconst.i32 0
+@0005                               v121 = iconst.i32 520
+@0005                               v122 = iconst.i64 0x0160_0003
 @0005                               v123 = iconst.i64 0x7000_0f00
-@0005                               v124 = call_indirect sig0, v123(v0, v84, v94, v120, v121, v122, v105, v106, v108, v109, v111, v112, v114)  ; v123 = 0x7000_0f00, v94 = 10, v121 = 0, v122 = 520, v111 = 0, v112 = 0
+@0005                               v124 = call_indirect sig0, v123(v0, v84, v94, v119, v120, v121, v122, v105, v106, v108, v109, v110, v111, v113)  ; v123 = 0x7000_0f00, v94 = 10, v120 = 0, v121 = 520, v122 = 0x0160_0003, v110 = 0, v111 = 0
 @0005                               brif v124, block17(v185, v107, v205), block29
 
                                 block29:
@@ -207,7 +207,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0005                               jump block31(v134)
 
                                 block31(v135: i8):
-@0005                               brif v135, block17(v184, v140, v204), block26(v84, v116, v186, v78)
+@0005                               brif v135, block17(v184, v140, v204), block26(v84, v115, v186, v78)
 
                                 block25 cold:
                                     v207 = iconst.i64 0
