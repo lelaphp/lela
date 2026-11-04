@@ -1430,6 +1430,42 @@ struct DynamicTarget {
     closure: Option<(PhpObject, bool)>,
 }
 
+impl DynamicTarget {
+    /// A callee that is no closure, `this` taken with one more owner
+    /// (`GC_ADDREF` under `ZEND_CALL_RELEASE_THIS`).
+    fn held(
+        req: &mut Request,
+        function: Function,
+        name: Option<PhpString>,
+        this: Option<PhpObject>,
+        called_scope: Option<crate::api::values::ClassId>,
+    ) -> DynamicTarget {
+        if let Some(this) = this {
+            req.addref(&this.as_value());
+        }
+        let receiver = this.map(exec::Receiver::Owned);
+        DynamicTarget {
+            function,
+            name,
+            receiver,
+            called_scope,
+            closure: None,
+        }
+    }
+
+    /// A method called on `object`, which it takes as `$this` where it
+    /// is not static.
+    fn on(
+        req: &mut Request,
+        function: Function,
+        name: PhpString,
+        object: PhpObject,
+    ) -> DynamicTarget {
+        let this = req.takes_this(function).then_some(object);
+        DynamicTarget::held(req, function, Some(name), this, Some(object.class()))
+    }
+}
+
 /// `zend_init_dynamic_call_object` (`Z/Zend/zend_execute.c:5152`): the
 /// object's `get_closure`, a `Closure`'s payload with its receiver, its
 /// scope and the closure itself held by the call, or `__invoke` on the
@@ -1441,16 +1477,8 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
     }
     let class = object.class();
     if let Some(made) = req.handler_closure(object) {
-        if let Some(this) = made.this {
-            req.addref(&this.as_value());
-        }
-        return Ok(DynamicTarget {
-            function: made.function,
-            name: None,
-            receiver: made.this.map(exec::Receiver::Owned),
-            called_scope: made.called_scope,
-            closure: None,
-        });
+        let (function, this, scope) = (made.function, made.this, made.called_scope);
+        return Ok(DynamicTarget::held(req, function, None, this, scope));
     }
     let Some(function) = req.symbols().method_named(class, b"__invoke") else {
         let shown = req.symbols().class_name(class).to_vec();
@@ -1460,19 +1488,7 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         ));
     };
     let name = req.method_name_string(function)?;
-    let this = if req.takes_this(function) {
-        req.addref(&object.as_value());
-        Some(object)
-    } else {
-        None
-    };
-    Ok(DynamicTarget {
-        function,
-        name: Some(name),
-        receiver: this.map(exec::Receiver::Owned),
-        called_scope: Some(class),
-        closure: None,
-    })
+    Ok(DynamicTarget::on(req, function, name, object))
 }
 
 /// `zend_closure_get_closure` with `GC_ADDREF` of the closure: what a
@@ -1544,13 +1560,7 @@ fn dynamic_call_string(
     let Some(function) = exec::find_function(req, Bare::of(name)) else {
         return Err(crate::api::raising::undefined_function(req, name));
     };
-    Ok(DynamicTarget {
-        function,
-        name: None,
-        receiver: None,
-        called_scope: None,
-        closure: None,
-    })
+    Ok(DynamicTarget::held(req, function, None, None, None))
 }
 
 /// `zend_init_dynamic_call_array` (`Z/Zend/zend_execute.c:5196`): a
@@ -1644,19 +1654,7 @@ fn dynamic_call_array(
         }
     };
     let object = receiver.unwrap_or(object);
-    let this = if req.takes_this(function) {
-        req.addref(&object.as_value());
-        Some(object)
-    } else {
-        None
-    };
-    Ok(DynamicTarget {
-        function,
-        name: Some(method),
-        receiver: this.map(exec::Receiver::Owned),
-        called_scope: Some(object.class()),
-        closure: None,
-    })
+    Ok(DynamicTarget::on(req, function, method, object))
 }
 
 /// `zend_fetch_class_by_name` under `ZEND_FETCH_CLASS_EXCEPTION`: the
@@ -1711,13 +1709,13 @@ fn dynamic_call_static(
             return Err(thrown);
         }
     };
-    Ok(DynamicTarget {
+    Ok(DynamicTarget::held(
+        req,
         function,
-        name: Some(method),
-        receiver: None,
-        called_scope: Some(class),
-        closure: None,
-    })
+        Some(method),
+        None,
+        Some(class),
+    ))
 }
 
 /// `ZEND_ECHO`: the operand as a string (`zval_get_string`), written to
@@ -3172,29 +3170,22 @@ fn user_call_target(
     target: crate::api::call::Target,
 ) -> Result<DynamicTarget, Thrown> {
     match target {
-        crate::api::call::Target::Function(function) => Ok(DynamicTarget {
-            function,
-            name: None,
-            receiver: None,
-            called_scope: None,
-            closure: None,
-        }),
+        crate::api::call::Target::Function(function) => {
+            Ok(DynamicTarget::held(req, function, None, None, None))
+        }
         crate::api::call::Target::Method {
             function,
             scope,
             this,
         } => {
             let name = req.method_name_string(function)?;
-            if let Some(this) = this {
-                req.addref(&this.as_value());
-            }
-            Ok(DynamicTarget {
+            Ok(DynamicTarget::held(
+                req,
                 function,
-                name: Some(name),
-                receiver: this.map(exec::Receiver::Owned),
-                called_scope: Some(scope),
-                closure: None,
-            })
+                Some(name),
+                this,
+                Some(scope),
+            ))
         }
         crate::api::call::Target::Closure(object) => dynamic_call_object(req, object),
     }
@@ -3357,14 +3348,10 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
     // operand holds it while a by-reference warning reaches the program.
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let value = *row.value();
-        let (slot, number) = match row.key().clone() {
+        let reserved = match row.key().clone() {
             crate::api::values::Key::Str(name) => {
                 have_named = true;
-                match reserve_named(req, name) {
-                    Ok(Ok(reserved)) => (reserved.slot, reserved.number),
-                    Ok(Err(thrown)) => return Err(thrown),
-                    Err(fatal) => return Err(ended(req, fatal)),
-                }
+                reserve_named(req, name).map_err(|fatal| ended(req, fatal))??
             }
             crate::api::values::Key::Int(_) => {
                 if have_named {
@@ -3373,13 +3360,10 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
                         "Cannot use positional argument after named argument",
                     ));
                 }
-                match reserve_next(req) {
-                    Ok(reserved) => (reserved.slot, reserved.number),
-                    Err(fatal) => return Err(ended(req, fatal)),
-                }
+                reserve_next(req).map_err(|fatal| ended(req, fatal))?
             }
         };
-        send_array_element(req, slot, number, value)?;
+        send_array_element(req, reserved, value)?;
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(())
@@ -3440,11 +3424,8 @@ fn send_array_slice(
             return Ok(ControlFlow::Break(()));
         }
         sent += 1;
-        let reserved = match reserve_next(req) {
-            Ok(reserved) => reserved,
-            Err(fatal) => return Err(ended(req, fatal)),
-        };
-        send_array_element(req, reserved.slot, reserved.number, *row.value())?;
+        let reserved = reserve_next(req).map_err(|fatal| ended(req, fatal))?;
+        send_array_element(req, reserved, *row.value())?;
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(())
@@ -3457,12 +3438,8 @@ fn send_array_slice(
 /// one of its own, with php's warning, where the parameter takes a
 /// reference and nothing else. `number` is the parameter's, php's
 /// `arg_num`.
-fn send_array_element(
-    req: &mut Request,
-    slot: ArgSlot,
-    number: u32,
-    element: Value,
-) -> Result<(), Thrown> {
+fn send_array_element(req: &mut Request, at: Reserved, element: Value) -> Result<(), Thrown> {
+    let Reserved { slot, number } = at;
     let is_ref = element.as_php_ref().is_some();
     let value = if should_be_sent_by_ref(req, number) {
         if !is_ref && must_be_sent_by_ref(req, number) {
@@ -3489,10 +3466,7 @@ fn send_array_element(
         req.addref(&value);
         value
     };
-    if let Err(fatal) = put_argument(req, slot, value) {
-        return Err(ended(req, fatal));
-    }
-    Ok(())
+    put_argument(req, slot, value).map_err(|fatal| ended(req, fatal))
 }
 
 /// The internal error a `SEND_ARRAY` with no call frame under it is.
@@ -3588,6 +3562,16 @@ struct Reserved {
     number: u32,
 }
 
+impl Reserved {
+    /// The slot `to` of the call `call`, for argument `number`.
+    fn of(call: FrameRef, to: ArgTo, number: u32) -> Reserved {
+        Reserved {
+            slot: ArgSlot { call, to },
+            number,
+        }
+    }
+}
+
 /// The slot a send writes into: `ZEND_CALL_VAR` over the slot
 /// `EX_NUM_TO_VAR` numbered for a number, bounded by the count the `INIT`
 /// said, and `zend_handle_named_arg` for a name
@@ -3625,13 +3609,7 @@ fn reserve_arg(
                     "InternalError: a SEND_* opline places argument {number} of a call of {passed}"
                 ))));
             }
-            Ok(Reserved {
-                slot: ArgSlot {
-                    call,
-                    to: ArgTo::Positional(at),
-                },
-                number,
-            })
+            Ok(Reserved::of(call, ArgTo::Positional(at), number))
         }
         ArgAt::Name(at) => {
             let Some(name) = exec::constant(code, at).as_php_string() else {
@@ -3694,18 +3672,7 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
             // given, `ZEND_CALL_NUM_ARGS` raised to take it, every slot
             // between left `UNDEF` for `CHECK_UNDEF_ARGS`.
             if at >= passed {
-                let len = req
-                    .vm()
-                    .stack
-                    .frame(call)
-                    .map_or(0, crate::exec::HeapFrame::len);
-                if at >= len {
-                    req.grow_call(call, at + 1 - len)?;
-                }
-                if let Some(header) = req.vm_mut().at_mut(call) {
-                    header.num_args = u32::try_from(at + 1).unwrap_or(u32::MAX);
-                    header.info.unlay_entry();
-                }
+                grow_args(req, call, at)?;
             }
             crate::api::call::NamedAt::Argument(at)
         }
@@ -3729,13 +3696,7 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
             crate::api::call::NamedAt::Extra(at)
         }
     };
-    Ok(Ok(Reserved {
-        slot: ArgSlot {
-            call,
-            to: ArgTo::Named(at),
-        },
-        number,
-    }))
+    Ok(Ok(Reserved::of(call, ArgTo::Named(at), number)))
 }
 
 /// The next positional slot of the call being built, past every
@@ -3753,6 +3714,14 @@ fn reserve_next(req: &mut Request) -> Result<Reserved, Fatal> {
         .vm()
         .at(call)
         .map_or(0, |header| header.num_args as usize);
+    grow_args(req, call, at)?;
+    let number = u32::try_from(at + 1).unwrap_or(u32::MAX);
+    Ok(Reserved::of(call, ArgTo::Positional(at), number))
+}
+
+/// `zend_vm_stack_extend_call_frame` to hold the argument at `at`, and
+/// `ZEND_CALL_NUM_ARGS` raised to count it.
+fn grow_args(req: &mut Request, call: FrameRef, at: usize) -> Result<(), Fatal> {
     let len = req
         .vm()
         .stack
@@ -3765,13 +3734,7 @@ fn reserve_next(req: &mut Request) -> Result<Reserved, Fatal> {
         header.num_args = u32::try_from(at + 1).unwrap_or(u32::MAX);
         header.info.unlay_entry();
     }
-    Ok(Reserved {
-        slot: ArgSlot {
-            call,
-            to: ArgTo::Positional(at),
-        },
-        number: u32::try_from(at + 1).unwrap_or(u32::MAX),
-    })
+    Ok(())
 }
 
 /// `ZEND_DO_ICALL`: serve the native the call frame names, and write
@@ -4305,12 +4268,7 @@ fn included(
 /// The value an `INCLUDE_OR_EVAL` answers without a frame, into the
 /// `VAR` where the opline's value is read and given up where it is not.
 fn answered(req: &mut Request, returns_to: Option<(FrameRef, u32)>, value: Value) -> Included {
-    match returns_to {
-        Some((at, slot)) => {
-            req.replace_slot(at, slot, value);
-        }
-        None => req.release(value),
-    }
+    handed_back(req, returns_to, value);
     Included::Answered
 }
 
@@ -6470,11 +6428,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         .and_then(crate::exec::Header::function)
         .and_then(|function| req.method_class(function));
     let Some(parent) = scope.and_then(|scope| req.symbols().class_parent(scope)) else {
-        return threw_error(
-            req,
-            frame,
-            "Cannot use \"parent\" when current class scope has no parent",
-        );
+        return threw_error(req, frame, NO_PARENT);
     };
     let name = exec::constant(code, ConstIdx(op.op1));
     let name = name.as_str_bytes().unwrap_or_default().to_vec();
@@ -7540,11 +7494,7 @@ pub(crate) fn isset_isempty_var<T: Tier>(
         Ok(name) => name,
         Err(thrown) => return threw_freeing(req, frame, op, &thrown),
     };
-    let table = if op.extended_value & FETCH_GLOBAL != 0 {
-        exec::TableId::GLOBAL
-    } else {
-        req.rebuild_symbol_table(frame)
-    };
+    let table = name_table(req, frame, op.extended_value & FETCH_GLOBAL != 0);
     let held = req.symbol_value(table, &name);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     let answer = match held {
@@ -7620,11 +7570,7 @@ pub(crate) fn unset_var<T: Tier>(
         Ok(name) => name,
         Err(thrown) => return threw_freeing(req, frame, op, &thrown),
     };
-    let table = if op.extended_value & FETCH_GLOBAL != 0 {
-        exec::TableId::GLOBAL
-    } else {
-        req.rebuild_symbol_table(frame)
-    };
+    let table = name_table(req, frame, op.extended_value & FETCH_GLOBAL != 0);
     req.symbol_unset(table, name.as_bytes());
     name.give_up(req);
     exec::free_operand(req, frame, op.op1_type, op.op1);
@@ -7647,6 +7593,16 @@ enum ByName {
 /// under `ZEND_FETCH_GLOBAL_LOCK` the name is left for the fetch after this one.
 const FETCH_GLOBAL: u32 = 1 << 1;
 const FETCH_GLOBAL_LOCK: u32 = 1 << 3;
+
+/// The table a fetch by name reads: `EG(symbol_table)`, or the frame's
+/// own, built by `zend_rebuild_symbol_table` where it has none yet.
+fn name_table(req: &mut Request, frame: FrameRef, global: bool) -> exec::TableId {
+    if global {
+        exec::TableId::GLOBAL
+    } else {
+        req.rebuild_symbol_table(frame)
+    }
+}
 
 /// `zend_fetch_var_address_helper` (`Z/Zend/zend_vm_def.h:1724`): the
 /// name read as a string (`zval_try_get_tmp_string`, a CV nothing wrote
@@ -7698,11 +7654,7 @@ fn fetch_named(
     let lock = op.extended_value & FETCH_GLOBAL_LOCK != 0;
     let global = op.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0;
     let out = op.out;
-    let table = if global {
-        exec::TableId::GLOBAL
-    } else {
-        req.rebuild_symbol_table(frame)
-    };
+    let table = name_table(req, frame, global);
     let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
     let undefined = |req: &mut Request| {
         let scope = if op.extended_value & FETCH_GLOBAL != 0 {
@@ -8601,7 +8553,8 @@ pub(crate) fn fetch_static_prop_is<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    fetch_static_prop(req, frame, code, op, PropertyRead::Silent)
+    let read = static_read(req, frame, code, op, PropertyRead::Silent);
+    computed_into(req, frame, op, read)
 }
 
 /// `zend_fetch_static_property_address_ex`
@@ -8668,7 +8621,8 @@ pub(crate) fn fetch_static_prop_r<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    fetch_static_prop(req, frame, code, op, PropertyRead::Warning)
+    let read = static_read(req, frame, code, op, PropertyRead::Warning);
+    computed_into(req, frame, op, read)
 }
 
 /// The body `FETCH_STATIC_PROP_R` and `FETCH_STATIC_PROP_IS` share,
@@ -8882,17 +8836,6 @@ fn static_prop_place(
     Ok(advance(req, frame))
 }
 
-fn fetch_static_prop(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
-    fetch: PropertyRead,
-) -> Edge {
-    let read = static_read(req, frame, code, op, property_cache_slot(op), fetch);
-    computed_into(req, frame, op, read)
-}
-
 /// [`static_slot_at`] and the value its slot holds, one more owner of it
 /// ([`Request::static_value`]), `null` for the silent miss: the read of
 /// `FETCH_STATIC_PROP_R` and `_IS`.
@@ -8902,9 +8845,9 @@ fn static_read(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    slot: CacheSlot,
     read: PropertyRead,
 ) -> Result<Value, Thrown> {
+    let slot = property_cache_slot(op);
     match static_slot_at(req, frame, code, op, slot, read)? {
         Some(StaticSlot { info, .. }) => req.static_value(info, read),
         None => Ok(Value::null()),
@@ -13040,11 +12983,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
             FETCH_CLASS_SELF => scope,
             FETCH_CLASS_PARENT => {
                 let Some(parent) = req.symbols().class_parent(scope) else {
-                    return threw_error(
-                        req,
-                        frame,
-                        "Cannot use \"parent\" when current class scope has no parent",
-                    );
+                    return threw_error(req, frame, NO_PARENT);
                 };
                 parent
             }
@@ -13231,6 +13170,9 @@ fn data_gone(req: &mut Request, frame: FrameRef, op: &Opline, data: Opline) -> R
     write_out(req, frame, op, &Value::null());
     Ok(())
 }
+
+/// The sentence of `parent` named where the scope has none.
+const NO_PARENT: &str = "Cannot use \"parent\" when current class scope has no parent";
 
 /// `zend_throw_error(NULL, …)` at the opline the frame stands at, and
 /// the [`threw`] edge.
@@ -21231,29 +21173,16 @@ fn send_unpacked_iterator(
                 named = true;
                 let reserved = reserve_named(req, name);
                 req.release(Value::string(name));
-                match reserved {
-                    Ok(Ok(reserved)) => Ok(reserved),
-                    Ok(Err(thrown)) => Err(thrown),
-                    Err(fatal) => {
-                        req.release(value);
-                        return Err(fatal);
-                    }
-                }
+                reserved
             }
-            None if named => Err(positional_after_named(req)),
-            None => match reserve_next(req) {
-                Ok(reserved) => Ok(reserved),
-                Err(fatal) => {
-                    req.release(value);
-                    return Err(fatal);
-                }
-            },
+            None if named => Ok(Err(positional_after_named(req))),
+            None => reserve_next(req).map(Ok),
         };
         let reserved = match reserved {
-            Ok(reserved) => reserved,
-            Err(thrown) => {
+            Ok(Ok(reserved)) => reserved,
+            unsent => {
                 req.release(value);
-                return Ok(Err(thrown));
+                return unsent.map(|refused| refused.map(drop));
             }
         };
         let value = if must_be_sent_by_ref(req, reserved.number) {
@@ -27570,12 +27499,7 @@ pub(crate) fn yield_from<T: Tier>(
     let out = (op.out_type != OperandKind::Unused).then_some(op.out);
     match crate::generator::yield_from(req, generator, owned, op.op1_type == OperandKind::Const) {
         Ok(crate::generator::From::Finished(retval)) => {
-            match out {
-                Some(slot) => {
-                    req.replace_slot(frame, slot, retval);
-                }
-                None => req.release(retval),
-            }
+            handed_back(req, out.map(|slot| (frame, slot)), retval);
             Ok(advance(req, frame))
         }
         Ok(crate::generator::From::Delegating) => {
@@ -27671,29 +27595,26 @@ pub(crate) fn make_ref<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let out = op.out;
-    let held = if op.op1_type == OperandKind::Cv {
-        let cell = match cv_reference(req, frame, op.op1) {
-            Ok(cell) => cell,
-            Err(thrown) => return threw(req, frame, &thrown),
-        };
+    let made = made_ref(req, frame, op);
+    computed_into(req, frame, op, made)
+}
+
+/// The reference [`make_ref`] answers: the CV's cell with one more
+/// owner, a place's cell bound, or what the `VAR` already holds.
+fn made_ref(req: &mut Request, frame: FrameRef, op: &Opline) -> Result<Value, Thrown> {
+    if op.op1_type == OperandKind::Cv {
+        let cell = cv_reference(req, frame, op.op1)?;
         req.addref(&cell.as_value());
-        cell.as_value()
-    } else {
-        let at = op.op1;
-        let place = req
-            .slot_ptr(frame, at)
-            .and_then(|slot| slot.read().as_indirect());
-        match place {
-            Some(place) => match bound_at(req, place) {
-                Ok(bound) => bound,
-                Err(thrown) => return threw(req, frame, &thrown),
-            },
-            None => req.take_slot(frame, at),
-        }
-    };
-    req.replace_slot(frame, out, held);
-    Ok(advance(req, frame))
+        return Ok(cell.as_value());
+    }
+    let at = op.op1;
+    let place = req
+        .slot_ptr(frame, at)
+        .and_then(|slot| slot.read().as_indirect());
+    match place {
+        Some(place) => bound_at(req, place),
+        None => Ok(req.take_slot(frame, at)),
+    }
 }
 
 /// The inline paths of the handlers that have one (design §5.8), named
