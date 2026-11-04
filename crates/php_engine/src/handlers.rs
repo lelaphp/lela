@@ -7716,6 +7716,9 @@ fn fetch_named(
                 if Value::of_slot(place.read()).tag() == TypeTag::Undef {
                     place.write(php_heap::Zval::null());
                 }
+                // A place of a table no owner is noted for, so no
+                // walk an earlier fetch noted answers for it.
+                req.note_walk(None);
                 if let Some(var) = req.slot_ptr(frame, out) {
                     var.write(php_heap::Zval::indirect(place));
                 }
@@ -11091,7 +11094,16 @@ fn read_dimension(
         return Ok(Ok(array_entry(req, array, key, mode)));
     }
     if let Some(text) = container.as_php_string() {
-        let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+        let mut dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+        // `case IS_UNDEF`: `ZVAL_UNDEFINED_OP2` with the string held, a
+        // handler's taking its last owner answering `null`.
+        if matches!(dim.as_ref(), ValueRef::Undef) {
+            let held = Owner::take(req, text);
+            dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+            if held.let_go(req).freed() {
+                return Ok(Ok(Value::null()));
+            }
+        }
         return Ok(string_offset(req, text, &dim, mode));
     }
     if let Some(object) = container.as_object() {
@@ -14831,6 +14843,31 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
 /// int(5)
 /// int(5)
 /// ```
+///
+/// Both operands are freed on every way out, a throw's as well: what a
+/// call returned goes with the opline that refused it.
+///
+/// ```php
+/// class D { function __destruct() { echo "dtor\n"; } }
+/// class T { public int $i = 0; }
+/// function f() { return new D; }
+/// $t = new T; $x = &$t->i;
+/// try { $x = &f(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// echo "after\n";
+/// unset($x);
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// try { $x = &f(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// echo "after\n";
+/// ```
+/// ```expect
+/// Notice: Only variables should be assigned by reference in %SCRATCH%/witness.php on line 6
+/// dtor
+/// Cannot assign D to reference held by property T::$i of type int
+/// after
+/// dtor
+/// Only variables should be assigned by reference
+/// after
+/// ```
 pub(crate) fn assign_ref<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -14843,17 +14880,10 @@ pub(crate) fn assign_ref<T: Tier>(
         ));
     };
     let target = match op.op1_type {
-        OperandKind::Cv => req.slot_ptr(frame, op.op1),
+        OperandKind::Cv => req.slot_ptr(frame, op.op1).map(Some),
         OperandKind::Var => {
             let at = req.slot_ptr(frame, op.op1);
-            let Some(entry) = at.and_then(|at| at.read().as_indirect()) else {
-                let thrown = error(
-                    req,
-                    "Cannot assign by reference to an array dimension of an object",
-                );
-                return threw_freeing(req, frame, op, &thrown);
-            };
-            Some(entry)
+            at.map(|at| at.read().as_indirect())
         }
         OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => None,
     };
@@ -14862,41 +14892,67 @@ pub(crate) fn assign_ref<T: Tier>(
             "InternalError: ZEND_ASSIGN_REF over a target php compiles no write over",
         ));
     };
-    let held = Value::of_slot(source.read());
-    // `ZEND_RETURNS_FUNCTION`: the source is a call, and a call that
-    // returned by value has no cell to bind, which is php's notice and
-    // then the plain assignment (`zend_wrong_assign_to_variable_reference`
-    // over `zend_assign_to_variable`), so a target that is a reference,
-    // a `static` among them, keeps it and takes the value through it.
-    if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
-        crate::api::raising::notice(req, "Only variables should be assigned by reference");
-        if req.is_pending() {
-            return Ok(Stepped::Threw(frame).into());
-        }
-        let value = held.undef_as_null();
-        req.addref(&value);
-        // `zend_wrong_assign_to_variable_reference`: one more owner, handed
-        // on as `IS_TMP_VAR`.
-        match assign_to_place(req, frame, target, (value, OperandKind::Tmp)) {
-            Ok(pair) => landed_out(req, frame, op, pair),
-            Err(thrown) => return threw(req, frame, &thrown),
-        }
+    let bound = match target {
+        Some(target) => bind_ref(req, frame, op, source, target),
+        None => Err(error(
+            req,
+            "Cannot assign by reference to an array dimension of an object",
+        )),
+    };
+    // `FREE_OP2()` before `FREE_OP1()`: a `VAR` holding the
+    // `IS_INDIRECT` a fetch left owns nothing and this drops nothing,
+    // and one holding the cell a `MAKE_REF` or this handler itself put
+    // there gives up the owner it took, so the cell is held by the
+    // place it binds and by the target alone.
+    let freed = freed_after(req, bound, |req| {
         exec::free_operand(req, frame, op.op2_type, op.op2);
         exec::free_operand(req, frame, op.op1_type, op.op1);
-        return Ok(advance(req, frame));
+    });
+    settled(req, frame, freed)
+}
+
+/// `FREE_OP` over what a handler's step answered, php's at its one end
+/// whether the step threw or not: a destructor it serves sees a
+/// throwable pending ([`Request::free_pending`]).
+#[inline]
+fn freed_after(
+    req: &mut Request,
+    step: Result<(), Thrown>,
+    free: impl FnOnce(&mut Request),
+) -> Result<(), Thrown> {
+    match step {
+        Ok(()) => {
+            free(req);
+            Ok(())
+        }
+        Err(thrown) => Err(req.free_pending(thrown, free)),
+    }
+}
+
+/// [`assign_ref`]'s bind: `zend_assign_to_variable_reference` over a
+/// source that is a place, and over a call that returned by value
+/// [`assign_returned`].
+#[inline]
+fn bind_ref(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    source: php_heap::ZvalRef,
+    target: php_heap::ZvalRef,
+) -> Result<(), Thrown> {
+    let held = Value::of_slot(source.read());
+    // `ZEND_RETURNS_FUNCTION`: the source is a call, and a call that
+    // returned by value has no cell to bind.
+    if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
+        return assign_returned(req, frame, op, target, held);
     }
     let cell = match held.as_php_ref() {
         Some(cell) if target == source => {
             write_out(req, frame, op, &cell.as_value());
-            exec::free_operand(req, frame, op.op2_type, op.op2);
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            return Ok(advance(req, frame));
+            return Ok(());
         }
         // The owner the slot had of `held` is the cell's now.
-        _ => match req.make_ref(source) {
-            Ok(cell) => cell,
-            Err(thrown) => return threw(req, frame, &thrown),
-        },
+        _ => req.make_ref(source)?,
     };
     let bound = cell.as_value();
     req.addref(&bound);
@@ -14904,14 +14960,55 @@ pub(crate) fn assign_ref<T: Tier>(
     target.write(bound.to_zval());
     write_out(req, frame, op, &bound);
     req.release(garbage);
-    // `FREE_OP2()` before `FREE_OP1()`: a `VAR` holding the
-    // `IS_INDIRECT` a fetch left owns nothing and this drops nothing,
-    // and one holding the cell a `MAKE_REF` or this handler itself put
-    // there gives up the owner it took, so the cell is held by the
-    // place it binds and by the target alone.
-    exec::free_operand(req, frame, op.op2_type, op.op2);
-    exec::free_operand(req, frame, op.op1_type, op.op1);
-    Ok(advance(req, frame))
+    Ok(())
+}
+
+/// `zend_wrong_assign_to_variable_reference`
+/// (`Z/Zend/zend_execute.c:596`) over `held`, what a call returned by
+/// value: php's notice and then the plain assignment
+/// (`zend_assign_to_variable_ex`), one more owner handed on as
+/// `IS_TMP_VAR`, so a target that is a reference, a `static` among them,
+/// keeps it and takes the value through it.
+///
+/// A handler of the notice can give up the table `target` is an entry
+/// of, which php then writes into. The table the `FETCH_DIM_W` before
+/// walked to is held across it, the entry its handler left behind taking
+/// the value and going with the table.
+///
+/// ```php
+/// function f() { return str_repeat("v", 200); }
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["a"] = 1; return true; });
+/// $a = array_fill(0, 40, 1);
+/// $a[3] = &f();
+/// var_dump($a);
+/// ```
+/// ```expect
+/// [Only variables should be assigned by reference]
+/// int(1)
+/// ```
+#[cold]
+fn assign_returned(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    target: php_heap::ZvalRef,
+    held: Value,
+) -> Result<(), Thrown> {
+    let table = (op.op1_type == OperandKind::Var)
+        .then(|| req.hold_walk(target))
+        .flatten();
+    crate::api::raising::notice(req, "Only variables should be assigned by reference");
+    let landed = none_pending(req).and_then(|()| {
+        let value = held.undef_as_null();
+        req.addref(&value);
+        let pair = assign_to_place(req, frame, target, (value, OperandKind::Tmp))?;
+        landed_out(req, frame, op, pair);
+        Ok(())
+    });
+    if let Some(table) = table {
+        table.let_go(req);
+    }
+    landed
 }
 
 /// `zend_assign_to_property_reference` over a name the class serves
@@ -15018,6 +15115,38 @@ fn overloaded_reference(req: &mut Request, object: PhpObject, name: &[u8]) -> Th
 /// Deprecated: Creation of dynamic property C::$q is deprecated in %s on line 18
 /// int(7)
 /// ```
+///
+/// All three operands are freed on every way out, after the bind:
+///
+/// ```php
+/// class D { public int $t = 0; public $p; function __construct(public $n) {} function __destruct() { echo "dtor {$this->n}\n"; } }
+/// function c($n) { return new D($n); }
+/// $x = 1; c("bound")->p = &$x; echo "after\n";
+/// $s = "no"; try { c("refused")->t = &$s; } catch (TypeError $e) { echo "caught\n"; }
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// try { c("notice")->p = &c("value"); } catch (Exception $e) { echo "caught\n"; }
+/// echo "end\n";
+/// ```
+/// ```expect
+/// dtor bound
+/// after
+/// dtor refused
+/// caught
+/// dtor notice
+/// dtor value
+/// caught
+/// end
+/// ```
+///
+/// ```php
+/// class N { function __toString(): string { return "dyn"; } function __destruct() { global $o; $o = null; echo "dtor\n"; } }
+/// #[AllowDynamicProperties] class C {}
+/// $o = new C; $x = 1; $o->{new N} = &$x; var_dump($o);
+/// ```
+/// ```expect
+/// dtor
+/// NULL
+/// ```
 pub(crate) fn assign_obj_ref<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -15027,82 +15156,176 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     let data = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let mut member = exec::Member::default();
-    let found = property_place(req, frame, code, op, PropertyRead::Silent, &mut member);
-    member.release(req, frame, op);
-    let (place, object, name) = match found? {
-        PropertyFound::At(place, object, name) => (place, object, name),
-        PropertyFound::Served(object, name) => {
-            let thrown = overloaded_reference(req, object, &name);
-            let thrown = freeing_container(req, frame, op, thrown);
-            exec::free_operand(req, frame, data_type, data_at);
-            return threw(req, frame, &thrown);
+    let found = property_place(req, frame, code, op, PropertyRead::Silent, &mut member)?;
+    let bound = match found {
+        PropertyFound::At(place, object, name) => {
+            let source = write_place(req, frame, data_type, data_at).ok_or_else(|| {
+                Fatal::error(
+                    "InternalError: ZEND_ASSIGN_OBJ_REF over a source php compiles no write over",
+                )
+            })?;
+            bind_property_ref(
+                req,
+                (frame, code, op),
+                &mut member,
+                (place, object, &name),
+                source,
+            )?
         }
-        PropertyFound::Threw(thrown) => {
-            exec::free_operand(req, frame, data_type, data_at);
-            return threw(req, frame, &thrown);
-        }
+        PropertyFound::Served(object, name) => Err(overloaded_reference(req, object, &name)),
+        PropertyFound::Threw(thrown) => Err(thrown),
     };
-    let Some(source) = write_place(req, frame, data_type, data_at) else {
-        return Err(Fatal::error(
-            "InternalError: ZEND_ASSIGN_OBJ_REF over a source php compiles no write over",
-        ));
-    };
-    let held = Value::of_slot(source.read());
-    let strict = req.frame_strict_types(frame);
-    if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
-        crate::api::raising::notice(req, "Only variables should be assigned by reference");
-        if req.is_pending() {
-            exec::free_operand(req, frame, data_type, data_at);
-            return Ok(Stepped::Threw(frame).into());
-        }
-        let value = held.undef_as_null();
-        req.addref(&value);
-        match assign_to_place(req, frame, place, (value, OperandKind::Tmp)) {
-            Ok(pair) => landed_out(req, frame, op, pair),
-            Err(thrown) => return threw(req, frame, &thrown),
-        }
+    // `FREE_OP1()`, `FREE_OP2()` and `FREE_OP_DATA()`, after the bind: a
+    // dimension's or a name's destructor can give up what the place is
+    // in. A throw out of the fetch gave `op1` up already.
+    let freed = freed_after(req, bound, |req| {
+        exec::free_operand(req, frame, op.op1_type, op.op1);
+        member.release(req, frame, op);
         exec::free_operand(req, frame, data_type, data_at);
-        return Ok(advance_over_data(req, frame));
+    });
+    match freed {
+        Ok(()) => Ok(advance_over_data(req, frame)),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// `zend_assign_to_property_reference`'s bind of `source` over the
+/// property's `place`, and where a call returned by value
+/// [`assign_returned_to_property`].
+fn bind_property_ref(
+    req: &mut Request,
+    (frame, code, op): (FrameRef, &OpArray, &Opline),
+    member: &mut exec::Member,
+    (place, object, name): (php_heap::ZvalRef, PhpObject, &[u8]),
+    source: php_heap::ZvalRef,
+) -> Result<Result<(), Thrown>, Fatal> {
+    let held = Value::of_slot(source.read());
+    if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
+        return assign_returned_to_property(req, (frame, code, op), member, (object, name), held);
     }
     // The owner the source had of `held` is the cell's now.
     let cell = match req.make_ref(source) {
         Ok(cell) => cell,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => return Ok(Err(thrown)),
     };
-    let typed = req.declared_typed_property(object.class(), &name);
-    if let Some(typed) = typed.as_ref() {
-        match crate::ops::verify_prop_assignable_by_ref(
-            req,
-            cell.heap(),
-            &typed.ty,
-            typed.declaring,
-            &name,
-            strict,
-        ) {
-            Ok(None) => {}
-            Ok(Some(coerced)) => req.reference_set(cell.heap(), coerced),
-            Err(thrown) => {
-                exec::free_operand(req, frame, data_type, data_at);
-                return threw(req, frame, &thrown);
-            }
+    let typed = req.declared_typed_property(object.class(), name);
+    let strict = req.frame_strict_types(frame);
+    // The object the slot is in, across the conversion a cell can reach
+    // `__toString` by, as [`verified_cell`] holds the cell.
+    let kept = typed.is_some().then(|| Owner::take(req, object.as_value()));
+    let cell_kept = match verified_cell(req, cell, typed.as_ref(), name, strict) {
+        Ok(cell_kept) => cell_kept,
+        Err(thrown) => {
+            let thrown = req.free_pending(thrown, |req| give_back(req, [kept, None, None]));
+            return Ok(Err(thrown));
         }
-    }
+    };
     let garbage = Value::of_slot(place.read());
     // `ZEND_REF_DEL_TYPE_SOURCE`: the cell the slot held is no longer
     // typed by this property.
     if let (Some(typed), Some(old)) = (typed.as_ref(), garbage.as_php_ref()) {
-        req.ref_del_type_source(old.heap(), typed.declaring, &name);
+        req.ref_del_type_source(old.heap(), typed.declaring, name);
     }
     let bound = cell.as_value();
     req.addref(&bound);
     place.write(bound.to_zval());
     if let Some(typed) = typed {
-        req.ref_add_type_source(cell.heap(), type_source(&typed, &name));
+        req.ref_add_type_source(cell.heap(), type_source(&typed, name));
     }
     write_out(req, frame, op, &bound);
     req.release(garbage);
-    exec::free_operand(req, frame, data_type, data_at);
-    Ok(advance_over_data(req, frame))
+    give_back(req, [cell_kept, kept, None]);
+    Ok(Ok(()))
+}
+
+/// [`assign_returned`] over a property: the object held across the
+/// notice, and the place found again after it, php writing where the
+/// dynamic table the handler grew stood (`tests::given_up`).
+fn assign_returned_to_property(
+    req: &mut Request,
+    (frame, code, op): (FrameRef, &OpArray, &Opline),
+    member: &mut exec::Member,
+    (object, name): (PhpObject, &[u8]),
+    held: Value,
+) -> Result<Result<(), Thrown>, Fatal> {
+    let kept = Owner::take(req, object.as_value());
+    crate::api::raising::notice(req, "Only variables should be assigned by reference");
+    let found = match none_pending(req).and_then(|()| member.name(req, frame, code, op)) {
+        Ok(name_value) => property_place_on(
+            req,
+            (frame, op),
+            PropertyRead::Silent,
+            object,
+            name,
+            &name_value,
+        ),
+        Err(thrown) => Ok(PropertyFound::Threw(thrown)),
+    };
+    let landed = match found {
+        Ok(PropertyFound::At(place, ..)) => {
+            let value = held.undef_as_null();
+            req.addref(&value);
+            match assign_to_place(req, frame, place, (value, OperandKind::Tmp)) {
+                Ok(pair) => {
+                    landed_out(req, frame, op, pair);
+                    Ok(Ok(()))
+                }
+                Err(thrown) => Ok(Err(thrown)),
+            }
+        }
+        Ok(PropertyFound::Served(..)) => Ok(Ok(())),
+        Ok(PropertyFound::Threw(thrown)) => Ok(Err(thrown)),
+        Err(fatal) => Err(fatal),
+    };
+    kept.let_go(req);
+    landed
+}
+
+/// `zend_verify_prop_assignable_by_ref` over `cell`, which a bind is
+/// about to give the property `typed` names, where it has a declared
+/// type: `cell` held to it and converted in place, so every name bound
+/// to it reads the converted value. A conversion can reach `__toString`,
+/// which can give up every name the cell has and php's cell with them
+/// (`tests::given_up`), so the owner here stays until the bind has its
+/// own, and is handed back.
+fn verified_cell(
+    req: &mut Request,
+    cell: PhpRef,
+    typed: Option<&crate::api::request::TypedProperty>,
+    name: &[u8],
+    strict: bool,
+) -> Result<Option<Owner<Value>>, Thrown> {
+    let Some(typed) = typed else {
+        return Ok(None);
+    };
+    let hold = Owner::take(req, cell.as_value());
+    let verdict = crate::ops::verify_prop_assignable_by_ref(
+        req,
+        cell.heap(),
+        &typed.ty,
+        typed.declaring,
+        name,
+        strict,
+    );
+    match verdict {
+        Ok(None) => Ok(Some(hold)),
+        Ok(Some(coerced)) => {
+            req.reference_set(cell.heap(), coerced);
+            Ok(Some(hold))
+        }
+        Err(thrown) => {
+            hold.let_go(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// The owners a step held across a handler it can reach, given back in
+/// the order they stand.
+fn give_back(req: &mut Request, hold: [Option<Owner<Value>>; 3]) {
+    for owner in hold.into_iter().flatten() {
+        owner.let_go(req);
+    }
 }
 
 /// `ZEND_ASSIGN_OBJ` (`Z/Zend/zend_vm_def.h:2466`), `$o->p = v`, two
@@ -16827,7 +17050,38 @@ pub(crate) fn post_dec_static_prop<T: Tier>(
 /// ([`Request::bind_static_property`]). `ZEND_RETURNS_FUNCTION` on
 /// `extended_value`, beside the cache slot it shares the field with, is
 /// the source that is a call, and a call that returned by value is
-/// php's notice over a cell of its own.
+/// php's notice and a plain assignment, through a reference the slot
+/// holds and held to no declared type. `FREE_OP_DATA` ends each way
+/// through, so a loop leaves nothing at its return:
+///
+/// ```php
+/// class R { public static $a = [1, 2, 3]; public static $b; static function f($n) { $o = 0; for ($i = 0; $i < $n; $i++) { self::$b = &self::$a; $o += 1; } return $o; } }
+/// echo R::f(4), "\n";
+/// ```
+/// ```expect
+/// 4
+/// ```
+///
+/// ```php
+/// class D { function __destruct() { echo "dtor\n"; } }
+/// class R { public static $a; public static $b; public static $p = 1; public static int $t = 1; static function f() { self::$b = &self::$a; } }
+/// R::$a = new D; R::f();
+/// $x = null; R::$a = &$x; R::$b = &$x; echo "after\n";
+/// function f() { return 7; }
+/// $q = 5; R::$p = &$q; R::$p = &f(); var_dump($q);
+/// function g() { return "no"; }
+/// R::$t = &g(); var_dump(R::$t);
+/// ```
+/// ```expect
+/// dtor
+/// after
+///
+/// Notice: Only variables should be assigned by reference in %SCRATCH%/witness.php on line 7
+/// int(7)
+///
+/// Notice: Only variables should be assigned by reference in %SCRATCH%/witness.php on line 9
+/// string(2) "no"
+/// ```
 ///
 /// ```php
 /// class C { public static $p = 1; }
@@ -16917,12 +17171,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
             return threw(req, frame, &thrown);
         }
     };
-    let Some(Placed {
-        info,
-        name,
-        held_to,
-    }) = placed
-    else {
+    let Some(placed) = placed else {
         exec::free_operand(req, frame, data_type, data_at);
         return Ok(advance_over_data(req, frame));
     };
@@ -16931,22 +17180,51 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
             "InternalError: ZEND_ASSIGN_STATIC_PROP_REF over a source php compiles no write over",
         ));
     };
+    let bound = bind_static_ref(req, frame, op, placed, source);
+    // `FREE_OP_DATA()`: the `VAR` of a `FETCH_STATIC_PROP_W` under
+    // `ZEND_FETCH_REF` holds the cell with an owner, as a `MAKE_REF`'s
+    // does, and a call's what it returned.
+    match freed_after(req, bound, |req| {
+        exec::free_operand(req, frame, data_type, data_at);
+    }) {
+        Ok(()) => Ok(advance_over_data(req, frame)),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// `ZEND_ASSIGN_STATIC_PROP_REF`'s three arms over the slot `placed`
+/// addressed: a call that returned by value, the typed bind and the
+/// bind.
+fn bind_static_ref(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    placed: Placed<'_>,
+    source: php_heap::ZvalRef,
+) -> Result<(), Thrown> {
+    let Placed {
+        info,
+        name,
+        held_to,
+    } = placed;
     let held = Value::of_slot(source.read());
-    let returns_function = op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none();
-    if returns_function {
+    let strict = req.frame_strict_types(frame);
+    if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
+        // `zend_wrong_assign_to_variable_reference`: php's notice and
+        // `zend_assign_to_variable_ex`, one more owner of what the call
+        // returned as `IS_TMP_VAR`, held to no declared type.
         crate::api::raising::notice(req, "Only variables should be assigned by reference");
-        if req.is_pending() {
-            return Ok(Stepped::Threw(frame).into());
-        }
+        none_pending(req)?;
+        let value = held.undef_as_null();
+        req.addref(&value);
+        let pair = req.assign_static_slot(info, value, (strict, OperandKind::Tmp))?;
+        landed_out(req, frame, op, pair);
+        return Ok(());
     }
     let cell = if let Some(cell) = held.as_php_ref() {
         cell
     } else {
-        let held = held.undef_as_null();
-        let cell = match req.reference(held) {
-            Ok(cell) => cell,
-            Err(thrown) => return threw(req, frame, &thrown),
-        };
+        let cell = req.reference(held.undef_as_null())?;
         // The owner the source had of `held` is the cell's now.
         source.write(cell.as_value().to_zval());
         cell
@@ -16954,29 +17232,9 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     // `zend_assign_to_typed_property_reference`
     // (`Z/Zend/zend_execute.c:583`): the cell is held to the declared
     // type before it is bound, and the type goes onto the cell, so a
-    // write through any name bound to it is held to the type too. php
-    // takes this arm only where the source is a place; a call that
-    // returned by value is the notice and an assignment by value.
-    let typed = (held_to.typed() && !returns_function)
-        .then(|| req.typed_static(info))
-        .flatten();
-    if let Some(typed) = typed.as_ref() {
-        let strict = req.frame_strict_types(frame);
-        match crate::ops::verify_prop_assignable_by_ref(
-            req,
-            cell.heap(),
-            &typed.ty,
-            info.declaring,
-            &name,
-            strict,
-        ) {
-            Ok(None) => {}
-            // The conversion lands in the cell, so the name bound to it
-            // reads the converted value too.
-            Ok(Some(coerced)) => req.reference_set(cell.heap(), coerced),
-            Err(thrown) => return threw(req, frame, &thrown),
-        }
-    }
+    // write through any name bound to it is held to the type too.
+    let typed = held_to.typed().then(|| req.typed_static(info)).flatten();
+    let cell_kept = verified_cell(req, cell, typed.as_ref(), &name, strict)?;
     // `ZEND_REF_DEL_TYPE_SOURCE`: the cell the slot held is no longer
     // typed by this property.
     if let Some(old) = req.static_slot_cell(info) {
@@ -16989,7 +17247,8 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     if let Some(typed) = typed {
         req.ref_add_type_source(cell.heap(), type_source(&typed, &name));
     }
-    Ok(advance_over_data(req, frame))
+    give_back(req, [cell_kept, None, None]);
+    Ok(())
 }
 
 /// `zend_assign_to_variable` (`Z/Zend/zend_execute.h:171`) over a place:
@@ -19653,7 +19912,12 @@ fn stepped_obj(
     let stepped = match (member.name(req, frame, code, op), container.as_object()) {
         (Ok(name), Some(object)) => {
             prime_constant(req, frame, op, property_cache_slot(op), object, &name);
-            incdec_property(req, frame, op, step, object, &name)?
+            // A step's diagnostic can reach a handler that gives the
+            // object up.
+            let kept = Owner::take(req, object.as_value());
+            let stepped = incdec_property(req, frame, op, step, object, &name);
+            kept.let_go(req);
+            stepped?
         }
         (Ok(name), None) => {
             let name = name.as_str_bytes().unwrap_or_default();
@@ -20541,6 +20805,14 @@ pub(crate) fn unset_dim<T: Tier>(
             object_dim(req, frame, code, op).unwrap_or_else(Value::null)
         } else {
             exec::operand(req, frame, code, op.op2_type, op.op2)
+        };
+        // A handler of `ZVAL_UNDEFINED_OP2` can have written a `CV`,
+        // which php reads through its zval after it.
+        let container = match op.op1_type {
+            OperandKind::Cv if !matches!(container.as_ref(), ValueRef::Null) => {
+                exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref()
+            }
+            _ => container,
         };
         unset_container(req, &container, &offset)
     };
@@ -24313,9 +24585,19 @@ fn inline_isset_dim<T: Tier>(
 #[inline(never)]
 fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let empty = op.extended_value & ISEMPTY != 0;
+    let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+    // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
+    // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension as
+    // it was written, which is the arm that reads it at all.
+    let offset = if held.as_object().is_some() {
+        object_dim(req, frame, code, op).unwrap_or_else(Value::null)
+    } else {
+        exec::operand(req, frame, code, op.op2_type, op.op2)
+    };
+    // A handler of `ZVAL_UNDEFINED_OP2` can have written the container,
+    // which php reads through its zval after it.
     let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
     let answer = if let Some(array) = container.as_array() {
-        let offset = exec::operand(req, frame, code, op.op2_type, op.op2);
         crate::ops::isset_dim(
             req,
             array,
@@ -24324,15 +24606,7 @@ fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &
             empty,
         )
     } else {
-        // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
-        // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension
-        // as it was written, which is the arm that reads it at all.
-        let offset = if container.as_object().is_some() {
-            object_dim(req, frame, code, op).unwrap_or_else(Value::null)
-        } else {
-            exec::operand(req, frame, code, op.op2_type, op.op2)
-        };
-        isset_container(req, &container, &offset, empty)
+        isset_container(req, (frame, code, op), &container, &offset, empty)
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
     exec::free_operand(req, frame, op.op1_type, op.op1);
@@ -24432,8 +24706,35 @@ pub(crate) fn isset_isempty_prop_obj<T: Tier>(
 /// bool(true)
 /// bool(false)
 /// ```
+///
+/// The offset is read before the string is: `zval_get_long_ex` warns of
+/// a float, and a handler can have written the variable, whose string
+/// php reads through its zval after it.
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS['s'] = "x"; return true; });
+/// $s = str_repeat("ab", 64); var_dump(isset($s[1.5]));
+/// $s = str_repeat("ab", 64); var_dump(empty($s[1.5]));
+/// $s = str_repeat("ab", 64); var_dump(isset($s[1e42]));
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS['s'] = 1; return true; });
+/// $s = str_repeat("ab", 64); var_dump(isset($s[$undefined]), empty($s[$undefined]));
+/// ```
+/// ```expect
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// bool(false)
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// bool(true)
+/// [The float 1.0E+42 is not representable as an int, cast occurred]
+/// [Implicit conversion from float 1.0E+42 to int loses precision]
+/// bool(true)
+/// [Undefined variable $undefined]
+/// [Undefined variable $undefined]
+/// bool(false)
+/// bool(true)
+/// ```
 fn isset_container(
     req: &mut Request,
+    (frame, code, op): (FrameRef, &OpArray, &Opline),
     container: &Value,
     offset: &Value,
     empty: bool,
@@ -24444,8 +24745,12 @@ fn isset_container(
             let held = table.has_dimension(req, object, offset, empty)?;
             Ok(held != empty)
         }
-        ValueRef::Str(text) => {
+        ValueRef::Str(_) => {
             let Some(at) = string_isset_offset(req, offset) else {
+                return Ok(empty);
+            };
+            let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+            let Some(text) = container.as_php_string() else {
                 return Ok(empty);
             };
             let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
@@ -26469,9 +26774,13 @@ fn incdec_typed_ref(
     cell: PhpRef,
     held: Value,
 ) -> Edge {
+    let stepping = step_hold(req, held, Some(cell), None);
     let stepped = match kernel(req, &held) {
         Ok(stepped) => stepped,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            let thrown = req.free_pending(thrown, |req| give_back(req, stepping));
+            return threw_freeing(req, frame, op, &thrown);
+        }
     };
     let increment = matches!(op.opcode, Opcode::PreInc | Opcode::PostInc);
     let strict = req.frame_strict_types(frame);
@@ -26481,16 +26790,39 @@ fn incdec_typed_ref(
             RefStep::Clamped(stored, thrown) => (stored, Some(thrown)),
             RefStep::Refused(thrown) => {
                 write_out(req, frame, op, &Value::null());
+                let thrown = req.free_pending(thrown, |req| give_back(req, stepping));
                 return threw_freeing(req, frame, op, &thrown);
             }
         };
     write_out(req, frame, op, if post { &held } else { &stored });
     req.reference_set(cell.heap(), stored);
+    give_back(req, stepping);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     if let Some(thrown) = raised {
         return threw(req, frame, &thrown);
     }
     Ok(advance(req, frame))
+}
+
+/// What a step holds across a diagnostic that can reach a handler: the
+/// value stepped, which `ZVAL_COPY(result, var_ptr)` has an owner of
+/// before php's `POST_*` steps it, the reference it stands in and the
+/// table the `FETCH_DIM_RW` before walked to `place` in. A number raises
+/// nothing and takes none of the three.
+fn step_hold(
+    req: &mut Request,
+    held: Value,
+    cell: Option<PhpRef>,
+    place: Option<php_heap::ZvalRef>,
+) -> [Option<Owner<Value>>; 3] {
+    if matches!(held.as_ref(), ValueRef::Int(_) | ValueRef::Float(_)) {
+        return [None, None, None];
+    }
+    [
+        Some(Owner::take(req, held)),
+        cell.map(|cell| Owner::take(req, cell.as_value())),
+        place.and_then(|place| req.hold_walk(place)),
+    ]
 }
 
 /// What a step through a reference typed properties hold comes to
@@ -26559,6 +26891,45 @@ fn step_through_typed_ref(
 ///
 /// A call of its own, so that an inline path before it keeps to the
 /// registers it needs.
+///
+/// What is no number raises a diagnostic, and a handler of it can give
+/// the variable up; the step holds what it reads ([`step_hold`]), and
+/// the string goes back into the variable as php's does.
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["s"] = 1; return true; });
+/// $s = str_repeat("a", 30) . "!"; $x = $s++; var_dump(strlen($x), $s);
+/// $s = str_repeat("a", 30) . "!"; $x = $s--; var_dump(strlen($x), $s);
+/// $s = str_repeat("a", 30) . "!"; $x = ++$s; var_dump($x);
+/// ```
+/// ```expect
+/// [Increment on non-numeric string is deprecated, use str_increment() instead]
+/// int(31)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// [Decrement on non-numeric string has no effect and is deprecated]
+/// int(31)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// [Increment on non-numeric string is deprecated, use str_increment() instead]
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// ```
+///
+/// ```php
+/// class P { public array $held = [1]; }
+/// class A implements ArrayAccess {
+///     public $v;
+///     function __construct() { $this->v = new P; }
+///     function &offsetGet($k): mixed { return $this->v->held; }
+///     function offsetSet($k, $v): void {}
+///     function offsetExists($k): bool { return true; }
+///     function offsetUnset($k): void {}
+/// }
+/// function t() { $a = new A; try { $a[0]++; } catch (TypeError $e) { echo $e->getMessage(), "\n"; } return 1; }
+/// var_dump(t());
+/// ```
+/// ```expect
+/// Cannot increment array
+/// int(1)
+/// ```
 #[inline(never)]
 fn incdec(
     req: &mut Request,
@@ -26586,6 +26957,7 @@ fn incdec(
     if let Some(cell) = cell.filter(|cell| cell.heap().sources() != 0) {
         return incdec_typed_ref(req, frame, op, post, kernel, cell, held);
     }
+    let stepping = step_hold(req, held, cell, place);
     match kernel(req, &held) {
         Ok(stepped) => {
             // `ZVAL_COPY(EX_VAR(opline->result.var), var_ptr)`, before
@@ -26604,13 +26976,17 @@ fn incdec(
             } else {
                 req.replace_slot(frame, op.op1, stepped);
             }
+            give_back(req, stepping);
             // `FREE_OP1()`: a `VAR` holding an `IS_INDIRECT` owns
             // nothing, and one holding what `offsetGet` answered gives
             // it up.
             exec::free_operand(req, frame, op.op1_type, op.op1);
             Ok(advance(req, frame))
         }
-        Err(thrown) => threw_freeing(req, frame, op, &thrown),
+        Err(thrown) => {
+            let thrown = req.free_pending(thrown, |req| give_back(req, stepping));
+            threw_freeing(req, frame, op, &thrown)
+        }
     }
 }
 
