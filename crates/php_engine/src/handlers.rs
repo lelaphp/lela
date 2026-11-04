@@ -7071,11 +7071,7 @@ fn method_on(
             Undefined::OnCalled => object,
             Undefined::OnHanded => receiver.unwrap_or(object),
         };
-        return Err(undefined_method(
-            req,
-            named.class(),
-            written.as_str_bytes().unwrap_or_default(),
-        ));
+        return Err(undefined_method(req, named.class(), bytes));
     };
     if receiver.is_some() {
         return Ok((function, receiver));
@@ -12918,19 +12914,14 @@ fn class_operand(
     if let Some(class) = cached_class(req, frame, code, at, slot) {
         return Ok(class);
     }
-    let written = exec::constant(code, ConstIdx(at));
-    if let Some(class) =
-        crate::api::call::autoload_keyed(req, written.as_str_bytes().unwrap_or_default())?
-    {
+    let written = exec::constant_str(code, ConstIdx(at)).unwrap_or_default();
+    if let Some(class) = crate::api::call::autoload_keyed(req, written)? {
         if let Some(slot) = slot {
             req.prime(frame, slot, Cached::Class(class));
         }
         return Ok(class);
     }
-    Err(crate::api::raising::class_not_found(
-        req,
-        written.as_str_bytes().unwrap_or_default(),
-    ))
+    Err(crate::api::raising::class_not_found(req, written))
 }
 
 /// `ZEND_FETCH_CLASS_NO_AUTOLOAD` and `ZEND_FETCH_CLASS_SILENT`
@@ -16075,13 +16066,7 @@ type BinaryKernel = fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>;
 /// reads with `get_binary_op` over the opcode
 /// `zend_compile_compound_assign` wrote there.
 fn binary_op_of(extended_value: u32) -> Option<BinaryKernel> {
-    operator(extended_value).and_then(kernel_of)
-}
-
-/// The kernel of the binary operator `opcode`, php's `get_binary_op`.
-#[inline(never)]
-fn kernel_of(opcode: Opcode) -> Option<BinaryKernel> {
-    Some(match opcode {
+    Some(match operator(extended_value)? {
         Opcode::Add => crate::ops::add_assign,
         Opcode::Sub => crate::ops::sub,
         Opcode::Mul => crate::ops::mul,
@@ -22736,7 +22721,7 @@ pub(crate) fn div<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary_by_kind(req, frame, code, op, Binary::Div)
+    binary_by_kind(req, frame, code, op, (Binary::Div, crate::ops::div))
 }
 
 /// `ZEND_MOD`: [`crate::ops::mod`], the same way; a divisor of zero
@@ -22747,7 +22732,7 @@ pub(crate) fn r#mod<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary_by_kind(req, frame, code, op, Binary::Mod)
+    binary_by_kind(req, frame, code, op, (Binary::Mod, crate::ops::r#mod))
 }
 
 /// `ZEND_POW`: [`crate::ops::pow`], the same way.
@@ -22763,12 +22748,20 @@ pub(crate) fn pow<T: Tier>(
 /// `ZEND_SL`: [`crate::ops::shift_left`], the same way; a negative count
 /// leaves php's `ArithmeticError` pending where the opline stands.
 pub(crate) fn sl<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    binary_by_kind(req, frame, code, op, Binary::Shift(Shift::Left))
+    let kernel = (
+        Binary::Shift(Shift::Left),
+        crate::ops::shift_left as BinaryKernel,
+    );
+    binary_by_kind(req, frame, code, op, kernel)
 }
 
 /// `ZEND_SR`: [`crate::ops::shift_right`], the same way.
 pub(crate) fn sr<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    binary_by_kind(req, frame, code, op, Binary::Shift(Shift::Right))
+    let kernel = (
+        Binary::Shift(Shift::Right),
+        crate::ops::shift_right as BinaryKernel,
+    );
+    binary_by_kind(req, frame, code, op, kernel)
 }
 
 /// `ZEND_CONCAT` (`Z/Zend/zend_vm_def.h:374`): [`crate::ops::concat`],
@@ -23824,7 +23817,11 @@ pub(crate) fn bw_or<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary_by_kind(req, frame, code, op, Binary::Bitwise(Bitwise::Or))
+    let kernel = (
+        Binary::Bitwise(Bitwise::Or),
+        crate::ops::bitwise_or as BinaryKernel,
+    );
+    binary_by_kind(req, frame, code, op, kernel)
 }
 
 /// `ZEND_BW_XOR` (`Z/Zend/zend_vm_def.h:902`), what `^` compiles to:
@@ -23835,7 +23832,11 @@ pub(crate) fn bw_xor<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary_by_kind(req, frame, code, op, Binary::Bitwise(Bitwise::Xor))
+    let kernel = (
+        Binary::Bitwise(Bitwise::Xor),
+        crate::ops::bitwise_xor as BinaryKernel,
+    );
+    binary_by_kind(req, frame, code, op, kernel)
 }
 
 /// `ZEND_BW_AND` (`Z/Zend/zend_vm_def.h:863`), what `&` compiles to:
@@ -23863,7 +23864,11 @@ pub(crate) fn bw_and<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary_by_kind(req, frame, code, op, Binary::Bitwise(Bitwise::And))
+    let kernel = (
+        Binary::Bitwise(Bitwise::And),
+        crate::ops::bitwise_and as BinaryKernel,
+    );
+    binary_by_kind(req, frame, code, op, kernel)
 }
 
 /// `ZEND_BOOL_NOT` (`Z/Zend/zend_vm_def.h:961`), what `!` compiles to:
@@ -25828,17 +25833,12 @@ fn binary_by_kind(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    rule: Binary,
+    (rule, kernel): (Binary, BinaryKernel),
 ) -> Edge {
     let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
     if let Some(Inline::On(places)) = inline_arith(req.slots_mut(frame), code, op, rule, kinds) {
         return Ok(Next::by(places));
     }
-    let Some(kernel) = kernel_of(op.opcode) else {
-        return Err(Fatal::error(
-            "InternalError: an arithmetic handler over no binary operator",
-        ));
-    };
     binary(req, frame, code, op, kernel)
 }
 
