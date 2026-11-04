@@ -3157,6 +3157,7 @@ pub(crate) fn container(
 /// value the cell holds is the handler's with one more owner, and the
 /// `VAR`'s owner of the cell is given up, which frees the cell when it
 /// was the last.
+#[inline]
 pub(crate) fn take_operand(
     req: &mut Request,
     frame: FrameRef,

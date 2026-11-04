@@ -21105,7 +21105,7 @@ pub(crate) fn add_array_element<T: Tier>(
 ///
 /// Warning: r(): Argument #1 ($r) must be passed by reference, value given in %s on line 3
 /// ```
-#[inline]
+#[inline(always)] // as `array_append`, in each of its two handlers
 fn add_element(
     req: &mut Request,
     frame: FrameRef,
