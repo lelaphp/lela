@@ -6339,7 +6339,32 @@ fn static_call_named(
 /// whether it takes `$this`, which the cache slot holds beside it and
 /// a pass that looked it up read once ([`Request::takes_this`]), and the
 /// push the slot after it keeps, which the frame is pushed with where
-/// there is one ([`push_method_call`]).
+/// there is one ([`push_method_call`]). The calling frame's `$this` is
+/// read in those two arms alone, as php tests `Z_TYPE(EX(This))` nowhere
+/// else: a static callee named through its class takes neither it nor
+/// the caller's called scope, in a method or out of one, and only `self`
+/// and `parent` forward them.
+///
+/// ```php
+/// class P { static function who() { return static::class; }
+///     function viaName() { return P::who(); }
+///     function viaSelf() { return self::who(); }
+///     function inst() { return get_class($this); }
+///     function viaInstance() { return P::inst(); } }
+/// class C extends P {
+///     function up() { return parent::who(); }
+///     static function st() { return self::who() . P::who(); } }
+/// class Other { function call() { return P::inst(); } }
+/// $c = new C;
+/// echo P::who(), $c->viaName(), $c->viaSelf(), $c->up(), C::st(), $c->viaInstance(), "\n";
+/// try { (new Other)->call(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { P::inst(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// PPCCCPC
+/// Non-static method P::inst() cannot be called statically
+/// Non-static method P::inst() cannot be called statically
+/// ```
 fn static_call_frame(
     req: &mut Request,
     frame: FrameRef,
@@ -6357,9 +6382,11 @@ fn static_call_frame(
     // of the class, and is php's `Error` otherwise; a static one called
     // through `self` or `parent` forwards the calling frame's called
     // scope, `Z_OBJCE(EX(This))` or `Z_CE(EX(This))`.
-    let receiver = req.vm().this(frame);
     let (this, called) = if instance {
-        let Some(this) = receiver.filter(|this| req.symbols().instance_of(this.class(), class))
+        let Some(this) = req
+            .vm()
+            .this(frame)
+            .filter(|this| req.symbols().instance_of(this.class(), class))
         else {
             let thrown = non_static_method_call(req, function);
             return threw(req, frame, &thrown);
@@ -6373,9 +6400,12 @@ fn static_call_frame(
             FETCH_CLASS_SELF | FETCH_CLASS_PARENT
         )
     {
-        let forwarded = receiver
-            .map(|this| this.class())
-            .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope));
+        let forwarded = req.vm().at(frame).and_then(|caller| {
+            caller
+                .this()
+                .map(|this| this.class())
+                .or_else(|| caller.called_scope())
+        });
         (None, forwarded.unwrap_or(class))
     } else {
         (None, class)
@@ -7965,11 +7995,15 @@ fn static_slot_at<'c>(
         .symbols()
         .class_decl(info.declaring)
         .is_some_and(|decl| decl.kind == php_unit::decl::ClassKind::Trait);
-    if named && !on_trait {
+    if named
+        && !on_trait
+        && let Some(place) = req.static_place(info)
+    {
         req.prime_scoped(frame, slot, |primed| Cached::StaticProperty {
             class,
             primed,
             info,
+            place,
         });
     }
     Ok(Some(StaticSlot { info, name }))
@@ -8425,9 +8459,7 @@ pub(crate) fn fetch_constant<T: Tier>(
 ) -> Edge {
     // `CACHED_PTR(opline->extended_value)`: the constant a pass before
     // found, read without a lookup.
-    if let exec::Cached::Constant(at) = req.cached(frame, CacheSlot(op.extended_value))
-        && let Some(value) = req.constant_at(at)
-    {
+    if let exec::Cached::Constant(value) = req.cached(frame, CacheSlot(op.extended_value)) {
         req.addref(&value);
         set_out(req, frame, op, value);
         return Ok(advance(req, frame));
@@ -8453,21 +8485,15 @@ fn fetch_constant_found(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
             "InternalError: ZEND_FETCH_CONSTANT over a name no literal carries",
         ));
     }
-    let slot = CacheSlot(op.extended_value);
-    let mut key = named(code, op.op2.saturating_add(1));
-    let mut found = req.constant_found(&key);
-    if found.is_none() && op.op1 & UNQUALIFIED_IN_NAMESPACE != 0 {
-        key = named(code, op.op2.saturating_add(2));
-        found = req.constant_found(&key);
-    }
-    let Some((at, value, deprecated)) = found else {
-        let thrown = crate::api::raising::undefined_constant(req, &named(code, op.op2));
-        return threw(req, frame, &thrown);
+    let (value, deprecated, key) = match constant_named(req, code, op) {
+        Ok(found) => found,
+        Err(thrown) => return threw(req, frame, &thrown),
     };
     req.addref(&value);
     set_out(req, frame, op, value);
     if !deprecated {
-        req.prime(frame, slot, exec::Cached::Constant(at));
+        let slot = CacheSlot(op.extended_value);
+        req.prime(frame, slot, exec::Cached::Constant(value));
         return Ok(advance(req, frame));
     }
     // `if (ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED)`
@@ -8481,6 +8507,66 @@ fn fetch_constant_found(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
         req.leave_pending(&thrown);
     }
     Ok(advance(req, frame))
+}
+
+/// The lookup of the constant a `FETCH_CONSTANT` names: its value,
+/// whether it is deprecated and the name the table holds it by, or php's
+/// `Undefined constant "%s"`.
+fn constant_named(
+    req: &mut Request,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<(Value, bool, Vec<u8>), Thrown> {
+    let mut key = named(code, op.op2.saturating_add(1));
+    let mut found = req.constant_found(&key);
+    if found.is_none() && op.op1 & UNQUALIFIED_IN_NAMESPACE != 0 {
+        key = named(code, op.op2.saturating_add(2));
+        found = req.constant_found(&key);
+    }
+    match found {
+        Some((value, deprecated)) => Ok((value, deprecated, key)),
+        None => Err(crate::api::raising::undefined_constant(
+            req,
+            &named(code, op.op2),
+        )),
+    }
+}
+
+/// What compiled code reaches of a fetch's handler past the slot it reads
+/// in place.
+pub(crate) mod fetched {
+    use super::{
+        CacheSlot, FrameRef, OpArray, Opline, Request, Thrown, Value, constant_named, exec,
+    };
+
+    /// The value of the constant a `FETCH_CONSTANT` names, nobody's to
+    /// release, for compiled code to copy where its slot did not answer,
+    /// as php's `zend_jit_get_constant` answers the `zend_constant`: the
+    /// slot read, or the lookup, the slot written for a constant that is
+    /// not deprecated and the deprecation of one raised.
+    pub(crate) fn get_constant(
+        req: &mut Request,
+        frame: FrameRef,
+        code: &OpArray,
+        op: &Opline,
+    ) -> Result<Value, Thrown> {
+        let slot = CacheSlot(op.extended_value);
+        if let exec::Cached::Constant(value) = req.cached(frame, slot) {
+            return Ok(value);
+        }
+        let (value, deprecated, key) = constant_named(req, code, op)?;
+        if deprecated {
+            crate::api::raising::deprecated_constant(req, &key)?;
+        } else {
+            req.prime(frame, slot, exec::Cached::Constant(value));
+        }
+        Ok(value)
+    }
+
+    /// The cache slot a `FETCH_STATIC_PROP_R` keeps its property in.
+    pub(crate) fn static_slot(op: &Opline) -> CacheSlot {
+        super::property_cache_slot(op)
+    }
 }
 
 /// The bytes of the constant at `at`, which is a name where the opline
@@ -14259,7 +14345,11 @@ pub(crate) fn assign<T: Tier, A: Operand + Default, B: Operand + Default, R: Ret
         sensed_unmovable(req, frame, code, op, (B::default(), op.op2));
     }
     req.vm_mut().stand(frame, at);
-    assigned(req, frame, code, op)
+    if A::default().kind() == OperandKind::Cv {
+        assigned_over_owner::<B, R>(req, frame, code, op)
+    } else {
+        assigned(req, frame, code, op)
+    }
 }
 
 /// `ZEND_ASSIGN` past its inline path: the value taken as
@@ -14285,6 +14375,62 @@ fn assigned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> 
     };
     write_out(req, frame, op, &landed);
     req.release(garbage);
+    Ok(advance(req, frame))
+}
+
+/// `zend_assign_to_variable` over a CV that is no reference, past the
+/// inline path, which refuses one that owns what it holds: the value
+/// [`taking`] takes written in one look at the frame's slots, what stood
+/// there given up after the write, `GC_DTOR_NO_REF(garbage)`. Any other
+/// value is [`assigned`]'s, with nothing touched.
+///
+/// What the CV held is given up after the new value stands in it, a
+/// destructor served there, an array with another owner a possible root,
+/// and the assignment's own value read by the expression around it:
+///
+/// ```php
+/// class D { function __construct(public $n) {} function __destruct() { global $o; echo "[{$this->n}:", $o->n ?? '-', "]"; } }
+/// $o = new D(1); $o = new D(2); echo "\n";
+/// $x = $o = new D(3); echo $x->n, "\n"; unset($x);
+/// $o = null; echo "\n";
+/// gc_collect_cycles(); $s = gc_status()['roots'];
+/// $i = 1; $a = [$i, [$i]]; $b = $a; $a = 'str'; echo gc_status()['roots'] - $s, "\n";
+/// $b = 1; echo gc_status()['roots'] - $s, "\n";
+/// $t = str_repeat('a', 3); $u = $t; $t = new stdClass; $t = $t; echo $u, get_class($t), "\n";
+/// ```
+/// ```expect
+/// [1:2]
+/// [2:3]3
+/// [3:-]
+/// 1
+/// 0
+/// aaastdClass
+/// ```
+#[inline(never)]
+fn assigned_over_owner<B: Operand + Default, R: Retval>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let slots = req.slots_mut(frame);
+    let place = op.op1 as usize;
+    let Some(held) = slots
+        .get(place)
+        .copied()
+        .filter(|held| held.as_reference().is_none())
+    else {
+        return assigned(req, frame, code, op);
+    };
+    let Some(z) =
+        taking::<R>(slots, code, op, B::default(), op.op2).and_then(|taking| taking.take(slots))
+    else {
+        return assigned(req, frame, code, op);
+    };
+    if let Some(at) = slots.get_mut(place) {
+        *at = z;
+    }
+    req.release(Value::of_slot(held));
     Ok(advance(req, frame))
 }
 
@@ -24423,7 +24569,7 @@ pub(crate) fn defined<T: Tier>(
 #[inline]
 fn defined_cached(req: &Request, frame: FrameRef, slot: CacheSlot) -> Option<bool> {
     match req.cached(frame, slot) {
-        Cached::Constant(at) if req.constant_at(at).is_some() => Some(true),
+        Cached::Constant(_) => Some(true),
         Cached::Undefined(count) if count == req.constant_count() => Some(false),
         _ => None,
     }
@@ -24437,7 +24583,7 @@ fn defined_cached(req: &Request, frame: FrameRef, slot: CacheSlot) -> Option<boo
 fn defined_looked_up(req: &mut Request, frame: FrameRef, slot: CacheSlot, name: &Value) -> bool {
     let name = name.as_str_bytes().unwrap_or_default();
     let primed = match req.constant_found(name) {
-        Some((at, _, _)) => Cached::Constant(at),
+        Some((value, _)) => Cached::Constant(value),
         None if crate::ops::defined(req, name) => return true,
         None => Cached::Undefined(req.constant_count()),
     };

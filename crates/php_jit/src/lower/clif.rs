@@ -52,6 +52,7 @@ use super::{
 mod calls;
 mod dims;
 mod doors;
+mod fetches;
 mod objects;
 mod strings;
 mod unread;
@@ -1949,14 +1950,16 @@ impl<'a> Emit<'a> {
             Kernel::Frameless => &[
                 I64, I64, I32, I32, I32, I32, I64, I64, I32, I64, I32, I64, I32, I64,
             ],
-            Kernel::Step | Kernel::CallNative => &[I64, I64, I32, I32, I64],
-            Kernel::FreeThis | Kernel::PopCall | Kernel::Interrupt => &[I64, I64, I32],
+            Kernel::Step | Kernel::CallNative | Kernel::GetConstant => &[I64, I64, I32, I32, I64],
+            Kernel::FreeThis | Kernel::PopCall | Kernel::Interrupt | Kernel::NanToBool => {
+                &[I64, I64, I32]
+            }
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
             Kernel::RopeInit | Kernel::Leave => &[I64, I64, I32, I64, I32, I64],
             Kernel::RopeAdd | Kernel::AssignConcat => &[I64, I64, I32, I64, I64, I32],
-            Kernel::RopeEnd => &[I64, I64, I32, I64, I64, I32, I64],
+            Kernel::RopeEnd | Kernel::StrOffset => &[I64, I64, I32, I64, I64, I32, I64],
             Kernel::Concat => &[I64, I64, I32, I64, I32, I64, I32, I32, I64],
             Kernel::Find | Kernel::Lookup => &[I64, I64, I32, I64, I64, I32, I32, I64],
             Kernel::MakeRef => &[I64, I64, I32, I64, I64],
@@ -3003,6 +3006,7 @@ impl<'a> Emit<'a> {
             Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => {
                 self.increment(at, line)
             }
+            Opcode::FetchDimR if line.imm == Imm::StrOffset => self.str_offset(at, line),
             Opcode::FetchDimR => self.fetch(at, line),
             Opcode::IssetIsemptyDimObj => self.isset_dim(at, line),
             Opcode::FetchDimIs => self.fetch_is(at, line),
@@ -3020,6 +3024,9 @@ impl<'a> Emit<'a> {
             Opcode::FetchDimW | Opcode::FetchDimRw => self.fetch_dim_w(at, line),
             Opcode::AssignDimOp => self.assign_dim_op(at, line),
             Opcode::Strlen => self.strlen(line),
+            Opcode::Count => self.count(at, line),
+            Opcode::FetchConstant => self.fetch_constant(at, line),
+            Opcode::FetchStaticPropR => self.fetch_static(line),
             Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => self.rope(line),
             Opcode::Concat | Opcode::FastConcat => self.concat(line),
             Opcode::Bool | Opcode::BoolNot => self.bool(at, line),
@@ -3066,7 +3073,7 @@ impl<'a> Emit<'a> {
     /// boolean a `JMPZ_EX` or `JMPNZ_EX` writes.
     fn jump(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let held = self.scalar(at, line.op1)?;
-        let truth = self.truth(held);
+        let truth = self.warned_truth(line, held)?;
         if let Some(out) = line.out {
             self.define(out, Scalar::Bool(truth))?;
         }
@@ -4162,7 +4169,7 @@ impl<'a> Emit<'a> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:7533-7800`).
     fn bool(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let held = self.scalar(at, line.op1)?;
-        let truth = self.truth(held);
+        let truth = self.warned_truth(line, held)?;
         let truth = match line.opcode {
             Opcode::BoolNot => self.b.ins().icmp_imm_s(IntCC::Equal, truth, 0),
             _ => truth,

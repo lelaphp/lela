@@ -915,12 +915,14 @@ impl<'a> Builder<'a> {
             Opcode::InitStaticMethodCall => self.static_at((func, at), &op, next),
             _ => None,
         };
+        let fetched = self.view.fetched_slot(func, &op);
         let form = match (op.opcode, property) {
             (opcode, Some(_)) if on_declared_slot(opcode) => Form::Inline,
             (opcode, None) if on_declared_slot(opcode) => Form::Step,
             (Opcode::InitMethodCall | Opcode::InitStaticMethodCall, _) if pushed.is_some() => {
                 Form::Inline
             }
+            _ if fetched.is_some() => Form::Inline,
             _ => form,
         };
         let pair = match pushed.as_ref().map(|pushed| &pushed.held) {
@@ -945,7 +947,8 @@ impl<'a> Builder<'a> {
         };
         self.sampled.insert(idx, samples);
         let cached = (property.and_then(|property| property.slot.cached()))
-            .or_else(|| pair.map(|(slot, _)| slot.cached()));
+            .or_else(|| pair.map(|(slot, _)| slot.cached()))
+            .or(fetched);
         let map_ptr = match cached {
             Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
             _ => None,
@@ -1028,6 +1031,12 @@ impl<'a> Builder<'a> {
                         .map_or(PairCallee::Record, PairCallee::Number),
                     class,
                 },
+                _ if form == Form::Inline
+                    && op.opcode == Opcode::FetchDimR
+                    && t1 == Types::STRING =>
+                {
+                    Imm::StrOffset
+                }
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
                     Imm::Property {
                         slot: match property.slot.cached() {
@@ -1192,6 +1201,13 @@ impl<'a> Builder<'a> {
         let out = match (slot, inferred.out) {
             (Some(slot), Some(held)) if !pushes && !fused => {
                 let types = returns.map_or(held.types, |returns| held.types.and(returns));
+                // php's `zend_jit_fetch_static_prop` writes the slot
+                // whatever the property's type, in the arm its handler
+                // serves too, and keeps no register.
+                let form = match op.opcode {
+                    Opcode::FetchStaticPropR => Form::Step,
+                    _ => form,
+                };
                 Some(self.define(slot, (types, held.range), idx, form))
             }
             _ => None,
@@ -1431,6 +1447,9 @@ impl<'a> Builder<'a> {
         let throws = match form {
             Form::Inline => {
                 (op.opcode == Opcode::Assign && !old.within(UNCOUNTED))
+                    // A NAN's warning runs the error handler, which may
+                    // throw, where the handler would leave it pending.
+                    || (takes_truth(op.opcode) && old == Types::DOUBLE)
                     || (matches!(
                         op.opcode,
                         Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::IssetIsemptyDimObj
@@ -1443,7 +1462,10 @@ impl<'a> Builder<'a> {
                     // A temporary string or array it reads is given up.
                     || (matches!(
                         op.opcode,
-                        Opcode::IsIdentical | Opcode::IsNotIdentical | Opcode::Strlen
+                        Opcode::IsIdentical
+                            | Opcode::IsNotIdentical
+                            | Opcode::Strlen
+                            | Opcode::Count
                     ) && [op1, op2].into_iter().any(|operand| {
                         self.is_temp(operand) && !self.types_of(frame, operand).within(UNCOUNTED)
                     }))
@@ -1452,10 +1474,17 @@ impl<'a> Builder<'a> {
                     // the memory limit.
                     || op.opcode == Opcode::SendRef
                     // The join may refuse, the memory limit or the string's
-                    // size, and leave it pending.
+                    // size, and leave it pending; a constant's name may
+                    // answer nothing, or a deprecation run the error
+                    // handler, and a `static` property's handler serves
+                    // what no slot answers and may refuse it.
                     || matches!(
                         op.opcode,
-                        Opcode::RopeEnd | Opcode::Concat | Opcode::FastConcat
+                        Opcode::RopeEnd
+                            | Opcode::Concat
+                            | Opcode::FastConcat
+                            | Opcode::FetchConstant
+                            | Opcode::FetchStaticPropR
                     )
                     || (op.opcode == Opcode::AssignOp
                         && lattice::binary_of(op.extended_value) == Some(Opcode::Concat))
@@ -1485,8 +1514,9 @@ impl<'a> Builder<'a> {
                         && (!self.uncounted(frame) || self.receives(frame)))
                     // A call pushed under its slot's pair goes to its
                     // handler where the slot holds another, which looks
-                    // the class and the method up and may throw.
-                    || matches!(line.imm, Imm::Pair { .. })
+                    // the class and the method up and may throw; an
+                    // offset's read warns, and may refuse the key.
+                    || matches!(line.imm, Imm::Pair { .. } | Imm::StrOffset)
             }
             // php checks for a throwable after a handler where
             // `zend_may_throw_ex` says it may leave one
@@ -3061,7 +3091,7 @@ impl<'a> Builder<'a> {
         let held = *self.val(value);
         let computed = match (held.def, tag) {
             (Def::Op(def), Some(tag)) => match self.ops.get(def.index()) {
-                Some(Op::Line(line)) if line.form == Form::Inline => {
+                Some(Op::Line(line)) if line.form == Form::Inline && line.imm != Imm::StrOffset => {
                     within(line.opcode, tag, line.op2)
                         .filter(|kind| {
                             matches!(kind, Within::Fetched { .. })
@@ -3236,12 +3266,13 @@ impl<'a> Builder<'a> {
         }
         let inline = match op.opcode {
             Opcode::Jmp => true,
-            // A double's truth is the handler's, which warns of a NAN as
-            // php 8.5 coerces it (`ZEND_JMPZ`, `Z/Zend/zend_vm_def.h`).
-            Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx => {
-                scalar(t1) && t1 != Types::DOUBLE
+            // A scalar's truth, as php's `zend_jit_bool_jmpznz` compiles
+            // it, a double's with the warning of a NAN in a cold arm
+            // (`Z/ext/opcache/jit/zend_jit_ir.c:7750-7768`), and a scalar
+            // moved.
+            Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx | Opcode::QmAssign => {
+                scalar(t1)
             }
-            Opcode::QmAssign => scalar(t1),
             Opcode::IsSmaller | Opcode::IsSmallerOrEqual | Opcode::IsEqual | Opcode::IsNotEqual => {
                 number(t1) && number(t2)
             }
@@ -3289,6 +3320,9 @@ impl<'a> Builder<'a> {
                     && (scalar(t1) || copied(op.op1_type, op.op1, t1))
             }
             Opcode::TypeCheck => type_checked(op, t1, seen.read[0]),
+            // php's `zend_jit_count`, over an array in place or through
+            // the reference a guard held (`:11671-11713`).
+            Opcode::Count => t1.tag() == Some(ZvalType::Array),
             // php's `zend_jit_send_ref` of a variable (`:9792-9860`): the
             // reference it holds sent with an owner more, or made first.
             Opcode::SendRef => op.op1_type == OperandKind::Cv && op.op2_type == OperandKind::Unused,
@@ -4929,7 +4963,7 @@ struct Branched {
 /// `zend_jit_identical` compares them inline or calls `zend_is_identical`
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:7292-7532`); a string's length read
 /// in place, php's `zend_jit_strlen` (`:11623-11660`); a scalar's truth,
-/// php's `zend_jit_bool_jmpznz`, a double's the handler's as a jump's is;
+/// php's `zend_jit_bool_jmpznz`;
 /// an array, which holds no iterator to delete, given up as php's
 /// `zend_jit_free` gives it up (`:11543-11580`); a rope's piece that is a
 /// string, which php's `zend_jit_rope` stores inline and joins through
@@ -4948,7 +4982,14 @@ fn strung(op: &Opline, seen: Seen) -> Option<Form> {
                 || (t1.scalar() && string(t2, 1))
         }
         Opcode::Strlen => string(t1, 0),
-        Opcode::Bool | Opcode::BoolNot => t1.scalar() && t1 != Types::DOUBLE,
+        // php's `zend_jit_fetch_dim_read` over a string
+        // (`Z/ext/opcache/jit/zend_jit_ir.c:12720-12755`): by a long or a
+        // string, what a key of any other kind warns of being the
+        // handler's.
+        Opcode::FetchDimR if t1 == Types::STRING => {
+            (t2 == Types::LONG || t2 == Types::STRING) && seen.read[1] == Read::InPlace
+        }
+        Opcode::Bool | Opcode::BoolNot => t1.scalar(),
         Opcode::FeFree => t1.tag() == Some(ZvalType::Array),
         Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => string(t2, 1),
         Opcode::Concat | Opcode::FastConcat => string(t1, 0) && string(t2, 1),
@@ -4961,6 +5002,20 @@ fn strung(op: &Opline, seen: Seen) -> Option<Form> {
         _ => return None,
     };
     Some(if inline { Form::Inline } else { Form::Step })
+}
+
+/// Whether `opcode` reads its operand's truth, php's
+/// `zend_jit_bool_jmpznz`'s oplines.
+fn takes_truth(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Jmpz
+            | Opcode::Jmpnz
+            | Opcode::JmpzEx
+            | Opcode::JmpnzEx
+            | Opcode::Bool
+            | Opcode::BoolNot
+    )
 }
 
 /// The jump after `op` it is fused to, where it is a comparison whose
