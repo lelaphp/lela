@@ -67,7 +67,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{
-    Thrown, non_static_method_call, none_pending, type_error, undefined_method,
+    Thrown, error, non_static_method_call, none_pending, type_error, undefined_method,
 };
 use crate::api::request::ropes::RopeAt;
 use crate::api::request::{CodeFrom, ConstantRead, Opened, Raised, Request};
@@ -83,7 +83,9 @@ use crate::exec::{
 use crate::observer::OnThrow;
 use crate::operand::{ByKind, Operand, Retval, RetvalByte, Var};
 use crate::ops::inline::{self, Arith, Binary, Bitwise, Shift};
-use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
+use crate::ops::{
+    DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset, verify_property_type,
+};
 use crate::tier::{Flow, Inline, Next, SafepointIdx, Site, Stepped, Tier};
 use branch::Branch;
 use php_unit::Opcode;
@@ -140,10 +142,8 @@ pub(crate) fn ext_stmt<T: Tier>(
     _: &OpArray,
     _: &Opline,
 ) -> Edge {
-    if let Err(thrown) = crate::statement::told(req, frame) {
-        return threw(req, frame, &thrown);
-    }
-    Ok(advance(req, frame))
+    let done = crate::statement::told(req, frame);
+    settled(req, frame, done)
 }
 
 /// `ZEND_EXT_FCALL_BEGIN` (`Z/Zend/zend_vm_def.h:7940`), before a call
@@ -242,10 +242,8 @@ pub(crate) fn ext_nop<T: Tier>(
 /// out
 /// ```
 pub(crate) fn ticks<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: &Opline) -> Edge {
-    if let Err(thrown) = req.tick(op.extended_value) {
-        return threw(req, frame, &thrown);
-    }
-    Ok(advance(req, frame))
+    let done = req.tick(op.extended_value);
+    settled(req, frame, done)
 }
 
 /// `ZEND_FREE`: a temporary nothing reads, given up where it stands
@@ -312,10 +310,8 @@ pub(crate) fn declare_class<T: Tier>(
 ) -> Edge {
     let serving = exec::standing(req, frame)?;
     let key = runtime_key(code, op)?;
-    match req.bind_class_in_slot(&serving.unit, &key) {
-        Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    let done = req.bind_class_in_slot(&serving.unit, &key);
+    settled(req, frame, done)
 }
 
 /// The runtime definition key a class-declaring opline carries in the
@@ -363,10 +359,8 @@ pub(crate) fn declare_class_delayed<T: Tier>(
 ) -> Edge {
     let serving = exec::standing(req, frame)?;
     let key = runtime_key(code, op)?;
-    match req.bind_delayed(&serving.unit, &key) {
-        Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    let done = req.bind_delayed(&serving.unit, &key);
+    settled(req, frame, done)
 }
 
 /// `ZEND_DECLARE_ANON_CLASS` (`Z/Zend/zend_vm_def.h:7993`): the class
@@ -435,9 +429,7 @@ pub(crate) fn declare_anon_class<T: Tier>(
                 req.prime(frame, slot, Cached::Class(class));
                 class
             }
-            Err(thrown) => {
-                return threw(req, frame, &thrown);
-            }
+            Err(thrown) => return threw(req, frame, &thrown),
         }
     };
     hold_class(req, frame, op.out, class);
@@ -499,10 +491,8 @@ pub(crate) fn declare_function<T: Tier>(
         ));
     };
     let lowered = constant_bytes(code, op, op.op1)?;
-    match req.bind_function(&serving.unit, at, &lowered) {
-        Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    let done = req.bind_function(&serving.unit, at, &lowered);
+    settled(req, frame, done)
 }
 
 /// `ZEND_DECLARE_CONST` (`Z/Zend/zend_vm_def.h:8276`), the opline
@@ -1366,9 +1356,8 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     } else if let Some(array) = callee.as_array() {
         dynamic_call_array(req, array, req.vm().this(frame))
     } else {
-        Err(crate::api::raising::throw_error(
+        Err(error(
             req,
-            ClassId::ERROR,
             &format!("Value of type {} is not callable", callee.type_name()),
         ))
     };
@@ -1441,6 +1430,42 @@ struct DynamicTarget {
     closure: Option<(PhpObject, bool)>,
 }
 
+impl DynamicTarget {
+    /// A callee that is no closure, `this` taken with one more owner
+    /// (`GC_ADDREF` under `ZEND_CALL_RELEASE_THIS`).
+    fn held(
+        req: &mut Request,
+        function: Function,
+        name: Option<PhpString>,
+        this: Option<PhpObject>,
+        called_scope: Option<crate::api::values::ClassId>,
+    ) -> DynamicTarget {
+        if let Some(this) = this {
+            req.addref(&this.as_value());
+        }
+        let receiver = this.map(exec::Receiver::Owned);
+        DynamicTarget {
+            function,
+            name,
+            receiver,
+            called_scope,
+            closure: None,
+        }
+    }
+
+    /// A method called on `object`, which it takes as `$this` where it
+    /// is not static.
+    fn on(
+        req: &mut Request,
+        function: Function,
+        name: PhpString,
+        object: PhpObject,
+    ) -> DynamicTarget {
+        let this = req.takes_this(function).then_some(object);
+        DynamicTarget::held(req, function, Some(name), this, Some(object.class()))
+    }
+}
+
 /// `zend_init_dynamic_call_object` (`Z/Zend/zend_execute.c:5152`): the
 /// object's `get_closure`, a `Closure`'s payload with its receiver, its
 /// scope and the closure itself held by the call, or `__invoke` on the
@@ -1452,39 +1477,18 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
     }
     let class = object.class();
     if let Some(made) = req.handler_closure(object) {
-        if let Some(this) = made.this {
-            req.addref(&this.as_value());
-        }
-        return Ok(DynamicTarget {
-            function: made.function,
-            name: None,
-            receiver: made.this.map(exec::Receiver::Owned),
-            called_scope: made.called_scope,
-            closure: None,
-        });
+        let (function, this, scope) = (made.function, made.this, made.called_scope);
+        return Ok(DynamicTarget::held(req, function, None, this, scope));
     }
     let Some(function) = req.symbols().method_named(class, b"__invoke") else {
         let shown = req.symbols().class_name(class).to_vec();
-        return Err(crate::api::raising::throw_error(
+        return Err(error(
             req,
-            ClassId::ERROR,
             &bytes!(b"Object of type ", shown, b" is not callable"),
         ));
     };
     let name = req.method_name_string(function)?;
-    let this = if req.takes_this(function) {
-        req.addref(&object.as_value());
-        Some(object)
-    } else {
-        None
-    };
-    Ok(DynamicTarget {
-        function,
-        name: Some(name),
-        receiver: this.map(exec::Receiver::Owned),
-        called_scope: Some(class),
-        closure: None,
-    })
+    Ok(DynamicTarget::on(req, function, name, object))
 }
 
 /// `zend_closure_get_closure` with `GC_ADDREF` of the closure: what a
@@ -1556,13 +1560,7 @@ fn dynamic_call_string(
     let Some(function) = exec::find_function(req, Bare::of(name)) else {
         return Err(crate::api::raising::undefined_function(req, name));
     };
-    Ok(DynamicTarget {
-        function,
-        name: None,
-        receiver: None,
-        called_scope: None,
-        closure: None,
-    })
+    Ok(DynamicTarget::held(req, function, None, None, None))
 }
 
 /// `zend_init_dynamic_call_array` (`Z/Zend/zend_execute.c:5196`): a
@@ -1597,8 +1595,7 @@ fn dynamic_call_array(
     array: PhpArray,
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
-    let refuse =
-        |req: &mut Request, text: &str| crate::api::raising::throw_error(req, ClassId::ERROR, text);
+    let refuse = |req: &mut Request, text: &str| error(req, text);
     if array.len() != 2 {
         return Err(refuse(req, "Array callback must have exactly two elements"));
     }
@@ -1657,19 +1654,7 @@ fn dynamic_call_array(
         }
     };
     let object = receiver.unwrap_or(object);
-    let this = if req.takes_this(function) {
-        req.addref(&object.as_value());
-        Some(object)
-    } else {
-        None
-    };
-    Ok(DynamicTarget {
-        function,
-        name: Some(method),
-        receiver: this.map(exec::Receiver::Owned),
-        called_scope: Some(object.class()),
-        closure: None,
-    })
+    Ok(DynamicTarget::on(req, function, method, object))
 }
 
 /// `zend_fetch_class_by_name` under `ZEND_FETCH_CLASS_EXCEPTION`: the
@@ -1724,13 +1709,13 @@ fn dynamic_call_static(
             return Err(thrown);
         }
     };
-    Ok(DynamicTarget {
+    Ok(DynamicTarget::held(
+        req,
         function,
-        name: Some(method),
-        receiver: None,
-        called_scope: Some(class),
-        closure: None,
-    })
+        Some(method),
+        None,
+        Some(class),
+    ))
 }
 
 /// `ZEND_ECHO`: the operand as a string (`zval_get_string`), written to
@@ -2487,7 +2472,7 @@ fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
         name,
         format!("(): Argument #{number}{parameter} could not be passed by reference")
     );
-    crate::api::raising::throw_error(req, ClassId::ERROR, &message)
+    error(req, &message)
 }
 
 /// `ZEND_SEND_VAL_EX`: `SEND_VAL` for an argument that is no variable,
@@ -2586,8 +2571,7 @@ fn sent_declared(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline
     };
     if must_be_sent_by_ref(req, reserved.number) {
         let thrown = cannot_pass_by_reference(req, reserved.number);
-        exec::free_operand(req, frame, op.op1_type, op.op1);
-        return threw(req, frame, &thrown);
+        return threw_freeing(req, frame, op, &thrown);
     }
     send(req, frame, code, op, reserved.slot)
 }
@@ -3186,29 +3170,22 @@ fn user_call_target(
     target: crate::api::call::Target,
 ) -> Result<DynamicTarget, Thrown> {
     match target {
-        crate::api::call::Target::Function(function) => Ok(DynamicTarget {
-            function,
-            name: None,
-            receiver: None,
-            called_scope: None,
-            closure: None,
-        }),
+        crate::api::call::Target::Function(function) => {
+            Ok(DynamicTarget::held(req, function, None, None, None))
+        }
         crate::api::call::Target::Method {
             function,
             scope,
             this,
         } => {
             let name = req.method_name_string(function)?;
-            if let Some(this) = this {
-                req.addref(&this.as_value());
-            }
-            Ok(DynamicTarget {
+            Ok(DynamicTarget::held(
+                req,
                 function,
-                name: Some(name),
-                receiver: this.map(exec::Receiver::Owned),
-                called_scope: Some(scope),
-                closure: None,
-            })
+                Some(name),
+                this,
+                Some(scope),
+            ))
         }
         crate::api::call::Target::Closure(object) => dynamic_call_object(req, object),
     }
@@ -3340,18 +3317,16 @@ pub(crate) fn send_array<T: Tier>(
 ) -> Edge {
     let given = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let Some(array) = given.as_array() else {
-        let shown = crate::ops::value_name(req, &given.undef_as_null());
         let thrown = type_error(
             req,
-            &bytes!(
+            &sentence_given(
+                req,
                 b"call_user_func_array(): Argument #2 ($args) must be of type array, ",
-                shown,
-                b" given"
+                &given.undef_as_null(),
             ),
         );
         exec::free_operand(req, frame, op.op2_type, op.op2);
-        exec::free_operand(req, frame, op.op1_type, op.op1);
-        return threw(req, frame, &thrown);
+        return threw_freeing(req, frame, op, &thrown);
     };
     let placed = if op.op2_type == OperandKind::Unused {
         send_array_elements(req, array)
@@ -3359,10 +3334,7 @@ pub(crate) fn send_array<T: Tier>(
         send_array_slice(req, frame, code, op, array)
     };
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    match placed {
-        Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    settled(req, frame, placed)
 }
 
 /// `SEND_ARRAY`'s walk of the whole array, keys read.
@@ -3376,30 +3348,22 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
     // operand holds it while a by-reference warning reaches the program.
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let value = *row.value();
-        let (slot, number) = match row.key().clone() {
+        let reserved = match row.key().clone() {
             crate::api::values::Key::Str(name) => {
                 have_named = true;
-                match reserve_named(req, name) {
-                    Ok(Ok(reserved)) => (reserved.slot, reserved.number),
-                    Ok(Err(thrown)) => return Err(thrown),
-                    Err(fatal) => return Err(ended(req, fatal)),
-                }
+                reserve_named(req, name).map_err(|fatal| ended(req, fatal))??
             }
             crate::api::values::Key::Int(_) => {
                 if have_named {
-                    return Err(crate::api::raising::throw_error(
+                    return Err(error(
                         req,
-                        ClassId::ERROR,
                         "Cannot use positional argument after named argument",
                     ));
                 }
-                match reserve_next(req) {
-                    Ok(reserved) => (reserved.slot, reserved.number),
-                    Err(fatal) => return Err(ended(req, fatal)),
-                }
+                reserve_next(req).map_err(|fatal| ended(req, fatal))?
             }
         };
-        send_array_element(req, slot, number, value)?;
+        send_array_element(req, reserved, value)?;
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(())
@@ -3460,11 +3424,8 @@ fn send_array_slice(
             return Ok(ControlFlow::Break(()));
         }
         sent += 1;
-        let reserved = match reserve_next(req) {
-            Ok(reserved) => reserved,
-            Err(fatal) => return Err(ended(req, fatal)),
-        };
-        send_array_element(req, reserved.slot, reserved.number, *row.value())?;
+        let reserved = reserve_next(req).map_err(|fatal| ended(req, fatal))?;
+        send_array_element(req, reserved, *row.value())?;
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(())
@@ -3477,12 +3438,8 @@ fn send_array_slice(
 /// one of its own, with php's warning, where the parameter takes a
 /// reference and nothing else. `number` is the parameter's, php's
 /// `arg_num`.
-fn send_array_element(
-    req: &mut Request,
-    slot: ArgSlot,
-    number: u32,
-    element: Value,
-) -> Result<(), Thrown> {
+fn send_array_element(req: &mut Request, at: Reserved, element: Value) -> Result<(), Thrown> {
+    let Reserved { slot, number } = at;
     let is_ref = element.as_php_ref().is_some();
     let value = if should_be_sent_by_ref(req, number) {
         if !is_ref && must_be_sent_by_ref(req, number) {
@@ -3509,10 +3466,7 @@ fn send_array_element(
         req.addref(&value);
         value
     };
-    if let Err(fatal) = put_argument(req, slot, value) {
-        return Err(ended(req, fatal));
-    }
-    Ok(())
+    put_argument(req, slot, value).map_err(|fatal| ended(req, fatal))
 }
 
 /// The internal error a `SEND_ARRAY` with no call frame under it is.
@@ -3608,6 +3562,16 @@ struct Reserved {
     number: u32,
 }
 
+impl Reserved {
+    /// The slot `to` of the call `call`, for argument `number`.
+    fn of(call: FrameRef, to: ArgTo, number: u32) -> Reserved {
+        Reserved {
+            slot: ArgSlot { call, to },
+            number,
+        }
+    }
+}
+
 /// The slot a send writes into: `ZEND_CALL_VAR` over the slot
 /// `EX_NUM_TO_VAR` numbered for a number, bounded by the count the `INIT`
 /// said, and `zend_handle_named_arg` for a name
@@ -3645,13 +3609,7 @@ fn reserve_arg(
                     "InternalError: a SEND_* opline places argument {number} of a call of {passed}"
                 ))));
             }
-            Ok(Reserved {
-                slot: ArgSlot {
-                    call,
-                    to: ArgTo::Positional(at),
-                },
-                number,
-            })
+            Ok(Reserved::of(call, ArgTo::Positional(at), number))
         }
         ArgAt::Name(at) => {
             let Some(name) = exec::constant(code, at).as_php_string() else {
@@ -3661,10 +3619,7 @@ fn reserve_arg(
             };
             match reserve_named(req, name) {
                 Ok(Ok(reserved)) => Ok(reserved),
-                Ok(Err(thrown)) => {
-                    exec::free_operand(req, frame, op.op1_type, op.op1);
-                    Err(threw(req, frame, &thrown))
-                }
+                Ok(Err(thrown)) => Err(threw_freeing(req, frame, op, &thrown)),
                 Err(fatal) => Err(Err(fatal)),
             }
         }
@@ -3714,18 +3669,7 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
             // given, `ZEND_CALL_NUM_ARGS` raised to take it, every slot
             // between left `UNDEF` for `CHECK_UNDEF_ARGS`.
             if at >= passed {
-                let len = req
-                    .vm()
-                    .stack
-                    .frame(call)
-                    .map_or(0, crate::exec::HeapFrame::len);
-                if at >= len {
-                    req.grow_call(call, at + 1 - len)?;
-                }
-                if let Some(header) = req.vm_mut().at_mut(call) {
-                    header.num_args = u32::try_from(at + 1).unwrap_or(u32::MAX);
-                    header.info.unlay_entry();
-                }
+                grow_args(req, call, at)?;
             }
             crate::api::call::NamedAt::Argument(at)
         }
@@ -3749,13 +3693,7 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
             crate::api::call::NamedAt::Extra(at)
         }
     };
-    Ok(Ok(Reserved {
-        slot: ArgSlot {
-            call,
-            to: ArgTo::Named(at),
-        },
-        number,
-    }))
+    Ok(Ok(Reserved::of(call, ArgTo::Named(at), number)))
 }
 
 /// The next positional slot of the call being built, past every
@@ -3773,6 +3711,14 @@ fn reserve_next(req: &mut Request) -> Result<Reserved, Fatal> {
         .vm()
         .at(call)
         .map_or(0, |header| header.num_args as usize);
+    grow_args(req, call, at)?;
+    let number = u32::try_from(at + 1).unwrap_or(u32::MAX);
+    Ok(Reserved::of(call, ArgTo::Positional(at), number))
+}
+
+/// `zend_vm_stack_extend_call_frame` to hold the argument at `at`, and
+/// `ZEND_CALL_NUM_ARGS` raised to count it.
+fn grow_args(req: &mut Request, call: FrameRef, at: usize) -> Result<(), Fatal> {
     let len = req
         .vm()
         .stack
@@ -3785,13 +3731,7 @@ fn reserve_next(req: &mut Request) -> Result<Reserved, Fatal> {
         header.num_args = u32::try_from(at + 1).unwrap_or(u32::MAX);
         header.info.unlay_entry();
     }
-    Ok(Reserved {
-        slot: ArgSlot {
-            call,
-            to: ArgTo::Positional(at),
-        },
-        number: u32::try_from(at + 1).unwrap_or(u32::MAX),
-    })
+    Ok(())
 }
 
 /// `ZEND_DO_ICALL`: serve the native the call frame names, and write
@@ -4189,11 +4129,7 @@ fn included_under_hook(
     }
     answered(req, returns_to, returned);
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    Ok(if req.is_pending() {
-        Stepped::Threw(frame).into()
-    } else {
-        advance(req, frame)
-    })
+    Ok(advance(req, frame))
 }
 
 /// What [`included`] made of an `INCLUDE_OR_EVAL` before the handler's
@@ -4281,9 +4217,7 @@ fn included(
         Ok(Opened::Declared(unit)) => (unit, true),
         Ok(Opened::Already) => return Ok(answered(req, returns_to, Value::bool(true))),
         Ok(Opened::Failed) => return Ok(answered(req, returns_to, Value::bool(false))),
-        Err(thrown) => {
-            return Ok(Included::threw(req, frame, &thrown));
-        }
+        Err(thrown) => return Ok(Included::threw(req, frame, &thrown)),
     };
     let source = match kind {
         exec::IncludeKind::Eval => php_compile::SourceKind::EVAL,
@@ -4296,9 +4230,7 @@ fn included(
     // `zend_compile` made, the request's while the file runs.
     let copy = match req.main_op_array(&unit) {
         Ok(copy) => copy,
-        Err(thrown) => {
-            return Ok(Included::threw(req, frame, &thrown));
-        }
+        Err(thrown) => return Ok(Included::threw(req, frame, &thrown)),
     };
     let main = exec::code_of(&unit);
     let hooked = req.shared.hooked.user;
@@ -4329,12 +4261,7 @@ fn included(
 /// The value an `INCLUDE_OR_EVAL` answers without a frame, into the
 /// `VAR` where the opline's value is read and given up where it is not.
 fn answered(req: &mut Request, returns_to: Option<(FrameRef, u32)>, value: Value) -> Included {
-    match returns_to {
-        Some((at, slot)) => {
-            req.replace_slot(at, slot, value);
-        }
-        None => req.release(value),
-    }
+    handed_back(req, returns_to, value);
     Included::Answered
 }
 
@@ -4600,10 +4527,8 @@ pub(crate) fn recv<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op:
     if op.op2 & (1u32 << u32::from(argument.type_code())) != 0 {
         return Ok(advance(req, frame));
     }
-    if let Err(thrown) = verify_arg_type(req, frame, op.op1, op.out) {
-        return threw(req, frame, &thrown);
-    }
-    Ok(advance(req, frame))
+    let done = verify_arg_type(req, frame, op.op1, op.out);
+    settled(req, frame, done)
 }
 
 /// `zend_verify_recv_arg_type` (`Z/Zend/zend_execute.c:1241`) over the
@@ -4775,6 +4700,13 @@ pub(crate) fn recv_variadic<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
+    let collected = collect_variadics(req, frame, op);
+    settled(req, frame, collected)
+}
+
+/// The array [`recv_variadic`] lays in its CV, each argument held to the
+/// declared type on its way in.
+fn collect_variadics(req: &mut Request, frame: FrameRef, op: &Opline) -> Result<(), Thrown> {
     let first = op.op1;
     let at = usize::try_from(first.saturating_sub(1)).unwrap_or(usize::MAX);
     // The extra arguments stand past the CVs and the temporaries.
@@ -4813,28 +4745,22 @@ pub(crate) fn recv_variadic<T: Tier>(
     } else {
         req.array_sized(u32::try_from(count).unwrap_or(u32::MAX), true)
     };
-    let collected = match collected {
-        Ok(collected) => collected,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
+    let collected = collected?;
     req.replace_slot(frame, op.out, collected.to_value());
     for step in 0..count {
         let place = base.saturating_add(u32::try_from(step).unwrap_or(u32::MAX));
         let argument = req.slot(frame, place);
         let number = first.saturating_add(u32::try_from(step).unwrap_or(0));
-        let argument = match verified_arg(req, frame, number, at, &argument) {
-            Ok(None) => argument,
-            Ok(Some(coerced)) => {
+        let argument = match verified_arg(req, frame, number, at, &argument)? {
+            None => argument,
+            Some(coerced) => {
                 let previous = req.swap_slot(frame, place, coerced);
                 req.release(previous);
                 coerced
             }
-            Err(thrown) => return threw(req, frame, &thrown),
         };
         req.addref(&argument);
-        if let Err(thrown) = req.array_append(collected.heap(), argument) {
-            return threw(req, frame, &thrown);
-        }
+        req.array_append(collected.heap(), argument)?;
     }
     // `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`: the extra named arguments
     // after the positional ones, each under its name, held to the
@@ -4842,9 +4768,9 @@ pub(crate) fn recv_variadic<T: Tier>(
     // the loop above has walked past the last positional one.
     let number = first.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
     for (name, argument) in named {
-        let argument = match verified_arg(req, frame, number, at, &argument) {
-            Ok(None) => argument,
-            Ok(Some(coerced)) => {
+        let argument = match verified_arg(req, frame, number, at, &argument)? {
+            None => argument,
+            Some(coerced) => {
                 if let Some(extra) = req.annex_mut(frame)
                     && let Some((_, place)) = extra
                         .extra_named
@@ -4856,15 +4782,12 @@ pub(crate) fn recv_variadic<T: Tier>(
                 }
                 coerced
             }
-            Err(thrown) => return threw(req, frame, &thrown),
         };
         req.addref(&argument);
         let key = php_heap::Key::Str(name.heap());
-        if let Err(thrown) = req.array_update(collected.heap(), key, argument) {
-            return threw(req, frame, &thrown);
-        }
+        req.array_update(collected.heap(), key, argument)?;
     }
-    Ok(advance(req, frame))
+    Ok(())
 }
 
 /// `ZEND_VERIFY_RETURN_TYPE` (`Z/Zend/zend_vm_def.h:4432`), which the
@@ -5793,10 +5716,8 @@ pub(crate) fn recv_init<T: Tier>(
     // the default it copied, and only where the function has one to
     // check (`ZEND_ACC_HAS_TYPE_HINTS`, the `recv_init_check_type`
     // label).
-    if let Err(thrown) = verify_arg_type(req, frame, op.op1, op.out) {
-        return threw(req, frame, &thrown);
-    }
-    Ok(advance(req, frame))
+    let done = verify_arg_type(req, frame, op.op1, op.out);
+    settled(req, frame, done)
 }
 
 /// `ZEND_NEW` (`Z/Zend/zend_vm_def.h:5942`) over a class named at
@@ -6242,12 +6163,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     let function = match op.op2_type {
         OperandKind::Unused => {
             let Some(constructor) = req.constructor(class) else {
-                let thrown = crate::api::raising::throw_error(
-                    req,
-                    ClassId::ERROR,
-                    "Cannot call constructor",
-                );
-                return threw(req, frame, &thrown);
+                return threw_error(req, frame, "Cannot call constructor");
             };
             // `Z_OBJ(EX(This))->ce != ce->constructor->common.scope` over a
             // private constructor.
@@ -6260,12 +6176,11 @@ pub(crate) fn init_static_method_call<T: Tier>(
                 .is_some_and(|this| Some(this.class()) != req.method_class(constructor));
             if private && foreign {
                 let name = req.symbols().class_name(class).to_vec();
-                let thrown = crate::api::raising::throw_error(
+                return threw_error(
                     req,
-                    ClassId::ERROR,
+                    frame,
                     &bytes!(b"Cannot call private ", name, b"::__construct()"),
                 );
-                return threw(req, frame, &thrown);
             }
             constructor
         }
@@ -6340,23 +6255,13 @@ fn static_method(
     }
     let function = match req.symbols().method_named(class, lowered) {
         Some(function) if req.method_accessible(function) => function,
-        Some(function) => {
-            if let Some(trampoline) = req.static_trampoline(class, name, this) {
-                trampoline
-            } else {
+        found => match (req.static_trampoline(class, name, this), found) {
+            (Some(trampoline), _) => trampoline,
+            (None, Some(function)) => {
                 req.check_method_access(function, name)?;
                 function
             }
-        }
-        None => match req.static_trampoline(class, name, this) {
-            Some(trampoline) => trampoline,
-            None => {
-                return Err(undefined_method(
-                    req,
-                    class,
-                    written.as_str_bytes().unwrap_or_default(),
-                ));
-            }
+            (None, None) => return Err(undefined_method(req, class, name)),
         },
     };
     let never_cached = req.never_cached(function);
@@ -6534,29 +6439,23 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         .and_then(crate::exec::Header::function)
         .and_then(|function| req.method_class(function));
     let Some(parent) = scope.and_then(|scope| req.symbols().class_parent(scope)) else {
-        let thrown = crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            "Cannot use \"parent\" when current class scope has no parent",
-        );
-        return threw(req, frame, &thrown);
+        return threw_error(req, frame, NO_PARENT);
     };
     let name = exec::constant(code, ConstIdx(op.op1));
     let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let shown = String::from_utf8_lossy(&name).into_owned();
     let parent_name = req.symbols().class_name(parent).to_vec();
     let Some((declaring, property)) = req.property_info_of(parent, &name) else {
-        let thrown = crate::api::raising::throw_error(
+        return threw_error(
             req,
-            ClassId::ERROR,
+            frame,
             &bytes!(b"Undefined property ", parent_name, b"::$", shown),
         );
-        return threw(req, frame, &thrown);
     };
     if property.visibility == php_unit::decl::Visibility::Private {
-        let thrown = crate::api::raising::throw_error(
+        return threw_error(
             req,
-            ClassId::ERROR,
+            frame,
             &bytes!(
                 b"Cannot access private property ",
                 parent_name,
@@ -6564,7 +6463,6 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
                 shown
             ),
         );
-        return threw(req, frame, &thrown);
     }
     let kind = if op.op2 == 0 {
         php_unit::decl::HookKind::Get
@@ -6923,19 +6821,15 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     // receiver is read ([`exec::MethodName`]).
     let method = match exec::MethodName::of(req, frame, code, op) {
         Ok(method) => method,
-        Err(thrown) => {
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            return threw(req, frame, &thrown);
-        }
+        Err(thrown) => return threw_freeing(req, frame, op, &thrown),
     };
     let receiver = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let found = match receiver.as_object() {
         Some(object) => {
             method_of_call(req, frame, op, object, &method).map(|found| (object, found))
         }
-        None => Err(crate::api::raising::throw_error(
+        None => Err(error(
             req,
-            ClassId::ERROR,
             &bytes!(
                 b"Call to a member function ",
                 method.written.as_str_bytes().unwrap_or_default(),
@@ -6948,8 +6842,7 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
         Ok(found) => found,
         Err(thrown) => {
             method.release(req);
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            return threw(req, frame, &thrown);
+            return threw_freeing(req, frame, op, &thrown);
         }
     };
     method.release(req);
@@ -7191,11 +7084,7 @@ fn method_on(
             Undefined::OnCalled => object,
             Undefined::OnHanded => receiver.unwrap_or(object),
         };
-        return Err(undefined_method(
-            req,
-            named.class(),
-            written.as_str_bytes().unwrap_or_default(),
-        ));
+        return Err(undefined_method(req, named.class(), bytes));
     };
     if receiver.is_some() {
         return Ok((function, receiver));
@@ -7297,12 +7186,7 @@ pub(crate) fn fetch_this<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let Some(this) = req.vm().this(frame) else {
-        let thrown = crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            "Using $this when not in object context",
-        );
-        return threw(req, frame, &thrown);
+        return threw_error(req, frame, "Using $this when not in object context");
     };
     let value = this.as_value();
     req.addref(&value);
@@ -7569,12 +7453,8 @@ pub(crate) fn fetch_globals<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let array = match req.symbol_table_array() {
-        Ok(array) => array,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
-    set_out(req, frame, op, Value::array(array));
-    Ok(advance(req, frame))
+    let array = req.symbol_table_array().map(Value::array);
+    computed_into(req, frame, op, array)
 }
 
 /// `ZEND_ISSET_ISEMPTY_VAR` (`Z/Zend/zend_vm_def.h:7486`), `isset($$x)`,
@@ -7619,16 +7499,9 @@ pub(crate) fn isset_isempty_var<T: Tier>(
 ) -> Edge {
     let name = match isset_name(req, frame, code, op) {
         Ok(name) => name,
-        Err(thrown) => {
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            return threw(req, frame, &thrown);
-        }
+        Err(thrown) => return threw_freeing(req, frame, op, &thrown),
     };
-    let table = if op.extended_value & FETCH_GLOBAL != 0 {
-        exec::TableId::GLOBAL
-    } else {
-        req.rebuild_symbol_table(frame)
-    };
+    let table = name_table(req, frame, op.extended_value & FETCH_GLOBAL != 0);
     let held = req.symbol_value(table, &name);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     let answer = match held {
@@ -7702,22 +7575,12 @@ pub(crate) fn unset_var<T: Tier>(
 ) -> Edge {
     let name = match fetched_name(req, frame, code, op) {
         Ok(name) => name,
-        Err(thrown) => {
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            return threw(req, frame, &thrown);
-        }
+        Err(thrown) => return threw_freeing(req, frame, op, &thrown),
     };
-    let table = if op.extended_value & FETCH_GLOBAL != 0 {
-        exec::TableId::GLOBAL
-    } else {
-        req.rebuild_symbol_table(frame)
-    };
+    let table = name_table(req, frame, op.extended_value & FETCH_GLOBAL != 0);
     req.symbol_unset(table, name.as_bytes());
     name.give_up(req);
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    if req.is_pending() {
-        return Ok(Stepped::Threw(frame).into());
-    }
     Ok(advance(req, frame))
 }
 
@@ -7738,6 +7601,24 @@ enum ByName {
 const FETCH_GLOBAL: u32 = 1 << 1;
 const FETCH_GLOBAL_LOCK: u32 = 1 << 3;
 
+/// `FREE_OP1()` of a fetch by name, whose name stays under
+/// `ZEND_FETCH_GLOBAL_LOCK` for the fetch after it.
+fn free_name_operand(req: &mut Request, frame: FrameRef, op: &Opline) {
+    if op.extended_value & FETCH_GLOBAL_LOCK == 0 {
+        exec::free_operand(req, frame, op.op1_type, op.op1);
+    }
+}
+
+/// The table a fetch by name reads: `EG(symbol_table)`, or the frame's
+/// own, built by `zend_rebuild_symbol_table` where it has none yet.
+fn name_table(req: &mut Request, frame: FrameRef, global: bool) -> exec::TableId {
+    if global {
+        exec::TableId::GLOBAL
+    } else {
+        req.rebuild_symbol_table(frame)
+    }
+}
+
 /// `zend_fetch_var_address_helper` (`Z/Zend/zend_vm_def.h:1724`): the
 /// name read as a string (`zval_try_get_tmp_string`, a CV nothing wrote
 /// warning first, an object with no `__toString` php's `Error`), the
@@ -7757,14 +7638,11 @@ fn fetch_by_name(
     op: &Opline,
     mode: ByName,
 ) -> Edge {
-    let lock = op.extended_value & FETCH_GLOBAL_LOCK != 0;
     let out = op.out;
     let name = match fetched_name(req, frame, code, op) {
         Ok(name) => name,
         Err(thrown) => {
-            if !lock {
-                exec::free_operand(req, frame, op.op1_type, op.op1);
-            }
+            free_name_operand(req, frame, op);
             req.replace_slot(frame, out, Value::undef());
             return threw(req, frame, &thrown);
         }
@@ -7785,14 +7663,9 @@ fn fetch_named(
     mode: ByName,
     name: PhpString,
 ) -> Edge {
-    let lock = op.extended_value & FETCH_GLOBAL_LOCK != 0;
     let global = op.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0;
     let out = op.out;
-    let table = if global {
-        exec::TableId::GLOBAL
-    } else {
-        req.rebuild_symbol_table(frame)
-    };
+    let table = name_table(req, frame, global);
     let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
     let undefined = |req: &mut Request| {
         let scope = if op.extended_value & FETCH_GLOBAL != 0 {
@@ -7806,9 +7679,7 @@ fn fetch_named(
     let unset = held.is_none_or(|value| value.tag() == TypeTag::Undef);
     // `zend_fetch_this_var`: `$this` where no bucket names it.
     if unset && name.as_bytes() == b"this" {
-        if !lock {
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-        }
+        free_name_operand(req, frame, op);
         return fetch_this_by_name(req, frame, out, mode);
     }
     let value = match mode {
@@ -7848,20 +7719,13 @@ fn fetch_named(
                 if let Some(var) = req.slot_ptr(frame, out) {
                     var.write(php_heap::Zval::indirect(place));
                 }
-                if !lock {
-                    exec::free_operand(req, frame, op.op1_type, op.op1);
-                }
+                free_name_operand(req, frame, op);
                 return Ok(advance(req, frame));
             }
         }
     };
-    if !lock {
-        exec::free_operand(req, frame, op.op1_type, op.op1);
-    }
+    free_name_operand(req, frame, op);
     req.replace_slot(frame, out, value.unwrap_or_else(Value::null));
-    if req.is_pending() {
-        return Ok(Stepped::Threw(frame).into());
-    }
     Ok(advance(req, frame))
 }
 
@@ -8133,8 +7997,7 @@ fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName
             } else {
                 "Cannot re-assign $this"
             };
-            let thrown = crate::api::raising::throw_error(req, ClassId::ERROR, message);
-            return threw(req, frame, &thrown);
+            return threw_error(req, frame, message);
         }
         (Some(this), _) => {
             let value = this.as_value();
@@ -8751,7 +8614,8 @@ pub(crate) fn fetch_static_prop_is<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    fetch_static_prop(req, frame, code, op, PropertyRead::Silent)
+    let read = static_read(req, frame, code, op, PropertyRead::Silent);
+    computed_into(req, frame, op, read)
 }
 
 /// `zend_fetch_static_property_address_ex`
@@ -8818,7 +8682,8 @@ pub(crate) fn fetch_static_prop_r<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    fetch_static_prop(req, frame, code, op, PropertyRead::Warning)
+    let read = static_read(req, frame, code, op, PropertyRead::Warning);
+    computed_into(req, frame, op, read)
 }
 
 /// The body `FETCH_STATIC_PROP_R` and `FETCH_STATIC_PROP_IS` share,
@@ -9032,17 +8897,6 @@ fn static_prop_place(
     Ok(advance(req, frame))
 }
 
-fn fetch_static_prop(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
-    fetch: PropertyRead,
-) -> Edge {
-    let read = static_read(req, frame, code, op, property_cache_slot(op), fetch);
-    computed_into(req, frame, op, read)
-}
-
 /// [`static_slot_at`] and the value its slot holds, one more owner of it
 /// ([`Request::static_value`]), `null` for the silent miss: the read of
 /// `FETCH_STATIC_PROP_R` and `_IS`.
@@ -9052,9 +8906,9 @@ fn static_read(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    slot: CacheSlot,
     read: PropertyRead,
 ) -> Result<Value, Thrown> {
+    let slot = property_cache_slot(op);
     match static_slot_at(req, frame, code, op, slot, read)? {
         Some(StaticSlot { info, .. }) => req.static_value(info, read),
         None => Ok(Value::null()),
@@ -9404,10 +9258,7 @@ fn inline_place(
         exec::PropertyOffset::Declared { slot, ty } => Some((object.slot_ref(slot)?, ty)),
         exec::PropertyOffset::Dynamic => {
             let name = code.literals.get(op.op2 as usize)?.as_str()?;
-            Some((
-                dynamic_bucket(object, name, write)?,
-                exec::SlotType::UNTYPED,
-            ))
+            dynamic_bucket(object, name, write)
         }
     }
 }
@@ -9429,10 +9280,9 @@ fn computed_place(
     use crate::api::request::PropertyNames;
     let class = crate::api::values::ClassId(object.class());
     match req.property_names(class)? {
-        PropertyNames::Dynamic if !Request::bad_property_name(name.bytes()) => Some((
-            dynamic_bucket(object, name, write)?,
-            exec::SlotType::UNTYPED,
-        )),
+        PropertyNames::Dynamic if !Request::bad_property_name(name.bytes()) => {
+            dynamic_bucket(object, name, write)
+        }
         PropertyNames::Declared => declared_place(req, object, name, write),
         PropertyNames::Dynamic | PropertyNames::Own => None,
     }
@@ -9452,10 +9302,7 @@ fn declared_place(
     let class = crate::api::values::ClassId(object.class());
     match req.declared_offset(class, name)? {
         exec::PropertyOffset::Declared { slot, ty } => Some((object.slot_ref(slot)?, ty)),
-        exec::PropertyOffset::Dynamic => Some((
-            dynamic_bucket(object, name, write)?,
-            exec::SlotType::UNTYPED,
-        )),
+        exec::PropertyOffset::Dynamic => dynamic_bucket(object, name, write),
     }
 }
 
@@ -9466,11 +9313,12 @@ fn dynamic_bucket(
     object: php_heap::Obj,
     name: php_heap::Str,
     write: bool,
-) -> Option<php_heap::ZvalRef> {
+) -> Option<(php_heap::ZvalRef, exec::SlotType)> {
     object
         .properties()
         .filter(|table| !write || (table.refcount() == 1 && !table.is_immutable()))?
         .value_ref(php_heap::Key::Str(name))
+        .map(|at| (at, exec::SlotType::UNTYPED))
 }
 
 /// [`Request::prime_property`] for a property opcode whose name is a
@@ -9812,12 +9660,8 @@ fn fetch_obj(
     // `ZVAL_COPY_DEREF`, or `zend_unwrap_reference` where the slot
     // answered into the temporary: a `&__get` hands back its reference,
     // and the temporary holds the value, never the cell.
-    let value = match read {
-        Ok(value) => req.unwrap_reference(value),
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
-    set_out(req, frame, op, value);
-    Ok(advance(req, frame))
+    let read = read.map(|value| req.unwrap_reference(value));
+    computed_into(req, frame, op, read)
 }
 
 /// `ZEND_FETCH_OBJ_W` (`Z/Zend/zend_vm_def.h:2238`),
@@ -10255,10 +10099,8 @@ fn fetched_dim_func_arg<A: Operand + Default, B: Operand + Default>(
     }
     if B::default().kind() == OperandKind::Unused {
         // `zend_use_undef_in_read_context_helper`.
-        let thrown =
-            crate::api::raising::throw_error(req, ClassId::ERROR, "Cannot use [] for reading");
-        exec::free_operand(req, frame, op.op1_type, op.op1);
-        return threw(req, frame, &thrown);
+        let thrown = error(req, "Cannot use [] for reading");
+        return threw_freeing(req, frame, op, &thrown);
     }
     fetched_dim(req, frame, code, op)
 }
@@ -10300,14 +10142,9 @@ pub(crate) fn fetch_static_prop_func_arg<T: Tier>(
 /// temporary where the parameter takes its argument by reference, php's
 /// `Error`, both operands given up.
 fn use_tmp_in_write_context(req: &mut Request, frame: FrameRef, op: &Opline) -> Edge {
-    let thrown = crate::api::raising::throw_error(
-        req,
-        ClassId::ERROR,
-        "Cannot use temporary expression in write context",
-    );
+    let thrown = error(req, "Cannot use temporary expression in write context");
     exec::free_operand(req, frame, op.op2_type, op.op2);
-    exec::free_operand(req, frame, op.op1_type, op.op1);
-    threw(req, frame, &thrown)
+    threw_freeing(req, frame, op, &thrown)
 }
 
 /// The body `FETCH_OBJ_W` and `FETCH_OBJ_RW` share, php's one
@@ -10655,11 +10492,7 @@ fn property_place(
     prime_constant(req, frame, op, property_cache_slot(op), object, &name_value);
     let (object, lent) = match req.lazy_place(object, name) {
         Ok(placed) => placed,
-        Err(thrown) => {
-            return Ok(PropertyFound::Threw(freeing_container(
-                req, frame, op, thrown,
-            )));
-        }
+        Err(thrown) => return place_threw(req, frame, op, thrown),
     };
     // The guard a proxy's `__get` lent the instance is held while the
     // place is resolved there, and given back before what the fetch
@@ -10685,11 +10518,7 @@ fn property_place_on(
         Ok(place) => place,
         // The class refused the place with a throwable, php's
         // `&EG(error_zval)`.
-        Err(thrown) => {
-            return Ok(PropertyFound::Threw(freeing_container(
-                req, frame, op, thrown,
-            )));
-        }
+        Err(thrown) => return place_threw(req, frame, op, thrown),
     };
     let placed = match place {
         // `if (NULL == ptr) ptr = zobj->handlers->read_property(...)`:
@@ -10720,9 +10549,7 @@ fn property_place_on(
             if read == PropertyRead::Warning
                 && let Err(thrown) = req.read_before_write(object, &name) =>
         {
-            return Ok(PropertyFound::Threw(freeing_container(
-                req, frame, op, thrown,
-            )));
+            return place_threw(req, frame, op, thrown);
         }
         PropertyPlace::Std => {
             req.declared_slot_for_write(object, &name, "indirectly modify", false)
@@ -10757,18 +10584,10 @@ fn property_place_on(
                         String::from_utf8_lossy(&name)
                     )));
                 }
-                Err(thrown) => {
-                    return Ok(PropertyFound::Threw(freeing_container(
-                        req, frame, op, thrown,
-                    )));
-                }
+                Err(thrown) => return place_threw(req, frame, op, thrown),
             }
         }
-        Err(thrown) => {
-            return Ok(PropertyFound::Threw(freeing_container(
-                req, frame, op, thrown,
-            )));
-        }
+        Err(thrown) => return place_threw(req, frame, op, thrown),
     };
     Ok(PropertyFound::At(at, object, name))
 }
@@ -10822,6 +10641,18 @@ fn fetch_obj_read(
 fn freeing_container(req: &mut Request, frame: FrameRef, op: &Opline, thrown: Thrown) -> Thrown {
     exec::free_operand(req, frame, op.op1_type, op.op1);
     thrown
+}
+
+/// [`freeing_container`] as what a property's place answers.
+fn place_threw(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    thrown: Thrown,
+) -> Result<PropertyFound, Fatal> {
+    Ok(PropertyFound::Threw(freeing_container(
+        req, frame, op, thrown,
+    )))
 }
 
 /// `ZEND_FETCH_DIM_R` (`Z/Zend/zend_vm_def.h:1933`), `$a[k]` where a
@@ -11623,13 +11454,7 @@ fn write_container(
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => {}
         ValueRef::Str(_) => return Ok(Container::Text(at)),
         ValueRef::Object(object) => return Ok(Container::Object(object)),
-        _ => {
-            return Err(crate::api::raising::throw_error(
-                req,
-                ClassId::ERROR,
-                "Cannot use a scalar value as an array",
-            ));
-        }
+        _ => return Err(error(req, "Cannot use a scalar value as an array")),
     }
     let typed = cell.filter(|cell| cell.heap().sources() != 0);
     match (walk, cell) {
@@ -11915,9 +11740,8 @@ fn assign_string_offset(
         return Ok(TextWrite::Gone);
     };
     if count == 0 {
-        return Err(crate::api::raising::throw_error(
+        return Err(error(
             req,
-            ClassId::ERROR,
             "Cannot assign an empty string to a string offset",
         ));
     }
@@ -12758,11 +12582,7 @@ fn text_dim_place(
     unset: bool,
 ) -> Thrown {
     if op.op2_type == OperandKind::Unused {
-        return crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            "[] operator not supported for strings",
-        );
+        return error(req, "[] operator not supported for strings");
     }
     let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
     let checked = if unset {
@@ -12780,11 +12600,7 @@ fn text_dim_place(
         return Thrown::of(None);
     }
     if op.opcode == Opcode::FetchListW {
-        return crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            "Cannot create references to/from string offsets",
-        );
+        return error(req, "Cannot create references to/from string offsets");
     }
     let message = match op.extended_value {
         FETCH_DIM_REF => "Cannot create references to/from string offsets",
@@ -12792,7 +12608,7 @@ fn text_dim_place(
         FETCH_DIM_INCDEC => "Cannot increment/decrement string offsets",
         _ => "Cannot use string offset as an array",
     };
-    crate::api::raising::throw_error(req, ClassId::ERROR, message)
+    error(req, message)
 }
 
 /// `zend_check_string_offset` under `BP_VAR_UNSET`: what
@@ -12817,11 +12633,7 @@ fn unset_string_offset(req: &mut Request, dim: &Value) -> Result<(), Thrown> {
     if legal {
         return Ok(());
     }
-    Err(crate::api::raising::throw_error(
-        req,
-        ClassId::ERROR,
-        "Cannot unset string offsets",
-    ))
+    Err(error(req, "Cannot unset string offsets"))
 }
 
 /// What a `FETCH_DIM_W`, `_RW` or `_UNSET` found laid into its `VAR`:
@@ -13020,20 +12832,15 @@ pub(crate) fn clone<T: Tier>(
         Some(object) => req.clone_object(object, None).map(Owner::hand_on),
         None => Err(type_error(
             req,
-            &bytes!(
+            &sentence_given(
+                req,
                 b"clone(): Argument #1 ($object) must be of type object, ",
-                crate::ops::value_name(req, &operand),
-                b" given"
+                &operand,
             ),
         )),
     };
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    let object = match cloned {
-        Ok(object) => object,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
-    set_out(req, frame, op, object.as_value());
-    Ok(advance(req, frame))
+    computed_into(req, frame, op, cloned.map(|object| object.as_value()))
 }
 
 /// `ZEND_INSTANCEOF` (`Z/Zend/zend_vm_def.h:8046`) over a class named
@@ -13082,10 +12889,7 @@ pub(crate) fn instanceof<T: Tier>(
         (Some(_), OperandKind::Var) if req.slot(frame, op.op2).tag() == TypeTag::Null => false,
         (Some(object), _) => match class_operand(req, frame, code, op.op2_type, op.op2, None) {
             Ok(class) => req.symbols().instance_of(object.class(), class),
-            Err(thrown) => {
-                exec::free_operand(req, frame, op.op1_type, op.op1);
-                return threw(req, frame, &thrown);
-            }
+            Err(thrown) => return threw_freeing(req, frame, op, &thrown),
         },
         (None, _) => false,
     };
@@ -13123,19 +12927,14 @@ fn class_operand(
     if let Some(class) = cached_class(req, frame, code, at, slot) {
         return Ok(class);
     }
-    let written = exec::constant(code, ConstIdx(at));
-    if let Some(class) =
-        crate::api::call::autoload_keyed(req, written.as_str_bytes().unwrap_or_default())?
-    {
+    let written = exec::constant_str(code, ConstIdx(at)).unwrap_or_default();
+    if let Some(class) = crate::api::call::autoload_keyed(req, written)? {
         if let Some(slot) = slot {
             req.prime(frame, slot, Cached::Class(class));
         }
         return Ok(class);
     }
-    Err(crate::api::raising::class_not_found(
-        req,
-        written.as_str_bytes().unwrap_or_default(),
-    ))
+    Err(crate::api::raising::class_not_found(req, written))
 }
 
 /// `ZEND_FETCH_CLASS_NO_AUTOLOAD` and `ZEND_FETCH_CLASS_SILENT`
@@ -13224,23 +13023,17 @@ pub(crate) fn fetch_class_name<T: Tier>(
             _ => "static",
         };
         let Some(scope) = req.frame_scope(frame) else {
-            let thrown = crate::api::raising::throw_error(
+            return threw_error(
                 req,
-                ClassId::ERROR,
+                frame,
                 &format!("Cannot use \"{word}\" in the global scope"),
             );
-            return threw(req, frame, &thrown);
         };
         match fetch {
             FETCH_CLASS_SELF => scope,
             FETCH_CLASS_PARENT => {
                 let Some(parent) = req.symbols().class_parent(scope) else {
-                    let thrown = crate::api::raising::throw_error(
-                        req,
-                        ClassId::ERROR,
-                        "Cannot use \"parent\" when current class scope has no parent",
-                    );
-                    return threw(req, frame, &thrown);
+                    return threw_error(req, frame, NO_PARENT);
                 };
                 parent
             }
@@ -13257,8 +13050,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         let Some(class) = class else {
             let shown = crate::ops::value_name(req, &value);
             let thrown = type_error(req, &bytes!(b"Cannot use \"::class\" on ", shown));
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            return threw(req, frame, &thrown);
+            return threw_freeing(req, frame, op, &thrown);
         };
         exec::free_operand(req, frame, op.op1_type, op.op1);
         class
@@ -13339,11 +13131,7 @@ pub(crate) fn fetch_class<T: Tier>(
                 _ => crate::api::call::lookup_class_string(req, name, false),
             }
         } else {
-            Err(crate::api::raising::throw_error(
-                req,
-                ClassId::ERROR,
-                "Class name must be a valid object or a string",
-            ))
+            Err(error(req, "Class name must be a valid object or a string"))
         };
         exec::free_operand(req, frame, op.op2_type, op.op2);
         class
@@ -13387,6 +13175,111 @@ fn data_after(
 fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
     req.leave_pending(thrown);
     Ok(Stepped::Threw(frame).into())
+}
+
+/// The sentence of `zend_type_error`'s and `zend_error`'s callers that
+/// ends in the type of the value refused: `head`, `zend_zval_value_name`
+/// and ` given`.
+fn sentence_given(req: &Request, head: &[u8], value: &Value) -> Vec<u8> {
+    bytes!(head, crate::ops::value_name(req, value), b" given")
+}
+
+/// The sentence of an unpacked value that is neither array nor
+/// `Traversable`.
+const UNPACKED: &[u8] = b"Only arrays and Traversables can be unpacked, ";
+/// The sentence of a `foreach` over a value it cannot walk.
+const FOREACH_SUBJECT: &[u8] = b"foreach() argument must be of type array|object, ";
+
+/// The end of a handler whose step answers nothing: on to the next
+/// opline, [`advance`] testing what is pending, or the [`threw`] edge.
+#[inline]
+fn settled(req: &mut Request, frame: FrameRef, done: Result<(), Thrown>) -> Edge {
+    match done {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// `FREE_OP1()` and the [`threw`] edge, what a handler that holds its
+/// `op1` to the end does when its step throws.
+fn threw_freeing(req: &mut Request, frame: FrameRef, op: &Opline, thrown: &Thrown) -> Edge {
+    exec::free_operand(req, frame, op.op1_type, op.op1);
+    threw(req, frame, thrown)
+}
+
+/// The `null` a compound write's temporary takes as `thrown` passes on.
+fn nulled_out(req: &mut Request, frame: FrameRef, op: &Opline, thrown: Thrown) -> Thrown {
+    write_out(req, frame, op, &Value::null());
+    thrown
+}
+
+/// A throwable over what `ran_on` left pending, `FREE_OP_DATA` and the
+/// `null` of the temporary served under it, as `zend_throw_error` from
+/// the middle of an assignment leaves them.
+fn data_thrown(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    (kind, at): (OperandKind, u32),
+    (thrown, ran_on): (Thrown, Option<PhpObject>),
+) -> Thrown {
+    let thrown = req.raised_over(thrown, ran_on);
+    req.free_pending(thrown, |req| {
+        exec::free_operand(req, frame, kind, at);
+        write_out(req, frame, op, &Value::null());
+    })
+}
+
+/// The end of `ASSIGN_DIM` and `ASSIGN_DIM_OP`: both operands freed, and
+/// on past the `OP_DATA`, or [`data_thrown`] and the [`threw`] edge. Both
+/// callers stand on the path a shared table's write takes, so it is theirs.
+#[inline(always)]
+fn dim_written(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    data: (OperandKind, u32),
+    (written, ran_on): (Result<(), Thrown>, Option<PhpObject>),
+) -> Edge {
+    exec::free_operand(req, frame, op.op2_type, op.op2);
+    exec::free_operand(req, frame, op.op1_type, op.op1);
+    match written {
+        Ok(()) => Ok(advance_over_data(req, frame)),
+        Err(thrown) => {
+            let thrown = data_thrown(req, frame, op, data, (thrown, ran_on));
+            threw(req, frame, &thrown)
+        }
+    }
+}
+
+/// php's deprecation of a write through `false` as an array, and what a
+/// handler of it threw.
+fn false_to_array(req: &mut Request) -> Result<(), Thrown> {
+    crate::api::raising::deprecated(req, "Automatic conversion of false to array is deprecated");
+    none_pending(req)
+}
+
+/// `assign_dim_error` past a place that is gone: `FREE_OP_DATA` and `null`
+/// in the temporary.
+fn data_gone(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    (kind, at): (OperandKind, u32),
+) -> Result<(), Thrown> {
+    exec::free_operand(req, frame, kind, at);
+    write_out(req, frame, op, &Value::null());
+    Ok(())
+}
+
+/// The sentence of `parent` named where the scope has none.
+const NO_PARENT: &str = "Cannot use \"parent\" when current class scope has no parent";
+
+/// `zend_throw_error(NULL, …)` at the opline the frame stands at, and
+/// the [`threw`] edge.
+fn threw_error(req: &mut Request, frame: FrameRef, message: &(impl AsRef<[u8]> + ?Sized)) -> Edge {
+    let thrown = error(req, message);
+    threw(req, frame, &thrown)
 }
 
 /// What a `DO_*CALL` opline says of the call it makes: whether the
@@ -14732,7 +14625,7 @@ fn inline_assign_op(
 /// ```
 #[inline(always)] // the front of [`assigned_op`], out of the loop's body
 fn appended(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Option<Edge> {
-    if op.op1_type != OperandKind::Cv || !is_concat(op.extended_value) {
+    if op.op1_type != OperandKind::Cv || operator(op.extended_value) != Some(Opcode::Concat) {
         return None;
     }
     let slots = req.slots_mut(frame);
@@ -14794,19 +14687,9 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
             .map_or_else(Value::null, |place| Value::of_slot(place.read()))
     };
     let computed = if grows_in_place(req, op.extended_value, &held) {
-        crate::ops::concat_assign(
-            req,
-            &held,
-            &value,
-            |req| {
-                let at = write_place(req, frame, op.op1_type, op.op1);
-                vacate(req, at);
-            },
-            |req, left| {
-                let at = write_place(req, frame, op.op1_type, op.op1);
-                reinstate(req, at, left);
-            },
-        )
+        concat_over(req, &held, &value, |req| {
+            write_place(req, frame, op.op1_type, op.op1)
+        })
     } else {
         kernel(req, &held, &value)
     };
@@ -14964,13 +14847,11 @@ pub(crate) fn assign_ref<T: Tier>(
         OperandKind::Var => {
             let at = req.slot_ptr(frame, op.op1);
             let Some(entry) = at.and_then(|at| at.read().as_indirect()) else {
-                let thrown = crate::api::raising::throw_error(
+                let thrown = error(
                     req,
-                    ClassId::ERROR,
                     "Cannot assign by reference to an array dimension of an object",
                 );
-                exec::free_operand(req, frame, op.op1_type, op.op1);
-                return threw(req, frame, &thrown);
+                return threw_freeing(req, frame, op, &thrown);
             };
             Some(entry)
         }
@@ -14996,13 +14877,10 @@ pub(crate) fn assign_ref<T: Tier>(
         req.addref(&value);
         // `zend_wrong_assign_to_variable_reference`: one more owner, handed
         // on as `IS_TMP_VAR`.
-        let (landed, garbage) = match assign_to_place(req, frame, target, (value, OperandKind::Tmp))
-        {
-            Ok(pair) => pair,
+        match assign_to_place(req, frame, target, (value, OperandKind::Tmp)) {
+            Ok(pair) => landed_out(req, frame, op, pair),
             Err(thrown) => return threw(req, frame, &thrown),
-        };
-        write_out(req, frame, op, &landed);
-        req.release(garbage);
+        }
         exec::free_operand(req, frame, op.op2_type, op.op2);
         exec::free_operand(req, frame, op.op1_type, op.op1);
         return Ok(advance(req, frame));
@@ -15050,11 +14928,7 @@ fn overloaded_reference(req: &mut Request, object: PhpObject, name: &[u8]) -> Th
     match table.read_property(req, object, name, PropertyRead::Write) {
         Ok(value) => {
             value.give_up(req);
-            crate::api::raising::throw_error(
-                req,
-                ClassId::ERROR,
-                "Cannot assign by reference to overloaded object",
-            )
+            error(req, "Cannot assign by reference to overloaded object")
         }
         Err(thrown) => thrown,
     }
@@ -15183,13 +15057,10 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         }
         let value = held.undef_as_null();
         req.addref(&value);
-        let (landed, garbage) = match assign_to_place(req, frame, place, (value, OperandKind::Tmp))
-        {
-            Ok(pair) => pair,
+        match assign_to_place(req, frame, place, (value, OperandKind::Tmp)) {
+            Ok(pair) => landed_out(req, frame, op, pair),
             Err(thrown) => return threw(req, frame, &thrown),
-        };
-        write_out(req, frame, op, &landed);
-        req.release(garbage);
+        }
         exec::free_operand(req, frame, data_type, data_at);
         return Ok(advance_over_data(req, frame));
     }
@@ -15226,14 +15097,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     req.addref(&bound);
     place.write(bound.to_zval());
     if let Some(typed) = typed {
-        req.ref_add_type_source(
-            cell.heap(),
-            crate::api::request::RefSource {
-                declaring: typed.declaring,
-                name: name.clone(),
-                ty: typed.ty,
-            },
-        );
+        req.ref_add_type_source(cell.heap(), type_source(&typed, &name));
     }
     write_out(req, frame, op, &bound);
     req.release(garbage);
@@ -15861,22 +15725,16 @@ fn assign_property(
     // place only through `zend_std_write_property`'s cache.
     let lazy = object.heap().laziness() != php_heap::Laziness::Eager;
     let place = if lazy || object.handlers(req).write_overloaded() {
-        PropertyPlace::Handlers
+        Ok(PropertyPlace::Handlers)
     } else {
-        match place_of(req, object, bytes) {
-            Ok(place) => place,
-            Err(thrown) => {
-                req.release(value);
-                return Ok(Err(thrown));
-            }
-        }
+        place_of(req, object, bytes)
     };
-    let placed = match place {
+    let placed = place.and_then(|place| match place {
         // `zobj->handlers->write_property`: the class serves the name,
         // declared or not, so the write is its handler's, as a name no
         // class declared is; php's `ASSIGN_OBJ` asks no place, so one the
         // class keeps apart is its `write_property`'s too.
-        PropertyPlace::Handlers | PropertyPlace::Apart => None,
+        PropertyPlace::Handlers | PropertyPlace::Apart => Ok(None),
         // `zend_get_property_offset(ce, name, ce->__set != NULL, ...)`:
         // a class with a `__set` places the name quietly, so a property
         // the scope may not reach reaches `write_property` and the
@@ -15884,13 +15742,14 @@ fn assign_property(
         // guard stands.
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Set);
-            match req.declared_slot_for_write(object, bytes, "modify", silent) {
-                Ok(placed) => placed,
-                Err(thrown) => {
-                    req.release(value);
-                    return Ok(Err(thrown));
-                }
-            }
+            req.declared_slot_for_write(object, bytes, "modify", silent)
+        }
+    });
+    let placed = match placed {
+        Ok(placed) => placed,
+        Err(thrown) => {
+            req.release(value);
+            return Ok(Err(thrown));
         }
     };
     match placed {
@@ -16227,10 +16086,7 @@ type BinaryKernel = fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>;
 /// reads with `get_binary_op` over the opcode
 /// `zend_compile_compound_assign` wrote there.
 fn binary_op_of(extended_value: u32) -> Option<BinaryKernel> {
-    let opcode = u8::try_from(extended_value)
-        .ok()
-        .and_then(Opcode::from_u8)?;
-    Some(match opcode {
+    Some(match operator(extended_value)? {
         Opcode::Add => crate::ops::add_assign,
         Opcode::Sub => crate::ops::sub,
         Opcode::Mul => crate::ops::mul,
@@ -16254,7 +16110,7 @@ fn binary_op_of(extended_value: u32) -> Option<BinaryKernel> {
 /// hands to `zend_binary_op` and the check of each type instead
 /// (`zend_binary_assign_op_typed_ref`, `Z/Zend/zend_execute.c:1677-1682`).
 fn grows_in_place(req: &Request, extended_value: u32, held: &Value) -> bool {
-    if !is_concat(extended_value) {
+    if operator(extended_value) != Some(Opcode::Concat) {
         return false;
     }
     match held.as_php_ref() {
@@ -16463,39 +16319,39 @@ fn undefined_as(masks: &[u32], strict: bool) -> Option<Value> {
         .then(|| Value::float(0.0))
 }
 
-/// Whether `extended_value` names `.`, the operator of `.=`.
-fn is_concat(extended_value: u32) -> bool {
-    u8::try_from(extended_value)
-        .ok()
-        .and_then(Opcode::from_u8)
-        .is_some_and(|opcode| opcode == Opcode::Concat)
+/// The operator `extended_value` names on a compound assignment, the
+/// opcode `zend_compile_compound_assign` wrote there.
+fn operator(extended_value: u32) -> Option<Opcode> {
+    u8::try_from(extended_value).ok().and_then(Opcode::from_u8)
 }
 
-/// Whether `extended_value` names `+`, the operator of `+=`.
-fn is_add(extended_value: u32) -> bool {
-    u8::try_from(extended_value)
-        .ok()
-        .and_then(Opcode::from_u8)
-        .is_some_and(|opcode| opcode == Opcode::Add)
+/// [`crate::ops::concat_assign`] over the place `at` names, read again
+/// at each step where it stands by then, as `concat_function` reads it:
+/// `i_zval_ptr_dtor(result); ZVAL_NULL(result)` first, a reference there
+/// followed to its cell, `null` written and the owner the place held
+/// given up, and [`reinstate`] of what the append answers or refuses.
+fn concat_over(
+    req: &mut Request,
+    held: &Value,
+    value: &Value,
+    at: impl Fn(&mut Request) -> Option<php_heap::ZvalRef>,
+) -> Result<Value, Thrown> {
+    crate::ops::concat_assign(
+        req,
+        held,
+        value,
+        |req| {
+            let place = at(req);
+            reinstate(req, place, Value::null());
+        },
+        |req, left| {
+            let place = at(req);
+            reinstate(req, place, left);
+        },
+    )
 }
 
-/// `i_zval_ptr_dtor(result); ZVAL_NULL(result)` of `concat_function`
-/// over a place, read again where it stands now: a reference there is
-/// followed to its cell, `null` is written, and the owner the place held
-/// is given up.
-fn vacate(req: &mut Request, at: Option<php_heap::ZvalRef>) {
-    let Some(mut at) = at else {
-        return;
-    };
-    if let Some(cell) = Value::of_slot(at.read()).as_php_ref() {
-        at = cell.heap().val_ref();
-    }
-    let held = Value::of_slot(at.read());
-    at.write(Value::null().to_zval());
-    req.release(held);
-}
-
-/// What [`vacate`] gave up put back where it stood, the place read again
+/// `left` put back where a `.=` took it from, the place read again
 /// and a reference there followed to its cell: the left string of a `.=`
 /// whose append the limit refused, which php's `zend_string_extend`
 /// leaves in the place. `left` is one owner, the place's from here; with
@@ -16646,9 +16502,9 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     };
     // php's `.=` over a string grows it where the slot holds it
     // (`zend_binary_assign_op_typed_prop`'s first arm, and
-    // `zend_binary_op` over an untyped slot); `vacate` gives up the
+    // `zend_binary_op` over an untyped slot); the first step gives up the
     // read's owner and the slot's, so the append holds the only one.
-    let in_place = is_concat(op.extended_value)
+    let in_place = operator(op.extended_value) == Some(Opcode::Concat)
         && (held.as_php_string().is_some()
             || !placed.held_to.typed()
                 && req
@@ -16659,7 +16515,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     // not take, is given up first and the union separates the array the
     // slot holds where it stands ([`crate::ops::add_assign`]).
     let over_slot = !in_place
-        && is_add(op.extended_value)
+        && operator(op.extended_value) == Some(Opcode::Add)
         && held.as_array().is_some()
         && value.deref().as_array().is_some();
     if over_slot {
@@ -16674,7 +16530,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
                 req.release(held);
                 req.store_static_property(info, Value::null());
             },
-            // The read's owner `vacate` gave up taken again, for the
+            // The read's owner the first step gave up taken again, for the
             // release below.
             |req, left| {
                 req.addref(&left);
@@ -16717,7 +16573,8 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     let stepped = match placed.verified_against(req, &stepped) {
         None => stepped,
         Some(ty) => {
-            let verdict = verified_op(req, &stepped, &ty, info, &placed.name, strict);
+            let name = &placed.name;
+            let verdict = verify_property_type(req, &stepped, &ty, info.declaring, name, strict);
             // php gives the operation's value up and the slot keeps what
             // it held (`zval_ptr_dtor(&z_copy)`).
             match crate::ops::landed(req, stepped, verdict) {
@@ -16734,28 +16591,6 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     let previous = req.replace_static_property(info, stepped);
     release_overwritten(req, previous);
     Ok(advance_over_data(req, frame))
-}
-
-/// `zend_binary_assign_op_typed_prop` (`Z/Zend/zend_execute.c:1693`):
-/// the value the operation made, held to the declared type under the
-/// frame's regime before it lands in the slot. Where the slot holds a
-/// cell another name is bound to, php verifies against the cell's own
-/// sources instead (`zend_binary_assign_op_typed_ref`), which is the
-/// same type by a different sentence.
-fn verified_op(
-    req: &mut Request,
-    stepped: &Value,
-    ty: &php_unit::decl::Type,
-    info: crate::api::request::PropertyInfo,
-    name: &[u8],
-    strict: bool,
-) -> Result<Option<Value>, Thrown> {
-    match req.static_slot_cell(info) {
-        Some(cell) if !req.ref_type_sources(cell.heap()).is_empty() => {
-            crate::ops::verify_ref_assignable(req, cell.heap(), stepped, strict)
-        }
-        _ => crate::ops::verify_property_type(req, stepped, ty, info.declaring, name, strict),
-    }
 }
 
 /// The body the four steps over a `static` property share: the slot
@@ -17123,14 +16958,14 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     // takes this arm only where the source is a place; a call that
     // returned by value is the notice and an assignment by value.
     let typed = (held_to.typed() && !returns_function)
-        .then(|| req.typed_static(info).map(|typed| typed.ty))
+        .then(|| req.typed_static(info))
         .flatten();
-    if let Some(ty) = typed.as_ref() {
+    if let Some(typed) = typed.as_ref() {
         let strict = req.frame_strict_types(frame);
         match crate::ops::verify_prop_assignable_by_ref(
             req,
             cell.heap(),
-            ty,
+            &typed.ty,
             info.declaring,
             &name,
             strict,
@@ -17151,15 +16986,8 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     req.addref(&bound);
     write_out(req, frame, op, &bound);
     req.bind_static_property(info, bound);
-    if let Some(ty) = typed {
-        req.ref_add_type_source(
-            cell.heap(),
-            crate::api::request::RefSource {
-                declaring: info.declaring,
-                name: name.into_owned(),
-                ty,
-            },
-        );
+    if let Some(typed) = typed {
+        req.ref_add_type_source(cell.heap(), type_source(&typed, &name));
     }
     Ok(advance_over_data(req, frame))
 }
@@ -17329,11 +17157,7 @@ fn assign_text_dim(
     keeper: &Keeper,
 ) -> Result<(), Thrown> {
     if op.op2_type == OperandKind::Unused {
-        return Err(crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            "[] operator not supported for strings",
-        ));
+        return Err(error(req, "[] operator not supported for strings"));
     }
     let written = assign_string_offset(req, frame, code, op, data, place, keeper);
     // `FREE_OP_DATA`, where the write landed before the value was read.
@@ -17761,11 +17585,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
                     }
                 }
                 // `assign_dim_error`: `FREE_OP_DATA` and a `null` result.
-                Ok(Landing::Gone) => {
-                    exec::free_operand(req, frame, data.op1_type, data.op1);
-                    write_out(req, frame, op, &Value::null());
-                    Ok(())
-                }
+                Ok(Landing::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
                 Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
                 Err(thrown) => Err(thrown),
             }
@@ -17780,26 +17600,11 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
             written
         }
         // `assign_dim_error`: `FREE_OP_DATA` and a `null` result.
-        Ok(Container::Gone) => {
-            exec::free_operand(req, frame, data.op1_type, data.op1);
-            write_out(req, frame, op, &Value::null());
-            Ok(())
-        }
+        Ok(Container::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
         Err(thrown) => Err(thrown),
     };
-    if op.op2_type != OperandKind::Unused {
-        exec::free_operand(req, frame, op.op2_type, op.op2);
-    }
-    exec::free_operand(req, frame, op.op1_type, op.op1);
-    if let Err(thrown) = written {
-        let thrown = req.raised_over(thrown, ran_on);
-        let thrown = req.free_pending(thrown, |req| {
-            exec::free_operand(req, frame, data.op1_type, data.op1);
-            write_out(req, frame, op, &Value::null());
-        });
-        return threw(req, frame, &thrown);
-    }
-    Ok(advance_over_data(req, frame))
+    let freed = (data.op1_type, data.op1);
+    dim_written(req, frame, op, freed, (written, ran_on))
 }
 
 /// The value `$a[] = $v` appends, read as `ZEND_ASSIGN_DIM` reads it
@@ -18351,11 +18156,7 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
                 Ok(Landing::Entry(entry)) => stepped_entry(req, frame, code, step, entry),
                 // `assign_dim_op_ret_null`: `FREE_OP_DATA` and a `null`
                 // result.
-                Ok(Landing::Gone) => {
-                    exec::free_operand(req, frame, data.op1_type, data.op1);
-                    write_out(req, frame, op, &Value::null());
-                    Ok(())
-                }
+                Ok(Landing::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
                 Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
                 Err(thrown) => Err(thrown),
             }
@@ -18364,11 +18165,7 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
             binary_assign_op_obj_dim(req, frame, code, step, object)
         }),
         Ok(Container::Text(_)) if op.op2_type == OperandKind::Unused => {
-            Err(crate::api::raising::throw_error(
-                req,
-                ClassId::ERROR,
-                "[] operator not supported for strings",
-            ))
+            Err(error(req, "[] operator not supported for strings"))
         }
         // `zend_binary_assign_op_dim_slow`: `zend_check_string_offset`
         // under `BP_VAR_RW`, its warnings and its `Error`, and then
@@ -18379,34 +18176,18 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
             match string_dim_offset(req, &dim, DimRead::Warning) {
                 Err(thrown) => Err(thrown),
                 Ok(_) if req.is_pending() => Err(Thrown::of(None)),
-                Ok(_) => Err(crate::api::raising::throw_error(
+                Ok(_) => Err(error(
                     req,
-                    ClassId::ERROR,
                     "Cannot use assign-op operators with string offsets",
                 )),
             }
         }
         // `assign_dim_op_ret_null`.
-        Ok(Container::Gone) => {
-            exec::free_operand(req, frame, data.op1_type, data.op1);
-            write_out(req, frame, op, &Value::null());
-            Ok(())
-        }
+        Ok(Container::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
         Err(thrown) => Err(thrown),
     };
-    if op.op2_type != OperandKind::Unused {
-        exec::free_operand(req, frame, op.op2_type, op.op2);
-    }
-    exec::free_operand(req, frame, op.op1_type, op.op1);
-    if let Err(thrown) = written {
-        let thrown = req.raised_over(thrown, ran_on);
-        let thrown = req.free_pending(thrown, |req| {
-            exec::free_operand(req, frame, data.op1_type, data.op1);
-            write_out(req, frame, op, &Value::null());
-        });
-        return threw(req, frame, &thrown);
-    }
-    Ok(advance_over_data(req, frame))
+    let freed = (data.op1_type, data.op1);
+    dim_written(req, frame, op, freed, (written, ran_on))
 }
 
 /// The kernel over what one place holds and the `OP_DATA`'s value, and
@@ -18430,13 +18211,7 @@ fn stepped_entry(
     let raw = Value::of_slot(entry.read());
     let held = raw.deref();
     let computed = if grows_in_place(req, op.extended_value, &raw) {
-        crate::ops::concat_assign(
-            req,
-            &held,
-            &value,
-            |req| vacate(req, Some(entry)),
-            |req, left| reinstate(req, Some(entry), left),
-        )
+        concat_over(req, &held, &value, |_| Some(entry))
     } else {
         kernel(req, &held, &value)
     };
@@ -18562,9 +18337,8 @@ fn binary_assign_op_obj_dim(
             req.leave_pending(&thrown);
             let ran_on = req.pending();
             let class = req.symbols().class_name(object.class()).to_vec();
-            let error = crate::api::raising::throw_error(
+            let error = error(
                 req,
-                ClassId::ERROR,
                 &bytes!(b"Cannot use object of type ", class, b" as array"),
             );
             // `FREE_OP_DATA` before `GC_DELREF(obj)`, the `Error` pending.
@@ -18823,12 +18597,8 @@ pub(crate) fn assign_obj_op<T: Tier>(
             let ran_on = req.pending();
             let name = name.as_str_bytes().unwrap_or_default();
             let thrown = crate::api::raising::non_object_error(req, "assign", name, &container);
-            let thrown = req.raised_over(thrown, ran_on);
-            let thrown = req.free_pending(thrown, |req| {
-                exec::free_operand(req, frame, data.op1_type, data.op1);
-                write_out(req, frame, op, &Value::null());
-            });
-            Err(thrown)
+            let freed = (data.op1_type, data.op1);
+            Err(data_thrown(req, frame, op, freed, (thrown, ran_on)))
         }
         (Err(thrown), _) => {
             exec::free_operand(req, frame, data.op1_type, data.op1);
@@ -18944,13 +18714,14 @@ fn withheld_step(
     step: Compound<'_>,
     object: PhpObject,
     name: &[u8],
+    read: PropertyRead,
 ) -> Result<Value, Thrown> {
     let Compound {
         op, data, kernel, ..
     } = step;
     let value = step.value(req, frame, code);
     let table = req.object_handlers(object.heap());
-    let computed = match table.read_property(req, object, name, PropertyRead::Warning) {
+    let computed = match table.read_property(req, object, name, read) {
         Ok(held) => {
             let computed = kernel(req, &held, &value);
             held.give_up(req);
@@ -19088,8 +18859,7 @@ fn step_property(
         Ok(placed) => placed,
         Err(thrown) => {
             exec::free_operand(req, frame, data.op1_type, data.op1);
-            write_out(req, frame, op, &Value::null());
-            return Ok(Err(thrown));
+            return Ok(Err(nulled_out(req, frame, op, thrown)));
         }
     };
     match ptr {
@@ -19129,10 +18899,11 @@ fn step_property(
         // it throws comes before what the write refuses
         // (`zend_assign_op_overloaded_property`).
         PropertyPtr::Withheld => {
-            let precomputed = match withheld_step(req, frame, code, step, object, bytes) {
-                Ok(stepped) => stepped,
-                Err(thrown) => return Ok(Err(thrown)),
-            };
+            let precomputed =
+                match withheld_step(req, frame, code, step, object, bytes, PropertyRead::Warning) {
+                    Ok(stepped) => stepped,
+                    Err(thrown) => return Ok(Err(thrown)),
+                };
             let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
             match req.declared_slot_for_write(object, bytes, "modify", silent) {
                 Ok(Some((slot, typed))) => {
@@ -19190,7 +18961,7 @@ fn union_over_entry(
 ) -> Option<Result<(), Thrown>> {
     let Compound { op, data, .. } = step;
     let held = Value::of_slot(place.read());
-    if !is_add(op.extended_value) || held.as_array().is_none() {
+    if operator(op.extended_value) != Some(Opcode::Add) || held.as_array().is_none() {
         return None;
     }
     let value = step.value(req, frame, code);
@@ -19419,8 +19190,7 @@ fn step_slot(
                 }
                 None => thrown,
             };
-            write_out(req, frame, op, &Value::null());
-            return Ok(Err(thrown));
+            return Ok(Err(nulled_out(req, frame, op, thrown)));
         }
     };
     land_step(req, frame, op, object, (slot, typed), bytes, stepped)
@@ -19469,10 +19239,7 @@ fn land_step(
     let strict = req.frame_strict_types(frame);
     let landed = match req.hold_to_property_type(&typed, bytes, stepped, strict) {
         Ok(landed) => landed,
-        Err(thrown) => {
-            write_out(req, frame, op, &Value::null());
-            return Ok(Err(thrown));
-        }
+        Err(thrown) => return Ok(Err(nulled_out(req, frame, op, thrown))),
     };
     Ok(stepped_slot(
         req,
@@ -19541,16 +19308,7 @@ fn slot_step(
     if grows_in_place(req, step.op.extended_value, &raw)
         && (!typed || held.as_php_string().is_some())
     {
-        return crate::ops::concat_assign(
-            req,
-            &held,
-            value,
-            |req| {
-                let at = object.heap().slot_ref(slot);
-                vacate(req, at);
-            },
-            |req, left| reinstate(req, object.heap().slot_ref(slot), left),
-        );
+        return concat_over(req, &held, value, |_| object.heap().slot_ref(slot));
     }
     (step.kernel)(req, &held, value)
 }
@@ -19592,29 +19350,8 @@ fn served_property_step(
     name: crate::api::values::PhpString,
     back: WriteBack,
 ) -> Result<(), Thrown> {
-    let Compound {
-        op, data, kernel, ..
-    } = step;
-    let value = step.value(req, frame, code);
-    let table = req.object_handlers(object.heap());
-    let held = match table.read_property(req, object, name.as_bytes(), back.read()) {
-        Ok(held) => held,
-        Err(thrown) => {
-            exec::free_operand(req, frame, data.op1_type, data.op1);
-            write_out(req, frame, op, &Value::null());
-            return Err(thrown);
-        }
-    };
-    let computed = kernel(req, &held, &value);
-    held.give_up(req);
-    exec::free_operand(req, frame, data.op1_type, data.op1);
-    let stepped = match computed {
-        Ok(stepped) => stepped,
-        Err(thrown) => {
-            write_out(req, frame, op, &Value::null());
-            return Err(thrown);
-        }
-    };
+    let op = step.op;
+    let stepped = withheld_step(req, frame, code, step, object, name.as_bytes(), back.read())?;
     write_out(req, frame, op, &stepped);
     if back == WriteBack::Apart {
         req.release(stepped);
@@ -19932,10 +19669,7 @@ fn stepped_obj(
     };
     member.release(req, frame, op);
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    match stepped {
-        Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    settled(req, frame, stepped)
 }
 
 /// The inline path of the four `*_INC_OBJ`/`*_DEC_OBJ` over a constant
@@ -20182,15 +19916,7 @@ fn incdec_property(
                 Arith::Sub
             };
             let Some(stepped) = inline::step(arith, held) else {
-                return Ok(served_incdec(
-                    req,
-                    frame,
-                    op,
-                    step,
-                    object,
-                    key,
-                    WriteBack::Property,
-                ));
+                return Ok(overloaded_incdec(req, frame, op, step, object, key));
             };
             place.write(stepped);
             let out = Value::of_slot(if step.post { held } else { stepped });
@@ -20203,10 +19929,7 @@ fn incdec_property(
         Ok((object, PropertyPtr::Withheld)) => {
             return Ok(overloaded_incdec(req, frame, op, step, object, key));
         }
-        Err(thrown) => {
-            write_out(req, frame, op, &Value::null());
-            return Ok(Err(thrown));
-        }
+        Err(thrown) => return Ok(Err(nulled_out(req, frame, op, thrown))),
     };
     let named = Value::of_slot(object.heap().slot(slot));
     let held = named.deref().undef_as_null();
@@ -20215,8 +19938,7 @@ fn incdec_property(
         Ok(stepped) => stepped,
         Err(thrown) => {
             req.release(held);
-            write_out(req, frame, op, &Value::null());
-            return Ok(Err(thrown));
+            return Ok(Err(nulled_out(req, frame, op, thrown)));
         }
     };
     // `zend_pre_incdec_property_zval`: a slot bound to a reference other
@@ -20266,8 +19988,7 @@ fn step_property_ref(
             RefStep::Clamped(stored, thrown) => (stored, Some(thrown)),
             RefStep::Refused(thrown) => {
                 req.release(held);
-                write_out(req, frame, op, &Value::null());
-                return Err(thrown);
+                return Err(nulled_out(req, frame, op, thrown));
             }
         };
     write_out(req, frame, op, if step.post { &held } else { &stored });
@@ -20369,10 +20090,7 @@ fn served_incdec(
     let read = table.read_property(req, object, name.as_bytes(), back.read());
     let held = match read {
         Ok(held) => held,
-        Err(thrown) => {
-            write_out(req, frame, op, &Value::null());
-            return Err(thrown);
-        }
+        Err(thrown) => return Err(nulled_out(req, frame, op, thrown)),
     };
     let copy = held.deref();
     req.addref(&copy);
@@ -20568,11 +20286,7 @@ pub(crate) fn fetch_dim_unset<T: Tier>(
                 ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => {
                     unset_under_nothing(req, frame, code, op, &held)
                 }
-                _ => Err(crate::api::raising::throw_error(
-                    req,
-                    ClassId::ERROR,
-                    "Cannot unset offset in a non-array variable",
-                )),
+                _ => Err(error(req, "Cannot unset offset in a non-array variable")),
             }
         }
         Err(thrown) => Err(thrown),
@@ -20615,11 +20329,7 @@ fn unset_under_nothing(
         let _ = exec::operand(req, frame, code, op.op1_type, op.op1);
     }
     if held.as_bool() == Some(false) {
-        crate::api::raising::deprecated(
-            req,
-            "Automatic conversion of false to array is deprecated",
-        );
-        none_pending(req)?;
+        false_to_array(req)?;
     }
     if op.op2_type == OperandKind::Cv {
         let _ = exec::operand(req, frame, code, op.op2_type, op.op2);
@@ -20717,17 +20427,16 @@ pub(crate) fn unset_static_prop<T: Tier>(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let class = req.symbols().class_name(class).to_vec();
-    let thrown = crate::api::raising::throw_error(
+    threw_error(
         req,
-        ClassId::ERROR,
+        frame,
         &bytes!(
             b"Attempt to unset static property ",
             class,
             b"::$",
             &name[..]
         ),
-    );
-    threw(req, frame, &thrown)
+    )
 }
 
 /// `ZEND_UNSET_DIM` (`Z/Zend/zend_vm_def.h:6740`), what `unset($a[$k])`
@@ -20837,10 +20546,7 @@ pub(crate) fn unset_dim<T: Tier>(
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    if let Err(thrown) = unset {
-        return threw(req, frame, &thrown);
-    }
-    Ok(advance(req, frame))
+    settled(req, frame, unset)
 }
 
 /// `UNSET_DIM`'s ladder for a container that is no array
@@ -20856,27 +20562,14 @@ fn unset_container(req: &mut Request, container: &Value, offset: &Value) -> Resu
             let table = req.object_handlers(object.heap());
             table.unset_dimension(req, object, offset)
         }
-        ValueRef::Str(_) => Err(crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            "Cannot unset string offsets",
-        )),
+        ValueRef::Str(_) => Err(error(req, "Cannot unset string offsets")),
         ValueRef::Bool(false) => {
             // `zend_false_to_array_deprecated`, the one this handler
             // raises without making the array.
-            crate::api::raising::deprecated(
-                req,
-                "Automatic conversion of false to array is deprecated",
-            );
-            none_pending(req)?;
-            Ok(())
+            false_to_array(req)
         }
         ValueRef::Undef | ValueRef::Null => Ok(()),
-        _ => Err(crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            "Cannot unset offset in a non-array variable",
-        )),
+        _ => Err(error(req, "Cannot unset offset in a non-array variable")),
     }
 }
 
@@ -20948,10 +20641,7 @@ pub(crate) fn unset_obj<T: Tier>(
     };
     member.release(req, frame, op);
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    if let Err(thrown) = unset {
-        return threw(req, frame, &thrown);
-    }
-    Ok(advance(req, frame))
+    settled(req, frame, unset)
 }
 
 /// `ZEND_INIT_ARRAY` (`Z/Zend/zend_vm_def.h:6474`), the first opline of
@@ -21126,10 +20816,7 @@ fn add_element(
     } else {
         add_keyed_element(req, frame, code, op, array, value)
     };
-    match added {
-        Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    settled(req, frame, added)
 }
 
 /// [`add_element`]'s `op1` under `ZEND_ARRAY_ELEMENT_REF`: the cell the
@@ -21235,10 +20922,7 @@ pub(crate) fn add_array_unpack<T: Tier>(
     let spread = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let added = unpack_into(req, array, &spread);
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    match added {
-        Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    settled(req, frame, added)
 }
 
 /// The body of [`add_array_unpack`] over `array`, which has one owner:
@@ -21271,16 +20955,7 @@ fn unpack_into(req: &mut Request, array: PhpArray, spread: &Value) -> Result<(),
         return Ok(());
     }
     let Some(object) = spread.as_object() else {
-        let given = crate::ops::value_name(req, spread);
-        return Err(crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            &bytes!(
-                b"Only arrays and Traversables can be unpacked, ",
-                given,
-                b" given"
-            ),
-        ));
+        return Err(error(req, &sentence_given(req, UNPACKED, spread)));
     };
     let wrapper = unpack_iterator(req, object)?;
     let walked = (|| -> Result<(), Thrown> {
@@ -21323,14 +20998,9 @@ fn append_unpacked(req: &mut Request, a: php_heap::Arr, value: Value) -> Result<
 /// no `Traversable`.
 fn unpack_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     if !crate::interfaces::is_traversable(req, object.class()) {
-        let given = crate::ops::value_name(req, &object.as_value());
         return Err(type_error(
             req,
-            &bytes!(
-                b"Only arrays and Traversables can be unpacked, ",
-                given,
-                b" given"
-            ),
+            &sentence_given(req, UNPACKED, &object.as_value()),
         ));
     }
     crate::interfaces::get_iterator(req, object, false)
@@ -21358,9 +21028,8 @@ fn unpacked_key(req: &mut Request, key: Value, during: &str) -> Result<Option<Ph
     if is_int {
         return Ok(None);
     }
-    Err(crate::api::raising::throw_error(
+    Err(error(
         req,
-        ClassId::ERROR,
         &format!("Keys must be of type int|string during {during} unpacking"),
     ))
 }
@@ -21474,21 +21143,13 @@ pub(crate) fn send_unpack<T: Tier>(
         if spread.tag() == TypeTag::Undef {
             exec::operand(req, frame, code, op.op1_type, op.op1);
         }
-        let given = crate::ops::value_name(req, &spread.undef_as_null());
         Ok(Err(type_error(
             req,
-            &bytes!(
-                b"Only arrays and Traversables can be unpacked, ",
-                given,
-                b" given"
-            ),
+            &sentence_given(req, UNPACKED, &spread.undef_as_null()),
         )))
     };
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    match sent? {
-        Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    settled(req, frame, sent?)
 }
 
 /// [`send_unpack`]'s array arm. Where the operand is a variable and an
@@ -21535,9 +21196,7 @@ fn send_unpacked_array(
                     Err(ended) => return fatal(ended),
                 }
             }
-            crate::api::values::Key::Int(_) if named => {
-                return Err(positional_after_named(req));
-            }
+            crate::api::values::Key::Int(_) if named => return Err(positional_after_named(req)),
             crate::api::values::Key::Int(_) => match reserve_next(req) {
                 Ok(reserved) => reserved,
                 Err(ended) => return fatal(ended),
@@ -21626,29 +21285,16 @@ fn send_unpacked_iterator(
                 named = true;
                 let reserved = reserve_named(req, name);
                 req.release(Value::string(name));
-                match reserved {
-                    Ok(Ok(reserved)) => Ok(reserved),
-                    Ok(Err(thrown)) => Err(thrown),
-                    Err(fatal) => {
-                        req.release(value);
-                        return Err(fatal);
-                    }
-                }
+                reserved
             }
-            None if named => Err(positional_after_named(req)),
-            None => match reserve_next(req) {
-                Ok(reserved) => Ok(reserved),
-                Err(fatal) => {
-                    req.release(value);
-                    return Err(fatal);
-                }
-            },
+            None if named => Ok(Err(positional_after_named(req))),
+            None => reserve_next(req).map(Ok),
         };
         let reserved = match reserved {
-            Ok(reserved) => reserved,
-            Err(thrown) => {
+            Ok(Ok(reserved)) => reserved,
+            unsent => {
                 req.release(value);
-                return Ok(Err(thrown));
+                return unsent.map(|refused| refused.map(drop));
             }
         };
         let value = if must_be_sent_by_ref(req, reserved.number) {
@@ -21676,9 +21322,8 @@ fn send_unpacked_iterator(
 /// php's `Error` for an integer key after a string one in what
 /// `SEND_UNPACK` spreads.
 fn positional_after_named(req: &mut Request) -> Thrown {
-    crate::api::raising::throw_error(
+    error(
         req,
-        ClassId::ERROR,
         "Cannot use positional argument after named argument during unpacking",
     )
 }
@@ -22004,14 +21649,7 @@ fn take_temporary(req: &mut Request, frame: FrameRef, field: u32) {
 /// `Z_FE_ITER` at `-1` so the `FE_FREE` deletes nothing, the operand
 /// freed and the jump `op2` names.
 fn fe_reset_refused(req: &mut Request, frame: FrameRef, op: &Opline, subject: &Value) -> Edge {
-    crate::api::raising::warning(
-        req,
-        &bytes!(
-            b"foreach() argument must be of type array|object, ",
-            crate::ops::value_name(req, subject),
-            b" given"
-        ),
-    );
+    crate::api::raising::warning(req, &sentence_given(req, FOREACH_SUBJECT, subject));
     let slot = op.out;
     req.replace_slot(frame, slot, Value::undef());
     set_fe_iter(req, frame, slot, None);
@@ -22364,9 +22002,7 @@ fn fetched_element(req: &mut Request, frame: FrameRef, op: &Opline) -> Edge {
                 }
                 (owned_key.as_ref().map(|key| key.heap()), value)
             }
-            Ok(None) => {
-                return jump_to(op.extended_value);
-            }
+            Ok(None) => return jump_to(op.extended_value),
             Err(thrown) => return threw(req, frame, &thrown),
         },
         ForeachVar::Iterator(iterator) => return fe_fetch_iterator(req, frame, op, iterator),
@@ -22409,9 +22045,7 @@ fn fe_fetch_iterator(req: &mut Request, frame: FrameRef, op: &Opline, iterator: 
     let keyed = op.out_type != OperandKind::Unused;
     let (current, key) = match crate::interfaces::fetch(req, iterator, keyed, false) {
         Ok(Some(found)) => found,
-        Ok(None) => {
-            return jump_to(op.extended_value);
-        }
+        Ok(None) => return jump_to(op.extended_value),
         Err(thrown) => return threw(req, frame, &thrown),
     };
     if let Some(key) = key {
@@ -22789,11 +22423,7 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
             } else {
                 crate::api::raising::warning(
                     req,
-                    &bytes!(
-                        b"foreach() argument must be of type array|object, ",
-                        crate::ops::value_name(req, &subject.undef_as_null()),
-                        b" given"
-                    ),
+                    &sentence_given(req, FOREACH_SUBJECT, &subject.undef_as_null()),
                 );
                 if req.is_pending() {
                     return Ok(Stepped::Threw(frame).into());
@@ -22811,9 +22441,7 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
     };
     let BoundRw { key, cell, owned } = match found? {
         Ok(Some(found)) => found,
-        Ok(None) => {
-            return jump_to(op.extended_value);
-        }
+        Ok(None) => return jump_to(op.extended_value),
         Err(thrown) => return threw(req, frame, &thrown),
     };
     if let Some(key) = key {
@@ -24667,7 +24295,13 @@ fn inline_isset_dim<T: Tier>(
         exec::free_operand(req, frame, op.op2_type, op.op2);
     }
     if let Some(jump) = fused {
-        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
+        return Some(inlined::<T>(
+            req,
+            frame,
+            code,
+            at,
+            fused_way(at, jump, answer),
+        ));
     }
     write_owning_nothing(req.slots_mut(frame), op, Zval::bool(answer))?;
     Some(Ok(advanced()))
@@ -24999,13 +24633,13 @@ pub(crate) fn func_get_args<T: Tier>(
         0
     };
     let arguments = req.frame_arguments(frame);
-    match crate::natives::copied_arguments(req, arguments, skip) {
-        Ok(array) => {
-            set_out(req, frame, op, Value::array(array.hand_on()));
-            Ok(advance(req, frame))
-        }
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    let copied = crate::natives::copied_arguments(req, arguments, skip);
+    computed_into(
+        req,
+        frame,
+        op,
+        copied.map(|array| Value::array(array.hand_on())),
+    )
 }
 
 /// `ZEND_FUNC_NUM_ARGS` (`Z/Zend/zend_vm_def.h:9635`), what php's
@@ -25081,12 +24715,11 @@ pub(crate) fn get_class<T: Tier>(
 ) -> Edge {
     let class = if op.op1_type == OperandKind::Unused {
         let Some(scope) = req.frame_scope(frame) else {
-            let thrown = crate::api::raising::throw_error(
+            return threw_error(
                 req,
-                ClassId::ERROR,
+                frame,
                 "get_class() without arguments must be called from within a class",
             );
-            return threw(req, frame, &thrown);
         };
         crate::api::raising::deprecated(req, "Calling get_class() without arguments is deprecated");
         scope
@@ -25094,17 +24727,15 @@ pub(crate) fn get_class<T: Tier>(
         let value = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
         let class = value.as_object().map(|v| v.class());
         let Some(class) = class else {
-            let shown = crate::ops::value_name(req, &value);
             let thrown = type_error(
                 req,
-                &bytes!(
+                &sentence_given(
+                    req,
                     b"get_class(): Argument #1 ($object) must be of type object, ",
-                    shown,
-                    b" given"
+                    &value,
                 ),
             );
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            return threw(req, frame, &thrown);
+            return threw_freeing(req, frame, op, &thrown);
         };
         exec::free_operand(req, frame, op.op1_type, op.op1);
         class
@@ -25144,12 +24775,11 @@ pub(crate) fn get_called_class<T: Tier>(
         .map(|this| this.class())
         .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope));
     let Some(class) = called else {
-        let thrown = crate::api::raising::throw_error(
+        return threw_error(
             req,
-            ClassId::ERROR,
+            frame,
             "get_called_class() must be called from within a class",
         );
-        return threw(req, frame, &thrown);
     };
     class_name_into(req, frame, op, class)
 }
@@ -25165,12 +24795,8 @@ fn class_name_into(
     class: crate::api::values::ClassId,
 ) -> Edge {
     let name = req.class_name_bytes(class);
-    let name = match req.declared_string(&name) {
-        Ok(name) => name,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
-    set_out(req, frame, op, name.into_value().hand_on());
-    Ok(advance(req, frame))
+    let name = req.declared_string(&name);
+    computed_into(req, frame, op, name.map(|name| name.into_value().hand_on()))
 }
 
 /// `ZEND_GET_TYPE` (`Z/Zend/zend_vm_def.h:9630`), what php's compiler
@@ -25256,13 +24882,12 @@ pub(crate) fn array_key_exists<T: Tier>(
             exec::operand(req, frame, code, op.op2_type, op.op2);
         }
         if !req.is_pending() {
-            let shown = crate::ops::value_name(req, &subject);
             let thrown = type_error(
                 req,
-                &bytes!(
+                &sentence_given(
+                    req,
                     b"array_key_exists(): Argument #2 ($array) must be of type array, ",
-                    shown,
-                    b" given"
+                    &subject,
                 ),
             );
             req.leave_pending(&thrown);
@@ -25666,10 +25291,7 @@ pub(crate) fn jmp_set<T: Tier>(
             exec::free_operand(req, frame, op.op1_type, op.op1);
             return Ok(advance(req, frame));
         }
-        Err(thrown) => {
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            return threw(req, frame, &thrown);
-        }
+        Err(thrown) => return threw_freeing(req, frame, op, &thrown),
     }
     let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     set_out(req, frame, op, taken);
@@ -26341,7 +25963,8 @@ fn smart_branch<T: Tier, S: Branch>(
     if req.is_pending() {
         return Ok(Stepped::Threw(frame).into());
     }
-    branch_fused::<T>(req, frame, code, at, jump, answer.as_bool() == Some(true))
+    let way = fused_way(at, jump, answer.as_bool() == Some(true));
+    inlined::<T>(req, frame, code, at, way)
 }
 
 /// A comparison's handler past its inline path: [`binary_kernel`] and
@@ -26432,23 +26055,6 @@ pub(crate) mod branch {
                 })
         }
     }
-}
-
-/// The fused jump after the comparison at `at` over its `answer`: on
-/// past the jump where it is not taken, and taken as [`jumped`] takes
-/// it, the distance counted from the comparison, the direction the
-/// jump's own, a backward one raising the loop safepoint with the
-/// jump's number.
-#[inline(always)] // as `branch::Branch::fused`
-fn branch_fused<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    at: u32,
-    fused: branch::Fused<'_>,
-    answer: bool,
-) -> Edge {
-    inlined::<T>(req, frame, code, at, fused_way(at, fused, answer))
 }
 
 /// Where a comparison at `at` goes with the jump fused to it: past both,
@@ -26865,9 +26471,7 @@ fn incdec_typed_ref(
 ) -> Edge {
     let stepped = match kernel(req, &held) {
         Ok(stepped) => stepped,
-        Err(thrown) => {
-            return threw(req, frame, &thrown);
-        }
+        Err(thrown) => return threw(req, frame, &thrown),
     };
     let increment = matches!(op.opcode, Opcode::PreInc | Opcode::PostInc);
     let strict = req.frame_strict_types(frame);
@@ -26877,8 +26481,7 @@ fn incdec_typed_ref(
             RefStep::Clamped(stored, thrown) => (stored, Some(thrown)),
             RefStep::Refused(thrown) => {
                 write_out(req, frame, op, &Value::null());
-                exec::free_operand(req, frame, op.op1_type, op.op1);
-                return threw(req, frame, &thrown);
+                return threw_freeing(req, frame, op, &thrown);
             }
         };
     write_out(req, frame, op, if post { &held } else { &stored });
@@ -27007,10 +26610,7 @@ fn incdec(
             exec::free_operand(req, frame, op.op1_type, op.op1);
             Ok(advance(req, frame))
         }
-        Err(thrown) => {
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            threw(req, frame, &thrown)
-        }
+        Err(thrown) => threw_freeing(req, frame, op, &thrown),
     }
 }
 
@@ -27161,8 +26761,7 @@ pub(crate) fn throw<T: Tier>(
 ) -> Edge {
     let value = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let thrown = thrown_value(req, &value);
-    exec::free_operand(req, frame, op.op1_type, op.op1);
-    threw(req, frame, &thrown)
+    threw_freeing(req, frame, op, &thrown)
 }
 
 /// `zend_throw_exception_object` (`Z/Zend/zend_exceptions.c`): the object
@@ -27170,15 +26769,11 @@ pub(crate) fn throw<T: Tier>(
 /// words where the value is no object or its class implements nothing.
 fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
     let Some(object) = value.as_object() else {
-        return crate::api::raising::throw_error(req, ClassId::ERROR, "Can only throw objects");
+        return error(req, "Can only throw objects");
     };
     let throwable = req.class_named(Bare::resolved(b"throwable"));
     if !throwable.is_some_and(|of| req.symbols().instance_of(object.class(), of)) {
-        return crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            "Cannot throw objects that do not implement Throwable",
-        );
+        return error(req, "Cannot throw objects that do not implement Throwable");
     }
     crate::api::raising::throw_value(req, value)
 }
@@ -27867,11 +27462,7 @@ pub(crate) fn r#yield<T: Tier>(
     let generator = crate::generator::running(req, frame)?;
     if crate::generator::forced_close(req, generator) {
         // `zend_yield_in_closed_generator_helper`.
-        let thrown = crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            "Cannot yield from finally in a force-closed generator",
-        );
+        let thrown = error(req, "Cannot yield from finally in a force-closed generator");
         exec::free_operand(req, frame, op.op2_type, op.op2);
         exec::free_operand(req, frame, op.op1_type, op.op1);
         if op.out_type != OperandKind::Unused {
@@ -27996,13 +27587,8 @@ pub(crate) fn yield_from<T: Tier>(
     let generator = crate::generator::running(req, frame)?;
     let value = exec::operand(req, frame, code, op.op1_type, op.op1);
     if crate::generator::forced_close(req, generator) {
-        let thrown = crate::api::raising::throw_error(
-            req,
-            ClassId::ERROR,
-            "Cannot use \"yield from\" in a force-closed generator",
-        );
-        exec::free_operand(req, frame, op.op1_type, op.op1);
-        return threw(req, frame, &thrown);
+        let thrown = error(req, "Cannot use \"yield from\" in a force-closed generator");
+        return threw_freeing(req, frame, op, &thrown);
     }
     let owned = match op.op1_type {
         OperandKind::Tmp | OperandKind::Var => req.take_slot(frame, op.op1),
@@ -28015,12 +27601,7 @@ pub(crate) fn yield_from<T: Tier>(
     let out = (op.out_type != OperandKind::Unused).then_some(op.out);
     match crate::generator::yield_from(req, generator, owned, op.op1_type == OperandKind::Const) {
         Ok(crate::generator::From::Finished(retval)) => {
-            match out {
-                Some(slot) => {
-                    req.replace_slot(frame, slot, retval);
-                }
-                None => req.release(retval),
-            }
+            handed_back(req, out.map(|slot| (frame, slot)), retval);
             Ok(advance(req, frame))
         }
         Ok(crate::generator::From::Delegating) => {
@@ -28116,29 +27697,26 @@ pub(crate) fn make_ref<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let out = op.out;
-    let held = if op.op1_type == OperandKind::Cv {
-        let cell = match cv_reference(req, frame, op.op1) {
-            Ok(cell) => cell,
-            Err(thrown) => return threw(req, frame, &thrown),
-        };
+    let made = made_ref(req, frame, op);
+    computed_into(req, frame, op, made)
+}
+
+/// The reference [`make_ref`] answers: the CV's cell with one more
+/// owner, a place's cell bound, or what the `VAR` already holds.
+fn made_ref(req: &mut Request, frame: FrameRef, op: &Opline) -> Result<Value, Thrown> {
+    if op.op1_type == OperandKind::Cv {
+        let cell = cv_reference(req, frame, op.op1)?;
         req.addref(&cell.as_value());
-        cell.as_value()
-    } else {
-        let at = op.op1;
-        let place = req
-            .slot_ptr(frame, at)
-            .and_then(|slot| slot.read().as_indirect());
-        match place {
-            Some(place) => match bound_at(req, place) {
-                Ok(bound) => bound,
-                Err(thrown) => return threw(req, frame, &thrown),
-            },
-            None => req.take_slot(frame, at),
-        }
-    };
-    req.replace_slot(frame, out, held);
-    Ok(advance(req, frame))
+        return Ok(cell.as_value());
+    }
+    let at = op.op1;
+    let place = req
+        .slot_ptr(frame, at)
+        .and_then(|slot| slot.read().as_indirect());
+    match place {
+        Some(place) => bound_at(req, place),
+        None => Ok(req.take_slot(frame, at)),
+    }
 }
 
 /// The inline paths of the handlers that have one (design §5.8), named
