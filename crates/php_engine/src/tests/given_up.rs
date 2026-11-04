@@ -122,6 +122,35 @@ fn a_test_past_the_table_a_handler_gave_up_finds_nothing() {
     assert_eq!(stdout, "not set\nempty\n");
 }
 
+/// The table a write held goes first and takes the key's last owner with
+/// it, and a destructor it serves lays another key down in that block, so
+/// the key is held past the table to ask what `$a` holds now.
+#[test]
+fn a_write_finds_no_entry_by_a_key_a_handler_gave_up() {
+    let stdout = served(
+        "<?php\n\
+         class D { function __destruct() { $GLOBALS['a']['n' . $GLOBALS['j']] = 'kept'; } }\n\
+         set_error_handler(function () { unset($GLOBALS['a'][$GLOBALS['k']]); $GLOBALS['a'][9] = 1; $GLOBALS['k'] = 0; return true; });\n\
+         $i = 7; $j = 8; $k = 'n' . $i; $a = [$k => 1, 9 => new D];\n\
+         $a[$k] = $u; foreach ($a as $at => $v) { echo $at, \"=\", $v, \"\\n\"; }\n",
+    );
+    assert_eq!(stdout, "9=1\nn8=kept\n");
+}
+
+/// The table going serves a destructor that moves what the handler's
+/// write left, so the entry is found after it.
+#[test]
+fn a_write_finds_its_entry_past_a_destructor_of_the_table_it_held() {
+    let stdout = served(
+        "<?php\n\
+         class D { function __destruct() { for ($i = 0; $i < 200; $i++) { $GLOBALS['a'][\"g$i\"] = $i; } } }\n\
+         set_error_handler(function () { $GLOBALS['a'][1] = 1; return true; });\n\
+         $i = 7; $a = ['x' . $i, new D]; $a[0] = $u;\n\
+         $n = 0; foreach ($a as $v) { $n++; } echo $n, $a[0] === null ? ' null' : ' kept', \"\\n\";\n",
+    );
+    assert_eq!(stdout, "202 null\n");
+}
+
 #[test]
 fn a_typed_cell_a_conversion_gave_up_takes_nothing() {
     let stdout = served(
