@@ -68,8 +68,8 @@ mod strings;
 mod tail;
 mod view;
 pub use crossing::{
-    at_room, current, free_cv, free_operands, free_this, laid, make_ref, primed, release,
-    return_entry, room, stack, stack_room, stand,
+    at_room, current, free_cv, free_operands, free_this, laid, make_ref, nan_to_bool, primed,
+    release, return_entry, room, stack, stack_room, stand,
 };
 pub use dims::{dim_key, lookup_element};
 pub use frames::{
@@ -85,7 +85,7 @@ pub use sampled::{
     Building, Sample, building, building_call, class_number, class_published, native_returns,
     numbered_class, on_heap, sample, this_class, under_way,
 };
-pub use strings::{assign_concat, concat, rope_end, rope_open, rope_push};
+pub use strings::{assign_concat, concat, rope_end, rope_open, rope_push, string_offset};
 pub use view::{
     Bindings, CachedSlot, CallSite, CalledFunction, CalledMethod, CalleeSlot, Declaration, Epoch,
     FuncRef, Held, MapPtrRaw, PropertySlot, UnitView, epoch, epoch_state, frame_cache, func,
@@ -1948,6 +1948,36 @@ pub fn dispatch_held(
             "InternalError: a handler compiled code serves in its frame went on elsewhere",
         )),
     }
+}
+
+/// The value of the constant the `FETCH_CONSTANT` at `at` in `held`
+/// names, nobody's to release, for compiled code to copy where its slot
+/// did not answer, as php's code calls `zend_jit_get_constant`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:8150-8156`): `frame` stood at `at`;
+/// `UNDEF` where the name answers nothing or a handler of its deprecation
+/// threw, which is left pending.
+///
+/// # Errors
+///
+/// An opline past the op array, which no compiled code hands.
+pub fn get_constant(
+    req: &mut Request,
+    frame: FrameRef,
+    at: OplineIdx,
+    held: Held<'_>,
+) -> Result<Zval, Fatal> {
+    let (code, at) = (held.code(), at.0);
+    req.vm_mut().stand(frame, at);
+    let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
+    Ok(
+        match crate::handlers::fetched::get_constant(req, frame, code, op) {
+            Ok(value) => value.to_zval(),
+            Err(thrown) => {
+                req.leave_pending(&thrown);
+                Zval::UNDEF
+            }
+        },
+    )
 }
 
 /// The native the call on top of the stack, `call`, is to, served from

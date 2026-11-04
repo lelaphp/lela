@@ -1263,6 +1263,32 @@ impl UnitView {
             .copied()
     }
 
+    /// The runtime-cache slot compiled code reads what the fetch `op` of
+    /// the op array `f` fetches from, as php's code reads
+    /// `CACHED_PTR(opline->extended_value)`: a `FETCH_CONSTANT`'s, and
+    /// a `FETCH_STATIC_PROP_R`'s over a name and a class php's trace
+    /// compiles it over (`Z/ext/opcache/jit/zend_jit_trace.c:6146-6152`) in
+    /// an op array every frame runs in one scope, whose slot answers each
+    /// frame alike ([`super::published::Func::fixes_scope`]); none for any
+    /// other opline and for a slot past its cache.
+    #[must_use]
+    pub fn fetched_slot(&self, f: FuncRef, op: &Opline) -> Option<MapPtrRaw> {
+        match op.opcode {
+            Opcode::FetchConstant => self.cache_slot(f, CacheSlot(op.extended_value)),
+            Opcode::FetchStaticPropR
+                if op.op1_type == OperandKind::Const
+                    && crate::exec::class_fixed(op.op2_type, op.op2)
+                    && self
+                        .epoch
+                        .func(f)
+                        .is_some_and(super::published::Func::fixes_scope) =>
+            {
+                self.cache_slot(f, crate::handlers::fetched::static_slot(op))
+            }
+            _ => None,
+        }
+    }
+
     /// The declared slot the property opline at `at` of the op array `f`
     /// names on an object of `class`; none unless
     /// [`UnitView::hold_place`] took it.

@@ -813,6 +813,9 @@ kernels! {
         CallNative => call_native(call: u32) -> Zval = tier::call_native;
         PopCall => pop_call() = tier::pop_call;
         Interrupt => interrupt() = tier::interrupted;
+        NanToBool => nan_to_bool() = tier::nan_to_bool;
+        StrOffset => str_offset(text: u64, key: u64, key_info: u32) -> Zval = tier::string_offset;
+        GetConstant => get_constant(func: u32) -> Zval = tier::get_constant;
     }
 }
 
@@ -1031,6 +1034,17 @@ fn free_this(req: &mut Request, on: On<'_, '_>) -> Result<(), Fatal> {
     Ok(())
 }
 
+/// The `nan_to_bool` kernel: the warning of a NAN whose truth compiled
+/// code reads, the frame stood at the opline first ([`tier::nan_to_bool`]),
+/// as php's cold arm saves the opline and calls
+/// `zend_jit_nan_coerced_to_type_warning`; what an error handler throws
+/// is left pending, which the wrapper answers as one.
+fn nan_to_bool(req: &mut Request, on: On<'_, '_>) -> Result<(), Fatal> {
+    standing(req, on.room, on.at)?;
+    tier::nan_to_bool(req);
+    Ok(())
+}
+
 /// The `identical` kernel: php's `zend_is_identical` of two zvals of a
 /// scalar kind or a string, one or zero, as compiled code compares two
 /// strings' bytes; it reads nothing of the request and stands no frame,
@@ -1130,6 +1144,31 @@ fn concat(
     let left = (zval(a, a_info), a_kind);
     let right = (zval(b, b_info), b_kind);
     Ok(tier::concat(req, left, right)?.unwrap_or(Zval::UNDEF))
+}
+
+/// The `get_constant` kernel: the value of the constant the
+/// `FETCH_CONSTANT` at `on.at` of the op array the engine numbers `func`
+/// names, where its slot did not answer ([`tier::get_constant`]); `UNDEF`
+/// where a throwable was left pending, which the wrapper answers as one.
+fn get_constant(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Zval, Fatal> {
+    let (frame, _) = found(req, on.room)?;
+    let (held, _) = held(on, func)?;
+    tier::get_constant(req, frame, on.at, held)
+}
+
+/// The `str_offset` kernel: the byte of the string at `text` the zval
+/// `key`, `key_info` names ([`tier::string_offset`]); `UNDEF` where the
+/// read left a throwable pending, which the wrapper answers as one.
+/// Compiled code stood the frame at the opline first.
+fn str_offset(
+    req: &mut Request,
+    _: On<'_, '_>,
+    text: u64,
+    key: u64,
+    key_info: u32,
+) -> Result<Zval, Fatal> {
+    let text = zval(text, u32::from(ZvalType::String as u8));
+    Ok(tier::string_offset(req, text, zval(key, key_info))?.unwrap_or(Zval::UNDEF))
 }
 
 /// The array at `array` and the key the zval `key`, `key_info` names in

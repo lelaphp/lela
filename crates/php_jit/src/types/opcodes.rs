@@ -694,17 +694,18 @@ pub(super) fn inline_may_leave(line: &Line) -> bool {
     if let Some(op) = arithmetic {
         return !super::cannot_raise(op, line.op2);
     }
-    matches!(
-        line.opcode,
-        Opcode::AssignOp
-            | Opcode::FetchDimR
-            | Opcode::FetchObjR
-            | Opcode::FetchObjW
-            | Opcode::InitFcall
-            | Opcode::InitFcallByName
-            | Opcode::InitNsFcallByName
-            | Opcode::SendValEx
-    )
+    line.imm != Imm::StrOffset
+        && matches!(
+            line.opcode,
+            Opcode::AssignOp
+                | Opcode::FetchDimR
+                | Opcode::FetchObjR
+                | Opcode::FetchObjW
+                | Opcode::InitFcall
+                | Opcode::InitFcallByName
+                | Opcode::InitNsFcallByName
+                | Opcode::SendValEx
+        )
 }
 
 /// One operand of an opline: its `op1`, its `op2`, its `OP_DATA`'s `op1`.
@@ -1658,7 +1659,9 @@ pub(super) fn within(opcode: Opcode, tag: ZvalType, op2: Operand) -> Option<With
         {
             Some(Within::Rerun)
         }
-        Opcode::FetchDimR | Opcode::FetchObjR => Some(Within::Fetched { missed: false }),
+        Opcode::FetchDimR | Opcode::FetchObjR | Opcode::FetchConstant => {
+            Some(Within::Fetched { missed: false })
+        }
         Opcode::FetchDimIs => Some(Within::Fetched {
             missed: tag != ZvalType::Null,
         }),

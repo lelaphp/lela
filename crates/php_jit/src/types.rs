@@ -434,6 +434,11 @@ pub(crate) enum Imm {
     /// `ZEND_FLF_HANDLER(opline)`, which compiled code hands the
     /// `frameless` kernel so it reads no opline.
     Frameless(FramelessAt),
+    /// A `FETCH_DIM_R` of a string's offset, which php's
+    /// `zend_jit_fetch_dim_read` calls a function of its own for
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:12720-12755`): no exit of its own
+    /// and no guard within, what it writes being a string.
+    StrOffset,
     /// The types a `TYPE_CHECK` asks for, its `extended_value`: one bit
     /// per type, `1 << IS_*`, php's `MAY_BE_*` mask.
     Mask(u32),

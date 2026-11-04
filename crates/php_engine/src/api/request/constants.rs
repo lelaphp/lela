@@ -90,20 +90,6 @@ struct ConstantRow {
 
 /// The request's rows of `EG(zend_constants)` and `PHP_SAPI`, whose
 /// fields no file but this one reads.
-/// Where a constant the table holds stands, what a `FETCH_CONSTANT`'s
-/// cache slot keeps once its first pass found it, as php's
-/// `CACHE_PTR(opline->extended_value, c)` keeps the `zend_constant`
-/// (#2438): `PHP_SAPI`, a row of the engine's declared table, or a row this
-/// request added, beside the generation of the request's rows it was
-/// found in, so a slot written before phpdbg's `run <file` replaced
-/// `STDIN` reads as unprimed after it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConstantAt {
-    Sapi,
-    Declared(u32),
-    Request { at: u32, generation: u32 },
-}
-
 /// `zend_hash_num_elements(EG(zend_constants))`, what a `ZEND_DEFINED`'s
 /// cache slot keeps for a name no constant answered
 /// (`ENCODE_SPECIAL_CACHE_NUM`, `Z/Zend/zend_vm_def.h:8880`), so a pass
@@ -586,6 +572,7 @@ impl Request {
                 self.free_row(row);
             }
         }
+        self.map.forget_constants();
         self.register_file_handles(true)
     }
 
@@ -637,42 +624,17 @@ impl Request {
     /// The constant the table holds under `name` as `FETCH_CONSTANT`
     /// finds it: where it stands, its value, and whether it is
     /// `CONST_DEPRECATED`, which php caches no slot for.
-    pub(crate) fn constant_found(&self, name: &[u8]) -> Option<(ConstantAt, Value, bool)> {
+    pub(crate) fn constant_found(&self, name: &[u8]) -> Option<(Value, bool)> {
         if name == b"PHP_SAPI" {
-            return Some((ConstantAt::Sapi, self.constants.sapi_constant, false));
+            return Some((self.constants.sapi_constant, false));
         }
-        if let Some((at, row)) = self.constants.find(name) {
-            let generation = self.constants.generation;
-            return Some((
-                ConstantAt::Request { at, generation },
-                row.value,
-                row.deprecated,
-            ));
+        if let Some((_, row)) = self.constants.find(name) {
+            return Some((row.value, row.deprecated));
         }
         let at = self.shared.constant_index(name)?;
         let value = self.shared.constant_at(at)?;
         let deprecated = self.shared.constant_deprecated(name).unwrap_or(false);
-        Some((
-            ConstantAt::Declared(u32::try_from(at).ok()?),
-            value,
-            deprecated,
-        ))
-    }
-
-    /// The value of the constant a slot found, none where the request's
-    /// rows moved since.
-    #[inline]
-    pub(crate) fn constant_at(&self, at: ConstantAt) -> Option<Value> {
-        match at {
-            ConstantAt::Sapi => Some(self.constants.sapi_constant),
-            ConstantAt::Declared(at) => self.shared.constant_at(usize::try_from(at).ok()?),
-            ConstantAt::Request { at, generation } => {
-                if generation != self.constants.generation {
-                    return None;
-                }
-                Some(self.constants.rows.get(usize::try_from(at).ok()?)?.value)
-            }
-        }
+        Some((value, deprecated))
     }
 
     /// How many constants the table holds as the request stands

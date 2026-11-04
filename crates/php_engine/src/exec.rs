@@ -1935,10 +1935,15 @@ pub(crate) enum Cached {
     /// Nothing written yet: the table is looked up on this pass.
     #[default]
     Unprimed = UNPRIMED,
-    /// The constant a `FETCH_CONSTANT` found on its first pass, where it
-    /// is not deprecated, or a `DEFINED` found, deprecated or not
-    /// (`zend_quick_get_constant`'s `CACHE_PTR`).
-    Constant(crate::api::request::ConstantAt),
+    /// The value of the constant a `FETCH_CONSTANT` found on its first
+    /// pass, where it is not deprecated, or a `DEFINED` found, deprecated
+    /// or not (`zend_quick_get_constant`'s `CACHE_PTR`): its row or the
+    /// engine's table keeps an owner of it to request end, as php's slot
+    /// points at `c->value`, and phpdbg's `run <file`, which takes rows
+    /// out, forgets every slot that keeps one
+    /// ([`RuntimeCaches::forget_constants`]). Compiled code reads it at
+    /// [`Cached::CONSTANT_AT`].
+    Constant(Value) = CONSTANT,
     /// The callee an `INIT_FCALL`, `INIT_FCALL_BY_NAME` or
     /// `INIT_NS_FCALL_BY_NAME` resolved on its first pass, where it is
     /// no user function.
@@ -1990,12 +1995,16 @@ pub(crate) enum Cached {
     /// `FETCH_CLASS`), and the property's row, which names its slot and
     /// its declaration. Written for no property a trait declares, whose
     /// every access is php's deprecation, and for no miss, so a class
-    /// declared after a pass is found by the next.
+    /// declared after a pass is found by the next. `place` is where the
+    /// slot stands, the `result` of php's pair, which stands as long as
+    /// the request does ([`crate::api::request::Request::static_place`]):
+    /// compiled code reads it at [`Cached::STATIC_PLACE_AT`].
     StaticProperty {
         class: ClassId,
         primed: PrimedFrom,
         info: crate::api::request::PropertyInfo,
-    },
+        place: usize,
+    } = STATIC_PROPERTY,
     /// The value a `FETCH_CLASS_CONSTANT` over a constant name read on
     /// its first pass, `CACHE_POLYMORPHIC_PTR(opline->extended_value,
     /// ce, value)` (`Z/Zend/zend_vm_def.h:6144`): the class it was read
@@ -2128,9 +2137,17 @@ pub(crate) fn callee_slot(slot: CacheSlot) -> CacheSlot {
 /// before the handler's first pass.
 pub(crate) const UNPRIMED: u32 = 0;
 
+/// [`Cached::Constant`]'s tag, which compiled code tests before it reads
+/// the value.
+pub(crate) const CONSTANT: u32 = 1;
+
 /// [`Cached::ClassAndCallee`]'s tag, which compiled code tests before it
 /// reads the pair.
 pub(crate) const CLASS_AND_CALLEE: u32 = 4;
+
+/// [`Cached::StaticProperty`]'s tag, which compiled code tests before it
+/// reads the place.
+pub(crate) const STATIC_PROPERTY: u32 = 5;
 
 /// [`Cached::Property`]'s tag, which compiled code tests before it reads
 /// the place.
@@ -2146,6 +2163,23 @@ pub(crate) struct PropertyPlace {
     pub(crate) offset: PropertyOffset,
     pub(crate) function: Option<Function>,
     pub(crate) scope: Option<ClassId>,
+}
+
+/// [`Cached::Constant`] as RFC 2195 lays it out.
+#[repr(C)]
+struct ConstantRepr {
+    tag: u32,
+    value: Value,
+}
+
+/// [`Cached::StaticProperty`] as RFC 2195 lays it out.
+#[repr(C)]
+struct StaticRepr {
+    tag: u32,
+    class: ClassId,
+    primed: PrimedFrom,
+    info: crate::api::request::PropertyInfo,
+    place: usize,
 }
 
 /// [`Cached::Property`] as RFC 2195 lays a variant of a `#[repr(u32)]`
@@ -2180,6 +2214,10 @@ struct DeclaredRepr {
 impl Cached {
     /// Where a slot's tag stands.
     pub(crate) const TAG_AT: usize = std::mem::offset_of!(PropertyRepr, tag);
+    /// Where [`Cached::Constant`]'s value stands in a slot, a zval.
+    pub(crate) const CONSTANT_AT: usize = std::mem::offset_of!(ConstantRepr, value);
+    /// Where [`Cached::StaticProperty`]'s place stands in a slot, a word.
+    pub(crate) const STATIC_PLACE_AT: usize = std::mem::offset_of!(StaticRepr, place);
     /// Where [`Cached::Property`]'s place stands in a slot.
     pub(crate) const PLACE_AT: usize = std::mem::offset_of!(PropertyRepr, place);
     /// Where [`Cached::ClassAndCallee`]'s class stands in a slot, its
@@ -2218,6 +2256,10 @@ impl PropertyOffset {
 // wider or more aligned than what it mirrors.
 const _: () = {
     assert!(size_of::<Cached>() == 40 && size_of::<Option<Cached>>() == 40);
+    assert!(size_of::<ConstantRepr>() <= size_of::<Cached>());
+    assert!(align_of::<ConstantRepr>() <= align_of::<Cached>());
+    assert!(size_of::<StaticRepr>() <= size_of::<Cached>());
+    assert!(align_of::<StaticRepr>() <= align_of::<Cached>());
     assert!(size_of::<PropertyRepr>() <= size_of::<Cached>());
     assert!(align_of::<PropertyRepr>() <= align_of::<Cached>());
     assert!(size_of::<PairRepr>() <= size_of::<Cached>());

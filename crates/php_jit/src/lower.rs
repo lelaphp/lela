@@ -790,11 +790,30 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::interrupted`); a hook's throw is the status's,
     /// and the timeout's fatal an exit.
     Interrupt,
+    /// `nan_to_bool(cx, frame, opline: u32)`: php's
+    /// `zend_jit_nan_coerced_to_type_warning`, the warning of a NAN whose
+    /// truth compiled code reads, the frame stood at the opline; what an
+    /// error handler throws is the status's
+    /// (`php_engine::tier::nan_to_bool`).
+    NanToBool,
+    /// `str_offset(cx, frame, opline: u32, text: u64, key: u64, key_info:
+    /// u32, read: *mut Zval)`: the byte of the string at `text` the zval
+    /// `key` names, php's `zend_jit_fetch_dim_str_offset_r_helper` and
+    /// `zend_jit_fetch_dim_str_r_helper`
+    /// (`php_engine::tier::string_offset`); a key refused is a throwable
+    /// pending, answered as one.
+    StrOffset,
+    /// `get_constant(cx, frame, opline: u32, func: u32, value: *mut
+    /// Zval)`: the value of the constant the opline names, where its slot
+    /// did not answer, php's `zend_jit_get_constant`
+    /// (`php_engine::tier::get_constant`); an undefined one is a
+    /// throwable pending, answered as one.
+    GetConstant,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 21] = [
+    pub(crate) const ALL: [Kernel; 24] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -816,6 +835,9 @@ impl Kernel {
         Kernel::CallNative,
         Kernel::PopCall,
         Kernel::Interrupt,
+        Kernel::NanToBool,
+        Kernel::StrOffset,
+        Kernel::GetConstant,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

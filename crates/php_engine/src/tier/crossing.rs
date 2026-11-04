@@ -188,6 +188,14 @@ pub fn free_this(req: &mut Request, frame: FrameRef) {
     }
 }
 
+/// `zend_nan_coerced_to_type_warning(_IS_BOOL)`: the warning of a NAN
+/// whose truth compiled code reads, in place of the one [`crate::ops::is_true`]
+/// raises for the interpreter, which an error handler may answer with a
+/// throw left pending.
+pub fn nan_to_bool(req: &mut Request) {
+    crate::api::raising::warning(req, "unexpected NAN value was coerced to bool");
+}
+
 /// `FREE_OP1` and `FREE_OP2` of the opline at `at` of `frame`, as the
 /// handler would have freed them had it finished, each where it is
 /// asked and a temporary: php's exit with `ZEND_JIT_EXIT_FREE_OP1` or

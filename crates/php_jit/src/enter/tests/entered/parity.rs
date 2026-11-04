@@ -244,6 +244,9 @@ fn compiled(ir: &TraceIr, step: bool) -> Option<Compiled> {
         Kernel::CallNative => (super::super::super::wrapped::call_native as *const ()).addr(),
         Kernel::PopCall => (super::super::super::wrapped::pop_call as *const ()).addr(),
         Kernel::Interrupt => (super::super::super::wrapped::interrupt as *const ()).addr(),
+        Kernel::NanToBool => (super::super::super::wrapped::nan_to_bool as *const ()).addr(),
+        Kernel::StrOffset => (super::super::super::wrapped::str_offset as *const ()).addr(),
+        Kernel::GetConstant => (super::super::super::wrapped::get_constant as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend

@@ -495,7 +495,7 @@ impl Emit<'_> {
     /// ```expect regime=jit-tracing process
     /// 0
     /// ```
-    fn copied_element(&mut self, element: Value, out: ValueId) -> Result<(), Abort> {
+    pub(super) fn copied_element(&mut self, element: Value, out: ValueId) -> Result<(), Abort> {
         let held = self.value(out)?;
         if held.home == Home::Register && Kind::of(held.types).is_some_and(Kind::carries) {
             return Err(mismatch(
@@ -589,6 +589,15 @@ impl Emit<'_> {
             word,
             info,
             constant: false,
+        })
+    }
+
+    /// The two words of the key `line`'s `op2` names, as a kernel that
+    /// reads it as a zval takes them.
+    pub(super) fn key_words(&mut self, at: OpId, line: &Line) -> Result<(Value, Value), Abort> {
+        Ok(match self.key_of(at, line)? {
+            Key::Long { word, .. } => (word, self.b.ins().iconst(I32, tag(ZvalType::Long))),
+            Key::Zval { word, info, .. } => (word, info),
         })
     }
 

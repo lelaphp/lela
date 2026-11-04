@@ -118,6 +118,36 @@ pub fn assign_concat(req: &mut Request, place: ZvalRef, right: Zval) {
     }
 }
 
+/// The byte of the string `text` that `key` names, a long or a string,
+/// as php's code calls `zend_jit_fetch_dim_str_offset_r_helper` and
+/// `zend_jit_fetch_dim_str_r_helper`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:12720-12755`):
+/// [`crate::ops::string_offset`], as the handler reads it, the frame
+/// stood at the opline; none where the key was refused, or a handler of
+/// the warning threw, which is left pending as the handler leaves it.
+///
+/// # Errors
+///
+/// A `text` that is no string, which no compiled code hands.
+pub fn string_offset(req: &mut Request, text: Zval, key: Zval) -> Result<Option<Zval>, Fatal> {
+    let text = text
+        .as_str()
+        .ok_or_else(|| Fatal::error("InternalError: compiled code read an offset of no string"))?;
+    let read = crate::ops::string_offset(
+        req,
+        PhpString::of(text),
+        &Value::of_slot(key),
+        crate::ops::DimRead::Warning,
+    );
+    Ok(match read {
+        Ok(byte) => Some(byte.to_zval()),
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            None
+        }
+    })
+}
+
 /// `CONCAT` or `FAST_CONCAT` of two strings, `left` of `left_kind`, with
 /// its owner where it is a temporary compiled code moved out of its slot
 /// and a view otherwise, and `right` a view, whose temporary compiled
