@@ -592,10 +592,51 @@ pub(crate) mod entered {
         }
     }
 
+    /// `f`'s body steps its first opline, `echo $u` of a variable never
+    /// set, through the `step` wrapper as [`Stepping`]'s does; the
+    /// warning its handler raises calls the error handler `h`, whose
+    /// body calls the panicking kernel.
+    struct SteppingIntoAPanic;
+
+    impl Plan for SteppingIntoAPanic {
+        fn body(req: &mut Request, frame: FrameRef, function: &[u8]) -> Option<Compiled> {
+            match function {
+                b"f" => Stepping::body(req, frame, function),
+                b"h" => Panicking::body(req, frame, b"inner"),
+                _ => None,
+            }
+        }
+    }
+
+    /// As [`SteppingIntoAPanic`], with `f`'s first opline served through
+    /// the `handle` wrapper, its handler alone, and the body leaving
+    /// past it through exit 0.
+    struct HandlingIntoAPanic;
+
+    impl Plan for HandlingIntoAPanic {
+        fn body(req: &mut Request, frame: FrameRef, function: &[u8]) -> Option<Compiled> {
+            match function {
+                b"f" => {
+                    let func = tier::func(req, frame).and_then(super::super::engine_offset)?;
+                    let kernel = (wrapped::handle as *const ()).addr();
+                    let words = answering(calling(kernel, 0, &[func], false), 0);
+                    Some(compiled(&words, vec![landing(1, Landing::PLAIN)]))
+                }
+                b"h" => Panicking::body(req, frame, b"inner"),
+                _ => None,
+            }
+        }
+    }
+
     /// What reached the request's boundary: the payload of the one panic
     /// that did, or what it wrote where none did.
     fn boundary(program: &str) -> Result<String, String> {
-        catch_unwind(AssertUnwindSafe(|| served::<Panicking>(program).0)).map_err(|payload| {
+        boundary_of::<Panicking>(program)
+    }
+
+    /// [`boundary`] under `P`'s bodies.
+    fn boundary_of<P: Plan>(program: &str) -> Result<String, String> {
+        catch_unwind(AssertUnwindSafe(|| served::<P>(program).0)).map_err(|payload| {
             payload
                 .downcast_ref::<&str>()
                 .map_or_else(|| "another payload".to_owned(), |s| (*s).to_owned())
@@ -625,6 +666,33 @@ pub(crate) mod entered {
             Err("the kernel panicked".to_owned())
         );
     }
+
+    /// The `step` kernel's crossing (#4087): a panic under the handler a
+    /// step serves, here in a trace of the error handler its warning
+    /// calls, is kept by that trace's wrapper, resumed by its `enter`
+    /// through the handler, caught at the `step` wrapper, and resumed by
+    /// `f`'s `enter`: one panic, the inner payload, at the boundary.
+    #[test]
+    fn a_panic_under_a_stepped_handler_reaches_the_boundary_once() {
+        assert_eq!(
+            boundary_of::<SteppingIntoAPanic>(UNDEFINED_ECHO),
+            Err("the kernel panicked".to_owned())
+        );
+    }
+
+    /// The `handle` kernel's crossing, as the `step` kernel's above.
+    #[test]
+    fn a_panic_under_a_handled_opline_reaches_the_boundary_once() {
+        assert_eq!(
+            boundary_of::<HandlingIntoAPanic>(UNDEFINED_ECHO),
+            Err("the kernel panicked".to_owned())
+        );
+    }
+
+    /// `f`, whose first opline echoes a variable never set, under the
+    /// error handler `h`.
+    const UNDEFINED_ECHO: &str = r#"function h() { echo "h"; return true; } set_error_handler('h');
+        function f() { echo $u; echo "after"; } f(); echo "end";"#;
 
     /// `f` stepped by the plan to its `FETCH_DIM_R` over a temporary
     /// array holding the one `D`, and a body that leaves at once through a

@@ -828,10 +828,13 @@ kernels! {
 /// handed over with no destructor called; one that did would be answered
 /// as a throw ([`answered`]) and unwound from a frame already returned,
 /// so it is refused as the internal error it is.
+///
+/// The frame is found by its room ([`found`]) and stood at `at` by the
+/// step itself.
 fn step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
-    let frame = standing(req, on.room, on.at)?;
+    let (frame, _) = found(req, on.room)?;
     let (held, epoch) = held(on, func)?;
-    match tier::step_held(req, frame, held, epoch)? {
+    match tier::step_held(req, frame, on.at, held, epoch)? {
         Stepped::Done if req.unwinding() => Err(internal(
             "a step that ended the serving a trace runs in left it unwinding",
         )),
@@ -847,9 +850,9 @@ fn step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
 /// stands after it is left to compiled code, which knows it, and a throw
 /// is the request's pending throwable, which the wrapper answers as one.
 fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
-    let frame = standing(req, on.room, on.at)?;
+    let (frame, _) = found(req, on.room)?;
     let (held, _) = held(on, func)?;
-    tier::dispatch_held(req, frame, held)
+    tier::dispatch_held(req, frame, on.at, held)
 }
 
 /// The `frameless` kernel: the native at `at` of the engine's
@@ -958,7 +961,7 @@ fn push_call(req: &mut Request, on: On<'_, '_>, func: u32, callee: u32) -> Resul
             ..refused
         });
     }
-    let stepped = tier::step_held(req, frame, held, epoch)?;
+    let stepped = tier::step_held(req, frame, on.at, held, epoch)?;
     stood(req, stepped, (frame, func), on.holding)
 }
 
@@ -1216,11 +1219,27 @@ fn at_place(req: &Request, room: Room, place: u32) -> FrameRef {
 /// opline the kernel serves: php's `SAVE_OPLINE()`, so what it raises is
 /// reported at that opline and a step serves it.
 fn standing(req: &mut Request, room: Room, at: OplineIdx) -> Result<FrameRef, Fatal> {
-    let frame = NonNull::new(room.0)
-        .and_then(|room| tier::at_room(req, room))
-        .ok_or_else(|| internal("a kernel was handed a room no frame on the stack has"))?;
+    let (frame, _) = found(req, room)?;
     tier::stand(req, frame, at);
     Ok(frame)
+}
+
+/// The frame whose room compiled code handed a kernel, and that room,
+/// not stood: for a kernel whose engine item stands it as it serves
+/// ([`tier::step_held`], [`tier::dispatch_held`]).
+#[inline]
+fn found(req: &Request, room: Room) -> Result<(FrameRef, NonNull<u8>), Fatal> {
+    NonNull::new(room.0)
+        .and_then(|room| Some((tier::at_room(req, room)?, room)))
+        .ok_or_else(unfound)
+}
+
+/// [`found`]'s `InternalError`, with no argument a kernel lays out on
+/// its way to the frame.
+#[cold]
+#[inline(never)]
+fn unfound() -> Fatal {
+    internal("a kernel was handed a room no frame on the stack has")
 }
 
 /// Where the interpreter stands after a step of `stepped`'s opline in
@@ -2079,7 +2098,10 @@ fn land(req: &mut Request, exit: &Exit) -> Result<FrameRef, Fatal> {
     Ok(frame)
 }
 
-/// The crossing's `InternalError`.
+/// The crossing's `InternalError`: out of line and cold, so a kernel
+/// lays nothing out for it on its way.
+#[cold]
+#[inline(never)]
 fn internal(why: &str) -> Fatal {
     Fatal::error(format!("InternalError: {why}"))
 }
