@@ -171,11 +171,11 @@ abi::FiberSwitchHandler
 abi::FileCache
 abi::FromArgument
 abi::FromArgument::BY_REF
+abi::FromArgument::DECLARED
 abi::FromArgument::MASK
 abi::FromArgument::PASSED
 abi::FromArgument::VARIADIC
 abi::FromArgument::accepts
-abi::FromArgument::declared
 abi::FromArgument::from_default
 abi::FromArgument::from_value
 abi::FromArgument::hold
@@ -191,12 +191,12 @@ abi::Instance::object
 abi::Instance::of
 abi::Instance::payload_mut
 abi::IntoConst
-abi::IntoConst::declared
+abi::IntoConst::DECLARED
 abi::IntoConst::value
 abi::IntoReturn
+abi::IntoReturn::DECLARED
 abi::IntoReturn::MASK
 abi::IntoReturn::UNDECLARED
-abi::IntoReturn::declared
 abi::IntoReturn::into_return
 abi::Iterable
 abi::IteratorElement
@@ -470,8 +470,10 @@ decl::ClassFlags
 decl::ClassKind
 decl::ConstDecl
 decl::ConstExpr
+decl::ConstExpr::binary
 decl::ConstExpr::line
 decl::ConstExpr::long
+decl::ConstExpr::string
 decl::ConstantName
 decl::ConstantName::fallback
 decl::ConstantName::resolved
@@ -484,6 +486,7 @@ decl::HookKind::name
 decl::IniDecl
 decl::MethodDecl
 decl::Name
+decl::Name::borrowed
 decl::NameKind
 decl::Parameter
 decl::Parameter::is_required

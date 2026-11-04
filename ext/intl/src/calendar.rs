@@ -1667,13 +1667,13 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
         // `Z_PARAM_STRING_OR_NULL` for up to two arguments and `"lll|lll"`
         // past them, where the stub declares `$timezoneOrYear`,
         // `$localeOrMonth` and the rest untyped.
-        let zone_type = Type::Union(vec![Type::Object, Type::String, Type::Null]);
+        let zone_type = Type::Union(vec![Type::Object, Type::String, Type::Null].into());
         let zone = match given.first() {
             Some(v) => Some(coerce_param(req, v, &zone_type, 1)?),
             None => None,
         };
         let locale = match given.get(1) {
-            Some(v) => coerce_param(req, v, &Type::Nullable(Box::new(Type::String)), 2)?,
+            Some(v) => coerce_param(req, v, &Type::Nullable(Box::new(Type::String).into()), 2)?,
             None => Value::null(),
         };
         if held(req, object).is_some() {
@@ -1754,12 +1754,15 @@ fn zone_argument(req: &mut Request, zone: Option<Value>) -> Result<ZoneArg, Thro
     let Some(zone) = zone else {
         return Ok(None);
     };
-    let zone_union = Type::Union(vec![
-        Type::Named(php_ext::decl::Name(b"IntlTimeZone".as_slice().into())),
-        Type::Named(php_ext::decl::Name(b"DateTimeZone".as_slice().into())),
-        Type::String,
-        Type::Null,
-    ]);
+    let zone_union = Type::Union(
+        vec![
+            Type::Named(php_ext::decl::Name(b"IntlTimeZone".as_slice().into())),
+            Type::Named(php_ext::decl::Name(b"DateTimeZone".as_slice().into())),
+            Type::String,
+            Type::Null,
+        ]
+        .into(),
+    );
     // The classes the constructor's `Z_PARAM_OBJ_OR_STR_OR_NULL` is sorted
     // into, where the stub declares `$timezoneOrYear` untyped.
     let held = coerce_param(req, &zone, &zone_union, 1)?;

@@ -5,6 +5,7 @@
 
 use std::any::Any;
 
+use php_heap::Bytes;
 use php_unit::decl::{ConstExpr, Type};
 
 use crate::api::__private::{NativeClass, NativeClassConst, NativeMethod, NativeProperty};
@@ -89,8 +90,8 @@ impl PropertyValue for bool {
 }
 impl PropertyValue for PhpString {
     type Const = &'static str;
-    fn const_expr(value: &str) -> ConstExpr {
-        ConstExpr::Str(value.as_bytes().into())
+    fn const_expr(value: &'static str) -> ConstExpr {
+        ConstExpr::Str(Bytes::borrowed(value.as_bytes()))
     }
 }
 impl PropertyValue for PhpArray {
@@ -193,7 +194,7 @@ impl ConstArray {
 /// as `zend_declare_typed_class_constant` declares one.
 pub trait IntoConst {
     /// The declared type, `None` for none.
-    fn declared() -> Option<Type>;
+    const DECLARED: Option<Type>;
     /// The value.
     fn value(&self) -> ConstExpr;
 }
@@ -201,9 +202,7 @@ pub trait IntoConst {
 macro_rules! into_const {
     ($t:ty, $ty:expr, |$v:ident| $make:expr) => {
         impl IntoConst for $t {
-            fn declared() -> Option<Type> {
-                Some($ty)
-            }
+            const DECLARED: Option<Type> = Some($ty);
             fn value(&self) -> ConstExpr {
                 let $v = self;
                 $make
@@ -215,7 +214,9 @@ into_const!(i64, Type::Int, |n| ConstExpr::long(*n));
 into_const!(i32, Type::Int, |n| ConstExpr::long(i64::from(*n)));
 into_const!(f64, Type::Float, |f| ConstExpr::Double(*f));
 into_const!(bool, Type::Bool, |b| ConstExpr::Bool(*b));
-into_const!(&str, Type::String, |s| ConstExpr::Str(s.as_bytes().into()));
+into_const!(&'static str, Type::String, |s| ConstExpr::Str(
+    Bytes::borrowed(s.as_bytes())
+));
 into_const!(String, Type::String, |s| ConstExpr::Str(
     s.as_bytes().into()
 ));
@@ -227,9 +228,7 @@ into_const!(ConstArray, Type::Array, |array| array.expr());
 /// A plain value with no declared type, for a constant php declares by
 /// value alone, `NULL` among them.
 impl IntoConst for ConstValue {
-    fn declared() -> Option<Type> {
-        None
-    }
+    const DECLARED: Option<Type> = None;
     fn value(&self) -> ConstExpr {
         self.expr()
     }
@@ -255,9 +254,7 @@ impl<T, V> Typed<T, V> {
 }
 
 impl<T: FromArgument, V: IntoConst> IntoConst for Typed<T, V> {
-    fn declared() -> Option<Type> {
-        T::declared()
-    }
+    const DECLARED: Option<Type> = T::DECLARED;
     fn value(&self) -> ConstExpr {
         self.value.value()
     }

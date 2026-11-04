@@ -2889,8 +2889,8 @@ impl crate::Heap {
     /// collector is already destroying, whose type it turned to
     /// `IS_NULL` (`rc_dtor_func`'s `zend_empty_destroy`); otherwise the
     /// table taken out of the root buffer and turned to `IS_NULL`
-    /// itself, every element released in order, a packed list's strings
-    /// before its first other counted value in one flat pass
+    /// itself, every element released in order, a table's strings and
+    /// keys before its first other counted value in one flat pass
     /// ([`Heap::array_destroy_flat`]) and the rest through `hooks`, with
     /// the table standing around each, every string key given up, then
     /// the iterators unregistered and the data and the header back to
@@ -3048,15 +3048,17 @@ impl crate::Heap {
     /// go of, and as much of its loop as serves no destructor: nothing for
     /// a table the cycle collector is destroying already, whose type it
     /// turned to `IS_NULL`; otherwise the table out of the root buffer and
-    /// turned to `IS_NULL`, then each slot of a packed list released in
-    /// place while it holds a string or no count, a string freed at its
-    /// last owner with no hooks, as `i_zval_ptr_dtor` reaches
-    /// `zend_string_destroy`. `None` where that was every element, and the
-    /// table goes back, its data and its header; otherwise the position
-    /// of the first other counted value, `0` of a hash, for
-    /// [`Heap::destroy`]'s walk to go on from. So `explode`'s list goes in
-    /// one pass, and a destructor still runs after the strings before it
-    /// are freed and before the ones after it, as php's one loop runs it.
+    /// turned to `IS_NULL`, then each slot of a packed list, or each
+    /// bucket of a hash that is not a tombstone, released in place while
+    /// it holds a string or no count, a string freed at its last owner
+    /// with no hooks, as `i_zval_ptr_dtor` reaches `zend_string_destroy`,
+    /// and a bucket's string key given up after its value. `None` where
+    /// that was every element, and the table goes back, its data and its
+    /// header; otherwise the position of the first other counted value,
+    /// its key not yet given up, for [`Heap::destroy`]'s walk to go on
+    /// from. So `explode`'s list and `preg_match`'s named groups go in one
+    /// pass, and a destructor still runs after the strings before it are
+    /// freed and before the ones after it, as php's one loop runs it.
     ///
     /// ```php
     /// $b = memory_get_usage();
@@ -3085,6 +3087,27 @@ impl crate::Heap {
     /// ```expect
     /// 576 416 32
     /// ```
+    ///
+    /// And of a hash, between string values under string keys, one key
+    /// another owner holds and one bucket a tombstone:
+    ///
+    /// ```php
+    /// class D { function __destruct() { $GLOBALS['at'] = memory_get_usage() - $GLOBALS['b']; } }
+    /// $b = $at = 0; new D;
+    /// $k = str_repeat('kept', 8);
+    /// $b = memory_get_usage();
+    /// $h = [$k => str_repeat('v', 40)];
+    /// foreach (['a', 'b', 'c', 'd'] as $c) { $h[str_repeat($c, 30)] = str_repeat($c, 40); }
+    /// unset($h[str_repeat('b', 30)]);
+    /// $h['obj'] = new D; $h[7] = str_repeat('t', 100); $h['n'] = 1.5;
+    /// $all = memory_get_usage() - $b;
+    /// $h = null;
+    /// $f = array_flip(explode(' ', 'one two three four five six')); $f = null;
+    /// echo $all, ' ', $at, ' ', memory_get_usage() - $b, ' ', strlen($k), "\n";
+    /// ```
+    /// ```expect
+    /// 1088 576 32 32
+    /// ```
     fn array_destroy_flat(&mut self, a: Arr) -> Option<u32> {
         if a.gc().kind() == ZvalType::Null as u32 {
             return None;
@@ -3093,22 +3116,43 @@ impl crate::Heap {
         a.gc().set_kind(ZvalType::Null);
         if a.is_packed() {
             for at in 0..a.num_used() {
-                let z = a.read_slot(at);
-                let Some(header) = z.counted() else {
-                    continue;
-                };
-                let Some(s) = z.as_str() else {
+                if !self.release_flat(a.read_slot(at)) {
                     return Some(at);
-                };
-                if Heap::give_up(header) == gc::Release::Last {
-                    self.free_string(s);
                 }
             }
         } else if !a.is_uninitialized() {
-            return Some(0);
+            for at in 0..a.num_used() {
+                let b = a.read_bucket(at);
+                if b.val.is_undef() {
+                    continue;
+                }
+                if !self.release_flat(b.val) {
+                    return Some(at);
+                }
+                if let Some(k) = b.key {
+                    self.release_string(k);
+                }
+            }
         }
         self.array_give_back(a);
         None
+    }
+
+    /// `i_zval_ptr_dtor` of an element whose release serves no
+    /// destructor: nothing for a value with no count, and a string given
+    /// up, freed at its last owner with no hooks. `false`, and nothing
+    /// done, for every other counted value, the walk's.
+    fn release_flat(&mut self, z: Zval) -> bool {
+        let Some(header) = z.counted() else {
+            return true;
+        };
+        let Some(s) = z.as_str() else {
+            return false;
+        };
+        if Heap::give_up(header) == gc::Release::Last {
+            self.free_string(s);
+        }
+        true
     }
 
     /// The end of `zend_array_destroy` once every element is released:
@@ -3826,6 +3870,58 @@ mod tests {
             assert!(matches!(nothing.heap.array_append(list, z), Ok(true)));
         }
         Heap::release(&mut nothing, Zval::array(list));
+        assert_eq!(
+            nothing.heap.memory_usage(false),
+            start,
+            "the strings before the nest, the nest and its own"
+        );
+    }
+
+    /// A hash of strings under string keys, `preg_match`'s named groups
+    /// and a row's shape, goes in one flat pass, a tombstone passed over,
+    /// the walk's room never taken up; a key or a value another owner
+    /// holds is left to it. A hash whose strings stand before a nest
+    /// hands the walk the nest's bucket, and everything goes with it.
+    #[test]
+    fn a_hash_of_strings_goes_without_the_walk() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let kept = nothing.heap.string(b"kept").expect("the string \"kept\"");
+        let hash = nothing.heap.array().expect("an array");
+        for (key, value) in [(&b"one"[..], &b"1"[..]), (b"two", b"2"), (b"three", b"3")] {
+            let key = nothing.heap.string(key).expect("a key");
+            let value = nothing.heap.string(value).expect("a value");
+            assert!(
+                Heap::array_update(&mut nothing, hash, Key::Str(key), Zval::string(value)).is_ok()
+            );
+            nothing.heap.release_string(key);
+        }
+        let two = nothing.heap.string(b"two").expect("the string \"two\"");
+        assert!(Heap::array_del(&mut nothing, hash, Key::Str(two)));
+        nothing.heap.release_string(two);
+        nothing.heap.addref(Zval::string(kept));
+        assert!(Heap::array_update(&mut nothing, hash, Key::Str(kept), Zval::string(kept)).is_ok());
+        assert!(Heap::array_update(&mut nothing, hash, Key::Long(7), Zval::long(7)).is_ok());
+        Heap::release(&mut nothing, Zval::array(hash));
+        assert_eq!(nothing.heap.destroying.capacity(), 0, "no walk");
+        assert_eq!(kept.refcount(), 1, "the other owner's string stands");
+
+        let hash = nothing.heap.array().expect("an array");
+        let inner = nothing.heap.array().expect("an array");
+        let nested = nothing.heap.string(b"nested").expect("a piece");
+        assert!(matches!(
+            nothing.heap.array_append(inner, Zval::string(nested)),
+            Ok(true)
+        ));
+        let at = nothing.heap.string(b"at").expect("a key");
+        assert!(Heap::array_update(&mut nothing, hash, Key::Str(at), Zval::string(kept)).is_ok());
+        assert!(
+            Heap::array_update(&mut nothing, hash, Key::Str(nested), Zval::array(inner)).is_ok()
+        );
+        assert!(Heap::array_update(&mut nothing, hash, Key::Long(7), Zval::long(1)).is_ok());
+        nothing.heap.release_string(at);
+        Heap::release(&mut nothing, Zval::array(hash));
         assert_eq!(
             nothing.heap.memory_usage(false),
             start,

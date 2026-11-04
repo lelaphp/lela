@@ -1220,7 +1220,7 @@ fn number_format(
     let num = coerce_param(
         req,
         &num.value(),
-        &Type::Union(vec![Type::Int, Type::Float]),
+        &Type::Union(vec![Type::Int, Type::Float].into()),
         1,
     )?;
     let decimals = decimals.hold(req)?;

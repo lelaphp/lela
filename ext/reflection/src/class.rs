@@ -2980,7 +2980,7 @@ impl ReflectionClass {
         let class = this_class(req, this.object())?;
         let (attributes, file) = req.symbols().class_decl(class).map_or_else(
             || (Vec::new(), None),
-            |decl| (decl.attributes.clone(), attr::declared_in(&decl.file.0)),
+            |decl| (decl.attributes.to_vec(), attr::declared_in(&decl.file.0)),
         );
         attr::reflect_attributes(
             req,
