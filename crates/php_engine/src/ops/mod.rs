@@ -2213,11 +2213,9 @@ pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
         return Ok(inline::number_value(n));
     }
     if b.double() == 0.0 {
-        return Err(throw_error(
-            req,
-            ClassId::DIVISION_BY_ZERO_ERROR,
-            "Division by zero",
-        ));
+        let ran_on = req.pending();
+        let thrown = throw_error(req, ClassId::DIVISION_BY_ZERO_ERROR, "Division by zero");
+        return Err(req.raised_over(thrown, ran_on));
     }
     // php's own case, "prevent overflow error/crash": `PHP_INT_MIN / -1`
     // as a double, the one other pair the rule refuses.
@@ -2298,7 +2296,7 @@ pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Va
     match inline::remainder(a, b) {
         Some(n) => Ok(Value::int(n)),
         // `zend_throw_exception_ex` (`Z/Zend/zend_operators.c:1550`).
-        None => Err(crate::api::raising::throw_exception_ex(
+        None => Err(thrown_over_pending(
             req,
             ClassId::DIVISION_BY_ZERO_ERROR,
             "Modulo by zero",
@@ -2428,7 +2426,7 @@ fn shift(req: &mut Request, side: Shift, left: &Value, right: &Value) -> Result<
     }
     match u64::try_from(b) {
         Ok(by) => Ok(Value::int(by_heap(a, by))),
-        Err(_) => Err(throw_exception_ex(
+        Err(_) => Err(thrown_over_pending(
             req,
             ClassId::ARITHMETIC_ERROR,
             "Bit shift by negative number",
@@ -2690,6 +2688,20 @@ pub(crate) fn bitwise_and(req: &mut Request, left: &Value, right: &Value) -> Res
 /// }
 /// Cannot perform bitwise not on stdClass
 /// ```
+///
+/// A handler that throws over a float's conversion writes nothing:
+///
+/// ```php
+/// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; throw new Exception("t"); });
+/// $f = 1.5;
+/// try { $x = ~$f; } catch (Exception $e) { echo "caught\n"; }
+/// var_dump(isset($x));
+/// ```
+/// ```expect
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// caught
+/// bool(false)
+/// ```
 pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     let value = value.deref();
     if let ValueRef::Object(o) = value.as_ref() {
@@ -2702,7 +2714,9 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
         return Ok(Value::int(!n));
     }
     if let Some(d) = value.as_float() {
-        return Ok(Value::int(!double_to_long(req, d)));
+        let long = double_to_long(req, d);
+        none_pending(req)?;
+        return Ok(Value::int(!long));
     }
     if let Some(s) = value.as_php_string() {
         let bytes = s.as_bytes();
@@ -2786,14 +2800,7 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
 /// pages 4096
 /// ```
 pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
-    let a = concat_operand(req, left)?;
-    let b = match concat_operand(req, right) {
-        Ok(b) => b,
-        Err(thrown) => {
-            req.release(Value::string(a));
-            return Err(thrown);
-        }
-    };
+    let (a, b) = concat_operands(req, left, right)?;
     // An empty side hands the other side on as it is, with the owner
     // `to_string` took, which is php's `ZVAL_COPY` of the other operand.
     if a.is_empty() {
@@ -2917,12 +2924,30 @@ pub(crate) fn join(req: &mut Request, a: PhpString, b: PhpString) -> Result<PhpS
 /// bool(false)
 /// ```
 fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
+    let array = value.deref().as_array().is_some();
     let text = to_string(req, value)?;
-    if req.is_pending() && value.deref().as_php_string().is_none() {
+    if array && req.is_pending() {
         req.release(Value::string(text));
         return Err(Thrown::of(None));
     }
     Ok(text)
+}
+
+/// Both sides of `concat_function` as strings, the left first, each with
+/// an owner.
+fn concat_operands(
+    req: &mut Request,
+    left: &Value,
+    right: &Value,
+) -> Result<(PhpString, PhpString), Thrown> {
+    let a = concat_operand(req, left)?;
+    match concat_operand(req, right) {
+        Ok(b) => Ok((a, b)),
+        Err(thrown) => {
+            req.release(Value::string(a));
+            Err(thrown)
+        }
+    }
 }
 
 /// `concat_function` where `result` is `op1` (`Z/Zend/zend_operators.c:2125`),
@@ -3141,17 +3166,12 @@ pub(crate) fn concat_assign(
     // anything, so the right side is read unowned only then: what a
     // destructor `vacate` served could free is held.
     let quiet = left.deref().as_php_string().is_some();
-    let a = concat_operand(req, left)?;
-    let right = right.deref();
-    let (b, owned) = match right.as_php_string() {
-        Some(b) if quiet => (b, false),
-        _ => match concat_operand(req, &right) {
-            Ok(b) => (b, true),
-            Err(thrown) => {
-                req.release(Value::string(a));
-                return Err(thrown);
-            }
-        },
+    let (a, b, owned) = match right.deref().as_php_string() {
+        Some(b) if quiet => (concat_operand(req, left)?, b, false),
+        _ => {
+            let (a, b) = concat_operands(req, left, right)?;
+            (a, b, true)
+        }
     };
     if a.len() > ZSTR_MAX_LEN - b.len() {
         req.release(Value::string(a));
@@ -6164,12 +6184,49 @@ fn operands<T>(
     right: &Value,
     convert: fn(&mut Request, &Value) -> Result<Option<T>, Thrown>,
 ) -> Result<(T, T), Thrown> {
-    let (left, right) = (&left.deref(), &right.deref());
-    if let Some(a) = convert(req, left)?
-        && let Some(b) = convert(req, right)?
-    {
-        return Ok((a, b));
-    }
+    let left = &left.deref();
+    let Some(a) = convert(req, left)? else {
+        return binop_error(req, operator, left, right);
+    };
+    let right = &right.deref();
+    let Some(b) = convert(req, right)? else {
+        return binop_error(req, operator, left, right);
+    };
+    Ok((a, b))
+}
+
+/// `zend_throw_exception_ex` from a kernel, what an undefined operand's
+/// handler threw standing pending as its `previous`.
+///
+/// ```php
+/// set_error_handler(function ($no, $msg) { throw new Exception("from the handler"); });
+/// foreach (['%', '/', '<<'] as $how) {
+///     $x = 5;
+///     try { match ($how) { '%' => $x % $u, '/' => $x / $u, '<<' => $x << (-1 + $u) }; }
+///     catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " over ", $e->getPrevious()?->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// DivisionByZeroError: Modulo by zero over from the handler
+/// DivisionByZeroError: Division by zero over from the handler
+/// Exception: from the handler over
+/// ```
+fn thrown_over_pending(req: &mut Request, class: ClassId, message: &str) -> Thrown {
+    let ran_on = req.pending();
+    let thrown = throw_exception_ex(req, class, message);
+    req.raised_over(thrown, ran_on)
+}
+
+/// `zend_binop_error` (`Z/Zend/zend_operators.c:1119`): nothing over a
+/// throwable that stands pending, and otherwise php's `TypeError`.
+fn binop_error<T>(
+    req: &mut Request,
+    operator: &str,
+    left: &Value,
+    right: &Value,
+) -> Result<T, Thrown> {
+    none_pending(req)?;
+    let right = &right.deref();
     let message = bytes!(
         b"Unsupported operand types: ",
         zval_type_name(req, left),
@@ -6208,12 +6265,67 @@ fn operands<T>(
 /// A non-numeric value encountered
 /// int(77)
 /// ```
+///
+/// A handler that throws over a float's or a string's conversion stops
+/// the operation on the way out:
+///
+/// ```php
+/// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; throw new Exception("t"); });
+/// foreach ([1.5, "1x", "1.5", "1.5x"] as $v) {
+///     foreach (['|', '%', '<<'] as $how) {
+///         $x = 5;
+///         try { match ($how) { '|' => $x |= $v, '%' => $x %= $v, '<<' => $x <<= $v }; }
+///         catch (Exception $e) { echo "caught\n"; }
+///         var_dump($x);
+///     }
+/// }
+/// ```
+/// ```expect
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// caught
+/// int(5)
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// caught
+/// int(5)
+/// [Implicit conversion from float 1.5 to int loses precision]
+/// caught
+/// int(5)
+/// [A non-numeric value encountered]
+/// caught
+/// int(5)
+/// [A non-numeric value encountered]
+/// caught
+/// int(5)
+/// [A non-numeric value encountered]
+/// caught
+/// int(5)
+/// [Implicit conversion from float-string "1.5" to int loses precision]
+/// caught
+/// int(5)
+/// [Implicit conversion from float-string "1.5" to int loses precision]
+/// caught
+/// int(5)
+/// [Implicit conversion from float-string "1.5" to int loses precision]
+/// caught
+/// int(5)
+/// [A non-numeric value encountered]
+/// caught
+/// int(5)
+/// [A non-numeric value encountered]
+/// caught
+/// int(5)
+/// [A non-numeric value encountered]
+/// caught
+/// int(5)
+/// ```
 pub(crate) fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
     if let Some(n) = value.as_int() {
         return Ok(Some(n));
     }
     if let Some(d) = value.as_float() {
-        return Ok(Some(double_to_long(req, d)));
+        let long = double_to_long(req, d);
+        none_pending(req)?;
+        return Ok(Some(long));
     }
     if let Some(s) = value.as_php_string() {
         let Some((number, trailing)) = numeric_prefix(s.as_bytes()) else {
@@ -6223,6 +6335,7 @@ pub(crate) fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, T
             Number::Long(n) => {
                 if trailing {
                     warning(req, "A non-numeric value encountered");
+                    none_pending(req)?;
                 }
                 return Ok(Some(n));
             }
@@ -6234,12 +6347,20 @@ pub(crate) fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, T
         let held = Owner::take(req, Value::string(s));
         if trailing {
             warning(req, "A non-numeric value encountered");
+            if let Err(thrown) = none_pending(req) {
+                held.let_go(req);
+                return Err(thrown);
+            }
         }
         let capped = dval_to_lval_cap(d);
-        if !long_compatible(d, capped) {
+        let lost = !long_compatible(d, capped);
+        if lost {
             float_string_loses_precision(req, s.as_bytes());
         }
         held.let_go(req);
+        if lost {
+            none_pending(req)?;
+        }
         return Ok(Some(capped));
     }
     if let Some(b) = value.as_bool() {
@@ -6249,9 +6370,9 @@ pub(crate) fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, T
         // `cast_object(zobj, &dst, IS_LONG)`, failing where the class
         // converts to nothing or threw.
         let table = req.object_handlers(o.heap());
-        return Ok(table
-            .cast_object(req, o, TypeTag::Int)?
-            .and_then(|c| c.as_int()));
+        let cast = table.cast_object(req, o, TypeTag::Int)?;
+        none_pending(req)?;
+        return Ok(cast.and_then(|c| c.as_int()));
     }
     Ok(match value.tag() {
         // php's `IS_NULL` arm; an uninitialised zval reads as null here.
@@ -6569,6 +6690,39 @@ fn object_number(req: &mut Request, object: PhpObject) -> Result<Option<Value>, 
 /// int(0)
 /// Unsupported operand types: stdClass + int
 /// ```
+///
+/// What a handler threw over the conversion stops the operation, so a
+/// compound assignment leaves its place as it stood, whatever kind of
+/// place it is. A warning of the undefined variable leaves the operation
+/// going: php tests for the throw at the conversion's own sites.
+///
+/// ```php
+/// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; throw new Exception("t"); });
+/// class O { public $p = 5; }
+/// $x = 5; try { $x += "1x"; } catch (Exception $e) { echo "caught\n"; } var_dump($x);
+/// $x = 5; try { $y = $x * "2x"; } catch (Exception $e) { echo "caught\n"; } var_dump($x, isset($y));
+/// $a = [5]; try { $a[0] -= "1x"; } catch (Exception $e) { echo "caught\n"; } var_dump($a[0]);
+/// $o = new O; try { $o->p += "1x"; } catch (Exception $e) { echo "caught\n"; } var_dump($o->p);
+/// $x = 5; try { $x *= $undefined; } catch (Exception $e) { echo "caught\n"; } var_dump($x);
+/// ```
+/// ```expect
+/// [A non-numeric value encountered]
+/// caught
+/// int(5)
+/// [A non-numeric value encountered]
+/// caught
+/// int(5)
+/// bool(false)
+/// [A non-numeric value encountered]
+/// caught
+/// int(5)
+/// [A non-numeric value encountered]
+/// caught
+/// int(5)
+/// [Undefined variable $undefined]
+/// caught
+/// int(0)
+/// ```
 fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown> {
     if let Some(n) = value.as_int() {
         return Ok(Some(Number::Long(n)));
@@ -6582,6 +6736,7 @@ fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown>
         };
         if trailing {
             warning(req, "A non-numeric value encountered");
+            none_pending(req)?;
         }
         return Ok(Some(number));
     }
@@ -6589,7 +6744,9 @@ fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown>
         return Ok(Some(Number::Long(i64::from(b))));
     }
     if let Some(o) = value.as_object() {
-        return Ok(object_number(req, o)?.and_then(|c| match c.as_ref() {
+        let number = object_number(req, o)?;
+        none_pending(req)?;
+        return Ok(number.and_then(|c| match c.as_ref() {
             ValueRef::Int(n) => Some(Number::Long(n)),
             ValueRef::Float(d) => Some(Number::Double(d)),
             _ => None,
