@@ -1412,7 +1412,17 @@ impl UnitView {
     /// [`UnitView::hold_call`] took: a function's, and a method's of each
     /// called scope ([`super::PlainCall::scope`]).
     pub fn calls_of(&self, f: FuncRef, count: u32) -> impl Iterator<Item = &super::PlainCall> {
-        (self.calls.iter()).filter(move |call| call.callee() == Some(f) && call.count() == count)
+        (self.calls.iter()).filter(move |call| {
+            call.callee() == Some(f) && call.count() == count && !call.is_closure()
+        })
+    }
+
+    /// The plain call of a closure over the op array `f` names, with
+    /// `count` arguments, [`UnitView::hold_call`] took.
+    #[must_use]
+    pub fn closure_call(&self, f: FuncRef, count: u32) -> Option<&super::PlainCall> {
+        (self.calls.iter())
+            .find(|call| call.callee() == Some(f) && call.count() == count && call.is_closure())
     }
 
     /// The plain call to the native named `name`, lowered, with `count`

@@ -1232,6 +1232,11 @@ impl CallInfo {
         self.set(Self::LAID_ENTRY, false);
     }
 
+    #[inline]
+    pub(crate) fn own_cache(self) -> bool {
+        self.0 & Self::OWN_CACHE != 0
+    }
+
     pub(crate) fn set_own_cache(&mut self, on: bool) {
         self.set(Self::OWN_CACHE, on);
     }

@@ -16,7 +16,10 @@
 //! at the leave a frame that holds a receiver, a closure, an annex or arguments
 //! past its parameters, one a native's call made, one off the top page,
 //! or a caller's slot that holds a counted value. None takes an exit of
-//! its own: php's code takes none there.
+//! its own: php's code takes none there, past the call by a name whose
+//! slot holds another function ([`Emit::named_guard`]). A closure's push
+//! is the `push_call` kernel's, whose payload no offset here reads; what
+//! follows it is written here as for any other call.
 
 use std::num::NonZeroU32;
 

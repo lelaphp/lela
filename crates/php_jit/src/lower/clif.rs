@@ -3366,6 +3366,10 @@ impl<'a> Emit<'a> {
                 Some((plain, room)) => self.push_in_place(at, line, plain, room),
                 None => Err(mismatch("a method's call in place with no call held")),
             },
+            Opcode::InitDynamicCall => {
+                self.spill_operands(line)?;
+                self.push_call(at, line)
+            }
             _ => Err(mismatch("an inline opline the lowering does not serve")),
         }
     }
