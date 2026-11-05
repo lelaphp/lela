@@ -5286,23 +5286,19 @@ fn constant_value(
     php_ext::call::class_constant(req, scope, &constant.name.0)
 }
 
-/// The property `name` names in the class's info table: the class's
-/// own or a parent's non-private one, with the class that declares it.
+/// The property `name` names in the class's info table, its linked
+/// `ce->properties_info`, with the class that declares it: the class's
+/// own, a parent's or an interface's, a row another class declared
+/// private hiding the name as php's `property_info->ce == ce` test does.
 fn property_named(
     req: &mut Request,
     class: ClassId,
     name: &[u8],
 ) -> Option<(ClassId, PropertyDecl)> {
-    for (depth, at) in class_chain(req, class).into_iter().enumerate() {
-        let found =
-            req.symbols().class_decl(at)?.properties.iter().find(|p| {
-                &*p.name.0 == name && (depth == 0 || p.visibility != Visibility::Private)
-            });
-        if let Some(property) = found {
-            return Some((at, property.clone()));
-        }
-    }
-    None
+    let row = req.symbols().property_info_row(class, name)?;
+    let (declaring, property) = (row.declaring(), req.symbols().row_property_info(row)?);
+    (declaring == class || property.visibility != Visibility::Private)
+        .then(|| (declaring, property.clone()))
 }
 
 // -------------------------------------------------- ReflectionClass::__toString
