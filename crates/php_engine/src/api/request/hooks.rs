@@ -1192,7 +1192,7 @@ impl Request {
                 // with no `get` hook whose slot nothing wrote is no row.
                 if hooked.get.is_none()
                     && self
-                        .declared_slot(class, &row.name)
+                        .declared_slot(class, &row.name[..])
                         .is_none_or(|placed| object.heap().slot(placed.slot).is_undef())
                 {
                     continue;

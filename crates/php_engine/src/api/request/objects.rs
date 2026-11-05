@@ -2168,7 +2168,7 @@ impl Request {
             return table.write_property(self, object, name, value);
         }
         let silent = self.serves_accessor(object.class(), super::Accessor::Set);
-        let slot = match self.declared_slot_for_write(object, &bytes, "modify", silent) {
+        let slot = match self.declared_slot_for_write(object, &bytes[..], "modify", silent) {
             Ok(placed) => placed.map(|(slot, _)| slot),
             Err(thrown) => return self.refused_write(name, value, thrown),
         };

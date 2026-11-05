@@ -1216,9 +1216,9 @@ fn resolve(scope: &Scope<'_>, name: &[u8]) -> Vec<u8> {
 /// `zend_type_to_string_resolved` prints.
 fn resolved(ty: &Type, scope: &Scope<'_>) -> Type {
     match ty {
-        Type::SelfClass => Type::Named(Name(scope.name.into())),
+        Type::SelfClass => Type::named(Name(scope.name.into())),
         Type::ParentClass => match scope.parent {
-            Some(parent) => Type::Named(Name(parent.into())),
+            Some(parent) => Type::named(Name(parent.into())),
             None => Type::ParentClass,
         },
         Type::Nullable(inner) => Type::Nullable(Box::new(resolved(inner, scope)).into()),
@@ -2709,7 +2709,7 @@ impl<'a, H: Copy> Linker<'a, H> {
     ) -> Status {
         let fe = shape(fe, fe_scope);
         let proto = shape(proto, proto_scope);
-        if proto.mask == Type::MAY_BE_ANY && fe.mask & MAY_BE_VOID == 0 {
+        if proto.mask == php_unit::decl::MAY_BE_ANY && fe.mask & MAY_BE_VOID == 0 {
             return Status::Success;
         }
         let mut added = fe.mask & !proto.mask;
@@ -2818,7 +2818,7 @@ impl<'a, H: Copy> Linker<'a, H> {
             };
             let local = match (&fe_arg.ty, &proto_arg.ty) {
                 (None, _) => Status::Success,
-                (Some(ty), _) if ty.mask() == Type::MAY_BE_ANY => Status::Success,
+                (Some(ty), _) if ty.mask() == php_unit::decl::MAY_BE_ANY => Status::Success,
                 (Some(_), None) => Status::Error,
                 (Some(fe_ty), Some(proto_ty)) => {
                     self.covariant(child, proto_scope, proto_ty, fe_scope, fe_ty)

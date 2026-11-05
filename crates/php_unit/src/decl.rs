@@ -27,6 +27,85 @@ impl Name {
     }
 }
 
+/// A class a declared type names: `ZEND_TYPE_NAME`, the name as the
+/// compiler resolved it or a native spelled it, and the class cache of
+/// the string php would hold there (`zend_alloc_ce_cache`), which a
+/// file's compile hands it as the unit enters the engine's table
+/// ([`crate::Unit::each_type_name`]). The cache is a number, the same one
+/// wherever the type is copied; the class stands in the request's map
+/// table, never here. A native's name and a request-only unit's carry
+/// none, as php's plain string under opcache carries none, and are looked
+/// up. A cache says nothing of what a type is, so two names of the same
+/// bytes are one type whatever each carries.
+#[derive(Clone)]
+pub struct TypeName {
+    pub(crate) name: Name,
+    class_cache: Option<php_heap::ClassCache>,
+}
+
+impl TypeName {
+    /// `name`, with no class cache yet.
+    #[must_use]
+    pub const fn new(name: Name) -> TypeName {
+        TypeName {
+            name,
+            class_cache: None,
+        }
+    }
+
+    /// The name, as a `const` reads it, where no `Deref` runs.
+    #[must_use]
+    pub const fn name(&self) -> &Name {
+        &self.name
+    }
+
+    /// `ZSTR_HAS_CE_CACHE`: the class cache of the name, where it has one.
+    #[inline]
+    #[must_use]
+    pub const fn class_cache(&self) -> Option<php_heap::ClassCache> {
+        self.class_cache
+    }
+
+    /// The name given the class cache `cache`.
+    pub fn set_class_cache(&mut self, cache: Option<php_heap::ClassCache>) {
+        self.class_cache = cache;
+    }
+}
+
+impl std::ops::Deref for TypeName {
+    type Target = Name;
+
+    fn deref(&self) -> &Name {
+        &self.name
+    }
+}
+
+impl From<Name> for TypeName {
+    fn from(name: Name) -> TypeName {
+        TypeName::new(name)
+    }
+}
+
+impl std::fmt::Debug for TypeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.name.fmt(f)
+    }
+}
+
+impl PartialEq for TypeName {
+    fn eq(&self, other: &TypeName) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for TypeName {}
+
+impl std::hash::Hash for TypeName {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
+}
+
 mod list;
 pub use list::{Boxed, List};
 
@@ -68,6 +147,12 @@ impl<'a> Bare<'a> {
 
 impl<'a> From<&'a Name> for Bare<'a> {
     fn from(name: &'a Name) -> Bare<'a> {
+        Bare(&name.0)
+    }
+}
+
+impl<'a> From<&'a TypeName> for Bare<'a> {
+    fn from(name: &'a TypeName) -> Bare<'a> {
         Bare(&name.0)
     }
 }
@@ -330,17 +415,23 @@ pub enum Type {
     /// `self` and `parent`, resolved at link time.
     SelfClass,
     ParentClass,
-    Named(Name),
+    Named(TypeName),
     Nullable(Boxed<Type>),
     Union(List<Type>),
     Intersection(List<Type>),
 }
 
+/// `MAY_BE_ANY` (`Z/Zend/zend_type_info.h:35`): the bit of every `IS_*`
+/// a value can be, which is the mask a parameter with no declared type
+/// carries in a `RECV`'s `op2`.
+pub const MAY_BE_ANY: u32 = 0x3fe;
+
 impl Type {
-    /// `MAY_BE_ANY` (`Z/Zend/zend_type_info.h:35`): the bit of every
-    /// `IS_*` a value can be, which is the mask a parameter with no
-    /// declared type carries in a `RECV`'s `op2`.
-    pub const MAY_BE_ANY: u32 = 0x3fe;
+    /// The class `name` names as a type, as a native spells it.
+    #[must_use]
+    pub const fn named(name: Name) -> Type {
+        Type::Named(TypeName::new(name))
+    }
 
     /// `ZEND_TYPE_PURE_MASK` (`Z/Zend/zend_types.h:284`): the `1 <<
     /// IS_*` of every builtin this type accepts, which a `RECV`'s `op2`
@@ -352,7 +443,7 @@ impl Type {
     #[must_use]
     pub fn mask(&self) -> u32 {
         match self {
-            Type::Mixed => Type::MAY_BE_ANY,
+            Type::Mixed => MAY_BE_ANY,
             Type::Void => 1 << 14,
             Type::Never => 1 << 17,
             Type::Null => 1 << 1,

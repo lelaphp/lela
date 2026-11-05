@@ -295,7 +295,7 @@ pub(super) fn params(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<Para
             };
             let typed = match parameter {
                 Some(p) => p.ty.is_some(),
-                None => op.opcode == Opcode::Recv && op.op2 != Type::MAY_BE_ANY,
+                None => op.opcode == Opcode::Recv && op.op2 != php_unit::decl::MAY_BE_ANY,
             };
             Some(Param {
                 cv: op.out,

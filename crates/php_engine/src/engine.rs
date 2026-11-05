@@ -1962,7 +1962,7 @@ impl Shared {
     ) -> Fresh {
         let mut strings = self.interned.strings();
         let mut home = PermanentStrings::new(&self.interned.names, &mut strings, heap);
-        let unit = compile(
+        let mut unit = compile(
             source,
             origin,
             self.compile_ini(),
@@ -1978,7 +1978,7 @@ impl Shared {
             !(unit.as_ref().ok()).is_some_and(php_compile::values::holds_counted_value),
             "a unit for every request holds a counted value"
         );
-        if let Ok(unit) = &unit {
+        if let Ok(unit) = &mut unit {
             home.name_classes(unit);
         }
         let answers = home.settle(strings_kept(&unit));
@@ -2238,8 +2238,8 @@ impl Shared {
         let mut strings = self.interned.strings();
         let mut home =
             PermanentStrings::new(&self.interned.names, &mut strings, CompileHeap::Engine);
-        let unit = crate::unit_cache::decode(body, &mut home);
-        if let Some(unit) = &unit {
+        let mut unit = crate::unit_cache::decode(body, &mut home);
+        if let Some(unit) = &mut unit {
             home.name_classes(unit);
         }
         home.settle(unit.is_some());
@@ -4422,17 +4422,44 @@ impl<'a> PermanentStrings<'a> {
         }
     }
 
-    /// Each class `unit` declares by name named a class's, so the string
-    /// the compile made of it takes a class cache as it is published, as
-    /// `zend_compile_class_decl` allocates one on `ce->name`
-    /// (`Z/Zend/zend_compile.c:9305`); an anonymous class's name, which
-    /// holds a NUL, takes none.
-    fn name_classes(&mut self, unit: &Unit) {
+    /// `zend_alloc_ce_cache` over each name `unit` holds of a class: a
+    /// class's it declares, as `zend_compile_class_decl` allocates one on
+    /// `ce->name` (`Z/Zend/zend_compile.c:9305`), an anonymous class's
+    /// name, which holds a NUL, taking none; and each its declared types
+    /// write, as `zend_compile_single_typename` does, whose name carries
+    /// the cache from here on ([`php_unit::decl::TypeName`]). The string a
+    /// type's name takes is one opcache's `zend_persist_type` stores:
+    ///
+    /// ```php
+    /// $n = fn () => opcache_get_status()['interned_strings_usage']['number_of_strings'];
+    /// $f = sys_get_temp_dir() . '/ty-' . getmypid() . '.php';
+    /// file_put_contents($f, "<?php\nfunction nt(Zork\\Quux \$x, ?Blorp\\Ding \$y): Fnord\\Glim|Trag\\Halt { return \$x; }\nclass NT { public Prop\\Typed \$p; }\n");
+    /// touch($f, time() - 60); $before = $n(); include $f; echo $n() - $before, "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 8
+    /// ```
+    fn name_classes(&mut self, unit: &mut Unit) {
         for decl in &unit.classes {
             if !decl.name.0.contains(&0) {
-                self.made.class_name(&decl.name.0);
+                self.class_cache(&decl.name.0);
             }
         }
+        unit.each_type_name(&mut |name| name.set_class_cache(self.class_cache(&name.0)));
+    }
+
+    /// The class cache of `name`, one a name startup interned carries or
+    /// the unit table's; none where the table refuses a string for it,
+    /// which leaves the name to its lookup.
+    fn class_cache(&mut self, name: &[u8]) -> Option<php_heap::ClassCache> {
+        if let Some(held) = self.names.find(name) {
+            return held.ce_cache();
+        }
+        self.strings
+            .class_cache(&mut self.made, name)
+            .ok()
+            .flatten()
     }
 
     /// The compile ended: the request's copies given back, as opcache's

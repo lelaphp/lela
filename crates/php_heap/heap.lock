@@ -65,6 +65,8 @@ Bytes::borrowed
 CallStack
 ChunkCache
 ChunkCache::new
+ClassCache
+ClassCache::offset
 CountingSystem
 CountingSystem::allocations
 CountingSystem::watch
@@ -369,7 +371,6 @@ ParseArena::alloc_slice_copy
 ParseArena::allocated_bytes
 ParseArena::reset
 Pending
-Pending::class_name
 Pending::constant_array
 Pending::give_back
 Pending::hold
@@ -450,6 +451,7 @@ Str::put_byte
 Str::refcount
 Strings
 Strings::beside
+Strings::class_cache
 Strings::count
 Strings::find
 Strings::intern_known
