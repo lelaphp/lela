@@ -63,6 +63,50 @@ enum DynamicWrite {
     Absent(Owner<PhpString>, Owner<Value>),
 }
 
+/// A property's name as `zend_hash_find` takes it: a string, whose hash
+/// is `ZSTR_H`, or bytes a native spelled, hashed where a table asks.
+#[derive(Clone, Copy)]
+pub(crate) enum PropertyName<'a> {
+    String(PhpString),
+    Bytes(&'a [u8]),
+}
+
+impl PropertyName<'_> {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            PropertyName::String(name) => name.as_bytes(),
+            PropertyName::Bytes(name) => name,
+        }
+    }
+
+    fn hash(self) -> u64 {
+        match self {
+            PropertyName::String(name) => name.heap().hash(),
+            PropertyName::Bytes(name) => php_heap::Str::hash_of(name),
+        }
+    }
+}
+
+impl<'a> From<&'a [u8]> for PropertyName<'a> {
+    fn from(name: &'a [u8]) -> PropertyName<'a> {
+        PropertyName::Bytes(name)
+    }
+}
+
+impl From<PhpString> for PropertyName<'_> {
+    fn from(name: PhpString) -> Self {
+        PropertyName::String(name)
+    }
+}
+
+impl From<&Value> for PropertyName<'_> {
+    /// A name operand, which a fetch has made a string by now.
+    fn from(name: &Value) -> Self {
+        name.as_php_string()
+            .map_or(PropertyName::Bytes(b""), PropertyName::String)
+    }
+}
+
 /// What [`Request::find_property_info`] found for a name in a class's
 /// `ce->properties_info`.
 #[derive(Clone, Copy)]
@@ -531,15 +575,15 @@ impl Request {
     pub(crate) fn cacheable_offset(
         &self,
         object: PhpObject,
-        name: &[u8],
+        name: PhpString,
     ) -> Option<crate::exec::PropertyOffset> {
         let class = object.class();
         let table = self.own_handlers(class).map(ObjectHandlers::properties);
         if table == Some(PropertyAccess::Own) {
             return None;
         }
-        let found = self.find_property_info(class, name);
-        let offset = self.offset_of(class, name, found, self.class_hooks(class));
+        let found = self.find_property_info(class, name.into());
+        let offset = self.offset_of(class, name.as_bytes(), found, self.class_hooks(class));
         // A table of its own that serves properties as `Std` does, an
         // enum's (`zend_enum_object_handlers`, std's but for `clone_obj`
         // and `compare`, `Z/Zend/zend_enum.c:168-170`), caches a name it
@@ -889,7 +933,7 @@ impl Request {
     /// `zend_get_property_offset` reads it ([`Found`]); none where no
     /// class of the chain declares it.
     fn placing(&self, class: ClassId, name: &[u8]) -> Option<Found<'_>> {
-        match self.find_property_info(class, name) {
+        match self.find_property_info(class, name.into()) {
             InfoFound::Row(found) => Some(found),
             InfoFound::Absent => None,
             InfoFound::Unrecorded => self.placing_by_slots(class, name),
@@ -962,7 +1006,11 @@ impl Request {
     /// int(43)
     /// string(3) "foo"
     /// ```
-    pub(super) fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<DeclaredSlot> {
+    pub(super) fn declared_slot<'a>(
+        &self,
+        class: ClassId,
+        name: impl Into<PropertyName<'a>>,
+    ) -> Option<DeclaredSlot> {
         self.place_property(class, name).slot()
     }
 
@@ -971,8 +1019,13 @@ impl Request {
     /// ([`Placement`]): the one find of `ce->properties_info`, the scope
     /// read only where the row's flags ask for it, and the visibility
     /// measured once.
-    pub(super) fn place_property(&self, class: ClassId, name: &[u8]) -> Placement {
-        self.place_found(class, name, self.find_property_info(class, name))
+    pub(super) fn place_property<'a>(
+        &self,
+        class: ClassId,
+        name: impl Into<PropertyName<'a>>,
+    ) -> Placement {
+        let name = name.into();
+        self.place_found(class, name.bytes(), self.find_property_info(class, name))
     }
 
     /// [`Request::place_property`] from what the find answered.
@@ -1164,7 +1217,7 @@ impl Request {
     /// record in one find ([`Request::find_property_info`]), and the
     /// chain's declarations walked only for a class with no record.
     fn chain_declaration(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, &PropertyDecl)> {
-        match self.find_property_info(class, name) {
+        match self.find_property_info(class, name.into()) {
             InfoFound::Row(found) => return Some((found.info.declaring, found.property)),
             InfoFound::Absent => return None,
             InfoFound::Unrecorded => {}
@@ -1551,7 +1604,7 @@ impl Request {
     /// keeps across what writes the request and reads the declaration
     /// through again ([`Request::property_decl`]).
     pub(crate) fn property_info(&self, class: ClassId, name: &[u8]) -> Option<PropertyInfo> {
-        match self.find_property_info(class, name) {
+        match self.find_property_info(class, name.into()) {
             InfoFound::Row(found) => Some(found.info),
             InfoFound::Absent | InfoFound::Unrecorded => None,
         }
@@ -1563,18 +1616,9 @@ impl Request {
     /// which class of the chain declares a name, instance or `static`,
     /// private or not, or that none does and the name is a dynamic
     /// property's, with no class's declarations walked.
-    fn find_property_info(&self, class: ClassId, name: &[u8]) -> InfoFound<'_> {
-        self.find_property_row(class, name, || php_heap::Str::hash_of(name))
-    }
-
-    fn find_property_row(
-        &self,
-        class: ClassId,
-        name: &[u8],
-        hash: impl FnOnce() -> u64,
-    ) -> InfoFound<'_> {
+    fn find_property_info(&self, class: ClassId, name: PropertyName<'_>) -> InfoFound<'_> {
         match self.properties_info(class) {
-            Some(table) => self.find_in(table, name, hash),
+            Some(table) => self.find_in(table, name.bytes(), || name.hash()),
             None => InfoFound::Unrecorded,
         }
     }
@@ -2738,6 +2782,34 @@ impl Request {
         name: &[u8],
         read: PropertyRead,
     ) -> Result<Owner<Value>, Thrown> {
+        self.read_named(object, name.into(), read)
+    }
+
+    /// `zobj->handlers->read_property` over a name operand, a string:
+    /// a table that serves its class's properties as the standard
+    /// handlers do reads with the hash the string carries, as php's
+    /// handler takes the `zend_string`, and any other its own way.
+    pub(crate) fn read_operand_property(
+        &mut self,
+        object: PhpObject,
+        name: &Value,
+        read: PropertyRead,
+    ) -> Result<Owner<Value>, Thrown> {
+        let table = self.object_handlers(object.heap());
+        if table.properties() == PropertyAccess::Standard {
+            return self.read_named(object, name.into(), read);
+        }
+        table.read_property(self, object, name.as_str_bytes().unwrap_or_default(), read)
+    }
+
+    /// [`Request::read_property`] over a name that may carry its hash.
+    fn read_named(
+        &mut self,
+        object: PhpObject,
+        key: PropertyName<'_>,
+        read: PropertyRead,
+    ) -> Result<Owner<Value>, Thrown> {
+        let name = key.bytes();
         let silent = read == PropertyRead::Silent;
         // What nothing holds is `null`, quietly, under `BP_VAR_IS` and
         // `BP_VAR_UNSET`; only the first asks `__isset`.
@@ -2754,7 +2826,7 @@ impl Request {
         // read, so a slot that holds a value is placed and returned
         // without a lookup.
         let mut wrong = false;
-        let placement = self.place_property(class, name);
+        let placement = self.place_property(class, key);
         if let Some(placed) = placement.slot() {
             if matches!(placement, Placement::Reached(_)) {
                 let z = o.slot(placed.slot);
@@ -2766,7 +2838,7 @@ impl Request {
                 // initialised and read instead (`uninit_error`).
                 if self.lazy_slot(o, placed.slot) {
                     let instance = self.lazy_init(object)?;
-                    return self.read_property(instance, name, read);
+                    return self.read_named(instance, key, read);
                 }
                 // `IS_PROP_UNINIT`: a typed slot nothing has written
                 // skips `__get` and is the uninitialised-access error; one
@@ -2808,7 +2880,7 @@ impl Request {
         if let Some(instance) = self.lazy_instance(o)
             && self.guard_word(instance, name) & guard_bit != 0
         {
-            return self.read_property(instance, name, read);
+            return self.read_named(instance, key, read);
         }
         // `/* magic isset */`: under `BP_VAR_IS` a class with a
         // `__isset` is asked first, and the `__get` after it only where
@@ -2846,10 +2918,10 @@ impl Request {
             let guarded = getter.is_some() || issetter.is_some();
             if guarded && self.guard_word(instance, name) & guard_bit == 0 {
                 return self.guarded(instance, name, guard_bit, |req| {
-                    req.read_property(instance, name, read)
+                    req.read_named(instance, key, read)
                 });
             }
-            return self.read_property(instance, name, read);
+            return self.read_named(instance, key, read);
         }
         if !quiet {
             self.undefined_property(class, name);
@@ -2990,15 +3062,16 @@ impl Request {
     /// #0 {main}
     ///   thrown in %s on line 4
     /// ```
-    pub(crate) fn declared_slot_for_write(
+    pub(crate) fn declared_slot_for_write<'a>(
         &mut self,
         object: PhpObject,
-        name: &[u8],
+        name: impl Into<PropertyName<'a>>,
         operation: &str,
         silent: bool,
     ) -> Result<Option<(u32, bool)>, Thrown> {
+        let name = name.into();
         let placement = self.place_property(object.class(), name);
-        self.slot_for_write(object, name, placement, operation, silent)
+        self.slot_for_write(object, name.bytes(), placement, operation, silent)
     }
 
     /// [`Request::declared_slot_for_write`] over the placement the
@@ -3467,7 +3540,7 @@ impl Request {
                 return self.refused_write(name, value, thrown);
             }
         }
-        let placed = self.declared_slot(class, name.as_bytes());
+        let placed = self.declared_slot(class, *name);
         if let Some(p) = placed.as_ref()
             && self.reaches(p)
         {
@@ -3543,7 +3616,7 @@ impl Request {
         }
         // `write_std_property`'s set-visibility arm, which the write a
         // `__set` makes on its own property, under the guard, meets.
-        if let Some(placed) = self.declared_slot(class, &bytes)
+        if let Some(placed) = self.declared_slot(class, &bytes[..])
             && !placed.readonly
             && let Some(thrown) = self.set_refusal(&placed, &bytes, "modify")
         {
@@ -3664,7 +3737,7 @@ impl Request {
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let o = object.heap();
-        if let Some(placed) = self.declared_slot(object.class(), name.as_bytes()) {
+        if let Some(placed) = self.declared_slot(object.class(), *name) {
             let value = if placed.ty.typed() {
                 let Some(typed) = self.typed_property_at(object.class(), placed.slot) else {
                     value.give_up(self);

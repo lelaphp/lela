@@ -5134,7 +5134,7 @@ fn return_mask_holds(slots: &[Zval], code: &OpArray, op: &Opline) -> bool {
     // `MAY_BE_ANY` keeps the codes a value can have: an `IS_INDIRECT`
     // would test bit 12, which is `callable`'s.
     let code_bit = 1u32 << (returned.kind() as u32);
-    code.return_mask & php_unit::decl::Type::MAY_BE_ANY & code_bit != 0
+    code.return_mask & php_unit::decl::MAY_BE_ANY & code_bit != 0
 }
 
 /// [`verify_return_type`] past its mask, the frame stood at `at`
@@ -9418,9 +9418,9 @@ fn prime_constant(
 ) {
     if op.op2_type == OperandKind::Const
         && req.cached_property(frame, slot, object.class()).is_none()
-        && let Some(bytes) = name.as_str_bytes()
+        && let Some(name) = name.as_php_string()
     {
-        req.prime_property(frame, slot, object, bytes);
+        req.prime_property(frame, slot, object, name);
     }
 }
 
@@ -9707,10 +9707,7 @@ fn fetch_obj(
     let read = if let Some(object) = container.as_object() {
         name.name(req, frame, code, op).and_then(|name| {
             prime_constant(req, frame, op, property_cache_slot(op), object, &name);
-            let name = name.as_str_bytes().unwrap_or_default();
-            let table = req.object_handlers(object.heap());
-            table
-                .read_property(req, object, name, fetch)
+            req.read_operand_property(object, &name, fetch)
                 .map(Owner::hand_on)
         })
     } else if fetch == PropertyRead::Warning {
@@ -10629,7 +10626,7 @@ fn property_place_on(
             return place_threw(req, frame, op, thrown);
         }
         PropertyPlace::Std => {
-            req.declared_slot_for_write(object, &name, "indirectly modify", false)
+            req.declared_slot_for_write(object, name_value, "indirectly modify", false)
         }
     };
     let at = match placed {
@@ -16267,7 +16264,7 @@ fn assign_property(
         // guard stands.
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Set);
-            req.declared_slot_for_write(object, bytes, "modify", silent)
+            req.declared_slot_for_write(object, name, "modify", silent)
         }
     });
     let placed = match placed {

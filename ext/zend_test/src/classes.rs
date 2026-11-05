@@ -123,7 +123,7 @@ fn named_union(names: &[&[u8]]) -> Type {
     Type::Union(
         names
             .iter()
-            .map(|name| Type::Named(Name((*name).into())))
+            .map(|name| Type::named(Name((*name).into())))
             .collect(),
     )
 }
@@ -132,7 +132,7 @@ fn intersection(names: &[&[u8]]) -> Type {
     Type::Intersection(
         names
             .iter()
-            .map(|name| Type::Named(Name((*name).into())))
+            .map(|name| Type::named(Name((*name).into())))
             .collect(),
     )
 }
