@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, RequestConstants, SourceKind, StackLimit};
 use php_heap::{Intern, Strings, Zval};
-use php_link::{Exact, Folded, Indexed, LinkedClass, NameMap, Names};
+use php_link::{Exact, Folded, FoldedHash, Indexed, LinkedClass, NameMap, Names};
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, IniDecl, MethodDecl, Name,
     ParameterDefault, Type,
@@ -1290,9 +1290,15 @@ impl ClassKeys {
     /// `zend_hash_find(CG(class_table), lcname)` over `classes`, the rows
     /// the keys were made over.
     fn find(&self, classes: &[ClassDecl], name: &[u8]) -> Option<ClassId> {
-        match self.names.find(classes, name) {
+        self.find_hashed(classes, FoldedHash::of(name), name)
+    }
+
+    /// [`ClassKeys::find`] by the hash `name` was taken at, which a
+    /// lookup that goes on to the request's tables holds on to.
+    fn find_hashed(&self, classes: &[ClassDecl], hash: FoldedHash, name: &[u8]) -> Option<ClassId> {
+        match self.names.find_hashed(classes, hash, name) {
             Some(at) => u32::try_from(at).ok().map(ClassId),
-            None => self.aliases.find(name).copied(),
+            None => self.aliases.find_hashed(hash, name).copied(),
         }
     }
 }
@@ -2461,6 +2467,11 @@ impl Shared {
     /// lcname)` over the table startup leaves.
     pub(crate) fn class_at(&self, name: &[u8]) -> Option<ClassId> {
         self.class_keys.find(&self.classes, name)
+    }
+
+    /// [`Shared::class_at`] by the hash `name` was taken at.
+    pub(crate) fn class_hashed(&self, hash: FoldedHash, name: &[u8]) -> Option<ClassId> {
+        self.class_keys.find_hashed(&self.classes, hash, name)
     }
 }
 

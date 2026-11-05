@@ -1030,7 +1030,36 @@ impl Reader {
 
     /// `zip_source_zip_file_create` past the stat, for an unchanged
     /// entry read whole: decryption, then decompression, then the CRC,
-    /// each opened as libzip opens it.
+    /// each opened as libzip opens it. A password meets the decryption
+    /// layer of an entry that has one, so a plain entry under a default
+    /// password reads as it is, and encrypting one in place copies it:
+    ///
+    /// ```php
+    /// foreach ([ZipArchive::EM_AES_128, ZipArchive::EM_AES_256, ZipArchive::EM_TRAD_PKWARE] as $method) {
+    ///     $z = new ZipArchive; $z->open('plain-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    ///     $z->addFromString('f', 'lorum ipsum'); $z->close();
+    ///     $z->open('plain-witness.zip'); $z->setPassword('pw'); var_dump($z->getFromIndex(0), $z->setEncryptionIndex(0, $method), $z->close());
+    ///     $z->open('plain-witness.zip'); $z->setPassword('pw'); var_dump($z->statIndex(0)['encryption_method'], $z->getFromIndex(0)); $z->close();
+    /// }
+    /// unlink('plain-witness.zip');
+    /// ```
+    /// ```expect
+    /// string(11) "lorum ipsum"
+    /// bool(true)
+    /// bool(true)
+    /// int(257)
+    /// string(11) "lorum ipsum"
+    /// string(11) "lorum ipsum"
+    /// bool(true)
+    /// bool(true)
+    /// int(259)
+    /// string(11) "lorum ipsum"
+    /// string(11) "lorum ipsum"
+    /// bool(true)
+    /// bool(true)
+    /// int(1)
+    /// string(11) "lorum ipsum"
+    /// ```
     pub(crate) fn decoded(
         window: impl FnOnce() -> Result<Window, Status>,
         l: &Layers<'_>,
@@ -1039,11 +1068,9 @@ impl Reader {
         // The password the decryption layer is opened with, where one is
         // given; a method it has no layer for is refused.
         let key = match (l.password, encryption) {
-            (None, _) => None,
+            (None | Some(_), Encryption::None) | (None, _) => None,
             (Some(p), Encryption::Pkware | Encryption::Aes(_)) => Some(p),
-            (Some(_), Encryption::None | Encryption::Unknown) => {
-                return Err(Status::new(Er::Encrnotsupp));
-            }
+            (Some(_), Encryption::Unknown) => return Err(Status::new(Er::Encrnotsupp)),
         };
         let decrypt = key.is_some();
         supported(l.method)?;

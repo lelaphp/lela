@@ -25,7 +25,7 @@ use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
 use crate::api::abi::GcTable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpObject, Resource, Value};
+use crate::api::values::{ClassId, PhpObject, PhpString, Resource, Value};
 pub use crate::engine::Standard;
 use crate::engine::{OutputSink, RequestDescription, Shared};
 use crate::exec::{self, Vm};
@@ -451,6 +451,9 @@ pub struct Request {
     /// ([`classes::ce_cache`]), laid down empty with the request, as
     /// `zend_map_ptr_reset` lays php's table ([`Request::ce_cached`]).
     ce_caches: php_heap::MapTable<Option<ClassId>>,
+    /// `ce->name` of each class asked after whose name is an engine's
+    /// string ([`Request::class_name_string`]).
+    class_names: ClassNames,
     /// The classes the units this request served declared, each the
     /// unit that holds it and the index of its declaration, in the
     /// order declared: the rows a `ClassId` of the request's own counts
@@ -938,6 +941,49 @@ pub(crate) struct Declared {
     bound: Bound,
 }
 
+/// The strings classes are named by, by class: what `ce->name` is to a
+/// `zend_class_entry`, kept beside the classes here since a published
+/// class's row is shared between threads and a string is not `Sync`.
+/// Only a string of the engine's table stands here, which outlives the
+/// request; a class a request-only unit declares is read by its name, as
+/// that unit's strings can go before the request does.
+#[derive(Default)]
+pub(crate) struct ClassNames {
+    /// By the number of a class every request shares.
+    published: Vec<Option<PhpString>>,
+    /// By the place of a class among the request's own.
+    own: Vec<Option<PhpString>>,
+}
+
+impl ClassNames {
+    /// The string `class` is named by, where it was kept.
+    fn get(&self, class: ClassId) -> Option<PhpString> {
+        if let Some(at) = class.local_at() {
+            return self.own.get(at).copied().flatten();
+        }
+        let at = usize::try_from(class.published_number()?).ok()?;
+        self.published.get(at).copied().flatten()
+    }
+
+    /// `name` kept as the string `class` is named by.
+    fn keep(&mut self, class: ClassId, name: PhpString) {
+        let published = class
+            .published_number()
+            .and_then(|number| usize::try_from(number).ok());
+        let (column, at) = match (class.local_at(), published) {
+            (Some(at), _) => (&mut self.own, at),
+            (None, Some(at)) => (&mut self.published, at),
+            (None, None) => return,
+        };
+        if column.len() <= at {
+            column.resize(at + 1, None);
+        }
+        if let Some(slot) = column.get_mut(at) {
+            *slot = Some(name);
+        }
+    }
+}
+
 /// What binding a declared class settled once, for every lookup after
 /// to read rather than walk ([`Request::bind_members`]).
 #[derive(Default)]
@@ -1266,6 +1312,7 @@ impl Request {
             returned: Value::null(),
             declared: tables.classes,
             ce_caches: php_heap::MapTable::new(),
+            class_names: ClassNames::default(),
             own_classes: Vec::new(),
             arena,
             classes: classes::Classes::default(),

@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=92adf5f69cc602d3dc1a0df0f6e1b0a915f4d2c8b05b8c7ed297f57cc18b956b out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
+<!-- /computed in=9ae0c511ed2089420a88ec0267a90c73c8f145ac0b7347d79484333806615579 out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
 
 ## What makes the third engine special?
 
@@ -89,7 +89,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=e532e9673fecfe61559f6bf5669afac055c435ca9d53d80948aa10dd6b0205b3 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=346f36f2adce681fd5d56e23769f4334c290e581b406fe1c8d9a27a09ae75875 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -118,16 +118,16 @@ third-engine-design.md
 | heap | heap.lock | 570 |  |
 | process | process.lock | 41 |  |
 | unit | unit.lock | 185 |  |
-| link | link.lock | 65 |  |
+| link | link.lock | 69 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1550 | 1550 |
+| api | api.lock | 1550 | 1700 |
 | sapi | sapi.lock | 60 |  |
 | tier | tier.lock | 237 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 40 |  |
 | harness | xtask.lock | 448 |  |
 
-<!-- /computed in=f1676e1ded4c2b9997dbbf6ed9010b185c231abba17c74d986b848584d96e223 out=13da3babb2c9e76cf8305e27862e411c45883ad8724f97e67467ce1fbc089729 -->
+<!-- /computed in=7a685efe94ad0de38c44a862746ef0e643d4e06b4ec689d6c4349ff8e1b0174e out=dee42d5e1d4cfedb94b653fc7180ab636a43f86a8b2d1ca512257bde8257297c -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

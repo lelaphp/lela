@@ -95,7 +95,7 @@ use php_ext::raising::{
 };
 use php_ext::request::{
     MAXPATHLEN, Notification, NotifyCode, OptionAnswer, Request, Resolve, Stream, StreamCtx,
-    StreamOption, Streams as _, Whence,
+    StreamOption, Streams as _, Unresolved, Whence,
 };
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef};
@@ -1106,12 +1106,35 @@ fn stream_get_line(
 /// bool(false)
 /// bool(false)
 /// ```
+///
+/// An `include_path` entry of a wrapper is the wrapper's `url_stat`, the
+/// path answered as it was joined; a throw of `url_stat` leaves the walk.
+///
+/// ```php
+/// class W { public $context; function url_stat($path, $flags) { if (str_contains($path, 'boom')) throw new Exception("stat failed"); return str_contains($path, 'known') ? ['mode' => 0100644] : false; } }
+/// stream_wrapper_register('vw', 'W');
+/// set_include_path('vw://root/a' . PATH_SEPARATOR . '.');
+/// var_dump(stream_resolve_include_path('path/known.php'), stream_resolve_include_path('path/other.php'));
+/// try { stream_resolve_include_path('boom'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(26) "vw://root/a/path/known.php"
+/// bool(false)
+/// stat failed
+/// ```
 #[php_function]
 fn stream_resolve_include_path(
     req: &mut Request,
     filename: Path,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let filename = filename.0.as_bytes().to_vec();
+    // `zend_resolve_path`, which answers a regular file or a wrapper's
+    // path; the walk below is what it leaves, a directory.
+    match req.code_mut().resolve_path(&filename) {
+        Ok(path) => return Ok(OrFalse::Value(PhpString::new(req, &path)?)),
+        Err(Unresolved::Threw(thrown)) => return Err(thrown),
+        Err(Unresolved::Missing(_) | Unresolved::Url(_)) => {}
+    }
     let cwd = req.environment().cwd().as_os_str().as_bytes().to_vec();
     let realpath = |req: &mut Request, path: &[u8]| {
         let base: &[u8] = if path.first() == Some(&b'/') {

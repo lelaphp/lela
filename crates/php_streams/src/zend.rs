@@ -284,7 +284,7 @@ fn resolve_path(req: &mut Request, written: &[u8]) -> Result<Vec<u8>, Unresolved
                     Ok(path) => return Ok(path),
                     Err(reason) => last = Unresolved::Missing(reason),
                 },
-                _ => match req.url_stat_quiet(&candidate, false).map(UrlStat::found) {
+                _ => match req.wrapper_url_stat(&candidate).map(UrlStat::found) {
                     Ok(Some(_)) => return Ok(candidate),
                     Err(thrown) if thrown.exception().is_some() => {
                         return Err(Unresolved::Threw(thrown));

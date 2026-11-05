@@ -4594,11 +4594,19 @@ fn verified_arg(
     let Some(ty) = function
         .and_then(|function| req.symbols().function_decl(function))
         .and_then(|decl| decl.parameters.get(at))
-        .and_then(|parameter| parameter.ty.clone())
+        .and_then(|parameter| parameter.ty.as_ref())
     else {
         return Ok(None);
     };
-    if crate::api::coerce::holds(req, argument, &ty, req.frame_scopes(frame)) {
+    // The declared type is read where the request holds it, and copied
+    // only for what goes on past a value it holds as it stands.
+    let scopes = req.frame_scopes(frame);
+    let held = crate::api::coerce::holding(req, argument, ty, scopes);
+    if held == crate::api::coerce::Holding::Yes {
+        return Ok(None);
+    }
+    let ty = ty.clone();
+    if held.resolve(req, argument, scopes) {
         return Ok(None);
     }
     let strict = req.caller_strict_types(frame);
@@ -5031,6 +5039,44 @@ fn collect_variadics(req: &mut Request, frame: FrameRef, op: &Opline) -> Result<
 /// ```expect
 /// s(): Return value must be of type string, int returned
 /// ```
+///
+/// A handler that throws at an undefined variable's warning leaves with
+/// what it threw, and no `TypeError` is made over it:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// function f(): string { return $u; }
+/// try { f(); } catch (Throwable $e) { var_dump($e::class, $e->getMessage(), $e->getPrevious()); }
+/// ```
+/// ```expect
+/// string(9) "Exception"
+/// string(21) "Undefined variable $u"
+/// NULL
+/// ```
+///
+/// A coercion that throws is the `TypeError`, what it threw its
+/// `previous`, where an argument's would leave with what it threw:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// class S { function __toString(): string { throw new LogicException("ts"); } }
+/// function i(): int { return "1.5"; }
+/// function d(): int { return 1.5; }
+/// function s(): string { return new S; }
+/// function a(int $x) {}
+/// foreach (['i', 'd', 's', fn () => a("1.5")] as $f) {
+///     try { var_dump($f()); } catch (Throwable $e) { for (; $e; $e = $e->getPrevious()) { echo $e::class, ": ", $e->getMessage(), "\n"; } }
+/// }
+/// ```
+/// ```expect
+/// TypeError: i(): Return value must be of type int, string returned
+/// Exception: Implicit conversion from float-string "1.5" to int loses precision
+/// TypeError: d(): Return value must be of type int, float returned
+/// Exception: Implicit conversion from float 1.5 to int loses precision
+/// TypeError: s(): Return value must be of type string, S returned
+/// LogicException: ts
+/// Exception: Implicit conversion from float-string "1.5" to int loses precision
+/// ```
 pub(crate) fn verify_return_type<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -5124,6 +5170,9 @@ fn return_mask_missed(
         Some(place) => Value::of_slot(place.read()).deref(),
         None => exec::operand(req, frame, code, op.op1_type, op.op1).deref(),
     };
+    if let Err(thrown) = none_pending(req) {
+        return threw(req, frame, &thrown);
+    }
     // A `CONST` operand is checked in the temporary the `RETURN` reads
     // (`ZVAL_COPY(EX_VAR(opline->result.var), retval_ptr)`), never in
     // place in the table.
@@ -5140,9 +5189,20 @@ fn return_mask_missed(
     }
     let strict = req.frame_strict_types(frame);
     let mask = code.return_mask;
+    // `zend_verify_weak_scalar_type_hint` answers false where a coercion
+    // left a throwable pending, a handler's at its deprecation or a
+    // `__toString`'s, and `zend_verify_return_error` makes its `TypeError`
+    // over it: an argument's bails there, a return's does not.
     let coerced = match crate::api::coerce::scalar_type_hint(req, &returned, mask, strict) {
+        Ok(Some(made)) if req.is_pending() => {
+            req.release(made);
+            None
+        }
         Ok(coerced) => coerced,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            None
+        }
     };
     let Some(coerced) = coerced else {
         let thrown = return_type_error(req, frame, Some(&returned))?;
@@ -12881,6 +12941,19 @@ enum Keep {
 ///   thrown in %s on line 2
 /// ```
 ///
+/// A handler that throws at the warning leaves with what it threw, and
+/// no `TypeError` is made over it:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// try { clone $u; } catch (Throwable $e) { var_dump($e::class, $e->getMessage(), $e->getPrevious()); }
+/// ```
+/// ```expect
+/// string(9) "Exception"
+/// string(21) "Undefined variable $u"
+/// NULL
+/// ```
+///
 /// A throwable's table carries `default_exception_handlers`, whose
 /// `clone_obj` is null, and that is read before the private `__clone`
 /// `Exception` declares.
@@ -12908,14 +12981,16 @@ pub(crate) fn clone<T: Tier>(
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let cloned = match operand.as_object() {
         Some(object) => req.clone_object(object, None).map(Owner::hand_on),
-        None => Err(type_error(
-            req,
-            &sentence_given(
+        None => none_pending(req).and_then(|()| {
+            Err(type_error(
                 req,
-                b"clone(): Argument #1 ($object) must be of type object, ",
-                &operand,
-            ),
-        )),
+                &sentence_given(
+                    req,
+                    b"clone(): Argument #1 ($object) must be of type object, ",
+                    &operand,
+                ),
+            ))
+        }),
     };
     exec::free_operand(req, frame, op.op1_type, op.op1);
     computed_into(req, frame, op, cloned.map(|object| object.as_value()))
@@ -14134,6 +14209,53 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 ///
 /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
 /// ```
+///
+/// A handler that throws at an undefined operand's warning leaves with
+/// what it threw: the native is not served, so it neither makes its
+/// `TypeError` over that nor touches its other operands.
+///
+/// ```php
+/// class L { function __toString(): string { echo "ran\n"; return "l"; } }
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// function f($a) {
+///     try { return implode($u, $a); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f([new L]); }
+/// echo strlen(implode(",", [new L])), "\n";
+/// ```
+/// ```expect
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// ran
+/// 1
+/// ```
+///
+/// The same where a trace serves the loop, whose undefined operand comes
+/// here by the handler:
+///
+/// ```php
+/// class L { function __toString(): string { echo "ran\n"; return "l"; } }
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// function f($a) {
+///     try { return implode($u, $a); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f([new L]); }
+/// echo strlen(implode(",", [new L])), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// ran
+/// 1
+/// ```
 #[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
 fn frameless_call<const N: usize>(
     req: &mut Request,
@@ -14163,6 +14285,13 @@ fn frameless_call<const N: usize>(
             }
             (owned, req.slot_ptr(frame, op.out))
         };
+    // `if (EG(exception))` past the fetch: a handler threw at an undefined
+    // operand's warning, so the native is not served.
+    if let Err(thrown) = none_pending(req) {
+        free_operands(req, frame, (&operands, owned), &arguments);
+        checked_after_throw(req, &thrown)?;
+        return Ok(Stepped::Threw(frame).into());
+    }
     let served = frameless_native(req, op.extended_value, &operands);
     free_operands(req, frame, (&operands, owned), &arguments);
     let value = match served {
@@ -26841,8 +26970,63 @@ fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at:
         req.locate_oom();
     }
     req.vm_mut().stand(frame, at);
+    if temporary_discarded(req, frame, op) {
+        return discard_temporary(req, frame, op);
+    }
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     returned_to_caller(req, frame, returned)
+}
+
+/// `RETURN`'s `!return_value` arm (`Z/Zend/zend_vm_def.h:4623`): a
+/// temporary the caller reads nothing of is freed by the `RETURN`, with
+/// its frame still standing, so a destructor that runs sees the function
+/// it was returned from on its trace. A value of a CV or a constant
+/// waits for the leave. An observer takes the value, so it stands past
+/// the observer as `ZEND_OBSERVER_USE_RETVAL` keeps it.
+///
+/// ```php
+/// class D { function __destruct() { debug_print_backtrace(); } }
+/// function f() { return new D; }
+/// function g() { $d = new D; return $d; }
+/// class T { function __destruct() { throw new Exception("t"); } }
+/// function h() { return new T; }
+/// f();
+/// g();
+/// $v = f();
+/// unset($v);
+/// call_user_func('f');
+/// try { h(); } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
+/// function &r() { return new D; }
+/// r();
+/// ```
+/// ```expect
+/// #0 %SCRATCH%/witness.php(3): D->__destruct()
+/// #1 %SCRATCH%/witness.php(7): f()
+/// #0 %SCRATCH%/witness.php(8): D->__destruct()
+/// #0 %SCRATCH%/witness.php(10): D->__destruct()
+/// #0 %SCRATCH%/witness.php(3): D->__destruct()
+/// #1 %SCRATCH%/witness.php(11): f()
+/// #0 %SCRATCH%/witness.php(6): T->__destruct()
+/// #1 %SCRATCH%/witness.php(12): h()
+/// #2 {main}
+///
+/// Notice: Only variable references should be returned by reference in %SCRATCH%/witness.php on line 13
+/// #0 %SCRATCH%/witness.php(13): D->__destruct()
+/// #1 %SCRATCH%/witness.php(14): r()
+/// ```
+fn temporary_discarded(req: &mut Request, frame: FrameRef, op: &Opline) -> bool {
+    matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var)
+        && req.stack_mut().entry() != frame
+        && !crate::observer::observing(req)
+        && req.returning(frame).1.is_none()
+}
+
+/// The temporary [`temporary_discarded`] found given up, with the frame
+/// standing, and the frame left with nothing to hand back.
+fn discard_temporary(req: &mut Request, frame: FrameRef, op: &Opline) -> Stepped {
+    let discarded = req.take_slot(frame, op.op1);
+    req.release(discarded);
+    returned_to_caller(req, frame, Value::null())
 }
 
 /// The return safepoint of a `RETURN*` (design §5.8, `jit-design.md`
@@ -28606,6 +28790,10 @@ pub(crate) fn return_by_ref<T: Tier>(
             req,
             "Only variable references should be returned by reference",
         );
+        if temporary_discarded(req, frame, op) {
+            let left = discard_temporary(req, frame, op);
+            return raise_return::<T>(req, left, code, op);
+        }
         let value = if op.op1_type == OperandKind::Var {
             req.take_slot(frame, op.op1)
         } else {

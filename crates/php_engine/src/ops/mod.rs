@@ -6190,6 +6190,19 @@ fn object_operation(
 /// int(78)
 /// string(2) "7"
 /// ```
+///
+/// As `zend_binop_error`, it says nothing over a throwable already
+/// pending, which leaves as it stands:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// try { $u + []; } catch (Throwable $e) { var_dump($e::class, $e->getMessage(), $e->getPrevious()); }
+/// ```
+/// ```expect
+/// string(9) "Exception"
+/// string(21) "Undefined variable $u"
+/// NULL
+/// ```
 fn operands<T>(
     req: &mut Request,
     operator: &str,

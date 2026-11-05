@@ -200,6 +200,31 @@ fn c_string(bytes: &[u8]) -> CString {
     CString::new(c_str(bytes)).unwrap_or_default()
 }
 
+/// The six names a composite `LC_ALL` name gives its categories, in
+/// `query`'s order, as the host's `setlocale(3)` reads one back: the last
+/// name stands for the categories past it and a name past the sixth is
+/// not read. `None` where `loc` is not composite.
+fn composite(loc: &[u8]) -> Result<Option<Vec<Vec<u8>>>, EmptyName> {
+    if !loc.contains(&b'/') {
+        return Ok(None);
+    }
+    let mut names: Vec<Vec<u8>> = loc
+        .split(|byte| *byte == b'/')
+        .take(6)
+        .map(<[u8]>::to_vec)
+        .collect();
+    if names.iter().any(Vec::is_empty) {
+        return Err(EmptyName);
+    }
+    let last = names.last().cloned().unwrap_or_default();
+    names.resize(6, last);
+    Ok(Some(names))
+}
+
+/// A composite name with nothing between two of its `/`, which the host
+/// refuses where `newlocale(3)` would read the environment.
+struct EmptyName;
+
 /// `try_setlocale_str(cat, loc)`: the name answered, or `None` where
 /// the C library knows no such locale. The locale is built whole before
 /// it is installed, every category `LC_ALL` names or none.
@@ -217,11 +242,17 @@ fn try_setlocale(req: &mut Request, category: i64, loc: &[u8]) -> Option<Vec<u8>
     } else {
         vec![category]
     };
+    let parts = match category {
+        0 => composite(c_str(loc)).ok()?,
+        _ => None,
+    };
     let mut built = c::Locale::current()?;
     let mut names = Vec::with_capacity(targets.len());
-    for target in &targets {
+    for (at, target) in targets.iter().enumerate() {
         let name = c_string(&if loc.is_empty() {
             from_environment(req, *target)
+        } else if let Some(part) = parts.as_ref().and_then(|parts| parts.get(at)) {
+            part.clone()
         } else {
             loc.to_vec()
         });
@@ -298,6 +329,39 @@ fn try_setlocale(req: &mut Request, category: i64, loc: &[u8]) -> Option<Vec<u8>
 /// string(71) "de_DE.UTF-8/de_DE.UTF-8/de_DE.UTF-8/de_DE.UTF-8/fr_FR.UTF-8/de_DE.UTF-8"
 /// string(1) "C"
 /// string(1) "C"
+/// ```
+///
+/// An `LC_ALL` name the host joined is read back into its categories, so
+/// `setlocale(LC_ALL, $saved)` restores what `setlocale(LC_ALL, "0")`
+/// answered; only `LC_ALL` reads one, and any name it holds that the
+/// host does not know leaves the locale where it was.
+///
+/// ```php
+/// $saved = setlocale(LC_ALL, "0");
+/// var_dump(setlocale(LC_ALL, "de_DE.UTF-8"), localeconv()["decimal_point"]);
+/// var_dump(setlocale(LC_ALL, $saved), localeconv()["decimal_point"], setlocale(LC_ALL, "0"));
+/// var_dump(setlocale(LC_ALL, "C/de_DE.UTF-8/de_DE.UTF-8/fr_FR.UTF-8/C/C"), setlocale(LC_NUMERIC, "0"), localeconv()["decimal_point"]);
+/// var_dump(setlocale(LC_ALL, "C/nope/C/C/C/C"), setlocale(LC_NUMERIC, "C/de_DE.UTF-8/C/C/C/C"), setlocale(LC_ALL, "/C/C/C/C/C"), setlocale(LC_ALL, "/"));
+/// var_dump(setlocale(LC_ALL, "C//de_DE.UTF-8"), setlocale(LC_ALL, "C/"), setlocale(LC_ALL, "C/C/C/C/C/C/nope"), setlocale(LC_ALL, "C/C/C/C/C/C//"), setlocale(LC_ALL, "de_DE.UTF-8/C"));
+/// ```
+/// ```expect locale=de_DE.UTF-8 locale=fr_FR.UTF-8
+/// string(11) "de_DE.UTF-8"
+/// string(1) ","
+/// string(17) "C/C.UTF-8/C/C/C/C"
+/// string(1) "."
+/// string(17) "C/C.UTF-8/C/C/C/C"
+/// string(41) "C/de_DE.UTF-8/de_DE.UTF-8/fr_FR.UTF-8/C/C"
+/// string(11) "fr_FR.UTF-8"
+/// string(1) ","
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// string(1) "C"
+/// string(1) "C"
+/// string(21) "de_DE.UTF-8/C/C/C/C/C"
 /// ```
 #[php_function]
 pub(super) fn setlocale(

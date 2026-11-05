@@ -23,7 +23,7 @@ use php_ext::raising::{
 use php_ext::request::{Execution, Request};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
 
-use super::signature::{FunctionRef, parameter_factory, this_function, type_factory};
+use super::signature::{FunctionRef, held_method, parameter_factory, this_function, type_factory};
 use super::{
     HeldMethod, at_most_arguments, class_name_of, class_named, closure_string, exactly_arguments,
     function_string, is_constructor, keep, keep_closure, keep_method, kept_class, kept_closure,
@@ -909,8 +909,10 @@ impl ReflectionFunctionAbstract {
     /// ```
     #[php(tentative)]
     fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
-        let (_, decl) = this_function(req, this.object())?;
-        let name = decl.name.0.to_vec();
+        let name = match held_method(req, this.object()) {
+            Some((_, method)) => method.function.name.0.to_vec(),
+            None => this_function(req, this.object())?.1.name.0.to_vec(),
+        };
         PhpString::declared(req, &name)
     }
 

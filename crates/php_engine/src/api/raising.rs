@@ -1215,17 +1215,23 @@ pub fn throw_exception_ex(
 /// `message`, printed as [`Printing::Buffered`] says. The `TypeError` row
 /// of [`throw_error`]'s witness is `unserialize`'s.
 pub fn type_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
-    throw_printed(
-        req,
-        Printing::Buffered,
-        None,
-        ClassId::TYPE_ERROR,
-        message.as_ref(),
-    )
+    throw_over_pending(req, Printing::Buffered, ClassId::TYPE_ERROR, message)
 }
 
 /// `zend_value_error` (`Z/Zend/zend.c:1905`): php's `ValueError` with
-/// `message`, printed as [`Printing::Buffered`] says.
+/// `message`, printed as [`Printing::Buffered`] says. What an error
+/// handler threw on the way here is its `previous`, as
+/// `zend_throw_exception_internal` chains it ([`throw_over_pending`]):
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new ErrorException($m); });
+/// $r = [fopen('php://memory', 'r')]; $w = $e = [];
+/// try { stream_select($r, $w, $e, 0); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n", get_class($t->getPrevious()), ': ', $t->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// ValueError: No stream arrays were passed
+/// ErrorException: stream_select(): Cannot represent a stream of type MEMORY as a select()able descriptor
+/// ```
 ///
 /// ```php
 /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
@@ -1238,25 +1244,18 @@ pub fn type_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> T
 /// 2760 0
 /// ```
 pub fn value_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
-    throw_printed(
-        req,
-        Printing::Buffered,
-        None,
-        ClassId::VALUE_ERROR,
-        message.as_ref(),
-    )
+    throw_over_pending(req, Printing::Buffered, ClassId::VALUE_ERROR, message)
 }
 
 /// `zend_argument_count_error` (`Z/Zend/zend.c:1892`): php's
 /// `ArgumentCountError` with `message`, printed as
 /// [`Printing::Buffered`] says.
 pub fn argument_count_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
-    throw_printed(
+    throw_over_pending(
         req,
         Printing::Buffered,
-        None,
         ClassId::ARGUMENT_COUNT_ERROR,
-        message.as_ref(),
+        message,
     )
 }
 

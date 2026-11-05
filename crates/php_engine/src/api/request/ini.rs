@@ -717,12 +717,9 @@ impl Request {
     /// A core entry's `modifiable` bits as [`IniDecl`] spells them,
     /// `PHP_INI_USER`, `PHP_INI_PERDIR` and `PHP_INI_SYSTEM`; the first
     /// is what `ini_set()` asks: every entry of the table is
-    /// `PHP_INI_ALL` but `xmlrpc_errors`, `sys_temp_dir`,
-    /// `sendmail_path`, `syslog.facility`, `syslog.ident`,
-    /// `disable_functions`, `enable_dl`, `extension_dir` and `browscap`,
-    /// `PHP_INI_SYSTEM` (`Z/main/main.c:806-890`), and
-    /// `short_open_tag` and the four `mail.*` beside `sendmail_path`,
-    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820-871`).
+    /// `PHP_INI_ALL` but those named here, as `main.c`'s and `zend.c`'s
+    /// tables declare them (`Z/main/main.c:792-892`,
+    /// `Z/Zend/zend.c:261-282`).
     ///
     /// `disable_functions` is read once, as the engine is built, so
     /// setting it from inside is refused and takes nothing out.
@@ -736,9 +733,30 @@ impl Request {
     /// bool(true)
     /// int(3)
     /// ```
+    ///
+    /// What the request's input was read under is settled before its
+    /// code runs, so the entries that shape it refuse too.
+    ///
+    /// ```php
+    /// foreach (['expose_php', 'file_uploads', 'realpath_cache_size', 'realpath_cache_ttl', 'upload_tmp_dir', 'zend.max_allowed_stack_size', 'zend.reserved_stack_size', 'arg_separator.input', 'auto_globals_jit', 'enable_post_data_reading', 'max_file_uploads', 'max_input_nesting_level', 'max_input_time', 'max_input_vars', 'max_multipart_body_parts', 'post_max_size', 'register_argc_argv', 'request_order', 'upload_max_filesize', 'variables_order', 'zend.multibyte'] as $name) {
+    ///     $before = ini_get($name);
+    ///     if (ini_set($name, '1') !== false || ini_get($name) !== $before) echo $name, " moved\n";
+    /// }
+    /// echo implode(' ', array_map(fn($name) => ini_get_all(null, true)[$name]['access'], ['expose_php', 'max_input_vars', 'zend.multibyte'])), "\n";
+    /// ```
+    /// ```expect
+    /// 4 6 2
+    /// ```
     pub(crate) fn ini_modifiable(name: &[u8]) -> (bool, bool, bool) {
         match name {
             b"xmlrpc_errors"
+            | b"expose_php"
+            | b"file_uploads"
+            | b"upload_tmp_dir"
+            | b"realpath_cache_size"
+            | b"realpath_cache_ttl"
+            | b"zend.max_allowed_stack_size"
+            | b"zend.reserved_stack_size"
             | b"hard_timeout"
             | b"sys_temp_dir"
             | b"sendmail_path"
@@ -756,8 +774,21 @@ impl Request {
             | b"user_dir"
             | b"user_ini.filename"
             | b"user_ini.cache_ttl" => (false, false, true),
+            b"zend.multibyte" => (false, true, false),
             b"short_open_tag"
-            | b"zend.multibyte"
+            | b"arg_separator.input"
+            | b"auto_globals_jit"
+            | b"enable_post_data_reading"
+            | b"max_file_uploads"
+            | b"max_input_nesting_level"
+            | b"max_input_time"
+            | b"max_input_vars"
+            | b"max_multipart_body_parts"
+            | b"post_max_size"
+            | b"register_argc_argv"
+            | b"request_order"
+            | b"upload_max_filesize"
+            | b"variables_order"
             | b"output_buffering"
             | b"output_handler"
             | b"mail.add_x_header"
