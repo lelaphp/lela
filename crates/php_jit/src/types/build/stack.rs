@@ -32,7 +32,7 @@ const SLOT: u32 = 16;
 /// a function's, by name or not. A method's, a static method's and a
 /// closure's are php's too, under conditions of their own, and are held
 /// once this tier compiles them as php does (#2963).
-fn pushes_inline(opcode: Opcode) -> bool {
+pub(super) fn pushes_inline(opcode: Opcode) -> bool {
     matches!(
         opcode,
         Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName

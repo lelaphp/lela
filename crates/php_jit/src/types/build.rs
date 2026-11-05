@@ -41,6 +41,7 @@ use php_ssa::{Range, Types as Php};
 mod loads;
 mod ranges;
 mod stack;
+use stack::pushes_inline;
 
 /// php's `ZEND_JIT_TRACE_MAX_EXITS`: the most exits one trace has.
 const MAX_EXITS: usize = 512;
@@ -1586,20 +1587,17 @@ impl<'a> Builder<'a> {
             .pushing
             .take()
             .filter(|plain| began == Began::Here && callee.user() == plain.callee());
-        // A function's call by its full name serves the function the name
-        // resolves to, the one recorded, since no function is declared
-        // twice; a method's or a dynamic call's may serve another, and an
-        // unqualified call in a namespace one declared there after the
-        // recording, which php's trace guards and this tier does not, so
-        // how it takes its arguments is not known.
+        // A function's call by its name serves the function recorded: no
+        // function is declared twice, and an unqualified name in a
+        // namespace, which another may answer, is held to the one recorded
+        // by what its slot holds as php's trace holds it. A method's or a
+        // dynamic call's may serve another, so how it takes its arguments
+        // is not known.
         let named = plain.as_ref().is_some_and(|plain| plain.scope().is_some())
             || began == Began::Here
                 && matches!(
                     self.ops.last(),
-                    Some(Op::Line(line)) if matches!(
-                        line.opcode,
-                        Opcode::InitFcall | Opcode::InitFcallByName
-                    )
+                    Some(Op::Line(line)) if pushes_inline(line.opcode)
                 );
         self.begin();
         self.calls.push(Call {
@@ -1656,23 +1654,66 @@ impl<'a> Builder<'a> {
     }
 
     /// The opline as the trace compiles it, where the callee the trace
-    /// knows settles how an argument is sent: a `SEND_VAR_EX` or a
-    /// `SEND_FUNC_ARG` to a parameter taken by value is a `SEND_VAR`,
-    /// whose variable it leaves as it was (`Z/ext/opcache/jit/zend_jit_trace.c:2373-2382`,
-    /// `:5324-5378`), and a `FETCH_DIM_FUNC_ARG` after a `CHECK_FUNC_ARG`
+    /// knows settles how an argument is sent: a `SEND_VAR_EX`, a
+    /// `SEND_VAR_NO_REF_EX` or a `SEND_FUNC_ARG` to a parameter taken by
+    /// value is a `SEND_VAR`, whose variable it leaves as it was
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:2373-2382`, `:5324-5378`); a
+    /// variable's `SEND_VAR_EX` or `SEND_FUNC_ARG` to one taken by
+    /// reference is a `SEND_REF`, as `zend_jit_send_var` hands it to
+    /// `zend_jit_send_ref` (`Z/ext/opcache/jit/zend_jit_ir.c:9662-9669`);
+    /// and a `FETCH_DIM_FUNC_ARG` after a `CHECK_FUNC_ARG`
     /// that found its argument sent by value is a `FETCH_DIM_R`, as php's
     /// code generator falls through to it (`:5822-5829`, the guards
     /// `:2001-2010`). A `CHECK_FUNC_ARG` records what it found on the call
-    /// (`:2199-2215`). Every other opline is itself.
+    /// (`:2199-2215`). Every other opline is itself. A by-reference
+    /// parameter, a by-value one, what a call returned by value and by
+    /// reference, and a variable undefined at its send, each to a function
+    /// called by its name:
+    /// ```php
+    /// if (true) { function inc(&$x) { $x++; } function both(&$a, $b) { $a += $b; } function val($x) { $x++; return $x; } function &ref() { static $v = 1; $v++; return $v; } function arr($a) { return count($a); } }
+    /// function loop($n) { $s = 0; $u = 0; $l = [1, 2]; for ($i = 0; $i < $n; $i++) { inc($s); both($s, $i); $v = val($i); $u += val(val($v)) + val(ref()) + arr($l) + val(arr(array_merge($l, [$i]))); } return [$s, $u]; }
+    /// echo json_encode(loop(30)), "\n";
+    /// function undef($a) { return $a === null ? 1 : 2; }
+    /// function warned($n) { $s = 0; for ($i = 0; $i < $n; $i++) { if ($i == 25) { $s += undef($u); } else { $v = $i; $s += undef($v); } unset($v); } return $s; }
+    /// echo warned(30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [465,1230]
+    ///
+    /// Warning: Undefined variable $u in %SCRATCH%/witness.php on line 6
+    /// 59
+    /// ```
+    ///
+    /// ```php
+    /// if (true) { function inc(&$x) { $x++; } function both(&$a, $b) { $a += $b; } function val($x) { $x++; return $x; } function &ref() { static $v = 1; $v++; return $v; } function arr($a) { return count($a); } }
+    /// function loop($n) { $s = 0; $u = 0; $l = [1, 2]; for ($i = 0; $i < $n; $i++) { inc($s); both($s, $i); $v = val($i); $u += val(val($v)) + val(ref()) + arr($l) + val(arr(array_merge($l, [$i]))); } return [$s, $u]; }
+    /// echo json_encode(loop(30)), "\n";
+    /// function undef($a) { return $a === null ? 1 : 2; }
+    /// function warned($n) { $s = 0; for ($i = 0; $i < $n; $i++) { if ($i == 25) { $s += undef($u); } else { $v = $i; $s += undef($v); } unset($v); } return $s; }
+    /// echo warned(30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [465,1230]
+    ///
+    /// Warning: Undefined variable $u in %SCRATCH%/witness.php on line 6
+    /// 59
+    /// ```
     fn as_compiled(&mut self, mut op: Opline) -> Opline {
         let numbered = op.op2_type == OperandKind::Unused;
         match op.opcode {
-            Opcode::SendVarEx | Opcode::SendFuncArg
-                if numbered
-                    && (op.opcode == Opcode::SendFuncArg || op.op2 <= MAX_ARG_FLAG_NUM)
-                    && self.sends_by_value(op.op2) == Some(true) =>
+            Opcode::SendVarEx | Opcode::SendVarNoRefEx | Opcode::SendFuncArg
+                if numbered && (op.opcode == Opcode::SendFuncArg || op.op2 <= MAX_ARG_FLAG_NUM) =>
             {
-                op.opcode = Opcode::SendVar;
+                match self.sends_by_value(op.op2) {
+                    Some(true) => op.opcode = Opcode::SendVar,
+                    Some(false)
+                        if op.opcode != Opcode::SendVarNoRefEx
+                            && op.op1_type == OperandKind::Cv =>
+                    {
+                        op.opcode = Opcode::SendRef;
+                    }
+                    _ => {}
+                }
             }
             Opcode::CheckFuncArg => {
                 let by_value = numbered
