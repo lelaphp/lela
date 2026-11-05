@@ -389,9 +389,11 @@ pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> (&Word, Option<
 /// and nothing else, the row read off the frame's
 /// `EX(run_time_cache)`, and looked up only where that is no
 /// op array's own cache, a closure's or a trait method's copy's. Sealed
-/// where the frame stands nowhere, as [`landing`] reads it.
+/// where the frame stands nowhere, as [`landing`] reads it. One call, so
+/// each `RETURN*` arm the test is inlined in keeps to the call and the
+/// compare.
 #[must_use]
-#[inline]
+#[inline(never)]
 pub fn landing_stood(req: &Request, frame: FrameRef) -> &Word {
     let Some(header) = req.vm().at(frame) else {
         return &SEALED;
