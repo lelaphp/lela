@@ -206,6 +206,7 @@ fn connect(
     let xport = Xport::Client {
         timeout,
         connect: true,
+        asynchronous: false,
         persistent: None,
         socket: SocketOptions::default(),
         context: ctx,
@@ -854,6 +855,7 @@ fn start(
     let xport = Xport::Client {
         timeout,
         connect: true,
+        asynchronous: false,
         persistent: None,
         socket: SocketOptions::default(),
         context: ctx,
@@ -965,6 +967,7 @@ fn listing(
     let xport = Xport::Client {
         timeout,
         connect: true,
+        asynchronous: false,
         persistent: None,
         socket,
         context: None,

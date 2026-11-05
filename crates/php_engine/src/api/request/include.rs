@@ -695,6 +695,11 @@ impl Request {
         // read where the cache holds it and copied nowhere.
         let path = match &as_written {
             Some((held, _)) => Cow::Borrowed(&held.path[..]),
+            // `compile_filename` resolves nothing: the open is the first
+            // to locate a wrapper's path, `include_once` alone asks before.
+            None if !kind.once() && is_wrapper_url(written) => {
+                return self.include_stream(kind, written, written);
+            }
             None => match self.code_mut().resolve_path(written) {
                 Ok(path) => Cow::Owned(path),
                 Err(Unresolved::Threw(thrown)) => return Err(thrown),

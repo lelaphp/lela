@@ -879,6 +879,7 @@ fn connect(
     let xport = Xport::Client {
         timeout,
         connect: true,
+        asynchronous: false,
         persistent: None,
         socket: SocketOptions::default(),
         context,

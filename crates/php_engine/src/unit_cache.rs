@@ -18,6 +18,7 @@ mod disk;
 mod wire;
 
 use std::borrow::Cow;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -165,13 +166,28 @@ pub(crate) trait Stat {
 
 impl Stat for () {}
 
-/// What the system reported of a file as it was compiled, the
-/// `zend_stat_t` php's `validate_timestamps` reads: when it was last
-/// written and its size.
+/// What the system reported of a file as it was compiled: when it was
+/// last written, the `zend_stat_t` field php's `validate_timestamps`
+/// reads, and for a hit that php without opcache would have read from
+/// disk its size, its inode and when the inode last changed. Those last
+/// two tell apart a file `rename(2)` put over another with the same
+/// `mtime` and the same length, which `touch()` makes of a write-then-move.
+///
+/// ```php
+/// $f = __DIR__ . '/stamp.inc';
+/// foreach ([1, 2] as $v) { file_put_contents("$f.t", "<?php return $v;"); touch("$f.t", 1000000); rename("$f.t", $f); var_dump(include $f); }
+/// unlink($f);
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stamp {
     modified: Duration,
     size: u64,
+    inode: u64,
+    changed: (i64, i64),
 }
 
 impl Stamp {
@@ -183,6 +199,8 @@ impl Stamp {
         Some(Stamp {
             modified,
             size: described.len(),
+            inode: described.ino(),
+            changed: (described.ctime(), described.ctime_nsec()),
         })
     }
 
@@ -193,6 +211,8 @@ impl Stamp {
         Stamp {
             modified: Duration::from_secs(u64::try_from(sb[9]).unwrap_or(0)),
             size: u64::try_from(sb[7]).unwrap_or(0),
+            inode: u64::try_from(sb[1]).unwrap_or(0),
+            changed: (sb[10], 0),
         }
     }
 

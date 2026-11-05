@@ -335,6 +335,7 @@ impl Ftp {
         let xport = Xport::Client {
             timeout: Some(seconds(timeout)),
             connect: true,
+            asynchronous: false,
             persistent: None,
             socket: SocketOptions::default(),
             context: context.as_ref().map(|context| **context),
@@ -809,6 +810,7 @@ impl Ftp {
             let xport = Xport::Client {
                 timeout: Some(seconds(self.timeout)),
                 connect: true,
+                asynchronous: false,
                 persistent: None,
                 socket: SocketOptions::default(),
                 context,

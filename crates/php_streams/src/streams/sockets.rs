@@ -1120,13 +1120,16 @@ const fn textless(step: XportStep) -> XportFailure {
 /// socket of its family, bound to `bindto` where it is an address of that
 /// family (php's `Invalid IP Address` and `Failed to bind` warnings where
 /// it is not one, or will not bind), `SO_BROADCAST` on a UDP one and
-/// `TCP_NODELAY` on a TCP one as the options say, and connected. The last
+/// `TCP_NODELAY` on a TCP one as the options say, and connected, or under
+/// `asynchronous`, `STREAM_XPORT_OP_CONNECT_ASYNC`, the connect begun and
+/// left to finish on a socket that does not block. The last
 /// failure is the error, and one with no text where no address was
 /// tried, as php leaves `error_string` unwritten then.
 fn connect_inet(
     req: &mut Request,
     name: &[u8],
     udp: bool,
+    asynchronous: bool,
     timeout: Option<Duration>,
     options: &SocketOptions,
 ) -> Result<Sock, XportFailure> {
@@ -1171,6 +1174,7 @@ fn connect_inet(
         match crate::api::layer::connect_fd(
             fd.as_fd(),
             &addr,
+            asynchronous,
             left.map(|t| t.max(Duration::from_micros(1))),
         ) {
             Ok(()) if udp => return Ok(Sock::Udp(UdpSocket::from(fd))),
@@ -1345,15 +1349,21 @@ impl Transports for Request {
             (
                 "tcp_socket",
                 Xport::Client {
-                    timeout, socket, ..
+                    timeout,
+                    asynchronous,
+                    socket,
+                    ..
                 },
-            ) => connect_inet(self, rest, false, timeout, &socket),
+            ) => connect_inet(self, rest, false, asynchronous, timeout, &socket),
             (
                 "udp_socket",
                 Xport::Client {
-                    timeout, socket, ..
+                    timeout,
+                    asynchronous,
+                    socket,
+                    ..
                 },
-            ) => connect_inet(self, rest, true, timeout, &socket),
+            ) => connect_inet(self, rest, true, asynchronous, timeout, &socket),
             ("tcp_socket", Xport::Server { listen, socket, .. }) => {
                 bind_inet(self, rest, false, listen, &socket)
             }

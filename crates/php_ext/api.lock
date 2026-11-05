@@ -1058,6 +1058,7 @@ request::Streams::open_dir
 request::Streams::open_stream
 request::Streams::open_stream_with
 request::Streams::open_url
+request::Streams::path_is_url
 request::Streams::plain_path
 request::Streams::register_engine_wrapper
 request::Streams::register_filter
