@@ -155,6 +155,7 @@ Heap::gc_enable
 Heap::gc_enabled
 Heap::gc_mem_caches
 Heap::gc_protect
+Heap::gc_runs
 Heap::gc_startup
 Heap::gc_status
 Heap::has_oom

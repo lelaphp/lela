@@ -1647,6 +1647,13 @@ impl Heap {
         self.gc.status()
     }
 
+    /// `GC_G(gc_runs)`, the collections that found a root to read, and
+    /// nothing of what [`Heap::gc_status`] measures with a clock.
+    #[must_use]
+    pub fn gc_runs(&self) -> u32 {
+        self.gc.runs
+    }
+
     /// `zend_mm_gc`, what `gc_mem_caches()` calls: the wholly free bin
     /// `runs` given back to their chunks, and the bytes that was.
     pub fn gc_mem_caches(&mut self) -> usize {

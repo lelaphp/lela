@@ -18478,9 +18478,25 @@ pub(crate) fn separate<T: Tier>(
 /// ```
 struct StepHold {
     held: Option<Owner<Value>>,
-    /// The owners the object had with the hold among them, `u32::MAX`
-    /// under the pair of handlers, whose release php's own is.
-    owners: u32,
+    /// The collector's runs as the step began, `None` under the pair of
+    /// handlers, whose release php's own is.
+    runs: Option<u32>,
+}
+
+/// An owner php has not, given up past a handler: a release, a possible
+/// root of the collector, only where the count of collections has moved
+/// from `runs`. A collection read the hold as an owner from outside, so it
+/// kept what php's would have freed and took it out of its buffer, and
+/// nothing else would put it back. Past no collection the buffer stands as
+/// php's does. A value another owner holds is buffered past a collection
+/// all the same, where php's has none, until the next collection reads
+/// it live.
+fn hold_given_up(req: &mut Request, held: Owner<Value>, runs: u32) {
+    if req.heap_mut().gc_runs() == runs {
+        held.give_up_nogc(req);
+    } else {
+        held.give_up(req);
+    }
 }
 
 impl StepHold {
@@ -18496,33 +18512,28 @@ impl StepHold {
         let held = (!stands).then(|| Owner::take(req, object.as_value()));
         StepHold {
             held,
-            owners: object.as_value().refcount(),
+            runs: Some(req.heap_mut().gc_runs()),
         }
     }
 
     /// The step goes through the pair of handlers, whose owner php takes.
     fn overloaded(&mut self, req: &mut Request, object: PhpObject) {
-        self.owners = u32::MAX;
+        self.runs = None;
         if self.held.is_none() {
             self.held = Some(Owner::take(req, object.as_value()));
         }
     }
 
-    /// The object given up, with what the step threw pending: a release,
-    /// a possible root of the collector, where it is `OBJ_RELEASE` or the
-    /// step cost the object an owner, which a collection in a handler may
-    /// have read past; otherwise the hold is one php has not, and it
-    /// leaves the collector's buffer as it found it.
+    /// The object given up, with what the step threw pending: `OBJ_RELEASE`
+    /// under the pair of handlers, and otherwise a hold php has not
+    /// ([`hold_given_up`]).
     fn given_up<T>(&mut self, req: &mut Request, done: Result<T, Thrown>) -> Result<T, Thrown> {
         let Some(held) = self.held.take() else {
             return done;
         };
-        req.freed_after(done, |req| {
-            if held.refcount() < self.owners {
-                held.give_up(req);
-            } else {
-                let _ = held.let_go(req);
-            }
+        req.freed_after(done, |req| match self.runs {
+            Some(runs) => hold_given_up(req, held, runs),
+            None => held.give_up(req),
         })
     }
 
@@ -19540,6 +19551,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
     let mut member = exec::Member::default();
     let name = member.name(req, frame, code, op);
     let read = undefined_cv(req, frame, data.op1_type, data.op1);
+    let runs = req.heap_mut().gc_runs();
     let in_table = (read && op.op1_type == OperandKind::Var)
         .then(|| entry_past_warning(req, frame, code, op, data))
         .transpose()?;
@@ -19591,7 +19603,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
     };
     let written = req.freed_after(written, |req| {
         if let Some(held) = in_table {
-            held.give_up(req);
+            hold_given_up(req, held, runs);
         }
     });
     member.release(req, frame, op);
@@ -19720,9 +19732,13 @@ fn entry_past_warning(
     op: &Opline,
     data: Opline,
 ) -> Result<Owner<Value>, Fatal> {
+    let runs = req.heap_mut().gc_runs();
     let held = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
     let held = Owner::take(req, held);
-    let holder = entry_holder(req, frame, code, op);
+    let place = req
+        .slot_ptr(frame, op.op1)
+        .and_then(|at| at.read().as_indirect());
+    let holder = entry_holder(req, frame, code, op, place);
     let object = holder.and_then(|holder| holder.as_object());
     let owner = object.map(|object| Owner::take(req, object));
     let table = match object {
@@ -19744,22 +19760,29 @@ fn entry_past_warning(
         *held
     };
     let now = Owner::take(req, now);
-    held.give_up(req);
+    hold_given_up(req, held, runs);
     if let Some(owner) = owner {
-        owner.give_up(req);
+        hold_given_up(req, owner.into_value(), runs);
     }
     Ok(now)
 }
 
-/// What the fetch before this opline found the entry its `VAR` points at
-/// in, an array or an object: `null` for a `VAR` that holds what it holds
-/// and for a static property, which nothing frees, and none where the
-/// fetch does not say. An object's owner is what shows its slots stand,
-/// which a write in the handler does not separate as an owner of a table
-/// would; an iterator on a table leaves its writes in place, and goes
-/// with it ([`php_heap::Heap::iterator_on`], which reads no table).
-fn entry_holder(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Option<Value> {
-    let place = req.slot_ptr(frame, op.op1)?.read().as_indirect();
+/// What the fetch before this opline found `place` in, an array or an
+/// object: `null` for a `VAR` that holds what it holds and for a static
+/// property, which nothing frees, and none where the fetch does not say.
+/// An object's owner is what shows its slots stand, which a write in the
+/// handler does not separate as an owner of a table would; an iterator on
+/// a table leaves its writes in place, and goes with it
+/// ([`php_heap::Heap::iterator_on`], which reads no table). A `place` out
+/// of the rows, a CV's slot a symbol table points at or an object's
+/// declared one, is not the table's to move.
+fn entry_holder(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    place: Option<php_heap::ZvalRef>,
+) -> Option<Value> {
     let Some(place) = place else {
         return Some(Value::null());
     };
