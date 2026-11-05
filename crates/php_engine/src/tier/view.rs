@@ -291,6 +291,7 @@ pub fn frame_cache(req: &Request, frame: FrameRef) -> Option<FuncRef> {
 /// activated user frame's, where the epoch holds one at that offset: none
 /// for a cache that is no op array's own (a closure's, a trait method's
 /// copy's), for a request's, and for any other frame.
+#[inline]
 fn own_row<'r>(
     req: &'r Request,
     header: &crate::exec::Header,
@@ -380,6 +381,37 @@ pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> (&Word, Option<
     held(req, frame).map_or((&SEALED, None), |func| {
         (func.landing(at), func.op_array().map(Held))
     })
+}
+
+/// The landing word of the opline `frame` stands at, in the op array it
+/// serves: what a tier's inlined test of a return reads in the caller it
+/// popped to (`jit-design.md` §2.2), its position and its op array's row
+/// and nothing else, the row read off the frame's
+/// `EX(run_time_cache)`, and looked up only where that is no
+/// op array's own cache, a closure's or a trait method's copy's. Sealed
+/// where the frame stands nowhere, as [`landing`] reads it. One call, so
+/// each `RETURN*` arm the test is inlined in keeps to the call and the
+/// compare.
+#[must_use]
+#[inline(never)]
+pub fn landing_stood(req: &Request, frame: FrameRef) -> &Word {
+    let Some(header) = req.vm().at(frame) else {
+        return &SEALED;
+    };
+    let at = OplineIdx(header.opline);
+    match own_row(req, header) {
+        Some(func) => func.landing(at),
+        None => landing_looked_up(req, frame, at),
+    }
+}
+
+/// [`landing_stood`] for a frame that reads no op array's own cache: its
+/// op array looked up. Out of line, so the test in the `RETURN*` arms
+/// keeps to what it reads there.
+#[cold]
+#[inline(never)]
+fn landing_looked_up(req: &Request, frame: FrameRef, at: OplineIdx) -> &Word {
+    landing(req, frame, at).0
 }
 
 /// Where a request keeps one slot of a held op array's `run_time_cache`:

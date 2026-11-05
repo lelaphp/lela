@@ -663,17 +663,7 @@ pub(crate) fn landings(
         let called = last.filter(|(func, at)| {
             (view.op_array(*func))
                 .and_then(|code| code.oplines.get(at.0 as usize))
-                .is_some_and(|op| {
-                    matches!(
-                        op.opcode,
-                        Opcode::DoUcall
-                            | Opcode::DoFcall
-                            | Opcode::DoFcallByName
-                            | Opcode::Yield
-                            | Opcode::YieldFrom
-                            | Opcode::IncludeOrEval
-                    )
-                })
+                .is_some_and(|op| lands_past(op.opcode))
         });
         armed.extend(called.map(past));
         armed.extend(calls.into_iter().rev().map(past));
@@ -685,6 +675,37 @@ pub(crate) fn landings(
         })
     });
     armed
+}
+
+/// Whether a frame goes on past `opcode` from something the opline left
+/// it for: php's list where its code generator arms the opline past
+/// one (`Z/ext/opcache/jit/zend_jit_trace.c:7322-7368`).
+fn lands_past(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::DoUcall
+            | Opcode::DoFcall
+            | Opcode::DoFcallByName
+            | Opcode::Yield
+            | Opcode::YieldFrom
+            | Opcode::IncludeOrEval
+    )
+}
+
+/// The root of loop `header` where a return can land there, the opline
+/// past a call; none for a loop no return lands at the root of, whose
+/// landing word stays unlaid, so an op array no trace returns into
+/// allocates none (`jit-design.md` §2.2, §3.2).
+pub(crate) fn root_landing(
+    code: &OpArray,
+    header: SafepointIdx,
+    folds: Folds,
+) -> Option<OplineIdx> {
+    let root = loop_root(code, header, folds)?;
+    let before = code
+        .oplines
+        .get(usize::try_from(root.0.checked_sub(1)?).ok()?)?;
+    lands_past(before.opcode).then_some(root)
 }
 
 /// The condition a loop's recording begins at behind `frame`, which the

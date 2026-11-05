@@ -416,13 +416,6 @@ impl<'l> Lent<'l> {
     ) -> Landed<'l> {
         self.state.landings.keep(self.epoch, func, at, header)
     }
-
-    /// Keep `trace`, of the table the lend holds, as the one entered
-    /// where the request goes on at opline `at` of the op array `func`
-    /// names ([`Landings::entered`]).
-    pub(crate) fn entered(self, func: FuncRef, at: OplineIdx, trace: &'l Trace) {
-        self.state.landings.entered(self.epoch, func, at, trace);
-    }
 }
 
 /// How many oplines a request keeps the words of ([`Landings`]): a
@@ -451,31 +444,22 @@ pub(crate) struct Landings {
 }
 
 /// One opline [`Landings`] keeps; its addresses zero where it keeps
-/// none, and `func` none in a place that keeps nothing. `trace` is the
-/// address of the trace the request last entered there, of the epoch's
-/// table, and `id` its number, zero where it entered none
-/// ([`Landings::entered`]).
+/// none, and `func` none in a place that keeps nothing.
 #[derive(Debug, Default, Clone, Copy)]
 struct Kept {
     func: Option<FuncRef>,
     at: OplineIdx,
     landing: usize,
     header: usize,
-    trace: usize,
-    id: u32,
 }
 
 /// The words a return or a leave reads where it goes on at an opline
 /// ([`Landings::landed`]): its landing word, sealed until a trace armed
-/// it, and the word of the loop rooted there, where one is; and the
-/// trace the request entered there last, with its number, which one of
-/// the words names while it reads compiled, as php's handler there is
-/// the trace itself (#4100).
+/// it, and the word of the loop rooted there, where one is.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Landed<'l> {
     pub(crate) landing: &'l Word,
     pub(crate) header: Option<&'l Word>,
-    pub(crate) entered: Option<(u32, &'l Trace)>,
 }
 
 impl Landings {
@@ -497,7 +481,7 @@ impl Landings {
     ) -> Option<Landed<'e>> {
         let (slot, kept) = (self.kept.iter())
             .map(|slot| (slot, slot.get()))
-            .find(|(_, kept)| kept.func == Some(func) && kept.at == at)?;
+            .find(|(_, kept)| kept.at == at && kept.func == Some(func))?;
         let landing = match kept.landing {
             0 => laid_since(epoch, slot, kept),
             // SAFETY: kept by `keep` or `laid_since`, of `epoch`, as this
@@ -507,36 +491,7 @@ impl Landings {
         // SAFETY: kept by `keep`, of `epoch`, as this function's contract
         // says.
         let header = (kept.header != 0).then(|| unsafe { kept_word(epoch, kept.header) });
-        // SAFETY: kept by `entered`, of `epoch`'s table, as this
-        // function's contract says.
-        let entered =
-            (kept.trace != 0).then(|| (kept.id, unsafe { kept_trace(epoch, kept.trace) }));
-        Some(Landed {
-            landing,
-            header,
-            entered,
-        })
-    }
-
-    /// `trace`, of the table of `epoch`, the one every word kept here is
-    /// of, entered where the request goes on at opline `at` of the op
-    /// array `func` names: kept beside the words kept there, so the next
-    /// entry there reads it with no row of the table read; nothing where
-    /// the request keeps no words there. `trace` is borrowed for as long
-    /// as `epoch` is, as [`Landings::keep`]'s words are, the proof
-    /// [`Landings::landed`]'s read of it stands on.
-    fn entered<'e>(&self, _epoch: &'e Epoch, func: FuncRef, at: OplineIdx, trace: &'e Trace) {
-        let Some(slot) = (self.kept.iter()).find(|slot| {
-            let kept = slot.get();
-            kept.func == Some(func) && kept.at == at
-        }) else {
-            return;
-        };
-        slot.set(Kept {
-            trace: ptr::from_ref(trace).expose_provenance(),
-            id: trace.id.get(),
-            ..slot.get()
-        });
+        Some(Landed { landing, header })
     }
 
     /// Keep the words a return or a leave reads where it goes on at
@@ -559,15 +514,12 @@ impl Landings {
                 at,
                 landing: landing.map_or(0, address),
                 header: header.map_or(0, address),
-                trace: 0,
-                id: 0,
             });
         }
         self.next.set((next + 1) % LANDINGS);
         Landed {
             landing: landing.unwrap_or(&SEALED),
             header,
-            entered: None,
         }
     }
 }
@@ -604,21 +556,6 @@ unsafe fn kept_word(_epoch: &Epoch, address: usize) -> &Word {
     // SAFETY: the function's contract: the word stands for as long as
     // `epoch`, which the borrow keeps.
     unsafe { &*word }
-}
-
-/// The trace at `address`, which [`Landings`] kept, for as long as
-/// `epoch` is borrowed.
-///
-/// # Safety
-///
-/// `address` is that of a trace of `epoch`'s table that
-/// [`Landings::entered`] kept, which the table holds in place, never
-/// written again, until the epoch drops (`crate::table`).
-unsafe fn kept_trace(_epoch: &Epoch, address: usize) -> &Trace {
-    let trace = ptr::with_exposed_provenance::<Trace>(address);
-    // SAFETY: the function's contract: the trace stands for as long as
-    // `epoch`, which the borrow keeps.
-    unsafe { &*trace }
 }
 
 /// The address of `word`, its provenance exposed, as [`Landings`] keeps it.
@@ -1501,11 +1438,9 @@ pub(crate) fn enter<'t>(
     // last answer left through written where this trace is the one it
     // leads to.
     let stack = tier::stack(req).as_ptr();
-    let (images, rows) = Images::of(req, state, (epoch, trace));
+    let (images, rows, escaped) = Images::of(req, state, (epoch, trace));
     if let Some(state) = state {
-        let by = (state.headers)
-            .escaped_by(trace)
-            .and_then(|by| crate::table::of_epoch(epoch)?.get(by));
+        let by = escaped.and_then(|by| crate::table::of_epoch(epoch)?.get(by));
         state.headers.open_door((trace, at, &images), by);
     }
     let word = lower::EntryWord {
@@ -1737,22 +1672,24 @@ impl Images {
     /// What `trace`'s code reads in `req`, the touched cache slots beside
     /// the headers ([`touched`]) and its doors' words past them, and the
     /// request's rows with the trace's laid down as they say, which an
-    /// escape's way past its door reads ([`Rows`]); a request that keeps no
+    /// escape's way past its door reads ([`Rows`]), and the note of the
+    /// trace whose escape entered this one through the landing's word,
+    /// taken off the row ([`Rows::settled`]); a request that keeps no
     /// state of the tier's keeps no rows, and its rows are [`NO_ROWS`].
     fn of(
         req: &Request,
         state: Option<&crate::JitRequest>,
         (epoch, trace): (&Epoch, &Trace),
-    ) -> (Images, *const usize) {
+    ) -> (Images, *const usize, Option<crate::table::TraceId>) {
         let reads_none =
             trace.calls.is_empty() && trace.map_ptrs.is_empty() && trace.doors.is_empty();
         if let Some(state) = state {
             let rows = (state.headers).rows(|| {
                 crate::table::of_epoch(epoch).map_or(0, crate::table::TraceTable::segments)
             });
-            if let Some(at) = rows.settled(trace.id) {
+            if let Some((at, escaped)) = rows.settled(trace.id) {
                 let laid = Readiness::Settled;
-                return (Images::Kept { at, laid }, rows.base());
+                return (Images::Kept { at, laid }, rows.base(), escaped);
             }
             let images = if reads_none {
                 Images::None
@@ -1763,12 +1700,12 @@ impl Images {
                 )
             };
             rows.lay(trace.id, images.addresses(), images.row());
-            return (images, rows.base());
+            return (images, rows.base(), rows.escaped_by(trace.id));
         }
         if reads_none {
-            return (Images::None, NO_ROWS.as_ptr());
+            return (Images::None, NO_ROWS.as_ptr(), None);
         }
-        (Images::own(req, (epoch, trace)), NO_ROWS.as_ptr())
+        (Images::own(req, (epoch, trace)), NO_ROWS.as_ptr(), None)
     }
 
     /// What `trace`'s code reads laid out for one entry, by a request that
@@ -2042,15 +1979,6 @@ impl Headers {
         }));
     }
 
-    /// The trace whose escape entered the return root `trace` through the
-    /// landing's word since the crossing last asked ([`Rows::escaped_by`]).
-    fn escaped_by(&self, trace: &Trace) -> Option<crate::table::TraceId> {
-        if trace.start != crate::record::Start::Return {
-            return None;
-        }
-        self.rows.get()?.escaped_by(trace.id)
-    }
-
     /// The words of the door of `trace` that `door` names, as the request
     /// holds them; `elsewhere`, an open one made to name no landing a
     /// frame stands at.
@@ -2238,17 +2166,25 @@ impl Rows {
     }
 
     /// Where the addresses the code of the trace `id` names reads are, in
-    /// a row an entry laid settled ([`Rows::lay`]): what each entry after
-    /// it reads and nothing else, as php's enters a trace through the
-    /// handler its op array holds with nothing looked up. None for a row
-    /// not laid or not settled yet.
+    /// a row an entry laid settled ([`Rows::lay`]), and the row's note of
+    /// the escape that entered it, taken ([`Rows::escaped_by`]): what each
+    /// entry after it reads and nothing else, as php's enters a trace
+    /// through the handler its op array holds with nothing looked up. None
+    /// for a row not laid or not settled yet.
     #[inline]
-    fn settled(&self, id: crate::table::TraceId) -> Option<*const usize> {
+    fn settled(
+        &self,
+        id: crate::table::TraceId,
+    ) -> Option<(*const usize, Option<crate::table::TraceId>)> {
         let (segment, at) = id.slot();
         let row = self.segments.get(segment)?.get()?.get(at)?;
-        row.settled
-            .get()
-            .then(|| ptr::with_exposed_provenance(row.images.get()))
+        row.settled.get().then(|| {
+            let images = ptr::with_exposed_provenance(row.images.get());
+            (
+                images,
+                crate::table::TraceId::new(row.escaped_by.replace(0)),
+            )
+        })
     }
 
     /// The trace whose escape entered the trace `id` names through the
