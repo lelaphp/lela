@@ -534,6 +534,7 @@ Zval::str_bytes
 Zval::string
 ZvalRef
 ZvalRef::read
+ZvalRef::replace
 ZvalRef::set_fe_pos
 ZvalRef::set_prop_bit
 ZvalRef::write

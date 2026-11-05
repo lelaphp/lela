@@ -210,6 +210,17 @@ impl ZvalRef {
         unsafe { self.0.as_ptr().write(z) };
     }
 
+    /// `z` written whole over what stood there, which is handed back,
+    /// no owner touched: a slot whose `u2` word is nobody's, a frame's
+    /// temporary, written as [`Frame::set`](crate::Frame::set) writes it
+    /// where the caller holds the name and not the frame.
+    #[inline]
+    #[must_use = "what stood there is the caller's to give up"]
+    pub fn replace(self, z: Zval) -> Zval {
+        // SAFETY: as `write`.
+        unsafe { self.0.as_ptr().replace(z) }
+    }
+
     /// `Z_FE_POS_P(z) = pos`: the slot's `u2` word alone, the value it
     /// holds untouched. What `FE_RESET_R` sets to zero on the VAR it
     /// fills after copying the array in, and what `FE_FETCH_R` moves one
@@ -955,6 +966,14 @@ mod tests {
         );
         assert_eq!(Zval::long(1).as_str(), None);
         assert!(!Zval::null().is_refcounted());
+    }
+
+    #[test]
+    fn a_slot_replaced_through_its_name_hands_back_what_stood_there() {
+        let mut z = Zval::long(7);
+        let old = ZvalRef::new(std::ptr::NonNull::from(&mut z)).replace(Zval::long(8));
+        assert_eq!(old.as_long(), Some(7));
+        assert_eq!(z.as_long(), Some(8));
     }
 
     #[test]
