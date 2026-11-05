@@ -16,7 +16,10 @@
 //! at the leave a frame that holds a receiver, a closure, an annex or arguments
 //! past its parameters, one a native's call made, one off the top page,
 //! or a caller's slot that holds a counted value. None takes an exit of
-//! its own: php's code takes none there.
+//! its own: php's code takes none there, past the call by a name whose
+//! slot holds another function ([`Emit::named_guard`]). A closure's push
+//! is the `push_call` kernel's, whose payload no offset here reads; what
+//! follows it is written here as for any other call.
 
 use std::num::NonZeroU32;
 
@@ -387,6 +390,10 @@ impl Emit<'_> {
             Imm::Pair { function, class } => {
                 self.pair_guard(line, plain, (function, class), slow)?
             }
+            Imm::Named => {
+                self.named_guard(line, plain, slow)?;
+                Over::default()
+            }
             _ => Over::default(),
         };
         let stack = self.stack()?;
@@ -457,11 +464,15 @@ impl Emit<'_> {
         self.b.ins().jump(join, &[]);
         self.b.switch_to_block(slow);
         self.b.seal_block(slow);
-        let [room, opline] = self.served(line)?;
-        let func = self.func_of(line.frame)?;
-        let stood = self.stood_out();
-        self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
-        self.stood_back();
+        if line.imm == Imm::Named {
+            self.push_call(id, line)?;
+        } else {
+            let [room, opline] = self.served(line)?;
+            let func = self.func_of(line.frame)?;
+            let stood = self.stood_out();
+            self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
+            self.stood_back();
+        }
         for guard in self.within(id) {
             match guard.check {
                 Check::Callee { func } => self.callee_guard(func, guard.exit)?,
@@ -472,6 +483,42 @@ impl Emit<'_> {
         self.b.switch_to_block(join);
         self.b.seal_block(join);
         Ok(())
+    }
+
+    /// php's guard on the callee a function's call by its name reads from
+    /// its own runtime-cache slot before it pushes the call in place: the
+    /// compare of the slot with the function recorded, past
+    /// `opline->opcode != ZEND_INIT_FCALL` (`zend_jit_init_fcall`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:8860-8880`). This tier holds the
+    /// slot's call to the record of the header the request laid out for
+    /// `plain`, as `pair_guard` holds a request's own method, and refuses
+    /// to `slow`, where the `push_call` kernel is php's cold
+    /// `zend_jit_find_func_helper` and `zend_jit_func_guard`.
+    fn named_guard(&mut self, line: &Line, plain: &PlainCall, slow: Block) -> Result<(), Abort> {
+        let refuse = Refuse::To(slow);
+        let place = self.cached_slot(line, P.call(), refuse)?;
+        self.held_to_record(place, P.call_record(), plain, refuse)
+    }
+
+    /// Refused to `refuse` unless the record at `at` of the slot `place`
+    /// is the one of the header the request laid out for `plain`, read
+    /// once the request is ready, so laid out.
+    fn held_to_record(
+        &mut self,
+        place: Value,
+        at_record: u32,
+        plain: &PlainCall,
+        refuse: Refuse,
+    ) -> Result<(), Abort> {
+        let unready = self.unready()?;
+        self.refuse_if(unready, refuse)?;
+        let header = self.header_of(plain)?;
+        let images = self.images()?;
+        let image = self.b.ins().load(I64, trusted(), images, header);
+        let laid = (self.b.ins()).load(I64, trusted(), image, at(L.callee() - L.header()));
+        let record = (self.b.ins()).load(I64, trusted(), place, at(at_record));
+        let other = self.b.ins().icmp(IntCC::NotEqual, record, laid);
+        self.refuse_if(other, refuse)
     }
 
     /// php's guard on the pair a method's call reads from its own
@@ -672,17 +719,7 @@ impl Emit<'_> {
                 self.refuse_if(other, refuse)?;
             }
             PairCallee::Record => {
-                // The record of the header the request laid out for the
-                // call, read once the request is ready, so laid out.
-                let unready = self.unready()?;
-                self.refuse_if(unready, refuse)?;
-                let header = self.header_of(plain)?;
-                let images = self.images()?;
-                let image = self.b.ins().load(I64, trusted(), images, header);
-                let laid = (self.b.ins()).load(I64, trusted(), image, at(L.callee() - L.header()));
-                let record = (self.b.ins()).load(I64, trusted(), place, at(P.pair_record()));
-                let other = self.b.ins().icmp(IntCC::NotEqual, record, laid);
-                self.refuse_if(other, refuse)?;
+                self.held_to_record(place, P.pair_record(), plain, refuse)?;
             }
         }
         let named = match class {

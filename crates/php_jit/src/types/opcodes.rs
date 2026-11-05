@@ -704,6 +704,7 @@ pub(super) fn inline_may_leave(line: &Line) -> bool {
                 | Opcode::FetchDimR
                 | Opcode::FetchObjR
                 | Opcode::FetchObjW
+                | Opcode::InitDynamicCall
                 | Opcode::InitFcall
                 | Opcode::InitFcallByName
                 | Opcode::InitNsFcallByName
@@ -1671,6 +1672,29 @@ pub(super) fn within(opcode: Opcode, tag: ZvalType, op2: Operand) -> Option<With
         }),
         _ => None,
     }
+}
+
+/// The oplines that begin a call, php's `zend_jit_inc_call_level`.
+pub(super) fn begins_call(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::InitFcall
+            | Opcode::InitFcallByName
+            | Opcode::InitNsFcallByName
+            | Opcode::InitMethodCall
+            | Opcode::InitDynamicCall
+            | Opcode::InitUserCall
+            | Opcode::New
+            | Opcode::InitStaticMethodCall
+            | Opcode::InitParentPropertyHookCall
+    )
+}
+
+/// The oplines that end a call one of [`begins_call`] began, php's
+/// `zend_jit_dec_call_level`: those that make it and the
+/// `CALLABLE_CONVERT` that takes it and makes none.
+pub(super) fn ends_call(opcode: Opcode) -> bool {
+    is_call(opcode) || opcode == Opcode::CallableConvert
 }
 
 /// Whether php's tracing code generator has a case that compiles `opcode`

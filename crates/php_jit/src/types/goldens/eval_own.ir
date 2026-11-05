@@ -9,15 +9,17 @@ entry
 0010 f0 IS_SMALLER #0, #1 fused inline
   checks direction taken -> exit 2
   guard #2 object -> exit 3
+  guard room 96 -> exit 4
 0005 f0 INIT_METHOD_CALL #2, const#2 inline pair fn own of receiver map 0 unwinds -> unwind 0
      f0 init request in-place
 0006 f0 SEND_VAR_EX #0 step
   -> #3 f0.CV3 [ref, any]
-end: exit 4
+end: exit 5
 exit 0: f0 0010 plain
 exit 1: f0 0010 plain f0.CV3:long
 exit 2: f0 0012 plain f0.CV1:long f0.CV3:long
 exit 3: f0 0005 plain f0.CV1:long f0.CV3:long
-exit 4: f0 0007 restore call f0.CV0:object f0.CV1:long
+exit 4: f0 0005 plain f0.CV0:object f0.CV1:long f0.CV3:long to vm
+exit 5: f0 0007 restore call f0.CV0:object f0.CV1:long
 unwind 0:
 map 0: offset 1 slot 0

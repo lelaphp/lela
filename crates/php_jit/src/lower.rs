@@ -569,7 +569,8 @@ fn in_place(ir: &TraceIr) -> (Box<[PlainCall]>, Box<[FuncRef]>) {
         else {
             continue;
         };
-        if !calls.contains(plain) {
+        // A closure's handler pushes it, from no header of the trace's.
+        if !calls.contains(plain) && !plain.is_closure() {
             calls.push(plain.clone());
         }
         // A user function's cache the call enters, laid down; a native's

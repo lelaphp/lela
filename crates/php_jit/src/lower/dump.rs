@@ -439,6 +439,7 @@ fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
             slot: Slotted::Cached,
             ..
         } => return write!(text, " cached"),
+        Imm::Named => return write!(text, " named"),
         Imm::Pair { function, class } => {
             match function {
                 PairCallee::Number(function) => write!(text, " pair fn {function}")?,

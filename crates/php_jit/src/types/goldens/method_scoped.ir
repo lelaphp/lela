@@ -14,12 +14,12 @@ loop at 0, loop, interrupt exit 11
   #3 f0.CV3 [long] reg = phi(#2, #11)
 0010 f0 IS_SMALLER #3, #4 fused inline
   checks direction taken -> exit 3
+  guard room 128 -> exit 5
 0005 f0 INIT_METHOD_CALL #5, const#2 inline pair fn 175 of receiver map 0 unwinds -> unwind 0
   checks callee e3 -> exit 4
      f0 init e3 in-place
 0006 f0 SEND_VAR #3 inline
 0007 f0 DO_FCALL inline in-place unwinds -> unwind 0
-  checks stands e3 0001 -> exit 5
      f1 enter e3
   -> #6 f1.CV0 [long]
 0001 f1 FETCH_OBJ_R const#0 inline cached map 1 leaves -> exit 6
@@ -43,7 +43,7 @@ exit 1: f0 0010 plain f0.CV0:object
 exit 2: f0 0010 plain f0.CV0:object f0.CV1:long
 exit 3: f0 0012 plain f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long
 exit 4: f0 where it stands plain f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long
-exit 5: f0 where it stands restore call f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long
+exit 5: f0 0005 plain f0.CV3=#3 f0.CV0:object f0.CV1:long f0.CV3:long to vm
 exit 6: f1 0001 plain f0.CV3=#3 f1.CV0:long to vm
 exit 7: f1 0002 plain f0.CV3=#3 f1.T0=copied #7 f1.CV0:long
 exit 8: f1 0002 plain f0.CV3=#3 f1.T0=copied #7 through a reference f1.CV0:long

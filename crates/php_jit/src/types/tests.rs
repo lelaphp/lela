@@ -3437,7 +3437,7 @@ fn pushed_under_its_class_guard(fixture: Fixture) -> Result<(), String> {
 /// up to the call are numbered as php's exit info for its trace numbers
 /// them: `exit_0` and `exit_1` at `0012`, knowing none and `$n` and `$o`,
 /// `exit_2` the loop's way out at `0014`, `exit_3` the receiver's class
-/// guard at `0007`, then the call's. A static method's call carries no
+/// guard at `0007`, `exit_4` the push's own stack check. A static method's call carries no
 /// class, and its loop keeps the check, as php's `exit_0`
 /// `0009/----/0/VM` for `s` does.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -3451,16 +3451,11 @@ fn a_methods_call_on_an_object_takes_no_stack_check_at_entry() -> Result<(), Str
     for fixture in [METHOD_CALL, TEMP_CALL, METHOD_OWN, ENUM_OWN, METHOD_SCOPED] {
         let ir = golden(fixture)?;
         assert_eq!(rooms(&ir), 0, "{}\n{}", fixture.name, dump::render(&ir));
-        // No stack check holds such a push, so it tests the page itself.
+        // The check before the push holds it, php's `exit_4/VM` at the
+        // opline.
         assert!(
-            (ir.ops.iter()).all(|op| !matches!(
-                op,
-                Op::InitCall {
-                    plain: Some(_),
-                    room: PushRoom::Checked,
-                    ..
-                }
-            )),
+            (ir.guards.iter()).any(|guard| matches!(guard.at, GuardAt::Before(_))
+                && matches!(guard.check, Check::Room { .. })),
             "{}\n{}",
             fixture.name,
             dump::render(&ir)
@@ -3478,7 +3473,7 @@ fn a_methods_call_on_an_object_takes_no_stack_check_at_entry() -> Result<(), Str
             (Some(OplineIdx(12)), 2),
             (Some(OplineIdx(14)), 3),
             (Some(OplineIdx(7)), 3),
-            (None, 3),
+            (Some(OplineIdx(7)), 3),
         ],
         "{rendered}"
     );

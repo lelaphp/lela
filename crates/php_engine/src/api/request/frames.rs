@@ -1488,7 +1488,7 @@ impl Request {
     /// ([`Request::init_func_run_time_cache`]); the inline `INIT_*` paths,
     /// which read their callee off a primed cache slot, push through
     /// [`Request::push_laid`] and [`Request::push_room`], since the pass
-    /// that primed the slot laid the callee's cache. A closure's cache
+    /// that primed the slot laid the callee's cache. A closure's own cache
     /// was chosen as it was made ([`crate::classes::closure_cache`]). A
     /// call `zend_call_function` pushes already serving, which no `INIT_*`
     /// builds, lays it at its activation ([`Request::activate_user`]), as
@@ -1512,7 +1512,7 @@ impl Request {
             return Err(Fatal::error("InternalError: a call pushed with no callee"));
         };
         if header.info.building()
-            && header.closure().is_none()
+            && !header.info.own_cache()
             && let Some(function) = header.function()
             && let Some(base) = self.init_func_run_time_cache(function)?
         {

@@ -1120,6 +1120,41 @@ fn a_class_the_next_request_declares_fails_the_class_guard() {
     assert!(lines.contains("TRACE 1 exit"), "{lines}");
 }
 
+/// A call by its name pushed in place, on the next request: its slot is
+/// empty, so the `push_call` kernel finds the name, as php's cold path
+/// calls `zend_jit_find_func_helper`, and goes on in the trace where it
+/// answers the function recorded; a request whose name answers another
+/// function, by reference, leaves at the opline's exit and is served as
+/// the interpreter serves it (#4086).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_by_name_is_held_to_what_each_request_finds() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("jit.mode", "force"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+    ]);
+    let program = "if (defined('OTHER')) { function g(&$x) { $x += 2; return 0; } } else { function g($x) { return $x + 1; } }
+        function k($m) { $t = 0; for ($i = 0; $i < $m; $i++) { $v = $i; $t += g($v) + $v; } return $t; }
+        echo k(20), \"\\n\";";
+    let first = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&first), "400\n");
+    let same = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&same), "400\n");
+    let lines = String::from_utf8_lossy(&same.stderr);
+    assert!(!lines.contains(" exit "), "{lines}");
+    let other = engine.serve_capture_in(
+        &scratch.0,
+        b"main.php",
+        "<?php const OTHER = true; include 'body.php';",
+        php_engine::test::Capture::default(),
+    );
+    assert_eq!(testing::stdout(&other), "230\n");
+    let lines = String::from_utf8_lossy(&other.stderr);
+    assert!(lines.contains(" exit "), "{lines}");
+}
+
 /// A trace over a request-scoped class's properties, entered on a request
 /// that has not yet called the function whose property oplines it inlines:
 /// the touch finds that function's cache not laid down, as php lays it at

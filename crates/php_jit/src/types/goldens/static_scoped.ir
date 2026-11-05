@@ -8,7 +8,7 @@ entry
   guard room 112 -> exit 0
   guard #4 long -> exit 1
   guard #2 long -> exit 2
-loop at 0, loop, interrupt exit 8
+loop at 0, loop, interrupt exit 7
   #1 f0.CV1 [any] = phi(#0, #8)
   #3 f0.CV2 [long] reg = phi(#2, #9)
 0009 f0 IS_SMALLER #3, #4 fused inline
@@ -18,12 +18,11 @@ loop at 0, loop, interrupt exit 8
      f0 init e4 in-place
 0005 f0 SEND_VAR #3 inline
 0006 f0 DO_FCALL inline in-place unwinds -> unwind 0
-  checks stands e4 0001 -> exit 5
      f1 enter e4
   -> #5 f1.CV0 [long]
 0001 f1 ADD #5, #5 inline
   -> #6 f1.T0 [long] reg
-  checks #6 long -> exit 6
+  checks #6 long -> exit 5
 0002 f1 RETURN #6 inline receives in-place unwinds -> unwind 0
      f0 back to #7
   -> #7 f0.T2 [long]
@@ -31,17 +30,16 @@ loop at 0, loop, interrupt exit 8
   -> #8 f0.CV1 [long] reg
 0008 f0 PRE_INC #3 inline
   -> #9 f0.CV2 [long] reg
-  checks #9 long -> exit 7
+  checks #9 long -> exit 6
 end: back to 0
 exit 0: f0 0009 plain to vm
 exit 1: f0 0009 plain
 exit 2: f0 0009 plain f0.CV0:long
 exit 3: f0 0011 plain f0.CV2=#3 f0.CV0:long f0.CV2:long
 exit 4: f0 where it stands plain f0.CV2=#3 f0.CV0:long f0.CV2:long
-exit 5: f0 where it stands restore call f0.CV2=#3 f0.CV0:long f0.CV2:long
-exit 6: f1 0001 plain f0.CV2=#3 f1.CV0:long
-exit 7: f0 0009 plain f0.CV1=#8 f0.CV2=overflowed up f0.CV0:long f0.CV1:long f0.CV2:double
-exit 8: f0 0009 plain f0.CV2=#3 f0.CV0:long f0.CV2:long to vm
+exit 5: f1 0001 plain f0.CV2=#3 f1.CV0:long
+exit 6: f0 0009 plain f0.CV1=#8 f0.CV2=overflowed up f0.CV0:long f0.CV1:long f0.CV2:double
+exit 7: f0 0009 plain f0.CV2=#3 f0.CV0:long f0.CV2:long to vm
 unwind 0: f0.CV2=#3
 unwind 1: f0.CV1=#8 f0.CV2=#3
 map 0: offset 2 slot 0
