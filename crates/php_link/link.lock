@@ -12,6 +12,8 @@ Column::lay
 Composed
 Exact
 Folded
+FoldedHash
+FoldedHash::of
 Held
 HookVariance
 Indexed
@@ -28,11 +30,13 @@ NameMap
 NameMap::add
 NameMap::clear
 NameMap::find
+NameMap::find_hashed
 NameMap::new
 Named
 Named::name
 Names
 Names::find
+Names::find_hashed
 Names::new
 Names::over
 Names::remove

@@ -765,7 +765,11 @@ impl<C: Case> Names<C> {
         if self.index.is_empty() {
             return None;
         }
-        let found = self.index.find(wide(hash::<C>(name)), |&at| {
+        self.found(rows, hash::<C>(name), name)
+    }
+
+    fn found<R: Named>(&self, rows: &[R], hash: u32, name: &[u8]) -> Option<usize> {
+        let found = self.index.find(wide(hash), |&at| {
             let at = usize::try_from(at).unwrap_or(usize::MAX);
             rows.get(at).is_some_and(|row| same::<C>(row.name(), name))
         })?;
@@ -782,6 +786,18 @@ impl<C: Case> Names<C> {
         });
         let (at, _) = found.ok()?.remove();
         usize::try_from(at).ok()
+    }
+}
+
+impl Names<Folded> {
+    /// [`Names::find`] by the hash `name` was taken at ([`FoldedHash`]).
+    pub fn find_hashed<R: Named>(
+        &self,
+        rows: &[R],
+        hash: FoldedHash,
+        name: &[u8],
+    ) -> Option<usize> {
+        self.found(rows, hash.0, name)
     }
 }
 
@@ -893,7 +909,10 @@ impl<C: Case, V> NameMap<C, V> {
         if self.table.is_empty() {
             return None;
         }
-        let hash = hash::<C>(name);
+        self.found(hash::<C>(name), name)
+    }
+
+    fn found(&self, hash: u32, name: &[u8]) -> Option<&V> {
         let found = self.table.find(wide(hash), |filed| {
             filed.hash == hash && same::<C>(&filed.name, name)
         })?;
@@ -920,6 +939,27 @@ impl<C: Case, V> NameMap<C, V> {
                 true
             }
         }
+    }
+}
+
+impl<V> NameMap<Folded, V> {
+    /// [`NameMap::find`] by the hash `name` was taken at ([`FoldedHash`]).
+    pub fn find_hashed(&self, hash: FoldedHash, name: &[u8]) -> Option<&V> {
+        self.found(hash.0, name)
+    }
+}
+
+/// The hash a folded table files a name under, taken once: what
+/// `zend_lookup_class_ex`'s `ZSTR_H(lc_name)` is to the tables one name
+/// is looked up in, since `EG(class_table)` is several tables here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldedHash(u32);
+
+impl FoldedHash {
+    /// The hash of `name`, whatever its case.
+    #[must_use]
+    pub fn of(name: &[u8]) -> FoldedHash {
+        FoldedHash(hash::<Folded>(name))
     }
 }
 
@@ -1022,10 +1062,32 @@ fn wide(hash: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Exact, Folded, Rows};
+    use super::{Exact, Folded, FoldedHash, NameMap, Names, Rows};
 
     fn named(row: &&'static [u8]) -> &'static [u8] {
         row
+    }
+
+    struct Row(&'static [u8]);
+
+    impl super::Named for Row {
+        fn name(&self) -> &[u8] {
+            self.0
+        }
+    }
+
+    #[test]
+    fn a_hash_taken_once_finds_what_each_table_finds_by_name() {
+        let mut map: NameMap<Folded, u32> = NameMap::new();
+        assert!(map.add(b"Alias", 7));
+        let hash = FoldedHash::of(b"ALIAS");
+        assert_eq!(map.find_hashed(hash, b"ALIAS"), map.find(b"ALIAS"));
+        assert_eq!(map.find_hashed(FoldedHash::of(b"nope"), b"nope"), None);
+        let rows = [Row(b"Own"), Row(b"Other")];
+        let names: Names<Folded> = Names::over(&rows);
+        let hash = FoldedHash::of(b"OTHER");
+        assert_eq!(names.find_hashed(&rows, hash, b"OTHER"), Some(1));
+        assert_eq!(names.find_hashed(&rows, FoldedHash::of(b"x"), b"x"), None);
     }
 
     #[test]
