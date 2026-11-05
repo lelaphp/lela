@@ -34,6 +34,7 @@ Arr::position
 Arr::protect
 Arr::refcount
 Arr::reset
+Arr::rows_at
 Arr::set_declared_rows
 Arr::set_has_empty_ind
 Arr::set_next_free

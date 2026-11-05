@@ -1318,6 +1318,14 @@ impl Arr {
         Some(ZvalRef::new(at))
     }
 
+    /// Where the rows stand, an address for comparing and no more: one
+    /// that differs says the table's write moved them, as an entry a
+    /// [`ZvalRef`] names does not move with them.
+    #[must_use]
+    pub fn rows_at(&self) -> usize {
+        self.header().data.get() as usize
+    }
+
     // ------------------------------------------- the internal pointer
 
     /// `_zend_hash_get_valid_pos`: `pos` or the first live position

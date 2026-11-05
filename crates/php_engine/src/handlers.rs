@@ -19395,14 +19395,10 @@ pub(crate) fn assign_obj_op<T: Tier>(
     let mut member = exec::Member::default();
     let name = member.name(req, frame, code, op);
     let read = undefined_cv(req, frame, data.op1_type, data.op1);
-    // A `VAR` points at an entry the warning's handler can free with its
-    // table, so what it held is held.
-    let mut in_table = None;
-    if read {
-        if op.op1_type == OperandKind::Var {
-            let held = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
-            in_table = Some(Owner::take(req, held));
-        }
+    let in_table = (read && op.op1_type == OperandKind::Var)
+        .then(|| entry_past_warning(req, frame, code, op, data))
+        .transpose()?;
+    if read && in_table.is_none() {
         exec::operand(req, frame, code, data.op1_type, data.op1);
     }
     let step = Compound {
@@ -19448,13 +19444,196 @@ pub(crate) fn assign_obj_op<T: Tier>(
             Err(thrown)
         }
     };
-    let written = req.held_past(in_table, written);
+    let written = req.freed_after(written, |req| {
+        if let Some(held) = in_table {
+            held.give_up(req);
+        }
+    });
     member.release(req, frame, op);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
     Ok(advance_over_data(req, frame))
+}
+
+/// What `warn` raises, an undefined `OP_DATA`'s warning or a name's, over
+/// the entry a `VAR` points at, and what stands there after it, as
+/// `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF` is read past `GET_OP_DATA_ZVAL_PTR`
+/// and `GET_OP2_ZVAL_PTR`: a handler's write is seen. Where the
+/// handler freed the entry or moved it, what the entry held is held.
+/// The owner is the caller's, past the step, with the collector's count
+/// from where it was taken.
+///
+/// ```php
+/// class C { public $i = 1; public $q; public static $s; }
+/// function t($f) {
+///     try { $f(); echo "stepped\n"; }
+///     catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// set_error_handler(function () {
+///     $GLOBALS['o'] = null; $GLOBALS['a'][0] = null; C::$s = null;
+///     return true;
+/// });
+/// t(function () { $GLOBALS['o'] = new C; $GLOBALS['o']->i += $undefined; });
+/// t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->i .= $undefined; });
+/// t(function () { C::$s = new C; C::$s->i += $undefined; });
+/// set_error_handler(function () { $GLOBALS['a'] = [new C]; unset($GLOBALS['a'][0]); return true; });
+/// t(function () { $GLOBALS['o'] = new C; $GLOBALS['o']->i .= $undefined; });
+/// set_error_handler(function () { $GLOBALS['o']->q = null; return true; });
+/// t(function () {
+///     $o = new C; $o->q = new C; $GLOBALS['o'] = $o;
+///     $o->q->i += $undefined;
+/// });
+/// ```
+/// ```expect
+/// Attempt to assign property "i" on null
+/// Attempt to assign property "i" on null
+/// Attempt to assign property "i" on null
+/// stepped
+/// Attempt to assign property "i" on null
+/// ```
+///
+/// A table's rows moving moves no entry that is not a row of it, a CV's
+/// slot or a declared property's:
+///
+/// ```php
+/// #[AllowDynamicProperties] class C { public $i = 1; public $q; }
+/// function t($f) {
+///     try { $f(); echo "stepped\n"; }
+///     catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// $o = null;
+/// set_error_handler(function () {
+///     $GLOBALS['o'] = null;
+///     for ($i = 0; $i < 300; $i++) $GLOBALS["v$i"] = 1;
+///     return true;
+/// });
+/// t(function () { $GLOBALS['o'] = new C; $GLOBALS['o']->i += $undefined; });
+/// set_error_handler(function () {
+///     $GLOBALS['o']->q = 5;
+///     for ($i = 0; $i < 100; $i++) $GLOBALS['o']->{"d$i"} = 1;
+///     return true;
+/// });
+/// t(function () {
+///     $o = new C; $o->dyn = 1; $o->q = new C; $GLOBALS['o'] = $o;
+///     $o->q->i .= $undefined;
+/// });
+/// ```
+/// ```expect
+/// Attempt to assign property "i" on null
+/// Attempt to assign property "i" on int
+/// ```
+///
+/// The object a chain's last link read holds its slots past the handler:
+///
+/// ```php
+/// class C { public $i = 1; public $q; }
+/// function t($f) {
+///     try { $f(); echo "stepped\n"; }
+///     catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// set_error_handler(function () { $GLOBALS['a'][0]->q = null; return true; });
+/// t(function () {
+///     $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C;
+///     $GLOBALS['a'][0]->q->i += $undefined;
+/// });
+/// set_error_handler(function () { $GLOBALS['a'][0]->q = 5; return true; });
+/// t(function () {
+///     $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C;
+///     $GLOBALS['a'][0]->q->i += $undefined;
+/// });
+/// ```
+/// ```expect
+/// Attempt to assign property "i" on null
+/// Attempt to assign property "i" on int
+/// ```
+///
+/// What is held here php holds nowhere, so it adds no possible root:
+///
+/// ```php
+/// class C { public $i = 1; public $q; }
+/// set_error_handler(function () { return true; });
+/// $o = new C; $o->q = new C;
+/// $o->q->i += $undefined; echo gc_status()['roots'], "\n";
+/// $a = [new C]; $a[0]->i += $undefined; echo gc_status()['roots'], "\n";
+/// function f() {
+///     $GLOBALS['g'] = new C; $GLOBALS['g']->i += $undefined;
+///     echo gc_status()['roots'], "\n";
+/// }
+/// f();
+/// ```
+/// ```expect
+/// 1
+/// 1
+/// 1
+/// ```
+fn entry_past_warning(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    data: Opline,
+) -> Result<Owner<Value>, Fatal> {
+    let held = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
+    let held = Owner::take(req, held);
+    let holder = entry_holder(req, frame, code, op);
+    let object = holder.and_then(|holder| holder.as_object());
+    let owner = object.map(|object| Owner::take(req, object));
+    let table = match object {
+        Some(object) => object.heap().properties(),
+        None => holder.and_then(|h| h.as_array()).map(PhpArray::heap),
+    };
+    let rows = table.map(|t| (req.heap_mut().iterator_add(t, 0), t, t.rows_at()));
+    exec::operand(req, frame, code, data.op1_type, data.op1);
+    let moved = rows.is_some_and(|(at, table, rows)| {
+        !req.heap_mut().iterator_on(at, table) || table.rows_at() != rows
+    });
+    let stands = holder.is_some() && !moved;
+    if let Some((at, ..)) = rows {
+        req.heap_mut().iterator_del(at);
+    }
+    let now = if stands {
+        exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?
+    } else {
+        *held
+    };
+    let now = Owner::take(req, now);
+    held.give_up(req);
+    if let Some(owner) = owner {
+        owner.give_up(req);
+    }
+    Ok(now)
+}
+
+/// What the fetch before this opline found the entry its `VAR` points at
+/// in, an array or an object: `null` for a `VAR` that holds what it holds
+/// and for a static property, which nothing frees, and none where the
+/// fetch does not say. An object's owner is what shows its slots stand,
+/// which a write in the handler does not separate as an owner of a table
+/// would; an iterator on a table leaves its writes in place, and goes
+/// with it ([`php_heap::Heap::iterator_on`], which reads no table).
+fn entry_holder(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Option<Value> {
+    let place = req.slot_ptr(frame, op.op1)?.read().as_indirect();
+    let Some(place) = place else {
+        return Some(Value::null());
+    };
+    let at = req.vm().opline(frame).checked_sub(1)?;
+    let fetch = exec::opline_at(code, at).filter(|fetch| fetch.out == op.op1)?;
+    match fetch.opcode {
+        Opcode::FetchStaticPropW | Opcode::FetchStaticPropRw => Some(Value::null()),
+        Opcode::FetchW | Opcode::FetchRw => {
+            let global = fetch.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0;
+            let table = name_table(req, frame, global);
+            Some(Value::array(PhpArray::of(req.symbol_arr(table)?)))
+        }
+        Opcode::FetchDimW | Opcode::FetchDimRw => req.walked(place),
+        Opcode::FetchObjW | Opcode::FetchObjRw if fetch.op1_type != OperandKind::Var => {
+            let object = exec::container(req, frame, fetch.op1_type, fetch.op1, "FETCH_OBJ_W");
+            object.ok().map(|object| object.deref())
+        }
+        _ => None,
+    }
 }
 
 /// The inline path of `ZEND_ASSIGN_OBJ_OP` over a constant name or one a

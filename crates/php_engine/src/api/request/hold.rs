@@ -48,4 +48,11 @@ impl Request {
         let walk = self.hold.walk.take()?;
         (walk.place == place).then(|| Owner::take(self, walk.table))
     }
+
+    /// The array or object the `FETCH_DIM_W` before this opline walked to
+    /// `place`.
+    pub(crate) fn walked(&self, place: ZvalRef) -> Option<Value> {
+        let walk = self.hold.walk.filter(|walk| walk.place == place)?;
+        Some(walk.table)
+    }
 }
