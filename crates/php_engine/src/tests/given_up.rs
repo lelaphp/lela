@@ -87,3 +87,91 @@ fn a_property_step_stands_past_the_object_a_handler_gave_up() {
     );
     assert_eq!(stdout, "31\n31\n");
 }
+
+#[test]
+fn an_unset_past_the_table_a_handler_gave_up_deletes_nothing() {
+    let stdout = served(
+        "<?php\n\
+         set_error_handler(function () { $GLOBALS['a'] = 1; return true; });\n\
+         function tbl() { $x = []; for ($i = 0; $i < 40; $i++) { $x[] = 'x' . $i; } return $x; }\n\
+         $a = tbl(); unset($a[$u]); echo $a, \"\\n\";\n",
+    );
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn an_unset_under_a_table_a_handler_gave_up_reads_no_entry_of_it() {
+    let stdout = served(
+        "<?php\n\
+         set_error_handler(function () { $GLOBALS['a'] = 1; return true; });\n\
+         function row() { $x = []; for ($i = 0; $i < 40; $i++) { $x[] = 'x' . $i; } return $x; }\n\
+         $a = row(); $a[1] = row(); unset($a[1][$u]); echo $a, \"\\n\";\n",
+    );
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn a_test_past_the_table_a_handler_gave_up_finds_nothing() {
+    let stdout = served(
+        "<?php\n\
+         set_error_handler(function () { $GLOBALS['a'] = 1; return true; });\n\
+         function tbl() { $x = ['' => 'e']; for ($i = 0; $i < 40; $i++) { $x[] = 'x' . $i; } return $x; }\n\
+         $a = tbl(); echo isset($a[$u]) ? 'set' : 'not set', \"\\n\";\n\
+         $a = tbl(); echo empty($a[$u]) ? 'empty' : 'not empty', \"\\n\";\n",
+    );
+    assert_eq!(stdout, "not set\nempty\n");
+}
+
+/// The table a write held goes first and takes the key's last owner with
+/// it, and a destructor it serves lays another key down in that block, so
+/// the key is held past the table to ask what `$a` holds now.
+#[test]
+fn a_write_finds_no_entry_by_a_key_a_handler_gave_up() {
+    let stdout = served(
+        "<?php\n\
+         class D { function __destruct() { $GLOBALS['a']['n' . $GLOBALS['j']] = 'kept'; } }\n\
+         set_error_handler(function () { unset($GLOBALS['a'][$GLOBALS['k']]); $GLOBALS['a'][9] = 1; $GLOBALS['k'] = 0; return true; });\n\
+         $i = 7; $j = 8; $k = 'n' . $i; $a = [$k => 1, 9 => new D];\n\
+         $a[$k] = $u; foreach ($a as $at => $v) { echo $at, \"=\", $v, \"\\n\"; }\n",
+    );
+    assert_eq!(stdout, "9=1\nn8=kept\n");
+}
+
+/// The table going serves a destructor that moves what the handler's
+/// write left, so the entry is found after it.
+#[test]
+fn a_write_finds_its_entry_past_a_destructor_of_the_table_it_held() {
+    let stdout = served(
+        "<?php\n\
+         class D { function __destruct() { for ($i = 0; $i < 200; $i++) { $GLOBALS['a'][\"g$i\"] = $i; } } }\n\
+         set_error_handler(function () { $GLOBALS['a'][1] = 1; return true; });\n\
+         $i = 7; $a = ['x' . $i, new D]; $a[0] = $u;\n\
+         $n = 0; foreach ($a as $v) { $n++; } echo $n, $a[0] === null ? ' null' : ' kept', \"\\n\";\n",
+    );
+    assert_eq!(stdout, "202 null\n");
+}
+
+#[test]
+fn a_typed_cell_a_conversion_gave_up_takes_nothing() {
+    let stdout = served(
+        "<?php\n\
+         class P { public string $s = 'a'; }\n\
+         class T { function __toString(): string { $GLOBALS['a'] = 1; $GLOBALS['p'] = null; return 'conv'; } }\n\
+         $p = new P; $a = [0]; $a[0] = &$p->s;\n\
+         echo $a[0] = new T, '|', $a, '|', $p === null ? 'gone' : 'here', \"\\n\";\n",
+    );
+    assert_eq!(stdout, "conv|1|gone\n");
+}
+
+#[test]
+fn a_write_goes_with_the_table_a_handler_gave_up() {
+    let stdout = served(
+        "<?php\n\
+         set_error_handler(function () { $GLOBALS['a'] = 1; return true; });\n\
+         function tbl() { $x = []; for ($i = 0; $i < 40; $i++) { $x[] = 'x' . $i; } return $x; }\n\
+         $a = tbl(); echo $a[0] = $u, '|', $a, \"\\n\";\n\
+         $a = tbl(); echo $a[0] .= [], '|', $a, \"\\n\";\n\
+         $a = tbl(); $a[5] = ['q' . 'r']; $a[5][0] .= []; echo $a, \"\\n\";\n",
+    );
+    assert_eq!(stdout, "|1\nx0Array|1\n1\n");
+}

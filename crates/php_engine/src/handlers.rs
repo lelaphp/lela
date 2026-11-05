@@ -11086,12 +11086,17 @@ fn read_dimension(
     mode: DimRead,
 ) -> Result<Result<Value, Thrown>, Fatal> {
     if let Some(array) = container.as_array() {
-        let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-        let key = match crate::ops::array_offset(req, &dim, op.op2_type == OperandKind::Const) {
+        let dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+        let constant = op.op2_type == OperandKind::Const;
+        let refused = DimensionRead::Warning;
+        let undefined = undefined_op2(frame, code, op);
+        let key = match crate::ops::read_offset(req, array, &dim, constant, refused, undefined) {
             Ok(key) => key,
             Err(thrown) => return Ok(Err(thrown)),
         };
-        return Ok(Ok(array_entry(req, array, key, mode)));
+        return Ok(Ok(key.map_or_else(Value::null, |key| {
+            array_entry(req, array, key, mode)
+        })));
     }
     if let Some(text) = container.as_php_string() {
         let mut dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
@@ -11139,6 +11144,18 @@ fn read_dimension(
     let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
     crate::api::raising::warning(req, &bytes!(b"Trying to access array offset on ", named));
     Ok(Ok(Value::null()))
+}
+
+/// `ZVAL_UNDEFINED_OP2()`: the warning a dimension nothing wrote raises,
+/// for a kernel to raise where php's ladder does, the array held.
+fn undefined_op2<'a>(
+    frame: FrameRef,
+    code: &'a OpArray,
+    op: &'a Opline,
+) -> impl FnOnce(&mut Request) + 'a {
+    move |req| {
+        let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+    }
 }
 
 /// An object a dimension opline works on, held across `step`: php's
@@ -12070,11 +12087,7 @@ fn held_alone<T>(
     array: PhpArray,
     step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
 ) -> Result<Option<T>, Thrown> {
-    let held = Owner::take(req, Value::array(array));
-    let stepped = step(req);
-    let left = held.let_go(req);
-    let stepped = stepped?;
-    none_pending(req)?;
+    let (stepped, left) = crate::ops::array_held(req, array, step)?;
     Ok((!left.not_alone()).then_some(stepped))
 }
 
@@ -17318,8 +17331,24 @@ fn assign_to_place(
         if !req.ref_type_sources(cell.heap()).is_empty() {
             // The frame's regime, read only where a type is held to it.
             let strict = req.frame_strict_types(frame);
+            // A conversion can reach `__toString`, which can give up every
+            // name of the cell: php's `zend_assign_to_typed_ref_ex` then
+            // writes through a freed one. Held here, and where the hold
+            // was the last owner the value lands nowhere and is the
+            // caller's to give up.
+            let kept = Owner::take(req, cell.as_value());
             let verdict = crate::ops::verify_ref_assignable(req, cell.heap(), &value, strict);
-            value = crate::ops::landed(req, value, verdict)?;
+            value = match crate::ops::landed(req, value, verdict) {
+                Ok(landed) => landed,
+                Err(thrown) => {
+                    return Err(req.free_pending(thrown, |req| {
+                        kept.let_go(req);
+                    }));
+                }
+            };
+            if kept.let_go(req).freed() {
+                return Ok((value, value));
+            }
             // `zend_assign_to_typed_ref_ex`'s `i_zval_ptr_dtor_noref` of a
             // `Tmp` or `Var` operand after its copy landed
             // ([`Request::assign_to_reference`]).
@@ -17829,23 +17858,43 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
             }
         }
         Ok(Container::Array(array)) => {
-            let landing =
-                write_at(req, frame, code, op, array).and_then(|at| write_entry(req, array, at));
+            let landing = write_at(req, frame, code, op, array).and_then(|at| {
+                let key = write_key(array, at);
+                write_entry(req, array, at).map(|landing| (key, landing))
+            });
             match landing {
-                Ok(Landing::Entry(entry)) => {
-                    let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-                    match assign_to_place(req, frame, entry, (value, data.op1_type)) {
-                        Ok((landed, garbage)) => {
-                            write_out(req, frame, op, &landed);
-                            req.release(garbage);
-                            Ok(())
-                        }
-                        Err(thrown) => Err(thrown),
-                    }
+                Ok((key, Landing::Entry(entry))) => {
+                    let undefined = data.op1_type == OperandKind::Cv
+                        && req.slot(frame, data.op1).tag() == TypeTag::Undef;
+                    let taken = |req: &mut Request| {
+                        Ok(exec::take_operand(
+                            req,
+                            frame,
+                            code,
+                            data.op1_type,
+                            data.op1,
+                        ))
+                    };
+                    let placed = if undefined {
+                        entry_past(req, (op, place), (array, key, entry), taken)
+                    } else {
+                        taken(req).map(|value| (value, Some(entry)))
+                    };
+                    placed.and_then(|(value, entry)| {
+                        let (landed, garbage) = match entry {
+                            Some(entry) => {
+                                assign_to_place(req, frame, entry, (value, data.op1_type))?
+                            }
+                            None => (value, value),
+                        };
+                        write_out(req, frame, op, &landed);
+                        req.release(garbage);
+                        Ok(())
+                    })
                 }
                 // `assign_dim_error`: `FREE_OP_DATA` and a `null` result.
-                Ok(Landing::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
-                Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
+                Ok((_, Landing::Gone)) => data_gone(req, frame, op, (data.op1_type, data.op1)),
+                Ok((_, Landing::Occupied)) => Err(crate::api::raising::cannot_add_element(req)),
                 Err(thrown) => Err(thrown),
             }
         }
@@ -17889,6 +17938,122 @@ fn append_value(
     let held = Owner::take(req, Value::array(array));
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
     (!held.let_go(req).freed()).then_some(value)
+}
+
+/// The key a write at `at` lands at, read before the append that takes
+/// it, since `next_free` stays at `ZEND_LONG_MAX` once that index is
+/// taken and says nothing of the index before it. `_zend_hash_next_index_insert`
+/// reads `nNextFreeElement` the same way.
+fn write_key(array: PhpArray, at: WriteAt) -> php_heap::Key {
+    let next = array.heap().next_free();
+    match at {
+        WriteAt::At(key) => key,
+        _ if next == i64::MIN => php_heap::Key::Long(0),
+        _ => php_heap::Key::Long(next),
+    }
+}
+
+/// `step` over a diagnostic a write raises with its entry in hand, and
+/// the entry to land what it answered in. An owner keeps the table
+/// across it, and makes a handler's write to it separate, so where that
+/// owner was the last the entry is found afresh in what a CV holds now,
+/// as it stands: the table the handler wrote, shared by what the handler
+/// copied it to, and none where the handler unset the key, left no
+/// array or left an immutable one. Letting the owner go can serve a
+/// destructor, so the entry is found after it, by a key held past it. A
+/// `VAR` or `$this` root is not read again, and the write lands nowhere.
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["a"]["k"] = "w"; return true; });
+/// $a = [str_repeat("x", 3), "k" => 0]; $a[0] = $u; var_dump($a);
+/// $a = [str_repeat("x", 3), "k" => 0]; $a[0] .= []; var_dump($a[0], $a["k"]);
+/// $r = 1; $a = [&$r, "k" => 0]; $a[0] = $u; var_dump($r);
+/// $k = str_repeat("n", 3); $a = [$k => 1, "k" => 0]; $a[$k] = $u; var_dump($a[$k]);
+/// $a = ["k" => 0]; $a[] .= []; var_dump($a);
+/// ```
+/// ```expect
+/// [Undefined variable $u]
+/// array(2) {
+///   [0]=>
+///   NULL
+///   ["k"]=>
+///   string(1) "w"
+/// }
+/// [Array to string conversion]
+/// string(8) "xxxArray"
+/// string(1) "w"
+/// [Undefined variable $u]
+/// NULL
+/// [Undefined variable $u]
+/// NULL
+/// [Array to string conversion]
+/// array(2) {
+///   ["k"]=>
+///   string(1) "w"
+///   [0]=>
+///   string(5) "Array"
+/// }
+/// ```
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { $GLOBALS["a"]["k"] = "w"; return true; });
+/// $a = [PHP_INT_MAX - 1 => "p", "k" => 0]; $a[] .= []; var_dump($a);
+/// ```
+/// ```expect
+/// array(3) {
+///   [9223372036854775806]=>
+///   string(1) "p"
+///   ["k"]=>
+///   string(1) "w"
+///   [9223372036854775807]=>
+///   string(5) "Array"
+/// }
+/// ```
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { $GLOBALS["a"]["k"] = "w"; $GLOBALS["c"] = $GLOBALS["a"]; return true; });
+/// $a = [str_repeat("x", 3), "k" => 0]; $a[0] = $u; var_dump($a[0], $c[0]);
+/// $a = [str_repeat("x", 3), "k" => 0]; $a[0] .= []; var_dump($a[0], $c[0]);
+/// ```
+/// ```expect
+/// NULL
+/// NULL
+/// string(8) "xxxArray"
+/// string(8) "xxxArray"
+/// ```
+fn entry_past<T>(
+    req: &mut Request,
+    (op, place): (&Opline, php_heap::ZvalRef),
+    (array, key, entry): (PhpArray, php_heap::Key, php_heap::ZvalRef),
+    step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
+) -> Result<(T, Option<php_heap::ZvalRef>), Thrown> {
+    let name = match key {
+        php_heap::Key::Str(name) => Value::string(PhpString::of(name)),
+        php_heap::Key::Long(_) => Value::null(),
+    };
+    let name = Owner::take(req, name);
+    let held = Owner::take(req, Value::array(array));
+    let stepped = match step(req) {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            return Err(req.free_pending(thrown, |req| {
+                held.let_go(req);
+                name.give_up(req);
+            }));
+        }
+    };
+    let entry = if !held.let_go(req).freed() {
+        Some(entry)
+    } else if op.op1_type == OperandKind::Cv {
+        let now = Value::of_slot(place.read()).deref();
+        now.as_array()
+            .filter(|now| !now.heap().is_immutable())
+            .and_then(|now| now.heap().value_ref(key))
+    } else {
+        None
+    };
+    name.give_up(req);
+    Ok((stepped, entry))
 }
 
 /// `ZEND_SEPARATE` (`Z/Zend/zend_vm_def.h:8377`), the opline
@@ -17993,6 +18158,53 @@ impl From<Option<php_heap::ZvalRef>> for Landing {
     fn from(entry: Option<php_heap::ZvalRef>) -> Landing {
         entry.map_or(Landing::Occupied, Landing::Entry)
     }
+}
+
+/// Whether a compound assignment over `entry` raises nothing a handler
+/// could use to give the table up: a `.=` of a string or a long over
+/// one, which is the step a program repeats. php holds nothing across
+/// any step and writes through the entry after it, so every other step
+/// takes an owner of the table ([`entry_past`]).
+///
+/// A table a handler took an owner of is written as php writes it:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["c"] = $GLOBALS["a"]; return true; });
+/// $a = [str_repeat("x", 3)]; $a[0] .= []; var_dump($a, $c);
+/// $a = [str_repeat("x", 3)]; $a[0] = $u; var_dump($a, $c);
+/// ```
+/// ```expect
+/// [Array to string conversion]
+/// array(1) {
+///   [0]=>
+///   string(8) "xxxArray"
+/// }
+/// array(1) {
+///   [0]=>
+///   string(8) "xxxArray"
+/// }
+/// [Undefined variable $u]
+/// array(1) {
+///   [0]=>
+///   NULL
+/// }
+/// array(1) {
+///   [0]=>
+///   NULL
+/// }
+/// ```
+fn step_is_silent(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    entry: php_heap::ZvalRef,
+) -> bool {
+    let plain = |value: Value| matches!(value.as_ref(), ValueRef::Str(_) | ValueRef::Int(_));
+    let Opline { op1_type, op1, .. } = step.data;
+    operator(step.op.extended_value) == Some(Opcode::Concat)
+        && plain(Value::of_slot(entry.read()))
+        && plain(exec::operand_undef(req, frame, code, op1_type, op1))
 }
 
 /// The entry a compound assignment to a dimension lands in, php's
@@ -18409,14 +18621,34 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
     let ran_on = req.pending();
     let written = match container {
         Ok(Container::Array(array)) => {
-            let landing =
-                write_at(req, frame, code, op, array).and_then(|at| rw_entry(req, array, at));
+            let landing = write_at(req, frame, code, op, array).and_then(|at| {
+                let key = write_key(array, at);
+                rw_entry(req, array, at).map(|landing| (key, landing))
+            });
             match landing {
-                Ok(Landing::Entry(entry)) => stepped_entry(req, frame, code, step, entry),
+                Ok((key, Landing::Entry(entry))) => {
+                    let computed = |req: &mut Request| stepped_entry(req, frame, code, step, entry);
+                    let placed = if step_is_silent(req, frame, code, step, entry) {
+                        computed(req).map(|stepped| (stepped, Some(entry)))
+                    } else {
+                        entry_past(req, (op, place), (array, key, entry), computed)
+                    };
+                    placed.and_then(|(stepped, entry)| {
+                        let (landed, garbage) = match entry {
+                            Some(entry) => {
+                                assign_to_place(req, frame, entry, (stepped, OperandKind::Unused))?
+                            }
+                            None => (stepped, stepped),
+                        };
+                        write_out(req, frame, op, &landed);
+                        release_overwritten(req, garbage);
+                        Ok(())
+                    })
+                }
                 // `assign_dim_op_ret_null`: `FREE_OP_DATA` and a `null`
                 // result.
-                Ok(Landing::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
-                Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
+                Ok((_, Landing::Gone)) => data_gone(req, frame, op, (data.op1_type, data.op1)),
+                Ok((_, Landing::Occupied)) => Err(crate::api::raising::cannot_add_element(req)),
                 Err(thrown) => Err(thrown),
             }
         }
@@ -18449,20 +18681,19 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
     dim_written(req, frame, op, freed, (written, ran_on))
 }
 
-/// The kernel over what one place holds and the `OP_DATA`'s value, and
-/// the write back into that place: php's `zend_binary_op(var_ptr,
-/// var_ptr, value)` with the reference followed and the cell's types
-/// held to where it carries any ([`assign_to_place`], which is
-/// `zend_binary_assign_op_typed_ref`). What landed is what the
-/// temporary takes under `RETURN_VALUE_USED`, and the value operand is
-/// given up either way, as `FREE_OP_DATA` gives it up.
+/// The kernel over what one place holds and the `OP_DATA`'s value:
+/// php's `zend_binary_op(var_ptr, var_ptr, value)` up to its write back,
+/// which [`assigned_dim_op`] makes with the reference followed and the
+/// cell's types held to where it carries any ([`assign_to_place`], which
+/// is `zend_binary_assign_op_typed_ref`). The value operand is given up
+/// either way, as `FREE_OP_DATA` gives it up.
 fn stepped_entry(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     step: Compound<'_>,
     entry: php_heap::ZvalRef,
-) -> Result<(), Thrown> {
+) -> Result<Value, Thrown> {
     let Compound {
         op, data, kernel, ..
     } = step;
@@ -18475,19 +18706,12 @@ fn stepped_entry(
         kernel(req, &held, &value)
     };
     exec::free_operand(req, frame, data.op1_type, data.op1);
-    let stepped = match computed {
-        Ok(stepped) => stepped,
-        Err(thrown) => {
-            let strict = req.frame_strict_types(frame);
-            return Err(land_failed_step(req, entry, (None, strict), thrown));
-        }
-    };
-    // `EX_USES_STRICT_TYPES()`: the regime of the frame the opline
-    // stands in.
-    let (landed, garbage) = assign_to_place(req, frame, entry, (stepped, OperandKind::Unused))?;
-    write_out(req, frame, op, &landed);
-    release_overwritten(req, garbage);
-    Ok(())
+    computed.map_err(|thrown| {
+        // `EX_USES_STRICT_TYPES()`: the regime of the frame the opline
+        // stands in.
+        let strict = req.frame_strict_types(frame);
+        land_failed_step(req, entry, (None, strict), thrown)
+    })
 }
 
 /// `zend_binary_assign_op_obj_dim` (`Z/Zend/zend_execute.c:1638`), the
@@ -20569,11 +20793,13 @@ fn unset_entry(
     op: &Opline,
     array: PhpArray,
 ) -> Result<php_heap::Zval, Thrown> {
-    let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-    let key = crate::ops::array_offset(req, &dim, op.op2_type == OperandKind::Const)?;
-    Ok(array
-        .heap()
-        .value_ref(key)
+    let dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+    let constant = op.op2_type == OperandKind::Const;
+    let refused = DimensionRead::Warning;
+    let undefined = undefined_op2(frame, code, op);
+    let key = crate::ops::read_offset(req, array, &dim, constant, refused, undefined)?;
+    Ok(key
+        .and_then(|key| array.heap().value_ref(key))
         .map_or_else(php_heap::Zval::null, php_heap::Zval::indirect))
 }
 
@@ -20788,7 +21014,15 @@ pub(crate) fn unset_dim<T: Tier>(
     };
     let unset = if let (_, Some(array)) = found {
         let constant = op.op2_type == OperandKind::Const;
-        crate::ops::unset_dim(req, array, &offset, constant)
+        let undefined = undefined_op2(frame, code, op);
+        // A `CV`'s slot stands; a `VAR`'s `IS_INDIRECT` is an entry of a
+        // table the handler may have freed with the array, and no read.
+        let again = |req: &mut Request| {
+            let stands = op.op1_type == OperandKind::Cv;
+            let found = stands.then(|| separated_array(req, place).ok());
+            found.flatten().and_then(|(_, now)| now)
+        };
+        crate::ops::unset_dim(req, array, &offset, constant, undefined, again)
     } else {
         // The two reads php raises a warning for stand here, after the
         // array arm and before the rest (`ZVAL_UNDEFINED_OP1`,
@@ -24586,26 +24820,28 @@ fn inline_isset_dim<T: Tier>(
 fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let empty = op.extended_value & ISEMPTY != 0;
     let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
-    // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
-    // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension as
-    // it was written, which is the arm that reads it at all.
-    let offset = if held.as_object().is_some() {
-        object_dim(req, frame, code, op).unwrap_or_else(Value::null)
+    let answer = if let Some(array) = held.as_array() {
+        let offset = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+        let constant = op.op2_type == OperandKind::Const;
+        let undefined = undefined_op2(frame, code, op);
+        let again = |req: &mut Request| {
+            let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+            held.deref().as_array()
+        };
+        crate::ops::isset_dim(req, array, &offset, (constant, empty), undefined, again)
     } else {
-        exec::operand(req, frame, code, op.op2_type, op.op2)
-    };
-    // A handler of `ZVAL_UNDEFINED_OP2` can have written the container,
-    // which php reads through its zval after it.
-    let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
-    let answer = if let Some(array) = container.as_array() {
-        crate::ops::isset_dim(
-            req,
-            array,
-            &offset,
-            op.op2_type == OperandKind::Const,
-            empty,
-        )
-    } else {
+        // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
+        // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension
+        // as it was written, which is the arm that reads it at all.
+        let offset = if held.as_object().is_some() {
+            object_dim(req, frame, code, op).unwrap_or_else(Value::null)
+        } else {
+            exec::operand(req, frame, code, op.op2_type, op.op2)
+        };
+        // A handler of `ZVAL_UNDEFINED_OP2` can have written the
+        // container, which `zend_isset_dim_slow` reads through its zval
+        // after it, and an array there is neither of its two arms.
+        let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
         isset_container(req, (frame, code, op), &container, &offset, empty)
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
@@ -26774,7 +27010,8 @@ fn incdec_typed_ref(
     cell: PhpRef,
     held: Value,
 ) -> Edge {
-    let stepping = step_hold(req, held, Some(cell), None);
+    // `ZVAL_COPY(copy, var_ptr)`, under a `PRE_*` as under a `POST_*`.
+    let stepping = step_hold(req, held, true, Some(cell), None);
     let stepped = match kernel(req, &held) {
         Ok(stepped) => stepped,
         Err(thrown) => {
@@ -26805,13 +27042,30 @@ fn incdec_typed_ref(
 }
 
 /// What a step holds across a diagnostic that can reach a handler: the
-/// value stepped, which `ZVAL_COPY(result, var_ptr)` has an owner of
-/// before php's `POST_*` steps it, the reference it stands in and the
-/// table the `FETCH_DIM_RW` before walked to `place` in. A number raises
-/// nothing and takes none of the three.
+/// value stepped under `copied`, which `ZVAL_COPY(result, var_ptr)` has
+/// an owner of before php's `POST_*` steps it and a `PRE_*` has not, the
+/// kernel taking its own, the reference it stands in and the table the
+/// `FETCH_DIM_RW` before walked to `place` in. A number raises nothing
+/// and takes none of the three.
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { debug_zval_dump($GLOBALS["s"]); $GLOBALS["s"] = 1; return true; });
+/// $s = str_repeat("a", 30) . "!"; $x = --$s; var_dump($x);
+/// $s = str_repeat("a", 30) . "z"; $x = ++$s; var_dump($x);
+/// $s = str_repeat("a", 30) . "!"; $x = $s--; var_dump($x);
+/// ```
+/// ```expect
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!" refcount(3)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaz" refcount(3)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaba"
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!" refcount(4)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// ```
 fn step_hold(
     req: &mut Request,
     held: Value,
+    copied: bool,
     cell: Option<PhpRef>,
     place: Option<php_heap::ZvalRef>,
 ) -> [Option<Owner<Value>>; 3] {
@@ -26819,7 +27073,7 @@ fn step_hold(
         return [None, None, None];
     }
     [
-        Some(Owner::take(req, held)),
+        copied.then(|| Owner::take(req, held)),
         cell.map(|cell| Owner::take(req, cell.as_value())),
         place.and_then(|place| req.hold_walk(place)),
     ]
@@ -26957,7 +27211,7 @@ fn incdec(
     if let Some(cell) = cell.filter(|cell| cell.heap().sources() != 0) {
         return incdec_typed_ref(req, frame, op, post, kernel, cell, held);
     }
-    let stepping = step_hold(req, held, cell, place);
+    let stepping = step_hold(req, held, post, cell, place);
     match kernel(req, &held) {
         Ok(stepped) => {
             // `ZVAL_COPY(EX_VAR(opline->result.var), var_ptr)`, before
