@@ -1542,8 +1542,8 @@ fn a_stepped_return_past_the_root_holds_its_landing_with_an_exit() -> Result<(),
     Ok(())
 }
 
-/// A recursive return trace whose `RETURN` of a string this tier steps,
-/// which php compiles with `zend_jit_return`: each return past its root
+/// A recursive return trace whose `RETURN` of a variable's array this tier
+/// steps, which php compiles with `zend_jit_return`: each return past its root
 /// escapes, as `zend_jit_leave_func` takes no exit, and its line holds
 /// no guard of its own (#3688).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -1552,8 +1552,8 @@ fn a_stepped_return_php_compiles_in_place_escapes() -> Result<(), String> {
     let ir = built(
         &[("record.function", "p"), ("record.start", "return")],
         "function h() { return 1; }
-        function p($n) { if ($n == 0) { return \"\"; } $x = p($n - 1); h(); $x .= \"a\"; return $x; }
-        echo strlen(p(8)), \"\\n\";",
+        function p($n) { if ($n == 0) { return []; } $x = p($n - 1); h(); $x[] = 1; return $x; }
+        $r = p(8); echo $r[7], \"\\n\";",
     )?;
     let shown = dump::render(&ir);
     assert_eq!(ir.entry.stop, Stop::RecursiveRet, "{shown}");

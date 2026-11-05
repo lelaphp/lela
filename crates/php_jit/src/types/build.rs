@@ -665,13 +665,14 @@ impl<'a> Builder<'a> {
     /// place: php's code compiles the `RETURN` a trace stops at, leaves the
     /// frame and goes on in the interpreter where the return left it
     /// (`zend_jit_leave_func`, then `zend_jit_trace_return`,
-    /// `Z/ext/opcache/jit/zend_jit_trace.c:6532-6556`). Here only where its
+    /// `Z/ext/opcache/jit/zend_jit_trace.c:6532-6556`). Here where its
     /// frame leaves in place and its value, held as the opline's guard
-    /// holds it ([`Builder::guard_use`]), is a scalar; otherwise the
-    /// interpreter serves it, through the trace's end. A variable the
-    /// recording saw holding a reference to a scalar is held by no guard
-    /// and copied through the reference ([`Returned::Shared`]) where the
-    /// trace knows it set, as the opline's form reads it.
+    /// holds it ([`Builder::guard_use`]), is a scalar or one [`returned`]
+    /// hands on; otherwise the interpreter serves it, through the trace's
+    /// end. A variable the recording saw holding a reference to a scalar
+    /// is held by no guard and copied through the reference
+    /// ([`Returned::Shared`]) where the trace knows it set, as the opline's
+    /// form reads it.
     fn returns_in_place(&self, last: &Event) -> Result<bool, Abort> {
         let Event::Op {
             func, opline, op1, ..
@@ -708,7 +709,11 @@ impl<'a> Builder<'a> {
             (_, Some(sample)) if !sample.indirect => Types::of_tag(sample.kind).scalar(),
             (kind, _) => held(kind).is_some_and(Types::scalar),
         };
-        Ok(scalar)
+        let t1 = match op.op1_type {
+            OperandKind::Const => constant_types(constant(code, op.op1), code),
+            kind => held(kind).unwrap_or(Types::ANY),
+        };
+        Ok(scalar || returned(op, code, t1) != Returned::Scalar)
     }
 
     /// The `RETURN` the trace stops at, `last`, left in place, after the
@@ -2130,12 +2135,11 @@ impl<'a> Builder<'a> {
     /// The `RETURN` of `eval`'d code php hands it too is never recorded
     /// here (revision 120).
     ///
-    /// A return trace whose `RETURN` of a string this tier steps, as it
-    /// steps every `RETURN` of a value it does not hold to one scalar:
-    /// php compiles it with `zend_jit_return`, so where it returns into
-    /// the file's loop, away from its recursion's header, it escapes and
-    /// writes no exit line, and php's interpreter goes on to root a trace
-    /// at the loop:
+    /// A return trace whose `RETURN` of a string php compiles with
+    /// `zend_jit_return`, as this tier leaves it in place ([`returned`]),
+    /// so where it returns into the file's loop, away from its recursion's
+    /// header, it escapes and writes no exit line, and php's interpreter
+    /// goes on to root a trace at the loop:
     ///
     /// ```php
     /// function h() { return 1; }
@@ -5311,12 +5315,16 @@ fn iterated(op: &Opline, t1: Types, read1: Read, branch: Option<bool>) -> bool {
 /// What a `RETURN` of `code` hands its caller where it leaves in place:
 /// a constant no reference counts, copied as it is; a temporary that is
 /// no reference, moved; a variable that may hold a reference, which no
-/// guard held (php's trace SSA reads it `IS_UNKNOWN`), copied through it
-/// with an owner more, where it is never unset, as php serves the
-/// `RETURN` of a value that may be unset through its handler; a scalar
-/// otherwise, which the form holds it to (`zend_jit_return`,
-/// `Z/ext/opcache/jit/zend_jit_ir.c:11265-11400`, and its caller,
-/// `Z/ext/opcache/jit/zend_jit_trace.c:5580-5607`).
+/// guard held (php's trace SSA reads it `IS_UNKNOWN`), or an object or a
+/// string, copied through it with an owner more, where it is never unset,
+/// as php serves the `RETURN` of a value that may be unset through its
+/// handler; a scalar otherwise, which the form holds it to
+/// (`zend_jit_return`, `Z/ext/opcache/jit/zend_jit_ir.c:11265-11400`, and
+/// its caller, `Z/ext/opcache/jit/zend_jit_trace.c:5580-5607`). php's trace
+/// moves a string or an array out of its variable; a string's extra owner
+/// is seen by nothing, and an array's, given up with the variable, may
+/// take it as a possible root, which `gc_status()` reads, so a variable's
+/// array stays the interpreter's.
 fn returned(op: &Opline, code: &OpArray, t1: Types) -> Returned {
     match op.op1_type {
         OperandKind::Const if !t1.scalar() => code
@@ -5328,7 +5336,12 @@ fn returned(op: &Opline, code: &OpArray, t1: Types) -> Returned {
             }),
         OperandKind::Tmp if !t1.scalar() => Returned::Moved,
         OperandKind::Var if !t1.scalar() && !t1.meets(Types::REF) => Returned::Moved,
-        OperandKind::Cv if t1.meets(Types::REF) && !t1.meets(Types::UNDEF) => Returned::Shared,
+        OperandKind::Cv
+            if !t1.meets(Types::UNDEF)
+                && (t1.meets(Types::REF) || !(t1.scalar() || t1.meets(Types::ARRAY))) =>
+        {
+            Returned::Shared
+        }
         _ => Returned::Scalar,
     }
 }
