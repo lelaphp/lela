@@ -463,9 +463,13 @@ fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
             value,
             owners,
             receives,
+            closure,
         } => {
             if receives {
                 write!(text, " receives")?;
+            }
+            if closure {
+                write!(text, " closure")?;
             }
             (value, owners)
         }

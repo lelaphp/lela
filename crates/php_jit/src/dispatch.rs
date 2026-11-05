@@ -461,7 +461,7 @@ impl Goes {
 /// `record` stops at a recursive return alone for a `Return` start, rooted
 /// at a landing a trace armed, which this reads first, so no loop's root
 /// word names one. A trace that leaves for the interpreter where it
-/// opens enters nothing there ([`visit_landing`]'s `left`), as php's
+/// was entered enters nothing there ([`visit_landing`]), as php's
 /// `zend_jit_trace_exit` runs the opline's own handler.
 ///
 /// A `while` whose condition php keeps is headed there, and `f`'s
@@ -867,8 +867,8 @@ fn followed<'t>(
     let (state, shared, epoch) = (lending.state, lending.shared(), lending.epoch);
     loop {
         // The trace that answered: the one entered, or one it jumped to.
-        let (left, mut trace) = match entered {
-            Ok(Answered { left, by }) => (left, by),
+        let (left, mut trace, from) = match entered {
+            Ok(Answered { left, by, from }) => (left, by, from),
             Err(fatal) => return Flow::Bail(fatal),
         };
         let exited = match left {
@@ -952,7 +952,7 @@ fn followed<'t>(
             // where a return lands, the landing's.
             None if let Some(flow) = owed(req, shared, frame) => return flow,
             None if unarmed(req, lending, frame) => return Flow::Resume(frame),
-            None => match visit_landing(req, lending, frame, Came::Left(Some(trace))) {
+            None => match visit_landing(req, lending, frame, Came::Left(Some(from))) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => next,
                     None => return Flow::Resume(frame),
@@ -972,17 +972,18 @@ fn followed<'t>(
 }
 
 /// How the interpreter came to a landing ([`visit_landing`]).
-#[derive(Debug, Clone, Copy)]
-enum Came<'t> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Came {
     /// A trace's escape, which php's stub hands to the handler of the
     /// opline the frame stands at with nothing tested
     /// (`zend_jit_trace_escape_stub`), as the escaping trace's own code
     /// does where the trace compiled there is ready ([`crate::lower::Escapes`]).
     Escaped,
-    /// A trace's exit, the trace that left, or a recording's stop, none,
-    /// which php's `zend_jit_trace_exit` hands on only while the
-    /// interrupt is not raised.
-    Left(Option<&'t Trace>),
+    /// A trace's exit, with the frame and the opline the [`enter::enter`]
+    /// it answered found, or a recording's stop, none, which php's
+    /// `zend_jit_trace_exit` hands on only while the interrupt is not
+    /// raised.
+    Left(Option<(FrameRef, OplineIdx)>),
 }
 
 /// Whether the opline a trace left `frame` at is one no visit acts on,
@@ -1018,21 +1019,58 @@ fn unarmed(req: &Request, lending: Lent<'_>, frame: FrameRef) -> bool {
 /// armed landing's word bumped and claimed at `opcache.jit_hot_return`
 /// (`jit-design.md` §2.2, #3036), and a loop root's compiled trace
 /// entered (#3318). Nothing while the request records, nor, but at an
-/// escape, while the interrupt is raised, nor where the trace that left
-/// the frame there opens there, as php's `zend_jit_trace_exit` answers 1
-/// at the first opline of the trace that exited
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:8920`) and the opline's own
-/// handler runs, not a trace again; a frame at an opline with a sealed
-/// word is left as it is.
+/// escape, while the interrupt is raised, nor where the trace left the
+/// frame where it was entered; a frame at an opline with a sealed word is
+/// left as it is.
 ///
-/// That trace may be a side, which opens where its root does and which
-/// the landing's word does not name. Here a closure's `RETURN` is not
-/// left in place, so the return root at it and its sides all end at it
-/// with nothing done, and the root's type guard fails to a side on every
-/// other value: asking the word from a side enters the root again, and
-/// the interpreter never makes the return (#4148). Under the exit-fuzz
-/// lane each guard failing once grows those sides, whatever hosts the
-/// loop:
+/// php's `zend_jit_trace_exit` ends by answering
+/// `orig_opline == t->opline && EX(opline) == orig_opline`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:8920`). A root's `t->opline` is
+/// its first recorded opline (`:7547`), so a root that leaves there
+/// answers 1, in whichever frame, and the exit stub
+/// calls the opline's original handler, past the trace php patched in
+/// (`zend_jit_trace_exit_stub`, `Z/ext/opcache/jit/zend_jit_ir.c:2517`). A
+/// side's `t->opline` is null (`:8381`), so a side answers 0 and the stub
+/// goes through `EX(opline)->handler`, which is the root's where one
+/// stands there. That is safe in php because its `RETURN` always leaves:
+/// a trace that stands at the opline it opened at made its way there.
+///
+/// Here it may have done nothing. A `RETURN` a trace stops at can refuse
+/// its leave ([`crate::lower`]'s `leave_refused`: arguments
+/// past the parameters, an annex, a first-class callable's closure, a
+/// frame served from outside), and a `RETURN_BY_REF` is the interpreter's
+/// alone: each takes the trace's end with the frame untouched, so a return
+/// root and its sides all come back to the opline they opened at having
+/// done nothing, and asking the word again enters the root again, and the
+/// interpreter never makes the return (#4148).
+/// So the rule kept is about progress rather than about roots: any trace,
+/// root or side, whose call of [`enter::enter`] found the frame where it
+/// left it goes to the opline's own handler. It reads the place and the
+/// opline `enter` found, not where the trace opens: a side that recorded
+/// no opline is held by it with no branch of its own, and a root that
+/// left at its own opline in another frame, by a recursive return, made
+/// way and enters, where php's root runs the handler. A [`FrameRef`] is a
+/// place, so a frame popped and pushed again at the same place and opline
+/// reads as not having moved, which costs one opline in the interpreter.
+///
+/// Under the exit-fuzz lane each guard failing once grows those sides. A
+/// first-class callable's return, a closure's passed one argument more
+/// and a return by reference each loop here without the rule:
+///
+/// ```php
+/// function f($x) { if ($x % 3 == 0) { return 1.5; } if ($x % 3 == 1) { return 2; } return true; }
+/// function g($i) { return f($i); }
+/// function &r($i) { static $v = 1; f($i); return $v; }
+/// $h = g(...); $e = function ($i) { return f($i); };
+/// $s = 0;
+/// for ($i = 0; $i < 120; $i++) { $s += (int) $h($i); $s += (int) $e($i, 1); $s += (int) r($i); }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// 440
+/// ```
+///
+/// A closure's return, which leaves in place, whatever hosts the loop:
 ///
 /// ```php
 /// function f($x) { if ($x % 3 == 0) { return 1.5; } if ($x % 3 == 1) { return 2; } return true; }
@@ -1061,16 +1099,12 @@ fn unarmed(req: &Request, lending: Lent<'_>, frame: FrameRef) -> bool {
 /// ```expect regime=jit-exit-fuzz process
 /// 160 160 160 160 160 160 160
 /// ```
-fn visit_landing(req: &Request, lending: Lent<'_>, frame: FrameRef, came: Came<'_>) -> Visited {
+fn visit_landing(req: &Request, lending: Lent<'_>, frame: FrameRef, came: Came) -> Visited {
     #[cfg(test)]
     (lending.state.landings_visited).set(lending.state.landings_visited.get().saturating_add(1));
     if matches!(came, Came::Left(_)) && req.limits().interrupt().raised().load(Ordering::Relaxed) {
         return Visited::Continue;
     }
-    let left = match came {
-        Came::Left(left) => left,
-        Came::Escaped => None,
-    };
     let (state, shared) = (lending.state, lending.shared());
     if state.recording.get() {
         return Visited::Continue;
@@ -1082,9 +1116,7 @@ fn visit_landing(req: &Request, lending: Lent<'_>, frame: FrameRef, came: Came<'
     // A word that neither enters nor counts is read once and left, as
     // php's escape runs the plain handler of an opline no trace armed.
     match (goes, policy::read(word)) {
-        (_, State::Compiled(_)) if left.is_some_and(|trace| stayed(req, frame, at, trace)) => {
-            Visited::Continue
-        }
+        (_, State::Compiled(_)) if came == Came::Left(Some((frame, at))) => Visited::Continue,
         (_, State::Compiled(id)) => Visited::Enter(id),
         (Goes::Landing(_), State::Cold) => {
             let claims = !quieted(state, None);
@@ -1383,7 +1415,7 @@ fn recordings(
             );
             return Ok((resumed(frame, *stepped), None, false));
         }
-        let opening = side_opened(table, start, behind);
+        let opening = side_opened(req, frame, (table, shared.policy.folds()), start, behind);
         let claimed = claim.holder();
         let (recorded, ended) =
             match record::run(req, frame, start, claimed, &shared.policy, opening) {
@@ -1884,25 +1916,15 @@ fn begins(
     }
 }
 
-/// Whether trace `id` opens where `frame` stands ([`opens_at`]).
+/// Whether trace `id` opens where `frame` stands: its first recorded
+/// opline is that one, in the frame's op array.
 fn opens(req: &Request, frame: FrameRef, id: TraceId, shared: &Shared) -> bool {
-    let at = tier::frame(req, frame).map(|view| view.opline());
+    let at = tier::standing_at(req, frame);
     let table = table::of(req, &shared.policy, &shared.perf);
     at.zip(table.and_then(|table| table.get(id)))
-        .is_some_and(|(at, trace)| opens_at(req, frame, at, trace))
-}
-
-/// Whether `trace`, having left `frame` at `at`, left where it opens: a
-/// trace that recorded no opline ran none, so it left where it was
-/// entered.
-fn stayed(req: &Request, frame: FrameRef, at: OplineIdx, trace: &Trace) -> bool {
-    trace.opens.is_none() || opens_at(req, frame, at, trace)
-}
-
-/// Whether `trace` opens at `at` of `frame`: its first recorded opline
-/// is that one, in the frame's op array.
-fn opens_at(req: &Request, frame: FrameRef, at: OplineIdx, trace: &Trace) -> bool {
-    tier::func(req, frame).is_some_and(|func| trace.opens == Some((func, at)))
+        .is_some_and(|((_, at), trace)| {
+            tier::func(req, frame).is_some_and(|func| trace.opens == Some((func, at)))
+        })
 }
 
 /// Why a recording of `start` is refused before it records, php's
@@ -1929,15 +1951,19 @@ fn refused(table: Option<&table::Table>, start: Start) -> Option<Stop> {
 /// What a recording of `start` opens with, `behind` beside it: for a
 /// side trace, what its parent's exit knew of the slots of the frame it
 /// landed in, and whether the exit named the opline it landed at or left
-/// the frame where it stood; nothing of either for a root.
+/// the frame where it stood, and how many returns past `frame` it
+/// follows back to its root's loop ([`record::ret_depth`]); nothing of
+/// any for a root.
 fn side_opened(
-    table: Option<&table::Table>,
+    req: &Request,
+    frame: FrameRef,
+    (table, folds): (Option<&table::Table>, record::Folds),
     start: Start,
     behind: Option<OplineIdx>,
 ) -> record::Opening {
-    let exit = (start.grew())
-        .and_then(|(parent, exit)| Some((table?.get(parent)?, exit)))
-        .and_then(|(trace, exit)| trace.exits.get(usize::from(exit.0)));
+    let table = table.filter(|_| start.grew().is_some());
+    let parent = (start.grew()).and_then(|(parent, exit)| Some((table?.get(parent)?, exit)));
+    let exit = parent.and_then(|(trace, exit)| trace.exits.get(usize::from(exit.0)));
     let Some(exit) = exit else {
         return record::Opening {
             behind,
@@ -1952,6 +1978,11 @@ fn side_opened(
             Landed::Stood
         },
         behind,
+        ret_depth: parent
+            .and_then(|(trace, _)| table?.get(trace.root))
+            .filter(|root| root.leaves.is_none())
+            .and_then(|root| root.opens)
+            .map_or(0, |root| record::ret_depth(req, frame, root, folds)),
     }
 }
 

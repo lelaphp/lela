@@ -241,6 +241,7 @@ fn compiled(ir: &TraceIr, step: bool) -> Option<Compiled> {
         Kernel::Leave => (super::super::super::wrapped::leave as *const ()).addr(),
         Kernel::Frameless => (super::super::super::wrapped::frameless as *const ()).addr(),
         Kernel::FreeThis => (super::super::super::wrapped::free_this as *const ()).addr(),
+        Kernel::FreeClosure => (super::super::super::wrapped::free_closure as *const ()).addr(),
         Kernel::MakeRef => (super::super::super::wrapped::make_ref as *const ()).addr(),
         Kernel::CallNative => (super::super::super::wrapped::call_native as *const ()).addr(),
         Kernel::PopCall => (super::super::super::wrapped::pop_call as *const ()).addr(),
@@ -516,6 +517,7 @@ fn leave_in_place(req: &mut Request, g: FrameRef) -> Option<(FrameRef, Read)> {
             owners: Owners::Each(both),
             value,
             receives: false,
+            closure: false,
         },
     );
     leave.unwind = Some(UnwindId(0));

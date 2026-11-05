@@ -37,7 +37,8 @@ use super::{
 use crate::lower::{INTERRUPT_AT, RETURNED, THREW};
 use crate::types::{
     Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Leave, Line,
-    Object, OpId, Operand, Owners, PairCallee, PairClass, PushRoom, Returned, Types, Vars,
+    Object, OpId, Operand, Owners, PairCallee, PairClass, PushRoom, Returned, Types, UnwindId,
+    Vars,
 };
 
 /// The receiver a method's call `line` pushes in place.
@@ -1383,10 +1384,7 @@ impl Emit<'_> {
     /// 6765 338350
     /// ```
     pub(super) fn leave_in_place(&mut self, id: OpId, line: &Line) -> Result<(), Abort> {
-        let Imm::Leave {
-            owners, receives, ..
-        } = line.imm
-        else {
+        let Imm::Leave { owners, .. } = line.imm else {
             return Err(mismatch("a leave in place with no value named"));
         };
         let returned = self.returned(id, line)?;
@@ -1409,7 +1407,7 @@ impl Emit<'_> {
         // Nothing refuses the leave from here: what the variables own is
         // given up, and a destructor the kernel served may grow the frame
         // table, which is read past them, but moves no frame.
-        let threw = self.frees_of_leave(room, line, owners, receives)?;
+        let threw = self.frees_of_leave(room, line, owners)?;
         self.write_handed(handed, |emit, slot| {
             match returned {
                 Out::Scalar(scalar) => emit.write(slot, 0, scalar),
@@ -1518,28 +1516,35 @@ impl Emit<'_> {
         }
     }
 
-    /// What the frame in `room` gives up as it leaves: its variables, and
-    /// its receiver where it takes one; not zero where a destructor threw.
+    /// What the frame in `room` gives up as it leaves: its variables, its
+    /// receiver where it takes one, and its closure where it is a
+    /// closure's, in the order the interpreter's owning leave gives them
+    /// up; not zero where a destructor threw.
     fn frees_of_leave(
         &mut self,
         room: Value,
         line: &Line,
         owners: Owners,
-        receives: bool,
     ) -> Result<Option<Value>, Abort> {
-        let freed = match owners {
+        let Imm::Leave {
+            receives, closure, ..
+        } = line.imm
+        else {
+            return Err(mismatch("a leave in place with no value named"));
+        };
+        let mut threw = match owners {
             Owners::Each(vars) => Some(self.free_cvs(room, line, vars)?),
             Owners::Uncounted | Owners::Kernel => None,
         };
-        let let_go = if receives {
-            Some(self.free_this(room, line)?)
-        } else {
-            None
-        };
-        Ok(match (freed, let_go) {
-            (Some(freed), Some(let_go)) => Some(self.b.ins().bor(freed, let_go)),
-            (threw, None) | (None, threw) => threw,
-        })
+        if receives {
+            let thrown = self.free_this(room, line)?;
+            threw = Some(threw.map_or(thrown, |threw| self.b.ins().bor(threw, thrown)));
+        }
+        if closure {
+            let thrown = self.free_closure(room, line)?;
+            threw = Some(threw.map_or(thrown, |threw| self.b.ins().bor(threw, thrown)));
+        }
+        Ok(threw)
     }
 
     /// The caller of a leave to `to`, its slots at `callers`, stood past
@@ -2023,11 +2028,88 @@ impl Emit<'_> {
         self.b.ins().jump(next, &[]);
         self.b.switch_to_block(kernel);
         self.b.seal_block(kernel);
-        let status = self.call_status(
-            Kernel::FreeThis,
-            &[room, opline],
-            Some(Leave::Unwind(unwind)),
-        )?;
+        self.free_by_kernel(Kernel::FreeThis, (room, opline), (unwind, threw), next)?;
+        Ok(self.b.use_var(threw))
+    }
+
+    /// The closure of the closure's frame in `room` given up after its
+    /// variables and its receiver, as `zend_jit_leave_func` gives it up
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11125-11133`): one owner fewer in
+    /// place, and [`Kernel::FreeClosure`] where that is the last or the
+    /// collector may take the object as a possible root, `OBJ_RELEASE`.
+    /// Whether a destructor the kernel served threw, an `i32`. A closure
+    /// its own call holds the last owner of gives up what it bound there,
+    /// a destructor's throw thrown from the call, under force and where
+    /// every guard fails once:
+    ///
+    /// ```php
+    /// class D { public $n; function __construct($n) { $this->n = $n; } function __destruct() { echo "d", $this->n, ","; if ($this->n == 3) { throw new Exception("e"); } } }
+    /// function make($i) { $d = new D($i); return function ($x) use ($d) { return $d->n + $x; }; }
+    /// $t = 0;
+    /// for ($i = 0; $i < 6; $i++) {
+    ///     try { $t += make($i)(1); } catch (Exception $e) { $t += 100; }
+    /// }
+    /// echo "\n", $t, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// d0,d1,d2,d3,d4,d5,
+    /// 117
+    /// ```
+    ///
+    /// ```php
+    /// class D { public $n; function __construct($n) { $this->n = $n; } function __destruct() { echo "d", $this->n, ","; if ($this->n == 3) { throw new Exception("e"); } } }
+    /// function make($i) { $d = new D($i); return function ($x) use ($d) { return $d->n + $x; }; }
+    /// $t = 0;
+    /// for ($i = 0; $i < 6; $i++) {
+    ///     try { $t += make($i)(1); } catch (Exception $e) { $t += 100; }
+    /// }
+    /// echo "\n", $t, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// d0,d1,d2,d3,d4,d5,
+    /// 117
+    /// ```
+    fn free_closure(&mut self, room: Value, line: &Line) -> Result<Value, Abort> {
+        let unwind = line
+            .unwind
+            .ok_or_else(|| mismatch("a leave that frees with no unwind"))?;
+        let threw = self.b.declare_var(I32);
+        let none = self.b.ins().iconst(I32, 0);
+        self.b.def_var(threw, none);
+        let [_, opline] = self.served(line)?;
+        let [held, fewer, kernel, next] = [(); 4].map(|()| self.b.create_block());
+        self.b.set_cold_block(kernel);
+        let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
+        self.b.ins().brif(closure, held, &[], next, &[]);
+        self.b.switch_to_block(held);
+        self.b.seal_block(held);
+        let count = self.b.ins().load(I32, trusted(), closure, COUNT_AT);
+        let object = self.b.ins().iconst(I32, super::tag(ZvalType::Object));
+        let called = self.kernel_releases(closure, object, count, Dtor::Gc);
+        self.b.ins().brif(called, kernel, &[], fewer, &[]);
+        self.b.switch_to_block(fewer);
+        self.b.seal_block(fewer);
+        let one_fewer = self.b.ins().iadd_imm_s(count, -1);
+        self.b.ins().store(trusted(), one_fewer, closure, COUNT_AT);
+        self.b.ins().jump(next, &[]);
+        self.b.switch_to_block(kernel);
+        self.b.seal_block(kernel);
+        self.free_by_kernel(Kernel::FreeClosure, (room, opline), (unwind, threw), next)?;
+        Ok(self.b.use_var(threw))
+    }
+
+    /// What a leave holds given up by `kernel` where no owner fewer in
+    /// place will do, on to `next`, `threw` saying whether a destructor it
+    /// served threw, and to `unwind` where it left the request unwinding.
+    /// The block it stands in ends here, and `next` is sealed here.
+    fn free_by_kernel(
+        &mut self,
+        kernel: Kernel,
+        (room, opline): (Value, Value),
+        (unwind, threw): (UnwindId, Variable),
+        next: Block,
+    ) -> Result<(), Abort> {
+        let status = self.call_status(kernel, &[room, opline], Some(Leave::Unwind(unwind)))?;
         let unwinds = self
             .b
             .ins()
@@ -2046,7 +2128,7 @@ impl Emit<'_> {
         self.b.ins().jump(next, &[]);
         self.b.switch_to_block(next);
         self.b.seal_block(next);
-        Ok(self.b.use_var(threw))
+        Ok(())
     }
 
     /// What a `RETURN` left in place hands its caller ([`Returned`]): a
@@ -2154,13 +2236,13 @@ impl Emit<'_> {
     /// `Request::leave_plainly` reads the flags: a receiver of a frame the
     /// trace takes to have none ([`Imm::Leave`]'s `receives`), a call not
     /// made a frame, arguments past the parameters or an annex; then a
-    /// closure, a caller that is none or the loop's, and, where the frame
-    /// has more variables than the leave frees one by one
-    /// ([`Owners::Kernel`]), a variable that owns something, every
-    /// variable's type word tested at once. The interpreter's owning leave
-    /// gives up the receiver or the closure after the variables; a frame
-    /// that holds a closure is the leave kernel's, and a receiver is the
-    /// last of what a leave in place gives up ([`Emit::free_this`]).
+    /// closure over an op array that is no closure's, a caller that is none
+    /// or the loop's, and, where the frame has more variables than the
+    /// leave frees one by one ([`Owners::Kernel`]), a variable that owns
+    /// something, every variable's type word tested at once. The
+    /// interpreter's owning leave gives up the receiver and the closure
+    /// after the variables, as a leave in place does ([`Emit::free_this`],
+    /// [`Emit::free_closure`]).
     ///
     /// A frame that took an annex as it ran, a `finally`'s, a `static`'s
     /// and a symbol table's, one passed more than it declares, a closure's
@@ -2205,7 +2287,12 @@ impl Emit<'_> {
         line: &Line,
         slow: Block,
     ) -> Result<(), Abort> {
-        let receives = matches!(line.imm, Imm::Leave { receives: true, .. });
+        let (receives, closure) = match line.imm {
+            Imm::Leave {
+                receives, closure, ..
+            } => (receives, closure),
+            _ => (false, false),
+        };
         let refusing = if receives {
             L.leaves_by_kernel()
         } else {
@@ -2216,10 +2303,15 @@ impl Emit<'_> {
         self.divert_if(flagged, slow);
         // The word stays for a frame of the trace: an annex comes as the
         // frame runs. No closure comes to one, and its caller is the frame
-        // that made the call.
+        // that made the call. A closure's op array gives its closure up as
+        // it leaves ([`Emit::free_closure`]); a closure over any other, a
+        // first-class callable's, php's `ZEND_CALL_FAKE_CLOSURE`, is the
+        // leave kernel's, as it is php's helper's.
         if let LeavesTo::Named(caller) = to {
-            let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
-            self.divert_if(closure, slow);
+            if !closure {
+                let held = self.b.ins().load(I64, trusted(), room, at(L.closure()));
+                self.divert_if(held, slow);
+            }
             let outside = self.outside(caller);
             self.divert_if(outside, slow);
         }

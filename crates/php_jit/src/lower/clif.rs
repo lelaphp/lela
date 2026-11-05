@@ -2209,9 +2209,11 @@ impl<'a> Emit<'a> {
             Kernel::Handle => &[I64, I64, I32, I32],
             Kernel::Frameless => &[I64, I64, I32, I32, I64, I32, I64],
             Kernel::Step | Kernel::CallNative | Kernel::GetConstant => &[I64, I64, I32, I32, I64],
-            Kernel::FreeThis | Kernel::PopCall | Kernel::Interrupt | Kernel::NanToBool => {
-                &[I64, I64, I32]
-            }
+            Kernel::FreeThis
+            | Kernel::FreeClosure
+            | Kernel::PopCall
+            | Kernel::Interrupt
+            | Kernel::NanToBool => &[I64, I64, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv | Kernel::Destruct => &[I64, I64, I32, I64, I32],
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
