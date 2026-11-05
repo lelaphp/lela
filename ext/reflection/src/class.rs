@@ -1194,8 +1194,8 @@ impl ReflectionClass {
     }
 
     /// `ReflectionClass::hasProperty(string $name)`: the name in
-    /// `ce->properties_info`, the class's own properties and every
-    /// parent's, a parent's private one excluded as php's
+    /// `ce->properties_info`, the class's own properties, every parent's
+    /// and every interface's, a parent's private one excluded as php's
     /// `property_info->ce == ce` test excludes it. php then asks a
     /// `ReflectionObject`'s instance for a dynamic property of that name;
     /// the reflector here keeps no instance, so that branch is `false`
@@ -1213,6 +1213,22 @@ impl ReflectionClass {
     /// bool(false)
     /// bool(true)
     /// bool(false)
+    /// ```
+    ///
+    /// A property an interface declares is in the table of what extends
+    /// or implements it.
+    ///
+    /// ```php
+    /// interface I { public int $n { get; } } interface J extends I {} abstract class A implements J {}
+    /// foreach (['J', 'A'] as $c) { $r = new ReflectionClass($c); var_dump($r->hasProperty('n'), $r->getProperty('n')->class, (new ReflectionProperty($c, 'n'))->getType()->getName()); }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(1) "I"
+    /// string(3) "int"
+    /// bool(true)
+    /// string(1) "I"
+    /// string(3) "int"
     /// ```
     #[php(tentative)]
     fn hasProperty(req: &mut Request, this: This<Self>, name: PhpString) -> Result<bool, Thrown> {

@@ -214,6 +214,26 @@ impl PhpToken {
     /// }
     /// ```
     ///
+    /// A token with no name is its byte, the last of its text: php's
+    /// scanner returns `'"'` for the `b"` that opens an interpolated
+    /// binary string, whose text keeps the prefix.
+    ///
+    /// ```php
+    /// foreach (PhpToken::tokenize('<?php b"$a"; B"$a";') as $t) echo $t->id, ':', $t->text, ' ', $t->getTokenName(), "\n";
+    /// ```
+    /// ```expect
+    /// 394:<?php  T_OPEN_TAG
+    /// 34:b" "
+    /// 266:$a T_VARIABLE
+    /// 34:" "
+    /// 59:; ;
+    /// 397:  T_WHITESPACE
+    /// 34:B" "
+    /// 266:$a T_VARIABLE
+    /// 34:" "
+    /// 59:; ;
+    /// ```
+    ///
     /// The texts are `make_str`'s here as under `token_get_all` ([`Texts`]):
     /// the second `echo` and the second `1;` are one more owner each of the
     /// first's string, and no string of their own.
@@ -266,7 +286,7 @@ impl PhpToken {
             let text = code.as_bytes().get(token.start..token.end).unwrap_or(&[]);
             let id = match token.name.and_then(names::id_of) {
                 Some(id) => id,
-                None => i64::from(text.first().copied().unwrap_or(0)),
+                None => i64::from(text.last().copied().unwrap_or(0)),
             };
             // `make_str` before `zend_objects_new` since 8.5.12, and
             // where the memory limit refused the text, `add_token`'s
