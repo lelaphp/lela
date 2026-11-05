@@ -181,6 +181,7 @@ enum Walked {
 impl Iterator for Rows<'_> {
     type Item = (Key, Value);
 
+    #[inline] // a walk's step, in the walk's own body as php's macro's is
     fn next(&mut self) -> Option<(Key, Value)> {
         match &mut self.rows {
             Walked::Array(rows) => rows.next().map(super::view),

@@ -2210,11 +2210,6 @@ impl Request {
         Some((Function(row.function), *entry))
     }
 
-    /// `zend_flf_count`: how many rows the frameless table has.
-    pub(crate) fn frameless_count(&self) -> usize {
-        self.shared.frameless.len()
-    }
-
     /// What [`defined_functions`](Self::defined_functions) makes, its one owner not yet named.
     pub(crate) fn defined_functions_made(&mut self) -> Result<PhpArray, Thrown> {
         let (mut internal, mut user) = (Vec::new(), Vec::new());

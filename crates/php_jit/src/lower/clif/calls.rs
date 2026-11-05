@@ -37,7 +37,8 @@ use super::{
 use crate::lower::{INTERRUPT_AT, RETURNED, THREW};
 use crate::types::{
     Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Leave, Line,
-    Object, OpId, Operand, Owners, PairCallee, PairClass, PushRoom, Returned, Types, Vars,
+    Object, OpId, Operand, Owners, PairCallee, PairClass, PushRoom, Returned, Types, UnwindId,
+    Vars,
 };
 
 /// The receiver a method's call `line` pushes in place.
@@ -1383,10 +1384,7 @@ impl Emit<'_> {
     /// 6765 338350
     /// ```
     pub(super) fn leave_in_place(&mut self, id: OpId, line: &Line) -> Result<(), Abort> {
-        let Imm::Leave {
-            owners, receives, ..
-        } = line.imm
-        else {
+        let Imm::Leave { owners, .. } = line.imm else {
             return Err(mismatch("a leave in place with no value named"));
         };
         let returned = self.returned(id, line)?;
@@ -1409,7 +1407,7 @@ impl Emit<'_> {
         // Nothing refuses the leave from here: what the variables own is
         // given up, and a destructor the kernel served may grow the frame
         // table, which is read past them, but moves no frame.
-        let threw = self.frees_of_leave(room, line, owners, receives)?;
+        let threw = self.frees_of_leave(room, line, owners)?;
         self.write_handed(handed, |emit, slot| {
             match returned {
                 Out::Scalar(scalar) => emit.write(slot, 0, scalar),
@@ -1518,28 +1516,35 @@ impl Emit<'_> {
         }
     }
 
-    /// What the frame in `room` gives up as it leaves: its variables, and
-    /// its receiver where it takes one; not zero where a destructor threw.
+    /// What the frame in `room` gives up as it leaves: its variables, its
+    /// receiver where it takes one, and its closure where it is a
+    /// closure's, in the order the interpreter's owning leave gives them
+    /// up; not zero where a destructor threw.
     fn frees_of_leave(
         &mut self,
         room: Value,
         line: &Line,
         owners: Owners,
-        receives: bool,
     ) -> Result<Option<Value>, Abort> {
-        let freed = match owners {
+        let Imm::Leave {
+            receives, closure, ..
+        } = line.imm
+        else {
+            return Err(mismatch("a leave in place with no value named"));
+        };
+        let mut threw = match owners {
             Owners::Each(vars) => Some(self.free_cvs(room, line, vars)?),
             Owners::Uncounted | Owners::Kernel => None,
         };
-        let let_go = if receives {
-            Some(self.free_this(room, line)?)
-        } else {
-            None
-        };
-        Ok(match (freed, let_go) {
-            (Some(freed), Some(let_go)) => Some(self.b.ins().bor(freed, let_go)),
-            (threw, None) | (None, threw) => threw,
-        })
+        if receives {
+            let thrown = self.free_this(room, line)?;
+            threw = Some(threw.map_or(thrown, |threw| self.b.ins().bor(threw, thrown)));
+        }
+        if closure {
+            let thrown = self.free_closure(room, line)?;
+            threw = Some(threw.map_or(thrown, |threw| self.b.ins().bor(threw, thrown)));
+        }
+        Ok(threw)
     }
 
     /// The caller of a leave to `to`, its slots at `callers`, stood past
@@ -2023,11 +2028,88 @@ impl Emit<'_> {
         self.b.ins().jump(next, &[]);
         self.b.switch_to_block(kernel);
         self.b.seal_block(kernel);
-        let status = self.call_status(
-            Kernel::FreeThis,
-            &[room, opline],
-            Some(Leave::Unwind(unwind)),
-        )?;
+        self.free_by_kernel(Kernel::FreeThis, (room, opline), (unwind, threw), next)?;
+        Ok(self.b.use_var(threw))
+    }
+
+    /// The closure of the closure's frame in `room` given up after its
+    /// variables and its receiver, as `zend_jit_leave_func` gives it up
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11125-11133`): one owner fewer in
+    /// place, and [`Kernel::FreeClosure`] where that is the last or the
+    /// collector may take the object as a possible root, `OBJ_RELEASE`.
+    /// Whether a destructor the kernel served threw, an `i32`. A closure
+    /// its own call holds the last owner of gives up what it bound there,
+    /// a destructor's throw thrown from the call, under force and where
+    /// every guard fails once:
+    ///
+    /// ```php
+    /// class D { public $n; function __construct($n) { $this->n = $n; } function __destruct() { echo "d", $this->n, ","; if ($this->n == 3) { throw new Exception("e"); } } }
+    /// function make($i) { $d = new D($i); return function ($x) use ($d) { return $d->n + $x; }; }
+    /// $t = 0;
+    /// for ($i = 0; $i < 6; $i++) {
+    ///     try { $t += make($i)(1); } catch (Exception $e) { $t += 100; }
+    /// }
+    /// echo "\n", $t, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// d0,d1,d2,d3,d4,d5,
+    /// 117
+    /// ```
+    ///
+    /// ```php
+    /// class D { public $n; function __construct($n) { $this->n = $n; } function __destruct() { echo "d", $this->n, ","; if ($this->n == 3) { throw new Exception("e"); } } }
+    /// function make($i) { $d = new D($i); return function ($x) use ($d) { return $d->n + $x; }; }
+    /// $t = 0;
+    /// for ($i = 0; $i < 6; $i++) {
+    ///     try { $t += make($i)(1); } catch (Exception $e) { $t += 100; }
+    /// }
+    /// echo "\n", $t, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// d0,d1,d2,d3,d4,d5,
+    /// 117
+    /// ```
+    fn free_closure(&mut self, room: Value, line: &Line) -> Result<Value, Abort> {
+        let unwind = line
+            .unwind
+            .ok_or_else(|| mismatch("a leave that frees with no unwind"))?;
+        let threw = self.b.declare_var(I32);
+        let none = self.b.ins().iconst(I32, 0);
+        self.b.def_var(threw, none);
+        let [_, opline] = self.served(line)?;
+        let [held, fewer, kernel, next] = [(); 4].map(|()| self.b.create_block());
+        self.b.set_cold_block(kernel);
+        let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
+        self.b.ins().brif(closure, held, &[], next, &[]);
+        self.b.switch_to_block(held);
+        self.b.seal_block(held);
+        let count = self.b.ins().load(I32, trusted(), closure, COUNT_AT);
+        let object = self.b.ins().iconst(I32, super::tag(ZvalType::Object));
+        let called = self.kernel_releases(closure, object, count, Dtor::Gc);
+        self.b.ins().brif(called, kernel, &[], fewer, &[]);
+        self.b.switch_to_block(fewer);
+        self.b.seal_block(fewer);
+        let one_fewer = self.b.ins().iadd_imm_s(count, -1);
+        self.b.ins().store(trusted(), one_fewer, closure, COUNT_AT);
+        self.b.ins().jump(next, &[]);
+        self.b.switch_to_block(kernel);
+        self.b.seal_block(kernel);
+        self.free_by_kernel(Kernel::FreeClosure, (room, opline), (unwind, threw), next)?;
+        Ok(self.b.use_var(threw))
+    }
+
+    /// What a leave holds given up by `kernel` where no owner fewer in
+    /// place will do, on to `next`, `threw` saying whether a destructor it
+    /// served threw, and to `unwind` where it left the request unwinding.
+    /// The block it stands in ends here, and `next` is sealed here.
+    fn free_by_kernel(
+        &mut self,
+        kernel: Kernel,
+        (room, opline): (Value, Value),
+        (unwind, threw): (UnwindId, Variable),
+        next: Block,
+    ) -> Result<(), Abort> {
+        let status = self.call_status(kernel, &[room, opline], Some(Leave::Unwind(unwind)))?;
         let unwinds = self
             .b
             .ins()
@@ -2046,7 +2128,7 @@ impl Emit<'_> {
         self.b.ins().jump(next, &[]);
         self.b.switch_to_block(next);
         self.b.seal_block(next);
-        Ok(self.b.use_var(threw))
+        Ok(())
     }
 
     /// What a `RETURN` left in place hands its caller ([`Returned`]): a
@@ -2154,13 +2236,13 @@ impl Emit<'_> {
     /// `Request::leave_plainly` reads the flags: a receiver of a frame the
     /// trace takes to have none ([`Imm::Leave`]'s `receives`), a call not
     /// made a frame, arguments past the parameters or an annex; then a
-    /// closure, a caller that is none or the loop's, and, where the frame
-    /// has more variables than the leave frees one by one
-    /// ([`Owners::Kernel`]), a variable that owns something, every
-    /// variable's type word tested at once. The interpreter's owning leave
-    /// gives up the receiver or the closure after the variables; a frame
-    /// that holds a closure is the leave kernel's, and a receiver is the
-    /// last of what a leave in place gives up ([`Emit::free_this`]).
+    /// closure over an op array that is no closure's, a caller that is none
+    /// or the loop's, and, where the frame has more variables than the
+    /// leave frees one by one ([`Owners::Kernel`]), a variable that owns
+    /// something, every variable's type word tested at once. The
+    /// interpreter's owning leave gives up the receiver and the closure
+    /// after the variables, as a leave in place does ([`Emit::free_this`],
+    /// [`Emit::free_closure`]).
     ///
     /// A frame that took an annex as it ran, a `finally`'s, a `static`'s
     /// and a symbol table's, one passed more than it declares, a closure's
@@ -2205,7 +2287,12 @@ impl Emit<'_> {
         line: &Line,
         slow: Block,
     ) -> Result<(), Abort> {
-        let receives = matches!(line.imm, Imm::Leave { receives: true, .. });
+        let (receives, closure) = match line.imm {
+            Imm::Leave {
+                receives, closure, ..
+            } => (receives, closure),
+            _ => (false, false),
+        };
         let refusing = if receives {
             L.leaves_by_kernel()
         } else {
@@ -2216,10 +2303,15 @@ impl Emit<'_> {
         self.divert_if(flagged, slow);
         // The word stays for a frame of the trace: an annex comes as the
         // frame runs. No closure comes to one, and its caller is the frame
-        // that made the call.
+        // that made the call. A closure's op array gives its closure up as
+        // it leaves ([`Emit::free_closure`]); a closure over any other, a
+        // first-class callable's, php's `ZEND_CALL_FAKE_CLOSURE`, is the
+        // leave kernel's, as it is php's helper's.
         if let LeavesTo::Named(caller) = to {
-            let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
-            self.divert_if(closure, slow);
+            if !closure {
+                let held = self.b.ins().load(I64, trusted(), room, at(L.closure()));
+                self.divert_if(held, slow);
+            }
             let outside = self.outside(caller);
             self.divert_if(outside, slow);
         }
@@ -2802,9 +2894,10 @@ impl Emit<'_> {
     /// is, the call is its handler's, through [`Kernel::Handle`], which
     /// warns of it as php's `zend_jit_zval_check_undef` calls
     /// `zend_jit_undefined_op_helper` to. A variable in a frame a name
-    /// reaches, one that carries an annex as a file's own code does, is
-    /// held with one more owner through the call, as the handler holds
-    /// it ([`Emit::frameless_owners`]).
+    /// reaches, one that carries an annex as a file's own code does, or
+    /// read through a reference, whose other end is a name, is held with
+    /// one more owner through the call, as the handler holds it
+    /// ([`Emit::give_up_owner`]).
     ///
     /// The three arities over constants, variables, a temporary, a
     /// variable that is unset once and one that holds a reference, a
@@ -3046,16 +3139,28 @@ impl Emit<'_> {
         }
         self.b.ins().store(trusted(), opline, room, EX_OPLINE);
         let laid = self.frameless_room();
+        let named =
+            (held != [false; 3]).then(|| self.b.ins().load(I32, trusted(), room, at(L.annex())));
+        let mut owners = [None; 3];
+        let mut destructs = [false; 3];
         for (place, operand) in operands.into_iter().enumerate().take(arity) {
-            let (word, info) = self.frameless_operand(line.frame, operand)?;
+            destructs[place] = self.may_destruct(operand)?;
+            let (word, info, through) = self.frameless_operand(line.frame, operand)?;
             let cell = i32::try_from(place * SLOT as usize).unwrap_or(i32::MAX);
             self.b.ins().stack_store(I64, word, laid, cell);
             self.b.ins().stack_store(I64, info, laid, cell + TYPE_AT);
-        }
-        let named =
-            (held != [false; 3]).then(|| self.b.ins().load(I32, trusted(), room, at(L.annex())));
-        if let Some(named) = named {
-            self.frameless_owners(named, laid, held, arity)?;
+            let Some(named) = named.filter(|_| held[place]) else {
+                continue;
+            };
+            let owner = match through {
+                Some(through) => {
+                    let through = self.b.ins().uextend(I32, through);
+                    self.b.ins().bor(named, through)
+                }
+                None => named,
+            };
+            self.when(owner, |emit| emit.addref(word, info))?;
+            owners[place] = Some(owner);
         }
         let returns = self.returns_of(line)?;
         let out = returns.address();
@@ -3070,10 +3175,11 @@ impl Emit<'_> {
         let threw = self.not_thrown();
         self.thrown_into(line, status, threw)?;
         for (place, operand) in operands.iter().enumerate().take(arity) {
-            if let Some(named) = named.filter(|_| held[place]) {
-                self.give_up_owner(line, named, (laid, place), threw)?;
+            if let Some(owner) = owners[place] {
+                self.give_up_owner(line, owner, (laid, place), threw)?;
             }
-            self.free_frameless(line, *operand, threw)?;
+            let followed = destructs.iter().skip(place + 1).any(|&destructs| destructs);
+            self.free_frameless(line, *operand, followed, threw)?;
         }
         self.interrupt_after(line, [room, opline], threw)?;
         self.release_unread(line, returns)?;
@@ -3084,27 +3190,30 @@ impl Emit<'_> {
     }
 
     /// The two words of a frameless call's `operand` of `frame`, as the
-    /// native reads it: a variable's read through its reference, php's
-    /// `ZVAL_DEREF`, and a temporary held in a register stored where it
-    /// stands through the call, where a backtrace the native takes reads
-    /// it, as php's code hands its address.
+    /// native reads it, and whether a variable that may hold a reference
+    /// was read through one: a variable's read through its reference,
+    /// php's `ZVAL_DEREF`, and a temporary held in a register stored where
+    /// it stands through the call, where a backtrace the native takes
+    /// reads it, as php's code hands its address.
     fn frameless_operand(
         &mut self,
         frame: Frame,
         operand: Operand,
-    ) -> Result<(Value, Value), Abort> {
+    ) -> Result<(Value, Value, Option<Value>), Abort> {
         let kind = self.kind_of(operand)?;
         let Operand::Value(value) = operand else {
-            return self.operand_words(frame, operand);
+            let (word, info) = self.operand_words(frame, operand)?;
+            return Ok((word, info, None));
         };
         let held = self.value(value)?;
         if kind == OperandKind::Cv && held.types.meets(Types::REF) {
             let (base, slot) = self.place(held.slot)?;
             let zval = self.b.ins().iadd_imm_s(base, i64::from(slot));
-            let zval = self.deref(zval);
-            let word = self.b.ins().load(I64, trusted(), zval, 0);
-            let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
-            return Ok((word, info));
+            let read = self.deref(zval);
+            let through = self.b.ins().icmp(IntCC::NotEqual, read, zval);
+            let word = self.b.ins().load(I64, trusted(), read, 0);
+            let info = self.b.ins().load(I32, trusted(), read, TYPE_AT);
+            return Ok((word, info, Some(through)));
         }
         let (word, info) = self.operand_words(frame, operand)?;
         if kind == OperandKind::Tmp && held.home == Home::Register {
@@ -3112,41 +3221,23 @@ impl Emit<'_> {
             self.b.ins().store(trusted(), word, base, slot);
             self.b.ins().store(trusted(), info, base, slot + TYPE_AT);
         }
-        Ok((word, info))
+        Ok((word, info, None))
     }
 
-    /// The owner a frameless call holds of each variable among the
-    /// zvals laid at `laid` that `held` names, where `named` says a name
-    /// reaches the frame's variables, so one written through it while the
-    /// native runs leaves the native's copy standing
-    /// (`exec::frameless_operand`).
-    fn frameless_owners(
-        &mut self,
-        named: Value,
-        laid: StackSlot,
-        held: [bool; 3],
-        arity: usize,
-    ) -> Result<(), Abort> {
-        self.when(named, |emit| {
-            for place in (0..arity).filter(|&place| held[place]) {
-                let (word, info) = emit.laid_operand(laid, place);
-                emit.addref(word, info)?;
-            }
-            Ok(())
-        })
-    }
-
-    /// The owner [`Emit::frameless_owners`] took of the zval at `place`
-    /// of `laid` given up after the call, where `named` says it took one,
-    /// a throw or'd into `threw`.
+    /// The owner a frameless call took of the variable at `place` of
+    /// `laid` (`exec::frameless_operand`) given up after the call, where
+    /// `owner` says it took one, a name reaching the frame's variables or
+    /// the variable read through a reference, either of which leaves the
+    /// native's copy standing when it is written while the native runs; a
+    /// throw is or'd into `threw`.
     fn give_up_owner(
         &mut self,
         line: &Line,
-        named: Value,
+        owner: Value,
         (laid, place): (StackSlot, usize),
         threw: Variable,
     ) -> Result<(), Abort> {
-        self.when(named, |emit| {
+        self.when(owner, |emit| {
             let (word, info) = emit.laid_operand(laid, place);
             emit.release_through(line, [word, info], Dtor::Nogc, |emit, args| {
                 let status = emit.call_status(Kernel::Release, args, leave_of(line))?;
@@ -3163,31 +3254,67 @@ impl Emit<'_> {
         (word, info)
     }
 
+    /// Whether a frameless call's `operand` is a temporary that may hold
+    /// an object, whose free may serve a destructor over its slot
+    /// ([`Emit::free_frameless`]).
+    fn may_destruct(&self, operand: Operand) -> Result<bool, Abort> {
+        let Operand::Value(value) = operand else {
+            return Ok(false);
+        };
+        let held = self.value(value)?;
+        Ok(held.types.meets(Types::OBJECT) && self.is_temporary(held.slot)?)
+    }
+
     /// A frameless call's `operand` given up after the call, as php's
-    /// `jit_FREE_OP` frees it: nothing of a variable, a constant or a
-    /// temporary held in a register, which no value counts, and a
-    /// temporary freed where it stands ([`Emit::free_slot`]). A throw is
-    /// or'd into `threw` and the code goes on, the other operands still
-    /// to free with it pending; the release kernel answers a throw for
-    /// one that stood before it as for its own destructor's.
+    /// `jit_FREE_OP` frees it: nothing of a variable or a constant; a
+    /// temporary held in a register, which no value counts, cleared
+    /// where `followed` says a later operand's destructor may read the
+    /// slots, php's `ZVAL_UNDEF` "in case `FREE_OP2()` throws"
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:17990`); and a temporary freed
+    /// where it stands ([`Emit::free_slot`]), an object's destructor
+    /// served first with the slot as it stands, cleared after it
+    /// (`Request::destruct_in_place`). A throw is or'd into `threw` and
+    /// the code goes on, the other operands still to free with it
+    /// pending, as php's `FREE_OP*` go on; the release kernel answers a
+    /// throw for one that stood before it as for its own destructor's.
     fn free_frameless(
         &mut self,
         line: &Line,
         operand: Operand,
+        followed: bool,
         threw: Variable,
     ) -> Result<(), Abort> {
         let Operand::Value(value) = operand else {
             return Ok(());
         };
         let held = self.value(value)?;
-        if held.home == Home::Register || !self.is_temporary(held.slot)? {
+        if !self.is_temporary(held.slot)? {
             return Ok(());
         }
         let (base, slot) = self.place(held.slot)?;
-        let info = self.b.ins().load(I32, trusted(), base, slot + TYPE_AT);
         let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
-        self.b.ins().store(trusted(), undef, base, slot + TYPE_AT);
+        if held.home == Home::Register {
+            if followed {
+                self.b.ins().store(trusted(), undef, base, slot + TYPE_AT);
+            }
+            return Ok(());
+        }
+        let info = self.b.ins().load(I32, trusted(), base, slot + TYPE_AT);
         let word = self.b.ins().load(I64, trusted(), base, slot);
+        if held.types.meets(Types::OBJECT) {
+            let kind = self.b.ins().band_imm_u(info, KIND);
+            let object = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Object));
+            let [room, opline] = self.served(line)?;
+            self.when(object, |emit| {
+                let args = [room, opline, word, info];
+                let status = emit.call_status(Kernel::Destruct, &args, leave_of(line))?;
+                emit.thrown_into(line, status, threw)
+            })?;
+        }
+        self.b.ins().store(trusted(), undef, base, slot + TYPE_AT);
         self.release_through(line, [word, info], Dtor::Nogc, |emit, args| {
             let status = emit.call_status(Kernel::Release, args, leave_of(line))?;
             emit.thrown_into(line, status, threw)

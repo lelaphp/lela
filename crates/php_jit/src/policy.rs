@@ -1572,16 +1572,11 @@ pub(crate) fn arm(word: &Word, policy: &Policy) {
     };
     heat.store(armed_heat, Ordering::Relaxed);
     // Another arming of the same landing may win; either leaves it cold.
-    // A headed word is sealed but for its loop's trace, and an arming
-    // keeps its landing armed over it.
-    if state
+    // A loop's header is never armed (`record::landings`), so no headed
+    // word comes here.
+    state
         .compare_exchange(u32::MAX, COLD, Ordering::Release, Ordering::Relaxed)
-        .is_err()
-    {
-        state
-            .compare_exchange(HEADED, COLD, Ordering::Release, Ordering::Relaxed)
-            .ok();
-    }
+        .ok();
 }
 
 /// A word in the recording state, owned until it is settled once

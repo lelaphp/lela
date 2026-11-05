@@ -703,6 +703,7 @@ kernels! {
         Call => call(func: u32, callee: u32) -> Stood = tier::call_held;
         Release => release(word: u64, type_info: u32) = tier::release;
         FreeCv => free_cv(word: u64, type_info: u32) = tier::free_cv;
+        Destruct => destruct(word: u64, type_info: u32) = tier::destruct;
         Identical => identical(a: u64, a_info: u32, b: u64, b_info: u32) -> u64;
         RopeInit => rope_init(word: u64, type_info: u32) -> u64 = tier::rope_open;
         RopeAdd => rope_add(rope: u64, word: u64, type_info: u32) = tier::rope_push;
@@ -714,6 +715,7 @@ kernels! {
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
         Frameless => frameless(at: FramelessAt, operands: *const Zval, count: u32) -> Zval = tier::frameless_call;
         FreeThis => free_this() = tier::free_this;
+        FreeClosure => free_closure() = tier::free_closure;
         MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
         CallNative => call_native(call: u32) -> Zval = tier::call_native;
         PopCall => pop_call() = tier::pop_call;
@@ -914,6 +916,15 @@ fn free_cv(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Resu
     Ok(())
 }
 
+/// The `destruct` kernel: the destructor of the object a frameless
+/// call's temporary holds, served with the temporary in its slot
+/// ([`tier::destruct`]), a throw left pending.
+fn destruct(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result<(), Fatal> {
+    standing(req, on.room, on.at)?;
+    tier::destruct(req, zval(word, type_info));
+    Ok(())
+}
+
 /// The `free_this` kernel: the receiver of the method's frame a
 /// `RETURN` leaves in place, after its variables, where its owner or its
 /// pin is the last, that frame off the chain first
@@ -921,6 +932,16 @@ fn free_cv(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Resu
 fn free_this(req: &mut Request, on: On<'_, '_>) -> Result<(), Fatal> {
     let frame = standing(req, on.room, on.at)?;
     tier::free_this(req, frame);
+    Ok(())
+}
+
+/// The `free_closure` kernel: the closure of the closure's frame a
+/// `RETURN` leaves in place, after its variables and its receiver, where
+/// its owner is the last, that frame off the chain first
+/// ([`tier::free_closure`]), a destructor's throw left pending.
+fn free_closure(req: &mut Request, on: On<'_, '_>) -> Result<(), Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    tier::free_closure(req, frame);
     Ok(())
 }
 
@@ -1368,13 +1389,14 @@ type Entry = unsafe extern "C" fn(
     u64,
 ) -> u32;
 
-/// What a call of [`enter`] answered: how the request was given back, and
-/// the trace that gave it back, the one entered or one it jumped to,
-/// whose exit it is.
+/// What a call of [`enter`] answered: how the request was given back, the
+/// trace that gave it back, the one entered or one it jumped to, whose
+/// exit it is, and where the call found the frame it entered on.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Answered<'t> {
     pub(crate) left: Left,
     pub(crate) by: &'t Trace,
+    pub(crate) from: (FrameRef, OplineIdx),
 }
 
 /// `trace` called on `frame` (`jit-design.md` §4.6), out of `epoch`, the
@@ -1416,6 +1438,7 @@ pub(crate) fn enter<'t>(
 ) -> Result<Answered<'t>, Fatal> {
     let room = tier::room(req, frame)
         .ok_or_else(|| internal("a trace entered on a frame with no room"))?;
+    let from = (frame, crate::record::position(req, frame));
     // SAFETY: the table published bytes `lower` compiled for this ABI at
     // this address, final and executable for as long as the trace, which
     // the borrow of the epoch's table keeps.
@@ -1501,7 +1524,7 @@ pub(crate) fn enter<'t>(
     if let Some(state) = state {
         state.headers.left_through(by, left);
     }
-    Ok(Answered { left, by })
+    Ok(Answered { left, by, from })
 }
 
 /// What `by`, the trace that answered, left the request as: `answer` and

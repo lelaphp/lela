@@ -3240,7 +3240,43 @@ pub(crate) fn key_value(req: &mut Request, key: php_heap::Key) -> Value {
 /// string(4) "xbxb"
 /// string(4) "abab"
 /// ```
-#[inline]
+///
+/// A variable read through a reference is held in a frame no name
+/// reaches too, since the reference's other end is a name: here
+/// `__toString` writes over the string the native reads, and the read
+/// goes on over the owner, in compiled code as in the handler
+/// (`Emit::frameless_call`).
+///
+/// ```php
+/// class S { function __toString(): string { global $g, $k; if ($k >= 10) { $g = str_repeat("z", 41); } return "lo"; } }
+/// function f(&$x) { global $k; $t = 0; for ($i = 0; $i < 30; $i++) { $k = $i; $x = str_repeat("hello", 8) . $i; $t += str_contains($x, new S) ? 1 : 0; } return $t; }
+/// $g = "";
+/// echo f($g), "\n";
+/// ```
+/// ```expect
+/// 30
+/// ```
+///
+/// ```php
+/// class S { function __toString(): string { global $g, $k; if ($k >= 10) { $g = str_repeat("z", 41); } return "lo"; } }
+/// function f(&$x) { global $k; $t = 0; for ($i = 0; $i < 30; $i++) { $k = $i; $x = str_repeat("hello", 8) . $i; $t += str_contains($x, new S) ? 1 : 0; } return $t; }
+/// $g = "";
+/// echo f($g), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// 30
+/// ```
+///
+/// ```php
+/// class S { function __toString(): string { global $g, $k; if ($k >= 10) { $g = str_repeat("z", 41); } return "lo"; } }
+/// function f(&$x) { global $k; $t = 0; for ($i = 0; $i < 30; $i++) { $k = $i; $x = str_repeat("hello", 8) . $i; $t += str_contains($x, new S) ? 1 : 0; } return $t; }
+/// $g = "";
+/// echo f($g), "\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// 30
+/// ```
+#[cold]
 pub(crate) fn frameless_operand(
     req: &mut Request,
     frame: FrameRef,
@@ -3263,14 +3299,6 @@ pub(crate) fn frameless_operand(
     let value = operand(req, frame, code, kind, field).deref();
     req.addref(&value);
     (value.to_zval(), true)
-}
-
-/// Whether a name reaches the variables of the frame `header` is, so a
-/// frameless call's `CV` operand takes one more owner
-/// ([`frameless_operand`]): a frame that carries an annex, its symbol
-/// table or its extra arguments, or none at all.
-pub(crate) fn frameless_named(header: Option<&Header>) -> bool {
-    header.is_none_or(|header| header.annex.is_some())
 }
 
 /// `FREE_OP`: a `TMP` or a `VAR` operand read by [`operand`] and done

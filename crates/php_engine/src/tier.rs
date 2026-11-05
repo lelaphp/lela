@@ -67,8 +67,8 @@ mod strings;
 mod tail;
 mod view;
 pub use crossing::{
-    at_room, current, free_cv, free_operands, free_this, laid, make_ref, nan_to_bool, primed,
-    release, return_entry, room, stack, stack_room, stand,
+    at_room, current, destruct, free_closure, free_cv, free_operands, free_this, laid, make_ref,
+    nan_to_bool, primed, release, return_entry, room, stack, stack_room, stand,
 };
 pub use dims::{dim_key, lookup_element};
 pub use frames::{
@@ -2170,16 +2170,26 @@ pub struct FramelessAt(pub u32);
 ///
 /// # Errors
 ///
-/// A fatal the native or its observer raised, and an internal error
-/// where `at` names no entry of the table.
+/// None reach the caller today: a fatal the native or its observer
+/// raised, and the internal error where `at` names no entry of the
+/// table, stand pending as its throw does.
 #[inline]
 pub fn frameless_call(
     req: &mut Request,
     at: FramelessAt,
     operands: &[Zval],
 ) -> Result<Zval, Fatal> {
-    match crate::handlers::frameless_native(req, at.0, operands)? {
-        Ok(value) => Ok(value.to_zval()),
+    use crate::api::values::Value;
+    use crate::handlers::frameless_native as native;
+    let of = Value::of_zval;
+    let served = match *operands {
+        [a] => native(req, at.0, &[of(a)]),
+        [a, b] => native(req, at.0, &[of(a), of(b)]),
+        [a, b, c] => native(req, at.0, &[of(a), of(b), of(c)]),
+        _ => native(req, at.0, &[]),
+    };
+    match served {
+        Ok(value) => Ok(value.hand_on().to_zval()),
         Err(thrown) => {
             req.leave_pending(&thrown);
             Ok(Zval::null())
