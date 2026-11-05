@@ -33,6 +33,8 @@
 
 mod input;
 
+use php_heap::MappedVec;
+
 use crate::SyntaxKind;
 use crate::line_index::LineIndex;
 use crate::source::{Diagnostic, FileId, Span};
@@ -54,9 +56,9 @@ pub struct Lead {
 /// builder, the room of the delimiter stack, for a parse that lends it
 /// to the next, and the diagnostics raised, in stream order.
 pub struct Ended {
-    pub(crate) events: Vec<Event>,
+    pub(crate) events: MappedVec<Event>,
     pub(crate) census: Census,
-    pub(crate) delims: Vec<(SyntaxKind, Span)>,
+    pub(crate) delims: MappedVec<(SyntaxKind, Span)>,
     pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
@@ -68,7 +70,7 @@ pub struct Parser<'t> {
     /// The line table, for the line a diagnostic reports and php's `on
     /// line N` inside the bracket-balance text.
     lines: &'t LineIndex<'t>,
-    events: Vec<Event>,
+    events: MappedVec<Event>,
     /// What the stream holds, counted as it is written, for the builder
     /// to lay its arena down at.
     census: Census,
@@ -92,7 +94,7 @@ pub struct Parser<'t> {
     depth_reported: bool,
     /// The open delimiters, pushed and popped by every consumed token:
     /// where php's `Unclosed '('` and `Unmatched ')'` read their opener.
-    delims: Vec<(SyntaxKind, Span)>,
+    delims: MappedVec<(SyntaxKind, Span)>,
     /// The one-shot grants the next primary consumes.
     pub(crate) grants: Grants,
     /// php's `, expecting …` clause for a token that cannot start a
@@ -200,9 +202,9 @@ impl<'t> Parser<'t> {
             input,
             file,
             lines,
-            Vec::new(),
+            MappedVec::new(),
             Census::default(),
-            Vec::new(),
+            MappedVec::new(),
         )
     }
 
@@ -212,9 +214,9 @@ impl<'t> Parser<'t> {
         input: &'t Input<'t>,
         file: FileId,
         lines: &'t LineIndex<'t>,
-        mut events: Vec<Event>,
+        mut events: MappedVec<Event>,
         census: Census,
-        mut delims: Vec<(SyntaxKind, Span)>,
+        mut delims: MappedVec<(SyntaxKind, Span)>,
     ) -> Parser<'t> {
         let burst_cap = u32::try_from(input.len())
             .unwrap_or(u32::MAX)

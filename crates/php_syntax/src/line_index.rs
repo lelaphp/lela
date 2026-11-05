@@ -42,14 +42,14 @@ impl<'a> LineIndex<'a> {
         if count == 0 {
             return LineIndex { breaks: &[], len };
         }
-        let mut breaks = bumpalo::collections::Vec::with_capacity_in(count, arena.bump());
+        let mut breaks = php_heap::ArenaVec::with_capacity_in(count, arena.bump());
         for (pos, byte) in text.iter().enumerate() {
             if *byte == b'\n' {
                 breaks.push(u32::try_from(pos + 1).unwrap_or(u32::MAX));
             }
         }
         LineIndex {
-            breaks: breaks.into_bump_slice(),
+            breaks: breaks.into_slice(),
             len,
         }
     }

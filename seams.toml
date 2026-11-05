@@ -451,6 +451,9 @@ lock = "xtask.lock"
 # Design §4.2. A manifest edge outside this list fails `api-check`; so does a
 # `use` path that crosses a seam without going through its lock.
 [[edge]]
+from = "php_syntax"
+to = ["php_heap"]
+[[edge]]
 from = "php_unit"
 to = ["php_heap"]
 [[edge]]

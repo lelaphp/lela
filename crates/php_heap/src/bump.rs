@@ -36,8 +36,8 @@ const MIN_CHUNK: usize = 64 * 1024;
 /// Blocks handed out through chunks laid down whole, each after the
 /// last, and freed only with the bump.
 pub(crate) struct Bump {
-    /// Each chunk, its address and its size, the last the one laid into.
-    chunks: Vec<(NonNull<u8>, usize)>,
+    /// Each chunk, the last the one laid into.
+    chunks: Vec<Chunk>,
     /// The bytes of the last chunk handed out.
     used: usize,
     /// What the next chunk is laid at, at least: the size asked for as
@@ -61,28 +61,29 @@ impl Bump {
     /// `None` where the machine refuses a chunk.
     pub(crate) fn alloc(&mut self, size: usize) -> Option<NonNull<u8>> {
         let size = size.checked_next_multiple_of(ALIGN)?;
-        if let Some(&(chunk, len)) = self.chunks.last()
-            && len - self.used >= size
+        if let Some(chunk) = self.chunks.last()
+            && chunk.len() - self.used >= size
         {
-            let at = chunk.as_ptr().wrapping_add(self.used);
+            let at = chunk.at().as_ptr().wrapping_add(self.used);
             self.used += size;
             return NonNull::new(at);
         }
         let len = (self.next.max(size).max(MIN_CHUNK)).checked_next_multiple_of(real_page_size())?;
-        let chunk = map(len)?;
-        self.chunks.push((chunk, len));
+        let chunk = Chunk::map(len)?;
+        let at = chunk.at();
+        self.chunks.push(chunk);
         self.used = size;
         self.next = MIN_CHUNK;
-        Some(chunk)
+        Some(at)
     }
 
     /// Whether `at` is a block this bump handed out, which says the
     /// bump frees it and nothing else does.
     pub(crate) fn holds(&self, at: NonNull<u8>) -> bool {
         let at = at.as_ptr().addr();
-        (self.chunks.iter()).any(|&(chunk, len)| {
-            let start = chunk.as_ptr().addr();
-            start <= at && at < start + len
+        (self.chunks.iter()).any(|chunk| {
+            let start = chunk.at().as_ptr().addr();
+            start <= at && at < start + chunk.len()
         })
     }
 
@@ -94,23 +95,49 @@ impl Bump {
     }
 }
 
-impl Drop for Bump {
-    /// Every chunk back to the machine; whatever was laid in them goes
-    /// with them, its owner having dropped first.
-    fn drop(&mut self) {
-        for (chunk, len) in self.chunks.drain(..) {
-            unmap(chunk, len);
-        }
-    }
-}
-
 impl std::fmt::Debug for Bump {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Bump({} chunks)", self.chunks.len())
     }
 }
 
-/// A chunk of `len` bytes, a whole number of pages, mapped fresh.
+/// Whole pages laid down fresh, given back to the machine as it drops.
+/// Whatever was laid in it goes with it, so whoever lays there holds it
+/// past every name into it.
+pub(crate) struct Chunk {
+    at: NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: a chunk is its owner's alone, and nothing about a mapping is
+// the thread's that made it.
+unsafe impl Send for Chunk {}
+
+impl Chunk {
+    /// `len` bytes, a whole number of pages, mapped fresh; `None` where
+    /// the machine refuses.
+    pub(crate) fn map(len: usize) -> Option<Chunk> {
+        Some(Chunk { at: map(len)?, len })
+    }
+
+    /// Its first byte, aligned to a page.
+    pub(crate) fn at(&self) -> NonNull<u8> {
+        self.at
+    }
+
+    /// Its bytes.
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl Drop for Chunk {
+    fn drop(&mut self) {
+        unmap(self.at, self.len);
+    }
+}
+
+/// `len` bytes, a whole number of pages, mapped fresh.
 #[cfg(all(unix, not(miri)))]
 fn map(len: usize) -> Option<NonNull<u8>> {
     crate::mm::mmap(std::ptr::null_mut(), len)
@@ -137,8 +164,8 @@ fn unmap(chunk: NonNull<u8>, len: usize) {
     let Ok(layout) = std::alloc::Layout::from_size_align(len, real_page_size()) else {
         return;
     };
-    // SAFETY: the chunk came from `map` with this layout, and its bump
-    // is dropping, so nothing names it.
+    // SAFETY: the chunk came from `map` with this layout, and its
+    // `Chunk` is dropping, so nothing names it.
     unsafe { std::alloc::dealloc(chunk.as_ptr(), layout) };
 }
 

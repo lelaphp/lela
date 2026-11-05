@@ -20,6 +20,8 @@ mod strings;
 #[cfg(test)]
 mod tests;
 
+use php_heap::MappedVec;
+
 use crate::SyntaxKind;
 use crate::line_index::LineIndex;
 use crate::source::{Diagnostic, FileId, Span};
@@ -81,7 +83,7 @@ pub enum Position {
 pub struct Lexed {
     /// The tokens, in source order. No EOF sentinel; the sum of the
     /// lengths equals the input length.
-    pub tokens: Vec<Token>,
+    pub tokens: MappedVec<Token>,
     /// What php's scanner raises on its own, in emission order: what it
     /// throws (`Unterminated comment starting line 3`,
     /// `Invalid numeric literal`, the heredoc indentation rules, the
@@ -104,9 +106,9 @@ pub fn lex(file: FileId, text: &[u8], options: &LexOptions) -> Lexed {
         text,
         options,
         &LineIndex::new(&arena, text),
-        Vec::new(),
+        MappedVec::new(),
         &mut Vec::new(),
-        &mut Vec::new(),
+        &mut MappedVec::new(),
     )
 }
 
@@ -123,9 +125,9 @@ pub(crate) fn lex_with_lines(
     text: &[u8],
     options: &LexOptions,
     lines: &LineIndex<'_>,
-    tokens: Vec<Token>,
+    tokens: MappedVec<Token>,
     states: &mut Vec<StateFrame>,
-    significant: &mut Vec<u32>,
+    significant: &mut MappedVec<u32>,
 ) -> Lexed {
     let mut scan = Lexer::new(file, text, options, lines, tokens, std::mem::take(states));
     scan.significant = std::mem::take(significant);
@@ -287,13 +289,13 @@ pub(crate) struct Lexer<'a> {
     pub(crate) pos: usize,
     /// The state stack ([`States`]).
     pub(crate) frames: States,
-    pub(crate) tokens: Vec<Token>,
+    pub(crate) tokens: MappedVec<Token>,
     pub(crate) diags: Vec<Diagnostic>,
     halt: HaltStage,
     /// End offset of the last emitted token (the coverage invariant).
     emitted: usize,
     /// The index of every significant token emitted ([`lex_with_lines`]).
-    significant: Vec<u32>,
+    significant: MappedVec<u32>,
 }
 
 impl<'a> Lexer<'a> {
@@ -302,7 +304,7 @@ impl<'a> Lexer<'a> {
         text: &'a [u8],
         options: &LexOptions,
         lines: &'a LineIndex<'a>,
-        mut tokens: Vec<Token>,
+        mut tokens: MappedVec<Token>,
         above: Vec<StateFrame>,
     ) -> Lexer<'a> {
         // The 4 GiB cap `load_bytes` holds is what makes every `narrow`
@@ -346,13 +348,13 @@ impl<'a> Lexer<'a> {
             diags: Vec::new(),
             halt: HaltStage::Off,
             emitted: 0,
-            significant: Vec::new(),
+            significant: MappedVec::new(),
         }
     }
 
     /// The stream and the diagnostics, the room of the state stack
     /// above its base, and the index of the significant tokens.
-    pub(crate) fn lex(mut self, position: Position) -> (Lexed, Vec<StateFrame>, Vec<u32>) {
+    pub(crate) fn lex(mut self, position: Position) -> (Lexed, Vec<StateFrame>, MappedVec<u32>) {
         if position == Position::AtShebang {
             self.lex_shebang();
         }
