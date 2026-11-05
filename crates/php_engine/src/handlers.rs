@@ -26203,8 +26203,63 @@ fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at:
         req.locate_oom();
     }
     req.vm_mut().stand(frame, at);
+    if temporary_discarded(req, frame, op) {
+        return discard_temporary(req, frame, op);
+    }
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     returned_to_caller(req, frame, returned)
+}
+
+/// `RETURN`'s `!return_value` arm (`Z/Zend/zend_vm_def.h:4623`): a
+/// temporary the caller reads nothing of is freed by the `RETURN`, with
+/// its frame still standing, so a destructor that runs sees the function
+/// it was returned from on its trace. A value of a CV or a constant
+/// waits for the leave. An observer takes the value, so it stands past
+/// the observer as `ZEND_OBSERVER_USE_RETVAL` keeps it.
+///
+/// ```php
+/// class D { function __destruct() { debug_print_backtrace(); } }
+/// function f() { return new D; }
+/// function g() { $d = new D; return $d; }
+/// class T { function __destruct() { throw new Exception("t"); } }
+/// function h() { return new T; }
+/// f();
+/// g();
+/// $v = f();
+/// unset($v);
+/// call_user_func('f');
+/// try { h(); } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
+/// function &r() { return new D; }
+/// r();
+/// ```
+/// ```expect
+/// #0 %SCRATCH%/witness.php(3): D->__destruct()
+/// #1 %SCRATCH%/witness.php(7): f()
+/// #0 %SCRATCH%/witness.php(8): D->__destruct()
+/// #0 %SCRATCH%/witness.php(10): D->__destruct()
+/// #0 %SCRATCH%/witness.php(3): D->__destruct()
+/// #1 %SCRATCH%/witness.php(11): f()
+/// #0 %SCRATCH%/witness.php(6): T->__destruct()
+/// #1 %SCRATCH%/witness.php(12): h()
+/// #2 {main}
+///
+/// Notice: Only variable references should be returned by reference in %SCRATCH%/witness.php on line 13
+/// #0 %SCRATCH%/witness.php(13): D->__destruct()
+/// #1 %SCRATCH%/witness.php(14): r()
+/// ```
+fn temporary_discarded(req: &mut Request, frame: FrameRef, op: &Opline) -> bool {
+    matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var)
+        && req.stack_mut().entry() != frame
+        && !crate::observer::observing(req)
+        && req.returning(frame).1.is_none()
+}
+
+/// The temporary [`temporary_discarded`] found given up, with the frame
+/// standing, and the frame left with nothing to hand back.
+fn discard_temporary(req: &mut Request, frame: FrameRef, op: &Opline) -> Stepped {
+    let discarded = req.take_slot(frame, op.op1);
+    req.release(discarded);
+    returned_to_caller(req, frame, Value::null())
 }
 
 /// The return safepoint of a `RETURN*` (design §5.8, `jit-design.md`
@@ -27968,6 +28023,10 @@ pub(crate) fn return_by_ref<T: Tier>(
             req,
             "Only variable references should be returned by reference",
         );
+        if temporary_discarded(req, frame, op) {
+            let left = discard_temporary(req, frame, op);
+            return raise_return::<T>(req, left, code, op);
+        }
         let value = if op.op1_type == OperandKind::Var {
             req.take_slot(frame, op.op1)
         } else {
