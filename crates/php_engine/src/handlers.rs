@@ -9082,14 +9082,7 @@ fn inline_fetch_obj_r(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, _) = inline_place(
-        req,
-        (frame, code, op),
-        b,
-        property_cache_slot(op),
-        object,
-        false,
-    )?;
+    let (place, _) = opline_place(req, (frame, code, op), b, object, false)?;
     let z = crate::operand::deref(place.read());
     if z.is_undef() {
         return None;
@@ -9243,6 +9236,18 @@ fn inline_fetch_obj_r(
 /// 1010C
 /// Cannot access protected property C::$pr
 /// ```
+/// [`inline_place`] through the opline's own cache slot.
+#[inline(always)] // as `inline_fetch_obj_r`
+fn opline_place(
+    req: &mut Request,
+    at: (FrameRef, &OpArray, &Opline),
+    b: impl Operand,
+    object: php_heap::Obj,
+    write: bool,
+) -> Option<(php_heap::ZvalRef, exec::SlotType)> {
+    inline_place(req, at, b, property_cache_slot(at.2), object, write)
+}
+
 #[inline(always)] // as `inline_fetch_obj_r`
 fn inline_place(
     req: &mut Request,
@@ -9872,14 +9877,7 @@ fn inline_fetch_obj_w(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, ty) = inline_place(
-        req,
-        (frame, code, op),
-        b,
-        property_cache_slot(op),
-        object,
-        true,
-    )?;
+    let (place, ty) = opline_place(req, (frame, code, op), b, object, true)?;
     // `zend_fetch_property_address`'s cached arm: a typed slot with no
     // fetch flag is the `IS_INDIRECT` an untyped one is, and only the
     // flags (`zend_handle_fetch_obj_flags`) and a guarded property read
@@ -11327,21 +11325,24 @@ fn object_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -
     Some(exec::operand(req, frame, code, op.op2_type, op.op2))
 }
 
-/// Whether the dimension is a CV nothing wrote, php's `ZVAL_UNDEFINED_OP2()`,
+/// Whether an operand is a CV nothing wrote, php's `ZVAL_UNDEFINED_OP*()`,
 /// which stands as `&EG(uninitialized_zval)` whatever is written after.
-fn dim_undefined(req: &Request, frame: FrameRef, op: &Opline) -> bool {
-    op.op2_type == OperandKind::Cv && req.slot(frame, op.op2).tag() == TypeTag::Undef
+fn undefined_cv(req: &Request, frame: FrameRef, kind: OperandKind, at: u32) -> bool {
+    kind == OperandKind::Cv && req.slot(frame, at).tag() == TypeTag::Undef
 }
 
-/// [`object_dim`] over a dimension whose warning is raised already.
-fn object_dim_as_it_stands(
+/// [`object_dim`] read again past what ran, its warning raised already:
+/// `dim` as first read stands where no write reaches it, an undefined CV
+/// among them.
+fn object_dim_now(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    (dim, undefined): (Option<Value>, bool),
 ) -> Option<Value> {
-    if matches!(op.op2_type, OperandKind::Unused | OperandKind::Const) {
-        return object_dim(req, frame, code, op);
+    if undefined || matches!(op.op2_type, OperandKind::Unused | OperandKind::Const) {
+        return dim;
     }
     Some(exec::operand_undef(req, frame, code, op.op2_type, op.op2).undef_as_null())
 }
@@ -15829,14 +15830,7 @@ fn inline_assign_obj(
         return None;
     }
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, ty) = inline_place(
-        req,
-        (frame, code, op),
-        b,
-        property_cache_slot(op),
-        object,
-        true,
-    )?;
+    let (place, ty) = opline_place(req, (frame, code, op), b, object, true)?;
     let held = place.read();
     if held.is_undef() || held.is_refcounted() {
         return None;
@@ -16027,9 +16021,7 @@ fn assigned_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
     // its handlers can free (`trace:assign-obj-entry-container-under-a-handler`).
     let guard = early
         .filter(|_| {
-            op.op1_type == OperandKind::Var
-                && data.op1_type == OperandKind::Cv
-                && req.slot(frame, data.op1).tag() == TypeTag::Undef
+            op.op1_type == OperandKind::Var && undefined_cv(req, frame, data.op1_type, data.op1)
         })
         .map(|container| Owner::take(req, container.deref()));
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
@@ -17585,14 +17577,10 @@ fn assign_object_dim(
     data: Opline,
     object: PhpObject,
 ) -> Result<(), Thrown> {
-    let undefined = dim_undefined(req, frame, op);
+    let undefined = undefined_cv(req, frame, op.op2_type, op.op2);
     let dim = object_dim(req, frame, code, op);
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-    let dim = if undefined {
-        dim
-    } else {
-        object_dim_as_it_stands(req, frame, code, op)
-    };
+    let dim = object_dim_now(req, frame, code, op, (dim, undefined));
     let table = req.object_handlers(object.heap());
     let given = Owner::take(req, value);
     match table.write_dimension(req, object, dim.as_ref(), given) {
@@ -18040,8 +18028,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
             });
             match landing {
                 Ok((key, Landing::Entry(entry))) => {
-                    let undefined = data.op1_type == OperandKind::Cv
-                        && req.slot(frame, data.op1).tag() == TypeTag::Undef;
+                    let undefined = undefined_cv(req, frame, data.op1_type, data.op1);
                     let taken = |req: &mut Request| {
                         Ok(exec::take_operand(
                             req,
@@ -18056,17 +18043,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
                     } else {
                         taken(req).map(|value| (value, Some(entry)))
                     };
-                    placed.and_then(|(value, entry)| {
-                        let (landed, garbage) = match entry {
-                            Some(entry) => {
-                                assign_to_place(req, frame, entry, (value, data.op1_type))?
-                            }
-                            None => (value, value),
-                        };
-                        write_out(req, frame, op, &landed);
-                        req.release(garbage);
-                        Ok(())
-                    })
+                    entry_landed(req, frame, op, placed, (data.op1_type, Request::release))
                 }
                 // `assign_dim_error`: `FREE_OP_DATA` and a `null` result.
                 Ok((_, Landing::Gone)) => data_gone(req, frame, op, (data.op1_type, data.op1)),
@@ -18230,6 +18207,27 @@ fn entry_past<T>(
     };
     name.give_up(req);
     Ok((stepped, entry))
+}
+
+/// Where a dimension write's value lands past [`entry_past`]: the entry
+/// still standing, or nothing where a handler freed it, the value then
+/// written out alone; what the entry held is `free`'s.
+#[inline(always)] // the handlers' own path, and each `free` folds
+fn entry_landed(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    placed: Result<(Value, Option<php_heap::ZvalRef>), Thrown>,
+    (handed, free): (OperandKind, impl FnOnce(&mut Request, Value)),
+) -> Result<(), Thrown> {
+    let (value, entry) = placed?;
+    let (landed, garbage) = match entry {
+        Some(entry) => assign_to_place(req, frame, entry, (value, handed))?,
+        None => (value, value),
+    };
+    write_out(req, frame, op, &landed);
+    free(req, garbage);
+    Ok(())
 }
 
 /// `ZEND_SEPARATE` (`Z/Zend/zend_vm_def.h:8377`), the opline
@@ -18922,17 +18920,13 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
                     } else {
                         entry_past(req, (op, place), (array, key, entry), computed)
                     };
-                    placed.and_then(|(stepped, entry)| {
-                        let (landed, garbage) = match entry {
-                            Some(entry) => {
-                                assign_to_place(req, frame, entry, (stepped, OperandKind::Unused))?
-                            }
-                            None => (stepped, stepped),
-                        };
-                        write_out(req, frame, op, &landed);
-                        release_overwritten(req, garbage);
-                        Ok(())
-                    })
+                    entry_landed(
+                        req,
+                        frame,
+                        op,
+                        placed,
+                        (OperandKind::Unused, release_overwritten),
+                    )
                 }
                 // `assign_dim_op_ret_null`: `FREE_OP_DATA` and a `null`
                 // result.
@@ -19149,20 +19143,14 @@ fn binary_assign_op_obj_dim(
     let Compound {
         op, data, kernel, ..
     } = step;
-    let undefined = dim_undefined(req, frame, op);
+    let undefined = undefined_cv(req, frame, op.op2_type, op.op2);
     let dim = object_dim(req, frame, code, op);
     exec::operand(req, frame, code, data.op1_type, data.op1);
     // php's `property` and `value` are pointers at their operands, so
     // each is read here where php reads through it: what a handler or
     // `offsetGet` wrote is what the next call meets. A dimension nothing
     // wrote stays php's `&EG(uninitialized_zval)`.
-    let dim_now = |req: &mut Request| {
-        if undefined {
-            dim
-        } else {
-            object_dim_as_it_stands(req, frame, code, op)
-        }
-    };
+    let dim_now = |req: &mut Request| object_dim_now(req, frame, code, op, (dim, undefined));
     let at = dim_now(req);
     let table = req.object_handlers(object.heap());
     let read = table.read_dimension(req, object, at.as_ref(), DimensionRead::Warning);
@@ -19406,8 +19394,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
     // (`Z/Zend/zend_vm_def.h:1023-1026`).
     let mut member = exec::Member::default();
     let name = member.name(req, frame, code, op);
-    let read =
-        data.op1_type == OperandKind::Cv && req.slot(frame, data.op1).tag() == TypeTag::Undef;
+    let read = undefined_cv(req, frame, data.op1_type, data.op1);
     // A `VAR` points at an entry the warning's handler can free with its
     // table, so what it held is held.
     let mut in_table = None;
@@ -20513,6 +20500,14 @@ impl IncDec {
         increment: false,
     };
 
+    fn arith(self) -> Arith {
+        if self.increment {
+            Arith::Add
+        } else {
+            Arith::Sub
+        }
+    }
+
     fn kernel(self) -> fn(&mut Request, &Value) -> Result<Value, Thrown> {
         if self.increment {
             crate::ops::increment
@@ -20668,21 +20663,9 @@ fn inline_incdec_obj(
 ) -> Option<Edge> {
     let b = ByKind(op.op2_type);
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, ty) = inline_place(
-        req,
-        (frame, code, op),
-        b,
-        property_cache_slot(op),
-        object,
-        true,
-    )?;
+    let (place, ty) = opline_place(req, (frame, code, op), b, object, true)?;
     let held = place.read();
-    let arith = if step.increment {
-        Arith::Add
-    } else {
-        Arith::Sub
-    };
-    let stepped = inline::step(arith, held)?;
+    let stepped = inline::step(step.arith(), held)?;
     if !ty.admits(stepped) {
         return None;
     }
@@ -20824,13 +20807,16 @@ fn incdec_property(
         // the entry laid down.
         Ok((object, PropertyPtr::Dynamic(place))) => {
             let held = place.read();
-            let arith = if step.increment {
-                Arith::Add
-            } else {
-                Arith::Sub
-            };
-            let Some(stepped) = inline::step(arith, held) else {
-                return Ok(overloaded_incdec(req, frame, op, step, object, key));
+            let Some(stepped) = inline::step(step.arith(), held) else {
+                return Ok(served_incdec(
+                    req,
+                    frame,
+                    op,
+                    step,
+                    object,
+                    key,
+                    WriteBack::Property,
+                ));
             };
             place.write(stepped);
             let out = Value::of_slot(if step.post { held } else { stepped });
@@ -20842,7 +20828,15 @@ fn incdec_property(
         // chained onto what the step threw.
         Ok((object, PropertyPtr::Withheld)) => {
             held.overloaded(req, object);
-            return Ok(overloaded_incdec(req, frame, op, step, object, key));
+            return Ok(served_incdec(
+                req,
+                frame,
+                op,
+                step,
+                object,
+                key,
+                WriteBack::Property,
+            ));
         }
         Err(thrown) => return Ok(Err(nulled_out(req, frame, op, thrown))),
     };
@@ -20967,7 +20961,7 @@ fn typed_step(
 /// `read_property` under `BP_VAR_R`, the step over a dereferenced copy
 /// of what it answered, the temporary written with the value before or
 /// after it, and `write_property` with the stepped value, or with the
-/// copy unchanged where the step was refused.
+/// copy unchanged where the step was refused, as `back` says.
 ///
 /// ```php
 /// $o = new class { public $bar; function __construct() { $this->bar = new stdClass; } function &__get($x) { return $this->bar; } };
@@ -20979,18 +20973,6 @@ fn typed_step(
 /// Cannot increment stdClass
 /// bool(true)
 /// ```
-fn overloaded_incdec(
-    req: &mut Request,
-    frame: FrameRef,
-    op: &Opline,
-    step: IncDec,
-    object: PhpObject,
-    name: crate::api::values::PhpString,
-) -> Result<(), Thrown> {
-    served_incdec(req, frame, op, step, object, name, WriteBack::Property)
-}
-
-/// [`overloaded_incdec`] with the stepped value written back as `back` says.
 #[allow(clippy::too_many_arguments)] // the site's operands, and where the result goes
 fn served_incdec(
     req: &mut Request,
