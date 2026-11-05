@@ -1674,6 +1674,22 @@ pub(super) fn within(opcode: Opcode, tag: ZvalType, op2: Operand) -> Option<With
     }
 }
 
+/// The oplines that begin a call, php's `zend_jit_inc_call_level`.
+pub(super) fn begins_call(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::InitFcall
+            | Opcode::InitFcallByName
+            | Opcode::InitNsFcallByName
+            | Opcode::InitMethodCall
+            | Opcode::InitDynamicCall
+            | Opcode::InitUserCall
+            | Opcode::New
+            | Opcode::InitStaticMethodCall
+            | Opcode::InitParentPropertyHookCall
+    )
+}
+
 /// Whether php's tracing code generator has a case that compiles `opcode`
 /// inline where nothing about its operands breaks it to the handler
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:4436-6477`): the calls, the sends

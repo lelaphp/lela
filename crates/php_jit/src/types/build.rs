@@ -18,8 +18,8 @@ use php_unit::{Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 use super::lattice::{self, Types};
 use super::opcodes::{
     Carried, Declared, Hold, ISEMPTY, MAX_ARG_FLAG_NUM, MAY_BE_RESOURCE, Site, Within, arith,
-    assigned, carried, check_sites, checked_order, compiled_inline, compound_in_place, constant,
-    constant_types, goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call,
+    assigned, begins_call, carried, check_sites, checked_order, compiled_inline, compound_in_place,
+    constant, constant_types, goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call,
     keeps_temporaries, keyed, may_exit, needs_call_chain, packed_guard, param_types, params, reads,
     reads_by_name, recv_exits, referenced, slot_of, within, written, written_through,
 };
@@ -341,9 +341,9 @@ struct Call {
 
 /// What holds a call to the callee the trace recorded, so how it takes
 /// its arguments is known: nothing, for a method's or a dynamic call's
-/// that may serve another; its name, or the guard at its push; or a
-/// `Closure`'s function at its push, the closure the frame gives up as it
-/// leaves, whatever op array it is over.
+/// that may serve another; a name that answers it alone, or the guard at
+/// its push; or a `Closure`'s function at its push, the closure the frame
+/// gives up as it leaves, whatever op array it is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Held {
     Not,
@@ -1617,6 +1617,55 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Whether a call found under way in `frame` serves `callee` by a name
+    /// that answers no other, where php's fake init takes no guard
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7110-7136`): the frame's own
+    /// function, or one `INIT_FCALL` named. `ahead`, the events after it,
+    /// say which of the calls under way it is, and the `INIT_*` is found
+    /// as `zend_jit_trace_find_init_fcall_op` finds it, walking back over
+    /// the calls begun and made since (`:1162-1198`). A recursive call's
+    /// second argument, sent past the return of the first:
+    /// ```php
+    /// if (true) { function ack($m, $n) { if ($m == 0) { return $n + 1; } if ($n == 0) { return ack($m - 1, 1); } return ack($m - 1, ack($m, $n - 1)); } }
+    /// if (true) { function rf($n, &$c) { $c++; if ($n == 0) { return 0; } $d = $n - 1; return 1 + rf(rf($d, $c), $c); } }
+    /// $c = 0; $s = 0; for ($i = 0; $i < 6; $i++) { $s += ack(2, $i); } echo $s, " ", rf(4, $c), " ", $c, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 48 4 31
+    /// ```
+    ///
+    /// ```php
+    /// if (true) { function ack($m, $n) { if ($m == 0) { return $n + 1; } if ($n == 0) { return ack($m - 1, 1); } return ack($m - 1, ack($m, $n - 1)); } }
+    /// if (true) { function rf($n, &$c) { $c++; if ($n == 0) { return 0; } $d = $n - 1; return 1 + rf(rf($d, $c), $c); } }
+    /// $c = 0; $s = 0; for ($i = 0; $i < 6; $i++) { $s += ack(2, $i); } echo $s, " ", rf(4, $c), " ", $c, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 48 4 31
+    /// ```
+    fn named_before(&self, frame: Frame, callee: Callee, ahead: &[Event]) -> bool {
+        let mut under = (ahead.iter())
+            .take_while(|event| matches!(event, Event::InitCall { .. }))
+            .count();
+        let Some(Event::Op { opline, .. }) = ahead.get(under) else {
+            return false;
+        };
+        let code = self.meta(frame).code;
+        let begun = code.oplines.get(..opline.0 as usize).into_iter().flatten();
+        for op in begun.rev() {
+            if is_call(op.opcode) {
+                under += 1;
+            } else if begins_call(op.opcode) {
+                if under > 0 {
+                    under -= 1;
+                    continue;
+                }
+                let own = callee.user() == Some(self.frames[usize::from(frame.0)].func);
+                return op.opcode == Opcode::InitFcall || (own && pushes_inline(op.opcode));
+            }
+        }
+        false
+    }
+
     /// A call an `INIT_*` began, here or before the trace reached the
     /// frame, whose arguments sent before it the trace knows nothing of;
     /// `ahead`, the events after it, say whether compiled code links it
@@ -1658,6 +1707,9 @@ impl<'a> Builder<'a> {
                     Some(Op::Line(line)) if pushes_inline(line.opcode)
                 ) =>
             {
+                Held::ByPush
+            }
+            None if began == Began::Before && self.named_before(frame, callee, ahead) => {
                 Held::ByPush
             }
             None => Held::Not,
