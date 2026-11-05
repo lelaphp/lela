@@ -18349,7 +18349,9 @@ pub(crate) fn separate<T: Tier>(
 /// ```
 struct StepHold {
     held: Option<Owner<Value>>,
-    overloaded: bool,
+    /// The owners the object had with the hold among them, `u32::MAX`
+    /// under the pair of handlers, whose release php's own is.
+    owners: u32,
 }
 
 impl StepHold {
@@ -18365,26 +18367,29 @@ impl StepHold {
         let held = (!stands).then(|| Owner::take(req, object.as_value()));
         StepHold {
             held,
-            overloaded: false,
+            owners: object.as_value().refcount(),
         }
     }
 
     /// The step goes through the pair of handlers, whose owner php takes.
     fn overloaded(&mut self, req: &mut Request, object: PhpObject) {
-        self.overloaded = true;
+        self.owners = u32::MAX;
         if self.held.is_none() {
             self.held = Some(Owner::take(req, object.as_value()));
         }
     }
 
-    /// The object given up, with what the step threw pending,
-    /// `OBJ_RELEASE` over the pair of handlers.
+    /// The object given up, with what the step threw pending: a release,
+    /// a possible root of the collector, where it is `OBJ_RELEASE` or the
+    /// step cost the object an owner, which a collection in a handler may
+    /// have read past; otherwise the hold is one php has not, and it
+    /// leaves the collector's buffer as it found it.
     fn given_up<T>(&mut self, req: &mut Request, done: Result<T, Thrown>) -> Result<T, Thrown> {
         let Some(held) = self.held.take() else {
             return done;
         };
         req.freed_after(done, |req| {
-            if self.overloaded {
+            if held.refcount() < self.owners {
                 held.give_up(req);
             } else {
                 let _ = held.let_go(req);

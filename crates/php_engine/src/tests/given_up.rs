@@ -188,6 +188,28 @@ fn an_object_a_handler_gave_up_goes_past_its_compound_step() {
 }
 
 #[test]
+fn a_cycle_a_collection_read_past_under_a_step_stays_a_possible_root() {
+    let stdout = served(
+        "<?php\n\
+         class C { public $p = 'pp'; public $self; function __destruct() { echo 'dtor ', $this->p, \"\\n\"; } }\n\
+         set_error_handler(function () { $GLOBALS['o'] = null; gc_collect_cycles(); return true; });\n\
+         $o = new C; $o->self = $o; $o->p .= []; echo \"after\\n\";\n\
+         echo gc_collect_cycles(), \"\\nend\\n\";\n",
+    );
+    assert_eq!(stdout, "after\ndtor ppArray\n1\nend\n");
+}
+
+#[test]
+fn a_step_that_cost_the_object_no_owner_adds_no_possible_root() {
+    let stdout = served(
+        "<?php\n\
+         class C { public $p = 'pp'; }\n\
+         $o = new C; $o->p .= 'x'; $o->p .= 'y'; echo gc_status()['roots'], \"\\n\";\n",
+    );
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
 fn a_throw_over_a_compound_step_is_the_previous_of_the_destructor_it_serves() {
     let stdout = served(
         "<?php\n\
