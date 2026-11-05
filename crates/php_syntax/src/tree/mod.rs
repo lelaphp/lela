@@ -52,8 +52,7 @@ use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::ops::Index;
 
-use bumpalo::Bump;
-use bumpalo::collections::Vec as BumpVec;
+use php_heap::{ArenaVec, MappedVec, ParseArena};
 
 use crate::SyntaxKind;
 use crate::source::TextRange;
@@ -238,7 +237,7 @@ pub(crate) trait Pooled: Listed + Copy + 'static {
 /// the pool emptied for the next build. Only a pool a list was written
 /// to is frozen ([`Pools::freeze`]), so a tree of a few lists copies
 /// those and leaves the rest of [`Lists`] empty.
-fn frozen<'a, T: Copy>(bump: &'a Bump, pool: &mut Vec<T>) -> &'a [T] {
+fn frozen<'a, T: Copy>(bump: &'a ParseArena, pool: &mut Vec<T>) -> &'a [T] {
     let slice = bump.alloc_slice_copy(pool);
     pool.clear();
     slice
@@ -435,14 +434,14 @@ impl<'a> Nodes<'a> {
 /// over them.
 #[derive(Default)]
 pub(crate) struct Census {
-    counts: Vec<u32>,
+    counts: MappedVec<u32>,
     kinds: usize,
     shaped: usize,
 }
 
 impl Census {
     /// A census over `counts`, the room a parse lends, at zero.
-    pub(crate) fn new(mut counts: Vec<u32>) -> Census {
+    pub(crate) fn new(mut counts: MappedVec<u32>) -> Census {
         counts.resize(SLOTS, 0);
         Census {
             counts,
@@ -453,7 +452,7 @@ impl Census {
 
     /// The census of a stream written without one: every `Start` the
     /// builder will open and every `Token`.
-    pub(crate) fn of(events: &[Event], counts: Vec<u32>) -> Census {
+    pub(crate) fn of(events: &[Event], counts: MappedVec<u32>) -> Census {
         let mut census = Census::new(counts);
         for event in events {
             match *event {
@@ -489,19 +488,19 @@ impl Census {
 /// made with the kind's first node at the count the [`Census`] holds of
 /// it, so no vector grows.
 pub(crate) struct Building<'a> {
-    bump: &'a Bump,
+    bump: &'a ParseArena,
     slots: [Option<StoreAt>; SLOTS],
-    stores: BumpVec<'a, Store<'a>>,
-    counts: Vec<u32>,
+    stores: ArenaVec<'a, Store<'a>>,
+    counts: MappedVec<u32>,
 }
 
 impl<'a> Building<'a> {
     /// An empty arena in `bump`, to hold what `census` counted.
-    pub(crate) fn new(bump: &'a Bump, census: Census) -> Building<'a> {
+    pub(crate) fn new(bump: &'a ParseArena, census: Census) -> Building<'a> {
         Building {
             bump,
             slots: [None; SLOTS],
-            stores: BumpVec::with_capacity_in(census.kinds, bump),
+            stores: ArenaVec::with_capacity_in(census.kinds, bump),
             counts: census.counts,
         }
     }
@@ -509,14 +508,14 @@ impl<'a> Building<'a> {
     /// The vector of `T`'s kind, made with the kind's first node. `None`
     /// only where more kinds stand than a slot counts, which the
     /// codegen's count of slots rules out.
-    fn open<T: Stored>(&mut self) -> Option<&mut BumpVec<'a, T>> {
+    fn open<T: Stored>(&mut self) -> Option<&mut ArenaVec<'a, T>> {
         let at = if let Some(at) = *self.slots.get(T::SLOT)? {
             at
         } else {
             let at = StoreAt::new(self.stores.len())?;
             let room = self.counts.get_mut(T::SLOT).map_or(0, std::mem::take) as usize;
             self.stores
-                .push(T::store(BumpVec::with_capacity_in(room, self.bump)));
+                .push(T::store(ArenaVec::with_capacity_in(room, self.bump)));
             *self.slots.get_mut(T::SLOT)? = Some(at);
             at
         };
@@ -526,15 +525,15 @@ impl<'a> Building<'a> {
     /// The arena as the tree keeps it, in the arena, each kind's vector
     /// read where the builder filled it; and the counts back, at zero,
     /// each taken as its kind was opened.
-    pub(crate) fn freeze(self) -> (&'a Nodes<'a>, Vec<u32>) {
+    pub(crate) fn freeze(self) -> (&'a Nodes<'a>, MappedVec<u32>) {
         let Building {
             bump,
             slots,
             stores,
             counts,
         } = self;
-        let stores = stores.into_bump_slice();
-        (bump.alloc_with(|| Nodes { slots, stores }), counts)
+        let stores = stores.into_slice();
+        (bump.alloc(Nodes { slots, stores }), counts)
     }
 }
 
@@ -558,9 +557,9 @@ trait Stored: Sized + 'static {
     /// put the kind in.
     const FIELD: &'static str;
     /// The kind's vector as a `Store`.
-    fn store(nodes: BumpVec<'_, Self>) -> Store<'_>;
+    fn store(nodes: ArenaVec<'_, Self>) -> Store<'_>;
     /// The kind's vector, if `store` is the kind's.
-    fn stored<'a, 'g>(store: &'g mut Store<'a>) -> Option<&'g mut BumpVec<'a, Self>>;
+    fn stored<'a, 'g>(store: &'g mut Store<'a>) -> Option<&'g mut ArenaVec<'a, Self>>;
     /// The node from its children, or the required child that is absent.
     fn resolved(at: &Finished<'_>, pools: &mut Pools) -> Result<Self, &'static str>;
 }

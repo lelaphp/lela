@@ -49,12 +49,14 @@ mod hooks;
 mod iterators;
 mod lend;
 mod map;
+mod mapped_vec;
 mod mm;
 mod numeric;
 mod object;
 mod observe;
 #[cfg(debug_assertions)]
 pub mod owners;
+mod parse_arena;
 mod payload;
 mod persist;
 mod property_table;
@@ -88,6 +90,7 @@ pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, FatalReason, GcTable, HeapHooks};
 pub use lend::{ecalloc, efree, emalloc, erealloc};
 pub use map::{MapPtr, MapTable};
+pub use mapped_vec::MappedVec;
 pub use mm::{ChunkCache, DelayedOom, PendingOom};
 pub use numeric::{
     DoubleText, Exponent, LongText, Number, NumberText, double_to_string, gcvt, numeric_prefix,
@@ -95,6 +98,7 @@ pub use numeric::{
 };
 pub use object::{Laziness, Obj, ObjectId};
 pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};
+pub use parse_arena::{ArenaVec, ParseArena};
 pub use persist::{Persist, PersistSize, Table, TableVec};
 pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;

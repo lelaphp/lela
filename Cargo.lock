@@ -1867,9 +1867,9 @@ dependencies = [
 name = "php_syntax"
 version = "0.0.0"
 dependencies = [
- "bumpalo",
  "expect-test",
  "nix",
+ "php_heap",
 ]
 
 [[package]]

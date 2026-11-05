@@ -17,7 +17,9 @@ description = "The syntax: the schema and its kind enum, the lexer, lossless tok
 workspace = true
 
 [dependencies]
-bumpalo.workspace = true
+# The parse arena's chunks and the stacks' mappings, which stay php_heap's,
+# an `unsafe` home, so this crate keeps none (#4064).
+php_heap = { path = "../php_heap" }
 
 [dev-dependencies]
 expect-test.workspace = true

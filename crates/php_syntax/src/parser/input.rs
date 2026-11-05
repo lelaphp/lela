@@ -5,6 +5,8 @@
 //! and the bytes after `__halt_compiler` are significant: the statement
 //! grammar reads them, a close tag standing in for `;`.
 
+use php_heap::MappedVec;
+
 use crate::SyntaxKind;
 use crate::lexer::Token;
 use crate::source::TextRange;
@@ -14,7 +16,7 @@ pub struct Input<'t> {
     text: &'t [u8],
     tokens: &'t [Token],
     /// The index into `tokens` of each significant token.
-    significant: Vec<u32>,
+    significant: MappedVec<u32>,
 }
 
 impl<'t> Input<'t> {
@@ -35,7 +37,11 @@ impl<'t> Input<'t> {
     /// The cursor over `tokens` whose significant ones the lexer indexed
     /// as it emitted them, `significant`, which
     /// [`Input::into_significant`] hands back.
-    pub(crate) fn indexed(text: &'t [u8], tokens: &'t [Token], significant: Vec<u32>) -> Input<'t> {
+    pub(crate) fn indexed(
+        text: &'t [u8],
+        tokens: &'t [Token],
+        significant: MappedVec<u32>,
+    ) -> Input<'t> {
         Input {
             text,
             tokens,
@@ -44,7 +50,7 @@ impl<'t> Input<'t> {
     }
 
     /// The significant-token table's room, emptied.
-    pub(crate) fn into_significant(self) -> Vec<u32> {
+    pub(crate) fn into_significant(self) -> MappedVec<u32> {
         let mut significant = self.significant;
         significant.clear();
         significant

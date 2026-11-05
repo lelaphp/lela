@@ -19,10 +19,17 @@
 //! the builder's frames, lent to each parse and taken back empty, and
 //! the stacks and the strings of the walk that reads what php's scanner
 //! lays, so their room is reused too.
+//!
+//! The bump and the larger stacks are `php_heap`'s, on mappings of their
+//! own, which this crate reaches in safe code ([`ParseArena`],
+//! [`MappedVec`]): what a compile grew past [`KEPT`] and
+//! [`Scratch::KEPT`] goes back to the machine, where the system
+//! allocator would keep the pages dirty in its zone (#4020, #4064).
 
 use std::cell::{Cell, RefCell, RefMut};
 
-use bumpalo::Bump;
+pub use php_heap::ArenaVec;
+use php_heap::{MappedVec, ParseArena};
 
 use crate::lexer::Token;
 
@@ -31,7 +38,7 @@ use crate::lexer::Token;
 /// allocates nothing until it is first used.
 #[derive(Default)]
 pub struct Arena {
-    bump: Bump,
+    bump: ParseArena,
     /// The stacks [`crate::parse`] lends its stages, borrowed where they
     /// stand for a parse, so a parse nested in another finds them taken
     /// and makes its own.
@@ -54,12 +61,12 @@ impl std::fmt::Debug for Arena {
 /// The room [`crate::parse`] lends its stages and takes back empty.
 #[derive(Default)]
 pub(crate) struct Scratch {
-    pub(crate) tokens: Vec<Token>,
+    pub(crate) tokens: MappedVec<Token>,
     /// The lexer's states above its base.
     pub(crate) states: Vec<crate::lexer::StateFrame>,
     /// The parser's open delimiters.
-    pub(crate) delims: Vec<(crate::SyntaxKind, crate::Span)>,
-    pub(crate) significant: Vec<u32>,
+    pub(crate) delims: MappedVec<(crate::SyntaxKind, crate::Span)>,
+    pub(crate) significant: MappedVec<u32>,
     pub(crate) stacks: crate::tree::Stacks,
     /// The stacks of the walk that lays what php's scanner lays
     /// ([`crate::note_scanner_heap`]).
@@ -68,11 +75,11 @@ pub(crate) struct Scratch {
 
 impl Scratch {
     /// The most room of one stack an arena keeps between parses: a parse
-    /// of a large file pays for its own and gives it up. It holds the
-    /// stacks of a framework's larger files, so their compiles one after
-    /// another reuse the same room rather than each growing its own and
-    /// leaving the allocator fragmented (#4012).
-    const KEPT: usize = 256 * 1024;
+    /// of a large file pays for its own and gives it up. It was read
+    /// with the arena's [`KEPT`] on #4064, and a compile that outgrows
+    /// either maps again, 234 mappings on Symfony's `about`, a cost ruled
+    /// on #4154.
+    const KEPT: usize = 64 * 1024;
 
     /// The longest source whose parse grows no stack near
     /// [`Scratch::KEPT`]: every stack holds a few entries per token at
@@ -98,20 +105,27 @@ impl Scratch {
     }
 }
 
-/// The most room the arena keeps when it is reset: a compile of a large
-/// file pays for its own and gives it up. A framework's larger files fit,
-/// as they fit the room php's request heap keeps of the `CG(ast_arena)`
-/// each one destroys (#4012).
-const KEPT: usize = 1024 * 1024;
+/// The most room the arena keeps when it is reset: the newest chunk,
+/// within this. A compile of a large file pays for its own and gives it
+/// up. php keeps none and starts each compile at 32 KiB; this was read
+/// with [`Scratch::KEPT`] on #4064, and a compile that outgrows either
+/// maps again, 234 mappings on Symfony's `about`, a cost ruled on #4154.
+const KEPT: usize = 128 * 1024;
 
 impl Arena {
-    /// Give up everything in the arena at once, keeping the room of its
-    /// last chunk for what is bumped into it next, up to 1 MiB.
+    /// Give up everything in the arena at once, keeping its newest chunk
+    /// for what is bumped into it next where it is within [`KEPT`], and
+    /// every other chunk back to the machine. It takes the arena by
+    /// `&mut`, so no parse is read past the memory it is in:
+    ///
+    /// ```compile_fail,E0502
+    /// let mut arena = php_syntax::Arena::default();
+    /// let parsed = php_syntax::parse(&arena, b"<?php", &php_syntax::Options::default());
+    /// arena.reset();
+    /// assert_eq!(parsed.source, b"<?php");
+    /// ```
     pub fn reset(&mut self) {
-        self.bump.reset();
-        if self.bump.allocated_bytes() > KEPT {
-            self.bump = Bump::new();
-        }
+        self.bump.reset(KEPT);
     }
 
     /// How many elements, nodes and significant tokens, the shape of
@@ -166,7 +180,7 @@ impl Arena {
 
     /// The bump allocator under the arena, for the builders of this
     /// crate.
-    pub(crate) fn bump(&self) -> &Bump {
+    pub(crate) fn bump(&self) -> &ParseArena {
         &self.bump
     }
 
@@ -189,56 +203,24 @@ impl Arena {
     /// it holds is `Copy`, so nothing in the arena is ever owed a drop.
     #[must_use]
     pub fn vec<T: Copy>(&self, capacity: usize) -> ArenaVec<'_, T> {
-        ArenaVec(bumpalo::collections::Vec::with_capacity_in(
-            capacity, &self.bump,
-        ))
+        ArenaVec::with_capacity_in(capacity, &self.bump)
     }
 
     /// `parts` one after another, in the arena.
     #[must_use]
     pub fn concat<T: Copy>(&self, parts: &[&[T]]) -> &[T] {
         let len = parts.iter().map(|part| part.len()).sum();
-        let mut joined = bumpalo::collections::Vec::with_capacity_in(len, &self.bump);
+        let mut joined = ArenaVec::with_capacity_in(len, &self.bump);
         for part in parts {
             joined.extend_from_slice(part);
         }
-        joined.into_bump_slice()
-    }
-}
-
-/// A vector of [`Arena::vec`], grown in the arena and frozen to a slice
-/// of it: a compiler's temporary list, given up with the arena.
-pub struct ArenaVec<'a, T: Copy>(bumpalo::collections::Vec<'a, T>);
-
-impl<'a, T: Copy> ArenaVec<'a, T> {
-    /// `item` at the end.
-    pub fn push(&mut self, item: T) {
-        self.0.push(item);
-    }
-
-    /// `items` at the end.
-    pub fn extend_from_slice(&mut self, items: &[T]) {
-        self.0.extend_from_slice(items);
-    }
-
-    /// What it holds, as a slice of the arena.
-    #[must_use]
-    pub fn into_slice(self) -> &'a [T] {
-        self.0.into_bump_slice()
-    }
-}
-
-impl<T: Copy> std::ops::Deref for ArenaVec<'_, T> {
-    type Target = [T];
-
-    fn deref(&self) -> &[T] {
-        &self.0
+        joined.into_slice()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Arena;
+    use super::{Arena, KEPT, Scratch};
 
     #[test]
     fn a_reset_arena_keeps_its_room_and_what_it_held_is_given_up() {
@@ -253,10 +235,71 @@ mod tests {
         assert!(room > 0);
         arena.reset();
         assert_eq!(arena.bump.allocated_bytes(), room);
-        let large = vec![0u8; 1024 * 1024];
+        let large = vec![0u8; KEPT + 1];
         assert_eq!(arena.copy(&large).len(), large.len());
         arena.reset();
         assert_eq!(arena.bump.allocated_bytes(), 0, "a large chunk is given up");
+    }
+
+    #[test]
+    fn a_reset_keeps_no_more_than_the_newest_chunk_within_128_kib() {
+        let mut arena = Arena::default();
+        let mut block = 1024;
+        while block <= 4 * KEPT {
+            assert_eq!(arena.copy(&vec![0u8; block]).len(), block);
+            block *= 2;
+            assert!(arena.bump.allocated_bytes() > 0);
+            arena.reset();
+            let kept = arena.bump.allocated_bytes();
+            assert!(kept <= KEPT, "{block}: {kept}");
+        }
+    }
+
+    /// A parse of a source whose stacks outgrow what an arena keeps
+    /// gives all of them back, and the next finds room for its own.
+    #[test]
+    fn a_large_parse_keeps_no_stack_past_64_kib() {
+        let mut arena = Arena::default();
+        let source = format!("<?php\n{}", "echo $a + 1;\n".repeat(20_000));
+        let source = source.as_bytes();
+        let small: &[u8] = b"<?php echo 1;\n";
+        {
+            let parsed = crate::parse(&arena, source, &crate::Options::default());
+            assert!(parsed.diagnostics.is_empty());
+            crate::note_scanner_heap(&arena, parsed.source, parsed.tokens);
+        }
+        assert!(arena.scratch.borrow().within(Scratch::KEPT));
+        arena.reset();
+        assert!(arena.scratch.borrow().within(Scratch::KEPT));
+        assert!(arena.bump.allocated_bytes() <= KEPT);
+        let parsed = crate::parse(&arena, small, &crate::Options::default());
+        assert!(parsed.diagnostics.is_empty());
+    }
+
+    /// What a request does between compiles: a compile that its parser
+    /// refuses gives up its arena as one that compiled does, an arena
+    /// taken out for a compile leaves an empty one that maps nothing,
+    /// and the one put back serves the next.
+    #[test]
+    fn an_arena_outlives_a_refused_parse_and_a_take_for_a_compile() {
+        let mut arena = Arena::default();
+        {
+            let parsed = crate::parse(&arena, b"<?php function (", &crate::Options::default());
+            assert!(parsed.diagnostics.iter().any(|d| d.level.is_fatal()));
+        }
+        arena.reset();
+        let mut taken = std::mem::take(&mut arena);
+        assert_eq!(arena.bump.allocated_bytes(), 0);
+        {
+            let nested = crate::parse(&arena, b"<?php echo 2;", &crate::Options::default());
+            let outer = crate::parse(&taken, b"<?php echo 1;", &crate::Options::default());
+            assert_eq!(outer.source, b"<?php echo 1;");
+            assert_eq!(nested.source, b"<?php echo 2;");
+        }
+        taken.reset();
+        arena = taken;
+        let parsed = crate::parse(&arena, b"<?php echo 3;", &crate::Options::default());
+        assert!(parsed.diagnostics.is_empty());
     }
 
     /// One compile's scan in `arena`, as `php_compile` scans a source:
