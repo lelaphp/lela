@@ -322,8 +322,11 @@ struct Call {
     /// ([`Op::InitCall`]'s `plain`).
     pushed: Option<Pushed>,
     /// How many arguments its `INIT_*` says are passed, where it pushed
-    /// it in place ([`PlainCall::count`]).
-    passed: u32,
+    /// it in place ([`PlainCall::count`]); none past a named argument, an
+    /// unpack or an array sent, which may move the count or leave a
+    /// parameter between them undefined, php's `unknown_num_args`, so its
+    /// `DO_*CALL` is the handler's.
+    passed: Option<u32>,
     /// Whether a function's `INIT_*` by its name began it, so it serves
     /// the callee recorded.
     named: bool,
@@ -1604,7 +1607,7 @@ impl<'a> Builder<'a> {
                     Pushed::Activates
                 }
             }),
-            passed: plain.as_ref().map_or(0, PlainCall::count),
+            passed: Some(plain.as_ref().map_or(0, PlainCall::count)),
             named,
             last_send: LastSend::Unknown,
         });
@@ -1797,12 +1800,13 @@ impl<'a> Builder<'a> {
         let callee = call.callee.user()?;
         let params = self.view.parameters(callee)?;
         let code = self.view.op_array(callee)?;
+        let passed = call.passed? as usize;
         let mut checks = ArgChecks::default();
         for (at, param) in params.iter().enumerate() {
             if param.variadic {
                 return None;
             }
-            let Some(ty) = param.ty.as_ref().filter(|_| at < call.passed as usize) else {
+            let Some(ty) = param.ty.as_ref().filter(|_| at < passed) else {
                 continue;
             };
             let held = held_as_is(ty)?;
@@ -1852,13 +1856,14 @@ impl<'a> Builder<'a> {
     /// float(445)
     /// ```
     fn defaults(&self, call: &Call) -> Option<Defaults> {
+        let passed = call.passed? as usize;
         let Some(callee) = call.callee.user() else {
             return Some(Defaults::default());
         };
         let params = self.view.parameters(callee)?;
         let code = self.view.op_array(callee)?;
         let mut defaults = Defaults::default();
-        for at in (call.passed as usize)..params.len() {
+        for at in passed..params.len() {
             let recv = code
                 .oplines
                 .get(at)
@@ -1873,8 +1878,38 @@ impl<'a> Builder<'a> {
         Some(defaults)
     }
 
-    /// What a send wrote into the call under way, where it sends a value.
+    /// What a send wrote into the call under way, where it sends a value,
+    /// and what moves its count, so its `DO_*CALL` is its handler's:
+    /// ```php
+    /// function f($a = 1, $b = 2, $c = 3) { return $a * 100 + $b * 10 + $c; }
+    /// if (true) { function g($a = 1, $b = 2, $c = 3) { return $a * 100 + $b * 10 + $c; } }
+    /// function loop($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += f(b: $i) + f(c: 1, a: 2) + g(b: $i) + g(1, c: $i) + g(...[1, 2]) + f(...[3]); } return $s; }
+    /// echo loop(30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 38925
+    /// ```
+    ///
+    /// ```php
+    /// function f($a = 1, $b = 2, $c = 3) { return $a * 100 + $b * 10 + $c; }
+    /// if (true) { function g($a = 1, $b = 2, $c = 3) { return $a * 100 + $b * 10 + $c; } }
+    /// function loop($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += f(b: $i) + f(c: 1, a: 2) + g(b: $i) + g(1, c: $i) + g(...[1, 2]) + f(...[3]); } return $s; }
+    /// echo loop(30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 38925
+    /// ```
     fn record_send(&mut self, frame: Frame, op: &Opline, op1: Operand) {
+        // php takes the count as unknown past these
+        // (`Z/ext/opcache/jit/zend_jit_ir.c:10050-10054`); a send by name
+        // comes before the `CHECK_UNDEF_ARGS` the compiler leaves after it.
+        if matches!(
+            op.opcode,
+            Opcode::SendUnpack | Opcode::SendArray | Opcode::CheckUndefArgs
+        ) && let Some(call) = self.calls.last_mut()
+        {
+            call.passed = None;
+        }
         let by_value = matches!(
             op.opcode,
             Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx
