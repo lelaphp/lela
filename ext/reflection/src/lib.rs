@@ -5307,6 +5307,68 @@ fn property_named(
 
 // -------------------------------------------------- ReflectionClass::__toString
 
+/// A rendering as php's `smart_str` holds it: bytes, since what it shows
+/// of a program's strings need be no UTF-8.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Text(Vec<u8>);
+
+impl Text {
+    pub(crate) fn push_str(&mut self, more: impl AsRef<[u8]>) {
+        self.0.extend_from_slice(more.as_ref());
+    }
+
+    pub(crate) fn push(&mut self, c: char) {
+        self.push_str(c.encode_utf8(&mut [0; 4]));
+    }
+
+    /// This text with `more` after it.
+    fn then(mut self, more: impl AsRef<[u8]>) -> Text {
+        self.push_str(more);
+        self
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for Text {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Write for Text {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        self.push_str(text);
+        Ok(())
+    }
+}
+
+impl From<&str> for Text {
+    fn from(text: &str) -> Text {
+        Text(text.as_bytes().to_vec())
+    }
+}
+
+impl From<String> for Text {
+    fn from(text: String) -> Text {
+        Text(text.into_bytes())
+    }
+}
+
+impl From<&[u8]> for Text {
+    fn from(bytes: &[u8]) -> Text {
+        Text(bytes.to_vec())
+    }
+}
+
+impl From<Vec<u8>> for Text {
+    fn from(bytes: Vec<u8>) -> Text {
+        Text(bytes)
+    }
+}
+
 // -------------------------------------------------- ReflectionMethod
 
 // -------------------------------------------------- ReflectionProperty
@@ -5438,8 +5500,8 @@ fn extension_string(
     req: &mut Request,
     extension: ExtensionId,
     indent: &str,
-) -> Result<String, Thrown> {
-    let mut out = String::new();
+) -> Result<Text, Thrown> {
+    let mut out = Text::default();
     let name = req
         .extensions()
         .name(extension)
@@ -5485,7 +5547,7 @@ fn extension_string(
     if !constants.is_empty() {
         write!(out, "\n  - Constants [{}] {{\n", constants.len()).ok();
         for constant in &constants {
-            out.push_str(&const_string(req, &constant.0, "    "));
+            out.push_str(const_string(req, &constant.0, "    "));
         }
         writeln!(out, "{indent}  }}").ok();
     }
@@ -5493,7 +5555,7 @@ fn extension_string(
     if !functions.is_empty() {
         out.push_str("\n  - Functions {\n");
         for function in functions {
-            out.push_str(&function_string(req, function, "    "));
+            out.push_str(function_string(req, function, "    "));
         }
         writeln!(out, "{indent}  }}").ok();
     }
@@ -5517,7 +5579,7 @@ fn extension_string(
 /// the bundle's yet), the value's `zend_zval_type_name`, and the value
 /// as `zval_get_string` prints it, `Array` for an array. The value is
 /// the linked table's, read as `constant()` reads it.
-fn const_string(req: &mut Request, name: &[u8], indent: &str) -> String {
+fn const_string(req: &mut Request, name: &[u8], indent: &str) -> Text {
     let value = constant(req, name).ok().flatten().unwrap_or_default();
     let shown = value_string(req, &value);
     // `DUMP_CONST_FLAG` (`php_reflection.c`'s `_const_string`): the
@@ -5536,11 +5598,14 @@ fn const_string(req: &mut Request, name: &[u8], indent: &str) -> String {
     } else {
         format!("<{}> ", flags.join(", "))
     };
-    format!(
-        "{indent}Constant [ {words}{} {} ] {{ {shown} }}\n",
+    let mut out = Text::from(format!(
+        "{indent}Constant [ {words}{} {} ] {{ ",
         value.type_name(),
         String::from_utf8_lossy(name)
-    )
+    ));
+    out.push_str(&shown);
+    out.push_str(" }\n");
+    out
 }
 
 /// `CONST_PERSISTENT`: the bit every constant an extension registered
@@ -5588,15 +5653,26 @@ fn constant_is_deprecated(req: &Request, name: &[u8]) -> bool {
 /// Constant [ public float I ] { 1.0E+25 }
 /// Constant [ <persistent> float M_PI ] { 3.14 }
 /// ```
-fn value_string(req: &mut Request, value: &Value) -> String {
+///
+/// A string's bytes stand as they are, UTF-8 or not:
+///
+/// ```php
+/// class C { const X = "\xff"; }
+/// define('D', "\xfe");
+/// echo bin2hex(new ReflectionClassConstant('C', 'X')), "\n", bin2hex(new ReflectionConstant('D')), "\n";
+/// ```
+/// ```expect
+/// 436f6e7374616e74205b207075626c696320737472696e672058205d207b20ff207d0a
+/// 436f6e7374616e74205b20737472696e672044205d207b20fe207d0a
+/// ```
+fn value_string(req: &mut Request, value: &Value) -> Text {
     match value.deref().as_ref() {
-        ValueRef::Array(_) => String::from("Array"),
-        ValueRef::Object(_) => String::from("Object"),
-        ValueRef::Float(number) => float_format(number, req.ini().precision(), Exponent::Upper)
-            .as_str()
-            .to_owned(),
-        _ => php_ext::coerce::with_string(req, value, |s| String::from_utf8_lossy(s).into_owned())
-            .unwrap_or_default(),
+        ValueRef::Array(_) => Text::from("Array"),
+        ValueRef::Object(_) => Text::from("Object"),
+        ValueRef::Float(number) => {
+            Text::from(float_format(number, req.ini().precision(), Exponent::Upper).as_str())
+        }
+        _ => php_ext::coerce::with_string(req, value, |s| Text::from(s)).unwrap_or_default(),
     }
 }
 
@@ -5650,8 +5726,8 @@ fn class_string(
     class: ClassId,
     object: Option<PhpObject>,
     indent: &str,
-) -> Result<String, Thrown> {
-    let mut out = String::new();
+) -> Result<Text, Thrown> {
+    let mut out = Text::default();
     let Some(decl) = req.symbols().class_decl(class).cloned() else {
         return Ok(out);
     };
@@ -5676,7 +5752,7 @@ fn class_string(
     if !cases.is_empty() {
         write!(out, "\n{indent}  - Enum cases [{}] {{\n", cases.len()).ok();
         for (case, _) in &cases {
-            out.push_str(&enum_case_string(req, case, decl.backing, &sub_indent));
+            out.push_str(enum_case_string(req, case, decl.backing, &sub_indent));
         }
         writeln!(out, "{indent}  }}").ok();
     }
@@ -5712,7 +5788,7 @@ fn class_string(
             .collect();
         write!(out, "\n{indent}  - {block} [{}] {{\n", chosen.len()).ok();
         for (property, declaring) in chosen {
-            out.push_str(&property_string(req, *declaring, property, &sub_indent));
+            out.push_str(property_string(req, *declaring, property, &sub_indent));
         }
         writeln!(out, "{indent}  }}").ok();
 
@@ -5755,7 +5831,7 @@ fn class_string(
         }
         for method in chosen {
             out.push('\n');
-            out.push_str(&method_string(req, method, class, &sub_indent));
+            out.push_str(method_string(req, method, class, &sub_indent));
         }
         writeln!(out, "{indent}  }}").ok();
     }
@@ -5882,7 +5958,7 @@ fn undeclared_properties(req: &mut Request, class: ClassId, object: PhpObject) -
 /// ```
 fn class_header(
     req: &mut Request,
-    out: &mut String,
+    out: &mut Text,
     class: ClassId,
     decl: &ClassDecl,
     methods: &[LinkedMethod],
@@ -5891,7 +5967,7 @@ fn class_header(
 ) {
     if let Some(doc) = &decl.doc_comment {
         out.push_str(indent);
-        out.push_str(&String::from_utf8_lossy(doc));
+        out.push_str(&**doc);
         out.push('\n');
     }
     let kind = match (of_object, decl.kind) {
@@ -5946,7 +6022,7 @@ fn class_header(
             out.push_str("class ");
         }
     }
-    out.push_str(&String::from_utf8_lossy(&decl.name.0));
+    out.push_str(&*decl.name.0);
     // `ce->parent->name`: the parent as it was declared, not as the
     // child's `extends` spelled it.
     if let Some(parent) = req.symbols().class_parent(class) {
@@ -6015,11 +6091,11 @@ fn class_const_string(
     scope: ClassId,
     enum_of: Option<&[u8]>,
     indent: &str,
-) -> Result<String, Thrown> {
-    let mut out = String::new();
+) -> Result<Text, Thrown> {
+    let mut out = Text::default();
     if let Some(doc) = &constant.doc_comment {
         out.push_str(indent);
-        out.push_str(&String::from_utf8_lossy(doc));
+        out.push_str(&**doc);
         out.push('\n');
     }
     // A case of an enum holds the enum's own instance, so
@@ -6035,18 +6111,20 @@ fn class_const_string(
         (None, None) => String::from(value.type_name()),
     };
     let shown = match enum_of {
-        Some(_) => String::from("Object"),
+        Some(_) => Text::from("Object"),
         None => value_string(req, &value),
     };
     value.give_up(req);
-    writeln!(
+    write!(
         out,
-        "{indent}Constant [ {}{} {ty} {} ] {{ {shown} }}",
+        "{indent}Constant [ {}{} {ty} {} ] {{ ",
         if constant.is_final { "final " } else { "" },
         visibility_word(constant.visibility),
         String::from_utf8_lossy(&constant.name.0)
     )
     .ok();
+    out.push_str(&shown);
+    out.push_str(" }\n");
     Ok(out)
 }
 
@@ -6058,11 +6136,11 @@ fn enum_case_string(
     case: &ClassConstDecl,
     backing: EnumBacking,
     indent: &str,
-) -> String {
-    let mut out = String::new();
+) -> Text {
+    let mut out = Text::default();
     if let Some(doc) = &case.doc_comment {
         out.push_str(indent);
-        out.push_str(&String::from_utf8_lossy(doc));
+        out.push_str(&**doc);
         out.push('\n');
     }
     write!(
@@ -6073,7 +6151,8 @@ fn enum_case_string(
     .ok();
     if backing != EnumBacking::Pure {
         let value = eval_const_expr(req, &case.value, None).unwrap_or_else(|_| Owner::null());
-        write!(out, " = {}", value_string(req, &value)).ok();
+        out.push_str(" = ");
+        out.push_str(value_string(req, &value));
         value.give_up(req);
     }
     out.push('\n');
@@ -6102,11 +6181,11 @@ fn property_string(
     declaring: ClassId,
     property: &PropertyDecl,
     indent: &str,
-) -> String {
-    let mut out = String::new();
+) -> Text {
+    let mut out = Text::default();
     if let Some(doc) = &property.doc_comment {
         out.push_str(indent);
-        out.push_str(&String::from_utf8_lossy(doc));
+        out.push_str(&**doc);
         out.push('\n');
     }
     out.push_str(indent);
@@ -6158,10 +6237,12 @@ fn property_string(
     match (&property.default, &property.ty) {
         _ if is_virtual => {}
         (Some(_), _) if let Some(value) = evaluated => {
-            write!(out, " = {}", value_default_string(req, &value)).ok();
+            out.push_str(" = ");
+            out.push_str(value_default_string(req, &value));
         }
         (Some(default), _) => {
-            write!(out, " = {}", default_value_string(req, default)).ok();
+            out.push_str(" = ");
+            out.push_str(default_value_string(req, default));
         }
         (None, None) => out.push_str(" = NULL"),
         (None, Some(_)) => {}
@@ -6200,18 +6281,18 @@ fn property_string(
 /// ([`Symbols::evaluated_default`]): a scalar as `smart_str_append_scalar`
 /// writes it, an enum case `Class::Case`, an array by its keys where it
 /// is no list, and any other object `object(Class)`, as GH-15902 has it.
-fn value_default_string(req: &mut Request, value: &Value) -> String {
+fn value_default_string(req: &mut Request, value: &Value) -> Text {
     match value.as_ref() {
-        ValueRef::Null => String::from("NULL"),
-        ValueRef::Bool(b) => String::from(if b { "true" } else { "false" }),
-        ValueRef::Int(n) => n.to_string(),
+        ValueRef::Null => Text::from("NULL"),
+        ValueRef::Bool(b) => Text::from(if b { "true" } else { "false" }),
+        ValueRef::Int(n) => Text::from(n.to_string()),
         ValueRef::Float(f) => default_value_string(req, &ConstExpr::Double(f)),
-        ValueRef::Str(s) => format!("'{}'", escaped(s.as_bytes())),
+        ValueRef::Str(s) => Text::from(format!("'{}'", escaped(s.as_bytes()))),
         ValueRef::Array(array) => {
             let is_list = (0..)
                 .zip(walk::rows(req, array))
                 .all(|(i, (key, _))| key == Key::Int(i));
-            let mut out = String::from("[");
+            let mut out = Text::from("[");
             let mut first = true;
             // `zend_ast_export_zval`'s `ZEND_HASH_FOREACH_KEY_VAL`
             // (`Z/Zend/zend_ast.c:1854`), which no
@@ -6227,11 +6308,11 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
                         Key::Str(s) => {
                             write!(out, "'{}'", escaped(s.as_bytes())).ok();
                         }
-                        Key::Int(n) => out.push_str(&n.to_string()),
+                        Key::Int(n) => out.push_str(n.to_string()),
                     }
                     out.push_str(" => ");
                 }
-                out.push_str(&value_default_string(req, row.value()));
+                out.push_str(value_default_string(req, row.value()));
                 Ok(ControlFlow::Continue(()))
             });
             match walked {
@@ -6249,14 +6330,14 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
                 .class_decl(object.class())
                 .is_some_and(|decl| decl.kind == ClassKind::Enum);
             match object.prop(req, b"name").filter(|_| is_enum) {
-                Some(case) => format!(
+                Some(case) => Text::from(format!(
                     "{class}::{}",
                     String::from_utf8_lossy(case.as_str_bytes().unwrap_or_default())
-                ),
-                None => format!("object({class})"),
+                )),
+                None => Text::from(format!("object({class})")),
             }
         }
-        _ => String::from("<default>"),
+        _ => Text::from("<default>"),
     }
 }
 
@@ -6308,10 +6389,10 @@ fn double_string(req: &mut Request, f: f64) -> String {
 /// Property [ public $b = [1, 2] ]
 /// Property [ public $c = [FOO, 2 => X, [0 => 5]] ]
 /// ```
-fn exported(req: &mut Request, expr: &ConstExpr) -> String {
+fn exported(req: &mut Request, expr: &ConstExpr) -> Text {
     match expr {
         ConstExpr::UnitValue(_) => folded_value(req, expr, exported_value),
-        ConstExpr::Null => String::from("null"),
+        ConstExpr::Null => Text::from("null"),
         ConstExpr::Str(s) => quoted_str(s),
         _ => default_value_string(req, expr),
     }
@@ -6321,14 +6402,14 @@ fn exported(req: &mut Request, expr: &ConstExpr) -> String {
 /// an array with every key written, `'key' => ` or the number, a string
 /// as [`quoted_str`] writes it, `null` in lower case, and any other
 /// scalar as [`value_default_string`] writes it.
-fn exported_value(req: &mut Request, value: &Value) -> String {
+fn exported_value(req: &mut Request, value: &Value) -> Text {
     let array = match value.as_ref() {
         ValueRef::Array(array) => array,
         ValueRef::Str(s) => return quoted_str(s.as_bytes()),
-        ValueRef::Null => return String::from("null"),
+        ValueRef::Null => return Text::from("null"),
         _ => return value_default_string(req, value),
     };
-    let mut out = String::from("[");
+    let mut out = Text::from("[");
     let mut first = true;
     // As [`value_default_string`] walks one.
     let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
@@ -6338,13 +6419,14 @@ fn exported_value(req: &mut Request, value: &Value) -> String {
         first = false;
         match row.key() {
             Key::Str(s) => {
-                write!(out, "{} => ", quoted_str(s.as_bytes())).ok();
+                out.push_str(quoted_str(s.as_bytes()));
+                out.push_str(" => ");
             }
             Key::Int(n) => {
                 write!(out, "{n} => ").ok();
             }
         }
-        out.push_str(&exported_value(req, row.value()));
+        out.push_str(exported_value(req, row.value()));
         Ok(ControlFlow::Continue(()))
     });
     match walked {
@@ -6360,15 +6442,15 @@ fn exported_value(req: &mut Request, value: &Value) -> String {
 fn folded_value(
     req: &mut Request,
     expr: &ConstExpr,
-    write: fn(&mut Request, &Value) -> String,
-) -> String {
+    write: fn(&mut Request, &Value) -> Text,
+) -> Text {
     match eval_const_expr(req, expr, None) {
         Ok(value) => {
             let written = write(req, &value);
             value.give_up(req);
             written
         }
-        Err(_) => String::new(),
+        Err(_) => Text::default(),
     }
 }
 
@@ -6387,13 +6469,13 @@ fn folded_value(
 /// Parameter #0 [ <optional> $a = \App\Bar::BAZ ]
 /// Parameter #0 [ <optional> $a = N\Bar::BAZ ]
 /// ```
-fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
+fn default_value_string(req: &mut Request, expr: &ConstExpr) -> Text {
     match expr {
-        ConstExpr::Null => String::from("NULL"),
-        ConstExpr::Bool(b) => String::from(if *b { "true" } else { "false" }),
-        ConstExpr::Long { value, .. } => value.to_string(),
-        ConstExpr::Double(f) => double_string(req, *f),
-        ConstExpr::Str(s) => format!("'{}'", escaped(s)),
+        ConstExpr::Null => Text::from("NULL"),
+        ConstExpr::Bool(b) => Text::from(if *b { "true" } else { "false" }),
+        ConstExpr::Long { value, .. } => Text::from(value.to_string()),
+        ConstExpr::Double(f) => Text::from(double_string(req, *f)),
+        ConstExpr::Str(s) => Text::from(format!("'{}'", escaped(s))),
         // The array the compiler folded is the value it is, whose keys
         // print unless it is a list.
         ConstExpr::UnitValue(_) => folded_value(req, expr, value_default_string),
@@ -6401,22 +6483,21 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
         // which is still to evaluate: a key where one is written, and
         // each element as the export writes it ([`exported`]).
         ConstExpr::Array { elements, .. } => {
-            let mut out = String::from("[");
+            let mut out = Text::from("[");
             for (i, (key, value)) in elements.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
                 if let Some(key) = key {
-                    write!(out, "{} => ", exported(req, key)).ok();
+                    out.push_str(exported(req, key));
+                    out.push_str(" => ");
                 }
-                out.push_str(&exported(req, value));
+                out.push_str(exported(req, value));
             }
             out.push(']');
             out
         }
-        ConstExpr::Constant { name, .. } => {
-            String::from_utf8_lossy(&name.resolved().0).into_owned()
-        }
+        ConstExpr::Constant { name, .. } => Text::from(&*name.resolved().0),
         // `zend_ast_export_ns_name`: the mark compilation left on the
         // class's name before it.
         ConstExpr::ClassConstant {
@@ -6430,14 +6511,14 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
                 NameKind::FullyQualified => "\\",
                 NameKind::Relative => "namespace\\",
             };
-            format!(
+            Text::from(format!(
                 "{mark}{}::{}",
                 String::from_utf8_lossy(&class.0),
                 String::from_utf8_lossy(&name.0)
-            )
+            ))
         }
         ConstExpr::ClassName { class, .. } => {
-            format!("{}::class", String::from_utf8_lossy(&class.0))
+            Text::from(format!("{}::class", String::from_utf8_lossy(&class.0)))
         }
         // `zend_ast_export_name` over a name that is no string: the
         // expression written between the braces, without them.
@@ -6452,15 +6533,13 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
                 NameKind::FullyQualified => "\\",
                 NameKind::Relative => "namespace\\",
             };
-            format!(
-                "{mark}{}::{}",
-                String::from_utf8_lossy(&class.0),
-                ast_export(req, name, 0)
-            )
+            let mut out = Text::from(format!("{mark}{}::", String::from_utf8_lossy(&class.0)));
+            out.push_str(ast_export(req, name, 0));
+            out
         }
         ConstExpr::Closure { .. }
         | ConstExpr::FunctionCallable { .. }
-        | ConstExpr::MethodCallable { .. } => callable_string(expr),
+        | ConstExpr::MethodCallable { .. } => Text::from(callable_string(expr)),
         ConstExpr::Unary { .. }
         | ConstExpr::Binary { .. }
         | ConstExpr::Dim { .. }
@@ -6468,7 +6547,7 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
         | ConstExpr::Conditional { .. }
         | ConstExpr::Cast { .. }
         | ConstExpr::New { .. } => ast_export(req, expr, 0),
-        _ => String::from("<default>"),
+        _ => Text::from("<default>"),
     }
 }
 
@@ -6519,7 +6598,7 @@ fn new_class_name(class: &[u8]) -> String {
 
 /// `zend_ast_export_var` over a property's name: a string that is a
 /// valid name as it stands, and anything else in braces.
-fn property_name(req: &mut Request, name: &ConstExpr) -> String {
+fn property_name(req: &mut Request, name: &ConstExpr) -> Text {
     if let ConstExpr::Str(bytes) = name {
         let valid = bytes
             .first()
@@ -6529,13 +6608,12 @@ fn property_name(req: &mut Request, name: &ConstExpr) -> String {
                 .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte >= 0x80);
         // `zend_ast_export_name`: a string as it stands, in braces
         // where it is no valid name.
-        let written = String::from_utf8_lossy(bytes);
         if valid {
-            return written.into_owned();
+            return Text::from(&**bytes);
         }
-        return format!("{{{written}}}");
+        return Text::from("{").then(&**bytes).then("}");
     }
-    format!("{{{}}}", ast_export(req, name, 0))
+    Text::from("{").then(ast_export(req, name, 0)).then("}")
 }
 
 /// `zend_ast_export_ex` over an operator of a constant expression, the
@@ -6573,11 +6651,11 @@ fn property_name(req: &mut Request, name: &ConstExpr) -> String {
 /// Parameter #5 [ <optional> $k = FOO?->x ]
 /// Parameter #6 [ <optional> $l = FOO->{a b} ]
 /// ```
-fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
+fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> Text {
     let (text, own) = match expr {
         ConstExpr::Unary { op, operand, .. } => {
             let operand = ast_export(req, operand, 241);
-            (format!("{}{operand}", String::from_utf8_lossy(&op.0)), 240)
+            (Text::from(&*op.0).then(operand), 240)
         }
         ConstExpr::Binary { op, lhs, rhs, .. } => {
             let (own, left, right) = match op.0.as_ref() {
@@ -6598,10 +6676,7 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
             };
             let lhs = ast_export(req, lhs, left);
             let rhs = ast_export(req, rhs, right);
-            (
-                format!("{lhs} {} {rhs}", String::from_utf8_lossy(&op.0)),
-                own,
-            )
+            (lhs.then(" ").then(&*op.0).then(" ").then(rhs), own)
         }
         ConstExpr::Conditional {
             cond,
@@ -6610,11 +6685,13 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
         } => {
             let cond = ast_export(req, cond, 100);
             let middle = match then {
-                Some(then) => format!(" ? {} : ", ast_export(req, then, 101)),
-                None => String::from(" ?: "),
+                Some(then) => Text::from(" ? ")
+                    .then(ast_export(req, then, 101))
+                    .then(" : "),
+                None => Text::from(" ?: "),
             };
             let otherwise = ast_export(req, otherwise, 101);
-            (format!("{cond}{middle}{otherwise}"), 100)
+            (cond.then(middle).then(otherwise), 100)
         }
         ConstExpr::Cast { to, operand, .. } => {
             let written = match to {
@@ -6626,13 +6703,13 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
                 _ => "(object)",
             };
             let operand = ast_export(req, operand, 241);
-            (format!("{written}{operand}"), 240)
+            (Text::from(written).then(operand), 240)
         }
         // The primary expressions, which no priority wraps.
         ConstExpr::Dim { container, dim, .. } => {
             let container = ast_export(req, container, 260);
             let dim = ast_export(req, dim, 0);
-            return format!("{container}[{dim}]");
+            return container.then("[").then(dim).then("]");
         }
         ConstExpr::Prop {
             object,
@@ -6643,12 +6720,12 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
             let object = ast_export(req, object, 0);
             let arrow = if *nullsafe { "?->" } else { "->" };
             let name = property_name(req, name);
-            return format!("{object}{arrow}{name}");
+            return object.then(arrow).then(name);
         }
         ConstExpr::New {
             class, arguments, ..
         } => {
-            let mut text = format!("new {}(", new_class_name(&class.0));
+            let mut text = Text::from(format!("new {}(", new_class_name(&class.0)));
             for (at, (name, value)) in arguments.iter().enumerate() {
                 if at > 0 {
                     text.push_str(", ");
@@ -6656,7 +6733,7 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
                 if let Some(name) = name {
                     write!(text, "{}: ", String::from_utf8_lossy(&name.0)).ok();
                 }
-                text.push_str(&ast_export(req, value, 0));
+                text.push_str(ast_export(req, value, 0));
             }
             text.push(')');
             return text;
@@ -6664,7 +6741,7 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
         leaf => return exported(req, leaf),
     };
     if priority > own {
-        format!("({text})")
+        Text::from("(").then(text).then(")")
     } else {
         text
     }
@@ -6674,10 +6751,7 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
 /// inside an expression still to evaluate: in single quotes with `'` and
 /// `\\` escaped, and where a byte stands below a space in double quotes
 /// through `zend_ast_export_qstr`, the C escapes, `\\0` and two octal
-/// digits for the rest, and `"`, `$` and `\\` escaped. The default of a
-/// parameter is the string's bytes as far as text holds them: a byte that
-/// is no UTF-8 reads as the replacement character, the one thing the
-/// [`String`] these renderings are made of cannot say.
+/// digits for the rest, and `"`, `$` and `\\` escaped.
 ///
 /// ```php
 /// class I { function __construct(public $v = null) {} }
@@ -6695,7 +6769,19 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
 /// Parameter #0 [ <optional> $a = 'it's' ]
 /// Parameter #1 [ <optional> $b = ['it's' => 'a\n'] ]
 /// ```
-fn quoted_str(bytes: &[u8]) -> String {
+///
+/// The bytes stand as they are, UTF-8 or not:
+///
+/// ```php
+/// const FOO = 'foo';
+/// function f($a = FOO . "\xff", $b = ["\xfe", FOO => "\xfd\n"]) {}
+/// foreach ((new ReflectionFunction('f'))->getParameters() as $p) echo bin2hex($p), "\n";
+/// ```
+/// ```expect
+/// 506172616d65746572202330205b203c6f7074696f6e616c3e202461203d20464f4f202e2027ff27205d
+/// 506172616d65746572202331205b203c6f7074696f6e616c3e202462203d205b27fe272c20464f4f203d3e2022fd5c6e225d205d
+/// ```
+fn quoted_str(bytes: &[u8]) -> Text {
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 2);
     if bytes.iter().any(|c| *c < b' ') {
         out.push(b'"');
@@ -6723,7 +6809,7 @@ fn quoted_str(bytes: &[u8]) -> String {
         }
         out.push(b'\'');
     }
-    String::from_utf8_lossy(&out).into_owned()
+    Text::from(out)
 }
 
 /// `smart_str_append_escaped`: a backslash, a byte below 32 and one
@@ -7024,16 +7110,16 @@ fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, Cl
 /// function name ] {`, its parameters and its return row, each line
 /// under `indent`. A function with the `Deprecated` attribute carries
 /// `, deprecated` after `<internal`, as `ZEND_ACC_DEPRECATED` does.
-fn function_string(req: &mut Request, function: Function, indent: &str) -> String {
+fn function_string(req: &mut Request, function: Function, indent: &str) -> Text {
     let Some(decl) = req.symbols().function_decl(function).cloned() else {
-        return String::new();
+        return Text::default();
     };
     let module = req
         .extensions()
         .function_extension(function)
         .and_then(|e| req.extensions().name(e))
         .map(str::to_owned);
-    let mut out = String::new();
+    let mut out = Text::default();
     function_header(&mut out, &decl, module.as_deref(), Header::Function, indent);
     let arg_info = ArgInfo::of(&decl);
     function_body(req, &mut out, &decl, false, arg_info, &[], indent);
@@ -7108,9 +7194,9 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
 ///   @@ %s 3 - 3
 /// }
 /// ```
-fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result<String, Thrown> {
+fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result<Text, Thrown> {
     let Some(decl) = signature::closure_decl(req, closure) else {
-        return Ok(String::new());
+        return Ok(Text::default());
     };
     let mut bound: Vec<Vec<u8>> = Vec::new();
     for (name, _) in closure.closure_bound(req)? {
@@ -7129,7 +7215,7 @@ fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result
             .is_some_and(|info| req.symbols().closure_refuses_receiver(info)),
         scoped: info.as_ref().is_some_and(|info| info.scope.is_some()),
     };
-    let mut out = String::new();
+    let mut out = Text::default();
     function_header(&mut out, &decl, module.as_deref(), header, indent);
     let arg_info = ArgInfo::of(&decl);
     function_body(req, &mut out, &decl, false, arg_info, &bound, indent);
@@ -7174,7 +7260,7 @@ impl ArgInfo {
 /// when it is not `ce`; `overwrites` names the scope of the parent's
 /// method of the same name when the method is `ce`'s own and the
 /// parent's is not private; `prototype` names the prototype's scope.
-fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: &str) -> String {
+fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: &str) -> Text {
     // `fptr->internal_function.module`: the function the row is names
     // it, so a native trait's method copied into a user class prints
     // the trait's extension; a function made on the lookup has none.
@@ -7214,7 +7300,7 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
     if is_constructor(&method.decl) {
         words.push(String::from("ctor"));
     }
-    let mut out = String::new();
+    let mut out = Text::default();
     function_header(
         &mut out,
         &method.decl.function,
@@ -7263,7 +7349,7 @@ enum Header<'a> {
 /// inheritance words, then
 /// the modifiers and the name.
 fn function_header(
-    out: &mut String,
+    out: &mut Text,
     decl: &FunctionDecl,
     module: Option<&str>,
     header: Header<'_>,
@@ -7275,7 +7361,7 @@ fn function_header(
     };
     if let Some(doc) = &decl.doc_comment {
         out.push_str(indent);
-        out.push_str(&String::from_utf8_lossy(doc));
+        out.push_str(&**doc);
         out.push('\n');
     }
     out.push_str(indent);
@@ -7361,7 +7447,7 @@ fn function_header(
 /// ```
 fn function_body(
     req: &mut Request,
-    out: &mut String,
+    out: &mut Text,
     decl: &FunctionDecl,
     tentative: bool,
     arg_info: ArgInfo,
@@ -7428,8 +7514,8 @@ fn parameter_string(
     offset: usize,
     required: bool,
     internal: bool,
-) -> String {
-    let mut out = format!("Parameter #{offset} [ ");
+) -> Text {
+    let mut out = Text::from(format!("Parameter #{offset} [ "));
     out.push_str(if required {
         "<required> "
     } else {
@@ -7456,7 +7542,8 @@ fn parameter_string(
             }
             (None, true) => out.push_str(" = <default>"),
             (Some(expr), false) => {
-                write!(out, " = {}", default_value_string(req, expr)).ok();
+                out.push_str(" = ");
+                out.push_str(default_value_string(req, expr));
             }
             (None, false) => {}
         }
@@ -7490,7 +7577,7 @@ fn parameter_string(
 /// ```
 fn function_parameter_string(
     req: &mut Request,
-    out: &mut String,
+    out: &mut Text,
     decl: &FunctionDecl,
     arg_info: ArgInfo,
     indent: &str,
@@ -7504,7 +7591,9 @@ fn function_parameter_string(
     writeln!(out, "{indent}- Parameters [{}] {{", decl.parameters.len()).ok();
     for (offset, parameter) in decl.parameters.clone().iter().enumerate() {
         let row = parameter_string(req, parameter, offset, offset < required, internal);
-        writeln!(out, "{indent}  {row}").ok();
+        write!(out, "{indent}  ").ok();
+        out.push_str(&row);
+        out.push('\n');
     }
     writeln!(out, "{indent}}}").ok();
 }
