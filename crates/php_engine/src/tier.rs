@@ -37,10 +37,9 @@ pub use crate::api::abi::{Extension, ExtensionBuilder, Refusal, Start, StartupIn
 /// What a tier's request start answers where it fails, as an
 /// extension's `rinit` does.
 pub use crate::api::raising::Thrown;
-use crate::api::values::Value;
 use crate::observer::{Declared, ObservedOpcodes, OnThrow, Telling, Untold};
 use crate::{exec, interrupt};
-use php_unit::{OpArray, OperandKind, OplineIdx};
+use php_unit::{OpArray, OplineIdx};
 
 pub use crate::api::request::Request;
 use crate::api::request::TierStatus;
@@ -2138,75 +2137,35 @@ pub fn pop_call(req: &mut Request) {
 pub struct FramelessAt(pub u32);
 
 /// The native at `at` of the engine's frameless table served over
-/// `operands` for the `FRAMELESS_ICALL_*` `frame` stands at, as php's
-/// compiled code calls the native's frameless handler with the operand
-/// zvals it addressed and the slot that takes its return
-/// (`jit_frameless_icall*`, `Z/ext/opcache/jit/zend_jit_ir.c:17868-18110`),
-/// each operand of the kind of its slot, as compiled code read it,
-/// neither `UNDEF`, which compiled code hands to the handler instead,
-/// nor a reference, which it reads through, and `Unused` past the
-/// native's arity. A temporary stands in its slot through the call,
-/// where compiled code left it and the operand's field names it, so a
-/// trace taken while the native runs reads it there as the handler
-/// leaves it and php's code does, and is freed there as the call ends;
-/// a variable is held as [`crate::exec::frameless_owner`] says
-/// ([`crate::handlers::frameless_served`]). Nothing is read of the
-/// opline or of the op array the frame serves: the native's place in the
-/// table, each operand's kind and its field are compiled code's
-/// constants, as php's `jit_frameless_icall*` holds `ZEND_FLF_HANDLER`
-/// and the operands' addresses as its own; compiled code
-/// makes the interrupt check after a native that returned,
-/// `jit_frameless_interrupt_check`, and this makes it after one that
-/// threw, or returned with a throwable a warning's handler threw, with
-/// the throwable pending, before compiled code's throw guard. What the
-/// native returned, a handler's throwable left pending where one stands,
-/// or `null` with the throwable the native threw left pending.
+/// `operands`, as php's compiled code calls `ZEND_FLF_HANDLER(opline)`
+/// with the operand zvals it addressed and the slot that takes its
+/// return (`jit_frameless_icall*`, `Z/ext/opcache/jit/zend_jit_ir.c:17868-18110`),
+/// each neither `UNDEF` nor a reference, which compiled code hands to
+/// the handler and reads through. The rest of php's sequence is compiled
+/// code's, as it is there: a temporary stands in its slot through the
+/// call, where a trace taken while the native runs reads it, and is
+/// freed there after it; a frame a name reaches is the handler's; and
+/// the interrupt is tested after the frees, with what the native threw
+/// left pending here, as php's `EG(exception)` stands through them. What
+/// the native returned, or `null` with its throw pending.
 ///
 /// # Errors
 ///
-/// The memory limit's fatal where the record's room is refused, the
-/// interrupt check's fatal after a native that threw or left a handler's
-/// throwable pending, and an internal error where `at` names no entry of
-/// the table.
+/// A fatal the native or its observer raised, and an internal error
+/// where `at` names no entry of the table.
 #[inline]
 pub fn frameless_call(
     req: &mut Request,
-    frame: FrameRef,
     at: FramelessAt,
-    operands: [(Zval, OperandKind, u32); 3],
+    operands: &[Zval],
 ) -> Result<Zval, Fatal> {
-    // Whether a name reaches the frame's variables is read once, and only
-    // for a call that holds one.
-    let named = operands.iter().any(|&(_, kind, _)| kind == OperandKind::Cv)
-        && exec::frameless_named(req.vm().at(frame));
-    let mut held = [Zval::UNDEF; 3];
-    let mut slots = [(OperandKind::Const, 0); 3];
-    let mut owned = 0u8;
-    let mut count = 0;
-    for (place, (z, kind, field)) in operands.into_iter().enumerate() {
-        if kind == OperandKind::Unused {
-            break;
+    match crate::handlers::frameless_native(req, at.0, operands)? {
+        Ok(value) => Ok(value.to_zval()),
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(Zval::null())
         }
-        debug_assert!(!z.is_undef() && z.kind() != php_heap::ZvalType::Reference);
-        let own;
-        (held[place], own) = match kind {
-            OperandKind::Tmp | OperandKind::Var => {
-                slots[place] = (kind, field);
-                (z, false)
-            }
-            _ => exec::frameless_owner(z, kind, named),
-        };
-        owned |= u8::from(own) << place;
-        count = place + 1;
     }
-    let held = crate::handlers::Operands {
-        frame,
-        zvals: held.get(..count).unwrap_or_default(),
-        owned,
-        slots: slots.get(..count).unwrap_or_default(),
-    };
-    let returned = crate::handlers::frameless_served(req, at.0, held)?;
-    Ok(returned.map_or_else(Zval::null, Value::to_zval))
 }
 
 /// The `DO_UCALL`, `DO_FCALL` or `DO_FCALL_BY_NAME` at `frame`'s opline
@@ -2311,7 +2270,12 @@ pub fn unwind(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
 /// own code: the interrupt cleared, then php's timeout fatal, or each
 /// extension's interrupt hook served. `Ok(true)` where a hook left a
 /// throwable pending, which the tier hands back to the loop to unwind.
+/// A fatal under way makes no check, as php's `zend_bailout` left the
+/// native before it ([`crate::handlers::thrown_on_call`]).
 pub fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
+    if req.diagnostics().bailing_out() {
+        return Ok(false);
+    }
     interrupt::check(req)
 }
 

@@ -313,10 +313,11 @@ fn a_natives_call_lowers_in_place() -> Result<(), String> {
     lowered(NATIVE_CALL).map(drop)
 }
 
-/// A frameless call made from compiled code: the operand zvals handed
-/// to [`Kernel::Frameless`], which reads no opline, then the interrupt
-/// tested; a variable that may be unset or hold a reference tested
-/// first, its handler's through [`Kernel::Handle`] where it is (#3560).
+/// A frameless call made from compiled code: the operand zvals laid for
+/// [`Kernel::Frameless`], which reads no opline and no frame, then the
+/// temporaries freed and the interrupt tested; a variable that may be
+/// unset or hold a reference tested first, its handler's through
+/// [`Kernel::Handle`] where it is (#3560, #4107).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_frameless_call_lowers_in_place() -> Result<(), String> {

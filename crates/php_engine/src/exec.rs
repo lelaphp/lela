@@ -3267,30 +3267,10 @@ pub(crate) fn frameless_operand(
 
 /// Whether a name reaches the variables of the frame `header` is, so a
 /// frameless call's `CV` operand takes one more owner
-/// ([`frameless_owner`]): a frame that carries an annex, its symbol
+/// ([`frameless_operand`]): a frame that carries an annex, its symbol
 /// table or its extra arguments, or none at all.
 pub(crate) fn frameless_named(header: Option<&Header>) -> bool {
     header.is_none_or(|header| header.annex.is_some())
-}
-
-/// What a frameless call is handed of the operand `z` of `kind`,
-/// read where it stands and neither `UNDEF` nor a reference, and whether
-/// it owns it, as [`frameless_operand`] reads it from its slot and
-/// compiled code hands it over: a `TMP` or a `VAR` moved out of its
-/// slot is owned, a `CONST` borrowed, and a `CV` borrowed but in a frame
-/// whose variables a name reaches (`named`), where it takes one more
-/// owner.
-pub(crate) fn frameless_owner(z: Zval, kind: OperandKind, named: bool) -> (Zval, bool) {
-    match kind {
-        OperandKind::Tmp | OperandKind::Var => (z, true),
-        OperandKind::Cv => {
-            if named {
-                z.addref();
-            }
-            (z, named)
-        }
-        OperandKind::Const | OperandKind::Unused => (z, false),
-    }
 }
 
 /// `FREE_OP`: a `TMP` or a `VAR` operand read by [`operand`] and done

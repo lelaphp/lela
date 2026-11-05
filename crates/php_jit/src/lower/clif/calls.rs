@@ -22,7 +22,9 @@ use std::num::NonZeroU32;
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64, I64X2, I128};
-use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, Value};
+use cranelift_codegen::ir::{
+    Block, BlockArg, InstBuilder, MemFlagsData, StackSlot, StackSlotData, StackSlotKind, Value,
+};
 use cranelift_frontend::Variable;
 use php_engine::tier::{self, FRAME, FrameLayout, FuncRef, PLACE, PlaceLayout, PlainCall};
 use php_heap::{Obj, Ref, Zval, ZvalType};
@@ -32,7 +34,7 @@ use super::{
     COUNTED, Dtor, EX_OPLINE, Emit, KIND, Kernel, Refuse, STOOD_CALL, Scalar, TYPE_AT, imm,
     leave_of, mismatch, tag, trusted,
 };
-use crate::lower::{INTERRUPT_AT, OperandFields, OperandKinds, RETURNED, THREW};
+use crate::lower::{INTERRUPT_AT, RETURNED, THREW};
 use crate::types::{
     Abort, ArgChecks, Check, Constant, Defaults, End, ExitId, Frame, Home, Imm, Line, Object, OpId,
     Operand, Owners, PairCallee, PairClass, PushRoom, Returned, Types, Vars,
@@ -2610,7 +2612,8 @@ impl Emit<'_> {
             &[room, opline, place, out],
             leave_of(line),
         )?;
-        let threw = self.interrupt_after(line, [room, opline])?;
+        let threw = self.not_thrown();
+        self.interrupt_after(line, [room, opline], threw)?;
         self.pop_native(line, (call, count), [room, opline], threw)?;
         self.release_unread(line, returns)?;
         let threw = self.b.use_var(threw);
@@ -2627,17 +2630,15 @@ impl Emit<'_> {
     /// `ZEND_VM_FCALL_INTERRUPT_CHECK` as its code compiles it under a
     /// `zend_interrupt_function`, `zend_fcall_interrupt` on a cold path
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:10583-10590`, `:17842-17850`): a
-    /// variable that holds whether a hook left a throwable pending, which
-    /// the caller tests once it has done what php's code does before its
+    /// hook that left a throwable pending is or'd into `threw`, which the
+    /// caller tests once it has done what php's code does before its
     /// throw guard; an exit leaves at once.
     fn interrupt_after(
         &mut self,
         line: &Line,
         [room, opline]: [Value; 2],
-    ) -> Result<Variable, Abort> {
-        let threw = self.b.declare_var(I8);
-        let none = self.b.ins().iconst(I8, 0);
-        self.b.def_var(threw, none);
+        threw: Variable,
+    ) -> Result<(), Abort> {
         let cx = self
             .cx
             .ok_or_else(|| mismatch("a native's call before the entry"))?;
@@ -2652,7 +2653,16 @@ impl Emit<'_> {
         self.b.ins().jump(on, &[]);
         self.b.switch_to_block(on);
         self.b.seal_block(on);
-        Ok(threw)
+        Ok(())
+    }
+
+    /// A variable that holds whether a throwable stands pending past a
+    /// native, which [`Emit::thrown_into`] sets, none yet.
+    fn not_thrown(&mut self) -> Variable {
+        let threw = self.b.declare_var(I8);
+        let none = self.b.ins().iconst(I8, 0);
+        self.b.def_var(threw, none);
+        threw
     }
 
     /// A kernel's `status` read where compiled code goes on past a throw
@@ -2771,18 +2781,22 @@ impl Emit<'_> {
     /// A `FRAMELESS_ICALL_*`, made as php's `jit_frameless_icall*` makes
     /// it (`Z/ext/opcache/jit/zend_jit_ir.c:17868-18110`): the frame
     /// stood at the call, `SET_EX_OPLINE`; the operand zvals read where
-    /// they stand, a temporary's moved out of its slot, php's `FREE_OP*`
-    /// after the call being the native's record's; the native at the
-    /// opline's place in the frameless table served over them through
-    /// [`Kernel::Frameless`], which reads no opline, its return written to
-    /// the temporary the opline names; then the interrupt tested, php's
+    /// they stand and laid in the trace's room, what the native's slice
+    /// reads; the native at the opline's place in the frameless table
+    /// served over them through [`Kernel::Frameless`], its return written
+    /// to the temporary the opline names; each temporary freed where it
+    /// stood through the call, php's `jit_FREE_OP`, a native's throw left
+    /// pending through them; then the interrupt tested, php's
     /// `jit_frameless_interrupt_check`, and a throw leaving through the
     /// opline's unwind. A variable's reference is read through in place,
     /// php's `jit_ZVAL_DEREF_ref`; a variable that may be unset, or a
     /// temporary that may hold a reference, is tested first and, where it
     /// is, the call is its handler's, through [`Kernel::Handle`], which
     /// warns of it as php's `zend_jit_zval_check_undef` calls
-    /// `zend_jit_undefined_op_helper` to.
+    /// `zend_jit_undefined_op_helper` to. A variable in a frame a name
+    /// reaches, one that carries an annex as a file's own code does, is
+    /// held with one more owner through the call, as the handler holds
+    /// it ([`Emit::frameless_owners`]).
     ///
     /// The three arities over constants, variables, a temporary, a
     /// variable that is unset once and one that holds a reference, a
@@ -2890,6 +2904,86 @@ impl Emit<'_> {
     /// Warning: Array to string conversion in %SCRATCH%/witness.php on line 7
     /// yzArray|1zArray|Array
     /// ```
+    ///
+    /// What a native threw stands pending through the frees: a temporary
+    /// of a call that refuses its argument gives up its slot's owner where
+    /// it stood, and the throwable's backtrace, which holds another, keeps
+    /// it until `$e` is written over:
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo "d", $this->n, "\n"; } function __toString(): string { return "D" . $this->n; } }
+    /// function f($n) {
+    ///     $t = [];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         try { $t[] = str_contains(new D($i), $i == 3 ? [1] : "D"); } catch (TypeError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+    ///     }
+    ///     return json_encode($t);
+    /// }
+    /// echo f(5), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// d0
+    /// d1
+    /// d2
+    /// str_contains(): Argument #2 ($needle) must be of type string, array given at 6
+    /// d4
+    /// d3
+    /// [true,true,true,true]
+    /// ```
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo "d", $this->n, "\n"; } function __toString(): string { return "D" . $this->n; } }
+    /// function f($n) {
+    ///     $t = [];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         try { $t[] = str_contains(new D($i), $i == 3 ? [1] : "D"); } catch (TypeError $e) { echo $e->getMessage(), " at ", $e->getLine(), "\n"; }
+    ///     }
+    ///     return json_encode($t);
+    /// }
+    /// echo f(5), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// d0
+    /// d1
+    /// d2
+    /// str_contains(): Argument #2 ($needle) must be of type string, array given at 6
+    /// d4
+    /// d3
+    /// [true,true,true,true]
+    /// ```
+    ///
+    /// A file's own code carries an annex, so its variables are held with
+    /// one more owner through each call:
+    ///
+    /// ```php
+    /// $s = str_repeat("ab", 2);
+    /// for ($i = 0; $i < 5; $i++) {
+    ///     $t = "x$i" . $s;
+    ///     echo strlen(substr($t, 1, 3)), trim(" $t "), str_contains($t, $s) ? "y" : "n", max($i, 2), "\n";
+    /// }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 3x0ababy2
+    /// 3x1ababy2
+    /// 3x2ababy2
+    /// 3x3ababy3
+    /// 3x4ababy4
+    /// ```
+    ///
+    /// ```php
+    /// $s = str_repeat("ab", 2);
+    /// for ($i = 0; $i < 5; $i++) {
+    ///     $t = "x$i" . $s;
+    ///     echo strlen(substr($t, 1, 3)), trim(" $t "), str_contains($t, $s) ? "y" : "n", max($i, 2), "\n";
+    /// }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 3x0ababy2
+    /// 3x1ababy2
+    /// 3x2ababy2
+    /// 3x3ababy3
+    /// 3x4ababy4
+    /// ```
     pub(super) fn frameless_call(
         &mut self,
         line: &Line,
@@ -2907,36 +3001,33 @@ impl Emit<'_> {
         };
         let operands = [line.op1, line.op2, line.data];
         let (handler, join) = self.split();
-        // A field past what the word holds leaves the call to the handler.
-        let Some(fields) = self.operand_fields(&operands, arity)? else {
-            self.b.ins().jump(handler, &[]);
-            return self.frameless_handled(line, [room, opline, func], (handler, join));
-        };
-        for operand in operands.iter().take(arity) {
+        let mut held = [false; 3];
+        for (place, operand) in operands.iter().enumerate().take(arity) {
             let Operand::Value(value) = *operand else {
                 continue;
             };
-            let held = self.value(value)?;
+            let read = self.value(value)?;
             // A variable's reference is read through in place below; a
             // temporary's is the handler's, as is an unset variable,
             // which php's code warns of out of line.
             let through = self.kind_of(*operand)? == OperandKind::Cv;
+            held[place] = through;
             let refused = if through {
                 Types::UNDEF
             } else {
                 Types::UNDEF.or(Types::REF)
             };
-            if !held.types.meets(refused) {
+            if !read.types.meets(refused) {
                 continue;
             }
-            let (base, slot) = self.place(held.slot)?;
+            let (base, slot) = self.place(read.slot)?;
             let info = self.b.ins().load(I32, trusted(), base, slot + TYPE_AT);
             let kind = self.b.ins().band_imm_u(info, KIND);
             let mut either = self
                 .b
                 .ins()
                 .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Undef));
-            if !through && held.types.meets(Types::REF) {
+            if !through && read.types.meets(Types::REF) {
                 let reference =
                     self.b
                         .ins()
@@ -2946,54 +3037,36 @@ impl Emit<'_> {
             self.divert_if(either, handler);
         }
         self.b.ins().store(trusted(), opline, room, EX_OPLINE);
-        let mut kinds = [OperandKind::Unused; 3];
-        let mut words = Vec::with_capacity(6);
-        for (place, operand) in operands.into_iter().enumerate() {
-            if place >= arity {
-                words.push(self.b.ins().iconst(I64, 0));
-                words.push(self.b.ins().iconst(I32, 0));
-                continue;
-            }
-            let kind = self.kind_of(operand)?;
-            let (word, info) = match operand {
-                Operand::Value(value)
-                    if kind == OperandKind::Cv && self.value(value)?.types.meets(Types::REF) =>
-                {
-                    // php's `ZVAL_DEREF` before the native reads it.
-                    let (base, slot) = self.place(self.value(value)?.slot)?;
-                    let zval = self.b.ins().iadd_imm_s(base, i64::from(slot));
-                    let zval = self.deref(zval);
-                    let word = self.b.ins().load(I64, trusted(), zval, 0);
-                    let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
-                    (word, info)
-                }
-                _ => self.operand_words(line.frame, operand)?,
-            };
-            if let (OperandKind::Tmp | OperandKind::Var, Operand::Value(value)) = (kind, operand)
-                && self.value(value)?.home == Home::Register
-            {
-                // A temporary stands in its slot through the call, where a
-                // backtrace the native takes reads it and the kernel frees
-                // it after, as php's handler leaves it there.
-                let (base, slot) = self.place(self.value(value)?.slot)?;
-                self.b.ins().store(trusted(), word, base, slot);
-                self.b.ins().store(trusted(), info, base, slot + TYPE_AT);
-            }
-            kinds[place] = kind;
-            words.extend([word, info]);
+        let laid = self.frameless_room();
+        for (place, operand) in operands.into_iter().enumerate().take(arity) {
+            let (word, info) = self.frameless_operand(line.frame, operand)?;
+            let cell = i32::try_from(place * SLOT as usize).unwrap_or(i32::MAX);
+            self.b.ins().stack_store(I64, word, laid, cell);
+            self.b.ins().stack_store(I64, info, laid, cell + TYPE_AT);
+        }
+        let named =
+            (held != [false; 3]).then(|| self.b.ins().load(I32, trusted(), room, at(L.annex())));
+        if let Some(named) = named {
+            self.frameless_owners(named, laid, held, arity)?;
         }
         let returns = self.returns_of(line)?;
         let out = returns.address();
-        let place = self.frame_ref(line.frame)?;
-        let place = self.b.ins().ireduce(I32, place);
         let native = self.b.ins().iconst(I32, i64::from(native.0));
-        let kinds = self.b.ins().iconst(I32, OperandKinds::of(kinds).word());
-        let fields = self.b.ins().iconst(I64, fields.word());
-        let mut args = vec![room, opline, place, native, kinds, fields];
-        args.extend(words);
-        args.push(out);
-        self.call(Kernel::Frameless, &args, leave_of(line))?;
-        let threw = self.interrupt_after(line, [room, opline])?;
+        let zvals = self.b.ins().stack_addr(I64, laid, 0);
+        let count = self.b.ins().iconst(I32, i64::try_from(arity).unwrap_or(0));
+        let status = self.call_status(
+            Kernel::Frameless,
+            &[room, opline, native, zvals, count, out],
+        )?;
+        let threw = self.not_thrown();
+        self.thrown_into(line, status, threw)?;
+        for (place, operand) in operands.iter().enumerate().take(arity) {
+            if let Some(named) = named.filter(|_| held[place]) {
+                self.give_up_owner(line, named, (laid, place), threw)?;
+            }
+            self.free_frameless(line, *operand, threw)?;
+        }
+        self.interrupt_after(line, [room, opline], threw)?;
         self.release_unread(line, returns)?;
         let threw = self.b.use_var(threw);
         let to = self.left_by(leave_of(line))?;
@@ -3001,21 +3074,129 @@ impl Emit<'_> {
         self.frameless_handled(line, [room, opline, func], (handler, join))
     }
 
-    /// The slot each of a frameless call's `arity` operands stands in,
-    /// which the kernel frees a temporary's at after the call, packed as
-    /// one word; `None` where a field is past what the word holds.
-    fn operand_fields(
+    /// The two words of a frameless call's `operand` of `frame`, as the
+    /// native reads it: a variable's read through its reference, php's
+    /// `ZVAL_DEREF`, and a temporary held in a register stored where it
+    /// stands through the call, where a backtrace the native takes reads
+    /// it, as php's code hands its address.
+    fn frameless_operand(
         &mut self,
-        operands: &[Operand; 3],
-        arity: usize,
-    ) -> Result<Option<OperandFields>, Abort> {
-        let mut slots = [0; 3];
-        for (place, operand) in operands.iter().enumerate().take(arity) {
-            if let Operand::Value(value) = *operand {
-                slots[place] = self.value(value)?.slot.var;
-            }
+        frame: Frame,
+        operand: Operand,
+    ) -> Result<(Value, Value), Abort> {
+        let kind = self.kind_of(operand)?;
+        let Operand::Value(value) = operand else {
+            return self.operand_words(frame, operand);
+        };
+        let held = self.value(value)?;
+        if kind == OperandKind::Cv && held.types.meets(Types::REF) {
+            let (base, slot) = self.place(held.slot)?;
+            let zval = self.b.ins().iadd_imm_s(base, i64::from(slot));
+            let zval = self.deref(zval);
+            let word = self.b.ins().load(I64, trusted(), zval, 0);
+            let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
+            return Ok((word, info));
         }
-        Ok(OperandFields::of(slots))
+        let (word, info) = self.operand_words(frame, operand)?;
+        if kind == OperandKind::Tmp && held.home == Home::Register {
+            let (base, slot) = self.place(held.slot)?;
+            self.b.ins().store(trusted(), word, base, slot);
+            self.b.ins().store(trusted(), info, base, slot + TYPE_AT);
+        }
+        Ok((word, info))
+    }
+
+    /// The owner a frameless call holds of each variable among the
+    /// zvals laid at `laid` that `held` names, where `named` says a name
+    /// reaches the frame's variables, so one written through it while the
+    /// native runs leaves the native's copy standing
+    /// (`exec::frameless_operand`).
+    fn frameless_owners(
+        &mut self,
+        named: Value,
+        laid: StackSlot,
+        held: [bool; 3],
+        arity: usize,
+    ) -> Result<(), Abort> {
+        self.when(named, |emit| {
+            for place in (0..arity).filter(|&place| held[place]) {
+                let (word, info) = emit.laid_operand(laid, place);
+                emit.addref(word, info)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The owner [`Emit::frameless_owners`] took of the zval at `place`
+    /// of `laid` given up after the call, where `named` says it took one,
+    /// a throw or'd into `threw`.
+    fn give_up_owner(
+        &mut self,
+        line: &Line,
+        named: Value,
+        (laid, place): (StackSlot, usize),
+        threw: Variable,
+    ) -> Result<(), Abort> {
+        self.when(named, |emit| {
+            let (word, info) = emit.laid_operand(laid, place);
+            emit.release_through(line, [word, info], Dtor::Nogc, |emit, args| {
+                let status = emit.call_status(Kernel::Release, args)?;
+                emit.thrown_into(line, status, threw)
+            })
+        })
+    }
+
+    /// The two words of the zval laid at `place` of `laid`.
+    fn laid_operand(&mut self, laid: StackSlot, place: usize) -> (Value, Value) {
+        let cell = i32::try_from(place * SLOT as usize).unwrap_or(i32::MAX);
+        let word = self.b.ins().stack_load(I64, I64, laid, cell);
+        let info = self.b.ins().stack_load(I64, I32, laid, cell + TYPE_AT);
+        (word, info)
+    }
+
+    /// A frameless call's `operand` given up after the call, as php's
+    /// `jit_FREE_OP` frees it: nothing of a variable, a constant or a
+    /// temporary held in a register, which no value counts, and a
+    /// temporary freed where it stands ([`Emit::free_slot`]). A throw is
+    /// or'd into `threw` and the code goes on, the other operands still
+    /// to free with it pending; the release kernel answers a throw for
+    /// one that stood before it as for its own destructor's.
+    fn free_frameless(
+        &mut self,
+        line: &Line,
+        operand: Operand,
+        threw: Variable,
+    ) -> Result<(), Abort> {
+        let Operand::Value(value) = operand else {
+            return Ok(());
+        };
+        let held = self.value(value)?;
+        if held.home == Home::Register || !self.is_temporary(held.slot)? {
+            return Ok(());
+        }
+        let (base, slot) = self.place(held.slot)?;
+        let info = self.b.ins().load(I32, trusted(), base, slot + TYPE_AT);
+        let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+        self.b.ins().store(trusted(), undef, base, slot + TYPE_AT);
+        let word = self.b.ins().load(I64, trusted(), base, slot);
+        self.release_through(line, [word, info], Dtor::Nogc, |emit, args| {
+            let status = emit.call_status(Kernel::Release, args)?;
+            emit.thrown_into(line, status, threw)
+        })
+    }
+
+    /// The trace's room for the zvals of a frameless call, the slice
+    /// [`Kernel::Frameless`] hands the native. One room serves every call
+    /// of the trace: each lays its zvals just before it, and what reads
+    /// them after it reads them before the next is laid.
+    fn frameless_room(&mut self) -> StackSlot {
+        *self.frameless.get_or_insert_with(|| {
+            self.b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                u32::try_from(3 * SLOT as usize).unwrap_or(u32::MAX),
+                3,
+            ))
+        })
     }
 
     /// A `FRAMELESS_ICALL_*`'s way through its handler, `handler`, joined
