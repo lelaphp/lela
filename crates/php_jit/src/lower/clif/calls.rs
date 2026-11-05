@@ -3050,7 +3050,9 @@ impl Emit<'_> {
         let named =
             (held != [false; 3]).then(|| self.b.ins().load(I32, trusted(), room, at(L.annex())));
         let mut owners = [None; 3];
+        let mut destructs = [false; 3];
         for (place, operand) in operands.into_iter().enumerate().take(arity) {
+            destructs[place] = self.may_destruct(operand)?;
             let (word, info, through) = self.frameless_operand(line.frame, operand)?;
             let cell = i32::try_from(place * SLOT as usize).unwrap_or(i32::MAX);
             self.b.ins().stack_store(I64, word, laid, cell);
@@ -3084,7 +3086,8 @@ impl Emit<'_> {
             if let Some(owner) = owners[place] {
                 self.give_up_owner(line, owner, (laid, place), threw)?;
             }
-            self.free_frameless(line, *operand, threw)?;
+            let followed = destructs.iter().skip(place + 1).any(|&destructs| destructs);
+            self.free_frameless(line, *operand, followed, threw)?;
         }
         self.interrupt_after(line, [room, opline], threw)?;
         self.release_unread(line, returns)?;
@@ -3159,31 +3162,67 @@ impl Emit<'_> {
         (word, info)
     }
 
+    /// Whether a frameless call's `operand` is a temporary that may hold
+    /// an object, whose free may serve a destructor over its slot
+    /// ([`Emit::free_frameless`]).
+    fn may_destruct(&self, operand: Operand) -> Result<bool, Abort> {
+        let Operand::Value(value) = operand else {
+            return Ok(false);
+        };
+        let held = self.value(value)?;
+        Ok(held.types.meets(Types::OBJECT) && self.is_temporary(held.slot)?)
+    }
+
     /// A frameless call's `operand` given up after the call, as php's
-    /// `jit_FREE_OP` frees it: nothing of a variable, a constant or a
-    /// temporary held in a register, which no value counts, and a
-    /// temporary freed where it stands ([`Emit::free_slot`]). A throw is
-    /// or'd into `threw` and the code goes on, the other operands still
-    /// to free with it pending; the release kernel answers a throw for
-    /// one that stood before it as for its own destructor's.
+    /// `jit_FREE_OP` frees it: nothing of a variable or a constant; a
+    /// temporary held in a register, which no value counts, cleared
+    /// where `followed` says a later operand's destructor may read the
+    /// slots, php's `ZVAL_UNDEF` "in case `FREE_OP2()` throws"
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:17990`); and a temporary freed
+    /// where it stands ([`Emit::free_slot`]), an object's destructor
+    /// served first with the slot as it stands, cleared after it
+    /// (`Request::destruct_in_place`). A throw is or'd into `threw` and
+    /// the code goes on, the other operands still to free with it
+    /// pending, as php's `FREE_OP*` go on; the release kernel answers a
+    /// throw for one that stood before it as for its own destructor's.
     fn free_frameless(
         &mut self,
         line: &Line,
         operand: Operand,
+        followed: bool,
         threw: Variable,
     ) -> Result<(), Abort> {
         let Operand::Value(value) = operand else {
             return Ok(());
         };
         let held = self.value(value)?;
-        if held.home == Home::Register || !self.is_temporary(held.slot)? {
+        if !self.is_temporary(held.slot)? {
             return Ok(());
         }
         let (base, slot) = self.place(held.slot)?;
-        let info = self.b.ins().load(I32, trusted(), base, slot + TYPE_AT);
         let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
-        self.b.ins().store(trusted(), undef, base, slot + TYPE_AT);
+        if held.home == Home::Register {
+            if followed {
+                self.b.ins().store(trusted(), undef, base, slot + TYPE_AT);
+            }
+            return Ok(());
+        }
+        let info = self.b.ins().load(I32, trusted(), base, slot + TYPE_AT);
         let word = self.b.ins().load(I64, trusted(), base, slot);
+        if held.types.meets(Types::OBJECT) {
+            let kind = self.b.ins().band_imm_u(info, KIND);
+            let object = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Object));
+            let [room, opline] = self.served(line)?;
+            self.when(object, |emit| {
+                let args = [room, opline, word, info];
+                let status = emit.call_status(Kernel::Destruct, &args, leave_of(line))?;
+                emit.thrown_into(line, status, threw)
+            })?;
+        }
+        self.b.ins().store(trusted(), undef, base, slot + TYPE_AT);
         self.release_through(line, [word, info], Dtor::Nogc, |emit, args| {
             let status = emit.call_status(Kernel::Release, args, leave_of(line))?;
             emit.thrown_into(line, status, threw)

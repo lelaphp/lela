@@ -9,7 +9,7 @@
 
 use std::any::Any;
 
-use php_heap::{Fatal, Heap, Obj, Zval};
+use php_heap::{Fatal, Heap, HeapHooks, Obj, Zval};
 use php_link::{LinkedClass, Row};
 use php_unit::decl::{Bare, ClassDecl, ClassKind, PropertyDecl, Visibility};
 
@@ -661,6 +661,29 @@ impl Request {
         // destructor ran may have found it reachable and taken it out of
         // the buffer, and the shutdown collection finds it here.
         self.memory_mut().gc_possible_root(&object.as_value());
+    }
+
+    /// The destructor [`Heap::release_nogc`] would serve `object`, whose
+    /// last owner is a frameless call's temporary, served with that owner
+    /// standing in its slot, so what the destructor raises or prints
+    /// reads the call's row with the object among its arguments, as php's
+    /// `FREE_OP*` runs it over the slot it has not cleared yet. The row
+    /// takes an owner of each operand, which keeps the ones still to free
+    /// from their destructors for as long as the throwable lives
+    /// (`zend_fetch_debug_backtrace`), which `handlers::free_operands`
+    /// says more of. The object's storage goes only once
+    /// the slot is cleared, a release's work after this: php reads its
+    /// slot over the object's freed members too, and over an array or a
+    /// reference that is dying, which is undefined, and here none of those
+    /// stands in its slot.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn destruct_in_place(&mut self, object: Obj) {
+        let mut hooks = Hooks(self);
+        if object.refcount() == 1 && !object.destructor_called() && hooks.has_destructor(object) {
+            object.set_destructor_called(true);
+            hooks.destruct(object);
+        }
     }
 
     /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`:

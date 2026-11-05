@@ -3301,14 +3301,6 @@ pub(crate) fn frameless_operand(
     (value.to_zval(), true)
 }
 
-/// Whether a name reaches the variables of the frame `header` is, so a
-/// frameless call's `CV` operand takes one more owner
-/// ([`frameless_operand`]): a frame that carries an annex, its symbol
-/// table or its extra arguments, or none at all.
-pub(crate) fn frameless_named(header: Option<&Header>) -> bool {
-    header.is_none_or(|header| header.annex.is_some())
-}
-
 /// `FREE_OP`: a `TMP` or a `VAR` operand read by [`operand`] and done
 /// with, its slot's owner given up as `zval_ptr_dtor_nogc` gives it up,
 /// never a possible root; a `CV` and a `CONST` are nobody's to free here

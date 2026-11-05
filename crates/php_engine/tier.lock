@@ -217,6 +217,7 @@ tier::assign_concat
 tier::call_held
 tier::call_native
 tier::concat
+tier::destruct
 tier::dispatch_held
 tier::frameless_call
 tier::free_cv

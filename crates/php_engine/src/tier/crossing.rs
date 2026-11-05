@@ -141,6 +141,15 @@ pub fn release(req: &mut Request, zval: Zval) {
     req.release(Value::of_slot(zval));
 }
 
+/// The destructor of `object`, a frameless call's temporary compiled
+/// code has yet to free, served with the temporary standing in its slot
+/// ([`Request::destruct_in_place`]): it may leave a throwable pending.
+pub fn destruct(req: &mut Request, object: Zval) {
+    if let Some(object) = object.as_obj() {
+        req.destruct_in_place(object);
+    }
+}
+
 /// `ZVAL_MAKE_REF` of the variable at `place`, which holds no reference,
 /// as php's `zend_jit_send_ref` makes it in place
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:9792-9860`): a new reference over
