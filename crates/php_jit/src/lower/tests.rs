@@ -230,15 +230,23 @@ fn untested(clif: &str) -> Result<(), String> {
 }
 
 /// What the cold block `block` of `clif` answers: the number it returns,
-/// the last constant it makes, past the type words it stores.
+/// the last constant it makes, past the type words it stores, or what the
+/// block it goes on to answers, the way out of a guard.
 fn answer(clif: &str, block: &str) -> Option<i64> {
-    clif.lines()
+    let lines: Vec<&str> = clif
+        .lines()
         .map(instruction)
         .skip_while(|line| *line != format!("{block} cold:"))
         .skip(1)
         .take_while(|line| !line.ends_with(':'))
-        .filter_map(|line| line.split_once("iconst.i32 ")?.1.parse().ok())
-        .last()
+        .filter(|line| !line.is_empty())
+        .collect();
+    match lines.as_slice() {
+        [line] => answer(clif, line.strip_prefix("jump ")?),
+        _ => (lines.iter())
+            .filter_map(|line| line.split_once("iconst.i32 ")?.1.parse().ok())
+            .next_back(),
+    }
 }
 
 /// A line of CLIF text as its instruction: the indent and the source
@@ -429,7 +437,8 @@ fn calls_of(clif: &str, kernel: Kernel) -> Vec<String> {
         .filter(|(_, line)| line.contains("call_indirect") && line.contains(&address))
         .filter_map(|(at, line)| {
             let status = line.split_once(" = ")?.0;
-            let branch = lines.get(at + 1)?;
+            // Past the doubles read back after the call.
+            let branch = (lines.get(at + 1..)?.iter()).find(|line| line.starts_with("brif "))?;
             let to = branch.strip_prefix(&format!("brif {status}, "))?;
             Some(to.split(',').next()?.trim().to_owned())
         })
