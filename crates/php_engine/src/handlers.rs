@@ -9361,9 +9361,9 @@ fn prime_constant(
 ) {
     if op.op2_type == OperandKind::Const
         && req.cached_property(frame, slot, object.class()).is_none()
-        && let Some(bytes) = name.as_str_bytes()
+        && let Some(name) = name.as_php_string()
     {
-        req.prime_property(frame, slot, object, bytes);
+        req.prime_property(frame, slot, object, name);
     }
 }
 
@@ -9650,10 +9650,7 @@ fn fetch_obj(
     let read = if let Some(object) = container.as_object() {
         name.name(req, frame, code, op).and_then(|name| {
             prime_constant(req, frame, op, property_cache_slot(op), object, &name);
-            let name = name.as_str_bytes().unwrap_or_default();
-            let table = req.object_handlers(object.heap());
-            table
-                .read_property(req, object, name, fetch)
+            req.read_operand_property(object, &name, fetch)
                 .map(Owner::hand_on)
         })
     } else if fetch == PropertyRead::Warning {
@@ -10563,7 +10560,7 @@ fn property_place_on(
             return place_threw(req, frame, op, thrown);
         }
         PropertyPlace::Std => {
-            req.declared_slot_for_write(object, &name, "indirectly modify", false)
+            req.declared_slot_for_write(object, name_value, "indirectly modify", false)
         }
     };
     let at = match placed {
@@ -16104,7 +16101,7 @@ fn assign_property(
         // guard stands.
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Set);
-            req.declared_slot_for_write(object, bytes, "modify", silent)
+            req.declared_slot_for_write(object, name, "modify", silent)
         }
     });
     let placed = match placed {

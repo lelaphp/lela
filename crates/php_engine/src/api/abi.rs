@@ -3552,7 +3552,11 @@ pub type ClassUnserialize = fn(&mut Request, PhpObject, &[u8]) -> Result<(), Thr
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Std;
 
-impl ObjectHandlers for Std {}
+impl ObjectHandlers for Std {
+    fn properties(&self) -> PropertyAccess {
+        PropertyAccess::Standard
+    }
+}
 
 /// The three refusals php keeps in a class's handler table, each a fact
 /// of its own: a `get_constructor` that throws "Cannot directly
