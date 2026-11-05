@@ -14113,6 +14113,53 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 ///
 /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
 /// ```
+///
+/// A handler that throws at an undefined operand's warning leaves with
+/// what it threw: the native is not served, so it neither makes its
+/// `TypeError` over that nor touches its other operands.
+///
+/// ```php
+/// class L { function __toString(): string { echo "ran\n"; return "l"; } }
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// function f($a) {
+///     try { return implode($u, $a); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f([new L]); }
+/// echo strlen(implode(",", [new L])), "\n";
+/// ```
+/// ```expect
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// ran
+/// 1
+/// ```
+///
+/// The same where a trace serves the loop, whose undefined operand comes
+/// here by the handler:
+///
+/// ```php
+/// class L { function __toString(): string { echo "ran\n"; return "l"; } }
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// function f($a) {
+///     try { return implode($u, $a); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f([new L]); }
+/// echo strlen(implode(",", [new L])), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// ran
+/// 1
+/// ```
 #[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
 fn frameless_call<const N: usize>(
     req: &mut Request,
@@ -14141,6 +14188,13 @@ fn frameless_call<const N: usize>(
         }
         (operands, owned)
     };
+    // `if (EG(exception))` past the fetch: a handler threw at an undefined
+    // operand's warning, so the native is not served.
+    if let Err(thrown) = none_pending(req) {
+        free_operands(req, frame, (&operands, owned), &arguments);
+        checked_after_throw(req, &thrown)?;
+        return Ok(Stepped::Threw(frame).into());
+    }
     // A fatal frees the operands as the served path does, and is the only
     // answer that skips the rest.
     let served = frameless_native(req, op.extended_value, &operands);
