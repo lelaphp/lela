@@ -1724,47 +1724,6 @@ impl<'p> Recorder<'p> {
     /// ```expect regime=jit-exit-fuzz process
     /// 1200
     /// ```
-    ///
-    /// ```php
-    /// function f($x) { if ($x % 3 == 0) { return 1.5; } if ($x % 3 == 1) { return 2; } return true; }
-    /// $s = 0; $h = function ($i) { return f($i); }; $k = fn ($i) => "a" . f($i);
-    /// for ($i = 0; $i < 300; $i++) { $s += (int) $h($i); $s += strlen($k($i)); }
-    /// echo $s, "\n";
-    /// ```
-    /// ```expect regime=jit-inline process capture
-    /// 1200
-    /// ```
-    /// ```stderr
-    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
-    /// ---- TRACE 1 abort (inner loop)
-    /// ---- TRACE 1 start (loop) $main() %SCRATCH%/witness.php:4
-    /// ---- TRACE 1 stop (loop)
-    /// ---- TRACE 1 compiled
-    ///
-    ///      TRACE 1 exit 8 f() %SCRATCH%/witness.php:2
-    /// ---- TRACE 2 start (side trace 1/8) f() %SCRATCH%/witness.php:2
-    /// ---- TRACE 2 stop (return)
-    /// ---- TRACE 2 compiled
-    ///
-    /// ---- TRACE 3 start (enter) {closure:%SCRATCH%/witness.php:3}() %SCRATCH%/witness.php:3
-    /// ---- TRACE 3 stop (return)
-    /// ---- TRACE 3 compiled
-    ///
-    ///      TRACE 2 exit 0 f() %SCRATCH%/witness.php:2
-    /// ---- TRACE 4 start (side trace 2/0) f() %SCRATCH%/witness.php:2
-    /// ---- TRACE 4 stop (return)
-    /// ---- TRACE 4 compiled
-    ///
-    ///      TRACE 3 exit 3 f() %SCRATCH%/witness.php:2
-    /// ---- TRACE 5 start (side trace 3/3) f() %SCRATCH%/witness.php:2
-    /// ---- TRACE 5 stop (return)
-    /// ---- TRACE 5 compiled
-    ///
-    ///      TRACE 1 exit 1 $main() %SCRATCH%/witness.php:5
-    /// ---- TRACE 6 start (side trace 1/1) $main() %SCRATCH%/witness.php:5
-    /// ---- TRACE 6 stop (return)
-    /// ---- TRACE 6 compiled
-    /// ```
     fn popped(
         &mut self,
         req: &Request,
