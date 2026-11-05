@@ -2953,11 +2953,8 @@ fn concat_operands(
     left: &Value,
     right: &Value,
 ) -> Result<(PhpString, PhpString), Thrown> {
-    let held = left
-        .deref()
-        .as_php_string()
-        .is_none()
-        .then(|| Owner::take(req, *right));
+    let string = left.deref().as_php_string().is_some();
+    let held = (!string).then(|| Owner::take(req, *right));
     let a = concat_operand(req, left);
     let pair = a.and_then(|a| match concat_operand(req, right) {
         Ok(b) => Ok((a, b)),
@@ -2966,10 +2963,7 @@ fn concat_operands(
             Err(thrown)
         }
     });
-    match held {
-        Some(held) => held_past(req, held, pair),
-        None => pair,
-    }
+    held_past(req, held, pair)
 }
 
 /// `concat_function` where `result` is `op1` (`Z/Zend/zend_operators.c:2125`),
@@ -6228,10 +6222,7 @@ fn operands<T>(
     // side through its place after it.
     let held = left.as_int().is_none().then(|| Owner::take(req, *right));
     let converted = operand_pair(req, operator, (left, right), convert);
-    match held {
-        Some(held) => held_past(req, held, converted),
-        None => converted,
-    }
+    held_past(req, held, converted)
 }
 
 /// [`operands`] with the right side standing: it is followed through a
@@ -6276,41 +6267,32 @@ fn thrown_over_pending(req: &mut Request, class: ClassId, message: &str) -> Thro
 
 /// `zend_binop_error` (`Z/Zend/zend_operators.c:1119`): nothing over a
 /// throwable that stands pending, and otherwise php's `TypeError`.
-fn binop_error<T>(
-    req: &mut Request,
-    operator: &str,
-    left: &Value,
-    right: &Value,
-) -> Result<T, Thrown> {
+fn binop_error<T>(req: &mut Request, op: &str, left: &Value, right: &Value) -> Result<T, Thrown> {
     none_pending(req)?;
     let right = &right.deref();
     let message = bytes!(
         b"Unsupported operand types: ",
         zval_type_name(req, left),
         b" ",
-        operator,
+        op,
         b" ",
         zval_type_name(req, right)
     );
     Err(type_error(req, &message))
 }
 
-/// `held` given up past `done`, what `done` threw pending, so a
-/// destructor it serves chains it ([`Request::free_pending`]).
+/// What is held given up past `done`, what `done` threw pending, so a
+/// destructor it serves chains it ([`Request::freed_after`]).
 pub(crate) fn held_past<T>(
     req: &mut Request,
-    held: Owner<Value>,
+    held: Option<Owner<Value>>,
     done: Result<T, Thrown>,
 ) -> Result<T, Thrown> {
-    match done {
-        Ok(done) => {
+    req.freed_after(done, |req| {
+        if let Some(held) = held {
             held.let_go(req);
-            Ok(done)
         }
-        Err(thrown) => Err(req.free_pending(thrown, |req| {
-            held.let_go(req);
-        })),
-    }
+    })
 }
 
 /// `zendi_try_get_long`: the long php works in, or nothing for an array,

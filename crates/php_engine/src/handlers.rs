@@ -11230,7 +11230,7 @@ fn object_held<T>(
 ) -> Result<T, Thrown> {
     let held = Owner::take(req, object.as_value());
     let stepped = step(req);
-    crate::ops::held_past(req, held, stepped)
+    crate::ops::held_past(req, Some(held), stepped)
 }
 
 /// The dimension a handler over an object reads, php's `if (OP2_TYPE ==
@@ -14886,29 +14886,11 @@ pub(crate) fn assign_ref<T: Tier>(
     // and one holding the cell a `MAKE_REF` or this handler itself put
     // there gives up the owner it took, so the cell is held by the
     // place it binds and by the target alone.
-    let freed = freed_after(req, bound, |req| {
+    let freed = req.freed_after(bound, |req| {
         exec::free_operand(req, frame, op.op2_type, op.op2);
         exec::free_operand(req, frame, op.op1_type, op.op1);
     });
     settled(req, frame, freed)
-}
-
-/// `FREE_OP` over what a handler's step answered, php's at its one end
-/// whether the step threw or not: a destructor it serves sees a
-/// throwable pending ([`Request::free_pending`]).
-#[inline]
-fn freed_after(
-    req: &mut Request,
-    step: Result<(), Thrown>,
-    free: impl FnOnce(&mut Request),
-) -> Result<(), Thrown> {
-    match step {
-        Ok(()) => {
-            free(req);
-            Ok(())
-        }
-        Err(thrown) => Err(req.free_pending(thrown, free)),
-    }
 }
 
 /// [`assign_ref`]'s bind: `zend_assign_to_variable_reference` over a
@@ -15160,7 +15142,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     // `FREE_OP1()`, `FREE_OP2()` and `FREE_OP_DATA()`, after the bind: a
     // dimension's or a name's destructor can give up what the place is
     // in. A throw out of the fetch gave `op1` up already.
-    let freed = freed_after(req, bound, |req| {
+    let freed = req.freed_after(bound, |req| {
         exec::free_operand(req, frame, op.op1_type, op.op1);
         member.release(req, frame, op);
         exec::free_operand(req, frame, data_type, data_at);
@@ -17166,7 +17148,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     // `FREE_OP_DATA()`: the `VAR` of a `FETCH_STATIC_PROP_W` under
     // `ZEND_FETCH_REF` holds the cell with an owner, as a `MAKE_REF`'s
     // does, and a call's what it returned.
-    match freed_after(req, bound, |req| {
+    match req.freed_after(bound, |req| {
         exec::free_operand(req, frame, data_type, data_at);
     }) {
         Ok(()) => Ok(advance_over_data(req, frame)),
@@ -18183,23 +18165,14 @@ impl StepHold {
         let Some(held) = held else {
             return stepped;
         };
-        let done = match stepped {
-            Ok(done) => done,
+        match stepped {
             Err(fatal) => {
                 held.abandon(&fatal);
-                return Err(fatal);
+                Err(fatal)
             }
-        };
-        if !overloaded {
-            return Ok(crate::ops::held_past(req, held, done));
+            Ok(done) if overloaded => Ok(req.freed_after(done, |req| held.give_up(req))),
+            Ok(done) => Ok(crate::ops::held_past(req, Some(held), done)),
         }
-        Ok(match done {
-            Ok(done) => {
-                held.give_up(req);
-                Ok(done)
-            }
-            Err(thrown) => Err(req.free_pending(thrown, |req| held.give_up(req))),
-        })
     }
 }
 
@@ -19192,10 +19165,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
             Err(thrown)
         }
     };
-    let written = match in_table {
-        Some(held) => crate::ops::held_past(req, held, written),
-        None => written,
-    };
+    let written = crate::ops::held_past(req, in_table, written);
     member.release(req, frame, op);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     if let Err(thrown) = written {
@@ -19512,7 +19482,11 @@ fn step_property(
         PropertyPtr::Withheld => {
             held.overloaded(req, object);
             let written = withheld_property_step(req, frame, code, step, object, bytes);
-            written.map(|done| data_freed(req, frame, data, done))
+            written.map(|done| {
+                req.freed_after(done, |req| {
+                    exec::free_operand(req, frame, data.op1_type, data.op1);
+                })
+            })
         }
         PropertyPtr::Slot(slot, typed) => {
             step_slot(req, frame, code, step, (object, slot, typed), bytes, None)
@@ -19564,24 +19538,6 @@ fn withheld_property_step(
             write_out(req, frame, op, &Value::null());
             Ok(Err(thrown))
         }
-    }
-}
-
-/// `FREE_OP_DATA()` past the step, with what it threw pending.
-fn data_freed(
-    req: &mut Request,
-    frame: FrameRef,
-    data: Opline,
-    done: Result<(), Thrown>,
-) -> Result<(), Thrown> {
-    match done {
-        Ok(()) => {
-            exec::free_operand(req, frame, data.op1_type, data.op1);
-            Ok(())
-        }
-        Err(thrown) => Err(req.free_pending(thrown, |req| {
-            exec::free_operand(req, frame, data.op1_type, data.op1);
-        })),
     }
 }
 
@@ -20018,7 +19974,9 @@ fn served_property_step(
         let table = req.object_handlers(object.heap());
         table.write_property(req, object, name, stepped)
     });
-    data_freed(req, frame, data, written)
+    req.freed_after(written, |req| {
+        exec::free_operand(req, frame, data.op1_type, data.op1);
+    })
 }
 
 /// Where a compound write or a step over a property the class serves
