@@ -76,8 +76,7 @@ fn object_or_class_name(req: &mut Request, given: Value, position: u32) -> Resul
 /// `ce->name`: the declared name of a class, the string php keeps on the
 /// class entry, one more owner ([`Request::declared_string`]).
 fn class_name(req: &mut Request, class: ClassId) -> Result<Owner<PhpString>, Thrown> {
-    let name = req.class_name_bytes(class);
-    req.declared_string(&name)
+    req.class_name_string(class)
 }
 
 /// `get_called_class(): string`, php's `ZEND_FUNCTION(get_called_class)`
@@ -1336,24 +1335,22 @@ fn class_alias(
 /// the class's declared name, and an alias's row by the lowered name it
 /// is keyed by.
 fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Owner<PhpArray>, Thrown> {
-    let names: Vec<Vec<u8>> = req
-        .symbols()
-        .class_keys()
-        .into_iter()
-        .filter_map(|(class, alias)| {
-            let decl = req.symbols().class_decl(class)?;
-            kinds
-                .contains(&decl.kind)
-                .then(|| alias.unwrap_or_else(|| decl.name.0.to_vec()))
-        })
+    let mut array = PhpArray::new(req)?;
+    for (class, alias) in req.symbols().class_keys() {
+        let Some(decl) = req.symbols().class_decl(class) else {
+            continue;
+        };
         // `ZSTR_VAL(key)[0] != 0`: a key with a leading `\0` is none a
         // program declared, the iterator wrapper's here.
-        .filter(|name| name.first() != Some(&0))
-        .collect();
-    let mut array = PhpArray::new(req)?;
-    for name in names {
+        let key = alias.as_deref().unwrap_or(&decl.name.0);
+        if !kinds.contains(&decl.kind) || key.first() == Some(&0) {
+            continue;
+        }
         // `copy_class_or_interface_name`: `ce->name`, or the alias's key.
-        let name = req.declared_string(&name)?;
+        let name = match &alias {
+            Some(alias) => req.declared_string(alias)?,
+            None => class_name(req, class)?,
+        };
         array.append(req, name.into_value())?;
     }
     Ok(array)

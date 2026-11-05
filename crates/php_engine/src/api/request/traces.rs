@@ -500,7 +500,9 @@ impl Request {
                     // and site; a receiver's class name for a function of
                     // no scope it is passed to, `zend_ffi_get_func`'s.
                     let class = match (self.method_class(function).or(scope), this) {
-                        (Some(class), _) => Some(self.class_name_string(class)?),
+                        (Some(class), _) => {
+                            Some(self.class_name_string(class).map(Owner::hand_on)?)
+                        }
                         (None, Some(this)) => {
                             let name = this.handlers(self).get_class_name(self, this);
                             Some(self.declared_string(&name)?.hand_on())
@@ -652,20 +654,6 @@ impl Request {
             }
             None => self.declared_string(b"native").map(Owner::hand_on),
         }
-    }
-
-    /// `ce->name` as a row copies it, read as
-    /// [`Request::function_name_string`] reads a function's.
-    fn class_name_string(&mut self, class: ClassId) -> Result<PhpString, Thrown> {
-        let held = self
-            .symbols()
-            .class_decl(class)
-            .and_then(|decl| self.shared.existing_interned(&decl.name.0));
-        if let Some(held) = held {
-            return Ok(PhpString::of(held));
-        }
-        let name = self.class_name_bytes(class);
-        self.declared_string(&name).map(Owner::hand_on)
     }
 
     /// The string of a row's file: the one the row before copied where

@@ -4594,11 +4594,19 @@ fn verified_arg(
     let Some(ty) = function
         .and_then(|function| req.symbols().function_decl(function))
         .and_then(|decl| decl.parameters.get(at))
-        .and_then(|parameter| parameter.ty.clone())
+        .and_then(|parameter| parameter.ty.as_ref())
     else {
         return Ok(None);
     };
-    if crate::api::coerce::holds(req, argument, &ty, req.frame_scopes(frame)) {
+    // The declared type is read where the request holds it, and copied
+    // only for what goes on past a value it holds as it stands.
+    let scopes = req.frame_scopes(frame);
+    let held = crate::api::coerce::holding(req, argument, ty, scopes);
+    if held == crate::api::coerce::Holding::Yes {
+        return Ok(None);
+    }
+    let ty = ty.clone();
+    if held.resolve(req, argument, scopes) {
         return Ok(None);
     }
     let strict = req.caller_strict_types(frame);
