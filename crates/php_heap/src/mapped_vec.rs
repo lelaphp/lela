@@ -14,13 +14,21 @@ use crate::mm::real_page_size;
 /// A stack whose room is a mapping of its own, given back to the machine
 /// whole when it is dropped. What it holds is never dropped.
 pub struct MappedVec<T> {
-    /// The mapping, none until room is first asked for.
-    room: Option<Chunk>,
+    /// Where the room stands: the mapping's first byte, dangling and
+    /// aligned with none. The parser reads through it per token, so it
+    /// stands here rather than behind `room`'s test.
+    at: NonNull<T>,
     /// How many of `T` the mapping has room for.
     cap: usize,
     len: usize,
+    /// The mapping, none until room is first asked for.
+    room: Option<Chunk>,
     held: PhantomData<T>,
 }
+
+// SAFETY: the stack owns what `at` points to through `room`, which is
+// `Send`, and its elements are `Send`.
+unsafe impl<T: Send> Send for MappedVec<T> {}
 
 impl<T> Default for MappedVec<T> {
     fn default() -> MappedVec<T> {
@@ -44,9 +52,10 @@ impl<T> MappedVec<T> {
             );
         };
         MappedVec {
-            room: None,
+            at: NonNull::dangling(),
             cap: 0,
             len: 0,
+            room: None,
             held: PhantomData,
         }
     }
@@ -55,13 +64,6 @@ impl<T> MappedVec<T> {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.cap
-    }
-
-    /// Where its room stands: a dangling, aligned pointer with no room.
-    fn at(&self) -> *mut T {
-        (self.room.as_ref())
-            .map_or(NonNull::dangling(), |room| room.at().cast())
-            .as_ptr()
     }
 
     /// Room for `more` past the length, in a mapping twice the last at
@@ -80,10 +82,11 @@ impl<T> MappedVec<T> {
         let Some(room) = room else {
             std::alloc::handle_alloc_error(Layout::new::<T>())
         };
-        let to = room.at().cast::<T>().as_ptr();
+        let at = room.at().cast::<T>();
         // SAFETY: the old room holds `len` initialised elements, the new
         // mapping room for at least `wanted`, and the two do not overlap.
-        unsafe { std::ptr::copy_nonoverlapping(self.at(), to, self.len) };
+        unsafe { std::ptr::copy_nonoverlapping(self.at.as_ptr(), at.as_ptr(), self.len) };
+        self.at = at;
         self.cap = room.len() / size_of::<T>();
         self.room = Some(room);
     }
@@ -94,7 +97,7 @@ impl<T> MappedVec<T> {
             self.reserve(1);
         }
         // SAFETY: `len < cap`, so the slot is inside the mapping.
-        unsafe { self.at().wrapping_add(self.len).write(item) };
+        unsafe { self.at.as_ptr().wrapping_add(self.len).write(item) };
         self.len += 1;
     }
 
@@ -103,7 +106,7 @@ impl<T> MappedVec<T> {
         self.len = self.len.checked_sub(1)?;
         // SAFETY: the slot at the old top was written, and is no longer
         // counted, so it is read out once.
-        Some(unsafe { self.at().wrapping_add(self.len).read() })
+        Some(unsafe { self.at.as_ptr().wrapping_add(self.len).read() })
     }
 
     /// Every element given up, the room kept.
@@ -150,14 +153,14 @@ impl<T> std::ops::Deref for MappedVec<T> {
     fn deref(&self) -> &[T] {
         // SAFETY: the first `len` elements are written; with no mapping
         // the pointer is dangling and aligned, at length zero.
-        unsafe { std::slice::from_raw_parts(self.at(), self.len) }
+        unsafe { std::slice::from_raw_parts(self.at.as_ptr(), self.len) }
     }
 }
 
 impl<T> std::ops::DerefMut for MappedVec<T> {
     fn deref_mut(&mut self) -> &mut [T] {
         // SAFETY: as `deref`, and the stack is borrowed uniquely.
-        unsafe { std::slice::from_raw_parts_mut(self.at(), self.len) }
+        unsafe { std::slice::from_raw_parts_mut(self.at.as_ptr(), self.len) }
     }
 }
 
