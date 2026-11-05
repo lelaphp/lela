@@ -1321,6 +1321,21 @@ impl UnitView {
         }
     }
 
+    /// The runtime-cache slot compiled code reads the callee of the
+    /// function's call by its name `op` from, as php's code reads
+    /// `CACHED_PTR(opline->result.num)` (`zend_jit_init_fcall`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:8860-8880`); none for any other
+    /// opline and for a slot past its cache.
+    #[must_use]
+    pub fn named_slot(&self, f: FuncRef, op: &Opline) -> Option<MapPtrRaw> {
+        matches!(
+            op.opcode,
+            Opcode::InitFcallByName | Opcode::InitNsFcallByName
+        )
+        .then(|| self.cache_slot(f, CacheSlot(op.out)))
+        .flatten()
+    }
+
     /// The declared slot the property opline at `at` of the op array `f`
     /// names on an object of `class`; none unless
     /// [`UnitView::hold_place`] took it.
@@ -1397,7 +1412,17 @@ impl UnitView {
     /// [`UnitView::hold_call`] took: a function's, and a method's of each
     /// called scope ([`super::PlainCall::scope`]).
     pub fn calls_of(&self, f: FuncRef, count: u32) -> impl Iterator<Item = &super::PlainCall> {
-        (self.calls.iter()).filter(move |call| call.callee() == Some(f) && call.count() == count)
+        (self.calls.iter()).filter(move |call| {
+            call.callee() == Some(f) && call.count() == count && !call.is_closure()
+        })
+    }
+
+    /// The plain call of a closure over the op array `f` names, with
+    /// `count` arguments, [`UnitView::hold_call`] took.
+    #[must_use]
+    pub fn closure_call(&self, f: FuncRef, count: u32) -> Option<&super::PlainCall> {
+        (self.calls.iter())
+            .find(|call| call.callee() == Some(f) && call.count() == count && call.is_closure())
     }
 
     /// The plain call to the native named `name`, lowered, with `count`

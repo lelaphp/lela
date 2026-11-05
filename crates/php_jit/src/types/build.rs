@@ -17,11 +17,12 @@ use php_unit::{Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Carried, Declared, Hold, ISEMPTY, MAX_ARG_FLAG_NUM, MAY_BE_RESOURCE, Within, arith, assigned,
-    carried, check_sites, checked_order, compiled_inline, compound_in_place, constant,
-    constant_types, goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call,
-    keeps_temporaries, keyed, may_exit, needs_call_chain, packed_guard, param_types, params, reads,
-    reads_by_name, recv_exits, referenced, slot_of, within, written, written_through,
+    Carried, Declared, Hold, ISEMPTY, MAX_ARG_FLAG_NUM, MAY_BE_RESOURCE, Site, Within, arith,
+    assigned, begins_call, carried, check_sites, checked_order, compiled_inline, compound_in_place,
+    constant, constant_types, ends_call, goes_one_way, guard_sites, held_as_is, inline_may_leave,
+    is_call, keeps_temporaries, keyed, may_exit, needs_call_chain, packed_guard, param_types,
+    params, reads, reads_by_name, recv_exits, referenced, slot_of, within, written,
+    written_through,
 };
 use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
@@ -41,6 +42,7 @@ use php_ssa::{Range, Types as Php};
 mod loads;
 mod ranges;
 mod stack;
+use stack::pushes_inline;
 
 /// php's `ZEND_JIT_TRACE_MAX_EXITS`: the most exits one trace has.
 const MAX_EXITS: usize = 512;
@@ -91,6 +93,9 @@ struct Meta<'a> {
     /// For a frame the trace entered in or returned to, the opline its
     /// part of the trace begins at.
     begins: Option<OplineIdx>,
+    /// Whether a `Closure`'s call the trace pushed made it, so it holds
+    /// the closure, over a closure's op array or any other.
+    closed: bool,
 }
 
 /// What the trace held before one op: every value of a live frame, how
@@ -322,15 +327,29 @@ struct Call {
     /// ([`Op::InitCall`]'s `plain`).
     pushed: Option<Pushed>,
     /// How many arguments its `INIT_*` says are passed, where it pushed
-    /// it in place ([`PlainCall::count`]).
-    passed: u32,
-    /// Whether a function's `INIT_*` by its name began it, so it serves
-    /// the callee recorded.
-    named: bool,
+    /// it in place ([`PlainCall::count`]); none past a named argument, an
+    /// unpack or an array sent, which may move the count or leave a
+    /// parameter between them undefined, php's `unknown_num_args`, so its
+    /// `DO_*CALL` is the handler's.
+    passed: Option<u32>,
+    /// What holds it to the callee recorded.
+    held: Held,
     /// How its last `CHECK_FUNC_ARG` found the argument it checked sent,
     /// php's `TRACE_FRAME_IS_LAST_SEND_BY_VAL` and `_BY_REF`, which the
     /// `FETCH_*_FUNC_ARG` after it reads.
     last_send: LastSend,
+}
+
+/// What holds a call to the callee the trace recorded, so how it takes
+/// its arguments is known: nothing, for a method's or a dynamic call's
+/// that may serve another; a name that answers it alone, or the guard at
+/// its push; or a `Closure`'s function at its push, the closure the frame
+/// gives up as it leaves, whatever op array it is over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    Not,
+    ByPush,
+    ByClosure,
 }
 
 /// How compiled code makes a call it pushed in place: in place, or in
@@ -366,21 +385,28 @@ enum InPlace {
     Leave,
 }
 
-/// The call a method's `INIT_*` pushes in place, and what holds the
-/// callee the trace recorded before it.
+/// The call an `INIT_*` pushes in place, and what holds the callee the
+/// trace recorded before it.
 struct PushAt {
     plain: PlainCall,
     held: HeldBy,
 }
 
-/// What holds a method's call pushed in place to the callee the trace
-/// recorded: the class guard before it on a receiver of a published class,
-/// whose table answers the one method in every request; or the pair the
-/// opline's runtime-cache slot holds, which compiled code reads in the
-/// request it runs in, and the class it is held to.
+/// What holds a call pushed in place to the callee the trace recorded:
+/// the class guard before it on a receiver of a published class, whose
+/// table answers the one method in every request; or what the opline's
+/// runtime-cache slot holds, which compiled code reads in the request it
+/// runs in, the pair and the class it is held to, or a function.
 enum HeldBy {
     Class(Object, ClassId),
     Pair(CalleeSlot, PairClass),
+    /// A function's call by its name: the callee the slot holds, which
+    /// the request's image of the call names.
+    Slot(MapPtrRaw),
+    /// A closure's call, held by the `push_call` kernel to the function
+    /// the object holds, under php's guard on its class, `Closure`, where
+    /// nothing has held that.
+    Closure(Object, ClassId),
 }
 
 /// What a send wrote into a call's argument: the types of what it sent,
@@ -580,6 +606,7 @@ impl<'a> Builder<'a> {
             aliased,
             called_at,
             begins,
+            closed: false,
         });
         let size = code.num_cvs.saturating_add(code.num_tmps) as usize;
         self.slots.push(vec![None; size]);
@@ -913,15 +940,18 @@ impl<'a> Builder<'a> {
                 self.method_at((frame, func, at), &op, (op1, samples[0]), seen, next)
             }
             Opcode::InitStaticMethodCall => self.static_at((func, at), &op, next),
+            Opcode::InitFcallByName | Opcode::InitNsFcallByName => self.named_at(func, &op, next),
+            Opcode::InitDynamicCall => self.closure_at(&op, (op2, samples[1]), seen, next),
             _ => None,
         };
         let fetched = self.view.fetched_slot(func, &op);
         let form = match (op.opcode, property) {
             (opcode, Some(_)) if on_declared_slot(opcode) => Form::Inline,
             (opcode, None) if on_declared_slot(opcode) => Form::Step,
-            (Opcode::InitMethodCall | Opcode::InitStaticMethodCall, _) if pushed.is_some() => {
-                Form::Inline
-            }
+            (
+                Opcode::InitMethodCall | Opcode::InitStaticMethodCall | Opcode::InitDynamicCall,
+                _,
+            ) if pushed.is_some() => Form::Inline,
             _ if fetched.is_some() => Form::Inline,
             _ => form,
         };
@@ -931,7 +961,15 @@ impl<'a> Builder<'a> {
                 None
             }
             Some(HeldBy::Pair(slot, class)) => Some((*slot, *class)),
-            None => None,
+            Some(HeldBy::Closure(object, class)) => {
+                self.closure_guard(idx, (frame, func, at), &op, (*object, *class));
+                None
+            }
+            Some(HeldBy::Slot(_)) | None => None,
+        };
+        let named = match pushed.as_ref().map(|pushed| &pushed.held) {
+            Some(HeldBy::Slot(slot)) => Some(*slot),
+            _ => None,
         };
         if let (Form::Inline, Some(property)) = (form, property)
             && property.slot.cached().is_none()
@@ -940,6 +978,13 @@ impl<'a> Builder<'a> {
         }
         let pair_callee = pushed.as_ref().and_then(|pushed| pushed.plain.callee());
         let in_place = match pushed {
+            Some(PushAt {
+                plain,
+                held: HeldBy::Closure(..),
+            }) => {
+                self.pushing = Some(plain);
+                None
+            }
             Some(pushed) => Some(InPlace::Push(pushed.plain)),
             None => (form == Form::Inline)
                 .then(|| self.in_place(frame, &op, next))
@@ -948,6 +993,7 @@ impl<'a> Builder<'a> {
         self.sampled.insert(idx, samples);
         let cached = (property.and_then(|property| property.slot.cached()))
             .or_else(|| pair.map(|(slot, _)| slot.cached()))
+            .or(named)
             .or(fetched);
         let map_ptr = match cached {
             Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
@@ -1019,13 +1065,15 @@ impl<'a> Builder<'a> {
                     owners: self.owners(frame),
                     value: returned(&op, code, t1),
                     receives: self.receives(frame),
-                    closure: record::closure(self.view, self.frames[usize::from(frame.0)].func),
+                    closure: self.meta(frame).closed
+                        || record::closure(self.view, self.frames[usize::from(frame.0)].func),
                 },
                 Some(InPlace::Make(checks, defaults)) => Imm::Make {
                     returns: (op.out_type != OperandKind::Unused).then_some(op.out),
                     checks,
                     defaults,
                 },
+                _ if named.is_some() => Imm::Named,
                 _ if let Some((slot, class)) = pair => Imm::Pair {
                     function: slot
                         .function()
@@ -1081,10 +1129,16 @@ impl<'a> Builder<'a> {
             (form, in_place.as_ref()),
             (t1, inferred.may_throw),
         );
+        // A `DO_FCALL` made in place goes where the callee its `INIT_*`
+        // held enters, as `zend_jit_do_fcall` goes with no guard;
+        // `zend_jit_trace_may_exit` is of the handler's.
+        let made = matches!(in_place, Some(InPlace::Make(..)));
         if let Some(InPlace::Push(plain)) = in_place {
             self.pushing = Some(plain);
         }
-        self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
+        if !made {
+            self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
+        }
         // A call pushed in place under its slot's pair goes to its
         // handler where the slot holds another, which may push another
         // callee: held to the one the trace recorded after it, as a
@@ -1314,8 +1368,20 @@ impl<'a> Builder<'a> {
     /// The opline the trace serves next, where the record says it: the
     /// next one it recorded before a return, or, past the last, the
     /// header a loop, a recursive call or a recursive return goes back to,
-    /// as php holds the trace's next opline at every end but `RETURN` and
-    /// `INTERPRETER` (`zend_jit_ir.c:17152-17156`).
+    /// or the opline a link goes on at, as php holds the trace's next
+    /// opline at every end but `RETURN` and `INTERPRETER`
+    /// (`zend_jit_ir.c:17152-17156`). A `DO_FCALL` a side
+    /// trace ends on goes on where the link does, or, held to that, leaves
+    /// in the frame of whatever other callee it entered:
+    /// ```php
+    /// class I { function __invoke($a, $b) { return $a * $b; } }
+    /// function run($c, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $c($i, 2); } return $s; }
+    /// $a = function ($x, $y) { return $x + $y; };
+    /// echo run($a, 200), " ", run(new I, 200), " ", run($a, 100), " ", run('max', 100), " ", run([new I, '__invoke'], 100), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 20300 39800 5150 4953 9900
+    /// ```
     fn following(&self, ahead: &[Event]) -> Option<(FuncRef, OplineIdx)> {
         let mut until_back = ahead
             .iter()
@@ -1330,6 +1396,10 @@ impl<'a> Builder<'a> {
         match (next, ends, self.repeat) {
             (Some(next), ..) => Some(next),
             (None, true, Some(_)) => self.header_line(),
+            (None, true, None) if matches!(self.rec.stop, Stop::Link(_)) => {
+                let frame = *self.stack.last()?;
+                Some((self.frames[usize::from(frame.0)].func, self.successor?))
+            }
             _ => None,
         }
     }
@@ -1429,10 +1499,11 @@ impl<'a> Builder<'a> {
         let Some(Op::Line(line)) = self.ops.get(idx.index()) else {
             return;
         };
-        // What compiled code serves in place takes no exit of its own; a
-        // kernel it falls back to that throws unwinds.
+        // What compiled code serves in place takes no exit of its own, but
+        // a call by its name held to the function its slot holds; a kernel
+        // it falls back to that throws unwinds.
         let (at, op1, op2) = (line.opline, line.op1, line.op2);
-        let may_leave = inline_may_leave(line) && in_place.is_none();
+        let may_leave = inline_may_leave(line) && (in_place.is_none() || line.imm == Imm::Named);
         if form == Form::Inline && may_leave {
             let unfinished = draft(Point::Before(idx), frame, At::Opline(at));
             // An element a fetch does not find is the interpreter's to
@@ -1547,6 +1618,86 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Whether a call found under way in `frame` serves `callee` by a name
+    /// that answers no other, where php's fake init takes no guard
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7110-7136`): the frame's own
+    /// function, or one `INIT_FCALL` named. `ahead`, the events after it,
+    /// say which of the calls under way it is, and the `INIT_*` is found
+    /// as `zend_jit_trace_find_init_fcall_op` finds it, walking back over
+    /// the calls begun and ended since (`:1162-1198`). A recursive call's
+    /// second argument, sent past the return of the first:
+    /// ```php
+    /// if (true) { function ack($m, $n) { if ($m == 0) { return $n + 1; } if ($n == 0) { return ack($m - 1, 1); } return ack($m - 1, ack($m, $n - 1)); } }
+    /// if (true) { function rf($n, &$c) { $c++; if ($n == 0) { return 0; } $d = $n - 1; return 1 + rf(rf($d, $c), $c); } }
+    /// $c = 0; $s = 0; for ($i = 0; $i < 6; $i++) { $s += ack(2, $i); } echo $s, " ", rf(4, $c), " ", $c, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 48 4 31
+    /// ```
+    ///
+    /// ```php
+    /// if (true) { function ack($m, $n) { if ($m == 0) { return $n + 1; } if ($n == 0) { return ack($m - 1, 1); } return ack($m - 1, ack($m, $n - 1)); } }
+    /// if (true) { function rf($n, &$c) { $c++; if ($n == 0) { return 0; } $d = $n - 1; return 1 + rf(rf($d, $c), $c); } }
+    /// $c = 0; $s = 0; for ($i = 0; $i < 6; $i++) { $s += ack(2, $i); } echo $s, " ", rf(4, $c), " ", $c, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 48 4 31
+    /// ```
+    ///
+    /// A first-class callable's `INIT_*` lies between a call's and its
+    /// send on a branch never taken; its `CALLABLE_CONVERT` ends it, so the
+    /// walk goes on to the `INIT_DYNAMIC_CALL` the send belongs to, whose
+    /// callee no name answers, and the by-reference argument stays one:
+    ///
+    /// ```php
+    /// function byval($a, $b, $c) { return $b . $c; }
+    /// function byref($a, $b, &$c) { $c = "changed"; return $b; }
+    /// function rec($n, $f) { if ($n == 0) { return "0"; } $v = "v$n"; $r = $f(($n > 100 ? strlen(...) : 0), rec($n - 1, $f), $v); return $r . "/" . $v; }
+    /// echo rec(6, 'byval'), "\n", rec(6, 'byval'), "\n", rec(6, 'byref'), "\n", rec(6, 'byval'), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// 0/changed/changed/changed/changed/changed/changed
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// ```
+    ///
+    /// ```php
+    /// function byval($a, $b, $c) { return $b . $c; }
+    /// function byref($a, $b, &$c) { $c = "changed"; return $b; }
+    /// function rec($n, $f) { if ($n == 0) { return "0"; } $v = "v$n"; $r = $f(($n > 100 ? strlen(...) : 0), rec($n - 1, $f), $v); return $r . "/" . $v; }
+    /// echo rec(6, 'byval'), "\n", rec(6, 'byval'), "\n", rec(6, 'byref'), "\n", rec(6, 'byval'), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// 0/changed/changed/changed/changed/changed/changed
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// ```
+    fn named_before(&self, frame: Frame, callee: Callee, ahead: &[Event]) -> bool {
+        let mut under = (ahead.iter())
+            .take_while(|event| matches!(event, Event::InitCall { .. }))
+            .count();
+        let Some(Event::Op { opline, .. }) = ahead.get(under) else {
+            return false;
+        };
+        let code = self.meta(frame).code;
+        let begun = code.oplines.get(..opline.0 as usize).into_iter().flatten();
+        for op in begun.rev() {
+            if ends_call(op.opcode) {
+                under += 1;
+            } else if begins_call(op.opcode) {
+                if under > 0 {
+                    under -= 1;
+                    continue;
+                }
+                let own = callee.user() == Some(self.frames[usize::from(frame.0)].func);
+                return op.opcode == Opcode::InitFcall || (own && pushes_inline(op.opcode));
+            }
+        }
+        false
+    }
+
     /// A call an `INIT_*` began, here or before the trace reached the
     /// frame, whose arguments sent before it the trace knows nothing of;
     /// `ahead`, the events after it, say whether compiled code links it
@@ -1572,21 +1723,29 @@ impl<'a> Builder<'a> {
             .pushing
             .take()
             .filter(|plain| began == Began::Here && callee.user() == plain.callee());
-        // A function's call by its full name serves the function the name
-        // resolves to, the one recorded, since no function is declared
-        // twice; a method's or a dynamic call's may serve another, and an
-        // unqualified call in a namespace one declared there after the
-        // recording, which php's trace guards and this tier does not, so
-        // how it takes its arguments is not known.
-        let named = plain.as_ref().is_some_and(|plain| plain.scope().is_some())
-            || began == Began::Here
+        // A function's call by its name serves the function recorded: no
+        // function is declared twice, and an unqualified name in a
+        // namespace, which another may answer, is held to the one recorded
+        // by what its slot holds as php's trace holds it. A method's or a
+        // closure's is held where it is pushed; any other method's or
+        // dynamic call's may serve another, so how it takes its arguments
+        // is not known.
+        let held = match plain.as_ref() {
+            Some(plain) if plain.is_closure() => Held::ByClosure,
+            Some(_) => Held::ByPush,
+            None if began == Began::Here
                 && matches!(
                     self.ops.last(),
-                    Some(Op::Line(line)) if matches!(
-                        line.opcode,
-                        Opcode::InitFcall | Opcode::InitFcallByName
-                    )
-                );
+                    Some(Op::Line(line)) if pushes_inline(line.opcode)
+                ) =>
+            {
+                Held::ByPush
+            }
+            None if began == Began::Before && self.named_before(frame, callee, ahead) => {
+                Held::ByPush
+            }
+            None => Held::Not,
+        };
         self.begin();
         self.calls.push(Call {
             inline,
@@ -1604,8 +1763,8 @@ impl<'a> Builder<'a> {
                     Pushed::Activates
                 }
             }),
-            passed: plain.as_ref().map_or(0, PlainCall::count),
-            named,
+            passed: Some(plain.as_ref().map_or(0, PlainCall::count)),
+            held,
             last_send: LastSend::Unknown,
         });
         self.ops.push(Op::InitCall {
@@ -1635,30 +1794,73 @@ impl<'a> Builder<'a> {
     /// [15,3]
     /// ```
     fn sends_by_value(&self, n: u32) -> Option<bool> {
-        let call = self.calls.last().filter(|call| call.named)?;
+        let call = self.calls.last().filter(|call| call.held != Held::Not)?;
         let callee = call.callee.user()?;
         let params = self.view.parameters(callee)?;
         Some(sent_by_value(params, n))
     }
 
     /// The opline as the trace compiles it, where the callee the trace
-    /// knows settles how an argument is sent: a `SEND_VAR_EX` or a
-    /// `SEND_FUNC_ARG` to a parameter taken by value is a `SEND_VAR`,
-    /// whose variable it leaves as it was (`Z/ext/opcache/jit/zend_jit_trace.c:2373-2382`,
-    /// `:5324-5378`), and a `FETCH_DIM_FUNC_ARG` after a `CHECK_FUNC_ARG`
+    /// knows settles how an argument is sent: a `SEND_VAR_EX`, a
+    /// `SEND_VAR_NO_REF_EX` or a `SEND_FUNC_ARG` to a parameter taken by
+    /// value is a `SEND_VAR`, whose variable it leaves as it was
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:2373-2382`, `:5324-5378`); a
+    /// variable's `SEND_VAR_EX` or `SEND_FUNC_ARG` to one taken by
+    /// reference is a `SEND_REF`, as `zend_jit_send_var` hands it to
+    /// `zend_jit_send_ref` (`Z/ext/opcache/jit/zend_jit_ir.c:9662-9669`);
+    /// and a `FETCH_DIM_FUNC_ARG` after a `CHECK_FUNC_ARG`
     /// that found its argument sent by value is a `FETCH_DIM_R`, as php's
     /// code generator falls through to it (`:5822-5829`, the guards
     /// `:2001-2010`). A `CHECK_FUNC_ARG` records what it found on the call
-    /// (`:2199-2215`). Every other opline is itself.
+    /// (`:2199-2215`). Every other opline is itself. A by-reference
+    /// parameter, a by-value one, what a call returned by value and by
+    /// reference, and a variable undefined at its send, each to a function
+    /// called by its name:
+    /// ```php
+    /// if (true) { function inc(&$x) { $x++; } function both(&$a, $b) { $a += $b; } function val($x) { $x++; return $x; } function &ref() { static $v = 1; $v++; return $v; } function arr($a) { return count($a); } }
+    /// function loop($n) { $s = 0; $u = 0; $l = [1, 2]; for ($i = 0; $i < $n; $i++) { inc($s); both($s, $i); $v = val($i); $u += val(val($v)) + val(ref()) + arr($l) + val(arr(array_merge($l, [$i]))); } return [$s, $u]; }
+    /// echo json_encode(loop(30)), "\n";
+    /// function undef($a) { return $a === null ? 1 : 2; }
+    /// function warned($n) { $s = 0; for ($i = 0; $i < $n; $i++) { if ($i == 25) { $s += undef($u); } else { $v = $i; $s += undef($v); } unset($v); } return $s; }
+    /// echo warned(30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [465,1230]
+    ///
+    /// Warning: Undefined variable $u in %SCRATCH%/witness.php on line 6
+    /// 59
+    /// ```
+    ///
+    /// ```php
+    /// if (true) { function inc(&$x) { $x++; } function both(&$a, $b) { $a += $b; } function val($x) { $x++; return $x; } function &ref() { static $v = 1; $v++; return $v; } function arr($a) { return count($a); } }
+    /// function loop($n) { $s = 0; $u = 0; $l = [1, 2]; for ($i = 0; $i < $n; $i++) { inc($s); both($s, $i); $v = val($i); $u += val(val($v)) + val(ref()) + arr($l) + val(arr(array_merge($l, [$i]))); } return [$s, $u]; }
+    /// echo json_encode(loop(30)), "\n";
+    /// function undef($a) { return $a === null ? 1 : 2; }
+    /// function warned($n) { $s = 0; for ($i = 0; $i < $n; $i++) { if ($i == 25) { $s += undef($u); } else { $v = $i; $s += undef($v); } unset($v); } return $s; }
+    /// echo warned(30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [465,1230]
+    ///
+    /// Warning: Undefined variable $u in %SCRATCH%/witness.php on line 6
+    /// 59
+    /// ```
     fn as_compiled(&mut self, mut op: Opline) -> Opline {
         let numbered = op.op2_type == OperandKind::Unused;
         match op.opcode {
-            Opcode::SendVarEx | Opcode::SendFuncArg
-                if numbered
-                    && (op.opcode == Opcode::SendFuncArg || op.op2 <= MAX_ARG_FLAG_NUM)
-                    && self.sends_by_value(op.op2) == Some(true) =>
+            Opcode::SendVarEx | Opcode::SendVarNoRefEx | Opcode::SendFuncArg
+                if numbered && (op.opcode == Opcode::SendFuncArg || op.op2 <= MAX_ARG_FLAG_NUM) =>
             {
-                op.opcode = Opcode::SendVar;
+                match self.sends_by_value(op.op2) {
+                    Some(true) => op.opcode = Opcode::SendVar,
+                    Some(false)
+                        if op.opcode != Opcode::SendVarNoRefEx
+                            && op.op1_type == OperandKind::Cv =>
+                    {
+                        op.opcode = Opcode::SendRef;
+                    }
+                    _ => {}
+                }
             }
             Opcode::CheckFuncArg => {
                 let by_value = numbered
@@ -1691,6 +1893,7 @@ impl<'a> Builder<'a> {
     /// whose callee the trace recorded where php's needs no guard, an
     /// `INIT_FCALL` of a user function of the engine's arena or a call of
     /// the frame's own op array, php's recursive call
+    /// ([`Builder::named_at`] the rest of the calls by name)
     /// (`zend_jit_init_fcall`, `Z/ext/opcache/jit/zend_jit_ir.c:8790-8906`),
     /// which the view took as a plain call; a `SEND_VAL_EX` to a callee the
     /// trace recorded that takes the argument by value, decided as php's
@@ -1797,12 +2000,13 @@ impl<'a> Builder<'a> {
         let callee = call.callee.user()?;
         let params = self.view.parameters(callee)?;
         let code = self.view.op_array(callee)?;
+        let passed = call.passed? as usize;
         let mut checks = ArgChecks::default();
         for (at, param) in params.iter().enumerate() {
             if param.variadic {
                 return None;
             }
-            let Some(ty) = param.ty.as_ref().filter(|_| at < call.passed as usize) else {
+            let Some(ty) = param.ty.as_ref().filter(|_| at < passed) else {
                 continue;
             };
             let held = held_as_is(ty)?;
@@ -1852,13 +2056,14 @@ impl<'a> Builder<'a> {
     /// float(445)
     /// ```
     fn defaults(&self, call: &Call) -> Option<Defaults> {
+        let passed = call.passed? as usize;
         let Some(callee) = call.callee.user() else {
             return Some(Defaults::default());
         };
         let params = self.view.parameters(callee)?;
         let code = self.view.op_array(callee)?;
         let mut defaults = Defaults::default();
-        for at in (call.passed as usize)..params.len() {
+        for at in passed..params.len() {
             let recv = code
                 .oplines
                 .get(at)
@@ -1873,8 +2078,38 @@ impl<'a> Builder<'a> {
         Some(defaults)
     }
 
-    /// What a send wrote into the call under way, where it sends a value.
+    /// What a send wrote into the call under way, where it sends a value,
+    /// and what moves its count, so its `DO_*CALL` is its handler's:
+    /// ```php
+    /// function f($a = 1, $b = 2, $c = 3) { return $a * 100 + $b * 10 + $c; }
+    /// if (true) { function g($a = 1, $b = 2, $c = 3) { return $a * 100 + $b * 10 + $c; } }
+    /// function loop($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += f(b: $i) + f(c: 1, a: 2) + g(b: $i) + g(1, c: $i) + g(...[1, 2]) + f(...[3]); } return $s; }
+    /// echo loop(30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 38925
+    /// ```
+    ///
+    /// ```php
+    /// function f($a = 1, $b = 2, $c = 3) { return $a * 100 + $b * 10 + $c; }
+    /// if (true) { function g($a = 1, $b = 2, $c = 3) { return $a * 100 + $b * 10 + $c; } }
+    /// function loop($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += f(b: $i) + f(c: 1, a: 2) + g(b: $i) + g(1, c: $i) + g(...[1, 2]) + f(...[3]); } return $s; }
+    /// echo loop(30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 38925
+    /// ```
     fn record_send(&mut self, frame: Frame, op: &Opline, op1: Operand) {
+        // php takes the count as unknown past these
+        // (`Z/ext/opcache/jit/zend_jit_ir.c:10050-10054`); a send by name
+        // comes before the `CHECK_UNDEF_ARGS` the compiler leaves after it.
+        if matches!(
+            op.opcode,
+            Opcode::SendUnpack | Opcode::SendArray | Opcode::CheckUndefArgs
+        ) && let Some(call) = self.calls.last_mut()
+        {
+            call.passed = None;
+        }
         let by_value = matches!(
             op.opcode,
             Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx
@@ -1923,6 +2158,9 @@ impl<'a> Builder<'a> {
             .collect();
         let frame = self.frame(func, Place::Callee(caller), self.call_at, None)?;
         self.stack.push(frame);
+        self.meta[usize::from(frame.0)].closed = call
+            .as_ref()
+            .is_some_and(|call| call.held == Held::ByClosure);
         let meta = self.meta(frame);
         for param in params(meta.code, meta.parameters) {
             let sent = (call.as_ref())
@@ -2722,7 +2960,12 @@ impl<'a> Builder<'a> {
             _ => false,
         };
         let code = self.meta(frame).code;
-        let sites = guard_sites(op, data_line, samples, (types, referenced), code);
+        let mut sites = guard_sites(op, data_line, samples, (types, referenced), code);
+        // php's `ADD_OP2_TRACE_GUARD` on a closure's call alone
+        // (`Z/ext/opcache/jit/zend_jit_trace.c:2257-2261`).
+        if op.opcode == Opcode::InitDynamicCall && self.of_closure(samples[1]).is_some() {
+            sites.push((Site::Op2, Hold::Recorded));
+        }
         for (site, hold) in checked_order(op.opcode)
             .iter()
             .filter_map(|site| sites.iter().find(|(held, _)| held == site))
@@ -3465,6 +3708,230 @@ impl<'a> Builder<'a> {
             class,
             slot,
         })
+    }
+
+    /// The call a function's `INIT_FCALL_BY_NAME` or
+    /// `INIT_NS_FCALL_BY_NAME` pushes in place, as php's
+    /// `zend_jit_init_fcall` pushes it (`Z/ext/opcache/jit/zend_jit_ir.c:8809-8937`):
+    /// under the guard on the callee the opline's runtime-cache slot holds,
+    /// the function the recording took the call of ([`HeldBy::Slot`]). The
+    /// frame's own op array is php's recursive call, which [`Builder::in_place`]
+    /// pushes with no guard. None for a native's and a request's own
+    /// function's, which their `push_call` kernel or handler serves. A
+    /// name in a namespace answers what the slot holds, the global function
+    /// past the `eval` that declares its namespace's own, as php's does,
+    /// and a name nothing declares yet is the handler's `Error`:
+    /// ```php
+    /// namespace N {
+    ///     function loop($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += add($i, 1); if ($i == 20 && !function_exists('N\\add')) { eval('namespace N; function add($a, $b) { return -1; }'); } } return $s; }
+    ///     function late($n) { $s = 0; for ($i = 0; $i < $n; $i++) { try { $s += later($i); } catch (\Error $e) { echo $e->getMessage(), "\n"; if ($i == 2) { eval('namespace N; function later($x) { return $x; }'); } } } return $s; }
+    /// }
+    /// namespace {
+    ///     if (true) { function add($a, $b) { return $a + $b; } }
+    ///     echo \N\loop(40), " ", \N\loop(40), " ", \N\late(40), "\n";
+    /// }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 820 820 Call to undefined function N\later()
+    /// Call to undefined function N\later()
+    /// Call to undefined function N\later()
+    /// 777
+    /// ```
+    ///
+    /// ```php
+    /// namespace N {
+    ///     function loop($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += add($i, 1); if ($i == 20 && !function_exists('N\\add')) { eval('namespace N; function add($a, $b) { return -1; }'); } } return $s; }
+    ///     function late($n) { $s = 0; for ($i = 0; $i < $n; $i++) { try { $s += later($i); } catch (\Error $e) { echo $e->getMessage(), "\n"; if ($i == 2) { eval('namespace N; function later($x) { return $x; }'); } } } return $s; }
+    /// }
+    /// namespace {
+    ///     if (true) { function add($a, $b) { return $a + $b; } }
+    ///     echo \N\loop(40), " ", \N\loop(40), " ", \N\late(40), "\n";
+    /// }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 820 820 Call to undefined function N\later()
+    /// Call to undefined function N\later()
+    /// Call to undefined function N\later()
+    /// 777
+    /// ```
+    fn named_at(&self, func: FuncRef, op: &Opline, next: Option<&Event>) -> Option<PushAt> {
+        let Some(Event::InitCall {
+            callee: Callee::User(callee),
+            began: Began::Here,
+        }) = next
+        else {
+            return None;
+        };
+        if *callee == func {
+            return None;
+        }
+        let plain = (self.view.calls_of(*callee, op.extended_value))
+            .find(|plain| plain.scope().is_none())?
+            .clone();
+        Some(PushAt {
+            plain,
+            held: HeldBy::Slot(self.view.named_slot(func, op)?),
+        })
+    }
+
+    /// The class of a sample that holds a `Closure` as it is, php's
+    /// `orig_op2_type == IS_OBJECT && op2_ce == zend_ce_closure`.
+    fn of_closure(&self, sample: Option<Sample>) -> Option<ClassId> {
+        let class = sample.filter(|sample| !sample.reference)?.class?;
+        (self.view.engine_class(b"closure") == Some(class)).then_some(class)
+    }
+
+    /// The call an `INIT_DYNAMIC_CALL` of a `Closure` makes, as php's
+    /// `zend_jit_init_closure_call` compiles it (`Z/ext/opcache/jit/zend_jit_ir.c:9393-9490`):
+    /// held to the function recorded, php's compare of the op array's
+    /// `opcodes` whose exit is `ZEND_JIT_EXIT_CLOSURE_CALL`, and pushed,
+    /// by the `push_call` kernel, since what it reads lies behind the
+    /// object's native slot and php calls
+    /// `zend_jit_init_func_run_time_cache_helper` there too. Its sends,
+    /// its activation and its leave are compiled in place. A closure over
+    /// a native or a function of the request's own stays its handler's.
+    /// Its exit numbers are php's, the guard on what is called and the
+    /// stack check at the opline, nothing at the call:
+    /// ```php
+    /// function loop($n) { $s = 0; $y = 3; $c = function ($a) use ($y) { return $a + $y; }; for ($i = 0; $i < $n; $i++) { $s += $c($i); if ($i > 180) { $s++; } } return $s; }
+    /// echo loop(300), "\n";
+    /// ```
+    /// ```expect regime=jit-inline process capture
+    /// 45869
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) loop() %SCRATCH%/witness.php:2
+    /// ---- TRACE 1 stop (loop)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 9 loop() %SCRATCH%/witness.php:2
+    /// ---- TRACE 2 start (side trace 1/9) loop() %SCRATCH%/witness.php:2
+    /// ---- TRACE 2 stop (link to 1)
+    /// ---- TRACE 2 compiled
+    ///
+    ///      TRACE 1 exit 3 loop() %SCRATCH%/witness.php:2
+    /// ---- TRACE 3 start (side trace 1/3) loop() %SCRATCH%/witness.php:2
+    /// ---- TRACE 3 stop (return)
+    /// ---- TRACE 3 compiled
+    /// ```
+    ///
+    /// A closure's receiver, its called scope, what it binds and declares,
+    /// another that takes the guard's exit, one with a cache of its own in
+    /// another scope, one over a method, whose frame gives it up as it
+    /// leaves, and any other callee at the same opline:
+    /// ```php
+    /// class A { private $v = 1; function get() { return function ($x) { return $this->v + $x; }; } function st() { return static fn($x) => $x + strlen(static::class); } function inc($x) { $this->v++; return $x; } }
+    /// class B extends A {}
+    /// class C { private $v = 100; }
+    /// function run($c, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $c($i); } return $s; }
+    /// $d = function ($x, $y = 2) { return $x * $y; };
+    /// $g = Closure::bind(function ($x) { return $this->v * $x; }, new C, C::class);
+    /// $o = new B;
+    /// echo run($o->get(), 40), " ", run($o->st(), 40), " ", run($d, 40), " ", run($g, 40), " ", run($o->inc(...), 40), " ", run('abs', 40), " ", run($o->get(), 40), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 820 820 1560 78000 780 780 2420
+    /// ```
+    ///
+    /// ```php
+    /// class A { private $v = 1; function get() { return function ($x) { return $this->v + $x; }; } function st() { return static fn($x) => $x + strlen(static::class); } function inc($x) { $this->v++; return $x; } }
+    /// class B extends A {}
+    /// class C { private $v = 100; }
+    /// function run($c, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $c($i); } return $s; }
+    /// $d = function ($x, $y = 2) { return $x * $y; };
+    /// $g = Closure::bind(function ($x) { return $this->v * $x; }, new C, C::class);
+    /// $o = new B;
+    /// echo run($o->get(), 40), " ", run($o->st(), 40), " ", run($d, 40), " ", run($g, 40), " ", run($o->inc(...), 40), " ", run('abs', 40), " ", run($o->get(), 40), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 820 820 1560 78000 780 780 2420
+    /// ```
+    fn closure_at(
+        &self,
+        op: &Opline,
+        (op2, sample): (Operand, Option<Sample>),
+        seen: Seen,
+        next: Option<&Event>,
+    ) -> Option<PushAt> {
+        let Some(Event::InitCall {
+            callee: Callee::User(callee),
+            began: Began::Here,
+        }) = next
+        else {
+            return None;
+        };
+        let class = self.of_closure(sample)?;
+        let Operand::Value(value) = op2 else {
+            return None;
+        };
+        if seen.types[1] != Types::OBJECT || seen.read[1] != Read::InPlace {
+            return None;
+        }
+        Some(PushAt {
+            plain: (self.view.closure_call(*callee, op.extended_value))?.clone(),
+            held: HeldBy::Closure(Object::Value(value), class),
+        })
+    }
+
+    /// php's guard on the class of what a closure's call reads, whose
+    /// exit is `ZEND_JIT_EXIT_TO_VM`, past what its analysis or a guard
+    /// before it knows (`Z/ext/opcache/jit/zend_jit_ir.c:9407-9428`). A
+    /// parameter is held as php holds it; one its type names `Closure` and
+    /// a temporary of `DECLARE_LAMBDA_FUNCTION` are not. An object that is
+    /// no closure leaves there, and a destructor the closure holds runs
+    /// as its call is left:
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// class I { function __invoke($x) { return $x + 9; } }
+    /// function run($c, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $c($i); } return $s; }
+    /// function typed(Closure $c, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $c($i); } return $s; }
+    /// function tmp($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += (function ($x) { return $x * 2; })($i); } return $s; }
+    /// function held($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $o = new D; $s += (function ($x) use ($o) { return $x; })($i); unset($o); } return $s; }
+    /// $f = function ($x) { return $x + 1; };
+    /// echo run($f, 40), " ", run(new I, 40), " ", run($f, 40), " ", typed($f, 40), " ", tmp(40), " ", held(30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 820 1140 820 820 1560 dddddddddddddddddddddddddddddd435
+    /// ```
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// class I { function __invoke($x) { return $x + 9; } }
+    /// function run($c, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $c($i); } return $s; }
+    /// function typed(Closure $c, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $c($i); } return $s; }
+    /// function tmp($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += (function ($x) { return $x * 2; })($i); } return $s; }
+    /// function held($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $o = new D; $s += (function ($x) use ($o) { return $x; })($i); unset($o); } return $s; }
+    /// $f = function ($x) { return $x + 1; };
+    /// echo run($f, 40), " ", run(new I, 40), " ", run($f, 40), " ", typed($f, 40), " ", tmp(40), " ", held(30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 820 1140 820 820 1560 dddddddddddddddddddddddddddddd435
+    /// ```
+    fn closure_guard(
+        &mut self,
+        idx: OpId,
+        (frame, func, at): (Frame, FuncRef, OplineIdx),
+        op: &Opline,
+        (object, class): (Object, ClassId),
+    ) {
+        let known = (self.analysed.reaching(func, at.0, op.op2))
+            .and_then(|info| info.class)
+            .is_some_and(|of| of.class == class && !of.instanceof);
+        if known || self.classed.get(&object) == Some(&class) {
+            self.classed.insert(object, class);
+            return;
+        }
+        self.classed.insert(object, class);
+        self.guards.push(Placed {
+            at: GuardAt::Before(idx),
+            check: Check::Class { object, class },
+            exit: Draft {
+                grows: Grows::Never,
+                ..draft(Point::Before(idx), frame, At::Opline(at))
+            },
+        });
     }
 
     /// The call a method's `INIT_METHOD_CALL` pushes in place, as php's

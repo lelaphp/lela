@@ -12,11 +12,14 @@
 use std::ptr::NonNull;
 
 use php_heap::{FrameRef, ROOM_BYTES, Zval};
-use php_unit::{CacheSlot, Opcode, OplineIdx};
+use php_unit::decl::Bare;
+use php_unit::{CacheSlot, ConstIdx, OpArray, Opcode, Opline, OplineIdx};
 
 use super::{FuncRef, Held};
+use crate::api::call::Function;
 use crate::api::request::Request;
 use crate::api::values::Value;
+use crate::classes::{ClosureCache, ClosureObject};
 use crate::exec;
 
 /// The room of the frame standing at `frame`, php's `execute_data`: the
@@ -103,21 +106,59 @@ pub fn stand(req: &mut Request, frame: FrameRef, at: OplineIdx) {
 /// where a pass primed it with a user function: what each pushes with no
 /// lookup (`ZEND_INIT_FCALL_SPEC_CONST`'s `CACHED_PTR`), so compiled code
 /// that inlined a call to one callee asks before the engine pushes one.
-/// None for a slot not primed, a native and any other opline. `held` is
-/// the op array `frame` serves, as compiled code holds it.
+/// A slot not primed answers the function the `INIT_*` would find, as
+/// php's trace calls `zend_jit_find_func_helper` cold before it holds
+/// what it found to the function it recorded (`Z/ext/opcache/jit/zend_jit_ir.c:8889-8915`),
+/// so the first pass of a request does not leave. An `INIT_DYNAMIC_CALL`
+/// answers the function of the `Closure` it reads, php's compare of
+/// `func.op_array.opcodes`, compiled code reading no payload
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:9428-9450`). None for a name nothing
+/// declares, a native, a closure with a cache of its own, whose scope is
+/// not the one compiled, and any other opline. `held` is the op array
+/// `frame` serves, as compiled code holds it.
 #[must_use]
-pub fn primed(req: &Request, frame: FrameRef, held: Held<'_>, at: OplineIdx) -> Option<FuncRef> {
+pub fn primed(
+    req: &mut Request,
+    frame: FrameRef,
+    held: Held<'_>,
+    at: OplineIdx,
+) -> Option<FuncRef> {
     let op = exec::opline_at(held.code(), at.0)?;
-    let init = matches!(
-        op.opcode,
-        Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName
-    );
-    let exec::Cached::Call(call) = req.cached(frame, CacheSlot(op.out)) else {
-        return None;
+    let function = match op.opcode {
+        Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
+            match req.cached(frame, CacheSlot(op.out)) {
+                exec::Cached::Call(call) => call.function,
+                exec::Cached::Unprimed => found(req, held.code(), op)?,
+                _ => return None,
+            }
+        }
+        Opcode::InitDynamicCall => {
+            let callee = exec::operand(req, frame, held.code(), op.op2_type, op.op2);
+            let object = callee.deref().as_object()?;
+            let closure = object.native::<ClosureObject>(req)?;
+            (closure.cache == ClosureCache::Function).then_some(closure.info.function)?
+        }
+        _ => return None,
     };
-    let user = req.user_function(call.function).filter(|_| init)?;
+    let user = req.user_function(function)?;
     let body = exec::body_of(&user.unit, user.body)?;
     Some(FuncRef::at(body.runtime_cache))
+}
+
+/// The function the name an `INIT_*` calls answers, by the constants its
+/// handler looks up: the name itself, lowered, past the one written
+/// (`INIT_FCALL_BY_NAME`'s `zv + 1`), and the unqualified name after it
+/// for one in a namespace.
+fn found(req: &Request, code: &OpArray, op: &Opline) -> Option<Function> {
+    let names: &[u32] = match op.opcode {
+        Opcode::InitFcall => &[0],
+        Opcode::InitFcallByName => &[1],
+        _ => &[1, 2],
+    };
+    names.iter().find_map(|&past| {
+        let name = exec::constant_str(code, ConstIdx(op.op2.saturating_add(past)))?;
+        req.function_named(Bare::resolved(name))
+    })
 }
 
 /// The serving's entry frame `frame` returned `zval`, which compiled code
