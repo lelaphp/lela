@@ -1336,6 +1336,23 @@ pub(crate) enum Admitted {
 /// int(7)
 /// string(1) "5"
 /// ```
+///
+/// A handler that throws on the deprecation of a float the type's long
+/// loses leaves the property as it stood.
+///
+/// ```php
+/// set_error_handler(function ($no, $msg) { throw new Exception("t"); });
+/// class O { public int $t = 5; }
+/// $o = new O;
+/// try { $o->t = 6.5; } catch (Exception $e) { echo "caught\n"; }
+/// try { $o->t += 1.5; } catch (Exception $e) { echo "caught\n"; }
+/// var_dump($o->t);
+/// ```
+/// ```expect
+/// caught
+/// caught
+/// int(5)
+/// ```
 pub(crate) fn property_type_admits(
     req: &mut Request,
     held: &Value,
@@ -1346,9 +1363,12 @@ pub(crate) fn property_type_admits(
     Ok(match type_assignable(req, held, ty, declaring, strict) {
         Assignable::Yes => Admitted::As,
         Assignable::Coerce => {
+            // `zend_parse_arg_long_weak` fails on what a handler threw
+            // from the conversion's deprecation: the long is no write.
+            let standing = req.is_pending();
             match crate::api::coerce::scalar_type_hint(req, held, ty.mask(), strict)? {
-                Some(coerced) => Admitted::Converted(coerced),
-                None => Admitted::Refused,
+                Some(coerced) if standing || !req.is_pending() => Admitted::Converted(coerced),
+                _ => Admitted::Refused,
             }
         }
         Assignable::No => Admitted::Refused,
