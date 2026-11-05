@@ -5045,6 +5045,30 @@ fn collect_variadics(req: &mut Request, frame: FrameRef, op: &Opline) -> Result<
 /// string(21) "Undefined variable $u"
 /// NULL
 /// ```
+///
+/// A coercion that throws is the `TypeError`, what it threw its
+/// `previous`, where an argument's would leave with what it threw:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// class S { function __toString(): string { throw new LogicException("ts"); } }
+/// function i(): int { return "1.5"; }
+/// function d(): int { return 1.5; }
+/// function s(): string { return new S; }
+/// function a(int $x) {}
+/// foreach (['i', 'd', 's', fn () => a("1.5")] as $f) {
+///     try { var_dump($f()); } catch (Throwable $e) { for (; $e; $e = $e->getPrevious()) { echo $e::class, ": ", $e->getMessage(), "\n"; } }
+/// }
+/// ```
+/// ```expect
+/// TypeError: i(): Return value must be of type int, string returned
+/// Exception: Implicit conversion from float-string "1.5" to int loses precision
+/// TypeError: d(): Return value must be of type int, float returned
+/// Exception: Implicit conversion from float 1.5 to int loses precision
+/// TypeError: s(): Return value must be of type string, S returned
+/// LogicException: ts
+/// Exception: Implicit conversion from float-string "1.5" to int loses precision
+/// ```
 pub(crate) fn verify_return_type<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -5157,9 +5181,20 @@ fn return_mask_missed(
     }
     let strict = req.frame_strict_types(frame);
     let mask = code.return_mask;
+    // `zend_verify_weak_scalar_type_hint` answers false where a coercion
+    // left a throwable pending, a handler's at its deprecation or a
+    // `__toString`'s, and `zend_verify_return_error` makes its `TypeError`
+    // over it: an argument's bails there, a return's does not.
     let coerced = match crate::api::coerce::scalar_type_hint(req, &returned, mask, strict) {
+        Ok(Some(made)) if req.is_pending() => {
+            req.release(made);
+            None
+        }
         Ok(coerced) => coerced,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            None
+        }
     };
     let Some(coerced) = coerced else {
         let thrown = return_type_error(req, frame, Some(&returned))?;
