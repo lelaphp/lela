@@ -1566,10 +1566,7 @@ impl Request {
             (Frameless::One(entry), &[a]) => entry(self, &[Value::of_zval(a)]),
             (Frameless::Two(entry), &[a, b]) => entry(self, &[a, b].map(Value::of_zval)),
             (Frameless::Three(entry), &[a, b, c]) => entry(self, &[a, b, c].map(Value::of_zval)),
-            _ => Err(crate::api::raising::fatal(
-                self,
-                "InternalError: a frameless call of another arity than its entry's",
-            )),
+            _ => Err(self.frameless_of_another_arity()),
         };
         #[cfg(debug_assertions)]
         if let Some(outer) = outer {
@@ -1585,6 +1582,17 @@ impl Request {
             return self.frameless_kept(served);
         }
         served.map(crate::api::values::Owner::hand_on)
+    }
+
+    /// What a frameless call of another arity than its entry's raises,
+    /// which no opline the compiler wrote is.
+    #[cold]
+    #[inline(never)]
+    fn frameless_of_another_arity(&mut self) -> Thrown {
+        crate::api::raising::fatal(
+            self,
+            "InternalError: a frameless call of another arity than its entry's",
+        )
     }
 
     /// [`Request::serve_frameless`] past the entry where a stream kept a

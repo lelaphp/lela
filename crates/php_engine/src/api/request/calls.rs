@@ -1840,6 +1840,15 @@ impl Request {
     /// that made them returns.
     #[inline(always)] // the frameless handler's hot path, a length's test
     pub(super) fn release_coerced(&mut self, made: usize) {
+        if self.calls.coerced.len() > made {
+            self.give_up_coerced(made);
+        }
+    }
+
+    /// [`Request::release_coerced`] where a coercion kept something.
+    #[cold]
+    #[inline(never)]
+    fn give_up_coerced(&mut self, made: usize) {
         while self.calls.coerced.len() > made {
             if let Some(value) = self.calls.coerced.pop() {
                 self.release_nogc(value);

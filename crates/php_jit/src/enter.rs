@@ -51,7 +51,7 @@ use php_engine::tier::{
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
-use crate::lower::{self, OperandFields, OperandKinds, Stood, engine_offset};
+use crate::lower::{self, OperandKinds, Stood, engine_offset};
 use crate::table::{Exit, Trace};
 use crate::types::ExitId;
 
@@ -775,7 +775,7 @@ kernels! {
         Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
-        Frameless => frameless(place: u32, at: FramelessAt, kinds: OperandKinds, fields: OperandFields, a: u64, a_info: u32, b: u64, b_info: u32, c: u64, c_info: u32) -> Zval = tier::frameless_call;
+        Frameless => frameless(at: FramelessAt, operands: *const Zval, count: u32) -> Zval = tier::frameless_call;
         FreeThis => free_this() = tier::free_this;
         MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
         CallNative => call_native(call: u32) -> Zval = tier::call_native;
@@ -838,41 +838,26 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
     tier::dispatch_held(req, frame, on.at, held)
 }
 
-/// The `frameless` kernel: the native at `at` of the engine's
-/// frameless table, the `FRAMELESS_ICALL_*` at `on.at` of the frame at
-/// `place`, served over the three operand zvals compiled code read, each
-/// of the kind `kinds` names for it ([`OperandKinds`]), a temporary
-/// standing in the slot `fields` names for it ([`OperandFields`]), with
-/// no opline read ([`tier::frameless_call`]), as php's code calls the
-/// native's frameless handler; where the interpreter stands after it is
-/// compiled code's, and a throw is the request's pending throwable.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "php's frameless handler takes three operand zvals, each two words across the crossing"
-)]
+/// The `frameless` kernel: the native at `at` of the engine's frameless
+/// table served over the `count` zvals compiled code laid at `operands`
+/// ([`tier::frameless_call`]), as php's code calls the native's frameless
+/// handler. What stands around the call is compiled code's, as it is in
+/// php's (`Emit::frameless_call`): it reads the frame, frees the
+/// operands and tests the interrupt, so this kernel takes no frame and
+/// no operand's kind, and what the wrapper adds to the native is the
+/// boundary alone.
 fn frameless(
     req: &mut Request,
-    on: On<'_, '_>,
-    place: u32,
+    _: On<'_, '_>,
     at: FramelessAt,
-    kinds: OperandKinds,
-    fields: OperandFields,
-    a: u64,
-    a_info: u32,
-    b: u64,
-    b_info: u32,
-    c: u64,
-    c_info: u32,
+    operands: *const Zval,
+    count: u32,
 ) -> Result<Zval, Fatal> {
-    let frame = at_place(req, on.room, place);
-    let [a_kind, b_kind, c_kind] = operand_kinds(kinds)?;
-    let [a_field, b_field, c_field] = fields.fields();
-    let operands = [
-        (zval(a, a_info), a_kind, a_field),
-        (zval(b, b_info), b_kind, b_field),
-        (zval(c, c_info), c_kind, c_field),
-    ];
-    tier::frameless_call(req, frame, at, operands)
+    // SAFETY: `count` zvals stand at `operands`, in the room of the trace
+    // that called this wrapper, which is written again only after it
+    // returns, and at most three, as `Emit::frameless_call` lays them.
+    let operands = unsafe { std::slice::from_raw_parts(operands, count as usize) };
+    tier::frameless_call(req, at, operands)
 }
 
 /// The `call_native` kernel: the native the call at `call` on the stack
@@ -1219,19 +1204,6 @@ fn make_ref(req: &mut Request, on: On<'_, '_>, place: u64) -> Result<u64, Fatal>
         .as_indirect()
         .ok_or_else(|| internal("compiled code's SEND_REF of no place"))?;
     Ok(u64::from(tier::make_ref(req, place)))
-}
-
-/// The frame at `place` on the stack, which compiled code holds for the
-/// frame whose room it handed a kernel, so no frame is looked for by its
-/// room ([`standing`]); a debug build holds the two to one frame.
-fn at_place(req: &Request, room: Room, place: u32) -> FrameRef {
-    let frame = FrameRef(place);
-    debug_assert_eq!(
-        NonNull::new(room.0).and_then(|room| tier::at_room(req, room)),
-        Some(frame),
-        "compiled code's place of a frame is the place of the frame at its room"
-    );
-    frame
 }
 
 /// The frame whose room compiled code handed a kernel, stood at the

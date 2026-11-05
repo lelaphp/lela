@@ -113,9 +113,14 @@ pub(crate) fn engine_holding<T: Tier>(ini: &[(&str, &str)]) -> Engine {
             file_cache: None,
         })
         .build("holding");
+    engine_with::<T>(holding, ini)
+}
+
+/// [`engine`] with `extension` beside the tier's own.
+pub(crate) fn engine_with<T: Tier>(extension: Extension, ini: &[(&str, &str)]) -> Engine {
     let mut builder = Engine::builder()
         .tier::<T>()
-        .extensions([holding])
+        .extensions([extension])
         .ini("opcache.file_update_protection", "0");
     for (name, value) in ini {
         builder = builder.ini(name, value);

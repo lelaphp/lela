@@ -13484,7 +13484,7 @@ pub(super) fn thrown_on_call(req: &mut Request, thrown: &Thrown) -> Result<(), F
 /// pending and the interrupt check made with it pending, as php 8.5.12's
 /// `ZEND_VM_FCALL_INTERRUPT_CHECK` comes before the handler reads
 /// `EG(exception)`, in `DO_*CALL`'s handler ([`thrown_on_call`]) and the
-/// `FRAMELESS_ICALL_*` ones ([`frameless_served`]) alike. The memory
+/// `FRAMELESS_ICALL_*` ones ([`frameless_call`]) alike. The memory
 /// limit's is the `Err`: `zend_handle_delayed_oom` gives up what the
 /// native threw for the unwind exit, so no `catch` takes it (a DOM parse
 /// lexbor stopped at the limit throws its `DOMException` and the limit's
@@ -13498,7 +13498,7 @@ fn checked_after_throw(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> 
 
 /// [`checked_after_throw`]'s check, made with whatever throwable stands
 /// pending: the one a native threw, or one a warning's handler threw
-/// while a frameless native went on ([`frameless_served`]).
+/// while a frameless native went on ([`frameless_call`]).
 #[inline(always)] // both handlers' throw path
 fn checked_while_pending(req: &mut Request) -> Result<(), Fatal> {
     if req.diagnostics().bailing_out() {
@@ -13965,7 +13965,7 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// ```
 ///
 /// The interrupt check comes first, made with the handler's throwable
-/// pending ([`frameless_served`]), so a signal that lands after the last
+/// pending ([`frameless_call`]), so a signal that lands after the last
 /// check inside the native is dispatched before the `catch`: here each
 /// handler's signal lands as the dispatch that served it ends, `SIGHUP`
 /// after the check `zend_call_function` makes as the warning's handler
@@ -14058,7 +14058,7 @@ fn frameless_call<const N: usize>(
     // The interrupt read once, as php's handler reads `EG(vm_interrupt)`
     // once after the native, and its check out of line: made with a
     // handler's throwable pending before the value is written, as
-    // [`frameless_served`] makes it, or after the write where none is.
+    // [`checked_while_pending`] makes it, or after the write where none is.
     let raised = crate::interrupt::raised(req);
     if raised
         && req.is_pending()
@@ -14117,26 +14117,20 @@ fn frameless_read<const N: usize>(
 }
 
 /// The native at `at` of the engine's frameless table served over the
-/// operands `held` carries, as the `FRAMELESS_ICALL_*` handlers and the
-/// frameless call compiled code makes ([`crate::tier::frameless_call`])
-/// both serve it: its arity's entry called with no record, or the
-/// framed entry's full call where an observer watches it
-/// (`Z/Zend/zend_execute.c:1577-1597`), and then each operand given up,
-/// the ones `held` owns released and each temporary freed as `FREE_OP*`
-/// frees it, whether the native threw or not. What it returned, with the
-/// throwable a warning's handler threw left pending where the native
-/// went on past one, or none with the throwable it threw left pending;
-/// the handler's pending test and the tier's wrapper find either.
+/// operands `held` carries, as the `FRAMELESS_ICALL_*` handlers serve it:
+/// the native ([`frameless_native`]), and then each operand given up, the
+/// ones `held` owns released and each temporary freed as `FREE_OP*` frees
+/// it, whether the native threw or not.
 ///
 /// Where a throwable stands pending as the native leaves, thrown by it or
-/// by a handler, the interrupt check is made here with it pending
+/// by a handler, the interrupt check is made with it pending
 /// ([`checked_after_throw`], [`checked_while_pending`]), as each
 /// `FRAMELESS_ICALL_*` handler makes `ZEND_VM_FCALL_INTERRUPT_CHECK`
 /// before `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` and compiled code
 /// `jit_frameless_interrupt_check` before `zend_jit_check_exception`
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:17842`, made at `:17888`, `:17932`,
-/// `:18002` and `:18106`), so the handler and
-/// the tier's `frameless` kernel make it alike.
+/// `:18002` and `:18106`), so the handler and compiled code make it alike
+/// (`Emit::frameless_call`).
 ///
 /// The one frameless native php 8.5.12 lets raise the interrupt there is
 /// `implode`, deterministically: a signal or a timeout would have to land
@@ -14192,56 +14186,35 @@ fn frameless_read<const N: usize>(
 ///
 /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
 /// ```
-#[inline] // the handler's and the tier's `frameless` kernel's hot path, each its own copy
-pub(super) fn frameless_served(
-    req: &mut Request,
-    at: u32,
-    held: Operands<'_>,
-) -> Result<Option<Value>, Fatal> {
-    match frameless_entered(req, at, held)? {
-        // The native went on past a warning whose handler threw, as php's
-        // body writes `return_value` whatever `EG(exception)` holds: the
-        // check is made with that throwable pending, as for one the native
-        // threw, and the value is the caller's to write before it unwinds.
-        Ok(value) if crate::interrupt::raised(req) && req.is_pending() => {
-            match checked_while_pending(req) {
-                Ok(()) => Ok(Some(value)),
-                Err(fatal) => {
-                    req.release(value);
-                    Err(fatal)
-                }
-            }
-        }
-        Ok(value) => Ok(Some(value)),
-        Err(thrown) => checked_after_throw(req, &thrown).map(|()| None),
-    }
-}
-
-/// [`frameless_served`] up to the native's answer: the entry served, or
-/// the framed one where an observer watches, and each operand given up,
-/// what the handler's tail and the tier's read the interrupt after.
 #[inline(always)] // the handler's hot path, which it was before the tier shared it
 fn frameless_entered(
     req: &mut Request,
     at: u32,
     held: Operands<'_>,
 ) -> Result<Result<Value, Thrown>, Fatal> {
-    // The aside's answer taken apart here: a fatal frees the operands as
-    // the served path does, and is the only answer that skips the rest.
-    let served = match req.frameless_entry(at) {
-        Some((function, entry)) if !crate::observer::frameless_observed(req, function) => {
-            req.serve_frameless(function, entry, held.zvals)
-        }
-        found => match frameless_aside(req, at, found, held.zvals) {
-            Ok(served) => served,
-            Err(fatal) => {
-                free_operands(req, held);
-                return Err(fatal);
-            }
-        },
-    };
+    // A fatal frees the operands as the served path does, and is the only
+    // answer that skips the rest.
+    let served = frameless_native(req, at, held.zvals);
     free_operands(req, held);
-    Ok(served)
+    served
+}
+
+/// The native at `at` of the frameless table over `zvals`, the entry
+/// served or the framed one where an observer watches: php's
+/// `ZEND_FLF_HANDLER(opline)`, what the handler and the tier's kernel
+/// share, each freeing the operands after it as its code does.
+#[inline(always)] // the frameless handler's and the tier's kernel's hot path
+pub(super) fn frameless_native(
+    req: &mut Request,
+    at: u32,
+    zvals: &[Zval],
+) -> Result<Result<Value, Thrown>, Fatal> {
+    match req.frameless_entry(at) {
+        Some((function, entry)) if !crate::observer::observing(req) => {
+            Ok(req.serve_frameless(function, entry, zvals))
+        }
+        found => frameless_aside(req, at, found, zvals),
+    }
 }
 
 /// `FREE_OP*` once the native returned, whether it threw or not: an
@@ -14257,8 +14230,9 @@ fn free_operands(req: &mut Request, held: Operands<'_>) {
     }
 }
 
-/// [`frameless_entered`]'s entry where an observer watches the native,
-/// the framed entry's full call, or where `at` names no entry.
+/// [`frameless_native`]'s entry where an observer is declared, the entry
+/// itself where it declined the native and the framed entry's full call
+/// where it watches it, or where `at` names no entry.
 #[cold]
 #[inline(never)]
 fn frameless_aside(
@@ -14268,6 +14242,9 @@ fn frameless_aside(
     zvals: &[Zval],
 ) -> Result<Result<Value, Thrown>, Fatal> {
     match found {
+        Some((function, entry)) if !crate::observer::frameless_observed(req, function) => {
+            Ok(req.serve_frameless(function, entry, zvals))
+        }
         Some((function, _)) => req.serve_frameless_observed(function, zvals),
         None => Err(Fatal::error(format!(
             "InternalError: ZEND_FRAMELESS_ICALL_{} indexes frameless entry {at} and the engine's table has {} entries",
@@ -14278,8 +14255,7 @@ fn frameless_aside(
 }
 
 /// The operands a frameless call is served over, as its handler read
-/// them ([`exec::frameless_operand`]) or compiled code handed them
-/// ([`crate::tier::frameless_call`]): the frame it stands in, each
+/// them ([`exec::frameless_operand`]): the frame it stands in, each
 /// zval, the bits of `owned` the ones the caller holds an owner of, and
 /// each operand's kind and slot, a temporary's freed there after the
 /// call.

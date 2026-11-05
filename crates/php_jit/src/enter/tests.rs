@@ -742,6 +742,55 @@ pub(crate) mod entered {
         );
     }
 
+    /// What reached the boundary of `program` served by the compiled tier
+    /// under `force`, where each diagnostic raised while a trace runs
+    /// panics: inside the native or the frameless entry compiled code
+    /// called, whose wrapper is the one boundary between it and the
+    /// trace (`jit-design.md` §4.6, #4104). A diagnostic the interpreter
+    /// raises does not panic, so a program no trace serves answers what
+    /// it wrote.
+    fn compiled_boundary(program: &str) -> Result<String, String> {
+        let observer = ExtensionBuilder::default()
+            .error_observer(|req, _| {
+                assert!(tier::trace_num(req).raw() == 0, "the native panicked");
+            })
+            .build("panicking");
+        let ini = [("jit.mode", "force"), ("jit.compile", "inline")];
+        let engine = testing::engine_with::<testing::Lane>(observer, &ini);
+        catch_unwind(AssertUnwindSafe(|| {
+            stdout(&Scratch::new().serve(&engine, program))
+        }))
+        .map_err(|payload| {
+            payload
+                .downcast_ref::<&str>()
+                .map_or_else(|| "another payload".to_owned(), |s| (*s).to_owned())
+        })
+    }
+
+    /// A panic in a frameless entry, the wrapper that called it thinned
+    /// to the boundary (#4107): `class_exists(null)` deprecates its null
+    /// inside the entry, and the panic stops at the wrapper and is resumed
+    /// by `enter` past the code, one panic at the request's boundary.
+    #[test]
+    fn a_panic_in_a_frameless_entry_reaches_the_boundary_once() {
+        let program = r#"function f($n) { for ($i = 0; $i < $n; $i++) { echo class_exists(null) ? "y" : "n"; } } f(5);"#;
+        assert_eq!(
+            compiled_boundary(program),
+            Err("the native panicked".to_owned())
+        );
+    }
+
+    /// As for a native a trace calls: `trigger_error` raises inside it.
+    #[test]
+    fn a_panic_in_a_native_reaches_the_boundary_once() {
+        let program =
+            r#"function f($n) { for ($i = 0; $i < $n; $i++) { trigger_error("x"); } } f(5);"#;
+        assert_eq!(
+            compiled_boundary(program),
+            Err("the native panicked".to_owned())
+        );
+    }
+
     /// `f`, whose first opline echoes a variable never set, under the
     /// error handler `h`.
     const UNDEFINED_ECHO: &str = r#"function h() { echo "h"; return true; } set_error_handler('h');

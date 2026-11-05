@@ -836,6 +836,9 @@ struct Emit<'a> {
     /// Where a kernel that answers a word or a zval writes it, made where
     /// one is first called.
     answer: Option<StackSlot>,
+    /// The trace's room for a frameless call's operand zvals, laid once
+    /// ([`Emit::frameless_room`]).
+    frameless: Option<StackSlot>,
     /// Per frame of the trace, the room it runs in.
     rooms: Vec<Variable>,
     /// Per value the trace keeps in a register, its variable.
@@ -935,6 +938,7 @@ impl<'a> Emit<'a> {
             stood,
             stood_vars,
             answer: None,
+            frameless: None,
             rooms,
             regs: vec![None; ir.values.len()],
             calls: Vec::new(),
@@ -2203,9 +2207,7 @@ impl<'a> Emit<'a> {
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
             Kernel::Handle => &[I64, I64, I32, I32],
-            Kernel::Frameless => &[
-                I64, I64, I32, I32, I32, I32, I64, I64, I32, I64, I32, I64, I32, I64,
-            ],
+            Kernel::Frameless => &[I64, I64, I32, I32, I64, I32, I64],
             Kernel::Step | Kernel::CallNative | Kernel::GetConstant => &[I64, I64, I32, I32, I64],
             Kernel::FreeThis | Kernel::PopCall | Kernel::Interrupt | Kernel::NanToBool => {
                 &[I64, I64, I32]
@@ -2711,7 +2713,7 @@ impl<'a> Emit<'a> {
     ///
     /// A native's `DO_ICALL` is made in place ([`Emit::native_call`]), the
     /// native alone served through [`Kernel::CallNative`], and a frameless
-    /// call's operands are handed to [`Kernel::Frameless`]
+    /// call's operands are laid for [`Kernel::Frameless`]
     /// ([`Emit::frameless_call`]); neither kernel reads an opline. One that
     /// refuses its argument throws out of the loop:
     ///
@@ -4823,31 +4825,42 @@ impl<'a> Emit<'a> {
     /// 012345abab
     /// ```
     fn release(&mut self, line: &Line, word: Value, info: Value, dtor: Dtor) -> Result<(), Abort> {
+        let leave = line.unwind.map(Leave::Unwind);
+        self.release_through(line, [word, info], dtor, |emit, args| {
+            emit.call(Kernel::Release, args, leave)
+        })
+    }
+
+    /// [`Emit::release`] with what the code does at the release kernel
+    /// its caller's, `kernel`, which is handed the kernel's arguments.
+    fn release_through(
+        &mut self,
+        line: &Line,
+        [word, info]: [Value; 2],
+        dtor: Dtor,
+        kernel: impl FnOnce(&mut Emit<'a>, &[Value; 4]) -> Result<(), Abort>,
+    ) -> Result<(), Abort> {
         let counted = self.b.ins().band_imm_u(info, COUNTED);
         let [room, opline] = self.served(line)?;
         self.when(counted, |emit| {
             let count_at = imm(Zval::COUNT_AT);
             let count = emit.b.ins().load(I32, trusted(), word, count_at);
             let called = emit.kernel_releases(word, info, count, dtor);
-            let (kernel, inline, done) = (
+            let (cold, inline, done) = (
                 emit.b.create_block(),
                 emit.b.create_block(),
                 emit.b.create_block(),
             );
-            emit.b.set_cold_block(kernel);
-            emit.b.ins().brif(called, kernel, &[], inline, &[]);
+            emit.b.set_cold_block(cold);
+            emit.b.ins().brif(called, cold, &[], inline, &[]);
             emit.b.switch_to_block(inline);
             emit.b.seal_block(inline);
             let fewer = emit.b.ins().iadd_imm_s(count, -1);
             emit.b.ins().store(trusted(), fewer, word, count_at);
             emit.b.ins().jump(done, &[]);
-            emit.b.switch_to_block(kernel);
-            emit.b.seal_block(kernel);
-            emit.call(
-                Kernel::Release,
-                &[room, opline, word, info],
-                line.unwind.map(Leave::Unwind),
-            )?;
+            emit.b.switch_to_block(cold);
+            emit.b.seal_block(cold);
+            kernel(emit, &[room, opline, word, info])?;
             emit.b.ins().jump(done, &[]);
             emit.b.switch_to_block(done);
             emit.b.seal_block(done);
