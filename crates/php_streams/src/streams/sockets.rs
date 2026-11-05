@@ -1112,6 +1112,23 @@ const fn textless(step: XportStep) -> XportFailure {
     }
 }
 
+/// What a kind's connect or bind made: the socket, and the `errno` a
+/// connect left behind it, `EINPROGRESS` over one still under way, which
+/// a crypto layer that then fails answers with.
+pub(crate) struct Made {
+    sock: Sock,
+    error_code: i32,
+}
+
+impl From<Sock> for Made {
+    fn from(sock: Sock) -> Made {
+        Made {
+            sock,
+            error_code: 0,
+        }
+    }
+}
+
 /// `php_tcp_sockop_connect` (`Z/main/streams/xp_socket.c:747`) for
 /// `tcp` and `udp`, over `php_network_connect_socket_to_host`
 /// (`Z/main/network.c:818`): the `bindto` option read after the host,
@@ -1132,7 +1149,7 @@ fn connect_inet(
     asynchronous: bool,
     timeout: Option<Duration>,
     options: &SocketOptions,
-) -> Result<Sock, XportFailure> {
+) -> Result<Made, XportFailure> {
     let refused = |text| text_only(XportStep::Connect, text);
     let (host, port) = parse_ip_address(name).map_err(refused)?;
     // A `bindto` that does not parse is php's error text, which the first
@@ -1177,8 +1194,14 @@ fn connect_inet(
             asynchronous,
             left.map(|t| t.max(Duration::from_micros(1))),
         ) {
-            Ok(()) if udp => return Ok(Sock::Udp(UdpSocket::from(fd))),
-            Ok(()) => return Ok(Sock::Tcp(TcpStream::from(fd))),
+            Ok(error_code) => {
+                let sock = if udp {
+                    Sock::Udp(UdpSocket::from(fd))
+                } else {
+                    Sock::Tcp(TcpStream::from(fd))
+                };
+                return Ok(Made { sock, error_code });
+            }
             Err(error) => last = failure(XportStep::Connect, &error),
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -1306,7 +1329,7 @@ pub(crate) enum Found {
 
 pub(crate) trait Transports {
     fn transport_named(&self, protocol: &[u8]) -> Option<Found>;
-    fn make_sock(&mut self, label: &str, rest: &[u8], xport: Xport) -> Result<Sock, XportFailure>;
+    fn make_sock(&mut self, label: &str, rest: &[u8], xport: Xport) -> Result<Made, XportFailure>;
     fn socket_stream(&mut self, fd: OwnedFd) -> Result<Owner<Stream>, Thrown>;
     fn php_socket_stream(&mut self, fd: OwnedFd) -> Result<Owner<Stream>, Thrown>;
     fn xport_stream(
@@ -1344,7 +1367,7 @@ impl Transports for Request {
     /// The socket of a `transport`'s kind, by its label: a client
     /// connected or a server bound, `php_stream_xport_connect` and
     /// `php_stream_xport_bind` under the kind's ops.
-    fn make_sock(&mut self, label: &str, rest: &[u8], xport: Xport) -> Result<Sock, XportFailure> {
+    fn make_sock(&mut self, label: &str, rest: &[u8], xport: Xport) -> Result<Made, XportFailure> {
         match (label, xport) {
             (
                 "tcp_socket",
@@ -1365,33 +1388,33 @@ impl Transports for Request {
                 },
             ) => connect_inet(self, rest, true, asynchronous, timeout, &socket),
             ("tcp_socket", Xport::Server { listen, socket, .. }) => {
-                bind_inet(self, rest, false, listen, &socket)
+                bind_inet(self, rest, false, listen, &socket).map(Made::from)
             }
             ("udp_socket", Xport::Server { listen, socket, .. }) => {
-                bind_inet(self, rest, true, listen, &socket)
+                bind_inet(self, rest, true, listen, &socket).map(Made::from)
             }
             ("unix_socket", Xport::Client { .. }) => {
                 let path = unix_path(self, rest);
                 UnixStream::connect(path)
-                    .map(Sock::Unix)
+                    .map(|s| Sock::Unix(s).into())
                     .map_err(|e| failure(XportStep::Connect, &e))
             }
             ("unix_socket", Xport::Server { .. }) => {
                 let path = unix_path(self, rest);
                 UnixListener::bind(path)
-                    .map(Sock::UnixServer)
+                    .map(|s| Sock::UnixServer(s).into())
                     .map_err(|_| textless(XportStep::Bind))
             }
             ("udg_socket", Xport::Client { .. }) => {
                 let path = unix_path(self, rest);
                 UnixDatagram::unbound()
-                    .and_then(|s| s.connect(path).map(|()| Sock::Udg(s)))
+                    .and_then(|s| s.connect(path).map(|()| Sock::Udg(s).into()))
                     .map_err(|e| failure(XportStep::Connect, &e))
             }
             (_, _) => {
                 let path = unix_path(self, rest);
                 UnixDatagram::bind(path)
-                    .map(Sock::Udg)
+                    .map(|s| Sock::Udg(s).into())
                     .map_err(|_| textless(XportStep::Bind))
             }
         }
@@ -1552,10 +1575,10 @@ impl Transports for Request {
         // `php_stream_generic_socket_factory` makes the stream with
         // `sock->socket = -1`, and only a client asked to connect, or a
         // server, is handed a socket.
-        let sock = match xport {
-            Xport::Client { connect: false, .. } => None,
+        let (sock, error_code) = match xport {
+            Xport::Client { connect: false, .. } => (None, 0),
             xport => match self.make_sock(label, rest, xport) {
-                Ok(sock) => Some(sock),
+                Ok(Made { sock, error_code }) => (Some(sock), error_code),
                 Err(failed) => return Ok(Err(failed)),
             },
         };
@@ -1585,7 +1608,10 @@ impl Transports for Request {
                 .unwrap_or(Ok(()));
             if connected.is_err() {
                 stream.free(self);
-                return Ok(Err(textless(XportStep::Connect)));
+                return Ok(Err(XportFailure {
+                    code: error_code,
+                    ..textless(XportStep::Connect)
+                }));
             }
         }
         if let Some(key) = persistent {
