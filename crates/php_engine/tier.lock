@@ -222,6 +222,7 @@ tier::call_native
 tier::concat
 tier::dispatch_held
 tier::frameless_call
+tier::free_closure
 tier::free_cv
 tier::free_this
 tier::get_constant

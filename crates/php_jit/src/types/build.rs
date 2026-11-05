@@ -1014,6 +1014,7 @@ impl<'a> Builder<'a> {
                     owners: self.owners(frame),
                     value: returned(&op, code, t1),
                     receives: self.receives(frame),
+                    closure: record::closure(self.view, self.frames[usize::from(frame.0)].func),
                 },
                 Some(InPlace::Make(checks, defaults)) => Imm::Make {
                     returns: (op.out_type != OperandKind::Unused).then_some(op.out),

@@ -821,11 +821,18 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::get_constant`); an undefined one is a
     /// throwable pending, answered as one.
     GetConstant,
+    /// `free_closure(cx, frame, opline: u32)`: the closure of the closure's
+    /// frame a `RETURN` leaves in place, after its variables and its
+    /// receiver, where the owner the frame holds is the last
+    /// (`php_engine::tier::free_closure`), as `zend_jit_leave_func`'s
+    /// `OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)))` gives it up; a
+    /// destructor's throw is the status's.
+    FreeClosure,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 24] = [
+    pub(crate) const ALL: [Kernel; 25] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -850,6 +857,7 @@ impl Kernel {
         Kernel::NanToBool,
         Kernel::StrOffset,
         Kernel::GetConstant,
+        Kernel::FreeClosure,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

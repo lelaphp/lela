@@ -714,6 +714,7 @@ kernels! {
         Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
         Frameless => frameless(at: FramelessAt, operands: *const Zval, count: u32) -> Zval = tier::frameless_call;
         FreeThis => free_this() = tier::free_this;
+        FreeClosure => free_closure() = tier::free_closure;
         MakeRef => make_ref(place: u64) -> u64 = tier::make_ref;
         CallNative => call_native(call: u32) -> Zval = tier::call_native;
         PopCall => pop_call() = tier::pop_call;
@@ -921,6 +922,16 @@ fn free_cv(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Resu
 fn free_this(req: &mut Request, on: On<'_, '_>) -> Result<(), Fatal> {
     let frame = standing(req, on.room, on.at)?;
     tier::free_this(req, frame);
+    Ok(())
+}
+
+/// The `free_closure` kernel: the closure of the closure's frame a
+/// `RETURN` leaves in place, after its variables and its receiver, where
+/// its owner is the last, that frame off the chain first
+/// ([`tier::free_closure`]), a destructor's throw left pending.
+fn free_closure(req: &mut Request, on: On<'_, '_>) -> Result<(), Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    tier::free_closure(req, frame);
     Ok(())
 }
 

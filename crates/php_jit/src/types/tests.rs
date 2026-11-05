@@ -2504,6 +2504,7 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
             owners: super::Owners::Each(d),
             value: super::Returned::Scalar,
             receives: false,
+            closure: false,
         },
         "{rendered}"
     );

@@ -188,6 +188,23 @@ pub fn free_this(req: &mut Request, frame: FrameRef) {
     }
 }
 
+/// The closure whose call pushed `frame`, a closure's frame a `RETURN`
+/// compiled code leaves by in place gives up, after its variables and its
+/// receiver, where its owner is the last: `frame` off the chain a backtrace
+/// reads, as [`free_cv`] takes it, then
+/// `OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)))`, as `zend_jit_leave_func`
+/// gives it up (`Z/ext/opcache/jit/zend_jit_ir.c:11125-11133`). A
+/// destructor of what it bound may leave a throwable pending.
+pub fn free_closure(req: &mut Request, frame: FrameRef) {
+    let Some(header) = req.vm_mut().at_mut(frame) else {
+        return;
+    };
+    header.info.set_leaving(true);
+    if let Some(closure) = header.take_closure() {
+        req.release(closure.as_value());
+    }
+}
+
 /// `zend_nan_coerced_to_type_warning(_IS_BOOL)`: the warning of a NAN
 /// whose truth compiled code reads, in place of the one [`crate::ops::is_true`]
 /// raises for the interpreter, which an error handler may answer with a
