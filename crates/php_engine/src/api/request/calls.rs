@@ -1728,11 +1728,12 @@ impl Request {
         served.map(Owner::hand_on)
     }
 
-    /// [`Request::serve_entry`] past the entry where an observer ended
-    /// the call or a stream kept a throwable while it ran.
+    /// [`Request::serve_entry`] or [`Request::serve_frameless`] past the
+    /// entry where an observer ended the call or a stream kept a
+    /// throwable while it ran.
     #[cold]
     #[inline(never)]
-    fn served_aside(
+    pub(super) fn served_aside(
         &mut self,
         begun: Option<crate::observer::NativeCall>,
         served: Result<Owner<Value>, Thrown>,
