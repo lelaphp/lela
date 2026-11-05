@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use php_link::{Folded, Linked, NameMap, Obligation};
+use php_link::{Folded, FoldedHash, Linked, NameMap, Obligation};
 use php_unit::decl::{Bare, ClassDecl, Name, shown};
 use php_unit::{AutoGlobal, Level, PublishedUnit};
 
@@ -113,10 +113,15 @@ impl<T> Keyed<T> {
 
     /// The row filed under `key`, any case.
     pub(crate) fn find(&self, key: &[u8]) -> Option<&T> {
+        self.find_hashed(FoldedHash::of(key), key)
+    }
+
+    /// [`Keyed::find`] by the hash `key` was taken at.
+    pub(crate) fn find_hashed(&self, hash: FoldedHash, key: &[u8]) -> Option<&T> {
         let at = *self
             .preloaded_keys
-            .find(key)
-            .or_else(|| self.own_keys.find(key))?;
+            .find_hashed(hash, key)
+            .or_else(|| self.own_keys.find_hashed(hash, key))?;
         self.get(at)
     }
 
