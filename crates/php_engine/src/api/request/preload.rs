@@ -683,6 +683,7 @@ impl Request {
         // The classes found so far are numbered as the request's own,
         // which the preload's publication numbers again.
         self.ce_caches = php_heap::MapTable::new();
+        self.class_names = super::ClassNames::default();
         self.aliases.clear_own();
         self.own_classes.clear();
         self.class_natives.clear();
