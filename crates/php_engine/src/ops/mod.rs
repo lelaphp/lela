@@ -2934,19 +2934,41 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 }
 
 /// Both sides of `concat_function` as strings, the left first, each with
-/// an owner.
+/// an owner. Only a left side that is a string converts with no code reached,
+/// so the right one stands across the left's conversion otherwise, as
+/// php's is read through its place past it.
+///
+/// ```php
+/// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["v"] = "77"; });
+/// $a = [];
+/// $v = str_repeat("7", 2);
+/// var_dump($a . $v);
+/// ```
+/// ```expect
+/// [Array to string conversion]
+/// string(7) "Array77"
+/// ```
 fn concat_operands(
     req: &mut Request,
     left: &Value,
     right: &Value,
 ) -> Result<(PhpString, PhpString), Thrown> {
-    let a = concat_operand(req, left)?;
-    match concat_operand(req, right) {
+    let held = left
+        .deref()
+        .as_php_string()
+        .is_none()
+        .then(|| Owner::take(req, *right));
+    let a = concat_operand(req, left);
+    let pair = a.and_then(|a| match concat_operand(req, right) {
         Ok(b) => Ok((a, b)),
         Err(thrown) => {
             req.release(Value::string(a));
             Err(thrown)
         }
+    });
+    match held {
+        Some(held) => held_past(req, held, pair),
+        None => pair,
     }
 }
 
@@ -6177,6 +6199,22 @@ fn longs(
 /// Both operands as `convert` converts them, the left first, or
 /// `zend_binop_error`'s `TypeError` for the first that fails, naming
 /// php's types around the operator as written.
+///
+/// A handler the left side's conversion reaches may give the right side
+/// up, and the right side stands to be read past it:
+///
+/// ```php
+/// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["v"] = 77; });
+/// $v = str_repeat("7", 2);
+/// var_dump("1x" + $v);
+/// $v = str_repeat("7", 2);
+/// var_dump("1x" | $v);
+/// ```
+/// ```expect
+/// [A non-numeric value encountered]
+/// int(78)
+/// string(2) "7"
+/// ```
 fn operands<T>(
     req: &mut Request,
     operator: &str,
@@ -6185,6 +6223,25 @@ fn operands<T>(
     convert: fn(&mut Request, &Value) -> Result<Option<T>, Thrown>,
 ) -> Result<(T, T), Thrown> {
     let left = &left.deref();
+    // A long converts with no warning; anything else may reach a handler
+    // that gives up what the right side hangs from, and php reads that
+    // side through its place after it.
+    let held = left.as_int().is_none().then(|| Owner::take(req, *right));
+    let converted = operand_pair(req, operator, (left, right), convert);
+    match held {
+        Some(held) => held_past(req, held, converted),
+        None => converted,
+    }
+}
+
+/// [`operands`] with the right side standing: it is followed through a
+/// reference only here, past the left side's conversion.
+fn operand_pair<T>(
+    req: &mut Request,
+    operator: &str,
+    (left, right): (&Value, &Value),
+    convert: fn(&mut Request, &Value) -> Result<Option<T>, Thrown>,
+) -> Result<(T, T), Thrown> {
     let Some(a) = convert(req, left)? else {
         return binop_error(req, operator, left, right);
     };
@@ -6236,6 +6293,24 @@ fn binop_error<T>(
         zval_type_name(req, right)
     );
     Err(type_error(req, &message))
+}
+
+/// `held` given up past `done`, what `done` threw pending, so a
+/// destructor it serves chains it ([`Request::free_pending`]).
+pub(crate) fn held_past<T>(
+    req: &mut Request,
+    held: Owner<Value>,
+    done: Result<T, Thrown>,
+) -> Result<T, Thrown> {
+    match done {
+        Ok(done) => {
+            held.let_go(req);
+            Ok(done)
+        }
+        Err(thrown) => Err(req.free_pending(thrown, |req| {
+            held.let_go(req);
+        })),
+    }
 }
 
 /// `zendi_try_get_long`: the long php works in, or nothing for an array,

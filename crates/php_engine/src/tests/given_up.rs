@@ -175,3 +175,14 @@ fn a_write_goes_with_the_table_a_handler_gave_up() {
     );
     assert_eq!(stdout, "|1\nx0Array|1\n1\n");
 }
+
+#[test]
+fn a_right_operand_a_handler_gave_up_is_read_past_the_left() {
+    let stdout = served(
+        "<?php\n\
+         set_error_handler(function () { unset($GLOBALS['v']); return true; });\n\
+         $v = '7'; $v .= '7'; echo '1x' + $v, \"\\n\";\n\
+         $a = []; $v = '7'; $v .= '7'; echo $a . $v, \"\\n\";\n",
+    );
+    assert_eq!(stdout, "78\nArray77\n");
+}
