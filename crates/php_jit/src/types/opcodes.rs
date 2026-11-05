@@ -1690,6 +1690,13 @@ pub(super) fn begins_call(opcode: Opcode) -> bool {
     )
 }
 
+/// The oplines that end a call one of [`begins_call`] began, php's
+/// `zend_jit_dec_call_level`: those that make it and the
+/// `CALLABLE_CONVERT` that takes it and makes none.
+pub(super) fn ends_call(opcode: Opcode) -> bool {
+    is_call(opcode) || opcode == Opcode::CallableConvert
+}
+
 /// Whether php's tracing code generator has a case that compiles `opcode`
 /// inline where nothing about its operands breaks it to the handler
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:4436-6477`): the calls, the sends

@@ -19,9 +19,10 @@ use super::lattice::{self, Types};
 use super::opcodes::{
     Carried, Declared, Hold, ISEMPTY, MAX_ARG_FLAG_NUM, MAY_BE_RESOURCE, Site, Within, arith,
     assigned, begins_call, carried, check_sites, checked_order, compiled_inline, compound_in_place,
-    constant, constant_types, goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call,
-    keeps_temporaries, keyed, may_exit, needs_call_chain, packed_guard, param_types, params, reads,
-    reads_by_name, recv_exits, referenced, slot_of, within, written, written_through,
+    constant, constant_types, ends_call, goes_one_way, guard_sites, held_as_is, inline_may_leave,
+    is_call, keeps_temporaries, keyed, may_exit, needs_call_chain, packed_guard, param_types,
+    params, reads, reads_by_name, recv_exits, referenced, slot_of, within, written,
+    written_through,
 };
 use super::{
     Abort, ArgChecks, BodyEntry, Check, Constant, Def, Defaults, End, Entry, ExitId, ExitSpec,
@@ -1623,7 +1624,7 @@ impl<'a> Builder<'a> {
     /// function, or one `INIT_FCALL` named. `ahead`, the events after it,
     /// say which of the calls under way it is, and the `INIT_*` is found
     /// as `zend_jit_trace_find_init_fcall_op` finds it, walking back over
-    /// the calls begun and made since (`:1162-1198`). A recursive call's
+    /// the calls begun and ended since (`:1162-1198`). A recursive call's
     /// second argument, sent past the return of the first:
     /// ```php
     /// if (true) { function ack($m, $n) { if ($m == 0) { return $n + 1; } if ($n == 0) { return ack($m - 1, 1); } return ack($m - 1, ack($m, $n - 1)); } }
@@ -1642,6 +1643,37 @@ impl<'a> Builder<'a> {
     /// ```expect regime=jit-exit-fuzz process
     /// 48 4 31
     /// ```
+    ///
+    /// A first-class callable's `INIT_*` lies between a call's and its
+    /// send on a branch never taken; its `CALLABLE_CONVERT` ends it, so the
+    /// walk goes on to the `INIT_DYNAMIC_CALL` the send belongs to, whose
+    /// callee no name answers, and the by-reference argument stays one:
+    ///
+    /// ```php
+    /// function byval($a, $b, $c) { return $b . $c; }
+    /// function byref($a, $b, &$c) { $c = "changed"; return $b; }
+    /// function rec($n, $f) { if ($n == 0) { return "0"; } $v = "v$n"; $r = $f(($n > 100 ? strlen(...) : 0), rec($n - 1, $f), $v); return $r . "/" . $v; }
+    /// echo rec(6, 'byval'), "\n", rec(6, 'byval'), "\n", rec(6, 'byref'), "\n", rec(6, 'byval'), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// 0/changed/changed/changed/changed/changed/changed
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// ```
+    ///
+    /// ```php
+    /// function byval($a, $b, $c) { return $b . $c; }
+    /// function byref($a, $b, &$c) { $c = "changed"; return $b; }
+    /// function rec($n, $f) { if ($n == 0) { return "0"; } $v = "v$n"; $r = $f(($n > 100 ? strlen(...) : 0), rec($n - 1, $f), $v); return $r . "/" . $v; }
+    /// echo rec(6, 'byval'), "\n", rec(6, 'byval'), "\n", rec(6, 'byref'), "\n", rec(6, 'byval'), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// 0/changed/changed/changed/changed/changed/changed
+    /// 0v1/v1v2/v2v3/v3v4/v4v5/v5v6/v6
+    /// ```
     fn named_before(&self, frame: Frame, callee: Callee, ahead: &[Event]) -> bool {
         let mut under = (ahead.iter())
             .take_while(|event| matches!(event, Event::InitCall { .. }))
@@ -1652,7 +1684,7 @@ impl<'a> Builder<'a> {
         let code = self.meta(frame).code;
         let begun = code.oplines.get(..opline.0 as usize).into_iter().flatten();
         for op in begun.rev() {
-            if is_call(op.opcode) {
+            if ends_call(op.opcode) {
                 under += 1;
             } else if begins_call(op.opcode) {
                 if under > 0 {
