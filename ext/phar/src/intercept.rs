@@ -173,6 +173,25 @@ fn relative_name(
 /// `phar_find_in_include_path` finds for a path named from inside the
 /// archive being served, where it knows the directory it is served from;
 /// any other path left to the one it saved, `phar_save_resolve_path`.
+/// `stream_resolve_include_path` from inside an archive comes through
+/// here and through the walk of the `include_path` once:
+///
+/// ```php
+/// $p = __DIR__ . '/resolve-witness.phar';
+/// $files = ['d/a.php' => '<?php var_dump(stream_resolve_include_path("nope.php"), basename(stream_resolve_include_path("b.php"))); include "b.php";', 'd/b.php' => '<?php echo "bee\n";'];
+/// $m = ''; $body = '';
+/// foreach ($files as $n => $c) { $m .= pack('V', strlen($n)) . $n . pack('VVVVVV', strlen($c), 1700000000, strlen($c), crc32($c), 0x1a4, 0); $body .= $c; }
+/// $m = pack('VnVV', count($files), 0x1110, 0x10000, 0) . pack('V', 0) . $m;
+/// $data = "<?php __HALT_COMPILER(); ?>\r\n" . pack('V', strlen($m)) . $m . $body;
+/// file_put_contents($p, $data . sha1($data, true) . pack('V', 2) . 'GBMB');
+/// include "phar://$p/d/a.php";
+/// unlink($p);
+/// ```
+/// ```expect
+/// bool(false)
+/// string(5) "b.php"
+/// bee
+/// ```
 pub(crate) fn resolve_path(
     req: &mut Request,
     beneath: Beneath<'_, chain::ResolvePath>,
@@ -192,18 +211,40 @@ fn found_in_archive(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>
     let Some(arch) = serving_archive(req)? else {
         return Ok(None);
     };
-    find_in_include_path(req, &arch, filename)
+    in_archive(req, &arch, filename)
 }
 
-/// `phar_find_in_include_path`: a `./` or `../` path looked for in the
-/// archive, and any other along `phar://<arch>/<cwd>` then the
-/// `include_path`; `None` where there is no directory of the file being
-/// served (`PHAR_G(cwd)` unset) or nothing is found.
+/// `phar_find_in_include_path`: what [`in_archive`] finds, then the
+/// `include_path`, whose walk the chain's own link ends in without
+/// asking the archive again past [`in_archive`].
 fn find_in_include_path(
     req: &mut Request,
     arch: &[u8],
     filename: &[u8],
 ) -> Result<Option<Vec<u8>>, Thrown> {
+    if let Some(found) = in_archive(req, arch, filename)? {
+        return Ok(Some(found));
+    }
+    let function = archive::string(req, b"stream_resolve_include_path")?;
+    let callable = php_ext::coerce::callable_checked(req, &function);
+    function.give_up(req);
+    let Ok(callable) = callable else {
+        return Ok(None);
+    };
+    let name = archive::string(req, filename)?;
+    let found = php_ext::call::call(req, &callable, &[*name]);
+    name.give_up(req);
+    let found = found?;
+    let out = found.as_str_bytes().map(<[u8]>::to_vec);
+    found.give_up(req);
+    Ok(out)
+}
+
+/// The archive's part of `phar_find_in_include_path`: a `./` or `../`
+/// path looked for in it, and any other along `phar://<arch>/<cwd>`;
+/// `None` where there is no directory of the file being served
+/// (`PHAR_G(cwd)` unset) or the archive holds nothing by the name.
+fn in_archive(req: &mut Request, arch: &[u8], filename: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
     let Some(cwd) = req.state::<crate::State>().cwd.clone() else {
         return Ok(None);
     };
@@ -221,22 +262,8 @@ fn find_in_include_path(
         }
     }
     let candidate = [b"phar://".as_slice(), arch, b"/", &cwd, b"/", filename].concat();
-    if req.url_stat_quiet(&candidate, false)?.found().is_some() {
-        return Ok(Some(candidate));
-    }
-    let function = archive::string(req, b"stream_resolve_include_path")?;
-    let callable = php_ext::coerce::callable_checked(req, &function);
-    function.give_up(req);
-    let Ok(callable) = callable else {
-        return Ok(None);
-    };
-    let name = archive::string(req, filename)?;
-    let found = php_ext::call::call(req, &callable, &[*name]);
-    name.give_up(req);
-    let found = found?;
-    let out = found.as_str_bytes().map(<[u8]>::to_vec);
-    found.give_up(req);
-    Ok(out)
+    let found = req.url_stat_quiet(&candidate, false)?.found().is_some();
+    Ok(found.then_some(candidate))
 }
 
 /// The first argument replaced by `name` and the replaced native served,
