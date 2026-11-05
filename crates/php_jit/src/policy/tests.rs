@@ -318,8 +318,8 @@ fn a_landing_is_armed_from_the_pool_php_hands_it_a_slot_of() {
 /// A landing a loop's trace was published at is headed (#4105's ruling):
 /// neither sealed, so a return visits, nor armed, so it counts nothing,
 /// and blacklisted to a read of the word, so no visit claims it and
-/// compiled code reads no trace in it. An arming goes over it and a head
-/// leaves an armed word as it stands.
+/// compiled code reads no trace in it. A head leaves an armed word as it
+/// stands.
 #[test]
 fn a_headed_landing_is_neither_sealed_nor_armed() {
     let (policy, _) = read_ini(&[("opcache.jit", "tracing")]);
@@ -330,6 +330,7 @@ fn a_headed_landing_is_neither_sealed_nor_armed() {
     assert!(headed.headed() && !headed.sealed() && !super::armed(&word));
     assert_eq!(read(&word), State::Blacklisted);
     assert_eq!(bad_stop(&word, 0), None);
+    let word = Word::sealed();
     super::arm(&word, &policy);
     assert_eq!(Landing::of(&word).state(), State::Cold);
     super::head(&word);
