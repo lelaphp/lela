@@ -18377,24 +18377,35 @@ impl StepHold {
         }
     }
 
-    /// The object given up past the step, with what the step threw
-    /// pending, `OBJ_RELEASE` over the pair of handlers.
+    /// The object given up, with what the step threw pending,
+    /// `OBJ_RELEASE` over the pair of handlers.
+    fn given_up<T>(&mut self, req: &mut Request, done: Result<T, Thrown>) -> Result<T, Thrown> {
+        let Some(held) = self.held.take() else {
+            return done;
+        };
+        req.freed_after(done, |req| {
+            if self.overloaded {
+                held.give_up(req);
+            } else {
+                let _ = held.let_go(req);
+            }
+        })
+    }
+
+    /// The object given up past the step, unless the step did.
     fn past<T>(
-        self,
+        mut self,
         req: &mut Request,
         stepped: Result<Result<T, Thrown>, Fatal>,
     ) -> Result<Result<T, Thrown>, Fatal> {
-        let StepHold { held, overloaded } = self;
-        let Some(held) = held else {
-            return stepped;
-        };
         match stepped {
             Err(fatal) => {
-                held.abandon(&fatal);
+                if let Some(held) = self.held.take() {
+                    held.abandon(&fatal);
+                }
                 Err(fatal)
             }
-            Ok(done) if overloaded => Ok(req.freed_after(done, |req| held.give_up(req))),
-            Ok(done) => Ok(req.held_past(Some(held), done)),
+            Ok(done) => Ok(self.given_up(req, done)),
         }
     }
 }
@@ -19902,12 +19913,19 @@ fn step_property(
             return Ok(Err(nulled_out(req, frame, op, thrown)));
         }
     };
+    // The end of `zend_assign_op_overloaded_property`, `OBJ_RELEASE(object)`,
+    // and the handler's `FREE_OP_DATA()` after it, in that order.
+    let overloaded_past = |req: &mut Request, held: &mut StepHold, written| {
+        let written = held.given_up(req, written);
+        req.freed_after(written, |req| {
+            exec::free_operand(req, frame, data.op1_type, data.op1);
+        })
+    };
     match ptr {
         PropertyPtr::Served(back) => {
             held.overloaded(req, object);
-            Ok(served_property_step(
-                req, frame, code, step, object, key, back,
-            ))
+            let written = served_property_step(req, frame, code, step, object, key, back);
+            Ok(overloaded_past(req, held, written))
         }
         // `zend_binary_assign_op_obj_dim` over the bucket: a number pair
         // made in place by the rule the inline path and the kernel make
@@ -19927,15 +19945,11 @@ fn step_property(
             if let Some(done) = union_over_entry(req, frame, code, step, place) {
                 return Ok(done);
             }
-            Ok(served_property_step(
-                req,
-                frame,
-                code,
-                step,
-                object,
-                key,
-                WriteBack::Entry,
-            ))
+            let back = WriteBack::Entry;
+            let written = served_property_step(req, frame, code, step, object, key, back);
+            Ok(req.freed_after(written, |req| {
+                exec::free_operand(req, frame, data.op1_type, data.op1);
+            }))
         }
         // A readonly or set-restricted property gets no place, so the
         // operation is made over what `read_property` answers, and what
@@ -19944,11 +19958,7 @@ fn step_property(
         PropertyPtr::Withheld => {
             held.overloaded(req, object);
             let written = withheld_property_step(req, frame, code, step, object, bytes);
-            written.map(|done| {
-                req.freed_after(done, |req| {
-                    exec::free_operand(req, frame, data.op1_type, data.op1);
-                })
-            })
+            written.map(|done| overloaded_past(req, held, done))
         }
         PropertyPtr::Slot(slot, typed) => {
             step_slot(req, frame, code, step, (object, slot, typed), bytes, None)
@@ -20410,6 +20420,34 @@ fn slot_step(
 /// set p=ad
 /// dtor
 /// ```
+///
+/// The object goes before the `OP_DATA`, `OBJ_RELEASE(object)` closing
+/// `zend_assign_op_overloaded_property` and `FREE_OP_DATA()` after it,
+/// over a handler that gives up the program's owner, and over a property
+/// that hands out no place.
+///
+/// ```php
+/// class D { function __destruct() { echo "dtor D\n"; } function __toString() { return "d"; } }
+/// class M {
+///     function __get($n) { $GLOBALS['o'] = null; return "a"; }
+///     function __set($n, $v) { echo "set $n=$v\n"; }
+///     function __destruct() { echo "dtor M\n"; }
+/// }
+/// class S { public private(set) string $s = "s"; function __destruct() { echo "dtor S\n"; } }
+/// $o = new M;
+/// $o->p .= new D;
+/// set_error_handler(function () { $GLOBALS['s'] = null; return true; });
+/// $s = new S;
+/// try { $s->s .= [new D]; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// set p=ad
+/// dtor M
+/// dtor D
+/// dtor S
+/// dtor D
+/// Cannot modify private(set) property S::$s from global scope
+/// ```
 fn served_property_step(
     req: &mut Request,
     frame: FrameRef,
@@ -20419,9 +20457,9 @@ fn served_property_step(
     name: crate::api::values::PhpString,
     back: WriteBack,
 ) -> Result<(), Thrown> {
-    let Compound { op, data, .. } = step;
+    let op = step.op;
     let read = withheld_step(req, frame, code, step, object, name.as_bytes(), back);
-    let written = read.and_then(|stepped| {
+    read.and_then(|stepped| {
         write_out(req, frame, op, &stepped);
         if back == WriteBack::Apart {
             req.release(stepped);
@@ -20435,9 +20473,6 @@ fn served_property_step(
         let stepped = Owner::adopt(stepped);
         let table = req.object_handlers(object.heap());
         table.write_property(req, object, name, stepped)
-    });
-    req.freed_after(written, |req| {
-        exec::free_operand(req, frame, data.op1_type, data.op1);
     })
 }
 
