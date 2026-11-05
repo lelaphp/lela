@@ -450,11 +450,14 @@ pub(crate) enum Imm {
     /// a function's frame, with no observer declared; what it hands its
     /// caller, the variables it gives up as it leaves ([`Owners`]), and
     /// whether its frame may have a receiver, which it gives up after
-    /// them ([`php_engine::tier::UnitView::receives`]).
+    /// them ([`php_engine::tier::UnitView::receives`]), and whether it is
+    /// a closure's, whose closure it gives up last
+    /// ([`crate::record::closure`]).
     Leave {
         owners: Owners,
         value: Returned,
         receives: bool,
+        closure: bool,
     },
     /// The native a `FRAMELESS_ICALL_*` calls, its place in the engine's
     /// frameless table, the opline's `extended_value`, php's

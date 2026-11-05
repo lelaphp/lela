@@ -141,6 +141,15 @@ pub fn release(req: &mut Request, zval: Zval) {
     req.release(Value::of_slot(zval));
 }
 
+/// The destructor of `object`, a frameless call's temporary compiled
+/// code has yet to free, served with the temporary standing in its slot
+/// ([`Request::destruct_in_place`]): it may leave a throwable pending.
+pub fn destruct(req: &mut Request, object: Zval) {
+    if let Some(object) = object.as_obj() {
+        req.destruct_in_place(object);
+    }
+}
+
 /// `ZVAL_MAKE_REF` of the variable at `place`, which holds no reference,
 /// as php's `zend_jit_send_ref` makes it in place
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:9792-9860`): a new reference over
@@ -185,6 +194,23 @@ pub fn free_this(req: &mut Request, frame: FrameRef) {
     header.set_receiver(None);
     if let Some(receiver) = receiver {
         req.give_up_receiver(receiver);
+    }
+}
+
+/// The closure whose call pushed `frame`, a closure's frame a `RETURN`
+/// compiled code leaves by in place gives up, after its variables and its
+/// receiver, where its owner is the last: `frame` off the chain a backtrace
+/// reads, as [`free_cv`] takes it, then
+/// `OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)))`, as `zend_jit_leave_func`
+/// gives it up (`Z/ext/opcache/jit/zend_jit_ir.c:11125-11133`). A
+/// destructor of what it bound may leave a throwable pending.
+pub fn free_closure(req: &mut Request, frame: FrameRef) {
+    let Some(header) = req.vm_mut().at_mut(frame) else {
+        return;
+    };
+    header.info.set_leaving(true);
+    if let Some(closure) = header.take_closure() {
+        req.release(closure.as_value());
     }
 }
 

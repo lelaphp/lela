@@ -732,12 +732,12 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | ops | ops.lock | 209 |  |
 | api | api.lock | 1550 | 1550 |
 | sapi | sapi.lock | 60 |  |
-| tier | tier.lock | 232 |  |
+| tier | tier.lock | 237 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 40 |  |
 | harness | xtask.lock | 448 |  |
 
-<!-- /computed in=ccbb31a7409a301ff542df3715b3f3bc1f1d49e7ec0b22113fb4cd8b417aa907 out=f665659a21ea627f5a57d7ab54e13cbe8a67266a88a21bb848ba7b2953ec658a -->
+<!-- /computed in=3516e8a207160c82ed7dde3fceb863e83931c25a2feddaf20f5e3075001f52ff out=62f8de45b5c51064dc3e3f44134af2c53d42b85726ec62baf5019ccefebe4002 -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 
