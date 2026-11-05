@@ -152,6 +152,7 @@ impl ParseArena {
         reason = "each block is handed out once until a reset, which takes the arena by `&mut`"
     )]
     pub fn alloc<T>(&self, value: T) -> &mut T {
+        const { assert!(!std::mem::needs_drop::<T>()) };
         let at = self.block(Layout::new::<T>()).cast::<T>();
         // SAFETY: `at` is aligned and sized for a `T`, in a chunk no
         // other block covers.
