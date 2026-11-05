@@ -821,11 +821,16 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::get_constant`); an undefined one is a
     /// throwable pending, answered as one.
     GetConstant,
+    /// `destruct(cx, frame, opline: u32, word: u64, type_info: u32)`: the
+    /// destructor of the object a frameless call's temporary holds,
+    /// served before compiled code clears the slot, where a backtrace it
+    /// takes reads it (`php_engine::tier::destruct`).
+    Destruct,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 24] = [
+    pub(crate) const ALL: [Kernel; 25] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -850,6 +855,7 @@ impl Kernel {
         Kernel::NanToBool,
         Kernel::StrOffset,
         Kernel::GetConstant,
+        Kernel::Destruct,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

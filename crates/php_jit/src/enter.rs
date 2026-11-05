@@ -703,6 +703,7 @@ kernels! {
         Call => call(func: u32, callee: u32) -> Stood = tier::call_held;
         Release => release(word: u64, type_info: u32) = tier::release;
         FreeCv => free_cv(word: u64, type_info: u32) = tier::free_cv;
+        Destruct => destruct(word: u64, type_info: u32) = tier::destruct;
         Identical => identical(a: u64, a_info: u32, b: u64, b_info: u32) -> u64;
         RopeInit => rope_init(word: u64, type_info: u32) -> u64 = tier::rope_open;
         RopeAdd => rope_add(rope: u64, word: u64, type_info: u32) = tier::rope_push;
@@ -911,6 +912,15 @@ fn release(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Resu
 fn free_cv(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result<(), Fatal> {
     let frame = standing(req, on.room, on.at)?;
     tier::free_cv(req, frame, zval(word, type_info));
+    Ok(())
+}
+
+/// The `destruct` kernel: the destructor of the object a frameless
+/// call's temporary holds, served with the temporary in its slot
+/// ([`tier::destruct`]), a throw left pending.
+fn destruct(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result<(), Fatal> {
+    standing(req, on.room, on.at)?;
+    tier::destruct(req, zval(word, type_info));
     Ok(())
 }
 

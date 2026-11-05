@@ -229,6 +229,7 @@ fn compiled(ir: &TraceIr, step: bool) -> Option<Compiled> {
         Kernel::PushCall | Kernel::Call => (refusing::refused_call as *const ()).addr(),
         Kernel::Release => (super::super::super::wrapped::release as *const ()).addr(),
         Kernel::FreeCv => (super::super::super::wrapped::free_cv as *const ()).addr(),
+        Kernel::Destruct => (super::super::super::wrapped::destruct as *const ()).addr(),
         Kernel::Identical => (super::super::super::wrapped::identical as *const ()).addr(),
         Kernel::RopeInit => (super::super::super::wrapped::rope_init as *const ()).addr(),
         Kernel::RopeAdd => (super::super::super::wrapped::rope_add as *const ()).addr(),

@@ -2213,7 +2213,7 @@ impl<'a> Emit<'a> {
                 &[I64, I64, I32]
             }
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
-            Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
+            Kernel::Release | Kernel::FreeCv | Kernel::Destruct => &[I64, I64, I32, I64, I32],
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
             Kernel::RopeInit | Kernel::Leave => &[I64, I64, I32, I64, I32, I64],
             Kernel::RopeAdd | Kernel::AssignConcat => &[I64, I64, I32, I64, I64, I32],

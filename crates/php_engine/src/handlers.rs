@@ -14016,6 +14016,71 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// caught unexpected NAN value was coerced to string
 /// 3
 /// ```
+///
+/// Where a throwable stands pending as the native leaves, thrown by it or
+/// by a handler, the interrupt check is made with it pending
+/// ([`checked_after_throw`], [`checked_while_pending`]), as each
+/// `FRAMELESS_ICALL_*` handler makes `ZEND_VM_FCALL_INTERRUPT_CHECK`
+/// before `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` and compiled code
+/// `jit_frameless_interrupt_check` before `zend_jit_check_exception`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:17842`, made at `:17888`, `:17932`,
+/// `:18002` and `:18106`), so the handler and compiled code make it alike
+/// (`Emit::frameless_call`).
+///
+/// The one frameless native php 8.5.12 lets raise the interrupt there is
+/// `implode`, deterministically: a signal or a timeout would have to land
+/// inside the native after its last callback, since `zend_call_function`'s
+/// own check after each callback takes whatever the callback raised (the
+/// engine's `call_function` likewise). `implode` converts every piece,
+/// walking on past one whose `__toString` threw, and then asks for its
+/// string fallibly, which records the delayed OOM
+/// (`Z/ext/standard/string.c:1036`), so the check made with the piece's
+/// throwable pending raises the limit's fatal in its place, before the
+/// `catch`:
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// class T { function __toString(): string { throw new Exception("thrown"); } }
+/// function f($all) {
+///     foreach ($all as $a) {
+///         try { echo strlen(implode(',', $a)), "\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+///     }
+/// }
+/// $a = array_fill(0, 100, str_repeat('x', 30000));
+/// $a[] = new T;
+/// f([['a', 'b'], ['c'], ['d', 'e'], $a]);
+/// echo "after\n";
+/// ```
+/// ```expect exit=255
+/// 3
+/// 1
+/// 3
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
+/// ```
+///
+/// The same where a trace serves the loop:
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// class T { function __toString(): string { throw new Exception("thrown"); } }
+/// function f($all) {
+///     foreach ($all as $a) {
+///         try { echo strlen(implode(',', $a)), "\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+///     }
+/// }
+/// $a = array_fill(0, 100, str_repeat('x', 30000));
+/// $a[] = new T;
+/// f([['a', 'b'], ['c'], ['d', 'e'], $a]);
+/// echo "after\n";
+/// ```
+/// ```expect exit=255 regime=jit-force process
+/// 3
+/// 1
+/// 3
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
+/// ```
 #[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
 fn frameless_call<const N: usize>(
     req: &mut Request,
@@ -14025,14 +14090,16 @@ fn frameless_call<const N: usize>(
     arguments: [(OperandKind, u32); N],
 ) -> Edge {
     // The frame stands at the call, and a `CV` is borrowed where no name
-    // reaches its variables ([`exec::frameless_named`]): every operand
+    // reaches its variables, a frame that carries an annex, its symbol
+    // table or its extra arguments, or none at all: every operand
     // read where it stands in the one look at the frame that writes the
     // opline, and each read in turn ([`exec::frameless_operand`]) where
     // one is `UNUSED`, `UNDEF` or a reference.
     let (operands, owned) = if let Some(read) = frameless_read(req, frame, code, at, &arguments) {
         read
     } else {
-        let named = exec::frameless_named(req.vm().at(frame));
+        let header = req.vm().at(frame);
+        let named = header.is_none_or(|header| header.annex().is_some());
         let mut operands = [Zval::UNDEF; N];
         let mut owned = 0u8;
         for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
@@ -14042,13 +14109,11 @@ fn frameless_call<const N: usize>(
         }
         (operands, owned)
     };
-    let held = Operands {
-        frame,
-        zvals: &operands,
-        owned,
-        slots: &arguments,
-    };
-    let value = match frameless_entered(req, op.extended_value, held)? {
+    // A fatal frees the operands as the served path does, and is the only
+    // answer that skips the rest.
+    let served = frameless_native(req, op.extended_value, &operands);
+    free_operands(req, frame, (&operands, owned), &arguments);
+    let value = match served? {
         Ok(value) => value,
         Err(thrown) => {
             checked_after_throw(req, &thrown)?;
@@ -14116,89 +14181,6 @@ fn frameless_read<const N: usize>(
     Some((operands, owned))
 }
 
-/// The native at `at` of the engine's frameless table served over the
-/// operands `held` carries, as the `FRAMELESS_ICALL_*` handlers serve it:
-/// the native ([`frameless_native`]), and then each operand given up, the
-/// ones `held` owns released and each temporary freed as `FREE_OP*` frees
-/// it, whether the native threw or not.
-///
-/// Where a throwable stands pending as the native leaves, thrown by it or
-/// by a handler, the interrupt check is made with it pending
-/// ([`checked_after_throw`], [`checked_while_pending`]), as each
-/// `FRAMELESS_ICALL_*` handler makes `ZEND_VM_FCALL_INTERRUPT_CHECK`
-/// before `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` and compiled code
-/// `jit_frameless_interrupt_check` before `zend_jit_check_exception`
-/// (`Z/ext/opcache/jit/zend_jit_ir.c:17842`, made at `:17888`, `:17932`,
-/// `:18002` and `:18106`), so the handler and compiled code make it alike
-/// (`Emit::frameless_call`).
-///
-/// The one frameless native php 8.5.12 lets raise the interrupt there is
-/// `implode`, deterministically: a signal or a timeout would have to land
-/// inside the native after its last callback, since `zend_call_function`'s
-/// own check after each callback takes whatever the callback raised (the
-/// engine's `call_function` likewise). `implode` converts every piece,
-/// walking on past one whose `__toString` threw, and then asks for its
-/// string fallibly, which records the delayed OOM
-/// (`Z/ext/standard/string.c:1036`), so the check made with the piece's
-/// throwable pending raises the limit's fatal in its place, before the
-/// `catch`:
-///
-/// ```php
-/// ini_set('memory_limit', '4M');
-/// class T { function __toString(): string { throw new Exception("thrown"); } }
-/// function f($all) {
-///     foreach ($all as $a) {
-///         try { echo strlen(implode(',', $a)), "\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
-///     }
-/// }
-/// $a = array_fill(0, 100, str_repeat('x', 30000));
-/// $a[] = new T;
-/// f([['a', 'b'], ['c'], ['d', 'e'], $a]);
-/// echo "after\n";
-/// ```
-/// ```expect exit=255
-/// 3
-/// 1
-/// 3
-///
-/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
-/// ```
-///
-/// The same where a trace serves the loop:
-///
-/// ```php
-/// ini_set('memory_limit', '4M');
-/// class T { function __toString(): string { throw new Exception("thrown"); } }
-/// function f($all) {
-///     foreach ($all as $a) {
-///         try { echo strlen(implode(',', $a)), "\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
-///     }
-/// }
-/// $a = array_fill(0, 100, str_repeat('x', 30000));
-/// $a[] = new T;
-/// f([['a', 'b'], ['c'], ['d', 'e'], $a]);
-/// echo "after\n";
-/// ```
-/// ```expect exit=255 regime=jit-force process
-/// 3
-/// 1
-/// 3
-///
-/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
-/// ```
-#[inline(always)] // the handler's hot path, which it was before the tier shared it
-fn frameless_entered(
-    req: &mut Request,
-    at: u32,
-    held: Operands<'_>,
-) -> Result<Result<Value, Thrown>, Fatal> {
-    // A fatal frees the operands as the served path does, and is the only
-    // answer that skips the rest.
-    let served = frameless_native(req, at, held.zvals);
-    free_operands(req, held);
-    served
-}
-
 /// The native at `at` of the frameless table over `zvals`, the entry
 /// served or the framed one where an observer watches: php's
 /// `ZEND_FLF_HANDLER(opline)`, what the handler and the tier's kernel
@@ -14217,16 +14199,183 @@ pub(super) fn frameless_native(
     }
 }
 
-/// `FREE_OP*` once the native returned, whether it threw or not: an
-/// owner the handler took given up, and a temporary freed where it
-/// stands.
+/// `FREE_OP*` once the native returned, whether it threw or not, each
+/// operand of `zvals` over its slot in `slots`: an owner the bits of
+/// `owned` say the handler took given up, and a temporary freed where it
+/// stands, an object that dies there destructed in its slot first
+/// ([`Request::destruct_in_place`]).
+///
+/// php's handler goes on through every `FREE_OP*`, and a throw's reach
+/// is the row: a destructor that throws at an operand writes a trace that
+/// reads the call off the opline, and its arguments are the operands not
+/// yet cleared, so the throwable holds the ones after it, whose
+/// destructors wait for it to go. An earlier temporary's cleared slot
+/// (`ZVAL_UNDEF`, "in case `FREE_OP2()` throws") takes the row away, and
+/// the next destructor runs at once with the throwable pending and
+/// chains:
+///
+/// ```php
+/// class T { static $boom = []; function __construct(public $n) {}
+///     function __destruct() { if ($this->n > 90) echo "d$this->n,"; if (isset(self::$boom[$this->n])) throw new Exception("dtor$this->n"); }
+///     function __toString(): string { return "ab"; } }
+/// function chain($e) { $m = []; for (; $e; $e = $e->getPrevious()) { $m[] = $e->getMessage(); } echo implode(" ", $m), "\n"; }
+/// function one($n) { for ($i = 1; $i <= $n; $i++) { try { $r = trim(new T(10 * $i + 1)); } catch (Exception $e) { chain($e); } } }
+/// function two($n) { for ($i = 1; $i <= $n; $i++) { try { $r = str_contains(new T(10 * $i + 1), new T(10 * $i + 2)); } catch (Exception $e) { chain($e); } } }
+/// function three($n) { for ($i = 1; $i <= $n; $i++) { try { $r = str_replace(new T(10 * $i + 1), new T(10 * $i + 2), new T(10 * $i + 3)); } catch (Exception $e) { chain($e); } } }
+/// T::$boom = [91 => 1, 102 => 1, 113 => 1, 121 => 1, 123 => 1, 141 => 1];
+/// foreach (['one', 'two', 'three'] as $f) {
+///     try { $f(15); } catch (Exception $e) { echo "out "; chain($e); }
+///     $e = null;
+///     echo "\n";
+/// }
+/// ```
+/// ```expect
+/// d91,dtor91
+/// d101,d111,d121,dtor121
+/// d131,d141,dtor141
+/// d151,
+/// d91,dtor91
+/// d101,d102,d92,dtor102
+/// d111,d112,d121,dtor121
+/// d131,d132,d141,d122,dtor141
+/// d151,d152,d142,
+/// d91,dtor91
+/// d101,d102,d103,d92,d93,dtor102
+/// d111,d112,d113,dtor113
+/// d121,dtor121
+/// d131,d132,d133,d141,d122,d123,d142,d143,out dtor123
+/// ```
+///
+/// The same where a trace serves each loop, compiled by the destructors
+/// that do not throw:
+///
+/// ```php
+/// class T { static $boom = []; function __construct(public $n) {}
+///     function __destruct() { if ($this->n > 90) echo "d$this->n,"; if (isset(self::$boom[$this->n])) throw new Exception("dtor$this->n"); }
+///     function __toString(): string { return "ab"; } }
+/// function chain($e) { $m = []; for (; $e; $e = $e->getPrevious()) { $m[] = $e->getMessage(); } echo implode(" ", $m), "\n"; }
+/// function one($n) { for ($i = 1; $i <= $n; $i++) { try { $r = trim(new T(10 * $i + 1)); } catch (Exception $e) { chain($e); } } }
+/// function two($n) { for ($i = 1; $i <= $n; $i++) { try { $r = str_contains(new T(10 * $i + 1), new T(10 * $i + 2)); } catch (Exception $e) { chain($e); } } }
+/// function three($n) { for ($i = 1; $i <= $n; $i++) { try { $r = str_replace(new T(10 * $i + 1), new T(10 * $i + 2), new T(10 * $i + 3)); } catch (Exception $e) { chain($e); } } }
+/// T::$boom = [91 => 1, 102 => 1, 113 => 1, 121 => 1, 123 => 1, 141 => 1];
+/// foreach (['one', 'two', 'three'] as $f) {
+///     try { $f(15); } catch (Exception $e) { echo "out "; chain($e); }
+///     $e = null;
+///     echo "\n";
+/// }
+/// ```
+/// ```expect regime=jit-force process
+/// d91,dtor91
+/// d101,d111,d121,dtor121
+/// d131,d141,dtor141
+/// d151,
+/// d91,dtor91
+/// d101,d102,d92,dtor102
+/// d111,d112,d121,dtor121
+/// d131,d132,d141,d122,dtor141
+/// d151,d152,d142,
+/// d91,dtor91
+/// d101,d102,d103,d92,d93,dtor102
+/// d111,d112,d113,dtor113
+/// d121,dtor121
+/// d131,d132,d133,d141,d122,d123,d142,d143,out dtor123
+/// ```
+///
+/// With no arguments kept the row holds nothing, so each is served in turn:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class T { function __construct(public $n) {} function __destruct() { echo "d$this->n\n"; if ($this->n % 2) throw new Exception("dtor$this->n"); } function __toString(): string { return "ab"; } }
+/// try { str_replace(new T(1), new T(2), new T(3)); } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// d1
+/// d2
+/// d3
+/// dtor3 after dtor1
+/// ```
+///
+/// A destructor that throws nothing reads the same row, which a
+/// constant or a variable never clears and a temporary does, a temporary
+/// a trace keeps in a register among them:
+///
+/// ```php
+/// class T { function __construct(public $n) {}
+///     function __destruct() { if ($this->n) { echo "d$this->n\n"; debug_print_backtrace(); } }
+///     function __toString(): string { return "ab"; } }
+/// function f($i) {
+///     for ($j = 0; $j < 8; $j++) {
+///         $on = $j == 7 ? 1 : 0;
+///         $r = str_replace("zz", new T($on), new T($on * 2));
+///         $r = str_replace($i + $j, new T($on * 3), "x");
+///         $r = str_replace($j, new T($on * 4), "x");
+///     }
+/// }
+/// f(1);
+/// ```
+/// ```expect
+/// d1
+/// #0 [internal function]: T->__destruct()
+/// #1 %SCRATCH%/witness.php(8): str_replace('zz', Object(T), Object(T))
+/// #2 %SCRATCH%/witness.php(13): f(1)
+/// d2
+/// #0 %SCRATCH%/witness.php(8): T->__destruct()
+/// #1 %SCRATCH%/witness.php(13): f(1)
+/// d3
+/// #0 %SCRATCH%/witness.php(9): T->__destruct()
+/// #1 %SCRATCH%/witness.php(13): f(1)
+/// d4
+/// #0 [internal function]: T->__destruct()
+/// #1 %SCRATCH%/witness.php(10): str_replace(7, Object(T), 'x')
+/// #2 %SCRATCH%/witness.php(13): f(1)
+/// ```
+///
+/// ```php
+/// class T { function __construct(public $n) {}
+///     function __destruct() { if ($this->n) { echo "d$this->n\n"; debug_print_backtrace(); } }
+///     function __toString(): string { return "ab"; } }
+/// function f($i) {
+///     for ($j = 0; $j < 8; $j++) {
+///         $on = $j == 7 ? 1 : 0;
+///         $r = str_replace("zz", new T($on), new T($on * 2));
+///         $r = str_replace($i + $j, new T($on * 3), "x");
+///         $r = str_replace($j, new T($on * 4), "x");
+///     }
+/// }
+/// f(1);
+/// ```
+/// ```expect regime=jit-force process
+/// d1
+/// #0 [internal function]: T->__destruct()
+/// #1 %SCRATCH%/witness.php(8): str_replace('zz', Object(T), Object(T))
+/// #2 %SCRATCH%/witness.php(13): f(1)
+/// d2
+/// #0 %SCRATCH%/witness.php(8): T->__destruct()
+/// #1 %SCRATCH%/witness.php(13): f(1)
+/// d3
+/// #0 %SCRATCH%/witness.php(9): T->__destruct()
+/// #1 %SCRATCH%/witness.php(13): f(1)
+/// d4
+/// #0 [internal function]: T->__destruct()
+/// #1 %SCRATCH%/witness.php(10): str_replace(7, Object(T), 'x')
+/// #2 %SCRATCH%/witness.php(13): f(1)
+/// ```
 #[inline(always)] // the frameless handler's hot path
-fn free_operands(req: &mut Request, held: Operands<'_>) {
-    for (at, (&operand, &(kind, field))) in held.zvals.iter().zip(held.slots).enumerate() {
-        if held.owned >> at & 1 != 0 {
+fn free_operands(
+    req: &mut Request,
+    frame: FrameRef,
+    (zvals, owned): (&[Zval], u8),
+    slots: &[(OperandKind, u32)],
+) {
+    for (at, (&operand, &(kind, field))) in zvals.iter().zip(slots).enumerate() {
+        if owned >> at & 1 != 0 {
             req.release_zval_nogc(operand);
+        } else if matches!(kind, OperandKind::Tmp | OperandKind::Var)
+            && let Some(object) = operand.as_obj()
+        {
+            req.destruct_in_place(object);
         }
-        exec::free_operand(req, held.frame, kind, field);
+        exec::free_operand(req, frame, kind, field);
     }
 }
 
@@ -14252,19 +14401,6 @@ fn frameless_aside(
             req.frameless_count()
         ))),
     }
-}
-
-/// The operands a frameless call is served over, as its handler read
-/// them ([`exec::frameless_operand`]): the frame it stands in, each
-/// zval, the bits of `owned` the ones the caller holds an owner of, and
-/// each operand's kind and slot, a temporary's freed there after the
-/// call.
-#[derive(Clone, Copy)]
-pub(super) struct Operands<'a> {
-    pub(super) frame: FrameRef,
-    pub(super) zvals: &'a [Zval],
-    pub(super) owned: u8,
-    pub(super) slots: &'a [(OperandKind, u32)],
 }
 
 /// `ZEND_ASSIGN`, `zend_assign_to_variable`
