@@ -11,7 +11,7 @@
 use php_syntax::tree;
 use php_syntax::tree::{NodeId, TypeExpr};
 use php_unit::Level;
-use php_unit::decl::{Name, NameKind, Type};
+use php_unit::decl::{MAY_BE_ANY, Name, NameKind, Type};
 use php_unit::type_to_string;
 
 use super::walk::unread;
@@ -104,7 +104,7 @@ impl Emit<'_> {
             TypeExpr::NullableType(_) => return Err(unread(self.line, "a type")),
         };
         let mut mask = ty.mask();
-        if mask == Type::MAY_BE_ANY && marked_nullable {
+        if mask == MAY_BE_ANY && marked_nullable {
             return Err(self.compile_error(
                 "Type mixed cannot be marked as nullable since mixed already includes null",
             ));
@@ -267,7 +267,7 @@ impl Emit<'_> {
                 }
             };
             let single_mask = single.mask();
-            if single_mask == Type::MAY_BE_ANY {
+            if single_mask == MAY_BE_ANY {
                 return Err(self.compile_error("Type mixed can only be used as a standalone type"));
             }
             if is_complex(&single) && single != Type::Iterable {
@@ -315,7 +315,7 @@ impl Emit<'_> {
                 .into_iter()
                 .flat_map(|member| match member {
                     Type::Iterable => vec![
-                        Type::Named(Name(b"Traversable".as_slice().into())),
+                        Type::named(Name(b"Traversable".as_slice().into())),
                         Type::Array,
                     ],
                     member => vec![member],
@@ -515,7 +515,7 @@ impl Emit<'_> {
             if qualified == NameKind::NotFullyQualified && self.not_imported(&written) {
                 self.confusable_type(&written, &resolved);
             }
-            return Ok(Type::Named(Name(resolved.into())));
+            return Ok(Type::named(Name(resolved.into())));
         }
         self.ensure_valid_class_fetch_type(fetch)?;
         // `substitute_self_parent`: never in an anonymous class, whose
@@ -533,7 +533,7 @@ impl Emit<'_> {
             _ => self.active_name(),
         };
         Ok(match substituted {
-            Some(name) => Type::Named(Name(name.into())),
+            Some(name) => Type::named(Name(name.into())),
             None if fetch == FETCH_CLASS_SELF => Type::SelfClass,
             None => Type::ParentClass,
         })
@@ -710,7 +710,7 @@ fn same_class(a: &Type, b: &Type) -> bool {
 /// is what php hands `zend_type_to_string` to name an overlap or the
 /// type a magic method must declare.
 pub(super) fn of_mask(mask: u32) -> Type {
-    if mask & Type::MAY_BE_ANY == Type::MAY_BE_ANY {
+    if mask & MAY_BE_ANY == MAY_BE_ANY {
         return Type::Mixed;
     }
     let mut members = Vec::new();

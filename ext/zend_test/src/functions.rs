@@ -167,7 +167,7 @@ pub(crate) fn lorem_ipsum(indent: usize, since: &str) -> Box<[u8]> {
 /// `Iterator|(Traversable&Countable)`, `create_test_dnf_type`: the type
 /// `gen_stub.php` cannot write, laid on by hand.
 pub(crate) fn dnf_type() -> Type {
-    let named = |name: &[u8]| Type::Named(Name(name.into()));
+    let named = |name: &[u8]| Type::named(Name(name.into()));
     Type::Union(
         vec![
             named(b"Iterator"),

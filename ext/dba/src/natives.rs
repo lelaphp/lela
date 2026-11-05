@@ -697,7 +697,7 @@ pub(crate) fn dba_fetch(
     } else {
         arity(req, 2, Some(3))?;
         let key = key.hold(req)?;
-        let class = Type::Named(Name(b"Dba\\Connection".as_slice().into()));
+        let class = Type::named(Name(b"Dba\\Connection".as_slice().into()));
         // `Z_PARAM_OBJECT_OF_CLASS` over `Dba\Connection` and
         // `Z_PARAM_LONG`, where the stub declares `$dba` and `$skip`
         // untyped for the legacy order.

@@ -501,8 +501,8 @@ const fn again(ty: &Type) -> Type {
         Type::CalledClass => Type::CalledClass,
         Type::SelfClass => Type::SelfClass,
         Type::ParentClass => Type::ParentClass,
-        Type::Named(Name(bytes)) => match bytes.as_borrowed() {
-            Some(bytes) => Type::Named(Name(Bytes::borrowed(bytes))),
+        Type::Named(name) => match name.name().0.as_borrowed() {
+            Some(bytes) => Type::named(Name(Bytes::borrowed(bytes))),
             None => Type::Mixed,
         },
         Type::Nullable(inner) => match inner.as_borrowed() {
@@ -694,7 +694,7 @@ impl<C: Class> Instance<C> {
 }
 
 const fn named<C: Class>() -> Type {
-    Type::Named(Name(Bytes::borrowed(C::NAME)))
+    Type::named(Name(Bytes::borrowed(C::NAME)))
 }
 
 impl<C: Class> FromArgument for Instance<C> {
@@ -789,7 +789,7 @@ pub enum Iterable {
 
 /// `Traversable|array`, laid in the binary.
 const ITERABLE: &[Type] = &[
-    Type::Named(Name(Bytes::borrowed(b"Traversable"))),
+    Type::named(Name(Bytes::borrowed(b"Traversable"))),
     Type::Array,
 ];
 

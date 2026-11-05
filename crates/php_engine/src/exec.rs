@@ -2400,7 +2400,7 @@ impl SlotType {
             None => SlotType::UNTYPED,
             Some(_) if property.is_readonly => SlotType(SlotType::READONLY),
             Some(ty) => {
-                let mask = ty.mask() & php_unit::decl::Type::MAY_BE_ANY;
+                let mask = ty.mask() & php_unit::decl::MAY_BE_ANY;
                 SlotType(u16::try_from(mask).map_or(0, |mask| mask & SlotType::KINDS))
             }
         }

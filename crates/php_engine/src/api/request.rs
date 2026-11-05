@@ -447,7 +447,7 @@ pub struct Request {
     /// slots: the class each name that carries one found last
     /// ([`classes::ce_cache`]), laid down empty with the request, as
     /// `zend_map_ptr_reset` lays php's table ([`Request::ce_cached`]).
-    ce_caches: php_heap::MapTable<Option<ClassId>>,
+    ce_caches: std::cell::RefCell<php_heap::MapTable<Option<ClassId>>>,
     /// `ce->name` of each class asked after whose name is an engine's
     /// string ([`Request::class_name_string`]).
     class_names: ClassNames,
@@ -1308,7 +1308,7 @@ impl Request {
             objects: objects::Objects::default(),
             returned: Value::null(),
             declared: tables.classes,
-            ce_caches: php_heap::MapTable::new(),
+            ce_caches: std::cell::RefCell::default(),
             class_names: ClassNames::default(),
             own_classes: Vec::new(),
             arena,

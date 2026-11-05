@@ -5096,7 +5096,7 @@ fn return_mask_holds(slots: &[Zval], code: &OpArray, op: &Opline) -> bool {
     // `MAY_BE_ANY` keeps the codes a value can have: an `IS_INDIRECT`
     // would test bit 12, which is `callable`'s.
     let code_bit = 1u32 << (returned.kind() as u32);
-    code.return_mask & php_unit::decl::Type::MAY_BE_ANY & code_bit != 0
+    code.return_mask & php_unit::decl::MAY_BE_ANY & code_bit != 0
 }
 
 /// [`verify_return_type`] past its mask, the frame stood at `at`

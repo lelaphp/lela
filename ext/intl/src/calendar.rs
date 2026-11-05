@@ -1756,8 +1756,8 @@ fn zone_argument(req: &mut Request, zone: Option<Value>) -> Result<ZoneArg, Thro
     };
     let zone_union = Type::Union(
         vec![
-            Type::Named(php_ext::decl::Name(b"IntlTimeZone".as_slice().into())),
-            Type::Named(php_ext::decl::Name(b"DateTimeZone".as_slice().into())),
+            Type::named(php_ext::decl::Name(b"IntlTimeZone".as_slice().into())),
+            Type::named(php_ext::decl::Name(b"DateTimeZone".as_slice().into())),
             Type::String,
             Type::Null,
         ]

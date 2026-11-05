@@ -57,6 +57,8 @@ Bytes::borrowed
 CallStack
 ChunkCache
 ChunkCache::new
+ClassCache
+ClassCache::offset
 CountingSystem
 CountingSystem::allocations
 CountingSystem::watch
@@ -347,7 +349,6 @@ Origin
 Origin::new
 Origin::number
 Pending
-Pending::class_name
 Pending::constant_array
 Pending::give_back
 Pending::hold
@@ -428,6 +429,7 @@ Str::put_byte
 Str::refcount
 Strings
 Strings::beside
+Strings::class_cache
 Strings::count
 Strings::find
 Strings::intern_known

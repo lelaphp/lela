@@ -534,7 +534,7 @@ impl Wire for Type {
             return u8::try_from(at).ok()?.put(out);
         }
         match self {
-            Type::Named(name) => (100u8, name).put(out),
+            Type::Named(name) => (100u8, &**name).put(out),
             Type::Nullable(inner) => (101u8, inner).put(out),
             Type::Union(members) => (102u8, members).put(out),
             Type::Intersection(members) => (103u8, members).put(out),
@@ -548,7 +548,7 @@ impl Wire for Type {
             return Some(simple);
         }
         Some(match tag {
-            100 => Type::Named(Wire::take(r)?),
+            100 => Type::named(Wire::take(r)?),
             101 => Type::Nullable(Wire::take(r)?),
             102 => Type::Union(Wire::take(r)?),
             103 => Type::Intersection(Wire::take(r)?),

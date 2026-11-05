@@ -500,7 +500,7 @@ fn enumeration(attribute: Tokens, mut item: ItemEnum) -> syn::Result<Tokens> {
             objects: quote!(None),
         },
     );
-    let declared = quote!(Some(#root::decl::Type::Named(#root::decl::Name::borrowed(#class_name))));
+    let declared = quote!(Some(#root::decl::Type::named(#root::decl::Name::borrowed(#class_name))));
     Ok(quote! {
         #[derive(Clone, Copy, PartialEq)]
         #item

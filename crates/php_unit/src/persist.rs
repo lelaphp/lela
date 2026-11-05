@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use php_heap::{Persist, PersistSize};
 
-use crate::decl::{ClassDecl, FunctionDecl, List, MethodDecl, Name};
+use crate::decl::{ClassDecl, FunctionDecl, List, MethodDecl, Name, Type, TypeName};
 use crate::op::OpArray;
 use crate::unit::Unit;
 
@@ -100,6 +100,40 @@ impl Unit {
         }
         for (name, _) in runtime_keys {
             visit(name);
+        }
+    }
+
+    /// Every class name the unit's declared types hold: its functions'
+    /// and dynamic definitions', its classes' members' and their hooks'.
+    /// What `zend_compile_single_typename` hands `zend_alloc_ce_cache`,
+    /// walked once the unit is whole, so a home that gives a cache sees
+    /// each name once and one that gives none is never asked.
+    pub fn each_type_name(&mut self, visit: &mut impl FnMut(&mut TypeName)) {
+        let Unit {
+            functions,
+            dynamic,
+            classes,
+            ..
+        } = self;
+        for (decl, _) in functions.iter_mut().chain(dynamic.iter_mut()) {
+            function_type_names(decl, visit);
+        }
+        for class in classes {
+            let constants = class.constants.iter_mut().map(|constant| &mut constant.ty);
+            let properties = class.properties.iter_mut().map(|property| &mut property.ty);
+            for ty in constants.chain(properties).flatten() {
+                type_names(ty, visit);
+            }
+            for property in &mut class.properties {
+                let hooks = property.hooks.as_deref_mut();
+                let hooks = hooks.into_iter().flat_map(|h| [&mut h.get, &mut h.set]);
+                for hook in hooks.flatten() {
+                    function_type_names(&mut hook.function, visit);
+                }
+            }
+            for MethodDecl { function, .. } in &mut class.methods {
+                function_type_names(function, visit);
+            }
         }
     }
 
@@ -187,6 +221,32 @@ fn function_names(decl: &mut FunctionDecl, visit: &mut impl FnMut(&mut Name)) {
     visit(&mut decl.file);
     for parameter in &mut *decl.parameters {
         visit(&mut parameter.name);
+    }
+}
+
+/// The class names of a function's parameters' and return's types.
+fn function_type_names(decl: &mut FunctionDecl, visit: &mut impl FnMut(&mut TypeName)) {
+    let parameters = decl
+        .parameters
+        .iter_mut()
+        .map(|parameter| &mut parameter.ty);
+    for ty in parameters.chain([&mut decl.return_type]).flatten() {
+        type_names(ty, visit);
+    }
+}
+
+/// The class names of `ty`, a member of a union, an intersection or a
+/// `?T` among them.
+fn type_names(ty: &mut Type, visit: &mut impl FnMut(&mut TypeName)) {
+    match ty {
+        Type::Named(name) => visit(name),
+        Type::Nullable(inner) => type_names(inner, visit),
+        Type::Union(members) | Type::Intersection(members) => {
+            members
+                .iter_mut()
+                .for_each(|member| type_names(member, visit));
+        }
+        _ => {}
     }
 }
 

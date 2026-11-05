@@ -710,7 +710,7 @@ impl Request {
         };
         let evaluated = crate::api::call::eval_declared(self, &expr, Some(declaring))?;
         let value = match &ty {
-            Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
+            Some(ty) if ty.mask() != php_unit::decl::MAY_BE_ANY => {
                 match crate::ops::verify_class_constant_type(self, *evaluated, ty, declaring, name)
                 {
                     // The owner goes on to the row that keeps the value,

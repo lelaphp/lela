@@ -9,7 +9,7 @@
 //! bit, and `null` as a `?` in front of a single name or as `|null` after
 //! a union.
 
-use crate::decl::Type;
+use crate::decl::{MAY_BE_ANY, Type};
 
 /// `zend_type_to_string` over a declared type, with no scope to resolve
 /// `self` and `parent` against, which the compiler has already put the
@@ -35,7 +35,7 @@ pub fn type_to_string_called(ty: &Type, called: &str) -> String {
     let mut parts = Vec::new();
     push_names(ty, &mut parts);
     let mask = ty.mask();
-    if mask == Type::MAY_BE_ANY {
+    if mask == MAY_BE_ANY {
         parts.push(String::from("mixed"));
         return parts.join("|");
     }
@@ -107,7 +107,7 @@ mod tests {
     use crate::decl::Name;
 
     fn named(name: &str) -> Type {
-        Type::Named(Name::from(name))
+        Type::named(Name::from(name))
     }
 
     #[test]
