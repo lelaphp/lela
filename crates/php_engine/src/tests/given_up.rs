@@ -177,6 +177,29 @@ fn a_write_goes_with_the_table_a_handler_gave_up() {
 }
 
 #[test]
+fn an_object_a_handler_gave_up_goes_past_its_compound_step() {
+    let stdout = served(
+        "<?php\n\
+         class C { public $p = 'pp'; function __destruct() { echo $this->p, \"\\n\"; } }\n\
+         set_error_handler(function () { $GLOBALS['o'] = null; return true; });\n\
+         $o = new C; $o->p .= []; echo \"after\\n\";\n",
+    );
+    assert_eq!(stdout, "ppArray\nafter\n");
+}
+
+#[test]
+fn a_throw_over_a_compound_step_is_the_previous_of_the_destructor_it_serves() {
+    let stdout = served(
+        "<?php\n\
+         class C { public $p = 'pp'; function __destruct() { throw new Exception('dtor'); } }\n\
+         set_error_handler(function () { $GLOBALS['o'] = null; throw new Exception('handler'); });\n\
+         try { $o = new C; $o->p .= []; }\n\
+         catch (Exception $e) { echo $e->getMessage(), ' over ', $e->getPrevious()->getMessage(), \"\\n\"; }\n",
+    );
+    assert_eq!(stdout, "dtor over handler\n");
+}
+
+#[test]
 fn a_right_operand_a_handler_gave_up_is_read_past_the_left() {
     let stdout = served(
         "<?php\n\

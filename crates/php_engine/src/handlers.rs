@@ -11229,15 +11229,8 @@ fn object_held<T>(
     step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
 ) -> Result<T, Thrown> {
     let held = Owner::take(req, object.as_value());
-    match step(req) {
-        Ok(stepped) => {
-            held.let_go(req);
-            Ok(stepped)
-        }
-        Err(thrown) => Err(req.free_pending(thrown, |req| {
-            held.let_go(req);
-        })),
-    }
+    let stepped = step(req);
+    crate::ops::held_past(req, held, stepped)
 }
 
 /// The dimension a handler over an object reads, php's `if (OP2_TYPE ==
@@ -18090,6 +18083,126 @@ pub(crate) fn separate<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// What keeps the object of a property step, a compound assignment's or
+/// an increment's, through what the step reaches: a warning's handler
+/// that gives the object up, where php's in-place arm writes into what
+/// it freed. The frame's receiver and a `VAR` holding the object own it
+/// past any program text, so nothing is taken over them. Over the pair of
+/// handlers the owner is php's own, `GC_ADDREF(object)` and `OBJ_RELEASE`
+/// (`zend_assign_op_overloaded_property`,
+/// `zend_pre_incdec_overloaded_property`), so `debug_zval_dump` in a
+/// `__get` reads php's count.
+///
+/// ```php
+/// class M { public int $i = 5;
+///     function __get($n) { debug_zval_dump($this); return 1; } function __set($n, $v) {}
+///     function t() { $this->z += 1; $this->z++; } }
+/// $o = new M; $o->x += 1; $o->x--; $o->t();
+/// ```
+/// ```expect
+/// object(M)#1 (1) refcount(4){
+///   ["i"]=>
+///   int(5)
+/// }
+/// object(M)#1 (1) refcount(4){
+///   ["i"]=>
+///   int(5)
+/// }
+/// object(M)#1 (1) refcount(5){
+///   ["i"]=>
+///   int(5)
+/// }
+/// object(M)#1 (1) refcount(5){
+///   ["i"]=>
+///   int(5)
+/// }
+/// ```
+///
+/// An object a handler gives up stands to the end of the step, by a
+/// variable's, a table's, an entry's and a declared slot's way alike:
+///
+/// ```php
+/// class C { public $p = "pp"; public $n = "1x"; public $i = 1; }
+/// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["o"] = 1; $GLOBALS["a"] = 1; });
+/// $o = new C; $o->p .= []; var_dump($o);
+/// $o = new C; $o->n += 1; var_dump($o);
+/// $o = new stdClass; $o->p = "pp"; $o->p .= []; var_dump($o);
+/// $a = [new C]; $a[0]->p .= []; var_dump($a);
+/// $a = [new C]; $a[0]->i += $undefined; var_dump($a);
+/// ```
+/// ```expect
+/// [Array to string conversion]
+/// int(1)
+/// [A non-numeric value encountered]
+/// int(1)
+/// [Array to string conversion]
+/// int(1)
+/// [Array to string conversion]
+/// int(1)
+/// [Undefined variable $undefined]
+/// int(1)
+/// ```
+struct StepHold {
+    held: Option<Owner<Value>>,
+    overloaded: bool,
+}
+
+impl StepHold {
+    /// The hold over `object` as the opline's `op1` names it.
+    fn taken(req: &mut Request, frame: FrameRef, op: &Opline, object: PhpObject) -> StepHold {
+        let stands = match op.op1_type {
+            OperandKind::Unused => true,
+            OperandKind::Var => req
+                .slot_ptr(frame, op.op1)
+                .is_some_and(|at| Value::of_slot(at.read()).as_object().is_some()),
+            _ => false,
+        };
+        let held = (!stands).then(|| Owner::take(req, object.as_value()));
+        StepHold {
+            held,
+            overloaded: false,
+        }
+    }
+
+    /// The step goes through the pair of handlers, whose owner php takes.
+    fn overloaded(&mut self, req: &mut Request, object: PhpObject) {
+        self.overloaded = true;
+        if self.held.is_none() {
+            self.held = Some(Owner::take(req, object.as_value()));
+        }
+    }
+
+    /// The object given up past the step, with what the step threw
+    /// pending, `OBJ_RELEASE` over the pair of handlers.
+    fn past<T>(
+        self,
+        req: &mut Request,
+        stepped: Result<Result<T, Thrown>, Fatal>,
+    ) -> Result<Result<T, Thrown>, Fatal> {
+        let StepHold { held, overloaded } = self;
+        let Some(held) = held else {
+            return stepped;
+        };
+        let done = match stepped {
+            Ok(done) => done,
+            Err(fatal) => {
+                held.abandon(&fatal);
+                return Err(fatal);
+            }
+        };
+        if !overloaded {
+            return Ok(crate::ops::held_past(req, held, done));
+        }
+        Ok(match done {
+            Ok(done) => {
+                held.give_up(req);
+                Ok(done)
+            }
+            Err(thrown) => Err(req.free_pending(thrown, |req| held.give_up(req))),
+        })
+    }
+}
+
 /// The two oplines a compound assignment to a place is, and the kernel
 /// its operator names: what every arm of `ASSIGN_DIM_OP` and
 /// `ASSIGN_OBJ_OP` is handed beside the request and the frame.
@@ -18105,13 +18218,15 @@ struct Compound<'a> {
 }
 
 impl Compound<'_> {
-    /// `GET_OP_DATA_ZVAL_PTR(BP_VAR_R)`, or the `null` an undefined CV
-    /// read early answered (`zval_undefined_cv`).
+    /// What `GET_OP_DATA_ZVAL_PTR(BP_VAR_R)` points at as it stands, or
+    /// the `null` an undefined CV read early answered
+    /// (`zval_undefined_cv`). Only a variable a handler unset since is
+    /// undefined here, and it warns of nothing.
     fn value(self, req: &mut Request, frame: FrameRef, code: &OpArray) -> Value {
         if self.read {
             return Value::null();
         }
-        exec::operand(req, frame, code, self.data.op1_type, self.data.op1)
+        exec::operand_undef(req, frame, code, self.data.op1_type, self.data.op1).undef_as_null()
     }
 }
 
@@ -19024,7 +19139,14 @@ pub(crate) fn assign_obj_op<T: Tier>(
     let name = member.name(req, frame, code, op);
     let read =
         data.op1_type == OperandKind::Cv && req.slot(frame, data.op1).tag() == TypeTag::Undef;
+    // A `VAR` points at an entry the warning's handler can free with its
+    // table, so what it held is held.
+    let mut in_table = None;
     if read {
+        if op.op1_type == OperandKind::Var {
+            let held = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
+            in_table = Some(Owner::take(req, held));
+        }
         exec::operand(req, frame, code, data.op1_type, data.op1);
     }
     let step = Compound {
@@ -19033,7 +19155,10 @@ pub(crate) fn assign_obj_op<T: Tier>(
         kernel,
         read,
     };
-    let container = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?.deref();
+    let container = match &in_table {
+        Some(held) => held.deref(),
+        None => exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?.deref(),
+    };
     let written = match (name, container.as_object()) {
         (Ok(name), Some(object)) => {
             prime_constant(
@@ -19044,7 +19169,9 @@ pub(crate) fn assign_obj_op<T: Tier>(
                 object,
                 &name,
             );
-            step_property(req, frame, code, step, object, &name)?
+            let mut held = StepHold::taken(req, frame, op, object);
+            let stepped = step_property(req, frame, code, step, (object, &mut held), &name);
+            held.past(req, stepped)?
         }
         (Ok(name), None) => {
             // `GET_OP_DATA_ZVAL_PTR(BP_VAR_R)` and `ZVAL_UNDEFINED_OP1`,
@@ -19064,6 +19191,10 @@ pub(crate) fn assign_obj_op<T: Tier>(
             write_out(req, frame, op, &Value::null());
             Err(thrown)
         }
+    };
+    let written = match in_table {
+        Some(held) => crate::ops::held_past(req, held, written),
+        None => written,
     };
     member.release(req, frame, op);
     exec::free_operand(req, frame, op.op1_type, op.op1);
@@ -19163,9 +19294,25 @@ fn inline_assign_obj_op(
 /// The operation of a compound assignment over a declared property
 /// that hands out no place, readonly or set-restricted
 /// ([`Request::place_withheld`]): what `read_property` answers and the
-/// `OP_DATA` value through the kernel, the value operand given up
-/// either way, as `zend_assign_op_overloaded_property` does before its
-/// `write_property`.
+/// `OP_DATA` value through the kernel, php's
+/// `zend_assign_op_overloaded_property` up to its `write_property`, what
+/// `read_property` left pending ending it there; over a place, whose
+/// operation php makes in it, nothing pending stops the kernel.
+///
+/// ```php
+/// set_error_handler(function ($no, $msg) { throw new Exception("from the handler"); });
+/// class M { function __get($n) { return 5; } function __set($n, $v) { echo "set\n"; } }
+/// foreach ([new M, new stdClass] as $o) {
+///     $o->p = 5;
+///     try { $o->p %= $undefined; }
+///     catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// set
+/// Exception: from the handler
+/// DivisionByZeroError: Modulo by zero
+/// ```
 fn withheld_step(
     req: &mut Request,
     frame: FrameRef,
@@ -19173,22 +19320,24 @@ fn withheld_step(
     step: Compound<'_>,
     object: PhpObject,
     name: &[u8],
-    read: PropertyRead,
+    back: WriteBack,
 ) -> Result<Value, Thrown> {
-    let Compound {
-        op, data, kernel, ..
-    } = step;
-    let value = step.value(req, frame, code);
+    let Compound { op, kernel, .. } = step;
     let table = req.object_handlers(object.heap());
-    let computed = match table.read_property(req, object, name, read) {
+    let computed = match table.read_property(req, object, name, back.read()) {
         Ok(held) => {
-            let computed = kernel(req, &held, &value);
+            // Past the read, whose `__get` may have written the variable.
+            let value = step.value(req, frame, code);
+            let computed = match back {
+                WriteBack::Property => none_pending(req),
+                WriteBack::Entry | WriteBack::Apart => Ok(()),
+            }
+            .and_then(|()| kernel(req, &held, &value));
             held.give_up(req);
             computed
         }
         Err(thrown) => Err(thrown),
     };
-    exec::free_operand(req, frame, data.op1_type, data.op1);
     if computed.is_err() {
         write_out(req, frame, op, &Value::null());
     }
@@ -19289,7 +19438,7 @@ fn step_property(
     frame: FrameRef,
     code: &OpArray,
     step: Compound<'_>,
-    object: PhpObject,
+    (object, held): (PhpObject, &mut StepHold),
     name: &Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
     let Compound { op, data, .. } = step;
@@ -19322,9 +19471,12 @@ fn step_property(
         }
     };
     match ptr {
-        PropertyPtr::Served(back) => Ok(served_property_step(
-            req, frame, code, step, object, key, back,
-        )),
+        PropertyPtr::Served(back) => {
+            held.overloaded(req, object);
+            Ok(served_property_step(
+                req, frame, code, step, object, key, back,
+            ))
+        }
         // `zend_binary_assign_op_obj_dim` over the bucket: a number pair
         // made in place by the rule the inline path and the kernel make
         // it by, and anything else, whose operation may raise and so run
@@ -19350,7 +19502,7 @@ fn step_property(
                 step,
                 object,
                 key,
-                WriteBack::Property,
+                WriteBack::Entry,
             ))
         }
         // A readonly or set-restricted property gets no place, so the
@@ -19358,50 +19510,78 @@ fn step_property(
         // it throws comes before what the write refuses
         // (`zend_assign_op_overloaded_property`).
         PropertyPtr::Withheld => {
-            let precomputed =
-                match withheld_step(req, frame, code, step, object, bytes, PropertyRead::Warning) {
-                    Ok(stepped) => stepped,
-                    Err(thrown) => return Ok(Err(thrown)),
-                };
-            let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
-            match req.declared_slot_for_write(object, bytes, "modify", silent) {
-                Ok(Some((slot, typed))) => {
-                    let written = step_slot(
-                        req,
-                        frame,
-                        code,
-                        step,
-                        (object, slot, typed),
-                        bytes,
-                        Some(precomputed),
-                    )?;
-                    // `zend_std_write_property`'s `Z_PROP_FLAG_P(variable_ptr)
-                    // &= ~IS_PROP_REINITABLE`: the write
-                    // `zend_assign_op_overloaded_property` makes locks a
-                    // readonly property `__clone` reinitialised again.
-                    if written.is_ok() {
-                        object
-                            .heap()
-                            .set_slot_bit(slot, php_heap::PropBit::Reinitable, false);
-                    }
-                    Ok(written)
-                }
-                Ok(None) => {
-                    req.release(precomputed);
-                    Err(Fatal::error(
-                        "InternalError: ZEND_ASSIGN_OBJ_OP withheld the place of a property no class declared",
-                    ))
-                }
-                Err(thrown) => {
-                    req.release(precomputed);
-                    write_out(req, frame, op, &Value::null());
-                    Ok(Err(thrown))
-                }
-            }
+            held.overloaded(req, object);
+            let written = withheld_property_step(req, frame, code, step, object, bytes);
+            written.map(|done| data_freed(req, frame, data, done))
         }
         PropertyPtr::Slot(slot, typed) => {
             step_slot(req, frame, code, step, (object, slot, typed), bytes, None)
         }
+    }
+}
+
+/// [`step_property`] over a property that hands out no place: what
+/// [`withheld_step`] made written through the declared slot, whose write
+/// refuses what the scope may not do.
+fn withheld_property_step(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    object: PhpObject,
+    bytes: &[u8],
+) -> Result<Result<(), Thrown>, Fatal> {
+    let op = step.op;
+    let precomputed =
+        match withheld_step(req, frame, code, step, object, bytes, WriteBack::Property) {
+            Ok(stepped) => stepped,
+            Err(thrown) => return Ok(Err(thrown)),
+        };
+    let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
+    match req.declared_slot_for_write(object, bytes, "modify", silent) {
+        Ok(Some((slot, typed))) => {
+            let at = (object, slot, typed);
+            let written = step_slot(req, frame, code, step, at, bytes, Some(precomputed))?;
+            // `zend_std_write_property`'s `Z_PROP_FLAG_P(variable_ptr)
+            // &= ~IS_PROP_REINITABLE`: the write
+            // `zend_assign_op_overloaded_property` makes locks a
+            // readonly property `__clone` reinitialised again.
+            if written.is_ok() {
+                object
+                    .heap()
+                    .set_slot_bit(slot, php_heap::PropBit::Reinitable, false);
+            }
+            Ok(written)
+        }
+        Ok(None) => {
+            req.release(precomputed);
+            Err(Fatal::error(
+                "InternalError: ZEND_ASSIGN_OBJ_OP withheld the place of a property no class declared",
+            ))
+        }
+        Err(thrown) => {
+            req.release(precomputed);
+            write_out(req, frame, op, &Value::null());
+            Ok(Err(thrown))
+        }
+    }
+}
+
+/// `FREE_OP_DATA()` past the step, with what it threw pending.
+fn data_freed(
+    req: &mut Request,
+    frame: FrameRef,
+    data: Opline,
+    done: Result<(), Thrown>,
+) -> Result<(), Thrown> {
+    match done {
+        Ok(()) => {
+            exec::free_operand(req, frame, data.op1_type, data.op1);
+            Ok(())
+        }
+        Err(thrown) => Err(req.free_pending(thrown, |req| {
+            exec::free_operand(req, frame, data.op1_type, data.op1);
+        })),
     }
 }
 
@@ -19799,7 +19979,19 @@ fn slot_step(
 /// }
 /// ```
 ///
-/// The stepped value is written back as `back` says.
+/// The stepped value is written back as `back` says, and the value
+/// operand is freed past that write, php's `FREE_OP_DATA()`:
+///
+/// ```php
+/// class D { function __toString() { return "d"; } function __destruct() { echo "dtor\n"; } }
+/// class M { function __get($n) { return "a"; } function __set($n, $v) { echo "set $n=$v\n"; } }
+/// $o = new M;
+/// $o->p .= new D;
+/// ```
+/// ```expect
+/// set p=ad
+/// dtor
+/// ```
 fn served_property_step(
     req: &mut Request,
     frame: FrameRef,
@@ -19809,31 +20001,37 @@ fn served_property_step(
     name: crate::api::values::PhpString,
     back: WriteBack,
 ) -> Result<(), Thrown> {
-    let op = step.op;
-    let stepped = withheld_step(req, frame, code, step, object, name.as_bytes(), back.read())?;
-    write_out(req, frame, op, &stepped);
-    if back == WriteBack::Apart {
-        req.release(stepped);
-        return Ok(());
-    }
-    // `write_property` takes an owner of the value and of the name, on
-    // every arm: the stepped value's own, which php's `zval_ptr_dtor(&res)`
-    // gives up after the write, and one more of the name, which the
-    // operand keeps its own of.
-    let name = Owner::take(req, name);
-    let stepped = Owner::adopt(stepped);
-    let table = req.object_handlers(object.heap());
-    table.write_property(req, object, name, stepped)
+    let Compound { op, data, .. } = step;
+    let read = withheld_step(req, frame, code, step, object, name.as_bytes(), back);
+    let written = read.and_then(|stepped| {
+        write_out(req, frame, op, &stepped);
+        if back == WriteBack::Apart {
+            req.release(stepped);
+            return Ok(());
+        }
+        // `write_property` takes an owner of the value and of the name,
+        // on every arm: the stepped value's own, which php's
+        // `zval_ptr_dtor(&res)` gives up after the write, and one more of
+        // the name, which the operand keeps its own of.
+        let name = Owner::take(req, name);
+        let stepped = Owner::adopt(stepped);
+        let table = req.object_handlers(object.heap());
+        table.write_property(req, object, name, stepped)
+    });
+    data_freed(req, frame, data, written)
 }
 
 /// Where a compound write or a step over a property the class serves
 /// goes after the operation: back through `write_property`
-/// (`zend_assign_op_overloaded_property`), or nowhere, the class having
-/// answered a place of its own ([`PropertyPlace::Apart`], php's pointer
-/// into `sxe->tmp`) that the operation changes in place.
+/// (`zend_assign_op_overloaded_property`), back through it for a dynamic
+/// property's entry, the pair standing in for php's operation in the
+/// bucket, or nowhere, the class having answered a place of its own
+/// ([`PropertyPlace::Apart`], php's pointer into `sxe->tmp`) that the
+/// operation changes in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriteBack {
     Property,
+    Entry,
     Apart,
 }
 
@@ -19851,7 +20049,7 @@ impl WriteBack {
     /// the class keeps apart.
     fn read(self) -> PropertyRead {
         match self {
-            WriteBack::Property => PropertyRead::Warning,
+            WriteBack::Property | WriteBack::Entry => PropertyRead::Warning,
             WriteBack::Apart => PropertyRead::Write,
         }
     }
@@ -20112,12 +20310,9 @@ fn stepped_obj(
     let stepped = match (member.name(req, frame, code, op), container.as_object()) {
         (Ok(name), Some(object)) => {
             prime_constant(req, frame, op, property_cache_slot(op), object, &name);
-            // A step's diagnostic can reach a handler that gives the
-            // object up.
-            let kept = Owner::take(req, object.as_value());
-            let stepped = incdec_property(req, frame, op, step, object, &name);
-            kept.let_go(req);
-            stepped?
+            let mut held = StepHold::taken(req, frame, op, object);
+            let stepped = incdec_property(req, frame, op, step, (object, &mut held), &name);
+            held.past(req, stepped)?
         }
         (Ok(name), None) => {
             let name = name.as_str_bytes().unwrap_or_default();
@@ -20336,7 +20531,7 @@ fn incdec_property(
     frame: FrameRef,
     op: &Opline,
     step: IncDec,
-    object: PhpObject,
+    (object, held): (PhpObject, &mut StepHold),
     name: &Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
     let bytes = name.as_str_bytes().unwrap_or_default();
@@ -20365,6 +20560,7 @@ fn incdec_property(
     let (object, (slot, typed)) = match placed {
         Ok((object, PropertyPtr::Slot(slot, typed))) => (object, (slot, typed)),
         Ok((object, PropertyPtr::Served(back))) => {
+            held.overloaded(req, object);
             return Ok(served_incdec(req, frame, op, step, object, key, back));
         }
         // `zend_pre_incdec_property_zval` over the bucket: a number
@@ -20391,6 +20587,7 @@ fn incdec_property(
         // step is the overloaded one, and what the write refuses is
         // chained onto what the step threw.
         Ok((object, PropertyPtr::Withheld)) => {
+            held.overloaded(req, object);
             return Ok(overloaded_incdec(req, frame, op, step, object, key));
         }
         Err(thrown) => return Ok(Err(nulled_out(req, frame, op, thrown))),
