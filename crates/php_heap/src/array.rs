@@ -1383,6 +1383,7 @@ impl Arr {
     /// value is copied and no owner taken. The key of a packed array's
     /// element is its position, as `ZVAL_LONG(result, pos)` reads it.
     #[must_use]
+    #[inline] // a walk's step, its key dropped where the walk reads none
     pub fn live_from(&self, mut pos: u32) -> Option<(u32, Key, Zval)> {
         let used = self.num_used();
         while pos < used {
@@ -1924,11 +1925,11 @@ impl IntoIterator for &Arr {
 impl Iterator for ArrIter {
     type Item = (Key, Zval);
 
+    #[inline] // a walk's step, php's `ZEND_HASH_FOREACH`'s in the walk's own body
     fn next(&mut self) -> Option<(Key, Zval)> {
-        let pos = self.arr.valid_pos(self.pos);
-        let entry = self.arr.entry_at(pos)?;
-        self.pos = pos + 1;
-        Some(entry)
+        let (found, key, z) = self.arr.live_from(self.pos)?;
+        self.pos = found + 1;
+        Some((key, z))
     }
 }
 

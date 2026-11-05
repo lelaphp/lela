@@ -14209,20 +14209,21 @@ fn frameless_call<const N: usize>(
     // read where it stands in the one look at the frame that writes the
     // opline, and each read in turn ([`exec::frameless_operand`]) where
     // one is `UNUSED`, `UNDEF` or a reference.
-    let (operands, owned) = if let Some(read) = frameless_read(req, frame, code, at, &arguments) {
-        read
-    } else {
-        let header = req.vm().at(frame);
-        let named = header.is_none_or(|header| header.annex().is_some());
-        let mut operands = [Zval::UNDEF; N];
-        let mut owned = 0u8;
-        for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
-            let own;
-            (*read, own) = exec::frameless_operand(req, frame, code, operand, named);
-            owned |= u8::from(own) << at;
-        }
-        (operands, owned)
-    };
+    let mut operands = [Value::undef(); N];
+    let (owned, out) =
+        if let Some(read) = frameless_read(req, frame, code, (op, at), arguments, &mut operands) {
+            read
+        } else {
+            let header = req.vm().at(frame);
+            let named = header.is_none_or(|header| header.annex().is_some());
+            let mut owned = 0u8;
+            for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
+                let (zval, own) = exec::frameless_operand(req, frame, code, operand, named);
+                *read = Value::of_zval(zval);
+                owned |= u8::from(own) << at;
+            }
+            (owned, req.slot_ptr(frame, op.out))
+        };
     // `if (EG(exception))` past the fetch: a handler threw at an undefined
     // operand's warning, so the native is not served.
     if let Err(thrown) = none_pending(req) {
@@ -14230,12 +14231,10 @@ fn frameless_call<const N: usize>(
         checked_after_throw(req, &thrown)?;
         return Ok(Stepped::Threw(frame).into());
     }
-    // A fatal frees the operands as the served path does, and is the only
-    // answer that skips the rest.
     let served = frameless_native(req, op.extended_value, &operands);
     free_operands(req, frame, (&operands, owned), &arguments);
-    let value = match served? {
-        Ok(value) => value,
+    let value = match served {
+        Ok(value) => value.hand_on(),
         Err(thrown) => {
             checked_after_throw(req, &thrown)?;
             return Ok(Stepped::Threw(frame).into());
@@ -14253,56 +14252,64 @@ fn frameless_call<const N: usize>(
         req.release(value);
         return Err(fatal);
     }
-    set_out(req, frame, op, value);
+    req.replace_place(frame, op.out, out, value);
     // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`: a throwable a handler left
     // pending while the native went on, its check made.
     if req.is_pending() || raised && crate::interrupt::interrupted(req)? {
         return Ok(Stepped::Threw(frame).into());
     }
-    jump_to(at.saturating_add(if N == 3 { 2 } else { 1 }))
+    Ok(Next::by(if N == 3 { 2 } else { 1 }))
 }
 
-/// [`frameless_call`]'s operands read in one look at `frame`, which is
-/// made to stand at `at`: each as [`exec::frameless_operand`] reads one
-/// that is a constant or a value in its slot, a `CV` of a frame a name
-/// reaches taking one more owner; none, with only the opline written,
-/// where any is `UNUSED`, `UNDEF` or a reference.
+/// [`frameless_call`]'s operands read into `operands` in one look at
+/// `frame`, which is made to stand at the opline at `at`: each as
+/// [`exec::frameless_operand`] reads one that is a constant or a value
+/// in its slot, a `CV` of a frame a name reaches taking one more owner.
+/// What is held of each, and the slot `result` names, php's
+/// `EX_VAR(opline->result.var)` taken before the native as php takes it;
+/// none, with only the opline written, where any is `UNUSED`, `UNDEF` or
+/// a reference.
 #[inline(always)] // the frameless handler's hot path
 fn frameless_read<const N: usize>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
-    at: u32,
-    arguments: &[(OperandKind, u32); N],
-) -> Option<([Zval; N], u8)> {
+    (op, at): (&Opline, u32),
+    arguments: [(OperandKind, u32); N],
+    operands: &mut [Value; N],
+) -> Option<(u8, Option<php_heap::ZvalRef>)> {
     let state = req.vm_mut().stack.frame_mut(frame)?;
     let header = state.header_mut();
     header.opline = at;
     let named = header.annex().is_some();
+    let out = state.slot_ptr(php_heap::Slot(op.out));
     let slots = state.slots_mut();
-    let mut operands = [Zval::UNDEF; N];
-    let mut owned = 0u8;
-    for (at, (&(kind, field), read)) in arguments.iter().zip(&mut operands).enumerate() {
+    let mut variables = 0u8;
+    for (at, (&(kind, field), read)) in arguments.iter().zip(&mut *operands).enumerate() {
         let z = match kind {
             OperandKind::Const => *code.literals.get(field as usize)?,
             OperandKind::Unused => return None,
-            _ => *slots.get(field as usize)?,
+            _ => {
+                let z = *slots.get(field as usize)?;
+                if z.is_undef() || z.kind() == php_heap::ZvalType::Reference {
+                    return None;
+                }
+                variables |= u8::from(kind == OperandKind::Cv) << at;
+                z
+            }
         };
-        if z.is_undef() || z.kind() == php_heap::ZvalType::Reference {
-            return None;
-        }
-        *read = z;
-        owned |= u8::from(kind == OperandKind::Cv && named) << at;
+        *read = Value::of_zval(z);
     }
-    for (at, z) in operands.iter().enumerate() {
+    let owned = if named { variables } else { 0 };
+    for (at, operand) in operands.iter().enumerate() {
         if owned >> at & 1 != 0 {
-            z.addref();
+            operand.to_zval().addref();
         }
     }
-    Some((operands, owned))
+    Some((owned, out))
 }
 
-/// The native at `at` of the frameless table over `zvals`, the entry
+/// The native at `at` of the frameless table over `operands`, the entry
 /// served or the framed one where an observer watches: php's
 /// `ZEND_FLF_HANDLER(opline)`, what the handler and the tier's kernel
 /// share, each freeing the operands after it as its code does.
@@ -14310,13 +14317,13 @@ fn frameless_read<const N: usize>(
 pub(super) fn frameless_native(
     req: &mut Request,
     at: u32,
-    zvals: &[Zval],
-) -> Result<Result<Value, Thrown>, Fatal> {
+    operands: &[Value],
+) -> Result<Owner<Value>, Thrown> {
     match req.frameless_entry(at) {
         Some((function, entry)) if !crate::observer::observing(req) => {
-            Ok(req.serve_frameless(function, entry, zvals))
+            req.serve_frameless(function, entry, operands)
         }
-        found => frameless_aside(req, at, found, zvals),
+        _ => frameless_aside(req, at, operands),
     }
 }
 
@@ -14482,17 +14489,17 @@ pub(super) fn frameless_native(
 /// #2 %SCRATCH%/witness.php(13): f(1)
 /// ```
 #[inline(always)] // the frameless handler's hot path
-fn free_operands(
+fn free_operands<const N: usize>(
     req: &mut Request,
     frame: FrameRef,
-    (zvals, owned): (&[Zval], u8),
-    slots: &[(OperandKind, u32)],
+    (operands, owned): (&[Value; N], u8),
+    slots: &[(OperandKind, u32); N],
 ) {
-    for (at, (&operand, &(kind, field))) in zvals.iter().zip(slots).enumerate() {
+    for (at, (operand, &(kind, field))) in operands.iter().zip(slots).enumerate() {
         if owned >> at & 1 != 0 {
-            req.release_zval_nogc(operand);
+            req.release_zval_nogc(operand.to_zval());
         } else if matches!(kind, OperandKind::Tmp | OperandKind::Var)
-            && let Some(object) = operand.as_obj()
+            && let Some(object) = operand.to_zval().as_obj()
         {
             req.destruct_in_place(object);
         }
@@ -14502,25 +14509,24 @@ fn free_operands(
 
 /// [`frameless_native`]'s entry where an observer is declared, the entry
 /// itself where it declined the native and the framed entry's full call
-/// where it watches it, or where `at` names no entry.
+/// where it watches it, or the internal error where `at` names no entry.
 #[cold]
 #[inline(never)]
-fn frameless_aside(
-    req: &mut Request,
-    at: u32,
-    found: Option<(Function, crate::api::__private::Frameless)>,
-    zvals: &[Zval],
-) -> Result<Result<Value, Thrown>, Fatal> {
-    match found {
+fn frameless_aside(req: &mut Request, at: u32, operands: &[Value]) -> Result<Owner<Value>, Thrown> {
+    match req.frameless_entry(at) {
         Some((function, entry)) if !crate::observer::frameless_observed(req, function) => {
-            Ok(req.serve_frameless(function, entry, zvals))
+            req.serve_frameless(function, entry, operands)
         }
-        Some((function, _)) => req.serve_frameless_observed(function, zvals),
-        None => Err(Fatal::error(format!(
-            "InternalError: ZEND_FRAMELESS_ICALL_{} indexes frameless entry {at} and the engine's table has {} entries",
-            zvals.len(),
-            req.frameless_count()
-        ))),
+        Some((function, _)) => {
+            crate::api::values::adopted(req.serve_frameless_observed(function, operands))
+        }
+        None => {
+            let message = format!(
+                "InternalError: ZEND_FRAMELESS_ICALL_{} indexes frameless entry {at}, past the engine's table",
+                operands.len()
+            );
+            Err(crate::api::raising::fatal(req, &message))
+        }
     }
 }
 
