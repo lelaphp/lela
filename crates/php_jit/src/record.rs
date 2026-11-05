@@ -575,6 +575,7 @@ pub(crate) fn run(
         entered,
         landed,
         behind,
+        ret_depth,
     } = opening;
     let mut req = Recording::set(req);
     let mut view = UnitView::new(&req);
@@ -585,7 +586,13 @@ pub(crate) fn run(
             ended(frame, false),
         ));
     };
-    let mut recorder = Recorder::new(policy, start, tier::epoch(&req), Claimed::of(claimed));
+    let mut recorder = Recorder::new(
+        policy,
+        start,
+        tier::epoch(&req),
+        Claimed::of(claimed),
+        ret_depth,
+    );
     let (stop, ended) = recorder.record(&mut req, &mut view, frame, root, behind)?;
     let record = TraceRecord {
         start: recorder.start,
@@ -619,6 +626,104 @@ pub(crate) struct Opening {
     pub(crate) entered: Vec<Entered>,
     pub(crate) landed: Landed,
     pub(crate) behind: Option<OplineIdx>,
+    /// For a side trace, how many returns past its first frame it follows
+    /// ([`ret_depth`]).
+    pub(crate) ret_depth: u32,
+}
+
+/// How many returns past `frame` a side trace of the loop `root` names
+/// follows, php's `ret_depth` (`Z/ext/opcache/jit/zend_jit_trace.c:8566-8585`):
+/// where the root is a loop's in another op array, the frames from
+/// `frame` down to the nearest that runs it, so a side that starts in a
+/// callee the loop's trace inlined goes back to the loop and links to
+/// it, where the callee's return would end it; none where no such frame
+/// stands within php's four returns.
+///
+/// php compares `zend_op_array` addresses. `$main` runs in a copy of the
+/// cached op array and a closure in its object's, while a trace names
+/// the original of either, so neither is ever found: a loop in a file's
+/// own code or in a closure gives its sides no depth. Its side stops at
+/// the return, and the landing's own trace goes on from there.
+///
+/// A polymorphic callee of a function's loop, whose side links back to
+/// the loop, and of a closure's, whose side stops at the return:
+///
+/// ```php
+/// function poly($x) { if ($x % 2 == 1) { return 1.5; } return 2; }
+/// function run($n) { $s = 0; while ($n-- > 0) { $s += (int) poly($n); } return $s; }
+/// $c = function ($n) { $s = 0; while ($n-- > 0) { $s += (int) poly($n); } return $s; };
+/// echo run(7), " ", $c(7), "\n";
+/// ```
+/// ```expect regime=jit-inline process capture
+/// 11 11
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:4
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) run() %SCRATCH%/witness.php:3
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 5 poly() %SCRATCH%/witness.php:2
+/// ---- TRACE 2 start (side trace 1/5) poly() %SCRATCH%/witness.php:2
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 4 run() %SCRATCH%/witness.php:3
+/// ---- TRACE 3 start (side trace 1/4) run() %SCRATCH%/witness.php:3
+/// ---- TRACE 3 stop (return)
+/// ---- TRACE 3 compiled
+///
+/// ---- TRACE 4 start (enter) {closure:%SCRATCH%/witness.php:4}() %SCRATCH%/witness.php:4
+/// ---- TRACE 4 abort (inner loop)
+/// ---- TRACE 4 start (loop) {closure:%SCRATCH%/witness.php:4}() %SCRATCH%/witness.php:4
+/// ---- TRACE 4 stop (loop)
+/// ---- TRACE 4 compiled
+///
+///      TRACE 4 exit 5 poly() %SCRATCH%/witness.php:2
+/// ---- TRACE 5 start (side trace 4/5) poly() %SCRATCH%/witness.php:2
+/// ---- TRACE 5 stop (return)
+/// ---- TRACE 5 compiled
+///
+///      TRACE 4 exit 4 {closure:%SCRATCH%/witness.php:4}() %SCRATCH%/witness.php:4
+/// ---- TRACE 6 start (side trace 4/4) {closure:%SCRATCH%/witness.php:4}() %SCRATCH%/witness.php:4
+/// ---- TRACE 6 stop (return)
+/// ---- TRACE 6 compiled
+/// ```
+pub(crate) fn ret_depth(
+    req: &Request,
+    frame: FrameRef,
+    (root, at): (FuncRef, OplineIdx),
+    folds: Folds,
+) -> u32 {
+    if tier::func(req, frame) == Some(root) {
+        return 0;
+    }
+    let mut view = UnitView::new(req);
+    let copied = !view.hold(req, root) || view.is_main(root) != Some(false) || closure(&view, root);
+    if copied || (view.op_array(root)).is_none_or(|code| header_at(code, at, folds).is_none()) {
+        return 0;
+    }
+    let mut below = frame;
+    for depth in 1..=MAX_RET_DEPTH {
+        let Some(next) = tier::below(req, below) else {
+            return 0;
+        };
+        if tier::func(req, next) == Some(root) {
+            return depth;
+        }
+        below = next;
+    }
+    0
+}
+
+/// Whether the op array `func` names is a closure's body, php's
+/// `ZEND_ACC_CLOSURE`, which its compiler names `{closure:...}`; false for
+/// one `view` does not hold.
+pub(crate) fn closure(view: &UnitView, func: FuncRef) -> bool {
+    (view.declaration(func))
+        .and_then(|declared| declared.function)
+        .is_some_and(|function| function.name.0.starts_with(b"{closure:"))
 }
 
 /// The landings a compiled trace arms (`jit-design.md` §2.2, #3036),
@@ -1020,6 +1125,8 @@ struct Recorder<'p> {
     length: u32,
     level: u32,
     ret_level: u32,
+    /// php's `ret_depth` ([`ret_depth`]).
+    ret_depth: u32,
     /// php's `unrolled_calls`: the op array entered at each depth, the
     /// returns past the root first.
     unrolled: Vec<FuncRef>,
@@ -1070,7 +1177,13 @@ enum Went {
 }
 
 impl<'p> Recorder<'p> {
-    fn new(policy: &'p Policy, start: Start, epoch: Epoch, claimed: Claimed) -> Recorder<'p> {
+    fn new(
+        policy: &'p Policy,
+        start: Start,
+        epoch: Epoch,
+        claimed: Claimed,
+        ret_depth: u32,
+    ) -> Recorder<'p> {
         Recorder {
             policy,
             start,
@@ -1081,6 +1194,7 @@ impl<'p> Recorder<'p> {
             length: HEAD,
             level: 0,
             ret_level: 0,
+            ret_depth,
             unrolled: Vec::new(),
             backtrack_recursion: None,
             backtrack_ret_recursion: None,
@@ -1612,6 +1726,20 @@ impl<'p> Recorder<'p> {
                         && self.root_bad_stop(limit) != Some(Stop::RecursionExit) =>
                 {
                     return Went::Stopped(Stop::RecursionExit);
+                }
+                Start::Side { .. } if self.ret_level < self.ret_depth => {
+                    let Some(landed) = tier::func(req, caller).filter(|f| view.hold(req, *f))
+                    else {
+                        return Went::Stopped(Stop::Return);
+                    };
+                    self.events.push(Event::Back);
+                    if self.count(1) {
+                        return Went::Stopped(Stop::TooLong);
+                    }
+                    self.ret_level += 1;
+                    self.last_loop = None;
+                    *func = landed;
+                    self.under_way(req, caller);
                 }
                 _ => return Went::Stopped(Stop::Return),
             }

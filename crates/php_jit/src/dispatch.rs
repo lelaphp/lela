@@ -1383,7 +1383,7 @@ fn recordings(
             );
             return Ok((resumed(frame, *stepped), None, false));
         }
-        let opening = side_opened(table, start, behind);
+        let opening = side_opened(req, frame, (table, shared.policy.folds()), start, behind);
         let claimed = claim.holder();
         let (recorded, ended) =
             match record::run(req, frame, start, claimed, &shared.policy, opening) {
@@ -1929,15 +1929,19 @@ fn refused(table: Option<&table::Table>, start: Start) -> Option<Stop> {
 /// What a recording of `start` opens with, `behind` beside it: for a
 /// side trace, what its parent's exit knew of the slots of the frame it
 /// landed in, and whether the exit named the opline it landed at or left
-/// the frame where it stood; nothing of either for a root.
+/// the frame where it stood, and how many returns past `frame` it
+/// follows back to its root's loop ([`record::ret_depth`]); nothing of
+/// any for a root.
 fn side_opened(
-    table: Option<&table::Table>,
+    req: &Request,
+    frame: FrameRef,
+    (table, folds): (Option<&table::Table>, record::Folds),
     start: Start,
     behind: Option<OplineIdx>,
 ) -> record::Opening {
-    let exit = (start.grew())
-        .and_then(|(parent, exit)| Some((table?.get(parent)?, exit)))
-        .and_then(|(trace, exit)| trace.exits.get(usize::from(exit.0)));
+    let table = table.filter(|_| start.grew().is_some());
+    let parent = (start.grew()).and_then(|(parent, exit)| Some((table?.get(parent)?, exit)));
+    let exit = parent.and_then(|(trace, exit)| trace.exits.get(usize::from(exit.0)));
     let Some(exit) = exit else {
         return record::Opening {
             behind,
@@ -1952,6 +1956,11 @@ fn side_opened(
             Landed::Stood
         },
         behind,
+        ret_depth: parent
+            .and_then(|(trace, _)| table?.get(trace.root))
+            .filter(|root| root.leaves.is_none())
+            .and_then(|root| root.opens)
+            .map_or(0, |root| record::ret_depth(req, frame, root, folds)),
     }
 }
 
