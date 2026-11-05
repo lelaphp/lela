@@ -11077,6 +11077,45 @@ pub(crate) fn fetch_list_w<T: Tier>(
 /// string, and after `ZVAL_UNDEFINED_OP1` in the arm that has neither.
 /// That second warning is raised under both reads; the first and the
 /// `Trying to access array offset` beside it are `BP_VAR_R`'s alone.
+///
+/// A by-reference `offsetGet` answers its reference, and the read hands
+/// on what it holds, as `ZVAL_COPY_DEREF` does:
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     public $d = ['k' => ['x' => 1]];
+///     function offsetExists($o): bool { return isset($this->d[$o]); }
+///     function &offsetGet($o): mixed { return $this->d[$o]; }
+///     function offsetSet($o, $v): void {} function offsetUnset($o): void {}
+/// }
+/// $r = new A;
+/// $m = $r['k'];
+/// $m['y'] = 2;
+/// var_dump($r->d, $m, $r['k']['x'], [$r['k']]);
+/// ```
+/// ```expect
+/// array(1) {
+///   ["k"]=>
+///   array(1) {
+///     ["x"]=>
+///     int(1)
+///   }
+/// }
+/// array(2) {
+///   ["x"]=>
+///   int(1)
+///   ["y"]=>
+///   int(2)
+/// }
+/// int(1)
+/// array(1) {
+///   [0]=>
+///   array(1) {
+///     ["x"]=>
+///     int(1)
+///   }
+/// }
+/// ```
 fn read_dimension(
     req: &mut Request,
     frame: FrameRef,
@@ -11125,9 +11164,10 @@ fn read_dimension(
                 DimRead::Warning => DimensionRead::Warning,
                 DimRead::Silent => DimensionRead::Silent,
             };
-            table
-                .read_dimension(req, object, dim.as_ref(), fetch)
-                .map(Owner::hand_on)
+            let read = table.read_dimension(req, object, dim.as_ref(), fetch);
+            // `ZVAL_COPY_DEREF`, or `zend_unwrap_reference` over what a
+            // by-reference `offsetGet` left in `result`.
+            read.map(|read| req.unwrap_reference(read.hand_on()))
         }));
     }
     if mode == DimRead::Silent {
