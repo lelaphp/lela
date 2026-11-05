@@ -5031,6 +5031,20 @@ fn collect_variadics(req: &mut Request, frame: FrameRef, op: &Opline) -> Result<
 /// ```expect
 /// s(): Return value must be of type string, int returned
 /// ```
+///
+/// A handler that throws at an undefined variable's warning leaves with
+/// what it threw, and no `TypeError` is made over it:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// function f(): string { return $u; }
+/// try { f(); } catch (Throwable $e) { var_dump($e::class, $e->getMessage(), $e->getPrevious()); }
+/// ```
+/// ```expect
+/// string(9) "Exception"
+/// string(21) "Undefined variable $u"
+/// NULL
+/// ```
 pub(crate) fn verify_return_type<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -5124,6 +5138,9 @@ fn return_mask_missed(
         Some(place) => Value::of_slot(place.read()).deref(),
         None => exec::operand(req, frame, code, op.op1_type, op.op1).deref(),
     };
+    if let Err(thrown) = none_pending(req) {
+        return threw(req, frame, &thrown);
+    }
     // A `CONST` operand is checked in the temporary the `RETURN` reads
     // (`ZVAL_COPY(EX_VAR(opline->result.var), retval_ptr)`), never in
     // place in the table.
@@ -12828,6 +12845,19 @@ enum Keep {
 ///   thrown in %s on line 2
 /// ```
 ///
+/// A handler that throws at the warning leaves with what it threw, and
+/// no `TypeError` is made over it:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// try { clone $u; } catch (Throwable $e) { var_dump($e::class, $e->getMessage(), $e->getPrevious()); }
+/// ```
+/// ```expect
+/// string(9) "Exception"
+/// string(21) "Undefined variable $u"
+/// NULL
+/// ```
+///
 /// A throwable's table carries `default_exception_handlers`, whose
 /// `clone_obj` is null, and that is read before the private `__clone`
 /// `Exception` declares.
@@ -12855,14 +12885,16 @@ pub(crate) fn clone<T: Tier>(
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let cloned = match operand.as_object() {
         Some(object) => req.clone_object(object, None).map(Owner::hand_on),
-        None => Err(type_error(
-            req,
-            &sentence_given(
+        None => none_pending(req).and_then(|()| {
+            Err(type_error(
                 req,
-                b"clone(): Argument #1 ($object) must be of type object, ",
-                &operand,
-            ),
-        )),
+                &sentence_given(
+                    req,
+                    b"clone(): Argument #1 ($object) must be of type object, ",
+                    &operand,
+                ),
+            ))
+        }),
     };
     exec::free_operand(req, frame, op.op1_type, op.op1);
     computed_into(req, frame, op, cloned.map(|object| object.as_value()))
