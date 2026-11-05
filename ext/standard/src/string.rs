@@ -2303,9 +2303,13 @@ fn implode_array(
             let mut out = Fill::new(out);
             let mut position = 0;
             while let Some((found, _, value)) = pieces.live_from(position) {
-                // Past the first piece, whichever bucket it stood at.
+                // Past the first piece, whichever bucket it stood at: one
+                // byte written where it stands, as php writes it.
                 if position > 0 {
-                    out.put(glue);
+                    match *glue {
+                        [byte] => out.byte(byte),
+                        _ => out.put(glue),
+                    }
                 }
                 position = found.saturating_add(1);
                 plain_piece(&value, |bytes, _| out.put(bytes));
