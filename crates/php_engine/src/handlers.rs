@@ -28851,37 +28851,39 @@ pub(crate) mod inline_path {
         super::inlined::<T>(req, frame, code, at, inline)
     }
 
-    /// `ZEND_ADD` over two numbers.
-    #[inline(always)] // in the loop and in the handler
-    pub(crate) fn add<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_arith(slots, code, op, Arith::Add, (A::default(), B::default()))
+    /// `ZEND_ADD`, `ZEND_SUB` and `ZEND_MUL` over two numbers, and the
+    /// same op fused to the `ASSIGN` of its temporary to a CV. The loop
+    /// alone serves the fusion: the handler serves the op alone.
+    macro_rules! arith {
+        ($($op:ident, $assign_cv:ident, $arith:ident;)*) => {$(
+            #[inline(always)] // in the loop and in the handler
+            pub(crate) fn $op<A: Operand + Default, B: Operand + Default>(
+                slots: &mut [Zval],
+                code: &OpArray,
+                op: &Opline,
+                _: u32,
+            ) -> Option<Inline> {
+                inline_arith(slots, code, op, Arith::$arith, (A::default(), B::default()))
+            }
+
+            #[inline(always)] // in the loop
+            #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+            pub(crate) fn $assign_cv<A: Operand + Default, B: Operand + Default>(
+                slots: &mut [Zval],
+                code: &OpArray,
+                op: &Opline,
+                at: u32,
+            ) -> Option<Inline> {
+                let kinds = (A::default(), B::default());
+                inline_arith_assign(slots, code, op, at, Arith::$arith, kinds)
+            }
+        )*};
     }
 
-    /// `ZEND_SUB` over two numbers.
-    #[inline(always)] // in the loop and in the handler
-    pub(crate) fn sub<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_arith(slots, code, op, Arith::Sub, (A::default(), B::default()))
-    }
-
-    /// `ZEND_MUL` over two numbers.
-    #[inline(always)] // in the loop and in the handler
-    pub(crate) fn mul<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_arith(slots, code, op, Arith::Mul, (A::default(), B::default()))
+    arith! {
+        add, add_assign_cv, Add;
+        sub, sub_assign_cv, Sub;
+        mul, mul_assign_cv, Mul;
     }
 
     /// `ZEND_DIV` over the kinds its opline names. The loop alone serves
@@ -28892,64 +28894,6 @@ pub(crate) mod inline_path {
     pub(crate) fn div(slots: &mut [Zval], code: &OpArray, op: &Opline, _: u32) -> Option<Inline> {
         let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
         inline_arith(slots, code, op, Binary::Div, kinds)
-    }
-
-    /// `ZEND_ADD` and the `ASSIGN` of its temporary to a CV fused to it.
-    /// The loop alone serves it: the handler serves the `ADD` alone.
-    #[inline(always)] // in the loop
-    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
-    pub(crate) fn add_assign_cv<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_arith_assign(
-            slots,
-            code,
-            op,
-            at,
-            Arith::Add,
-            (A::default(), B::default()),
-        )
-    }
-
-    /// `ZEND_SUB` and the `ASSIGN` fused to it, as [`add_assign_cv`].
-    #[inline(always)] // in the loop
-    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
-    pub(crate) fn sub_assign_cv<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_arith_assign(
-            slots,
-            code,
-            op,
-            at,
-            Arith::Sub,
-            (A::default(), B::default()),
-        )
-    }
-
-    /// `ZEND_MUL` and the `ASSIGN` fused to it, as [`add_assign_cv`].
-    #[inline(always)] // in the loop
-    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
-    pub(crate) fn mul_assign_cv<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_arith_assign(
-            slots,
-            code,
-            op,
-            at,
-            Arith::Mul,
-            (A::default(), B::default()),
-        )
     }
 
     /// `ZEND_DIV` over the kinds its opline names and the `ASSIGN` fused
