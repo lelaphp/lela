@@ -2923,6 +2923,7 @@ pub(crate) fn join(req: &mut Request, a: PhpString, b: PhpString) -> Result<PhpS
 /// string(3) "foo"
 /// bool(false)
 /// ```
+#[inline]
 fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
     let array = value.deref().as_array().is_some();
     let text = to_string(req, value)?;
@@ -2933,10 +2934,12 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
     Ok(text)
 }
 
+type ConcatSides = (PhpString, PhpString);
+
 /// Both sides of `concat_function` as strings, the left first, each with
-/// an owner. Only a left side that is a string converts with no code reached,
-/// so the right one stands across the left's conversion otherwise, as
-/// php's is read through its place past it.
+/// an owner. Only a string and a long convert with no code reached, so
+/// the right one stands across the left's conversion otherwise, as php's
+/// is read through its place past it.
 ///
 /// ```php
 /// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["v"] = "77"; });
@@ -2948,22 +2951,22 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// [Array to string conversion]
 /// string(7) "Array77"
 /// ```
-fn concat_operands(
-    req: &mut Request,
-    left: &Value,
-    right: &Value,
-) -> Result<(PhpString, PhpString), Thrown> {
-    let string = left.deref().as_php_string().is_some();
-    let held = (!string).then(|| Owner::take(req, *right));
-    let a = concat_operand(req, left);
-    let pair = a.and_then(|a| match concat_operand(req, right) {
-        Ok(b) => Ok((a, b)),
-        Err(thrown) => {
-            req.release(Value::string(a));
-            Err(thrown)
-        }
-    });
-    req.held_past(held, pair)
+#[inline(always)] // a scalar's path pays for no frame of its own, in `.` and `.=` alike
+fn concat_operands(req: &mut Request, left: &Value, right: &Value) -> Result<ConcatSides, Thrown> {
+    let view = left.deref();
+    if view.as_php_string().is_some() || view.as_int().is_some() {
+        return concat_sides(req, left, right);
+    }
+    let held = Owner::take(req, *right);
+    let sides = concat_sides(req, left, right);
+    req.held_past(Some(held), sides)
+}
+
+#[inline(always)] // as `concat_operands`
+fn concat_sides(req: &mut Request, left: &Value, right: &Value) -> Result<ConcatSides, Thrown> {
+    let a = concat_operand(req, left)?;
+    let b = concat_operand(req, right).inspect_err(|_| req.release(Value::string(a)))?;
+    Ok((a, b))
 }
 
 /// `concat_function` where `result` is `op1` (`Z/Zend/zend_operators.c:2125`),
