@@ -95,7 +95,7 @@ use php_ext::raising::{
 };
 use php_ext::request::{
     MAXPATHLEN, Notification, NotifyCode, OptionAnswer, Request, Resolve, Stream, StreamCtx,
-    StreamOption, Streams as _, Whence,
+    StreamOption, Streams as _, Unresolved, Whence,
 };
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef};
@@ -1106,12 +1106,35 @@ fn stream_get_line(
 /// bool(false)
 /// bool(false)
 /// ```
+///
+/// An `include_path` entry of a wrapper is the wrapper's `url_stat`, the
+/// path answered as it was joined; a throw of `url_stat` leaves the walk.
+///
+/// ```php
+/// class W { public $context; function url_stat($path, $flags) { if (str_contains($path, 'boom')) throw new Exception("stat failed"); return str_contains($path, 'known') ? ['mode' => 0100644] : false; } }
+/// stream_wrapper_register('vw', 'W');
+/// set_include_path('vw://root/a' . PATH_SEPARATOR . '.');
+/// var_dump(stream_resolve_include_path('path/known.php'), stream_resolve_include_path('path/other.php'));
+/// try { stream_resolve_include_path('boom'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(26) "vw://root/a/path/known.php"
+/// bool(false)
+/// stat failed
+/// ```
 #[php_function]
 fn stream_resolve_include_path(
     req: &mut Request,
     filename: Path,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let filename = filename.0.as_bytes().to_vec();
+    // `zend_resolve_path`, which answers a regular file or a wrapper's
+    // path; the walk below is what it leaves, a directory.
+    match req.code_mut().resolve_path(&filename) {
+        Ok(path) => return Ok(OrFalse::Value(PhpString::new(req, &path)?)),
+        Err(Unresolved::Threw(thrown)) => return Err(thrown),
+        Err(Unresolved::Missing(_)) => {}
+    }
     let cwd = req.environment().cwd().as_os_str().as_bytes().to_vec();
     let realpath = |req: &mut Request, path: &[u8]| {
         let base: &[u8] = if path.first() == Some(&b'/') {
@@ -1196,11 +1219,11 @@ fn stream_get_wrappers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
 }
 
 /// `stream_is_local($stream): bool`, `PHP_FUNCTION(stream_is_local)`
-/// (`Z/ext/standard/streamsfuncs.c:1563`): whether the wrapper is not a
-/// URL wrapper. Every stream here is a local wrapper's; a path's wrapper
-/// is found as `php_stream_locate_url_wrapper` finds it, a scheme no
-/// wrapper serves warned of and taken as a plain file, and `file://`
-/// naming a host no wrapper at all.
+/// (`Z/ext/standard/streamsfuncs.c:1563`): `wrapper && wrapper->is_url ==
+/// 0`, the stream's wrapper or the one `php_stream_locate_url_wrapper`
+/// finds for a path. A stream no wrapper opened, a pipe or a socket, and a
+/// path no wrapper serves are not local, and a scheme nobody registered is
+/// warned of and read as a plain file.
 ///
 /// ```php
 /// var_dump(stream_is_local(fopen('php://memory', 'r')), stream_is_local('/tmp'), stream_is_local('php://memory'), stream_is_local('file:///tmp'), stream_is_local('file://host/x'), stream_is_local('foo://x'), stream_is_local(1));
@@ -1215,51 +1238,78 @@ fn stream_get_wrappers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
+///
+/// A URL wrapper's path is not local, whatever registered it; symfony's
+/// `FileLoader` refuses a resource that is, on this answer.
+///
+/// ```php
+/// class W { public $context; function stream_open($p, $m, $o, &$op) { return true; } function stream_eof() { return true; } }
+/// stream_wrapper_register('here', 'W'); stream_wrapper_register('there', 'W', STREAM_IS_URL);
+/// var_dump(stream_is_local('http://example.com/a'), stream_is_local('HTTPS://a'), stream_is_local('ftp://a'), stream_is_local('data:text/plain,a'), stream_is_local('glob://a'), stream_is_local('compress.zlib://a'), stream_is_local('phar://a'), stream_is_local('here://a'), stream_is_local('there://a'));
+/// var_dump(stream_is_local(fopen('here://a', 'r')), stream_is_local(fopen('there://a', 'r')));
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
+///
+/// The stream's own wrapper is what a resource is read by: `tmpfile()` and
+/// a directory are the plain files wrapper's, `data:` a URL wrapper's, and
+/// a pipe and a socket were opened by none.
+///
+/// ```php
+/// var_dump(stream_is_local(tmpfile()), stream_is_local(opendir('.')), stream_is_local(fopen('php://temp', 'r')), stream_is_local(STDIN));
+/// var_dump(stream_is_local(fopen('data:text/plain,a', 'r')), stream_is_local(popen('true', 'r')), stream_is_local(stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0)[0]));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+///
+/// A closed stream and another resource are refused as
+/// `php_stream_from_zval` refuses them, and a path that names a wrapper the
+/// request took out is not local.
+///
+/// ```php
+/// $f = fopen('php://memory', 'r'); fclose($f);
+/// foreach ([$f, stream_context_create()] as $r) {
+///     try { stream_is_local($r); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// stream_wrapper_unregister('file');
+/// var_dump(stream_is_local('/tmp'));
+/// ```
+/// ```expect
+/// stream_is_local(): supplied resource is not a valid stream resource
+/// stream_is_local(): supplied resource is not a valid stream resource
+/// bool(false)
+/// ```
 #[php_function]
 fn stream_is_local(req: &mut Request, stream: Untyped<Value>) -> Result<bool, Thrown> {
     let given = stream.0;
-    if let ValueRef::Resource(_) = given.as_ref() {
+    let is_url = if let ValueRef::Resource(_) = given.as_ref() {
         // `php_stream_from_zval`.
-        if Stream::from_value(req, &given).is_none() {
-            return Err(arg_type_error(req, 1, "be an open stream resource"));
-        }
-        return Ok(true);
-    }
-    let path = with_string(req, &given, <[u8]>::to_vec)?;
-    let path = path.as_slice();
-    let n = path
-        .iter()
-        .position(|c| !(c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.')))
-        .unwrap_or(path.len());
-    let rest = path.get(n..).unwrap_or_default();
-    let protocol = n > 1
-        && rest.first() == Some(&b':')
-        && (rest.get(1..3) == Some(b"//".as_slice()) || (n == 4 && path.starts_with(b"data:")));
-    if !protocol {
-        return Ok(true);
-    }
-    let scheme = &path[..n];
-    let known = req
-        .stream_wrappers()
-        .iter()
-        .any(|w| w.as_bytes().eq_ignore_ascii_case(scheme));
-    if !known {
-        let name = String::from_utf8_lossy(scheme.get(..31).unwrap_or(scheme)).into_owned();
-        docref(
-            req,
-            Level::Warning,
-            &format!(
-                "Unable to find the wrapper \"{name}\" - did you forget to enable it when you configured PHP?"
-            ),
-        );
-        return Ok(true);
-    }
-    if scheme.eq_ignore_ascii_case(b"file") {
-        let localhost = path.len() >= 17 && path[..17].eq_ignore_ascii_case(b"file://localhost/");
-        let after = path.get(n + 3).copied();
-        if !localhost && after.is_some_and(|c| c != b'/') {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+        let Some(stream) = Stream::from_value(req, &given) else {
+            let message = "stream_is_local(): supplied resource is not a valid stream resource";
+            return Err(type_error(req, message));
+        };
+        stream.is_url(req)
+    } else {
+        let path = with_string(req, &given, <[u8]>::to_vec)?;
+        req.path_is_url(&path)
+    };
+    Ok(is_url == Some(false))
 }

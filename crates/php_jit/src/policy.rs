@@ -15,7 +15,9 @@
 //! | 8..32 | the [`TraceId`] it enters, when compiled |
 //!
 //! so the sealed word, all ones, reads blacklisted: the one bit pattern
-//! the engine knows, and a layout invariant held by a test below.
+//! the engine knows, and a layout invariant held by a test below. A
+//! landing word has one state more, [`HEADED`], read by [`armed`] and
+//! [`sealed`] and blacklisted to every other reader.
 
 use std::io::{self, Write};
 use std::sync::atomic::Ordering;
@@ -28,7 +30,7 @@ use crate::types::ExitId;
 
 use php_unit::decl::IniDecl;
 
-use crate::record::{Start, Stop};
+use crate::record::{self, Start, Stop};
 use crate::table::{TraceId, code};
 
 /// How a unit's words are laid where php hands it counters out of a
@@ -56,6 +58,13 @@ const ATTEMPTS_SHIFT: u32 = 2;
 const ATTEMPTS_MAX: u8 = 0x3F;
 /// Where the trace number stands.
 pub(crate) const ID_SHIFT: u32 = 8;
+/// The state half of a landing word a loop's trace was published at
+/// ([`head`]): a word state of its own, neither sealed nor armed, whose
+/// state bits read blacklisted, so no visit of the word itself acts and
+/// compiled code reads no trace in it. An armed word that reads
+/// blacklisted holds nothing above its attempts ([`Claim::store`]), so
+/// none reads as this.
+const HEADED: u32 = !(1 << ID_SHIFT);
 
 /// php's `ZEND_JIT_ON_HOT_TRACE`, the one trigger this tier runs.
 const HOT_TRACE: u32 = 5;
@@ -1447,16 +1456,70 @@ impl Holder {
     }
 }
 
+/// A landing word's state half as a return read it (`jit-design.md`
+/// §2.2, #4105): compared with the sealed word's in the `RETURN*` arms,
+/// and read for what it holds in the visit it asks, so a word is loaded
+/// once a return and decoded only where it asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Landing(u32);
+
+impl Landing {
+    /// The word a `RETURN*` handler's test reads.
+    #[inline(always)] // jit-design.md §2.2: one load in the `RETURN*` arms
+    #[allow(clippy::inline_always)]
+    pub(crate) fn of(word: &Word) -> Landing {
+        Landing(word.halves()[1].load(Ordering::Relaxed))
+    }
+
+    /// Whether it is sealed, as its op array's landings are laid down, and
+    /// neither armed nor [`head`]ed: it asks nothing of a return.
+    #[inline(always)] // jit-design.md §2.2: one compare in the `RETURN*` arms
+    #[allow(clippy::inline_always)]
+    pub(crate) fn sealed(self) -> bool {
+        self.0 == u32::MAX
+    }
+
+    /// Whether a loop's trace [`head`]ed it, sealed but for that trace.
+    pub(crate) fn headed(self) -> bool {
+        self.0 == HEADED
+    }
+
+    /// What an armed word holds; never read of a word that is [`sealed`]
+    /// or [`headed`], which reads blacklisted.
+    ///
+    /// [`sealed`]: Landing::sealed
+    /// [`headed`]: Landing::headed
+    pub(crate) fn state(self) -> State {
+        decoded(self.0)
+    }
+}
+
 /// Whether a landing word was armed (`jit-design.md` §2.2, #3036): any
-/// word whose state half is not the sealed word's all ones, which its op
-/// array's landings are laid down as, php's `trace_flags` of an opline
-/// `zend_jit_trace_setup_ret_counter` set. An armed landing that is
-/// blacklisted is armed: its state half keeps its attempts and the stop
-/// below the trace number's bits, so it is never all ones.
+/// word whose state half is neither the sealed word's all ones, which its
+/// op array's landings are laid down as, nor [`HEADED`], php's
+/// `trace_flags` of an opline `zend_jit_trace_setup_ret_counter` set. An
+/// armed landing that is blacklisted is armed: its state half keeps its
+/// attempts and the stop below the trace number's bits, so it is never
+/// all ones and never [`HEADED`].
 #[inline(always)] // jit-design.md §4.9: one load where a return lands
 #[allow(clippy::inline_always)]
 pub(crate) fn armed(word: &Word) -> bool {
-    word.halves()[1].load(Ordering::Relaxed) != u32::MAX
+    !matches!(word.halves()[1].load(Ordering::Relaxed), u32::MAX | HEADED)
+}
+
+/// Lay a landing word [`HEADED`], a loop's trace published where a return
+/// lands (`jit-design.md` §2.2, #4105): sealed made headed, so a return
+/// that lands there visits and enters the loop's trace, and an armed word,
+/// which a return visits already, left. Never armed: php makes no return
+/// root of a loop's header, whose `trace_flags` its arming finds set
+/// (`zend_jit_trace_setup_ret_counter`,
+/// `Z/ext/opcache/jit/zend_jit_trace.c:3417-3430`), so a headed word
+/// counts nothing and is read for the loop's word beside it.
+pub(crate) fn head(word: &Word) {
+    let state = &word.halves()[1];
+    state
+        .compare_exchange(u32::MAX, HEADED, Ordering::Release, Ordering::Relaxed)
+        .ok();
 }
 
 /// Arm a landing word, php's `zend_jit_trace_setup_ret_counter`
@@ -1509,6 +1572,8 @@ pub(crate) fn arm(word: &Word, policy: &Policy) {
     };
     heat.store(armed_heat, Ordering::Relaxed);
     // Another arming of the same landing may win; either leaves it cold.
+    // A loop's header is never armed (`record::landings`), so no headed
+    // word comes here.
     state
         .compare_exchange(u32::MAX, COLD, Ordering::Release, Ordering::Relaxed)
         .ok();
@@ -1526,6 +1591,7 @@ pub(crate) struct Claim {
     holder: Holder,
     start: Start,
     spent: Spent,
+    folds: record::Folds,
     settled: bool,
 }
 
@@ -1546,6 +1612,19 @@ impl Claim {
         &self.holder
     }
 
+    /// A loop's trace published: the landing word of its root [`head`]ed
+    /// where a return lands there ([`record::root_landing`]), so a return
+    /// that lands on the compiled loop visits, and no other claim's.
+    fn head_root(&self) {
+        if let (Start::Loop, Holder::Root { epoch, func, at }) = (self.start, &self.holder)
+            && let Some(root) = (epoch.held(*func))
+                .and_then(|held| record::root_landing(held.code(), *at, self.folds))
+            && let Some(word) = epoch.lay_landing(*func, root)
+        {
+            head(word);
+        }
+    }
+
     /// The one release store that ends the claim; the state it left.
     fn store(&self, outcome: &Outcome) -> State {
         let [heat, state] = self.holder.word().halves();
@@ -1553,7 +1632,10 @@ impl Claim {
         let mut attempts = u8::try_from((held >> ATTEMPTS_SHIFT) & u32::from(ATTEMPTS_MAX))
             .unwrap_or(ATTEMPTS_MAX);
         let next = match outcome {
-            Outcome::Published(trace) => (trace.get() << ID_SHIFT) | COMPILED,
+            Outcome::Published(trace) => {
+                self.head_root();
+                (trace.get() << ID_SHIFT) | COMPILED
+            }
             Outcome::Abort(stop) => {
                 attempts = attempts.saturating_add(1).min(ATTEMPTS_MAX);
                 let spent = match self.spent {
@@ -1616,6 +1698,7 @@ pub(crate) fn claim(holder: Holder, policy: &Policy, start: Start) -> Option<Cla
         holder,
         start,
         spent: policy.spent(start),
+        folds: policy.folds(),
         settled: false,
     })
 }

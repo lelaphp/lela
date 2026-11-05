@@ -65,8 +65,8 @@ pub use charset::Charset;
 pub use emalloc::{Emalloc, Pemalloc};
 pub use fresh::FreshString;
 pub use identity::Identity;
+pub(crate) use owner::{Left, adopted, adopted_some};
 pub use owner::{Owner, ResourceView, View};
-pub(crate) use owner::{adopted, adopted_some};
 pub use smart_str::SmartStr;
 
 /// The type of a value, php's `zend_zval_type_name` set, and the one
@@ -1095,6 +1095,7 @@ impl PhpArray {
     /// resumes where it stood while the elements before it change. A
     /// view, no owner taken; `None` past the last.
     #[must_use]
+    #[inline] // a walk's step, its key dropped where the walk reads none
     pub fn live_from(&self, position: u32) -> Option<(u32, Key, Value)> {
         self.0
             .live_from(position)
@@ -1288,6 +1289,7 @@ impl PartialEq for PhpArray {
 /// is lent: what the rows walk ([`walk::rows`]), `==` between two
 /// arrays and the debug rendering read, none of which runs code of the
 /// program.
+#[inline]
 fn view((key, value): (php_heap::Key, php_heap::Zval)) -> (Key, Value) {
     (Key::of(key), Value::of_slot(value))
 }

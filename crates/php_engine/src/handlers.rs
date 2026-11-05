@@ -4594,11 +4594,19 @@ fn verified_arg(
     let Some(ty) = function
         .and_then(|function| req.symbols().function_decl(function))
         .and_then(|decl| decl.parameters.get(at))
-        .and_then(|parameter| parameter.ty.clone())
+        .and_then(|parameter| parameter.ty.as_ref())
     else {
         return Ok(None);
     };
-    if crate::api::coerce::holds(req, argument, &ty, req.frame_scopes(frame)) {
+    // The declared type is read where the request holds it, and copied
+    // only for what goes on past a value it holds as it stands.
+    let scopes = req.frame_scopes(frame);
+    let held = crate::api::coerce::holding(req, argument, ty, scopes);
+    if held == crate::api::coerce::Holding::Yes {
+        return Ok(None);
+    }
+    let ty = ty.clone();
+    if held.resolve(req, argument, scopes) {
         return Ok(None);
     }
     let strict = req.caller_strict_types(frame);
@@ -5031,6 +5039,44 @@ fn collect_variadics(req: &mut Request, frame: FrameRef, op: &Opline) -> Result<
 /// ```expect
 /// s(): Return value must be of type string, int returned
 /// ```
+///
+/// A handler that throws at an undefined variable's warning leaves with
+/// what it threw, and no `TypeError` is made over it:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// function f(): string { return $u; }
+/// try { f(); } catch (Throwable $e) { var_dump($e::class, $e->getMessage(), $e->getPrevious()); }
+/// ```
+/// ```expect
+/// string(9) "Exception"
+/// string(21) "Undefined variable $u"
+/// NULL
+/// ```
+///
+/// A coercion that throws is the `TypeError`, what it threw its
+/// `previous`, where an argument's would leave with what it threw:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// class S { function __toString(): string { throw new LogicException("ts"); } }
+/// function i(): int { return "1.5"; }
+/// function d(): int { return 1.5; }
+/// function s(): string { return new S; }
+/// function a(int $x) {}
+/// foreach (['i', 'd', 's', fn () => a("1.5")] as $f) {
+///     try { var_dump($f()); } catch (Throwable $e) { for (; $e; $e = $e->getPrevious()) { echo $e::class, ": ", $e->getMessage(), "\n"; } }
+/// }
+/// ```
+/// ```expect
+/// TypeError: i(): Return value must be of type int, string returned
+/// Exception: Implicit conversion from float-string "1.5" to int loses precision
+/// TypeError: d(): Return value must be of type int, float returned
+/// Exception: Implicit conversion from float 1.5 to int loses precision
+/// TypeError: s(): Return value must be of type string, S returned
+/// LogicException: ts
+/// Exception: Implicit conversion from float-string "1.5" to int loses precision
+/// ```
 pub(crate) fn verify_return_type<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -5124,6 +5170,9 @@ fn return_mask_missed(
         Some(place) => Value::of_slot(place.read()).deref(),
         None => exec::operand(req, frame, code, op.op1_type, op.op1).deref(),
     };
+    if let Err(thrown) = none_pending(req) {
+        return threw(req, frame, &thrown);
+    }
     // A `CONST` operand is checked in the temporary the `RETURN` reads
     // (`ZVAL_COPY(EX_VAR(opline->result.var), retval_ptr)`), never in
     // place in the table.
@@ -5140,9 +5189,20 @@ fn return_mask_missed(
     }
     let strict = req.frame_strict_types(frame);
     let mask = code.return_mask;
+    // `zend_verify_weak_scalar_type_hint` answers false where a coercion
+    // left a throwable pending, a handler's at its deprecation or a
+    // `__toString`'s, and `zend_verify_return_error` makes its `TypeError`
+    // over it: an argument's bails there, a return's does not.
     let coerced = match crate::api::coerce::scalar_type_hint(req, &returned, mask, strict) {
+        Ok(Some(made)) if req.is_pending() => {
+            req.release(made);
+            None
+        }
         Ok(coerced) => coerced,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            None
+        }
     };
     let Some(coerced) = coerced else {
         let thrown = return_type_error(req, frame, Some(&returned))?;
@@ -11086,12 +11146,17 @@ fn read_dimension(
     mode: DimRead,
 ) -> Result<Result<Value, Thrown>, Fatal> {
     if let Some(array) = container.as_array() {
-        let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-        let key = match crate::ops::array_offset(req, &dim, op.op2_type == OperandKind::Const) {
+        let dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+        let constant = op.op2_type == OperandKind::Const;
+        let refused = DimensionRead::Warning;
+        let undefined = undefined_op2(frame, code, op);
+        let key = match crate::ops::read_offset(req, array, &dim, constant, refused, undefined) {
             Ok(key) => key,
             Err(thrown) => return Ok(Err(thrown)),
         };
-        return Ok(Ok(array_entry(req, array, key, mode)));
+        return Ok(Ok(key.map_or_else(Value::null, |key| {
+            array_entry(req, array, key, mode)
+        })));
     }
     if let Some(text) = container.as_php_string() {
         let mut dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
@@ -11139,6 +11204,18 @@ fn read_dimension(
     let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
     crate::api::raising::warning(req, &bytes!(b"Trying to access array offset on ", named));
     Ok(Ok(Value::null()))
+}
+
+/// `ZVAL_UNDEFINED_OP2()`: the warning a dimension nothing wrote raises,
+/// for a kernel to raise where php's ladder does, the array held.
+fn undefined_op2<'a>(
+    frame: FrameRef,
+    code: &'a OpArray,
+    op: &'a Opline,
+) -> impl FnOnce(&mut Request) + 'a {
+    move |req| {
+        let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+    }
 }
 
 /// An object a dimension opline works on, held across `step`: php's
@@ -12070,11 +12147,7 @@ fn held_alone<T>(
     array: PhpArray,
     step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
 ) -> Result<Option<T>, Thrown> {
-    let held = Owner::take(req, Value::array(array));
-    let stepped = step(req);
-    let left = held.let_go(req);
-    let stepped = stepped?;
-    none_pending(req)?;
+    let (stepped, left) = crate::ops::array_held(req, array, step)?;
     Ok((!left.not_alone()).then_some(stepped))
 }
 
@@ -12815,6 +12888,19 @@ enum Keep {
 ///   thrown in %s on line 2
 /// ```
 ///
+/// A handler that throws at the warning leaves with what it threw, and
+/// no `TypeError` is made over it:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// try { clone $u; } catch (Throwable $e) { var_dump($e::class, $e->getMessage(), $e->getPrevious()); }
+/// ```
+/// ```expect
+/// string(9) "Exception"
+/// string(21) "Undefined variable $u"
+/// NULL
+/// ```
+///
 /// A throwable's table carries `default_exception_handlers`, whose
 /// `clone_obj` is null, and that is read before the private `__clone`
 /// `Exception` declares.
@@ -12842,14 +12928,16 @@ pub(crate) fn clone<T: Tier>(
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let cloned = match operand.as_object() {
         Some(object) => req.clone_object(object, None).map(Owner::hand_on),
-        None => Err(type_error(
-            req,
-            &sentence_given(
+        None => none_pending(req).and_then(|()| {
+            Err(type_error(
                 req,
-                b"clone(): Argument #1 ($object) must be of type object, ",
-                &operand,
-            ),
-        )),
+                &sentence_given(
+                    req,
+                    b"clone(): Argument #1 ($object) must be of type object, ",
+                    &operand,
+                ),
+            ))
+        }),
     };
     exec::free_operand(req, frame, op.op1_type, op.op1);
     computed_into(req, frame, op, cloned.map(|object| object.as_value()))
@@ -13471,7 +13559,7 @@ pub(super) fn thrown_on_call(req: &mut Request, thrown: &Thrown) -> Result<(), F
 /// pending and the interrupt check made with it pending, as php 8.5.12's
 /// `ZEND_VM_FCALL_INTERRUPT_CHECK` comes before the handler reads
 /// `EG(exception)`, in `DO_*CALL`'s handler ([`thrown_on_call`]) and the
-/// `FRAMELESS_ICALL_*` ones ([`frameless_served`]) alike. The memory
+/// `FRAMELESS_ICALL_*` ones ([`frameless_call`]) alike. The memory
 /// limit's is the `Err`: `zend_handle_delayed_oom` gives up what the
 /// native threw for the unwind exit, so no `catch` takes it (a DOM parse
 /// lexbor stopped at the limit throws its `DOMException` and the limit's
@@ -13485,7 +13573,7 @@ fn checked_after_throw(req: &mut Request, thrown: &Thrown) -> Result<(), Fatal> 
 
 /// [`checked_after_throw`]'s check, made with whatever throwable stands
 /// pending: the one a native threw, or one a warning's handler threw
-/// while a frameless native went on ([`frameless_served`]).
+/// while a frameless native went on ([`frameless_call`]).
 #[inline(always)] // both handlers' throw path
 fn checked_while_pending(req: &mut Request) -> Result<(), Fatal> {
     if req.diagnostics().bailing_out() {
@@ -13952,7 +14040,7 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// ```
 ///
 /// The interrupt check comes first, made with the handler's throwable
-/// pending ([`frameless_served`]), so a signal that lands after the last
+/// pending ([`frameless_call`]), so a signal that lands after the last
 /// check inside the native is dispatched before the `catch`: here each
 /// handler's signal lands as the dispatch that served it ends, `SIGHUP`
 /// after the check `zend_call_function` makes as the warning's handler
@@ -14003,127 +14091,16 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// caught unexpected NAN value was coerced to string
 /// 3
 /// ```
-#[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
-fn frameless_call<const N: usize>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    (op, at): (&Opline, u32),
-    arguments: [(OperandKind, u32); N],
-) -> Edge {
-    // The frame stands at the call, and a `CV` is borrowed where no name
-    // reaches its variables ([`exec::frameless_named`]): every operand
-    // read where it stands in the one look at the frame that writes the
-    // opline, and each read in turn ([`exec::frameless_operand`]) where
-    // one is `UNUSED`, `UNDEF` or a reference.
-    let (operands, owned) = if let Some(read) = frameless_read(req, frame, code, at, &arguments) {
-        read
-    } else {
-        let named = exec::frameless_named(req.vm().at(frame));
-        let mut operands = [Zval::UNDEF; N];
-        let mut owned = 0u8;
-        for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
-            let own;
-            (*read, own) = exec::frameless_operand(req, frame, code, operand, named);
-            owned |= u8::from(own) << at;
-        }
-        (operands, owned)
-    };
-    let held = Operands {
-        frame,
-        zvals: &operands,
-        owned,
-        slots: &arguments,
-    };
-    let value = match frameless_entered(req, op.extended_value, held)? {
-        Ok(value) => value,
-        Err(thrown) => {
-            checked_after_throw(req, &thrown)?;
-            return Ok(Stepped::Threw(frame).into());
-        }
-    };
-    // The interrupt read once, as php's handler reads `EG(vm_interrupt)`
-    // once after the native, and its check out of line: made with a
-    // handler's throwable pending before the value is written, as
-    // [`frameless_served`] makes it, or after the write where none is.
-    let raised = crate::interrupt::raised(req);
-    if raised
-        && req.is_pending()
-        && let Err(fatal) = checked_while_pending(req)
-    {
-        req.release(value);
-        return Err(fatal);
-    }
-    set_out(req, frame, op, value);
-    // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`: a throwable a handler left
-    // pending while the native went on, its check made.
-    if req.is_pending() || raised && crate::interrupt::interrupted(req)? {
-        return Ok(Stepped::Threw(frame).into());
-    }
-    jump_to(at.saturating_add(if N == 3 { 2 } else { 1 }))
-}
-
-/// [`frameless_call`]'s operands read in one look at `frame`, which is
-/// made to stand at `at`: each as [`exec::frameless_operand`] reads one
-/// that is a constant or a value in its slot, a `CV` of a frame a name
-/// reaches taking one more owner; none, with only the opline written,
-/// where any is `UNUSED`, `UNDEF` or a reference.
-#[inline(always)] // the frameless handler's hot path
-fn frameless_read<const N: usize>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    at: u32,
-    arguments: &[(OperandKind, u32); N],
-) -> Option<([Zval; N], u8)> {
-    let state = req.vm_mut().stack.frame_mut(frame)?;
-    let header = state.header_mut();
-    header.opline = at;
-    let named = header.annex().is_some();
-    let slots = state.slots_mut();
-    let mut operands = [Zval::UNDEF; N];
-    let mut owned = 0u8;
-    for (at, (&(kind, field), read)) in arguments.iter().zip(&mut operands).enumerate() {
-        let z = match kind {
-            OperandKind::Const => *code.literals.get(field as usize)?,
-            OperandKind::Unused => return None,
-            _ => *slots.get(field as usize)?,
-        };
-        if z.is_undef() || z.kind() == php_heap::ZvalType::Reference {
-            return None;
-        }
-        *read = z;
-        owned |= u8::from(kind == OperandKind::Cv && named) << at;
-    }
-    for (at, z) in operands.iter().enumerate() {
-        if owned >> at & 1 != 0 {
-            z.addref();
-        }
-    }
-    Some((operands, owned))
-}
-
-/// The native at `at` of the engine's frameless table served over the
-/// operands `held` carries, as the `FRAMELESS_ICALL_*` handlers and the
-/// frameless call compiled code makes ([`crate::tier::frameless_call`])
-/// both serve it: its arity's entry called with no record, or the
-/// framed entry's full call where an observer watches it
-/// (`Z/Zend/zend_execute.c:1577-1597`), and then each operand given up,
-/// the ones `held` owns released and each temporary freed as `FREE_OP*`
-/// frees it, whether the native threw or not. What it returned, with the
-/// throwable a warning's handler threw left pending where the native
-/// went on past one, or none with the throwable it threw left pending;
-/// the handler's pending test and the tier's wrapper find either.
 ///
 /// Where a throwable stands pending as the native leaves, thrown by it or
-/// by a handler, the interrupt check is made here with it pending
+/// by a handler, the interrupt check is made with it pending
 /// ([`checked_after_throw`], [`checked_while_pending`]), as each
 /// `FRAMELESS_ICALL_*` handler makes `ZEND_VM_FCALL_INTERRUPT_CHECK`
 /// before `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` and compiled code
 /// `jit_frameless_interrupt_check` before `zend_jit_check_exception`
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:17842`, made at `:17888`, `:17932`,
-/// `:18002` and `:18106`), so the handler and
-/// the tier's `frameless` kernel make it alike.
+/// `:18002` and `:18106`), so the handler and compiled code make it alike
+/// (`Emit::frameless_call`).
 ///
 /// The one frameless native php 8.5.12 lets raise the interrupt there is
 /// `implode`, deterministically: a signal or a timeout would have to land
@@ -14179,103 +14156,386 @@ fn frameless_read<const N: usize>(
 ///
 /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 6
 /// ```
-#[inline] // the handler's and the tier's `frameless` kernel's hot path, each its own copy
-pub(super) fn frameless_served(
+///
+/// A handler that throws at an undefined operand's warning leaves with
+/// what it threw: the native is not served, so it neither makes its
+/// `TypeError` over that nor touches its other operands.
+///
+/// ```php
+/// class L { function __toString(): string { echo "ran\n"; return "l"; } }
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// function f($a) {
+///     try { return implode($u, $a); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f([new L]); }
+/// echo strlen(implode(",", [new L])), "\n";
+/// ```
+/// ```expect
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// ran
+/// 1
+/// ```
+///
+/// The same where a trace serves the loop, whose undefined operand comes
+/// here by the handler:
+///
+/// ```php
+/// class L { function __toString(): string { echo "ran\n"; return "l"; } }
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// function f($a) {
+///     try { return implode($u, $a); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f([new L]); }
+/// echo strlen(implode(",", [new L])), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// Exception: Undefined variable $u
+/// NULL
+/// ran
+/// 1
+/// ```
+#[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
+fn frameless_call<const N: usize>(
     req: &mut Request,
-    at: u32,
-    held: Operands<'_>,
-) -> Result<Option<Value>, Fatal> {
-    match frameless_entered(req, at, held)? {
-        // The native went on past a warning whose handler threw, as php's
-        // body writes `return_value` whatever `EG(exception)` holds: the
-        // check is made with that throwable pending, as for one the native
-        // threw, and the value is the caller's to write before it unwinds.
-        Ok(value) if crate::interrupt::raised(req) && req.is_pending() => {
-            match checked_while_pending(req) {
-                Ok(()) => Ok(Some(value)),
-                Err(fatal) => {
-                    req.release(value);
-                    Err(fatal)
-                }
+    frame: FrameRef,
+    code: &OpArray,
+    (op, at): (&Opline, u32),
+    arguments: [(OperandKind, u32); N],
+) -> Edge {
+    // The frame stands at the call, and a `CV` is borrowed where no name
+    // reaches its variables, a frame that carries an annex, its symbol
+    // table or its extra arguments, or none at all: every operand
+    // read where it stands in the one look at the frame that writes the
+    // opline, and each read in turn ([`exec::frameless_operand`]) where
+    // one is `UNUSED`, `UNDEF` or a reference.
+    let mut operands = [Value::undef(); N];
+    let (owned, out) =
+        if let Some(read) = frameless_read(req, frame, code, (op, at), arguments, &mut operands) {
+            read
+        } else {
+            let header = req.vm().at(frame);
+            let named = header.is_none_or(|header| header.annex().is_some());
+            let mut owned = 0u8;
+            for (at, (operand, read)) in arguments.into_iter().zip(&mut operands).enumerate() {
+                let (zval, own) = exec::frameless_operand(req, frame, code, operand, named);
+                *read = Value::of_zval(zval);
+                owned |= u8::from(own) << at;
             }
-        }
-        Ok(value) => Ok(Some(value)),
-        Err(thrown) => checked_after_throw(req, &thrown).map(|()| None),
+            (owned, req.slot_ptr(frame, op.out))
+        };
+    // `if (EG(exception))` past the fetch: a handler threw at an undefined
+    // operand's warning, so the native is not served.
+    if let Err(thrown) = none_pending(req) {
+        free_operands(req, frame, (&operands, owned), &arguments);
+        checked_after_throw(req, &thrown)?;
+        return Ok(Stepped::Threw(frame).into());
     }
-}
-
-/// [`frameless_served`] up to the native's answer: the entry served, or
-/// the framed one where an observer watches, and each operand given up,
-/// what the handler's tail and the tier's read the interrupt after.
-#[inline(always)] // the handler's hot path, which it was before the tier shared it
-fn frameless_entered(
-    req: &mut Request,
-    at: u32,
-    held: Operands<'_>,
-) -> Result<Result<Value, Thrown>, Fatal> {
-    // The aside's answer taken apart here: a fatal frees the operands as
-    // the served path does, and is the only answer that skips the rest.
-    let served = match req.frameless_entry(at) {
-        Some((function, entry)) if !crate::observer::frameless_observed(req, function) => {
-            req.serve_frameless(function, entry, held.zvals)
+    let served = frameless_native(req, op.extended_value, &operands);
+    free_operands(req, frame, (&operands, owned), &arguments);
+    let value = match served {
+        Ok(value) => value.hand_on(),
+        Err(thrown) => {
+            checked_after_throw(req, &thrown)?;
+            return Ok(Stepped::Threw(frame).into());
         }
-        found => match frameless_aside(req, at, found, held.zvals) {
-            Ok(served) => served,
-            Err(fatal) => {
-                free_operands(req, held);
-                return Err(fatal);
-            }
-        },
     };
-    free_operands(req, held);
-    Ok(served)
+    // The interrupt read once, as php's handler reads `EG(vm_interrupt)`
+    // once after the native, and its check out of line: made with a
+    // handler's throwable pending before the value is written, as
+    // [`checked_while_pending`] makes it, or after the write where none is.
+    let raised = crate::interrupt::raised(req);
+    if raised
+        && req.is_pending()
+        && let Err(fatal) = checked_while_pending(req)
+    {
+        req.release(value);
+        return Err(fatal);
+    }
+    req.replace_place(frame, op.out, out, value);
+    // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`: a throwable a handler left
+    // pending while the native went on, its check made.
+    if req.is_pending() || raised && crate::interrupt::interrupted(req)? {
+        return Ok(Stepped::Threw(frame).into());
+    }
+    Ok(Next::by(if N == 3 { 2 } else { 1 }))
 }
 
-/// `FREE_OP*` once the native returned, whether it threw or not: an
-/// owner the handler took given up, and a temporary freed where it
-/// stands.
+/// [`frameless_call`]'s operands read into `operands` in one look at
+/// `frame`, which is made to stand at the opline at `at`: each as
+/// [`exec::frameless_operand`] reads one that is a constant or a value
+/// in its slot, a `CV` of a frame a name reaches taking one more owner.
+/// What is held of each, and the slot `result` names, php's
+/// `EX_VAR(opline->result.var)` taken before the native as php takes it;
+/// none, with only the opline written, where any is `UNUSED`, `UNDEF` or
+/// a reference.
 #[inline(always)] // the frameless handler's hot path
-fn free_operands(req: &mut Request, held: Operands<'_>) {
-    for (at, (&operand, &(kind, field))) in held.zvals.iter().zip(held.slots).enumerate() {
-        if held.owned >> at & 1 != 0 {
-            req.release_zval_nogc(operand);
+fn frameless_read<const N: usize>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    (op, at): (&Opline, u32),
+    arguments: [(OperandKind, u32); N],
+    operands: &mut [Value; N],
+) -> Option<(u8, Option<php_heap::ZvalRef>)> {
+    let state = req.vm_mut().stack.frame_mut(frame)?;
+    let header = state.header_mut();
+    header.opline = at;
+    let named = header.annex().is_some();
+    let out = state.slot_ptr(php_heap::Slot(op.out));
+    let slots = state.slots_mut();
+    let mut variables = 0u8;
+    for (at, (&(kind, field), read)) in arguments.iter().zip(&mut *operands).enumerate() {
+        let z = match kind {
+            OperandKind::Const => *code.literals.get(field as usize)?,
+            OperandKind::Unused => return None,
+            _ => {
+                let z = *slots.get(field as usize)?;
+                if z.is_undef() || z.kind() == php_heap::ZvalType::Reference {
+                    return None;
+                }
+                variables |= u8::from(kind == OperandKind::Cv) << at;
+                z
+            }
+        };
+        *read = Value::of_zval(z);
+    }
+    let owned = if named { variables } else { 0 };
+    for (at, operand) in operands.iter().enumerate() {
+        if owned >> at & 1 != 0 {
+            operand.to_zval().addref();
         }
-        exec::free_operand(req, held.frame, kind, field);
+    }
+    Some((owned, out))
+}
+
+/// The native at `at` of the frameless table over `operands`, the entry
+/// served or the framed one where an observer watches: php's
+/// `ZEND_FLF_HANDLER(opline)`, what the handler and the tier's kernel
+/// share, each freeing the operands after it as its code does.
+#[inline(always)] // the frameless handler's and the tier's kernel's hot path
+pub(super) fn frameless_native(
+    req: &mut Request,
+    at: u32,
+    operands: &[Value],
+) -> Result<Owner<Value>, Thrown> {
+    match req.frameless_entry(at) {
+        Some((function, entry)) if !crate::observer::observing(req) => {
+            req.serve_frameless(function, entry, operands)
+        }
+        _ => frameless_aside(req, at, operands),
     }
 }
 
-/// [`frameless_entered`]'s entry where an observer watches the native,
-/// the framed entry's full call, or where `at` names no entry.
+/// `FREE_OP*` once the native returned, whether it threw or not, each
+/// operand of `zvals` over its slot in `slots`: an owner the bits of
+/// `owned` say the handler took given up, and a temporary freed where it
+/// stands, an object that dies there destructed in its slot first
+/// ([`Request::destruct_in_place`]).
+///
+/// php's handler goes on through every `FREE_OP*`, and a throw's reach
+/// is the row: a destructor that throws at an operand writes a trace that
+/// reads the call off the opline, and its arguments are the operands not
+/// yet cleared, so the throwable holds the ones after it, whose
+/// destructors wait for it to go. An earlier temporary's cleared slot
+/// (`ZVAL_UNDEF`, "in case `FREE_OP2()` throws") takes the row away, and
+/// the next destructor runs at once with the throwable pending and
+/// chains:
+///
+/// ```php
+/// class T { static $boom = []; function __construct(public $n) {}
+///     function __destruct() { if ($this->n > 90) echo "d$this->n,"; if (isset(self::$boom[$this->n])) throw new Exception("dtor$this->n"); }
+///     function __toString(): string { return "ab"; } }
+/// function chain($e) { $m = []; for (; $e; $e = $e->getPrevious()) { $m[] = $e->getMessage(); } echo implode(" ", $m), "\n"; }
+/// function one($n) { for ($i = 1; $i <= $n; $i++) { try { $r = trim(new T(10 * $i + 1)); } catch (Exception $e) { chain($e); } } }
+/// function two($n) { for ($i = 1; $i <= $n; $i++) { try { $r = str_contains(new T(10 * $i + 1), new T(10 * $i + 2)); } catch (Exception $e) { chain($e); } } }
+/// function three($n) { for ($i = 1; $i <= $n; $i++) { try { $r = str_replace(new T(10 * $i + 1), new T(10 * $i + 2), new T(10 * $i + 3)); } catch (Exception $e) { chain($e); } } }
+/// T::$boom = [91 => 1, 102 => 1, 113 => 1, 121 => 1, 123 => 1, 141 => 1];
+/// foreach (['one', 'two', 'three'] as $f) {
+///     try { $f(15); } catch (Exception $e) { echo "out "; chain($e); }
+///     $e = null;
+///     echo "\n";
+/// }
+/// ```
+/// ```expect
+/// d91,dtor91
+/// d101,d111,d121,dtor121
+/// d131,d141,dtor141
+/// d151,
+/// d91,dtor91
+/// d101,d102,d92,dtor102
+/// d111,d112,d121,dtor121
+/// d131,d132,d141,d122,dtor141
+/// d151,d152,d142,
+/// d91,dtor91
+/// d101,d102,d103,d92,d93,dtor102
+/// d111,d112,d113,dtor113
+/// d121,dtor121
+/// d131,d132,d133,d141,d122,d123,d142,d143,out dtor123
+/// ```
+///
+/// The same where a trace serves each loop, compiled by the destructors
+/// that do not throw:
+///
+/// ```php
+/// class T { static $boom = []; function __construct(public $n) {}
+///     function __destruct() { if ($this->n > 90) echo "d$this->n,"; if (isset(self::$boom[$this->n])) throw new Exception("dtor$this->n"); }
+///     function __toString(): string { return "ab"; } }
+/// function chain($e) { $m = []; for (; $e; $e = $e->getPrevious()) { $m[] = $e->getMessage(); } echo implode(" ", $m), "\n"; }
+/// function one($n) { for ($i = 1; $i <= $n; $i++) { try { $r = trim(new T(10 * $i + 1)); } catch (Exception $e) { chain($e); } } }
+/// function two($n) { for ($i = 1; $i <= $n; $i++) { try { $r = str_contains(new T(10 * $i + 1), new T(10 * $i + 2)); } catch (Exception $e) { chain($e); } } }
+/// function three($n) { for ($i = 1; $i <= $n; $i++) { try { $r = str_replace(new T(10 * $i + 1), new T(10 * $i + 2), new T(10 * $i + 3)); } catch (Exception $e) { chain($e); } } }
+/// T::$boom = [91 => 1, 102 => 1, 113 => 1, 121 => 1, 123 => 1, 141 => 1];
+/// foreach (['one', 'two', 'three'] as $f) {
+///     try { $f(15); } catch (Exception $e) { echo "out "; chain($e); }
+///     $e = null;
+///     echo "\n";
+/// }
+/// ```
+/// ```expect regime=jit-force process
+/// d91,dtor91
+/// d101,d111,d121,dtor121
+/// d131,d141,dtor141
+/// d151,
+/// d91,dtor91
+/// d101,d102,d92,dtor102
+/// d111,d112,d121,dtor121
+/// d131,d132,d141,d122,dtor141
+/// d151,d152,d142,
+/// d91,dtor91
+/// d101,d102,d103,d92,d93,dtor102
+/// d111,d112,d113,dtor113
+/// d121,dtor121
+/// d131,d132,d133,d141,d122,d123,d142,d143,out dtor123
+/// ```
+///
+/// With no arguments kept the row holds nothing, so each is served in turn:
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class T { function __construct(public $n) {} function __destruct() { echo "d$this->n\n"; if ($this->n % 2) throw new Exception("dtor$this->n"); } function __toString(): string { return "ab"; } }
+/// try { str_replace(new T(1), new T(2), new T(3)); } catch (Exception $e) { echo $e->getMessage(), " after ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// d1
+/// d2
+/// d3
+/// dtor3 after dtor1
+/// ```
+///
+/// A destructor that throws nothing reads the same row, which a
+/// constant or a variable never clears and a temporary does, a temporary
+/// a trace keeps in a register among them:
+///
+/// ```php
+/// class T { function __construct(public $n) {}
+///     function __destruct() { if ($this->n) { echo "d$this->n\n"; debug_print_backtrace(); } }
+///     function __toString(): string { return "ab"; } }
+/// function f($i) {
+///     for ($j = 0; $j < 8; $j++) {
+///         $on = $j == 7 ? 1 : 0;
+///         $r = str_replace("zz", new T($on), new T($on * 2));
+///         $r = str_replace($i + $j, new T($on * 3), "x");
+///         $r = str_replace($j, new T($on * 4), "x");
+///     }
+/// }
+/// f(1);
+/// ```
+/// ```expect
+/// d1
+/// #0 [internal function]: T->__destruct()
+/// #1 %SCRATCH%/witness.php(8): str_replace('zz', Object(T), Object(T))
+/// #2 %SCRATCH%/witness.php(13): f(1)
+/// d2
+/// #0 %SCRATCH%/witness.php(8): T->__destruct()
+/// #1 %SCRATCH%/witness.php(13): f(1)
+/// d3
+/// #0 %SCRATCH%/witness.php(9): T->__destruct()
+/// #1 %SCRATCH%/witness.php(13): f(1)
+/// d4
+/// #0 [internal function]: T->__destruct()
+/// #1 %SCRATCH%/witness.php(10): str_replace(7, Object(T), 'x')
+/// #2 %SCRATCH%/witness.php(13): f(1)
+/// ```
+///
+/// ```php
+/// class T { function __construct(public $n) {}
+///     function __destruct() { if ($this->n) { echo "d$this->n\n"; debug_print_backtrace(); } }
+///     function __toString(): string { return "ab"; } }
+/// function f($i) {
+///     for ($j = 0; $j < 8; $j++) {
+///         $on = $j == 7 ? 1 : 0;
+///         $r = str_replace("zz", new T($on), new T($on * 2));
+///         $r = str_replace($i + $j, new T($on * 3), "x");
+///         $r = str_replace($j, new T($on * 4), "x");
+///     }
+/// }
+/// f(1);
+/// ```
+/// ```expect regime=jit-force process
+/// d1
+/// #0 [internal function]: T->__destruct()
+/// #1 %SCRATCH%/witness.php(8): str_replace('zz', Object(T), Object(T))
+/// #2 %SCRATCH%/witness.php(13): f(1)
+/// d2
+/// #0 %SCRATCH%/witness.php(8): T->__destruct()
+/// #1 %SCRATCH%/witness.php(13): f(1)
+/// d3
+/// #0 %SCRATCH%/witness.php(9): T->__destruct()
+/// #1 %SCRATCH%/witness.php(13): f(1)
+/// d4
+/// #0 [internal function]: T->__destruct()
+/// #1 %SCRATCH%/witness.php(10): str_replace(7, Object(T), 'x')
+/// #2 %SCRATCH%/witness.php(13): f(1)
+/// ```
+#[inline(always)] // the frameless handler's hot path
+fn free_operands<const N: usize>(
+    req: &mut Request,
+    frame: FrameRef,
+    (operands, owned): (&[Value; N], u8),
+    slots: &[(OperandKind, u32); N],
+) {
+    for (at, (operand, &(kind, field))) in operands.iter().zip(slots).enumerate() {
+        if owned >> at & 1 != 0 {
+            req.release_zval_nogc(operand.to_zval());
+        } else if matches!(kind, OperandKind::Tmp | OperandKind::Var)
+            && let Some(object) = operand.to_zval().as_obj()
+        {
+            req.destruct_in_place(object);
+        }
+        exec::free_operand(req, frame, kind, field);
+    }
+}
+
+/// [`frameless_native`]'s entry where an observer is declared, the entry
+/// itself where it declined the native and the framed entry's full call
+/// where it watches it, or the internal error where `at` names no entry.
 #[cold]
 #[inline(never)]
-fn frameless_aside(
-    req: &mut Request,
-    at: u32,
-    found: Option<(Function, crate::api::__private::Frameless)>,
-    zvals: &[Zval],
-) -> Result<Result<Value, Thrown>, Fatal> {
-    match found {
-        Some((function, _)) => req.serve_frameless_observed(function, zvals),
-        None => Err(Fatal::error(format!(
-            "InternalError: ZEND_FRAMELESS_ICALL_{} indexes frameless entry {at} and the engine's table has {} entries",
-            zvals.len(),
-            req.frameless_count()
-        ))),
+fn frameless_aside(req: &mut Request, at: u32, operands: &[Value]) -> Result<Owner<Value>, Thrown> {
+    match req.frameless_entry(at) {
+        Some((function, entry)) if !crate::observer::frameless_observed(req, function) => {
+            req.serve_frameless(function, entry, operands)
+        }
+        Some((function, _)) => {
+            crate::api::values::adopted(req.serve_frameless_observed(function, operands))
+        }
+        None => {
+            let message = format!(
+                "InternalError: ZEND_FRAMELESS_ICALL_{} indexes frameless entry {at}, past the engine's table",
+                operands.len()
+            );
+            Err(crate::api::raising::fatal(req, &message))
+        }
     }
-}
-
-/// The operands a frameless call is served over, as its handler read
-/// them ([`exec::frameless_operand`]) or compiled code handed them
-/// ([`crate::tier::frameless_call`]): the frame it stands in, each
-/// zval, the bits of `owned` the ones the caller holds an owner of, and
-/// each operand's kind and slot, a temporary's freed there after the
-/// call.
-#[derive(Clone, Copy)]
-pub(super) struct Operands<'a> {
-    pub(super) frame: FrameRef,
-    pub(super) zvals: &'a [Zval],
-    pub(super) owned: u8,
-    pub(super) slots: &'a [(OperandKind, u32)],
 }
 
 /// `ZEND_ASSIGN`, `zend_assign_to_variable`
@@ -17318,8 +17578,24 @@ fn assign_to_place(
         if !req.ref_type_sources(cell.heap()).is_empty() {
             // The frame's regime, read only where a type is held to it.
             let strict = req.frame_strict_types(frame);
+            // A conversion can reach `__toString`, which can give up every
+            // name of the cell: php's `zend_assign_to_typed_ref_ex` then
+            // writes through a freed one. Held here, and where the hold
+            // was the last owner the value lands nowhere and is the
+            // caller's to give up.
+            let kept = Owner::take(req, cell.as_value());
             let verdict = crate::ops::verify_ref_assignable(req, cell.heap(), &value, strict);
-            value = crate::ops::landed(req, value, verdict)?;
+            value = match crate::ops::landed(req, value, verdict) {
+                Ok(landed) => landed,
+                Err(thrown) => {
+                    return Err(req.free_pending(thrown, |req| {
+                        kept.let_go(req);
+                    }));
+                }
+            };
+            if kept.let_go(req).freed() {
+                return Ok((value, value));
+            }
             // `zend_assign_to_typed_ref_ex`'s `i_zval_ptr_dtor_noref` of a
             // `Tmp` or `Var` operand after its copy landed
             // ([`Request::assign_to_reference`]).
@@ -17829,23 +18105,43 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
             }
         }
         Ok(Container::Array(array)) => {
-            let landing =
-                write_at(req, frame, code, op, array).and_then(|at| write_entry(req, array, at));
+            let landing = write_at(req, frame, code, op, array).and_then(|at| {
+                let key = write_key(array, at);
+                write_entry(req, array, at).map(|landing| (key, landing))
+            });
             match landing {
-                Ok(Landing::Entry(entry)) => {
-                    let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-                    match assign_to_place(req, frame, entry, (value, data.op1_type)) {
-                        Ok((landed, garbage)) => {
-                            write_out(req, frame, op, &landed);
-                            req.release(garbage);
-                            Ok(())
-                        }
-                        Err(thrown) => Err(thrown),
-                    }
+                Ok((key, Landing::Entry(entry))) => {
+                    let undefined = data.op1_type == OperandKind::Cv
+                        && req.slot(frame, data.op1).tag() == TypeTag::Undef;
+                    let taken = |req: &mut Request| {
+                        Ok(exec::take_operand(
+                            req,
+                            frame,
+                            code,
+                            data.op1_type,
+                            data.op1,
+                        ))
+                    };
+                    let placed = if undefined {
+                        entry_past(req, (op, place), (array, key, entry), taken)
+                    } else {
+                        taken(req).map(|value| (value, Some(entry)))
+                    };
+                    placed.and_then(|(value, entry)| {
+                        let (landed, garbage) = match entry {
+                            Some(entry) => {
+                                assign_to_place(req, frame, entry, (value, data.op1_type))?
+                            }
+                            None => (value, value),
+                        };
+                        write_out(req, frame, op, &landed);
+                        req.release(garbage);
+                        Ok(())
+                    })
                 }
                 // `assign_dim_error`: `FREE_OP_DATA` and a `null` result.
-                Ok(Landing::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
-                Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
+                Ok((_, Landing::Gone)) => data_gone(req, frame, op, (data.op1_type, data.op1)),
+                Ok((_, Landing::Occupied)) => Err(crate::api::raising::cannot_add_element(req)),
                 Err(thrown) => Err(thrown),
             }
         }
@@ -17889,6 +18185,122 @@ fn append_value(
     let held = Owner::take(req, Value::array(array));
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
     (!held.let_go(req).freed()).then_some(value)
+}
+
+/// The key a write at `at` lands at, read before the append that takes
+/// it, since `next_free` stays at `ZEND_LONG_MAX` once that index is
+/// taken and says nothing of the index before it. `_zend_hash_next_index_insert`
+/// reads `nNextFreeElement` the same way.
+fn write_key(array: PhpArray, at: WriteAt) -> php_heap::Key {
+    let next = array.heap().next_free();
+    match at {
+        WriteAt::At(key) => key,
+        _ if next == i64::MIN => php_heap::Key::Long(0),
+        _ => php_heap::Key::Long(next),
+    }
+}
+
+/// `step` over a diagnostic a write raises with its entry in hand, and
+/// the entry to land what it answered in. An owner keeps the table
+/// across it, and makes a handler's write to it separate, so where that
+/// owner was the last the entry is found afresh in what a CV holds now,
+/// as it stands: the table the handler wrote, shared by what the handler
+/// copied it to, and none where the handler unset the key, left no
+/// array or left an immutable one. Letting the owner go can serve a
+/// destructor, so the entry is found after it, by a key held past it. A
+/// `VAR` or `$this` root is not read again, and the write lands nowhere.
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["a"]["k"] = "w"; return true; });
+/// $a = [str_repeat("x", 3), "k" => 0]; $a[0] = $u; var_dump($a);
+/// $a = [str_repeat("x", 3), "k" => 0]; $a[0] .= []; var_dump($a[0], $a["k"]);
+/// $r = 1; $a = [&$r, "k" => 0]; $a[0] = $u; var_dump($r);
+/// $k = str_repeat("n", 3); $a = [$k => 1, "k" => 0]; $a[$k] = $u; var_dump($a[$k]);
+/// $a = ["k" => 0]; $a[] .= []; var_dump($a);
+/// ```
+/// ```expect
+/// [Undefined variable $u]
+/// array(2) {
+///   [0]=>
+///   NULL
+///   ["k"]=>
+///   string(1) "w"
+/// }
+/// [Array to string conversion]
+/// string(8) "xxxArray"
+/// string(1) "w"
+/// [Undefined variable $u]
+/// NULL
+/// [Undefined variable $u]
+/// NULL
+/// [Array to string conversion]
+/// array(2) {
+///   ["k"]=>
+///   string(1) "w"
+///   [0]=>
+///   string(5) "Array"
+/// }
+/// ```
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { $GLOBALS["a"]["k"] = "w"; return true; });
+/// $a = [PHP_INT_MAX - 1 => "p", "k" => 0]; $a[] .= []; var_dump($a);
+/// ```
+/// ```expect
+/// array(3) {
+///   [9223372036854775806]=>
+///   string(1) "p"
+///   ["k"]=>
+///   string(1) "w"
+///   [9223372036854775807]=>
+///   string(5) "Array"
+/// }
+/// ```
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { $GLOBALS["a"]["k"] = "w"; $GLOBALS["c"] = $GLOBALS["a"]; return true; });
+/// $a = [str_repeat("x", 3), "k" => 0]; $a[0] = $u; var_dump($a[0], $c[0]);
+/// $a = [str_repeat("x", 3), "k" => 0]; $a[0] .= []; var_dump($a[0], $c[0]);
+/// ```
+/// ```expect
+/// NULL
+/// NULL
+/// string(8) "xxxArray"
+/// string(8) "xxxArray"
+/// ```
+fn entry_past<T>(
+    req: &mut Request,
+    (op, place): (&Opline, php_heap::ZvalRef),
+    (array, key, entry): (PhpArray, php_heap::Key, php_heap::ZvalRef),
+    step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
+) -> Result<(T, Option<php_heap::ZvalRef>), Thrown> {
+    let name = match key {
+        php_heap::Key::Str(name) => Value::string(PhpString::of(name)),
+        php_heap::Key::Long(_) => Value::null(),
+    };
+    let name = Owner::take(req, name);
+    let held = Owner::take(req, Value::array(array));
+    let stepped = match step(req) {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            return Err(req.free_pending(thrown, |req| {
+                held.let_go(req);
+                name.give_up(req);
+            }));
+        }
+    };
+    let entry = if !held.let_go(req).freed() {
+        Some(entry)
+    } else if op.op1_type == OperandKind::Cv {
+        let now = Value::of_slot(place.read()).deref();
+        now.as_array()
+            .filter(|now| !now.heap().is_immutable())
+            .and_then(|now| now.heap().value_ref(key))
+    } else {
+        None
+    };
+    name.give_up(req);
+    Ok((stepped, entry))
 }
 
 /// `ZEND_SEPARATE` (`Z/Zend/zend_vm_def.h:8377`), the opline
@@ -17993,6 +18405,53 @@ impl From<Option<php_heap::ZvalRef>> for Landing {
     fn from(entry: Option<php_heap::ZvalRef>) -> Landing {
         entry.map_or(Landing::Occupied, Landing::Entry)
     }
+}
+
+/// Whether a compound assignment over `entry` raises nothing a handler
+/// could use to give the table up: a `.=` of a string or a long over
+/// one, which is the step a program repeats. php holds nothing across
+/// any step and writes through the entry after it, so every other step
+/// takes an owner of the table ([`entry_past`]).
+///
+/// A table a handler took an owner of is written as php writes it:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["c"] = $GLOBALS["a"]; return true; });
+/// $a = [str_repeat("x", 3)]; $a[0] .= []; var_dump($a, $c);
+/// $a = [str_repeat("x", 3)]; $a[0] = $u; var_dump($a, $c);
+/// ```
+/// ```expect
+/// [Array to string conversion]
+/// array(1) {
+///   [0]=>
+///   string(8) "xxxArray"
+/// }
+/// array(1) {
+///   [0]=>
+///   string(8) "xxxArray"
+/// }
+/// [Undefined variable $u]
+/// array(1) {
+///   [0]=>
+///   NULL
+/// }
+/// array(1) {
+///   [0]=>
+///   NULL
+/// }
+/// ```
+fn step_is_silent(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    entry: php_heap::ZvalRef,
+) -> bool {
+    let plain = |value: Value| matches!(value.as_ref(), ValueRef::Str(_) | ValueRef::Int(_));
+    let Opline { op1_type, op1, .. } = step.data;
+    operator(step.op.extended_value) == Some(Opcode::Concat)
+        && plain(Value::of_slot(entry.read()))
+        && plain(exec::operand_undef(req, frame, code, op1_type, op1))
 }
 
 /// The entry a compound assignment to a dimension lands in, php's
@@ -18409,14 +18868,34 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
     let ran_on = req.pending();
     let written = match container {
         Ok(Container::Array(array)) => {
-            let landing =
-                write_at(req, frame, code, op, array).and_then(|at| rw_entry(req, array, at));
+            let landing = write_at(req, frame, code, op, array).and_then(|at| {
+                let key = write_key(array, at);
+                rw_entry(req, array, at).map(|landing| (key, landing))
+            });
             match landing {
-                Ok(Landing::Entry(entry)) => stepped_entry(req, frame, code, step, entry),
+                Ok((key, Landing::Entry(entry))) => {
+                    let computed = |req: &mut Request| stepped_entry(req, frame, code, step, entry);
+                    let placed = if step_is_silent(req, frame, code, step, entry) {
+                        computed(req).map(|stepped| (stepped, Some(entry)))
+                    } else {
+                        entry_past(req, (op, place), (array, key, entry), computed)
+                    };
+                    placed.and_then(|(stepped, entry)| {
+                        let (landed, garbage) = match entry {
+                            Some(entry) => {
+                                assign_to_place(req, frame, entry, (stepped, OperandKind::Unused))?
+                            }
+                            None => (stepped, stepped),
+                        };
+                        write_out(req, frame, op, &landed);
+                        release_overwritten(req, garbage);
+                        Ok(())
+                    })
+                }
                 // `assign_dim_op_ret_null`: `FREE_OP_DATA` and a `null`
                 // result.
-                Ok(Landing::Gone) => data_gone(req, frame, op, (data.op1_type, data.op1)),
-                Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
+                Ok((_, Landing::Gone)) => data_gone(req, frame, op, (data.op1_type, data.op1)),
+                Ok((_, Landing::Occupied)) => Err(crate::api::raising::cannot_add_element(req)),
                 Err(thrown) => Err(thrown),
             }
         }
@@ -18449,20 +18928,19 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
     dim_written(req, frame, op, freed, (written, ran_on))
 }
 
-/// The kernel over what one place holds and the `OP_DATA`'s value, and
-/// the write back into that place: php's `zend_binary_op(var_ptr,
-/// var_ptr, value)` with the reference followed and the cell's types
-/// held to where it carries any ([`assign_to_place`], which is
-/// `zend_binary_assign_op_typed_ref`). What landed is what the
-/// temporary takes under `RETURN_VALUE_USED`, and the value operand is
-/// given up either way, as `FREE_OP_DATA` gives it up.
+/// The kernel over what one place holds and the `OP_DATA`'s value:
+/// php's `zend_binary_op(var_ptr, var_ptr, value)` up to its write back,
+/// which [`assigned_dim_op`] makes with the reference followed and the
+/// cell's types held to where it carries any ([`assign_to_place`], which
+/// is `zend_binary_assign_op_typed_ref`). The value operand is given up
+/// either way, as `FREE_OP_DATA` gives it up.
 fn stepped_entry(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     step: Compound<'_>,
     entry: php_heap::ZvalRef,
-) -> Result<(), Thrown> {
+) -> Result<Value, Thrown> {
     let Compound {
         op, data, kernel, ..
     } = step;
@@ -18475,19 +18953,12 @@ fn stepped_entry(
         kernel(req, &held, &value)
     };
     exec::free_operand(req, frame, data.op1_type, data.op1);
-    let stepped = match computed {
-        Ok(stepped) => stepped,
-        Err(thrown) => {
-            let strict = req.frame_strict_types(frame);
-            return Err(land_failed_step(req, entry, (None, strict), thrown));
-        }
-    };
-    // `EX_USES_STRICT_TYPES()`: the regime of the frame the opline
-    // stands in.
-    let (landed, garbage) = assign_to_place(req, frame, entry, (stepped, OperandKind::Unused))?;
-    write_out(req, frame, op, &landed);
-    release_overwritten(req, garbage);
-    Ok(())
+    computed.map_err(|thrown| {
+        // `EX_USES_STRICT_TYPES()`: the regime of the frame the opline
+        // stands in.
+        let strict = req.frame_strict_types(frame);
+        land_failed_step(req, entry, (None, strict), thrown)
+    })
 }
 
 /// `zend_binary_assign_op_obj_dim` (`Z/Zend/zend_execute.c:1638`), the
@@ -20569,11 +21040,13 @@ fn unset_entry(
     op: &Opline,
     array: PhpArray,
 ) -> Result<php_heap::Zval, Thrown> {
-    let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-    let key = crate::ops::array_offset(req, &dim, op.op2_type == OperandKind::Const)?;
-    Ok(array
-        .heap()
-        .value_ref(key)
+    let dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+    let constant = op.op2_type == OperandKind::Const;
+    let refused = DimensionRead::Warning;
+    let undefined = undefined_op2(frame, code, op);
+    let key = crate::ops::read_offset(req, array, &dim, constant, refused, undefined)?;
+    Ok(key
+        .and_then(|key| array.heap().value_ref(key))
         .map_or_else(php_heap::Zval::null, php_heap::Zval::indirect))
 }
 
@@ -20788,7 +21261,15 @@ pub(crate) fn unset_dim<T: Tier>(
     };
     let unset = if let (_, Some(array)) = found {
         let constant = op.op2_type == OperandKind::Const;
-        crate::ops::unset_dim(req, array, &offset, constant)
+        let undefined = undefined_op2(frame, code, op);
+        // A `CV`'s slot stands; a `VAR`'s `IS_INDIRECT` is an entry of a
+        // table the handler may have freed with the array, and no read.
+        let again = |req: &mut Request| {
+            let stands = op.op1_type == OperandKind::Cv;
+            let found = stands.then(|| separated_array(req, place).ok());
+            found.flatten().and_then(|(_, now)| now)
+        };
+        crate::ops::unset_dim(req, array, &offset, constant, undefined, again)
     } else {
         // The two reads php raises a warning for stand here, after the
         // array arm and before the rest (`ZVAL_UNDEFINED_OP1`,
@@ -24586,26 +25067,28 @@ fn inline_isset_dim<T: Tier>(
 fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let empty = op.extended_value & ISEMPTY != 0;
     let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
-    // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
-    // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension as
-    // it was written, which is the arm that reads it at all.
-    let offset = if held.as_object().is_some() {
-        object_dim(req, frame, code, op).unwrap_or_else(Value::null)
+    let answer = if let Some(array) = held.as_array() {
+        let offset = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+        let constant = op.op2_type == OperandKind::Const;
+        let undefined = undefined_op2(frame, code, op);
+        let again = |req: &mut Request| {
+            let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+            held.deref().as_array()
+        };
+        crate::ops::isset_dim(req, array, &offset, (constant, empty), undefined, again)
     } else {
-        exec::operand(req, frame, code, op.op2_type, op.op2)
-    };
-    // A handler of `ZVAL_UNDEFINED_OP2` can have written the container,
-    // which php reads through its zval after it.
-    let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
-    let answer = if let Some(array) = container.as_array() {
-        crate::ops::isset_dim(
-            req,
-            array,
-            &offset,
-            op.op2_type == OperandKind::Const,
-            empty,
-        )
-    } else {
+        // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
+        // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension
+        // as it was written, which is the arm that reads it at all.
+        let offset = if held.as_object().is_some() {
+            object_dim(req, frame, code, op).unwrap_or_else(Value::null)
+        } else {
+            exec::operand(req, frame, code, op.op2_type, op.op2)
+        };
+        // A handler of `ZVAL_UNDEFINED_OP2` can have written the
+        // container, which `zend_isset_dim_slow` reads through its zval
+        // after it, and an array there is neither of its two arms.
+        let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
         isset_container(req, (frame, code, op), &container, &offset, empty)
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
@@ -25991,8 +26474,63 @@ fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at:
         req.locate_oom();
     }
     req.vm_mut().stand(frame, at);
+    if temporary_discarded(req, frame, op) {
+        return discard_temporary(req, frame, op);
+    }
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     returned_to_caller(req, frame, returned)
+}
+
+/// `RETURN`'s `!return_value` arm (`Z/Zend/zend_vm_def.h:4623`): a
+/// temporary the caller reads nothing of is freed by the `RETURN`, with
+/// its frame still standing, so a destructor that runs sees the function
+/// it was returned from on its trace. A value of a CV or a constant
+/// waits for the leave. An observer takes the value, so it stands past
+/// the observer as `ZEND_OBSERVER_USE_RETVAL` keeps it.
+///
+/// ```php
+/// class D { function __destruct() { debug_print_backtrace(); } }
+/// function f() { return new D; }
+/// function g() { $d = new D; return $d; }
+/// class T { function __destruct() { throw new Exception("t"); } }
+/// function h() { return new T; }
+/// f();
+/// g();
+/// $v = f();
+/// unset($v);
+/// call_user_func('f');
+/// try { h(); } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
+/// function &r() { return new D; }
+/// r();
+/// ```
+/// ```expect
+/// #0 %SCRATCH%/witness.php(3): D->__destruct()
+/// #1 %SCRATCH%/witness.php(7): f()
+/// #0 %SCRATCH%/witness.php(8): D->__destruct()
+/// #0 %SCRATCH%/witness.php(10): D->__destruct()
+/// #0 %SCRATCH%/witness.php(3): D->__destruct()
+/// #1 %SCRATCH%/witness.php(11): f()
+/// #0 %SCRATCH%/witness.php(6): T->__destruct()
+/// #1 %SCRATCH%/witness.php(12): h()
+/// #2 {main}
+///
+/// Notice: Only variable references should be returned by reference in %SCRATCH%/witness.php on line 13
+/// #0 %SCRATCH%/witness.php(13): D->__destruct()
+/// #1 %SCRATCH%/witness.php(14): r()
+/// ```
+fn temporary_discarded(req: &mut Request, frame: FrameRef, op: &Opline) -> bool {
+    matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var)
+        && req.stack_mut().entry() != frame
+        && !crate::observer::observing(req)
+        && req.returning(frame).1.is_none()
+}
+
+/// The temporary [`temporary_discarded`] found given up, with the frame
+/// standing, and the frame left with nothing to hand back.
+fn discard_temporary(req: &mut Request, frame: FrameRef, op: &Opline) -> Stepped {
+    let discarded = req.take_slot(frame, op.op1);
+    req.release(discarded);
+    returned_to_caller(req, frame, Value::null())
 }
 
 /// The return safepoint of a `RETURN*` (design §5.8, `jit-design.md`
@@ -26774,7 +27312,8 @@ fn incdec_typed_ref(
     cell: PhpRef,
     held: Value,
 ) -> Edge {
-    let stepping = step_hold(req, held, Some(cell), None);
+    // `ZVAL_COPY(copy, var_ptr)`, under a `PRE_*` as under a `POST_*`.
+    let stepping = step_hold(req, held, true, Some(cell), None);
     let stepped = match kernel(req, &held) {
         Ok(stepped) => stepped,
         Err(thrown) => {
@@ -26805,13 +27344,30 @@ fn incdec_typed_ref(
 }
 
 /// What a step holds across a diagnostic that can reach a handler: the
-/// value stepped, which `ZVAL_COPY(result, var_ptr)` has an owner of
-/// before php's `POST_*` steps it, the reference it stands in and the
-/// table the `FETCH_DIM_RW` before walked to `place` in. A number raises
-/// nothing and takes none of the three.
+/// value stepped under `copied`, which `ZVAL_COPY(result, var_ptr)` has
+/// an owner of before php's `POST_*` steps it and a `PRE_*` has not, the
+/// kernel taking its own, the reference it stands in and the table the
+/// `FETCH_DIM_RW` before walked to `place` in. A number raises nothing
+/// and takes none of the three.
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { debug_zval_dump($GLOBALS["s"]); $GLOBALS["s"] = 1; return true; });
+/// $s = str_repeat("a", 30) . "!"; $x = --$s; var_dump($x);
+/// $s = str_repeat("a", 30) . "z"; $x = ++$s; var_dump($x);
+/// $s = str_repeat("a", 30) . "!"; $x = $s--; var_dump($x);
+/// ```
+/// ```expect
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!" refcount(3)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaz" refcount(3)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaba"
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!" refcount(4)
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// ```
 fn step_hold(
     req: &mut Request,
     held: Value,
+    copied: bool,
     cell: Option<PhpRef>,
     place: Option<php_heap::ZvalRef>,
 ) -> [Option<Owner<Value>>; 3] {
@@ -26819,7 +27375,7 @@ fn step_hold(
         return [None, None, None];
     }
     [
-        Some(Owner::take(req, held)),
+        copied.then(|| Owner::take(req, held)),
         cell.map(|cell| Owner::take(req, cell.as_value())),
         place.and_then(|place| req.hold_walk(place)),
     ]
@@ -26957,7 +27513,7 @@ fn incdec(
     if let Some(cell) = cell.filter(|cell| cell.heap().sources() != 0) {
         return incdec_typed_ref(req, frame, op, post, kernel, cell, held);
     }
-    let stepping = step_hold(req, held, cell, place);
+    let stepping = step_hold(req, held, post, cell, place);
     match kernel(req, &held) {
         Ok(stepped) => {
             // `ZVAL_COPY(EX_VAR(opline->result.var), var_ptr)`, before
@@ -27738,6 +28294,10 @@ pub(crate) fn return_by_ref<T: Tier>(
             req,
             "Only variable references should be returned by reference",
         );
+        if temporary_discarded(req, frame, op) {
+            let left = discard_temporary(req, frame, op);
+            return raise_return::<T>(req, left, code, op);
+        }
         let value = if op.op1_type == OperandKind::Var {
             req.take_slot(frame, op.op1)
         } else {

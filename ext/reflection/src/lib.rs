@@ -5286,23 +5286,19 @@ fn constant_value(
     php_ext::call::class_constant(req, scope, &constant.name.0)
 }
 
-/// The property `name` names in the class's info table: the class's
-/// own or a parent's non-private one, with the class that declares it.
+/// The property `name` names in the class's info table, its linked
+/// `ce->properties_info`, with the class that declares it: the class's
+/// own, a parent's or an interface's, a row another class declared
+/// private hiding the name as php's `property_info->ce == ce` test does.
 fn property_named(
     req: &mut Request,
     class: ClassId,
     name: &[u8],
 ) -> Option<(ClassId, PropertyDecl)> {
-    for (depth, at) in class_chain(req, class).into_iter().enumerate() {
-        let found =
-            req.symbols().class_decl(at)?.properties.iter().find(|p| {
-                &*p.name.0 == name && (depth == 0 || p.visibility != Visibility::Private)
-            });
-        if let Some(property) = found {
-            return Some((at, property.clone()));
-        }
-    }
-    None
+    let row = req.symbols().property_info_row(class, name)?;
+    let (declaring, property) = (row.declaring(), req.symbols().row_property_info(row)?);
+    (declaring == class || property.visibility != Visibility::Private)
+        .then(|| (declaring, property.clone()))
 }
 
 // -------------------------------------------------- ReflectionClass::__toString
@@ -6311,16 +6307,22 @@ fn double_string(req: &mut Request, f: f64) -> String {
 fn exported(req: &mut Request, expr: &ConstExpr) -> String {
     match expr {
         ConstExpr::UnitValue(_) => folded_value(req, expr, exported_value),
+        ConstExpr::Null => String::from("null"),
+        ConstExpr::Str(s) => quoted_str(s),
         _ => default_value_string(req, expr),
     }
 }
 
 /// `zend_ast_export_zval` over a value of an array the compiler folded:
-/// an array with every key written, `'key' => ` or the number, and a
+/// an array with every key written, `'key' => ` or the number, a string
+/// as [`quoted_str`] writes it, `null` in lower case, and any other
 /// scalar as [`value_default_string`] writes it.
 fn exported_value(req: &mut Request, value: &Value) -> String {
-    let ValueRef::Array(array) = value.as_ref() else {
-        return value_default_string(req, value);
+    let array = match value.as_ref() {
+        ValueRef::Array(array) => array,
+        ValueRef::Str(s) => return quoted_str(s.as_bytes()),
+        ValueRef::Null => return String::from("null"),
+        _ => return value_default_string(req, value),
     };
     let mut out = String::from("[");
     let mut first = true;
@@ -6332,7 +6334,7 @@ fn exported_value(req: &mut Request, value: &Value) -> String {
         first = false;
         match row.key() {
             Key::Str(s) => {
-                write!(out, "'{}' => ", escaped(s.as_bytes())).ok();
+                write!(out, "{} => ", quoted_str(s.as_bytes())).ok();
             }
             Key::Int(n) => {
                 write!(out, "{n} => ").ok();
@@ -6400,14 +6402,8 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                match key {
-                    Some(ConstExpr::Str(s)) => {
-                        write!(out, "'{}' => ", escaped(s)).ok();
-                    }
-                    Some(key) => {
-                        write!(out, "{} => ", exported(req, key)).ok();
-                    }
-                    None => {}
+                if let Some(key) = key {
+                    write!(out, "{} => ", exported(req, key)).ok();
                 }
                 out.push_str(&exported(req, value));
             }
@@ -6668,6 +6664,62 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
     } else {
         text
     }
+}
+
+/// `zend_ast_export_quoted_str` (`Z/Zend/zend_ast.c:1543`), a string
+/// inside an expression still to evaluate: in single quotes with `'` and
+/// `\\` escaped, and where a byte stands below a space in double quotes
+/// through `zend_ast_export_qstr`, the C escapes, `\\0` and two octal
+/// digits for the rest, and `"`, `$` and `\\` escaped. The default of a
+/// parameter is the string's bytes as far as text holds them: a byte that
+/// is no UTF-8 reads as the replacement character, the one thing the
+/// [`String`] these renderings are made of cannot say.
+///
+/// ```php
+/// class I { function __construct(public $v = null) {} }
+/// function f($a = new I('it\'s'), $b = new I('"$a\\'), $c = FOO . "a\0b\n\$\"", $d = [FOO, 'k\'' => 'v\'', "k\n" => null], $e = FOO ? "\e" : 'é') {}
+/// foreach ((new ReflectionFunction('f'))->getParameters() as $p) echo $p, "\n";
+/// function g($a = 'it\'s', $b = ['it\'s' => "a\n"]) {}
+/// foreach ((new ReflectionFunction('g'))->getParameters() as $p) echo $p, "\n";
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = new \I('it\'s') ]
+/// Parameter #1 [ <optional> $b = new \I('"$a\\') ]
+/// Parameter #2 [ <optional> $c = FOO . "a\000b\n\$\"" ]
+/// Parameter #3 [ <optional> $d = [FOO, 'k\'' => 'v\'', "k\n" => null] ]
+/// Parameter #4 [ <optional> $e = FOO ? "\e" : 'é' ]
+/// Parameter #0 [ <optional> $a = 'it's' ]
+/// Parameter #1 [ <optional> $b = ['it's' => 'a\n'] ]
+/// ```
+fn quoted_str(bytes: &[u8]) -> String {
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 2);
+    if bytes.iter().any(|c| *c < b' ') {
+        out.push(b'"');
+        for &c in bytes {
+            match c {
+                b'\n' => out.extend_from_slice(b"\\n"),
+                b'\r' => out.extend_from_slice(b"\\r"),
+                b'\t' => out.extend_from_slice(b"\\t"),
+                0x0C => out.extend_from_slice(b"\\f"),
+                0x0B => out.extend_from_slice(b"\\v"),
+                0x1B => out.extend_from_slice(b"\\e"),
+                0..=31 => out.extend_from_slice(&[b'\\', b'0', b'0' + c / 8, b'0' + c % 8]),
+                b'"' | b'$' | b'\\' => out.extend_from_slice(&[b'\\', c]),
+                _ => out.push(c),
+            }
+        }
+        out.push(b'"');
+    } else {
+        out.push(b'\'');
+        for &c in bytes {
+            if matches!(c, b'\'' | b'\\') {
+                out.push(b'\\');
+            }
+            out.push(c);
+        }
+        out.push(b'\'');
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// `smart_str_append_escaped`: a backslash, a byte below 32 and one

@@ -76,6 +76,8 @@ impl Tier for Jit {
     /// bench` sets, the serving stepped to its end instead ([`stepping`],
     /// #2946). Every other build's `cfg!` is `false` and the branch folds
     /// away.
+    #[inline(always)] // jit-design.md §2.2: a return's test is in the `RETURN*` arms
+    #[allow(clippy::inline_always)]
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         if cfg!(php_jit_stepping) {
             return stepping::driven(req, frame);
@@ -220,6 +222,8 @@ impl JitRequest {
             escapes_crossed: Cell::new(0),
             #[cfg(test)]
             landings_visited: Cell::new(0),
+            #[cfg(test)]
+            returns_visited: Cell::new(0),
         }
     }
 }

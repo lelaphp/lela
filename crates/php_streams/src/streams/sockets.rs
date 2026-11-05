@@ -959,7 +959,31 @@ impl Socket {
     }
 }
 
-/// `php_network_get_sock_name` and `php_network_get_peer_name`.
+/// `php_network_get_sock_name` and `php_network_get_peer_name`, which ask
+/// the fd of whatever family it is, a socket `php://fd/` was handed
+/// among them. The fd is found by name, as the socket's stream reads it:
+///
+/// ```php
+/// function handed($s, $name) {
+///     foreach (scandir('/dev/fd') as $n) {
+///         if (ctype_digit($n) && ($h = @fopen("php://fd/$n", 'r+')) && stream_socket_get_name($h, false) === $name) { return $h; }
+///     }
+/// }
+/// $t = stream_socket_server('tcp://127.0.0.1:0');
+/// $h = handed($t, stream_socket_get_name($t, false));
+/// var_dump(stream_get_meta_data($h)['stream_type'], stream_socket_get_name($h, true));
+/// $path = sys_get_temp_dir() . '/s' . bin2hex(random_bytes(6)) . '.sock';
+/// $u = stream_socket_server("unix://$path");
+/// $h = handed($u, $path);
+/// var_dump(stream_get_meta_data($h)['stream_type'], stream_socket_get_name($h, true));
+/// unlink($path);
+/// ```
+/// ```expect
+/// string(10) "tcp_socket"
+/// bool(false)
+/// string(10) "tcp_socket"
+/// bool(false)
+/// ```
 fn name(sock: &Sock, peer: bool) -> Option<Vec<u8>> {
     let inet = |addr: std::io::Result<SocketAddr>| addr.ok().map(|a| inet_text(&a));
     let unix =
@@ -975,8 +999,30 @@ fn name(sock: &Sock, peer: bool) -> Option<Vec<u8>> {
         (Sock::UnixServer(s), false) => unix(s.local_addr()),
         (Sock::Udg(s), false) => unix(s.local_addr()),
         (Sock::Udg(s), true) => unix(s.peer_addr()),
+        (Sock::Generic(s), peer) => handed_name(s, peer),
         _ => None,
     }
+}
+
+/// [`name`] over a [`Sock::Generic`]: the family's own read through a
+/// copy of the fd, an inet socket's where the kernel answers one and
+/// the unix one's otherwise, as `accept` tells them apart.
+fn handed_name(handed: &UnixStream, peer: bool) -> Option<Vec<u8>> {
+    let inet = TcpStream::from(handed.as_fd().try_clone_to_owned().ok()?);
+    let addr = if peer {
+        inet.peer_addr()
+    } else {
+        inet.local_addr()
+    };
+    if let Ok(addr) = addr {
+        return Some(inet_text(&addr));
+    }
+    let addr = if peer {
+        handed.peer_addr()
+    } else {
+        handed.local_addr()
+    };
+    addr.ok().map(|addr| unix_text(&addr))
 }
 
 /// `sock_recvfrom` (`Z/main/streams/xp_socket.c:305`): `recvfrom(2)`, or
@@ -1120,13 +1166,16 @@ const fn textless(step: XportStep) -> XportFailure {
 /// socket of its family, bound to `bindto` where it is an address of that
 /// family (php's `Invalid IP Address` and `Failed to bind` warnings where
 /// it is not one, or will not bind), `SO_BROADCAST` on a UDP one and
-/// `TCP_NODELAY` on a TCP one as the options say, and connected. The last
+/// `TCP_NODELAY` on a TCP one as the options say, and connected, or under
+/// `asynchronous`, `STREAM_XPORT_OP_CONNECT_ASYNC`, the connect begun and
+/// left to finish on a socket that does not block. The last
 /// failure is the error, and one with no text where no address was
 /// tried, as php leaves `error_string` unwritten then.
 fn connect_inet(
     req: &mut Request,
     name: &[u8],
     udp: bool,
+    asynchronous: bool,
     timeout: Option<Duration>,
     options: &SocketOptions,
 ) -> Result<Sock, XportFailure> {
@@ -1171,6 +1220,7 @@ fn connect_inet(
         match crate::api::layer::connect_fd(
             fd.as_fd(),
             &addr,
+            asynchronous,
             left.map(|t| t.max(Duration::from_micros(1))),
         ) {
             Ok(()) if udp => return Ok(Sock::Udp(UdpSocket::from(fd))),
@@ -1345,15 +1395,21 @@ impl Transports for Request {
             (
                 "tcp_socket",
                 Xport::Client {
-                    timeout, socket, ..
+                    timeout,
+                    asynchronous,
+                    socket,
+                    ..
                 },
-            ) => connect_inet(self, rest, false, timeout, &socket),
+            ) => connect_inet(self, rest, false, asynchronous, timeout, &socket),
             (
                 "udp_socket",
                 Xport::Client {
-                    timeout, socket, ..
+                    timeout,
+                    asynchronous,
+                    socket,
+                    ..
                 },
-            ) => connect_inet(self, rest, true, timeout, &socket),
+            ) => connect_inet(self, rest, true, asynchronous, timeout, &socket),
             ("tcp_socket", Xport::Server { listen, socket, .. }) => {
                 bind_inet(self, rest, false, listen, &socket)
             }

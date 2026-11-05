@@ -1542,8 +1542,8 @@ fn a_stepped_return_past_the_root_holds_its_landing_with_an_exit() -> Result<(),
     Ok(())
 }
 
-/// A recursive return trace whose `RETURN` of a string this tier steps,
-/// which php compiles with `zend_jit_return`: each return past its root
+/// A recursive return trace whose `RETURN` of a variable's array this tier
+/// steps, which php compiles with `zend_jit_return`: each return past its root
 /// escapes, as `zend_jit_leave_func` takes no exit, and its line holds
 /// no guard of its own (#3688).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -1552,8 +1552,8 @@ fn a_stepped_return_php_compiles_in_place_escapes() -> Result<(), String> {
     let ir = built(
         &[("record.function", "p"), ("record.start", "return")],
         "function h() { return 1; }
-        function p($n) { if ($n == 0) { return \"\"; } $x = p($n - 1); h(); $x .= \"a\"; return $x; }
-        echo strlen(p(8)), \"\\n\";",
+        function p($n) { if ($n == 0) { return []; } $x = p($n - 1); h(); $x[] = 1; return $x; }
+        $r = p(8); echo $r[7], \"\\n\";",
     )?;
     let shown = dump::render(&ir);
     assert_eq!(ir.entry.stop, Stop::RecursiveRet, "{shown}");
@@ -2504,6 +2504,7 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
             owners: super::Owners::Each(d),
             value: super::Returned::Scalar,
             receives: false,
+            closure: false,
         },
         "{rendered}"
     );
@@ -3436,7 +3437,7 @@ fn pushed_under_its_class_guard(fixture: Fixture) -> Result<(), String> {
 /// up to the call are numbered as php's exit info for its trace numbers
 /// them: `exit_0` and `exit_1` at `0012`, knowing none and `$n` and `$o`,
 /// `exit_2` the loop's way out at `0014`, `exit_3` the receiver's class
-/// guard at `0007`, then the call's. A static method's call carries no
+/// guard at `0007`, `exit_4` the push's own stack check. A static method's call carries no
 /// class, and its loop keeps the check, as php's `exit_0`
 /// `0009/----/0/VM` for `s` does.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -3450,16 +3451,11 @@ fn a_methods_call_on_an_object_takes_no_stack_check_at_entry() -> Result<(), Str
     for fixture in [METHOD_CALL, TEMP_CALL, METHOD_OWN, ENUM_OWN, METHOD_SCOPED] {
         let ir = golden(fixture)?;
         assert_eq!(rooms(&ir), 0, "{}\n{}", fixture.name, dump::render(&ir));
-        // No stack check holds such a push, so it tests the page itself.
+        // The check before the push holds it, php's `exit_4/VM` at the
+        // opline.
         assert!(
-            (ir.ops.iter()).all(|op| !matches!(
-                op,
-                Op::InitCall {
-                    plain: Some(_),
-                    room: PushRoom::Checked,
-                    ..
-                }
-            )),
+            (ir.guards.iter()).any(|guard| matches!(guard.at, GuardAt::Before(_))
+                && matches!(guard.check, Check::Room { .. })),
             "{}\n{}",
             fixture.name,
             dump::render(&ir)
@@ -3477,7 +3473,7 @@ fn a_methods_call_on_an_object_takes_no_stack_check_at_entry() -> Result<(), Str
             (Some(OplineIdx(12)), 2),
             (Some(OplineIdx(14)), 3),
             (Some(OplineIdx(7)), 3),
-            (None, 3),
+            (Some(OplineIdx(7)), 3),
         ],
         "{rendered}"
     );

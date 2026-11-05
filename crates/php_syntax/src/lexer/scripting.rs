@@ -282,7 +282,7 @@ impl Lexer<'_> {
     /// `//` and `#` comments, ending before the newline (php 8 puts the
     /// newline in `T_WHITESPACE`) and before `?>` without consuming it.
     #[inline(never)]
-    fn lex_line_comment(&mut self) {
+    pub(crate) fn lex_line_comment(&mut self) {
         let start = self.pos;
         self.pos += if self.byte(start) == b'/' { 2 } else { 1 };
         while self.pos < self.text.len() {
@@ -308,7 +308,7 @@ impl Lexer<'_> {
     /// Parse error: Unterminated comment starting line 2 in %s on line 2
     /// ```
     #[inline(never)]
-    fn lex_block_comment(&mut self) {
+    pub(crate) fn lex_block_comment(&mut self) {
         let start = self.pos;
         let is_doc = self.byte(start + 2) == b'*'
             && matches!(self.byte(start + 3), b' ' | b'\t' | b'\r' | b'\n');

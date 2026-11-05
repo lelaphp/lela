@@ -7,7 +7,7 @@
 //! early is [`Classes`]'s, whose field no file but this one reads.
 
 use php_heap::{FrameRef, Heap, Intern};
-use php_link::LinkedClass;
+use php_link::{FoldedHash, LinkedClass};
 use php_unit::decl::{Bare, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
 use php_unit::{Opcode, PublishedUnit, TopLevel, Unit};
 
@@ -2210,11 +2210,6 @@ impl Request {
         Some((Function(row.function), *entry))
     }
 
-    /// `zend_flf_count`: how many rows the frameless table has.
-    pub(crate) fn frameless_count(&self) -> usize {
-        self.shared.frameless.len()
-    }
-
     /// What [`defined_functions`](Self::defined_functions) makes, its one owner not yet named.
     pub(crate) fn defined_functions_made(&mut self) -> Result<PhpArray, Thrown> {
         let (mut internal, mut user) = (Vec::new(), Vec::new());
@@ -2739,11 +2734,12 @@ fn class_in(
     aliases: &Keyed<preload::Alias>,
     name: &[u8],
 ) -> Option<ClassId> {
-    shared.class_at(name).or_else(|| {
+    let hash = FoldedHash::of(name);
+    shared.class_hashed(hash, name).or_else(|| {
         declared
-            .find(name)
+            .find_hashed(hash, name)
             .map(|named| named.class)
-            .or_else(|| aliases.find(name).map(|(_, _, class)| *class))
+            .or_else(|| aliases.find_hashed(hash, name).map(|(_, _, class)| *class))
     })
 }
 

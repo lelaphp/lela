@@ -1790,7 +1790,7 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
         );
         return 0;
     };
-    if stream.is_url(req) {
+    if stream.is_url(req) == Some(true) {
         stream.free(req);
         raise(
             req,

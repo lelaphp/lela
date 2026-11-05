@@ -350,6 +350,23 @@ impl Request {
             .map_or_else(|| b"object".to_vec(), |decl| decl.name.0.to_vec())
     }
 
+    /// `ce->name` as a string, one more owner, read with nothing hashed
+    /// once the class has been asked after.
+    pub(crate) fn class_name_string(&mut self, class: ClassId) -> Result<Owner<PhpString>, Thrown> {
+        if let Some(name) = self.class_names.get(class) {
+            return Ok(Owner::take(self, name));
+        }
+        let held = (self.symbols().class_decl(class))
+            .and_then(|decl| self.shared.existing_interned(&decl.name.0));
+        if let Some(held) = held {
+            let name = PhpString::of(held);
+            self.class_names.keep(class, name);
+            return Ok(Owner::take(self, name));
+        }
+        let name = self.class_name_bytes(class);
+        self.declared_string(&name)
+    }
+
     /// The parents of a class up from its own, `ce->parent` and on, held
     /// to 64 as [`Symbols::lineage`] is.
     pub(crate) fn ancestors(&self, class: ClassId) -> impl Iterator<Item = ClassId> + '_ {

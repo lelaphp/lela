@@ -20,14 +20,14 @@
 pin = "oracle.toml"                        # the only statement of version, digest, recipe
 
 [budget]
-total = 560000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this; 560000, the +40k step at the measured weekly rate, for php_ssa's 9,000 (#3174) and the tier's queue; #2971's dedupe freed 93 (#3565, 2026-10-26)
+total = 630000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this; 560000, the +40k step at the measured weekly rate, for php_ssa's 9,000 (#3174) and the tier's queue; #2971's dedupe freed 93 (#3565, 2026-10-26); 630000, four weeks at the measured rate (#4163, 2026-11-05)
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
 docs = 6500                                # design §10; `docs/**` plus the three living documents
 harness = 4800                             # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded, less the desk where `harness-desk` holds it; 1600 for the readiness-update skill (2026-10-24); 4800 for the vendored skills (#3620 D2, 2026-10-30)
 harness-desk = 1300                        # harness §12 item 6: `harness-plugins/desk/**` hand-written, tests included; 1300 for the desk's estimated 980 and its tests (#3491, ruled 2026-10-25)
 lock_packages = 190                        # design §4.1: third-party `Cargo.lock` packages (those with a `source`); a workspace crate is held by its [[crate]] row and ceiling (#1335); 164 is stage 1's TLS as #2333 ruled, 190 adds the compiled tier's Cranelift core set and rustix as #2945 ruled
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
-api_items = 1550                           # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34; #697); 1550 for the open-source gate's face items, #3548's reserved[] and #3509's set_aside, with room for the next (#3666, 2026-10-30)
+api_items = 1700                           # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34; #697); 1550 for the open-source gate's face items, #3548's reserved[] and #3509's set_aside, with room for the next (#3666, 2026-10-30); 1700, about five weeks at the measured rate (#4163, 2026-11-05)
 api_private_items = 16                     # design §4.4 (revision 34, D1 of #947): api::__private, the helpers only a macro expansion names, capped apart from api_items
 bindings = 32000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
 # Lines are non-blank, non-comment, tests excluded (`xtask budget`).
@@ -55,7 +55,7 @@ budget = 20000
 lock = "heap.lock"
 [[crate]]
 name = "php_process"
-budget = 700                               # fork, the signal pool, LC_CTYPE, the process identity and its file descriptors: the process-wide mechanisms (#1779, #1935)
+budget = 800                               # fork, the signal pool, LC_CTYPE, the process identity and its file descriptors: the process-wide mechanisms (#1779, #1935); 800, 1.2 times its use (#4163, 2026-11-05)
 lock = "process.lock"
 [[crate]]
 name = "php_unit"
@@ -63,14 +63,14 @@ budget = 4000                              # 2.5k raised to 3k for the unit form
 lock = "unit.lock"
 [[crate]]
 name = "php_link"
-budget = 5500                               # the linker and the linked class record, moved out of php_unit (ADR-0012; #2193, #2228)
+budget = 6000                               # the linker and the linked class record, moved out of php_unit (ADR-0012; #2193, #2228); 6k, 1.2 times its use (#4163, 2026-11-05)
 lock = "link.lock"
 [[crate]]
 name = "php_compile"
-budget = 24000
+budget = 27000                              # 27k, four weeks at the measured rate (#4163, 2026-11-05)
 [[crate]]
 name = "php_engine"
-budget = 89000                             # 86k raised to 88k for the compile-memory queue (#3915, 2026-11-02); 89k for a native call's glue, #4058 and #4062, and no raise after this one without #3566's dedupe landed (#4063, 2026-11-03)
+budget = 105000                             # 86k raised to 88k for the compile-memory queue (#3915, 2026-11-02); 89k for a native call's glue, #4058 and #4062 (#4063, 2026-11-03); #3566's dedupe landed and freed 468 (7582a1b48); 105k, four weeks at the measured rate, and no raise after this one without #4164 landed (#4163, 2026-11-05)
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
@@ -84,7 +84,7 @@ name = "php_bundle"
 budget = 500
 [[crate]]
 name = "php_jit"
-budget = 28000
+budget = 40000                              # 40k, four weeks at the measured rate (#4163, 2026-11-05)
 feature = "jit"
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]
 [[crate]]
@@ -93,7 +93,7 @@ budget = 9000                              # php's CFG, DFG, SSA and inference o
 lock = "ssa.lock"
 [[crate]]
 name = "php_proto"
-budget = 4000
+budget = 4300                               # 4.3k, 1.2 times its use (#4163, 2026-11-05)
 [[crate]]
 name = "php_sapi"
 budget = 2000                              # the hosts' facade and what php-src shares between its SAPIs (ADR-0008); the hosts' phpt subsets are their rows'
@@ -103,7 +103,7 @@ budget = 12000                             # php's main/streams/ and main/networ
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
-budget = 46200                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20); 44k after #3279's dedupe found 166 lines (#3357, 2026-10-24); 45.5k for #3619, #3621, #3622 and #3624 (2026-10-30); 46.2k for #2140's framework lane and #3607's fuzz instrument, the room #3612's 45k gave them that #3619–#3624 spent (#3672, 2026-10-31)
+budget = 54000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20); 44k after #3279's dedupe found 166 lines (#3357, 2026-10-24); 45.5k for #3619, #3621, #3622 and #3624 (2026-10-30); 46.2k for #2140's framework lane and #3607's fuzz instrument, the room #3612's 45k gave them that #3619–#3624 spent (#3672, 2026-10-31); 54k, about two weeks at the measured rate, so the harness stays held tighter than the engine; #3750's two lanes take their 700 out of this row (#4163, 2026-11-05)
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
@@ -139,7 +139,7 @@ name = "ext/session"
 budget = 5500
 [[crate]]
 name = "ext/pdo"
-budget = 7000
+budget = 7700                               # 7.7k, 1.2 times its use (#4163, 2026-11-05)
 [[crate]]
 name = "ext/dom"
 budget = 25500
@@ -158,7 +158,7 @@ name = "ext/tokenizer"
 budget = 1500
 [[crate]]
 name = "ext/json"
-budget = 1700
+budget = 2100                               # 2.1k, 1.2 times its use (#4163, 2026-11-05)
 [[crate]]
 name = "ext/openssl"
 budget = 13500
@@ -198,7 +198,7 @@ budget = 2000     # posix.c: ids, the user and group databases, rlimits, ttys, m
 feature = "posix"
 [[crate]]
 name = "ext/sockets"
-budget = 5000     # sockets.c, conversions.c, multicast.c; nix with libc for what it lacks, as posix and pcntl (Mitchell, 2026-09-27, #1078)
+budget = 5300     # sockets.c, conversions.c, multicast.c; nix with libc for what it lacks, as posix and pcntl (Mitchell, 2026-09-27, #1078); 5.3k, 1.2 times its use (#4163, 2026-11-05)
 feature = "sockets"
 [[crate]]
 name = "ext/phar"
@@ -209,7 +209,7 @@ budget = 2500     # bz2.c and bz2_filter.c; pure Rust first, held to the oracle'
 feature = "bz2"
 [[crate]]
 name = "ext/opcache"
-budget = 2200     # zend_accelerator_module.c and zend_accelerator_blacklist.c: the ini entries, the natives and the status and configuration arrays; the unit cache they answer from is php_engine's (design §6.3), so the shared allocator, persist and file cache are not ported here (#1163)
+budget = 2500     # zend_accelerator_module.c and zend_accelerator_blacklist.c: the ini entries, the natives and the status and configuration arrays; the unit cache they answer from is php_engine's (design §6.3), so the shared allocator, persist and file cache are not ported here (#1163); 2.5k, 1.2 times its use (#4163, 2026-11-05)
 [[crate]]
 name = "ext/calendar"
 budget = 2000     # calendar.c, cal_unix.c, dow.c, easter.c, french.c, gregor.c, jewish.c, julian.c; pure arithmetic, php's own C ported, no library (#1163)
@@ -232,7 +232,7 @@ name = "ext/xmlreader"
 budget = 1500     # php_xmlreader.c over libxml2's xmlTextReader, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 1,089 lines of C (#1166, #727's rule, #1323)
 [[crate]]
 name = "ext/xmlwriter"
-budget = 1150     # php_xmlwriter.c over libxml2's xmlTextWriter, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 769 lines of C (#1166, #727's rule, #1323)
+budget = 1300     # php_xmlwriter.c over libxml2's xmlTextWriter, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 769 lines of C (#1166, #727's rule, #1323); 1.3k, 1.2 times its use (#4163, 2026-11-05)
 [[crate]]
 name = "ext/exif"
 budget = 5500     # exif.c, php's own C ported, no library; php's --enable-exif, whose feature turns on mbstring, the decoding the oracle's --ri reports; 4,198 lines of C (#1166, #727's rule, #1323)
@@ -266,7 +266,7 @@ feature = "mysqlnd"
 porting = true
 [[crate]]
 name = "ext/mysqli"
-budget = 5500     # mysqli*.c, 3,713 lines of C, over ext/mysqlnd (#1345)
+budget = 6000     # mysqli*.c, 3,713 lines of C, over ext/mysqlnd (#1345); 6k, 1.2 times its use (#4163, 2026-11-05)
 feature = "mysqli"
 [[crate]]
 name = "ext/sqlite3"

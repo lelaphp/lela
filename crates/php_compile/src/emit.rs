@@ -20692,6 +20692,24 @@ impl Emit<'_> {
     /// the value's names come before the key's. A `.` over two literals
     /// is one value to php's parser and two nodes here, so `${'a' . 'b'}`
     /// binds nothing here.
+    ///
+    /// `new class($v)` is walked for its arguments and not its body, so
+    /// the arguments reach the arrow function's enclosing scope:
+    ///
+    /// ```php
+    /// $x = 1; $y = 2;
+    /// $f = fn () => new class($x) { public $y = 3; function __construct(public $v) {} function y() { return $y ?? 'none'; } };
+    /// var_dump($f()->v, $f()->y());
+    /// var_dump((new ReflectionFunction($f))->getStaticVariables());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// string(4) "none"
+    /// array(1) {
+    ///   ["x"]=>
+    ///   int(1)
+    /// }
+    /// ```
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per node kind, which is what php's walk over the children of a node it makes no special case of comes to here: the length is the number of kinds `Expr` has, and there is nothing in it to shorten that would not be a second walk"
@@ -20777,7 +20795,10 @@ impl Emit<'_> {
             tree::Expr::NewExpr(id) => {
                 let node = &tree[id];
                 self.implicit_uses_of_any(names, node.ctor);
-                if let Some(args) = node.args {
+                // `new class(...)` is `ZEND_AST_NEW` over the declaration,
+                // which is special and not walked, and these arguments.
+                let args = node.anon.map_or(node.args, |anon| tree[anon].args);
+                if let Some(args) = args {
                     self.implicit_uses_of_args(names, args);
                 }
             }

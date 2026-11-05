@@ -1488,7 +1488,7 @@ impl Request {
     /// ([`Request::init_func_run_time_cache`]); the inline `INIT_*` paths,
     /// which read their callee off a primed cache slot, push through
     /// [`Request::push_laid`] and [`Request::push_room`], since the pass
-    /// that primed the slot laid the callee's cache. A closure's cache
+    /// that primed the slot laid the callee's cache. A closure's own cache
     /// was chosen as it was made ([`crate::classes::closure_cache`]). A
     /// call `zend_call_function` pushes already serving, which no `INIT_*`
     /// builds, lays it at its activation ([`Request::activate_user`]), as
@@ -1512,7 +1512,7 @@ impl Request {
             return Err(Fatal::error("InternalError: a call pushed with no callee"));
         };
         if header.info.building()
-            && header.closure().is_none()
+            && !header.info.own_cache()
             && let Some(function) = header.function()
             && let Some(base) = self.init_func_run_time_cache(function)?
         {
@@ -1553,22 +1553,22 @@ impl Request {
         &mut self,
         function: Function,
         entry: crate::api::__private::Frameless,
-        operands: &[php_heap::Zval],
-    ) -> Result<Value, Thrown> {
+        operands: &[Value],
+    ) -> Result<crate::api::values::Owner<Value>, Thrown> {
         use crate::api::__private::Frameless;
         let made = self.calls_coerced();
         #[cfg(debug_assertions)]
         let outer = self
             .function_origin(function)
             .map(|extension| self.heap.set_origin(extension.origin()));
-        let served = match (entry, operands) {
-            (Frameless::Zero(entry), &[]) => entry(self, &[]),
-            (Frameless::One(entry), &[a]) => entry(self, &[Value::of_zval(a)]),
-            (Frameless::Two(entry), &[a, b]) => entry(self, &[a, b].map(Value::of_zval)),
-            (Frameless::Three(entry), &[a, b, c]) => entry(self, &[a, b, c].map(Value::of_zval)),
+        let served = match entry {
+            Frameless::Zero(entry) if let Some(given) = operands.as_array() => entry(self, given),
+            Frameless::One(entry) if let Some(given) = operands.as_array() => entry(self, given),
+            Frameless::Two(entry) if let Some(given) = operands.as_array() => entry(self, given),
+            Frameless::Three(entry) if let Some(given) = operands.as_array() => entry(self, given),
             _ => Err(crate::api::raising::fatal(
                 self,
-                "InternalError: a frameless call of another arity than its entry's",
+                "InternalError: a frameless call's arity",
             )),
         };
         #[cfg(debug_assertions)]
@@ -1582,30 +1582,10 @@ impl Request {
         self.release_coerced(made);
         // A throwable a stream kept is out of line, as `serve_entry` takes it.
         if self.stream_thrown.is_some() {
-            return self.frameless_kept(served);
+            let served = self.served_aside(None, served, crate::observer::OnThrow::Nothing);
+            return crate::api::values::adopted(served);
         }
-        served.map(crate::api::values::Owner::hand_on)
-    }
-
-    /// [`Request::serve_frameless`] past the entry where a stream kept a
-    /// throwable while it ran: raised over what the entry answered.
-    #[cold]
-    #[inline(never)]
-    fn frameless_kept(
-        &mut self,
-        served: Result<crate::api::values::Owner<Value>, Thrown>,
-    ) -> Result<Value, Thrown> {
-        let served = served.map(crate::api::values::Owner::hand_on);
-        let Some(deferred) = self.stream_thrown.take() else {
-            return served;
-        };
-        match served {
-            Ok(value) => {
-                self.release(value);
-                Err(deferred)
-            }
-            Err(thrown) => Err(deferred.chain(self, thrown)),
-        }
+        served
     }
 
     /// `zend_frameless_observed_call` (`Z/Zend/zend_execute.c:1577-1597`):
@@ -1618,12 +1598,13 @@ impl Request {
     pub(crate) fn serve_frameless_observed(
         &mut self,
         function: Function,
-        operands: &[php_heap::Zval],
-    ) -> Result<Result<Value, Thrown>, Fatal> {
+        operands: &[Value],
+    ) -> Result<Value, Thrown> {
         let count = u32::try_from(operands.len()).unwrap_or(u32::MAX);
         let mut header = exec::Header::call(function, count);
         header.info.set_serving();
-        let call = self.push_room(self.native_room(count) as usize, header)?;
+        let pushed = self.push_room(self.native_room(count) as usize, header);
+        let call = self.fatal_of(pushed)?;
         let slots = self
             .vm
             .stack
@@ -1632,13 +1613,13 @@ impl Request {
         // `ZVAL_COPY_DEREF` of each operand, read through already.
         if let Some(slots) = slots.and_then(|slots| slots.get_mut(..operands.len())) {
             for (slot, &operand) in slots.iter_mut().zip(operands) {
-                operand.addref();
-                *slot = operand;
+                operand.to_zval().addref();
+                *slot = operand.to_zval();
             }
         }
         let served = self.serve_native(function, crate::observer::OnThrow::ReturnValue);
         self.pop_call();
-        Ok(served)
+        served
     }
 
     /// A call pushed with `room` slots past its header, its record named,
@@ -2452,15 +2433,24 @@ impl Request {
     /// write, the `zval_ptr_dtor` php's assignment over a slot ends with.
     #[inline]
     pub(crate) fn replace_slot(&mut self, frame: FrameRef, at: u32, value: Value) {
-        let Some(slot) = self
-            .vm
-            .stack
-            .frame_mut(frame)
-            .and_then(|f| f.slots_mut().get_mut(at as usize))
-        else {
+        let place = self.slot_ptr(frame, at);
+        self.replace_place(frame, at, place, value);
+    }
+
+    /// [`Request::replace_slot`] through `place`, the name of slot `at`
+    /// of `frame` the caller took before it ran what ran since.
+    #[inline(always)] // the frameless handler's hot path, and `replace_slot`
+    pub(crate) fn replace_place(
+        &mut self,
+        frame: FrameRef,
+        at: u32,
+        place: Option<ZvalRef>,
+        value: Value,
+    ) {
+        let Some(place) = place else {
             return self.release(value);
         };
-        let old = std::mem::replace(slot, value.to_zval());
+        let old = place.replace(value.to_zval());
         if old.is_refcounted() {
             self.release_replaced(frame, at, old);
         }

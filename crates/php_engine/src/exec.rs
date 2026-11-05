@@ -1232,6 +1232,11 @@ impl CallInfo {
         self.set(Self::LAID_ENTRY, false);
     }
 
+    #[inline]
+    pub(crate) fn own_cache(self) -> bool {
+        self.0 & Self::OWN_CACHE != 0
+    }
+
     pub(crate) fn set_own_cache(&mut self, on: bool) {
         self.set(Self::OWN_CACHE, on);
     }
@@ -2040,8 +2045,9 @@ pub(crate) enum Cached {
     /// its scope is `scope` too.
     Property(PropertyPlace) = PROPERTY,
     /// The user function one of the same three resolved on its first
-    /// pass, with what each pass after pushes its call with.
-    Call(PrimedCall),
+    /// pass, with what each pass after pushes its call with. Compiled
+    /// code reads its record at [`Cached::CALL_RECORD_AT`].
+    Call(PrimedCall) = CALL,
     /// `ZEND_JMP_FL_MISS`: the table has the name in the namespace, so
     /// the jump is not taken and the call by name after it runs.
     Miss,
@@ -2153,6 +2159,10 @@ pub(crate) const STATIC_PROPERTY: u32 = 5;
 /// the place.
 pub(crate) const PROPERTY: u32 = 7;
 
+/// [`Cached::Call`]'s tag, which compiled code tests before it reads the
+/// record.
+pub(crate) const CALL: u32 = 8;
+
 /// [`Cached::Property`]'s fields, the place a property opline found on
 /// objects of one class: what compiled code reads, the class and the
 /// offset at fixed offsets, and what the interpreter reads beside them.
@@ -2203,6 +2213,13 @@ struct PairRepr {
     record: crate::readable::CalleeAt,
 }
 
+/// [`Cached::Call`] as RFC 2195 lays it out.
+#[repr(C)]
+struct CallRepr {
+    tag: u32,
+    call: PrimedCall,
+}
+
 /// [`PropertyOffset::Declared`] as RFC 2195 lays it out.
 #[repr(C)]
 struct DeclaredRepr {
@@ -2229,6 +2246,9 @@ impl Cached {
     /// Where [`Cached::ClassAndCallee`]'s callee's record stands in a
     /// slot, a word.
     pub(crate) const PAIR_RECORD_AT: usize = std::mem::offset_of!(PairRepr, record);
+    /// Where [`Cached::Call`]'s callee's record stands in a slot, a word.
+    pub(crate) const CALL_RECORD_AT: usize =
+        std::mem::offset_of!(CallRepr, call) + std::mem::offset_of!(PrimedCall, callee);
 }
 
 impl PropertyPlace {
@@ -2264,6 +2284,9 @@ const _: () = {
     assert!(align_of::<PropertyRepr>() <= align_of::<Cached>());
     assert!(size_of::<PairRepr>() <= size_of::<Cached>());
     assert!(align_of::<PairRepr>() <= align_of::<Cached>());
+    assert!(size_of::<CallRepr>() <= size_of::<Cached>());
+    assert!(align_of::<CallRepr>() <= align_of::<Cached>());
+    assert!(Cached::CALL_RECORD_AT.is_multiple_of(8));
     assert!(size_of::<Function>() == 4);
     assert!(Cached::PAIR_CLASS_AT == 4 && Cached::PAIR_FUNCTION_AT.is_multiple_of(4));
     assert!(Cached::PAIR_RECORD_AT.is_multiple_of(8));
@@ -3240,7 +3263,43 @@ pub(crate) fn key_value(req: &mut Request, key: php_heap::Key) -> Value {
 /// string(4) "xbxb"
 /// string(4) "abab"
 /// ```
-#[inline]
+///
+/// A variable read through a reference is held in a frame no name
+/// reaches too, since the reference's other end is a name: here
+/// `__toString` writes over the string the native reads, and the read
+/// goes on over the owner, in compiled code as in the handler
+/// (`Emit::frameless_call`).
+///
+/// ```php
+/// class S { function __toString(): string { global $g, $k; if ($k >= 10) { $g = str_repeat("z", 41); } return "lo"; } }
+/// function f(&$x) { global $k; $t = 0; for ($i = 0; $i < 30; $i++) { $k = $i; $x = str_repeat("hello", 8) . $i; $t += str_contains($x, new S) ? 1 : 0; } return $t; }
+/// $g = "";
+/// echo f($g), "\n";
+/// ```
+/// ```expect
+/// 30
+/// ```
+///
+/// ```php
+/// class S { function __toString(): string { global $g, $k; if ($k >= 10) { $g = str_repeat("z", 41); } return "lo"; } }
+/// function f(&$x) { global $k; $t = 0; for ($i = 0; $i < 30; $i++) { $k = $i; $x = str_repeat("hello", 8) . $i; $t += str_contains($x, new S) ? 1 : 0; } return $t; }
+/// $g = "";
+/// echo f($g), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// 30
+/// ```
+///
+/// ```php
+/// class S { function __toString(): string { global $g, $k; if ($k >= 10) { $g = str_repeat("z", 41); } return "lo"; } }
+/// function f(&$x) { global $k; $t = 0; for ($i = 0; $i < 30; $i++) { $k = $i; $x = str_repeat("hello", 8) . $i; $t += str_contains($x, new S) ? 1 : 0; } return $t; }
+/// $g = "";
+/// echo f($g), "\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// 30
+/// ```
+#[cold]
 pub(crate) fn frameless_operand(
     req: &mut Request,
     frame: FrameRef,
@@ -3263,34 +3322,6 @@ pub(crate) fn frameless_operand(
     let value = operand(req, frame, code, kind, field).deref();
     req.addref(&value);
     (value.to_zval(), true)
-}
-
-/// Whether a name reaches the variables of the frame `header` is, so a
-/// frameless call's `CV` operand takes one more owner
-/// ([`frameless_owner`]): a frame that carries an annex, its symbol
-/// table or its extra arguments, or none at all.
-pub(crate) fn frameless_named(header: Option<&Header>) -> bool {
-    header.is_none_or(|header| header.annex.is_some())
-}
-
-/// What a frameless call is handed of the operand `z` of `kind`,
-/// read where it stands and neither `UNDEF` nor a reference, and whether
-/// it owns it, as [`frameless_operand`] reads it from its slot and
-/// compiled code hands it over: a `TMP` or a `VAR` moved out of its
-/// slot is owned, a `CONST` borrowed, and a `CV` borrowed but in a frame
-/// whose variables a name reaches (`named`), where it takes one more
-/// owner.
-pub(crate) fn frameless_owner(z: Zval, kind: OperandKind, named: bool) -> (Zval, bool) {
-    match kind {
-        OperandKind::Tmp | OperandKind::Var => (z, true),
-        OperandKind::Cv => {
-            if named {
-                z.addref();
-            }
-            (z, named)
-        }
-        OperandKind::Const | OperandKind::Unused => (z, false),
-    }
 }
 
 /// `FREE_OP`: a `TMP` or a `VAR` operand read by [`operand`] and done

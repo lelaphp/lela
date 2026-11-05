@@ -569,7 +569,8 @@ fn in_place(ir: &TraceIr) -> (Box<[PlainCall]>, Box<[FuncRef]>) {
         else {
             continue;
         };
-        if !calls.contains(plain) {
+        // A closure's handler pushes it, from no header of the trace's.
+        if !calls.contains(plain) && !plain.is_closure() {
             calls.push(plain.clone());
         }
         // A user function's cache the call enters, laid down; a native's
@@ -610,8 +611,7 @@ fn stub_at(ir: &TraceIr) -> Option<OplineIdx> {
 
 /// The kinds of the operands compiled code hands a kernel, at most
 /// three, which the crossing carries as one `i32`, a byte each in
-/// operand order: the `frameless` and `concat` kernels' (`jit-design.md`
-/// §4.3). `lower` makes it from the kinds and `enter` reads them back at
+/// operand order: the `concat` kernel's (`jit-design.md` §4.3). `lower` makes it from the kinds and `enter` reads them back at
 /// the crossing, so the encoding is this type's alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
@@ -649,44 +649,6 @@ impl OperandKinds {
             .find(|kind| u32::from(*kind as u8) == self.0 >> (8 * at) & 0xff)
         };
         Some([kind(0)?, kind(1)?, kind(2)?])
-    }
-}
-
-/// The slots three operands stand in, one word: the `frameless` kernel's,
-/// whose temporaries stay in their slots through the call and are freed
-/// there after it, so the kernel reads no opline to find them. `lower`
-/// makes it and `enter` reads it back, so the encoding is this type's
-/// alone: each field in [`OperandFields::BITS`] bits, in operand order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
-pub(crate) struct OperandFields(u64);
-
-impl OperandFields {
-    /// The bits each field takes.
-    const BITS: u32 = 21;
-
-    /// `fields` in operand order; none where one is past what
-    /// [`OperandFields::BITS`] bits hold, which compiled code then leaves
-    /// to the opline's handler.
-    pub(crate) fn of(fields: [u32; 3]) -> Option<OperandFields> {
-        fields
-            .iter()
-            .rev()
-            .try_fold(0u64, |word, &field| {
-                (field >> Self::BITS == 0).then_some(word << Self::BITS | u64::from(field))
-            })
-            .map(OperandFields)
-    }
-
-    /// The word compiled code passes.
-    pub(crate) fn word(self) -> i64 {
-        i64::from_ne_bytes(self.0.to_ne_bytes())
-    }
-
-    /// The fields in operand order.
-    pub(crate) fn fields(self) -> [u32; 3] {
-        let mask = (1u64 << Self::BITS) - 1;
-        [0, 1, 2].map(|at| u32::try_from(self.0 >> (Self::BITS * at) & mask).unwrap_or(0))
     }
 }
 
@@ -860,11 +822,23 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::get_constant`); an undefined one is a
     /// throwable pending, answered as one.
     GetConstant,
+    /// `destruct(cx, frame, opline: u32, word: u64, type_info: u32)`: the
+    /// destructor of the object a frameless call's temporary holds,
+    /// served before compiled code clears the slot, where a backtrace it
+    /// takes reads it (`php_engine::tier::destruct`).
+    Destruct,
+    /// `free_closure(cx, frame, opline: u32)`: the closure of the closure's
+    /// frame a `RETURN` leaves in place, after its variables and its
+    /// receiver, where the owner the frame holds is the last
+    /// (`php_engine::tier::free_closure`), as `zend_jit_leave_func`'s
+    /// `OBJ_RELEASE(ZEND_CLOSURE_OBJECT(EX(func)))` gives it up; a
+    /// destructor's throw is the status's.
+    FreeClosure,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 24] = [
+    pub(crate) const ALL: [Kernel; 26] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -889,6 +863,8 @@ impl Kernel {
         Kernel::NanToBool,
         Kernel::StrOffset,
         Kernel::GetConstant,
+        Kernel::Destruct,
+        Kernel::FreeClosure,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

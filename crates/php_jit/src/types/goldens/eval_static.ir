@@ -7,14 +7,16 @@ entry
   guard #1 long -> exit 1
 0009 f0 IS_SMALLER #0, #1 fused inline
   checks direction taken -> exit 2
+  guard room 96 -> exit 3
 0004 f0 INIT_STATIC_METHOD_CALL const#2, const#4 inline pair fn own of named map 0 unwinds -> unwind 0
      f0 init request in-place
 0005 f0 SEND_VAR_EX #0 step
   -> #2 f0.CV2 [ref, any]
-end: exit 3
+end: exit 4
 exit 0: f0 0009 plain
 exit 1: f0 0009 plain f0.CV2:long
 exit 2: f0 0011 plain f0.CV0:long f0.CV2:long
-exit 3: f0 0006 restore call f0.CV0:long
+exit 3: f0 0004 plain f0.CV0:long f0.CV2:long to vm
+exit 4: f0 0006 restore call f0.CV0:long
 unwind 0:
 map 0: offset 2 slot 0

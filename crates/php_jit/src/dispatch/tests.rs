@@ -1455,6 +1455,93 @@ fn an_escape_to_an_unarmed_landing_visits_nothing() {
     );
 }
 
+/// `Lane` that keeps the request's count of the returns that visited
+/// their site ([`super::return_visit`]) in [`Returned`] after each
+/// serving's sites.
+struct Testing;
+
+/// How many returns visited their site.
+#[derive(Debug, Default)]
+struct Returned(u32);
+
+impl Tier for Testing {
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
+        let flow = super::safepoint(req, frame, site, held);
+        let visited =
+            tier::state::<crate::JitRequest>(req).map(|state| state.returns_visited.get());
+        req.state::<Returned>().0 = visited.unwrap_or(0);
+        flow
+    }
+
+    fn bound(started: &tier::Started<'_>) -> tier::Bound {
+        <Lane as Tier>::bound(started)
+    }
+
+    fn laid(started: &tier::Started<'_>, req: Option<&Request>) -> tier::Laid {
+        <Lane as Tier>::laid(started, req)
+    }
+
+    fn setting(started: &tier::Started<'_>, startup: TierStatus) -> TierStatus {
+        <Lane as Tier>::setting(started, startup)
+    }
+
+    /// `Lane`'s, with [`Returned`].
+    fn extension() -> Option<Extension> {
+        let mut ini = crate::policy::ini();
+        ini.extend(testing::declared(&testing::OPCACHE));
+        Some(
+            testing::switched(ExtensionBuilder::default())
+                .ini(ini)
+                .engine_state(crate::JitEngine::new)
+                .rinit(crate::JitEngine::request_started)
+                .request_state::<Returned>()
+                .build("jit"),
+        )
+    }
+}
+
+/// An interpreted `RETURN` to a landing no trace armed makes no call into
+/// `dispatch` (#4105's ruling, `jit-design.md` §2.2): `f`'s return lands
+/// fifty times in a loop too cold to count, and the visits [`Testing`]
+/// keeps stay none, where a tier with no test visits one a return.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_to_an_unarmed_landing_visits_nothing() {
+    let ini = [("opcache.jit", "tracing"), ("jit.compile", "inline")];
+    let program = "function f($x) { return $x + 1; }\n$s = 0; for ($i = 0; $i < 50; $i++) { $s = f($s); }\necho $s, \"\\n\";";
+    let engine = testing::engine::<Testing>(&ini);
+    let (served, kept) = testing::Scratch::new().serve_kept::<Returned>(&engine, program);
+    assert_eq!(testing::stdout(&served), "50\n");
+    assert_eq!(
+        kept.map_or(0, |kept| kept.0),
+        0,
+        "a return visited its site"
+    );
+}
+
+/// A return to a landing a trace armed does visit: fib's second call's
+/// landing roots a return trace, so where its first landing is armed
+/// [`super::return_site`] lets the returns through that enter it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_to_an_armed_landing_visits_its_site() {
+    let ini = [("opcache.jit", "tracing"), ("jit.compile", "inline")];
+    let engine = testing::engine::<Testing>(&ini);
+    let program = "function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }\necho fib(20), \"\\n\";";
+    let (served, kept) = testing::Scratch::new().serve_kept::<Returned>(&engine, program);
+    assert_eq!(testing::stdout(&served), "6765\n");
+    assert!(
+        kept.is_some_and(|kept| kept.0 > 0),
+        "no return visited its site"
+    );
+}
+
 /// [`an_escape_enters_the_trace_compiled_at_its_landing_in_code`] with
 /// fib preloaded (#3568): a preloaded op array has its words and its
 /// landings in every epoch (`php_engine::arena::Base`), and the epoch's

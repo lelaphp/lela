@@ -462,7 +462,7 @@ impl Emit<'_> {
         args: &[Value],
         (line, freed): (&Line, Operand),
     ) -> Result<(), Abort> {
-        let status = self.call_status(kernel, args)?;
+        let status = self.call_status(kernel, args, line.unwind.map(Leave::Unwind))?;
         self.free_temp(line, freed)?;
         self.left_unless(status, line.unwind.map(Leave::Unwind))
     }

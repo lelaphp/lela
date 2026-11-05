@@ -230,15 +230,23 @@ fn untested(clif: &str) -> Result<(), String> {
 }
 
 /// What the cold block `block` of `clif` answers: the number it returns,
-/// the last constant it makes, past the type words it stores.
+/// the last constant it makes, past the type words it stores, or what the
+/// block it goes on to answers, the way out of a guard.
 fn answer(clif: &str, block: &str) -> Option<i64> {
-    clif.lines()
+    let lines: Vec<&str> = clif
+        .lines()
         .map(instruction)
         .skip_while(|line| *line != format!("{block} cold:"))
         .skip(1)
         .take_while(|line| !line.ends_with(':'))
-        .filter_map(|line| line.split_once("iconst.i32 ")?.1.parse().ok())
-        .last()
+        .filter(|line| !line.is_empty())
+        .collect();
+    match lines.as_slice() {
+        [line] => answer(clif, line.strip_prefix("jump ")?),
+        _ => (lines.iter())
+            .filter_map(|line| line.split_once("iconst.i32 ")?.1.parse().ok())
+            .next_back(),
+    }
 }
 
 /// A line of CLIF text as its instruction: the indent and the source
@@ -313,10 +321,11 @@ fn a_natives_call_lowers_in_place() -> Result<(), String> {
     lowered(NATIVE_CALL).map(drop)
 }
 
-/// A frameless call made from compiled code: the operand zvals handed
-/// to [`Kernel::Frameless`], which reads no opline, then the interrupt
-/// tested; a variable that may be unset or hold a reference tested
-/// first, its handler's through [`Kernel::Handle`] where it is (#3560).
+/// A frameless call made from compiled code: the operand zvals laid for
+/// [`Kernel::Frameless`], which reads no opline and no frame, then the
+/// temporaries freed and the interrupt tested; a variable that may be
+/// unset or hold a reference tested first, its handler's through
+/// [`Kernel::Handle`] where it is (#3560, #4107).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_frameless_call_lowers_in_place() -> Result<(), String> {
@@ -429,7 +438,8 @@ fn calls_of(clif: &str, kernel: Kernel) -> Vec<String> {
         .filter(|(_, line)| line.contains("call_indirect") && line.contains(&address))
         .filter_map(|(at, line)| {
             let status = line.split_once(" = ")?.0;
-            let branch = lines.get(at + 1)?;
+            // Past the doubles read back after the call.
+            let branch = (lines.get(at + 1..)?.iter()).find(|line| line.starts_with("brif "))?;
             let to = branch.strip_prefix(&format!("brif {status}, "))?;
             Some(to.split(',').next()?.trim().to_owned())
         })
@@ -1108,6 +1118,41 @@ fn a_class_the_next_request_declares_fails_the_class_guard() {
     assert_eq!(testing::stdout(&second), "104 64\n");
     let lines = String::from_utf8_lossy(&second.stderr);
     assert!(lines.contains("TRACE 1 exit"), "{lines}");
+}
+
+/// A call by its name pushed in place, on the next request: its slot is
+/// empty, so the `push_call` kernel finds the name, as php's cold path
+/// calls `zend_jit_find_func_helper`, and goes on in the trace where it
+/// answers the function recorded; a request whose name answers another
+/// function, by reference, leaves at the opline's exit and is served as
+/// the interpreter serves it (#4086).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_by_name_is_held_to_what_each_request_finds() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("jit.mode", "force"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+    ]);
+    let program = "if (defined('OTHER')) { function g(&$x) { $x += 2; return 0; } } else { function g($x) { return $x + 1; } }
+        function k($m) { $t = 0; for ($i = 0; $i < $m; $i++) { $v = $i; $t += g($v) + $v; } return $t; }
+        echo k(20), \"\\n\";";
+    let first = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&first), "400\n");
+    let same = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&same), "400\n");
+    let lines = String::from_utf8_lossy(&same.stderr);
+    assert!(!lines.contains(" exit "), "{lines}");
+    let other = engine.serve_capture_in(
+        &scratch.0,
+        b"main.php",
+        "<?php const OTHER = true; include 'body.php';",
+        php_engine::test::Capture::default(),
+    );
+    assert_eq!(testing::stdout(&other), "230\n");
+    let lines = String::from_utf8_lossy(&other.stderr);
+    assert!(lines.contains(" exit "), "{lines}");
 }
 
 /// A trace over a request-scoped class's properties, entered on a request

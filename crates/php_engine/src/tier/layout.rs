@@ -411,6 +411,8 @@ pub struct PlaceLayout {
     pair_class: u32,
     pair_function: u32,
     pair_record: u32,
+    call: u32,
+    call_record: u32,
     class: u32,
     offset_tag: u32,
     declared: u8,
@@ -435,6 +437,8 @@ pub const PLACE: PlaceLayout = {
         pair_class: word(Cached::PAIR_CLASS_AT),
         pair_function: word(Cached::PAIR_FUNCTION_AT),
         pair_record: word(Cached::PAIR_RECORD_AT),
+        call: crate::exec::CALL,
+        call_record: word(Cached::CALL_RECORD_AT),
         class: word(Cached::PLACE_AT + PropertyPlace::CLASS_AT),
         offset_tag: word(offset + PropertyOffset::TAG_AT),
         declared: PropertyOffset::DECLARED,
@@ -496,6 +500,21 @@ impl PlaceLayout {
     #[must_use]
     pub const fn pair_record(&self) -> u32 {
         self.pair_record
+    }
+
+    /// The tag of a slot that holds the function a call by its name
+    /// resolved and how it is pushed, php's `CACHED_PTR(opline->result.num)`.
+    #[must_use]
+    pub const fn call(&self) -> u32 {
+        self.call
+    }
+
+    /// Where that slot keeps its callee's record, a word, the one a frame
+    /// serving the callee is pushed with
+    /// ([`FrameLayout::callee`](super::FrameLayout::callee)).
+    #[must_use]
+    pub const fn call_record(&self) -> u32 {
+        self.call_record
     }
 
     /// Where a property's place keeps the class it was found on, a
@@ -605,6 +624,9 @@ pub struct PlainCall {
     /// request's own, whose number the recording's request gave it and
     /// compiled code reads where it runs.
     method: Option<(ClassId, Method)>,
+    /// A `Closure`'s call: its handler pushes it, and compiled code makes
+    /// it and leaves it in place ([`UnitView::closure_call`]).
+    closure: bool,
 }
 
 /// What a plain call serves.
@@ -641,7 +663,7 @@ enum Method {
 /// own method by its class's name too.
 impl PartialEq for PlainCall {
     fn eq(&self, other: &PlainCall) -> bool {
-        (self.serves, self.count) == (other.serves, other.count)
+        (self.serves, self.count, self.closure) == (other.serves, other.count, other.closure)
             && self.scope() == other.scope()
             && self.own_class() == other.own_class()
             && (self.callee().is_some() || self.name == other.name)
@@ -700,6 +722,12 @@ impl PlainCall {
             Serves::Published(f) => Some(f),
             Serves::Native | Serves::Request => None,
         }
+    }
+
+    /// Whether the call is a `Closure`'s.
+    #[must_use]
+    pub fn is_closure(&self) -> bool {
+        self.closure
     }
 
     /// Whether the call serves a native.
@@ -789,7 +817,9 @@ impl PlainCall {
 /// request-scoped one whose method is published (#3558), one it inherits
 /// from a published class, or its own (#3561), the request's, numbered
 /// for it alone as php's `zend_lazy_class_load` copies each into the
-/// request ([`Method::Own`]); none for any other.
+/// request ([`Method::Own`]); or to a closure over a user function that
+/// reads its function's own cache, whatever its receiver; none for any
+/// other.
 #[must_use]
 pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let (top, laid) = req.vm().stack.top()?;
@@ -797,13 +827,14 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let function = header.function()?;
     let plain = top == call
         && header.info.building()
-        && header.closure().is_none()
         && header.annex().is_none()
         && !crate::observer::observing(req);
     if !plain {
         return None;
     }
+    let closure = header.closure().is_some();
     let method = match (header.called_scope(), header.this()) {
+        _ if closure => None,
         (None, None) => None,
         (Some(class), this) if this.is_none_or(|this| this.class() == class) => {
             let method = if function.published_number().is_some() {
@@ -821,7 +852,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         Some(decl.name.0.to_ascii_lowercase().into_boxed_slice())
     };
     let user = req.user_function(function);
-    if method.is_some() && user.is_none() {
+    if (method.is_some() || closure) && user.is_none() {
         return None;
     }
     let Some(user) = user else {
@@ -837,6 +868,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
             activation: None,
             checks: false,
             method: None,
+            closure: false,
         });
     };
     if !header.info.plain_entry() {
@@ -906,6 +938,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         activation,
         checks,
         method,
+        closure,
     })
 }
 

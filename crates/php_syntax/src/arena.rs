@@ -75,9 +75,10 @@ pub(crate) struct Scratch {
 
 impl Scratch {
     /// The most room of one stack an arena keeps between parses: a parse
-    /// of a large file pays for its own and gives it up. It is the
-    /// smallest room read that does not pay for a mapping per compile
-    /// (#4064).
+    /// of a large file pays for its own and gives it up. It was read
+    /// with the arena's [`KEPT`] on #4064, and a compile that outgrows
+    /// either maps again, 234 mappings on Symfony's `about`, a cost ruled
+    /// on #4154.
     const KEPT: usize = 64 * 1024;
 
     /// The longest source whose parse grows no stack near
@@ -106,9 +107,9 @@ impl Scratch {
 
 /// The most room the arena keeps when it is reset: the newest chunk,
 /// within this. A compile of a large file pays for its own and gives it
-/// up. php keeps none and starts each compile at 32 KiB, and this is the
-/// smallest room read that does not pay for a mapping per compile
-/// (#4064).
+/// up. php keeps none and starts each compile at 32 KiB; this was read
+/// with [`Scratch::KEPT`] on #4064, and a compile that outgrows either
+/// maps again, 234 mappings on Symfony's `about`, a cost ruled on #4154.
 const KEPT: usize = 128 * 1024;
 
 impl Arena {

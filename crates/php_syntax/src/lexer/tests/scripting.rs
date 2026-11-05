@@ -274,10 +274,9 @@ fn arrow_followed_by_non_label_pops_silently() {
 }
 
 #[test]
-fn comment_exits_property_mode_like_zend() {
-    // Zend's ST_LOOKING_FOR_PROPERTY has no comment rule: the {ANY_CHAR}
-    // fallback pops, so a label after the comment lexes in scripting mode
-    // and keyword-ness returns. Conformance-relevant; see CONFORMANCE.md.
+fn comment_stays_in_property_mode_like_zend() {
+    // Zend's comment rules are `<ST_IN_SCRIPTING,ST_LOOKING_FOR_PROPERTY>`,
+    // so a label after the comment is still the member's name.
     check_php(
         "$x-> /*c*/ class",
         &[
@@ -286,7 +285,7 @@ fn comment_exits_property_mode_like_zend() {
             (WHITESPACE, " "),
             (BLOCK_COMMENT, "/*c*/"),
             (WHITESPACE, " "),
-            (CLASS_KW, "class"),
+            (IDENT, "class"),
         ],
     );
 }

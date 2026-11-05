@@ -264,8 +264,8 @@ pub(crate) enum PushRoom {
     /// ([`Check::Room`]), as `zend_jit_push_call_frame` trusts php's
     /// `checked_stack`: the push tests nothing.
     Checked,
-    /// No stack check holds this push, a method's or one whose callee the
-    /// record names no size of, so it tests the page itself.
+    /// No stack check holds this push, one whose callee the record names
+    /// no size of, so it tests the page itself.
     Unchecked,
 }
 
@@ -450,11 +450,14 @@ pub(crate) enum Imm {
     /// a function's frame, with no observer declared; what it hands its
     /// caller, the variables it gives up as it leaves ([`Owners`]), and
     /// whether its frame may have a receiver, which it gives up after
-    /// them ([`php_engine::tier::UnitView::receives`]).
+    /// them ([`php_engine::tier::UnitView::receives`]), and whether it is
+    /// a closure's, whose closure it gives up last
+    /// ([`crate::record::closure`]).
     Leave {
         owners: Owners,
         value: Returned,
         receives: bool,
+        closure: bool,
     },
     /// The native a `FRAMELESS_ICALL_*` calls, its place in the engine's
     /// frameless table, the opline's `extended_value`, php's
@@ -479,6 +482,14 @@ pub(crate) enum Imm {
         slot: Slotted,
         binary: Option<Opcode>,
     },
+    /// A function's call by its name pushed in place under the guard on
+    /// the callee its own runtime-cache slot holds ([`Line::map_ptr`]), as
+    /// php's code compares `CACHED_PTR(opline->result.num)` with the
+    /// function it recorded (`zend_jit_init_fcall`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:8860-8880`). A slot that holds
+    /// another or none yet goes to the `push_call` kernel, which finds the
+    /// name, and to the opline's exit where that is another function.
+    Named,
     /// A method's call pushed in place under the guard on the pair its
     /// own runtime-cache slot holds ([`Line::map_ptr`]), as php's code
     /// reads `CACHED_PTR(opline->result.num)` and the callee past it
