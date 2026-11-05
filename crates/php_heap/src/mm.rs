@@ -2515,8 +2515,8 @@ const MAPPING_TAG: libc::c_int = -1;
 /// nothing names any more, given back to the machine.
 #[cfg(all(unix, not(miri)))]
 pub(crate) fn munmap(at: *mut u8, size: usize) {
-    // SAFETY: the range is part of a mapping `mmap` made for this heap,
-    // and the caller holds no name into it.
+    // SAFETY: the range is part of a mapping `mmap` made, a heap's or a
+    // `bump::Chunk`'s, and the caller holds no name into it.
     unsafe { libc::munmap(at.cast(), size) };
 }
 

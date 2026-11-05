@@ -16,7 +16,7 @@ pub struct LineCol {
 /// Construction is `O(len)`; a lookup is a binary search. Lines split on
 /// `\n` only, so `\r\n` leaves the `\r` as the last column of its line and
 /// every byte stays addressable. The table is in the arena of the parse
-/// it serves ([`crate::Arena`]).
+/// it serves ([`crate::Arena`]), or beside a lex with no parse to serve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct LineIndex<'a> {
     /// Byte offset of the first byte of each line after the first, which
@@ -28,6 +28,24 @@ pub struct LineIndex<'a> {
     len: u32,
 }
 
+/// `text` within the 4 GiB an index holds, and its length.
+fn indexed(text: &[u8]) -> (&[u8], u32) {
+    let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
+    (text.get(..len as usize).unwrap_or(text), len)
+}
+
+/// The offset each line after the first of `text` begins at.
+fn breaks_in(text: &[u8]) -> impl Iterator<Item = u32> {
+    (text.iter().enumerate())
+        .filter(|(_, byte)| **byte == b'\n')
+        .map(|(pos, _)| u32::try_from(pos + 1).unwrap_or(u32::MAX))
+}
+
+/// The breaks of `text`, for [`LineIndex::over`].
+pub(crate) fn breaks(text: &[u8]) -> Vec<u32> {
+    breaks_in(indexed(text).0).collect()
+}
+
 impl<'a> LineIndex<'a> {
     /// Builds the index for `text` in `arena`, which [`crate::load_bytes`]
     /// has held under 4 GiB; a longer text is indexed up to that length.
@@ -35,23 +53,27 @@ impl<'a> LineIndex<'a> {
     /// its length.
     #[must_use]
     pub fn new(arena: &'a crate::Arena, text: &[u8]) -> LineIndex<'a> {
-        let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
-        let text = text.get(..len as usize).unwrap_or(text);
+        let (text, len) = indexed(text);
         #[allow(clippy::naive_bytecount)] // a count the compiler vectorises; no package for it
         let count = text.iter().filter(|byte| **byte == b'\n').count();
         if count == 0 {
             return LineIndex { breaks: &[], len };
         }
-        let mut breaks = bumpalo::collections::Vec::with_capacity_in(count, arena.bump());
-        for (pos, byte) in text.iter().enumerate() {
-            if *byte == b'\n' {
-                breaks.push(u32::try_from(pos + 1).unwrap_or(u32::MAX));
-            }
+        let mut breaks = php_heap::ArenaVec::with_capacity_in(count, arena.bump());
+        for line in breaks_in(text) {
+            breaks.push(line);
         }
         LineIndex {
-            breaks: breaks.into_bump_slice(),
+            breaks: breaks.into_slice(),
             len,
         }
+    }
+
+    /// The index of `text` over `breaks`, its [`breaks`]: what a caller
+    /// with no arena to hand holds it in.
+    pub(crate) fn over(breaks: &'a [u32], text: &[u8]) -> LineIndex<'a> {
+        let (_, len) = indexed(text);
+        LineIndex { breaks, len }
     }
 
     /// Number of lines (a trailing `\n` opens a final empty line).
@@ -127,6 +149,14 @@ mod tests {
 
     fn lc(line: u32, col: u32) -> LineCol {
         LineCol { line, col }
+    }
+
+    #[test]
+    fn an_index_over_breaks_held_elsewhere_reads_as_the_arena_s() {
+        let text = b"<?php\necho 1;\n\nx";
+        let arena = crate::Arena::default();
+        let breaks = breaks(text);
+        assert_eq!(LineIndex::over(&breaks, text), LineIndex::new(&arena, text));
     }
 
     #[test]

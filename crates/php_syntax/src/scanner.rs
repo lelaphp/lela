@@ -30,6 +30,8 @@
 //! What `token_get_all` decides on its own, the stop three tokens after
 //! `T_HALT_COMPILER` that `tokenize()` counts, stays with `ext/tokenizer`.
 
+use php_heap::MappedVec;
+
 use crate::value::{Quote, single_quoted, unescape};
 use crate::{
     SyntaxKind, Token, amp_name, cast_name, int_overflows, magic_const_name, operator_name,
@@ -79,9 +81,9 @@ pub fn scanned(source: &[u8], tokens: &[Token]) -> Vec<ScannedToken> {
         source,
         tokens,
         out: Vec::new(),
-        contexts: vec![Context::Scripting],
+        contexts: std::iter::once(Context::Scripting).collect(),
         run: None,
-        quotes: Vec::new(),
+        quotes: MappedVec::new(),
         line: 1,
         counted_to: 0,
         heap: None,
@@ -221,8 +223,8 @@ fn lay_scanner_heap(source: &[u8], tokens: &[Token], heap: &mut ScannerHeap, roo
 #[derive(Default)]
 pub(crate) struct WalkRoom {
     out: Vec<ScannedToken>,
-    contexts: Vec<Context>,
-    quotes: Vec<usize>,
+    contexts: MappedVec<Context>,
+    quotes: MappedVec<usize>,
 }
 
 impl WalkRoom {
@@ -318,11 +320,11 @@ struct Walk<'a> {
     source: &'a [u8],
     tokens: &'a [Token],
     out: Vec<ScannedToken>,
-    contexts: Vec<Context>,
+    contexts: MappedVec<Context>,
     run: Option<Run>,
     /// The index in `out` of each `"` still open, innermost last, for the
     /// fusion into `T_CONSTANT_ENCAPSED_STRING` at its close.
-    quotes: Vec<usize>,
+    quotes: MappedVec<usize>,
     line: u32,
     counted_to: usize,
     /// What the scanner lays, where [`scanner_heap`] asks.

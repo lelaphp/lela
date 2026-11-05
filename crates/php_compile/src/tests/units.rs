@@ -117,6 +117,25 @@ fn a_short_tag_opens_code_only_while_short_open_tag_is_on() {
 /// A unit laid down in the room of one given up (#3028) is the unit
 /// laid down in none, and an `eval` of one line in a loop takes its
 /// oplines', its constants' and its file name's room from the last.
+/// A compile cut short by a refusal gives its arena up as one that
+/// finished does, past what the arena keeps, and the next compile in it
+/// lays what a fresh arena lays.
+#[test]
+fn a_refused_compile_leaves_its_arena_to_the_next() {
+    let mut arena = Arena::default();
+    let mut strings = php_heap::Strings::new();
+    let options = Options::default();
+    let refused = format!("<?php\n{}function (", "echo $a + 1;\n".repeat(50_000));
+    let mut compile =
+        |arena: &mut Arena, source: &[u8]| compile_source(arena, source, &options, &mut strings);
+    assert!(compile(&mut arena, refused.as_bytes()).is_err());
+    assert!(compile(&mut arena, b"<?php class C { function m() {").is_err());
+    let source = b"<?php function f($a) { return $a + 1; } echo f(1);";
+    let unit = compile(&mut arena, source).expect("the source compiles");
+    let fresh = compile(&mut Arena::default(), source).expect("the source compiles");
+    assert_eq!(unit, fresh);
+}
+
 #[test]
 fn a_unit_laid_down_in_a_room_is_the_unit_laid_down_in_none() {
     let options = Options {

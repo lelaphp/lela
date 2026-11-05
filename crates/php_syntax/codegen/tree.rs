@@ -952,10 +952,10 @@ fn emit_struct(
          impl Stored for {name} {{\n    \
              const SLOT: usize = {slot};\n    \
              const FIELD: &'static str = \"Nodes.{snake}\";\n    \
-             fn store(nodes: BumpVec<'_, Self>) -> Store<'_> {{\n        \
+             fn store(nodes: ArenaVec<'_, Self>) -> Store<'_> {{\n        \
                  Store::{name}(nodes)\n    \
              }}\n    \
-             fn stored<'a, 'g>(store: &'g mut Store<'a>) -> Option<&'g mut BumpVec<'a, Self>> {{\n        \
+             fn stored<'a, 'g>(store: &'g mut Store<'a>) -> Option<&'g mut ArenaVec<'a, Self>> {{\n        \
                  match store {{\n            \
                      Store::{name}(nodes) => Some(nodes),\n            \
                      _ => None,\n        \
@@ -1158,7 +1158,7 @@ fn emit_nodes(buf: &mut String, model: &Model<'_>) {
     );
     for info in model.structs() {
         let name = &info.def.name;
-        writeln!(buf, "    {name}(BumpVec<'a, {name}>),").ok();
+        writeln!(buf, "    {name}(ArenaVec<'a, {name}>),").ok();
     }
     buf.push_str("}\n\n");
     write!(
@@ -1262,7 +1262,7 @@ fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
              /// since the last freeze copied there and emptied, and every\n    \
              /// other list no slice, so a tree pays for the pools it wrote.\n    \
              #[allow(clippy::too_many_lines)]\n    \
-             pub(crate) fn freeze<'a>(&mut self, bump: &'a bumpalo::Bump) -> &'a Lists<'a> {\n        \
+             pub(crate) fn freeze<'a>(&mut self, bump: &'a ParseArena) -> &'a Lists<'a> {\n        \
                  let lists = bump.alloc(NO_LISTS);\n        \
                  let mut used = std::mem::take(&mut self.used);\n        \
                  while used != 0 {\n            \
@@ -1960,7 +1960,7 @@ mod tests {
              Member = '->' name:<member_ident>\n",
         );
         for needle in [
-            "enum Store<'a> {\n    Root(BumpVec<'a, Root>),\n    Decl(BumpVec<'a, Decl>),",
+            "enum Store<'a> {\n    Root(ArenaVec<'a, Root>),\n    Decl(ArenaVec<'a, Decl>),",
             "const SLOTS: usize = 6;",
             "        SyntaxKind::DECL => Some(1),",
             "pub struct Lists<'a> {\n    item: Option<&'a [Item]>,\n}",

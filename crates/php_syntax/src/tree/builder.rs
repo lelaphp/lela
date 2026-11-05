@@ -69,7 +69,7 @@
 //! the fixture harness prints the broken promise beside the dump and no
 //! parent reads a node that was never resolved.
 
-use bumpalo::collections::Vec as BumpVec;
+use php_heap::{ArenaVec, MappedVec};
 
 use crate::SyntaxKind;
 use crate::arena::Arena;
@@ -172,13 +172,13 @@ struct Builder<'s, 'a> {
     prev: Option<usize>,
     /// php's `CG(doc_comment)`: the pending doc comment (the docs above).
     doc_comment: Option<TokenId>,
-    elements: BumpVec<'a, Element>,
+    elements: ArenaVec<'a, Element>,
     /// The direct children of every open frame, innermost last.
-    pending: Vec<Element>,
+    pending: MappedVec<Element>,
     frames: Vec<Frame>,
     /// The kinds of one forward-parent chain while it is opened, kept
     /// between chains so a chain costs no allocation of its own.
-    chain: Vec<SyntaxKind>,
+    chain: MappedVec<SyntaxKind>,
     nodes: Building<'a>,
     pools: &'s mut Pools,
     missing: Vec<Missing>,
@@ -196,7 +196,8 @@ pub fn build<'a>(
     lines: &LineIndex<'_>,
     events: Vec<Event>,
 ) -> Built<'a> {
-    let census = Census::of(&events, Vec::new());
+    let events: MappedVec<Event> = events.into_iter().collect();
+    let census = Census::of(&events, MappedVec::new());
     build_in(arena, tokens, lines, events, census, &mut Stacks::default())
 }
 
@@ -210,11 +211,11 @@ pub fn build<'a>(
 /// pools its tree has.
 #[derive(Default)]
 pub(crate) struct Stacks {
-    pub(crate) events: Vec<Event>,
-    pending: Vec<Element>,
+    pub(crate) events: MappedVec<Event>,
+    pending: MappedVec<Element>,
     frames: Vec<Frame>,
-    chain: Vec<SyntaxKind>,
-    counts: Vec<u32>,
+    chain: MappedVec<SyntaxKind>,
+    counts: MappedVec<u32>,
     pools: Pools,
 }
 
@@ -243,13 +244,20 @@ fn lent<T>(stack: &mut Vec<T>, at_least: usize) -> Vec<T> {
     stack
 }
 
+/// [`lent`] of a stack on a mapping of its own.
+fn lent_mapped<T>(stack: &mut MappedVec<T>, at_least: usize) -> MappedVec<T> {
+    let mut stack = std::mem::take(stack);
+    stack.reserve(at_least);
+    stack
+}
+
 /// [`build`] of `events`, which `census` counted, over the stacks
 /// `stacks` lends, handed back empty with `events`' room among them.
 pub(crate) fn build_in<'a>(
     arena: &'a Arena,
     tokens: &[Token],
     lines: &LineIndex<'_>,
-    mut events: Vec<Event>,
+    mut events: MappedVec<Event>,
     census: Census,
     stacks: &mut Stacks,
 ) -> Built<'a> {
@@ -266,8 +274,8 @@ pub(crate) fn build_in<'a>(
         raw: 0,
         prev: None,
         doc_comment: None,
-        elements: BumpVec::with_capacity_in(shaped, bump),
-        pending: lent(&mut stacks.pending, shaped.min(2 * OPEN)),
+        elements: ArenaVec::with_capacity_in(shaped, bump),
+        pending: lent_mapped(&mut stacks.pending, shaped.min(2 * OPEN)),
         frames: lent(&mut stacks.frames, OPEN),
         chain: std::mem::take(&mut stacks.chain),
         nodes,
@@ -321,7 +329,7 @@ pub(crate) fn build_in<'a>(
     stacks.counts = counts;
     Built {
         tree: Tree {
-            elements: elements.into_bump_slice(),
+            elements: elements.into_slice(),
             nodes,
             lists,
         },
@@ -563,7 +571,9 @@ mod tests {
     }
 
     fn lexed(source: &[u8]) -> Vec<Token> {
-        crate::lexer::lex(FileId(0), source, &LexOptions::default()).tokens
+        crate::lexer::lex(FileId(0), source, &LexOptions::default())
+            .tokens
+            .to_vec()
     }
 
     /// The build of `events` in an arena of its own, kept for the test.

@@ -50,7 +50,11 @@ use names::constants::{self, TOKEN_PARSE};
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
 #[derive(Default)]
-struct State {}
+struct State {
+    /// What `TOKEN_PARSE` parses in, kept across its calls as a request
+    /// keeps its compile's, so a call does not map a chunk of its own.
+    arena: syntax::Arena,
+}
 
 /// The extension value (design §7.1): the two natives, `PhpToken`, the
 /// `T_*` constants and `TOKEN_PARSE`, and the state declared on it.
@@ -1508,6 +1512,25 @@ fn tokenize(
 ///
 /// Parse error: Unclosed '(' in  on line 1
 /// ```
+///
+/// The arena stands out of the state for the parse, so a handler the
+/// parse's own diagnostic calls parses in one of its own.
+///
+/// ```php
+/// set_error_handler(function ($no, $message) {
+///     echo $message, "\n";
+///     var_dump(count(token_get_all('<?php echo 1;', TOKEN_PARSE)));
+///     return true;
+/// });
+/// var_dump(count(token_get_all('<?php $a = (integer) 1;', TOKEN_PARSE)));
+/// var_dump(count(token_get_all('<?php echo 1;', TOKEN_PARSE)));
+/// ```
+/// ```expect exit=0
+/// Non-canonical cast (integer) is deprecated, use the (int) cast instead
+/// int(5)
+/// int(9)
+/// int(5)
+/// ```
 fn tokenize_parse(
     req: &mut Request,
     code: &[u8],
@@ -1521,8 +1544,23 @@ fn tokenize_parse(
             ..LexOptions::default()
         },
     };
-    let arena = syntax::Arena::default();
-    let parsed = syntax::parse(&arena, code, &options);
+    let mut arena = std::mem::take(&mut req.state::<State>().arena);
+    let tokens = parse_tokens(req, &arena, code, &options, ce);
+    arena.reset();
+    req.state::<State>().arena = arena;
+    tokens
+}
+
+/// The tokens of `code` parsed in `arena`, its diagnostics raised as a
+/// compile raises them, a parse error thrown.
+fn parse_tokens(
+    req: &mut Request,
+    arena: &syntax::Arena,
+    code: &[u8],
+    options: &syntax::Options,
+    ce: throwables::Throwables,
+) -> Result<Vec<php_ext::syntax::ScannedToken>, Thrown> {
+    let parsed = syntax::parse(arena, code, options);
     for raised in &parsed.diagnostics {
         match raised.level {
             syntax::Level::Parse => {
