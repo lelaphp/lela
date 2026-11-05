@@ -100,12 +100,14 @@ pub struct Lexed {
 /// `INITIAL`, for a file, and [`State::Scripting`] after an open tag.
 #[must_use]
 pub fn lex(file: FileId, text: &[u8], options: &LexOptions) -> Lexed {
-    let arena = crate::Arena::default();
+    // In no arena: a lone lex, as `token_get_all` makes one per call, has
+    // nothing else to bump and would map a chunk for this table alone.
+    let breaks = crate::line_index::breaks(text);
     lex_with_lines(
         file,
         text,
         options,
-        &LineIndex::new(&arena, text),
+        &LineIndex::over(&breaks, text),
         MappedVec::new(),
         &mut Vec::new(),
         &mut MappedVec::new(),
