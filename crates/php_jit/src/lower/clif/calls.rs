@@ -2802,9 +2802,10 @@ impl Emit<'_> {
     /// is, the call is its handler's, through [`Kernel::Handle`], which
     /// warns of it as php's `zend_jit_zval_check_undef` calls
     /// `zend_jit_undefined_op_helper` to. A variable in a frame a name
-    /// reaches, one that carries an annex as a file's own code does, is
-    /// held with one more owner through the call, as the handler holds
-    /// it ([`Emit::frameless_owners`]).
+    /// reaches, one that carries an annex as a file's own code does, or
+    /// read through a reference, whose other end is a name, is held with
+    /// one more owner through the call, as the handler holds it
+    /// ([`Emit::give_up_owner`]).
     ///
     /// The three arities over constants, variables, a temporary, a
     /// variable that is unset once and one that holds a reference, a
@@ -3046,16 +3047,26 @@ impl Emit<'_> {
         }
         self.b.ins().store(trusted(), opline, room, EX_OPLINE);
         let laid = self.frameless_room();
+        let named =
+            (held != [false; 3]).then(|| self.b.ins().load(I32, trusted(), room, at(L.annex())));
+        let mut owners = [None; 3];
         for (place, operand) in operands.into_iter().enumerate().take(arity) {
-            let (word, info) = self.frameless_operand(line.frame, operand)?;
+            let (word, info, through) = self.frameless_operand(line.frame, operand)?;
             let cell = i32::try_from(place * SLOT as usize).unwrap_or(i32::MAX);
             self.b.ins().stack_store(I64, word, laid, cell);
             self.b.ins().stack_store(I64, info, laid, cell + TYPE_AT);
-        }
-        let named =
-            (held != [false; 3]).then(|| self.b.ins().load(I32, trusted(), room, at(L.annex())));
-        if let Some(named) = named {
-            self.frameless_owners(named, laid, held, arity)?;
+            let Some(named) = named.filter(|_| held[place]) else {
+                continue;
+            };
+            let owner = match through {
+                Some(through) => {
+                    let through = self.b.ins().uextend(I32, through);
+                    self.b.ins().bor(named, through)
+                }
+                None => named,
+            };
+            self.when(owner, |emit| emit.addref(word, info))?;
+            owners[place] = Some(owner);
         }
         let returns = self.returns_of(line)?;
         let out = returns.address();
@@ -3070,8 +3081,8 @@ impl Emit<'_> {
         let threw = self.not_thrown();
         self.thrown_into(line, status, threw)?;
         for (place, operand) in operands.iter().enumerate().take(arity) {
-            if let Some(named) = named.filter(|_| held[place]) {
-                self.give_up_owner(line, named, (laid, place), threw)?;
+            if let Some(owner) = owners[place] {
+                self.give_up_owner(line, owner, (laid, place), threw)?;
             }
             self.free_frameless(line, *operand, threw)?;
         }
@@ -3084,27 +3095,30 @@ impl Emit<'_> {
     }
 
     /// The two words of a frameless call's `operand` of `frame`, as the
-    /// native reads it: a variable's read through its reference, php's
-    /// `ZVAL_DEREF`, and a temporary held in a register stored where it
-    /// stands through the call, where a backtrace the native takes reads
-    /// it, as php's code hands its address.
+    /// native reads it, and whether a variable that may hold a reference
+    /// was read through one: a variable's read through its reference,
+    /// php's `ZVAL_DEREF`, and a temporary held in a register stored where
+    /// it stands through the call, where a backtrace the native takes
+    /// reads it, as php's code hands its address.
     fn frameless_operand(
         &mut self,
         frame: Frame,
         operand: Operand,
-    ) -> Result<(Value, Value), Abort> {
+    ) -> Result<(Value, Value, Option<Value>), Abort> {
         let kind = self.kind_of(operand)?;
         let Operand::Value(value) = operand else {
-            return self.operand_words(frame, operand);
+            let (word, info) = self.operand_words(frame, operand)?;
+            return Ok((word, info, None));
         };
         let held = self.value(value)?;
         if kind == OperandKind::Cv && held.types.meets(Types::REF) {
             let (base, slot) = self.place(held.slot)?;
             let zval = self.b.ins().iadd_imm_s(base, i64::from(slot));
-            let zval = self.deref(zval);
-            let word = self.b.ins().load(I64, trusted(), zval, 0);
-            let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
-            return Ok((word, info));
+            let read = self.deref(zval);
+            let through = self.b.ins().icmp(IntCC::NotEqual, read, zval);
+            let word = self.b.ins().load(I64, trusted(), read, 0);
+            let info = self.b.ins().load(I32, trusted(), read, TYPE_AT);
+            return Ok((word, info, Some(through)));
         }
         let (word, info) = self.operand_words(frame, operand)?;
         if kind == OperandKind::Tmp && held.home == Home::Register {
@@ -3112,41 +3126,23 @@ impl Emit<'_> {
             self.b.ins().store(trusted(), word, base, slot);
             self.b.ins().store(trusted(), info, base, slot + TYPE_AT);
         }
-        Ok((word, info))
+        Ok((word, info, None))
     }
 
-    /// The owner a frameless call holds of each variable among the
-    /// zvals laid at `laid` that `held` names, where `named` says a name
-    /// reaches the frame's variables, so one written through it while the
-    /// native runs leaves the native's copy standing
-    /// (`exec::frameless_operand`).
-    fn frameless_owners(
-        &mut self,
-        named: Value,
-        laid: StackSlot,
-        held: [bool; 3],
-        arity: usize,
-    ) -> Result<(), Abort> {
-        self.when(named, |emit| {
-            for place in (0..arity).filter(|&place| held[place]) {
-                let (word, info) = emit.laid_operand(laid, place);
-                emit.addref(word, info)?;
-            }
-            Ok(())
-        })
-    }
-
-    /// The owner [`Emit::frameless_owners`] took of the zval at `place`
-    /// of `laid` given up after the call, where `named` says it took one,
-    /// a throw or'd into `threw`.
+    /// The owner a frameless call took of the variable at `place` of
+    /// `laid` (`exec::frameless_operand`) given up after the call, where
+    /// `owner` says it took one, a name reaching the frame's variables or
+    /// the variable read through a reference, either of which leaves the
+    /// native's copy standing when it is written while the native runs; a
+    /// throw is or'd into `threw`.
     fn give_up_owner(
         &mut self,
         line: &Line,
-        named: Value,
+        owner: Value,
         (laid, place): (StackSlot, usize),
         threw: Variable,
     ) -> Result<(), Abort> {
-        self.when(named, |emit| {
+        self.when(owner, |emit| {
             let (word, info) = emit.laid_operand(laid, place);
             emit.release_through(line, [word, info], Dtor::Nogc, |emit, args| {
                 let status = emit.call_status(Kernel::Release, args, leave_of(line))?;
