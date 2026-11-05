@@ -153,6 +153,11 @@ impl ZvalRef {
         ZvalRef(at)
     }
 
+    /// Where the zval stands, an address for comparing and no more.
+    pub(crate) fn addr(self) -> usize {
+        self.0.as_ptr().addr()
+    }
+
     /// The zval in place, copied: `ZVAL_COPY_VALUE` off a `zval *`, no
     /// owner taken.
     #[must_use]

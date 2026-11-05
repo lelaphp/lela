@@ -1326,6 +1326,18 @@ impl Arr {
         self.header().data.get() as usize
     }
 
+    /// Whether `place` is a row of this table as it stands, by address
+    /// and with nothing read: an entry a table's `IS_INDIRECT` points
+    /// out of it to, a CV's slot or a declared property's, is none, and
+    /// stands wherever the table's rows go.
+    #[must_use]
+    pub fn holds_row(&self, place: ZvalRef) -> bool {
+        let stride = if self.is_packed() { SLOT } else { BUCKET };
+        let first = self.rows_at();
+        let rows = self.table_size() as usize * stride;
+        (first..first + rows).contains(&place.addr())
+    }
+
     // ------------------------------------------- the internal pointer
 
     /// `_zend_hash_get_valid_pos`: `pos` or the first live position

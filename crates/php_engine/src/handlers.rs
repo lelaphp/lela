@@ -19745,6 +19745,7 @@ fn entry_past_warning(
         Some(object) => object.heap().properties(),
         None => holder.and_then(|h| h.as_array()).map(PhpArray::heap),
     };
+    let table = table.filter(|table| place.is_some_and(|place| table.holds_row(place)));
     let rows = table.map(|t| (req.heap_mut().iterator_add(t, 0), t, t.rows_at()));
     exec::operand(req, frame, code, data.op1_type, data.op1);
     let moved = rows.is_some_and(|(at, table, rows)| {

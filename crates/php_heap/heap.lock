@@ -20,6 +20,7 @@ Arr::forward
 Arr::get
 Arr::has_empty_ind
 Arr::has_iterators
+Arr::holds_row
 Arr::is_empty
 Arr::is_immutable
 Arr::is_packed
