@@ -3,32 +3,67 @@
 //! grown past what is kept goes back to the machine whole, rather than
 //! to the system allocator, which keeps the pages it frees dirty in its
 //! zone.
+//!
+//! A mapping is a page at least, so a stack within one page has nothing
+//! to give back, and a call that lexes a short string with stacks of its
+//! own, as `token_get_all` does, would pay the machine for each (#4019).
+//! Its first room is that page from the system allocator.
 
 use std::alloc::Layout;
-use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use crate::bump::Chunk;
 use crate::mm::real_page_size;
 
-/// A stack whose room is a mapping of its own, given back to the machine
-/// whole when it is dropped. What it holds is never dropped.
+/// A stack whose room past one page is a mapping of its own, given back
+/// to the machine whole when it is dropped. What it holds is never
+/// dropped.
 pub struct MappedVec<T> {
-    /// Where the room stands: the mapping's first byte, dangling and
-    /// aligned with none. The parser reads through it per token, so it
-    /// stands here rather than behind `room`'s test.
+    /// Where the room stands, dangling and aligned with none. The parser
+    /// reads through it per token, so it stands here rather than behind
+    /// a test of `room`.
     at: NonNull<T>,
-    /// How many of `T` the mapping has room for.
+    /// How many of `T` the room holds.
     cap: usize,
     len: usize,
-    /// The mapping, none until room is first asked for.
-    room: Option<Chunk>,
-    held: PhantomData<T>,
+    room: Room<T>,
 }
 
 // SAFETY: the stack owns what `at` points to through `room`, which is
-// `Send`, and its elements are `Send`.
+// `Send` where its elements are.
 unsafe impl<T: Send> Send for MappedVec<T> {}
+
+/// What holds a stack's elements.
+enum Room<T> {
+    /// The system allocator's, one page at most and none until an
+    /// element asks for it. The vector's own length stays zero: the
+    /// stack counts what is written in its spare capacity.
+    Allocated(Vec<T>),
+    /// A mapping, past one page.
+    Mapped(Chunk),
+}
+
+impl<T> Room<T> {
+    /// Room for `items` at least, in whole pages; `None` where the
+    /// machine refuses.
+    fn holding(items: usize) -> Option<Room<T>> {
+        let page = real_page_size();
+        let bytes = items.checked_mul(size_of::<T>())?;
+        let bytes = bytes.checked_next_multiple_of(page)?;
+        if bytes == page {
+            return Some(Room::Allocated(Vec::with_capacity(page / size_of::<T>())));
+        }
+        Chunk::map(bytes).map(Room::Mapped)
+    }
+
+    /// Its first element's slot, and how many it holds.
+    fn slots(&mut self) -> Option<(NonNull<T>, usize)> {
+        match self {
+            Room::Allocated(vec) => Some((NonNull::new(vec.as_mut_ptr())?, vec.capacity())),
+            Room::Mapped(chunk) => Some((chunk.at().cast(), chunk.len() / size_of::<T>())),
+        }
+    }
+}
 
 impl<T> Default for MappedVec<T> {
     fn default() -> MappedVec<T> {
@@ -55,8 +90,7 @@ impl<T> MappedVec<T> {
             at: NonNull::dangling(),
             cap: 0,
             len: 0,
-            room: None,
-            held: PhantomData,
+            room: Room::Allocated(Vec::new()),
         }
     }
 
@@ -66,8 +100,8 @@ impl<T> MappedVec<T> {
         self.cap
     }
 
-    /// Room for `more` past the length, in a mapping twice the last at
-    /// least, in whole pages.
+    /// Room for `more` past the length, twice the last at least, in
+    /// whole pages.
     pub fn reserve(&mut self, more: usize) {
         let Some(wanted) = self.len.checked_add(more) else {
             std::alloc::handle_alloc_error(Layout::new::<T>())
@@ -75,20 +109,17 @@ impl<T> MappedVec<T> {
         if wanted <= self.cap {
             return;
         }
-        let room = (wanted.max(self.cap.saturating_mul(2)))
-            .checked_mul(size_of::<T>())
-            .and_then(|bytes| bytes.checked_next_multiple_of(real_page_size()))
-            .and_then(Chunk::map);
-        let Some(room) = room else {
+        let room = Room::holding(wanted.max(self.cap.saturating_mul(2)))
+            .and_then(|mut room| Some((room.slots()?, room)));
+        let Some(((at, cap), room)) = room else {
             std::alloc::handle_alloc_error(Layout::new::<T>())
         };
-        let at = room.at().cast::<T>();
         // SAFETY: the old room holds `len` initialised elements, the new
-        // mapping room for at least `wanted`, and the two do not overlap.
+        // one room for at least `wanted`, and the two do not overlap.
         unsafe { std::ptr::copy_nonoverlapping(self.at.as_ptr(), at.as_ptr(), self.len) };
         self.at = at;
-        self.cap = room.len() / size_of::<T>();
-        self.room = Some(room);
+        self.cap = cap;
+        self.room = room;
     }
 
     /// `item` on top.
@@ -203,6 +234,35 @@ mod tests {
         stack.resize(page + 1, 2);
         assert_eq!(stack.capacity(), 2 * page);
         assert_eq!((stack[0], stack[page]), (1, 2));
+    }
+
+    #[test]
+    fn a_stack_within_a_page_takes_no_mapping_and_one_past_it_does() {
+        let mut stack = MappedVec::<u64>::new();
+        stack.push(1);
+        assert!(matches!(stack.room, Room::Allocated(_)));
+        stack.resize(stack.capacity(), 2);
+        assert!(matches!(stack.room, Room::Allocated(_)));
+        let within = stack.len();
+        assert_eq!(within * size_of::<u64>(), real_page_size());
+        stack.push(3);
+        assert!(matches!(stack.room, Room::Mapped(_)));
+        assert_eq!((stack[0], stack[within - 1], stack[within]), (1, 2, 3));
+        assert_eq!(stack.len(), within + 1);
+    }
+
+    /// A stack moved keeps its elements where they stand, whichever
+    /// room holds them, as a parse hands its stacks back to the arena.
+    #[test]
+    fn a_moved_stack_reads_what_it_held() {
+        let small: MappedVec<u32> = (0..10).collect();
+        let at = small.as_ptr();
+        let moved = Box::new(small);
+        assert_eq!(moved.as_ptr(), at);
+        assert!(moved.iter().copied().eq(0..10));
+        let large: MappedVec<u32> = (0..10_000).collect();
+        let moved = Box::new(large);
+        assert!(moved.iter().copied().eq(0..10_000));
     }
 
     #[test]
