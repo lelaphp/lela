@@ -207,14 +207,26 @@ impl Lexer<'_> {
 
     // ----- LookingForProperty (Zend ST_LOOKING_FOR_PROPERTY) ------------------
 
-    /// After `->` or `?->`: whitespace stays, another arrow stays, a label
-    /// pops and lexes as IDENT even when it is a keyword (Zend's lexical
-    /// member-name remap). Anything else, a comment included, exactly like
-    /// Zend's `{ANY_CHAR}` fallback, pops without consuming.
+    /// After `->` or `?->`: whitespace and a comment stay, another arrow
+    /// stays, a label pops and lexes as IDENT even when it is a keyword
+    /// (Zend's lexical member-name remap). Anything else, exactly like
+    /// Zend's `{ANY_CHAR}` fallback, pops without consuming. `#[` is a
+    /// comment here: the attribute's open is `ST_IN_SCRIPTING`'s alone.
+    ///
+    /// ```php
+    /// foreach (PhpToken::tokenize('<?php $x->/*c*/ __PROPERTY__; $x?->#[a
+    /// __class__;') as $t) echo $t->getTokenName(), ' ';
+    /// ```
+    /// ```expect
+    /// T_OPEN_TAG T_VARIABLE T_OBJECT_OPERATOR T_COMMENT T_WHITESPACE T_STRING ; T_WHITESPACE T_VARIABLE T_NULLSAFE_OBJECT_OPERATOR T_COMMENT T_WHITESPACE T_STRING ;
+    /// ```
     pub(crate) fn lex_looking_for_property(&mut self) {
         let start = self.pos;
         match self.byte(start) {
             b' ' | b'\t' | b'\r' | b'\n' => self.lex_whitespace(),
+            b'#' => self.lex_line_comment(),
+            b'/' if self.byte(start + 1) == b'/' => self.lex_line_comment(),
+            b'/' if self.byte(start + 1) == b'*' => self.lex_block_comment(),
             b'-' if self.byte(start + 1) == b'>' => {
                 self.pos = start + 2;
                 self.emit(SyntaxKind::ARROW, start);

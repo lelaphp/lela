@@ -6156,7 +6156,19 @@ fn longs(
 
 /// Both operands as `convert` converts them, the left first, or
 /// `zend_binop_error`'s `TypeError` for the first that fails, naming
-/// php's types around the operator as written.
+/// php's types around the operator as written. As `zend_binop_error`,
+/// it says nothing over a throwable already pending, which leaves as
+/// it stands:
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { throw new Exception($m); });
+/// try { $u + []; } catch (Throwable $e) { var_dump($e::class, $e->getMessage(), $e->getPrevious()); }
+/// ```
+/// ```expect
+/// string(9) "Exception"
+/// string(21) "Undefined variable $u"
+/// NULL
+/// ```
 fn operands<T>(
     req: &mut Request,
     operator: &str,
@@ -6170,6 +6182,7 @@ fn operands<T>(
     {
         return Ok((a, b));
     }
+    none_pending(req)?;
     let message = bytes!(
         b"Unsupported operand types: ",
         zval_type_name(req, left),
