@@ -2963,7 +2963,7 @@ fn concat_operands(
             Err(thrown)
         }
     });
-    held_past(req, held, pair)
+    req.held_past(held, pair)
 }
 
 /// `concat_function` where `result` is `op1` (`Z/Zend/zend_operators.c:2125`),
@@ -6222,7 +6222,7 @@ fn operands<T>(
     // side through its place after it.
     let held = left.as_int().is_none().then(|| Owner::take(req, *right));
     let converted = operand_pair(req, operator, (left, right), convert);
-    held_past(req, held, converted)
+    req.held_past(held, converted)
 }
 
 /// [`operands`] with the right side standing: it is followed through a
@@ -6279,20 +6279,6 @@ fn binop_error<T>(req: &mut Request, op: &str, left: &Value, right: &Value) -> R
         zval_type_name(req, right)
     );
     Err(type_error(req, &message))
-}
-
-/// What is held given up past `done`, what `done` threw pending, so a
-/// destructor it serves chains it ([`Request::freed_after`]).
-pub(crate) fn held_past<T>(
-    req: &mut Request,
-    held: Option<Owner<Value>>,
-    done: Result<T, Thrown>,
-) -> Result<T, Thrown> {
-    req.freed_after(done, |req| {
-        if let Some(held) = held {
-            held.let_go(req);
-        }
-    })
 }
 
 /// `zendi_try_get_long`: the long php works in, or nothing for an array,

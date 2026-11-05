@@ -11270,7 +11270,7 @@ fn object_held<T>(
 ) -> Result<T, Thrown> {
     let held = Owner::take(req, object.as_value());
     let stepped = step(req);
-    crate::ops::held_past(req, Some(held), stepped)
+    req.held_past(Some(held), stepped)
 }
 
 /// The dimension a handler over an object reads, php's `if (OP2_TYPE ==
@@ -18254,7 +18254,7 @@ impl StepHold {
                 Err(fatal)
             }
             Ok(done) if overloaded => Ok(req.freed_after(done, |req| held.give_up(req))),
-            Ok(done) => Ok(crate::ops::held_past(req, Some(held), done)),
+            Ok(done) => Ok(req.held_past(Some(held), done)),
         }
     }
 }
@@ -19319,7 +19319,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
             Err(thrown)
         }
     };
-    let written = crate::ops::held_past(req, in_table, written);
+    let written = req.held_past(in_table, written);
     member.release(req, frame, op);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     if let Err(thrown) = written {

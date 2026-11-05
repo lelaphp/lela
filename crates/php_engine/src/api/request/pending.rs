@@ -267,6 +267,20 @@ impl Request {
         }
     }
 
+    /// What is held given up past `done`, what `done` threw pending, so a
+    /// destructor it serves chains it ([`Request::freed_after`]).
+    pub(crate) fn held_past<T>(
+        &mut self,
+        held: Option<Owner<Value>>,
+        done: Result<T, Thrown>,
+    ) -> Result<T, Thrown> {
+        self.freed_after(done, |req| {
+            if let Some(held) = held {
+                held.let_go(req);
+            }
+        })
+    }
+
     /// The pending throwable at the end of a serving, php's
     /// `zend_exception_error` (design §5.9): the throwable's own
     /// `__toString` behind `Uncaught `, with `\n  thrown` after it, given
