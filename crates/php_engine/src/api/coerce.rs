@@ -1114,7 +1114,7 @@ pub(crate) fn holding(req: &Request, value: &Value, ty: &Type, scopes: Scopes) -
                 .iter()
                 .all(|member| holding(req, &value, member, scopes) == Holding::Yes),
         ),
-        Type::Named(name) => is(req.class_named(name.into())),
+        Type::Named(name) => is(req.type_class(name)),
         Type::Iterable if value.as_array().is_some() => Holding::Yes,
         Type::Iterable => is(req.class_named(Bare::resolved(b"Traversable"))),
         Type::Callable => Holding::IfCallable,
@@ -1425,7 +1425,7 @@ pub(crate) fn resolved_type_name(req: &Request, scopes: Scopes, ty: &Type) -> St
 /// `resolve_class_name` over each member: `self` the scope's name,
 /// `parent` its parent's where it has one.
 fn resolve_named(ty: &Type, own: &str, parent: Option<&str>) -> Type {
-    let named = |name: &str| Type::Named(php_unit::decl::Name(name.as_bytes().into()));
+    let named = |name: &str| Type::named(php_unit::decl::Name(name.as_bytes().into()));
     match ty {
         Type::SelfClass => named(own),
         Type::ParentClass => parent.map_or(Type::ParentClass, named),

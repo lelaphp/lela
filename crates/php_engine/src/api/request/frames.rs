@@ -11,7 +11,7 @@ use php_unit::{CacheSlot, PublishedUnit, Unit};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{PhpObject, Value};
+use crate::api::values::{PhpObject, PhpString, Value};
 use crate::exec::{self, TableId, Vm};
 use crate::tier::Stepped;
 
@@ -1386,7 +1386,7 @@ impl Request {
         frame: FrameRef,
         slot: CacheSlot,
         object: PhpObject,
-        name: &[u8],
+        name: PhpString,
     ) {
         let Some(header) = self.vm.at(frame) else {
             return;

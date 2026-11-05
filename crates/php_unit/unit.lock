@@ -65,6 +65,7 @@ TopLevel
 TryCatch
 Unit
 Unit::dump
+Unit::each_type_name
 Unit::persist
 Unit::published
 UnitCell
@@ -118,6 +119,7 @@ decl::List::reserve_exact
 decl::List::retain
 decl::List::shrink_to_fit
 decl::List::to_mut
+decl::MAY_BE_ANY
 decl::MethodDecl
 decl::Name
 decl::Name::borrowed
@@ -138,9 +140,14 @@ decl::Radix::written
 decl::TraitAdaptation
 decl::TraitMethodRef
 decl::Type
-decl::Type::MAY_BE_ANY
 decl::Type::contains_code
 decl::Type::mask
+decl::Type::named
+decl::TypeName
+decl::TypeName::class_cache
+decl::TypeName::name
+decl::TypeName::new
+decl::TypeName::set_class_cache
 decl::UnitValue
 decl::UnitValue::is_empty
 decl::UnitValue::new

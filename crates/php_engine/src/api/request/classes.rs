@@ -8,7 +8,7 @@
 
 use php_heap::{FrameRef, Heap, Intern};
 use php_link::{FoldedHash, LinkedClass};
-use php_unit::decl::{Bare, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
+use php_unit::decl::{Bare, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind, TypeName};
 use php_unit::{Opcode, PublishedUnit, TopLevel, Unit};
 
 use crate::api::call::{ClassNative, Function};
@@ -2040,19 +2040,65 @@ impl Request {
         class_in(&self.shared, &self.declared, &self.aliases, name.bytes())
     }
 
+    /// `zend_fetch_ce_from_type` (`Z/Zend/zend_execute.c`): the class a
+    /// declared type names, read off the slot of the type's name once a
+    /// lookup has found it, with no table probed, and otherwise looked up
+    /// with no autoload. A name no class holds yet leaves its slot empty,
+    /// so a class declared after the miss is found:
+    ///
+    /// ```php
+    /// function f(?Later $x = null) { return $x === null ? "none" : get_class($x); }
+    /// function g(): ?Later { return new Later; }
+    /// class Prop { public ?Later $p = null; }
+    /// try { f(new stdClass); } catch (TypeError $e) { echo "miss\n"; }
+    /// $o = new Prop;
+    /// try { $o->p = new stdClass; } catch (TypeError $e) { echo "miss\n"; }
+    /// eval('class Later {} class Sub extends Later {}');
+    /// class_alias('Sub', 'Alias');
+    /// function h(Alias $x, ?Sub $y) { return get_class($x); }
+    /// for ($i = 0; $i < 3; $i++) { echo f(new Later), f(new Sub), get_class(g()), h(new Sub, null), "\n"; }
+    /// $o->p = new Sub; echo get_class($o->p), "\n";
+    /// try { h(new Later, null); } catch (TypeError $e) { echo preg_replace('/, called in.*/', '', $e->getMessage()), "\n"; }
+    /// ```
+    /// ```expect
+    /// miss
+    /// miss
+    /// LaterSubLaterSub
+    /// LaterSubLaterSub
+    /// LaterSubLaterSub
+    /// Sub
+    /// h(): Argument #1 ($x) must be of type Alias, Later given
+    /// ```
+    #[inline]
+    pub(crate) fn type_class(&self, name: &TypeName) -> Option<ClassId> {
+        let Some(at) = name.class_cache().map(ce_slot) else {
+            return self.class_named(name.into());
+        };
+        self.ce_cached(at).or_else(|| {
+            let class = self.class_named(name.into())?;
+            self.set_ce_cache(at, class);
+            Some(class)
+        })
+    }
+
     /// `GET_CE_CACHE` (`Z/Zend/zend_types.h:901`): the class a lookup by
     /// the name whose slot is `at` found last in this request, read with
     /// no table probed; none where no lookup has found one yet.
     #[inline]
     pub(crate) fn ce_cached(&self, at: CeCache) -> Option<ClassId> {
-        self.ce_caches.get(at).copied().flatten()
+        let table = self.ce_caches.try_borrow().ok()?;
+        table.get(at).copied().flatten()
     }
 
     /// `SET_CE_CACHE` (`Z/Zend/zend_types.h:904`): `class` kept at the
     /// slot `at`, which a lookup that found it fills, as
-    /// `zend_lookup_class_ex` fills it.
-    pub(crate) fn set_ce_cache(&mut self, at: CeCache, class: ClassId) {
-        *self.ce_caches.map(at) = Some(class);
+    /// `zend_lookup_class_ex` fills it. The table is written through the
+    /// shared request, as a check over a type the request holds fills it
+    /// with the request borrowed.
+    pub(crate) fn set_ce_cache(&self, at: CeCache, class: ClassId) {
+        if let Ok(mut table) = self.ce_caches.try_borrow_mut() {
+            *table.map(at) = Some(class);
+        }
     }
 
     /// The home the units it compiles for itself make their constant
@@ -2725,7 +2771,13 @@ pub(crate) type CeCache = php_heap::MapPtr<Option<ClassId>>;
 /// none for any other string ([`php_heap::Str::ce_cache`]).
 #[inline]
 pub(crate) fn ce_cache(name: php_heap::Str) -> Option<CeCache> {
-    name.ce_cache().map(php_heap::MapPtr::new)
+    name.ce_cache().map(ce_slot)
+}
+
+/// The slot of the class cache `cache` in a request's map table.
+#[inline]
+fn ce_slot(cache: php_heap::ClassCache) -> CeCache {
+    php_heap::MapPtr::new(cache.offset())
 }
 
 fn class_in(

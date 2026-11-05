@@ -5460,7 +5460,7 @@ impl<'a> Emit<'a> {
                     op2: if parameter.variadic {
                         0
                     } else {
-                        ty.as_ref().map_or(Type::MAY_BE_ANY, Type::mask)
+                        ty.as_ref().map_or(php_unit::decl::MAY_BE_ANY, Type::mask)
                     },
                     out_type: OperandKind::Cv,
                     out: cv,
@@ -7126,7 +7126,7 @@ impl<'a> Emit<'a> {
     ) -> Result<Type, CompileError> {
         let ty = self.typename(written, false)?.0;
         let mask = ty.mask();
-        if mask != Type::MAY_BE_ANY
+        if mask != php_unit::decl::MAY_BE_ANY
             && mask & (types::MAY_BE_CALLABLE | types::MAY_BE_VOID | types::MAY_BE_NEVER) != 0
         {
             return Err(self.compile_error(format!(
@@ -10674,7 +10674,7 @@ impl<'a> Emit<'a> {
                 },
             ));
         }
-        if written && ty.mask() & Type::MAY_BE_ANY == Type::MAY_BE_ANY {
+        if written && ty.mask() & php_unit::decl::MAY_BE_ANY == php_unit::decl::MAY_BE_ANY {
             return Ok(value);
         }
         if let (true, Where::Constant(zval)) = (written, value)
