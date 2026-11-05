@@ -1379,13 +1379,14 @@ type Entry = unsafe extern "C" fn(
     u64,
 ) -> u32;
 
-/// What a call of [`enter`] answered: how the request was given back, and
-/// the trace that gave it back, the one entered or one it jumped to,
-/// whose exit it is.
+/// What a call of [`enter`] answered: how the request was given back, the
+/// trace that gave it back, the one entered or one it jumped to, whose
+/// exit it is, and where the call found the frame it entered on.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Answered<'t> {
     pub(crate) left: Left,
     pub(crate) by: &'t Trace,
+    pub(crate) from: (FrameRef, OplineIdx),
 }
 
 /// `trace` called on `frame` (`jit-design.md` §4.6), out of `epoch`, the
@@ -1427,6 +1428,7 @@ pub(crate) fn enter<'t>(
 ) -> Result<Answered<'t>, Fatal> {
     let room = tier::room(req, frame)
         .ok_or_else(|| internal("a trace entered on a frame with no room"))?;
+    let from = (frame, crate::record::position(req, frame));
     // SAFETY: the table published bytes `lower` compiled for this ABI at
     // this address, final and executable for as long as the trace, which
     // the borrow of the epoch's table keeps.
@@ -1512,7 +1514,7 @@ pub(crate) fn enter<'t>(
     if let Some(state) = state {
         state.headers.left_through(by, left);
     }
-    Ok(Answered { left, by })
+    Ok(Answered { left, by, from })
 }
 
 /// What `by`, the trace that answered, left the request as: `answer` and
