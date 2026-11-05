@@ -20794,11 +20794,13 @@ fn incdec_property(
         req.give_back_guard(lent);
         ptr.map(|ptr| (object, ptr))
     });
+    let served =
+        |req: &mut Request, object, back| served_incdec(req, frame, op, step, object, key, back);
     let (object, (slot, typed)) = match placed {
         Ok((object, PropertyPtr::Slot(slot, typed))) => (object, (slot, typed)),
         Ok((object, PropertyPtr::Served(back))) => {
             held.overloaded(req, object);
-            return Ok(served_incdec(req, frame, op, step, object, key, back));
+            return Ok(served(req, object, back));
         }
         // `zend_pre_incdec_property_zval` over the bucket: a number
         // stepped in place by the rule the kernel steps it by, and
@@ -20808,15 +20810,7 @@ fn incdec_property(
         Ok((object, PropertyPtr::Dynamic(place))) => {
             let held = place.read();
             let Some(stepped) = inline::step(step.arith(), held) else {
-                return Ok(served_incdec(
-                    req,
-                    frame,
-                    op,
-                    step,
-                    object,
-                    key,
-                    WriteBack::Property,
-                ));
+                return Ok(served(req, object, WriteBack::Property));
             };
             place.write(stepped);
             let out = Value::of_slot(if step.post { held } else { stepped });
@@ -20828,15 +20822,7 @@ fn incdec_property(
         // chained onto what the step threw.
         Ok((object, PropertyPtr::Withheld)) => {
             held.overloaded(req, object);
-            return Ok(served_incdec(
-                req,
-                frame,
-                op,
-                step,
-                object,
-                key,
-                WriteBack::Property,
-            ));
+            return Ok(served(req, object, WriteBack::Property));
         }
         Err(thrown) => return Ok(Err(nulled_out(req, frame, op, thrown))),
     };
