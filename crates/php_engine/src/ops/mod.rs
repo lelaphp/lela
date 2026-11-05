@@ -2129,7 +2129,7 @@ pub(crate) fn add(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
     if let Some(value) = object_operation(req, BinaryOp::Add, left, right)? {
         return Ok(value);
     }
-    let (a, b) = numbers(req, "+", left, right)?;
+    let (a, b) = operands(req, "+", left, right, to_number)?;
     Ok(inline::arith_numbers(Arith::Add, a, b))
 }
 
@@ -2150,7 +2150,7 @@ pub(crate) fn sub(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
     if let Some(value) = object_operation(req, BinaryOp::Sub, left, right)? {
         return Ok(value);
     }
-    let (a, b) = numbers(req, "-", left, right)?;
+    let (a, b) = operands(req, "-", left, right, to_number)?;
     Ok(inline::arith_numbers(Arith::Sub, a, b))
 }
 
@@ -2171,7 +2171,7 @@ pub(crate) fn mul(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
     if let Some(value) = object_operation(req, BinaryOp::Mul, left, right)? {
         return Ok(value);
     }
-    let (a, b) = numbers(req, "*", left, right)?;
+    let (a, b) = operands(req, "*", left, right, to_number)?;
     Ok(inline::arith_numbers(Arith::Mul, a, b))
 }
 
@@ -2208,7 +2208,7 @@ pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
     if let Some(value) = object_operation(req, BinaryOp::Div, left, right)? {
         return Ok(value);
     }
-    let (a, b) = numbers(req, "/", left, right)?;
+    let (a, b) = operands(req, "/", left, right, to_number)?;
     if let Some(n) = inline::quotient(a, b) {
         return Ok(inline::number_value(n));
     }
@@ -2292,7 +2292,7 @@ pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Va
     if let Some(value) = object_operation(req, BinaryOp::Mod, left, right)? {
         return Ok(value);
     }
-    let (a, b) = longs(req, "%", left, right)?;
+    let (a, b) = operands(req, "%", left, right, to_long)?;
     match inline::remainder(a, b) {
         Some(n) => Ok(Value::int(n)),
         // `zend_throw_exception_ex` (`Z/Zend/zend_operators.c:1550`).
@@ -2336,7 +2336,7 @@ pub(crate) fn pow(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
     if let Some(value) = object_operation(req, BinaryOp::Pow, left, right)? {
         return Ok(value);
     }
-    let (a, b) = numbers(req, "**", left, right)?;
+    let (a, b) = operands(req, "**", left, right, to_number)?;
     if let (Number::Long(a), Number::Long(b)) = (a, b)
         && let Ok(exponent) = u64::try_from(b)
     {
@@ -2420,7 +2420,7 @@ fn shift(req: &mut Request, side: Shift, left: &Value, right: &Value) -> Result<
     if let Some(value) = object_operation(req, op, left, right)? {
         return Ok(value);
     }
-    let (a, b) = longs(req, word, left, right)?;
+    let (a, b) = operands(req, word, left, right, to_long)?;
     if let Some(n) = inline::shifted(side, a, b) {
         return Ok(Value::int(n));
     }
@@ -2507,7 +2507,7 @@ fn bitwise(req: &mut Request, op: Bitwise, left: &Value, right: &Value) -> Resul
     if let Some(value) = object_operation(req, op.binary_op(), left, right)? {
         return Ok(value);
     }
-    let (x, y) = longs(req, op.spelling(), left, right)?;
+    let (x, y) = operands(req, op.spelling(), left, right, to_long)?;
     Ok(Value::int(op.long(x, y)))
 }
 
@@ -4303,18 +4303,7 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
                 _ => Ok(Value::string(increment_string(req, s)?)),
             }
         }
-        ValueRef::Bool(_) => {
-            warning(
-                req,
-                "Increment on type bool has no effect, this will change in the next major version of PHP",
-            );
-            none_pending(req)?;
-            // php steps nothing here, so the variable keeps what it
-            // holds; the value handed back is a second owner of it,
-            // which the caller's write-back gives the variable again.
-            req.addref(value);
-            Ok(*value)
-        }
+        ValueRef::Bool(_) => unstepped_bool(req, value, "Increment"),
         ValueRef::Object(_)
         | ValueRef::Array(_)
         | ValueRef::Resource(_)
@@ -4424,15 +4413,7 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
             none_pending(req)?;
             Ok(Value::null())
         }
-        ValueRef::Bool(_) => {
-            warning(
-                req,
-                "Decrement on type bool has no effect, this will change in the next major version of PHP",
-            );
-            none_pending(req)?;
-            req.addref(value);
-            Ok(*value)
-        }
+        ValueRef::Bool(_) => unstepped_bool(req, value, "Decrement"),
         ValueRef::Object(_)
         | ValueRef::Array(_)
         | ValueRef::Resource(_)
@@ -6167,35 +6148,12 @@ fn object_operation(
     Ok(None)
 }
 
-/// Both operands as `zendi_try_convert_scalar_to_number` converts them,
-/// or `zend_binop_error`'s `TypeError`, which names php's types around
-/// the operator as written. php converts the left operand first and stops
-/// there when it fails, so a right operand that would warn does not.
-fn numbers(
-    req: &mut Request,
-    operator: &str,
-    left: &Value,
-    right: &Value,
-) -> Result<(Number, Number), Thrown> {
-    operands(req, operator, left, right, to_number)
-}
-
-/// Both operands as `convert_op1_op2_long` converts them, which is
-/// [`to_long`] over the left one and then the right, or
-/// `zend_binop_error`'s `TypeError` for the one that failed, which names
-/// php's types around the operator as written.
-fn longs(
-    req: &mut Request,
-    operator: &str,
-    left: &Value,
-    right: &Value,
-) -> Result<(i64, i64), Thrown> {
-    operands(req, operator, left, right, to_long)
-}
-
 /// Both operands as `convert` converts them, the left first, or
 /// `zend_binop_error`'s `TypeError` for the first that fails, naming
-/// php's types around the operator as written.
+/// php's types around the operator as written: [`to_number`] is
+/// `zendi_try_convert_scalar_to_number`, [`to_long`] `convert_op1_op2_long`,
+/// and php stops at a left operand that fails, so a right one that would
+/// warn does not.
 ///
 /// A handler the left side's conversion reaches may give the right side
 /// up, and the right side stands to be read past it:
@@ -6282,6 +6240,27 @@ fn binop_error<T>(req: &mut Request, op: &str, left: &Value, right: &Value) -> R
         zval_type_name(req, right)
     );
     Err(type_error(req, &message))
+}
+
+/// A step over a bool: php steps nothing, so the variable keeps what it
+/// holds, and the value handed back is a second owner of it, which the
+/// caller's write-back gives the variable again.
+fn unstepped_bool(req: &mut Request, value: &Value, step: &str) -> Result<Value, Thrown> {
+    let rest = b" on type bool has no effect, this will change in the next major version of PHP";
+    warning(req, &bytes!(step, rest));
+    none_pending(req)?;
+    req.addref(value);
+    Ok(*value)
+}
+
+/// php's warning over what follows a string's number, and its test past
+/// the warning's handler, where a string has anything there.
+fn non_numeric_tail(req: &mut Request, trailing: bool) -> Result<(), Thrown> {
+    if trailing {
+        warning(req, "A non-numeric value encountered");
+        none_pending(req)?;
+    }
+    Ok(())
 }
 
 /// `zendi_try_get_long`: the long php works in, or nothing for an array,
@@ -6379,10 +6358,7 @@ pub(crate) fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, T
         };
         let d = match number {
             Number::Long(n) => {
-                if trailing {
-                    warning(req, "A non-numeric value encountered");
-                    none_pending(req)?;
-                }
+                non_numeric_tail(req, trailing)?;
                 return Ok(Some(n));
             }
             Number::Double(d) => d,
@@ -6391,19 +6367,14 @@ pub(crate) fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, T
         // reaches may give up the string's every other owner, and the
         // deprecation after it names the string.
         let held = Owner::take(req, Value::string(s));
-        if trailing {
-            warning(req, "A non-numeric value encountered");
-            if let Err(thrown) = none_pending(req) {
-                held.let_go(req);
-                return Err(thrown);
-            }
-        }
         let capped = dval_to_lval_cap(d);
         let lost = !long_compatible(d, capped);
-        if lost {
-            float_string_loses_precision(req, s.as_bytes());
-        }
-        held.let_go(req);
+        let warned = non_numeric_tail(req, trailing).inspect(|()| {
+            if lost {
+                float_string_loses_precision(req, s.as_bytes());
+            }
+        });
+        req.held_past(Some(held), warned)?;
         if lost {
             none_pending(req)?;
         }
@@ -6780,10 +6751,7 @@ fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown>
         let Some((number, trailing)) = numeric_prefix(s.as_bytes()) else {
             return Ok(None);
         };
-        if trailing {
-            warning(req, "A non-numeric value encountered");
-            none_pending(req)?;
-        }
+        non_numeric_tail(req, trailing)?;
         return Ok(Some(number));
     }
     if let Some(b) = value.as_bool() {
