@@ -1334,8 +1334,20 @@ impl<'a> Builder<'a> {
     /// The opline the trace serves next, where the record says it: the
     /// next one it recorded before a return, or, past the last, the
     /// header a loop, a recursive call or a recursive return goes back to,
-    /// as php holds the trace's next opline at every end but `RETURN` and
-    /// `INTERPRETER` (`zend_jit_ir.c:17152-17156`).
+    /// or the opline a link goes on at, as php holds the trace's next
+    /// opline at every end but `RETURN` and `INTERPRETER`
+    /// (`zend_jit_ir.c:17152-17156`). A `DO_FCALL` a side
+    /// trace ends on goes on where the link does, or, held to that, leaves
+    /// in the frame of whatever other callee it entered:
+    /// ```php
+    /// class I { function __invoke($a, $b) { return $a * $b; } }
+    /// function run($c, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $c($i, 2); } return $s; }
+    /// $a = function ($x, $y) { return $x + $y; };
+    /// echo run($a, 200), " ", run(new I, 200), " ", run($a, 100), " ", run('max', 100), " ", run([new I, '__invoke'], 100), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 20300 39800 5150 4953 9900
+    /// ```
     fn following(&self, ahead: &[Event]) -> Option<(FuncRef, OplineIdx)> {
         let mut until_back = ahead
             .iter()
@@ -1350,6 +1362,10 @@ impl<'a> Builder<'a> {
         match (next, ends, self.repeat) {
             (Some(next), ..) => Some(next),
             (None, true, Some(_)) => self.header_line(),
+            (None, true, None) if matches!(self.rec.stop, Stop::Link(_)) => {
+                let frame = *self.stack.last()?;
+                Some((self.frames[usize::from(frame.0)].func, self.successor?))
+            }
             _ => None,
         }
     }
