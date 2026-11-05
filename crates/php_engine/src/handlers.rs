@@ -17858,10 +17858,12 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
             }
         }
         Ok(Container::Array(array)) => {
-            let landing = write_at(req, frame, code, op, array)
-                .and_then(|at| write_entry(req, array, at).map(|landing| (at, landing)));
+            let landing = write_at(req, frame, code, op, array).and_then(|at| {
+                let key = write_key(array, at);
+                write_entry(req, array, at).map(|landing| (key, landing))
+            });
             match landing {
-                Ok((at, Landing::Entry(entry))) => {
+                Ok((key, Landing::Entry(entry))) => {
                     let undefined = data.op1_type == OperandKind::Cv
                         && req.slot(frame, data.op1).tag() == TypeTag::Undef;
                     let taken = |req: &mut Request| {
@@ -17874,7 +17876,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
                         ))
                     };
                     let placed = if undefined {
-                        entry_past(req, (op, place), (array, at, entry), taken)
+                        entry_past(req, (op, place), (array, key, entry), taken)
                     } else {
                         taken(req).map(|value| (value, Some(entry)))
                     };
@@ -17936,6 +17938,19 @@ fn append_value(
     let held = Owner::take(req, Value::array(array));
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
     (!held.let_go(req).freed()).then_some(value)
+}
+
+/// The key a write at `at` lands at, read before the append that takes
+/// it, since `next_free` stays at `ZEND_LONG_MAX` once that index is
+/// taken and says nothing of the index before it. `_zend_hash_next_index_insert`
+/// reads `nNextFreeElement` the same way.
+fn write_key(array: PhpArray, at: WriteAt) -> php_heap::Key {
+    let next = array.heap().next_free();
+    match at {
+        WriteAt::At(key) => key,
+        _ if next == i64::MIN => php_heap::Key::Long(0),
+        _ => php_heap::Key::Long(next),
+    }
 }
 
 /// `step` over a diagnostic a write raises with its entry in hand, and
@@ -18009,13 +18024,9 @@ fn append_value(
 fn entry_past<T>(
     req: &mut Request,
     (op, place): (&Opline, php_heap::ZvalRef),
-    (array, at, entry): (PhpArray, WriteAt, php_heap::ZvalRef),
+    (array, key, entry): (PhpArray, php_heap::Key, php_heap::ZvalRef),
     step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
 ) -> Result<(T, Option<php_heap::ZvalRef>), Thrown> {
-    let key = match at {
-        WriteAt::At(key) => key,
-        _ => php_heap::Key::Long(array.heap().next_free().wrapping_sub(1)),
-    };
     let name = match key {
         php_heap::Key::Str(name) => Value::string(PhpString::of(name)),
         php_heap::Key::Long(_) => Value::null(),
@@ -18032,14 +18043,17 @@ fn entry_past<T>(
         }
     };
     let entry = if !held.let_go(req).freed() {
-        Ok(Some(entry))
+        Some(entry)
     } else if op.op1_type == OperandKind::Cv {
-        separated_array(req, place).map(|(_, now)| now.and_then(|now| now.heap().value_ref(key)))
+        let now = Value::of_slot(place.read()).deref();
+        now.as_array()
+            .filter(|now| !now.heap().is_immutable())
+            .and_then(|now| now.heap().value_ref(key))
     } else {
-        Ok(None)
+        None
     };
     name.give_up(req);
-    Ok((stepped, entry?))
+    Ok((stepped, entry))
 }
 
 /// `ZEND_SEPARATE` (`Z/Zend/zend_vm_def.h:8377`), the opline
@@ -18607,15 +18621,17 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
     let ran_on = req.pending();
     let written = match container {
         Ok(Container::Array(array)) => {
-            let landing = write_at(req, frame, code, op, array)
-                .and_then(|at| rw_entry(req, array, at).map(|landing| (at, landing)));
+            let landing = write_at(req, frame, code, op, array).and_then(|at| {
+                let key = write_key(array, at);
+                rw_entry(req, array, at).map(|landing| (key, landing))
+            });
             match landing {
-                Ok((at, Landing::Entry(entry))) => {
+                Ok((key, Landing::Entry(entry))) => {
                     let computed = |req: &mut Request| stepped_entry(req, frame, code, step, entry);
                     let placed = if step_is_silent(req, frame, code, step, entry) {
                         computed(req).map(|stepped| (stepped, Some(entry)))
                     } else {
-                        entry_past(req, (op, place), (array, at, entry), computed)
+                        entry_past(req, (op, place), (array, key, entry), computed)
                     };
                     placed.and_then(|(stepped, entry)| {
                         let (landed, garbage) = match entry {
