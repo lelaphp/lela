@@ -1095,10 +1095,16 @@ impl<'a> Builder<'a> {
             (form, in_place.as_ref()),
             (t1, inferred.may_throw),
         );
+        // A `DO_FCALL` made in place goes where the callee its `INIT_*`
+        // held enters, as `zend_jit_do_fcall` goes with no guard;
+        // `zend_jit_trace_may_exit` is of the handler's.
+        let made = matches!(in_place, Some(InPlace::Make(..)));
         if let Some(InPlace::Push(plain)) = in_place {
             self.pushing = Some(plain);
         }
-        self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
+        if !made {
+            self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
+        }
         // A call pushed in place under its slot's pair goes to its
         // handler where the slot holds another, which may push another
         // callee: held to the one the trace recorded after it, as a

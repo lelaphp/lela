@@ -264,8 +264,8 @@ pub(crate) enum PushRoom {
     /// ([`Check::Room`]), as `zend_jit_push_call_frame` trusts php's
     /// `checked_stack`: the push tests nothing.
     Checked,
-    /// No stack check holds this push, a method's or one whose callee the
-    /// record names no size of, so it tests the page itself.
+    /// No stack check holds this push, one whose callee the record names
+    /// no size of, so it tests the page itself.
     Unchecked,
 }
 

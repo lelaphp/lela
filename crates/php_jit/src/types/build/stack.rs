@@ -18,7 +18,7 @@ use php_unit::{OpArray, Opcode, Opline};
 
 use super::{At, Builder, Draft, Placed, Point, draft};
 use crate::record::{Began, Callee, Stop, classes};
-use crate::types::{Check, Frame, Grows, GuardAt, Op, OpId, Place, PushRoom};
+use crate::types::{Check, Form, Frame, Grows, GuardAt, Line, Op, OpId, Place, PushRoom};
 
 /// `ZEND_CALL_FRAME_SLOT`: the slots of a frame's header,
 /// `sizeof(zend_execute_data)` in zvals.
@@ -30,13 +30,52 @@ const SLOT: u32 = 16;
 /// The `INIT_*` oplines whose push php's code generator makes inline,
 /// through `zend_jit_push_call_frame`, and so holds against the room:
 /// a function's, by name or not. A method's, a static method's and a
-/// closure's are php's too, under conditions of their own, and are held
-/// once this tier compiles them as php does (#2963).
+/// closure's are php's too, under conditions of their own ([`holds_room`]).
 pub(super) fn pushes_inline(opcode: Opcode) -> bool {
     matches!(
         opcode,
         Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName
     )
+}
+
+/// Whether php holds `line`'s `INIT_*` against the room: as [`pushes_inline`]
+/// says, or a method's or a closure's this tier compiles, each through
+/// `zend_jit_push_call_frame` too (`Z/ext/opcache/jit/zend_jit_ir.c:9133-9213`,
+/// `:9300-9370`, `:9460`). One served by its handler stays the handler's,
+/// which takes a page of its own. A method's exits are php's, its class
+/// guard and this check at the `INIT_*`, nothing at its `DO_FCALL`:
+/// ```php
+/// class C { public $n = 0; function m($a) { return $a + 1; } }
+/// function f() { $o = new C; $s = 0; for ($i = 0; $i < 300; $i++) { $s += $o->m($i); if ($i > 180) { $s++; } } return $s; }
+/// echo f(), "\n";
+/// ```
+/// ```expect regime=jit-inline process capture
+/// 45269
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:4
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %SCRATCH%/witness.php:3
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 7 f() %SCRATCH%/witness.php:3
+/// ---- TRACE 2 start (side trace 1/7) f() %SCRATCH%/witness.php:3
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 2 f() %SCRATCH%/witness.php:3
+/// ---- TRACE 3 start (side trace 1/2) f() %SCRATCH%/witness.php:3
+/// ---- TRACE 3 stop (return)
+/// ---- TRACE 3 compiled
+/// ```
+fn holds_room(line: &Line) -> bool {
+    pushes_inline(line.opcode)
+        || (line.form == Form::Inline
+            && matches!(
+                line.opcode,
+                Opcode::InitMethodCall | Opcode::InitStaticMethodCall | Opcode::InitDynamicCall
+            ))
 }
 
 /// The `INIT_*` oplines whose frame `zend_jit_trace_build_tssa` adds to a
@@ -289,7 +328,7 @@ impl Builder<'_> {
                     if made {
                         covered = calls.pop().unwrap_or(covered);
                     }
-                    if !pushes_inline(line.opcode) {
+                    if !holds_room(line) {
                         continue;
                     }
                     let Some((op, callee)) = self.init_at(at) else {
