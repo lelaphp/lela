@@ -971,6 +971,14 @@ const fn lower(byte: u8) -> u8 {
 /// or more and a needle of nine bytes or more to `zend_memnstr_ex`'s
 /// Sunday search, which finds the same offset.
 fn memnstr(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    memnstr_inline(haystack, needle, from)
+}
+
+/// [`memnstr`]'s body in the caller, `zend_memnstr`'s
+/// `zend_always_inline`, for a walk that searches once a piece.
+#[expect(clippy::inline_always, reason = "`zend_memnstr`'s own attribute")]
+#[inline(always)]
+fn memnstr_inline(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     let rest = haystack.get(from..)?;
     let found = match needle {
         [] => Some(0),
@@ -1922,7 +1930,7 @@ fn explode(
     let p2 = if s.is_empty() || limit == 0 || limit == 1 {
         None
     } else {
-        memnstr(s, d, 0)
+        memnstr_inline(s, d, 0)
     };
     let Some(p2) = p2 else {
         // `array_init` and one `zend_hash_next_index_insert_new` at most:
@@ -1970,7 +1978,7 @@ fn explode(
         let piece = PhpString::fast(req, &s[p1..end])?;
         p1 = end + d.len();
         // `while (p2 != NULL && --limit > 1)`.
-        p2 = memnstr(s, d, p1).filter(|_| {
+        p2 = memnstr_inline(s, d, p1).filter(|_| {
             limit -= 1;
             limit > 1
         });

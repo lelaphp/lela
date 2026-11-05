@@ -13,7 +13,7 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, SmartStr, Value};
 
-use super::{Fill, KeyBytes, long, lower, memnstr};
+use super::{Fill, KeyBytes, long, lower, memnstr_inline};
 use crate::ffi::memchr;
 use crate::throwables::Throwables;
 
@@ -557,7 +557,7 @@ fn str_to_str(
         return PhpString::fast(req, with).map(Replaced::Made);
     }
     if needle.len() == with.len() {
-        let Some(first) = memnstr(searched, needle, 0) else {
+        let Some(first) = memnstr_inline(searched, needle, 0) else {
             return Ok(Replaced::Kept);
         };
         let mut n = 0;
@@ -573,7 +573,7 @@ fn str_to_str(
         *count += n;
         return Ok(Replaced::Made(replaced));
     }
-    let Some(first) = memnstr(searched, needle, 0) else {
+    let Some(first) = memnstr_inline(searched, needle, 0) else {
         return Ok(Replaced::Kept);
     };
     let n = found(searched, needle, first).count();
@@ -615,7 +615,7 @@ fn found<'a>(
     let mut next = Some(first);
     std::iter::from_fn(move || {
         let at = next?;
-        next = memnstr(haystack, needle, at + needle.len().max(1));
+        next = memnstr_inline(haystack, needle, at + needle.len().max(1));
         Some(at)
     })
 }
