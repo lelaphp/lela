@@ -11287,6 +11287,25 @@ fn object_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -
     Some(exec::operand(req, frame, code, op.op2_type, op.op2))
 }
 
+/// Whether the dimension is a CV nothing wrote, php's `ZVAL_UNDEFINED_OP2()`,
+/// which stands as `&EG(uninitialized_zval)` whatever is written after.
+fn dim_undefined(req: &Request, frame: FrameRef, op: &Opline) -> bool {
+    op.op2_type == OperandKind::Cv && req.slot(frame, op.op2).tag() == TypeTag::Undef
+}
+
+/// [`object_dim`] over a dimension whose warning is raised already.
+fn object_dim_as_it_stands(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Option<Value> {
+    if matches!(op.op2_type, OperandKind::Unused | OperandKind::Const) {
+        return object_dim(req, frame, code, op);
+    }
+    Some(exec::operand_undef(req, frame, code, op.op2_type, op.op2).undef_as_null())
+}
+
 /// The place a dimension write lands in, php's
 /// `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)` (`_get_zval_ptr_ptr_var`,
 /// `Z/Zend/zend_execute.c:167`): a CV's own slot, or a `VAR` read
@@ -17358,6 +17377,24 @@ fn assign_to_place(
 /// destructed after set
 /// destructed after set
 /// ```
+///
+/// The dimension is read past the value's warning, whose handler may
+/// have written it:
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     function offsetExists($k): bool { return true; } function offsetGet($k): mixed { return 1; }
+///     function offsetSet($k, $v): void { echo "set "; var_dump($k, $v); } function offsetUnset($k): void {}
+/// }
+/// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["k"] = "later"; });
+/// $o = new A; $k = "first";
+/// $o[$k] = $undefined;
+/// ```
+/// ```expect
+/// [Undefined variable $undefined]
+/// set string(5) "later"
+/// NULL
+/// ```
 fn assign_object_dim(
     req: &mut Request,
     frame: FrameRef,
@@ -17366,8 +17403,14 @@ fn assign_object_dim(
     data: Opline,
     object: PhpObject,
 ) -> Result<(), Thrown> {
+    let undefined = dim_undefined(req, frame, op);
     let dim = object_dim(req, frame, code, op);
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
+    let dim = if undefined {
+        dim
+    } else {
+        object_dim_as_it_stands(req, frame, code, op)
+    };
     let table = req.object_handlers(object.heap());
     let given = Owner::take(req, value);
     match table.write_dimension(req, object, dim.as_ref(), given) {
@@ -18861,6 +18904,59 @@ fn stepped_entry(
 /// O dtor
 /// Cannot use object of type O as array
 /// ```
+///
+/// The dimension and the value are read afresh past `offsetGet`, which
+/// may have written either variable:
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     function offsetExists($k): bool { return true; }
+///     function offsetGet($k): mixed { echo "get $k\n"; $GLOBALS["v"] = 2; $GLOBALS["k"] = "later"; return 1; }
+///     function offsetSet($k, $v): void { echo "set $k=$v\n"; }
+///     function offsetUnset($k): void {}
+/// }
+/// $o = new A; $k = "first"; $v = 1;
+/// $o[$k] += $v;
+/// ```
+/// ```expect
+/// get first
+/// set later=3
+/// ```
+///
+/// With a throw pending over the value's warning, the standard read
+/// answers nothing, and the class that serves no dimensions refuses over
+/// the throw:
+///
+/// ```php
+/// class P {}
+/// set_error_handler(function ($no, $msg) { throw new Exception("from the handler"); });
+/// $o = new P; $k = "k";
+/// try { $o[$k] += $undefined; }
+/// catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " over ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error: Cannot use object of type P as array over Cannot use object of type P as array
+/// ```
+///
+/// The read of an `ArrayAccess` calls no `offsetGet` over the throw, and
+/// answers nothing:
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     function offsetExists($k): bool { return true; } function offsetGet($k): mixed { echo "get\n"; return 1; }
+///     function offsetSet($k, $v): void { echo "set\n"; } function offsetUnset($k): void {}
+/// }
+/// set_error_handler(function ($no, $msg) { throw new Exception("from the handler"); });
+/// $o = new A; $k = "k";
+/// try { $o[$k] += $undefined; }
+/// catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " over ", $e->getPrevious()?->getMessage(), "\n"; }
+/// try { $x = $o[$undefined]; }
+/// catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " over ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error: Cannot use object of type A as array over from the handler
+/// Exception: from the handler over
+/// ```
 fn binary_assign_op_obj_dim(
     req: &mut Request,
     frame: FrameRef,
@@ -18871,16 +18967,32 @@ fn binary_assign_op_obj_dim(
     let Compound {
         op, data, kernel, ..
     } = step;
+    let undefined = dim_undefined(req, frame, op);
     let dim = object_dim(req, frame, code, op);
-    let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+    exec::operand(req, frame, code, data.op1_type, data.op1);
+    // php's `property` and `value` are pointers at their operands, so
+    // each is read here where php reads through it: what a handler or
+    // `offsetGet` wrote is what the next call meets. A dimension nothing
+    // wrote stays php's `&EG(uninitialized_zval)`.
+    let dim_now = |req: &mut Request| {
+        if undefined {
+            dim
+        } else {
+            object_dim_as_it_stands(req, frame, code, op)
+        }
+    };
+    let at = dim_now(req);
     let table = req.object_handlers(object.heap());
-    let read = table.read_dimension(req, object, dim.as_ref(), DimensionRead::Warning);
+    let read = table.read_dimension(req, object, at.as_ref(), DimensionRead::Warning);
     let held = match read.map(Owner::hand_on) {
         Ok(held) => held,
         // `zend_use_object_as_array`: php's `read_dimension` answered
         // `NULL`, so the `Error` is raised over what it raised, chained.
         // An extension's table answers for itself.
-        Err(thrown) if thrown.exception().is_some() && req.std_dimensions(object.class()) => {
+        Err(thrown)
+            if (thrown.exception().is_some() || req.pending().is_some())
+                && req.std_dimensions(object.class()) =>
+        {
             req.leave_pending(&thrown);
             let ran_on = req.pending();
             let class = req.symbols().class_name(object.class()).to_vec();
@@ -18901,12 +19013,14 @@ fn binary_assign_op_obj_dim(
     // the operator or `offsetSet` threw in `EG(exception)`.
     // `write_dimension` takes an owner of its own, where php's copies
     // the value, so the one the temporary and the release read stays.
+    let value = exec::operand_undef(req, frame, code, data.op1_type, data.op1).undef_as_null();
     let (stepped, written) = match kernel(req, &held, &value) {
         Ok(stepped) => {
+            let at = dim_now(req);
             let given = Owner::take(req, stepped);
             (
                 stepped,
-                table.write_dimension(req, object, dim.as_ref(), given),
+                table.write_dimension(req, object, at.as_ref(), given),
             )
         }
         Err(thrown) => (Value::null(), Err(thrown)),

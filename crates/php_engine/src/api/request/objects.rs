@@ -1129,7 +1129,9 @@ impl Request {
         }
         let class = self.symbols().class_name(object.class());
         let message = bytes!(b"Cannot use object of type ", class, b" as array");
-        Err(crate::api::raising::error(self, &message))
+        let ran_on = self.pending();
+        let refused = crate::api::raising::error(self, &message);
+        Err(self.raised_over(refused, ran_on))
     }
 
     /// What the four `zend_std_*_dimension` handlers do around the
@@ -1184,6 +1186,8 @@ impl Request {
         read: DimensionRead,
     ) -> Result<Owner<Value>, Thrown> {
         self.array_access(object)?;
+        // `zend_call_function` calls nothing over what a handler threw.
+        crate::api::raising::none_pending(self)?;
         let offset = offset.copied().unwrap_or_else(Value::null);
         let read = self.with_array_access(object, offset, |req, offset| {
             if read == DimensionRead::Silent
