@@ -201,8 +201,13 @@ fn a_row_the_table_has_not_is_an_internal_error() {
     let frame = req.pushed(PublishedUnit::clone(&unit));
     let code = crate::exec::code_of(&unit);
     let call = code.oplines.first().copied().expect("opline 0");
-    assert!(matches!(
+    assert_eq!(
         served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call, at)),
-        Err(fatal) if matches!(fatal.reason(), php_heap::FatalReason::Error(message) if message.starts_with("InternalError: ZEND_FRAMELESS_ICALL_0 indexes frameless entry 1000000"))
+        Ok(Stepped::Threw(frame))
+    );
+    assert!(matches!(
+        req.ending(),
+        Some(crate::api::request::Ending::Fatal(logged))
+            if logged.contains("InternalError: ZEND_FRAMELESS_ICALL_0 indexes frameless entry 1000000")
     ));
 }

@@ -3276,7 +3276,7 @@ pub(crate) fn key_value(req: &mut Request, key: php_heap::Key) -> Value {
 /// ```expect regime=jit-exit-fuzz process
 /// 30
 /// ```
-#[inline]
+#[cold]
 pub(crate) fn frameless_operand(
     req: &mut Request,
     frame: FrameRef,
