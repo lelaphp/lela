@@ -15,9 +15,9 @@ use php_ext::abi::{Instance, This, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{Function, autoload, eval_const_expr, eval_declared, lookup_class};
 use php_ext::coerce::{value_name, with_string};
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, MethodDecl, Parameter, Type};
 use php_ext::raising::{Thrown, throw, throw_error, throw_exception_ex};
-use php_ext::request::Request;
+use php_ext::request::{MethodRow, Request};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use super::{
@@ -669,6 +669,20 @@ fn no_default(req: &mut Request) -> Thrown {
 
 // --------------------------------------- ReflectionFunctionAbstract
 
+/// `intern->ptr`, the method a `ReflectionMethod`'s constructor or
+/// factory found, as php reads it, with no property of the reflector
+/// read and no lookup by name: none for a reflector that keeps a closure,
+/// whose declaration its closure answers ([`this_function`]).
+pub(super) fn held_method(req: &Request, this: PhpObject) -> Option<(MethodRow, &MethodDecl)> {
+    if super::kept_closure(req, this).is_some() {
+        return None;
+    }
+    match super::kept_method(req, this)? {
+        super::HeldMethod::Row(row) => Some((row, req.symbols().row_method(row)?)),
+        super::HeldMethod::Invoke(_) => None,
+    }
+}
+
 /// The function a `ReflectionFunctionAbstract` reflects, php's
 /// `GET_REFLECTION_OBJECT_PTR(fptr)`: `$class` and `$name` for a
 /// `ReflectionMethod`, `$name` alone for a `ReflectionFunction`,
@@ -710,6 +724,10 @@ pub(super) fn this_function(
     req: &mut Request,
     this: PhpObject,
 ) -> Result<(FunctionRef, FunctionDecl), Thrown> {
+    if let Some((row, method)) = held_method(req, this) {
+        let decl = method.function.clone();
+        return Ok((FunctionRef::Method(row.scope(), decl.name.0.to_vec()), decl));
+    }
     let ce = crate::throwables::Throwables::of(req)?;
     let name = this_name(req, this, "ReflectionFunctionAbstract")?;
     let scope = this
