@@ -720,7 +720,10 @@ fn schema_validate_as(
 
 /// `dom_document_register_node_class`.
 ///
-/// Both classes are `Z_PARAM_CLASS`, `zend_lookup_class`, which asks the autoloaders.
+/// Both classes are the `C` of `zend_parse_parameters`, `zend_lookup_class`,
+/// which asks the autoloaders, and a refusal names the class as written, the
+/// base's by the class it must derive from and `extendedClass`'s with its
+/// `or null`.
 ///
 /// ```php
 /// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy extends DOMElement {} } });
@@ -731,6 +734,21 @@ fn schema_validate_as(
 /// ```expect
 /// load Lazy
 /// Lazy
+/// ```
+///
+/// ```php
+/// $d = new DOMDocument;
+/// foreach ([['nosuch', null], ['stdClass', null], ['DOMElement', 'nosuch']] as [$base, $extended]) {
+///     try { $d->registerNodeClass($base, $extended); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// }
+/// try { $d->registerNodeClass("DOM\xffElement", null); }
+/// catch (Error $e) { echo bin2hex(substr($e->getMessage(), -14)), "\n"; }
+/// ```
+/// ```expect
+/// TypeError: DOMDocument::registerNodeClass(): Argument #1 ($baseClass) must be a class name derived from DOMNode, nosuch given
+/// TypeError: DOMDocument::registerNodeClass(): Argument #1 ($baseClass) must be a class name derived from DOMNode, stdClass given
+/// TypeError: DOMDocument::registerNodeClass(): Argument #2 ($extendedClass) must be a valid class name or null, nosuch given
+/// ff456c656d656e7420676976656e
 /// ```
 fn register_node_class_as(
     req: &mut Request,
@@ -749,21 +767,10 @@ fn register_node_class_as(
         {
             c
         }
-        Some(c) => {
-            let shown = crate::class_name(req, c);
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!("be a class name derived from {node_name}, {shown} given"),
-            ));
-        }
-        None => {
-            let shown = String::from_utf8_lossy(base_name).into_owned();
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!("be a valid class name, {shown} given"),
-            ));
+        _ => {
+            let derived = format!("be a class name derived from {node_name}, ");
+            let tail = [derived.as_bytes(), base_name, b" given"].concat();
+            return Err(arg_type_error(req, 1, &tail));
         }
     };
     let extended = match extended {
@@ -772,12 +779,8 @@ fn register_node_class_as(
             if let Some(c) = php_ext::call::autoload(req, name)? {
                 Some(c)
             } else {
-                let shown = String::from_utf8_lossy(name).into_owned();
-                return Err(arg_type_error(
-                    req,
-                    2,
-                    &format!("be a valid class name, {shown} given"),
-                ));
+                let tail = [b"be a valid class name or null, ", name, b" given"].concat();
+                return Err(arg_type_error(req, 2, &tail));
             }
         }
     };

@@ -8,8 +8,9 @@ use php_heap::ZvalRef;
 use super::Request;
 use crate::api::values::{Owner, Value};
 
-/// Where the last `FETCH_DIM_W` laid the `IS_INDIRECT` of its `VAR`,
-/// and the array or object whose table the entry is in. What it names
+/// Where the last `FETCH_DIM_W`, or `FETCH_OBJ_RW` over a `VAR`, laid the
+/// `IS_INDIRECT` of its `VAR`, and the array or object whose table or
+/// slot the entry is in. What it names
 /// is owned by whatever held the container when the fetch walked it,
 /// and no PHP code may be reached between the fetch and the one read
 /// of it: [`Request::hold_walk`] turns it into an owner or into
@@ -47,5 +48,11 @@ impl Request {
     pub(crate) fn hold_walk(&mut self, place: ZvalRef) -> Option<Owner<Value>> {
         let walk = self.hold.walk.take()?;
         (walk.place == place).then(|| Owner::take(self, walk.table))
+    }
+
+    /// The array or object the fetch before this opline walked to `place`.
+    pub(crate) fn walked(&self, place: ZvalRef) -> Option<Value> {
+        let walk = self.hold.walk.filter(|walk| walk.place == place)?;
+        Some(walk.table)
     }
 }

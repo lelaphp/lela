@@ -247,6 +247,9 @@ pub fn select(
 pub enum Unresolved {
     /// No file: the reason the last attempt failed with.
     Missing(std::io::Error),
+    /// A URL the plain files wrapper does not serve: the open locates it
+    /// again, reporting what this quiet walk could not.
+    Url(std::io::Error),
     /// What a wrapper's `url_stat` threw, which ends the walk.
     Threw(Thrown),
 }

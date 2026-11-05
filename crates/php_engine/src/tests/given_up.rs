@@ -175,3 +175,71 @@ fn a_write_goes_with_the_table_a_handler_gave_up() {
     );
     assert_eq!(stdout, "|1\nx0Array|1\n1\n");
 }
+
+#[test]
+fn an_object_a_handler_gave_up_goes_past_its_compound_step() {
+    let stdout = served(
+        "<?php\n\
+         class C { public $p = 'pp'; function __destruct() { echo $this->p, \"\\n\"; } }\n\
+         set_error_handler(function () { $GLOBALS['o'] = null; return true; });\n\
+         $o = new C; $o->p .= []; echo \"after\\n\";\n",
+    );
+    assert_eq!(stdout, "ppArray\nafter\n");
+}
+
+#[test]
+fn a_cycle_a_collection_read_past_under_a_step_stays_a_possible_root() {
+    let stdout = served(
+        "<?php\n\
+         class C { public $p = 'pp'; public $self; function __destruct() { echo 'dtor ', $this->p, \"\\n\"; } }\n\
+         set_error_handler(function () { $GLOBALS['o'] = null; gc_collect_cycles(); return true; });\n\
+         $o = new C; $o->self = $o; $o->p .= []; echo \"after\\n\";\n\
+         echo gc_collect_cycles(), \"\\nend\\n\";\n",
+    );
+    assert_eq!(stdout, "after\ndtor ppArray\n1\nend\n");
+}
+
+#[test]
+fn a_collection_under_a_step_that_left_the_count_as_it_stood_keeps_the_cycle_a_possible_root() {
+    let stdout = served(
+        "<?php\n\
+         class C { public $p = true; public $self; public $self2; function __destruct() { echo \"dtor\\n\"; } }\n\
+         set_error_handler(function () { $GLOBALS['o']->self2 = $GLOBALS['o']; $GLOBALS['o'] = null; gc_collect_cycles(); return true; });\n\
+         $o = new C; $o->self = $o; $o->p++; echo \"after\\n\";\n\
+         echo gc_collect_cycles(), \"\\nend\\n\";\n",
+    );
+    assert_eq!(stdout, "after\ndtor\n1\nend\n");
+}
+
+#[test]
+fn a_step_that_cost_the_object_no_owner_adds_no_possible_root() {
+    let stdout = served(
+        "<?php\n\
+         class C { public $p = 'pp'; }\n\
+         $o = new C; $o->p .= 'x'; $o->p .= 'y'; echo gc_status()['roots'], \"\\n\";\n",
+    );
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn a_throw_over_a_compound_step_is_the_previous_of_the_destructor_it_serves() {
+    let stdout = served(
+        "<?php\n\
+         class C { public $p = 'pp'; function __destruct() { throw new Exception('dtor'); } }\n\
+         set_error_handler(function () { $GLOBALS['o'] = null; throw new Exception('handler'); });\n\
+         try { $o = new C; $o->p .= []; }\n\
+         catch (Exception $e) { echo $e->getMessage(), ' over ', $e->getPrevious()->getMessage(), \"\\n\"; }\n",
+    );
+    assert_eq!(stdout, "dtor over handler\n");
+}
+
+#[test]
+fn a_right_operand_a_handler_gave_up_is_read_past_the_left() {
+    let stdout = served(
+        "<?php\n\
+         set_error_handler(function () { unset($GLOBALS['v']); return true; });\n\
+         $v = '7'; $v .= '7'; echo '1x' + $v, \"\\n\";\n\
+         $a = []; $v = '7'; $v .= '7'; echo $a . $v, \"\\n\";\n",
+    );
+    assert_eq!(stdout, "78\nArray77\n");
+}

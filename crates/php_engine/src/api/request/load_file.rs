@@ -76,10 +76,8 @@ impl Request {
             Err(super::Unresolved::Threw(thrown)) => return Err(thrown),
             // A path a stream wrapper serves is opened as it is written,
             // `zend_stream_open`'s `php_stream_open_for_zend_ex`.
-            Err(super::Unresolved::Missing(_)) if super::is_wrapper_url(written) => {
-                written.to_vec()
-            }
-            Err(super::Unresolved::Missing(_)) => return Ok(false),
+            Err(_) if super::is_wrapper_url(written) => written.to_vec(),
+            Err(_) => return Ok(false),
         };
         let stream = super::is_wrapper_url(&path);
         if stream && autoloading {

@@ -73,7 +73,7 @@ use crate::api::request::ropes::RopeAt;
 use crate::api::request::{CodeFrom, ConstantRead, Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
-    ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
+    ClosureInfo, Left, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::exec::{
     self, Cached, E_FATAL_ERRORS, FETCH_CLASS_MASK, FETCH_CLASS_PARENT, FETCH_CLASS_SELF,
@@ -9142,14 +9142,7 @@ fn inline_fetch_obj_r(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, _) = inline_place(
-        req,
-        (frame, code, op),
-        b,
-        property_cache_slot(op),
-        object,
-        false,
-    )?;
+    let (place, _) = opline_place(req, (frame, code, op), b, object, false)?;
     let z = crate::operand::deref(place.read());
     if z.is_undef() {
         return None;
@@ -9303,6 +9296,18 @@ fn inline_fetch_obj_r(
 /// 1010C
 /// Cannot access protected property C::$pr
 /// ```
+/// [`inline_place`] through the opline's own cache slot.
+#[inline(always)] // as `inline_fetch_obj_r`
+fn opline_place(
+    req: &mut Request,
+    at: (FrameRef, &OpArray, &Opline),
+    b: impl Operand,
+    object: php_heap::Obj,
+    write: bool,
+) -> Option<(php_heap::ZvalRef, exec::SlotType)> {
+    inline_place(req, at, b, property_cache_slot(at.2), object, write)
+}
+
 #[inline(always)] // as `inline_fetch_obj_r`
 fn inline_place(
     req: &mut Request,
@@ -9929,14 +9934,7 @@ fn inline_fetch_obj_w(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, ty) = inline_place(
-        req,
-        (frame, code, op),
-        b,
-        property_cache_slot(op),
-        object,
-        true,
-    )?;
+    let (place, ty) = opline_place(req, (frame, code, op), b, object, true)?;
     // `zend_fetch_property_address`'s cached arm: a typed slot with no
     // fetch flag is the `IS_INDIRECT` an untyped one is, and only the
     // flags (`zend_handle_fetch_obj_flags`) and a guarded property read
@@ -9996,6 +9994,14 @@ pub(crate) fn fetch_obj_rw<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let b = ByKind(op.op2_type);
+    // A `VAR`'s `IS_INDIRECT` is what the link after this cannot read
+    // again, so the object is noted here, where nothing has run since the
+    // fetch before laid it.
+    let over = (op.op1_type == OperandKind::Var).then(|| {
+        req.note_walk(None);
+        let container = exec::container(req, frame, op.op1_type, op.op1, "ZEND_FETCH_OBJ_RW");
+        container.ok().map(|container| container.deref())
+    });
     let inline = over_container!(op.op1_type, |a| inline_fetch_obj_w(
         req,
         frame,
@@ -10004,6 +10010,11 @@ pub(crate) fn fetch_obj_rw<T: Tier>(
         (a, b)
     ));
     if let Some(edge) = inline {
+        if let Some(Some(object)) = over {
+            let place = req.slot_ptr(frame, op.out);
+            let place = place.and_then(|var| var.read().as_indirect());
+            req.note_walk(place.map(|place| (place, object)));
+        }
         return edge;
     }
     fetch_obj_place(req, frame, code, op, PropertyRead::Warning)
@@ -10235,6 +10246,9 @@ fn fetch_obj_place(
             {
                 let thrown = freeing_container(req, frame, op, thrown);
                 return threw(req, frame, &thrown);
+            }
+            if op.op1_type == OperandKind::Var && op.opcode == Opcode::FetchObjRw {
+                req.note_walk(Some((at, object.as_value())));
             }
             at
         }
@@ -11134,6 +11148,45 @@ pub(crate) fn fetch_list_w<T: Tier>(
 /// string, and after `ZVAL_UNDEFINED_OP1` in the arm that has neither.
 /// That second warning is raised under both reads; the first and the
 /// `Trying to access array offset` beside it are `BP_VAR_R`'s alone.
+///
+/// A by-reference `offsetGet` answers its reference, and the read hands
+/// on what it holds, as `ZVAL_COPY_DEREF` does:
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     public $d = ['k' => ['x' => 1]];
+///     function offsetExists($o): bool { return isset($this->d[$o]); }
+///     function &offsetGet($o): mixed { return $this->d[$o]; }
+///     function offsetSet($o, $v): void {} function offsetUnset($o): void {}
+/// }
+/// $r = new A;
+/// $m = $r['k'];
+/// $m['y'] = 2;
+/// var_dump($r->d, $m, $r['k']['x'], [$r['k']]);
+/// ```
+/// ```expect
+/// array(1) {
+///   ["k"]=>
+///   array(1) {
+///     ["x"]=>
+///     int(1)
+///   }
+/// }
+/// array(2) {
+///   ["x"]=>
+///   int(1)
+///   ["y"]=>
+///   int(2)
+/// }
+/// int(1)
+/// array(1) {
+///   [0]=>
+///   array(1) {
+///     ["x"]=>
+///     int(1)
+///   }
+/// }
+/// ```
 fn read_dimension(
     req: &mut Request,
     frame: FrameRef,
@@ -11182,9 +11235,10 @@ fn read_dimension(
                 DimRead::Warning => DimensionRead::Warning,
                 DimRead::Silent => DimensionRead::Silent,
             };
-            table
-                .read_dimension(req, object, dim.as_ref(), fetch)
-                .map(Owner::hand_on)
+            let read = table.read_dimension(req, object, dim.as_ref(), fetch);
+            // `ZVAL_COPY_DEREF`, or `zend_unwrap_reference` over what a
+            // by-reference `offsetGet` left in `result`.
+            read.map(|read| req.unwrap_reference(read.hand_on()))
         }));
     }
     if mode == DimRead::Silent {
@@ -11286,15 +11340,8 @@ fn object_held<T>(
     step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
 ) -> Result<T, Thrown> {
     let held = Owner::take(req, object.as_value());
-    match step(req) {
-        Ok(stepped) => {
-            held.let_go(req);
-            Ok(stepped)
-        }
-        Err(thrown) => Err(req.free_pending(thrown, |req| {
-            held.let_go(req);
-        })),
-    }
+    let stepped = step(req);
+    req.held_past(Some(held), stepped)
 }
 
 /// The dimension a handler over an object reads, php's `if (OP2_TYPE ==
@@ -11349,6 +11396,28 @@ fn object_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -
         );
     }
     Some(exec::operand(req, frame, code, op.op2_type, op.op2))
+}
+
+/// Whether an operand is a CV nothing wrote, php's `ZVAL_UNDEFINED_OP*()`,
+/// which stands as `&EG(uninitialized_zval)` whatever is written after.
+fn undefined_cv(req: &Request, frame: FrameRef, kind: OperandKind, at: u32) -> bool {
+    kind == OperandKind::Cv && req.slot(frame, at).tag() == TypeTag::Undef
+}
+
+/// [`object_dim`] read again past what ran, its warning raised already:
+/// `dim` as first read stands where no write reaches it, an undefined CV
+/// among them.
+fn object_dim_now(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (dim, undefined): (Option<Value>, bool),
+) -> Option<Value> {
+    if undefined || matches!(op.op2_type, OperandKind::Unused | OperandKind::Const) {
+        return dim;
+    }
+    Some(exec::operand_undef(req, frame, code, op.op2_type, op.op2).undef_as_null())
 }
 
 /// The place a dimension write lands in, php's
@@ -15161,29 +15230,11 @@ pub(crate) fn assign_ref<T: Tier>(
     // and one holding the cell a `MAKE_REF` or this handler itself put
     // there gives up the owner it took, so the cell is held by the
     // place it binds and by the target alone.
-    let freed = freed_after(req, bound, |req| {
+    let freed = req.freed_after(bound, |req| {
         exec::free_operand(req, frame, op.op2_type, op.op2);
         exec::free_operand(req, frame, op.op1_type, op.op1);
     });
     settled(req, frame, freed)
-}
-
-/// `FREE_OP` over what a handler's step answered, php's at its one end
-/// whether the step threw or not: a destructor it serves sees a
-/// throwable pending ([`Request::free_pending`]).
-#[inline]
-fn freed_after(
-    req: &mut Request,
-    step: Result<(), Thrown>,
-    free: impl FnOnce(&mut Request),
-) -> Result<(), Thrown> {
-    match step {
-        Ok(()) => {
-            free(req);
-            Ok(())
-        }
-        Err(thrown) => Err(req.free_pending(thrown, free)),
-    }
 }
 
 /// [`assign_ref`]'s bind: `zend_assign_to_variable_reference` over a
@@ -15435,7 +15486,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     // `FREE_OP1()`, `FREE_OP2()` and `FREE_OP_DATA()`, after the bind: a
     // dimension's or a name's destructor can give up what the place is
     // in. A throw out of the fetch gave `op1` up already.
-    let freed = freed_after(req, bound, |req| {
+    let freed = req.freed_after(bound, |req| {
         exec::free_operand(req, frame, op.op1_type, op.op1);
         member.release(req, frame, op);
         exec::free_operand(req, frame, data_type, data_at);
@@ -15921,14 +15972,7 @@ fn inline_assign_obj(
         return None;
     }
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, ty) = inline_place(
-        req,
-        (frame, code, op),
-        b,
-        property_cache_slot(op),
-        object,
-        true,
-    )?;
+    let (place, ty) = opline_place(req, (frame, code, op), b, object, true)?;
     let held = place.read();
     if held.is_undef() || held.is_refcounted() {
         return None;
@@ -16119,9 +16163,7 @@ fn assigned_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
     // its handlers can free (`trace:assign-obj-entry-container-under-a-handler`).
     let guard = early
         .filter(|_| {
-            op.op1_type == OperandKind::Var
-                && data.op1_type == OperandKind::Cv
-                && req.slot(frame, data.op1).tag() == TypeTag::Undef
+            op.op1_type == OperandKind::Var && undefined_cv(req, frame, data.op1_type, data.op1)
         })
         .map(|container| Owner::take(req, container.deref()));
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
@@ -17441,7 +17483,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     // `FREE_OP_DATA()`: the `VAR` of a `FETCH_STATIC_PROP_W` under
     // `ZEND_FETCH_REF` holds the cell with an owner, as a `MAKE_REF`'s
     // does, and a call's what it returned.
-    match freed_after(req, bound, |req| {
+    match req.freed_after(bound, |req| {
         exec::free_operand(req, frame, data_type, data_at);
     }) {
         Ok(()) => Ok(advance_over_data(req, frame)),
@@ -17651,6 +17693,24 @@ fn assign_to_place(
 /// destructed after set
 /// destructed after set
 /// ```
+///
+/// The dimension is read past the value's warning, whose handler may
+/// have written it:
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     function offsetExists($k): bool { return true; } function offsetGet($k): mixed { return 1; }
+///     function offsetSet($k, $v): void { echo "set "; var_dump($k, $v); } function offsetUnset($k): void {}
+/// }
+/// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["k"] = "later"; });
+/// $o = new A; $k = "first";
+/// $o[$k] = $undefined;
+/// ```
+/// ```expect
+/// [Undefined variable $undefined]
+/// set string(5) "later"
+/// NULL
+/// ```
 fn assign_object_dim(
     req: &mut Request,
     frame: FrameRef,
@@ -17659,8 +17719,10 @@ fn assign_object_dim(
     data: Opline,
     object: PhpObject,
 ) -> Result<(), Thrown> {
+    let undefined = undefined_cv(req, frame, op.op2_type, op.op2);
     let dim = object_dim(req, frame, code, op);
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
+    let dim = object_dim_now(req, frame, code, op, (dim, undefined));
     let table = req.object_handlers(object.heap());
     let given = Owner::take(req, value);
     match table.write_dimension(req, object, dim.as_ref(), given) {
@@ -18108,8 +18170,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
             });
             match landing {
                 Ok((key, Landing::Entry(entry))) => {
-                    let undefined = data.op1_type == OperandKind::Cv
-                        && req.slot(frame, data.op1).tag() == TypeTag::Undef;
+                    let undefined = undefined_cv(req, frame, data.op1_type, data.op1);
                     let taken = |req: &mut Request| {
                         Ok(exec::take_operand(
                             req,
@@ -18124,17 +18185,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
                     } else {
                         taken(req).map(|value| (value, Some(entry)))
                     };
-                    placed.and_then(|(value, entry)| {
-                        let (landed, garbage) = match entry {
-                            Some(entry) => {
-                                assign_to_place(req, frame, entry, (value, data.op1_type))?
-                            }
-                            None => (value, value),
-                        };
-                        write_out(req, frame, op, &landed);
-                        req.release(garbage);
-                        Ok(())
-                    })
+                    entry_landed(req, frame, op, placed, (data.op1_type, Request::release))
                 }
                 // `assign_dim_error`: `FREE_OP_DATA` and a `null` result.
                 Ok((_, Landing::Gone)) => data_gone(req, frame, op, (data.op1_type, data.op1)),
@@ -18300,6 +18351,27 @@ fn entry_past<T>(
     Ok((stepped, entry))
 }
 
+/// Where a dimension write's value lands past [`entry_past`]: the entry
+/// still standing, or nothing where a handler freed it, the value then
+/// written out alone; what the entry held is `free`'s.
+#[inline(always)] // the handlers' own path, and each `free` folds
+fn entry_landed(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    placed: Result<(Value, Option<php_heap::ZvalRef>), Thrown>,
+    (handed, free): (OperandKind, impl FnOnce(&mut Request, Value)),
+) -> Result<(), Thrown> {
+    let (value, entry) = placed?;
+    let (landed, garbage) = match entry {
+        Some(entry) => assign_to_place(req, frame, entry, (value, handed))?,
+        None => (value, value),
+    };
+    write_out(req, frame, op, &landed);
+    free(req, garbage);
+    Ok(())
+}
+
 /// `ZEND_SEPARATE` (`Z/Zend/zend_vm_def.h:8377`), the opline
 /// `zend_separate_if_call_and_write` puts after a call whose `VAR` a
 /// write is about to land in: a cell nothing else holds is unwrapped in
@@ -18358,6 +18430,161 @@ pub(crate) fn separate<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// What keeps the object of a property step, a compound assignment's or
+/// an increment's, through what the step reaches: a warning's handler
+/// that gives the object up, where php's in-place arm writes into what
+/// it freed. The frame's receiver and a `VAR` holding the object own it
+/// past any program text, so nothing is taken over them. Over the pair of
+/// handlers the owner is php's own, `GC_ADDREF(object)` and `OBJ_RELEASE`
+/// (`zend_assign_op_overloaded_property`,
+/// `zend_pre_incdec_overloaded_property`), so `debug_zval_dump` in a
+/// `__get` reads php's count.
+///
+/// ```php
+/// class M { public int $i = 5;
+///     function __get($n) { debug_zval_dump($this); return 1; } function __set($n, $v) {}
+///     function t() { $this->z += 1; $this->z++; } }
+/// $o = new M; $o->x += 1; $o->x--; $o->t();
+/// ```
+/// ```expect
+/// object(M)#1 (1) refcount(4){
+///   ["i"]=>
+///   int(5)
+/// }
+/// object(M)#1 (1) refcount(4){
+///   ["i"]=>
+///   int(5)
+/// }
+/// object(M)#1 (1) refcount(5){
+///   ["i"]=>
+///   int(5)
+/// }
+/// object(M)#1 (1) refcount(5){
+///   ["i"]=>
+///   int(5)
+/// }
+/// ```
+///
+/// An object a handler gives up stands to the end of the step, by a
+/// variable's, a table's, an entry's and a declared slot's way alike:
+///
+/// ```php
+/// class C { public $p = "pp"; public $n = "1x"; public $i = 1; }
+/// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["o"] = 1; $GLOBALS["a"] = 1; });
+/// $o = new C; $o->p .= []; var_dump($o);
+/// $o = new C; $o->n += 1; var_dump($o);
+/// $o = new stdClass; $o->p = "pp"; $o->p .= []; var_dump($o);
+/// $a = [new C]; $a[0]->p .= []; var_dump($a);
+/// $a = [new C]; $a[0]->i += $undefined; var_dump($a);
+/// ```
+/// ```expect
+/// [Array to string conversion]
+/// int(1)
+/// [A non-numeric value encountered]
+/// int(1)
+/// [Array to string conversion]
+/// int(1)
+/// [Array to string conversion]
+/// int(1)
+/// [Undefined variable $undefined]
+/// int(1)
+/// ```
+struct StepHold {
+    held: Option<Owner<Value>>,
+    /// The collector's runs as the step began, `None` under the pair of
+    /// handlers, whose release php's own is.
+    runs: Option<u32>,
+}
+
+/// An owner php has not, given up past a handler. A collection since
+/// `runs` read the hold as an owner from outside, so it kept what php's
+/// would have freed and took it out of its buffer: with owners left the
+/// value is a possible root where it is garbage now, which nothing else
+/// would say ([`php_heap::Heap::gc_check_garbage`]). Past no collection,
+/// and of a value live past one, the buffer stands as php's does.
+///
+/// ```php
+/// class C { public $p = 'pp'; public $self; public $i = 1; }
+/// class R { public $s; }
+/// $x = null;
+/// set_error_handler(function () {
+///     $GLOBALS['o'] = null; $GLOBALS['x'] = null; gc_collect_cycles();
+///     return true;
+/// });
+/// $o = new C; $k = $o; $o->self = $o; $k->p .= [];
+/// echo gc_status()['roots'], "\n";
+/// $x = new R; $x->s = $x;
+/// $a = [new C]; $a[0]->i += $undefined;
+/// echo gc_status()['roots'], "\n";
+/// ```
+/// ```expect
+/// 1
+/// 1
+/// ```
+fn hold_given_up(req: &mut Request, held: Owner<Value>, runs: u32) {
+    let value = *held;
+    let left = held.let_go(req);
+    if req.heap_mut().gc_runs() != runs && matches!(left, Left::Owners(1..)) {
+        req.gc_check_garbage(value);
+    }
+}
+
+impl StepHold {
+    /// The hold over `object` as the opline's `op1` names it.
+    fn taken(req: &mut Request, frame: FrameRef, op: &Opline, object: PhpObject) -> StepHold {
+        let stands = match op.op1_type {
+            OperandKind::Unused => true,
+            OperandKind::Var => req
+                .slot_ptr(frame, op.op1)
+                .is_some_and(|at| Value::of_slot(at.read()).as_object().is_some()),
+            _ => false,
+        };
+        let held = (!stands).then(|| Owner::take(req, object.as_value()));
+        StepHold {
+            held,
+            runs: Some(req.heap_mut().gc_runs()),
+        }
+    }
+
+    /// The step goes through the pair of handlers, whose owner php takes.
+    fn overloaded(&mut self, req: &mut Request, object: PhpObject) {
+        self.runs = None;
+        if self.held.is_none() {
+            self.held = Some(Owner::take(req, object.as_value()));
+        }
+    }
+
+    /// The object given up, with what the step threw pending: `OBJ_RELEASE`
+    /// under the pair of handlers, and otherwise a hold php has not
+    /// ([`hold_given_up`]).
+    fn given_up<T>(&mut self, req: &mut Request, done: Result<T, Thrown>) -> Result<T, Thrown> {
+        let Some(held) = self.held.take() else {
+            return done;
+        };
+        req.freed_after(done, |req| match self.runs {
+            Some(runs) => hold_given_up(req, held, runs),
+            None => held.give_up(req),
+        })
+    }
+
+    /// The object given up past the step, unless the step did.
+    fn past<T>(
+        mut self,
+        req: &mut Request,
+        stepped: Result<Result<T, Thrown>, Fatal>,
+    ) -> Result<Result<T, Thrown>, Fatal> {
+        match stepped {
+            Err(fatal) => {
+                if let Some(held) = self.held.take() {
+                    held.abandon(&fatal);
+                }
+                Err(fatal)
+            }
+            Ok(done) => Ok(self.given_up(req, done)),
+        }
+    }
+}
+
 /// The two oplines a compound assignment to a place is, and the kernel
 /// its operator names: what every arm of `ASSIGN_DIM_OP` and
 /// `ASSIGN_OBJ_OP` is handed beside the request and the frame.
@@ -18373,13 +18600,15 @@ struct Compound<'a> {
 }
 
 impl Compound<'_> {
-    /// `GET_OP_DATA_ZVAL_PTR(BP_VAR_R)`, or the `null` an undefined CV
-    /// read early answered (`zval_undefined_cv`).
+    /// What `GET_OP_DATA_ZVAL_PTR(BP_VAR_R)` points at as it stands, or
+    /// the `null` an undefined CV read early answered
+    /// (`zval_undefined_cv`). Only a variable a handler unset since is
+    /// undefined here, and it warns of nothing.
     fn value(self, req: &mut Request, frame: FrameRef, code: &OpArray) -> Value {
         if self.read {
             return Value::null();
         }
-        exec::operand(req, frame, code, self.data.op1_type, self.data.op1)
+        exec::operand_undef(req, frame, code, self.data.op1_type, self.data.op1).undef_as_null()
     }
 }
 
@@ -18877,17 +19106,13 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
                     } else {
                         entry_past(req, (op, place), (array, key, entry), computed)
                     };
-                    placed.and_then(|(stepped, entry)| {
-                        let (landed, garbage) = match entry {
-                            Some(entry) => {
-                                assign_to_place(req, frame, entry, (stepped, OperandKind::Unused))?
-                            }
-                            None => (stepped, stepped),
-                        };
-                        write_out(req, frame, op, &landed);
-                        release_overwritten(req, garbage);
-                        Ok(())
-                    })
+                    entry_landed(
+                        req,
+                        frame,
+                        op,
+                        placed,
+                        (OperandKind::Unused, release_overwritten),
+                    )
                 }
                 // `assign_dim_op_ret_null`: `FREE_OP_DATA` and a `null`
                 // result.
@@ -19041,6 +19266,59 @@ fn stepped_entry(
 /// O dtor
 /// Cannot use object of type O as array
 /// ```
+///
+/// The dimension and the value are read afresh past `offsetGet`, which
+/// may have written either variable:
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     function offsetExists($k): bool { return true; }
+///     function offsetGet($k): mixed { echo "get $k\n"; $GLOBALS["v"] = 2; $GLOBALS["k"] = "later"; return 1; }
+///     function offsetSet($k, $v): void { echo "set $k=$v\n"; }
+///     function offsetUnset($k): void {}
+/// }
+/// $o = new A; $k = "first"; $v = 1;
+/// $o[$k] += $v;
+/// ```
+/// ```expect
+/// get first
+/// set later=3
+/// ```
+///
+/// With a throw pending over the value's warning, the standard read
+/// answers nothing, and the class that serves no dimensions refuses over
+/// the throw:
+///
+/// ```php
+/// class P {}
+/// set_error_handler(function ($no, $msg) { throw new Exception("from the handler"); });
+/// $o = new P; $k = "k";
+/// try { $o[$k] += $undefined; }
+/// catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " over ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error: Cannot use object of type P as array over Cannot use object of type P as array
+/// ```
+///
+/// The read of an `ArrayAccess` calls no `offsetGet` over the throw, and
+/// answers nothing:
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     function offsetExists($k): bool { return true; } function offsetGet($k): mixed { echo "get\n"; return 1; }
+///     function offsetSet($k, $v): void { echo "set\n"; } function offsetUnset($k): void {}
+/// }
+/// set_error_handler(function ($no, $msg) { throw new Exception("from the handler"); });
+/// $o = new A; $k = "k";
+/// try { $o[$k] += $undefined; }
+/// catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " over ", $e->getPrevious()?->getMessage(), "\n"; }
+/// try { $x = $o[$undefined]; }
+/// catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " over ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error: Cannot use object of type A as array over from the handler
+/// Exception: from the handler over
+/// ```
 fn binary_assign_op_obj_dim(
     req: &mut Request,
     frame: FrameRef,
@@ -19051,16 +19329,26 @@ fn binary_assign_op_obj_dim(
     let Compound {
         op, data, kernel, ..
     } = step;
+    let undefined = undefined_cv(req, frame, op.op2_type, op.op2);
     let dim = object_dim(req, frame, code, op);
-    let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+    exec::operand(req, frame, code, data.op1_type, data.op1);
+    // php's `property` and `value` are pointers at their operands, so
+    // each is read here where php reads through it: what a handler or
+    // `offsetGet` wrote is what the next call meets. A dimension nothing
+    // wrote stays php's `&EG(uninitialized_zval)`.
+    let dim_now = |req: &mut Request| object_dim_now(req, frame, code, op, (dim, undefined));
+    let at = dim_now(req);
     let table = req.object_handlers(object.heap());
-    let read = table.read_dimension(req, object, dim.as_ref(), DimensionRead::Warning);
+    let read = table.read_dimension(req, object, at.as_ref(), DimensionRead::Warning);
     let held = match read.map(Owner::hand_on) {
         Ok(held) => held,
         // `zend_use_object_as_array`: php's `read_dimension` answered
         // `NULL`, so the `Error` is raised over what it raised, chained.
         // An extension's table answers for itself.
-        Err(thrown) if thrown.exception().is_some() && req.std_dimensions(object.class()) => {
+        Err(thrown)
+            if (thrown.exception().is_some() || req.pending().is_some())
+                && req.std_dimensions(object.class()) =>
+        {
             req.leave_pending(&thrown);
             let ran_on = req.pending();
             let class = req.symbols().class_name(object.class()).to_vec();
@@ -19081,12 +19369,14 @@ fn binary_assign_op_obj_dim(
     // the operator or `offsetSet` threw in `EG(exception)`.
     // `write_dimension` takes an owner of its own, where php's copies
     // the value, so the one the temporary and the release read stays.
+    let value = exec::operand_undef(req, frame, code, data.op1_type, data.op1).undef_as_null();
     let (stepped, written) = match kernel(req, &held, &value) {
         Ok(stepped) => {
+            let at = dim_now(req);
             let given = Owner::take(req, stepped);
             (
                 stepped,
-                table.write_dimension(req, object, dim.as_ref(), given),
+                table.write_dimension(req, object, at.as_ref(), given),
             )
         }
         Err(thrown) => (Value::null(), Err(thrown)),
@@ -19290,9 +19580,11 @@ pub(crate) fn assign_obj_op<T: Tier>(
     // (`Z/Zend/zend_vm_def.h:1023-1026`).
     let mut member = exec::Member::default();
     let name = member.name(req, frame, code, op);
-    let read =
-        data.op1_type == OperandKind::Cv && req.slot(frame, data.op1).tag() == TypeTag::Undef;
-    if read {
+    let read = undefined_cv(req, frame, data.op1_type, data.op1);
+    let in_table = (read && op.op1_type == OperandKind::Var)
+        .then(|| entry_past_warning(req, frame, code, op, data))
+        .transpose()?;
+    if read && in_table.is_none() {
         exec::operand(req, frame, code, data.op1_type, data.op1);
     }
     let step = Compound {
@@ -19301,7 +19593,10 @@ pub(crate) fn assign_obj_op<T: Tier>(
         kernel,
         read,
     };
-    let container = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?.deref();
+    let container = match &in_table {
+        Some((held, _)) => held.deref(),
+        None => exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?.deref(),
+    };
     let written = match (name, container.as_object()) {
         (Ok(name), Some(object)) => {
             prime_constant(
@@ -19312,7 +19607,9 @@ pub(crate) fn assign_obj_op<T: Tier>(
                 object,
                 &name,
             );
-            step_property(req, frame, code, step, object, &name)?
+            let mut held = StepHold::taken(req, frame, op, object);
+            let stepped = step_property(req, frame, code, step, (object, &mut held), &name);
+            held.past(req, stepped)?
         }
         (Ok(name), None) => {
             // `GET_OP_DATA_ZVAL_PTR(BP_VAR_R)` and `ZVAL_UNDEFINED_OP1`,
@@ -19333,12 +19630,210 @@ pub(crate) fn assign_obj_op<T: Tier>(
             Err(thrown)
         }
     };
+    let written = req.freed_after(written, |req| {
+        if let Some((held, runs)) = in_table {
+            hold_given_up(req, held, runs);
+        }
+    });
     member.release(req, frame, op);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
     Ok(advance_over_data(req, frame))
+}
+
+/// An undefined `OP_DATA` warned of over the entry a `VAR` points at, and
+/// what stands there after it, as `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF` reads
+/// it past `GET_OP_DATA_ZVAL_PTR`: a handler's write is seen. Where the
+/// handler freed the entry or moved it, what the entry held is held.
+/// The owner is the caller's, past the step, with the collector's count
+/// from where it was taken.
+///
+/// ```php
+/// class C { public $i = 1; public $q; public static $s; }
+/// function t($f) {
+///     try { $f(); echo "stepped\n"; }
+///     catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// set_error_handler(function () {
+///     $GLOBALS['o'] = null; $GLOBALS['a'][0] = null; C::$s = null;
+///     return true;
+/// });
+/// t(function () { $GLOBALS['o'] = new C; $GLOBALS['o']->i += $undefined; });
+/// t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->i .= $undefined; });
+/// t(function () { C::$s = new C; C::$s->i += $undefined; });
+/// set_error_handler(function () { $GLOBALS['a'] = [new C]; unset($GLOBALS['a'][0]); return true; });
+/// t(function () { $GLOBALS['o'] = new C; $GLOBALS['o']->i .= $undefined; });
+/// set_error_handler(function () { $GLOBALS['o']->q = null; return true; });
+/// t(function () {
+///     $o = new C; $o->q = new C; $GLOBALS['o'] = $o;
+///     $o->q->i += $undefined;
+/// });
+/// ```
+/// ```expect
+/// Attempt to assign property "i" on null
+/// Attempt to assign property "i" on null
+/// Attempt to assign property "i" on null
+/// stepped
+/// Attempt to assign property "i" on null
+/// ```
+///
+/// A table's rows moving moves no entry that is not a row of it, a CV's
+/// slot or a declared property's:
+///
+/// ```php
+/// #[AllowDynamicProperties] class C { public $i = 1; public $q; }
+/// function t($f) {
+///     try { $f(); echo "stepped\n"; }
+///     catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// $o = null;
+/// set_error_handler(function () {
+///     $GLOBALS['o'] = null;
+///     for ($i = 0; $i < 300; $i++) $GLOBALS["v$i"] = 1;
+///     return true;
+/// });
+/// t(function () { $GLOBALS['o'] = new C; $GLOBALS['o']->i += $undefined; });
+/// set_error_handler(function () {
+///     $GLOBALS['o']->q = 5;
+///     for ($i = 0; $i < 100; $i++) $GLOBALS['o']->{"d$i"} = 1;
+///     return true;
+/// });
+/// t(function () {
+///     $o = new C; $o->dyn = 1; $o->q = new C; $GLOBALS['o'] = $o;
+///     $o->q->i .= $undefined;
+/// });
+/// ```
+/// ```expect
+/// Attempt to assign property "i" on null
+/// Attempt to assign property "i" on int
+/// ```
+///
+/// The object a chain's last link read holds its slots past the handler:
+///
+/// ```php
+/// class C { public $i = 1; public $q; }
+/// function t($f) {
+///     try { $f(); echo "stepped\n"; }
+///     catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// set_error_handler(function () { $GLOBALS['a'][0]->q = null; return true; });
+/// t(function () {
+///     $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C;
+///     $GLOBALS['a'][0]->q->i += $undefined;
+/// });
+/// set_error_handler(function () { $GLOBALS['a'][0]->q = 5; return true; });
+/// t(function () {
+///     $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C;
+///     $GLOBALS['a'][0]->q->i += $undefined;
+/// });
+/// ```
+/// ```expect
+/// Attempt to assign property "i" on null
+/// Attempt to assign property "i" on int
+/// ```
+///
+/// What is held here php holds nowhere, so it adds no possible root:
+///
+/// ```php
+/// class C { public $i = 1; public $q; }
+/// set_error_handler(function () { return true; });
+/// $o = new C; $o->q = new C;
+/// $o->q->i += $undefined; echo gc_status()['roots'], "\n";
+/// $a = [new C]; $a[0]->i += $undefined; echo gc_status()['roots'], "\n";
+/// function f() {
+///     $GLOBALS['g'] = new C; $GLOBALS['g']->i += $undefined;
+///     echo gc_status()['roots'], "\n";
+/// }
+/// f();
+/// ```
+/// ```expect
+/// 1
+/// 1
+/// 1
+/// ```
+fn entry_past_warning(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    data: Opline,
+) -> Result<(Owner<Value>, u32), Fatal> {
+    let runs = req.heap_mut().gc_runs();
+    let held = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
+    let held = Owner::take(req, held);
+    let place = req
+        .slot_ptr(frame, op.op1)
+        .and_then(|at| at.read().as_indirect());
+    let holder = entry_holder(req, frame, code, op, place);
+    let object = holder.and_then(|holder| holder.as_object());
+    let owner = object.map(|object| Owner::take(req, object));
+    let table = match object {
+        Some(object) => object.heap().properties(),
+        None => holder.and_then(|h| h.as_array()).map(PhpArray::heap),
+    };
+    let table = table.filter(|table| place.is_some_and(|place| table.holds_row(place)));
+    let rows = table.map(|t| (req.heap_mut().iterator_add(t, 0), t, t.rows_at()));
+    exec::operand(req, frame, code, data.op1_type, data.op1);
+    let moved = rows.is_some_and(|(at, table, rows)| {
+        !req.heap_mut().iterator_on(at, table) || table.rows_at() != rows
+    });
+    let stands = holder.is_some() && !moved;
+    if let Some((at, ..)) = rows {
+        req.heap_mut().iterator_del(at);
+    }
+    let now = if stands {
+        let now = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
+        let now = Owner::take(req, now);
+        let taken = req.heap_mut().gc_runs();
+        hold_given_up(req, held, runs);
+        (now, taken)
+    } else {
+        (held, runs)
+    };
+    if let Some(owner) = owner {
+        hold_given_up(req, owner.into_value(), runs);
+    }
+    Ok(now)
+}
+
+/// What the fetch before this opline found `place` in, an array or an
+/// object: `null` for a `VAR` that holds what it holds and for a static
+/// property, which nothing frees, and none where the fetch does not say.
+/// An object's owner is what shows its slots stand, which a write in the
+/// handler does not separate as an owner of a table would; an iterator on
+/// a table leaves its writes in place, and goes with it
+/// ([`php_heap::Heap::iterator_on`], which reads no table). A `place` out
+/// of the rows, a CV's slot a symbol table points at or an object's
+/// declared one, is not the table's to move.
+fn entry_holder(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    place: Option<php_heap::ZvalRef>,
+) -> Option<Value> {
+    let Some(place) = place else {
+        return Some(Value::null());
+    };
+    let at = req.vm().opline(frame).checked_sub(1)?;
+    let fetch = exec::opline_at(code, at).filter(|fetch| fetch.out == op.op1)?;
+    match fetch.opcode {
+        Opcode::FetchStaticPropW | Opcode::FetchStaticPropRw => Some(Value::null()),
+        Opcode::FetchW | Opcode::FetchRw => {
+            let global = fetch.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0;
+            let table = name_table(req, frame, global);
+            Some(Value::array(PhpArray::of(req.symbol_arr(table)?)))
+        }
+        Opcode::FetchDimW | Opcode::FetchDimRw => req.walked(place),
+        Opcode::FetchObjRw if fetch.op1_type == OperandKind::Var => req.walked(place),
+        Opcode::FetchObjW | Opcode::FetchObjRw if fetch.op1_type != OperandKind::Var => {
+            let object = exec::container(req, frame, fetch.op1_type, fetch.op1, "FETCH_OBJ_W");
+            object.ok().map(|object| object.deref())
+        }
+        _ => None,
+    }
 }
 
 /// The inline path of `ZEND_ASSIGN_OBJ_OP` over a constant name or one a
@@ -19431,9 +19926,25 @@ fn inline_assign_obj_op(
 /// The operation of a compound assignment over a declared property
 /// that hands out no place, readonly or set-restricted
 /// ([`Request::place_withheld`]): what `read_property` answers and the
-/// `OP_DATA` value through the kernel, the value operand given up
-/// either way, as `zend_assign_op_overloaded_property` does before its
-/// `write_property`.
+/// `OP_DATA` value through the kernel, php's
+/// `zend_assign_op_overloaded_property` up to its `write_property`, what
+/// `read_property` left pending ending it there; over a place, whose
+/// operation php makes in it, nothing pending stops the kernel.
+///
+/// ```php
+/// set_error_handler(function ($no, $msg) { throw new Exception("from the handler"); });
+/// class M { function __get($n) { return 5; } function __set($n, $v) { echo "set\n"; } }
+/// foreach ([new M, new stdClass] as $o) {
+///     $o->p = 5;
+///     try { $o->p %= $undefined; }
+///     catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// set
+/// Exception: from the handler
+/// DivisionByZeroError: Modulo by zero
+/// ```
 fn withheld_step(
     req: &mut Request,
     frame: FrameRef,
@@ -19441,22 +19952,24 @@ fn withheld_step(
     step: Compound<'_>,
     object: PhpObject,
     name: &[u8],
-    read: PropertyRead,
+    back: WriteBack,
 ) -> Result<Value, Thrown> {
-    let Compound {
-        op, data, kernel, ..
-    } = step;
-    let value = step.value(req, frame, code);
+    let Compound { op, kernel, .. } = step;
     let table = req.object_handlers(object.heap());
-    let computed = match table.read_property(req, object, name, read) {
+    let computed = match table.read_property(req, object, name, back.read()) {
         Ok(held) => {
-            let computed = kernel(req, &held, &value);
+            // Past the read, whose `__get` may have written the variable.
+            let value = step.value(req, frame, code);
+            let computed = match back {
+                WriteBack::Property => none_pending(req),
+                WriteBack::Entry | WriteBack::Apart => Ok(()),
+            }
+            .and_then(|()| kernel(req, &held, &value));
             held.give_up(req);
             computed
         }
         Err(thrown) => Err(thrown),
     };
-    exec::free_operand(req, frame, data.op1_type, data.op1);
     if computed.is_err() {
         write_out(req, frame, op, &Value::null());
     }
@@ -19557,7 +20070,7 @@ fn step_property(
     frame: FrameRef,
     code: &OpArray,
     step: Compound<'_>,
-    object: PhpObject,
+    (object, held): (PhpObject, &mut StepHold),
     name: &Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
     let Compound { op, data, .. } = step;
@@ -19589,10 +20102,20 @@ fn step_property(
             return Ok(Err(nulled_out(req, frame, op, thrown)));
         }
     };
+    // The end of `zend_assign_op_overloaded_property`, `OBJ_RELEASE(object)`,
+    // and the handler's `FREE_OP_DATA()` after it, in that order.
+    let overloaded_past = |req: &mut Request, held: &mut StepHold, written| {
+        let written = held.given_up(req, written);
+        req.freed_after(written, |req| {
+            exec::free_operand(req, frame, data.op1_type, data.op1);
+        })
+    };
     match ptr {
-        PropertyPtr::Served(back) => Ok(served_property_step(
-            req, frame, code, step, object, key, back,
-        )),
+        PropertyPtr::Served(back) => {
+            held.overloaded(req, object);
+            let written = served_property_step(req, frame, code, step, object, key, back);
+            Ok(overloaded_past(req, held, written))
+        }
         // `zend_binary_assign_op_obj_dim` over the bucket: a number pair
         // made in place by the rule the inline path and the kernel make
         // it by, and anything else, whose operation may raise and so run
@@ -19611,64 +20134,70 @@ fn step_property(
             if let Some(done) = union_over_entry(req, frame, code, step, place) {
                 return Ok(done);
             }
-            Ok(served_property_step(
-                req,
-                frame,
-                code,
-                step,
-                object,
-                key,
-                WriteBack::Property,
-            ))
+            let back = WriteBack::Entry;
+            let written = served_property_step(req, frame, code, step, object, key, back);
+            Ok(req.freed_after(written, |req| {
+                exec::free_operand(req, frame, data.op1_type, data.op1);
+            }))
         }
         // A readonly or set-restricted property gets no place, so the
         // operation is made over what `read_property` answers, and what
         // it throws comes before what the write refuses
         // (`zend_assign_op_overloaded_property`).
         PropertyPtr::Withheld => {
-            let precomputed =
-                match withheld_step(req, frame, code, step, object, bytes, PropertyRead::Warning) {
-                    Ok(stepped) => stepped,
-                    Err(thrown) => return Ok(Err(thrown)),
-                };
-            let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
-            match req.declared_slot_for_write(object, bytes, "modify", silent) {
-                Ok(Some((slot, typed))) => {
-                    let written = step_slot(
-                        req,
-                        frame,
-                        code,
-                        step,
-                        (object, slot, typed),
-                        bytes,
-                        Some(precomputed),
-                    )?;
-                    // `zend_std_write_property`'s `Z_PROP_FLAG_P(variable_ptr)
-                    // &= ~IS_PROP_REINITABLE`: the write
-                    // `zend_assign_op_overloaded_property` makes locks a
-                    // readonly property `__clone` reinitialised again.
-                    if written.is_ok() {
-                        object
-                            .heap()
-                            .set_slot_bit(slot, php_heap::PropBit::Reinitable, false);
-                    }
-                    Ok(written)
-                }
-                Ok(None) => {
-                    req.release(precomputed);
-                    Err(Fatal::error(
-                        "InternalError: ZEND_ASSIGN_OBJ_OP withheld the place of a property no class declared",
-                    ))
-                }
-                Err(thrown) => {
-                    req.release(precomputed);
-                    write_out(req, frame, op, &Value::null());
-                    Ok(Err(thrown))
-                }
-            }
+            held.overloaded(req, object);
+            let written = withheld_property_step(req, frame, code, step, object, bytes);
+            written.map(|done| overloaded_past(req, held, done))
         }
         PropertyPtr::Slot(slot, typed) => {
             step_slot(req, frame, code, step, (object, slot, typed), bytes, None)
+        }
+    }
+}
+
+/// [`step_property`] over a property that hands out no place: what
+/// [`withheld_step`] made written through the declared slot, whose write
+/// refuses what the scope may not do.
+fn withheld_property_step(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    object: PhpObject,
+    bytes: &[u8],
+) -> Result<Result<(), Thrown>, Fatal> {
+    let op = step.op;
+    let precomputed =
+        match withheld_step(req, frame, code, step, object, bytes, WriteBack::Property) {
+            Ok(stepped) => stepped,
+            Err(thrown) => return Ok(Err(thrown)),
+        };
+    let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
+    match req.declared_slot_for_write(object, bytes, "modify", silent) {
+        Ok(Some((slot, typed))) => {
+            let at = (object, slot, typed);
+            let written = step_slot(req, frame, code, step, at, bytes, Some(precomputed))?;
+            // `zend_std_write_property`'s `Z_PROP_FLAG_P(variable_ptr)
+            // &= ~IS_PROP_REINITABLE`: the write
+            // `zend_assign_op_overloaded_property` makes locks a
+            // readonly property `__clone` reinitialised again.
+            if written.is_ok() {
+                object
+                    .heap()
+                    .set_slot_bit(slot, php_heap::PropBit::Reinitable, false);
+            }
+            Ok(written)
+        }
+        Ok(None) => {
+            req.release(precomputed);
+            Err(Fatal::error(
+                "InternalError: ZEND_ASSIGN_OBJ_OP withheld the place of a property no class declared",
+            ))
+        }
+        Err(thrown) => {
+            req.release(precomputed);
+            write_out(req, frame, op, &Value::null());
+            Ok(Err(thrown))
         }
     }
 }
@@ -20067,7 +20596,47 @@ fn slot_step(
 /// }
 /// ```
 ///
-/// The stepped value is written back as `back` says.
+/// The stepped value is written back as `back` says, and the value
+/// operand is freed past that write, php's `FREE_OP_DATA()`:
+///
+/// ```php
+/// class D { function __toString() { return "d"; } function __destruct() { echo "dtor\n"; } }
+/// class M { function __get($n) { return "a"; } function __set($n, $v) { echo "set $n=$v\n"; } }
+/// $o = new M;
+/// $o->p .= new D;
+/// ```
+/// ```expect
+/// set p=ad
+/// dtor
+/// ```
+///
+/// The object goes before the `OP_DATA`, `OBJ_RELEASE(object)` closing
+/// `zend_assign_op_overloaded_property` and `FREE_OP_DATA()` after it,
+/// over a handler that gives up the program's owner, and over a property
+/// that hands out no place.
+///
+/// ```php
+/// class D { function __destruct() { echo "dtor D\n"; } function __toString() { return "d"; } }
+/// class M {
+///     function __get($n) { $GLOBALS['o'] = null; return "a"; }
+///     function __set($n, $v) { echo "set $n=$v\n"; }
+///     function __destruct() { echo "dtor M\n"; }
+/// }
+/// class S { public private(set) string $s = "s"; function __destruct() { echo "dtor S\n"; } }
+/// $o = new M;
+/// $o->p .= new D;
+/// set_error_handler(function () { $GLOBALS['s'] = null; return true; });
+/// $s = new S;
+/// try { $s->s .= [new D]; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// set p=ad
+/// dtor M
+/// dtor D
+/// dtor S
+/// dtor D
+/// Cannot modify private(set) property S::$s from global scope
+/// ```
 fn served_property_step(
     req: &mut Request,
     frame: FrameRef,
@@ -20078,30 +20647,35 @@ fn served_property_step(
     back: WriteBack,
 ) -> Result<(), Thrown> {
     let op = step.op;
-    let stepped = withheld_step(req, frame, code, step, object, name.as_bytes(), back.read())?;
-    write_out(req, frame, op, &stepped);
-    if back == WriteBack::Apart {
-        req.release(stepped);
-        return Ok(());
-    }
-    // `write_property` takes an owner of the value and of the name, on
-    // every arm: the stepped value's own, which php's `zval_ptr_dtor(&res)`
-    // gives up after the write, and one more of the name, which the
-    // operand keeps its own of.
-    let name = Owner::take(req, name);
-    let stepped = Owner::adopt(stepped);
-    let table = req.object_handlers(object.heap());
-    table.write_property(req, object, name, stepped)
+    let read = withheld_step(req, frame, code, step, object, name.as_bytes(), back);
+    read.and_then(|stepped| {
+        write_out(req, frame, op, &stepped);
+        if back == WriteBack::Apart {
+            req.release(stepped);
+            return Ok(());
+        }
+        // `write_property` takes an owner of the value and of the name,
+        // on every arm: the stepped value's own, which php's
+        // `zval_ptr_dtor(&res)` gives up after the write, and one more of
+        // the name, which the operand keeps its own of.
+        let name = Owner::take(req, name);
+        let stepped = Owner::adopt(stepped);
+        let table = req.object_handlers(object.heap());
+        table.write_property(req, object, name, stepped)
+    })
 }
 
 /// Where a compound write or a step over a property the class serves
 /// goes after the operation: back through `write_property`
-/// (`zend_assign_op_overloaded_property`), or nowhere, the class having
-/// answered a place of its own ([`PropertyPlace::Apart`], php's pointer
-/// into `sxe->tmp`) that the operation changes in place.
+/// (`zend_assign_op_overloaded_property`), back through it for a dynamic
+/// property's entry, the pair standing in for php's operation in the
+/// bucket, or nowhere, the class having answered a place of its own
+/// ([`PropertyPlace::Apart`], php's pointer into `sxe->tmp`) that the
+/// operation changes in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriteBack {
     Property,
+    Entry,
     Apart,
 }
 
@@ -20119,7 +20693,7 @@ impl WriteBack {
     /// the class keeps apart.
     fn read(self) -> PropertyRead {
         match self {
-            WriteBack::Property => PropertyRead::Warning,
+            WriteBack::Property | WriteBack::Entry => PropertyRead::Warning,
             WriteBack::Apart => PropertyRead::Write,
         }
     }
@@ -20329,6 +20903,14 @@ impl IncDec {
         increment: false,
     };
 
+    fn arith(self) -> Arith {
+        if self.increment {
+            Arith::Add
+        } else {
+            Arith::Sub
+        }
+    }
+
     fn kernel(self) -> fn(&mut Request, &Value) -> Result<Value, Thrown> {
         if self.increment {
             crate::ops::increment
@@ -20380,12 +20962,9 @@ fn stepped_obj(
     let stepped = match (member.name(req, frame, code, op), container.as_object()) {
         (Ok(name), Some(object)) => {
             prime_constant(req, frame, op, property_cache_slot(op), object, &name);
-            // A step's diagnostic can reach a handler that gives the
-            // object up.
-            let kept = Owner::take(req, object.as_value());
-            let stepped = incdec_property(req, frame, op, step, object, &name);
-            kept.let_go(req);
-            stepped?
+            let mut held = StepHold::taken(req, frame, op, object);
+            let stepped = incdec_property(req, frame, op, step, (object, &mut held), &name);
+            held.past(req, stepped)?
         }
         (Ok(name), None) => {
             let name = name.as_str_bytes().unwrap_or_default();
@@ -20487,21 +21066,9 @@ fn inline_incdec_obj(
 ) -> Option<Edge> {
     let b = ByKind(op.op2_type);
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
-    let (place, ty) = inline_place(
-        req,
-        (frame, code, op),
-        b,
-        property_cache_slot(op),
-        object,
-        true,
-    )?;
+    let (place, ty) = opline_place(req, (frame, code, op), b, object, true)?;
     let held = place.read();
-    let arith = if step.increment {
-        Arith::Add
-    } else {
-        Arith::Sub
-    };
-    let stepped = inline::step(arith, held)?;
+    let stepped = inline::step(step.arith(), held)?;
     if !ty.admits(stepped) {
         return None;
     }
@@ -20604,7 +21171,7 @@ fn incdec_property(
     frame: FrameRef,
     op: &Opline,
     step: IncDec,
-    object: PhpObject,
+    (object, held): (PhpObject, &mut StepHold),
     name: &Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
     let bytes = name.as_str_bytes().unwrap_or_default();
@@ -20630,10 +21197,13 @@ fn incdec_property(
         req.give_back_guard(lent);
         ptr.map(|ptr| (object, ptr))
     });
+    let served =
+        |req: &mut Request, object, back| served_incdec(req, frame, op, step, object, key, back);
     let (object, (slot, typed)) = match placed {
         Ok((object, PropertyPtr::Slot(slot, typed))) => (object, (slot, typed)),
         Ok((object, PropertyPtr::Served(back))) => {
-            return Ok(served_incdec(req, frame, op, step, object, key, back));
+            held.overloaded(req, object);
+            return Ok(served(req, object, back));
         }
         // `zend_pre_incdec_property_zval` over the bucket: a number
         // stepped in place by the rule the kernel steps it by, and
@@ -20642,13 +21212,8 @@ fn incdec_property(
         // the entry laid down.
         Ok((object, PropertyPtr::Dynamic(place))) => {
             let held = place.read();
-            let arith = if step.increment {
-                Arith::Add
-            } else {
-                Arith::Sub
-            };
-            let Some(stepped) = inline::step(arith, held) else {
-                return Ok(overloaded_incdec(req, frame, op, step, object, key));
+            let Some(stepped) = inline::step(step.arith(), held) else {
+                return Ok(served(req, object, WriteBack::Property));
             };
             place.write(stepped);
             let out = Value::of_slot(if step.post { held } else { stepped });
@@ -20659,7 +21224,8 @@ fn incdec_property(
         // step is the overloaded one, and what the write refuses is
         // chained onto what the step threw.
         Ok((object, PropertyPtr::Withheld)) => {
-            return Ok(overloaded_incdec(req, frame, op, step, object, key));
+            held.overloaded(req, object);
+            return Ok(served(req, object, WriteBack::Property));
         }
         Err(thrown) => return Ok(Err(nulled_out(req, frame, op, thrown))),
     };
@@ -20784,7 +21350,7 @@ fn typed_step(
 /// `read_property` under `BP_VAR_R`, the step over a dereferenced copy
 /// of what it answered, the temporary written with the value before or
 /// after it, and `write_property` with the stepped value, or with the
-/// copy unchanged where the step was refused.
+/// copy unchanged where the step was refused, as `back` says.
 ///
 /// ```php
 /// $o = new class { public $bar; function __construct() { $this->bar = new stdClass; } function &__get($x) { return $this->bar; } };
@@ -20796,18 +21362,6 @@ fn typed_step(
 /// Cannot increment stdClass
 /// bool(true)
 /// ```
-fn overloaded_incdec(
-    req: &mut Request,
-    frame: FrameRef,
-    op: &Opline,
-    step: IncDec,
-    object: PhpObject,
-    name: crate::api::values::PhpString,
-) -> Result<(), Thrown> {
-    served_incdec(req, frame, op, step, object, name, WriteBack::Property)
-}
-
-/// [`overloaded_incdec`] with the stepped value written back as `back` says.
 #[allow(clippy::too_many_arguments)] // the site's operands, and where the result goes
 fn served_incdec(
     req: &mut Request,
@@ -28745,37 +29299,39 @@ pub(crate) mod inline_path {
         super::inlined::<T>(req, frame, code, at, inline)
     }
 
-    /// `ZEND_ADD` over two numbers.
-    #[inline(always)] // in the loop and in the handler
-    pub(crate) fn add<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_arith(slots, code, op, Arith::Add, (A::default(), B::default()))
+    /// `ZEND_ADD`, `ZEND_SUB` and `ZEND_MUL` over two numbers, and the
+    /// same op fused to the `ASSIGN` of its temporary to a CV. The loop
+    /// alone serves the fusion: the handler serves the op alone.
+    macro_rules! arith {
+        ($($op:ident, $assign_cv:ident, $arith:ident;)*) => {$(
+            #[inline(always)] // in the loop and in the handler
+            pub(crate) fn $op<A: Operand + Default, B: Operand + Default>(
+                slots: &mut [Zval],
+                code: &OpArray,
+                op: &Opline,
+                _: u32,
+            ) -> Option<Inline> {
+                inline_arith(slots, code, op, Arith::$arith, (A::default(), B::default()))
+            }
+
+            #[inline(always)] // in the loop
+            #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
+            pub(crate) fn $assign_cv<A: Operand + Default, B: Operand + Default>(
+                slots: &mut [Zval],
+                code: &OpArray,
+                op: &Opline,
+                at: u32,
+            ) -> Option<Inline> {
+                let kinds = (A::default(), B::default());
+                inline_arith_assign(slots, code, op, at, Arith::$arith, kinds)
+            }
+        )*};
     }
 
-    /// `ZEND_SUB` over two numbers.
-    #[inline(always)] // in the loop and in the handler
-    pub(crate) fn sub<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_arith(slots, code, op, Arith::Sub, (A::default(), B::default()))
-    }
-
-    /// `ZEND_MUL` over two numbers.
-    #[inline(always)] // in the loop and in the handler
-    pub(crate) fn mul<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_arith(slots, code, op, Arith::Mul, (A::default(), B::default()))
+    arith! {
+        add, add_assign_cv, Add;
+        sub, sub_assign_cv, Sub;
+        mul, mul_assign_cv, Mul;
     }
 
     /// `ZEND_DIV` over the kinds its opline names. The loop alone serves
@@ -28786,64 +29342,6 @@ pub(crate) mod inline_path {
     pub(crate) fn div(slots: &mut [Zval], code: &OpArray, op: &Opline, _: u32) -> Option<Inline> {
         let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
         inline_arith(slots, code, op, Binary::Div, kinds)
-    }
-
-    /// `ZEND_ADD` and the `ASSIGN` of its temporary to a CV fused to it.
-    /// The loop alone serves it: the handler serves the `ADD` alone.
-    #[inline(always)] // in the loop
-    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
-    pub(crate) fn add_assign_cv<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_arith_assign(
-            slots,
-            code,
-            op,
-            at,
-            Arith::Add,
-            (A::default(), B::default()),
-        )
-    }
-
-    /// `ZEND_SUB` and the `ASSIGN` fused to it, as [`add_assign_cv`].
-    #[inline(always)] // in the loop
-    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
-    pub(crate) fn sub_assign_cv<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_arith_assign(
-            slots,
-            code,
-            op,
-            at,
-            Arith::Sub,
-            (A::default(), B::default()),
-        )
-    }
-
-    /// `ZEND_MUL` and the `ASSIGN` fused to it, as [`add_assign_cv`].
-    #[inline(always)] // in the loop
-    #[cfg(not(dispatch = "tailcall"))] // the held loop alone serves it
-    pub(crate) fn mul_assign_cv<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_arith_assign(
-            slots,
-            code,
-            op,
-            at,
-            Arith::Mul,
-            (A::default(), B::default()),
-        )
     }
 
     /// `ZEND_DIV` over the kinds its opline names and the `ASSIGN` fused

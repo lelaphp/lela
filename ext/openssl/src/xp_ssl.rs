@@ -2060,7 +2060,26 @@ impl Crypto for Layer {
 
     /// `STREAM_XPORT_OP_CONNECT`'s tail and the accept's: where the
     /// `transport` enables crypto as it connects, set up and enabled, and
-    /// php's `Failed to enable crypto` where that failed.
+    /// php's `Failed to enable crypto` where that failed, the connect's
+    /// `error_code` standing as the failure's, `EINPROGRESS` under an
+    /// async connect:
+    ///
+    /// ```php
+    /// $srv = stream_socket_server('tcp://127.0.0.1:0');
+    /// $n = stream_socket_get_name($srv, false);
+    /// foreach ([STREAM_CLIENT_CONNECT, STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT] as $flags) {
+    ///     $s = @stream_socket_client("tls://$n", $errno, $errstr, 0.05, $flags);
+    ///     var_dump($s, $errno !== 0, $errstr);
+    /// }
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// string(0) ""
+    /// bool(false)
+    /// bool(true)
+    /// string(0) ""
+    /// ```
     fn connected(
         &mut self,
         req: &mut Request,

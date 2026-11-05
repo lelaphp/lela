@@ -370,7 +370,7 @@ impl Request {
                         return Ok(false);
                     }
                 }
-                Err(Unresolved::Missing(_)) => {}
+                Err(Unresolved::Missing(_) | Unresolved::Url(_)) => {}
                 Err(Unresolved::Threw(thrown)) => return Err(thrown),
             }
         }
@@ -1086,7 +1086,7 @@ impl Request {
     fn kept_on_disk(&mut self, written: &[u8], file_cache: &FileCache) -> Result<bool, Thrown> {
         let full = match self.code_mut().resolve_path(written) {
             Ok(full) => full,
-            Err(Unresolved::Missing(_)) => return Ok(false),
+            Err(Unresolved::Missing(_) | Unresolved::Url(_)) => return Ok(false),
             Err(Unresolved::Threw(thrown)) => return Err(thrown),
         };
         let validation = match self.admission(&full) {
@@ -1268,7 +1268,7 @@ impl UnitCache<'_> {
     pub fn invalidate(&mut self, written: &[u8], how: Invalidation) -> Result<bool, Thrown> {
         let (path, on_disk) = match self.req.code_mut().resolve_path(written) {
             Ok(path) => (path, true),
-            Err(Unresolved::Missing(_)) => (written.to_vec(), false),
+            Err(Unresolved::Missing(_) | Unresolved::Url(_)) => (written.to_vec(), false),
             Err(Unresolved::Threw(thrown)) => return Err(thrown),
         };
         if let Some(file_cache) = self.req.file_cache_of(&path) {
@@ -1313,7 +1313,7 @@ impl UnitCache<'_> {
                     },
                     Err(refused) => Err((path, refused.into())),
                 },
-                Err(Unresolved::Missing(reason)) => {
+                Err(Unresolved::Missing(reason) | Unresolved::Url(reason)) => {
                     let refused = req.environment_mut().check_open_basedir(written, true);
                     Err((written.to_vec(), refused.err().map_or(reason, Into::into)))
                 }

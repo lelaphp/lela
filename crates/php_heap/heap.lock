@@ -28,6 +28,7 @@ Arr::forward
 Arr::get
 Arr::has_empty_ind
 Arr::has_iterators
+Arr::holds_row
 Arr::is_empty
 Arr::is_immutable
 Arr::is_packed
@@ -42,6 +43,7 @@ Arr::position
 Arr::protect
 Arr::refcount
 Arr::reset
+Arr::rows_at
 Arr::set_declared_rows
 Arr::set_has_empty_ind
 Arr::set_next_free
@@ -158,12 +160,14 @@ Heap::fatal_leaving
 Heap::free_block
 Heap::free_object_storage
 Heap::gc_call_destructor
+Heap::gc_check_garbage
 Heap::gc_check_possible_root
 Heap::gc_collect_cycles
 Heap::gc_enable
 Heap::gc_enabled
 Heap::gc_mem_caches
 Heap::gc_protect
+Heap::gc_runs
 Heap::gc_startup
 Heap::gc_status
 Heap::has_oom

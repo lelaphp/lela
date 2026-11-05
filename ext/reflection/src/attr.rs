@@ -782,10 +782,10 @@ impl ReflectionAttribute {
     /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let kept = this_attribute(req, this.object())?;
-        let mut out = format!(
+        let mut out = crate::Text::from(format!(
             "Attribute [ {} ]",
             String::from_utf8_lossy(&kept.attribute.name.0)
-        );
+        ));
         if kept.attribute.arguments.is_empty() {
             out.push('\n');
             return PhpString::new(req, out.as_bytes());
@@ -795,11 +795,10 @@ impl ReflectionAttribute {
         for (at, argument) in kept.attribute.arguments.iter().enumerate() {
             write!(out, "    Argument #{at} [ ").ok();
             if let Some(name) = &argument.name {
-                out.push_str(&String::from_utf8_lossy(&name.0));
+                out.push_str(&*name.0);
                 out.push_str(" = ");
             }
-            let written = default_value_string(req, &argument.value);
-            out.push_str(&written);
+            out.push_str(default_value_string(req, &argument.value));
             out.push_str(" ]\n");
         }
         out.push_str("  }\n}\n");

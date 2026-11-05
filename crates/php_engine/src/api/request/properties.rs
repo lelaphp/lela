@@ -3178,6 +3178,25 @@ impl Request {
             .map(ReadWriteSlot::Placed)
     }
 
+    /// The warning of a slot no one wrote, then the null it reads as,
+    /// unless a handler wrote the property: php's `/* An error handler may
+    /// set the property */`.
+    ///
+    /// ```php
+    /// class C { public $p = 1; }
+    /// set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["o"]->p = 5; });
+    /// $o = new C;
+    /// unset($o->p);
+    /// $o->p += 1;
+    /// var_dump($o);
+    /// ```
+    /// ```expect
+    /// [Undefined property: C::$p]
+    /// object(C)#2 (1) {
+    ///   ["p"]=>
+    ///   int(6)
+    /// }
+    /// ```
     fn read_before_write_at(
         &mut self,
         object: PhpObject,
@@ -3200,10 +3219,12 @@ impl Request {
         if placed.ty.typed() {
             return Err(self.uninitialized_property(placed.declaring, name));
         }
-        // `ZVAL_NULL(retval)` before the warning, so what an error handler
-        // writes into the slot is what the fetch then reads.
-        self.write_declared_slot(o, placed.slot, Value::null())?;
         self.undefined_property(class, name);
+        // "An error handler may set the property": `ZVAL_NULL(retval)`
+        // over a slot it left unwritten or unset again.
+        if o.slot(placed.slot).is_undef() {
+            self.write_declared_slot(o, placed.slot, Value::null())?;
+        }
         Ok(())
     }
 

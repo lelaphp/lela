@@ -4508,7 +4508,10 @@ impl StreamLayer for Request {
                     })?);
                 }
                 Err(crate::api::request::Unresolved::Threw(thrown)) => return Err(thrown),
-                Err(crate::api::request::Unresolved::Missing(_)) => {}
+                Err(
+                    crate::api::request::Unresolved::Missing(_)
+                    | crate::api::request::Unresolved::Url(_),
+                ) => {}
             }
         }
         let to_open = resolved

@@ -1133,7 +1133,7 @@ fn stream_resolve_include_path(
     match req.code_mut().resolve_path(&filename) {
         Ok(path) => return Ok(OrFalse::Value(PhpString::new(req, &path)?)),
         Err(Unresolved::Threw(thrown)) => return Err(thrown),
-        Err(Unresolved::Missing(_)) => {}
+        Err(Unresolved::Missing(_) | Unresolved::Url(_)) => {}
     }
     let cwd = req.environment().cwd().as_os_str().as_bytes().to_vec();
     let realpath = |req: &mut Request, path: &[u8]| {

@@ -257,7 +257,7 @@ fn resolve_path(req: &mut Request, written: &[u8]) -> Result<Vec<u8>, Unresolved
     if scheme_length(written).is_some() {
         return match req.locate_for(written, for_include) {
             (Located::Plain, local) => req.realpath_file(&local).map_err(Unresolved::Missing),
-            _ => Err(not_found()),
+            _ => Err(Unresolved::Url(std::io::ErrorKind::NotFound.into())),
         };
     }
     let include_path = req.ini().get(b"include_path").unwrap_or_default().to_vec();

@@ -64,7 +64,7 @@ impl Request {
     }
 
     /// The array of `table`, none for one freed in its place.
-    pub(super) fn symbol_arr(&self, table: TableId) -> Option<Arr> {
+    pub(crate) fn symbol_arr(&self, table: TableId) -> Option<Arr> {
         self.tables.get(table.0 as usize)?.arr()
     }
 

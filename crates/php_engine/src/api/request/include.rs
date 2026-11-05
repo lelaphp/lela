@@ -681,6 +681,40 @@ impl Request {
     /// D/x/a.inc
     /// D/x/b.inc
     /// ```
+    ///
+    /// The quiet walk over a URL no wrapper answers says nothing of a
+    /// remote host, and the open that follows reports it; the wrapper the
+    /// walk could not find is warned of in the construct's name:
+    ///
+    /// ```php
+    /// set_include_path('.');
+    /// include 'file://host/x';
+    /// include_once 'FILE://host/y';
+    /// include_once 'nosuchscheme://x';
+    /// ```
+    /// ```expect
+    /// Warning: include(): Remote host file access not supported, file://host/x in %SCRATCH%/witness.php on line 3
+    ///
+    /// Warning: include(file://host/x): Failed to open stream: no suitable wrapper could be found in %SCRATCH%/witness.php on line 3
+    ///
+    /// Warning: include(): Failed opening 'file://host/x' for inclusion (include_path='.') in %SCRATCH%/witness.php on line 3
+    ///
+    /// Warning: include_once(): Remote host file access not supported, FILE://host/y in %SCRATCH%/witness.php on line 4
+    ///
+    /// Warning: include_once(FILE://host/y): Failed to open stream: no suitable wrapper could be found in %SCRATCH%/witness.php on line 4
+    ///
+    /// Warning: include_once(): Failed opening 'FILE://host/y' for inclusion (include_path='.') in %SCRATCH%/witness.php on line 4
+    ///
+    /// Warning: include_once(): Unable to find the wrapper "nosuchscheme" - did you forget to enable it when you configured PHP? in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: include_once(): Unable to find the wrapper "nosuchscheme" - did you forget to enable it when you configured PHP? in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: include_once(): Unable to find the wrapper "nosuchscheme" - did you forget to enable it when you configured PHP? in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: include_once(nosuchscheme://x): Failed to open stream: No such file or directory in %SCRATCH%/witness.php on line 5
+    ///
+    /// Warning: include_once(): Failed opening 'nosuchscheme://x' for inclusion (include_path='.') in %SCRATCH%/witness.php on line 5
+    /// ```
     fn include_through(
         &mut self,
         kind: IncludeKind,
@@ -700,20 +734,23 @@ impl Request {
             None if !kind.once() && is_wrapper_url(written) => {
                 return self.include_stream(kind, written, written);
             }
-            None => match self.code_mut().resolve_path(written) {
-                Ok(path) => Cow::Owned(path),
-                Err(Unresolved::Threw(thrown)) => return Err(thrown),
-                Err(_) if is_wrapper_url(written) => {
-                    return self.include_stream(kind, written, written);
+            None => {
+                let outer = self.include.including.replace((kind, self.vm.depth()));
+                let resolved = self.code_mut().resolve_path(written);
+                self.include.including = outer;
+                match resolved {
+                    Ok(path) => Cow::Owned(path),
+                    Err(Unresolved::Threw(thrown)) => return Err(thrown),
+                    Err(Unresolved::Missing(reason)) if !is_wrapper_url(written) => {
+                        // The plain files wrapper is handed the path as
+                        // written, and asks the guard of it before it opens.
+                        let refused = self.include_guard(kind, written, written);
+                        return refused
+                            .unwrap_or_else(|| self.not_opened(kind, written, &reason, written));
+                    }
+                    Err(_) => return self.include_stream(kind, written, written),
                 }
-                Err(Unresolved::Missing(reason)) => {
-                    // The plain files wrapper is handed the path as written,
-                    // and asks the guard of it before it opens.
-                    let refused = self.include_guard(kind, written, written);
-                    return refused
-                        .unwrap_or_else(|| self.not_opened(kind, written, &reason, written));
-                }
-            },
+            }
         };
         let by_path = match as_written {
             None if kind.once() => self.file_once_key(written, &path),

@@ -381,14 +381,16 @@ pub fn listen_fd(fd: BorrowedFd<'_>, backlog: i32) -> std::io::Result<()> {
 /// in progress is left to finish and the socket not to block, the program
 /// asking `stream_select` when it has; otherwise the socket polled for
 /// writing within `timeout`, `None` to wait for ever, its `SO_ERROR` read,
-/// and the socket set to block again. The `Err` is the connect's `errno`,
-/// `ETIMEDOUT` where the time ran out.
+/// and the socket set to block again. The `Ok` is what php leaves in
+/// `*error_code`, `EINPROGRESS` over a connect left to finish and nothing
+/// otherwise; the `Err` is the connect's `errno`, `ETIMEDOUT` where the
+/// time ran out.
 pub fn connect_fd(
     fd: BorrowedFd<'_>,
     addr: &SocketAddr,
     asynchronous: bool,
     timeout: Option<Duration>,
-) -> std::io::Result<()> {
+) -> std::io::Result<i32> {
     set_fd_blocking(fd, false)?;
     let raw = RawAddr::of(addr);
     let (at, len) = raw.parts();
@@ -401,7 +403,7 @@ pub fn connect_fd(
             return Err(error);
         }
         if asynchronous {
-            return Ok(());
+            return Ok(libc::EINPROGRESS);
         }
         if !poll_fd(fd.as_fd(), Readiness::Writable, timeout)? {
             return Err(std::io::Error::from_raw_os_error(libc::ETIMEDOUT));
@@ -429,5 +431,5 @@ pub fn connect_fd(
     if !asynchronous {
         set_fd_blocking(fd, true)?;
     }
-    Ok(())
+    Ok(0)
 }
