@@ -369,21 +369,24 @@ enum InPlace {
     Leave,
 }
 
-/// The call a method's `INIT_*` pushes in place, and what holds the
-/// callee the trace recorded before it.
+/// The call an `INIT_*` pushes in place, and what holds the callee the
+/// trace recorded before it.
 struct PushAt {
     plain: PlainCall,
     held: HeldBy,
 }
 
-/// What holds a method's call pushed in place to the callee the trace
-/// recorded: the class guard before it on a receiver of a published class,
-/// whose table answers the one method in every request; or the pair the
-/// opline's runtime-cache slot holds, which compiled code reads in the
-/// request it runs in, and the class it is held to.
+/// What holds a call pushed in place to the callee the trace recorded:
+/// the class guard before it on a receiver of a published class, whose
+/// table answers the one method in every request; or what the opline's
+/// runtime-cache slot holds, which compiled code reads in the request it
+/// runs in, the pair and the class it is held to, or a function.
 enum HeldBy {
     Class(Object, ClassId),
     Pair(CalleeSlot, PairClass),
+    /// A function's call by its name: the callee the slot holds, which
+    /// the request's image of the call names.
+    Slot(MapPtrRaw),
 }
 
 /// What a send wrote into a call's argument: the types of what it sent,
@@ -916,6 +919,7 @@ impl<'a> Builder<'a> {
                 self.method_at((frame, func, at), &op, (op1, samples[0]), seen, next)
             }
             Opcode::InitStaticMethodCall => self.static_at((func, at), &op, next),
+            Opcode::InitFcallByName | Opcode::InitNsFcallByName => self.named_at(func, &op, next),
             _ => None,
         };
         let fetched = self.view.fetched_slot(func, &op);
@@ -934,7 +938,11 @@ impl<'a> Builder<'a> {
                 None
             }
             Some(HeldBy::Pair(slot, class)) => Some((*slot, *class)),
-            None => None,
+            Some(HeldBy::Slot(_)) | None => None,
+        };
+        let named = match pushed.as_ref().map(|pushed| &pushed.held) {
+            Some(HeldBy::Slot(slot)) => Some(*slot),
+            _ => None,
         };
         if let (Form::Inline, Some(property)) = (form, property)
             && property.slot.cached().is_none()
@@ -951,6 +959,7 @@ impl<'a> Builder<'a> {
         self.sampled.insert(idx, samples);
         let cached = (property.and_then(|property| property.slot.cached()))
             .or_else(|| pair.map(|(slot, _)| slot.cached()))
+            .or(named)
             .or(fetched);
         let map_ptr = match cached {
             Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
@@ -1029,6 +1038,7 @@ impl<'a> Builder<'a> {
                     checks,
                     defaults,
                 },
+                _ if named.is_some() => Imm::Named,
                 _ if let Some((slot, class)) = pair => Imm::Pair {
                     function: slot
                         .function()
@@ -1432,10 +1442,11 @@ impl<'a> Builder<'a> {
         let Some(Op::Line(line)) = self.ops.get(idx.index()) else {
             return;
         };
-        // What compiled code serves in place takes no exit of its own; a
-        // kernel it falls back to that throws unwinds.
+        // What compiled code serves in place takes no exit of its own, but
+        // a call by its name held to the function its slot holds; a kernel
+        // it falls back to that throws unwinds.
         let (at, op1, op2) = (line.opline, line.op1, line.op2);
-        let may_leave = inline_may_leave(line) && in_place.is_none();
+        let may_leave = inline_may_leave(line) && (in_place.is_none() || line.imm == Imm::Named);
         if form == Form::Inline && may_leave {
             let unfinished = draft(Point::Before(idx), frame, At::Opline(at));
             // An element a fetch does not find is the interpreter's to
@@ -1694,6 +1705,7 @@ impl<'a> Builder<'a> {
     /// whose callee the trace recorded where php's needs no guard, an
     /// `INIT_FCALL` of a user function of the engine's arena or a call of
     /// the frame's own op array, php's recursive call
+    /// ([`Builder::named_at`] the rest of the calls by name)
     /// (`zend_jit_init_fcall`, `Z/ext/opcache/jit/zend_jit_ir.c:8790-8906`),
     /// which the view took as a plain call; a `SEND_VAL_EX` to a callee the
     /// trace recorded that takes the argument by value, decided as php's
@@ -3499,6 +3511,70 @@ impl<'a> Builder<'a> {
             object,
             class,
             slot,
+        })
+    }
+
+    /// The call a function's `INIT_FCALL_BY_NAME` or
+    /// `INIT_NS_FCALL_BY_NAME` pushes in place, as php's
+    /// `zend_jit_init_fcall` pushes it (`Z/ext/opcache/jit/zend_jit_ir.c:8809-8937`):
+    /// under the guard on the callee the opline's runtime-cache slot holds,
+    /// the function the recording took the call of ([`HeldBy::Slot`]). The
+    /// frame's own op array is php's recursive call, which [`Builder::in_place`]
+    /// pushes with no guard. None for a native's and a request's own
+    /// function's, which their `push_call` kernel or handler serves. A
+    /// name in a namespace answers what the slot holds, the global function
+    /// past the `eval` that declares its namespace's own, as php's does,
+    /// and a name nothing declares yet is the handler's `Error`:
+    /// ```php
+    /// namespace N {
+    ///     function loop($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += add($i, 1); if ($i == 20 && !function_exists('N\\add')) { eval('namespace N; function add($a, $b) { return -1; }'); } } return $s; }
+    ///     function late($n) { $s = 0; for ($i = 0; $i < $n; $i++) { try { $s += later($i); } catch (\Error $e) { echo $e->getMessage(), "\n"; if ($i == 2) { eval('namespace N; function later($x) { return $x; }'); } } } return $s; }
+    /// }
+    /// namespace {
+    ///     if (true) { function add($a, $b) { return $a + $b; } }
+    ///     echo \N\loop(40), " ", \N\loop(40), " ", \N\late(40), "\n";
+    /// }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 820 820 Call to undefined function N\later()
+    /// Call to undefined function N\later()
+    /// Call to undefined function N\later()
+    /// 777
+    /// ```
+    ///
+    /// ```php
+    /// namespace N {
+    ///     function loop($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += add($i, 1); if ($i == 20 && !function_exists('N\\add')) { eval('namespace N; function add($a, $b) { return -1; }'); } } return $s; }
+    ///     function late($n) { $s = 0; for ($i = 0; $i < $n; $i++) { try { $s += later($i); } catch (\Error $e) { echo $e->getMessage(), "\n"; if ($i == 2) { eval('namespace N; function later($x) { return $x; }'); } } } return $s; }
+    /// }
+    /// namespace {
+    ///     if (true) { function add($a, $b) { return $a + $b; } }
+    ///     echo \N\loop(40), " ", \N\loop(40), " ", \N\late(40), "\n";
+    /// }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 820 820 Call to undefined function N\later()
+    /// Call to undefined function N\later()
+    /// Call to undefined function N\later()
+    /// 777
+    /// ```
+    fn named_at(&self, func: FuncRef, op: &Opline, next: Option<&Event>) -> Option<PushAt> {
+        let Some(Event::InitCall {
+            callee: Callee::User(callee),
+            began: Began::Here,
+        }) = next
+        else {
+            return None;
+        };
+        if *callee == func {
+            return None;
+        }
+        let plain = (self.view.calls_of(*callee, op.extended_value))
+            .find(|plain| plain.scope().is_none())?
+            .clone();
+        Some(PushAt {
+            plain,
+            held: HeldBy::Slot(self.view.named_slot(func, op)?),
         })
     }
 

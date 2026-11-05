@@ -482,6 +482,14 @@ pub(crate) enum Imm {
         slot: Slotted,
         binary: Option<Opcode>,
     },
+    /// A function's call by its name pushed in place under the guard on
+    /// the callee its own runtime-cache slot holds ([`Line::map_ptr`]), as
+    /// php's code compares `CACHED_PTR(opline->result.num)` with the
+    /// function it recorded (`zend_jit_init_fcall`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:8860-8880`). A slot that holds
+    /// another or none yet goes to the `push_call` kernel, which finds the
+    /// name, and to the opline's exit where that is another function.
+    Named,
     /// A method's call pushed in place under the guard on the pair its
     /// own runtime-cache slot holds ([`Line::map_ptr`]), as php's code
     /// reads `CACHED_PTR(opline->result.num)` and the callee past it

@@ -411,6 +411,8 @@ pub struct PlaceLayout {
     pair_class: u32,
     pair_function: u32,
     pair_record: u32,
+    call: u32,
+    call_record: u32,
     class: u32,
     offset_tag: u32,
     declared: u8,
@@ -435,6 +437,8 @@ pub const PLACE: PlaceLayout = {
         pair_class: word(Cached::PAIR_CLASS_AT),
         pair_function: word(Cached::PAIR_FUNCTION_AT),
         pair_record: word(Cached::PAIR_RECORD_AT),
+        call: crate::exec::CALL,
+        call_record: word(Cached::CALL_RECORD_AT),
         class: word(Cached::PLACE_AT + PropertyPlace::CLASS_AT),
         offset_tag: word(offset + PropertyOffset::TAG_AT),
         declared: PropertyOffset::DECLARED,
@@ -496,6 +500,21 @@ impl PlaceLayout {
     #[must_use]
     pub const fn pair_record(&self) -> u32 {
         self.pair_record
+    }
+
+    /// The tag of a slot that holds the function a call by its name
+    /// resolved and how it is pushed, php's `CACHED_PTR(opline->result.num)`.
+    #[must_use]
+    pub const fn call(&self) -> u32 {
+        self.call
+    }
+
+    /// Where that slot keeps its callee's record, a word, the one a frame
+    /// serving the callee is pushed with
+    /// ([`FrameLayout::callee`](super::FrameLayout::callee)).
+    #[must_use]
+    pub const fn call_record(&self) -> u32 {
+        self.call_record
     }
 
     /// Where a property's place keeps the class it was found on, a

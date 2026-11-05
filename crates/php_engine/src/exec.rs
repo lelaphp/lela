@@ -2040,8 +2040,9 @@ pub(crate) enum Cached {
     /// its scope is `scope` too.
     Property(PropertyPlace) = PROPERTY,
     /// The user function one of the same three resolved on its first
-    /// pass, with what each pass after pushes its call with.
-    Call(PrimedCall),
+    /// pass, with what each pass after pushes its call with. Compiled
+    /// code reads its record at [`Cached::CALL_RECORD_AT`].
+    Call(PrimedCall) = CALL,
     /// `ZEND_JMP_FL_MISS`: the table has the name in the namespace, so
     /// the jump is not taken and the call by name after it runs.
     Miss,
@@ -2153,6 +2154,10 @@ pub(crate) const STATIC_PROPERTY: u32 = 5;
 /// the place.
 pub(crate) const PROPERTY: u32 = 7;
 
+/// [`Cached::Call`]'s tag, which compiled code tests before it reads the
+/// record.
+pub(crate) const CALL: u32 = 8;
+
 /// [`Cached::Property`]'s fields, the place a property opline found on
 /// objects of one class: what compiled code reads, the class and the
 /// offset at fixed offsets, and what the interpreter reads beside them.
@@ -2203,6 +2208,13 @@ struct PairRepr {
     record: crate::readable::CalleeAt,
 }
 
+/// [`Cached::Call`] as RFC 2195 lays it out.
+#[repr(C)]
+struct CallRepr {
+    tag: u32,
+    call: PrimedCall,
+}
+
 /// [`PropertyOffset::Declared`] as RFC 2195 lays it out.
 #[repr(C)]
 struct DeclaredRepr {
@@ -2229,6 +2241,9 @@ impl Cached {
     /// Where [`Cached::ClassAndCallee`]'s callee's record stands in a
     /// slot, a word.
     pub(crate) const PAIR_RECORD_AT: usize = std::mem::offset_of!(PairRepr, record);
+    /// Where [`Cached::Call`]'s callee's record stands in a slot, a word.
+    pub(crate) const CALL_RECORD_AT: usize =
+        std::mem::offset_of!(CallRepr, call) + std::mem::offset_of!(PrimedCall, callee);
 }
 
 impl PropertyPlace {
@@ -2264,6 +2279,9 @@ const _: () = {
     assert!(align_of::<PropertyRepr>() <= align_of::<Cached>());
     assert!(size_of::<PairRepr>() <= size_of::<Cached>());
     assert!(align_of::<PairRepr>() <= align_of::<Cached>());
+    assert!(size_of::<CallRepr>() <= size_of::<Cached>());
+    assert!(align_of::<CallRepr>() <= align_of::<Cached>());
+    assert!(Cached::CALL_RECORD_AT.is_multiple_of(8));
     assert!(size_of::<Function>() == 4);
     assert!(Cached::PAIR_CLASS_AT == 4 && Cached::PAIR_FUNCTION_AT.is_multiple_of(4));
     assert!(Cached::PAIR_RECORD_AT.is_multiple_of(8));

@@ -5192,7 +5192,7 @@ impl<'a> Emit<'a> {
     /// An inline `INIT_*` through [`Kernel::PushCall`], held to the callee
     /// the trace recorded: a refusal leaves through the opline's exit
     /// before anything is pushed.
-    fn push_call(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+    pub(super) fn push_call(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let Some(Op::InitCall {
             callee: Callee::User(callee),
             ..

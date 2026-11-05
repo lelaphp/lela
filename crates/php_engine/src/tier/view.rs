@@ -1321,6 +1321,21 @@ impl UnitView {
         }
     }
 
+    /// The runtime-cache slot compiled code reads the callee of the
+    /// function's call by its name `op` from, as php's code reads
+    /// `CACHED_PTR(opline->result.num)` (`zend_jit_init_fcall`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:8860-8880`); none for any other
+    /// opline and for a slot past its cache.
+    #[must_use]
+    pub fn named_slot(&self, f: FuncRef, op: &Opline) -> Option<MapPtrRaw> {
+        matches!(
+            op.opcode,
+            Opcode::InitFcallByName | Opcode::InitNsFcallByName
+        )
+        .then(|| self.cache_slot(f, CacheSlot(op.out)))
+        .flatten()
+    }
+
     /// The declared slot the property opline at `at` of the op array `f`
     /// names on an object of `class`; none unless
     /// [`UnitView::hold_place`] took it.
