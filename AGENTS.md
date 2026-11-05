@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=bc38c25f13fe8409ce46baea5cff09e43b6fee3cf177179ad4feaa12485c0cbf out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
+<!-- /computed in=d3d6f42db9e84d8390a4fc8a4dca727a59cd6d854802c9d6567d221b254f2125 out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
 
 ## What makes the third engine special?
 
@@ -89,7 +89,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=ac47d5113f90e5ffe17e1a1480cadd752ff9e31100f5e6118ce22d8f9859fed7 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=5a5f9242f61201a58297cd2de19dff6c653ba805a355450ba7c5fd2335fa2e05 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -110,7 +110,7 @@ third-engine-design.md
 - ADR-0016 (accepted, 2026-10-25): The binaries are named after the product from one constant, with `php` an opt-in symlink
 - ADR-0017 (accepted, 2026-10-31): The compiled tier is refused as the default on G3: tracing stays opt-in, and Cranelift stands
 
-<!-- /computed in=34988da3010119b7a6587d5a7defdc3917400f9f81928f7756a2e866bec24881 out=505c842c422e5cf0dbefccae4eb1489aed874733945edcc8cac26bedb9aee9d3 -->
+<!-- /computed in=969184a667042decaa718dc0065c9b8bd1b74c320c10a8edc0e5fae7601f62b4 out=505c842c422e5cf0dbefccae4eb1489aed874733945edcc8cac26bedb9aee9d3 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling |
@@ -127,7 +127,7 @@ third-engine-design.md
 | layer | layer.lock | 40 |  |
 | harness | xtask.lock | 448 |  |
 
-<!-- /computed in=addf7b46591671a96a103d2625ea4b10b98688182ad30d914b9af1e001dc5dbf out=8948e86fa4f6df079dfbf40dbae9b71714198d8b9902abf197ecfa5fe9eed5f6 -->
+<!-- /computed in=26877b8ce6eddee0b9d8619ef1b7b42cc58d62bca9799bf46bce2fe035750387 out=8948e86fa4f6df079dfbf40dbae9b71714198d8b9902abf197ecfa5fe9eed5f6 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
