@@ -9997,6 +9997,14 @@ pub(crate) fn fetch_obj_rw<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let b = ByKind(op.op2_type);
+    // A `VAR`'s `IS_INDIRECT` is what the link after this cannot read
+    // again, so the object is noted here, where nothing has run since the
+    // fetch before laid it.
+    let over = (op.op1_type == OperandKind::Var).then(|| {
+        req.note_walk(None);
+        let container = exec::container(req, frame, op.op1_type, op.op1, "ZEND_FETCH_OBJ_RW");
+        container.ok().map(|container| container.deref())
+    });
     let inline = over_container!(op.op1_type, |a| inline_fetch_obj_w(
         req,
         frame,
@@ -10005,6 +10013,11 @@ pub(crate) fn fetch_obj_rw<T: Tier>(
         (a, b)
     ));
     if let Some(edge) = inline {
+        if let Some(Some(object)) = over {
+            let place = req.slot_ptr(frame, op.out);
+            let place = place.and_then(|var| var.read().as_indirect());
+            req.note_walk(place.map(|place| (place, object)));
+        }
         return edge;
     }
     fetch_obj_place(req, frame, code, op, PropertyRead::Warning)
@@ -10236,6 +10249,9 @@ fn fetch_obj_place(
             {
                 let thrown = freeing_container(req, frame, op, thrown);
                 return threw(req, frame, &thrown);
+            }
+            if op.op1_type == OperandKind::Var && op.opcode == Opcode::FetchObjRw {
+                req.note_walk(Some((at, object.as_value())));
             }
             at
         }
@@ -19797,6 +19813,7 @@ fn entry_holder(
             Some(Value::array(PhpArray::of(req.symbol_arr(table)?)))
         }
         Opcode::FetchDimW | Opcode::FetchDimRw => req.walked(place),
+        Opcode::FetchObjRw if fetch.op1_type == OperandKind::Var => req.walked(place),
         Opcode::FetchObjW | Opcode::FetchObjRw if fetch.op1_type != OperandKind::Var => {
             let object = exec::container(req, frame, fetch.op1_type, fetch.op1, "FETCH_OBJ_W");
             object.ok().map(|object| object.deref())
