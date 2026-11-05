@@ -160,6 +160,7 @@ Heap::fatal_leaving
 Heap::free_block
 Heap::free_object_storage
 Heap::gc_call_destructor
+Heap::gc_check_garbage
 Heap::gc_check_possible_root
 Heap::gc_collect_cycles
 Heap::gc_enable

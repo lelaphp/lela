@@ -229,6 +229,9 @@ pub(crate) struct Collector {
     full: bool,
     num_roots: u32,
     runs: u32,
+    /// What a [`Heap::gc_check_garbage`] under way has still to read:
+    /// `None` outside one, where the weak-map walk adds to the buffer.
+    trial: Option<Vec<Node>>,
     collected: u32,
     activated_at: Instant,
     collecting: Duration,
@@ -279,6 +282,7 @@ impl Collector {
             full: false,
             num_roots: 0,
             runs: 0,
+            trial: None,
             collected: 0,
             activated_at: Instant::now(),
             collecting: Duration::ZERO,
@@ -810,6 +814,26 @@ impl Heap {
         }
     }
 
+    /// What a release of an owner php did not have does with `z`, past a
+    /// collection that read that owner as one from outside and so took
+    /// `z` out of the buffer: a possible root only where it is garbage
+    /// now ([`Heap::gc_trial`]), which php's collection would have freed.
+    /// A value in the buffer is a collection's to read already. Under a
+    /// collection no colour says anything of the graph, so the value is
+    /// offered as any release offers it.
+    pub fn gc_check_garbage(hooks: &mut dyn HeapHooks, z: Zval) {
+        let Some(node) = possible_root(z) else {
+            return;
+        };
+        let gc = &hooks.heap().gc;
+        if gc.protected || gc.buf.is_none() {
+            return;
+        }
+        if gc.active || Heap::gc_trial(hooks, node) {
+            Heap::gc_possible_root(hooks, node);
+        }
+    }
+
     /// One owner of `z` given up where that serves no PHP code:
     /// `GC_DELREF` with another owner standing, and
     /// `gc_check_possible_root` taking nothing or placing the value in the
@@ -963,9 +987,7 @@ impl Heap {
             }));
             let map = Node::Obj(map);
             if map.gc().colour() == Colour::Grey {
-                if map.gc().address().is_none() {
-                    Heap::gc_growing(hooks, |gc| gc.extra_root(map));
-                }
+                Heap::gc_scan_too(hooks, map);
             } else if !marks.from_map && blacken(child) {
                 stack.push(child);
             }
@@ -983,14 +1005,23 @@ impl Heap {
             }));
             let key = Node::Obj(key);
             if key.gc().colour() == Colour::Grey {
-                if key.gc().address().is_none() {
-                    Heap::gc_growing(hooks, |gc| gc.extra_root(key));
-                }
+                Heap::gc_scan_too(hooks, key);
             } else if !marks.from_key && blacken(child) {
                 stack.push(child);
             }
         }
         true
+    }
+
+    /// A grey value the weak-map walk has yet to scan: the buffer's, which
+    /// [`Heap::gc_scan_roots`] reads, where it holds it or can add it as
+    /// an extra root, and a trial's own, whose buffer stands as it was.
+    fn gc_scan_too(hooks: &mut dyn HeapHooks, node: Node) {
+        if let Some(trial) = &mut hooks.heap().gc.trial {
+            trial.push(node);
+        } else if node.gc().address().is_none() {
+            Heap::gc_growing(hooks, |gc| gc.extra_root(node));
+        }
     }
 
     /// `gc_scan`'s weak-map pass (`zend_weakmap_get_object_entry_gc`):
@@ -1331,6 +1362,52 @@ impl Heap {
             }
             idx += 1;
         }
+    }
+
+    /// Whether nothing outside what `root` reaches holds `root`:
+    /// [`Heap::gc_mark_roots`] and [`Heap::gc_scan_roots`] restricted to
+    /// that one root. Nothing is freed and no destructor served. What
+    /// came out white has its owners given back as
+    /// [`Heap::gc_collect_white`] gives them back, by the walk that
+    /// blackens, and every root of the buffer it greyed is purple again,
+    /// so counts, colours, weak marks and the buffer stand as they were.
+    fn gc_trial(hooks: &mut dyn HeapHooks, root: Node) -> bool {
+        let mut kids = Vec::new();
+        let gc = &mut hooks.heap().gc;
+        let purple = (FIRST_ROOT..gc.first_unused())
+            .filter_map(|idx| match gc.entry(idx) {
+                Some(Entry::Root(node)) if node.gc().colour() == Colour::Purple => Some(node),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        gc.active = true;
+        gc.trial = Some(Vec::new());
+        root.gc().set_colour(Colour::Grey);
+        Heap::gc_mark_grey(hooks, root, &mut kids);
+        root.gc().set_colour(Colour::White);
+        Heap::gc_scan(hooks, root, &mut kids);
+        while let Some(node) = hooks.heap().gc.trial.as_mut().and_then(Vec::pop) {
+            if node.gc().colour() == Colour::Grey {
+                node.gc().set_colour(Colour::White);
+                Heap::gc_scan(hooks, node, &mut kids);
+            }
+        }
+        let garbage = root.gc().colour() == Colour::White;
+        let mut unread = garbage.then_some(root);
+        while let Some(node) = unread {
+            if node.gc().colour() != Colour::Black {
+                node.gc().set_colour(Colour::Black);
+                Heap::gc_scan_black(hooks, node, &mut kids);
+            }
+            unread = hooks.heap().gc.trial.as_mut().and_then(Vec::pop);
+        }
+        for node in purple {
+            node.gc().set_colour(Colour::Purple);
+        }
+        let gc = &mut hooks.heap().gc;
+        gc.trial = None;
+        gc.active = false;
+        garbage
     }
 
     /// `gc_collect_roots`: the live roots out of the buffer, the rest
@@ -1944,6 +2021,93 @@ mod tests {
         assert!(r.served.is_empty());
         assert_eq!(a.refcount(), 2);
         assert_eq!(b.refcount(), 1);
+    }
+
+    /// Every count, colour and place in the buffer of a pair and a table.
+    fn graph(a: Obj, b: Obj, list: Arr) -> [(u32, Colour, Option<u32>); 3] {
+        let of = |g: Counted| (g.refcount(), g.colour(), g.address());
+        [of(a.gc()), of(b.gc()), of(list.gc())]
+    }
+
+    /// A pair with a table in `a`'s second slot that holds `b`.
+    fn pair_and_table(r: &mut Recorder) -> (Obj, Obj, Arr) {
+        let a = r.heap.object(1, 2, 0).expect("an object");
+        let b = r.heap.object(1, 1, 0).expect("an object");
+        Heap::object_set_slot(r, a, 0, Zval::object(b));
+        b.addref();
+        Heap::object_set_slot(r, b, 0, Zval::object(a));
+        a.addref();
+        let list = r.heap.array_packed(2).expect("a table");
+        Heap::array_update(r, list, crate::Key::Long(0), Zval::object(b)).expect("a row");
+        b.addref();
+        Heap::object_set_slot(r, a, 1, Zval::array(list));
+        (a, b, list)
+    }
+
+    /// A value an owner outside the walk holds reads as live, and the
+    /// trial leaves the graph as it found it: a root of the buffer it
+    /// walked over purple in its place, counts as they stood.
+    #[test]
+    fn a_trial_of_a_live_value_leaves_the_graph_as_it_found_it() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        let (a, b, list) = pair_and_table(&mut r);
+        Heap::release(&mut r, Zval::object(b));
+        assert_eq!(r.heap.gc_status().roots, 1);
+        let before = graph(a, b, list);
+        Heap::gc_check_garbage(&mut r, Zval::object(a));
+        assert_eq!(graph(a, b, list), before);
+        assert_eq!(r.heap.gc_status().roots, 1);
+        assert_eq!(b.gc().colour(), Colour::Purple);
+        assert!(a.gc().is_unplaced());
+        assert_eq!(Heap::gc_collect_cycles(&mut r), 0);
+        assert_eq!(r.heap.gc_status().roots, 0);
+    }
+
+    /// What nothing outside holds comes out garbage: it alone is added
+    /// to the buffer, every count stands, and the next collection frees
+    /// the whole of it.
+    #[test]
+    fn a_trial_of_garbage_makes_it_a_root_and_frees_nothing() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        let (a, b, list) = pair_and_table(&mut r);
+        Heap::release_nogc(&mut r, Zval::object(a));
+        Heap::release_nogc(&mut r, Zval::object(b));
+        let before = graph(a, b, list);
+        Heap::gc_check_garbage(&mut r, Zval::object(a));
+        assert_eq!(r.heap.gc_status().roots, 1);
+        assert_eq!(a.gc().colour(), Colour::Purple);
+        assert_eq!(a.refcount(), before[0].0);
+        assert_eq!(graph(a, b, list)[1..], before[1..]);
+        assert!(r.served.is_empty());
+        assert_eq!(r.heap.objects(), 2);
+        assert_eq!(Heap::gc_collect_cycles(&mut r), 3);
+        assert_eq!(r.heap.objects(), 0);
+    }
+
+    /// A value in the buffer stays where it is, untried; and under a
+    /// collection the value is offered as a release offers it, with
+    /// nothing walked.
+    #[test]
+    fn a_buffered_value_and_a_collection_under_way_are_not_tried() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        let (a, b, list) = pair_and_table(&mut r);
+        Heap::release(&mut r, Zval::object(a));
+        let before = graph(a, b, list);
+        Heap::gc_check_garbage(&mut r, Zval::object(a));
+        assert_eq!(graph(a, b, list), before);
+        assert_eq!(r.heap.gc_status().roots, 1);
+        r.heap.gc.active = true;
+        Heap::gc_check_garbage(&mut r, Zval::object(b));
+        r.heap.gc.active = false;
+        assert_eq!(r.heap.gc_status().roots, 2);
+        assert_eq!(b.refcount(), before[1].0);
+        assert_eq!(a.refcount(), before[0].0);
+        assert_eq!(b.gc().colour(), Colour::Purple);
+        Heap::release(&mut r, Zval::object(b));
+        assert_eq!(Heap::gc_collect_cycles(&mut r), 3);
     }
 
     /// An owner given up where another is held, php's `GC_DELREF` and

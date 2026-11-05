@@ -966,6 +966,12 @@ impl Request {
         Heap::gc_collect_cycles(&mut Hooks(self))
     }
 
+    /// A possible root of the collector where `value`, whose hold has
+    /// just gone, is garbage ([`Heap::gc_check_garbage`]).
+    pub(crate) fn gc_check_garbage(&mut self, value: Value) {
+        Heap::gc_check_garbage(&mut Hooks(self), value.to_zval());
+    }
+
     /// One entry of the collector's destructor phase served
     /// ([`Heap::gc_call_destructor`]), for the fiber the phase is served
     /// in: the object whose destructor was served.

@@ -73,7 +73,7 @@ use crate::api::request::ropes::RopeAt;
 use crate::api::request::{CodeFrom, ConstantRead, Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
-    ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
+    ClosureInfo, Left, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::exec::{
     self, Cached, E_FATAL_ERRORS, FETCH_CLASS_MASK, FETCH_CLASS_PARENT, FETCH_CLASS_SELF,
@@ -18496,19 +18496,36 @@ struct StepHold {
     runs: Option<u32>,
 }
 
-/// An owner php has not, given up past a handler: a release, a possible
-/// root of the collector, only where the count of collections has moved
-/// from `runs`. A collection read the hold as an owner from outside, so it
-/// kept what php's would have freed and took it out of its buffer, and
-/// nothing else would put it back. Past no collection the buffer stands as
-/// php's does. A value another owner holds is buffered past a collection
-/// all the same, where php's has none, until the next collection reads
-/// it live.
+/// An owner php has not, given up past a handler. A collection since
+/// `runs` read the hold as an owner from outside, so it kept what php's
+/// would have freed and took it out of its buffer: with owners left the
+/// value is a possible root where it is garbage now, which nothing else
+/// would say ([`php_heap::Heap::gc_check_garbage`]). Past no collection,
+/// and of a value live past one, the buffer stands as php's does.
+///
+/// ```php
+/// class C { public $p = 'pp'; public $self; public $i = 1; }
+/// class R { public $s; }
+/// $x = null;
+/// set_error_handler(function () {
+///     $GLOBALS['o'] = null; $GLOBALS['x'] = null; gc_collect_cycles();
+///     return true;
+/// });
+/// $o = new C; $k = $o; $o->self = $o; $k->p .= [];
+/// echo gc_status()['roots'], "\n";
+/// $x = new R; $x->s = $x;
+/// $a = [new C]; $a[0]->i += $undefined;
+/// echo gc_status()['roots'], "\n";
+/// ```
+/// ```expect
+/// 1
+/// 1
+/// ```
 fn hold_given_up(req: &mut Request, held: Owner<Value>, runs: u32) {
-    if req.heap_mut().gc_runs() == runs {
-        held.give_up_nogc(req);
-    } else {
-        held.give_up(req);
+    let value = *held;
+    let left = held.let_go(req);
+    if req.heap_mut().gc_runs() != runs && matches!(left, Left::Owners(1..)) {
+        req.gc_check_garbage(value);
     }
 }
 
@@ -19564,7 +19581,6 @@ pub(crate) fn assign_obj_op<T: Tier>(
     let mut member = exec::Member::default();
     let name = member.name(req, frame, code, op);
     let read = undefined_cv(req, frame, data.op1_type, data.op1);
-    let runs = req.heap_mut().gc_runs();
     let in_table = (read && op.op1_type == OperandKind::Var)
         .then(|| entry_past_warning(req, frame, code, op, data))
         .transpose()?;
@@ -19578,7 +19594,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
         read,
     };
     let container = match &in_table {
-        Some(held) => held.deref(),
+        Some((held, _)) => held.deref(),
         None => exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?.deref(),
     };
     let written = match (name, container.as_object()) {
@@ -19615,7 +19631,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
         }
     };
     let written = req.freed_after(written, |req| {
-        if let Some(held) = in_table {
+        if let Some((held, runs)) = in_table {
             hold_given_up(req, held, runs);
         }
     });
@@ -19627,10 +19643,9 @@ pub(crate) fn assign_obj_op<T: Tier>(
     Ok(advance_over_data(req, frame))
 }
 
-/// What `warn` raises, an undefined `OP_DATA`'s warning or a name's, over
-/// the entry a `VAR` points at, and what stands there after it, as
-/// `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF` is read past `GET_OP_DATA_ZVAL_PTR`
-/// and `GET_OP2_ZVAL_PTR`: a handler's write is seen. Where the
+/// An undefined `OP_DATA` warned of over the entry a `VAR` points at, and
+/// what stands there after it, as `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF` reads
+/// it past `GET_OP_DATA_ZVAL_PTR`: a handler's write is seen. Where the
 /// handler freed the entry or moved it, what the entry held is held.
 /// The owner is the caller's, past the step, with the collector's count
 /// from where it was taken.
@@ -19744,7 +19759,7 @@ fn entry_past_warning(
     code: &OpArray,
     op: &Opline,
     data: Opline,
-) -> Result<Owner<Value>, Fatal> {
+) -> Result<(Owner<Value>, u32), Fatal> {
     let runs = req.heap_mut().gc_runs();
     let held = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
     let held = Owner::take(req, held);
@@ -19769,12 +19784,14 @@ fn entry_past_warning(
         req.heap_mut().iterator_del(at);
     }
     let now = if stands {
-        exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?
+        let now = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
+        let now = Owner::take(req, now);
+        let taken = req.heap_mut().gc_runs();
+        hold_given_up(req, held, runs);
+        (now, taken)
     } else {
-        *held
+        (held, runs)
     };
-    let now = Owner::take(req, now);
-    hold_given_up(req, held, runs);
     if let Some(owner) = owner {
         hold_given_up(req, owner.into_value(), runs);
     }
