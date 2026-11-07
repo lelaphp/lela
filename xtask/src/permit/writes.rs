@@ -97,7 +97,7 @@ const READERS: [(&str, &[&str]); 30] = [
 /// settings and a new worktree beside them; what reaches the tracker alone;
 /// and the instruments that say where things stand. Each with the words
 /// that would make it write.
-const LEAVES: [(&str, &[&str]); 35] = [
+const LEAVES: [(&str, &[&str]); 36] = [
     ("cd", &[]),
     ("pushd", &[]),
     ("popd", &[]),
@@ -135,6 +135,7 @@ const LEAVES: [(&str, &[&str]); 35] = [
     // `track work` runs sessions in the checkout it stands in.
     ("xtask track", &["work"]),
     ("xtask status", &[]),
+    ("xtask ticket read", &[]),
 ];
 
 /// `git symbolic-ref`'s options that leave the ref it names as it was.
@@ -454,6 +455,8 @@ mod tests {
             "git symbolic-ref -d HEAD",
             "git symbolic-ref --delete HEAD",
             "git symbolic-ref -qd HEAD",
+            // #4160.
+            "cargo xtask ticket close 4160 --opens-nothing",
         ] {
             assert!(changes(line), "{line}");
         }
@@ -483,6 +486,8 @@ mod tests {
             "git remote set-head origin -d",
             "git symbolic-ref refs/remotes/origin/HEAD",
             "git -C wt symbolic-ref -q --short HEAD",
+            // #4160.
+            "cargo xtask ticket read 4160",
         ] {
             assert!(!changes(line), "{line}");
         }
