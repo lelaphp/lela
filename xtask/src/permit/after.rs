@@ -17,14 +17,18 @@
 //! in, only where its line can write it, never where history carries it,
 //! and never where an operation in progress there has staged it; every
 //! other file that moved is kept as it stands and named. The checkout is
-//! where the call acts, its `cwd` moved by the line's leading `cd`,
-//! `pushd` and `popd`, or by git's `-C` where every command past them is
-//! git and names one directory, at the top of its worktree
-//! ([`Walk::ran_in`], #2607), and not the hook's own: a subagent's shell starts in the main
-//! checkout and `cd`s into its worktree, so the hook's checkout is often
-//! one the call never touched, and another session's merge may stand
-//! there (#2597). The line's words are read where its shell stands, the
-//! `cwd` moved by those changes.
+//! where the call acts, its start ([`Call::start`]) moved by the line's
+//! leading `cd`, `pushd` and `popd`, or by git's `-C` where every command
+//! past them is git and names one directory, at the top of its worktree
+//! ([`Walk::ran_in`], #2607), and not the hook's own: a subagent's shell
+//! starts in the main checkout and `cd`s into its worktree, so the hook's
+//! checkout is often one the call never touched, and another session's
+//! merge may stand there (#2597). The line's words are read where its
+//! shell stands, the call's `cwd` moved by those changes. The checkout
+//! and the start are taken as the call begins and kept in its record, and
+//! `--after` reads both there, the words read from that start, since the
+//! hook's `cwd` after the call is where the line left the shell (Round 1,
+//! Q18 (c)); a record whose checkout is gone by then is dropped.
 //!
 //! What it leaves alone, on purpose:
 //!
@@ -130,10 +134,25 @@ struct Record {
     at: i64,
     /// The call's command, whose words say whether it runs steer.
     command: String,
-    /// The checkout the call ran in ([`held`]), one; a list since a record
-    /// an older build wrote holds the hook's own beside it, which `--after`
-    /// does not compare (#2597).
+    /// Where the call's line started as the call began ([`Call::start`]),
+    /// which `--after` walks it from, since the hook's `cwd` after the
+    /// call is where the line left the shell (Round 1, Q18 (c)); `None` in
+    /// a record an older build wrote, whose line is walked from the
+    /// call's `cwd`.
+    #[serde(default)]
+    start: Option<PathBuf>,
+    /// The checkout the call ran in ([`held`]), the last; a list since a
+    /// record an older build wrote holds the hook's own before it, which
+    /// `--after` does not compare (#2597).
     checkouts: Vec<Guarded>,
+}
+
+impl Record {
+    /// Where `--after` walks the call's line from: the start the record
+    /// keeps, or the call's `cwd` in a record that keeps none.
+    fn walked_from<'a>(&'a self, call: &'a Call) -> Option<&'a Path> {
+        self.start.as_deref().or(call.cwd.as_deref().map(Path::new))
+    }
 }
 
 /// One checkout's files under the rule, as the call found them.
@@ -210,12 +229,14 @@ pub(super) fn before(root: &Path, call: &Call) -> Result<()> {
         return Ok(());
     }
     prune(&records(root));
-    let Some(guarded) = guard(&held(root, call))? else {
+    let (start, checkout) = held(root, call);
+    let Some(guarded) = guard(&checkout)? else {
         return Ok(());
     };
     let record = Record {
         at: reading::epoch_seconds(&reading::now()?)?,
         command: call.command().unwrap_or_default().to_owned(),
+        start: Some(start),
         checkouts: vec![guarded],
     };
     let text = serde_json::to_string(&record).context("rendering the record")?;
@@ -255,7 +276,20 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     };
     let record: Record = serde_json::from_str(&taken)
         .with_context(|| format!("reading the record at {}", file.display()))?;
-    let checkout = held(root, &call);
+    // The checkout the call was held in as it began, and not one walked
+    // again from where the line left the shell (Round 1, Q18 (c)).
+    let Some(checkout) = record.checkouts.last().map(|g| g.checkout.clone()) else {
+        fs::remove_file(&file).ok();
+        return Ok(());
+    };
+    if !checkout.is_dir() {
+        fs::remove_file(&file).ok();
+        eprintln!(
+            "xtask permit --after: {} is gone since the call began, so nothing is put back",
+            checkout.display()
+        );
+        return Ok(());
+    }
     let steering = runs_steer(&record.command);
     let unread = match steering.then(|| Steering::of(root, &checkout)) {
         Some(Steering::Newer(why)) => anyhow::bail!(
@@ -301,15 +335,17 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
 /// that steer did not write: kept where history carries it ([`landed_at`]),
 /// put back where the call's line can write it and no operation in
 /// progress staged it, kept otherwise. A word of the line is read where
-/// its shell stands ([`shell_at`]). Where the line runs steer and this
-/// build cannot read the manifest steer judges by, `unread` says why, and
-/// every file is kept: whether steer wrote it is not this build's to say.
+/// its shell stands ([`shell_at`]), walked from the start the record
+/// keeps, or from the call's `cwd` where it keeps none
+/// ([`Record::walked_from`]). Where the line runs steer and this build
+/// cannot read the manifest steer judges by, `unread` says why, and every
+/// file is kept: whether steer wrote it is not this build's to say.
 fn sort_moved(record: &Record, call: &Call, held: &Path, unread: Option<&str>) -> Vec<Moved> {
     let steering = runs_steer(&record.command);
     let line = argv::Line::read(&record.command);
     let mut moved = Vec::new();
     for guarded in record.checkouts.iter().filter(|g| g.checkout == held) {
-        let cwd = shell_at(call, &guarded.checkout, &line);
+        let cwd = shell_at(record.walked_from(call), &guarded.checkout, &line);
         // A line that moves `HEAD` itself makes the history it would be
         // credited with, so it is credited with none.
         let credited = !moves_head(&line);
@@ -422,7 +458,7 @@ pub(super) fn written(
     let Ok(Some(guarded)) = guard(&checkout) else {
         return (checkout, Vec::new());
     };
-    let cwd = shell_at(call, root, line);
+    let cwd = shell_at(call.cwd.as_deref().map(Path::new), root, line);
     let paths = guarded
         .blobs
         .into_keys()
@@ -779,20 +815,24 @@ fn moves_head(line: &argv::Line) -> bool {
         .any(|argv| MOVES.iter().any(|phrase| argv.runs(phrase)))
 }
 
-/// The one checkout a call is held in: the one it ran in, where its
-/// start ([`Call::start`]) moved by its line acts ([`Walk::ran_in`]), and
-/// never the hook's own where the call ran elsewhere (#2597, #2607).
-fn held(root: &Path, call: &Call) -> PathBuf {
+/// Where the call starts ([`Call::start`]), and the one checkout it is
+/// held in: the one it ran in, where that start moved by its line acts
+/// ([`Walk::ran_in`]), and never the hook's own where the call ran
+/// elsewhere (#2597, #2607).
+fn held(root: &Path, call: &Call) -> (PathBuf, PathBuf) {
     let line = call.command().map(argv::Line::read);
     let workspace = call.workspace(root);
-    Walk::of(&call.start(&workspace), line.as_ref()).ran_in(&workspace)
+    let start = call.start(&workspace);
+    let checkout = Walk::of(&start, line.as_ref()).ran_in(&workspace);
+    (start, checkout)
 }
 
-/// Where the line's shell stands, which its words are read against: the
-/// call's `cwd`, or `checkout` where it carries none, moved by the line's
-/// leading `cd`, `pushd` and `popd` ([`Walk::runs_in`]).
-fn shell_at(call: &Call, checkout: &Path, line: &argv::Line) -> PathBuf {
-    Walk::of(call.cwd.as_deref().map_or(checkout, Path::new), Some(line)).runs_in()
+/// Where the line's shell stands, which its words are read against:
+/// `from`, the call's `cwd` or the start its record keeps, or `checkout`
+/// where there is none, moved by the line's leading `cd`, `pushd` and
+/// `popd` ([`Walk::runs_in`]).
+fn shell_at(from: Option<&Path>, checkout: &Path, line: &argv::Line) -> PathBuf {
+    Walk::of(from.unwrap_or(checkout), Some(line)).runs_in()
 }
 
 /// The rule's text and the blob of every tracked file it scopes and does
