@@ -1641,6 +1641,51 @@ struct StopStdin {
     /// handed it (#3619).
     #[serde(default)]
     here: bool,
+    /// The host's tasks in flight as the turn stops, and its session's
+    /// scheduled wakeups, each an array where the host's task registry
+    /// was reachable and absent otherwise. Kept as values, so a change
+    /// of their shape blocks no Stop; read only to be counted
+    /// ([`StopStdin::count_waiting`]).
+    #[serde(default)]
+    background_tasks: Option<Value>,
+    #[serde(default)]
+    session_crons: Option<Value>,
+}
+
+impl StopStdin {
+    /// The host's waiting work, counted on the Stop's reading (Round 1,
+    /// Q23, c7): `background_tasks` and `session_crons`, each where the
+    /// host sent the array, so absent is told from none; the tasks by
+    /// type as groups; and `background_in_checkouts`, the shell tasks
+    /// whose command names a checkout the Stop judged. A count, read by
+    /// nothing that holds a turn.
+    fn count_waiting(&self, reading: &mut Reading, checkouts: &[PathBuf]) -> Result<()> {
+        if let Some(tasks) = self.background_tasks.as_ref().and_then(Value::as_array) {
+            reading.count("background_tasks", tasks.len() as u64)?;
+            let mut by_type = BTreeMap::<&str, u64>::new();
+            for task in tasks {
+                *by_type
+                    .entry(task["type"].as_str().unwrap_or("untyped"))
+                    .or_default() += 1;
+            }
+            for (kind, n) in by_type {
+                reading.group(&format!("background_tasks {kind}"), n)?;
+            }
+            let in_checkouts = tasks.iter().filter(|task| {
+                let command = task["command"].as_str().unwrap_or_default();
+                task["type"] == "shell"
+                    && checkouts
+                        .iter()
+                        .filter_map(|c| c.to_str())
+                        .any(|c| command.contains(c))
+            });
+            reading.count("background_in_checkouts", in_checkouts.count() as u64)?;
+        }
+        if let Some(crons) = self.session_crons.as_ref().and_then(Value::as_array) {
+            reading.count("session_crons", crons.len() as u64)?;
+        }
+        Ok(())
+    }
 }
 
 const UNREAD_STDIN: &str = "done could not read the Stop hook's stdin";
@@ -1737,6 +1782,7 @@ pub(crate) fn hook(
             // turn's close as this turn's and not an earlier one's.
             let mut r = called(r, caller);
             stop.session_id.clone_into(&mut r.session);
+            stop.count_waiting(&mut r, &checkouts)?;
             let mut readings = vec![r];
             if let Some(unfiled) = &unfiled {
                 readings.push(unfiled.reading(&snapshot, &stop.session_id)?);

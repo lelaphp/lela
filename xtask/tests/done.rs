@@ -1827,6 +1827,75 @@ fn a_stop_met_here_and_held_elsewhere_never_says_every_condition_is_met() {
     );
 }
 
+/// The Stop counts the host's waiting work on its reading (Round 1, Q23,
+/// c7): the tasks in flight, by type, the shell ones in a checkout it
+/// judged, and the session's crons, where the host sent each array, so a
+/// Stop whose host sent none says nothing of them. The counts hold
+/// nothing: the turn passes.
+#[test]
+fn the_stop_counts_the_hosts_background_tasks_and_session_crons() {
+    let root = scratch("hook-waiting");
+    let store = Store::of_workspace(&root);
+    let canonical = root.canonicalize().unwrap();
+    let stop = serde_json::json!({
+        "session_id": "s-waiting",
+        "hook_event_name": "Stop",
+        "background_tasks": [
+            {"id": "a", "type": "shell", "status": "running",
+             "command": format!("cd {} && cargo xtask test", canonical.display())},
+            {"id": "b", "type": "shell", "status": "running", "command": "tail -f /var/log/x"},
+            {"id": "c", "type": "subagent", "status": "running"},
+        ],
+        "session_crons": [{"id": "d", "schedule": "0 9 * * 1-5", "recurring": true}],
+    });
+    assert_eq!(hook(&root, &stop.to_string()).ok(), "");
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert_eq!(
+        reading.numbers["background_tasks"],
+        3.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        reading.numbers["background_in_checkouts"],
+        1.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(reading.numbers["session_crons"], 1.into(), "{reading:#?}");
+    assert_eq!(
+        reading.groups["background_tasks shell"],
+        2.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        reading.groups["background_tasks subagent"],
+        1.into(),
+        "{reading:#?}"
+    );
+
+    let empty = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
+    assert_eq!(hook(&root, &empty).ok(), "");
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert_eq!(
+        reading.numbers["background_tasks"],
+        0.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(reading.numbers["session_crons"], 0.into(), "{reading:#?}");
+
+    // A shape the host has not documented blocks nothing.
+    let odd = "{\"session_id\":\"s-odd\",\"background_tasks\":{\"n\":1}}";
+    assert_eq!(hook(&root, odd).ok(), "");
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert!(
+        !reading.numbers.contains_key("background_tasks"),
+        "{reading:#?}"
+    );
+    assert!(
+        !reading.numbers.contains_key("session_crons"),
+        "{reading:#?}"
+    );
+}
+
 /// A checkout the session wrote in and that was removed since is none
 /// the Stop judges, and none its reading counts (Round 1, Q23, c7).
 #[test]
