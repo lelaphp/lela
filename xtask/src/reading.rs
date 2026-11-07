@@ -979,9 +979,12 @@ impl Store {
         Ok(tallies)
     }
 
-    /// Every reading in the store, the last of each scope, in path order,
-    /// and every file of the store that is not one, by its path; the
-    /// index's entries are no scope's last reading and are left out. A
+    /// Every scope's file in the store, in path order, and every file of
+    /// the store that is not a reading, by its path; the index's entries
+    /// are left out. A scope's file is the last reading this store wrote
+    /// of it, and not always its last reading: a land puts another
+    /// checkout's later one in the index alone, which [`Store::last_of`]
+    /// reads (c2.i). A
     /// missing store is empty. A file a crash left empty or cut short,
     /// which [`replace`] no longer can (#1235), is named and skipped rather
     /// than failing every rendering of the store, as the log's torn line
