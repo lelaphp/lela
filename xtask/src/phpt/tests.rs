@@ -335,6 +335,7 @@ fn a_missed_expectation_fails_with_the_difference() {
             expected: Some("five".to_owned()),
             actual: Some("four".to_owned()),
             signature: miss::Signature::Differs,
+            died: None,
         })
     );
 }
@@ -588,6 +589,62 @@ fn a_run_a_signal_ended_is_trimmed_after_its_termsig_line_as_upstream_trims_it()
     let (_tree, subset) = subset("termsig", &[("killed.phpt", test)]);
     let tally = run(&subset, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+}
+
+/// A test whose program a signal ended keeps how it died on its miss, and
+/// its note says so, with the last of what it wrote on stderr, whether
+/// stderr is the stream stdout is too or a pipe of its own; a test whose
+/// program exited as a run does, having written on stderr too, keeps none
+/// (#4130). Before, the miss kept the lines and the signature alone, and a
+/// run that read `Termsig=11` once kept nothing to say what ended it. The
+/// fixture is a program that kills itself, run the adapter's own way;
+/// SIGKILL, which leaves no crash log on the machine.
+#[test]
+fn a_program_a_signal_ended_keeps_its_ending_and_its_stderr_on_the_miss() {
+    if oracle().is_none() {
+        return;
+    }
+    let test = |capture: &str, end: &str| {
+        format!(
+            "--TEST--\nDies\n{capture}--FILE--\n<?php echo \"out\\n\"; fwrite(STDERR, \"first words\\nlast words\\n\"); {end}\n--EXPECT--\nnever\n"
+        )
+    };
+    let killed = "posix_kill(getmypid(), 9);";
+    let (_tree, subset) = subset(
+        "died",
+        &[
+            ("merged.phpt", &test("", killed)),
+            ("apart.phpt", &test("--CAPTURE_STDIO--\nSTDOUT\n", killed)),
+            ("exited.phpt", &test("", "exit(1);")),
+        ],
+    );
+    let tally = run(&subset, &registry(""));
+    let judged = |file: &str| {
+        let name = format!("ext/fixture/tests/{file}");
+        let found = tally.judged.iter().find(|j| j.name == name);
+        found.unwrap_or_else(|| panic!("{file}: {tally:#?}"))
+    };
+    let died = |stderr: &str| miss::Died {
+        ended: crate::oracle::Ended::Signal(9),
+        stderr: stderr.to_owned(),
+    };
+    for (file, stderr) in [
+        ("merged.phpt", "out\nfirst words\nlast words"),
+        ("apart.phpt", "first words\nlast words"),
+    ] {
+        let judged = judged(file);
+        assert_eq!(judged.judgement, Judgement::Fail, "{judged:#?}");
+        let miss = judged.miss.as_ref().unwrap();
+        assert_eq!(miss.died, Some(died(stderr)), "{judged:#?}");
+        let said = stderr.replace('\n', "\n    ");
+        let words = format!("the program was ended by signal 9, and its stderr ended:\n    {said}");
+        assert!(judged.note.ends_with(&words), "{}", judged.note);
+        assert!(judged.note.contains("+Termsig=9"), "{}", judged.note);
+    }
+    let exited = judged("exited.phpt");
+    assert_eq!(exited.judgement, Judgement::Fail, "{exited:#?}");
+    assert_eq!(exited.miss.as_ref().unwrap().died, None, "{exited:#?}");
+    assert!(!exited.note.contains("the program"), "{}", exited.note);
 }
 
 /// A test whose `--XFAIL--` section is there and which passes is

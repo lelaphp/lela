@@ -22,6 +22,12 @@
 //! not, `php only:` and the first such diagnostic, where a compile or link
 //! fatal php raises lands. `.claude/skills/specs/first-failures.awk` read
 //! the same off a printed run; this is that rule, kept on the run.
+//!
+//! **How the program died.** Where a signal ended the test's program, or
+//! it exited 129 to 159 as a shell's child a signal ended does, the miss
+//! keeps that ending and the last of what it wrote on stderr ([`Died`]),
+//! which upstream's `Termsig=` line among the lines does not tell apart
+//! and which no rerun is sure to show again (#4130).
 
 use std::fmt;
 use std::sync::LazyLock;
@@ -30,7 +36,7 @@ use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::oracle::expect::{self, Expectation};
-use crate::oracle::{self, Step};
+use crate::oracle::{self, Ended, Step};
 
 /// The longest a masked line is kept, in characters.
 const MASKED: usize = 100;
@@ -54,6 +60,75 @@ pub(crate) struct Miss {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual: Option<String>,
     pub signature: Signature,
+    /// How the program died, where a signal ended it: none for a run
+    /// that exited as a run does, and for a run kept before the field was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub died: Option<Died>,
+}
+
+/// How a test's program died, which upstream's `Termsig=` line says too
+/// little of to tell what ended it (#4130): whether a signal ended it or
+/// it exited with a status a shell gives a child a signal ended, and the
+/// last of what it wrote on stderr.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Died {
+    /// The signal, or the status from 129 to 159.
+    pub ended: Ended,
+    /// The last [`TAIL`] lines of its stderr, the stream its stdout is
+    /// too where the test captures both as one (upstream's `2>&1`); empty
+    /// where it wrote none.
+    pub stderr: String,
+}
+
+/// The most lines of stderr a [`Died`] keeps.
+pub(crate) const TAIL: usize = 20;
+
+impl Died {
+    /// How a run that ended as `ended` died, `stderr` being its stderr,
+    /// or none where it exited as a run does: a status of 128 or under,
+    /// or past 159, which no shell gives a child a signal ended.
+    pub(crate) fn of(ended: Ended, stderr: &[u8]) -> Option<Died> {
+        if !matches!(ended, Ended::Signal(_) | Ended::Status(129..=159)) {
+            return None;
+        }
+        let text = String::from_utf8_lossy(stderr);
+        let lines: Vec<&str> = text.lines().collect();
+        let tail = &lines[lines.len().saturating_sub(TAIL)..];
+        Some(Died {
+            ended,
+            stderr: tail.join("\n"),
+        })
+    }
+
+    /// What a failure's note ends with of how its program died: the
+    /// death on a line of its own, and nothing where it did not die.
+    pub(crate) fn noted(died: Option<&Died>) -> String {
+        died.map_or_else(String::new, |died| format!("\n{died}"))
+    }
+}
+
+impl fmt::Display for Died {
+    /// The words a failure's note gives it: the ending on its own line,
+    /// then the stderr's tail indented under it, a line a reader of the
+    /// printed run never takes for a test's header or its difference.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.ended {
+            Ended::Signal(n) => write!(f, "the program was ended by signal {n}")?,
+            Ended::Status(n) => write!(
+                f,
+                "the program exited with status {n}, as a shell says signal {} ended its child",
+                n - 128
+            )?,
+        }
+        if self.stderr.is_empty() {
+            return f.write_str(", having written nothing on stderr");
+        }
+        f.write_str(", and its stderr ended:")?;
+        for line in self.stderr.lines() {
+            write!(f, "\n    {line}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Why a test missed, as the census groups it: one variant per kind of
@@ -136,6 +211,7 @@ impl Miss {
             expected: None,
             actual: None,
             signature,
+            died: None,
         }
     }
 
@@ -172,7 +248,13 @@ impl Miss {
             expected: first(&expected).map(str::to_owned),
             actual: written.map(str::to_owned),
             signature: signature(written, &expected),
+            died: None,
         }
+    }
+
+    /// The miss with how its program died, where it did.
+    pub(crate) fn dying(self, died: Option<Died>) -> Miss {
+        Miss { died, ..self }
     }
 }
 
