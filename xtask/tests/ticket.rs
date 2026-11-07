@@ -14,6 +14,7 @@ use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::ticket::brief;
+use xtask::ticket::found::Found;
 use xtask::ticket::view::{self, Author, Comment, Thread};
 use xtask::ticket::{
     Act, CAP, Issue, MERGED, Reach, State, SubIssues, Successors, Verdict, merged, parent, run,
@@ -222,7 +223,7 @@ fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothin
             &root,
             &manifest(),
             &tracker.gh(),
-            Act::Ready(successors),
+            Act::Ready(successors, Found::Nothing),
             Ticket::new(ticket),
             None,
         )
@@ -259,6 +260,125 @@ fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothin
     assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 }
 
+/// The found work a ready record names, read from a fixture under
+/// `xtask/fixtures/ticket/`.
+fn found(fixture: &str) -> Found {
+    let path = xtask::package_dir().join("fixtures/ticket").join(fixture);
+    Found::named(Some(&path), false).unwrap()
+}
+
+/// `ticket ready --found` (Round 2, Q20 (a)): over `found-held.md`, whose
+/// filed tickets `--opens` names, the branch is readied and the reading
+/// counts the section's items by outcome, keeping the `noted` item's text;
+/// over `found-unopened.md`, which names #11 as filed and `--opens` does
+/// not, it is refused naming #11 and the flag, and nothing is recorded.
+/// `--found-nothing` counts no item and says it was asserted.
+#[test]
+fn ready_holds_the_found_work_to_what_it_opens_and_counts_it_by_outcome() {
+    let root = repository("ticket-ready-found");
+    Repo::at(&root).git(&["checkout", "-q", "-b", "t7"]);
+    let tracker = Tracker::empty("ready-found");
+    for number in [7, 8, 9, 10, 11] {
+        tracker.with_issue(&with_body(number, TICKED));
+    }
+    let ready = |ticket: u64, opens: &[u64], found: Found| {
+        let successors = Successors::Tickets(opens.iter().copied().map(Ticket::new).collect());
+        run(
+            &root,
+            &manifest(),
+            &tracker.gh(),
+            Act::Ready(successors, found),
+            Ticket::new(ticket),
+            Some("s7"),
+        )
+        .unwrap()
+    };
+
+    let refused = ready(7, &[9], found("found-unopened.md"));
+    assert_eq!(refused.status, Status::Fail, "{}", refused.message);
+    assert!(
+        refused
+            .message
+            .contains("the found work names #11 as filed, which the ready record would not name: add `--opens 11`"),
+        "{}",
+        refused.message
+    );
+    assert!(
+        refused.message.ends_with("not ready, nothing recorded"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(refused.numbers["found"], 3.into(), "{refused:#?}");
+    assert_eq!(refused.numbers["file"], 2.into(), "{refused:#?}");
+    let recorded = std::process::Command::new("git")
+        .args(["config", "branch.t7.ready-7"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!recorded.status.success(), "nothing recorded");
+
+    let held = ready(7, &[9, 10], found("found-held.md"));
+    assert_eq!(held.status, Status::Pass, "{}", held.message);
+    for (outcome, n) in [
+        ("found", 6),
+        ("absorb", 1),
+        ("build", 1),
+        ("file", 1),
+        ("person", 1),
+        ("refuted", 1),
+        ("noted", 1),
+    ] {
+        assert_eq!(held.numbers[outcome], n.into(), "{outcome}: {held:#?}");
+    }
+    assert!(
+        held.message.contains(
+            "found 6: 1 absorb, 1 build, 1 file, 1 person, 1 refuted, 1 noted; noted: the run printed its seat wait, as it should"
+        ),
+        "{}",
+        held.message
+    );
+    assert_eq!(
+        Repo::at(&root).git(&["config", "branch.t7.ready-7"]),
+        "9 10"
+    );
+
+    let nothing = run(
+        &root,
+        &manifest(),
+        &tracker.gh(),
+        Act::Ready(Successors::Nothing, Found::Nothing),
+        Ticket::new(8),
+        Some("s7"),
+    )
+    .unwrap();
+    assert_eq!(nothing.status, Status::Pass, "{}", nothing.message);
+    assert_eq!(nothing.numbers["found"], 0.into(), "{nothing:#?}");
+    assert!(
+        nothing
+            .message
+            .contains("found nothing, asserted in session s7"),
+        "{}",
+        nothing.message
+    );
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
+}
+
+/// The flags of `ready` name the found work one way: `--found` and
+/// `--found-nothing` together, and neither, are refused before the
+/// tracker is asked anything, and so is a file that holds no item.
+#[test]
+fn ready_names_the_found_work_one_way_or_is_refused() {
+    let held = xtask::package_dir().join("fixtures/ticket/found-held.md");
+    let neither = format!("{:#}", Found::named(None, false).unwrap_err());
+    assert!(neither.contains("`--found <file>`"), "{neither}");
+    let both = format!("{:#}", Found::named(Some(&held), true).unwrap_err());
+    assert!(both.contains("contradict each other"), "{both}");
+    let unsectioned = xtask::package_dir().join("fixtures/ticket/half-done.md");
+    let none = format!("{:#}", Found::named(Some(&unsectioned), false).unwrap_err());
+    assert!(none.contains("opens with no outcome"), "{none}");
+    assert_eq!(Found::named(None, true).unwrap(), Found::Nothing);
+}
+
 /// `ticket ready` runs `done` over its own worktree and refuses, naming the
 /// list, while anything is unmet (#3618 ruling 2): a change to the harness
 /// with no reading of it holds the ticket, and nothing is recorded.
@@ -274,7 +394,7 @@ fn ready_refuses_while_done_is_unmet_in_its_worktree() {
         &root,
         &tracked_manifest(),
         &tracker.gh(),
-        Act::Ready(Successors::Nothing),
+        Act::Ready(Successors::Nothing, Found::Nothing),
         Ticket::new(7),
         None,
     )

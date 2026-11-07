@@ -482,10 +482,13 @@ fn ticket_command(
             session_id,
             opens,
             opens_nothing,
+            found,
+            found_nothing,
         } => {
             let ticket = ticket::ticket_of(root, number)?;
             let successors = ticket::Successors::named(ticket, &opens, opens_nothing)?;
-            (ticket::Act::Ready(successors), ticket, session_id)
+            let found = ticket::found::Found::named(found.as_deref(), found_nothing)?;
+            (ticket::Act::Ready(successors, found), ticket, session_id)
         }
         TicketCommand::Parent { .. }
         | TicketCommand::Merged { .. }
@@ -494,7 +497,7 @@ fn ticket_command(
             bail!("ticket parent, merged, brief and view: answered above")
         }
     };
-    let asks_ready = matches!(act, ticket::Act::Ready(_));
+    let asks_ready = matches!(act, ticket::Act::Ready(..));
     let gh = ticket::Gh::on_path();
     let reading = ticket::run(root, manifest, &gh, act, ticket, session_id.as_deref())?;
     // What was said on the ticket since its work began, printed and never

@@ -102,6 +102,16 @@
 //! `--opens-nothing` is an assertion, written there with the session that
 //! made it, which is what a person holds someone to later.
 //!
+//! A ready record names what the work found as well as what it opened
+//! (Round 2, Q20 (a)): `--found <file>`, the handback's `## Found work`
+//! section with the outcome its verifier gave each item, or
+//! `--found-nothing`, one of the two always ([`found::Found::named`]). The
+//! reading counts the items by outcome, keeps each `noted` item's text in
+//! its message, and the record is refused while the section names a ticket
+//! as filed that `--opens` does not, so an item filed is a successor the
+//! merge closes the ticket with. `--found-nothing` is an assertion as
+//! `--opens-nothing` is, and as strong.
+//!
 //! A ticket can also describe nothing that is in the tree (#185): #167
 //! was filed from a worktree behind the track, measured a defect that
 //! #135 had already answered on the tip, and had boxes no work could
@@ -197,8 +207,10 @@ use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status, joined, millis};
 use crate::track::{MAIN, Ticket, Track};
 use crate::track_next::{READY, TRACK_LABEL, tracks_of};
+use found::Found;
 
 pub mod brief;
+pub mod found;
 pub mod view;
 
 /// The instrument name every reading of ticket carries.
@@ -270,13 +282,14 @@ const HEADING: &str = "acceptance criteria";
 pub const CAP: u64 = 100;
 
 /// What `xtask ticket` does: read the criteria; read them and record the
-/// branch ready to merge, naming what the work opened (#2311); or read
+/// branch ready to merge, naming what the work opened (#2311) and what it
+/// found, each item with its verifier's outcome ([`found`]); or read
 /// them and close under a verdict, naming what the work opened, at a
 /// commit that stands where [`Reach`] says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
     Read,
-    Ready(Successors),
+    Ready(Successors, Found),
     Close(Verdict, Successors, Reach),
 }
 
@@ -1382,7 +1395,7 @@ fn judged(
     // nothing, said once for every condition that refuses one.
     let nothing = match act {
         Act::Read => "",
-        Act::Ready(_) => "; not ready, nothing recorded",
+        Act::Ready(..) => "; not ready, nothing recorded",
         Act::Close(..) => "; not closed, nothing changed at the tracker",
     };
     // A close at the tracker, which says what it opened and closed after
@@ -1428,14 +1441,16 @@ fn judged(
             Status::Pass,
             format!("{ticket}: {boxes}; {}", issue.state.as_str()),
         ),
-        Act::Ready(_) if issue.state == State::Closed => (
+        Act::Ready(..) if issue.state == State::Closed => (
             Status::Fail,
             format!("{ticket}: {boxes}; closed already, nothing recorded"),
         ),
-        Act::Ready(successors) => match ready(gh, (root, manifest), issue, &reading, &successors) {
-            Ok(said) => (Status::Pass, format!("{ticket}: {boxes}; {said}")),
-            Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
-        },
+        Act::Ready(successors, found) => {
+            match ready(gh, (root, manifest), issue, &reading, (&successors, &found)) {
+                Ok(said) => (Status::Pass, format!("{ticket}: {boxes}; {said}")),
+                Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
+            }
+        }
         Act::Close(Verdict::Done, ..) if issue.state == State::Closed => (
             Status::Fail,
             format!("{ticket}: {boxes}; closed already, nothing changed at the tracker"),
@@ -1462,9 +1477,9 @@ fn judged(
 }
 
 /// What a ticket reading counts: the boxes, the rows that say the label
-/// is wrong and those an instrument writes, and for a ready record or a
-/// close the successors and whether it is a withdrawal; its rule is the
-/// first denial's.
+/// is wrong and those an instrument writes, for a ready record or a close
+/// the successors, for a close whether it is a withdrawal, and for a ready
+/// record the found work by outcome; its rule is the first denial's.
 fn counted(
     reading: &mut Reading,
     criteria: &Criteria,
@@ -1488,8 +1503,9 @@ fn counted(
                 u64::from(matches!(verdict, Verdict::Withdrawn(_))),
             )?;
         }
-        Act::Ready(successors) => {
+        Act::Ready(successors, found) => {
             reading.count(OPENS, successors.tickets().len() as u64)?;
+            found.count(reading)?;
         }
         Act::Read => {}
     }
@@ -1855,7 +1871,8 @@ pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Resul
     Ok(unmet)
 }
 
-/// The branch ready to merge (#2311): `done` met in this worktree, every
+/// The branch ready to merge (#2311): every ticket the found work names as
+/// filed among the successors, `done` met in this worktree, every
 /// successor held as a close holds it, and the record written on the
 /// branch `HEAD` is on, which the merge reads to close the ticket. Nothing
 /// at the tracker changes.
@@ -1864,10 +1881,22 @@ fn ready(
     (root, manifest): (&Path, &Manifest),
     issue: &Issue,
     reading: &Reading,
-    successors: &Successors,
+    (successors, found): (&Successors, &Found),
 ) -> std::result::Result<String, String> {
     let session_id = (!reading.session.is_empty()).then_some(reading.session.as_str());
     let opened = successors.describe(session_id);
+    let said = found.describe(session_id);
+    let unopened = found.unopened(successors);
+    if !unopened.is_empty() {
+        let flags = joined(
+            unopened.iter().map(|t| format!("--opens {}", t.number())),
+            " ",
+        );
+        return Err(format!(
+            "{said}; the found work names {} as filed, which the ready record would not name: add `{flags}`, or give the item the outcome it ended as; not ready, nothing recorded",
+            joined(&unopened, ", ")
+        ));
+    }
     unmet_here(root, manifest, reading)
         .map_err(|err| format!("{err:#}; not ready, nothing recorded"))?;
     successors
@@ -1879,7 +1908,7 @@ fn ready(
     crate::git::git(root, &["config", &key, &successors.record()])
         .map_err(|err| format!("{key} could not be written: {err:#}; not ready"))?;
     Ok(format!(
-        "{opened}; ready to merge at {}, recorded as {key}; the merge into main closes it",
+        "{opened}; {said}; ready to merge at {}, recorded as {key}; the merge into main closes it",
         reading.commit
     ))
 }
