@@ -64,7 +64,7 @@ use crate::permit;
 use crate::phpt;
 use crate::phpt::against::{self, Against};
 use crate::port_map;
-use crate::reading::{Number, Reading, Status, Store, plural};
+use crate::reading::{Freshness, Moved, Number, Reading, Status, Store, plural};
 use crate::reply;
 use crate::ticket;
 use crate::track::{self, MAIN, Ticket, merge_base, short};
@@ -553,16 +553,7 @@ fn folded(
         .with_context(|| format!("the manifest has no [[crate]] row for {scope}"))?;
     let key = asking.snapshot.key(&krate.path())?;
     let pin = asking.manifest.pin_digest();
-    let mut reading = asking.store.read(instrument, scope)?;
-    if !reading.as_ref().is_some_and(|r| r.fresh_for(&key, pin)) {
-        let sought = [(instrument.to_owned(), scope.to_owned(), key)];
-        reading = asking
-            .store
-            .latest_over_each(&sought, pin)?
-            .into_values()
-            .next();
-    }
-    match reading {
+    match asking.store.over(instrument, scope, &key, pin)?.fresh() {
         Some(reading) if reading.status == Status::Pass => {}
         // The sensor reads an `aarch64` Mac alone: a host it cannot read has
         // nothing to hold, and says so.
@@ -600,17 +591,21 @@ fn boxes(
     unmet: &mut Vec<String>,
 ) -> Result<()> {
     const READ: &str = "run `cargo xtask ticket read`";
-    let Some(reading) = store.read(ticket::INSTRUMENT, &ticket::scope(ticket))? else {
-        unmet.push(format!("ticket: no reading for {ticket}; {READ}"));
-        return Ok(());
-    };
+    let last = store.read(ticket::INSTRUMENT, &ticket::scope(ticket))?;
     let tree = snapshot.key(Path::new(ticket::STAMPED_OVER))?;
-    if !reading.fresh_for(&tree, pin) {
-        unmet.push(format!(
-            "ticket: the reading for {ticket} is stale; the tree changed since it was read; {READ}"
-        ));
-        return Ok(());
-    }
+    let reading = match Freshness::judging(last, &tree, pin) {
+        Freshness::Fresh(reading) => reading,
+        Freshness::Never => {
+            unmet.push(format!("ticket: no reading for {ticket}; {READ}"));
+            return Ok(());
+        }
+        Freshness::Stale { .. } => {
+            unmet.push(format!(
+                "ticket: the reading for {ticket} is stale; the tree changed since it was read; {READ}"
+            ));
+            return Ok(());
+        }
+    };
     // The boxes are the condition, read from the numbers: a close the
     // tracker refused with every box ticked fails as a reading and is
     // met here, since the ticket has no unticked box; a reading that
@@ -742,12 +737,10 @@ fn slack_porting_notes(
         let mut columns = Vec::new();
         if krate.name.starts_with("ext/") {
             let key = snapshot.key(&krate.path())?;
-            let keys: BTreeMap<String, String> = (scopes_of(snapshot.root(), "crosscheck", krate)?)
-                .into_iter()
-                .map(|scope| (scope, key.clone()))
-                .collect();
-            let mut fresh = store.latest_over("crosscheck", &keys, manifest.pin_digest())?;
-            columns = keys.keys().map(|scope| fresh.remove(scope)).collect();
+            for scope in scopes_of(snapshot.root(), "crosscheck", krate)? {
+                let column = store.over("crosscheck", &scope, &key, manifest.pin_digest())?;
+                columns.push(column.fresh());
+            }
         }
         if let Some(why) = slack_porting(krate, &columns) {
             slack.entry(why).or_default().push(&krate.name);
@@ -846,10 +839,9 @@ fn no_regression(
         // holds nothing against any base (#725).
         Against::Unrun(_) if phpt::testless(asking.manifest, scope) => {}
         Against::Unrun(why) => {
-            let sought = [("phpt".to_owned(), scope.clone(), key.to_owned())];
             let digest = asking.manifest.pin_digest();
-            let read = asking.store.latest_over_each(&sought, digest)?;
-            let excused = read.values().any(no_binary_yet);
+            let read = asking.store.over("phpt", scope, key, digest)?.fresh();
+            let excused = read.as_ref().is_some_and(no_binary_yet);
             if asking.not_run.iter().any(|n| n == "phpt") {
                 not_judged.push(format!("phpt for {scope}"));
             } else if !excused {
@@ -948,35 +940,28 @@ fn fresh_readings(
             asked.push((instrument, scope));
         }
     }
-    let sought: Vec<(String, String, String)> = (asked.iter())
-        .map(|(instrument, scope)| ((*instrument).to_owned(), scope.clone(), key.clone()))
-        .collect();
-    let mut read = store.latest_over_each(&sought, pin)?;
     for (instrument, scope) in asked {
-        let found = match read.remove(&(instrument.to_owned(), scope.clone())) {
-            Some(reading) => Some(reading),
-            None => store.last_of(instrument, &scope)?,
-        };
-        let Some(reading) = found else {
-            if not_run.iter().any(|n| n == instrument) {
-                not_judged.push(format!("{instrument} for {scope}"));
-            } else {
-                unmet.push(format!("{instrument}: no reading for {scope}"));
+        let reading = match store.over(instrument, &scope, key, pin)? {
+            Freshness::Fresh(reading) => reading,
+            Freshness::Never => {
+                if not_run.iter().any(|n| n == instrument) {
+                    not_judged.push(format!("{instrument} for {scope}"));
+                } else {
+                    unmet.push(format!("{instrument}: no reading for {scope}"));
+                }
+                continue;
             }
-            continue;
+            Freshness::Stale { moved, .. } => {
+                let changed = match moved {
+                    Moved::Recipe => "oracle.toml",
+                    Moved::Key => &now.changed,
+                };
+                unmet.push(format!(
+                    "{instrument}: the reading for {scope} is stale; {changed} changed since it was taken"
+                ));
+                continue;
+            }
         };
-        if !reading.fresh_for(key, pin) {
-            // Over the key now, a reading is stale for its recipe alone.
-            let changed = if reading.key() == key {
-                "oracle.toml".to_owned()
-            } else {
-                now.changed.clone()
-            };
-            unmet.push(format!(
-                "{instrument}: the reading for {scope} is stale; {changed} changed since it was taken"
-            ));
-            continue;
-        }
         if reading.status != Status::Pass
             && !met_without_passing(krate, instrument, &reading)
             && !rule_absent(asking.manifest, &reading)
@@ -1065,18 +1050,17 @@ fn locks(
         let file = dir.join(&seam.lock);
         let shown = file.display().to_string();
         let in_diff = changed.iter().any(|c| Path::new(&c.path) == file);
-        let Some(last) = store.last_of(api_check::INSTRUMENT, &seam.name)? else {
-            if in_diff {
-                unmet.push(format!(
-                    "{shown} is in the diff and has no api-check reading"
-                ));
-            }
-            continue;
-        };
-        let now = BTreeMap::from([(seam.name.clone(), snapshot.key(&dir)?)]);
-        let fresh = store.latest_over(api_check::INSTRUMENT, &now, manifest.pin_digest())?;
-        match fresh.into_values().next() {
-            Some(reading) if reading.status == Status::Fail => unmet.push(format!(
+        let key = snapshot.key(&dir)?;
+        match store.over(
+            api_check::INSTRUMENT,
+            &seam.name,
+            &key,
+            manifest.pin_digest(),
+        )? {
+            Freshness::Never if in_diff => unmet.push(format!(
+                "{shown} is in the diff and has no api-check reading"
+            )),
+            Freshness::Fresh(reading) if reading.status == Status::Fail => unmet.push(format!(
                 "{shown}: {}{}",
                 reading.message,
                 if in_diff {
@@ -1085,9 +1069,9 @@ fn locks(
                     "; the lock is not in the diff"
                 }
             )),
-            None if in_diff && last.status == Status::Pass => unmet.push(format!(
-                "{shown} is in the diff and its api-check reading predates it"
-            )),
+            Freshness::Stale { last, .. } if in_diff && last.status == Status::Pass => unmet.push(
+                format!("{shown} is in the diff and its api-check reading predates it"),
+            ),
             _ => {}
         }
     }

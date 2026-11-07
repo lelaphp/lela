@@ -759,64 +759,48 @@ impl Store {
         Self::read_file(&path).map(Some)
     }
 
-    /// Of `instrument`, the latest reading of each scope of `keys` taken
-    /// over the content its key names, by scope: the scope's file when the
-    /// reading there is over it, since that one is the latest of all, and
-    /// otherwise the index's entry for the key. The index is where a
-    /// retired worktree's readings are: `worktree retire` lands its log in
-    /// main's store and leaves its files with the worktree, so its pass is
-    /// found here, by the key it was taken over, only when this is main's
-    /// store, as it is for `done`, `status` and pre-push run in main's
-    /// checkout (#1252). `done` in `_merge`, which `worktree land` runs
-    /// before it moves `main`, asks `_merge`'s store, and nothing lands a
-    /// reading there (#4216). A scope
-    /// with no reading over its key is absent, and so is one whose key is
-    /// empty, which names no content.
-    pub(crate) fn latest_over(
+    /// Which reading of `instrument` stands over `scope` at `key`, under
+    /// the pin whose digest is `pin` for an instrument of [`UNDER_RECIPE`]:
+    /// the one question `done`, the `--staged` instruments and `witness
+    /// --unmeasured` ask of a scope (harness-design.md §4.2). The scope's
+    /// file when the reading there is over the key, and otherwise the
+    /// index's entry for it. The index is where a retired worktree's
+    /// readings are: `worktree retire` lands its log in main's store and
+    /// leaves its files with the worktree, so its pass is found here, by
+    /// the key it was taken over, only when this is main's store, as it is
+    /// for `done`, `status` and pre-push run in main's checkout (#1252).
+    /// `done` in `_merge`, which `worktree land` runs before it moves
+    /// `main`, asks `_merge`'s store, and nothing lands a reading there
+    /// (#4216). Where neither stands, the scope's last reading judged
+    /// against the key ([`Freshness::judging`]). A file that is no reading
+    /// is no reading over the key, and the index is asked instead, as for
+    /// a stale one (#1235). An empty key names no content and nothing
+    /// stands over it. A lookup reads the scope's file and the index, and
+    /// no log.
+    pub(crate) fn over(
         &self,
         instrument: &str,
-        keys: &BTreeMap<String, String>,
+        scope: &str,
+        key: &str,
         pin: &str,
-    ) -> Result<BTreeMap<String, Reading>> {
-        let sought: Vec<(String, String, String)> = keys
-            .iter()
-            .map(|(scope, key)| (instrument.to_owned(), scope.clone(), key.clone()))
-            .collect();
-        Ok(self
-            .latest_over_each(&sought, pin)?
-            .into_iter()
-            .map(|((_, scope), reading)| (scope, reading))
-            .collect())
-    }
-
-    /// [`Store::latest_over`] for several instruments at once, each sought
-    /// as `(instrument, scope, key)` and found by instrument and scope:
-    /// what `done` asks of a touched crate whose file holds a reading over
-    /// another key, such as a refused commit's, while a pass over the key
-    /// now is in the index (#1312). A lookup reads the scope's file and the
-    /// index's entries for the key, and no log.
-    pub(crate) fn latest_over_each(
-        &self,
-        sought: &[(String, String, String)],
-        pin: &str,
-    ) -> Result<BTreeMap<(String, String), Reading>> {
-        let mut found = BTreeMap::new();
-        for (instrument, scope, key) in sought.iter().filter(|(_, _, key)| !key.is_empty()) {
-            // A file that is no reading is no reading over the key, and
-            // the index is asked instead, as for a stale one (#1235).
-            let reading = match self.read(instrument, scope).ok().flatten() {
-                Some(reading) if reading.fresh_for(key, pin) => Some(reading),
-                _ => self
-                    .entries(instrument, scope, key)?
-                    .into_iter()
-                    .filter(|r| r.fresh_for(key, pin))
-                    .max_by_key(|r| r.at.to_string()),
-            };
-            if let Some(reading) = reading {
-                found.insert((instrument.clone(), scope.clone()), reading);
+    ) -> Result<Freshness> {
+        if !key.is_empty() {
+            let file = self.read(instrument, scope).ok().flatten();
+            if let Some(reading) = file.filter(|r| r.fresh_for(key, pin)) {
+                return Ok(Freshness::Fresh(reading));
+            }
+            let entry = (self.entries(instrument, scope, key)?.into_iter())
+                .filter(|r| r.fresh_for(key, pin))
+                .max_by_key(|r| r.at.to_string());
+            if let Some(reading) = entry {
+                return Ok(Freshness::Fresh(reading));
             }
         }
-        Ok(found)
+        Ok(Freshness::judging(
+            self.last_of(instrument, scope)?,
+            key,
+            pin,
+        ))
     }
 
     /// The last reading of `instrument` over `scope` this store holds,
@@ -994,6 +978,63 @@ impl Store {
 
     fn read_file(path: &Path) -> Result<Reading> {
         crate::read_toml(path)
+    }
+}
+
+/// Which reading stands over a key: the answer [`Store::over`] gives of a
+/// scope, and [`Freshness::judging`] of a reading in hand.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Freshness {
+    /// A reading taken over the key, and under the pin for an instrument
+    /// of [`UNDER_RECIPE`]: it stands, whatever its status says.
+    Fresh(Reading),
+    /// No reading stands over the key, and `last` is the scope's last,
+    /// its status kept as it was taken.
+    Stale { last: Reading, moved: Moved },
+    /// The store holds no reading of the scope.
+    Never,
+}
+
+/// What moved since a stale reading was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Moved {
+    /// The scope's key: its files, or its dependency closure's (#1318).
+    Key,
+    /// The oracle's pin, the reading being over the key now (#1387).
+    Recipe,
+}
+
+impl Freshness {
+    /// `last` judged against `key` and the pin's digest `pin`: fresh by
+    /// [`Reading::fresh_for`], the one statement of fresh, stale over
+    /// another key or another recipe, or never taken. An empty key names
+    /// no content, so a reading over it is stale whatever it was taken
+    /// over. What a question about one reading asks, where finding a
+    /// reading by its key would revive one the question re-asserts by
+    /// reading again, as a ticket's (#31).
+    pub(crate) fn judging(last: Option<Reading>, key: &str, pin: &str) -> Freshness {
+        match last {
+            None => Freshness::Never,
+            Some(reading) if !key.is_empty() && reading.fresh_for(key, pin) => {
+                Freshness::Fresh(reading)
+            }
+            Some(last) => {
+                let moved = if !key.is_empty() && last.key == key {
+                    Moved::Recipe
+                } else {
+                    Moved::Key
+                };
+                Freshness::Stale { last, moved }
+            }
+        }
+    }
+
+    /// The reading that stands, none where it is stale or was never taken.
+    pub(crate) fn fresh(self) -> Option<Reading> {
+        match self {
+            Freshness::Fresh(reading) => Some(reading),
+            Freshness::Stale { .. } | Freshness::Never => None,
+        }
     }
 }
 
@@ -1404,8 +1445,154 @@ pub(crate) fn listed(names: &[impl AsRef<str>]) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{KEPT, Log, Reading, Status, Store, V, civil_from_days, days_from_civil, listed};
+    use super::{
+        Freshness, KEPT, Log, Moved, Reading, Status, Store, V, civil_from_days, days_from_civil,
+        listed,
+    };
     use crate::scratch::Tree;
+
+    /// `reading` as a run in another checkout leaves it, landed here by
+    /// `worktree retire` or `land`: in the index and the log, and not in
+    /// the scope's file (#1252, #3804).
+    fn landed(store: &Store, name: &str, reading: &Reading) {
+        let other = Tree::new(name).unwrap();
+        let other = Store::at(other.path());
+        other.record(std::slice::from_ref(reading)).unwrap();
+        store.land(&other).unwrap();
+    }
+
+    /// The lookup over a key, case by case (harness-design.md §4.2): the
+    /// file over the key stands; a file over another key gives way to the
+    /// index's entry over the key; an entry landed with no file stands; a
+    /// scope never taken is never; an unreadable file is no reading over
+    /// the key and the index is asked; nothing stands over an empty key;
+    /// a reading over the key under another recipe is stale for the
+    /// recipe; and a stale reading keeps the status it was taken with.
+    #[test]
+    fn the_reading_over_a_key_is_the_file_or_the_index_and_else_the_last_judged() {
+        let dir = Tree::new("store-over").unwrap();
+        let store = Store::at(dir.path());
+        let at = |m: u32| format!("2026-11-07T10:{m:02}:00Z");
+        let fresh_key = |f: Freshness| f.fresh().map(|r| r.key().to_owned());
+
+        store.record(&[over("test", "a", &key(1), &at(0))]).unwrap();
+        assert_eq!(
+            fresh_key(store.over("test", "a", &key(1), "").unwrap()),
+            Some(key(1))
+        );
+
+        // The file moved on to another key, a refused commit's: the pass
+        // over the key now is the index's (#1312).
+        let mut refused = over("test", "a", &key(2), &at(1));
+        refused.status = Status::Fail;
+        store.record(&[refused]).unwrap();
+        assert_eq!(
+            fresh_key(store.over("test", "a", &key(1), "").unwrap()),
+            Some(key(1))
+        );
+        let stale = store.over("test", "a", &key(3), "").unwrap();
+        assert!(
+            matches!(&stale, Freshness::Stale { last, moved: Moved::Key }
+                if last.status == Status::Fail && last.key() == key(2)),
+            "the last reading, over another key, keeps its fail: {stale:?}"
+        );
+
+        // Landed with no file of its scope.
+        landed(
+            &store,
+            "store-over-landed",
+            &over("test", "b", &key(4), &at(2)),
+        );
+        assert!(!store.path("test", "b").unwrap().exists());
+        assert_eq!(
+            fresh_key(store.over("test", "b", &key(4), "").unwrap()),
+            Some(key(4))
+        );
+
+        assert_eq!(
+            store.over("test", "never", &key(1), "").unwrap(),
+            Freshness::Never
+        );
+
+        std::fs::write(store.path("test", "a").unwrap(), "no reading").unwrap();
+        assert_eq!(
+            fresh_key(store.over("test", "a", &key(1), "").unwrap()),
+            Some(key(1))
+        );
+
+        let empty = store.over("test", "b", "", "").unwrap();
+        assert!(
+            matches!(
+                empty,
+                Freshness::Stale {
+                    moved: Moved::Key,
+                    ..
+                }
+            ),
+            "{empty:?}"
+        );
+
+        let witness = under(over("witness", "a", &key(5), &at(3)), "old-pin");
+        store.record(&[witness]).unwrap();
+        let moved = store.over("witness", "a", &key(5), "new-pin").unwrap();
+        assert!(
+            matches!(
+                moved,
+                Freshness::Stale {
+                    moved: Moved::Recipe,
+                    ..
+                }
+            ),
+            "{moved:?}"
+        );
+        assert_eq!(
+            fresh_key(store.over("witness", "a", &key(5), "old-pin").unwrap()),
+            Some(key(5))
+        );
+    }
+
+    /// One reading judged against a key: fresh over it, stale over another
+    /// key or under another recipe, never where there is none; and an
+    /// empty key, which names no content, stales a reading taken over
+    /// nothing as well.
+    #[test]
+    fn a_reading_in_hand_is_judged_fresh_stale_or_never() {
+        let reading = over("test", "a", &key(1), "2026-11-07T10:00:00Z");
+        let judged = |key: &str, pin: &str| Freshness::judging(Some(reading.clone()), key, pin);
+        assert_eq!(judged(&key(1), ""), Freshness::Fresh(reading.clone()));
+        assert!(matches!(
+            judged(&key(2), ""),
+            Freshness::Stale {
+                moved: Moved::Key,
+                ..
+            }
+        ));
+        assert_eq!(Freshness::judging(None, &key(1), ""), Freshness::Never);
+        let nothing = over("test", "a", "", "2026-11-07T10:00:00Z");
+        let empty = Freshness::judging(Some(nothing), "", "");
+        assert!(
+            matches!(
+                empty,
+                Freshness::Stale {
+                    moved: Moved::Key,
+                    ..
+                }
+            ),
+            "{empty:?}"
+        );
+        let witness = under(over("witness", "a", &key(1), "2026-11-07T10:00:00Z"), "p");
+        let other = Freshness::judging(Some(witness), &key(1), "q");
+        assert!(
+            matches!(
+                other,
+                Freshness::Stale {
+                    moved: Moved::Recipe,
+                    ..
+                }
+            ),
+            "{other:?}"
+        );
+    }
 
     /// A passing reading of `instrument` over `scope`, taken over `key`
     /// at `at`.
@@ -1415,6 +1602,12 @@ mod tests {
         reading.status = Status::Pass;
         reading.commit = "0000000".into();
         reading.at = at.parse().unwrap();
+        reading
+    }
+
+    /// `reading` as taken under the pin whose digest is `pin`.
+    fn under(mut reading: Reading, pin: &str) -> Reading {
+        reading.recipe = Some(pin.to_owned());
         reading
     }
 
@@ -1446,14 +1639,22 @@ mod tests {
             .collect();
         assert_eq!(kept.len(), KEPT);
         assert!(kept.contains(&key(KEPT + 7)) && !kept.contains(&key(0)));
-        let sought = |n: usize| [("budget".to_owned(), "ext/pcre".to_owned(), key(n))];
-        let found = store.latest_over_each(&sought(KEPT + 1), "").unwrap();
+        let over = |n: usize| store.over("budget", "ext/pcre", &key(n), "").unwrap();
         assert_eq!(
-            found.values().next().map(Reading::key),
+            over(KEPT + 1).fresh().as_ref().map(Reading::key),
             Some(key(KEPT + 1).as_str()),
             "found by its key while the scope's file holds the last"
         );
-        assert!(store.latest_over_each(&sought(0), "").unwrap().is_empty());
+        assert!(
+            matches!(
+                over(0),
+                Freshness::Stale {
+                    moved: Moved::Key,
+                    ..
+                }
+            ),
+            "a key the index let go"
+        );
         let let_go: BTreeSet<String> = [key(0)].into();
         assert_eq!(
             store.measured_over("budget", "ext/pcre", &let_go).unwrap(),
