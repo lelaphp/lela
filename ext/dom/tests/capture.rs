@@ -222,3 +222,55 @@ echo W::$doc->saveXml(), "\n";"#,
     );
     assert_eq!(served.exit_code, 0);
 }
+
+/// Serves #3962's `handler-*.php`: an error handler that removes the root
+/// element and collects while `call` canonicalizes a `Dom\XMLDocument`,
+/// then the document as it stands.
+fn c14n_under_a_handler_that_frees_the_root(call: &str) -> php_ext::test::Served {
+    let engine = support::engine();
+    let sink = Capture::default();
+    let source = format!(
+        r#"<?php
+$doc = Dom\XMLDocument::createFromString('<root xmlns="urn:a" xmlns:p="urn:p" p:x="1"><c/></root>');
+set_error_handler(function ($no, $str) use ($doc) {{ $doc->documentElement?->remove(); gc_collect_cycles(); echo "handler: $str\n"; return true; }});
+{call}
+echo $doc->saveXml(), "\n";
+"#
+    );
+    engine.serve_capture(&source, sink)
+}
+
+/// The inclusive-prefixes notice is raised once the tree is put back, so
+/// the handler that frees the root frees an element nothing writes into
+/// after it: the handler's line, the canonical form of the whole tree,
+/// then the emptied document.
+#[test]
+fn a_handler_that_frees_the_root_at_c14ns_notice_frees_a_restored_tree() {
+    let served = c14n_under_a_handler_that_frees_the_root(
+        "var_dump($doc->C14N(false, false, null, ['p']));",
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "handler: Dom\\Node::C14N(): Inclusive namespace prefixes only allowed in exclusive mode.\n\
+         string(58) \"<root xmlns=\"urn:a\" xmlns:p=\"urn:p\" p:x=\"1\"><c></c></root>\"\n\
+         <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
+
+/// The query's libxml error is raised once the tree is put back, then the
+/// `Error` for what is no node set: the handler's line, the `Error`, the
+/// emptied document.
+#[test]
+fn a_handler_that_frees_the_root_at_c14ns_query_error_frees_a_restored_tree() {
+    let served = c14n_under_a_handler_that_frees_the_root(
+        r#"try { var_dump($doc->C14N(false, false, ['query' => '//*['])); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }"#,
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "handler: Dom\\Node::C14N(): Invalid expression\n\
+         Error: XPath query did not return a nodeset\n\
+         <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
