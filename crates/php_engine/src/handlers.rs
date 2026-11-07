@@ -14733,8 +14733,32 @@ pub(crate) fn assign<T: Tier, A: Operand + Default, B: Operand + Default, R: Ret
 /// `zend_assign_to_variable` takes it, into the CV or the place a fetch
 /// by name left, what stood there given up last. A call of its own, so
 /// that the inline path before it keeps to the registers it needs.
+///
+/// A variable by name is a row of the symbol table, taken before the
+/// warning an undefined value raises. Where the row no longer stands
+/// past the warning, its table grown or the row emptied by an `unset`,
+/// the value lands nowhere and the temporary takes it
+/// ([`Request::named_place`]).
+///
+/// ```php
+/// set_error_handler(function () { static $k = 0; for ($i = 0; $i < 3000; $i++) $GLOBALS["g" . $k++] = 1; return true; });
+/// $n = "fr" . "esh"; $$n = str_repeat("x", 40); $$n = $undef; var_dump($GLOBALS[$n]);
+/// $n = "mo" . "re"; $$n = str_repeat("x", 40); $r = $$n = $undef; var_dump($r, $GLOBALS[$n]);
+/// set_error_handler(function () { unset($GLOBALS[$GLOBALS["n"]]); return true; });
+/// $n = "go" . "ne"; $$n = str_repeat("x", 40); $$n = $undef; var_dump($GLOBALS[$n] ?? "unset");
+/// ```
+/// ```expect
+/// string(40) "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+/// NULL
+/// string(40) "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+/// string(5) "unset"
+/// ```
 #[inline(never)]
 fn assigned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    // A row a fetch by name laid down, past the warning an undefined
+    // value raises; any other value reaches no PHP code before the write.
+    let warns = op.op2_type == OperandKind::Cv && req.slot(frame, op.op2).tag() == TypeTag::Undef;
+    let row = warns.then(|| named_operand(req, frame, op)).flatten();
     let value = exec::take_operand(req, frame, code, op.op2_type, op.op2);
     // `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`: a CV, or the place a fetch
     // by name left in its `VAR` as an `IS_INDIRECT`.
@@ -14742,6 +14766,11 @@ fn assigned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> 
         return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN over a variable the frame does not have",
         ));
+    };
+    let Some(at) = place_past(req, at, row) else {
+        write_out(req, frame, op, &value);
+        req.release(value);
+        return Ok(advance(req, frame));
     };
     // php copies into `result` what the write landed, which a typed
     // cell may have converted, so the copy is after the write and not
