@@ -204,7 +204,7 @@ pub fn judged_at_the_call(rule: &Rule) -> bool {
 pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement> {
     let path = call.path(root);
     let line = call.command().map(Line::read);
-    let walk = Walk::of(root, line.as_ref());
+    let walk = Walk::of(&call.start(root), line.as_ref());
     let mut findings = Vec::new();
     let mut judged = Vec::new();
     if let Some(path) = &path {

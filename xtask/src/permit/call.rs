@@ -286,6 +286,20 @@ impl Call {
             .unwrap_or(root)
     }
 
+    /// Where the walk of the call's shell line starts
+    /// ([`super::shell::Walk`]): the one start that `judge`, the checkout
+    /// `permit` holds a `Bash` call in before and after it, and the write
+    /// the Stop keeps are read from (Round 1, Q17 (a)). The `workspace`
+    /// whose manifest judges the call, for a call with no line and for one
+    /// whose `cwd` stands outside that workspace.
+    #[expect(
+        clippy::unused_self,
+        reason = "the start under the workspace reads the call's cwd, a commit of its own (Round 1, Q17 (a))"
+    )]
+    pub(super) fn start(&self, workspace: &Path) -> PathBuf {
+        workspace.to_path_buf()
+    }
+
     /// What a reading names: the path, or the command's first line.
     pub(super) fn subject(&self, root: &Path) -> String {
         match (self.path(root), self.command()) {
@@ -345,5 +359,41 @@ fn canonical(path: &Path) -> PathBuf {
     match (path.parent(), path.file_name()) {
         (Some(parent), Some(name)) => canonical(parent).join(name),
         _ => path.to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::Call;
+    use crate::scratch::Tree;
+
+    /// The call as the hook hands it: a `Bash` line in `cwd`, or an `Edit`
+    /// with no line.
+    fn bash(cwd: &Path, command: Option<&str>) -> Call {
+        let input = match command {
+            Some(command) => serde_json::json!({"command": command}),
+            None => serde_json::json!({"file_path": "x", "old_string": "a", "new_string": "b"}),
+        };
+        let tool = if command.is_some() { "Bash" } else { "Edit" };
+        let call = serde_json::json!({"tool_name": tool, "cwd": cwd.to_str().unwrap(),
+            "tool_input": input});
+        Call::parse(&call.to_string()).unwrap()
+    }
+
+    /// Round 1, Q17 (a): a call with no line, and a line whose `cwd`
+    /// stands outside the workspace, start where the workspace is.
+    #[test]
+    fn a_call_with_no_line_or_a_cwd_outside_the_workspace_starts_at_the_workspace() {
+        let tree = Tree::new("call-start").unwrap();
+        let workspace = tree.join("workspace");
+        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let outside = tree.canonicalize().unwrap();
+        let start = |cwd: &Path, command| bash(cwd, command).start(&workspace);
+        assert_eq!(start(&workspace.join("sub"), None), workspace);
+        assert_eq!(start(&outside, Some("touch x")), workspace);
+        assert_eq!(start(Path::new("/"), Some("touch x")), workspace);
     }
 }

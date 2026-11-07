@@ -239,8 +239,8 @@ fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
 
 /// The checkout an admitted writing call is placed in, kept under its
 /// session and agent for the Stop to hold (#3618 ruling 1): a file's by
-/// the file, a `Bash` line's where it runs from the call's directory
-/// ([`Walk::ran_in`]) unless it only reads ([`writes::reads_only`]);
+/// the file, a `Bash` line's where it runs from where the call starts
+/// ([`Call::start`], [`Walk::ran_in`]) unless it only reads ([`writes::reads_only`]);
 /// a place in no checkout of the repository is none. Best effort, as
 /// recording the decision is.
 fn record_the_write(workspace: &Path, call: &Call, judgement: &Judgement) {
@@ -253,8 +253,8 @@ fn record_the_write(workspace: &Path, call: &Call, judgement: &Judgement) {
             if writes::reads_only(&line, workspace) {
                 return;
             }
-            let start = call.cwd.as_deref().map_or(workspace, Path::new);
-            Walk::of(start, Some(&line)).ran_in(start)
+            let start = call.start(workspace);
+            Walk::of(&start, Some(&line)).ran_in(&start)
         }
         (None, Some(path)) => match path.ancestors().find(|dir| dir.is_dir()) {
             Some(dir) => Walk::of(dir, None).ran_in(dir),

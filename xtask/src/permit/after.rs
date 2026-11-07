@@ -780,12 +780,12 @@ fn moves_head(line: &argv::Line) -> bool {
 }
 
 /// The one checkout a call is held in: the one it ran in, where its
-/// workspace moved by its line acts ([`Walk::ran_in`]), and never the
-/// hook's own where the call ran elsewhere (#2597, #2607).
+/// start ([`Call::start`]) moved by its line acts ([`Walk::ran_in`]), and
+/// never the hook's own where the call ran elsewhere (#2597, #2607).
 fn held(root: &Path, call: &Call) -> PathBuf {
     let line = call.command().map(argv::Line::read);
     let workspace = call.workspace(root);
-    Walk::of(&workspace, line.as_ref()).ran_in(&workspace)
+    Walk::of(&call.start(&workspace), line.as_ref()).ran_in(&workspace)
 }
 
 /// Where the line's shell stands, which its words are read against: the
