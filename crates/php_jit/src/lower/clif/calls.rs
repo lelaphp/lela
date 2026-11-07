@@ -3254,10 +3254,14 @@ impl Emit<'_> {
         )?;
         let threw = self.not_thrown();
         self.thrown_into(line, status, threw)?;
-        for (place, operand) in operands.iter().enumerate().take(arity) {
-            if let Some(owner) = owners[place] {
+        // Every owner given up before the first operand is freed, as the
+        // handler gives them up (`handlers::free_operands`).
+        for (place, owner) in owners.iter().enumerate().take(arity) {
+            if let Some(owner) = *owner {
                 self.give_up_owner(line, owner, (laid, place), threw)?;
             }
+        }
+        for (place, operand) in operands.iter().enumerate().take(arity) {
             let followed = destructs.iter().skip(place + 1).any(|&destructs| destructs);
             self.free_frameless(line, *operand, followed, threw)?;
         }

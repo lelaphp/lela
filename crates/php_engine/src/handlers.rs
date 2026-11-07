@@ -14645,6 +14645,51 @@ pub(super) fn frameless_native(
 /// #1 %SCRATCH%/witness.php(10): str_replace(7, Object(T), 'x')
 /// #2 %SCRATCH%/witness.php(13): f(1)
 /// ```
+///
+/// The owner taken of a variable is given up before the first operand
+/// is freed, as php's handler holds none: a temporary's destructor that
+/// writes the variable, through a reference or through `$GLOBALS`, frees
+/// what it held inside that destructor, in a trace as in the handler:
+///
+/// ```php
+/// class B { function __construct(public $n) {} function __destruct() { if ($this->n >= 10) echo "B{$this->n} gone\n"; } function __toString(): string { return "ab"; } }
+/// class T { function __construct(public $w) {} function __destruct() { global $g; if ($this->w) { echo "T start\n"; if ($this->w === 'y') unset($GLOBALS['y']); else $g = "zz"; echo "T end\n"; } } function __toString(): string { return "ab"; } }
+/// function f(&$x, $n) { global $g; for ($i = 0; $i < $n; $i++) { $g = new B($i); str_contains(new T($i == $n - 1 ? 'g' : ''), $x); } }
+/// $g = new B(0);
+/// f($g, 11);
+/// $y = new B(20);
+/// str_contains(new T('y'), $y);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// T start
+/// B10 gone
+/// T end
+/// T start
+/// B20 gone
+/// T end
+/// end
+/// ```
+///
+/// ```php
+/// class B { function __construct(public $n) {} function __destruct() { if ($this->n >= 10) echo "B{$this->n} gone\n"; } function __toString(): string { return "ab"; } }
+/// class T { function __construct(public $w) {} function __destruct() { global $g; if ($this->w) { echo "T start\n"; if ($this->w === 'y') unset($GLOBALS['y']); else $g = "zz"; echo "T end\n"; } } function __toString(): string { return "ab"; } }
+/// function f(&$x, $n) { global $g; for ($i = 0; $i < $n; $i++) { $g = new B($i); str_contains(new T($i == $n - 1 ? 'g' : ''), $x); } }
+/// $g = new B(0);
+/// f($g, 11);
+/// $y = new B(20);
+/// str_contains(new T('y'), $y);
+/// echo "end\n";
+/// ```
+/// ```expect regime=jit-force process
+/// T start
+/// B10 gone
+/// T end
+/// T start
+/// B20 gone
+/// T end
+/// end
+/// ```
 #[inline(always)] // the frameless handler's hot path
 fn free_operands<const N: usize>(
     req: &mut Request,
@@ -14652,10 +14697,14 @@ fn free_operands<const N: usize>(
     (operands, owned): (&[Value; N], u8),
     slots: &[(OperandKind, u32); N],
 ) {
-    for (at, (operand, &(kind, field))) in operands.iter().zip(slots).enumerate() {
+    for (at, operand) in operands.iter().enumerate() {
         if owned >> at & 1 != 0 {
             req.release_zval_nogc(operand.to_zval());
-        } else if matches!(kind, OperandKind::Tmp | OperandKind::Var)
+        }
+    }
+    for (at, (operand, &(kind, field))) in operands.iter().zip(slots).enumerate() {
+        if owned >> at & 1 == 0
+            && matches!(kind, OperandKind::Tmp | OperandKind::Var)
             && let Some(object) = operand.to_zval().as_obj()
         {
             req.destruct_in_place(object);
