@@ -291,13 +291,20 @@ impl Call {
     /// `permit` holds a `Bash` call in before and after it, and the write
     /// the Stop keeps are read from (Round 1, Q17 (a)). The `workspace`
     /// whose manifest judges the call, for a call with no line and for one
-    /// whose `cwd` stands outside that workspace.
-    #[expect(
-        clippy::unused_self,
-        reason = "the start under the workspace reads the call's cwd, a commit of its own (Round 1, Q17 (a))"
-    )]
+    /// whose `cwd` stands outside that workspace; the `cwd`, resolved, for
+    /// a line whose shell stands under it, so `cd ..` and a relative word
+    /// are read from where the shell is. Told by the paths alone, with no
+    /// subprocess.
     pub(super) fn start(&self, workspace: &Path) -> PathBuf {
-        workspace.to_path_buf()
+        let Some(cwd) = self.cwd.as_deref().filter(|_| self.command().is_some()) else {
+            return workspace.to_path_buf();
+        };
+        let (cwd, top) = (canonical(&workspace.join(cwd)), canonical(workspace));
+        if cwd.starts_with(&top) && cwd != top {
+            cwd
+        } else {
+            workspace.to_path_buf()
+        }
     }
 
     /// What a reading names: the path, or the command's first line.
@@ -367,6 +374,8 @@ mod tests {
     use std::path::Path;
 
     use super::Call;
+    use crate::permit::argv::Line;
+    use crate::permit::shell::Walk;
     use crate::scratch::Tree;
 
     /// The call as the hook hands it: a `Bash` line in `cwd`, or an `Edit`
@@ -395,5 +404,27 @@ mod tests {
         assert_eq!(start(&workspace.join("sub"), None), workspace);
         assert_eq!(start(&outside, Some("touch x")), workspace);
         assert_eq!(start(Path::new("/"), Some("touch x")), workspace);
+    }
+
+    /// Round 1, Q17 (a): a line whose `cwd` stands under the workspace
+    /// starts there, resolved, and its walk reads `cd ..` and the places of
+    /// its commands from there; the workspace itself is its own start.
+    #[test]
+    fn a_line_whose_cwd_stands_under_the_workspace_starts_there() {
+        let tree = Tree::new("call-start-under").unwrap();
+        let workspace = tree.join("workspace");
+        std::fs::create_dir_all(workspace.join("sub/deeper")).unwrap();
+        let sub = workspace.canonicalize().unwrap().join("sub");
+        let call = |cwd: &Path, command| bash(cwd, Some(command));
+        assert_eq!(
+            call(&workspace.join("sub"), "touch x").start(&workspace),
+            sub
+        );
+        assert_eq!(call(Path::new("sub"), "touch x").start(&workspace), sub);
+        assert_eq!(call(&workspace, "touch x").start(&workspace), workspace);
+        let (deeper, up) = (workspace.join("sub/deeper"), "cd .. && git status");
+        let start = call(&deeper, up).start(&workspace);
+        let stands = Walk::of(&start, Some(&Line::read(up))).runs_in();
+        assert_eq!(stands.canonicalize().unwrap(), sub);
     }
 }
