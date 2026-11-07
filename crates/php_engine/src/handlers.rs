@@ -70,7 +70,7 @@ use crate::api::raising::{
     Thrown, error, non_static_method_call, none_pending, type_error, undefined_method,
 };
 use crate::api::request::ropes::RopeAt;
-use crate::api::request::{CodeFrom, ConstantRead, Opened, Raised, Request};
+use crate::api::request::{CodeFrom, ConstantRead, NamedRow, Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
     ClosureInfo, Left, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
@@ -7776,9 +7776,10 @@ fn fetch_named(
                 if Value::of_slot(place.read()).tag() == TypeTag::Undef {
                     place.write(php_heap::Zval::null());
                 }
-                // A place of a table no owner is noted for, so no
-                // walk an earlier fetch noted answers for it.
-                req.note_walk(None);
+                // A row of a table no owner keeps, noted so a step past
+                // PHP code finds it again where it stands, and no walk an
+                // earlier fetch noted answers for it.
+                req.note_named(place, table);
                 if let Some(var) = req.slot_ptr(frame, out) {
                     var.write(php_heap::Zval::indirect(place));
                 }
@@ -11440,6 +11441,18 @@ fn write_place(
         }
         OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => None,
     }
+}
+
+/// Where a step writes `place` past the PHP code it reached: the place
+/// itself, or where a fetch by name laid it down as a row, the row as
+/// [`Request::named_place`] finds it, none where the table moved or
+/// emptied it.
+fn place_past(
+    req: &Request,
+    place: php_heap::ZvalRef,
+    named: Option<NamedRow>,
+) -> Option<php_heap::ZvalRef> {
+    named.map_or(Some(place), |row| req.named_place(row))
 }
 
 /// `ZEND_FETCH_DIM_REF`, `ZEND_FETCH_DIM_DIM` and `ZEND_FETCH_DIM_OBJ`
@@ -15294,6 +15307,47 @@ fn bind_ref(
 /// [Only variables should be assigned by reference]
 /// int(1)
 /// ```
+///
+/// A variable by name, `$$n = &f()`, is a row of the symbol table, taken
+/// before the notice. Where the row no longer stands past it, its table
+/// grown or the row emptied by an `unset`, the value lands nowhere and
+/// the temporary takes it ([`Request::named_place`]).
+///
+/// ```php
+/// function f() { return str_repeat("v", 90); }
+/// set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 3000; $i++) $GLOBALS["g$i"] = $i; return true; });
+/// $n = "fr" . "esh"; $$n = &f(); var_dump(strlen($GLOBALS[$n] ?? ""), count($GLOBALS) > 100);
+/// ```
+/// ```expect
+/// [Only variables should be assigned by reference]
+/// int(0)
+/// bool(true)
+/// ```
+///
+/// ```php
+/// function f() { return str_repeat("v", 90); }
+/// set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS[$GLOBALS["n"]]); return true; });
+/// $n = "go" . "ne"; $$n = 1; $$n = &f(); var_dump(strlen($GLOBALS[$n] ?? ""));
+/// ```
+/// ```expect
+/// [Only variables should be assigned by reference]
+/// int(0)
+/// ```
+///
+/// The temporary takes the value all the same, and a name the frame
+/// compiled a CV for is that CV, which the table's growth does not move:
+///
+/// ```php
+/// function f() { return str_repeat("v", 9); }
+/// set_error_handler(function () { static $k = 0; for ($i = 0; $i < 3000; $i++) $GLOBALS["g" . $k++] = 1; return true; });
+/// $n = "fr" . "esh"; $$n = 1; $r = $$n = &f(); var_dump($r, $GLOBALS["fresh"]);
+/// $x = 1; $n = "x"; $$n = &f(); var_dump($x);
+/// ```
+/// ```expect
+/// string(9) "vvvvvvvvv"
+/// int(1)
+/// string(9) "vvvvvvvvv"
+/// ```
 #[cold]
 fn assign_returned(
     req: &mut Request,
@@ -15302,13 +15356,20 @@ fn assign_returned(
     target: php_heap::ZvalRef,
     held: Value,
 ) -> Result<(), Thrown> {
-    let table = (op.op1_type == OperandKind::Var)
-        .then(|| req.hold_walk(target))
-        .flatten();
+    let (table, named) = if op.op1_type == OperandKind::Var {
+        (req.hold_walk(target), req.hold_named(target))
+    } else {
+        (None, None)
+    };
     crate::api::raising::notice(req, "Only variables should be assigned by reference");
     let landed = none_pending(req).and_then(|()| {
         let value = held.undef_as_null();
         req.addref(&value);
+        let Some(target) = place_past(req, target, named) else {
+            write_out(req, frame, op, &value);
+            req.release(value);
+            return Ok(());
+        };
         let pair = assign_to_place(req, frame, target, (value, OperandKind::Tmp))?;
         landed_out(req, frame, op, pair);
         Ok(())
