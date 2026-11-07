@@ -2452,6 +2452,53 @@ fn a_branch_that_records_no_ticket_is_not_asked_and_says_nothing_about_tickets()
     assert!(verdict.met(), "{verdict:#?}");
 }
 
+/// Condition 7 reads the ticket's last reading, a later one a land put
+/// in the index included: an unticked read in the file gives way to the
+/// ticked one another checkout took after it over the same tree. A tree
+/// that returns to an earlier state does not revive the box state read
+/// over it, which a lookup by the key would (#31).
+#[test]
+fn the_ticket_is_held_to_its_last_reading_and_never_one_found_by_the_key() {
+    let root = scratch("ticket-last");
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
+    let mut ticked = ticket_act(&root, 31, "ticked.md", xtask::ticket::Act::Read);
+    ticket_read(&root, 31, "unticked.md");
+    assert_eq!(about_the_ticket(&judge(&root)).len(), 1);
+    ticked.at = "2099-01-01T00:00:00Z".parse().unwrap();
+    let other = Tree::new("done-ticket-last-other").unwrap();
+    let theirs = Store::at(other.to_path_buf());
+    theirs.record(&[ticked]).unwrap();
+    Store::of_workspace(&root).land(&theirs).unwrap();
+    let verdict = judge(&root);
+    assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
+
+    let root = scratch("ticket-returns");
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
+    let tree = || {
+        let snapshot = xtask::key::Snapshot::disk(&root).unwrap();
+        snapshot.key(Path::new(".")).unwrap()
+    };
+    let (before, file) = (tree(), root.join("ext/pcre/src/lib.rs"));
+    let was = std::fs::read(&file).unwrap();
+    ticket_read(&root, 31, "ticked.md");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    ticket_read(&root, 31, "unticked.md");
+    std::fs::write(&file, was).unwrap();
+    assert_eq!(
+        tree(),
+        before,
+        "the tree is back where the ticked read was taken"
+    );
+    let verdict = judge(&root);
+    assert_eq!(
+        about_the_ticket(&verdict),
+        [
+            "ticket: the reading for #31 is stale; the tree changed since it was read; run `cargo xtask ticket read`"
+        ],
+        "{verdict:#?}"
+    );
+}
+
 /// The Stop hook holds the turn on the ticket's boxes as it holds it on
 /// every other condition, from the store alone.
 #[test]

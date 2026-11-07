@@ -578,8 +578,11 @@ fn folded(
 
 /// Condition 7: the branch's ticket has no unticked box, or was withdrawn
 /// by the instrument, read from the `ticket` reading over its number and
-/// never from the tracker. The
-/// reading is fresh while the workspace's tree, [`ticket::STAMPED_OVER`],
+/// never from the tracker. The reading is the scope's last, a later one
+/// a land put in the index included, and never one found by the key: a
+/// tree that returns to an earlier state does not revive an earlier box
+/// state, the claim being re-asserted by reading again (#31). It is fresh
+/// while the workspace's tree, [`ticket::STAMPED_OVER`],
 /// still matches (the rule at the top of this module); a
 /// missing or stale one says what to run, and a failing one carries the
 /// instrument's message, which names each unticked box.
@@ -591,7 +594,7 @@ fn boxes(
     unmet: &mut Vec<String>,
 ) -> Result<()> {
     const READ: &str = "run `cargo xtask ticket read`";
-    let last = store.read(ticket::INSTRUMENT, &ticket::scope(ticket))?;
+    let last = store.last_of_readable(ticket::INSTRUMENT, &ticket::scope(ticket))?;
     let tree = snapshot.key(Path::new(ticket::STAMPED_OVER))?;
     let reading = match Freshness::judging(last, &tree, pin) {
         Freshness::Fresh(reading) => reading,

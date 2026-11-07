@@ -808,9 +808,35 @@ impl Store {
     /// The last reading of `instrument` over `scope` this store holds,
     /// by the time it was taken: the scope's file or, where a retired
     /// worktree's later one was landed in the index and not the file, the
-    /// index's latest entry. None where the store holds neither.
+    /// index's latest entry. None where the store holds neither. A file
+    /// that is no reading is none (#1235).
     pub(crate) fn last_of(&self, instrument: &str, scope: &str) -> Result<Option<Reading>> {
-        let mut last = self.read(instrument, scope).ok().flatten();
+        let file = self.read(instrument, scope).ok().flatten();
+        self.last_after(file, instrument, scope)
+    }
+
+    /// [`Store::last_of`], save that a scope file that is no reading is
+    /// an error: what a question reads whose empty answer would pass it on
+    /// no evidence, `done`'s ticket boxes and `ticket::stranded` (harness
+    /// §4.5 conditions 7 and 9).
+    pub(crate) fn last_of_readable(
+        &self,
+        instrument: &str,
+        scope: &str,
+    ) -> Result<Option<Reading>> {
+        let file = self.read(instrument, scope)?;
+        self.last_after(file, instrument, scope)
+    }
+
+    /// `file`, or the index's latest entry of the scope where it was taken
+    /// after it.
+    fn last_after(
+        &self,
+        file: Option<Reading>,
+        instrument: &str,
+        scope: &str,
+    ) -> Result<Option<Reading>> {
+        let mut last = file;
         for (_, path) in self.keys_of(instrument, scope)? {
             if let Ok(entry) = Self::read_file(&path)
                 && last

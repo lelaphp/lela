@@ -1889,3 +1889,63 @@ fn a_staging_fast_forward_closes_the_tickets_its_merges_name() {
         tracker.calls()
     );
 }
+
+/// `done`'s condition 9 reads each named ticket's last reading (harness
+/// §4.5 condition 9, "until a close replaces that reading"): a close
+/// another checkout took after the file's `unclosed`, landed in the index
+/// and not the file, replaces it; and a scope file that is no reading is
+/// an error, never an empty answer that passes the condition.
+#[test]
+fn stranded_reads_each_tickets_last_reading_and_errs_on_an_unreadable_file() {
+    let root = repository("ticket-stranded-landed");
+    let repo = Repo::at(&root);
+    repo.git(&["checkout", "-q", "-b", "t40"]);
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "the work"]);
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "t40",
+        "-m",
+        "Merge t40: the work (#40)",
+    ]);
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let snapshot = xtask::key::Snapshot::disk(&root).unwrap();
+    let reading = |status: Status, at: &str| {
+        let mut reading = Reading::stamped_over("ticket", "40", &snapshot, Path::new(".")).unwrap();
+        reading.status = status;
+        reading.message = format!("#40: {}", status.as_str());
+        reading.at = at.parse().unwrap();
+        reading
+    };
+    let dir = Tree::new("ticket-stranded-landed-store").unwrap();
+    let store = Store::at(dir.to_path_buf());
+    let mut left_open = reading(Status::Fail, "2026-11-07T10:00:00Z");
+    left_open.count("unclosed", 1).unwrap();
+    store.record(&[left_open]).unwrap();
+    assert_eq!(
+        stranded(&root, &store, &head).unwrap(),
+        ["ticket: #40: fail"]
+    );
+
+    let other = Tree::new("ticket-stranded-landed-other").unwrap();
+    let theirs = Store::at(other.to_path_buf());
+    theirs
+        .record(&[reading(Status::Pass, "2026-11-07T11:00:00Z")])
+        .unwrap();
+    store.land(&theirs).unwrap();
+    let file = store.read("ticket", "40").unwrap().unwrap();
+    assert!(
+        file.numbers.contains_key("unclosed"),
+        "the file is as it was"
+    );
+    assert_eq!(
+        stranded(&root, &store, &head).unwrap(),
+        Vec::<String>::new(),
+        "the landed close replaced the reading"
+    );
+
+    fs::write(store.path("ticket", "40").unwrap(), "no reading").unwrap();
+    assert!(stranded(&root, &store, &head).is_err());
+}

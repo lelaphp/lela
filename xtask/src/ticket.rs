@@ -1825,7 +1825,7 @@ pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Resul
     };
     let mut unmet = Vec::new();
     for ticket in named_by_merges(root, &range)? {
-        if let Some(reading) = store.read(INSTRUMENT, &scope(ticket))?
+        if let Some(reading) = store.last_of_readable(INSTRUMENT, &scope(ticket))?
             && reading.numbers.contains_key(UNCLOSED)
         {
             unmet.push(format!("ticket: {}", reading.message));
