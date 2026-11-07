@@ -1798,7 +1798,9 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 
 /// The Stop's one reading: this checkout's verdict where it was judged,
 /// otherwise one over the checkouts the session wrote in; `counts` and
-/// `unmet` counted over them all.
+/// `unmet` counted over them all. What the other checkouts hold is said
+/// beside this one's verdict, so a failing row never says every
+/// condition is met.
 fn stop_reading(
     here: Option<&Verdict>,
     manifest: &Manifest,
@@ -1808,7 +1810,21 @@ fn stop_reading(
 ) -> Result<Reading> {
     let unmet = counts.total();
     let mut reading = if let Some(verdict) = here {
-        verdict.reading(manifest, snapshot)?
+        let mut reading = verdict.reading(manifest, snapshot)?;
+        let elsewhere = unmet.saturating_sub(verdict.unmet.len());
+        if elsewhere > 0 {
+            let others = checkouts.saturating_sub(1);
+            let over = format!(
+                "{elsewhere} unmet over the {others} other checkout{} the session wrote in",
+                plural(others)
+            );
+            reading.message = if verdict.met() {
+                format!("{over}; this one is met since {}", verdict.base)
+            } else {
+                format!("{}; {over}", reading.message)
+            };
+        }
+        reading
     } else {
         let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, snapshot)?;
         reading.message = format!(

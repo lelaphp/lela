@@ -1795,6 +1795,38 @@ fn a_checkout_written_elsewhere_is_handed_to_its_own_build() {
     assert_eq!(reading.numbers["unmet"], 1.into(), "{reading:#?}");
 }
 
+/// A Stop met where it stands and held in another checkout the session
+/// wrote in fails, and its reading says what the other holds rather than
+/// that every condition is met (Round 1, Q23, c7).
+#[test]
+fn a_stop_met_here_and_held_elsewhere_never_says_every_condition_is_met() {
+    let root = scratch("hook-met-here");
+    let tree = Tree::new("done-hook-met-here").unwrap();
+    let other = tree.join("t1");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t1", other.to_str().unwrap()]);
+    wrote_in(&root, &root, "s", None);
+    wrote_in(&root, &other, "s", None);
+    let out = stop_hook(&root, "{\"session_id\":\"s\"}").ok();
+    assert!(out.contains("done could not judge"), "{out}");
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(
+        !reading.message.contains("every condition"),
+        "{}",
+        reading.message
+    );
+    assert!(
+        reading.message.starts_with(
+            "stop: 1 unmet over the 1 other checkout the session wrote in; this one is met since "
+        ),
+        "{}",
+        reading.message
+    );
+}
+
 /// A checkout the session wrote in and that was removed since is none
 /// the Stop judges, and none its reading counts (Round 1, Q23, c7).
 #[test]
