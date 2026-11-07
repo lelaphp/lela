@@ -14,7 +14,7 @@ Your scratch files, commit messages and run output alike, go in {scratch}, never
 
 Read first: AGENTS.md, CONTEXT.md, ext/AGENTS.md, the stage-commit skill, and the ADRs and design sections the ticket's area names.
 
-Run phpt only through `cargo xtask phpt`, never a program of your own written into the pinned php-src tree. The one subset run, at the end, goes to a file read through `awk -f {checkout}/.claude/skills/specs/first-failures.awk <file> | sort | uniq -c | sort -rn`, never raw: it prints about 200k lines. Regressions against the merge base are the coordinator's.
+Run phpt only through `cargo xtask phpt`, never a program of your own written into the pinned php-src tree, and only over hosts built at the tree you measure, since a binary the tree has moved past is a skip and not a verdict. The one subset run, at the end, is this recipe, in the worktree, `<scratch>` being your scratch directory: `cargo build --profile release-da -p php_sapi_cli -p php_sapi_cgi -p php_sapi_fpm -p php_sapi_phpdbg`, then `cargo xtask phpt --subset <crate> > <scratch>/phpt-<crate>.out 2>&1`, and read the file only through `grep -E '^(pass|fail|skip) phpt ' <scratch>/phpt-<crate>.out` for the verdict and `awk -f {checkout}/.claude/skills/specs/first-failures.awk <scratch>/phpt-<crate>.out | sort | uniq -c | sort -rn | head -40` for the causes, never raw: it prints about 200k lines. Regressions against the merge base are the coordinator's.
 
 Commit each piece as soon as it's done: sessions restart, and committed work survives them. The commit's hook is the measurement (stage-commit, step 4): make every source change, `cargo fmt` and `witness --accept` included, before `git commit`, and never chain a plain `cargo test` or your own clippy and test run before it. Witness runs once, `cargo xtask witness --crate <name>` before the branch is ready, not in the hook. A design ledger revision you add is `NEXT`, which the merge numbers (merging.md).
 
@@ -24,7 +24,7 @@ Return the final handoff when completed: ticket, exact head/base, actual checkou
 
 The disk might be tight: work in this one worktree and its one target/.
 
-The face: add a `php_ext` api item only where the face can't serve, general and typed, with its api.lock line in the same commit, never a narrow `Request` method for one native (#696). Hold every crate under its line ceiling; work that would cross one stops there and the crossing is filed `for-a-person`.
+The face: add a `php_ext` api item only where the face can't serve, general and typed, with its api.lock line in the same commit, never a narrow `Request` method for one native. Hold every crate under its line ceiling; work that would cross one stops there and the crossing is filed `for-a-person`.
 
 Standard: modern Rust and decisions that hold as the engine grows. State is a type, never an encoding: an enum decoded once at a boundary and matched exhaustively, not sentinel values packed into a field. One representation per idea, one place per rule. Typed faces, not stringly or `op(Kind)` ones. php's algorithm where the behaviour is observable, and php's shape where it keeps the executor and the compiled tier on one frame layout (ADR-0006).
 
