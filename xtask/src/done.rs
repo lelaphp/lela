@@ -1026,6 +1026,43 @@ pub fn scopes_of(root: &Path, instrument: &str, krate: &Crate) -> Result<Vec<Str
     Ok(scopes)
 }
 
+/// The command that takes `instrument`'s reading of the crate named
+/// `krate`: what clears a stale or missing reading of condition 1 (Round
+/// 1, Q12, c2.e). It is built from the instrument and the crate and never
+/// from the scope, since `<crate>/release` and `ext/<name>/ri` are scopes
+/// and no flag's value, and it lives here beside the flags it claims, so
+/// a test parses each through the command line and asks `permit` of each.
+/// The four instruments that take no crate run over the workspace. None
+/// for an instrument no `[[owed]]` row may name, and for `crosscheck` of a
+/// crate that is no extension; `fold`'s and `ticket`'s commands are said
+/// at their own sites.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the typed list of #3494 names it, in the next commit"
+    )
+)]
+pub(crate) fn command_taking(instrument: &str, krate: &str) -> Option<String> {
+    let flagged = |flag: &str, value: &str| format!("cargo xtask {instrument} {flag} {value}");
+    match instrument {
+        clippy::INSTRUMENT
+        | crate::test::INSTRUMENT
+        | crate::witness::INSTRUMENT
+        | crate::vocab::INSTRUMENT
+        | crate::miri::INSTRUMENT => Some(flagged("--crate", krate)),
+        phpt::INSTRUMENT => Some(flagged("--subset", krate)),
+        crosscheck::INSTRUMENT => krate.strip_prefix("ext/").map(|ext| flagged("--ext", ext)),
+        api_check::INSTRUMENT
+        | crate::budget::INSTRUMENT
+        | crate::unsafe_audit::INSTRUMENT
+        | port_map::INSTRUMENT
+        | crate::makala::compare::INSTRUMENT
+        | crate::makala::soak::INSTRUMENT => Some(format!("cargo xtask {instrument}")),
+        _ => None,
+    }
+}
+
 /// Condition 3: a lock that differs is in the diff, and a lock in the diff
 /// has a fresh `api-check` reading that passes. A seam reading that is
 /// stale says nothing here: the crate the lock lives with changed, and
@@ -1490,8 +1527,8 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 #[cfg(test)]
 mod tests {
     use super::{
-        Slack, met_without_passing, miri_unsupported, no_binary_yet, owed, porting_meter,
-        rule_absent, slack_porting,
+        Slack, command_taking, met_without_passing, miri_unsupported, no_binary_yet, owed,
+        porting_meter, rule_absent, slack_porting,
     };
     use crate::carried::Carried;
     use crate::manifest::{Crate, Manifest, Owed, Rule};
@@ -1909,6 +1946,78 @@ crates = ["php_heap"]                      # design §9's memory model; also wha
         assert!(!rule_absent(&with, &reading));
         reading.status = Status::Fail;
         assert!(!rule_absent(&without, &reading), "a fail is held");
+    }
+
+    /// c2.e: the command of every tracked `[[owed]]` row, for crates of
+    /// each shape it covers, an engine crate, the memory model, the lock's
+    /// home, an extension, a host and the harness, is a command line
+    /// `xtask` parses and one `permit` allows, in main's checkout and in a
+    /// ticketed one, where `lanes.builder-subset` denies a bare `phpt`; a
+    /// clap test alone would pass one of those. `fold` and `ticket` name
+    /// their commands at their sites, and `crosscheck` none for a crate
+    /// that is no extension.
+    #[cfg(tracked)]
+    #[test]
+    fn every_owed_reading_names_a_command_xtask_parses_and_permit_allows() {
+        use clap::Parser;
+        let root = crate::package_dir().parent().unwrap();
+        let manifest = Manifest::load(root).unwrap();
+        let checkout = |name: &str, ticket: Option<&str>| {
+            let tree = crate::scratch::Tree::new(name).unwrap();
+            crate::git::git(tree.path(), &["init", "-q", "-b", "main"]).unwrap();
+            if let Some(ticket) = ticket {
+                crate::git::git(tree.path(), &["config", "branch.main.ticket", ticket]).unwrap();
+            }
+            tree
+        };
+        let checkouts = [
+            checkout("done-commands-main", None),
+            checkout("done-commands-ticketed", Some("4251")),
+        ];
+        let shapes = [
+            "php_engine",
+            "php_heap",
+            "php_ext",
+            "ext/pcre",
+            "sapi/cli",
+            "sapi/makala",
+            "xtask",
+        ];
+        let denied = |command: &str, checkout: &std::path::Path| {
+            let call = serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": command, "description": "take the reading" }
+            });
+            let call = crate::permit::Call::parse(&call.to_string()).unwrap();
+            let judgement = crate::permit::judge(&manifest, checkout, &call).unwrap();
+            judgement.denial().map(|finding| finding.rule.clone())
+        };
+        let mut judged = 0;
+        for row in &manifest.owed {
+            let instrument = row.instrument.name();
+            for krate in shapes.into_iter().filter(|k| row.covers(k)) {
+                let command = command_taking(instrument, krate)
+                    .unwrap_or_else(|| panic!("{instrument} names no command for {krate}"));
+                let words: Vec<&str> = command.split_whitespace().collect();
+                assert_eq!(words[..2], ["cargo", "xtask"], "{command}");
+                let parsed = crate::cli::Cli::try_parse_from(&words[1..]);
+                assert!(parsed.is_ok(), "{command}: {}", parsed.unwrap_err());
+                for tree in &checkouts {
+                    let denial = denied(&command, tree.path());
+                    assert_eq!(denial, None, "{command} in {}", tree.path().display());
+                }
+                judged += 1;
+            }
+        }
+        assert!(judged >= manifest.owed.len(), "{judged} commands judged");
+        // The ticketed checkout is one: the lane without a subset is
+        // denied there and not in main's.
+        let ticketed = denied("cargo xtask phpt", checkouts[1].path());
+        assert_eq!(ticketed.as_deref(), Some("lanes.builder-subset"));
+        assert_eq!(denied("cargo xtask phpt", checkouts[0].path()), None);
+        assert_eq!(command_taking(crate::fold::INSTRUMENT, "sapi/cli"), None);
+        assert_eq!(command_taking(crate::ticket::INSTRUMENT, "xtask"), None);
+        assert_eq!(command_taking("crosscheck", "php_engine"), None);
     }
 
     /// #3206: the tracked manifest's `[[owed]]` rows ask every crate of it
