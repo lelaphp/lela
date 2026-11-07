@@ -379,6 +379,11 @@ ticket::Successors
 ticket::Successors::named
 ticket::Verdict
 ticket::Verdict::given
+ticket::brief::Ask
+ticket::brief::HEADING
+ticket::brief::TEMPLATE
+ticket::brief::brief
+ticket::brief::render
 ticket::denied
 ticket::merged
 ticket::parent

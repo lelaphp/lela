@@ -13,6 +13,7 @@ use std::path::Path;
 use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
+use xtask::ticket::brief;
 use xtask::ticket::view::{self, Author, Comment, Thread};
 use xtask::ticket::{
     Act, CAP, Issue, MERGED, Reach, State, SubIssues, Successors, Verdict, merged, parent, run,
@@ -2031,4 +2032,181 @@ fn ready_prints_the_comments_newer_than_the_branchs_first_commit() {
         "{said}"
     );
     assert!(said.contains("withheld 2: 1 written before"), "{said}");
+}
+
+/// The brief (#4263): the template's lines from `## Brief` on, each field
+/// filled from the ticket, the branch recording it and the flags; a line
+/// whose field is empty left out, so the unmerged base's line stands only
+/// for a branch laid on another and the track's only for a labelled
+/// ticket. A ticket no branch records is refused.
+#[test]
+fn the_brief_fills_the_template_from_the_ticket_and_its_branch() {
+    let dir = Tree::new("ticket-brief").unwrap();
+    let root = dir.join("repo");
+    xtask::scratch::repository(workspace(), &root, &["seams.toml"]).unwrap();
+    let repo = Repo::at(&root);
+    repo.write(
+        brief::TEMPLATE,
+        "a note for the template's editor, not rendered\n\n## Brief\n\n#{ticket} {title}: {worktree} on {branch} at {base}, laid on {laid_on}.\nLaid on {unmerged_base}: run status --session.\nScratch {scratch}; checkout {checkout}; own {owns}; {stamp}.\nSpec: {spec}\nCarry `{track_label}`.\n",
+    );
+    let worktrees = dir.join("worktrees");
+    repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "t6",
+        worktrees.join("t6").to_str().unwrap(),
+        "main",
+    ]);
+    Repo::at(&worktrees.join("t6")).git(
+        &[
+            &xtask::scratch::UNHOOKED[..],
+            &["commit", "-q", "--allow-empty", "-m", "six"],
+        ]
+        .concat(),
+    );
+    repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "t8",
+        worktrees.join("t8").to_str().unwrap(),
+        "t6",
+    ]);
+    repo.git(&["config", "branch.t6.ticket", "6"]);
+    repo.git(&["config", "branch.t8.ticket", "8"]);
+    let tracker = Tracker::empty("brief");
+    tracker.with_issue(&issue(6));
+    tracker.with_issue(&labelled(8, "", &["ready-for-agent", "track:parity-dom"]));
+    tracker.with_issue(&issue(9));
+    let gh = tracker.gh();
+    let ask = brief::Ask {
+        scratch: Some(dir.join("pad")),
+        owns: vec!["`ext/dom`".to_owned(), "its tests".to_owned()],
+        spec: None,
+    };
+    let main = repo.git(&["rev-parse", "main"]);
+    let six = brief::brief(&root, workspace(), &gh, Ticket::new(6), &ask).unwrap();
+    let canonical = |p: &Path| fs::canonicalize(p).unwrap().display().to_string();
+    // The stamp names the sources this build was compiled from, twelve
+    // hex digits of their digest.
+    let (six, stamp) = six.rsplit_once("xtask sources ").unwrap();
+    assert!(
+        stamp.len() == 14
+            && stamp[..12].bytes().all(|b| b.is_ascii_hexdigit())
+            && stamp.ends_with(".\n"),
+        "{stamp}"
+    );
+    assert_eq!(
+        six,
+        format!(
+            "## Brief\n\n#6 ticket 6: {} on t6 at {main}, laid on main.\nScratch {}/t6/; checkout {}; own `ext/dom`, its tests; ",
+            canonical(&worktrees.join("t6")),
+            dir.join("pad").display(),
+            canonical(&root),
+        )
+    );
+    let eight = brief::brief(
+        &root,
+        workspace(),
+        &gh,
+        Ticket::new(8),
+        &brief::Ask {
+            spec: Some("the dom slot".to_owned()),
+            ..ask.clone()
+        },
+    )
+    .unwrap();
+    assert!(
+        eight.contains(
+            "laid on #6's finished branch t6, not yet merged.\nLaid on t6: run status --session.\n"
+        ),
+        "{eight}"
+    );
+    assert!(
+        eight.ends_with("Spec: the dom slot\nCarry `track:parity-dom`.\n"),
+        "{eight}"
+    );
+
+    // The number alone, as a hook that expands `/build <n>` has it
+    // (#4270): the lines of what the dispatcher did not say are left out.
+    let bare = brief::Ask {
+        scratch: None,
+        owns: Vec::new(),
+        spec: None,
+    };
+    let bare = brief::brief(&root, workspace(), &gh, Ticket::new(6), &bare).unwrap();
+    assert!(bare.starts_with("## Brief\n\n#6 ticket 6: "), "{bare}");
+    assert!(!bare.contains("Scratch"), "{bare}");
+
+    let unrecorded = brief::brief(&root, workspace(), &gh, Ticket::new(9), &ask).unwrap_err();
+    assert!(
+        format!("{unrecorded:#}").contains("no branch records #9; lay its worktree down first"),
+        "{unrecorded:#}"
+    );
+}
+
+/// A build whose sources are not the tree's renders no brief: it is
+/// refused before the tracker is asked, saying how to rebuild (Round 3,
+/// Q15 (a)).
+#[test]
+fn the_brief_refuses_a_build_apart_from_the_trees_sources() {
+    let dir = Tree::new("ticket-brief-stale").unwrap();
+    let root = dir.join("repo");
+    xtask::scratch::repository(workspace(), &root, &["seams.toml"]).unwrap();
+    let tracker = Tracker::empty("brief-stale");
+    let ask = brief::Ask {
+        scratch: None,
+        owns: Vec::new(),
+        spec: None,
+    };
+    let elsewhere = Tree::new("ticket-brief-sources").unwrap();
+    Repo::at(&elsewhere).write("xtask/src/lib.rs", "// another harness\n");
+    let stale = brief::brief(&root, &elsewhere, &tracker.gh(), Ticket::new(6), &ask).unwrap_err();
+    assert!(
+        format!("{stale:#}").contains("Rebuild it: `cargo build -p xtask`"),
+        "{stale:#}"
+    );
+}
+
+/// The template the brief is rendered from: it renders with every field
+/// filled, opens with the heading the builder's role looks for, leaves no
+/// field unfilled, and carries no line naming cq while #3680's census is
+/// open (Round 2, Q5).
+#[test]
+fn the_brief_template_renders_whole_and_names_no_cq() {
+    let template = fs::read_to_string(workspace().join(brief::TEMPLATE)).unwrap();
+    let names = [
+        "ticket",
+        "title",
+        "worktree",
+        "branch",
+        "base",
+        "laid_on",
+        "unmerged_base",
+        "checkout",
+        "scratch",
+        "owns",
+        "track_label",
+        "spec",
+        "stamp",
+    ];
+    let fields = names.iter().map(|&n| (n, format!("<{n}>"))).collect();
+    let brief = brief::render(&template, &fields).unwrap();
+    assert!(brief.starts_with(brief::HEADING), "{brief}");
+    assert!(!brief.contains('{'), "a field left unfilled: {brief}");
+    for name in names {
+        assert!(
+            brief.contains(&format!("<{name}>")),
+            "the template names no {{{name}}}"
+        );
+    }
+    assert!(
+        !brief
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word.eq_ignore_ascii_case("cq")),
+        "{brief}"
+    );
 }

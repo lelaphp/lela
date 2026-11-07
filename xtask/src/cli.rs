@@ -193,8 +193,8 @@ pub(crate) enum Command {
         command: WorktreeCommand,
     },
     /// A ticket, one GitHub issue: `read`, `ready` and `close` hold it to
-    /// its boxes; `view` is what a builder reads; `parent` measures a
-    /// chart sheet.
+    /// its boxes; `view` and `brief` are what a builder reads; `parent`
+    /// measures a chart sheet.
     ///
     /// `read <n>` writes the reading of the boxes under the ticket's
     /// `## Acceptance criteria` heading, and `parent <n>` the reading of
@@ -875,6 +875,27 @@ pub(crate) enum TicketCommand {
         /// done is not a withdrawal.
         #[arg(long = "withdrawn", value_name = "REASON")]
         withdrawn: Option<String>,
+    },
+    /// Render the brief a spawned builder starts with, from the template
+    /// `.claude/skills/build/brief.md`, the ticket and the branch that
+    /// records it; refuse a build apart from the tree, and a ticket no
+    /// branch records. Writes no reading.
+    Brief {
+        /// The issue number.
+        number: u64,
+        /// The scratchpad the builder's files go under, in `t<n>/`; its
+        /// line is left out without one.
+        #[arg(long, value_name = "DIR")]
+        scratch: Option<PathBuf>,
+        /// What the builder owns, a path or a slice of code; once per
+        /// thing owned. Its line is left out without one, for the
+        /// dispatcher's own text to say.
+        #[arg(long, value_name = "WHAT")]
+        owns: Vec<String>,
+        /// What the ticket does not say: its track, the neighbouring slots
+        /// and what they own, the counts measured at the cut.
+        #[arg(long, value_name = "TEXT")]
+        spec: Option<String>,
     },
     /// Print the ticket's body and the comments a builder may act on, a
     /// maintainer's or CI's, and count what it withheld: outsiders'

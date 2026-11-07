@@ -173,10 +173,11 @@
 //! not judge the close of an issue labelled `frontier:chart` (CONTEXT.md,
 //! Chart; harness-design.md ledger 53).
 //!
-//! One reader writes no reading (#4263): `view <n>` prints the ticket
-//! with the comments a builder may act on, counting what it withheld
-//! ([`view`]), which `ready` prints too for the comments written since
-//! the branch's first commit.
+//! Two readers write no reading (#4263): `brief <n>` renders the brief a
+//! spawned builder starts with from a skill's template ([`brief`]), and
+//! `view <n>` prints the ticket with the comments a builder may act on,
+//! counting what it withheld ([`view`]), which `ready` prints too for the
+//! comments written since the branch's first commit.
 //!
 //! What the seam does not cover, written down rather than pretended: the
 //! rule is judged by `permit`, whose tools are `Edit`, `Write` and `Bash`,
@@ -197,6 +198,7 @@ use crate::reading::{Reading, Status, joined, millis};
 use crate::track::{MAIN, Ticket, Track};
 use crate::track_next::{READY, TRACK_LABEL, tracks_of};
 
+pub mod brief;
 pub mod view;
 
 /// The instrument name every reading of ticket carries.
