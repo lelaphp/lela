@@ -27152,11 +27152,47 @@ fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at:
 /// #0 %SCRATCH%/witness.php(13): D->__destruct()
 /// #1 %SCRATCH%/witness.php(14): r()
 /// ```
+///
+/// The entry frame of a serving that reads no return is one such: the
+/// primary file, which `zend_execute_scripts` serves with a `NULL`
+/// `return_value` ([`crate::engine::ScriptRetval::Null`]), frees a
+/// temporary it returns at its `RETURN`, the frame standing, and keeps
+/// nothing of it once it is served:
+///
+/// ```php
+/// class D { function __destruct() { echo "D: "; debug_print_backtrace(); } }
+/// echo "main\n";
+/// return new D;
+/// ```
+/// ```expect
+/// main
+/// D: #0 %SCRATCH%/witness.php(4): D->__destruct()
+/// ```
+///
+/// ```php
+/// class D { function __destruct() { echo "D: "; debug_print_backtrace(); } }
+/// function f() { $s = 0; for ($i = 0; $i < 20; $i++) { $s += $i; } return $s; }
+/// echo f(), "\n";
+/// return new D;
+/// ```
+/// ```expect regime=jit-force process
+/// 190
+/// D: #0 %SCRATCH%/witness.php(5): D->__destruct()
+/// ```
 fn temporary_discarded(req: &mut Request, frame: FrameRef, op: &Opline) -> bool {
     matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var)
-        && req.stack_mut().entry() != frame
+        && (req.stack_mut().entry() != frame || returns_nowhere(req, frame))
         && !crate::observer::observing(req)
         && req.returning(frame).1.is_none()
+}
+
+/// Whether `frame` is an entry frame whose serving reads nothing it
+/// returns, php's `EX(return_value) == NULL` at a `ZEND_CALL_TOP_CODE`
+/// frame: one [`crate::engine::serve_unit`] marked `RETURN_UNUSED`.
+fn returns_nowhere(req: &Request, frame: FrameRef) -> bool {
+    req.vm()
+        .at(frame)
+        .is_some_and(|header| header.info.top_code() && !header.info.return_used())
 }
 
 /// The temporary [`temporary_discarded`] found given up, with the frame

@@ -219,7 +219,7 @@ impl Engine {
             Err(_) => None,
         };
         let failed = match compiled {
-            Some(Ok(unit)) => !serve_unit(&mut req, &unit),
+            Some(Ok(unit)) => !serve_unit(&mut req, &unit, crate::engine::ScriptRetval::Null),
             Some(Err(refused)) => {
                 refused_program(&mut req, &refused, script);
                 true
