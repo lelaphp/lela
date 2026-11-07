@@ -15022,6 +15022,34 @@ fn appended(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> 
 /// `ASSIGN_OP` past its inline path: both operands read as values, the
 /// kernel over them, and what it came to written to the place
 /// ([`assign_to_place`]). A call of its own, as [`assigned_dim_op`] is.
+///
+/// A variable by name is a row of the symbol table, taken before the
+/// value's warning or the operator's conversion can reach PHP code.
+/// Where the row no longer stands past it, its table grown or the row
+/// emptied by an `unset`, the step lands nowhere, over `null` where the
+/// row went before the variable was read, and the temporary takes what
+/// it came to ([`Request::named_place`]).
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS[$GLOBALS["n"]]); return true; });
+/// class S { function __toString(): string { unset($GLOBALS[$GLOBALS["n"]]); return "s"; } }
+/// $n = "go" . "ne"; $$n = str_repeat("x", 40); $$n .= []; var_dump($GLOBALS[$n] ?? "unset");
+/// $n = "le" . "ft"; $$n = str_repeat("x", 40); $r = ($$n .= new S); var_dump(strlen($r), $GLOBALS[$n] ?? "unset");
+/// $n = "th" . "en"; $$n = str_repeat("x", 40); $r = ($$n .= $undef); var_dump($r, $GLOBALS[$n] ?? "unset");
+/// set_error_handler(function () { static $k = 0; for ($i = 0; $i < 3000; $i++) $GLOBALS["g" . $k++] = 1; return true; });
+/// $n = "fr" . "esh"; $$n = "5 apples"; $r = ($$n += 1); var_dump($r, $GLOBALS[$n]);
+/// ```
+/// ```expect
+/// [Array to string conversion]
+/// string(5) "unset"
+/// int(41)
+/// string(5) "unset"
+/// [Undefined variable $undef]
+/// string(0) ""
+/// string(5) "unset"
+/// int(6)
+/// string(8) "5 apples"
+/// ```
 #[inline(never)]
 fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     if let Some(edge) = appended(req, frame, code, op) {
@@ -15033,9 +15061,16 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
             op.extended_value
         )));
     };
+    // A row a fetch by name laid down, which a handler the value's
+    // warning or the operator's conversion reaches can move or empty.
+    let row = named_operand(req, frame, op);
     let value = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let place = |req: &mut Request| {
+        write_place(req, frame, op.op1_type, op.op1).and_then(|at| place_past(req, at, row))
+    };
     // A CV, or under a `VAR` the place `FETCH_RW` by name left there,
-    // which it has already made `null` where nothing was written.
+    // which it has already made `null` where nothing was written, and
+    // which the step is over `null` past a handler that took it away.
     let held = if op.op1_type == OperandKind::Cv {
         let held = exec::operand(req, frame, code, op.op1_type, op.op1);
         // What the read warned of is `null`, so only then is the slot
@@ -15045,13 +15080,10 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
         }
         held
     } else {
-        write_place(req, frame, op.op1_type, op.op1)
-            .map_or_else(Value::null, |place| Value::of_slot(place.read()))
+        place(req).map_or_else(Value::null, |place| Value::of_slot(place.read()))
     };
     let computed = if grows_in_place(req, op.extended_value, &held) {
-        concat_over(req, &held, &value, |req| {
-            write_place(req, frame, op.op1_type, op.op1)
-        })
+        concat_over(req, &held, &value, place)
     } else {
         kernel(req, &held, &value)
     };
@@ -15059,7 +15091,7 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     let stepped = match computed {
         Ok(stepped) => stepped,
         Err(thrown) => {
-            let thrown = match write_place(req, frame, op.op1_type, op.op1) {
+            let thrown = match place(req) {
                 Some(at) => {
                     let strict = req.frame_strict_types(frame);
                     land_failed_step(req, at, (None, strict), thrown)
@@ -15073,6 +15105,13 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
         return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_OP over a variable the frame does not have",
         ));
+    };
+    // A row that no longer stands takes nothing, and the temporary
+    // takes what the step came to.
+    let Some(at) = place_past(req, at, row) else {
+        write_out(req, frame, op, &stepped);
+        req.release(stepped);
+        return Ok(advance(req, frame));
     };
     // php's `ZEND_REF_HAS_TYPE_SOURCES` arm,
     // `zend_binary_assign_op_typed_ref`: the operation is over what the
