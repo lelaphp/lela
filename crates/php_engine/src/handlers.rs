@@ -14352,6 +14352,66 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// ran
 /// 1
 /// ```
+///
+/// What the native throws stands pending while its operands are freed,
+/// as php's `EG(exception)` stands over its `FREE_OP*`s, so a
+/// destructor the frees serve, an array's element's or an operand's
+/// own, throws with it as its previous
+/// (`zend_objects_destroy_object`'s `old_exception`):
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class T { function __toString(): string { throw new Exception("tostring"); } }
+/// class D { function __toString(): string { return "d"; } function __destruct() { echo "D gone\n"; throw new Exception("dtor"); } }
+/// function f() {
+///     try { implode(',', [new T, new D]); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+///     try { str_contains(new T, new D); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f(); }
+/// echo "end\n";
+/// ```
+/// ```expect
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// end
+/// ```
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class T { function __toString(): string { throw new Exception("tostring"); } }
+/// class D { function __toString(): string { return "d"; } function __destruct() { echo "D gone\n"; throw new Exception("dtor"); } }
+/// function f() {
+///     try { implode(',', [new T, new D]); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+///     try { str_contains(new T, new D); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f(); }
+/// echo "end\n";
+/// ```
+/// ```expect regime=jit-force process
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// end
+/// ```
 #[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
 fn frameless_call<const N: usize>(
     req: &mut Request,
@@ -14383,20 +14443,24 @@ fn frameless_call<const N: usize>(
         };
     // `if (EG(exception))` past the fetch: a handler threw at an undefined
     // operand's warning, so the native is not served.
+    // The throwable left pending before the operands are freed, as php's
+    // `EG(exception)` stands over its `FREE_OP*`s.
     if let Err(thrown) = none_pending(req) {
+        req.leave_pending(&thrown);
         free_operands(req, frame, (&operands, owned), &arguments);
-        checked_after_throw(req, &thrown)?;
+        checked_while_pending(req)?;
         return Ok(Stepped::Threw(frame).into());
     }
     let served = frameless_native(req, op.extended_value, &operands);
+    if let Err(thrown) = &served {
+        req.leave_pending(thrown);
+    }
     free_operands(req, frame, (&operands, owned), &arguments);
-    let value = match served {
-        Ok(value) => value.hand_on(),
-        Err(thrown) => {
-            checked_after_throw(req, &thrown)?;
-            return Ok(Stepped::Threw(frame).into());
-        }
+    let Ok(value) = served else {
+        checked_while_pending(req)?;
+        return Ok(Stepped::Threw(frame).into());
     };
+    let value = value.hand_on();
     // The interrupt read once, as php's handler reads `EG(vm_interrupt)`
     // once after the native, and its check out of line: made with a
     // handler's throwable pending before the value is written, as
