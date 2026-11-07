@@ -5141,6 +5141,58 @@ fn return_mask_holds(slots: &[Zval], code: &OpArray, op: &Opline) -> bool {
 /// (`SAVE_OPLINE()`): `zend_check_type_slow` over the declared type,
 /// the coercion beside it and the `TypeError`, out of line so the hit
 /// saves no register for it and writes no position.
+///
+/// A by-reference return of a reference a typed property holds is never
+/// coerced: `zend_check_type_slow` answers false where
+/// `ZEND_REF_HAS_TYPE_SOURCES(ref)` (`Z/Zend/zend_execute.c:1197`), so the
+/// `TypeError` is raised and the property keeps what it held. A
+/// reference no property types is coerced through, as before:
+///
+/// ```php
+/// class C { public string $p = "1.5"; public int $q = 7; }
+/// function &r2(): int { global $c; $r = &$c->p; return $r; }
+/// function &r4(): string { global $c; $r = &$c->q; return $r; }
+/// function &r5(): int { global $c; $r = &$c->q; return $r; }
+/// function &r6(): int { static $x = "15"; return $x; }
+/// $c = new C;
+/// try { var_dump(r2()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->p);
+/// try { var_dump(r4()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->q, r5(), r6(), r6());
+/// ```
+/// ```expect
+/// r2(): Return value must be of type int, string returned
+/// string(3) "1.5"
+/// r4(): Return value must be of type string, int returned
+/// int(7)
+/// int(7)
+/// int(15)
+/// int(15)
+/// ```
+///
+/// The same where a trace serves the calls:
+///
+/// ```php
+/// class C { public string $p = "1.5"; public int $q = 7; }
+/// function &r2(): int { global $c; $r = &$c->p; return $r; }
+/// function &r4(): string { global $c; $r = &$c->q; return $r; }
+/// $c = new C;
+/// for ($i = 0; $i < 3; $i++) {
+///     try { var_dump(r2()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+///     try { var_dump(r4()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// var_dump($c->p, $c->q);
+/// ```
+/// ```expect regime=jit-force process
+/// r2(): Return value must be of type int, string returned
+/// r4(): Return value must be of type string, int returned
+/// r2(): Return value must be of type int, string returned
+/// r4(): Return value must be of type string, int returned
+/// r2(): Return value must be of type int, string returned
+/// r4(): Return value must be of type string, int returned
+/// string(3) "1.5"
+/// int(7)
+/// ```
 #[cold]
 #[inline(never)]
 fn return_mask_missed(
@@ -5186,6 +5238,10 @@ fn return_mask_missed(
     let held = crate::api::coerce::holding(req, &returned, declared_again(req, frame)?, scopes);
     if held.resolve(req, &returned, scopes) {
         return Ok(advance(req, frame));
+    }
+    if by_ref && returns_typed_reference(req, frame, op, indirect) {
+        let thrown = return_type_error(req, frame, Some(&returned))?;
+        return threw(req, frame, &thrown);
     }
     let strict = req.frame_strict_types(frame);
     let mask = code.return_mask;
@@ -5239,6 +5295,33 @@ fn return_mask_missed(
     }
     req.replace_slot(frame, slot, coerced);
     Ok(advance(req, frame))
+}
+
+/// Whether a by-reference return's operand holds a reference with type
+/// sources (`ref && ZEND_REF_HAS_TYPE_SOURCES(ref)`, `zend_check_type_slow`):
+/// the reference `VERIFY_RETURN_TYPE` finds where its `CV` or its `VAR`
+/// stands, the place a `VAR` fetched read through (`Z_INDIRECT_P`), as
+/// php's `retval_ref` is. A `TMP` and a `CONST` are dereferenced by no
+/// one, so they hold none.
+fn returns_typed_reference(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    indirect: Option<php_heap::ZvalRef>,
+) -> bool {
+    if !matches!(op.op1_type, OperandKind::Cv | OperandKind::Var) {
+        return false;
+    }
+    let held = match indirect {
+        Some(place) => place.read(),
+        None => match req.slot_ptr(frame, op.op1) {
+            Some(at) => at.read(),
+            None => return false,
+        },
+    };
+    Value::of_slot(held)
+        .as_php_ref()
+        .is_some_and(|cell| cell.heap().sources() != 0)
 }
 
 /// `EX(func)->common.arg_info - 1` of the frame's function where it
