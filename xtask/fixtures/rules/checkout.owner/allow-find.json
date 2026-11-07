@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"find . -name '*.rs' -type f","description":"Find with no writing option, in a checkout another session owns (#4162)"}}

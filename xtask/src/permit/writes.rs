@@ -97,7 +97,7 @@ const READERS: [(&str, &[&str]); 30] = [
 /// settings and a new worktree beside them; what reaches the tracker alone;
 /// and the instruments that say where things stand. Each with the words
 /// that would make it write.
-const LEAVES: [(&str, &[&str]); 36] = [
+const LEAVES: [(&str, &[&str]); 38] = [
     ("cd", &[]),
     ("pushd", &[]),
     ("popd", &[]),
@@ -114,6 +114,9 @@ const LEAVES: [(&str, &[&str]); 36] = [
     ("tr", &[]),
     ("jq", &[]),
     ("sort", &["-o", "--output"]),
+    // `-exec` stands for `-execdir` too, `-ok` for `-okdir`, `-fprint` for
+    // `-fprint0` and `-fprintf` (#4162).
+    ("find", &["-delete", "-exec", "-ok", "-fprint", "-fls"]),
     ("gh", &["checkout", "clone"]),
     ("git rev-parse", &[]),
     ("git rev-list", &[]),
@@ -125,6 +128,8 @@ const LEAVES: [(&str, &[&str]); 36] = [
     ("git fetch", &[]),
     // It writes `refs/remotes/<name>/HEAD` alone (#4066).
     ("git remote set-head", &[]),
+    // git refuses every other mode of `branch` beside `--list` (#4162).
+    ("git branch --list", &[]),
     ("git config --get", &[]),
     ("git config --get-all", &[]),
     ("git config --get-regexp", &[]),
@@ -221,9 +226,9 @@ pub(super) fn can_write(line: &Line, place: &impl Place) -> bool {
 /// Whether `argv` can change the checkout it runs in (#3621, #3755): its
 /// working tree, its index, its HEAD or its operation files. Every command can but a reader that
 /// leaves the index alone ([`READERS`] less git's `add` and `commit`),
-/// `sed` without `-i`, what [`LEAVES`] names and a `git symbolic-ref` that
-/// reads ([`reads_ref`]); a redirection the line makes is the line's, and
-/// read beside its commands.
+/// `sed` without `-i`, what [`LEAVES`] names, a `git symbolic-ref` that
+/// reads ([`reads_ref`]) and an `xtask` that asks for its help; a
+/// redirection the line makes is the line's, and read beside its commands.
 pub(super) fn changes(argv: &Argv) -> bool {
     let index = argv.runs("git add") || argv.runs("git commit");
     let leaves = || {
@@ -231,6 +236,7 @@ pub(super) fn changes(argv: &Argv) -> bool {
             .iter()
             .any(|(phrase, writing)| argv.runs(phrase) && !carries(argv, writing))
             || reads_ref(argv)
+            || (argv.runs("xtask") && argv.asks_help())
     };
     index || !(operands_of(argv) == Operands::None || leaves())
 }
@@ -455,8 +461,17 @@ mod tests {
             "git symbolic-ref -d HEAD",
             "git symbolic-ref --delete HEAD",
             "git symbolic-ref -qd HEAD",
-            // #4160.
+            // #4160, #4162.
             "cargo xtask ticket close 4160 --opens-nothing",
+            "for n in a b; do touch $n; done",
+            "find . -name '*.orig' -delete",
+            "find . -exec rm {} +",
+            "find . -execdir rm {} ;",
+            "find . -okdir rm {} ;",
+            "find . -fprint list",
+            "git branch -D t1",
+            "git -C wt branch -m t2",
+            "git branch t3",
         ] {
             assert!(changes(line), "{line}");
         }
@@ -486,8 +501,15 @@ mod tests {
             "git remote set-head origin -d",
             "git symbolic-ref refs/remotes/origin/HEAD",
             "git -C wt symbolic-ref -q --short HEAD",
-            // #4160.
+            // #4160, #4162.
             "cargo xtask ticket read 4160",
+            "for n in 4160 4162; do gh issue view $n; done",
+            "find . -name '*.rs' -type f -newer a",
+            "git branch --list",
+            "git -C wt branch -a --list 't*'",
+            "cargo xtask --help",
+            "cargo xtask budget --help",
+            "cargo xtask ticket close -h",
         ] {
             assert!(!changes(line), "{line}");
         }

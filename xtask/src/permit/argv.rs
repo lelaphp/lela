@@ -988,8 +988,8 @@ fn run_of_xtask(words: &[String], at: usize) -> Option<usize> {
 }
 
 /// Words a command starts with that are the shell's and not the program's.
-const RESERVED: [&str; 10] = [
-    "!", "{", "}", "if", "then", "elif", "else", "do", "while", "until",
+const RESERVED: [&str; 11] = [
+    "!", "{", "}", "if", "then", "elif", "else", "do", "done", "while", "until",
 ];
 
 /// Programs that run the rest of their words as a command, with the
@@ -1161,7 +1161,14 @@ impl Argv {
         let mut moves = Vec::new();
         loop {
             let word = words.get(at)?;
-            if RESERVED.contains(&word.as_str()) || is_assignment(word) {
+            // A `for` loop's head, `for n in a b`, names a variable and the
+            // words it takes, and runs nothing; one the shell reads as a
+            // reserved word stands first or after another (#4162).
+            let reserved = |w: &String| RESERVED.contains(&w.as_str());
+            if word == "for" && !expanded && words[..at].iter().all(reserved) {
+                return None;
+            }
+            if reserved(word) || is_assignment(word) {
                 // `GIT_DIR+=…` extends a value the line may not say.
                 let set = word.split_once('=');
                 let set = set.and_then(|(set, value)| Some((assigns(set)?, value)));
@@ -1294,6 +1301,12 @@ impl Argv {
         self.phrase_end(phrase).map(|end| &self.words[end..])
     }
 
+    /// Whether the command asks for its help, `-h` or `--help` among its
+    /// words before a `--`, and so runs nothing else.
+    pub(super) fn asks_help(&self) -> bool {
+        asks_help(self.words.get(1..).unwrap_or_default())
+    }
+
     /// Whether one of the phrases names this command; none names every one.
     pub(super) fn invokes(&self, with: &OneOrMany) -> bool {
         self.invocations(with).next().is_some()
@@ -1340,8 +1353,7 @@ impl Argv {
     pub(super) fn unbounded(&self, separator: &str, with: &OneOrMany) -> bool {
         self.invocations(with).any(|invocation| {
             let own = invocation.own();
-            let options = own.iter().take_while(|w| *w != "--");
-            if options.into_iter().any(|w| w == "-h" || w == "--help") {
+            if asks_help(own) {
                 return false;
             }
             let joined = |word: &String| {
@@ -1412,6 +1424,12 @@ fn follows(tokens: &[String], words: &[&str]) -> Option<usize> {
         }
     }
     Some(at)
+}
+
+/// Whether `-h` or `--help` stands among `words` before a `--`.
+fn asks_help(words: &[String]) -> bool {
+    let options = words.iter().take_while(|w| *w != "--");
+    options.into_iter().any(|w| w == "-h" || w == "--help")
 }
 
 /// One matched phrase: the argv, and where the command's own words start.
@@ -1721,6 +1739,13 @@ mod tests {
             vec![vec!["git", "diff"], vec!["git", "commit"], vec!["fi"],]
         );
         assert_eq!(words("{ git commit; }"), vec![vec!["git", "commit"]]);
+        // #4162: a `for` loop's head and its `done` run nothing; what its
+        // list substitutes, and its body, run.
+        assert_eq!(
+            words("for n in a $(git stash); do gh issue view $n; done"),
+            vec![vec!["git", "stash"], vec!["gh", "issue", "view", "$n"]]
+        );
+        assert_eq!(words("xargs for n"), vec![vec!["for", "n"]]);
         assert_eq!(words("A=1"), Vec::<Vec<String>>::new());
         assert_eq!(
             words("CARGO_BUILD_JOBS=2 caffeinate -i git merge main"),
