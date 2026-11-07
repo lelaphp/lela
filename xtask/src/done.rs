@@ -46,7 +46,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -1678,16 +1678,21 @@ pub(crate) fn hook(
         Ok(snapshot) => snapshot,
         Err(err) => return Some(block(&format!("done could not judge the changes: {err:#}"))),
     };
-    let checkouts = if stop.here {
+    // A checkout removed since the session wrote in it is none the Stop
+    // judges or counts.
+    let checkouts: Vec<PathBuf> = if stop.here {
         vec![root.to_path_buf()]
     } else {
         let agent = stop.agent_id.as_deref().unwrap_or_default();
         crate::permit::written(root, &stop.session_id, agent)
-    };
+    }
+    .into_iter()
+    .filter(|c| c.is_dir())
+    .collect();
     let mut reasons = Vec::new();
     let mut counts = Counts::default();
     let mut here = None;
-    for checkout in checkouts.iter().filter(|c| c.is_dir()) {
+    for checkout in &checkouts {
         if same_dir(checkout, root) {
             match judge(&snapshot, manifest, registry, store, None, &[]) {
                 Ok(verdict) => {

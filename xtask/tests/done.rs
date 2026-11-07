@@ -1795,6 +1795,30 @@ fn a_checkout_written_elsewhere_is_handed_to_its_own_build() {
     assert_eq!(reading.numbers["unmet"], 1.into(), "{reading:#?}");
 }
 
+/// A checkout the session wrote in and that was removed since is none
+/// the Stop judges, and none its reading counts (Round 1, Q23, c7).
+#[test]
+fn a_checkout_removed_since_the_session_wrote_in_it_is_not_counted() {
+    let root = scratch("hook-removed");
+    let tree = Tree::new("done-hook-removed").unwrap();
+    let gone = tree.join("t1");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t1", gone.to_str().unwrap()]);
+    wrote_in(&root, &gone, "s", None);
+    Repo::at(&root).git(&["worktree", "remove", "--force", gone.to_str().unwrap()]);
+    assert_eq!(stop_hook(&root, "{\"session_id\":\"s\"}").ok(), "");
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert!(
+        reading
+            .message
+            .starts_with("stop: 0 unmet over the 0 checkouts"),
+        "{}",
+        reading.message
+    );
+}
+
 /// A checkout handed over judges itself and hands back its count and its
 /// kinds, which sum to it, so the Stop that handed it over counts kinds
 /// and not only a total (c2.f).
