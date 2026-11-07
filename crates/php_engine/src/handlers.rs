@@ -19582,7 +19582,11 @@ pub(crate) fn assign_obj_op<T: Tier>(
     let name = member.name(req, frame, code, op);
     let read = undefined_cv(req, frame, data.op1_type, data.op1);
     let in_table = (read && op.op1_type == OperandKind::Var)
-        .then(|| entry_past_warning(req, frame, code, op, data))
+        .then(|| {
+            entry_past_warning(req, frame, code, op, |req| {
+                exec::operand(req, frame, code, data.op1_type, data.op1);
+            })
+        })
         .transpose()?;
     if read && in_table.is_none() {
         exec::operand(req, frame, code, data.op1_type, data.op1);
@@ -19643,9 +19647,10 @@ pub(crate) fn assign_obj_op<T: Tier>(
     Ok(advance_over_data(req, frame))
 }
 
-/// An undefined `OP_DATA` warned of over the entry a `VAR` points at, and
-/// what stands there after it, as `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF` reads
-/// it past `GET_OP_DATA_ZVAL_PTR`: a handler's write is seen. Where the
+/// What `warn` raises, an undefined `OP_DATA`'s warning or a name's, over
+/// the entry a `VAR` points at, and what stands there after it, as
+/// `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF` is read past `GET_OP_DATA_ZVAL_PTR`
+/// and `GET_OP2_ZVAL_PTR`: a handler's write is seen. Where the
 /// handler freed the entry or moved it, what the entry held is held.
 /// The owner is the caller's, past the step, with the collector's count
 /// from where it was taken.
@@ -19758,10 +19763,11 @@ fn entry_past_warning(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    data: Opline,
+    warn: impl FnOnce(&mut Request),
 ) -> Result<(Owner<Value>, u32), Fatal> {
+    let opcode = op.opcode.name();
     let runs = req.heap_mut().gc_runs();
-    let held = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
+    let held = exec::container(req, frame, op.op1_type, op.op1, opcode)?;
     let held = Owner::take(req, held);
     let place = req
         .slot_ptr(frame, op.op1)
@@ -19775,7 +19781,7 @@ fn entry_past_warning(
     };
     let table = table.filter(|table| place.is_some_and(|place| table.holds_row(place)));
     let rows = table.map(|t| (req.heap_mut().iterator_add(t, 0), t, t.rows_at()));
-    exec::operand(req, frame, code, data.op1_type, data.op1);
+    warn(req);
     let moved = rows.is_some_and(|(at, table, rows)| {
         !req.heap_mut().iterator_on(at, table) || table.rows_at() != rows
     });
@@ -19784,7 +19790,7 @@ fn entry_past_warning(
         req.heap_mut().iterator_del(at);
     }
     let now = if stands {
-        let now = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
+        let now = exec::container(req, frame, op.op1_type, op.op1, opcode)?;
         let now = Owner::take(req, now);
         let taken = req.heap_mut().gc_runs();
         hold_given_up(req, held, runs);
@@ -20945,6 +20951,106 @@ fn incdec_obj(
 /// its own, as [`fetched_obj`] is: laid in the handler beside the inline
 /// paths at each kind, its registers were saved before they ran, four
 /// instructions on a step.
+///
+/// The name is read, an undefined CV's warning raised, before the
+/// container is looked at (`Z/Zend/zend_vm_def.h:1301-1305`), so a
+/// handler that replaced what the container names is what the step
+/// meets; over a `VAR` the entry it points at is read past the warning
+/// ([`entry_past_warning`]):
+///
+/// ```php
+/// class C { public $i = 1; public $q; }
+/// function t($f) { try { $f(); echo "stepped\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+/// set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = null; return true; });
+/// t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; $GLOBALS['a'][0]->q->$n++; });
+/// set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = 5; return true; });
+/// t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; ++$GLOBALS['a'][0]->q->$n; });
+/// set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['o'] = null; return true; });
+/// t(function () { global $o; $o = new C; $o->$n--; });
+/// t(function () { $GLOBALS['o'] = new C; --$GLOBALS['o']->$n; });
+/// set_error_handler(function ($no, $m) { echo "[$m]\n"; return true; });
+/// t(function () { $u->$n++; });
+/// t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; $GLOBALS['a'][0]->q->$n--; var_dump($GLOBALS['a'][0]->q); });
+/// ```
+/// ```expect
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// [Undefined variable $u]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// [Creation of dynamic property C::$ is deprecated]
+/// [Undefined property: C::$]
+/// [Decrement on type null has no effect, this will change in the next major version of PHP]
+/// object(C)#5 (3) {
+///   ["i"]=>
+///   int(1)
+///   ["q"]=>
+///   NULL
+///   [""]=>
+///   NULL
+/// }
+/// stepped
+/// ```
+///
+/// The same where a trace serves the step, the closure's body entered
+/// three times:
+///
+/// ```php
+/// class C { public $i = 1; public $q; }
+/// function t($f) { try { $f(); echo "stepped\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+/// for ($k = 0; $k < 3; $k++) {
+///     set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = null; return true; });
+///     t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; $GLOBALS['a'][0]->q->$n++; });
+///     set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = 5; return true; });
+///     t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; ++$GLOBALS['a'][0]->q->$n; });
+/// }
+/// ```
+/// ```expect regime=jit-force process
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// ```
+///
+/// ```php
+/// class C { public $i = 1; public $q; }
+/// function t($f) { try { $f(); echo "stepped\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+/// for ($k = 0; $k < 3; $k++) {
+///     set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = null; return true; });
+///     t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; $GLOBALS['a'][0]->q->$n++; });
+///     set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = 5; return true; });
+///     t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; ++$GLOBALS['a'][0]->q->$n; });
+/// }
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// ```
 #[inline(never)]
 fn stepped_obj(
     req: &mut Request,
@@ -20953,13 +21059,25 @@ fn stepped_obj(
     op: &Opline,
     step: IncDec,
 ) -> Edge {
-    let container = match op.op1_type {
-        OperandKind::Cv => exec::operand(req, frame, code, op.op1_type, op.op1),
-        _ => exec::container(req, frame, op.op1_type, op.op1, "ZEND_PRE_INC_OBJ")?,
-    }
-    .deref();
     let mut member = exec::Member::default();
-    let stepped = match (member.name(req, frame, code, op), container.as_object()) {
+    let mut read = None;
+    let in_table = (op.op1_type == OperandKind::Var && name_calls_code(req, frame, code, op))
+        .then(|| {
+            entry_past_warning(req, frame, code, op, |req| {
+                read = Some(member.name(req, frame, code, op));
+            })
+        })
+        .transpose()?;
+    let name = match read {
+        Some(name) => name,
+        None => member.name(req, frame, code, op),
+    };
+    let container = match (&in_table, op.op1_type) {
+        (Some((held, _)), _) => held.deref(),
+        (None, OperandKind::Cv) => exec::operand(req, frame, code, op.op1_type, op.op1).deref(),
+        (None, kind) => exec::container(req, frame, kind, op.op1, "ZEND_PRE_INC_OBJ")?.deref(),
+    };
+    let stepped = match (name, container.as_object()) {
         (Ok(name), Some(object)) => {
             prime_constant(req, frame, op, property_cache_slot(op), object, &name);
             let mut held = StepHold::taken(req, frame, op, object);
@@ -20978,9 +21096,27 @@ fn stepped_obj(
             Err(thrown)
         }
     };
+    let stepped = req.freed_after(stepped, |req| {
+        if let Some((held, runs)) = in_table {
+            hold_given_up(req, held, runs);
+        }
+    });
     member.release(req, frame, op);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     settled(req, frame, stepped)
+}
+
+/// Whether reading a property opline's name can call user code before
+/// the container is read: an undefined CV's warning, which an error
+/// handler answers, or the conversion of what is no string
+/// (`zval_try_get_tmp_string`), an array's warning or a `__toString`. A
+/// string, and a constant, call nothing.
+fn name_calls_code(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> bool {
+    op.op2_type != OperandKind::Const
+        && exec::operand_undef(req, frame, code, op.op2_type, op.op2)
+            .deref()
+            .as_str_bytes()
+            .is_none()
 }
 
 /// The inline path of the four `*_INC_OBJ`/`*_DEC_OBJ` over a constant
