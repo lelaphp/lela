@@ -66,6 +66,11 @@
 //! filing tickets whose sessions leave them standing plans again at each
 //! "none", and a person reading the lines is what stops it.
 //!
+//! A run is refused before anything is laid down where the session it
+//! starts would not load the `harness` plugin, whose hooks are what
+//! police it: an environment `--bare` left, or a plugin listing that
+//! names it missing or disabled ([`harnessed`], Round 3, Q15).
+//!
 //! What the session is started with, every part a flag of the run and
 //! none a record of the checkout ([`Session`]): `claude -p --model
 //! <model>` from `PATH`, the subagents' model, `--subagent-model` or the
@@ -135,6 +140,60 @@ pub(crate) const EFFORT: &str = "high";
 pub(crate) const SUBAGENT_VARIABLE: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 /// The program a session is, found on `PATH`.
 const PROGRAM: &str = "claude";
+/// The plugin whose hooks police a session, `permit` and `done` among
+/// them, by the id `.claude/settings.json` enables it under from the
+/// repository's own marketplace.
+const HARNESS: &str = "harness@dax-php";
+/// What Claude Code sets under `--bare`, which skips every hook and
+/// plugin, and which a session started from here inherits.
+const BARE: &str = "CLAUDE_CODE_SIMPLE";
+
+/// One plugin as `claude plugin list --json` answers it, by id, and
+/// whether it is enabled for the directory the list was asked in.
+#[derive(Debug, serde::Deserialize)]
+struct Plugin {
+    id: String,
+    #[serde(default)]
+    enabled: bool,
+}
+
+/// Whether a session started in `root` loads [`HARNESS`] (Round 3, Q15):
+/// a session without it fires none of the hooks that judge its calls and
+/// hold its turns, so it would work a ticket unpoliced, and Claude Code's
+/// docs say `--bare`, which skips hooks, will become `-p`'s default. So
+/// the run is refused, nothing laid down, where the environment is bare,
+/// `bare` being [`BARE`] set, and where `claude plugin list --json` asked
+/// in `root` names the plugin missing or disabled.
+fn harnessed(root: &Path, bare: bool) -> Result<()> {
+    let refuse = |why: &str| {
+        anyhow::anyhow!(
+            "{WORK}: refused, nothing laid down: {why}; a session without the `{HARNESS}` plugin fires none of the hooks that judge it"
+        )
+    };
+    if bare {
+        return Err(refuse(&format!(
+            "{BARE} is set, so a session started from here runs bare and loads no plugin"
+        )));
+    }
+    let out = Command::new(PROGRAM)
+        .args(["plugin", "list", "--json"])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output();
+    let listed = crate::printed(out, &format!("{PROGRAM} plugin list --json"))?;
+    let plugins: Vec<Plugin> = serde_json::from_str(&listed)
+        .with_context(|| format!("`{PROGRAM} plugin list --json` answered no list of plugins"))?;
+    match plugins.iter().find(|plugin| plugin.id == HARNESS) {
+        Some(plugin) if plugin.enabled => Ok(()),
+        Some(_) => Err(refuse(&format!(
+            "`{HARNESS}` is installed and not enabled in {}; `.claude/settings.json` enables it",
+            root.display()
+        ))),
+        None => Err(refuse(&format!(
+            "`{PROGRAM} plugin list` names no `{HARNESS}`; install it from the repository's marketplace, `{PROGRAM} plugin install {HARNESS}`"
+        ))),
+    }
+}
 /// The prompt of the session that fills the frontier (#85).
 const FRONTIER_PROMPT: &str = "/frontier";
 /// The prefix of the label that says which side of the frontier a
@@ -688,8 +747,10 @@ struct Ended {
 /// it empties and the closing line printed, or with `one` a single step whose
 /// ticket left open is the exit 1. Every step's reading and the run's own
 /// are written whatever the run came to (#117), and the run's error, where
-/// it has one, is the error it ends on.
+/// it has one, is the error it ends on. A session the `harness` plugin
+/// would not load in is refused first, nothing laid down ([`harnessed`]).
 pub fn command(root: &Path, run: &Run, one: bool) -> Result<()> {
+    harnessed(root, std::env::var_os(BARE).is_some_and(|v| !v.is_empty()))?;
     let store = Store::of_workspace(root);
     let mut tally = Tally::default();
     let mut total = Total::default();
