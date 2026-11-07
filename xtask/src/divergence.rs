@@ -51,6 +51,10 @@ pub const INSTRUMENT: &str = "divergence-reason";
 /// What a trace dump's id starts with, `trace:dump/<kernel>`, a `trace:`
 /// id: a row holding one must name its [`Digests`] (#3291's ruling).
 pub(crate) const DUMP_PREFIX: &str = "trace:dump/";
+/// What a hostile program's id starts with, `hostile:<id>`: no kind of its
+/// own, an id a `trace:` row covers, as Round 4's Q33 ruled (#4265), so a
+/// hostile difference is accepted by a reason a person wrote on a row.
+pub(crate) const HOSTILE_PREFIX: &str = "hostile:";
 
 /// One divergence key: `witness:<hash>`, `phpt:<path>`, `compile:<path>`,
 /// `crosscheck:<name>`, `trace:<site>`, `wire:<suite>/<case>` or
@@ -80,9 +84,12 @@ impl Id {
 
     /// `text` as an id a row of `kind` covers: one of the row's own, as
     /// [`Id::of`] holds it, or under a `trace:` row a `witness:` id, a
-    /// fence that pins the engine's side of the row (harness §4.3, #1650).
+    /// fence that pins the engine's side of the row (harness §4.3, #1650),
+    /// or a `hostile:` id, a program of the hostile corpus whose
+    /// difference the row accepts (#4265).
     fn covered(kind: Kind, text: &str) -> Result<Id> {
-        if kind == Kind::Trace && text.starts_with(Kind::Witness.prefix()) {
+        let beside = [Kind::Witness.prefix(), HOSTILE_PREFIX];
+        if kind == Kind::Trace && beside.iter().any(|prefix| text.starts_with(prefix)) {
             return Ok(Id(text.to_owned()));
         }
         Id::of(kind, text)
@@ -605,6 +612,28 @@ covers = ["php-ub:other-site"]
         assert!(ids.contains("php-ub:heap-openbsd-stack-base"), "{ids:?}");
         assert!(ids.contains("php-ub:other-site"), "{ids:?}");
         assert!(super::Registry::parse(old).is_err());
+    }
+
+    /// Round 4's Q33 (#4265): a `trace:` row covers a `hostile:` id and
+    /// accepts it as its own; a row of another kind covering one is
+    /// refused, naming it.
+    #[test]
+    fn a_trace_row_covers_a_hostile_id_and_no_other_kind_does() {
+        let row = |kind: &str, id: &str| {
+            format!(
+                "[[divergence]]\nid = \"{id}\"\nkind = \"{kind}\"\nreason = \"r\"\nstatus = \"accepted\"\nsince = \"2026-11-07\"\ncovers = [\"hostile:a-program\"]\n"
+            )
+        };
+        let registry = super::Registry::parse(&row("trace", "trace:a-site")).unwrap();
+        let accepted = registry
+            .accepted("hostile:a-program")
+            .map(|r| r.id.as_str());
+        assert_eq!(accepted, Some("trace:a-site"));
+        let refused = super::Registry::parse(&row("phpt", "phpt:a.phpt")).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("hostile:a-program"),
+            "{refused:#}"
+        );
     }
 }
 
