@@ -1288,6 +1288,12 @@ impl Argv {
         }
     }
 
+    /// The words after `phrase` where it names this command, its own
+    /// options and operands ([`Argv::phrase_end`]); `None` where it does not.
+    pub(super) fn after(&self, phrase: &str) -> Option<&[String]> {
+        self.phrase_end(phrase).map(|end| &self.words[end..])
+    }
+
     /// Whether one of the phrases names this command; none names every one.
     pub(super) fn invokes(&self, with: &OneOrMany) -> bool {
         self.invocations(with).next().is_some()
