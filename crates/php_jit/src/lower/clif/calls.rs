@@ -1408,6 +1408,49 @@ impl Emit<'_> {
     /// at return 30
     /// ```
     ///
+    /// A temporary returned to a caller that reads no return is given up
+    /// by the leave kernel the leave falls back to, and what its
+    /// destructor throws unwinds from the call, the callee's frame
+    /// standing in the trace:
+    ///
+    /// ```php
+    /// class T { static $n = 0; function __destruct() { if (++self::$n >= 38) throw new Exception("t" . self::$n); } }
+    /// function h() { return new T; }
+    /// for ($i = 0; $i < 40; $i++) { try { h(); } catch (Exception $e) { echo $e->getMessage(), " ", $e->getTraceAsString(), "\n"; } }
+    /// echo "end\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// t38 #0 %SCRATCH%/witness.php(3): T->__destruct()
+    /// #1 %SCRATCH%/witness.php(4): h()
+    /// #2 {main}
+    /// t39 #0 %SCRATCH%/witness.php(3): T->__destruct()
+    /// #1 %SCRATCH%/witness.php(4): h()
+    /// #2 {main}
+    /// t40 #0 %SCRATCH%/witness.php(3): T->__destruct()
+    /// #1 %SCRATCH%/witness.php(4): h()
+    /// #2 {main}
+    /// end
+    /// ```
+    ///
+    /// ```php
+    /// class T { static $n = 0; function __destruct() { if (++self::$n >= 38) throw new Exception("t" . self::$n); } }
+    /// function h() { return new T; }
+    /// for ($i = 0; $i < 40; $i++) { try { h(); } catch (Exception $e) { echo $e->getMessage(), " ", $e->getTraceAsString(), "\n"; } }
+    /// echo "end\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// t38 #0 %SCRATCH%/witness.php(3): T->__destruct()
+    /// #1 %SCRATCH%/witness.php(4): h()
+    /// #2 {main}
+    /// t39 #0 %SCRATCH%/witness.php(3): T->__destruct()
+    /// #1 %SCRATCH%/witness.php(4): h()
+    /// #2 {main}
+    /// t40 #0 %SCRATCH%/witness.php(3): T->__destruct()
+    /// #1 %SCRATCH%/witness.php(4): h()
+    /// #2 {main}
+    /// end
+    /// ```
+    ///
     /// A trace that stops at a `RETURN` leaves its frame in place and goes
     /// on in the caller ([`End::Return`]); the `RETURN` of a frame a native
     /// called ends the serving through the leave kernel ([`Emit::leave_top`]):
