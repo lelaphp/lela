@@ -395,6 +395,22 @@ fn pin_with_path(path: &Path) -> Pin {
     Pin::parse(&text.join("\n")).unwrap()
 }
 
+/// The tracked pin as the file says it, with no `[source].path` at all:
+/// the tree named by the variable alone (#4260).
+fn pin_without_path() -> Pin {
+    let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
+    let mut in_source = false;
+    let text: Vec<&str> = (text.lines())
+        .filter(|line| {
+            if line.starts_with('[') {
+                in_source = line.trim() == "[source]";
+            }
+            !(in_source && line.starts_with("path = "))
+        })
+        .collect();
+    Pin::parse(&text.join("\n")).unwrap()
+}
+
 /// A directory standing where the pinned php-src would.
 /// The crate directories of a manifest laying crates down in `crates`,
 /// `ext` and `sapi`.
@@ -449,6 +465,74 @@ fn an_absent_tree_names_the_variable_and_the_pins_path_and_not_one_of_them() {
         "{err}"
     );
     assert!(err.contains("/nowhere/pinned/php-src"), "{err}");
+}
+
+#[test]
+fn a_pin_with_no_path_loads_and_names_its_tree_by_the_variable() {
+    let pin = pin_without_path();
+    assert_eq!(pin.source.path(), None);
+    assert!(
+        pin.source.tag.starts_with("php-8.5"),
+        "the rest of [source] reads"
+    );
+    let named = fixture_tree("pathless");
+    let pin = pin.on_this_machine(Some(named.to_path_buf()));
+    assert_eq!(pin.source.tree().unwrap(), named.path());
+}
+
+#[test]
+fn an_unset_variable_with_no_path_fails_naming_the_variable() {
+    let err = pin_without_path().source.tree().unwrap_err().to_string();
+    assert!(
+        err.contains(&format!("{TREE_VARIABLE} is unset")),
+        "the variable is named, unset: {err}"
+    );
+    assert!(
+        err.contains("the pin states no `[source].path`"),
+        "and the pin's absent path is the other place tried: {err}"
+    );
+    // Set to no directory, its value is named instead.
+    let pin = pin_without_path().on_this_machine(Some(PathBuf::from("/nowhere/named/php-src")));
+    let err = pin.source.tree().unwrap_err().to_string();
+    assert!(
+        err.contains(&format!(
+            "{TREE_VARIABLE}=/nowhere/named/php-src is not a directory"
+        )),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_variable_read_under_the_home_names_what_it_was_read_as() {
+    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        eprintln!("HOME is unset; nothing is read under it, skipping");
+        return;
+    };
+    let value = "~/nowhere-xtask-4260/php-src";
+    let pin = pin_without_path().on_this_machine(Some(PathBuf::from(value)));
+    let err = pin.source.tree().unwrap_err().to_string();
+    let read = Path::new(&home).join("nowhere-xtask-4260/php-src");
+    assert!(
+        err.contains(&format!(
+            "{TREE_VARIABLE}={value}, read as {}",
+            read.display()
+        )),
+        "the value as written and as read: {err}"
+    );
+}
+
+#[test]
+fn the_fixture_pins_keep_their_path_and_load() {
+    let root = xtask::package_dir().join("fixtures/oracle");
+    for pin in [
+        "closure/linux.toml",
+        "closure/unnamed.toml",
+        "closure/moved.toml",
+        "variant-drift/oracle.toml",
+    ] {
+        let pin = Pin::load(&root.join(pin)).unwrap_or_else(|e| panic!("{pin}: {e:#}"));
+        assert_eq!(pin.source.path(), Some(Path::new("/nowhere/php-src")));
+    }
 }
 
 /// A git checkout standing where the pinned php-src would, at one commit

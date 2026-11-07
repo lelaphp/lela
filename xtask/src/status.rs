@@ -34,7 +34,7 @@ use crate::git::git;
 use crate::layout;
 use crate::manifest::{LockCeiling, Manifest, SCRIPTS, Seam};
 use crate::oracle::hosts::{EngineHost, HOSTS};
-use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, Platform, TREE_VARIABLE};
+use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, Platform, TREE_VARIABLE, Through};
 use crate::permit;
 use crate::phpt;
 use crate::reading::{self, Log, Reading, Store, joined};
@@ -1448,10 +1448,11 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// The `oracle` section: the pin as this machine has it (#36), from the
 /// pin and the process's environment alone. Seven rows: the tree's
 /// variable by name, its value and whether it is set; the promise's
-/// likewise; the pin's path and whether it is a directory; its tag and
-/// commit as `[source]` states them, which the corpus section clones at
-/// (#66); where [`crate::oracle::Source::tree`] found the tree, the
-/// variable's or the pin's, or the absence it named; and the pinned php,
+/// likewise; the pin's path and whether it is a directory, or that the
+/// pin states none (#4260); its tag and commit as `[source]` states
+/// them, which the corpus section clones at (#66); where
+/// [`crate::oracle::Source::tree`] found the tree, the variable's or the
+/// pin's, or the absence it named; and the pinned php,
 /// its version, keg path and md5. An eighth, `closure`, names the kegs
 /// `[closure]` records php loading, each at its version, where the pin
 /// records them (#2657), with the record's digest, and a `variant` row
@@ -1472,10 +1473,10 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let named = source.named();
     let promise = std::env::var_os(PROMISE_VARIABLE).map(|v| v.to_string_lossy().into_owned());
     let pinned = source.path();
-    let found = source.tree();
+    let found = source.found();
     let at = match &found {
-        Ok(tree) if named == Some(tree.as_path()) => Some("variable"),
-        Ok(_) => Some("pin"),
+        Ok((Through::Variable, _)) => Some("variable"),
+        Ok((Through::Pin, _)) => Some("pin"),
         Err(_) => None,
     };
     let set = |is: bool| if is { "set" } else { "unset" };
@@ -1493,13 +1494,13 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "set": promise.is_some(),
             },
             "pin": {
-                "path": pinned.display().to_string(),
-                "directory": pinned.is_dir(),
+                "path": display(pinned),
+                "directory": pinned.is_some_and(Path::is_dir),
                 "tag": source.tag,
                 "commit": source.commit,
             },
             "found": {
-                "path": found.as_ref().ok().map(|p| p.display().to_string()),
+                "path": found.as_ref().ok().map(|(_, p)| p.display().to_string()),
                 "at": at,
                 "error": found.as_ref().err().map(|e| format!("{e:#}")),
             },
@@ -1530,22 +1531,16 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 promised,
                 set(promise.is_some()),
             );
-            let dir = if pinned.is_dir() {
-                "a directory"
-            } else {
-                "not a directory"
+            let dir = match pinned {
+                Some(pinned) if pinned.is_dir() => "a directory",
+                Some(_) => "not a directory",
+                None => "not stated",
             };
-            row(o, "pin", "", &pinned.display().to_string(), dir);
+            row(o, "pin", "", &display(pinned).unwrap_or_default(), dir);
             row(o, "tag", "", &source.tag, "the pin's");
             row(o, "commit", "", &source.commit, "the pin's");
             let (path, state) = match &found {
-                Ok(tree) => (
-                    tree.display().to_string(),
-                    match at {
-                        Some("variable") => format!("named by {TREE_VARIABLE}"),
-                        _ => "the pin's path".to_owned(),
-                    },
-                ),
+                Ok((place, tree)) => (tree.display().to_string(), place.to_string()),
                 Err(e) => (String::new(), format!("absent: {e:#}")),
             };
             row(o, "found", "", &path, &state);

@@ -12,8 +12,9 @@
 //! runs and never per program; a [`Runner`] is what the lane measured the
 //! engine with, or why it could not; [`Source::tree`] is where the pinned
 //! php-src is on this machine, the tree [`TREE_VARIABLE`] names first and
-//! the pin's path second, which the runner and the tests that resolve a
-//! subset ask and never read off the pin themselves; [`Promise`] is what a
+//! the pin's path second where the pin states one, which the runner and
+//! the tests that resolve a subset ask and never read off the pin
+//! themselves; [`Promise`] is what a
 //! runner says this machine has of the pin, so a test that would skip for
 //! a fact the machine has not fails instead where the fact was promised
 //! (#38); and [`expect`] is how an expectation that is a pattern rather
@@ -451,65 +452,134 @@ impl Binary {
 pub struct Source {
     pub tag: String,
     pub commit: String,
-    /// Where the file says the tree is on the maintainer's machine; read
-    /// through [`Source::tree`] and nowhere else, and stated by
-    /// [`Source::path`] for the renderer.
-    path: PathBuf,
+    /// Where the file says the tree is on the maintainer's machine, where
+    /// it says so at all: the place [`Source::tree`] tries after
+    /// [`TREE_VARIABLE`], so a pin without it loads and names the tree by
+    /// the variable alone (#4260); stated by [`Source::path`] for the
+    /// renderer.
+    path: Option<PathBuf>,
     pub phpt_files: u64,
     /// The tree [`TREE_VARIABLE`] names on this machine, as [`Pin::load`]
-    /// read it or a test handed it; not a value of the file, and absent
-    /// under [`Pin::parse`], which is the pin as the file says it.
+    /// read it or a test handed it, its value as written; not a value of
+    /// the file, and absent under [`Pin::parse`], which is the pin as the
+    /// file says it.
     #[serde(skip)]
     named: Option<PathBuf>,
 }
 
-impl Source {
-    /// Where the pinned php-src tree is on this machine: the directory
-    /// [`TREE_VARIABLE`] names when it is one, else the pin's path when it
-    /// is one, held to the pin's commit. The one answer the phpt runner
-    /// and the tests that resolve a subset take, so the location, alone
-    /// among the pin's facts, is machine-local (#36). An absent tree is an
-    /// error naming both places tried, so a runner's failure reads as an
-    /// unset variable and not as a path that could never have existed
-    /// there. A tree that is a checkout at another commit is refused
-    /// naming both revisions and is never passed over for the other place
-    /// (#37): a corpus at the wrong revision measures the wrong thing,
-    /// more quietly than no corpus at all. A tree that is no checkout, a
-    /// tarball unpacked at the tag, states no commit and is taken at its
-    /// word.
-    pub fn tree(&self) -> Result<PathBuf> {
-        if let Some(named) = &self.named
-            && named.is_dir()
-        {
-            self.held(named, &format!("named by {TREE_VARIABLE}"))?;
-            return Ok(named.clone());
+/// What [`Source::tree`] found the pinned php-src through: one place it
+/// looks, in the order it looks, and what a refusal there names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Through {
+    /// The directory [`TREE_VARIABLE`] names, a leading `~/` or `$HOME/`
+    /// read as the home directory.
+    Variable,
+    /// `[source].path`, as the pin states it.
+    Pin,
+}
+
+impl fmt::Display for Through {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Through::Variable => write!(f, "named by {TREE_VARIABLE}"),
+            Through::Pin => f.write_str("the pin's path"),
         }
-        if self.path.is_dir() {
-            self.held(&self.path, "the pin's path")?;
-            return Ok(self.path.clone());
-        }
-        let variable = match &self.named {
-            Some(named) => format!("{TREE_VARIABLE}={} is not a directory", named.display()),
-            None => format!("{TREE_VARIABLE} is unset"),
-        };
-        bail!(
-            "the pinned php-src ({}) is at neither place tried: {variable}, and the pin's path {} is not a directory",
-            self.tag,
-            self.path.display()
-        )
     }
 }
 
 impl Source {
-    /// Where the pin says the tree is, as the file states it: what
-    /// `status --section oracle` renders beside [`Source::named`], never
-    /// what a lane reads the tree from, which is [`Source::tree`].
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// Where the pinned php-src tree is on this machine: the directory
+    /// [`TREE_VARIABLE`] names when it is one, else the pin's path when the
+    /// pin states one and it is one, held to the pin's commit. The one
+    /// answer the phpt runner and the tests that resolve a subset take, so
+    /// the location, alone among the pin's facts, is machine-local (#36).
+    /// The variable's value is read as written, but for a leading `~/` or
+    /// `$HOME/`, which is the home directory: Claude Code passes a
+    /// setting's `env` value with no shell between, and nothing else in
+    /// it is expanded (#4260). An absent tree is an error naming every
+    /// place tried, so a runner's failure reads as an unset variable and
+    /// not as a path that could never have existed there. A tree that is
+    /// a checkout at another commit is refused naming both revisions and
+    /// is never passed over for the other place (#37): a corpus at the
+    /// wrong revision measures the wrong thing, more quietly than no
+    /// corpus at all. A tree that is no checkout, a tarball unpacked at
+    /// the tag, states no commit and is taken at its word.
+    pub fn tree(&self) -> Result<PathBuf> {
+        self.found().map(|(_, tree)| tree)
+    }
+
+    /// [`Source::tree`] and the place it found the tree through, which
+    /// `status --section oracle` renders.
+    pub(crate) fn found(&self) -> Result<(Through, PathBuf)> {
+        let places = self.places();
+        if let Some((place, tree)) = places.iter().find(|(_, tree)| tree.is_dir()) {
+            self.held(tree, *place)?;
+            return Ok((*place, tree.clone()));
+        }
+        let read = places.iter().find(|(place, _)| *place == Through::Variable);
+        let variable = match (&self.named, read) {
+            (Some(named), Some((_, read))) if read != named => format!(
+                "{TREE_VARIABLE}={}, read as {}, is not a directory",
+                named.display(),
+                read.display()
+            ),
+            (Some(named), _) => format!("{TREE_VARIABLE}={} is not a directory", named.display()),
+            (None, _) => format!("{TREE_VARIABLE} is unset"),
+        };
+        let pinned = match &self.path {
+            Some(path) => format!("the pin's path {} is not a directory", path.display()),
+            None => "the pin states no `[source].path`".to_owned(),
+        };
+        bail!(
+            "the pinned php-src ({}) is at neither place tried: {variable}, and {pinned}",
+            self.tag
+        )
+    }
+
+    /// The places [`Source::tree`] tries, in its order: the variable's
+    /// value, its home expanded, where it is set, and the pin's path where
+    /// the pin states one.
+    pub(crate) fn places(&self) -> Vec<(Through, PathBuf)> {
+        let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from);
+        let named = (self.named.as_deref()).map(|named| expanded(named, home.as_deref()));
+        let named = named.map(|tree| (Through::Variable, tree));
+        let pinned = self.path.clone().map(|path| (Through::Pin, path));
+        named.into_iter().chain(pinned).collect()
+    }
+}
+
+/// `value` with a leading `~/` or `$HOME/` read as `home`, and taken as
+/// written otherwise: `x~/y`, `$HOMEX/y`, a bare `~` and any value where
+/// `home` is unknown are literal, as no shell stands between a setting
+/// and the variable to expand anything else (#4260).
+fn expanded(value: &Path, home: Option<&Path>) -> PathBuf {
+    let bytes = value.as_os_str().as_encoded_bytes();
+    let lead = ["~", "$HOME"].into_iter().find(|lead| {
+        (bytes.strip_prefix(lead.as_bytes())).is_some_and(|rest| rest.starts_with(b"/"))
+    });
+    match (lead, home) {
+        (Some(lead), Some(home)) => match value.strip_prefix(lead) {
+            Ok(rest) => home.join(rest),
+            Err(_) => value.to_path_buf(),
+        },
+        _ => value.to_path_buf(),
+    }
+}
+
+impl Source {
+    /// Where the pin says the tree is, as the file states it, none where
+    /// it states none: what `status --section oracle` renders beside
+    /// [`Source::named`], never what a lane reads the tree from, which is
+    /// [`Source::tree`].
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// What [`TREE_VARIABLE`] names on this machine, as [`Pin::load`] read
-    /// it or a test handed it; none where it is unset or empty.
+    /// it or a test handed it, as written; none where it is unset or
+    /// empty.
     pub fn named(&self) -> Option<&Path> {
         self.named.as_deref()
     }
@@ -521,7 +591,7 @@ impl Source {
     /// directory inside some other repository is not read as that
     /// repository's checkout. `how` says which place the tree was found
     /// through, so the refusal names it beside both revisions.
-    fn held(&self, tree: &Path, how: &str) -> Result<()> {
+    fn held(&self, tree: &Path, how: Through) -> Result<()> {
         if !checkout(tree) {
             return Ok(());
         }
@@ -2452,5 +2522,37 @@ mod renumber_tests {
             ),
             b"extension #%N% pcre, extension #%N% pcre, extension #x"
         );
+    }
+}
+
+#[cfg(test)]
+mod expanded_tests {
+    use super::expanded;
+    use std::path::{Path, PathBuf};
+
+    const HOME: &str = "/Users/someone";
+
+    fn read(value: &str) -> PathBuf {
+        expanded(Path::new(value), Some(Path::new(HOME)))
+    }
+
+    /// A leading `~/` or `$HOME/` is the home directory, as a shell would
+    /// read it, and the rest of the value is the path beneath it.
+    #[test]
+    fn a_leading_tilde_or_home_is_the_home_directory() {
+        assert_eq!(read("~/x"), Path::new(HOME).join("x"));
+        assert_eq!(read("$HOME/x"), Path::new(HOME).join("x"));
+        assert_eq!(read("~/php-src/8.5"), Path::new(HOME).join("php-src/8.5"));
+    }
+
+    /// Nothing else is expanded: a `~/` past the start, a variable whose
+    /// name only begins with `HOME`, a bare `~`, and a value read where the
+    /// home is unknown are each taken as written.
+    #[test]
+    fn anything_else_is_taken_as_written() {
+        for value in ["x~/y", "$HOMEX/y", "~", "$HOME", "/abs/~/y", "~user/y"] {
+            assert_eq!(read(value), Path::new(value), "{value}");
+        }
+        assert_eq!(expanded(Path::new("~/x"), None), Path::new("~/x"));
     }
 }
