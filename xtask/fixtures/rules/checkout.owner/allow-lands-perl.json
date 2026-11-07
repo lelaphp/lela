@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"perl -pi -e 's/one/two/' /tmp/t4250-perl.txt","description":"`perl` writes only what it names, outside the checkout another session owns, wherever it runs (#4250)"}}

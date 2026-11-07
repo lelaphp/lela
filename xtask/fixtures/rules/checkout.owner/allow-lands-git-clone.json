@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"git clone -q --depth 1 https://example.invalid/r.git /tmp/t4250-clone","description":"`git clone` writes only what it names, outside the checkout another session owns, wherever it runs (#4250)"}}

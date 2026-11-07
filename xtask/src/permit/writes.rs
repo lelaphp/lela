@@ -21,14 +21,16 @@
 //! it, the line cannot be read to write, and the sensor keeps the change.
 //!
 //! Whether a command can change the checkout it runs in at all is the
-//! other question asked here ([`changes`], #3621): what a rule with
-//! `writes = true` fires on, so that one session's writes in a checkout
-//! another owns are refused and its reads are not.
+//! other question asked here ([`changes`], #3621), and where each write a
+//! line makes lands is the third ([`of`], #4250): what a rule with
+//! `writes = true` fires on and the owner lock judges, so that one
+//! session's writes in a checkout another owns are refused and its reads,
+//! and its writes elsewhere, are not.
 
 use std::path::{Path, PathBuf};
 
 use super::argv::{Argv, Line};
-use super::rules::{Places, placed};
+use super::rules::{Places, Via, at, moved, placed, stood};
 
 /// The file asked about, where the call stands: the sensor's side of the
 /// question, which touches the disk so that this module does not.
@@ -146,6 +148,414 @@ const LEAVES: [(&str, &[&str]); 38] = [
 /// `git symbolic-ref`'s options that leave the ref it names as it was.
 const READS_REF: [&str; 5] = ["-q", "--quiet", "--short", "--recurse", "--no-recurse"];
 
+/// Where each write of `line` lands, read from `root` (#4250, Mitchell's
+/// rulings of 2026-11-06 on c9.b and c9.c): the places a rule with `writes
+/// = true` judges.
+///
+/// - A command that can change the checkout it runs in ([`changes`]) and
+///   that [`LANDS`] lists lands on what it names, each word read where it
+///   runs ([`moved`]), and on each place its own words reach besides
+///   ([`Via::Reaches`]), and not where it runs: `mkdir -p /tmp/x` lands in
+///   `/tmp/x` wherever the shell stands. A word the line does not resolve,
+///   one led by a variable it never assigned, and a listed command that
+///   names nothing, land where the command runs, as an unlisted one does.
+/// - Every other such command lands where it runs and where its words
+///   reach ([`placed`]), as the owner lock asked before.
+/// - A redirection lands on its target, read where the shell of its own
+///   command stands, or where the line stands for one on no command; a
+///   target still led by a variable or a `~`, a descriptor, a device and
+///   what a substitution prints are no place ([`Redirect`]).
+///
+/// [`Redirect`]: super::argv::Redirect
+pub(super) fn of(root: &Path, line: &Line) -> Vec<PathBuf> {
+    let stood = stood(root, line);
+    let mut places = Vec::new();
+    for argv in line.commands().iter().filter(|argv| changes(argv)) {
+        let lands = LANDS.iter().find(|row| row.lists(argv));
+        let named = lands.and_then(|row| row.names(argv));
+        let named = named.filter(|words| !words.is_empty() && words.iter().all(|w| resolved(w)));
+        for shell in stood.of(argv) {
+            for (dir, via) in moved(&shell, argv) {
+                match (&named, via) {
+                    (Some(words), Via::Runs) => places.extend(words.iter().map(|w| at(&dir, w))),
+                    _ => places.push(dir),
+                }
+            }
+        }
+    }
+    for redirect in line.redirects() {
+        if !resolved(&redirect.target) || is_no_file(&redirect.target) {
+            continue;
+        }
+        let command = redirect.command.and_then(|n| line.commands().get(n));
+        let shells = command.map_or_else(|| vec![stood.line().to_path_buf()], |c| stood.of(c));
+        places.extend(shells.iter().map(|shell| at(shell, &redirect.target)));
+    }
+    let mut once = Vec::new();
+    for place in places {
+        if !once.contains(&place) {
+            once.push(place);
+        }
+    }
+    once
+}
+
+/// Whether a word says a place: not empty, as what a substitution prints
+/// reads, and led by neither a variable the line never assigned nor a
+/// `~` it did not expand.
+fn resolved(word: &str) -> bool {
+    !word.is_empty() && !word.starts_with(['$', '~'])
+}
+
+/// Whether a redirection's target is no file of a checkout: a descriptor
+/// (`>&2`, `>&-`) or a device.
+fn is_no_file(target: &str) -> bool {
+    target.starts_with(['&', '-'])
+        || target.starts_with("/dev/")
+        || target.chars().all(|c| c.is_ascii_digit())
+}
+
+/// One program the owner lock places by what it names (#4250): its phrase,
+/// the words one of which it needs to write at all (`sed -i`, `find
+/// -delete`), the words whose presence leave it unlisted, since what they
+/// make it run its words do not name (`find -exec`), its options that take
+/// the word after them as their value, and which of its operands it writes.
+/// A row is added with a fixture each way under
+/// `xtask/fixtures/rules/checkout.owner/` (Round 2, Q35.9).
+struct Lands {
+    phrase: &'static str,
+    needs: &'static [&'static str],
+    unless: &'static [&'static str],
+    valued: &'static [&'static str],
+    writes: Writes,
+}
+
+/// Which operands a listed program writes.
+#[derive(Clone, Copy)]
+enum Writes {
+    /// Every one.
+    All,
+    /// The last, a copy's destination, or `-t`'s directory.
+    Last,
+    /// Every one past a program text, `sed`'s or `perl`'s, where no `-e`
+    /// or `-f` gives one.
+    PastScript,
+    /// The start points before its expression, `find`'s, `.` for none.
+    Roots,
+    /// `of=`'s value, `dd`'s.
+    Of,
+    /// The directory a template names, `mktemp`'s, or `-p`'s; the
+    /// temporary directory for none.
+    Template,
+    /// The directory, else the repository's name, `git clone`'s, and
+    /// `--separate-git-dir`'s value.
+    Clone,
+}
+
+/// The programs placed by what they name (Round 1, Q19 (a)): what writes
+/// exactly the files and directories its words name.
+const LANDS: [Lands; 16] = [
+    Lands::row("mkdir", &["-m", "--mode"], Writes::All),
+    Lands::row("rmdir", &[], Writes::All),
+    Lands::row("rm", &[], Writes::All),
+    Lands::row(
+        "touch",
+        &["-t", "-d", "-r", "-A", "--date", "--reference"],
+        Writes::All,
+    ),
+    Lands::row("tee", &[], Writes::All),
+    Lands::row(
+        "truncate",
+        &["-s", "-r", "--size", "--reference"],
+        Writes::All,
+    ),
+    Lands::row("mv", &["-t", "--target-directory"], Writes::All),
+    Lands::row("cp", &["-t", "--target-directory"], Writes::Last),
+    Lands::row("ln", &["-t", "--target-directory"], Writes::Last),
+    Lands::row(
+        "install",
+        &[
+            "-t",
+            "-m",
+            "-o",
+            "-g",
+            "-f",
+            "-B",
+            "-S",
+            "--target-directory",
+            "--mode",
+            "--owner",
+            "--group",
+        ],
+        Writes::Last,
+    ),
+    Lands::row("dd", &[], Writes::Of),
+    Lands::row(
+        "mktemp",
+        &["-p", "-t", "--tmpdir", "--suffix"],
+        Writes::Template,
+    ),
+    Lands {
+        needs: &["-i", "--in-place"],
+        ..Lands::row(
+            "sed",
+            &["-e", "-f", "-l", "-i", "--expression", "--file"],
+            Writes::PastScript,
+        )
+    },
+    Lands {
+        needs: &["-i"],
+        ..Lands::row("perl", &[], Writes::PastScript)
+    },
+    Lands {
+        needs: &["-delete"],
+        unless: &["-exec", "-ok", "-fprint", "-fls"],
+        ..Lands::row("find", &["-f"], Writes::Roots)
+    },
+    Lands::row(
+        "git clone",
+        &[
+            "-b",
+            "-o",
+            "-u",
+            "-c",
+            "-j",
+            "--branch",
+            "--origin",
+            "--upload-pack",
+            "--reference",
+            "--reference-if-able",
+            "--depth",
+            "--shallow-since",
+            "--shallow-exclude",
+            "--config",
+            "--template",
+            "--jobs",
+            "--filter",
+            "--server-option",
+            "--separate-git-dir",
+            "--bundle-uri",
+            "--ref-format",
+        ],
+        Writes::Clone,
+    ),
+];
+
+impl Lands {
+    const fn row(phrase: &'static str, valued: &'static [&'static str], writes: Writes) -> Lands {
+        Lands {
+            phrase,
+            needs: &[],
+            unless: &[],
+            valued,
+            writes,
+        }
+    }
+
+    /// Whether the row places `argv`: its phrase runs, with a word it needs
+    /// (`perl`'s `-i` in a cluster of its switches) and none it is unless.
+    fn lists(&self, argv: &Argv) -> bool {
+        let needs = match self.writes {
+            Writes::PastScript if self.phrase == "perl" => perl(argv).in_place,
+            Writes::PastScript => argv.words().iter().skip(1).any(|w| in_place(w)),
+            _ => self.needs.is_empty() || carries(argv, self.needs),
+        };
+        argv.runs(self.phrase) && needs && !carries(argv, self.unless)
+    }
+
+    /// The words `argv` writes, as the line expands them ([`Argv::named`]);
+    /// `None` where its words do not say.
+    fn names(&self, argv: &Argv) -> Option<Vec<String>> {
+        let own = argv.words().len() - argv.after(self.phrase)?.len();
+        let named = argv.named().get(own.checked_sub(1)?..)?;
+        if self.phrase == "perl" {
+            let perl = perl(argv);
+            let files = named.get(perl.files..)?;
+            return Some(files.to_vec());
+        }
+        let (operands, options) = read_options(named, self.valued);
+        let option = |names: &[&str]| {
+            options
+                .iter()
+                .filter(|(o, _)| names.contains(&o.as_str()))
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<String>>()
+        };
+        let mut written = match self.writes {
+            Writes::All => operands.clone(),
+            Writes::Last if !option(&["-t", "--target-directory"]).is_empty() => {
+                option(&["-t", "--target-directory"])
+            }
+            Writes::Last if self.phrase == "install" && argv.words().iter().any(|w| w == "-d") => {
+                operands.clone()
+            }
+            Writes::Last => operands.last().cloned().into_iter().collect(),
+            Writes::PastScript => {
+                let scripted = !option(&["-e", "-f", "--expression", "--file"]).is_empty();
+                operands.get(usize::from(!scripted)..)?.to_vec()
+            }
+            Writes::Roots => {
+                let mut words = named.iter().peekable();
+                let mut roots = Vec::new();
+                while let Some(word) =
+                    words.next_if(|w| FIND_LEADING.contains(&w.as_str()) || *w == "-f")
+                {
+                    if word == "-f" {
+                        roots.extend(words.next().cloned());
+                    }
+                }
+                roots.extend(
+                    words
+                        .take_while(|w| !w.starts_with(['-', '(', '!']))
+                        .cloned(),
+                );
+                if roots.is_empty() {
+                    roots.push(".".to_owned());
+                }
+                roots
+            }
+            Writes::Of => named
+                .iter()
+                .filter_map(|w| w.strip_prefix("of="))
+                .map(str::to_owned)
+                .collect(),
+            Writes::Template => {
+                let dir = option(&["-p", "--tmpdir"]);
+                let temporary = || std::env::temp_dir().to_string_lossy().into_owned();
+                match (dir.first(), operands.is_empty()) {
+                    (Some(dir), _) => vec![dir.clone()],
+                    (None, true) => vec![temporary()],
+                    (None, false) if !option(&["-t"]).is_empty() => vec![temporary()],
+                    (None, false) => operands.clone(),
+                }
+            }
+            Writes::Clone => {
+                let mut written = option(&["--separate-git-dir"]);
+                match operands.as_slice() {
+                    [_, dir, ..] => written.push(dir.clone()),
+                    [repository] => written.extend(cloned_name(repository)),
+                    [] => return None,
+                }
+                written
+            }
+        };
+        if !matches!(self.writes, Writes::Clone | Writes::Template) {
+            written.retain(|w| w != "-");
+        }
+        Some(written)
+    }
+}
+
+/// `find`'s options before its start points, BSD's and GNU's; `-f` takes a
+/// start point after it.
+const FIND_LEADING: [&str; 8] = ["-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x"];
+
+/// The directory `git clone <repository>` makes where it runs: the
+/// repository's last part less its `.git`.
+fn cloned_name(repository: &str) -> Option<String> {
+    let last = repository.trim_end_matches('/').rsplit(['/', ':']).next()?;
+    let name = last.strip_suffix(".git").unwrap_or(last);
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// A command's operands and its options with their values, read past its
+/// program: an option in `valued` takes the rest of its cluster, its `=`
+/// value or the word after it; `--` ends the options, and an option may
+/// stand after an operand, as GNU's programs read it.
+fn read_options(words: &[String], valued: &[&str]) -> (Vec<String>, Vec<(String, String)>) {
+    let (mut operands, mut options) = (Vec::new(), Vec::new());
+    let mut words = words.iter();
+    while let Some(word) = words.next() {
+        if word == "--" {
+            operands.extend(words.by_ref().cloned());
+            break;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, value) = long
+                .split_once('=')
+                .map_or((long, None), |(n, v)| (n, Some(v)));
+            let name = format!("--{name}");
+            let value = match value {
+                Some(value) => Some(value.to_owned()),
+                None if valued.contains(&name.as_str()) => words.next().cloned(),
+                None => None,
+            };
+            options.push((name, value.unwrap_or_default()));
+            continue;
+        }
+        let Some(cluster) = word.strip_prefix('-').filter(|c| !c.is_empty()) else {
+            operands.push(word.clone());
+            continue;
+        };
+        for (n, c) in cluster.char_indices() {
+            let option = format!("-{c}");
+            if valued.contains(&option.as_str()) {
+                let rest = &cluster[n + c.len_utf8()..];
+                let value = if rest.is_empty() {
+                    words.next().cloned().unwrap_or_default()
+                } else {
+                    rest.to_owned()
+                };
+                options.push((option, value));
+                break;
+            }
+            options.push((option, String::new()));
+        }
+    }
+    (operands, options)
+}
+
+/// What `perl`'s switches say of its words: whether `-i` edits in place,
+/// and where the files it reads, and so writes, start among
+/// [`Argv::named`] (#4250). A switch cluster ends at `-e` or `-E`, whose
+/// program is the rest or the next word, and at a switch that takes the
+/// rest as its value (`-i.bak`, `-Ilib`, `-Mstrict`); the first word past
+/// the switches is the program's file where no `-e` gave one.
+struct Perl {
+    in_place: bool,
+    files: usize,
+}
+
+fn perl(argv: &Argv) -> Perl {
+    let named = argv.named();
+    let (mut in_place, mut scripted, mut at) = (false, false, 0);
+    while let Some(word) = named.get(at) {
+        at += 1;
+        if word == "--" {
+            break;
+        }
+        let Some(cluster) = word
+            .strip_prefix('-')
+            .filter(|c| !c.is_empty() && !c.starts_with('-'))
+        else {
+            if word.starts_with("--") {
+                continue;
+            }
+            at -= 1;
+            break;
+        };
+        for (n, c) in cluster.char_indices() {
+            match c {
+                'e' | 'E' => {
+                    scripted = true;
+                    at += usize::from(cluster.len() == n + 1);
+                    break;
+                }
+                'i' => {
+                    in_place = true;
+                    break;
+                }
+                'I' | 'M' | 'm' | 'x' | 'C' | 'l' | '0' | 'd' | 'D' => break,
+                _ => {}
+            }
+        }
+    }
+    Perl {
+        in_place,
+        files: at + usize::from(!scripted),
+    }
+}
+
 /// Commands whose last operand is the one they write.
 const COPIES: [&str; 5] = ["cp", "install", "ln", "rsync", "scp"];
 
@@ -195,7 +605,7 @@ pub(super) fn can_write(line: &Line, place: &impl Place) -> bool {
             .any(|w| place.read(w).is_some_and(|bytes| names(&bytes)))
     };
     let commands = line.commands();
-    line.written().iter().any(|target| is(target))
+    line.written().any(|target| is(target))
         || commands.iter().any(|argv| {
             let operands = argv.words().get(1..).unwrap_or_default();
             let written = match operands_of(argv) {
@@ -293,7 +703,7 @@ pub(super) fn reads_only(line: &Line, root: &Path) -> bool {
             || target.starts_with('$')
             || (target.starts_with('/') && !Path::new(target).starts_with(beside))
     };
-    line.written().iter().all(elsewhere)
+    line.written().all(elsewhere)
         && line.commands().iter().all(|argv| {
             let words = argv.words();
             let still = STILL.iter().any(|phrase| argv.runs(phrase))
@@ -577,6 +987,99 @@ mod tests {
             "cargo xtask witness --accept --crate x",
         ] {
             assert!(!reads(line), "{line}");
+        }
+    }
+
+    /// Where `line`'s writes land from `/usr`, a directory every machine
+    /// has, as paths.
+    fn lands(line: &str) -> Vec<String> {
+        let places = of(Path::new("/usr"), &Line::read(line));
+        places
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// #4250 (Round 1, Q19 (a)): a listed program lands on what it names,
+    /// read where it runs, and not where it runs; a word the line does not
+    /// resolve, and a listed program that names nothing, land where it
+    /// runs, as every other program does.
+    #[test]
+    fn a_listed_program_lands_on_what_it_names_and_any_other_where_it_runs() {
+        assert_eq!(lands("mkdir -p /tmp/x a"), ["/tmp/x", "/usr/a"]);
+        assert_eq!(lands("cd /tmp && rm -rf /usr/x"), ["/usr/x"]);
+        assert_eq!(lands("S=/tmp/s; mkdir -p \"$S/out\""), ["/tmp/s/out"]);
+        assert_eq!(lands("mkdir -p \"$U/out\""), ["/usr"]);
+        assert_eq!(lands("env -C /tmp mkdir d"), ["/tmp/d"]);
+        assert_eq!(lands("cp -r /usr/a /tmp/b"), ["/tmp/b"]);
+        assert_eq!(lands("cp -t /tmp a b"), ["/tmp"]);
+        assert_eq!(lands("mv /usr/a /tmp/b"), ["/usr/a", "/tmp/b"]);
+        assert_eq!(lands("touch -t 202611070000 /tmp/a"), ["/tmp/a"]);
+        assert_eq!(lands("echo x | tee -a /tmp/a"), ["/tmp/a"]);
+        assert_eq!(lands("echo x | tee"), ["/usr"]);
+        assert_eq!(lands("dd if=/usr/a of=/tmp/b"), ["/tmp/b"]);
+        assert_eq!(lands("install -m 644 a /tmp/b"), ["/tmp/b"]);
+        assert_eq!(lands("mktemp -d /tmp/x.XXXX"), ["/tmp/x.XXXX"]);
+        assert_eq!(lands("sed -i '' -e s/a/b/ /tmp/f"), ["/tmp/f"]);
+        assert_eq!(
+            lands("sed -i.bak s/a/b/ /tmp/f /tmp/g"),
+            ["/tmp/f", "/tmp/g"]
+        );
+        assert_eq!(lands("sed -i s/a/b/"), ["/usr"]);
+        assert_eq!(lands("perl -pi -e 's/a/b/' /tmp/f"), ["/tmp/f"]);
+        assert_eq!(lands("perl -i.orig -pe 's/a/b/' -- /tmp/f"), ["/tmp/f"]);
+        assert_eq!(lands("perl -i fix.pl /tmp/f"), ["/tmp/f"]);
+        assert_eq!(lands("find /tmp/d -name '*.o' -delete"), ["/tmp/d"]);
+        assert_eq!(lands("find -L /tmp/d -delete"), ["/tmp/d"]);
+        assert_eq!(lands("find . -delete"), ["/usr/."]);
+        assert_eq!(lands("find /tmp/d -exec rm {} +"), ["/usr"]);
+        assert_eq!(lands("git -C /tmp clone -q --depth 1 u.git d"), ["/tmp/d"]);
+        assert_eq!(lands("git clone https://h/o/r.git"), ["/usr/r"]);
+        assert_eq!(lands("touch /tmp/a && cargo fmt"), ["/tmp/a", "/usr"]);
+        assert!(lands("cat /usr/a; git status; sed -n 1p /usr/a").is_empty());
+        // Q35.6: a directory the line makes and then enters is not one it
+        // can enter as it is judged, so what follows the change's `;` may
+        // run where the line started, and lands there too.
+        assert_eq!(
+            lands("mkdir -p /tmp/t4250-never && cd /tmp/t4250-never; touch a"),
+            ["/tmp/t4250-never", "/tmp/t4250-never/a", "/usr/a"]
+        );
+    }
+
+    /// #4250 (Round 1, Q20 (a)): a redirection lands on its target read
+    /// where its own command's shell stands, a variable the line assigned
+    /// and `~/` expanded; one on no command where the line stands; and a
+    /// target the line still does not resolve, a descriptor and a device,
+    /// nowhere.
+    #[test]
+    fn a_redirection_lands_where_its_own_command_stands() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(lands("ls; cd /tmp; echo x > y"), ["/tmp/y"]);
+        assert_eq!(lands("cd /tmp; ls; cd /usr; echo x > y"), ["/usr/y"]);
+        assert_eq!(lands("R=/usr; cd /tmp && echo x >> $R/a"), ["/usr/a"]);
+        assert_eq!(lands("cd /tmp && echo x > ~/y"), [format!("{home}/y")]);
+        assert_eq!(lands("(cd /tmp && ls) > out"), ["/usr/out"]);
+        assert_eq!(lands("git -C /tmp log > out"), ["/usr/out"]);
+        // An interpreter stays where it runs; what its program redirects
+        // lands where that program's command stands.
+        assert_eq!(lands("bash -c 'cd /tmp && echo x > y'"), ["/usr", "/tmp/y"]);
+        assert!(lands("echo x > \"$UNSET/a\"; echo y >&2; echo z > /dev/null 2>&1").is_empty());
+        assert!(lands("echo x > $(cat /usr/f)").is_empty());
+    }
+
+    /// Round 2, Q35.9: each row of [`LANDS`] carries a fixture of the owner
+    /// lock each way, `allow-lands-<row>.json` where what it names stands
+    /// outside the owned checkout and `deny-lands-<row>.json` where it
+    /// stands inside.
+    #[test]
+    fn each_listed_program_has_a_fixture_each_way() {
+        let dir = crate::package_dir().join("fixtures/rules/checkout.owner");
+        for row in &LANDS {
+            let name = row.phrase.replace(' ', "-");
+            for way in ["allow", "deny"] {
+                let fixture = dir.join(format!("{way}-lands-{name}.json"));
+                assert!(fixture.is_file(), "{}", fixture.display());
+            }
         }
     }
 }

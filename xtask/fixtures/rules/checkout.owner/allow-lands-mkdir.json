@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"mkdir -p /tmp/t4250-mkdir/d","description":"`mkdir` writes only what it names, outside the checkout another session owns, wherever it runs (#4250)"}}
