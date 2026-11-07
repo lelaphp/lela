@@ -157,6 +157,7 @@ manifest::Telemetry
 manifest::When
 manifest::Where
 manifest::scope_matches
+miri::NEXTEST
 miri::TOOLCHAIN
 miri::run
 new_ext::Laid

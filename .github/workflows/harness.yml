@@ -175,7 +175,10 @@ jobs:
     # Design §9's Miri on `php_heap`'s tests per commit (harness §7, #1916):
     # `xtask miri` on the nightly `xtask::miri::TOOLCHAIN` names, which
     # rustup installs here with its `miri` component where the runner has
-    # not yet; `xtask/tests/miri.rs` holds this line to the constant. The
+    # not yet, and the cargo-nextest `xtask::miri::NEXTEST` names, which
+    # runs each test in a Miri process of its own (#4117) and which
+    # `cargo install` leaves as it is where that release is installed;
+    # `xtask/tests/miri.rs` holds both lines to the constants. The
     # negative control runs here too, since the build job has no nightly
     # and its copy of the test returns on the skip.
     runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
@@ -186,6 +189,7 @@ jobs:
           fetch-depth: 0 # one history the runner keeps, fetched incrementally
       - uses: ./.github/actions/workspace
       - run: rustup toolchain install nightly-2026-02-20 --profile minimal --component miri,rust-src
+      - run: cargo install --locked cargo-nextest@0.9.127
       - run: cargo xtask miri
       - run: cargo test -p xtask --test miri
       - name: this job's readings
