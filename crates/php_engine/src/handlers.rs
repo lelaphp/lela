@@ -11443,6 +11443,17 @@ fn write_place(
     }
 }
 
+/// The row a fetch by name laid `op1`'s place down in, taken by a step
+/// over a `VAR` before it reaches PHP code ([`Request::hold_named`]):
+/// none for any other place.
+fn named_operand(req: &mut Request, frame: FrameRef, op: &Opline) -> Option<NamedRow> {
+    if op.op1_type != OperandKind::Var {
+        return None;
+    }
+    let place = write_place(req, frame, op.op1_type, op.op1)?;
+    req.hold_named(place)
+}
+
 /// Where a step writes `place` past the PHP code it reached: the place
 /// itself, or where a fetch by name laid it down as a row, the row as
 /// [`Request::named_place`] finds it, none where the table moved or
@@ -28081,6 +28092,29 @@ fn step_through_typed_ref(
 /// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
 /// ```
 ///
+/// A variable by name is a row of the symbol table, taken before the
+/// step's diagnostic can reach PHP code. Where the row no longer stands
+/// past it, its table grown or the row emptied by an `unset`, the step
+/// lands nowhere and the temporary is written as for any other step
+/// ([`Request::named_place`]).
+///
+/// ```php
+/// set_error_handler(function () { static $k = 0; for ($i = 0; $i < 3000; $i++) $GLOBALS["g" . $k++] = 1; return true; });
+/// $n = "fr" . "esh"; $$n = "a "; $$n++; var_dump($GLOBALS[$n]);
+/// $n = "mo" . "re"; $$n = str_repeat("a", 30) . "!"; $x = --$$n; var_dump($x, $GLOBALS[$n]);
+/// set_error_handler(function () { unset($GLOBALS[$GLOBALS["n"]]); return true; });
+/// $n = "go" . "ne"; $$n = "a "; $$n++; var_dump($GLOBALS[$n] ?? "unset");
+/// $n = "le" . "ft"; $$n = str_repeat("a", 30) . "!"; $x = $$n++; var_dump($x, $GLOBALS[$n] ?? "unset");
+/// ```
+/// ```expect
+/// string(2) "a "
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// string(5) "unset"
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// string(5) "unset"
+/// ```
+///
 /// ```php
 /// class P { public array $held = [1]; }
 /// class A implements ArrayAccess {
@@ -28114,6 +28148,9 @@ fn incdec(
         OperandKind::Var => write_place(req, frame, op.op1_type, op.op1),
         _ => None,
     };
+    // A row a fetch by name laid down, which the diagnostic's handler can
+    // move or empty before the step lands.
+    let row = named_operand(req, frame, op);
     let named = match place {
         Some(place) => Value::of_slot(place.read()).undef_as_null(),
         None => exec::operand(req, frame, code, op.op1_type, op.op1),
@@ -28138,9 +28175,14 @@ fn incdec(
             if let Some(cell) = cell {
                 req.reference_set(cell.heap(), stepped);
             } else if let Some(place) = place {
-                let previous = Value::of_slot(place.read());
-                place.write(stepped.into_zval());
-                req.release(previous);
+                match place_past(req, place, row) {
+                    Some(place) => {
+                        let previous = Value::of_slot(place.read());
+                        place.write(stepped.into_zval());
+                        req.release(previous);
+                    }
+                    None => req.release(stepped),
+                }
             } else {
                 req.replace_slot(frame, op.op1, stepped);
             }
