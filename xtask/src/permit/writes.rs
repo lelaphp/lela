@@ -15,7 +15,7 @@
 //!
 //! A word is the file when, read where the call stands or where the line
 //! runs a command, a `cd` or a git command's `-C` taking it there
-//! ([`placed`]), it is that path ([`Place::is`]); a program names it
+//! ([`Walk::placed`]), it is that path ([`Place::is`]); a program names it
 //! when the file's name stands in its text ([`names_file`]). What none of
 //! that shows, a binary that holds the path where no word or file spells
 //! it, the line cannot be read to write, and the sensor keeps the change.
@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use super::argv::{Argv, Line};
-use super::shell::{Places, Via, at, moved, placed, stood};
+use super::shell::{Places, Via, Walk, at, moved};
 
 /// The file asked about, where the call stands: the sensor's side of the
 /// question, which touches the disk so that this module does not.
@@ -148,7 +148,8 @@ const LEAVES: [(&str, &[&str]); 38] = [
 /// `git symbolic-ref`'s options that leave the ref it names as it was.
 const READS_REF: [&str; 5] = ["-q", "--quiet", "--short", "--recurse", "--no-recurse"];
 
-/// Where each write of `line` lands, read from `root` (#4250, Mitchell's
+/// Where each write of the line `walk` reads lands, read from where it
+/// starts (#4250, Mitchell's
 /// rulings of 2026-11-06 on c9.b and c9.c): the places a rule with `writes
 /// = true` judges.
 ///
@@ -160,21 +161,23 @@ const READS_REF: [&str; 5] = ["-q", "--quiet", "--short", "--recurse", "--no-rec
 ///   one led by a variable it never assigned, and a listed command that
 ///   names nothing, land where the command runs, as an unlisted one does.
 /// - Every other such command lands where it runs and where its words
-///   reach ([`placed`]), as the owner lock asked before.
+///   reach ([`Walk::placed`]), as the owner lock asked before.
 /// - A redirection lands on its target, read where the shell of its own
 ///   command stands, or where the line stands for one on no command; a
 ///   target still led by a variable or a `~`, a descriptor, a device and
 ///   what a substitution prints are no place ([`Redirect`]).
 ///
 /// [`Redirect`]: super::argv::Redirect
-pub(super) fn of(root: &Path, line: &Line) -> Vec<PathBuf> {
-    let stood = stood(root, line);
+pub(super) fn of(walk: &Walk) -> Vec<PathBuf> {
+    let Some(line) = walk.line() else {
+        return Vec::new();
+    };
     let mut places = Vec::new();
     for argv in line.commands().iter().filter(|argv| changes(argv)) {
         let lands = LANDS.iter().find(|row| row.lists(argv));
         let named = lands.and_then(|row| row.names(argv));
         let named = named.filter(|words| !words.is_empty() && words.iter().all(|w| resolved(w)));
-        for shell in stood.of(argv) {
+        for shell in walk.stood(argv) {
             for (dir, via) in moved(&shell, argv) {
                 match (&named, via) {
                     (Some(words), Via::Runs) => places.extend(words.iter().map(|w| at(&dir, w))),
@@ -188,7 +191,7 @@ pub(super) fn of(root: &Path, line: &Line) -> Vec<PathBuf> {
             continue;
         }
         let command = redirect.command.and_then(|n| line.commands().get(n));
-        let shells = command.map_or_else(|| vec![stood.line().to_path_buf()], |c| stood.of(c));
+        let shells = command.map_or_else(|| vec![walk.runs_in()], |c| walk.stood(c));
         places.extend(shells.iter().map(|shell| at(shell, &redirect.target)));
     }
     let mut once = Vec::new();
@@ -582,8 +585,9 @@ const INTERPRETERS: [&str; 15] = [
 /// Whether `line` can write the file at `place` (the module's list).
 pub(super) fn can_write(line: &Line, place: &impl Place) -> bool {
     // Each directory a command of the line runs or reaches in, read from
-    // where the call stands, as [`placed`] reads it.
-    let placed = placed(Path::new(""), line, Places::Every).into_iter();
+    // where the call stands, as [`Walk::placed`] reads it.
+    let placed = Walk::of(Path::new(""), Some(line)).placed(Places::Every);
+    let placed = placed.into_iter();
     let dirs: Vec<PathBuf> = placed.map(|(_, dir)| dir).collect();
     // The word as the shell would find it: where the call stands, and in
     // each of those.
@@ -993,7 +997,8 @@ mod tests {
     /// Where `line`'s writes land from `/usr`, a directory every machine
     /// has, as paths.
     fn lands(line: &str) -> Vec<String> {
-        let places = of(Path::new("/usr"), &Line::read(line));
+        let line = Line::read(line);
+        let places = of(&Walk::of(Path::new("/usr"), Some(&line)));
         places
             .iter()
             .map(|p| p.to_string_lossy().into_owned())

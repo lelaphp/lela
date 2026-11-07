@@ -13,13 +13,13 @@ use regex_lite::Regex;
 use serde_json::{Value, json};
 
 use super::approval::{Admission, LIFTED};
-use super::argv::{Argv, Line, Move};
+use super::argv::{Argv, Line};
 use super::call::Call;
 use super::label;
 use super::operation;
 use super::owned::{self, Owned, Scope};
 use super::region::region_body;
-use super::shell::{Places, Walk, acts_in, fired_in, runs_in};
+use super::shell::{Places, Unplaced, Walk};
 use super::unless;
 use super::writes::{self, changes};
 use crate::manifest::{Manifest, Rule, Runs, Where, scope_matches};
@@ -71,14 +71,6 @@ pub struct Finding {
 pub(crate) enum Placement {
     In(PathBuf),
     Unplaced(Unplaced),
-}
-
-/// A command a rule fires on that the walk places nowhere, and the change
-/// or the program past which it lost the line ([`Walk::lost_by`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Unplaced {
-    command: String,
-    past: String,
 }
 
 impl std::fmt::Display for Placement {
@@ -208,10 +200,11 @@ pub fn judged_at_the_call(rule: &Rule) -> bool {
 }
 
 /// Judge one call: the region-body rule, then the manifest's rules in
-/// order.
+/// order, each reading the one walk of the call's line ([`Walk`]).
 pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement> {
     let path = call.path(root);
     let line = call.command().map(Line::read);
+    let walk = Walk::of(root, line.as_ref());
     let mut findings = Vec::new();
     let mut judged = Vec::new();
     if let Some(path) = &path {
@@ -223,7 +216,7 @@ pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement>
         .filter(|r| applies(r, call, path.as_deref()))
     {
         judged.push(rule.id.clone());
-        let finding = evaluate(manifest, root, rule, call, path.as_deref(), line.as_ref())?;
+        let finding = evaluate(manifest, root, rule, call, path.as_deref(), &walk)?;
         findings.extend(finding);
     }
     let defects = manifest.defects().iter().map(ToString::to_string).collect();
@@ -246,16 +239,17 @@ fn applies(rule: &Rule, call: &Call, path: Option<&Path>) -> bool {
 }
 
 /// One rule that [`applies`] over the call, with the file it touches and
-/// the shell line it runs, each read once for every rule.
+/// the walk of the shell line it runs, each read once for every rule.
 fn evaluate(
     manifest: &Manifest,
     root: &Path,
     rule: &Rule,
     call: &Call,
     path: Option<&Path>,
-    line: Option<&Line>,
+    walk: &Walk,
 ) -> Result<Option<Finding>> {
     let p = &rule.predicate;
+    let line = walk.line();
     let source = path.is_some_and(is_rust_source);
     let fired = if p.deny_argv.is_some() || p.require_argv.is_some() {
         line.is_some_and(|l| l.commands().iter().any(|a| fires(rule, a)))
@@ -309,7 +303,7 @@ fn evaluate(
         // lands a write somewhere, by a command or a redirection (#3621,
         // #4250).
         match line {
-            Some(line) => !writes::of(root, line).is_empty(),
+            Some(_) => !writes::of(walk).is_empty(),
             None => call.tool_input.file_path.is_some(),
         }
     } else if let Some(types) = &p.deny_types {
@@ -343,7 +337,7 @@ fn evaluate(
     // names ([`judges_where`]).
     let mut standing = Standing::Judged;
     if fired {
-        standing = judges_where(root, rule, line, call)?;
+        standing = judges_where(root, rule, walk, call)?;
         if matches!(standing, Standing::Outside) {
             return Ok(None);
         }
@@ -352,7 +346,7 @@ fn evaluate(
     // one change the person approved in the session ([`super::approval`]).
     if fired
         && LIFTED.contains(&rule.id.as_str())
-        && let Some(admission) = admitted(root, call, path, line)
+        && let Some(admission) = admitted(root, call, path, walk)
     {
         return Ok(Some(Finding::admitted(rule, admission)));
     }
@@ -367,7 +361,7 @@ fn evaluate(
                 Placement::In(foreign.checkout)
             }
             Standing::Unplaced(lost) => Placement::Unplaced(lost),
-            Standing::Judged | Standing::Outside => Placement::In(judged_in(root, rule, line)),
+            Standing::Judged | Standing::Outside => Placement::In(judged_in(rule, walk)),
         });
         finding
     }))
@@ -388,11 +382,11 @@ enum Standing {
 }
 
 /// Where the call stands for the rule's `where`: asked where a command it
-/// fires on runs ([`fired_in`]), whose branch records a ticket, which is
+/// fires on runs ([`Walk::fired_in`]), whose branch records a ticket, which is
 /// the main checkout (#2751), which is the merge worktree (#3622), or
 /// whose checkout it is, and whether an operation stands there ([`owned`], #3621). An owner record that does
 /// not read is an error, so the call is judged by no build.
-fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> Result<Standing> {
+fn judges_where(root: &Path, rule: &Rule, walk: &Walk, call: &Call) -> Result<Standing> {
     let judged = |inside: bool| {
         if inside {
             Standing::Judged
@@ -401,10 +395,10 @@ fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> R
         }
     };
     let owned = |scope| {
-        let found = owned::owned(root, call, line, scope, |argv| fires(rule, argv))?;
+        let found = owned::owned(root, call, walk, scope, |argv| fires(rule, argv))?;
         Ok(found.map_or(Standing::Outside, Standing::Foreign))
     };
-    let lost = line.and_then(|line| unplaced(root, line, |argv| fires(rule, argv)));
+    let lost = walk.unplaced(|argv| fires(rule, argv));
     Ok(match (rule.within, lost) {
         (Where::Anywhere, _) => Standing::Judged,
         // Where each write lands is the owner record's to judge (#3621).
@@ -414,11 +408,11 @@ fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> R
         }
         (Where::Operating, Some(_)) => Standing::Outside,
         (_, Some(lost)) => Standing::Unplaced(lost),
-        (Where::Ticketed, None) => judged(ticketed(root, rule, line)),
+        (Where::Ticketed, None) => judged(ticketed(rule, walk)),
         (Where::Operating, None) => return owned(Scope::Operating),
-        (Where::Main, None) => judged(in_main(root, rule, line)),
-        (Where::Staging, None) => judged(on_staging(root, rule, line)),
-        (Where::Checkout, None) => judged(in_a_checkout(root, line)),
+        (Where::Main, None) => judged(in_main(rule, walk)),
+        (Where::Staging, None) => judged(on_staging(rule, walk)),
+        (Where::Checkout, None) => judged(in_a_checkout(root, walk)),
     })
 }
 
@@ -444,67 +438,36 @@ fn operating_elsewhere(root: &Path, call: &Call) -> Result<bool> {
     Ok(false)
 }
 
-/// The first command of `line` that `fires` and that the walk places in
-/// no checkout: one past a change the line does not say where it goes,
-/// or one moved by its own words where they do not say ([`Walk::lost`]).
-/// Where no command fires on its words alone, the line fired whole, as a
-/// pattern over a redirection does, and the first command placed nowhere
-/// that changes no directory is the one named, so the line is never
-/// judged where the shell started (#3625).
-fn unplaced(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) -> Option<Unplaced> {
-    let walk = Walk::of(root, Some(line));
-    let past = walk.lost_by.clone()?;
-    let lost = |argv: &&Argv| {
-        walk.places_of(argv).next().is_none() || argv.moves().contains(&Move::Unsaid)
-    };
-    let whole = !line.commands().iter().any(&fires);
-    let changes = |argv: &Argv| matches!(argv.program(), "cd" | "pushd" | "popd");
-    let command = line
-        .commands()
-        .iter()
-        .filter(|argv| if whole { !changes(argv) } else { fires(argv) })
-        .find(lost)?;
-    Some(Unplaced {
-        command: command.words().join(" "),
-        past,
-    })
-}
-
 /// The checkout a denial judged the call in: where the first command the
-/// rule fires on runs ([`fired_in`]) or else where the call acts
-/// ([`acts_in`]), at the top of its worktree.
-fn judged_in(root: &Path, rule: &Rule, line: Option<&Line>) -> PathBuf {
-    let fired = line.and_then(|line| {
-        fired_in(root, line, Places::Every, |argv| fires(rule, argv))
-            .into_iter()
-            .next()
-    });
-    let dir = fired.unwrap_or_else(|| acts_in(root, line));
+/// rule fires on runs ([`Walk::fired_in`]) or else where the call acts
+/// ([`Walk::acts_in`]), at the top of its worktree.
+fn judged_in(rule: &Rule, walk: &Walk) -> PathBuf {
+    let fired = walk.fired_in(Places::Every, |argv| fires(rule, argv));
+    let dir = fired.into_iter().next().unwrap_or_else(|| walk.acts_in());
     let top = crate::git::rev_parse(&dir, &["--show-toplevel"]).map_or(dir, PathBuf::from);
     fs::canonicalize(&top).unwrap_or(top)
 }
 
 /// Whether a shell line runs anything inside a checkout of `root`'s
 /// repository ([`crate::track::checkouts`]): where it stands
-/// ([`runs_in`]) or where [`placed`] puts any of its commands, each by its
+/// ([`Walk::runs_in`]) or where [`Walk::placed`] puts any of its commands, each by its
 /// canonical path, so a scratch repository's `docs/divergence.toml` is not
 /// this repository's (#2887), and a relative path the line names that
 /// resolves into one, through a link, is in one. It fails safe, reading
 /// as inside one: a line that changes directory, or moves a program,
 /// where it does not say ([`Walk::lost`]), or spells a change it did not
-/// read as a command ([`spells_unread_changes`]); a place that is no
+/// read as a command ([`Walk::spells_unread_changes`]); a place that is no
 /// directory on disk, which a `cd` cannot enter; and a repository git
 /// cannot list.
-fn in_a_checkout(root: &Path, line: Option<&Line>) -> bool {
-    let walk = Walk::of(root, line);
-    if walk.lost || line.is_some_and(spells_unread_changes) {
+fn in_a_checkout(root: &Path, walk: &Walk) -> bool {
+    if walk.lost() || walk.spells_unread_changes() {
         return true;
     }
     let Ok(checkouts) = crate::track::checkouts(root) else {
         return true;
     };
     let inside = |path: &Path| checkouts.iter().any(|c| path.starts_with(c));
-    let named: Vec<&String> = line.map_or_else(Vec::new, |line| {
+    let named: Vec<&String> = walk.line().map_or_else(Vec::new, |line| {
         let words = line.commands().iter().flat_map(Argv::words);
         words.chain(line.written()).collect()
     });
@@ -515,30 +478,21 @@ fn in_a_checkout(root: &Path, line: Option<&Line>) -> bool {
                 && fs::canonicalize(dir.join(name)).is_ok_and(|path| inside(&path))
         })
     };
-    std::iter::once(walk.runs_in(root))
-        .chain(walk.placed.into_iter().map(|p| p.dir))
+    let placed = walk.placed(Places::Every).into_iter().map(|(_, dir)| dir);
+    std::iter::once(walk.runs_in())
+        .chain(placed)
         .any(|dir| match fs::canonicalize(dir) {
             Ok(dir) => !dir.is_dir() || inside(&dir) || reaches(&dir),
             Err(_) => true,
         })
 }
 
-/// Whether the line spells a directory change it did not read as a
-/// command, one a program it does not peel runs (`xargs sh -c 'cd …'`):
-/// the one reading of a line's text where its commands cannot say.
-fn spells_unread_changes(line: &Line) -> bool {
-    let changes = |argv: &&Argv| matches!(argv.program(), "cd" | "pushd" | "popd");
-    let read = line.commands().iter().filter(changes).count();
-    let spelled = regex(r"(?:^|[^\w./-])(?:cd|pushd|popd)\b");
-    spelled.find_iter(line.text()).count() > read
-}
-
 /// Whether a command the rule fires on runs in a checkout whose branch
 /// records a ticket, or one the harness cannot tell does not
-/// ([`fired_in`]); a call with no line, or a line with no command the
-/// rule fires on, is asked where it stands ([`runs_in`]).
-fn ticketed(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
-    scoped_in(root, rule, line)
+/// ([`Walk::fired_in`]); a call with no line, or a line with no command the
+/// rule fires on, is asked where it stands ([`Walk::runs_in`]).
+fn ticketed(rule: &Rule, walk: &Walk) -> bool {
+    scoped_in(rule, walk)
         .iter()
         .any(|dir| !matches!(crate::track::head_ticket(dir), Ok(None)))
 }
@@ -548,8 +502,8 @@ fn ticketed(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
 /// [`ticketed`] reads (#2751). A directory under no `.git` is in no
 /// checkout at all, such as a scratch repository the line has yet to
 /// make, and not in main's (#3619).
-fn in_main(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
-    scoped_in(root, rule, line)
+fn in_main(rule: &Rule, walk: &Walk) -> bool {
+    scoped_in(rule, walk)
         .iter()
         .any(|dir| linked(dir) == Some(false))
 }
@@ -557,21 +511,19 @@ fn in_main(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
 /// Whether a command the rule fires on runs in the merge worktree, the
 /// checkout on [`crate::queue::STAGING`], read where [`ticketed`] reads
 /// (#3622).
-fn on_staging(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
-    scoped_in(root, rule, line)
+fn on_staging(rule: &Rule, walk: &Walk) -> bool {
+    scoped_in(rule, walk)
         .iter()
         .any(|dir| crate::track::head_branch(dir).as_deref() == Some(crate::queue::STAGING))
 }
 
 /// Where a `where`-scoped rule asks: each checkout a command it fires on
-/// runs in ([`fired_in`]), or, for a call with no line or a line with no
-/// such command, where the call stands ([`runs_in`]).
-fn scoped_in(root: &Path, rule: &Rule, line: Option<&Line>) -> Vec<PathBuf> {
-    let mut checkouts = line.map_or_else(Vec::new, |line| {
-        fired_in(root, line, Places::Every, |argv| fires(rule, argv))
-    });
+/// runs in ([`Walk::fired_in`]), or, for a call with no line or a line with no
+/// such command, where the call stands ([`Walk::runs_in`]).
+fn scoped_in(rule: &Rule, walk: &Walk) -> Vec<PathBuf> {
+    let mut checkouts = walk.fired_in(Places::Every, |argv| fires(rule, argv));
     if checkouts.is_empty() {
-        checkouts.push(runs_in(root, line));
+        checkouts.push(walk.runs_in());
     }
     checkouts
 }
@@ -621,23 +573,18 @@ fn fires(rule: &Rule, argv: &Argv) -> bool {
 /// for a `Bash` line, which cannot be read for what it writes, an
 /// approval pending for every harness file the line can write, whose
 /// write `permit --after` holds to the diff.
-fn admitted(
-    root: &Path,
-    call: &Call,
-    path: Option<&Path>,
-    line: Option<&Line>,
-) -> Option<Admission> {
+fn admitted(root: &Path, call: &Call, path: Option<&Path>, walk: &Walk) -> Option<Admission> {
     let approvals = call.approvals();
     if approvals.is_empty() {
         return None;
     }
-    let Some(line) = line else {
+    let Some(line) = walk.line() else {
         let path = path?;
         // A call at the hook displaces the one text at the path.
         let (before, after) = call.rewrite(root, Some(path))?;
         return approvals.admits(path, before.first().map(String::as_str), Some(&after));
     };
-    let (checkout, written) = super::after::written(root, call, line);
+    let (checkout, written) = super::after::written(root, call, walk, line);
     let pending: Option<Vec<Admission>> = written
         .iter()
         .map(|path| {
@@ -741,7 +688,7 @@ fn macro_pattern(path: &str) -> Regex {
 
 /// A pattern permit writes itself; one that does not compile is a bug
 /// here, not a call to let through.
-fn regex(pattern: &str) -> Regex {
+pub(super) fn regex(pattern: &str) -> Regex {
     Regex::new(pattern)
         .unwrap_or_else(|err| unreachable!("permit's own pattern {pattern:?}: {err}"))
 }

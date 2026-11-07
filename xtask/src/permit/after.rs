@@ -20,7 +20,7 @@
 //! where the call acts, its `cwd` moved by the line's leading `cd`,
 //! `pushd` and `popd`, or by git's `-C` where every command past them is
 //! git and names one directory, at the top of its worktree
-//! ([`operation::ran_in`], #2607), and not the hook's own: a subagent's shell starts in the main
+//! ([`Walk::ran_in`], #2607), and not the hook's own: a subagent's shell starts in the main
 //! checkout and `cd`s into its worktree, so the hook's checkout is often
 //! one the call never touched, and another session's merge may stand
 //! there (#2597). The line's words are read where its shell stands, the
@@ -106,7 +106,7 @@ use super::audit;
 use super::call::Call;
 use super::kept;
 use super::operation;
-use super::shell::{at, runs_in};
+use super::shell::{Walk, at};
 use super::writes::{self, Place};
 use crate::key::Snapshot;
 use crate::manifest::OneOrMany;
@@ -412,8 +412,13 @@ fn sort_moved(record: &Record, call: &Call, held: &Path, unread: Option<&str>) -
 /// The checkout the call ran in, and the tracked files of `harness.self`'s
 /// scope there that the call's line can write, read where it stands: what
 /// an approval must cover before the line runs (#2247).
-pub(super) fn written(root: &Path, call: &Call, line: &argv::Line) -> (PathBuf, Vec<String>) {
-    let checkout = operation::ran_in(root, Some(line));
+pub(super) fn written(
+    root: &Path,
+    call: &Call,
+    walk: &Walk,
+    line: &argv::Line,
+) -> (PathBuf, Vec<String>) {
+    let checkout = walk.ran_in(root);
     let Ok(Some(guarded)) = guard(&checkout) else {
         return (checkout, Vec::new());
     };
@@ -775,18 +780,19 @@ fn moves_head(line: &argv::Line) -> bool {
 }
 
 /// The one checkout a call is held in: the one it ran in, where its
-/// workspace moved by its line acts ([`operation::ran_in`]), and never
-/// the hook's own where the call ran elsewhere (#2597, #2607).
+/// workspace moved by its line acts ([`Walk::ran_in`]), and never the
+/// hook's own where the call ran elsewhere (#2597, #2607).
 fn held(root: &Path, call: &Call) -> PathBuf {
     let line = call.command().map(argv::Line::read);
-    operation::ran_in(&call.workspace(root), line.as_ref())
+    let workspace = call.workspace(root);
+    Walk::of(&workspace, line.as_ref()).ran_in(&workspace)
 }
 
 /// Where the line's shell stands, which its words are read against: the
 /// call's `cwd`, or `checkout` where it carries none, moved by the line's
-/// leading `cd`, `pushd` and `popd` ([`runs_in`]).
+/// leading `cd`, `pushd` and `popd` ([`Walk::runs_in`]).
 fn shell_at(call: &Call, checkout: &Path, line: &argv::Line) -> PathBuf {
-    runs_in(call.cwd.as_deref().map_or(checkout, Path::new), Some(line))
+    Walk::of(call.cwd.as_deref().map_or(checkout, Path::new), Some(line)).runs_in()
 }
 
 /// The rule's text and the blob of every tracked file it scopes and does

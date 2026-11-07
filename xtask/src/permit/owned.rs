@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::argv::{Argv, Line};
+use super::argv::Argv;
 use super::call::Call;
 use super::operation::Operation;
-use super::shell::{Places, fired_in};
+use super::shell::{Places, Walk};
 use super::writes;
 use crate::git;
 use crate::owner::{self, SessionId};
@@ -66,25 +66,24 @@ pub(super) enum Scope {
 }
 
 /// The first checkout another session owns among those `call` would write
-/// in, for the commands of `line` that `fires`; `None` where every one is
+/// in, for the commands of the line `walk` reads that `fires`, or for the
+/// file `call` names under `root`; `None` where every one is
 /// the caller's or no session's, or the call names no session. A record
 /// that does not read is an error, so the call is judged by no build
 /// rather than let through.
 pub(super) fn owned(
     root: &Path,
     call: &Call,
-    line: Option<&Line>,
+    walk: &Walk,
     scope: Scope,
     fires: impl Fn(&Argv) -> bool,
 ) -> Result<Option<Owned>> {
     let Some(caller) = SessionId::new(&call.session_id) else {
         return Ok(None);
     };
-    let places = match (line, call.tool_input.file_path.as_deref()) {
-        (Some(line), _) if scope == Scope::Operating => {
-            fired_in(root, line, Places::Repositories, fires)
-        }
-        (Some(line), _) => writes::of(root, line),
+    let places = match (walk.line(), call.tool_input.file_path.as_deref()) {
+        (Some(_), _) if scope == Scope::Operating => walk.fired_in(Places::Repositories, fires),
+        (Some(_), _) => writes::of(walk),
         (None, Some(file)) => vec![root.join(file)],
         (None, None) => vec![root.to_path_buf()],
     };
@@ -117,9 +116,11 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{Line, Operation, Owned, Scope, owned};
+    use super::{Operation, Owned, Scope, owned};
     use crate::owner::{self, SessionId};
+    use crate::permit::argv::Line;
     use crate::permit::call::Call;
+    use crate::permit::shell::Walk;
     use crate::permit::writes::changes;
     use crate::scratch::Tree;
 
@@ -158,7 +159,14 @@ mod tests {
     fn written(dir: &Path, session: &str, line: &str) -> Option<Owned> {
         let call = call(session, &serde_json::json!({"command": line}));
         let line = Line::read(line);
-        owned(dir, &call, Some(&line), Scope::Owned, changes).unwrap()
+        owned(
+            dir,
+            &call,
+            &Walk::of(dir, Some(&line)),
+            Scope::Owned,
+            changes,
+        )
+        .unwrap()
     }
 
     /// #3621: another session's write in an owned checkout is placed there
@@ -176,7 +184,7 @@ mod tests {
                 &serde_json::json!({"file_path": file,
                 "old_string": "a", "new_string": "b"}),
             );
-            owned(&dir, &call, None, Scope::Owned, changes).unwrap()
+            owned(&dir, &call, &Walk::of(&dir, None), Scope::Owned, changes).unwrap()
         };
         let named = edit("another", &dir.join("AGENTS.md")).unwrap();
         assert_eq!(named.checkout, top);
@@ -231,7 +239,14 @@ mod tests {
                 session,
                 &serde_json::json!({"command": "git merge --abort"}),
             );
-            owned(&dir, &call, Some(&line), Scope::Operating, |_| true).unwrap()
+            owned(
+                &dir,
+                &call,
+                &Walk::of(&dir, Some(&line)),
+                Scope::Operating,
+                |_| true,
+            )
+            .unwrap()
         };
         assert_eq!(stepped("another"), None);
         std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
