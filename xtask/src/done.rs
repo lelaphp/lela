@@ -1774,19 +1774,53 @@ fn handed_over(checkout: &Path, stop: &StopStdin) -> Option<(Counts, String)> {
         unkinded: n,
         ..Counts::default()
     };
-    match crate::permit::walk(checkout, adapter, &args, &handed.to_string()) {
-        Ok(out) => {
-            let held: Value = serde_json::from_slice(&out).unwrap_or(Value::Null);
-            let reason = held["reason"].as_str()?;
+    let out = match crate::permit::walk(checkout, adapter, &args, &handed.to_string()) {
+        Ok(out) => out,
+        Err(last) => {
+            let why = format!("done could not judge {}: {last}", checkout.display());
+            return Some((unkinded(1), why));
+        }
+    };
+    match handed_back(&out) {
+        Ok(None) => None,
+        Ok(Some((held, reason))) => {
             let counts = Counts::from_json(&held["kinds"]).unwrap_or_else(|| {
                 let n = held["unmet"].as_u64().and_then(|n| usize::try_from(n).ok());
                 unkinded(n.unwrap_or(1))
             });
             Some((counts, format!("In {}:\n{reason}", checkout.display())))
         }
-        Err(last) => Some((
+        Err(why) => Some((
             unkinded(1),
-            format!("done could not judge {}: {last}", checkout.display()),
+            format!(
+                "done could not read {}'s verdict: {why}",
+                checkout.display()
+            ),
+        )),
+    }
+}
+
+/// What a checkout's build printed for the Stop handed to it: nothing,
+/// which is its pass, or the hook's object with its reason. Anything
+/// else is no verdict, and holds.
+fn handed_back(out: &[u8]) -> Result<Option<(Value, String)>, String> {
+    if out.trim_ascii().is_empty() {
+        return Ok(None);
+    }
+    let held: Value = serde_json::from_slice(out).map_err(|err| {
+        let printed = String::from_utf8_lossy(out);
+        format!(
+            "its build printed what is not the hook's JSON ({err}): {}",
+            printed.trim()
+        )
+    })?;
+    match held["reason"].as_str() {
+        Some(reason) => {
+            let reason = reason.to_owned();
+            Ok(Some((held, reason)))
+        }
+        None => Err(format!(
+            "its build printed an object with no reason: {held}"
         )),
     }
 }
@@ -1876,8 +1910,8 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 #[cfg(test)]
 mod tests {
     use super::{
-        Slack, command_taking, met_without_passing, miri_unsupported, no_binary_yet, owed,
-        porting_meter, rule_absent, slack_porting,
+        Slack, command_taking, handed_back, met_without_passing, miri_unsupported, no_binary_yet,
+        owed, porting_meter, rule_absent, slack_porting,
     };
     use crate::carried::Carried;
     use crate::manifest::{Crate, Manifest, Owed, Rule};
@@ -2410,5 +2444,23 @@ crates = ["php_heap"]                      # design §9's memory model; also wha
             let asked = owed(&manifest, krate, &carried);
             assert_eq!(asked, asked_before, "{name}");
         }
+    }
+
+    /// A checkout's build that printed nothing passed; one that printed
+    /// what is not the hook's object, or an object with no reason, gave
+    /// no verdict and holds (Round 1, Q23, c7), where it used to pass.
+    #[test]
+    fn a_handed_checkout_passes_on_empty_stdout_and_holds_on_garbage() {
+        assert_eq!(handed_back(b""), Ok(None));
+        assert_eq!(handed_back(b"\n"), Ok(None));
+        let garbage = handed_back(b"warning: unused import").unwrap_err();
+        assert!(garbage.contains("not the hook's JSON"), "{garbage}");
+        assert!(garbage.contains("unused import"), "{garbage}");
+        let reasonless = handed_back(b"{\"decision\":\"block\"}").unwrap_err();
+        assert!(reasonless.contains("no reason"), "{reasonless}");
+        let held = handed_back(b"{\"decision\":\"block\",\"reason\":\"1 unmet\",\"unmet\":1}");
+        let (value, reason) = held.unwrap().unwrap();
+        assert_eq!(reason, "1 unmet");
+        assert_eq!(value["unmet"], 1);
     }
 }
