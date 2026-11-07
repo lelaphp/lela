@@ -641,10 +641,15 @@ impl Store {
     }
 
     /// Every reading another store's log holds, landed in this one's log
-    /// and index, and that log emptied: the retire of a worktree (`xtask
-    /// worktree retire`) lands its readings here, so a branch's passes
-    /// stand at its merge, found by the key they were taken over (#1252).
-    /// The other store's files of each scope stay where they are: each is
+    /// and index, and that log emptied. `worktree retire` lands a
+    /// worktree's readings in main's store, and `worktree land` lands
+    /// `_merge`'s there too; nothing lands a reading in `_merge`'s store.
+    /// So a retired worktree's reading is found, by the key it was taken
+    /// over, only where main's store is read: by `done`, `status` and
+    /// pre-push run in main's checkout, and by `permit`'s `unless`, which
+    /// reads every worktree's store (#1252). `done` in `_merge`, which
+    /// `worktree land` runs before it moves `main`, reads `_merge`'s store
+    /// and does not find it (#4216). The other store's files of each scope stay where they are: each is
     /// a scope's last run over a tree the store landed in may not have
     /// (#35). Its log is read whole, the file of each instrument, and each
     /// is emptied once landed, so a retire that refuses after this and the
@@ -758,9 +763,13 @@ impl Store {
     /// over the content its key names, by scope: the scope's file when the
     /// reading there is over it, since that one is the latest of all, and
     /// otherwise the index's entry for the key. The index is where a
-    /// retired worktree's readings are: `worktree retire` lands its log
-    /// here and leaves its files, so a branch's pass stands at its merge
-    /// only when it is found by the key it was taken over (#1252). A scope
+    /// retired worktree's readings are: `worktree retire` lands its log in
+    /// main's store and leaves its files with the worktree, so its pass is
+    /// found here, by the key it was taken over, only when this is main's
+    /// store, as it is for `done`, `status` and pre-push run in main's
+    /// checkout (#1252). `done` in `_merge`, which `worktree land` runs
+    /// before it moves `main`, asks `_merge`'s store, and nothing lands a
+    /// reading there (#4216). A scope
     /// with no reading over its key is absent, and so is one whose key is
     /// empty, which names no content.
     pub(crate) fn latest_over(
