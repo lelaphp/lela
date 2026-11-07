@@ -2673,16 +2673,15 @@ fn a_subset_a_full_volume_kept_from_running_is_a_skip_and_not_a_refusal() {
     assert_eq!(reading.message, "the server did not answer");
 }
 
-/// The dashboard's oracle job, the one CI job that runs the phpt lane on
+/// nightly.yml's oracle job, the one CI job that runs the phpt lane on
 /// `main`, stashes the runs it keeps beside its store (#2362, #3554): one
-/// put is the store's log, `oracle`, which `publish` folds, and one is
-/// [`against::RUNS`] under [`against::UPLOAD`], the name the fetch line
-/// reads, which `publish`'s get of the stores does not take. The job is
-/// the lines from its key to the next job's, each put the lines from its
+/// put is the store's log, `oracle`, and one is [`against::RUNS`] under
+/// [`against::UPLOAD`], the name the fetch line reads. The job is the
+/// lines from its key to the next job's, each put the lines from its
 /// `uses` to the next step.
 #[test]
 fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
-    let text = fs::read_to_string(workspace().join(".github/workflows/dashboard.yml")).unwrap();
+    let text = fs::read_to_string(workspace().join(".github/workflows/nightly.yml")).unwrap();
     assert!(
         !text.contains("upload-artifact") && !text.contains("download-artifact"),
         "the hand-offs are the stash's, not GitHub artifacts (#3554)"
@@ -2700,7 +2699,7 @@ fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
             .take_while(|(n, line)| *n == 0 || !key(line))
             .map(|(_, line)| line)
             .collect();
-        assert!(!job.is_empty(), "dashboard.yml has no {name} job");
+        assert!(!job.is_empty(), "nightly.yml has no {name} job");
         job.join("\n") + "\n"
     };
     let oracle = &job("oracle");
@@ -2729,14 +2728,5 @@ fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
     assert!(
         runs.contains(&format!("path: {}/\n", against::RUNS)),
         "the put is the kept runs: {runs}"
-    );
-    let publish = job("publish");
-    let stores = publish
-        .lines()
-        .find(|line| line.trim_start().starts_with("get:") && line.contains("measure"))
-        .expect("publish gets the stores by their names");
-    assert!(
-        stores.contains("oracle") && !stores.contains(against::UPLOAD),
-        "publish folds the store and not the runs: {stores}"
     );
 }

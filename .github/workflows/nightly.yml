@@ -1,0 +1,442 @@
+# The lanes that measure main beyond harness.yml's per-commit run. The
+# `oracle` job runs beside every harness run of a push to main, nightly and
+# by hand; `soak`, `bench`, `tailcall` and `red-nightly` run nightly and by
+# hand with `full`. Every job measures main.
+# - `oracle`, on the Mac mini: the phpt lane and the witnesses need the
+#   pinned php, a macOS keg (oracle.toml), which that runner keeps as poured
+#   byte for byte from homebrew-core's bottle of the pinned version, beside
+#   the MySQL server of ci/mysql/compose.yaml, started from Homebrew since
+#   the Mac has no Docker. After a push it runs the per-commit lane and
+#   `Zend/tests`; nightly, the whole corpus (`--full`, the nightly lane,
+#   which is CI's). It stashes the runs it keeps, which `xtask phpt
+#   --against` fetches (#2362);
+# - `soak`, on the Linux server: makala under many clients (#2350);
+# - `bench`, on the Mac after the oracle job: makala against the pinned
+#   php-fpm (#2351);
+# - `tailcall`, on the Mac after the bench: the threaded dispatch's corpus
+#   (#2970);
+# - `red-nightly`: a red `soak` or `tailcall` filed on the tracker after two
+#   nightlies in a row (#2980).
+#
+# This workflow was the dashboard's, whose three other jobs built its site
+# from these jobs' stores and put it on Cloudflare. Mitchell ruled the site
+# out (Round 4, Q9; Round 5, Q2 (b)), and #4243 took those three jobs out,
+# renamed the file and kept the rest, so no job here reads `dashboard/` or
+# a Cloudflare secret, and a store stashed below is read by no later job of
+# this workflow.
+#
+# Every job runs on one of harness.yml's two self-hosted runners (#2253):
+# `dax-build`, the Linux server, and `dax-oracle`, the Mac mini, so no hosted
+# macOS minute is spent. Each checkout is `clean: false` and the workspace
+# action cleans all but target/, which the runner keeps as the warm build.
+# The Linux jobs take their runner from DAX_BUILD_RUNNER as harness.yml's
+# do (#2477): unset, `dax-build`; set, a GitHub-hosted image while the
+# self-hosted pair is not online, with the Mac's jobs skipped
+# (scripts/ci/README.md).
+name: nightly
+on:
+  workflow_run:
+    workflows: [harness]
+    types: [requested]
+    # A pull request's harness run measures a merge commit off main, and a
+    # push to any other branch is not main's.
+    branches: [main]
+  schedule:
+    - cron: "23 2 * * *" # the nightly lane
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run the nightly lanes, the whole corpus in the oracle job and the soak
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# The stash every hand-off between jobs goes through (.github/actions/stash,
+# #3554): the repository's to configure once, for every runner, and unset
+# on a fork, where the hand-off is a GitHub artifact.
+env:
+  DAX_STASH: ${{ vars.DAX_STASH }}
+  DAX_STASH_HOST_KEY: ${{ vars.DAX_STASH_HOST_KEY }}
+  DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
+jobs:
+  oracle:
+    name: phpt and witnesses under the pinned oracle
+    # Skipped while DAX_BUILD_RUNNER is set: the Mac is not online, and a
+    # job queued for it would wait GitHub's 24 hours for a runner (#2477).
+    if: ${{ !vars.DAX_BUILD_RUNNER }}
+    runs-on: [self-hosted, macos, dax-oracle]
+    timeout-minutes: 150
+    # Every correctness lane of this job runs `release-da`, release's
+    # optimisation with debug assertions and overflow checks, without thin
+    # LTO or a single codegen unit (harness-design.md §7, revision 82;
+    # #1994): the harness, which serves every witness through the engine
+    # linked into it and builds a `process` fence's host in its own
+    # profile, the engine's binaries below, and the tree's test. So what
+    # `cfg(debug_assertions)` guards runs over the whole corpus; the bench
+    # lane and the shipped binaries stay plain release, and
+    # `xtask/src/oracle/profile.rs` holds each cargo line here to the
+    # profile it names. Measured on the dev machine (2026-10-05, M-series,
+    # 12 cores shared with other builds): php_compile's 417 witnesses took
+    # 19.2 s under the `dev` build `cargo xtask` makes and 4.7 s under
+    # `release-da`, at a load average of 30 to 42 (the 324 s this comment
+    # cited for one of them before was 7 s by 8ad5b0bd); `Zend/tests` at
+    # `--jobs 3` took 67 to 76 s under release and 75 to 90 s under
+    # `release-da`, three runs each at a load of 11 to 19, about 1.16x, and
+    # the per-commit lane 527 s and 634 s, one run each, about 1.20x; every
+    # subset met the same tests under both, before #1980's guard and gate.
+    # xtask turns every extension's feature on and the hosts their own, so
+    # the two builds share the third-party crates and each compiles the
+    # engine's: 2 min 0 s for the hosts and 2 min 12 s for xtask after
+    # them at `-j 4`, where release built the hosts in 3 min 31 s.
+    env:
+      XTASK: cargo run --profile release-da --quiet --package xtask --
+    # A push's run supersedes the push before it, and only that: the
+    # nightly and a run by hand keep a group of their own, since the whole
+    # corpus and the control are read nowhere else, and a push in the
+    # morning had cancelled four of the last nine nightlies.
+    concurrency:
+      group: nightly-oracle-${{ github.event_name == 'workflow_run' && 'push' || github.event_name }}
+      cancel-in-progress: ${{ github.event_name == 'workflow_run' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - uses: ./.github/actions/workspace
+      # The pinned php, the install harness.yml's oracle job runs too: the
+      # keg the runner keeps, held to the pin's md5, and poured afresh from
+      # homebrew-core's bottle only where it is not (#2200, #2253).
+      - uses: ./.github/actions/pinned-php
+        with:
+          xtask: ${{ env.XTASK }}
+      # Without the server `xtask phpt` refuses the mysqli and pdo_mysql
+      # subsets (#1366), and their readings are refusals (#1612); a server
+      # that did not start stops nothing else, since those two failing
+      # readings say so.
+      - uses: ./.github/actions/mysql
+        continue-on-error: true
+      # The pinned php-src, as harness.yml takes it, named to the harness;
+      # a subset the manifest adds is checked out with no edit here (#1713).
+      - name: the corpus the subsets need, named by the harness
+        id: corpus
+        uses: ./.github/actions/corpus
+        with:
+          xtask: ${{ env.XTASK }}
+          promise: tree oracle
+      # The oracle variants, as harness.yml's oracle job lays them (#2298):
+      # the control and the lanes run a crate whose row names one under it.
+      - uses: ./.github/actions/oracle-variants
+        continue-on-error: true
+        with:
+          xtask: ${{ env.XTASK }}
+      - name: the tree is at the pin's commit and holds every test the pin counts
+        run: cargo test --profile release-da -p xtask --test oracle a_tree_the_variable_names_
+      # The parity section under that tree: its outside list names every
+      # unbuilt suite the tree holds, whether or not a reading measured it,
+      # and says `"unbuilt_from": "tree"` (#1847, #1853). A section that did
+      # not render stops nothing else.
+      - name: the parity section, under the pinned tree
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/parity"
+          $XTASK status --section parity --format json > "$RUNNER_TEMP/parity/rendering"
+          mv "$RUNNER_TEMP/parity/rendering" "$RUNNER_TEMP/parity/parity.json"
+      - uses: ./.github/actions/stash
+        with:
+          put: parity
+          path: ${{ runner.temp }}/parity/parity.json
+      # The lane runs the engine's own binary, and a test that needs a host
+      # the host beside it: `php` for every subset, php-cgi for a
+      # CGI-shaped test, php-fpm for sapi/fpm/tests and phpdbg for a
+      # `--PHPDBG--` test. Since ADR-0008 each is its host's crate under
+      # sapi/, and the harness names each once (xtask/src/oracle/hosts.rs),
+      # rendered as `hosts` in the corpus section the corpus step wrote, so
+      # the packages built are the ones it names and this file spells none
+      # (#1908). A host not built is a skip for every test that needs it
+      # (#1904); a rendering that names none stops the step.
+      - name: the engine's binaries
+        env:
+          CORPUS: ${{ steps.corpus.outputs.corpus }}
+        run: |
+          set --
+          for package in $(jq -r '.hosts[].package' "$CORPUS"); do set -- "$@" -p "$package"; done
+          [ $# -gt 0 ] || { echo "::error::xtask status --section corpus names no host"; exit 1; }
+          echo "the hosts the lane runs tests through: $*"
+          cargo build --profile release-da "$@"
+      # The targets the engine's readings are held to (#1184, #1733): the
+      # control keeps the pinned php's verdicts on each subset it judged
+      # whole under the pin, in the directory `xtask status --section
+      # corpus` names as `targets`, under target/, and an engine's reading
+      # of a subset carries `target`, `met` and `outside` only where one is
+      # kept there. A kept target stands until the pin moves
+      # (xtask/src/phpt/target.rs), and the runner keeps target/ between
+      # runs, so the targets stand from one run to the next with no cache.
+      - run: $XTASK witness || true
+      # The lane's subsets under the pinned php itself, before the engine's
+      # lane so that its readings are held to the targets this keeps. Each
+      # is a `<scope>@control` reading too, which says what php itself
+      # skips (#1237). `--control`
+      # runs each subset under its own oracle's pinned php, the variant a
+      # crate's row names among them, so this file names no php (#1970).
+      # php's verdicts move only with the pin, so after a push it runs
+      # `--unkept` (#1830): each subset whose kept target stands is said and
+      # not run, and one with no target under the pin, or a target that
+      # predates a test the subset has now, is run and its target kept,
+      # whatever the cache restored. The nightly and a full run by hand run
+      # it whole.
+      - name: the lane under the pinned php, its control
+        env:
+          WHOLE: ${{ github.event_name == 'schedule' || inputs.full }}
+          TREE: ${{ steps.corpus.outputs.tree }}
+        run: |
+          set -- --control
+          [ "$WHOLE" = true ] || set -- "$@" --unkept
+          $XTASK phpt "$@" || true
+          $XTASK phpt "$@" --subset Zend/tests || true
+          for dir in "$TREE/tests/"*/; do
+            $XTASK phpt "$@" --subset "tests/$(basename "$dir")" || true
+          done
+      - name: the per-commit lane
+        run: $XTASK phpt || true
+      - run: $XTASK phpt --subset Zend/tests || true
+      # Each directory of `tests/` is its own subset, so `tests/lang` and
+      # `tests/classes` are readings beside `tests/basic`, not one.
+      - name: each directory of tests/
+        env:
+          TREE: ${{ steps.corpus.outputs.tree }}
+        run: |
+          for dir in "$TREE/tests/"*/; do
+            $XTASK phpt --subset "tests/$(basename "$dir")" || true
+          done
+      # Through `$XTASK` as every lane above: `cargo xtask` built the
+      # harness a second time, in `dev`, for this step alone.
+      - name: the whole corpus, the nightly lane
+        if: github.event_name == 'schedule' || inputs.full
+        run: $XTASK phpt --full || true
+      - uses: ./.github/actions/stash
+        with:
+          put: oracle
+          path: target/harness/log/
+      # The phpt runs the lanes above kept, each under the tree its
+      # engine is built from (xtask/src/phpt/against.rs), stashed apart
+      # from the store, so a run CI took on main serves a
+      # checkout as its merge base's (#2362): `phpt --against`'s skip names
+      # the line that fetches the stash's `latest/phpt-runs` and lays it
+      # where the comparison looks. The runner keeps target/ between runs,
+      # so this holds every tree it has run, and the latest is the one to
+      # fetch.
+      - uses: ./.github/actions/stash
+        with:
+          put: phpt-runs
+          path: target/harness/phpt-runs/
+
+  soak:
+    name: the concurrency soak
+    # `xtask soak --nightly` as #2336 rules it (#2350, #2632): nightly, ten minutes, 64
+    # clients, over the HTTP-served subset and the bench workloads, against
+    # a build with debug assertions, which arm the request leak sensor: the
+    # harness builds makala in the lanes' profile, release-da. It reads the
+    # pinned tree and never the oracle, so it is a Linux job, and its
+    # reading counts defects rather than timing anything, so while
+    # DAX_BUILD_RUNNER is set the hosted image runs it as it runs the other
+    # Linux jobs (#2477). A failing reading fails the job; its store is
+    # stashed either way, and a red soak is read on the tracker, where
+    # `red-nightly` files it.
+    if: ${{ github.event_name == 'schedule' || inputs.full }}
+    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - uses: ./.github/actions/workspace
+      - uses: ./.github/actions/platform-libraries
+      - uses: ./.github/actions/corpus
+        with:
+          promise: tree
+      - run: cargo xtask soak --nightly
+      - uses: ./.github/actions/stash
+        if: always()
+        with:
+          put: soak
+          path: target/harness/log/
+
+  bench:
+    name: makala against php-fpm, the server's bench series
+    # `xtask bench` as #2336 rules the server's bar (#2351): a nightly
+    # series of makala against the pinned php-fpm behind a FastCGI client
+    # over each bench workload, beside makala's A/A control over the same,
+    # each under two loads: one request a rep, the latency series
+    # `makala-fpm/<workload>` with `makala-aa/<workload>`, and 8 clients
+    # for 3 s a rep against 8 request threads and `pm.max_children = 8`,
+    # the worker-throughput series `makala-fpm-c8/<workload>` with
+    # `makala-c8-aa/<workload>` in requests a second (#2660), each read
+    # as how far makala stands from php-fpm. `xtask bench` runs every bar
+    # it declares; the throughput bars, about 80 minutes over the 21
+    # workloads on a quiet machine, are what the timeout below makes room
+    # for. Under the measurement protocol, each bar held to its tolerance once
+    # `[[bench]]` gives it one from its first two weeks (#2659). It needs the pinned php-fpm, a macOS keg, so it runs on
+    # the Mac and after the oracle job, the machine quiet with nothing else
+    # of this workflow on it, and takes the literal label and never
+    # DAX_BUILD_RUNNER: a hosted reading is noise, and `xtask bench` refuses
+    # a GitHub-hosted runner whatever job runs it (#2477). The arms are
+    # built in release, the bench lane's profile. A bench reading owes no
+    # exit, and a bar that refused the run (protocol §1), or one held to a
+    # `[[bench]]` tolerance that regressed two nights running (protocol §12,
+    # #2659), fails the step; each such bar's ticket, which `xtask bench`
+    # leaves under target/harness/bench-regressed/, is filed, or commented
+    # on where its title is open already. The store is stashed either way,
+    # for the stash's 30 days.
+    needs: oracle
+    if: ${{ !cancelled() && !vars.DAX_BUILD_RUNNER && (github.event_name == 'schedule' || inputs.full) }}
+    runs-on: [self-hosted, macos, dax-oracle]
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      issues: write # a bar that regressed two nights running is filed
+    env:
+      XTASK: cargo run --release --quiet --package xtask --
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - uses: ./.github/actions/workspace
+      - uses: ./.github/actions/pinned-php
+        with:
+          xtask: ${{ env.XTASK }}
+      # No published history: the dashboard that kept one is gone (#4243),
+      # and this job's store starts empty, so the log a bar held to a
+      # tolerance reads its earlier nights and its baseline from starts
+      # empty too, and every such bar reads as its first night, which
+      # fails nothing (#2659).
+      - run: |
+          : > "$RUNNER_TEMP/history.jsonl"
+          $XTASK bench --log "$RUNNER_TEMP/history.jsonl"
+      - name: each bar that regressed two nights running, filed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for ticket in target/harness/bench-regressed/*.md; do
+            [ -e "$ticket" ] || continue
+            title=$(head -n 1 "$ticket")
+            open=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --body "Still regressed: $(tail -n +5 "$ticket" | head -n 1)"
+            else
+              gh issue create --title "$title" --label ready-for-agent --body "$(tail -n +3 "$ticket")"
+            fi
+          done
+      - uses: ./.github/actions/stash
+        if: always()
+        with:
+          put: bench
+          path: target/harness/log/
+          retention-days: 30
+
+  tailcall:
+    name: the threaded dispatch's corpus, on its dated nightly
+    # The nightly half of the lane that holds `cfg(dispatch = "tailcall")`
+    # (#2905), as Mitchell ruled on #2970 (harness-design.md §7, design
+    # §5.8): the hosts built under the cfg in release-da on the dated
+    # nightly scripts/ci/tailcall.sh pins, in a target directory of their
+    # own, and `Zend/tests` and each directory of `tests/` with `--engine`
+    # on that build, held to the targets the oracle job keeps on this
+    # runner. The match loop is what ships; so the store is stashed apart
+    # as `tailcall`, and a reading of the threaded build is never one of
+    # the shipped engine's.
+    # It runs on the Mac, where the shipped engine's subsets run, after the
+    # bench job, so the bench finds the machine as quiet as before. A
+    # failing subset fails the job once every subset has run, and
+    # `red-nightly` files a red nightly of it on the tracker.
+    needs: [oracle, bench]
+    if: ${{ !cancelled() && !vars.DAX_BUILD_RUNNER && (github.event_name == 'schedule' || inputs.full) }}
+    runs-on: [self-hosted, macos, dax-oracle]
+    timeout-minutes: 90
+    env:
+      XTASK: cargo run --profile release-da --quiet --package xtask --
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - uses: ./.github/actions/workspace
+      - uses: ./.github/actions/pinned-php
+        with:
+          xtask: ${{ env.XTASK }}
+      - name: the corpus the subsets need, named by the harness
+        id: corpus
+        uses: ./.github/actions/corpus
+        with:
+          xtask: ${{ env.XTASK }}
+          promise: tree oracle
+      # The step's own timeout is under the job's, so the step after it
+      # runs whatever ended the subsets.
+      - name: the threaded build's subsets
+        timeout-minutes: 80
+        env:
+          CORPUS: ${{ steps.corpus.outputs.corpus }}
+          TREE: ${{ steps.corpus.outputs.tree }}
+        run: scripts/ci/tailcall.sh phpt "$CORPUS" "$TREE"
+      # The runs `phpt` keeps, put back as they stood before the subsets
+      # where a killed step left them set aside, so the `phpt-runs` the
+      # next oracle job stashes carries no run of the threaded build.
+      - name: the kept runs, as they stood
+        if: always()
+        run: scripts/ci/tailcall.sh restore
+      - uses: ./.github/actions/stash
+        if: always()
+        with:
+          put: tailcall
+          path: target/harness/log/
+
+  # A red nightly filed (#2980), as harness.yml's `red-main` files a red
+  # main (#1156): `soak` and `tailcall` fail no per-commit run, so their
+  # verdicts are read on the tracker. For each, two red nightlies in a row
+  # file one `ci:red-<job>` ticket; a third comments on it; a green one
+  # comments that the job is green again and leaves the ticket for its
+  # builder to close through `xtask ticket close`. A run in which the job
+  # was skipped (`tailcall` while DAX_BUILD_RUNNER is set) files nothing and
+  # is passed over as the nightly before, and a run by hand off another
+  # branch is not main's and files nothing. scripts/ci/red.sh says how, and
+  # `DRY_RUN=1` prints what it would write. The checkout is this run's own
+  # commit, whose workflow named the jobs the script reads back by name.
+  red-nightly:
+    name: a red nightly, filed
+    needs: [soak, tailcall]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || inputs.full) }}
+    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [soak, tailcall]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      # A filing that fails is the step's warning and never the run's
+      # failure, as red-main's is. The job's own result is red where it
+      # failed or was cancelled: this job does not run in a cancelled run,
+      # so a cancelled job here is one that ran out of its time, a soak that
+      # hung among them. A skipped job files nothing.
+      - name: two red nightlies in a row, one ticket
+        if: ${{ needs[matrix.job].result != 'skipped' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RED: ${{ needs[matrix.job].result != 'success' }}
+          JOB: ${{ matrix.job }}
+        run: scripts/ci/red.sh nightly "$JOB"
