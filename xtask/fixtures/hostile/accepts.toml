@@ -1,0 +1,8 @@
+# A registry whose accepted trace row covers one hostile program (Round 4, Q33).
+[[divergence]]
+id = "trace:fixture-hostile"
+kind = "trace"
+reason = "The engine writes what the handler left where php writes what it read first (fixture)."
+status = "accepted"
+since = "2026-11-07"
+covers = ["hostile:kept-accepted"]

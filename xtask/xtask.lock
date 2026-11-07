@@ -75,6 +75,9 @@ done::run
 done::run_hook
 done::scopes_of
 generated::write_all
+hostile::INSTRUMENT
+hostile::OWING
+hostile::run
 key::Snapshot
 key::Snapshot::commit
 key::Snapshot::disk

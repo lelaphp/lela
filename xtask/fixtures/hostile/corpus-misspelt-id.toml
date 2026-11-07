@@ -1,0 +1,5 @@
+# Must be refused: an id spelt with other than lowercase letters, digits and `-`.
+[[program]]
+id = "Grows_One"
+form = "grows"
+code = "echo 1;"

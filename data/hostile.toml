@@ -1,0 +1,1650 @@
+# The hostile corpus (harness row H15, #4265): PHP programs whose error
+# handler disturbs the opline that raised the diagnostic, mid-step, each held
+# to the oracle by `cargo xtask hostile`. Read by `xtask hostile` and its
+# tests and by nothing else.
+#
+# One `[[program]]` per program. `id` names it for good: a kept run's
+# verdict, a `hostile:<id>` a `trace:` row covers and the reading's message
+# all name it by its id, so an id is never given to another program. `form`
+# is what the handler does to the step's operands, one of
+#   grows     it adds entries to a table the step reads or writes: the symbol
+#             table, an array, an object's properties
+#   unsets    it unsets the container or an operand the step holds
+#   replaces  it assigns over the container or an operand, freeing what stood
+#   throws    it throws, so the step ends partway
+# `from` says where a program was taken from, where it was taken. `code` runs
+# as a witness's snippet does, with `<?php` on the line above it.
+#
+# Every program here the pinned php completes normally, its exit and output
+# defined, both plainly and with freed memory scribbled (USE_ZEND_ALLOC=0,
+# MallocScribble=1). A candidate it does not complete stays out of this file,
+# and its record is kept apart from this repository. No seeds: the corpus is
+# what is written here.
+
+[[program]]
+id = "kernel-serve-closure"
+form = "throws"
+from = "a witness of php_engine's serve_closure"
+code = '''
+class D { function __destruct() { echo "d\n"; } }
+set_error_handler(function () { throw new Exception('x'); });
+$d = new D;
+$f = function (array &$r) use ($d) {};
+unset($d);
+try { call_user_func($f, 'v'); } catch (Exception $e) { echo "caught\n"; }
+unset($f);
+echo "end\n";
+'''
+
+[[program]]
+id = "kernel-read-before-write-at"
+form = "replaces"
+from = "a witness of php_engine's read_before_write_at"
+code = '''
+class C { public $p = 1; }
+set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["o"]->p = 5; });
+$o = new C;
+unset($o->p);
+$o->p += 1;
+var_dump($o);
+'''
+
+[[program]]
+id = "kernel-dynamic-property-creation"
+form = "replaces"
+from = "a witness of php_engine's dynamic_property_creation"
+code = '''
+set_error_handler(function ($code, $msg) { echo "Err: $msg\n"; $GLOBALS['a'] = null; });
+$a = new class {};
+try { [&$a->y]; } catch (Throwable $ex) { echo "Exception: ", $ex->getMessage(), "\n"; }
+var_dump($a);
+'''
+
+[[program]]
+id = "kernel-object-held"
+form = "replaces"
+from = "a witness of php_engine's object_held"
+code = '''
+class A implements ArrayAccess {
+    public function &offsetGet($n): mixed { echo "get\n"; return $this->v; }
+    public function offsetSet($n, $v): void { echo "set\n"; }
+    public function offsetUnset($n): void {}
+    public function offsetExists($n): bool { return false; }
+    public function __destruct() { echo "destructed\n"; }
+    public $v = [];
+}
+set_error_handler(function ($no, $message) {
+    echo $message, "\n";
+    $GLOBALS['a'] = null;
+});
+$a = new A;
+$a[$c];
+$a = new A;
+$a[$c] = 1;
+$a = new A;
+$a[$c] .= 'x';
+$a = new A;
+$a[$c][] = 1;
+echo "done\n";
+'''
+
+[[program]]
+id = "kernel-made-array"
+form = "replaces"
+from = "a witness of php_engine's made_array"
+code = '''
+set_error_handler(function () { $GLOBALS['x'] = $GLOBALS['y']; });
+function x(&$s) { $s[0] = 1; }
+$y = false;
+x($y);
+var_dump($x, $y);
+set_error_handler(function () { $GLOBALS['z'] = 1; });
+$z = false;
+var_dump($z[0] = 2, $z);
+'''
+
+[[program]]
+id = "kernel-assign-string-offset"
+form = "replaces"
+from = "a witness of php_engine's assign_string_offset"
+code = '''
+set_error_handler(function ($no, $message) {
+    echo $message, "\n";
+    $GLOBALS['a'] = '';
+});
+$a = ['a'];
+var_dump($a[0][$d] = 'b');
+var_dump($a);
+$a = ['abc'];
+var_dump($a[0][0] = 7.5);
+var_dump($a);
+$a = ['abc'];
+var_dump($a[0][0] = $v);
+var_dump($a);
+$a = ['abc'];
+var_dump($a[0][0] = 'long');
+var_dump($a);
+set_error_handler(function ($no, $message) { echo $message, "\n"; });
+$s = 'abc';
+var_dump($s[$d] = 5, $s);
+'''
+
+[[program]]
+id = "kernel-write-at"
+form = "replaces"
+from = "a witness of php_engine's write_at"
+code = '''
+set_error_handler(function ($no, $message) {
+    echo $message, "\n";
+    $GLOBALS['a'] = null;
+});
+$a[$c] = 'x';
+var_dump($a);
+$a[null] = 1;
+var_dump($a);
+$a[$c][$c] = 'x';
+var_dump($a);
+$a = [];
+$b = &$a;
+set_error_handler(function () use (&$copy) { $copy = $GLOBALS['a']; });
+$a[null] = 2;
+var_dump($a, $copy);
+'''
+
+[[program]]
+id = "kernel-assign-ref"
+form = "throws"
+from = "a witness of php_engine's assign_ref"
+code = '''
+class D { function __destruct() { echo "dtor\n"; } }
+class T { public int $i = 0; }
+function f() { return new D; }
+$t = new T; $x = &$t->i;
+try { $x = &f(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+echo "after\n";
+unset($x);
+set_error_handler(function ($n, $m) { throw new Exception($m); });
+try { $x = &f(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+echo "after\n";
+'''
+
+[[program]]
+id = "kernel-assign-returned"
+form = "unsets"
+from = "a witness of php_engine's assign_returned"
+code = '''
+function f() { return str_repeat("v", 90); }
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS[$GLOBALS["n"]]); return true; });
+$n = "go" . "ne"; $$n = 1; $$n = &f(); var_dump(strlen($GLOBALS[$n] ?? ""));
+'''
+
+[[program]]
+id = "kernel-assign-object-dim"
+form = "grows"
+from = "a witness of php_engine's assign_object_dim"
+code = '''
+class A implements ArrayAccess {
+    function offsetExists($k): bool { return true; } function offsetGet($k): mixed { return 1; }
+    function offsetSet($k, $v): void { echo "set "; var_dump($k, $v); } function offsetUnset($k): void {}
+}
+set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["k"] = "later"; });
+$o = new A; $k = "first";
+$o[$k] = $undefined;
+'''
+
+[[program]]
+id = "kernel-entry-past-1"
+form = "grows"
+from = "a witness of php_engine's entry_past"
+code = '''
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["a"]["k"] = "w"; return true; });
+$a = [str_repeat("x", 3), "k" => 0]; $a[0] = $u; var_dump($a);
+$a = [str_repeat("x", 3), "k" => 0]; $a[0] .= []; var_dump($a[0], $a["k"]);
+$r = 1; $a = [&$r, "k" => 0]; $a[0] = $u; var_dump($r);
+$k = str_repeat("n", 3); $a = [$k => 1, "k" => 0]; $a[$k] = $u; var_dump($a[$k]);
+$a = ["k" => 0]; $a[] .= []; var_dump($a);
+'''
+
+[[program]]
+id = "kernel-entry-past-2"
+form = "grows"
+from = "a witness of php_engine's entry_past"
+code = '''
+set_error_handler(function ($n, $m) { $GLOBALS["a"]["k"] = "w"; return true; });
+$a = [PHP_INT_MAX - 1 => "p", "k" => 0]; $a[] .= []; var_dump($a);
+'''
+
+[[program]]
+id = "kernel-entry-past-3"
+form = "grows"
+from = "a witness of php_engine's entry_past"
+code = '''
+set_error_handler(function ($n, $m) { $GLOBALS["a"]["k"] = "w"; $GLOBALS["c"] = $GLOBALS["a"]; return true; });
+$a = [str_repeat("x", 3), "k" => 0]; $a[0] = $u; var_dump($a[0], $c[0]);
+$a = [str_repeat("x", 3), "k" => 0]; $a[0] .= []; var_dump($a[0], $c[0]);
+'''
+
+[[program]]
+id = "kernel-hold-given-up"
+form = "replaces"
+from = "a witness of php_engine's hold_given_up"
+code = '''
+class C { public $p = 'pp'; public $self; public $i = 1; }
+class R { public $s; }
+$x = null;
+set_error_handler(function () {
+    $GLOBALS['o'] = null; $GLOBALS['x'] = null; gc_collect_cycles();
+    return true;
+});
+$o = new C; $k = $o; $o->self = $o; $k->p .= [];
+echo gc_status()['roots'], "\n";
+$x = new R; $x->s = $x;
+$a = [new C]; $a[0]->i += $undefined;
+echo gc_status()['roots'], "\n";
+'''
+
+[[program]]
+id = "kernel-step-is-silent"
+form = "replaces"
+from = "a witness of php_engine's step_is_silent"
+code = '''
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["c"] = $GLOBALS["a"]; return true; });
+$a = [str_repeat("x", 3)]; $a[0] .= []; var_dump($a, $c);
+$a = [str_repeat("x", 3)]; $a[0] = $u; var_dump($a, $c);
+'''
+
+[[program]]
+id = "kernel-binary-assign-op-obj-dim"
+form = "replaces"
+from = "a witness of php_engine's binary_assign_op_obj_dim"
+code = '''
+class O { function __destruct() { echo "O dtor\n"; } }
+class D { function __destruct() { echo "D dtor\n"; } }
+set_error_handler(function () { $GLOBALS['o'] = null; return true; });
+$o = new O;
+try { $o[$u] += new D; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+'''
+
+[[program]]
+id = "kernel-entry-past-warning-1"
+form = "replaces"
+from = "a witness of php_engine's entry_past_warning"
+code = '''
+class C { public $i = 1; public $q; public static $s; }
+function t($f) {
+    try { $f(); echo "stepped\n"; }
+    catch (Error $e) { echo $e->getMessage(), "\n"; }
+}
+set_error_handler(function () {
+    $GLOBALS['o'] = null; $GLOBALS['a'][0] = null; C::$s = null;
+    return true;
+});
+t(function () { $GLOBALS['o'] = new C; $GLOBALS['o']->i += $undefined; });
+t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->i .= $undefined; });
+t(function () { C::$s = new C; C::$s->i += $undefined; });
+set_error_handler(function () { $GLOBALS['a'] = [new C]; unset($GLOBALS['a'][0]); return true; });
+t(function () { $GLOBALS['o'] = new C; $GLOBALS['o']->i .= $undefined; });
+set_error_handler(function () { $GLOBALS['o']->q = null; return true; });
+t(function () {
+    $o = new C; $o->q = new C; $GLOBALS['o'] = $o;
+    $o->q->i += $undefined;
+});
+'''
+
+[[program]]
+id = "kernel-entry-past-warning-2"
+form = "replaces"
+from = "a witness of php_engine's entry_past_warning"
+code = '''
+#[AllowDynamicProperties] class C { public $i = 1; public $q; }
+function t($f) {
+    try { $f(); echo "stepped\n"; }
+    catch (Error $e) { echo $e->getMessage(), "\n"; }
+}
+$o = null;
+set_error_handler(function () {
+    $GLOBALS['o'] = null;
+    for ($i = 0; $i < 300; $i++) $GLOBALS["v$i"] = 1;
+    return true;
+});
+t(function () { $GLOBALS['o'] = new C; $GLOBALS['o']->i += $undefined; });
+set_error_handler(function () {
+    $GLOBALS['o']->q = 5;
+    for ($i = 0; $i < 100; $i++) $GLOBALS['o']->{"d$i"} = 1;
+    return true;
+});
+t(function () {
+    $o = new C; $o->dyn = 1; $o->q = new C; $GLOBALS['o'] = $o;
+    $o->q->i .= $undefined;
+});
+'''
+
+[[program]]
+id = "kernel-entry-past-warning-3"
+form = "replaces"
+from = "a witness of php_engine's entry_past_warning"
+code = '''
+class C { public $i = 1; public $q; }
+function t($f) {
+    try { $f(); echo "stepped\n"; }
+    catch (Error $e) { echo $e->getMessage(), "\n"; }
+}
+set_error_handler(function () { $GLOBALS['a'][0]->q = null; return true; });
+t(function () {
+    $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C;
+    $GLOBALS['a'][0]->q->i += $undefined;
+});
+set_error_handler(function () { $GLOBALS['a'][0]->q = 5; return true; });
+t(function () {
+    $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C;
+    $GLOBALS['a'][0]->q->i += $undefined;
+});
+'''
+
+[[program]]
+id = "kernel-entry-past-warning-4"
+form = "replaces"
+from = "a witness of php_engine's entry_past_warning"
+code = '''
+class C { public $i = 1; public $q; }
+set_error_handler(function () { return true; });
+$o = new C; $o->q = new C;
+$o->q->i += $undefined; echo gc_status()['roots'], "\n";
+$a = [new C]; $a[0]->i += $undefined; echo gc_status()['roots'], "\n";
+function f() {
+    $GLOBALS['g'] = new C; $GLOBALS['g']->i += $undefined;
+    echo gc_status()['roots'], "\n";
+}
+f();
+'''
+
+[[program]]
+id = "kernel-served-property-step"
+form = "replaces"
+from = "a witness of php_engine's served_property_step"
+code = '''
+class D { function __destruct() { echo "dtor D\n"; } function __toString() { return "d"; } }
+class M {
+    function __get($n) { $GLOBALS['o'] = null; return "a"; }
+    function __set($n, $v) { echo "set $n=$v\n"; }
+    function __destruct() { echo "dtor M\n"; }
+}
+class S { public private(set) string $s = "s"; function __destruct() { echo "dtor S\n"; } }
+$o = new M;
+$o->p .= new D;
+set_error_handler(function () { $GLOBALS['s'] = null; return true; });
+$s = new S;
+try { $s->s .= [new D]; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+'''
+
+[[program]]
+id = "kernel-isset-container"
+form = "replaces"
+from = "a witness of php_engine's isset_container"
+code = '''
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS['s'] = "x"; return true; });
+$s = str_repeat("ab", 64); var_dump(isset($s[1.5]));
+$s = str_repeat("ab", 64); var_dump(empty($s[1.5]));
+$s = str_repeat("ab", 64); var_dump(isset($s[1e42]));
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS['s'] = 1; return true; });
+$s = str_repeat("ab", 64); var_dump(isset($s[$undefined]), empty($s[$undefined]));
+'''
+
+[[program]]
+id = "kernel-step-hold"
+form = "replaces"
+from = "a witness of php_engine's step_hold"
+code = '''
+set_error_handler(function ($n, $m) { debug_zval_dump($GLOBALS["s"]); $GLOBALS["s"] = 1; return true; });
+$s = str_repeat("a", 30) . "!"; $x = --$s; var_dump($x);
+$s = str_repeat("a", 30) . "z"; $x = ++$s; var_dump($x);
+$s = str_repeat("a", 30) . "!"; $x = $s--; var_dump($x);
+'''
+
+[[program]]
+id = "kernel-incdec"
+form = "replaces"
+from = "a witness of php_engine's incdec"
+code = '''
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["s"] = 1; return true; });
+$s = str_repeat("a", 30) . "!"; $x = $s++; var_dump(strlen($x), $s);
+$s = str_repeat("a", 30) . "!"; $x = $s--; var_dump(strlen($x), $s);
+$s = str_repeat("a", 30) . "!"; $x = ++$s; var_dump($x);
+'''
+
+[[program]]
+id = "kernel-concat-operands"
+form = "replaces"
+from = "a witness of php_engine's concat_operands"
+code = '''
+set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["v"] = "77"; });
+$a = [];
+$v = str_repeat("7", 2);
+var_dump($a . $v);
+'''
+
+[[program]]
+id = "kernel-string-offset"
+form = "replaces"
+from = "a witness of php_engine's string_offset"
+code = '''
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS['s'] = 1; return true; });
+$s = str_repeat("ab", 64); var_dump($s[1.5], $s);
+$s = str_repeat("ab", 64); var_dump($s[true]);
+$s = str_repeat("ab", 64); var_dump($s[$undefined]);
+$s = str_repeat("ab", 64); var_dump($s[$undefined] ?? "default");
+$s = str_repeat("ab", 64); $kept = $s; var_dump($s[1.5]);
+'''
+
+[[program]]
+id = "kernel-read-offset-1"
+form = "replaces"
+from = "a witness of php_engine's read_offset"
+code = '''
+function tbl() { return array_fill(0, 9, str_repeat("x", 90)); }
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["a"] = 1; return true; });
+$a = tbl(); var_dump($a[1.5]);
+$a = tbl(); var_dump($a[$u]);
+$a = tbl(); var_dump($a[null]);
+$a = tbl(); var_dump($a[STDIN]);
+$a = tbl(); var_dump($a[1.5] ?? "d");
+$a = tbl(); [1.5 => $b] = $a; var_dump($b);
+'''
+
+[[program]]
+id = "kernel-read-offset-2"
+form = "replaces"
+from = "a witness of php_engine's read_offset"
+code = '''
+function tbl() { return [1 => str_repeat("x", 90), "" => "e"]; }
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["c"] = $GLOBALS["a"]; $GLOBALS["a"] = 1; return true; });
+$a = tbl(); var_dump(strlen($a[1.5]), $a); unset($c);
+$a = tbl(); var_dump($a[$u], $a);
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; throw new Exception("out"); });
+$a = [];
+try { $a[1.5]; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+try { $a[$u]; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+'''
+
+[[program]]
+id = "kernel-array-held"
+form = "replaces"
+from = "a witness of php_engine's array_held"
+code = '''
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["c"] = $GLOBALS["a"]; return true; });
+$a = [str_repeat("x", 3)]; $a[$u] = 1; var_dump(count($a), count($c));
+$a = [1 => str_repeat("x", 3)]; var_dump($a[1.5]);
+'''
+
+[[program]]
+id = "kernel-array-key-exists"
+form = "replaces"
+from = "a witness of php_engine's array_key_exists"
+code = '''
+set_error_handler(function ($no, $message) { echo $message, "\n"; $GLOBALS['a'] = null; return true; });
+$a = [1 => 1]; $a[2] = 2; $b = $a;
+var_dump(array_key_exists(1.5, $a), $a);
+$a = [1 => 1]; $a[2] = 2;
+var_dump(array_key_exists(1.5, $a), $a);
+'''
+
+[[program]]
+id = "kernel-isset-dim"
+form = "grows"
+from = "a witness of php_engine's isset_dim"
+code = '''
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["a"]["k"] = 1; return true; });
+$a = [1 => str_repeat("x", 90), "" => "e"]; var_dump(isset($a[$u]), empty($a[STDIN]), count($a));
+'''
+
+[[program]]
+id = "kernel-unset-dim"
+form = "replaces"
+from = "a witness of php_engine's unset_dim"
+code = '''
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; return true; });
+$a = [1, "" => 2]; unset($a[$u]); var_dump($a);
+set_error_handler(function ($n, $m) { echo "[", $m, "]\n"; $GLOBALS["a"]["k"] = 1; return true; });
+$a = [str_repeat("x", 90), "" => 2]; unset($a[$u]); var_dump(count($a), isset($a[""]));
+'''
+
+[[program]]
+id = "kernel-operands"
+form = "replaces"
+from = "a witness of php_engine's operands"
+code = '''
+set_error_handler(function ($no, $msg) { echo "[$msg]\n"; $GLOBALS["v"] = 77; });
+$v = str_repeat("7", 2);
+var_dump("1x" + $v);
+$v = str_repeat("7", 2);
+var_dump("1x" | $v);
+'''
+
+[[program]]
+id = "kernel-to-long"
+form = "unsets"
+from = "a witness of php_engine's to_long"
+code = '''
+set_error_handler(function ($no, $message) {
+    echo $message, "\n";
+    unset($GLOBALS['x']);
+});
+$x = str_repeat("3e33", 2);
+var_dump($x & true);
+$x = str_repeat("7", 2) . "x";
+var_dump($x | 0);
+'''
+
+[[program]]
+id = "zend-bug79784"
+form = "replaces"
+from = "php-src Zend/tests/bug79784.phpt"
+code = '''
+set_error_handler(function () {
+    $GLOBALS['a'] = null;
+});
+
+$a[$c] = 'x' ;
+var_dump($a);
+$a[$c] .= 'x' ;
+var_dump($a);
+$a[$c][$c] = 'x' ;
+var_dump($a);
+
+?>
+'''
+
+[[program]]
+id = "zend-bug79791"
+form = "unsets"
+from = "php-src Zend/tests/bug79791.phpt"
+code = '''
+set_error_handler(function() {
+    unset($GLOBALS['c']);
+});
+$c -= 1;
+var_dump($c);
+?>
+'''
+
+[[program]]
+id = "zend-bug81705"
+form = "replaces"
+from = "php-src Zend/tests/concat/bug81705.phpt"
+code = '''
+
+$arr = [0];
+$my_var = str_repeat("a", 1);
+set_error_handler(
+    function() use(&$my_var) {
+        echo("error\n");
+        $my_var = 0x123;
+    }
+);
+$my_var .= $GLOBALS["arr"];
+var_dump($my_var);
+?>
+'''
+
+[[program]]
+id = "zend-dynamic-prop-deprecation-002"
+form = "replaces"
+from = "php-src Zend/tests/dynamic_prop_deprecation_002.phpt"
+code = '''
+set_error_handler(function($code, $msg){
+	echo "Err: $msg\n";
+    $GLOBALS['a']=null;
+});
+$a = new class{};
+try {
+    [&$a->y];
+} catch (Throwable $ex) {
+	echo "Exception: " .$ex->getMessage() . "\n";
+}
+?>
+'''
+
+[[program]]
+id = "zend-falsetoarray-002"
+form = "replaces"
+from = "php-src Zend/tests/falsetoarray_002.phpt"
+code = '''
+set_error_handler(function($code, $msg) {
+    echo "Err: $msg\n";
+    $GLOBALS['a']='';
+});
+$a=[!'a'];
+$a[0][$d]='b';
+var_dump($a);
+?>
+'''
+
+[[program]]
+id = "zend-falsetoarray-003"
+form = "replaces"
+from = "php-src Zend/tests/falsetoarray_003.phpt"
+code = '''
+set_error_handler(function($code, $msg) {
+    echo "Err: $msg\n";
+    $GLOBALS['a']=9;
+});
+$a=[];
+($a[PHP_INT_MAX+1]);
+?>
+DONE
+'''
+
+[[program]]
+id = "zend-oss-fuzz-60709-globals-unset-after-undef-warning"
+form = "unsets"
+from = "php-src Zend/tests/in-de-crement/oss-fuzz-60709_globals_unset_after_undef_warning.phpt"
+code = '''
+set_error_handler(function($_, $m) {
+    echo "$m\n";
+    unset($GLOBALS['x']);
+});
+
+echo "POST DEC\n";
+var_dump($x--);
+unset($x);
+echo "POST INC\n";
+var_dump($x++);
+unset($x);
+echo "PRE DEC\n";
+var_dump(--$x);
+unset($x);
+echo "PRE INC\n";
+var_dump(++$x);
+?>
+'''
+
+[[program]]
+id = "zend-oss-fuzz-62294-globals-unset-after-string-warning"
+form = "unsets"
+from = "php-src Zend/tests/in-de-crement/oss-fuzz-62294_globals_unset_after_string_warning.phpt"
+code = '''
+set_error_handler(function($_, $m) {
+    echo "$m\n";
+    unset($GLOBALS['x']);
+});
+
+$x=" ";
+echo "POST DEC\n";
+var_dump($x--);
+
+$x=" ";
+echo "PRE DEC\n";
+var_dump(--$x);
+
+$x=" ";
+echo "POST INC\n";
+var_dump($x++);
+
+$x=" ";
+echo "PRE INC\n";
+var_dump(++$x);
+?>
+'''
+
+[[program]]
+id = "zend-unset-globals-in-error-handler"
+form = "unsets"
+from = "php-src Zend/tests/in-de-crement/unset_globals_in_error_handler.phpt"
+code = '''
+set_error_handler(function($_, $m) {
+    echo "$m\n";
+    unset($GLOBALS['x']);
+});
+echo "NULL (only --)\n";
+echo "POST DEC\n";
+$x = null;
+var_dump($x--);
+unset($x);
+echo "PRE DEC\n";
+$x = null;
+var_dump(--$x);
+unset($x);
+echo "Empty string\n";
+echo "POST INC\n";
+$x = "";
+var_dump($x++);
+unset($x);
+echo "POST DEC\n";
+$x = "";
+var_dump($x--);
+unset($x);
+echo "PRE INC\n";
+$x = "";
+var_dump(++$x);
+unset($x);
+echo "PRE DEC\n";
+$x = "";
+var_dump(--$x);
+unset($x);
+echo "Non fill ASCII (only ++)\n";
+echo "POST INC\n";
+$x = " ad ";
+var_dump($x++);
+unset($x);
+echo "PRE INC\n";
+$x = " ad ";
+var_dump(++$x);
+unset($x);
+echo "Bool\n";
+echo "POST INC\n";
+$x = false;
+var_dump($x++);
+unset($x);
+echo "POST DEC\n";
+$x = false;
+var_dump($x--);
+unset($x);
+echo "PRE INC\n";
+$x = false;
+var_dump(++$x);
+unset($x);
+echo "PRE DEC\n";
+$x = false;
+var_dump(--$x);
+unset($x);
+echo "POST INC\n";
+$x = true;
+var_dump($x++);
+unset($x);
+echo "POST DEC\n";
+$x = true;
+var_dump($x--);
+unset($x);
+echo "PRE INC\n";
+$x = true;
+var_dump(++$x);
+unset($x);
+echo "PRE DEC\n";
+$x = true;
+var_dump(--$x);
+unset($x);
+?>
+'''
+
+[[program]]
+id = "zend-oss-fuzz-427814456"
+form = "unsets"
+from = "php-src Zend/tests/numeric_strings/oss_fuzz_427814456.phpt"
+code = '''
+set_error_handler(function(){unset($GLOBALS['x']);});
+$x = str_repeat("3e33", random_int(2, 2));
+$x & true;
+echo "Done\n";
+?>
+'''
+
+[[program]]
+id = "zend-objects-034"
+form = "replaces"
+from = "php-src Zend/tests/objects/objects_034.phpt"
+code = '''
+class A implements ArrayAccess {
+    public function &offsetGet($n): mixed {
+    	return null;
+    }
+    public function offsetSet($n, $v): void {
+    }
+    public function offsetUnset($n): void {
+    }
+    public function offsetExists($n): bool {
+    	return false;
+    }
+}
+
+set_error_handler(function () {
+    $GLOBALS['a'] = null;
+});
+
+$a = new A;
+$a[$c] = 'x' ;
+var_dump($a);
+
+$a = new A;
+$a[$c] .= 'x' ;
+var_dump($a);
+
+$a = new A;
+$a[$c][$c] = 'x' ;
+var_dump($a);
+?>
+'''
+
+[[program]]
+id = "zend-objects-035"
+form = "replaces"
+from = "php-src Zend/tests/objects/objects_035.phpt"
+code = '''
+class A implements ArrayAccess {
+    public function &offsetGet($n): mixed {
+    	return null;
+    }
+    public function offsetSet($n, $v): void {
+    }
+    public function offsetUnset($n): void {
+    }
+    public function offsetExists($n): bool {
+    	return false;
+    }
+}
+
+set_error_handler(function () {
+    $GLOBALS['a'] = null;
+});
+
+$a = new A;
+$a[$c];
+?>
+DONE
+'''
+
+[[program]]
+id = "zend-array-offset-002"
+form = "replaces"
+from = "php-src Zend/tests/offsets/array_offset_002.phpt"
+code = '''
+set_error_handler(function($code, $msg) {
+    echo "Err: $msg\n";
+    $GLOBALS[''] = $GLOBALS['y'];
+});
+function x(&$s){
+    $s[100000000000000000000] = 1;
+}
+x($y);
+var_dump($y);
+?>
+'''
+
+[[program]]
+id = "zend-str-offset-005"
+form = "replaces"
+from = "php-src Zend/tests/str_offset_005.phpt"
+code = '''
+set_error_handler(function(){$GLOBALS['a']=8;});
+$a='a';
+var_dump($a[$b]);
+var_dump($a);
+?>
+'''
+
+[[program]]
+id = "zend-str-offset-006"
+form = "replaces"
+from = "php-src Zend/tests/str_offset_006.phpt"
+code = '''
+set_error_handler(function($code, $msg) {
+    echo "Err: $msg\n";
+    $GLOBALS['a']=null;
+});
+$a[$y]=$a.=($y);
+var_dump($a);
+?>
+'''
+
+[[program]]
+id = "zend-str-offset-007"
+form = "replaces"
+from = "php-src Zend/tests/str_offset_007.phpt"
+code = '''
+set_error_handler(function($code, $msg) {
+    echo "Err: $msg\n";
+    $GLOBALS['a']='';
+});
+$a=['a'];
+$a[0][$d]='b';
+var_dump($a);
+?>
+'''
+
+[[program]]
+id = "zend-str-offset-008"
+form = "replaces"
+from = "php-src Zend/tests/str_offset_008.phpt"
+code = '''
+set_error_handler(function($code, $msg) {
+    echo "Err: $msg\n";
+    $GLOBALS['a']=8;
+});
+$z = "z";
+$a=["xx$z"];
+var_dump($a[0][$b]);
+var_dump($a);
+?>
+'''
+
+[[program]]
+id = "zend-undef-index-to-exception"
+form = "throws"
+from = "php-src Zend/tests/undef_index_to_exception.phpt"
+code = '''
+
+set_error_handler(function($_, $msg) {
+    throw new Exception($msg);
+});
+
+$test = [];
+try {
+    $test[0] .= "xyz";
+} catch (Exception $e) {
+    echo $e->getMessage(), "\n";
+}
+var_dump($test);
+
+try {
+    $test["key"] .= "xyz";
+} catch (Exception $e) {
+    echo $e->getMessage(), "\n";
+}
+var_dump($test);
+
+unset($test);
+try {
+    $GLOBALS["test"] .= "xyz";
+} catch (Exception $e) {
+    echo $e->getMessage(), "\n";
+}
+try {
+    var_dump($test);
+} catch (Exception $e) {
+    echo $e->getMessage(), "\n";
+}
+
+?>
+'''
+
+[[program]]
+id = "array-to-string-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['a']["g$i"] = $i; } return true; });
+$a = [str_repeat('v', 3)];
+try { $x = $a . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "array-to-string-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['a'] = str_repeat('r', 40); return true; });
+$a = [str_repeat('v', 3)];
+try { $x = $a . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "array-to-string-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$a = [str_repeat('v', 3)];
+try { $x = $a . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "array-to-string-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['a']); return true; });
+$a = [str_repeat('v', 3)];
+try { $x = $a . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-float-key-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['a']["g$i"] = $i; } return true; });
+$a = [1 => str_repeat('v', 3)];
+try { $a[1.5] = str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-float-key-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['a'] = str_repeat('r', 40); return true; });
+$a = [1 => str_repeat('v', 3)];
+try { $a[1.5] = str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-float-key-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$a = [1 => str_repeat('v', 3)];
+try { $a[1.5] = str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-float-key-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['a']); return true; });
+$a = [1 => str_repeat('v', 3)];
+try { $a[1.5] = str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-nested-op-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['a']["g$i"] = $i; } return true; });
+$a = ['x' => ['z' => 1]];
+try { $a['x']['y'] .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-nested-op-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['a'] = str_repeat('r', 40); return true; });
+$a = ['x' => ['z' => 1]];
+try { $a['x']['y'] .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-nested-op-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$a = ['x' => ['z' => 1]];
+try { $a['x']['y'] .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-nested-op-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['a']); return true; });
+$a = ['x' => ['z' => 1]];
+try { $a['x']['y'] .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-op-undef-key-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['a']["g$i"] = $i; } return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $a['k'] .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-op-undef-key-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['a'] = str_repeat('r', 40); return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $a['k'] .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-op-undef-key-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $a['k'] .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-op-undef-key-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['a']); return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $a['k'] .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-undef-key-var-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['a']["g$i"] = $i; } return true; });
+$a = ['k' => str_repeat('v', 3)];
+try { $a[$u] = str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-undef-key-var-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['a'] = str_repeat('r', 40); return true; });
+$a = ['k' => str_repeat('v', 3)];
+try { $a[$u] = str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-undef-key-var-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$a = ['k' => str_repeat('v', 3)];
+try { $a[$u] = str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-dim-undef-key-var-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['a']); return true; });
+$a = ['k' => str_repeat('v', 3)];
+try { $a[$u] = str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "assign-obj-op-undef-prop-grows"
+form = "grows"
+code = '''
+#[AllowDynamicProperties] class C {}
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['o']->{"g$i"} = $i; } return true; });
+$o = new C;
+try { $o->p .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($o ?? 'gone');
+'''
+
+[[program]]
+id = "assign-obj-op-undef-prop-throws"
+form = "throws"
+code = '''
+#[AllowDynamicProperties] class C {}
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$o = new C;
+try { $o->p .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($o ?? 'gone');
+'''
+
+[[program]]
+id = "assign-op-var-undef-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 3000; $i++) { $GLOBALS["g$i"] = $i; } return true; });
+$n = 1;
+try { $u .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($u ?? 'gone');
+var_dump(count($GLOBALS) > 100);
+'''
+
+[[program]]
+id = "assign-op-var-undef-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; foreach (['n', 'u', 't', 'v1', 'r1'] as $k) { $GLOBALS[$k] = str_repeat('r', 40); } return true; });
+$n = 1;
+try { $u .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($u ?? 'gone');
+'''
+
+[[program]]
+id = "assign-op-var-undef-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$n = 1;
+try { $u .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($u ?? 'gone');
+'''
+
+[[program]]
+id = "assign-op-var-undef-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; foreach (['n', 'u', 't', 'v1', 'r1'] as $k) { unset($GLOBALS[$k]); } return true; });
+$n = 1;
+try { $u .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($u ?? 'gone');
+'''
+
+[[program]]
+id = "assign-ref-call-by-name-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 3000; $i++) { $GLOBALS["g$i"] = $i; } return true; });
+function f() { return str_repeat('v', 90); } $n = 'r' . '1';
+try { $$n = &f(); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump(strlen($r1 ?? ''));
+var_dump(count($GLOBALS) > 100);
+'''
+
+[[program]]
+id = "assign-ref-call-by-name-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; foreach (['n', 'u', 't', 'v1', 'r1'] as $k) { $GLOBALS[$k] = str_repeat('r', 40); } return true; });
+function f() { return str_repeat('v', 90); } $n = 'r' . '1';
+try { $$n = &f(); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump(strlen($r1 ?? ''));
+'''
+
+[[program]]
+id = "assign-ref-call-by-name-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+function f() { return str_repeat('v', 90); } $n = 'r' . '1';
+try { $$n = &f(); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump(strlen($r1 ?? ''));
+'''
+
+[[program]]
+id = "assign-ref-call-by-name-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; foreach (['n', 'u', 't', 'v1', 'r1'] as $k) { unset($GLOBALS[$k]); } return true; });
+function f() { return str_repeat('v', 90); } $n = 'r' . '1';
+try { $$n = &f(); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump(strlen($r1 ?? ''));
+'''
+
+[[program]]
+id = "by-name-op-undef-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 3000; $i++) { $GLOBALS["g$i"] = $i; } return true; });
+$n = 'v' . '1';
+try { $$n .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($v1 ?? 'gone');
+var_dump(count($GLOBALS) > 100);
+'''
+
+[[program]]
+id = "by-name-op-undef-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; foreach (['n', 'u', 't', 'v1', 'r1'] as $k) { $GLOBALS[$k] = str_repeat('r', 40); } return true; });
+$n = 'v' . '1';
+try { $$n .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($v1 ?? 'gone');
+'''
+
+[[program]]
+id = "by-name-op-undef-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$n = 'v' . '1';
+try { $$n .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($v1 ?? 'gone');
+'''
+
+[[program]]
+id = "by-name-op-undef-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; foreach (['n', 'u', 't', 'v1', 'r1'] as $k) { unset($GLOBALS[$k]); } return true; });
+$n = 'v' . '1';
+try { $$n .= str_repeat('v', 3); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($v1 ?? 'gone');
+'''
+
+[[program]]
+id = "concat-undef-var-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 3000; $i++) { $GLOBALS["g$i"] = $i; } return true; });
+$t = str_repeat('v', 3);
+try { $t = $t . $u; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($t ?? 'gone');
+var_dump(count($GLOBALS) > 100);
+'''
+
+[[program]]
+id = "concat-undef-var-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; foreach (['n', 'u', 't', 'v1', 'r1'] as $k) { $GLOBALS[$k] = str_repeat('r', 40); } return true; });
+$t = str_repeat('v', 3);
+try { $t = $t . $u; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($t ?? 'gone');
+'''
+
+[[program]]
+id = "concat-undef-var-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$t = str_repeat('v', 3);
+try { $t = $t . $u; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($t ?? 'gone');
+'''
+
+[[program]]
+id = "concat-undef-var-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; foreach (['n', 'u', 't', 'v1', 'r1'] as $k) { unset($GLOBALS[$k]); } return true; });
+$t = str_repeat('v', 3);
+try { $t = $t . $u; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($t ?? 'gone');
+'''
+
+[[program]]
+id = "fetch-dim-undef-key-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['a']["g$i"] = $i; } return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $x = $a['k'] . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "fetch-dim-undef-key-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['a'] = str_repeat('r', 40); return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $x = $a['k'] . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "fetch-dim-undef-key-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $x = $a['k'] . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "fetch-dim-undef-key-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['a']); return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $x = $a['k'] . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "fetch-obj-undef-prop-grows"
+form = "grows"
+code = '''
+#[AllowDynamicProperties] class C {}
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['o']->{"g$i"} = $i; } return true; });
+$o = new C;
+try { $x = $o->p . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($o ?? 'gone');
+'''
+
+[[program]]
+id = "fetch-obj-undef-prop-replaces"
+form = "replaces"
+code = '''
+#[AllowDynamicProperties] class C {}
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['o'] = str_repeat('r', 40); return true; });
+$o = new C;
+try { $x = $o->p . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($o ?? 'gone');
+'''
+
+[[program]]
+id = "fetch-obj-undef-prop-throws"
+form = "throws"
+code = '''
+#[AllowDynamicProperties] class C {}
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$o = new C;
+try { $x = $o->p . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($o ?? 'gone');
+'''
+
+[[program]]
+id = "fetch-obj-undef-prop-unsets"
+form = "unsets"
+code = '''
+#[AllowDynamicProperties] class C {}
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['o']); return true; });
+$o = new C;
+try { $x = $o->p . str_repeat('v', 3); var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($o ?? 'gone');
+'''
+
+[[program]]
+id = "incdec-dim-undef-key-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['a']["g$i"] = $i; } return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $a['k']++; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "incdec-dim-undef-key-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['a'] = str_repeat('r', 40); return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $a['k']++; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "incdec-dim-undef-key-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $a['k']++; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "incdec-dim-undef-key-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['a']); return true; });
+$a = ['j' => str_repeat('v', 3)];
+try { $a['k']++; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "incdec-obj-undef-prop-grows"
+form = "grows"
+code = '''
+#[AllowDynamicProperties] class C {}
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['o']->{"g$i"} = $i; } return true; });
+$o = new C;
+try { $o->p++; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($o ?? 'gone');
+'''
+
+[[program]]
+id = "incdec-obj-undef-prop-throws"
+form = "throws"
+code = '''
+#[AllowDynamicProperties] class C {}
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$o = new C;
+try { $o->p++; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($o ?? 'gone');
+'''
+
+[[program]]
+id = "incdec-var-undef-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 3000; $i++) { $GLOBALS["g$i"] = $i; } return true; });
+$n = 1;
+try { $u++; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($u ?? 'gone');
+var_dump(count($GLOBALS) > 100);
+'''
+
+[[program]]
+id = "incdec-var-undef-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; foreach (['n', 'u', 't', 'v1', 'r1'] as $k) { $GLOBALS[$k] = str_repeat('r', 40); } return true; });
+$n = 1;
+try { $u++; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($u ?? 'gone');
+'''
+
+[[program]]
+id = "incdec-var-undef-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$n = 1;
+try { $u++; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($u ?? 'gone');
+'''
+
+[[program]]
+id = "incdec-var-undef-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; foreach (['n', 'u', 't', 'v1', 'r1'] as $k) { unset($GLOBALS[$k]); } return true; });
+$n = 1;
+try { $u++; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($u ?? 'gone');
+'''
+
+[[program]]
+id = "list-undef-key-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 64; $i++) { $GLOBALS['a']["g$i"] = $i; } return true; });
+$a = [str_repeat('v', 3)];
+try { [$x, $y] = $a; var_dump($x, $y); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "list-undef-key-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['a'] = str_repeat('r', 40); return true; });
+$a = [str_repeat('v', 3)];
+try { [$x, $y] = $a; var_dump($x, $y); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "list-undef-key-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$a = [str_repeat('v', 3)];
+try { [$x, $y] = $a; var_dump($x, $y); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "list-undef-key-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['a']); return true; });
+$a = [str_repeat('v', 3)];
+try { [$x, $y] = $a; var_dump($x, $y); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($a ?? 'gone');
+'''
+
+[[program]]
+id = "string-offset-float-write-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['s'] .= str_repeat('g', 64); return true; });
+$s = 'ab' . str_repeat('v', 3);
+try { $s[1.5] = 'x'; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($s ?? 'gone');
+'''
+
+[[program]]
+id = "string-offset-float-write-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['s'] = str_repeat('r', 40); return true; });
+$s = 'ab' . str_repeat('v', 3);
+try { $s[1.5] = 'x'; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($s ?? 'gone');
+'''
+
+[[program]]
+id = "string-offset-float-write-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$s = 'ab' . str_repeat('v', 3);
+try { $s[1.5] = 'x'; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($s ?? 'gone');
+'''
+
+[[program]]
+id = "string-offset-float-write-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['s']); return true; });
+$s = 'ab' . str_repeat('v', 3);
+try { $s[1.5] = 'x'; } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($s ?? 'gone');
+'''
+
+[[program]]
+id = "string-offset-read-grows"
+form = "grows"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['s'] .= str_repeat('g', 64); return true; });
+$s = 'ab' . str_repeat('v', 3);
+try { $x = $s[9]; var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($s ?? 'gone');
+'''
+
+[[program]]
+id = "string-offset-read-replaces"
+form = "replaces"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; $GLOBALS['s'] = str_repeat('r', 40); return true; });
+$s = 'ab' . str_repeat('v', 3);
+try { $x = $s[9]; var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($s ?? 'gone');
+'''
+
+[[program]]
+id = "string-offset-read-throws"
+form = "throws"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; throw new ErrorException($m); return true; });
+$s = 'ab' . str_repeat('v', 3);
+try { $x = $s[9]; var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($s ?? 'gone');
+'''
+
+[[program]]
+id = "string-offset-read-unsets"
+form = "unsets"
+code = '''
+set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS['s']); return true; });
+$s = 'ab' . str_repeat('v', 3);
+try { $x = $s[9]; var_dump($x); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+var_dump($s ?? 'gone');
+'''

@@ -1,0 +1,13 @@
+{
+  "commit": "0000000",
+  "recipe": "fixture",
+  "corpus": "fixture",
+  "built_from": [
+    "crates/php_engine"
+  ],
+  "verdicts": {
+    "kept-accepted": "accepted",
+    "kept-differs": "differs",
+    "kept-met": "met"
+  }
+}
