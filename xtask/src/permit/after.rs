@@ -106,7 +106,7 @@ use super::audit;
 use super::call::Call;
 use super::kept;
 use super::operation;
-use super::rules::{at, runs_in};
+use super::shell::{at, runs_in};
 use super::writes::{self, Place};
 use crate::key::Snapshot;
 use crate::manifest::OneOrMany;

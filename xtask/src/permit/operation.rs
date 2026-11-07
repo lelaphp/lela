@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::argv::Line;
-use super::rules::acts_in;
+use super::shell::acts_in;
 use crate::git;
 
 /// An operation that ends in a commit of the whole index, by the marker

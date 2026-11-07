@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use super::argv::{Argv, Line};
-use super::rules::{Places, Via, at, moved, placed, stood};
+use super::shell::{Places, Via, at, moved, placed, stood};
 
 /// The file asked about, where the call stands: the sensor's side of the
 /// question, which touches the disk so that this module does not.

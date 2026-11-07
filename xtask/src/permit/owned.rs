@@ -26,7 +26,7 @@ use anyhow::Result;
 use super::argv::{Argv, Line};
 use super::call::Call;
 use super::operation::Operation;
-use super::rules::{Places, fired_in};
+use super::shell::{Places, fired_in};
 use super::writes;
 use crate::git;
 use crate::owner::{self, SessionId};
