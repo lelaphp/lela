@@ -1832,6 +1832,7 @@ fn a_block_the_second_stop_released_is_a_reading_with_its_count() {
         .rfind(|r| r.scope == "released");
     let release = release.expect("the release was recorded");
     assert_eq!(release.status, Status::Fail);
+    assert!(!release.at.to_string().starts_with("1970-"), "{release:#?}");
     assert_eq!(release.numbers["unmet"], held.numbers["unmet"]);
     assert!(
         release

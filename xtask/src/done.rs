@@ -1820,13 +1820,15 @@ fn stop_reading(
 
 /// The second Stop's release, recorded (#3618 M4): `done` over `released`,
 /// failed, with the count of the block this session's last Stop wrote.
+/// It is timed as it is made and carries no key, since the release
+/// judged no tree.
 fn released(store: &Store, stop: &StopStdin, caller: Caller) -> Result<()> {
     let log = store.history(INSTRUMENT)?;
     let last = log.readings.iter().rev().find(|r| {
         r.scope == WORKSPACE && r.session == stop.session_id && !stop.session_id.is_empty()
     });
     let unmet = last.and_then(|r| r.int("unmet")).unwrap_or_default();
-    let mut reading = Reading::new(INSTRUMENT, RELEASED);
+    let mut reading = Reading::keyed(INSTRUMENT, RELEASED, String::new())?;
     reading.status = Status::Fail;
     reading.count("unmet", u64::try_from(unmet).unwrap_or_default())?;
     reading.message = format!("the second Stop released a block of {unmet} unmet");

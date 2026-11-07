@@ -76,7 +76,7 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Reading
         .crate_named(SCOPE)
         .with_context(|| format!("the manifest has no [[crate]] row for {SCOPE}"))?;
     let mut reading = match &ask.binary {
-        Some(_) => Reading::new(INSTRUMENT, SCOPE),
+        Some(_) => unkeyed()?,
         None => Reading::for_crate(INSTRUMENT, krate, &Snapshot::disk(root)?)?,
     };
     if !cfg!(all(target_arch = "aarch64", target_os = "macos")) {
@@ -105,6 +105,12 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Reading
         }
     }
     Ok(reading)
+}
+
+/// The reading over a binary the tree did not build here: timed as it
+/// is made, with no key, so `done` never reads it as fresh.
+fn unkeyed() -> Result<Reading> {
+    Reading::keyed(INSTRUMENT, SCOPE, String::new())
 }
 
 /// Write what `held` says of the instantiations into `reading`.
@@ -688,6 +694,15 @@ fn immediate(operand: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A held binary the tree did not build carries the time it was
+    /// held, and no key (Round 1, Q23, c3.b).
+    #[test]
+    fn a_binary_the_tree_did_not_build_is_held_at_a_time_and_no_key() {
+        let reading = unkeyed().unwrap();
+        assert!(!reading.at.to_string().starts_with("1970-"), "{reading:#?}");
+        assert!(reading.key().is_empty(), "{reading:#?}");
+    }
 
     const HEAD: &str = "\nbin/php:\tfile format mach-o arm64\n\nDisassembly of section __TEXT,__text:\n\n0000000100001000 <__ZN10php_engine4tier11serve_frame17h0123456789abcdefE>:\n100001000:     \tstp\tx20, x19, [sp, #-0x20]!\n100001004:     \tmov\tx19, x0\n";
 
