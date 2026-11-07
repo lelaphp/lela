@@ -211,6 +211,56 @@ impl Request {
         self.leave();
     }
 
+    /// [`Request::end_in_uncaught`] for the throwable that stood pending,
+    /// which `zend_exception_error` ends with `OBJ_RELEASE(ex)`
+    /// (`Z/Zend/zend_exceptions.c:1014`): the pending slot's owner given
+    /// up once the rendering has read it and before the request leaves,
+    /// so a destructor that release serves is served as any other, with
+    /// no frame standing. What it throws reaches
+    /// `zend_throw_exception_internal` with no frame
+    /// ([`Request::thrown_without_frame`]), which renders it as a second
+    /// uncaught fatal and bails out, and the shutdown functions are
+    /// served after both:
+    ///
+    /// ```php
+    /// class T { function __construct(public $n) {} function __destruct() { echo "d{$this->n}\n"; throw new Exception("dtor{$this->n}"); } }
+    /// function f($t) { throw new Exception("e1"); }
+    /// register_shutdown_function(function () { echo "shutdown\n"; });
+    /// f(new T(93));
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Exception: e1 in %SCRATCH%/witness.php:3
+    /// Stack trace:
+    /// #0 %SCRATCH%/witness.php(5): f(Object(T))
+    /// #1 {main}
+    ///   thrown in %SCRATCH%/witness.php on line 3
+    /// d93
+    ///
+    /// Fatal error: Uncaught Exception: dtor93 in %SCRATCH%/witness.php:2
+    /// Stack trace:
+    /// #0 [internal function]: T->__destruct()
+    /// #1 {main}
+    ///   thrown in %SCRATCH%/witness.php on line 2
+    /// shutdown
+    /// ```
+    pub(crate) fn end_in_uncaught_releasing(
+        &mut self,
+        level: Level,
+        (message, file, line): (&[u8], &[u8], u32),
+        throwable: Value,
+    ) {
+        if self.bailout {
+            self.release(throwable);
+            return;
+        }
+        self.clear_fatal_error_backtrace();
+        self.serve_uncaught(level, message, file, line);
+        self.release(throwable);
+        if !self.bailout {
+            self.leave();
+        }
+    }
+
     /// `zend_exception_error`'s `zend_error_va(severity | E_DONT_BAIL, ...)`
     /// (`Z/Zend/zend_exceptions.c:921-930`, `:999`): the observers told
     /// of an uncaught throwable with `E_DONT_BAIL`
