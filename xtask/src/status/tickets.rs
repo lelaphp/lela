@@ -65,7 +65,7 @@ impl Counts {
 
 /// The stores a close is written in: the main worktree's, where `git`
 /// names one, and the checkout's when it is another.
-fn stores(checkout: &Store, root: &Path) -> Vec<Store> {
+pub(super) fn stores(checkout: &Store, root: &Path) -> Vec<Store> {
     let mut stores = vec![checkout.clone()];
     if let Ok(main) = crate::track::main_worktree(root) {
         let main = Store::of_workspace(&main);

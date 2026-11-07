@@ -1,0 +1,25 @@
+# Must pass (Round 3, Q27 (c), Q28 (a)): class A is a diff touching
+# php_heap or php_process, or a changed unsafe line.
+[budget]
+total = 1
+new = 1
+docs = 1
+harness = 1
+lock_packages = 1
+clean_build_release_s = 1
+api_items = 1
+bindings = 1
+
+[[crate]]
+name = "php_heap"
+budget = 1
+[[crate]]
+name = "php_process"
+budget = 1
+[[crate]]
+name = "xtask"
+budget = 1
+
+[review]
+crates = ["php_heap", "php_process"]
+unsafe_lines = true
