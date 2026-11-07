@@ -1210,7 +1210,8 @@ fn the_queue_lays_the_merge_worktree_on_staging_owned_and_seeded_from_mains() {
 /// Once `staging` is reset to `main` with `--keep` and holds a change
 /// `done` meets, `main` is fast-forwarded to it and `_merge`'s log is
 /// landed in main's store and emptied, the worktree standing. A person's
-/// commit on `main` refuses the next land, `main` untouched.
+/// commit on `main` refuses the next land, `main` untouched. Each
+/// verdict's reading names land as its caller (Round 1, Q23, c11.b).
 #[test]
 fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
     let root = repository("land");
@@ -1228,6 +1229,16 @@ fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
     assert!(red.contains("main is untouched"), "{red}");
     assert_eq!(main_at(), before, "{red}");
     assert!(!root.join("target/harness/log").exists(), "{red}");
+    let landed_by = |store: &Path| {
+        let log = Store::of_workspace(store).history("done").unwrap();
+        log.readings
+            .into_iter()
+            .next_back()
+            .expect("a done reading")
+    };
+    let held = landed_by(&merge);
+    assert_eq!(held.status, Status::Fail, "{held:#?}");
+    assert!(held.message.starts_with("land: "), "{}", held.message);
 
     sh(&merge, &["git", "reset", "-q", "--keep", "main"]);
     write(&merge, "notes/queue.md", "A note no crate holds.\n");
@@ -1251,6 +1262,9 @@ fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
         "{green}"
     );
     assert!(merge.is_dir(), "the merge worktree stays: {green}");
+    let met = landed_by(&root);
+    assert_eq!(met.status, Status::Pass, "{met:#?}");
+    assert!(met.message.starts_with("land: "), "{}", met.message);
     assert_eq!(worktrees(&root).len(), 2, "{green}");
 
     commit(&root, "a person's commit on main");

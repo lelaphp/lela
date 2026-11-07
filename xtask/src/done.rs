@@ -1565,14 +1565,21 @@ fn answer(
     outcome.exit_saying(|| format!("{unmet} condition{} of done unmet", plural(unmet)))
 }
 
-/// Who asked `done` (#3619): each reading carries it, so a hold's verdict
-/// is told from a push's, CI's and a person's.
+/// Who asked `done`, a label and nothing more: it heads each `done`
+/// reading's message ([`called`], #3619), so the log tells a hold's
+/// verdict from a push's, CI's, a land's and a person's. Nothing reads
+/// it: no condition, list or base varies by caller, and no decision is
+/// taken on it (Round 1, Q4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Caller {
     Stop,
     SubagentStop,
     PrePush,
     Ci,
+    /// `worktree land`'s verdict over the merge worktree, which no
+    /// command line offers.
+    #[value(skip)]
+    Land,
     Hand,
 }
 
@@ -1600,6 +1607,7 @@ impl Caller {
             Caller::SubagentStop => "subagent-stop",
             Caller::PrePush => "pre-push",
             Caller::Ci => "ci",
+            Caller::Land => "land",
             Caller::Hand => "hand",
         }
     }

@@ -2061,11 +2061,15 @@ fn done_peek_writes_nothing_and_done_and_its_hook_settle_a_spent_kept_change() {
 }
 
 /// Each reading names its caller (#3619): pre-push says so on the command
-/// line, and a run that names none is a hand's outside CI.
+/// line, and a run that names none is a hand's outside CI. Land is
+/// `worktree land`'s alone, which no command line offers (c11.b).
 #[test]
 fn a_done_reading_carries_its_caller() {
     let root = scratch("caller");
     let store = Store::of_workspace(&root);
+    let land = xtask(&root, &["done", "--base", "HEAD", "--caller", "land"]);
+    assert_eq!(land.code(), 2, "{land}");
+    assert!(store.read("done", "workspace").unwrap().is_none(), "{land}");
     xtask(&root, &["done", "--base", "HEAD", "--caller", "pre-push"]).ok();
     let reading = store.read("done", "workspace").unwrap().unwrap();
     assert!(
