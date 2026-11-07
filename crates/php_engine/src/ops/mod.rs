@@ -6842,6 +6842,7 @@ fn resource_offset(req: &mut Request, id: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::abi::ExtensionBuilder;
     use crate::api::values::Key;
     use crate::engine::Engine;
     use crate::test::Capture;
@@ -6913,6 +6914,44 @@ mod tests {
             .build()
             .serve_capture(source, Capture::default());
         served.assert_clean("a,kkkkkkkkkk,");
+    }
+
+    /// `refcount(mixed $value): int`: the count `debug_zval_dump` prints
+    /// beside a refcounted value, which is ext/standard's and not Core's.
+    #[php_macros::php_function]
+    fn refcount(value: Value) -> i64 {
+        i64::from(value.refcount())
+    }
+
+    /// A kernel reads its operands as they stood (§5.8): the right one is
+    /// a copied view with an owner of its own across the left's
+    /// conversion (`operands`, `concat_operands`), so a handler that
+    /// conversion reaches reads its refcount one higher than php's, and
+    /// the destructor of a right operand the handler gives up runs once
+    /// the operation is done, where php's runs in the handler. The value
+    /// is php's, the handler putting back what reads the same, as the
+    /// witnesses on both kernels do. php 8.5.12 under `php -n`, with
+    /// `debug_zval_dump` in `refcount`'s place, reads 2 in both handlers
+    /// and prints `dtor old` before `handled`, so no witness can hold the
+    /// engine's side of it.
+    #[test]
+    fn a_right_operand_reads_one_more_owner_in_the_handler_and_is_destroyed_past_the_operation() {
+        let source = "<?php\n\
+            class C { function __construct(public string $n) {} function __toString(): string { return 'b'; } function __destruct() { echo \"dtor {$this->n}\\n\"; } }\n\
+            set_error_handler(function () { echo 'refcount ', refcount($GLOBALS['v']), \"\\n\"; $GLOBALS['v'] = new C('new'); echo \"handled\\n\"; return true; });\n\
+            $a = []; $v = new C('old'); $r = $a . $v; echo \"concat $r\\n\";\n\
+            set_error_handler(function () { echo 'refcount ', refcount($GLOBALS['w']), \"\\n\"; return true; });\n\
+            $w = '7'; $w .= '7'; $r = '1x' + $w; echo \"add $r\\n\";\n";
+        let operands = ExtensionBuilder::default()
+            .functions(&[refcount::DECLARED])
+            .build("operands");
+        let served = Engine::cli_builder()
+            .extensions(&[operands])
+            .build()
+            .serve_capture(source, Capture::default());
+        served.assert_clean(
+            "refcount 3\nhandled\ndtor old\nconcat Arrayb\nrefcount 3\nadd 78\ndtor new\n",
+        );
     }
 
     fn array(req: &mut Request, entries: Vec<(Key, Value)>) -> Value {
