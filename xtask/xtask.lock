@@ -364,6 +364,7 @@ ticket::Gh::blocking
 ticket::Gh::close
 ticket::Gh::on_path
 ticket::Gh::open
+ticket::Gh::thread
 ticket::Gh::view
 ticket::Issue
 ticket::Label
@@ -386,6 +387,12 @@ ticket::ready_of
 ticket::run
 ticket::stranded
 ticket::ticket_of
+ticket::view::Author
+ticket::view::Comment
+ticket::view::Thread
+ticket::view::instant
+ticket::view::newer_than_the_work
+ticket::view::view
 trace_dump::Ask
 trace_dump::kept
 trace_dump::run

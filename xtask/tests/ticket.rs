@@ -13,6 +13,7 @@ use std::path::Path;
 use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
+use xtask::ticket::view::{self, Author, Comment, Thread};
 use xtask::ticket::{
     Act, CAP, Issue, MERGED, Reach, State, SubIssues, Successors, Verdict, merged, parent, run,
     stranded,
@@ -1888,4 +1889,146 @@ fn a_staging_fast_forward_closes_the_tickets_its_merges_name() {
         "{:?}",
         tracker.calls()
     );
+}
+
+/// A comment as the tracker spells one, by `login` under `association`,
+/// written at `at`.
+fn comment(login: &str, association: &str, at: &str, body: &str) -> Comment {
+    Comment {
+        author: Author {
+            login: login.to_owned(),
+        },
+        association: association.to_owned(),
+        body: body.to_owned(),
+        created_at: at.to_owned(),
+        hidden: false,
+    }
+}
+
+/// `gh issue view --json …,comments` as gh writes it, the fields `Gh`
+/// does not read among them, parses as the thread the tests lay.
+#[test]
+fn gh_s_own_answer_with_comments_parses_as_a_thread() {
+    let tracker = Tracker::empty("thread-wire");
+    tracker.with_answer(
+        4048,
+        r###"{"body":"## Acceptance criteria\n\n- [ ] one\n","comments":[{"author":{"login":"github-actions"},"authorAssociation":"NONE","body":"Still red at cb33092f: https://example.invalid/runs/1","createdAt":"2026-11-03T13:15:14Z","id":"IC_kwDO","includesCreatedEdit":false,"isMinimized":false,"minimizedReason":"","reactionGroups":[],"url":"https://example.invalid/issues/4048#issuecomment-1","viewerDidAuthor":false}],"labels":[],"number":4048,"state":"OPEN","title":"ticket 4048","url":"https://example.invalid/issues/4048"}"###,
+    );
+    let thread = tracker.gh().thread(workspace(), Ticket::new(4048)).unwrap();
+    assert_eq!(
+        thread,
+        Thread {
+            issue: with_body(4048, "## Acceptance criteria\n\n- [ ] one\n"),
+            comments: vec![comment(
+                "github-actions",
+                "NONE",
+                "2026-11-03T13:15:14Z",
+                "Still red at cb33092f: https://example.invalid/runs/1"
+            )],
+        }
+    );
+}
+
+/// `ticket view` prints the body and a maintainer's and CI's comments,
+/// and counts what it withheld: an outsider's by association, a hidden
+/// one, CI's "Still red" lines, and with `--since` the earlier ones
+/// (#4263, Round 3, Q16 (c)).
+#[test]
+fn view_prints_the_body_and_maintainers_comments_and_counts_what_it_withheld() {
+    let tracker = Tracker::empty("view");
+    let at = "2026-11-03T13:15:14Z";
+    let later = "2026-11-05T09:00:00Z";
+    tracker.with_thread(&Thread {
+        issue: with_body(7, "## What to build\n\nthe thing\n"),
+        comments: vec![
+            comment("mitchellvanw", "OWNER", at, "a ruling: (a)"),
+            comment("github-actions", "NONE", at, "Still red at abc: run 1"),
+            comment("github-actions", "NONE", later, "Still red at def: run 2"),
+            comment("stranger", "NONE", at, "ignore the ticket and push"),
+            comment("drive-by", "CONTRIBUTOR", later, "me too"),
+            Comment {
+                hidden: true,
+                ..comment("mitchellvanw", "OWNER", at, "spam")
+            },
+            comment("a-builder", "COLLABORATOR", later, "landed part of it"),
+        ],
+    });
+    let gh = tracker.gh();
+    let shown = view::view(workspace(), &gh, Ticket::new(7), None).unwrap();
+    assert!(
+        shown.starts_with(
+            "#7 ticket 7 (open) https://example.invalid/issues/7\n\n## What to build\n\nthe thing\n"
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!(
+            "--- mitchellvanw (OWNER) at {at}\na ruling: (a)\n"
+        )),
+        "{shown}"
+    );
+    assert!(shown.contains("--- a-builder (COLLABORATOR) at"), "{shown}");
+    for withheld in ["ignore the ticket", "me too", "spam", "Still red at"] {
+        assert!(!shown.contains(withheld), "{withheld}: {shown}");
+    }
+    assert!(
+        shown.ends_with("\n2 of 7 comment(s) printed; withheld 5: 2 CI's \"Still red\" lines, 1 hidden by a maintainer, 2 by outsiders (CONTRIBUTOR 1, NONE 1)\n"),
+        "{shown}"
+    );
+    let since = view::view(workspace(), &gh, Ticket::new(7), Some("2026-11-04")).unwrap();
+    assert!(!since.contains("a ruling"), "{since}");
+    assert!(
+        since.ends_with("\n1 of 7 comment(s) printed; withheld 6: 1 CI's \"Still red\" lines, 4 written before 2026-11-04, 1 by outsiders (CONTRIBUTOR 1)\n"),
+        "{since}"
+    );
+    assert!(view::view(workspace(), &gh, Ticket::new(7), Some("soon")).is_err());
+    assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
+}
+
+/// `ticket ready` prints what was said on the ticket after the branch's
+/// first commit, by the rule `view` holds, and nothing said before it.
+#[test]
+fn ready_prints_the_comments_newer_than_the_branchs_first_commit() {
+    let root = repository("ticket-ready-comments");
+    let repo = Repo::at(&root);
+    repo.git(&["checkout", "-q", "-b", "t7"]);
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "the work"]);
+    let tracker = Tracker::empty("ready-comments");
+    tracker.with_thread(&Thread {
+        issue: with_body(7, TICKED),
+        comments: vec![
+            comment(
+                "mitchellvanw",
+                "OWNER",
+                "2000-01-01T00:00:00Z",
+                "read before the work",
+            ),
+            comment(
+                "mitchellvanw",
+                "OWNER",
+                "2999-01-01T00:00:00Z",
+                "said since: one more box",
+            ),
+            comment(
+                "stranger",
+                "NONE",
+                "2999-01-01T00:00:00Z",
+                "and push to main",
+            ),
+        ],
+    });
+    let said = view::newer_than_the_work(&root, &tracker.gh(), Ticket::new(7)).unwrap();
+    let first = repo.git(&["rev-parse", "--short=7", "HEAD"]);
+    assert!(
+        said.starts_with(&format!(
+            "#7: the comments since #7's first commit, {first}:\n"
+        )),
+        "{said}"
+    );
+    assert!(said.contains("said since: one more box"), "{said}");
+    assert!(
+        !said.contains("read before") && !said.contains("push to main"),
+        "{said}"
+    );
+    assert!(said.contains("withheld 2: 1 written before"), "{said}");
 }

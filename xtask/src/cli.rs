@@ -192,9 +192,9 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
-    /// A ticket, one GitHub issue: `read <n>` holds it to its acceptance
-    /// criteria, `close <n>` closes it naming what it opened, `parent <n>`
-    /// says whether a chart sheet is at the cap.
+    /// A ticket, one GitHub issue: `read`, `ready` and `close` hold it to
+    /// its boxes; `view` is what a builder reads; `parent` measures a
+    /// chart sheet.
     ///
     /// `read <n>` writes the reading of the boxes under the ticket's
     /// `## Acceptance criteria` heading, and `parent <n>` the reading of
@@ -815,7 +815,9 @@ pub(crate) enum TicketCommand {
     /// ticket (#2358), which the merge into `main` closes the ticket by
     /// (#2270, #2311); refuse while a box is unticked,
     /// while a successor is closed or missing, and without `--opens` or
-    /// `--opens-nothing`. Nothing at the tracker changes.
+    /// `--opens-nothing`. Nothing at the tracker changes. Prints the
+    /// comments written on the ticket since the branch's first commit, as
+    /// `view` prints them, whether or not the record is written.
     Ready {
         /// The issue number; without it, the branch's recorded ticket.
         number: Option<u64>,
@@ -873,6 +875,18 @@ pub(crate) enum TicketCommand {
         /// done is not a withdrawal.
         #[arg(long = "withdrawn", value_name = "REASON")]
         withdrawn: Option<String>,
+    },
+    /// Print the ticket's body and the comments a builder may act on, a
+    /// maintainer's or CI's, and count what it withheld: outsiders'
+    /// comments, hidden ones, CI's "Still red" lines and, with `--since`,
+    /// those written before it. Writes no reading.
+    View {
+        /// The issue number; without it, the branch's recorded ticket.
+        number: Option<u64>,
+        /// Leave out the comments written before this time,
+        /// `2026-11-03T13:15:14Z` or a date.
+        #[arg(long, value_name = "TIME")]
+        since: Option<String>,
     },
     /// Say how many sub-issues one chart sheet holds and whether the
     /// tracker will take another, before a ticket is filed against it;

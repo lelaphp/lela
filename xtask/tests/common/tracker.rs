@@ -18,6 +18,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use xtask::scratch::Tree;
+use xtask::ticket::view::Thread;
 use xtask::ticket::{BlockedBy, Blocker, Gh, Issue, Label, Open, State, SubIssues};
 
 /// The stand-in `gh` in its directory, which holds what it answers from;
@@ -45,6 +46,12 @@ impl Tracker {
     /// answered before.
     pub fn with_issue(&self, issue: &Issue) -> &Tracker {
         self.with_answer(issue.number, &serde_json::to_string(issue).unwrap())
+    }
+
+    /// `issue view <n>` answered with `thread`, the issue and its
+    /// comments, in place of what it answered before.
+    pub fn with_thread(&self, thread: &Thread) -> &Tracker {
+        self.with_answer(thread.issue.number, &serde_json::to_string(thread).unwrap())
     }
 
     /// `issue view <number>` answered with `text` as written: a

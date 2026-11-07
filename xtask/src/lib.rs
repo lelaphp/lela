@@ -487,18 +487,24 @@ fn ticket_command(
             let successors = ticket::Successors::named(ticket, &opens, opens_nothing)?;
             (ticket::Act::Ready(successors), ticket, session_id)
         }
-        TicketCommand::Parent { .. } | TicketCommand::Merged { .. } => {
-            bail!("ticket parent and merged: answered above")
+        TicketCommand::Parent { .. }
+        | TicketCommand::Merged { .. }
+        | TicketCommand::View { .. } => {
+            bail!("ticket parent, merged and view: answered above")
         }
     };
-    let reading = ticket::run(
-        root,
-        manifest,
-        &ticket::Gh::on_path(),
-        act,
-        ticket,
-        session_id.as_deref(),
-    )?;
+    let asks_ready = matches!(act, ticket::Act::Ready(_));
+    let gh = ticket::Gh::on_path();
+    let reading = ticket::run(root, manifest, &gh, act, ticket, session_id.as_deref())?;
+    // What was said on the ticket since its work began, printed and never
+    // a refusal (Round 3, Q16 (c)): a builder that comments on its own
+    // ticket is as common as one that does not.
+    if asks_ready {
+        match ticket::view::newer_than_the_work(root, &gh, ticket) {
+            Ok(said) => print!("{said}"),
+            Err(err) => println!("{ticket}: the comments could not be read: {err:#}"),
+        }
+    }
     record(store, std::slice::from_ref(&reading))
 }
 
@@ -682,6 +688,13 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         Command::Worktree {
             command: WorktreeCommand::Land,
         } => Some(queue::land(root)),
+        Command::Ticket {
+            command: TicketCommand::View { number, since },
+        } => Some(ticket::ticket_of(root, *number).and_then(|ticket| {
+            let shown = ticket::view::view(root, &ticket::Gh::on_path(), ticket, since.as_deref())?;
+            print!("{shown}");
+            Ok(())
+        })),
         _ => None,
     }
 }
