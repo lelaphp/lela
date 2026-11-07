@@ -49,7 +49,7 @@ use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::api_check;
@@ -64,7 +64,7 @@ use crate::permit;
 use crate::phpt;
 use crate::phpt::against::{self, Against};
 use crate::port_map;
-use crate::reading::{Freshness, Moved, Number, Reading, Status, Store, plural};
+use crate::reading::{Freshness, Moved, Number, Outcome, Reading, Status, Store, plural};
 use crate::reply;
 use crate::ticket;
 use crate::track::{self, MAIN, Ticket, merge_base, short};
@@ -165,8 +165,8 @@ pub struct Verdict {
     /// The ticket the branch records, the one condition 7 asked; `None`
     /// for a branch that records none, which is not asked.
     pub ticket: Option<Ticket>,
-    /// One sentence per unmet condition, in the order of the conditions.
-    pub unmet: Vec<String>,
+    /// Each unmet condition, typed, in the order of the conditions.
+    pub unmet: Vec<Unmet>,
     /// What the hook cannot tell: the harness's own files in the diff,
     /// and the readings of an instrument this run did not take.
     pub notes: Vec<String>,
@@ -184,10 +184,17 @@ impl Verdict {
         self.unmet.is_empty()
     }
 
+    /// Each unmet condition's line, in the order of the list.
+    pub fn messages(&self) -> Vec<String> {
+        self.unmet.iter().map(|u| u.message.clone()).collect()
+    }
+
     /// The list as text: the head line, the unmet conditions, the notes.
+    /// The head line counts the unmet by kind; the bullets are the
+    /// messages, in the order of the conditions (Round 1, Q11 (a)).
     pub fn render(&self) -> String {
         let mut out = format!(
-            "done: {} changed file{} since {} in {}{}\n",
+            "done: {} changed file{} since {} in {}{}{}\n",
             self.changed.len(),
             plural(self.changed.len()),
             self.base,
@@ -198,7 +205,12 @@ impl Verdict {
             },
             self.ticket
                 .map(|ticket| format!(", for {ticket}"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            if self.met() {
+                String::new()
+            } else {
+                format!("; {}", Counts::of(&self.unmet))
+            }
         );
         if self.met() && self.not_run.is_empty() {
             out.push_str("every condition of done is met\n");
@@ -207,7 +219,7 @@ impl Verdict {
             out.push_str(&self.did_not_run());
             out.push('\n');
         } else {
-            bullets(&mut out, "unmet", &self.unmet);
+            bullets(&mut out, "unmet", &self.messages());
         }
         if !self.notes.is_empty() {
             bullets(&mut out, "notes", &self.notes);
@@ -226,6 +238,7 @@ impl Verdict {
         reading.count("changed", self.changed.len() as u64)?;
         reading.count("crates", self.crates.len() as u64)?;
         reading.count("unmet", self.unmet.len() as u64)?;
+        Counts::of(&self.unmet).count_on(&mut reading)?;
         reading.count("notes", self.notes.len() as u64)?;
         reading.count("not_run", self.not_run.len() as u64)?;
         reading.message = if self.met() {
@@ -235,7 +248,7 @@ impl Verdict {
                 "{} unmet since {}: {}",
                 self.unmet.len(),
                 self.base,
-                self.unmet.join("; ")
+                self.messages().join("; ")
             )
         };
         if !self.not_run.is_empty() {
@@ -248,6 +261,194 @@ impl Verdict {
     /// beside it never reads as one over those instruments' readings.
     fn did_not_run(&self) -> String {
         format!("{} did not run in this run", self.not_run.join(" and "))
+    }
+
+    /// The list as one object, `done --format json` (#3494): the base,
+    /// the changed files and crates, the branch's ticket, the counts by
+    /// kind, each unmet condition as `{ kind, instrument, scope, message,
+    /// command }`, and the notes, the delegated readings and `--not-run`;
+    /// `v` is the shape's version ([`JSON_V`]).
+    pub fn to_json(&self) -> Value {
+        json!({
+            "v": JSON_V,
+            "base": { "since": self.base.since, "commit": self.base.commit },
+            "changed": self.changed.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(),
+            "crates": self.crates,
+            "ticket": self.ticket.map(Ticket::number),
+            "met": self.met(),
+            "counts": Counts::of(&self.unmet).to_json(),
+            "unmet": self.unmet,
+            "notes": self.notes,
+            "delegated": self.delegated,
+            "not_run": self.not_run,
+        })
+    }
+}
+
+/// The version of `done --format json`'s shape, `v` on its object: a field
+/// added is the same version, and one removed, renamed or retyped, or a
+/// meaning changed, is the next (Round 1, Q11 (a)).
+pub const JSON_V: u32 = 1;
+
+/// What clears one unmet condition: the kind it carries in the typed list
+/// (Round 1, Q11 (a), c2.d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// A reading over the tree now says the condition does not hold:
+    /// work clears it, and a run after the work.
+    Failing,
+    /// The last reading was taken over another key or recipe: a run
+    /// clears it.
+    Stale,
+    /// No reading was taken, or none measured anything: a run clears it.
+    Missing,
+    /// No instrument run clears it: a person's act, a denial of `permit`,
+    /// a close of the ticket or an open divergence.
+    Refused,
+}
+
+impl Kind {
+    /// Every kind, in the order the head line counts them.
+    pub(crate) const ALL: [Kind; 4] = [Kind::Failing, Kind::Stale, Kind::Missing, Kind::Refused];
+
+    /// The kind as the list, the JSON and the reading's numbers spell it.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Kind::Failing => "failing",
+            Kind::Stale => "stale",
+            Kind::Missing => "missing",
+            Kind::Refused => "refused",
+        }
+    }
+}
+
+/// One unmet condition: its kind, the instrument and scope it is over
+/// where it has them, its line in the list, and the command that clears
+/// it where a run does ([`command_taking`]); only an open divergence has
+/// neither instrument nor scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Unmet {
+    pub kind: Kind,
+    pub instrument: Option<String>,
+    pub scope: Option<String>,
+    pub message: String,
+    pub command: Option<String>,
+}
+
+impl Unmet {
+    /// `kind` over `instrument` and `scope`, said by `message`, with no
+    /// command.
+    fn over(kind: Kind, instrument: &str, scope: &str, message: String) -> Unmet {
+        Unmet {
+            kind,
+            instrument: Some(instrument.to_owned()),
+            scope: Some(scope.to_owned()),
+            message,
+            command: None,
+        }
+    }
+
+    /// The same, cleared by `command`.
+    fn cleared_by(mut self, command: Option<String>) -> Unmet {
+        self.command = command;
+        self
+    }
+}
+
+/// How many unmet conditions of each kind, and how many a checkout handed
+/// over without kinds, its build older than the kinds or its run failed:
+/// the head line's counts and the reading's numbers, which sum to `unmet`
+/// (c2.f).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Counts {
+    kinds: [usize; 4],
+    unkinded: usize,
+}
+
+impl Counts {
+    fn of(unmet: &[Unmet]) -> Counts {
+        let mut counts = Counts::default();
+        for item in unmet {
+            counts.add(item.kind, 1);
+        }
+        counts
+    }
+
+    fn add(&mut self, kind: Kind, n: usize) {
+        self.kinds[kind as usize] += n;
+    }
+
+    fn of_kind(self, kind: Kind) -> usize {
+        self.kinds[kind as usize]
+    }
+
+    fn total(self) -> usize {
+        self.kinds.iter().sum::<usize>() + self.unkinded
+    }
+
+    /// The counts by kind and `unkinded`, as the JSON says them and a
+    /// held checkout hands them over.
+    fn to_json(self) -> Value {
+        let mut by_kind: serde_json::Map<String, Value> = (Kind::ALL.into_iter())
+            .map(|kind| (kind.name().to_owned(), json!(self.of_kind(kind))))
+            .collect();
+        by_kind.insert("unkinded".to_owned(), json!(self.unkinded));
+        Value::Object(by_kind)
+    }
+
+    /// The counts a held checkout handed over, `None` where it handed
+    /// none, as a build older than the kinds does.
+    fn from_json(value: &Value) -> Option<Counts> {
+        let object = value.as_object()?;
+        let n = |name: &str| usize::try_from(object.get(name)?.as_u64()?).ok();
+        let mut counts = Counts::default();
+        for kind in Kind::ALL {
+            counts.add(kind, n(kind.name())?);
+        }
+        counts.unkinded = n("unkinded").unwrap_or_default();
+        Some(counts)
+    }
+
+    fn merge(&mut self, other: Counts) {
+        for kind in Kind::ALL {
+            self.add(kind, other.of_kind(kind));
+        }
+        self.unkinded += other.unkinded;
+    }
+
+    /// Each kind's count, and `unkinded`, on `reading`'s numbers.
+    fn count_on(self, reading: &mut Reading) -> Result<()> {
+        for kind in Kind::ALL {
+            reading.count(kind.name(), self.of_kind(kind) as u64)?;
+        }
+        reading.count("unkinded", self.unkinded as u64)
+    }
+}
+
+impl std::fmt::Display for Counts {
+    /// `3 unmet: 1 failing, 1 stale, 1 missing, 0 refused`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total = self.total();
+        let kinds: Vec<String> = (Kind::ALL.into_iter())
+            .map(|kind| format!("{} {}", self.of_kind(kind), kind.name()))
+            .collect();
+        write!(f, "{total} unmet: {}", kinds.join(", "))?;
+        if self.unkinded > 0 {
+            write!(f, ", {} unkinded", self.unkinded)?;
+        }
+        Ok(())
+    }
+}
+
+/// The clause a stale bullet carries where the reading it stands on last
+/// failed, so a failure under a stale reading is not read as a run owed
+/// (c2.f): empty where it passed or skipped.
+fn last_failed(last: &Reading) -> &'static str {
+    if last.status == Status::Fail {
+        "; its last reading failed"
+    } else {
+        ""
     }
 }
 
@@ -501,17 +702,28 @@ pub fn judge(
                 &mut unmet,
                 &mut notes,
             )?,
-            Condition::KeptChange => unmet.extend(
-                permit::kept_changes(store, root)?
-                    .iter()
-                    .map(ToString::to_string),
-            ),
+            Condition::KeptChange => {
+                unmet.extend(permit::kept_changes(store, root)?.iter().map(|kept| {
+                    Unmet::over(
+                        Kind::Refused,
+                        permit::INSTRUMENT,
+                        kept.path(),
+                        kept.to_string(),
+                    )
+                }));
+            }
             Condition::TicketBoxes => {
                 if let Some(ticket) = ticket {
                     boxes(snapshot, store, manifest.pin_digest(), ticket, &mut unmet)?;
                 }
             }
-            Condition::Stranded => unmet.extend(ticket::stranded(root, store, &base.commit)?),
+            Condition::Stranded => {
+                let stranded = ticket::stranded(root, store, &base.commit)?;
+                unmet.extend(stranded.into_iter().map(|reading| {
+                    let message = format!("ticket: {}", reading.message);
+                    Unmet::over(Kind::Refused, ticket::INSTRUMENT, &reading.scope, message)
+                }));
+            }
             Condition::Folded => folded(&asking, &built_under, &mut unmet, &mut notes)?,
         }
     }
@@ -540,7 +752,7 @@ pub fn judge(
 fn folded(
     asking: &Asking,
     built_under: &[&str],
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
     notes: &mut Vec<String>,
 ) -> Result<()> {
     let Some(changed) = built_under.first() else {
@@ -553,25 +765,36 @@ fn folded(
         .with_context(|| format!("the manifest has no [[crate]] row for {scope}"))?;
     let key = asking.snapshot.key(&krate.path())?;
     let pin = asking.manifest.pin_digest();
-    match asking.store.over(instrument, scope, &key, pin)?.fresh() {
-        Some(reading) if reading.status == Status::Pass => {}
+    // fold's command is said at its site, and is no crate's (c2.e).
+    let command = Some(format!("cargo xtask {instrument}"));
+    let unread = |kind: Kind, clause: &str| {
+        let message = format!(
+            "{instrument}: no reading for {scope} over the tree now, and {changed} changed; `cargo xtask fold` takes it, building the release {scope} first (minutes){clause}"
+        );
+        Unmet::over(kind, instrument, scope, message).cleared_by(command.clone())
+    };
+    let not_run = asking.not_run.iter().any(|n| n == instrument);
+    match asking.store.over(instrument, scope, &key, pin)? {
+        Freshness::Fresh(reading) if reading.status == Status::Pass => {}
         // The sensor reads an `aarch64` Mac alone: a host it cannot read has
         // nothing to hold, and says so.
-        Some(reading) if reading.status == Status::Skip => notes.push(format!(
+        Freshness::Fresh(reading) if reading.status == Status::Skip => notes.push(format!(
             "{instrument}: {scope} not held on this host: {}",
             reading.message
         )),
-        Some(reading) => unmet.push(format!(
-            "{instrument}: {scope} {}: {}",
-            reading.status.as_str(),
-            reading.message
-        )),
-        None if asking.not_run.iter().any(|n| n == instrument) => notes.push(format!(
+        Freshness::Fresh(reading) => {
+            let message = format!(
+                "{instrument}: {scope} {}: {}",
+                reading.status.as_str(),
+                reading.message
+            );
+            unmet.push(Unmet::over(Kind::Failing, instrument, scope, message).cleared_by(command));
+        }
+        Freshness::Stale { .. } | Freshness::Never if not_run => notes.push(format!(
             "{instrument} did not run in this run, so condition 10 judged no reading of it"
         )),
-        None => unmet.push(format!(
-            "{instrument}: no reading for {scope} over the tree now, and {changed} changed; `cargo xtask fold` takes it, building the release {scope} first (minutes)"
-        )),
+        Freshness::Stale { last, .. } => unmet.push(unread(Kind::Stale, last_failed(&last))),
+        Freshness::Never => unmet.push(unread(Kind::Missing, "")),
     }
     Ok(())
 }
@@ -591,21 +814,30 @@ fn boxes(
     store: &Store,
     pin: &str,
     ticket: Ticket,
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
 ) -> Result<()> {
     const READ: &str = "run `cargo xtask ticket read`";
-    let last = store.last_of_readable(ticket::INSTRUMENT, &ticket::scope(ticket))?;
+    let scope = ticket::scope(ticket);
+    // ticket's command is said at its site, and is no crate's (c2.e).
+    let held = |kind: Kind, message: String| {
+        let command = Some("cargo xtask ticket read".to_owned());
+        Unmet::over(kind, ticket::INSTRUMENT, &scope, message).cleared_by(command)
+    };
+    let last = store.last_of_readable(ticket::INSTRUMENT, &scope)?;
     let tree = snapshot.key(Path::new(ticket::STAMPED_OVER))?;
     let reading = match Freshness::judging(last, &tree, pin) {
         Freshness::Fresh(reading) => reading,
         Freshness::Never => {
-            unmet.push(format!("ticket: no reading for {ticket}; {READ}"));
+            let message = format!("ticket: no reading for {ticket}; {READ}");
+            unmet.push(held(Kind::Missing, message));
             return Ok(());
         }
-        Freshness::Stale { .. } => {
-            unmet.push(format!(
-                "ticket: the reading for {ticket} is stale; the tree changed since it was read; {READ}"
-            ));
+        Freshness::Stale { last, .. } => {
+            let message = format!(
+                "ticket: the reading for {ticket} is stale; the tree changed since it was read{}; {READ}",
+                last_failed(&last)
+            );
+            unmet.push(held(Kind::Stale, message));
             return Ok(());
         }
     };
@@ -618,13 +850,13 @@ fn boxes(
     // alone, met when the close went through and held when it was
     // refused.
     let count = |key: &str| reading.int(key);
-    let held = match (count("withdrawn"), count("criteria"), count("unticked")) {
+    let unmet_here = match (count("withdrawn"), count("criteria"), count("unticked")) {
         (Some(withdrawn), ..) if withdrawn > 0 => reading.status != Status::Pass,
         (_, Some(criteria), Some(unticked)) => criteria == 0 || unticked > 0,
         _ => reading.status != Status::Pass,
     };
-    if held {
-        unmet.push(format!("ticket: {}", reading.message));
+    if unmet_here {
+        unmet.push(held(Kind::Failing, format!("ticket: {}", reading.message)));
     }
     Ok(())
 }
@@ -824,12 +1056,18 @@ fn no_regression(
     krate: &Crate,
     key: &str,
     not_judged: &mut Vec<String>,
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
 ) -> Result<()> {
     let (scope, pin) = (&krate.name, asking.manifest.pin()?);
+    let held = |kind: Kind, message: String| {
+        let command = command_taking(phpt::INSTRUMENT, scope);
+        Unmet::over(kind, phpt::INSTRUMENT, scope, message).cleared_by(command)
+    };
     let pin = match krate.oracle.as_deref().map(|v| pin.variant(v)) {
+        // No run clears an oracle the pin does not hold: a person's.
         Some(Err(err)) => {
-            unmet.push(format!("phpt: {scope}: {err:#}"));
+            let message = format!("phpt: {scope}: {err:#}");
+            unmet.push(Unmet::over(Kind::Refused, phpt::INSTRUMENT, scope, message));
             return Ok(());
         }
         Some(Ok(variant)) => variant,
@@ -848,10 +1086,10 @@ fn no_regression(
             if asking.not_run.iter().any(|n| n == "phpt") {
                 not_judged.push(format!("phpt for {scope}"));
             } else if !excused {
-                unmet.push(format!("phpt: {why}"));
+                unmet.push(held(Kind::Missing, format!("phpt: {why}")));
             }
         }
-        Against::Unmet(why) => unmet.push(format!("phpt: {why}")),
+        Against::Unmet(why) => unmet.push(held(Kind::Failing, format!("phpt: {why}"))),
     }
     Ok(())
 }
@@ -913,7 +1151,7 @@ fn fresh_readings(
     krate: &Crate,
     now: &KeyNow,
     not_judged: &mut Vec<String>,
-    (unmet, delegated): (&mut Vec<String>, &mut Vec<String>),
+    (unmet, delegated): (&mut Vec<Unmet>, &mut Vec<String>),
     notes: &mut Vec<String>,
 ) -> Result<()> {
     let (root, store, not_run) = (asking.snapshot.root(), asking.store, asking.not_run);
@@ -944,24 +1182,32 @@ fn fresh_readings(
         }
     }
     for (instrument, scope) in asked {
+        // The command takes the crate, whichever of its scopes this is (c2.e).
+        let held = |kind: Kind, message: String| {
+            let command = command_taking(instrument, name);
+            Unmet::over(kind, instrument, &scope, message).cleared_by(command)
+        };
         let reading = match store.over(instrument, &scope, key, pin)? {
             Freshness::Fresh(reading) => reading,
             Freshness::Never => {
                 if not_run.iter().any(|n| n == instrument) {
                     not_judged.push(format!("{instrument} for {scope}"));
                 } else {
-                    unmet.push(format!("{instrument}: no reading for {scope}"));
+                    let message = format!("{instrument}: no reading for {scope}");
+                    unmet.push(held(Kind::Missing, message));
                 }
                 continue;
             }
-            Freshness::Stale { moved, .. } => {
+            Freshness::Stale { last, moved } => {
                 let changed = match moved {
                     Moved::Recipe => "oracle.toml",
                     Moved::Key => &now.changed,
                 };
-                unmet.push(format!(
-                    "{instrument}: the reading for {scope} is stale; {changed} changed since it was taken"
-                ));
+                let message = format!(
+                    "{instrument}: the reading for {scope} is stale; {changed} changed since it was taken{}",
+                    last_failed(&last)
+                );
+                unmet.push(held(Kind::Stale, message));
                 continue;
             }
         };
@@ -969,11 +1215,17 @@ fn fresh_readings(
             && !met_without_passing(krate, instrument, &reading)
             && !rule_absent(asking.manifest, &reading)
         {
-            unmet.push(format!(
+            // A skip measured nothing: the reading is missing, not failing.
+            let kind = match reading.status {
+                Status::Skip => Kind::Missing,
+                _ => Kind::Failing,
+            };
+            let message = format!(
                 "{instrument}: {scope} {}: {}",
                 reading.status.as_str(),
                 reading.message
-            ));
+            );
+            unmet.push(held(kind, message));
         }
         if instrument == "test"
             && reading.status == Status::Pass
@@ -990,9 +1242,9 @@ fn fresh_readings(
             && *missing > 0
         {
             let s = plural(usize::try_from(*missing).unwrap_or(usize::MAX));
-            unmet.push(format!(
-                "witness: {missing} kernel{s} or native{s} in {name} without a witness"
-            ));
+            let message =
+                format!("witness: {missing} kernel{s} or native{s} in {name} without a witness");
+            unmet.push(held(Kind::Failing, message));
         }
     }
     if phpt {
@@ -1036,13 +1288,6 @@ pub fn scopes_of(root: &Path, instrument: &str, krate: &Crate) -> Result<Vec<Str
 /// for an instrument no `[[owed]]` row may name, and for `crosscheck` of a
 /// crate that is no extension; `fold`'s and `ticket`'s commands are said
 /// at their own sites.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the typed list of #3494 names it, in the next commit"
-    )
-)]
 pub(crate) fn command_taking(instrument: &str, krate: &str) -> Option<String> {
     let flagged = |flag: &str, value: &str| format!("cargo xtask {instrument} {flag} {value}");
     match instrument {
@@ -1074,7 +1319,7 @@ fn locks(
     manifest: &Manifest,
     store: &Store,
     changed: &[Change],
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
 ) -> Result<()> {
     for seam in &manifest.seams {
         // A lock no [[crate]] row names has no home to hash. One that
@@ -1091,27 +1336,38 @@ fn locks(
         let shown = file.display().to_string();
         let in_diff = changed.iter().any(|c| Path::new(&c.path) == file);
         let key = snapshot.key(&dir)?;
+        let held = |kind: Kind, message: String| {
+            let command = command_taking(api_check::INSTRUMENT, &seam.name);
+            Unmet::over(kind, api_check::INSTRUMENT, &seam.name, message).cleared_by(command)
+        };
         match store.over(
             api_check::INSTRUMENT,
             &seam.name,
             &key,
             manifest.pin_digest(),
         )? {
-            Freshness::Never if in_diff => unmet.push(format!(
-                "{shown} is in the diff and has no api-check reading"
+            Freshness::Never if in_diff => unmet.push(held(
+                Kind::Missing,
+                format!("{shown} is in the diff and has no api-check reading"),
             )),
-            Freshness::Fresh(reading) if reading.status == Status::Fail => unmet.push(format!(
-                "{shown}: {}{}",
-                reading.message,
-                if in_diff {
-                    ""
-                } else {
-                    "; the lock is not in the diff"
-                }
-            )),
-            Freshness::Stale { last, .. } if in_diff && last.status == Status::Pass => unmet.push(
-                format!("{shown} is in the diff and its api-check reading predates it"),
-            ),
+            Freshness::Fresh(reading) if reading.status == Status::Fail => {
+                let message = format!(
+                    "{shown}: {}{}",
+                    reading.message,
+                    if in_diff {
+                        ""
+                    } else {
+                        "; the lock is not in the diff"
+                    }
+                );
+                unmet.push(held(Kind::Failing, message));
+            }
+            Freshness::Stale { last, .. } if in_diff && last.status == Status::Pass => {
+                unmet.push(held(
+                    Kind::Stale,
+                    format!("{shown} is in the diff and its api-check reading predates it"),
+                ));
+            }
             _ => {}
         }
     }
@@ -1127,7 +1383,7 @@ fn open_rows(
     registry: &Registry,
     crates: &[&Crate],
     changed: &[Change],
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
 ) -> Result<()> {
     let proposed_here: Vec<divergence::Id> = if changed.iter().any(|c| c.path == divergence::FILE) {
         let before = git::show(root, base, divergence::FILE)?
@@ -1165,10 +1421,17 @@ fn open_rows(
                 })
         };
         if let Some(what) = touched {
-            unmet.push(format!(
-                "open divergence {} touches {what}: a person writes the reason, or the difference gets fixed (harness §4.3)",
-                row.id
-            ));
+            // No instrument measures it and no command clears it: a person's.
+            unmet.push(Unmet {
+                kind: Kind::Refused,
+                instrument: None,
+                scope: None,
+                message: format!(
+                    "open divergence {} touches {what}: a person writes the reason, or the difference gets fixed (harness §4.3)",
+                    row.id
+                ),
+                command: None,
+            });
         }
     }
     Ok(())
@@ -1183,13 +1446,19 @@ fn over_the_diff(
     manifest: &Manifest,
     base: &str,
     changed: &[Change],
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
     notes: &mut Vec<String>,
 ) -> Result<()> {
     let files = permit::working_files(root, base, changed)?;
     let diff = permit::judge_files(manifest, root, &files)?;
     for (path, finding) in diff.denials() {
-        unmet.push(format!("permit denies {path}: {}", finding.reason()));
+        let message = format!("permit denies {path}: {}", finding.reason());
+        unmet.push(Unmet::over(
+            Kind::Refused,
+            permit::INSTRUMENT,
+            path,
+            message,
+        ));
     }
     for (path, finding) in diff.a_persons() {
         notes.push(format!(
@@ -1223,6 +1492,8 @@ pub(crate) fn command(
         base,
         not_run,
         caller,
+        format,
+        peek,
         ..
     } = asked
     else {
@@ -1230,14 +1501,20 @@ pub(crate) fn command(
     };
     let caller = caller.unwrap_or_else(Caller::ambient);
     let registry = Registry::load(root)?;
-    run(
-        root,
-        manifest,
-        &registry,
-        store,
+    answer(
+        (root, manifest, &registry, store),
         (base.as_deref(), caller),
         &not_run,
+        (format, peek),
     )
+}
+
+/// How `done` prints its list: as text, or as one object
+/// ([`Verdict::to_json`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Format {
+    Text,
+    Json,
 }
 
 /// The command: judge, write the reading, print the list, fail while
@@ -1251,6 +1528,19 @@ pub fn run(
     (base, caller): (Option<&str>, Caller),
     not_run: &[String],
 ) -> Result<()> {
+    let asked = (root, manifest, registry, store);
+    answer(asked, (base, caller), not_run, (Format::Text, false))
+}
+
+/// [`run`] in `format`, and where `peek`, writing nothing: no reading and
+/// no settled kept change, so a band that polls it leaves the store as it
+/// found it (Round 1, Q12, c2.h). The exit is the verdict's either way.
+fn answer(
+    (root, manifest, registry, store): (&Path, &Manifest, &Registry, &Store),
+    (base, caller): (Option<&str>, Caller),
+    not_run: &[String],
+    (format, peek): (Format, bool),
+) -> Result<()> {
     if let Some(unowed) = not_run.iter().find(|n| manifest.owing(n).is_none()) {
         let owed: Vec<&str> = manifest.owed.iter().map(|r| r.instrument.name()).collect();
         bail!(
@@ -1260,8 +1550,17 @@ pub fn run(
     }
     let snapshot = Snapshot::disk(root)?;
     let verdict = judge(&snapshot, manifest, registry, store, base, not_run)?;
-    let outcome = store.record(&[called(verdict.reading(manifest, &snapshot)?, caller)])?;
-    print!("{}", verdict.render());
+    let reading = called(verdict.reading(manifest, &snapshot)?, caller);
+    let outcome = if peek {
+        Outcome::of(&[reading])
+    } else {
+        permit::settle(store, root)?;
+        store.record(&[reading])?
+    };
+    match format {
+        Format::Text => print!("{}", verdict.render()),
+        Format::Json => println!("{}", verdict.to_json()),
+    }
     let unmet = verdict.unmet.len();
     outcome.exit_saying(|| format!("{unmet} condition{} of done unmet", plural(unmet)))
 }
@@ -1378,13 +1677,16 @@ pub(crate) fn hook(
         crate::permit::written(root, &stop.session_id, agent)
     };
     let mut reasons = Vec::new();
-    let mut unmet = 0;
+    let mut counts = Counts::default();
     let mut here = None;
     for checkout in checkouts.iter().filter(|c| c.is_dir()) {
         if same_dir(checkout, root) {
             match judge(&snapshot, manifest, registry, store, None, &[]) {
                 Ok(verdict) => {
-                    unmet += verdict.unmet.len();
+                    if let Err(err) = permit::settle(store, root) {
+                        eprintln!("xtask done: a settled kept change was not removed: {err:#}");
+                    }
+                    counts.merge(Counts::of(&verdict.unmet));
                     if !verdict.met() {
                         reasons.push(verdict.render());
                     }
@@ -1396,27 +1698,9 @@ pub(crate) fn hook(
             }
             continue;
         }
-        let handed = json!({"session_id": stop.session_id, "hook_event_name": stop.hook_event_name,
-            "here": true});
-        let args = ["done", "--hook"];
-        let adapter = crate::permit::Adapter::CommandHook;
-        match crate::permit::walk(checkout, adapter, &args, &handed.to_string()) {
-            Ok(out) => {
-                let held: Value = serde_json::from_slice(&out).unwrap_or(Value::Null);
-                if let Some(reason) = held["reason"].as_str() {
-                    unmet += (held["unmet"].as_u64())
-                        .and_then(|n| usize::try_from(n).ok())
-                        .unwrap_or(1);
-                    reasons.push(format!("In {}:\n{reason}", checkout.display()));
-                }
-            }
-            Err(last) => {
-                unmet += 1;
-                reasons.push(format!(
-                    "done could not judge {}: {last}",
-                    checkout.display()
-                ));
-            }
+        if let Some((held, reason)) = handed_over(checkout, &stop) {
+            counts.merge(held);
+            reasons.push(reason);
         }
     }
     // The reply, for a session that closed a ticket and no other.
@@ -1434,7 +1718,7 @@ pub(crate) fn hook(
     };
     // The hook's exit is 0 and its verdict is the JSON; the outcome of
     // recording it is neither.
-    let recorded = stop_reading(here.as_ref(), manifest, &snapshot, unmet, checkouts.len())
+    let recorded = stop_reading(here.as_ref(), manifest, &snapshot, counts, checkouts.len())
         .and_then(|r| {
             // The Stop's verdict carries the session: what marks a later
             // turn's close as this turn's and not an earlier one's.
@@ -1456,10 +1740,42 @@ pub(crate) fn hook(
         let mut held = block(&reasons.join("\n"));
         // The count, for the Stop that handed this checkout over.
         if stop.here {
-            held["unmet"] = json!(unmet);
+            held["unmet"] = json!(counts.total());
+            held["kinds"] = counts.to_json();
         }
         held
     })
+}
+
+/// `checkout`, which the session wrote in and the hook does not stand in,
+/// judged by its own build (#3619): what it counted and why it holds, or
+/// `None` where it holds nothing. A build older than the kinds hands the
+/// count alone, and one that could not judge holds as one unmet, each
+/// counted unkinded.
+fn handed_over(checkout: &Path, stop: &StopStdin) -> Option<(Counts, String)> {
+    let handed = json!({"session_id": stop.session_id, "hook_event_name": stop.hook_event_name,
+        "here": true});
+    let args = ["done", "--hook"];
+    let adapter = crate::permit::Adapter::CommandHook;
+    let unkinded = |n: usize| Counts {
+        unkinded: n,
+        ..Counts::default()
+    };
+    match crate::permit::walk(checkout, adapter, &args, &handed.to_string()) {
+        Ok(out) => {
+            let held: Value = serde_json::from_slice(&out).unwrap_or(Value::Null);
+            let reason = held["reason"].as_str()?;
+            let counts = Counts::from_json(&held["kinds"]).unwrap_or_else(|| {
+                let n = held["unmet"].as_u64().and_then(|n| usize::try_from(n).ok());
+                unkinded(n.unwrap_or(1))
+            });
+            Some((counts, format!("In {}:\n{reason}", checkout.display())))
+        }
+        Err(last) => Some((
+            unkinded(1),
+            format!("done could not judge {}: {last}", checkout.display()),
+        )),
+    }
 }
 
 /// Whether `a` and `b` are one directory.
@@ -1468,15 +1784,16 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 /// The Stop's one reading: this checkout's verdict where it was judged,
-/// otherwise one over the checkouts the session wrote in; `unmet` counted
-/// over them all.
+/// otherwise one over the checkouts the session wrote in; `counts` and
+/// `unmet` counted over them all.
 fn stop_reading(
     here: Option<&Verdict>,
     manifest: &Manifest,
     snapshot: &Snapshot,
-    unmet: usize,
+    counts: Counts,
     checkouts: usize,
 ) -> Result<Reading> {
+    let unmet = counts.total();
     let mut reading = if let Some(verdict) = here {
         verdict.reading(manifest, snapshot)?
     } else {
@@ -1489,6 +1806,7 @@ fn stop_reading(
     };
     reading.status = Status::of(unmet == 0);
     reading.count("unmet", unmet as u64)?;
+    counts.count_on(&mut reading)?;
     Ok(reading)
 }
 

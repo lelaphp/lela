@@ -206,14 +206,15 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
     store.record(&readings).unwrap();
     let verdict = judge();
     assert_eq!(verdict.crates, ["php_heap"], "{verdict:#?}");
-    assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
+    assert_eq!(verdict.messages().len(), 1, "{verdict:#?}");
     assert!(
-        verdict.unmet[0].starts_with("test: php_heap fail: php_heap: 1 test failed"),
+        verdict.messages()[0].starts_with("test: php_heap fail: php_heap: 1 test failed"),
         "{verdict:#?}"
     );
 
-    // The test is fixed; the readings are stale until measured again, and
-    // measured again the crate is done.
+    // The test is fixed; the readings are stale until measured again, the
+    // test's saying its last reading failed (#3494), and measured again
+    // the crate is done.
     let text = std::fs::read_to_string(&lib).unwrap();
     std::fs::write(
         &lib,
@@ -222,8 +223,8 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
     .unwrap();
     let verdict = judge();
     assert!(
-        verdict.unmet.contains(
-            &"test: the reading for php_heap is stale; php_heap changed since it was taken"
+        verdict.messages().contains(
+            &"test: the reading for php_heap is stale; php_heap changed since it was taken; its last reading failed"
                 .to_owned()
         ),
         "{verdict:#?}"

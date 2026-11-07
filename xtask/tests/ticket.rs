@@ -380,7 +380,9 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
     let unmet = stranded(&root, &store, &head).unwrap();
     assert_eq!(unmet.len(), 1, "{unmet:?}");
     assert!(
-        unmet[0].contains("#11 is named by a merge into main"),
+        unmet[0]
+            .message
+            .contains("#11 is named by a merge into main"),
         "{unmet:?}"
     );
     let closed = run(
@@ -500,7 +502,7 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
     let unmet = stranded(&root, &store, &head).unwrap();
     assert_eq!(unmet.len(), 2, "{unmet:?}");
     assert!(
-        unmet[0].contains("#15 is named") && unmet[1].contains("#17 is named"),
+        unmet[0].message.contains("#15 is named") && unmet[1].message.contains("#17 is named"),
         "{unmet:?}"
     );
 }
@@ -691,7 +693,10 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
     let head = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     let unmet = stranded(&root, &store, &head).unwrap();
     assert_eq!(unmet.len(), 1, "{unmet:?}");
-    assert!(unmet[0].contains("#21 could not be read"), "{unmet:?}");
+    assert!(
+        unmet[0].message.contains("#21 could not be read"),
+        "{unmet:?}"
+    );
 
     tracker.with_issue(&closed(20, TICKED));
     tracker.with_issue(&closed(22, TICKED));
@@ -1924,10 +1929,11 @@ fn stranded_reads_each_tickets_last_reading_and_errs_on_an_unreadable_file() {
     let mut left_open = reading(Status::Fail, "2026-11-07T10:00:00Z");
     left_open.count("unclosed", 1).unwrap();
     store.record(&[left_open]).unwrap();
-    assert_eq!(
-        stranded(&root, &store, &head).unwrap(),
-        ["ticket: #40: fail"]
-    );
+    let messages = |store: &Store| -> Vec<String> {
+        let stranded = stranded(&root, store, &head).unwrap();
+        stranded.into_iter().map(|r| r.message).collect()
+    };
+    assert_eq!(messages(&store), ["#40: fail"]);
 
     let other = Tree::new("ticket-stranded-landed-other").unwrap();
     let theirs = Store::at(other.to_path_buf());
@@ -1941,7 +1947,7 @@ fn stranded_reads_each_tickets_last_reading_and_errs_on_an_unreadable_file() {
         "the file is as it was"
     );
     assert_eq!(
-        stranded(&root, &store, &head).unwrap(),
+        messages(&store),
         Vec::<String>::new(),
         "the landed close replaced the reading"
     );

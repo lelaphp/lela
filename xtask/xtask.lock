@@ -67,9 +67,15 @@ done::Base
 done::Base::of
 done::Caller
 done::Caller::ambient
+done::Format
+done::JSON_V
+done::Kind
+done::Unmet
 done::Verdict
+done::Verdict::messages
 done::Verdict::met
 done::Verdict::render
+done::Verdict::to_json
 done::judge
 done::run
 done::run_hook
