@@ -1572,3 +1572,110 @@ fn an_escape_enters_the_trace_compiled_at_a_preloaded_landing_in_code() {
         "the crossing went on from {crossed:?} escapes"
     );
 }
+
+/// `Lane` that counts, in [`Landed`], each return the tier is asked
+/// about whose caller serves an op array an epoch holds, and each of
+/// those whose caller does not stand past a call ([`record::lands_past`]),
+/// before it asks [`super::safepoint`]. A caller whose op array no epoch
+/// holds reads only sealed landings ([`tier::landing_stood`]).
+struct Landing;
+
+/// The returns [`Landing`] saw, and how many of them landed past no call.
+#[derive(Debug, Default)]
+struct Landed {
+    held: u32,
+    past_no_call: u32,
+}
+
+impl Tier for Landing {
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
+        if let Site::Return(_) = site
+            && let Some((at, code)) = tier::frame(req, frame)
+                .map(|view| view.opline())
+                .zip(tier::served(req, frame))
+        {
+            let before = at.0.checked_sub(1);
+            let past_a_call = before
+                .and_then(|before| code.code().oplines.get(before as usize))
+                .is_some_and(|op| record::lands_past(op.opcode));
+            let landed = req.state::<Landed>();
+            landed.held += 1;
+            landed.past_no_call += u32::from(!past_a_call);
+        }
+        super::safepoint(req, frame, site, held)
+    }
+
+    fn bound(started: &tier::Started<'_>) -> tier::Bound {
+        <Lane as Tier>::bound(started)
+    }
+
+    fn laid(started: &tier::Started<'_>, req: Option<&Request>) -> tier::Laid {
+        <Lane as Tier>::laid(started, req)
+    }
+
+    fn setting(started: &tier::Started<'_>, startup: TierStatus) -> TierStatus {
+        <Lane as Tier>::setting(started, startup)
+    }
+
+    /// `Lane`'s, with [`Landed`].
+    fn extension() -> Option<Extension> {
+        let mut ini = crate::policy::ini();
+        ini.extend(testing::declared(&testing::OPCACHE));
+        Some(
+            testing::switched(ExtensionBuilder::default())
+                .ini(ini)
+                .engine_state(crate::JitEngine::new)
+                .rinit(crate::JitEngine::request_started)
+                .request_state::<Landed>()
+                .build("jit"),
+        )
+    }
+}
+
+/// A return reads a landing only past a call (#4156): php arms a
+/// landing at the opline past a `DO_*CALL`, a `YIELD*` or an
+/// `INCLUDE_OR_EVAL` (`zend_jit_trace_setup_ret_counter`), so a
+/// destructor or a `__toString` returning from inside a
+/// `FRAMELESS_ICALL_2` returns to no landing. Here they return from the
+/// entry frame of a serving of their own, which asks no site, and every
+/// return the tier is asked about, with `E_ALL` in a loop traces serve,
+/// under plain tracing and exit-fuzz, has its caller past a call, the
+/// interpreted returns plain tracing leaves among them; the
+/// frameless call is made once a turn, printing no `Deprecated` of a
+/// cleared operand.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_to_no_calls_successor_reads_no_landing() {
+    let program = r#"class T { static $boom = []; function __construct(public $n) {} function __destruct() { if (isset(self::$boom[$this->n])) { throw new Exception("dtor{$this->n}"); } } function __toString(): string { return "T"; } }
+function g($n) { $k = 0; for ($i = 0; $i < $n; $i++) { try { $k += property_exists(new T(10 * $i + 1), "n") ? 1 : 0; $k += class_exists(new T(10 * $i + 2), false) ? 1 : 0; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; } } return $k; }
+T::$boom = [61 => 1, 92 => 1];
+for ($j = 0; $j < 3; $j++) { echo g(12), "\n"; }"#;
+    let mut held = 0;
+    for mode in ["tracing", "exit-fuzz"] {
+        let ini = [
+            ("opcache.jit", "tracing"),
+            ("jit.compile", "inline"),
+            ("jit.mode", mode),
+            ("opcache.jit_hot_func", "2"),
+            ("opcache.jit_hot_return", "2"),
+            ("error_reporting", "32767"),
+        ];
+        let engine = testing::engine::<Landing>(&ini);
+        let (served, kept) = testing::Scratch::new().serve_kept::<Landed>(&engine, program);
+        assert_eq!(
+            testing::stdout(&served),
+            "caught dtor61\ncaught dtor92\n21\n".repeat(3),
+            "under {mode}"
+        );
+        let landed = kept.unwrap_or_default();
+        assert_eq!(landed.past_no_call, 0, "under {mode}: {landed:?}");
+        held += landed.held;
+    }
+    assert!(held > 0, "no return was asked about");
+}
