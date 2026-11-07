@@ -762,9 +762,11 @@ impl Store {
     /// Which reading of `instrument` stands over `scope` at `key`, under
     /// the pin whose digest is `pin` for an instrument of [`UNDER_RECIPE`]:
     /// the one question `done`, the `--staged` instruments and `witness
-    /// --unmeasured` ask of a scope (harness-design.md §4.2). The scope's
-    /// file when the reading there is over the key, and otherwise the
-    /// index's entry for it. The index is where a retired worktree's
+    /// --unmeasured` ask of a scope (harness-design.md §4.2). The index's
+    /// entry for the key, which is the latest reading over it, since every
+    /// record replaces it and a land replaces it only with a later one; and
+    /// the scope's file, over the key, only where prune let the entry go.
+    /// No `at` is compared between the two. The index is where a retired worktree's
     /// readings are: `worktree retire` lands its log in main's store and
     /// leaves its files with the worktree, so its pass is found here, by
     /// the key it was taken over, only when this is main's store, as it is
@@ -785,14 +787,14 @@ impl Store {
         pin: &str,
     ) -> Result<Freshness> {
         if !key.is_empty() {
-            let file = self.read(instrument, scope).ok().flatten();
-            if let Some(reading) = file.filter(|r| r.fresh_for(key, pin)) {
-                return Ok(Freshness::Fresh(reading));
-            }
             let entry = (self.entries(instrument, scope, key)?.into_iter())
                 .filter(|r| r.fresh_for(key, pin))
                 .max_by_key(|r| r.at.to_string());
             if let Some(reading) = entry {
+                return Ok(Freshness::Fresh(reading));
+            }
+            let file = self.read(instrument, scope).ok().flatten();
+            if let Some(reading) = file.filter(|r| r.fresh_for(key, pin)) {
                 return Ok(Freshness::Fresh(reading));
             }
         }
@@ -1548,6 +1550,48 @@ mod tests {
         assert_eq!(
             fresh_key(store.over("witness", "a", &key(5), "old-pin").unwrap()),
             Some(key(5))
+        );
+    }
+
+    /// A reading another checkout took later over the same key, landed in
+    /// the index, stands before this store's older file over that key:
+    /// the index's entry is the latest over its key (harness-design.md
+    /// §4.2, revision 83). Here a landed pass over a fail the file holds,
+    /// which the file-first order gave.
+    #[test]
+    fn a_landed_reading_later_than_the_file_over_the_same_key_stands() {
+        let dir = Tree::new("store-over-later").unwrap();
+        let store = Store::at(dir.path());
+        let mut failed = over("test", "xtask", &key(1), "2026-11-07T10:00:00Z");
+        failed.status = Status::Fail;
+        store.record(&[failed]).unwrap();
+        let passed = over("test", "xtask", &key(1), "2026-11-07T11:00:00Z");
+        landed(&store, "store-over-later-landed", &passed);
+        let file = store.read("test", "xtask").unwrap().unwrap();
+        assert_eq!(
+            file.status,
+            Status::Fail,
+            "the land leaves the file as it was"
+        );
+        assert_eq!(
+            store.over("test", "xtask", &key(1), "").unwrap(),
+            Freshness::Fresh(passed)
+        );
+    }
+
+    /// Where prune let a key's entry go, the scope's file over that key
+    /// still answers.
+    #[test]
+    fn an_entry_prune_let_go_is_answered_from_a_file_over_the_key() {
+        let dir = Tree::new("store-over-pruned").unwrap();
+        let store = Store::at(dir.path());
+        let reading = over("test", "xtask", &key(1), "2026-11-07T10:00:00Z");
+        store.record(std::slice::from_ref(&reading)).unwrap();
+        let entry = store.indexed(&reading).unwrap().unwrap();
+        std::fs::remove_file(entry).unwrap();
+        assert_eq!(
+            store.over("test", "xtask", &key(1), "").unwrap(),
+            Freshness::Fresh(reading)
         );
     }
 
