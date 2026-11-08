@@ -238,6 +238,21 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: UsageCommand,
     },
+    /// What a review found and whether each merge into `main` was
+    /// reviewed: `record`, `resolve`, `cover` and `class`; it refuses
+    /// nothing
+    ///
+    /// `record` writes a reviewer's findings file as one reading of the
+    /// range it read and one per finding; `resolve` applies a vote, a
+    /// reproduction, a fix or a ticket to one finding; `cover` writes the
+    /// coverage of each merge not yet judged, which `worktree land` runs
+    /// after it moves `main`; `class` prints a branch's class and writes
+    /// no reading. Every reading lands in the main checkout's store, and
+    /// none is a hold on anything (Round 2, Q33 (a)).
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
+    },
     /// Render the named files' regions with `computed run` and say what it
     /// did, one line per file, for pre-commit to re-stage. Writes no reading.
     ///
@@ -961,6 +976,38 @@ pub(crate) enum UsageCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub(crate) enum ReviewCommand {
+    /// Write a reviewer's findings file, JSON, as one reading of the range
+    /// it read and one per finding, each scoped `<ticket>/<head7>-<hash>`.
+    Record {
+        /// The findings file.
+        file: PathBuf,
+    },
+    /// Apply one act to the finding recorded under a scope and write it
+    /// again there; a refute by the branch's builder is refused.
+    Resolve {
+        /// The finding's scope, `<ticket>/<head7>-<hash>`.
+        scope: String,
+        #[command(subcommand)]
+        act: crate::review::Act,
+    },
+    /// Write the coverage reading of each merge into `main` of the last
+    /// seven days that has none, or of the merge named.
+    Cover {
+        /// One merge to judge, judged again where it was.
+        #[arg(long, value_name = "REV")]
+        merge: Option<String>,
+    },
+    /// Print the class of a branch's diff since its merge base with
+    /// `main`; writes no reading.
+    Class {
+        /// The branch's head.
+        #[arg(long, value_name = "REV", default_value = "HEAD")]
+        head: String,
+    },
+}
+
 /// The sections of harness-design.md §4.6 that have a renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Section {
@@ -1001,6 +1048,11 @@ pub enum Section {
     /// one line (#1157); and the tracker's week beside it, tickets created
     /// against closed and how many are open (#3619).
     Tickets,
+    /// The review coverage of the last 7 days in one line: the class A
+    /// merges covered, partial and unreviewed, and the class B merges
+    /// beside them, from the readings `worktree land` writes of each merge
+    /// in the main worktree's store and this checkout's (Round 4, Q35).
+    Review,
     /// Whether CI runs and passes on `main`: the last run that executed a
     /// job and the last that passed, from GitHub, unknown where it cannot
     /// be asked (#3619).

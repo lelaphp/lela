@@ -1,0 +1,25 @@
+# Must fail: a crate the table names is no [[crate]] row, so a misspelling
+# would leave php_heap out of class A unseen.
+[budget]
+total = 1
+new = 1
+docs = 1
+harness = 1
+lock_packages = 1
+clean_build_release_s = 1
+api_items = 1
+bindings = 1
+
+[[crate]]
+name = "php_heap"
+budget = 1
+[[crate]]
+name = "php_process"
+budget = 1
+[[crate]]
+name = "xtask"
+budget = 1
+
+[review]
+crates = ["php_hep", "php_process"]
+unsafe_lines = true

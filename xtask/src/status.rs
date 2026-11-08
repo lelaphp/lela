@@ -23,6 +23,7 @@ mod facts;
 mod graph;
 mod invocation;
 mod parity;
+mod review;
 mod tickets;
 pub(crate) use every::PerReading;
 
@@ -48,18 +49,22 @@ pub(crate) const MAP: &str = "AGENTS.md";
 /// The local region file, gitignored, rendered only by name (§5).
 pub(crate) const LOCAL: &str = ".claude/harness.local.md";
 /// The volatile sections of the local file, in the order it renders them:
-/// §5's eight, the instrument readings first and `port-map` with them
-/// since #148, a reading that moves with the store like the others and is
-/// otherwise renderable only by name. `mutants` waits on its instrument and
-/// `permits` is rendered by name, its "this session" line kept (#3620 D1).
-/// `ci` and `tickets` come last, which ask GitHub, so they are read where
-/// the local file renders and never at a prompt (#3619).
-pub(crate) const LOCAL_SECTIONS: [&str; 8] = [
+/// §5's eight and the review coverage line, the instrument readings first
+/// and `port-map` with them since #148, a reading that moves with the store
+/// like the others and is otherwise renderable only by name. `review`,
+/// one line of the coverage `worktree land` writes, is the ninth, as Round
+/// 4's Q35 ruled; §5's sentence that counts them waits on a person's
+/// wording. `mutants` waits on its instrument and `permits` is rendered by
+/// name, its "this session" line kept (#3620 D1). `ci` and `tickets` come
+/// last, which ask GitHub, so they are read where the local file renders
+/// and never at a prompt (#3619).
+pub(crate) const LOCAL_SECTIONS: [&str; 9] = [
     "budget",
     "phpt",
     "witness",
     "port-map",
     "divergence",
+    "review",
     "git",
     "ci",
     "tickets",
@@ -132,6 +137,7 @@ fn refuse_under_tracked(section: Section, against: Against<'_>) -> Result<()> {
             | Section::Parity
             | Section::Tickets
             | Section::Ci
+            | Section::Review
     );
     if alone && matches!(against, Against::Tree) {
         bail!(
@@ -206,6 +212,7 @@ pub fn render(
             });
         }
         Section::Ci => return Ok(facts::ci(root)),
+        Section::Review => return review::render(manifest, against.checkout()?, root, format),
         Section::Track => (
             last_run(&against.checkout()?.history(track_work::INSTRUMENT)?),
             TRACK,
@@ -1917,9 +1924,13 @@ mod tests {
     }
 
     #[test]
-    fn the_local_template_is_the_eight_volatile_sections() {
+    fn the_local_template_is_the_nine_volatile_sections() {
         let template = local_template();
-        assert_eq!(LOCAL_SECTIONS.len(), 8, "harness-design.md §5 says eight");
+        assert_eq!(
+            LOCAL_SECTIONS.len(),
+            9,
+            "harness-design.md §5's eight and the review line Round 4's Q35 added"
+        );
         for name in LOCAL_SECTIONS {
             let line = opener(&template, name).unwrap();
             assert!(line.contains(" volatile "), "{line}");

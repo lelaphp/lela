@@ -92,7 +92,7 @@ pub struct Reading {
     v: Version,
     /// The subcommands that write one, in the order `cli::Command` has
     /// them: `api-check | permit | done | track-work | ticket | usage |
-    /// bench | budget | clippy | test | miri | phpt | port-map |
+    /// review | bench | budget | clippy | test | miri | phpt | port-map |
     /// compile-identity | crosscheck | trace-dump | fpm-compare | soak | unsafe-audit |
     /// steer | divergence-reason | witness | vocab`; `fuzz | mutants` are
     /// named by harness-design.md §4.2 and not built yet.

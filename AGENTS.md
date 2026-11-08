@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=62e9e569f496c98695014801d9e8eee8a58611d548230dd08c4b4c01d8d530a0 out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
+<!-- /computed in=214a8f5e1e29179df19c76d4928bdef7b9fdc50941f0fe63350eebac398a96ef out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
 
 ## What makes the third engine special?
 
@@ -90,7 +90,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=981a3b8e4db29c25de28936cfaee752db4a3d43f04ffa57fb9bd5677e1ae2423 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=745eb08111f09c965eeade41acf70cb7dea77303e3b48650e0d429598b573f31 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -126,9 +126,9 @@ third-engine-design.md
 | tier | tier.lock | 237 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 40 |  |
-| harness | xtask.lock | 470 |  |
+| harness | xtask.lock | 488 |  |
 
-<!-- /computed in=946ab56f977b9d27f44187c60b7b11a5162cb615bfdd8323f4ff87ba893aef8b out=3b08034adcbf5396f52845ed59e3cd9d61b72d8420d9527986ebb592a05cadfa -->
+<!-- /computed in=8c306edd4f71a6d8e2d081c76b9e5ec8ff7f3a219783aed5ebc775d9bd5d6ffe out=21ff4caea3324b2c1726935e9c28d543960d224d5eeccb269b9819c77ea2e319 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -144,6 +144,7 @@ Commands:
   worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` say its owner, `queue` and `land` run the merge queue
   ticket             A ticket, one GitHub issue: `read`, `ready` and `close` hold it to its boxes; `view` and `brief` are what a builder reads; `parent` measures a chart sheet
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
+  review             What a review found and whether each merge into `main` was reviewed: `record`, `resolve`, `cover` and `class`; it refuses nothing
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
   bench              Measure one bar under the protocol: paired reps with the A/A control and the load average, one reading per bar, exit 0 always
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code, a stale generated file and a `build.rs` that bakes its crate's directory in
@@ -172,7 +173,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=a147eeadc62d555d8ff12bf778aacb70cdce2fee85b06d03396ffcbf8a189ff8 out=4890c46e3cf818724053edaab215fe5b203cecc1148d2dc2c117f2b7b6be56e3 -->
+<!-- /computed in=ef240a8a1bf6ed34e4f0c0ebff064d153b44dbc1882396ae02ff8c87e74e9ad1 out=69934e7bfc56ad3d2df8e71046ae048496bedb686737de018dd76c1aadb449d5 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
