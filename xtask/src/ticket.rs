@@ -49,9 +49,8 @@
 //! from prose here.
 //!
 //! Which criterion asks for the write is a heuristic, and one that says
-//! what it matched rather than one that stays silent, the shape
-//! `ticket.reply-unfiled` has: a false positive costs one hold and the
-//! recovery is a person's word on the label. A criterion is read to its
+//! what it matched rather than one that stays silent: a false positive
+//! costs one hold and the recovery is a person's word on the label. A criterion is read to its
 //! main clause, what stands before its first comma, colon or
 //! subordinating word, since
 //! a path named after one is a path the clause describes something else

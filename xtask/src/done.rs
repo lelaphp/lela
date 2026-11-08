@@ -37,12 +37,7 @@
 //! `data/pre-day-1.md` §4): exit 0 and nothing printed when
 //! `stop_hook_active` is true, otherwise `{"decision":"block","reason":…}`
 //! with the list while anything is unmet. Every verdict is one reading,
-//! `done` over `workspace`. At the Stop, and there alone, the reply is
-//! read as well (#32, the `reply` module): a session the store says closed a
-//! ticket whose `last_assistant_message` carries the language of not
-//! filing is held once with the sentences it matched, a second reading of
-//! `done` over the rule; the second Stop passes as it always did, so the
-//! hold costs one turn.
+//! `done` over `workspace`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -65,7 +60,6 @@ use crate::phpt;
 use crate::phpt::against::{self, Against};
 use crate::port_map;
 use crate::reading::{Freshness, Moved, Number, Outcome, Reading, Status, Store, plural};
-use crate::reply;
 use crate::ticket;
 use crate::track::{self, MAIN, Ticket, merge_base, short};
 
@@ -1620,16 +1614,13 @@ fn called(mut reading: Reading, caller: Caller) -> Reading {
 }
 
 /// The Stop hook's stdin: the keys `done` reads (harness-design.md §13
-/// D.16). The reply is read only for a session the store says closed a
-/// ticket.
+/// D.16).
 #[derive(Debug, Deserialize)]
 struct StopStdin {
     #[serde(default)]
     stop_hook_active: bool,
     #[serde(default)]
     session_id: String,
-    #[serde(default)]
-    last_assistant_message: String,
     /// The subagent stopping, absent at the main loop's Stop.
     #[serde(default)]
     agent_id: Option<String>,
@@ -1637,8 +1628,7 @@ struct StopStdin {
     #[serde(default)]
     hook_event_name: Option<String>,
     /// The Stop of another checkout handing this one to its own build:
-    /// judge this checkout alone, and leave the reply to the Stop that
-    /// handed it (#3619).
+    /// judge this checkout alone (#3619).
     #[serde(default)]
     here: bool,
     /// The host's tasks in flight as the turn stops, and its session's
@@ -1761,39 +1751,19 @@ pub(crate) fn hook(
             reasons.push(reason);
         }
     }
-    // The reply, for a session that closed a ticket and no other.
-    let read = || {
-        reply::closed_by(store, &stop.session_id)
-            .and_then(|closed| reply::read(manifest, &closed, &stop.last_assistant_message))
-    };
-    let unfiled = if stop.here {
-        None
-    } else {
-        match read() {
-            Ok(unfiled) => unfiled,
-            Err(err) => return Some(block(&format!("done could not read the reply: {err:#}"))),
-        }
-    };
     // The hook's exit is 0 and its verdict is the JSON; the outcome of
     // recording it is neither.
     let recorded = stop_reading(here.as_ref(), manifest, &snapshot, counts, checkouts.len())
         .and_then(|r| {
-            // The Stop's verdict carries the session: what marks a later
-            // turn's close as this turn's and not an earlier one's.
+            // The Stop's verdict carries the session: what the release of
+            // its block, at the second Stop, finds it by.
             let mut r = called(r, caller);
             stop.session_id.clone_into(&mut r.session);
             stop.count_waiting(&mut r, &checkouts)?;
-            let mut readings = vec![r];
-            if let Some(unfiled) = &unfiled {
-                readings.push(unfiled.reading(&snapshot, &stop.session_id)?);
-            }
-            store.record(&readings)
+            store.record(&[r])
         });
     if let Err(err) = recorded {
         eprintln!("xtask done: the verdict stands but was not recorded: {err:#}");
-    }
-    if let Some(unfiled) = unfiled {
-        reasons.push(unfiled.render());
     }
     (!reasons.is_empty()).then(|| {
         let mut held = block(&reasons.join("\n"));

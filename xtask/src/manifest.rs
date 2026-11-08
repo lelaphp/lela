@@ -885,9 +885,9 @@ impl Predicates {
 }
 
 impl Rule {
-    /// Whether the rule reads the reply at the Stop rather than a call:
-    /// `tool = "Stop"`, the hook event where it is read, so `permit` never
-    /// judges it and `done --hook` does (#32).
+    /// Whether the rule names the Stop rather than a call: `tool = "Stop"`,
+    /// which `permit` never judges. Nothing reads such a row since the
+    /// reply sensor retired (#4257); this goes with the last of them.
     pub(crate) fn at_the_stop(&self) -> bool {
         self.tool.iter().any(|t| t == "Stop")
     }

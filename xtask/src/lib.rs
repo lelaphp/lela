@@ -71,7 +71,6 @@ pub mod phpt;
 pub mod port_map;
 pub mod queue;
 pub mod reading;
-mod reply;
 pub mod review;
 mod rust;
 pub mod scratch;
