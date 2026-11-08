@@ -1795,6 +1795,131 @@ fn a_checkout_written_elsewhere_is_handed_to_its_own_build() {
     assert_eq!(reading.numbers["unmet"], 1.into(), "{reading:#?}");
 }
 
+/// A Stop met where it stands and held in another checkout the session
+/// wrote in fails, and its reading says what the other holds rather than
+/// that every condition is met (Round 1, Q23, c7).
+#[test]
+fn a_stop_met_here_and_held_elsewhere_never_says_every_condition_is_met() {
+    let root = scratch("hook-met-here");
+    let tree = Tree::new("done-hook-met-here").unwrap();
+    let other = tree.join("t1");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t1", other.to_str().unwrap()]);
+    wrote_in(&root, &root, "s", None);
+    wrote_in(&root, &other, "s", None);
+    let out = stop_hook(&root, "{\"session_id\":\"s\"}").ok();
+    assert!(out.contains("done could not judge"), "{out}");
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(
+        !reading.message.contains("every condition"),
+        "{}",
+        reading.message
+    );
+    assert!(
+        reading.message.starts_with(
+            "stop: 1 unmet over the 1 other checkout the session wrote in; this one is met since "
+        ),
+        "{}",
+        reading.message
+    );
+}
+
+/// The Stop counts the host's waiting work on its reading (Round 1, Q23,
+/// c7): the tasks in flight, by type, the shell ones in a checkout it
+/// judged, and the session's crons, where the host sent each array, so a
+/// Stop whose host sent none says nothing of them. The counts hold
+/// nothing: the turn passes.
+#[test]
+fn the_stop_counts_the_hosts_background_tasks_and_session_crons() {
+    let root = scratch("hook-waiting");
+    let store = Store::of_workspace(&root);
+    let canonical = root.canonicalize().unwrap();
+    let stop = serde_json::json!({
+        "session_id": "s-waiting",
+        "hook_event_name": "Stop",
+        "background_tasks": [
+            {"id": "a", "type": "shell", "status": "running",
+             "command": format!("cd {} && cargo xtask test", canonical.display())},
+            {"id": "b", "type": "shell", "status": "running", "command": "tail -f /var/log/x"},
+            {"id": "c", "type": "subagent", "status": "running"},
+        ],
+        "session_crons": [{"id": "d", "schedule": "0 9 * * 1-5", "recurring": true}],
+    });
+    assert_eq!(hook(&root, &stop.to_string()).ok(), "");
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert_eq!(
+        reading.numbers["background_tasks"],
+        3.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        reading.numbers["background_in_checkouts"],
+        1.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(reading.numbers["session_crons"], 1.into(), "{reading:#?}");
+    assert_eq!(
+        reading.groups["background_tasks shell"],
+        2.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        reading.groups["background_tasks subagent"],
+        1.into(),
+        "{reading:#?}"
+    );
+
+    let empty = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
+    assert_eq!(hook(&root, &empty).ok(), "");
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert_eq!(
+        reading.numbers["background_tasks"],
+        0.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(reading.numbers["session_crons"], 0.into(), "{reading:#?}");
+
+    // A shape the host has not documented blocks nothing.
+    let odd = "{\"session_id\":\"s-odd\",\"background_tasks\":{\"n\":1}}";
+    assert_eq!(hook(&root, odd).ok(), "");
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert!(
+        !reading.numbers.contains_key("background_tasks"),
+        "{reading:#?}"
+    );
+    assert!(
+        !reading.numbers.contains_key("session_crons"),
+        "{reading:#?}"
+    );
+}
+
+/// A checkout the session wrote in and that was removed since is none
+/// the Stop judges, and none its reading counts (Round 1, Q23, c7).
+#[test]
+fn a_checkout_removed_since_the_session_wrote_in_it_is_not_counted() {
+    let root = scratch("hook-removed");
+    let tree = Tree::new("done-hook-removed").unwrap();
+    let gone = tree.join("t1");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t1", gone.to_str().unwrap()]);
+    wrote_in(&root, &gone, "s", None);
+    Repo::at(&root).git(&["worktree", "remove", "--force", gone.to_str().unwrap()]);
+    assert_eq!(stop_hook(&root, "{\"session_id\":\"s\"}").ok(), "");
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert!(
+        reading
+            .message
+            .starts_with("stop: 0 unmet over the 0 checkouts"),
+        "{}",
+        reading.message
+    );
+}
+
 /// A checkout handed over judges itself and hands back its count and its
 /// kinds, which sum to it, so the Stop that handed it over counts kinds
 /// and not only a total (c2.f).
@@ -1832,6 +1957,7 @@ fn a_block_the_second_stop_released_is_a_reading_with_its_count() {
         .rfind(|r| r.scope == "released");
     let release = release.expect("the release was recorded");
     assert_eq!(release.status, Status::Fail);
+    assert!(!release.at.to_string().starts_with("1970-"), "{release:#?}");
     assert_eq!(release.numbers["unmet"], held.numbers["unmet"]);
     assert!(
         release
@@ -2061,11 +2187,15 @@ fn done_peek_writes_nothing_and_done_and_its_hook_settle_a_spent_kept_change() {
 }
 
 /// Each reading names its caller (#3619): pre-push says so on the command
-/// line, and a run that names none is a hand's outside CI.
+/// line, and a run that names none is a hand's outside CI. Land is
+/// `worktree land`'s alone, which no command line offers (c11.b).
 #[test]
 fn a_done_reading_carries_its_caller() {
     let root = scratch("caller");
     let store = Store::of_workspace(&root);
+    let land = xtask(&root, &["done", "--base", "HEAD", "--caller", "land"]);
+    assert_eq!(land.code(), 2, "{land}");
+    assert!(store.read("done", "workspace").unwrap().is_none(), "{land}");
     xtask(&root, &["done", "--base", "HEAD", "--caller", "pre-push"]).ok();
     let reading = store.read("done", "workspace").unwrap().unwrap();
     assert!(
