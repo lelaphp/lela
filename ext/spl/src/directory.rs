@@ -1014,7 +1014,20 @@ impl FilesystemIterator {
     #[php(tentative, implementation = DirectoryIterator::rewind)]
     fn rewind(this: This<Self>);
 
-    /// `FilesystemIterator::key(): string`, by the key flags ([`key_of`]).
+    /// `FilesystemIterator::key(): string`, by the key flags ([`key_of`]),
+    /// compared whole: flags of every key bit are no `KEY_AS_FILENAME`.
+    ///
+    /// ```php
+    /// $d = sys_get_temp_dir() . '/spl-fs-key'; @mkdir($d); touch("$d/f");
+    /// $it = new FilesystemIterator($d, FilesystemIterator::KEY_AS_FILENAME | FilesystemIterator::SKIP_DOTS);
+    /// var_dump($it->key());
+    /// $it->setFlags(FilesystemIterator::KEY_MODE_MASK);
+    /// var_dump(str_replace($d, '', $it->key()));
+    /// ```
+    /// ```expect
+    /// string(1) "f"
+    /// string(2) "/f"
+    /// ```
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         key_of(req, this.object())
