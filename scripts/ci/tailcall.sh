@@ -12,7 +12,7 @@
 #   scripts/ci/tailcall.sh check          per commit (harness.yml): php_engine
 #                                         checked under the cfg
 #   scripts/ci/tailcall.sh phpt <corpus> <tree>
-#                                         nightly (dashboard.yml): the hosts
+#                                         nightly (nightly.yml): the hosts
 #                                         <corpus> names built under the cfg
 #                                         in release-da, then `Zend/tests`
 #                                         and each directory of <tree>'s
@@ -36,8 +36,8 @@
 # profile passes (design §10 Profiles, #3372); a RUSTFLAGS variable would
 # replace the table, so none is set and none is inherited.
 # A subset that fails fails the run once every subset has run; the
-# readings are the lane's alone, stashed apart from what the dashboard
-# folds, and the runs `phpt` keeps are put back as they stood, so the
+# readings are the lane's alone, stashed apart from the oracle job's
+# store, and the runs `phpt` keeps are put back as they stood, so the
 # threaded build's are never read as the shipped engine's.
 #
 # The nightly is TOOLCHAIN below, and moving it is that one line. A nightly
@@ -58,7 +58,7 @@ cfg=(--config "target.'cfg(all())'.rustflags=['--cfg', 'dispatch=\"tailcall\"']"
 # shipped one, so the kept runs, the targets under the pin among them, are
 # set aside before the subsets and put back as they stood after: a base
 # `--against` or `done` reads is never the threaded build's. The EXIT trap
-# puts them back, and dashboard.yml's step after the subsets runs `restore`
+# puts them back, and nightly.yml's step after the subsets runs `restore`
 # whatever ended them, a timeout included.
 runs=target/harness/phpt-runs
 aside=$target/phpt-runs-aside

@@ -740,12 +740,12 @@ fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
     );
 }
 
-/// The oracle job runs the control with `--control`, so dashboard.yml
+/// The oracle job runs the control with `--control`, so nightly.yml
 /// names no php for it and no variant: each subset's own pinned php is the
 /// harness's to find (#1970).
 #[test]
 fn the_oracle_jobs_control_names_no_php_and_no_variant() {
-    let text = fs::read_to_string(workspace().join(".github/workflows/dashboard.yml")).unwrap();
+    let text = fs::read_to_string(workspace().join(".github/workflows/nightly.yml")).unwrap();
     let commands: Vec<&str> = text
         .lines()
         .map(str::trim)
@@ -763,7 +763,7 @@ fn the_oracle_jobs_control_names_no_php_and_no_variant() {
     }
     let pin = Pin::parse(&tracked_text()).unwrap();
     for name in pin.variant.keys() {
-        assert!(!text.contains(name.as_str()), "dashboard.yml names {name}");
+        assert!(!text.contains(name.as_str()), "nightly.yml names {name}");
     }
 }
 

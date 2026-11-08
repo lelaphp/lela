@@ -334,12 +334,12 @@ mod tests {
     #[test]
     fn the_oracle_job_builds_its_binaries_in_the_lanes_profile() {
         let text =
-            std::fs::read_to_string(workspace().join(".github/workflows/dashboard.yml")).unwrap();
+            std::fs::read_to_string(workspace().join(".github/workflows/nightly.yml")).unwrap();
         let mut lines = text.lines().skip_while(|line| *line != "  oracle:");
         assert_eq!(
             lines.next(),
             Some("  oracle:"),
-            "dashboard.yml has an oracle job"
+            "nightly.yml has an oracle job"
         );
         let job: Vec<&str> = lines
             .take_while(|line| {
