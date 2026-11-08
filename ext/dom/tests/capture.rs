@@ -302,3 +302,46 @@ echo "end\n";
     );
     assert_eq!(served.exit_code, 0);
 }
+
+/// `Dom\XMLDocument::C14NFile()` into a file, then the root's attributes,
+/// and a declaration attribute held across the call whose element is
+/// removed after it: the engine canonicalizes into memory, puts the tree
+/// back, then writes the file, so it reads `int(3)`, and `ownerElement`
+/// reads `NULL` (#3959).
+#[test]
+fn c14nfile_puts_a_modern_tree_back() {
+    let engine = support::engine();
+    let reproducer = engine.serve_capture(
+        r#"<?php
+$doc = Dom\XMLDocument::createFromString('<root xmlns="urn:a" xmlns:p="urn:p" p:x="1"><c/></root>');
+$file = tempnam(sys_get_temp_dir(), 'c14n');
+var_dump($doc->C14NFile($file));
+echo file_get_contents($file), "\n";
+unlink($file);
+var_dump($doc->documentElement->attributes->length);
+foreach ($doc->documentElement->attributes as $attr) {
+    echo $attr->name, "\n";
+}
+"#,
+        Capture::default(),
+    );
+    assert_eq!(
+        reproducer.stdout_text(),
+        "int(58)\n<root xmlns=\"urn:a\" xmlns:p=\"urn:p\" p:x=\"1\"><c></c></root>\nint(3)\nxmlns\nxmlns:p\np:x\n"
+    );
+    assert_eq!(reproducer.exit_code, 0);
+    let dangling = engine.serve_capture(
+        r#"<?php
+$doc = Dom\XMLDocument::createFromString('<root xmlns="urn:a"/>');
+$attr = $doc->documentElement->getAttributeNode('xmlns');
+$file = tempnam(sys_get_temp_dir(), 'c14n');
+var_dump($doc->C14NFile($file));
+unlink($file);
+$doc->documentElement->remove();
+var_dump($attr->ownerElement?->localName);
+"#,
+        Capture::default(),
+    );
+    assert_eq!(dangling.stdout_text(), "int(27)\nNULL\n");
+    assert_eq!(dangling.exit_code, 0);
+}
