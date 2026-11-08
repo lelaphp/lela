@@ -1022,6 +1022,102 @@ fn a_record_an_older_build_took_of_the_hook_s_checkout_is_not_compared() {
     assert!(!out.contains("divergence.toml"), "{out}");
 }
 
+/// `--after` for a call whose line leaves its shell in another worktree:
+/// the hook's `cwd` after the call is where the line's `cd` left the
+/// shell, so the call is taken before it in `root`, its line run there,
+/// and asked after it from `linked`; what `--after` printed, and the
+/// record as `edit` left it before the call ran.
+fn after_a_line_that_leaves_for(
+    root: &Path,
+    linked: &Path,
+    id: &str,
+    command: &str,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> String {
+    permit(root, &stdin("PreToolUse", SESSION, id, root, command), &[]).ok();
+    let file = record(root, SESSION, id);
+    let mut taken: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    edit(&mut taken);
+    std::fs::write(&file, taken.to_string()).unwrap();
+    shell(root, command);
+    let ran = permit(
+        root,
+        &stdin("PostToolUse", SESSION, id, linked, command),
+        &["--after"],
+    );
+    assert_eq!(ran.code(), 0, "{ran}");
+    assert!(!file.exists(), "the record is spent");
+    ran.stdout
+}
+
+/// Round 1, Q18 (c): `--after` holds the checkout the record took as the
+/// call began and walks the line from the start it kept, not from the
+/// hook's `cwd` after the call, which the line's own `cd` moved: a write
+/// into the main checkout's pin before a `cd` into a worktree is put
+/// back and denied in the main checkout.
+#[test]
+fn after_holds_the_recorded_checkout_and_walks_from_the_recorded_start() {
+    let root = scratch("recorded-start");
+    let (_base, linked) = linked_worktree(&root);
+    let was = read(&root, "oracle.toml");
+    let command = format!("echo '# written' >> oracle.toml && cd {}", linked.display());
+    let out = after_a_line_that_leaves_for(&root, &linked, "toolu_start", &command, |taken| {
+        let start = root.canonicalize().unwrap();
+        assert_eq!(taken["start"], start.to_str().unwrap(), "the start is kept");
+    });
+    assert_eq!(read(&root, "oracle.toml"), was, "put back");
+    assert_denied(&root, &out, "oracle.toml", "# written");
+}
+
+/// A record an older build took keeps no start: its line is walked from
+/// the hook's `cwd`, as before, so the same write read from the worktree
+/// the line left the shell in is not one its line names, and the change
+/// is kept and named.
+#[test]
+fn a_record_with_no_start_walks_the_line_from_the_call_s_cwd() {
+    let root = scratch("no-start");
+    let (_base, linked) = linked_worktree(&root);
+    let command = format!("echo '# written' >> oracle.toml && cd {}", linked.display());
+    let out = after_a_line_that_leaves_for(&root, &linked, "toolu_no_start", &command, |taken| {
+        taken.as_object_mut().unwrap().remove("start");
+    });
+    assert!(read(&root, "oracle.toml").contains("# written"), "kept");
+    assert_kept(&root, &out, "oracle.toml");
+}
+
+/// A record whose checkout is gone by `--after`, a worktree the call
+/// itself removed, is dropped: nothing is compared or put back, and
+/// stderr says why.
+#[test]
+fn a_record_whose_checkout_has_gone_is_dropped() {
+    let root = scratch("checkout-gone");
+    let (_base, linked) = linked_worktree(&root);
+    let command = format!("git worktree remove --force {}", linked.display());
+    let id = "toolu_gone";
+    permit(
+        &root,
+        &stdin("PreToolUse", SESSION, id, &linked, &command),
+        &[],
+    )
+    .ok();
+    let file = record(&root, SESSION, id);
+    let taken: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(taken["checkouts"][0]["checkout"], linked.to_str().unwrap());
+    shell(&root, &command);
+    assert!(!linked.exists());
+    let ran = permit(
+        &root,
+        &stdin("PostToolUse", SESSION, id, &root, &command),
+        &["--after"],
+    );
+    assert_eq!(ran.code(), 0, "{ran}");
+    assert!(ran.stdout.trim().is_empty(), "{}", ran.stdout);
+    assert!(ran.stderr.contains("is gone"), "{}", ran.stderr);
+    assert!(!file.exists(), "the record is dropped");
+}
+
 /// #2607: a call that works in its worktree by a shape other than a plain
 /// leading `cd`, while a person edits the main checkout's registry. The
 /// line's words can name the main checkout's file where they are read

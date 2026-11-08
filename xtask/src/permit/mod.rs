@@ -31,7 +31,8 @@
 //! call moved; and [`judge_files`], the diff judge that `done` and
 //! pre-commit's `--diff` read one verdict from. Each
 //! is one file under this one, with the call and its path resolution in
-//! [`call`], the rules in [`rules`], a shell line's argv in [`argv`], the
+//! [`call`], the rules in [`rules`], a shell line's argv in [`argv`] and
+//! where its commands run in [`shell`], the
 //! region-body rule in [`region`],
 //! the sensor over `harness.self`'s files around a `Bash` call in
 //! [`after`], the changes it kept, which `done` holds, in [`kept`], the
@@ -65,6 +66,7 @@ mod operation;
 mod owned;
 mod region;
 mod rules;
+mod shell;
 mod unless;
 mod writes;
 
