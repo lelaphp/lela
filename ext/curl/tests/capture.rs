@@ -54,3 +54,54 @@ echo "end\n";
     );
     assert_eq!(served.exit_code, 255);
 }
+
+/// A sibling's debug callable that calls `curl_multi_get_handles()`
+/// during the collection that frees the multi's `CurlHandle` objects is
+/// given the one the collection has destroyed, as php lists it, and
+/// `curl_getinfo` on it ends the request with the `InternalError` of a
+/// method served on an object without its payload, status 255, as on
+/// every destroyed `CurlHandle`. php's answer there is not held, so no
+/// witness can pin it; this holds the engine's side of #3926's program.
+#[test]
+fn a_curl_object_the_collection_destroyed_listed_to_a_sibling_ends_the_request() {
+    let engine = Engine::builder()
+        .extensions(&[php_ext_curl::extension()])
+        .ini("html_errors", "0")
+        .build();
+    let served = engine.serve_capture(
+        r#"<?php
+$collecting = false;
+$m = curl_multi_init();
+$a = curl_init('http://127.0.0.1:1/');
+$b = curl_init('http://127.0.0.1:1/');
+foreach ([$a, $b] as $h) {
+    curl_setopt($h, CURLOPT_VERBOSE, true);
+    curl_setopt($h, CURLOPT_DEBUGFUNCTION, function ($ch, $type, $data) use ($m, &$collecting) {
+        static $acted = false;
+        if (!$collecting || $acted) return;
+        $acted = true;
+        foreach (curl_multi_get_handles($m) as $k => $h) {
+            echo "$k: "; var_dump(curl_getinfo($h, CURLINFO_EFFECTIVE_URL), curl_getinfo($h, CURLINFO_PRIMARY_PORT), curl_errno($h));
+        }
+    });
+    curl_multi_add_handle($m, $h);
+}
+curl_multi_exec($m, $running);
+unset($a, $b, $h, $m);
+$collecting = true;
+var_dump(gc_collect_cycles());
+echo "Done\n";
+"#,
+        Capture::default(),
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "0: string(19) \"http://127.0.0.1:1/\"\nint(-1)\nint(0)\n\
+         1: string(19) \"http://127.0.0.1:1/\"\nint(-1)\nint(0)\n\
+         0: \nFatal error: InternalError: a method served on an object without its payload in Standard input code on line 13\n\
+         Stack trace:\n#0 Standard input code(13): curl_getinfo(Object(CurlHandle), 1048577)\n\
+         #1 [internal function]: {closure:Standard input code:8}(Object(CurlHandle), 0, 'closing connect...')\n\
+         #2 Standard input code(21): gc_collect_cycles()\n#3 {main}\n"
+    );
+    assert_eq!(served.exit_code, 255);
+}
