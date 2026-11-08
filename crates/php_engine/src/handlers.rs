@@ -4197,6 +4197,86 @@ impl Included {
 /// prompt> [Script ended normally]
 /// prompt>
 /// ```
+///
+/// The unit is that one `RETURN` too where php's compiler, which binds
+/// a top-level class against the request's table, would have made it
+/// so: a file that declares only classes whose parents the request had
+/// already linked, each `DECLARE_CLASS_DELAYED` the cached unit carries
+/// for it bound in its place as the unit loaded
+/// ([`Request::bound_in_place`]). So the include's operand is freed at
+/// its own opline, under no frame of the file's. A class whose parent is
+/// not linked yet keeps its declaration, as php's `DECLARE_CLASS` keeps
+/// it, so that file runs on a frame of its own, and the parent's
+/// autoload runs on that frame:
+///
+/// ```php
+/// class Path {
+///     function __construct(public string $file) {}
+///     function __toString(): string { return __DIR__ . "/$this->file"; }
+///     function __destruct() { echo $this->file, ' freed in ', basename(debug_backtrace()[0]['file']), "\n"; }
+/// }
+/// file_put_contents(__DIR__ . '/base.php', '<?php class Base {}');
+/// file_put_contents(__DIR__ . '/child.php', '<?php class Child extends Base {} class Other extends Base {}');
+/// file_put_contents(__DIR__ . '/late.php', '<?php class Late extends Later {}');
+/// spl_autoload_register(function ($class) { echo "autoload $class\n"; eval("class $class {}"); });
+/// require new Path('base.php');
+/// var_dump(require new Path('child.php'));
+/// require new Path('late.php');
+/// var_dump(get_parent_class(new Other), get_parent_class(new Late));
+/// foreach (['base', 'child', 'late'] as $f) unlink(__DIR__ . "/$f.php");
+/// ```
+/// ```expect
+/// base.php freed in witness.php
+/// child.php freed in witness.php
+/// int(1)
+/// late.php freed in late.php
+/// autoload Later
+/// string(4) "Base"
+/// string(5) "Later"
+/// ```
+///
+/// Each class served so is passed over as its opline would pass over
+/// it, so the file included again compiles to a declaration, runs on a
+/// frame and is refused there:
+///
+/// ```php
+/// class Path {
+///     function __construct(public string $file) {}
+///     function __toString(): string { return __DIR__ . "/$this->file"; }
+///     function __destruct() { echo $this->file, ' freed in ', basename(debug_backtrace()[0]['file']), "\n"; }
+/// }
+/// class Base {}
+/// file_put_contents(__DIR__ . '/child.php', "<?php\nclass Child extends Base {}\n");
+/// register_shutdown_function(fn () => unlink(__DIR__ . '/child.php'));
+/// include new Path('child.php');
+/// include new Path('child.php');
+/// ```
+/// ```expect exit=255
+/// child.php freed in witness.php
+/// child.php freed in child.php
+///
+/// Fatal error: Cannot redeclare class Child (previously declared in %s/child.php:2) in %s/child.php on line 2
+/// ```
+///
+/// A file opcache serves keeps its `DECLARE_CLASS_DELAYED` in php too,
+/// so it runs on a frame of its own, though its load bound the class:
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/frameless' . getmypid(); @mkdir($dir);
+/// file_put_contents("$dir/base.php", '<?php class Base {}');
+/// file_put_contents("$dir/child.php", '<?php class Child extends Base {}');
+/// file_put_contents("$dir/main.php", '<?php class Path { function __construct(public string $f) {} function __toString(): string { return __DIR__ . "/$this->f"; } function __destruct() { echo $this->f, " freed in ", basename(debug_backtrace()[0]["file"]), "\n"; } } require new Path("base.php"); require new Path("child.php");');
+/// foreach (['', '-d opcache.enable_cli=1 -d opcache.jit=off -d opcache.file_update_protection=0'] as $ini) {
+///     echo shell_exec(escapeshellarg(PHP_BINARY) . " -n $ini $dir/main.php");
+/// }
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// ```
+/// ```expect process
+/// base.php freed in main.php
+/// child.php freed in main.php
+/// base.php freed in main.php
+/// child.php freed in child.php
+/// ```
 fn included(
     req: &mut Request,
     frame: FrameRef,
@@ -4235,9 +4315,10 @@ fn included(
     let main = exec::code_of(&unit);
     let hooked = req.shared.hooked.user;
     if !hooked
-        && let [only] = &main.oplines[..]
+        && let Some(only) = main.oplines.last()
         && only.opcode == Opcode::Return
         && only.op1_type == OperandKind::Const
+        && (main.oplines.len() == 1 || req.bound_in_place(&unit))
     {
         let value = exec::constant(main, ConstIdx(only.op1));
         req.addref(&value);
