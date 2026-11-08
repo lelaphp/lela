@@ -1008,8 +1008,11 @@ pub struct Observation {
 }
 
 /// How a process ended: the status it exited with, or the signal that
-/// ended it, which a lane names where a binary died (#1069).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ended it, which a lane names where a binary died (#1069), and a phpt
+/// run keeps where its program died (#4130), as `{"signal":11}` or
+/// `{"status":139}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Ended {
     /// It exited with this status.
     Status(i32),

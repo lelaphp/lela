@@ -201,3 +201,46 @@ fn a_line_is_held_to_its_bytes() {
     assert_eq!(miss.actual.as_deref(), Some("x: \u{fffd}\u{fffd}"));
     assert_eq!(miss.expected.as_deref(), Some("%s: \u{fffd}\u{fffd}"));
 }
+
+/// A run is kept as one that died where a signal ended it or it exited as
+/// a shell says a signal ended its child, 129 to 159, and never otherwise;
+/// its stderr is kept to the last [`TAIL`] lines, and the note names the
+/// ending and indents the lines under it (#4130).
+#[test]
+fn a_death_is_a_signal_or_a_shells_status_for_one_and_keeps_the_last_of_stderr() {
+    for exited in [0, 1, 127, 128, 160, 255] {
+        assert_eq!(Died::of(Ended::Status(exited), b"said"), None, "{exited}");
+    }
+    let died = Died::of(Ended::Status(139), b"Segmentation fault\n").unwrap();
+    assert_eq!(died.ended, Ended::Status(139));
+    assert_eq!(
+        died.to_string(),
+        "the program exited with status 139, as a shell says signal 11 ended its child, and its stderr ended:\n    Segmentation fault"
+    );
+    let long = (1..=TAIL + 5).fold(String::new(), |long, n| long + &format!("line {n}\n"));
+    let died = Died::of(Ended::Signal(11), long.as_bytes()).unwrap();
+    let kept: Vec<&str> = died.stderr.lines().collect();
+    assert_eq!(kept.len(), TAIL);
+    assert_eq!((kept[0], kept[TAIL - 1]), ("line 6", "line 25"));
+    let silent = Died::of(Ended::Signal(6), b"").unwrap();
+    assert_eq!(
+        silent.to_string(),
+        "the program was ended by signal 6, having written nothing on stderr"
+    );
+}
+
+/// A miss kept before it kept how a program died reads with none, and one
+/// that died is kept with its ending as the oracle names it, so a run kept
+/// on disk says it of the test it ran (#4130).
+#[test]
+fn a_miss_keeps_its_death_on_disk_and_one_kept_before_reads_with_none() {
+    let before: Miss = serde_json::from_str(r#"{"signature":"differs"}"#).unwrap();
+    assert_eq!(before.died, None);
+    let miss = Miss::of(&exact("x"), b"\nTermsig=11").dying(Died::of(Ended::Signal(11), b"gone"));
+    let kept = serde_json::to_string(&miss).unwrap();
+    assert!(
+        kept.contains(r#""died":{"ended":{"signal":11},"stderr":"gone"}"#),
+        "{kept}"
+    );
+    assert_eq!(serde_json::from_str::<Miss>(&kept).unwrap(), miss);
+}

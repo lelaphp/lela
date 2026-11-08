@@ -27,7 +27,7 @@ use regex_lite::Regex;
 
 use super::environment::Environment;
 use super::file::{self, Phpt};
-use super::miss::Miss;
+use super::miss::{Died, Miss};
 use super::phpdbg;
 use super::redirect::{Item, Redirect, Test};
 use super::{Judged, Judgement, Lane, Subset, borked};
@@ -189,8 +189,8 @@ impl<'a> Adapter<'a> {
             Ok(request) => request,
             Err((refused, why)) => return Ok(refused.judged(&id, &name, why)),
         };
-        let actual = match self.run_program(subset, &phpt, test, &ini, (&env, request.as_ref()))? {
-            Ok(actual) => actual,
+        let ran = match self.run_program(subset, &phpt, test, &ini, (&env, request.as_ref()))? {
+            Ok(handed) => handed,
             Err(Stopped::PastLimit(why)) => {
                 return Ok(
                     Judged::new(&id, &name, Judgement::Fail, why).keeping(Miss::past_limit())
@@ -205,8 +205,8 @@ impl<'a> Adapter<'a> {
         // parted before the body is normalised (run-tests.php:2530-2543).
         let rules = &self.oracle.pin().recipe.normalise;
         let (headers, actual) = match &request {
-            Some(_) => cgi::parted(&actual, rules),
-            None => (Vec::new(), oracle::normalise(rules, actual)),
+            Some(_) => cgi::parted(&ran.said, rules),
+            None => (Vec::new(), oracle::normalise(rules, ran.said)),
         };
         if let Some(construct) = unread(&actual) {
             let miss = Miss::unread(&construct);
@@ -255,12 +255,13 @@ impl<'a> Adapter<'a> {
                 &name,
                 Judgement::Fail,
                 format!(
-                    "{trouble}{}the {} section is not what ran:\n{difference}",
+                    "{trouble}{}the {} section is not what ran:\n{difference}{}",
                     warned.map_or_else(String::new, |why| format!("warn: {why}\n")),
-                    expectation.section()
+                    expectation.section(),
+                    Died::noted(ran.died.as_ref()),
                 ),
             )
-            .keeping(Miss::of(&expectation, &actual)),
+            .keeping(Miss::of(&expectation, &actual).dying(ran.died)),
         })
     }
 
@@ -331,6 +332,7 @@ impl<'a> Adapter<'a> {
     /// the binary under test with the sections that shape one run, and
     /// taken away after; then `CLEAN`, which takes away what the test
     /// left. What [`system_with_timeout`] handed back, not yet normalised,
+    /// with how the program died where it did ([`Handed`]),
     /// or the verdict it came to without an expectation to hold it to: a
     /// file already standing where the program goes borks the test rather
     /// than being overwritten, and a program still running at the
@@ -357,7 +359,7 @@ impl<'a> Adapter<'a> {
         test: &Test,
         ini: &[String],
         (env, request): (&Environment, Option<&cgi::Request>),
-    ) -> Result<Result<Vec<u8>, Stopped>> {
+    ) -> Result<Result<Handed, Stopped>> {
         let program = test.beside(None);
         if program.exists() {
             return Ok(Err(Stopped::Occupied(format!(
@@ -385,7 +387,9 @@ impl<'a> Adapter<'a> {
         let dbg_args = phpdbg::args(phpt);
         let served = request.zip(self.hosts.http.as_deref());
         let ran = if let Some((request, host)) = served {
+            // A server's answer is no process's ending.
             http::served(&self.oracle.pin().recipe, host, &program, request, ini, env)
+                .map(|said| Handed { said, died: None })
         } else {
             let call = match (request, &self.hosts.cgi, &self.hosts.phpdbg) {
                 (_, _, Some(host)) if phpt.has("PHPDBG") => {
@@ -416,11 +420,11 @@ impl<'a> Adapter<'a> {
                 },
                 _ => invocation,
             };
-            system_with_timeout(self.oracle, &call)
+            handed(self.oracle, &call)
         };
         drop(written);
         let output = match ran {
-            Ok(stdout) => Ok(stdout),
+            Ok(handed) => Ok(handed),
             Err(e) => match e.downcast_ref::<PastLimit>() {
                 Some(past) => Err(Stopped::PastLimit(past.to_string())),
                 None if served.is_some() => Err(Stopped::Unserved(format!("{e:#}"))),
@@ -916,8 +920,32 @@ impl Said {
 /// after it. The one way the runner runs a test's program and the
 /// sections beside it.
 pub(crate) fn system_with_timeout(oracle: &Oracle<'_>, call: &Invocation<'_>) -> Result<Vec<u8>> {
+    Ok(handed(oracle, call)?.said)
+}
+
+/// What [`system_with_timeout`] hands back of a run, and how the program
+/// died where it did: the one thing of a run upstream's `Termsig=` line
+/// does not keep, which says neither whether a signal or a shell's status
+/// of 129 to 159 ended it nor what it wrote last (#4130).
+struct Handed {
+    said: Vec<u8>,
+    died: Option<Died>,
+}
+
+/// [`system_with_timeout`]'s run, with how the program died. Its stderr is
+/// its own pipe's, or the one stream its stdout is too where the call
+/// merges the two.
+fn handed(oracle: &Oracle<'_>, call: &Invocation<'_>) -> Result<Handed> {
     let out = oracle.run_under(&Invocation { raw: true, ..*call })?;
-    Ok(handed_back(out))
+    let stderr = match call.streams {
+        Streams::Pipes { merged: true } => &out.stdout,
+        Streams::Pipes { merged: false } | Streams::Files => &out.stderr,
+    };
+    let died = Died::of(out.exit, stderr);
+    Ok(Handed {
+        said: handed_back(out),
+        died,
+    })
 }
 
 /// What upstream's `system_with_timeout` hands back of a run, the test's
