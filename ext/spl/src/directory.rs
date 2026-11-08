@@ -631,18 +631,7 @@ impl SplFileInfo {
             Some(c) => Some(c),
             None => fs(req, this, |it| it.info_class)?,
         };
-        let class = info_class(req, chosen)?;
-        let (kind, entry) = fs(req, this, |it| (it.kind, it.entry.is_empty()))?;
-        if kind == Type::Dir && entry {
-            let ce = Throwables::of(req)?;
-            return Err(throw_exception_ex(
-                req,
-                ce.runtime_exception,
-                "Could not open file",
-            ));
-        }
-        let name = file_name(req, this)?;
-        create_info(req, &name, class).map(Owner::into_instance)
+        info_of(req, this, chosen).map(Owner::into_instance)
     }
 
     /// `getPathInfo(?string $class = null): ?SplFileInfo`; the witness is
@@ -724,15 +713,7 @@ impl SplFileInfo {
             Some(class) => class,
             None => linked(req, b"SplFileObject")?,
         };
-        let (kind, entry) = fs(req, this, |it| (it.kind, it.entry.is_empty()))?;
-        if kind == Type::Dir && entry {
-            let ce = Throwables::of(req)?;
-            return Err(throw_exception_ex(
-                req,
-                ce.runtime_exception,
-                "Could not open file",
-            ));
-        }
+        past_last(req, this)?;
         let object = create_object(req, class)?;
         match create_file(req, this, &object, class, mode, useIncludePath) {
             Ok(()) => Ok(object.into_instance()),
@@ -1052,23 +1033,30 @@ impl FilesystemIterator {
     }
 
     /// `FilesystemIterator::current()`, by the current flags: the path
-    /// name, an `SplFileInfo`, or the iterator itself.
+    /// name, an `SplFileInfo`, or the iterator itself ([`current_of`]).
+    /// Current flags of both bits answer the iterator, and past the last entry there
+    /// is no file to make an info of.
+    ///
+    /// ```php
+    /// $d = sys_get_temp_dir() . '/spl-fs-current'; @mkdir($d); touch("$d/f");
+    /// $it = new FilesystemIterator($d, FilesystemIterator::CURRENT_AS_PATHNAME | FilesystemIterator::CURRENT_AS_SELF);
+    /// var_dump($it->current() === $it);
+    /// $it->setFlags(FilesystemIterator::CURRENT_AS_FILEINFO);
+    /// foreach ($it as $v);
+    /// try { $it->current(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// Could not open file
+    /// ```
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<FsCurrent, Thrown> {
         let this = this.object();
-        let flags = fs(req, this, |it| it.flags)?;
-        if flags & Self::CURRENT_AS_PATHNAME != 0 {
-            let name = file_name(req, this)?;
-            return Ok(Union::A(PhpString::new(req, &name)?));
-        }
-        if flags & Self::CURRENT_AS_SELF != 0 {
-            return Ok(Union::B(Union::B(Owner::take(req, this).into_instance())));
-        }
-        let name = file_name(req, this)?;
-        let chosen = fs(req, this, |it| it.info_class)?;
-        let class = info_class(req, chosen)?;
-        let info = create_info(req, &name, class)?;
-        Ok(Union::B(Union::A(info.into_instance())))
+        Ok(match current_of(req, this)? {
+            Current::Pathname(name) => Union::A(name),
+            Current::Info(info) => Union::B(Union::A(info.into_instance())),
+            Current::Itself => Union::B(Union::B(Owner::take(req, this).into_instance())),
+        })
     }
 
     /// `getFlags(): int`, the flags under `SPL_FILE_DIR_KEY_MODE_MASK`,
@@ -2535,6 +2523,68 @@ fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<P
         set_filename(req, *object, path)?;
     }
     Ok(object)
+}
+
+/// The head of `spl_filesystem_object_create_type`: a directory past
+/// its last entry opens nothing, php's `RuntimeException`.
+fn past_last(req: &mut Request, source: PhpObject) -> Result<(), Thrown> {
+    let (kind, entry) = fs(req, source, |it| (it.kind, it.entry.is_empty()))?;
+    if kind == Type::Dir && entry {
+        let ce = Throwables::of(req)?;
+        return Err(throw_exception_ex(
+            req,
+            ce.runtime_exception,
+            "Could not open file",
+        ));
+    }
+    Ok(())
+}
+
+/// `spl_filesystem_object_create_type`'s `SPL_FS_INFO` branch over
+/// `source`: an object of `chosen`, or of `SplFileInfo` where none is,
+/// over the source's file name ([`create_info`]).
+fn info_of(
+    req: &mut Request,
+    source: PhpObject,
+    chosen: Option<ClassId>,
+) -> Result<Owner<PhpObject>, Thrown> {
+    let class = info_class(req, chosen)?;
+    past_last(req, source)?;
+    let name = file_name(req, source)?;
+    create_info(req, &name, class)
+}
+
+/// What a filesystem iterator serves its entry as, by its flags under
+/// `SPL_FILE_DIR_CURRENT_MODE_MASK` ([`current_of`]).
+enum Current {
+    /// `CURRENT_AS_PATHNAME`: the file name.
+    Pathname(Owner<PhpString>),
+    /// `CURRENT_AS_FILEINFO`: an object of the info class over it.
+    Info(Owner<PhpObject>),
+    /// Any other flags, `CURRENT_AS_SELF` among them: the iterator itself.
+    Itself,
+}
+
+/// `FilesystemIterator::current()` and `spl_filesystem_tree_it_current_data`
+/// alike: the current flags compared whole, as `SPL_FILE_DIR_CURRENT` compares
+/// them, so flags of both bits are neither a path name nor a file
+/// info, and the file name asked before the info is made.
+fn current_of(req: &mut Request, this: PhpObject) -> Result<Current, Thrown> {
+    let mode = fs(req, this, |it| {
+        it.flags & FilesystemIterator::CURRENT_MODE_MASK
+    })?;
+    match mode {
+        FilesystemIterator::CURRENT_AS_PATHNAME => {
+            let name = file_name(req, this)?;
+            PhpString::new(req, &name).map(Current::Pathname)
+        }
+        FilesystemIterator::CURRENT_AS_FILEINFO => {
+            file_name(req, this)?;
+            let chosen = fs(req, this, |it| it.info_class)?;
+            info_of(req, this, chosen).map(Current::Info)
+        }
+        _ => Ok(Current::Itself),
+    }
 }
 
 /// `spl_filesystem_object_create_type`'s `SPL_FS_FILE` branch over
