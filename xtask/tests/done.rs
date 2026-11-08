@@ -2024,6 +2024,27 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
     );
 }
 
+/// A pull request's `done` names `phpt` `--not-run` whatever else ran
+/// (Round 1, Q22): no job of the workflow runs the corpus through the
+/// engine, so a missing run is a note there and not unmet.
+#[test]
+fn a_pull_request_names_phpt_not_run() {
+    let text = read(".github/workflows/harness.yml");
+    let step = &text[text.find("- name: done").unwrap()..];
+    let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
+    let first = step
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("set --"))
+        .unwrap_or_else(|| panic!("the step sets its arguments: {step}"));
+    assert_eq!(first, "set -- --not-run phpt", "{step}");
+    assert!(
+        step.find("set -- --not-run phpt\n").unwrap()
+            < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
+        "phpt is named before the oracle job is asked about: {step}"
+    );
+}
+
 /// The red-main ticket `scripts/ci/red.sh` files quotes no `done` lines
 /// and holds its builder to no `done` box, since a push runs no `done`
 /// (Round 1, Q21), and the `done` job hands the red-main job no list.
@@ -2048,9 +2069,10 @@ fn a_red_main_carries_no_done_lines() {
 }
 
 /// While `DAX_BUILD_RUNNER` is set the oracle job is skipped, and the done
-/// step names as `--not-run` exactly the instruments of condition 1 that
-/// job's steps run, so a lane added there is named here or `done` is red
-/// for its absence (#2477). No instrument without an owed row is named.
+/// step names as `--not-run`, beside the `phpt` every pull request names,
+/// exactly the instruments of condition 1 that job's steps run, so a lane
+/// added there is named here or `done` is red for its absence (#2477). No
+/// instrument without an owed row is named.
 #[test]
 fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -2078,19 +2100,21 @@ fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
             && step.contains("if [ \"$ORACLE\" = skipped ]; then"),
         "the step reads whether the oracle job was skipped: {step}"
     );
-    let named: std::collections::BTreeSet<&str> = step
+    // What the skipped branch adds, beyond the `phpt` every pull request
+    // names (Round 1, Q22).
+    let asked = step.find("if [ \"$ORACLE\" = skipped ]; then").unwrap();
+    let skipped = &step[asked..];
+    let skipped = &skipped[..skipped.find("\n          fi\n").unwrap_or(skipped.len())];
+    let named: std::collections::BTreeSet<&str> = skipped
         .split("--not-run ")
         .skip(1)
         .filter_map(|rest| rest.split_whitespace().next())
         .collect();
     assert_eq!(named, runs, "{step}");
-    let empty = step
-        .find("set --\n")
-        .expect("no instrument is excluded before the oracle job is tested");
-    assert!(
-        empty < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
-        "{step}"
-    );
+    let before = step
+        .find("set -- --not-run phpt\n")
+        .expect("no instrument but phpt is excluded before the oracle job is tested");
+    assert!(before < asked, "{step}");
     assert!(
         step.contains("::warning title=the oracle lane did not run::"),
         "{step}"

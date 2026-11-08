@@ -33,7 +33,7 @@ That is `regions`, `per-commit`, `miri`, `tailcall`, `done` and `red-main` in `h
 
 ### What a skipped oracle job means
 
-- **`done`** (harness.yml) runs `xtask done --not-run witness --not-run crosscheck`, the two instruments the oracle job writes readings for. A missing reading of either is a note that it did not run, not an unmet condition. The head line reads "every condition of done is met over what ran; witness and crosscheck did not run in this run". The `done` reading counts `not_run` and its message says the same. The step adds a warning annotation, "the oracle lane did not run", and a line in the run's summary. Every other condition is judged as always, so `done` is red for anything else that is unmet. An oracle job that ran and failed is not skipped, so `done` judges the store it left.
+- **`done`** (harness.yml), which runs on a pull request alone and always names `--not-run phpt`, adds `--not-run witness --not-run crosscheck`, the two instruments the oracle job writes readings for. A missing reading of either is a note that it did not run, not an unmet condition. The head line reads "every condition of done is met over what ran; phpt and witness and crosscheck did not run in this run". The `done` reading counts `not_run` and its message says the same. The step adds a warning annotation, "the oracle lane did not run", and a line in the run's summary. Every other condition is judged as always, so `done` is red for anything else that is unmet. An oracle job that ran and failed is not skipped, so `done` judges the store it left.
 
 ### What the hosted image needs that the server has
 

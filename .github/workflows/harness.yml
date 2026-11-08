@@ -315,19 +315,23 @@ jobs:
       # itself (Round 1, Q21). The job still runs on a push, for the
       # store and the summary, so on a push it passes having judged
       # nothing, and a check that requires it holds a push to nothing.
+      # Every pull request names `phpt` `--not-run`: no job here runs the
+      # corpus through the engine, so the subsets' kept runs are the merge
+      # check's to hold (Round 1, Q22; harness-design.md §4.5), and a
+      # missing run is `done`'s note and not unmet.
       # While the oracle job is skipped (DAX_BUILD_RUNNER set, #2477), the
-      # two instruments its steps write readings for are named `--not-run`:
-      # a missing reading of either is `done`'s note and not unmet, its head
-      # line and its reading say the pass is over what ran, and the run
-      # carries a warning that the lane did not run. An oracle job that ran
-      # and failed is judged on the store it left, as ever.
+      # two instruments its steps write readings for are named `--not-run`
+      # too: a missing reading of either is `done`'s note and not unmet,
+      # its head line and its reading say the pass is over what ran, and
+      # the run carries a warning that the lane did not run. An oracle job
+      # that ran and failed is judged on the store it left, as ever.
       - name: done
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
         env:
           ORACLE: ${{ needs.oracle.result }}
         run: |
-          set --
+          set -- --not-run phpt
           if [ "$ORACLE" = skipped ]; then
             set -- "$@" --not-run witness --not-run crosscheck
             said="the oracle job was skipped while DAX_BUILD_RUNNER is set, so done judged no witness or crosscheck reading (scripts/ci/README.md)"
