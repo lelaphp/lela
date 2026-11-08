@@ -1973,10 +1973,11 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
 
 /// CI per commit runs on a push to `main` alone, since branch tracks are
 /// gone and a ticket's branch reaches CI as a pull request (ADR-0009,
-/// #1757), and judges each since the base its Stop hook took
-/// (harness-design.md §4.5, §7). A push passes no base, so `done` takes
-/// the merge base with `main`; a pull request's checkout is a detached
-/// merge commit, so the step passes the ref the pull request targets.
+/// #1757), and judges a pull request since the ref it targets, its
+/// checkout being a detached merge commit (harness-design.md §4.5, §7).
+/// A push runs no `done`: pre-push and `land` judged what it carries
+/// (Round 1, Q21), so the step is the pull request's alone and every
+/// `done` it runs passes the base.
 #[test]
 fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
     let text = read(".github/workflows/harness.yml");
@@ -2005,10 +2006,45 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
         "the base is passed as the ref, which merge_base resolves on origin: {step}"
     );
     assert!(
-        step.lines()
-            .any(|l| l.contains("cargo xtask done") && !l.contains("--base")),
-        "a push passes nothing and gets the merge base with main: {step}"
+        step.contains("\n        if: ${{ github.event_name == 'pull_request' }}\n"),
+        "a push runs no done: {step}"
     );
+    let runs = step
+        .lines()
+        .filter(|l| l.contains("cargo xtask done"))
+        .collect::<Vec<_>>();
+    assert!(
+        !runs.is_empty() && runs.iter().all(|l| l.contains("--base")),
+        "every done the step runs passes the base: {step}"
+    );
+    assert_eq!(
+        text.matches("xtask done").count(),
+        1,
+        "the pull request's step is the one done CI runs: {text}"
+    );
+}
+
+/// The red-main ticket `scripts/ci/red.sh` files quotes no `done` lines
+/// and holds its builder to no `done` box, since a push runs no `done`
+/// (Round 1, Q21), and the `done` job hands the red-main job no list.
+#[test]
+fn a_red_main_carries_no_done_lines() {
+    let text = read(".github/workflows/harness.yml");
+    for gone in ["UNMET", "outputs.unmet", "done.txt"] {
+        assert!(
+            !text.contains(gone),
+            "harness.yml still hands on {gone}: {text}"
+        );
+    }
+    let red = read("scripts/ci/red.sh");
+    let code = red
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for gone in ["UNMET", "xtask done", "done_lines", "unmet"] {
+        assert!(!code.contains(gone), "red.sh still reads {gone}: {code}");
+    }
 }
 
 /// While `DAX_BUILD_RUNNER` is set the oracle job is skipped, and the done

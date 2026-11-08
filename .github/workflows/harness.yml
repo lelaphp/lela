@@ -2,9 +2,11 @@
 # held by `computed check`, which runs no loader and needs no trust grant;
 # the harness's own tests hold the map, the hook wiring and the rules'
 # negative controls; and per commit the instruments run over the whole
-# workspace, then `done` judges the changes since the merge base with
-# `main`, the base the Stop hook took; the reading store is the only thing
-# the run keeps, and the permits section is the summary. A ticket is closed by
+# workspace, then, on a pull request, `done` judges the changes since the
+# ref it targets; a push to `main` runs no `done`, since pre-push and
+# `land` judged what it carries (Round 1, Q21; harness-design.md §4.5).
+# The reading store is the only thing the run keeps, and the permits
+# section is the summary. A ticket is closed by
 # the session that worked it, through `xtask ticket close`, the instrument
 # that reads its acceptance criteria; CI closes none (#290; CONTEXT.md,
 # Ticket). A red main is filed, once, by the last job (#1156).
@@ -289,8 +291,6 @@ jobs:
     # Run whatever the three found, so its list names every unmet condition.
     if: ${{ !cancelled() }}
     runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
-    outputs:
-      unmet: ${{ steps.unmet.outputs.unmet }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -309,12 +309,12 @@ jobs:
           path: target/harness
       # A ticket's branch is judged on its pull request, whose checkout is
       # a detached merge commit, so the base is the ref the pull request
-      # targets (§4.5, ADR-0009). A push to `main` passes none, and the
-      # merge base with `main` that `done` takes by default is the push
-      # itself: what the push changed was judged on its pull request.
-      # `done`'s list is kept for the red-main job through `tee`, and the
-      # step fails with `done`: `shell: bash` runs it with pipefail, where
-      # a step that names no shell would end with tee's exit.
+      # targets (§4.5, ADR-0009). A push to `main` runs no `done`: what
+      # the push carries was judged at pre-push and by `land`, and the
+      # step's verdict on a push would be the push measured against
+      # itself (Round 1, Q21). The job still runs on a push, for the
+      # store and the summary, so on a push it passes having judged
+      # nothing, and a check that requires it holds a push to nothing.
       # While the oracle job is skipped (DAX_BUILD_RUNNER set, #2477), the
       # two instruments its steps write readings for are named `--not-run`:
       # a missing reading of either is `done`'s note and not unmet, its head
@@ -322,6 +322,7 @@ jobs:
       # carries a warning that the lane did not run. An oracle job that ran
       # and failed is judged on the store it left, as ever.
       - name: done
+        if: ${{ github.event_name == 'pull_request' }}
         shell: bash
         env:
           ORACLE: ${{ needs.oracle.result }}
@@ -334,17 +335,7 @@ jobs:
             echo "**The oracle lane did not run**: $said." >> "$GITHUB_STEP_SUMMARY"
           fi
           # shellcheck disable=SC1010 # `done` is xtask's instrument, not the loop's keyword
-          if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            cargo xtask done --base "$GITHUB_BASE_REF" "$@" 2>&1 | tee "$RUNNER_TEMP/done.txt"
-          else
-            cargo xtask done "$@" 2>&1 | tee "$RUNNER_TEMP/done.txt"
-          fi
-      # The unmet lines, which a red main's ticket quotes (#1156).
-      - name: done's list, for the red-main job
-        id: unmet
-        if: always()
-        run: |
-          { echo 'unmet<<UNMET'; tail -n 40 "$RUNNER_TEMP/done.txt" 2>/dev/null || true; echo UNMET; } >> "$GITHUB_OUTPUT"
+          cargo xtask done --base "$GITHUB_BASE_REF" "$@"
       - name: the summary
         if: always()
         run: |
@@ -363,8 +354,10 @@ jobs:
   # run's verdict and the one before it decide. Two red runs in a row file
   # one `ci:red-main` ticket; a third comments on it; a green run comments
   # that main is green again and leaves the ticket for its builder to close
-  # through `xtask ticket close`. scripts/ci/red.sh says how, and
-  # `DRY_RUN=1` prints what it would write.
+  # through `xtask ticket close`. The ticket names the failing jobs and
+  # steps and carries no `done` lines, since a push runs no `done` (Round 1,
+  # Q21). scripts/ci/red.sh says how, and `DRY_RUN=1` prints what it would
+  # write.
   red-main:
     name: a red main, filed
     needs: [regions, per-commit, miri, tailcall, oracle, done]
@@ -387,5 +380,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RED: ${{ contains(needs.*.result, 'failure') }}
-          UNMET: ${{ needs.done.outputs.unmet }}
         run: scripts/ci/red.sh main
