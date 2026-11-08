@@ -60,3 +60,25 @@ fn a_return_class_that_cannot_be_instantiated_throws() {
     );
     assert_eq!(abstract_class.exit_code, 0);
 }
+
+/// `DOMElement` as `$returnClass`: the engine accepts it, wraps the new
+/// document in it, and reads an empty string for its `tagName` (#3918).
+#[test]
+fn a_non_document_return_class_reads_empty() {
+    let served = transform_to_doc(
+        "",
+        r#"try {
+    $r = $p->transformToDoc($in, DOMElement::class);
+    var_dump(get_class($r));
+    var_dump($r->nodeType);
+    var_dump($r->tagName);
+} catch (TypeError $e) {
+    echo get_class($e), ': ', $e->getMessage(), "\n";
+}"#,
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "string(10) \"DOMElement\"\nint(9)\nstring(0) \"\"\nend\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
