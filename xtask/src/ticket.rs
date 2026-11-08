@@ -173,6 +173,12 @@
 //! not judge the close of an issue labelled `frontier:chart` (CONTEXT.md,
 //! Chart; harness-design.md ledger 53).
 //!
+//! Two readers write no reading (#4263): `brief <n>` renders the brief a
+//! spawned builder starts with from a skill's template ([`brief`]), and
+//! `view <n>` prints the ticket with the comments a builder may act on,
+//! counting what it withheld ([`view`]), which `ready` prints too for the
+//! comments written since the branch's first commit.
+//!
 //! What the seam does not cover, written down rather than pretended: the
 //! rule is judged by `permit`, whose tools are `Edit`, `Write` and `Bash`,
 //! so a GitHub MCP server attached later would close a ticket unjudged.
@@ -191,6 +197,9 @@ use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status, joined, millis};
 use crate::track::{MAIN, Ticket, Track};
 use crate::track_next::{READY, TRACK_LABEL, tracks_of};
+
+pub mod brief;
+pub mod view;
 
 /// The instrument name every reading of ticket carries.
 pub(crate) const INSTRUMENT: &str = "ticket";
@@ -1060,6 +1069,18 @@ impl Gh {
         let issue: Issue = serde_json::from_str(&text)
             .with_context(|| format!("{ticket}: gh's answer is not an issue"))?;
         Ok((issue.state != State::Merged).then_some(issue))
+    }
+
+    /// `gh issue view <n> --json …,comments`: one issue and its comments,
+    /// which `view` and `ready` print as [`view`] says.
+    pub fn thread(&self, root: &Path, ticket: Ticket) -> Result<view::Thread> {
+        let number = ticket.number().to_string();
+        let fields = "number,title,body,state,url,labels,comments";
+        let text = self
+            .read(root, &["issue", "view", &number, "--json", fields])
+            .with_context(|| format!("{ticket}'s comments could not be read from the tracker"))?;
+        serde_json::from_str(&text)
+            .with_context(|| format!("{ticket}: gh's answer is not an issue with its comments"))
     }
 
     /// `gh issue list --state open --json …`: every open issue with its

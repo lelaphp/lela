@@ -23,7 +23,14 @@
 #                     turn, #210)
 #   then              run as shell after the act, before it ends: how a
 #                     test breaks the harness from inside a session
+#   plugins.json      what `plugin list --json` answers, `[]` where it is
+#                     not laid; that call starts no session and is not
+#                     recorded
 dir=$(cd "$(dirname "$0")/.." && pwd -P)
+if [ "$1 $2" = "plugin list" ]; then
+    cat "$dir/plugins.json" 2>/dev/null || echo '[]'
+    exit 0
+fi
 rest='' i=0
 for a; do
     i=$((i + 1))

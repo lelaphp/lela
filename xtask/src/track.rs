@@ -185,7 +185,7 @@ pub(crate) fn branch_of_ticket(root: &Path, ticket: Ticket) -> Option<String> {
 /// branches. A record that is not a number is no record here, and git
 /// not answering, as it does by exiting 1 when no branch records one, is
 /// no record at all.
-fn branch_records(root: &Path) -> Vec<(String, Ticket)> {
+pub(crate) fn branch_records(root: &Path) -> Vec<(String, Ticket)> {
     let found = git(root, &["config", "--get-regexp", r"^branch\..*\.ticket$"]).unwrap_or_default();
     found
         .lines()

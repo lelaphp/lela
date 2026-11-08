@@ -365,6 +365,7 @@ ticket::Gh::blocking
 ticket::Gh::close
 ticket::Gh::on_path
 ticket::Gh::open
+ticket::Gh::thread
 ticket::Gh::view
 ticket::Issue
 ticket::Label
@@ -379,6 +380,11 @@ ticket::Successors
 ticket::Successors::named
 ticket::Verdict
 ticket::Verdict::given
+ticket::brief::Ask
+ticket::brief::HEADING
+ticket::brief::TEMPLATE
+ticket::brief::brief
+ticket::brief::render
 ticket::denied
 ticket::merged
 ticket::parent
@@ -387,6 +393,12 @@ ticket::ready_of
 ticket::run
 ticket::stranded
 ticket::ticket_of
+ticket::view::Author
+ticket::view::Comment
+ticket::view::Thread
+ticket::view::instant
+ticket::view::newer_than_the_work
+ticket::view::view
 trace_dump::Ask
 trace_dump::kept
 trace_dump::run

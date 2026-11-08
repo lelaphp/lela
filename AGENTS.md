@@ -89,7 +89,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=fedcc29455e71d73a7a4b237e49b0c93d65a0a6004546868225463dbbf6304ae out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=596420b8d2481756ec6e3fc73e24ad135b837d8e01156e5e5f1c5762ea60ac12 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -125,9 +125,9 @@ third-engine-design.md
 | tier | tier.lock | 237 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 40 |  |
-| harness | xtask.lock | 449 |  |
+| harness | xtask.lock | 461 |  |
 
-<!-- /computed in=51fe3346fca896bef574b070e8d5bffa58d788bf73a800e9a71aef29b7d75bc3 out=058ffea8d857ee5646b6a9f3657cc2010d4686182db1dd559958b44c1da776f3 -->
+<!-- /computed in=e94737cc525bee8f8a10656f1b5c0b187d93b90496a0c3ee5667f6ae9e7fe489 out=a895d65b04a6b91ca7c7360fbffa4c3ac8aff602abe0b5b2ecf1eb85b739dfc0 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -141,7 +141,7 @@ Commands:
   done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
   track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
   worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` say its owner, `queue` and `land` run the merge queue
-  ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria, `close <n>` closes it naming what it opened, `parent <n>` says whether a chart sheet is at the cap
+  ticket             A ticket, one GitHub issue: `read`, `ready` and `close` hold it to its boxes; `view` and `brief` are what a builder reads; `parent` measures a chart sheet
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
   bench              Measure one bar under the protocol: paired reps with the A/A control and the load average, one reading per bar, exit 0 always
@@ -170,7 +170,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=8c6c6b426b7a04e344549b86e2d7ba12801dbe6c369ca2c0b743c98f1a90471c out=7d36360474ef686aa1dbccf693f6c58be3e09ee20203fbcf67b49f6bd0e36f2b -->
+<!-- /computed in=d493c5ce3d5ce57264018eaa381348bb7958d58c35308736e0362ec4a9f6c165 out=e34ef8e9246393b1ec3edba92a1a290a8f2f5e0898c8771118d3513f337bb0bd -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
