@@ -24,9 +24,13 @@
 #                                       through `xtask ticket close`; no
 #                                       workflow closes one
 #
+# A ticket names the runs, the first red commit and the failing jobs and
+# steps, and nothing of `done`: harness.yml runs no `done` on a push to
+# main, whose change pre-push and `land` judged (Round 1, Q21;
+# harness-design.md §4.5), so main's ticket has no list to quote.
+#
 # The environment: RED (`true` or `false`, whether the subject failed in
-# this run), UNMET (main's alone: `done`'s last lines, quoted in the
-# ticket), GH_TOKEN, and the runner's GITHUB_REPOSITORY, GITHUB_RUN_ID,
+# this run), GH_TOKEN, and the runner's GITHUB_REPOSITORY, GITHUB_RUN_ID,
 # GITHUB_SHA and GITHUB_SERVER_URL. With DRY_RUN=1 it reads as it would and
 # prints each write, the label, the ticket or the comment, instead of
 # making it.
@@ -132,37 +136,13 @@ fi
 
 # The red streak's first run: the oldest of the red runs before the newest green.
 first=$(jq -r '(map(.conclusion == "success") | index(true)) as $g | .[0:($g // length)] | last | "\(.headSha) \(.url)"' <<<"$runs")
-# The title names the failing readings, `done`'s first unmet line and how
-# many follow it, and otherwise the failing jobs and their failing steps:
-# main's when done listed none (it did not run, or something before it
-# failed), and a nightly's own job, which has no `done`.
-unmet=$(grep -E '^- ' <<<"${UNMET:-}" || true)
+# The title names the failing jobs and their failing steps: main's, and a
+# nightly's own job.
 failing=$(gh run view "$run" --repo "$repo" --json jobs |
     jq -r --arg name "$job_name" '[.jobs[] | select(.conclusion == "failure" and ($name == "" or .name == $name))
     | .name + ([.steps[] | select(.conclusion == "failure") | .name] | if length > 0 then " (" + join(", ") + ")" else "" end)]
     | join("; ")')
-if [ -n "$unmet" ]; then
-    more=$(($(wc -l <<<"$unmet") - 1))
-    named="$(head -n 1 <<<"$unmet" | sed 's/^- //')$([ "$more" -eq 0 ] || echo " and $more more")"
-else
-    named=${failing:-a failed job}
-fi
-title="$heading is red since ${first:0:8}: $named"
-# What main's ticket says beyond the runs, and holds its builder to.
-criteria="- [ ] The cause is named, and $what is green again"
-done_lines() {
-    [ "$subject" = main ] || return 0
-    cat <<EOF
-
-
-\`cargo xtask done\`'s last lines in this run:
-
-\`\`\`
-${UNMET:-(done did not run, or wrote nothing)}
-\`\`\`
-EOF
-}
-[ "$subject" != main ] || criteria+=$'\n- [ ] `cargo xtask done` lists nothing unmet for the crates touched'
+title="$heading is red since ${first:0:8}: ${failing:-a failed job}"
 ticket() {
     cat <<EOF
 ## What happened
@@ -173,11 +153,11 @@ On two $runs_of in a row, $what failed ($cause).
 - the run before it: $(jq -r '.[0].url' <<<"$runs"), at $(jq -r '.[0].headSha' <<<"$runs")
 - the first red commit: ${first% *} (${first#* })
 
-Failing: ${failing:-no job named its failure}$(done_lines)
+Failing: ${failing:-no job named its failure}
 
 ## Acceptance criteria
 
-$criteria
+- [ ] The cause is named, and $what is green again
 
 ## Blocked by
 
