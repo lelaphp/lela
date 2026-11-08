@@ -91,12 +91,7 @@ impl Tree {
     fn of(source: &Source) -> Tree {
         match source.tree() {
             Ok(tree) => Tree::At(tree),
-            Err(e)
-                if [source.named(), Some(source.path())]
-                    .into_iter()
-                    .flatten()
-                    .any(Path::is_dir) =>
-            {
+            Err(e) if source.places().iter().any(|(_, tree)| tree.is_dir()) => {
                 Tree::Refused(format!("{e:#}"))
             }
             Err(e) => Tree::Absent(format!("{e:#}")),
