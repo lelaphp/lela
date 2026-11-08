@@ -563,6 +563,53 @@ impl Request {
         self.bind_class_in_slot(unit, key)
     }
 
+    /// Whether `unit`'s main op array is, as php's compiler makes it
+    /// without opcache, the lone `RETURN` the include serves without a
+    /// frame: every opline before its last a `DECLARE_CLASS_DELAYED`
+    /// whose class the unit's load bound in its place
+    /// ([`Request::bind_at_load`]), as `zend_try_early_bind` binds a
+    /// top-level class against the request's table while the file
+    /// compiles and emits no opline for it
+    /// (`Z/Zend/zend_compile.c:9373-9384`). A unit opcache serves keeps
+    /// its `DECLARE_CLASS_DELAYED` in php too, whose load binds it
+    /// (`zend_accel_do_delayed_early_binding`), and is never one. Where
+    /// it is, each class is passed over as its opline would have passed
+    /// over it ([`Request::bind_delayed`]), so a later load of the file
+    /// declares again; where it is not, nothing is touched.
+    pub(crate) fn bound_in_place(&mut self, unit: &PublishedUnit) -> bool {
+        if self.accel_served(unit).is_some() {
+            return false;
+        }
+        let Some((_, delayed)) = unit.main.oplines.split_last() else {
+            return false;
+        };
+        let mut bound = Vec::with_capacity(delayed.len());
+        for op in delayed {
+            if op.opcode != Opcode::DeclareClassDelayed {
+                return false;
+            }
+            let key = usize::try_from(op.op1)
+                .ok()
+                .and_then(|at| at.checked_add(1))
+                .and_then(|at| unit.main.literals.get(at)?.as_str());
+            let at = key.and_then(|key| runtime_class(unit, key.bytes()));
+            let held = (self.classes.bound_at_load.iter())
+                .position(|(held, class)| PublishedUnit::ptr_eq(held, unit) && Some(*class) == at);
+            let Some(held) = held else {
+                return false;
+            };
+            bound.push(held);
+        }
+        bound.sort_unstable();
+        bound.dedup();
+        // The highest first, so each `swap_remove` moves an entry from
+        // past every one still to go.
+        for held in bound.into_iter().rev() {
+            self.classes.bound_at_load.swap_remove(held);
+        }
+        true
+    }
+
     /// `zend_bind_class_in_slot` (`Z/Zend/zend_compile.c:1304-1345`), what a
     /// `DECLARE_CLASS` and a `DECLARE_CLASS_DELAYED` the load did not
     /// bind make: the class bound ([`Request::bind_class`]), and the
