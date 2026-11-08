@@ -12,8 +12,8 @@
 //! opens, whose path and count they read off it.
 
 use php_ext::abi::{
-    CloneObj, DtorObj, ExtensionBuilder, False, Instance, Null, ObjectHandlers, OrFalse, Passed,
-    Path as PathArg, Raw, Ref, Refusals, Std, This, Union, Untyped, Variadic,
+    ClassIterator, CloneObj, DtorObj, ExtensionBuilder, False, Instance, Null, ObjectHandlers,
+    OrFalse, Passed, Path as PathArg, Raw, Ref, Refusals, Std, This, Union, Untyped, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, autoload, call_method, create_object, instantiate, lookup_class};
@@ -631,18 +631,7 @@ impl SplFileInfo {
             Some(c) => Some(c),
             None => fs(req, this, |it| it.info_class)?,
         };
-        let class = info_class(req, chosen)?;
-        let (kind, entry) = fs(req, this, |it| (it.kind, it.entry.is_empty()))?;
-        if kind == Type::Dir && entry {
-            let ce = Throwables::of(req)?;
-            return Err(throw_exception_ex(
-                req,
-                ce.runtime_exception,
-                "Could not open file",
-            ));
-        }
-        let name = file_name(req, this)?;
-        create_info(req, &name, class).map(Owner::into_instance)
+        info_of(req, this, chosen).map(Owner::into_instance)
     }
 
     /// `getPathInfo(?string $class = null): ?SplFileInfo`; the witness is
@@ -724,15 +713,7 @@ impl SplFileInfo {
             Some(class) => class,
             None => linked(req, b"SplFileObject")?,
         };
-        let (kind, entry) = fs(req, this, |it| (it.kind, it.entry.is_empty()))?;
-        if kind == Type::Dir && entry {
-            let ce = Throwables::of(req)?;
-            return Err(throw_exception_ex(
-                req,
-                ce.runtime_exception,
-                "Could not open file",
-            ));
-        }
+        past_last(req, this)?;
         let object = create_object(req, class)?;
         match create_file(req, this, &object, class, mode, useIncludePath) {
             Ok(()) => Ok(object.into_instance()),
@@ -916,13 +897,7 @@ impl DirectoryIterator {
     #[php(tentative)]
     fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let this = dir_checked(req, this.object())?;
-        let dir = fs(req, this, |it| {
-            it.index = 0;
-            it.dir.as_ref().map(Open::stream)
-        })?;
-        if let Some(dir) = dir {
-            dir.seek(req, 0, Whence::Set);
-        }
+        dir_rewind(req, this)?;
         dir_step(req, this)
     }
 
@@ -1039,36 +1014,50 @@ impl FilesystemIterator {
     #[php(tentative, implementation = DirectoryIterator::rewind)]
     fn rewind(this: This<Self>);
 
-    /// `FilesystemIterator::key(): string`, by the key flags.
+    /// `FilesystemIterator::key(): string`, by the key flags ([`key_of`]),
+    /// compared whole: flags of every key bit are no `KEY_AS_FILENAME`.
+    ///
+    /// ```php
+    /// $d = sys_get_temp_dir() . '/spl-fs-key'; @mkdir($d); touch("$d/f");
+    /// $it = new FilesystemIterator($d, FilesystemIterator::KEY_AS_FILENAME | FilesystemIterator::SKIP_DOTS);
+    /// var_dump($it->key());
+    /// $it->setFlags(FilesystemIterator::KEY_MODE_MASK);
+    /// var_dump(str_replace($d, '', $it->key()));
+    /// ```
+    /// ```expect
+    /// string(1) "f"
+    /// string(2) "/f"
+    /// ```
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
-        let this = this.object();
-        let (flags, entry) = fs(req, this, |it| (it.flags, it.entry.clone()))?;
-        if flags & Self::KEY_AS_FILENAME != 0 {
-            return PhpString::new(req, &entry);
-        }
-        let name = file_name(req, this)?;
-        PhpString::new(req, &name)
+        key_of(req, this.object())
     }
 
     /// `FilesystemIterator::current()`, by the current flags: the path
-    /// name, an `SplFileInfo`, or the iterator itself.
+    /// name, an `SplFileInfo`, or the iterator itself ([`current_of`]).
+    /// Current flags of both bits answer the iterator, and past the last entry there
+    /// is no file to make an info of.
+    ///
+    /// ```php
+    /// $d = sys_get_temp_dir() . '/spl-fs-current'; @mkdir($d); touch("$d/f");
+    /// $it = new FilesystemIterator($d, FilesystemIterator::CURRENT_AS_PATHNAME | FilesystemIterator::CURRENT_AS_SELF);
+    /// var_dump($it->current() === $it);
+    /// $it->setFlags(FilesystemIterator::CURRENT_AS_FILEINFO);
+    /// foreach ($it as $v);
+    /// try { $it->current(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// Could not open file
+    /// ```
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<FsCurrent, Thrown> {
         let this = this.object();
-        let flags = fs(req, this, |it| it.flags)?;
-        if flags & Self::CURRENT_AS_PATHNAME != 0 {
-            let name = file_name(req, this)?;
-            return Ok(Union::A(PhpString::new(req, &name)?));
-        }
-        if flags & Self::CURRENT_AS_SELF != 0 {
-            return Ok(Union::B(Union::B(Owner::take(req, this).into_instance())));
-        }
-        let name = file_name(req, this)?;
-        let chosen = fs(req, this, |it| it.info_class)?;
-        let class = info_class(req, chosen)?;
-        let info = create_info(req, &name, class)?;
-        Ok(Union::B(Union::A(info.into_instance())))
+        Ok(match current_of(req, this)? {
+            Current::Pathname(name) => Union::A(name),
+            Current::Info(info) => Union::B(Union::A(info.into_instance())),
+            Current::Itself => Union::B(Union::B(Owner::take(req, this).into_instance())),
+        })
     }
 
     /// `getFlags(): int`, the flags under `SPL_FILE_DIR_KEY_MODE_MASK`,
@@ -2228,6 +2217,79 @@ impl ObjectHandlers for Handlers {
             }
         })
     }
+
+    /// `spl_filesystem_iterator`: the iterator, its `current` and the
+    /// object it walks.
+    fn iterator_size(&self) -> usize {
+        112
+    }
+
+    /// `spl_filesystem_dir_get_iterator`, `DirectoryIterator`'s, and
+    /// `spl_filesystem_tree_get_iterator`, `FilesystemIterator`'s, each
+    /// inherited by the classes below it ([`FsIterator`]); none for the
+    /// classes php leaves on `zend_user_it_get_iterator`. A walk steps
+    /// the entries in C, so `RecursiveIteratorIterator`, `foreach` and the
+    /// outer iterators call no method of the iterator, and a user class
+    /// that overrides one of the five `Iterator` methods is served its
+    /// methods, every one of them, as `zend_implement_iterator` switches
+    /// it. An iterator whose constructor never ran walks nothing, where
+    /// its methods refuse it.
+    ///
+    /// ```php
+    /// $d = sys_get_temp_dir() . '/spl-fs-funcs'; @mkdir("$d/sub", 0777, true); touch("$d/sub/leaf");
+    /// class Info extends SplFileInfo { function __construct($p) { parent::__construct($p); echo implode(' < ', array_map(fn($f) => ($f['class'] ?? '') . ($f['type'] ?? '') . $f['function'], debug_backtrace())), "\n"; } }
+    /// class Loud extends RecursiveDirectoryIterator {
+    ///     function valid(): bool { echo "valid\n"; return parent::valid(); }
+    ///     function next(): void { echo "next\n"; parent::next(); }
+    /// }
+    /// foreach ([RecursiveDirectoryIterator::class, Loud::class] as $class) {
+    ///     $inner = new $class($d, FilesystemIterator::SKIP_DOTS);
+    ///     $inner->setInfoClass(Info::class);
+    ///     foreach (new RecursiveIteratorIterator($inner) as $k => $v) echo str_replace($d, '', $k), "\n";
+    /// }
+    /// class Bare extends DirectoryIterator { function __construct() {} }
+    /// class BareTree extends RecursiveDirectoryIterator { function __construct() {} }
+    /// foreach ([new Bare, new BareTree] as $it) foreach ($it as $v) echo "never\n";
+    /// try { foreach (new DirectoryIterator($d) as &$v) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Info->__construct
+    /// /sub/leaf
+    /// valid
+    /// valid
+    /// valid
+    /// Info->__construct < FilesystemIterator->current
+    /// /sub/leaf
+    /// next
+    /// valid
+    /// next
+    /// valid
+    /// valid
+    /// An iterator cannot be used with foreach by reference
+    /// ```
+    fn get_iterator(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        by_ref: bool,
+    ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        let iterator = if crate::is_a(req, object.class(), b"FilesystemIterator") {
+            FsIterator::Tree { current: None }
+        } else if crate::is_a(req, object.class(), b"DirectoryIterator") {
+            FsIterator::Dir
+        } else {
+            return Ok(None);
+        };
+        if by_ref {
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(
+                req,
+                ce.error,
+                "An iterator cannot be used with foreach by reference",
+            ));
+        }
+        Ok(Some(Box::new(iterator)))
+    }
 }
 
 /// What the table refuses: cloning.
@@ -2244,6 +2306,22 @@ impl ObjectHandlers for FileHandlers {
 
     fn dtor_obj(&self) -> DtorObj {
         HANDLERS.dtor_obj()
+    }
+
+    fn iterator_size(&self) -> usize {
+        HANDLERS.iterator_size()
+    }
+
+    /// `GlobIterator`'s, the tree iterator it inherits from
+    /// `FilesystemIterator`; none for `SplFileObject` and
+    /// `SplTempFileObject`.
+    fn get_iterator(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        by_ref: bool,
+    ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        HANDLERS.get_iterator(req, object, by_ref)
     }
 
     /// `spl_filesystem_object_get_method_check`: every method, the
@@ -2537,6 +2615,86 @@ fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<P
     Ok(object)
 }
 
+/// The head of `spl_filesystem_object_create_type`: a directory past
+/// its last entry opens nothing, php's `RuntimeException`.
+fn past_last(req: &mut Request, source: PhpObject) -> Result<(), Thrown> {
+    let (kind, entry) = fs(req, source, |it| (it.kind, it.entry.is_empty()))?;
+    if kind == Type::Dir && entry {
+        let ce = Throwables::of(req)?;
+        return Err(throw_exception_ex(
+            req,
+            ce.runtime_exception,
+            "Could not open file",
+        ));
+    }
+    Ok(())
+}
+
+/// `spl_filesystem_object_create_type`'s `SPL_FS_INFO` branch over
+/// `source`: an object of `chosen`, or of `SplFileInfo` where none is,
+/// over the source's file name ([`create_info`]).
+fn info_of(
+    req: &mut Request,
+    source: PhpObject,
+    chosen: Option<ClassId>,
+) -> Result<Owner<PhpObject>, Thrown> {
+    let class = info_class(req, chosen)?;
+    past_last(req, source)?;
+    let name = file_name(req, source)?;
+    create_info(req, &name, class)
+}
+
+/// What a filesystem iterator serves its entry as, its flags under
+/// `SPL_FILE_DIR_CURRENT_MODE_MASK` compared whole, as
+/// `SPL_FILE_DIR_CURRENT` compares them, so flags of both bits are
+/// neither a path name nor a file info.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Served {
+    /// `CURRENT_AS_PATHNAME`: the file name.
+    Pathname,
+    /// `CURRENT_AS_FILEINFO`: an object of the info class over it.
+    Info,
+    /// Any other flags, `CURRENT_AS_SELF` among them: the iterator itself.
+    Itself,
+}
+
+/// What `this` serves its entry as ([`Served`]).
+fn served(req: &mut Request, this: PhpObject) -> Result<Served, Thrown> {
+    let flags = fs(req, this, |it| {
+        it.flags & FilesystemIterator::CURRENT_MODE_MASK
+    })?;
+    Ok(match flags {
+        FilesystemIterator::CURRENT_AS_PATHNAME => Served::Pathname,
+        FilesystemIterator::CURRENT_AS_FILEINFO => Served::Info,
+        _ => Served::Itself,
+    })
+}
+
+/// The entry as `this` serves it ([`Served`]), made.
+enum Current {
+    Pathname(Owner<PhpString>),
+    Info(Owner<PhpObject>),
+    Itself,
+}
+
+/// `FilesystemIterator::current()` and `spl_filesystem_tree_it_current_data`
+/// alike: the entry as `this` serves it, the file name asked before the
+/// info is made.
+fn current_of(req: &mut Request, this: PhpObject) -> Result<Current, Thrown> {
+    match served(req, this)? {
+        Served::Pathname => {
+            let name = file_name(req, this)?;
+            PhpString::new(req, &name).map(Current::Pathname)
+        }
+        Served::Info => {
+            file_name(req, this)?;
+            let chosen = fs(req, this, |it| it.info_class)?;
+            info_of(req, this, chosen).map(Current::Info)
+        }
+        Served::Itself => Ok(Current::Itself),
+    }
+}
+
 /// `spl_filesystem_object_create_type`'s `SPL_FS_FILE` branch over
 /// `object`, just made of the file class `class` for `source`: the
 /// class's own constructor, where it is not `SplFileObject`'s, served
@@ -2685,6 +2843,125 @@ fn dir_step(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         if !(skip && is_dot(&entry)) {
             return Ok(());
         }
+    }
+}
+
+/// The head of a rewind: the index back to 0 and the directory, where
+/// one is open, back to its start (`php_stream_rewinddir`).
+fn dir_rewind(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
+    let dir = fs(req, this, |it| {
+        it.index = 0;
+        it.dir.as_ref().map(Open::stream)
+    })?;
+    if let Some(dir) = dir {
+        dir.seek(req, 0, Whence::Set);
+    }
+    Ok(())
+}
+
+/// `FilesystemIterator::key()` and `spl_filesystem_tree_it_current_key`
+/// alike: the entry's name where the key flags under
+/// `SPL_FILE_DIR_KEY_MODE_MASK` are `KEY_AS_FILENAME`, the file name
+/// otherwise.
+fn key_of(req: &mut Request, this: PhpObject) -> Result<Owner<PhpString>, Thrown> {
+    let (flags, entry) = fs(req, this, |it| (it.flags, it.entry.clone()))?;
+    if flags & FilesystemIterator::KEY_MODE_MASK == FilesystemIterator::KEY_AS_FILENAME {
+        return PhpString::new(req, &entry);
+    }
+    let name = file_name(req, this)?;
+    PhpString::new(req, &name)
+}
+
+/// `spl_filesystem_iterator`, the iterator a filesystem iterator's
+/// `get_iterator` hands out, stepping the entries in C with no method
+/// called and no check that the constructor ran: the table php chose by
+/// the class.
+enum FsIterator {
+    /// `spl_filesystem_dir_it_funcs`, `DirectoryIterator`'s: each entry
+    /// read as it comes, dots and all, served as the iterator itself and
+    /// keyed by its index.
+    Dir,
+    /// `spl_filesystem_tree_it_funcs`, `FilesystemIterator`'s: the dots
+    /// stepped over under `SKIP_DOTS`, each entry keyed and served by
+    /// the flags ([`key_of`], [`current_of`]), and a path name or an info
+    /// made once and kept until the walk moves, `iterator->current`.
+    Tree { current: Option<Owner<Value>> },
+}
+
+impl FsIterator {
+    /// The entry served and kept given up, as the tree's `zval_ptr_dtor`
+    /// of `iterator->current` gives it up.
+    fn forget(&mut self, req: &mut Request) {
+        if let FsIterator::Tree { current } = self
+            && let Some(kept) = current.take()
+        {
+            kept.give_up(req);
+        }
+    }
+}
+
+impl ClassIterator for FsIterator {
+    fn rewind(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        dir_rewind(req, object)?;
+        match self {
+            FsIterator::Dir => dir_read(req, object),
+            FsIterator::Tree { .. } => {
+                dir_step(req, object)?;
+                self.forget(req);
+                Ok(())
+            }
+        }
+    }
+
+    /// `spl_filesystem_dir_it_valid`, both tables': an entry stands.
+    fn valid(&mut self, req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
+        fs(req, object, |it| !it.entry.is_empty())
+    }
+
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
+        let FsIterator::Tree { current } = self else {
+            return Ok(Owner::take(req, object.as_value()));
+        };
+        // The flags first, every time: an iterator served as itself is
+        // served so whatever was kept under the flags before.
+        if served(req, object)? == Served::Itself {
+            return Ok(Owner::take(req, object.as_value()));
+        }
+        if let Some(kept) = current {
+            return Ok(Owner::take(req, **kept));
+        }
+        let made = match current_of(req, object)? {
+            Current::Pathname(name) => name.into_value(),
+            Current::Info(info) => info.into_value(),
+            Current::Itself => return Ok(Owner::take(req, object.as_value())),
+        };
+        let served = Owner::take(req, *made);
+        *current = Some(made);
+        Ok(served)
+    }
+
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
+        match self {
+            FsIterator::Dir => Ok(Owner::int(fs(req, object, |it| it.index)?)),
+            FsIterator::Tree { .. } => key_of(req, object).map(Owner::into_value),
+        }
+    }
+
+    fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        fs(req, object, |it| it.index += 1)?;
+        match self {
+            FsIterator::Dir => dir_read(req, object),
+            FsIterator::Tree { .. } => {
+                dir_step(req, object)?;
+                self.forget(req);
+                Ok(())
+            }
+        }
+    }
+
+    /// `spl_filesystem_tree_it_dtor`'s `zval_ptr_dtor(&iterator->current)`.
+    fn release(&mut self, req: &mut Request, _: PhpObject) {
+        self.forget(req);
     }
 }
 
