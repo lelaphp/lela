@@ -31,7 +31,8 @@
 //! call moved; and [`judge_files`], the diff judge that `done` and
 //! pre-commit's `--diff` read one verdict from. Each
 //! is one file under this one, with the call and its path resolution in
-//! [`call`], the rules in [`rules`], a shell line's argv in [`argv`], the
+//! [`call`], the rules in [`rules`], a shell line's argv in [`argv`] and
+//! where its commands run in [`shell`], the
 //! region-body rule in [`region`],
 //! the sensor over `harness.self`'s files around a `Bash` call in
 //! [`after`], the changes it kept, which `done` holds, in [`kept`], the
@@ -65,6 +66,7 @@ mod operation;
 mod owned;
 mod region;
 mod rules;
+mod shell;
 mod unless;
 mod writes;
 
@@ -77,7 +79,7 @@ pub use call::{Arguments, Call};
 pub(crate) use diff::judge_files;
 pub(crate) use diff::{run_diff, working_files};
 pub(crate) use hand_off::walk;
-pub(crate) use kept::kept_changes;
+pub(crate) use kept::{kept_changes, settle};
 pub(crate) use ledger::{judged, written};
 pub use rules::{Finding, Judgement, Kind, judge, judged_at_the_call};
 

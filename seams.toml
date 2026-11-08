@@ -576,12 +576,6 @@ check = "silent-return"   # the clippy instrument's sensor of a return at a #[te
 text = "A test that returns early passes without asserting: its setup fails with .expect(\"<step>\") (#3078), and a return at a #[test] fn's own level is refused unless it is return Err(..) (#3079)."
 
 [[rule]]
-id = "api.no-hot"
-scope = "crates/php_ext/**"
-deny_pattern = 'php_heap::hot'
-text = "php_heap::hot is for the handlers; api never re-exports it (design §4.4, §10)."
-
-[[rule]]
 id = "ext.no-private"
 scope = "ext/*/src/**"
 deny_pattern = '__private'
@@ -700,13 +694,6 @@ tool = "Bash"
 deny_pattern = '''gh\s+api\b(?:[^|;&]*issues/\d+(?:['"\s]|$)[^|;&]*(?:[\s'"]state=(?:closed|open)\b|"state"\s*:\s*"(?:closed|open)"|--input\b|=@-|=["']?\$\()|[^|;&]*(?:[\s'"]state=(?:closed|open)\b|"state"\s*:\s*"(?:closed|open)"|--input\b|=@-|=["']?\$\()[^|;&]*issues/\d+(?:['"\s]|$)|[^|;&]*\bgraphql\b[^|;&]*(?:(?:close|reopen)Issue\(|--input\b|=@-|=["']?\$\()|[^|;&]*(?:(?:close|reopen)Issue\(|--input\b|=@-|=["']?\$\()[^|;&]*\bgraphql\b)'''
 text = "The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. A write to an issue's comments, labels or other sub-resources sets no state and is not this rule's (#2390)."
 remedy = "`cargo xtask ticket close <n>`"                 # #3618 ruling 3
-
-[[rule]]
-id = "ticket.reply-unfiled"
-tool = "Stop"
-deny_pattern = '(?i)\b(left (for|to) a person|for a person to|handed (off )?to a person|a person (decides|must|should|will|would|has to)|is a person.?s( alone)?|worth (filing|a ticket)|(needs|deserves|wants) (a|its own) ticket|should be filed|not (yet )?filed|left open|leaves? open|open question|still to (do|decide)|not (yet )?done|remains? (to be|to do|undone|open)|in a later (commit|turn|session|ticket)|next turn|future work|follow[- ]?ups?|leftovers?|out of scope|todo)\b'
-text = "A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes."
-remedy = "file it with `gh issue create`, `ready-for-agent` or `for-a-person`, and name its number in the reply"                 # #3627
 
 [[rule]]
 id = "lanes.nightly"

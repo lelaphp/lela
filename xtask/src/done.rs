@@ -35,21 +35,18 @@
 //!
 //! With `--hook` the command reads the Stop hook's stdin (the shape in
 //! `data/pre-day-1.md` §4): exit 0 and nothing printed when
-//! `stop_hook_active` is true, otherwise `{"decision":"block","reason":…}`
-//! with the list while anything is unmet. Every verdict is one reading,
-//! `done` over `workspace`. At the Stop, and there alone, the reply is
-//! read as well (#32, the `reply` module): a session the store says closed a
-//! ticket whose `last_assistant_message` carries the language of not
-//! filing is held once with the sentences it matched, a second reading of
-//! `done` over the rule; the second Stop passes as it always did, so the
-//! hold costs one turn.
+//! `stop_hook_active` is true, and when the list repeats or shrinks the
+//! last judged Stop's of the same session and agent ([`crate::turn`]),
+//! otherwise `{"decision":"block","reason":…}` with the list while
+//! anything is unmet. Every verdict is one reading, `done` over
+//! `workspace`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::api_check;
@@ -64,10 +61,10 @@ use crate::permit;
 use crate::phpt;
 use crate::phpt::against::{self, Against};
 use crate::port_map;
-use crate::reading::{Number, Reading, Status, Store, plural};
-use crate::reply;
+use crate::reading::{Freshness, Moved, Number, Outcome, Reading, Status, Store, plural};
 use crate::ticket;
 use crate::track::{self, MAIN, Ticket, merge_base, short};
+use crate::turn::{self, Memory, Part, Turn};
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "done";
@@ -165,8 +162,8 @@ pub struct Verdict {
     /// The ticket the branch records, the one condition 7 asked; `None`
     /// for a branch that records none, which is not asked.
     pub ticket: Option<Ticket>,
-    /// One sentence per unmet condition, in the order of the conditions.
-    pub unmet: Vec<String>,
+    /// Each unmet condition, typed, in the order of the conditions.
+    pub unmet: Vec<Unmet>,
     /// What the hook cannot tell: the harness's own files in the diff,
     /// and the readings of an instrument this run did not take.
     pub notes: Vec<String>,
@@ -184,10 +181,17 @@ impl Verdict {
         self.unmet.is_empty()
     }
 
+    /// Each unmet condition's line, in the order of the list.
+    pub fn messages(&self) -> Vec<String> {
+        self.unmet.iter().map(|u| u.message.clone()).collect()
+    }
+
     /// The list as text: the head line, the unmet conditions, the notes.
+    /// The head line counts the unmet by kind; the bullets are the
+    /// messages, in the order of the conditions (Round 1, Q11 (a)).
     pub fn render(&self) -> String {
         let mut out = format!(
-            "done: {} changed file{} since {} in {}{}\n",
+            "done: {} changed file{} since {} in {}{}{}\n",
             self.changed.len(),
             plural(self.changed.len()),
             self.base,
@@ -198,7 +202,12 @@ impl Verdict {
             },
             self.ticket
                 .map(|ticket| format!(", for {ticket}"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            if self.met() {
+                String::new()
+            } else {
+                format!("; {}", Counts::of(&self.unmet))
+            }
         );
         if self.met() && self.not_run.is_empty() {
             out.push_str("every condition of done is met\n");
@@ -207,7 +216,7 @@ impl Verdict {
             out.push_str(&self.did_not_run());
             out.push('\n');
         } else {
-            bullets(&mut out, "unmet", &self.unmet);
+            bullets(&mut out, "unmet", &self.messages());
         }
         if !self.notes.is_empty() {
             bullets(&mut out, "notes", &self.notes);
@@ -226,6 +235,7 @@ impl Verdict {
         reading.count("changed", self.changed.len() as u64)?;
         reading.count("crates", self.crates.len() as u64)?;
         reading.count("unmet", self.unmet.len() as u64)?;
+        Counts::of(&self.unmet).count_on(&mut reading)?;
         reading.count("notes", self.notes.len() as u64)?;
         reading.count("not_run", self.not_run.len() as u64)?;
         reading.message = if self.met() {
@@ -235,7 +245,7 @@ impl Verdict {
                 "{} unmet since {}: {}",
                 self.unmet.len(),
                 self.base,
-                self.unmet.join("; ")
+                self.messages().join("; ")
             )
         };
         if !self.not_run.is_empty() {
@@ -248,6 +258,194 @@ impl Verdict {
     /// beside it never reads as one over those instruments' readings.
     fn did_not_run(&self) -> String {
         format!("{} did not run in this run", self.not_run.join(" and "))
+    }
+
+    /// The list as one object, `done --format json` (#3494): the base,
+    /// the changed files and crates, the branch's ticket, the counts by
+    /// kind, each unmet condition as `{ kind, instrument, scope, message,
+    /// command }`, and the notes, the delegated readings and `--not-run`;
+    /// `v` is the shape's version ([`JSON_V`]).
+    pub fn to_json(&self) -> Value {
+        json!({
+            "v": JSON_V,
+            "base": { "since": self.base.since, "commit": self.base.commit },
+            "changed": self.changed.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(),
+            "crates": self.crates,
+            "ticket": self.ticket.map(Ticket::number),
+            "met": self.met(),
+            "counts": Counts::of(&self.unmet).to_json(),
+            "unmet": self.unmet,
+            "notes": self.notes,
+            "delegated": self.delegated,
+            "not_run": self.not_run,
+        })
+    }
+}
+
+/// The version of `done --format json`'s shape, `v` on its object: a field
+/// added is the same version, and one removed, renamed or retyped, or a
+/// meaning changed, is the next (Round 1, Q11 (a)).
+pub const JSON_V: u32 = 1;
+
+/// What clears one unmet condition: the kind it carries in the typed list
+/// (Round 1, Q11 (a), c2.d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// A reading over the tree now says the condition does not hold:
+    /// work clears it, and a run after the work.
+    Failing,
+    /// The last reading was taken over another key or recipe: a run
+    /// clears it.
+    Stale,
+    /// No reading was taken, or none measured anything: a run clears it.
+    Missing,
+    /// No instrument run clears it: a person's act, a denial of `permit`,
+    /// a close of the ticket or an open divergence.
+    Refused,
+}
+
+impl Kind {
+    /// Every kind, in the order the head line counts them.
+    pub(crate) const ALL: [Kind; 4] = [Kind::Failing, Kind::Stale, Kind::Missing, Kind::Refused];
+
+    /// The kind as the list, the JSON and the reading's numbers spell it.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Kind::Failing => "failing",
+            Kind::Stale => "stale",
+            Kind::Missing => "missing",
+            Kind::Refused => "refused",
+        }
+    }
+}
+
+/// One unmet condition: its kind, the instrument and scope it is over
+/// where it has them, its line in the list, and the command that clears
+/// it where a run does ([`command_taking`]); only an open divergence has
+/// neither instrument nor scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Unmet {
+    pub kind: Kind,
+    pub instrument: Option<String>,
+    pub scope: Option<String>,
+    pub message: String,
+    pub command: Option<String>,
+}
+
+impl Unmet {
+    /// `kind` over `instrument` and `scope`, said by `message`, with no
+    /// command.
+    fn over(kind: Kind, instrument: &str, scope: &str, message: String) -> Unmet {
+        Unmet {
+            kind,
+            instrument: Some(instrument.to_owned()),
+            scope: Some(scope.to_owned()),
+            message,
+            command: None,
+        }
+    }
+
+    /// The same, cleared by `command`.
+    fn cleared_by(mut self, command: Option<String>) -> Unmet {
+        self.command = command;
+        self
+    }
+}
+
+/// How many unmet conditions of each kind, and how many a checkout handed
+/// over without kinds, its build older than the kinds or its run failed:
+/// the head line's counts and the reading's numbers, which sum to `unmet`
+/// (c2.f).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Counts {
+    kinds: [usize; 4],
+    unkinded: usize,
+}
+
+impl Counts {
+    fn of(unmet: &[Unmet]) -> Counts {
+        let mut counts = Counts::default();
+        for item in unmet {
+            counts.add(item.kind, 1);
+        }
+        counts
+    }
+
+    fn add(&mut self, kind: Kind, n: usize) {
+        self.kinds[kind as usize] += n;
+    }
+
+    fn of_kind(self, kind: Kind) -> usize {
+        self.kinds[kind as usize]
+    }
+
+    fn total(self) -> usize {
+        self.kinds.iter().sum::<usize>() + self.unkinded
+    }
+
+    /// The counts by kind and `unkinded`, as the JSON says them and a
+    /// held checkout hands them over.
+    fn to_json(self) -> Value {
+        let mut by_kind: serde_json::Map<String, Value> = (Kind::ALL.into_iter())
+            .map(|kind| (kind.name().to_owned(), json!(self.of_kind(kind))))
+            .collect();
+        by_kind.insert("unkinded".to_owned(), json!(self.unkinded));
+        Value::Object(by_kind)
+    }
+
+    /// The counts a held checkout handed over, `None` where it handed
+    /// none, as a build older than the kinds does.
+    fn from_json(value: &Value) -> Option<Counts> {
+        let object = value.as_object()?;
+        let n = |name: &str| usize::try_from(object.get(name)?.as_u64()?).ok();
+        let mut counts = Counts::default();
+        for kind in Kind::ALL {
+            counts.add(kind, n(kind.name())?);
+        }
+        counts.unkinded = n("unkinded").unwrap_or_default();
+        Some(counts)
+    }
+
+    fn merge(&mut self, other: Counts) {
+        for kind in Kind::ALL {
+            self.add(kind, other.of_kind(kind));
+        }
+        self.unkinded += other.unkinded;
+    }
+
+    /// Each kind's count, and `unkinded`, on `reading`'s numbers.
+    fn count_on(self, reading: &mut Reading) -> Result<()> {
+        for kind in Kind::ALL {
+            reading.count(kind.name(), self.of_kind(kind) as u64)?;
+        }
+        reading.count("unkinded", self.unkinded as u64)
+    }
+}
+
+impl std::fmt::Display for Counts {
+    /// `3 unmet: 1 failing, 1 stale, 1 missing, 0 refused`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total = self.total();
+        let kinds: Vec<String> = (Kind::ALL.into_iter())
+            .map(|kind| format!("{} {}", self.of_kind(kind), kind.name()))
+            .collect();
+        write!(f, "{total} unmet: {}", kinds.join(", "))?;
+        if self.unkinded > 0 {
+            write!(f, ", {} unkinded", self.unkinded)?;
+        }
+        Ok(())
+    }
+}
+
+/// The clause a stale bullet carries where the reading it stands on last
+/// failed, so a failure under a stale reading is not read as a run owed
+/// (c2.f): empty where it passed or skipped.
+fn last_failed(last: &Reading) -> &'static str {
+    if last.status == Status::Fail {
+        "; its last reading failed"
+    } else {
+        ""
     }
 }
 
@@ -501,17 +699,28 @@ pub fn judge(
                 &mut unmet,
                 &mut notes,
             )?,
-            Condition::KeptChange => unmet.extend(
-                permit::kept_changes(store, root)?
-                    .iter()
-                    .map(ToString::to_string),
-            ),
+            Condition::KeptChange => {
+                unmet.extend(permit::kept_changes(store, root)?.iter().map(|kept| {
+                    Unmet::over(
+                        Kind::Refused,
+                        permit::INSTRUMENT,
+                        kept.path(),
+                        kept.to_string(),
+                    )
+                }));
+            }
             Condition::TicketBoxes => {
                 if let Some(ticket) = ticket {
                     boxes(snapshot, store, manifest.pin_digest(), ticket, &mut unmet)?;
                 }
             }
-            Condition::Stranded => unmet.extend(ticket::stranded(root, store, &base.commit)?),
+            Condition::Stranded => {
+                let stranded = ticket::stranded(root, store, &base.commit)?;
+                unmet.extend(stranded.into_iter().map(|reading| {
+                    let message = format!("ticket: {}", reading.message);
+                    Unmet::over(Kind::Refused, ticket::INSTRUMENT, &reading.scope, message)
+                }));
+            }
             Condition::Folded => folded(&asking, &built_under, &mut unmet, &mut notes)?,
         }
     }
@@ -540,7 +749,7 @@ pub fn judge(
 fn folded(
     asking: &Asking,
     built_under: &[&str],
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
     notes: &mut Vec<String>,
 ) -> Result<()> {
     let Some(changed) = built_under.first() else {
@@ -553,42 +762,47 @@ fn folded(
         .with_context(|| format!("the manifest has no [[crate]] row for {scope}"))?;
     let key = asking.snapshot.key(&krate.path())?;
     let pin = asking.manifest.pin_digest();
-    let mut reading = asking.store.read(instrument, scope)?;
-    if !reading.as_ref().is_some_and(|r| r.fresh_for(&key, pin)) {
-        let sought = [(instrument.to_owned(), scope.to_owned(), key)];
-        reading = asking
-            .store
-            .latest_over_each(&sought, pin)?
-            .into_values()
-            .next();
-    }
-    match reading {
-        Some(reading) if reading.status == Status::Pass => {}
+    // fold's command is said at its site, and is no crate's (c2.e).
+    let command = Some(format!("cargo xtask {instrument}"));
+    let unread = |kind: Kind, clause: &str| {
+        let message = format!(
+            "{instrument}: no reading for {scope} over the tree now, and {changed} changed; `cargo xtask fold` takes it, building the release {scope} first (minutes){clause}"
+        );
+        Unmet::over(kind, instrument, scope, message).cleared_by(command.clone())
+    };
+    let not_run = asking.not_run.iter().any(|n| n == instrument);
+    match asking.store.over(instrument, scope, &key, pin)? {
+        Freshness::Fresh(reading) if reading.status == Status::Pass => {}
         // The sensor reads an `aarch64` Mac alone: a host it cannot read has
         // nothing to hold, and says so.
-        Some(reading) if reading.status == Status::Skip => notes.push(format!(
+        Freshness::Fresh(reading) if reading.status == Status::Skip => notes.push(format!(
             "{instrument}: {scope} not held on this host: {}",
             reading.message
         )),
-        Some(reading) => unmet.push(format!(
-            "{instrument}: {scope} {}: {}",
-            reading.status.as_str(),
-            reading.message
-        )),
-        None if asking.not_run.iter().any(|n| n == instrument) => notes.push(format!(
+        Freshness::Fresh(reading) => {
+            let message = format!(
+                "{instrument}: {scope} {}: {}",
+                reading.status.as_str(),
+                reading.message
+            );
+            unmet.push(Unmet::over(Kind::Failing, instrument, scope, message).cleared_by(command));
+        }
+        Freshness::Stale { .. } | Freshness::Never if not_run => notes.push(format!(
             "{instrument} did not run in this run, so condition 10 judged no reading of it"
         )),
-        None => unmet.push(format!(
-            "{instrument}: no reading for {scope} over the tree now, and {changed} changed; `cargo xtask fold` takes it, building the release {scope} first (minutes)"
-        )),
+        Freshness::Stale { last, .. } => unmet.push(unread(Kind::Stale, last_failed(&last))),
+        Freshness::Never => unmet.push(unread(Kind::Missing, "")),
     }
     Ok(())
 }
 
 /// Condition 7: the branch's ticket has no unticked box, or was withdrawn
 /// by the instrument, read from the `ticket` reading over its number and
-/// never from the tracker. The
-/// reading is fresh while the workspace's tree, [`ticket::STAMPED_OVER`],
+/// never from the tracker. The reading is the scope's last, a later one
+/// a land put in the index included, and never one found by the key: a
+/// tree that returns to an earlier state does not revive an earlier box
+/// state, the claim being re-asserted by reading again (#31). It is fresh
+/// while the workspace's tree, [`ticket::STAMPED_OVER`],
 /// still matches (the rule at the top of this module); a
 /// missing or stale one says what to run, and a failing one carries the
 /// instrument's message, which names each unticked box.
@@ -597,20 +811,33 @@ fn boxes(
     store: &Store,
     pin: &str,
     ticket: Ticket,
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
 ) -> Result<()> {
     const READ: &str = "run `cargo xtask ticket read`";
-    let Some(reading) = store.read(ticket::INSTRUMENT, &ticket::scope(ticket))? else {
-        unmet.push(format!("ticket: no reading for {ticket}; {READ}"));
-        return Ok(());
+    let scope = ticket::scope(ticket);
+    // ticket's command is said at its site, and is no crate's (c2.e).
+    let held = |kind: Kind, message: String| {
+        let command = Some("cargo xtask ticket read".to_owned());
+        Unmet::over(kind, ticket::INSTRUMENT, &scope, message).cleared_by(command)
     };
+    let last = store.last_of_readable(ticket::INSTRUMENT, &scope)?;
     let tree = snapshot.key(Path::new(ticket::STAMPED_OVER))?;
-    if !reading.fresh_for(&tree, pin) {
-        unmet.push(format!(
-            "ticket: the reading for {ticket} is stale; the tree changed since it was read; {READ}"
-        ));
-        return Ok(());
-    }
+    let reading = match Freshness::judging(last, &tree, pin) {
+        Freshness::Fresh(reading) => reading,
+        Freshness::Never => {
+            let message = format!("ticket: no reading for {ticket}; {READ}");
+            unmet.push(held(Kind::Missing, message));
+            return Ok(());
+        }
+        Freshness::Stale { last, .. } => {
+            let message = format!(
+                "ticket: the reading for {ticket} is stale; the tree changed since it was read{}; {READ}",
+                last_failed(&last)
+            );
+            unmet.push(held(Kind::Stale, message));
+            return Ok(());
+        }
+    };
     // The boxes are the condition, read from the numbers: a close the
     // tracker refused with every box ticked fails as a reading and is
     // met here, since the ticket has no unticked box; a reading that
@@ -620,13 +847,13 @@ fn boxes(
     // alone, met when the close went through and held when it was
     // refused.
     let count = |key: &str| reading.int(key);
-    let held = match (count("withdrawn"), count("criteria"), count("unticked")) {
+    let unmet_here = match (count("withdrawn"), count("criteria"), count("unticked")) {
         (Some(withdrawn), ..) if withdrawn > 0 => reading.status != Status::Pass,
         (_, Some(criteria), Some(unticked)) => criteria == 0 || unticked > 0,
         _ => reading.status != Status::Pass,
     };
-    if held {
-        unmet.push(format!("ticket: {}", reading.message));
+    if unmet_here {
+        unmet.push(held(Kind::Failing, format!("ticket: {}", reading.message)));
     }
     Ok(())
 }
@@ -742,12 +969,10 @@ fn slack_porting_notes(
         let mut columns = Vec::new();
         if krate.name.starts_with("ext/") {
             let key = snapshot.key(&krate.path())?;
-            let keys: BTreeMap<String, String> = (scopes_of(snapshot.root(), "crosscheck", krate)?)
-                .into_iter()
-                .map(|scope| (scope, key.clone()))
-                .collect();
-            let mut fresh = store.latest_over("crosscheck", &keys, manifest.pin_digest())?;
-            columns = keys.keys().map(|scope| fresh.remove(scope)).collect();
+            for scope in scopes_of(snapshot.root(), "crosscheck", krate)? {
+                let column = store.over("crosscheck", &scope, &key, manifest.pin_digest())?;
+                columns.push(column.fresh());
+            }
         }
         if let Some(why) = slack_porting(krate, &columns) {
             slack.entry(why).or_default().push(&krate.name);
@@ -828,12 +1053,18 @@ fn no_regression(
     krate: &Crate,
     key: &str,
     not_judged: &mut Vec<String>,
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
 ) -> Result<()> {
     let (scope, pin) = (&krate.name, asking.manifest.pin()?);
+    let held = |kind: Kind, message: String| {
+        let command = command_taking(phpt::INSTRUMENT, scope);
+        Unmet::over(kind, phpt::INSTRUMENT, scope, message).cleared_by(command)
+    };
     let pin = match krate.oracle.as_deref().map(|v| pin.variant(v)) {
+        // No run clears an oracle the pin does not hold: a person's.
         Some(Err(err)) => {
-            unmet.push(format!("phpt: {scope}: {err:#}"));
+            let message = format!("phpt: {scope}: {err:#}");
+            unmet.push(Unmet::over(Kind::Refused, phpt::INSTRUMENT, scope, message));
             return Ok(());
         }
         Some(Ok(variant)) => variant,
@@ -846,17 +1077,16 @@ fn no_regression(
         // holds nothing against any base (#725).
         Against::Unrun(_) if phpt::testless(asking.manifest, scope) => {}
         Against::Unrun(why) => {
-            let sought = [("phpt".to_owned(), scope.clone(), key.to_owned())];
             let digest = asking.manifest.pin_digest();
-            let read = asking.store.latest_over_each(&sought, digest)?;
-            let excused = read.values().any(no_binary_yet);
+            let read = asking.store.over("phpt", scope, key, digest)?.fresh();
+            let excused = read.as_ref().is_some_and(no_binary_yet);
             if asking.not_run.iter().any(|n| n == "phpt") {
                 not_judged.push(format!("phpt for {scope}"));
             } else if !excused {
-                unmet.push(format!("phpt: {why}"));
+                unmet.push(held(Kind::Missing, format!("phpt: {why}")));
             }
         }
-        Against::Unmet(why) => unmet.push(format!("phpt: {why}")),
+        Against::Unmet(why) => unmet.push(held(Kind::Failing, format!("phpt: {why}"))),
     }
     Ok(())
 }
@@ -918,7 +1148,7 @@ fn fresh_readings(
     krate: &Crate,
     now: &KeyNow,
     not_judged: &mut Vec<String>,
-    (unmet, delegated): (&mut Vec<String>, &mut Vec<String>),
+    (unmet, delegated): (&mut Vec<Unmet>, &mut Vec<String>),
     notes: &mut Vec<String>,
 ) -> Result<()> {
     let (root, store, not_run) = (asking.snapshot.root(), asking.store, asking.not_run);
@@ -948,44 +1178,51 @@ fn fresh_readings(
             asked.push((instrument, scope));
         }
     }
-    let sought: Vec<(String, String, String)> = (asked.iter())
-        .map(|(instrument, scope)| ((*instrument).to_owned(), scope.clone(), key.clone()))
-        .collect();
-    let mut read = store.latest_over_each(&sought, pin)?;
     for (instrument, scope) in asked {
-        let found = match read.remove(&(instrument.to_owned(), scope.clone())) {
-            Some(reading) => Some(reading),
-            None => store.last_of(instrument, &scope)?,
+        // The command takes the crate, whichever of its scopes this is (c2.e).
+        let held = |kind: Kind, message: String| {
+            let command = command_taking(instrument, name);
+            Unmet::over(kind, instrument, &scope, message).cleared_by(command)
         };
-        let Some(reading) = found else {
-            if not_run.iter().any(|n| n == instrument) {
-                not_judged.push(format!("{instrument} for {scope}"));
-            } else {
-                unmet.push(format!("{instrument}: no reading for {scope}"));
+        let reading = match store.over(instrument, &scope, key, pin)? {
+            Freshness::Fresh(reading) => reading,
+            Freshness::Never => {
+                if not_run.iter().any(|n| n == instrument) {
+                    not_judged.push(format!("{instrument} for {scope}"));
+                } else {
+                    let message = format!("{instrument}: no reading for {scope}");
+                    unmet.push(held(Kind::Missing, message));
+                }
+                continue;
             }
-            continue;
+            Freshness::Stale { last, moved } => {
+                let changed = match moved {
+                    Moved::Recipe => "oracle.toml",
+                    Moved::Key => &now.changed,
+                };
+                let message = format!(
+                    "{instrument}: the reading for {scope} is stale; {changed} changed since it was taken{}",
+                    last_failed(&last)
+                );
+                unmet.push(held(Kind::Stale, message));
+                continue;
+            }
         };
-        if !reading.fresh_for(key, pin) {
-            // Over the key now, a reading is stale for its recipe alone.
-            let changed = if reading.key() == key {
-                "oracle.toml".to_owned()
-            } else {
-                now.changed.clone()
-            };
-            unmet.push(format!(
-                "{instrument}: the reading for {scope} is stale; {changed} changed since it was taken"
-            ));
-            continue;
-        }
         if reading.status != Status::Pass
             && !met_without_passing(krate, instrument, &reading)
             && !rule_absent(asking.manifest, &reading)
         {
-            unmet.push(format!(
+            // A skip measured nothing: the reading is missing, not failing.
+            let kind = match reading.status {
+                Status::Skip => Kind::Missing,
+                _ => Kind::Failing,
+            };
+            let message = format!(
                 "{instrument}: {scope} {}: {}",
                 reading.status.as_str(),
                 reading.message
-            ));
+            );
+            unmet.push(held(kind, message));
         }
         if instrument == "test"
             && reading.status == Status::Pass
@@ -1002,9 +1239,9 @@ fn fresh_readings(
             && *missing > 0
         {
             let s = plural(usize::try_from(*missing).unwrap_or(usize::MAX));
-            unmet.push(format!(
-                "witness: {missing} kernel{s} or native{s} in {name} without a witness"
-            ));
+            let message =
+                format!("witness: {missing} kernel{s} or native{s} in {name} without a witness");
+            unmet.push(held(Kind::Failing, message));
         }
     }
     if phpt {
@@ -1038,6 +1275,36 @@ pub fn scopes_of(root: &Path, instrument: &str, krate: &Crate) -> Result<Vec<Str
     Ok(scopes)
 }
 
+/// The command that takes `instrument`'s reading of the crate named
+/// `krate`: what clears a stale or missing reading of condition 1 (Round
+/// 1, Q12, c2.e). It is built from the instrument and the crate and never
+/// from the scope, since `<crate>/release` and `ext/<name>/ri` are scopes
+/// and no flag's value, and it lives here beside the flags it claims, so
+/// a test parses each through the command line and asks `permit` of each.
+/// The four instruments that take no crate run over the workspace. None
+/// for an instrument no `[[owed]]` row may name, and for `crosscheck` of a
+/// crate that is no extension; `fold`'s and `ticket`'s commands are said
+/// at their own sites.
+pub(crate) fn command_taking(instrument: &str, krate: &str) -> Option<String> {
+    let flagged = |flag: &str, value: &str| format!("cargo xtask {instrument} {flag} {value}");
+    match instrument {
+        clippy::INSTRUMENT
+        | crate::test::INSTRUMENT
+        | crate::witness::INSTRUMENT
+        | crate::vocab::INSTRUMENT
+        | crate::miri::INSTRUMENT => Some(flagged("--crate", krate)),
+        phpt::INSTRUMENT => Some(flagged("--subset", krate)),
+        crosscheck::INSTRUMENT => krate.strip_prefix("ext/").map(|ext| flagged("--ext", ext)),
+        api_check::INSTRUMENT
+        | crate::budget::INSTRUMENT
+        | crate::unsafe_audit::INSTRUMENT
+        | port_map::INSTRUMENT
+        | crate::makala::compare::INSTRUMENT
+        | crate::makala::soak::INSTRUMENT => Some(format!("cargo xtask {instrument}")),
+        _ => None,
+    }
+}
+
 /// Condition 3: a lock that differs is in the diff, and a lock in the diff
 /// has a fresh `api-check` reading that passes. A seam reading that is
 /// stale says nothing here: the crate the lock lives with changed, and
@@ -1049,7 +1316,7 @@ fn locks(
     manifest: &Manifest,
     store: &Store,
     changed: &[Change],
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
 ) -> Result<()> {
     for seam in &manifest.seams {
         // A lock no [[crate]] row names has no home to hash. One that
@@ -1065,29 +1332,39 @@ fn locks(
         let file = dir.join(&seam.lock);
         let shown = file.display().to_string();
         let in_diff = changed.iter().any(|c| Path::new(&c.path) == file);
-        let Some(last) = store.last_of(api_check::INSTRUMENT, &seam.name)? else {
-            if in_diff {
-                unmet.push(format!(
-                    "{shown} is in the diff and has no api-check reading"
+        let key = snapshot.key(&dir)?;
+        let held = |kind: Kind, message: String| {
+            let command = command_taking(api_check::INSTRUMENT, &seam.name);
+            Unmet::over(kind, api_check::INSTRUMENT, &seam.name, message).cleared_by(command)
+        };
+        match store.over(
+            api_check::INSTRUMENT,
+            &seam.name,
+            &key,
+            manifest.pin_digest(),
+        )? {
+            Freshness::Never if in_diff => unmet.push(held(
+                Kind::Missing,
+                format!("{shown} is in the diff and has no api-check reading"),
+            )),
+            Freshness::Fresh(reading) if reading.status == Status::Fail => {
+                let message = format!(
+                    "{shown}: {}{}",
+                    reading.message,
+                    if in_diff {
+                        ""
+                    } else {
+                        "; the lock is not in the diff"
+                    }
+                );
+                unmet.push(held(Kind::Failing, message));
+            }
+            Freshness::Stale { last, .. } if in_diff && last.status == Status::Pass => {
+                unmet.push(held(
+                    Kind::Stale,
+                    format!("{shown} is in the diff and its api-check reading predates it"),
                 ));
             }
-            continue;
-        };
-        let now = BTreeMap::from([(seam.name.clone(), snapshot.key(&dir)?)]);
-        let fresh = store.latest_over(api_check::INSTRUMENT, &now, manifest.pin_digest())?;
-        match fresh.into_values().next() {
-            Some(reading) if reading.status == Status::Fail => unmet.push(format!(
-                "{shown}: {}{}",
-                reading.message,
-                if in_diff {
-                    ""
-                } else {
-                    "; the lock is not in the diff"
-                }
-            )),
-            None if in_diff && last.status == Status::Pass => unmet.push(format!(
-                "{shown} is in the diff and its api-check reading predates it"
-            )),
             _ => {}
         }
     }
@@ -1103,7 +1380,7 @@ fn open_rows(
     registry: &Registry,
     crates: &[&Crate],
     changed: &[Change],
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
 ) -> Result<()> {
     let proposed_here: Vec<divergence::Id> = if changed.iter().any(|c| c.path == divergence::FILE) {
         let before = git::show(root, base, divergence::FILE)?
@@ -1141,10 +1418,17 @@ fn open_rows(
                 })
         };
         if let Some(what) = touched {
-            unmet.push(format!(
-                "open divergence {} touches {what}: a person writes the reason, or the difference gets fixed (harness §4.3)",
-                row.id
-            ));
+            // No instrument measures it and no command clears it: a person's.
+            unmet.push(Unmet {
+                kind: Kind::Refused,
+                instrument: None,
+                scope: None,
+                message: format!(
+                    "open divergence {} touches {what}: a person writes the reason, or the difference gets fixed (harness §4.3)",
+                    row.id
+                ),
+                command: None,
+            });
         }
     }
     Ok(())
@@ -1159,13 +1443,19 @@ fn over_the_diff(
     manifest: &Manifest,
     base: &str,
     changed: &[Change],
-    unmet: &mut Vec<String>,
+    unmet: &mut Vec<Unmet>,
     notes: &mut Vec<String>,
 ) -> Result<()> {
     let files = permit::working_files(root, base, changed)?;
     let diff = permit::judge_files(manifest, root, &files)?;
     for (path, finding) in diff.denials() {
-        unmet.push(format!("permit denies {path}: {}", finding.reason()));
+        let message = format!("permit denies {path}: {}", finding.reason());
+        unmet.push(Unmet::over(
+            Kind::Refused,
+            permit::INSTRUMENT,
+            path,
+            message,
+        ));
     }
     for (path, finding) in diff.a_persons() {
         notes.push(format!(
@@ -1199,6 +1489,8 @@ pub(crate) fn command(
         base,
         not_run,
         caller,
+        format,
+        peek,
         ..
     } = asked
     else {
@@ -1206,14 +1498,20 @@ pub(crate) fn command(
     };
     let caller = caller.unwrap_or_else(Caller::ambient);
     let registry = Registry::load(root)?;
-    run(
-        root,
-        manifest,
-        &registry,
-        store,
+    answer(
+        (root, manifest, &registry, store),
         (base.as_deref(), caller),
         &not_run,
+        (format, peek),
     )
+}
+
+/// How `done` prints its list: as text, or as one object
+/// ([`Verdict::to_json`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Format {
+    Text,
+    Json,
 }
 
 /// The command: judge, write the reading, print the list, fail while
@@ -1227,6 +1525,19 @@ pub fn run(
     (base, caller): (Option<&str>, Caller),
     not_run: &[String],
 ) -> Result<()> {
+    let asked = (root, manifest, registry, store);
+    answer(asked, (base, caller), not_run, (Format::Text, false))
+}
+
+/// [`run`] in `format`, and where `peek`, writing nothing: no reading and
+/// no settled kept change, so a band that polls it leaves the store as it
+/// found it (Round 1, Q12, c2.h). The exit is the verdict's either way.
+fn answer(
+    (root, manifest, registry, store): (&Path, &Manifest, &Registry, &Store),
+    (base, caller): (Option<&str>, Caller),
+    not_run: &[String],
+    (format, peek): (Format, bool),
+) -> Result<()> {
     if let Some(unowed) = not_run.iter().find(|n| manifest.owing(n).is_none()) {
         let owed: Vec<&str> = manifest.owed.iter().map(|r| r.instrument.name()).collect();
         bail!(
@@ -1236,20 +1547,36 @@ pub fn run(
     }
     let snapshot = Snapshot::disk(root)?;
     let verdict = judge(&snapshot, manifest, registry, store, base, not_run)?;
-    let outcome = store.record(&[called(verdict.reading(manifest, &snapshot)?, caller)])?;
-    print!("{}", verdict.render());
+    let reading = called(verdict.reading(manifest, &snapshot)?, caller);
+    let outcome = if peek {
+        Outcome::of(&[reading])
+    } else {
+        permit::settle(store, root)?;
+        store.record(&[reading])?
+    };
+    match format {
+        Format::Text => print!("{}", verdict.render()),
+        Format::Json => println!("{}", verdict.to_json()),
+    }
     let unmet = verdict.unmet.len();
     outcome.exit_saying(|| format!("{unmet} condition{} of done unmet", plural(unmet)))
 }
 
-/// Who asked `done` (#3619): each reading carries it, so a hold's verdict
-/// is told from a push's, CI's and a person's.
+/// Who asked `done`, a label and nothing more: it heads each `done`
+/// reading's message ([`called`], #3619), so the log tells a hold's
+/// verdict from a push's, CI's, a land's and a person's. Nothing reads
+/// it: no condition, list or base varies by caller, and no decision is
+/// taken on it (Round 1, Q4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Caller {
     Stop,
     SubagentStop,
     PrePush,
     Ci,
+    /// `worktree land`'s verdict over the merge worktree, which no
+    /// command line offers.
+    #[value(skip)]
+    Land,
     Hand,
 }
 
@@ -1277,6 +1604,7 @@ impl Caller {
             Caller::SubagentStop => "subagent-stop",
             Caller::PrePush => "pre-push",
             Caller::Ci => "ci",
+            Caller::Land => "land",
             Caller::Hand => "hand",
         }
     }
@@ -1289,16 +1617,13 @@ fn called(mut reading: Reading, caller: Caller) -> Reading {
 }
 
 /// The Stop hook's stdin: the keys `done` reads (harness-design.md §13
-/// D.16). The reply is read only for a session the store says closed a
-/// ticket.
+/// D.16).
 #[derive(Debug, Deserialize)]
 struct StopStdin {
     #[serde(default)]
     stop_hook_active: bool,
     #[serde(default)]
     session_id: String,
-    #[serde(default)]
-    last_assistant_message: String,
     /// The subagent stopping, absent at the main loop's Stop.
     #[serde(default)]
     agent_id: Option<String>,
@@ -1306,10 +1631,54 @@ struct StopStdin {
     #[serde(default)]
     hook_event_name: Option<String>,
     /// The Stop of another checkout handing this one to its own build:
-    /// judge this checkout alone, and leave the reply to the Stop that
-    /// handed it (#3619).
+    /// judge this checkout alone (#3619).
     #[serde(default)]
     here: bool,
+    /// The host's tasks in flight as the turn stops, and its session's
+    /// scheduled wakeups, each an array where the host's task registry
+    /// was reachable and absent otherwise. Kept as values, so a change
+    /// of their shape blocks no Stop; read only to be counted
+    /// ([`StopStdin::count_waiting`]).
+    #[serde(default)]
+    background_tasks: Option<Value>,
+    #[serde(default)]
+    session_crons: Option<Value>,
+}
+
+impl StopStdin {
+    /// The host's waiting work, counted on the Stop's reading (Round 1,
+    /// Q23, c7): `background_tasks` and `session_crons`, each where the
+    /// host sent the array, so absent is told from none; the tasks by
+    /// type as groups; and `background_in_checkouts`, the shell tasks
+    /// whose command names a checkout the Stop judged. A count, read by
+    /// nothing that holds a turn.
+    fn count_waiting(&self, reading: &mut Reading, checkouts: &[PathBuf]) -> Result<()> {
+        if let Some(tasks) = self.background_tasks.as_ref().and_then(Value::as_array) {
+            reading.count("background_tasks", tasks.len() as u64)?;
+            let mut by_type = BTreeMap::<&str, u64>::new();
+            for task in tasks {
+                *by_type
+                    .entry(task["type"].as_str().unwrap_or("untyped"))
+                    .or_default() += 1;
+            }
+            for (kind, n) in by_type {
+                reading.group(&format!("background_tasks {kind}"), n)?;
+            }
+            let in_checkouts = tasks.iter().filter(|task| {
+                let command = task["command"].as_str().unwrap_or_default();
+                task["type"] == "shell"
+                    && checkouts
+                        .iter()
+                        .filter_map(|c| c.to_str())
+                        .any(|c| command.contains(c))
+            });
+            reading.count("background_in_checkouts", in_checkouts.count() as u64)?;
+        }
+        if let Some(crons) = self.session_crons.as_ref().and_then(Value::as_array) {
+            reading.count("session_crons", crons.len() as u64)?;
+        }
+        Ok(())
+    }
 }
 
 const UNREAD_STDIN: &str = "done could not read the Stop hook's stdin";
@@ -1317,14 +1686,20 @@ const UNREAD_STDIN: &str = "done could not read the Stop hook's stdin";
 /// `--hook`: judge the Stop hook's stdin text and give the hook's stdout,
 /// `None` for a pass. The second Stop (`stop_hook_active`) passes without
 /// judging and records the release with the count the block had (#3618
-/// M4); whatever goes wrong before a verdict is a block that says so,
-/// since the second Stop releases a held turn and nothing releases a
-/// silent pass.
+/// M4, Round 1, Q15 (a)); whatever goes wrong before a verdict is a block
+/// that says so, since the second Stop releases a held turn and nothing
+/// releases a silent pass.
 ///
 /// What is judged is each checkout the session's own calls wrote in, as
-/// permit placed them (harness-design.md §4.5, #3618 ruling 1): this one
-/// here, another by its own build, handed the Stop with `here`. A session
-/// that wrote in none passes.
+/// permit placed them (harness-design.md §4.5, #3618 ruling 1, Round 2,
+/// Q34 (a)), less the merge worktree, the checkout on `staging` (Round 1,
+/// Q14 (b)): this one here, another by its own build, handed the Stop with
+/// `here`. A session that wrote in none passes. How the Stop ends is
+/// [`turn::decide`]'s, over what each checkout gave and the memory of the
+/// last judged Stop of the same session and agent: a list that repeats or
+/// shrinks that one's passes and is recorded (Round 1, Q13 (d)). A
+/// checkout handed the Stop keeps no memory and holds on anything unmet,
+/// since the Stop that handed it over decides.
 pub(crate) fn hook(
     root: &Path,
     manifest: &Manifest,
@@ -1337,8 +1712,12 @@ pub(crate) fn hook(
         Err(err) => return Some(block(&format!("{UNREAD_STDIN}: {err}"))),
     };
     let caller = Caller::of_hook(stop.hook_event_name.as_deref());
+    let agent = stop.agent_id.as_deref();
+    let memory = (!stop.here)
+        .then(|| turn::path(root, &stop.session_id, agent))
+        .flatten();
     if stop.stop_hook_active {
-        if let Err(err) = released(store, &stop, caller) {
+        if let Err(err) = released(store, memory.as_deref(), &stop, caller) {
             eprintln!("xtask done: the release was not recorded: {err:#}");
         }
         return None;
@@ -1347,95 +1726,162 @@ pub(crate) fn hook(
         Ok(snapshot) => snapshot,
         Err(err) => return Some(block(&format!("done could not judge the changes: {err:#}"))),
     };
-    let checkouts = if stop.here {
+    // A checkout removed since the session wrote in it is none the Stop
+    // judges or counts.
+    let checkouts: Vec<PathBuf> = if stop.here {
         vec![root.to_path_buf()]
     } else {
-        let agent = stop.agent_id.as_deref().unwrap_or_default();
-        crate::permit::written(root, &stop.session_id, agent)
-    };
-    let mut reasons = Vec::new();
-    let mut unmet = 0;
+        crate::permit::written(root, &stop.session_id, agent.unwrap_or_default())
+            .into_iter()
+            .filter(|c| track::head_branch(c).as_deref() != Some(crate::queue::STAGING))
+            .collect()
+    }
+    .into_iter()
+    .filter(|c| c.is_dir())
+    .collect();
+    let mut parts = Vec::new();
+    let mut counts = Counts::default();
     let mut here = None;
-    for checkout in checkouts.iter().filter(|c| c.is_dir()) {
-        if same_dir(checkout, root) {
-            match judge(&snapshot, manifest, registry, store, None, &[]) {
-                Ok(verdict) => {
-                    unmet += verdict.unmet.len();
-                    if !verdict.met() {
-                        reasons.push(verdict.render());
-                    }
-                    here = Some(verdict);
-                }
-                Err(err) => {
-                    return Some(block(&format!("done could not judge the changes: {err:#}")));
-                }
-            }
+    for checkout in &checkouts {
+        if !same_dir(checkout, root) {
+            let (held, part) = handed_over(checkout, &stop);
+            counts.merge(held);
+            parts.push(part);
             continue;
         }
-        let handed = json!({"session_id": stop.session_id, "hook_event_name": stop.hook_event_name,
-            "here": true});
-        let args = ["done", "--hook"];
-        let adapter = crate::permit::Adapter::CommandHook;
-        match crate::permit::walk(checkout, adapter, &args, &handed.to_string()) {
-            Ok(out) => {
-                let held: Value = serde_json::from_slice(&out).unwrap_or(Value::Null);
-                if let Some(reason) = held["reason"].as_str() {
-                    unmet += (held["unmet"].as_u64())
-                        .and_then(|n| usize::try_from(n).ok())
-                        .unwrap_or(1);
-                    reasons.push(format!("In {}:\n{reason}", checkout.display()));
+        match judge(&snapshot, manifest, registry, store, None, &[]) {
+            Ok(verdict) => {
+                if let Err(err) = permit::settle(store, root) {
+                    eprintln!("xtask done: a settled kept change was not removed: {err:#}");
                 }
+                counts.merge(Counts::of(&verdict.unmet));
+                parts.push(if verdict.met() {
+                    Part::Met
+                } else {
+                    Part::Held {
+                        checkout: checkout.clone(),
+                        bullets: verdict.messages(),
+                        list: verdict.render(),
+                    }
+                });
+                here = Some(verdict);
             }
-            Err(last) => {
-                unmet += 1;
-                reasons.push(format!(
-                    "done could not judge {}: {last}",
-                    checkout.display()
-                ));
+            Err(err) => {
+                counts.unkinded += 1;
+                let reason = format!("done could not judge the changes: {err:#}");
+                parts.push(Part::Unjudged { reason });
             }
         }
     }
-    // The reply, for a session that closed a ticket and no other.
-    let read = || {
-        reply::closed_by(store, &stop.session_id)
-            .and_then(|closed| reply::read(manifest, &closed, &stop.last_assistant_message))
-    };
-    let unfiled = if stop.here {
-        None
+    let decision = turn::decide(
+        memory.as_deref().and_then(Memory::read).as_ref(),
+        &parts,
+        counts.total(),
+    );
+    if let Some(path) = &memory
+        && let Err(err) = Memory::keep(path, decision.memory.as_ref())
+    {
+        eprintln!("xtask done: the turn's memory was not kept: {err:#}");
+    }
+    let holds = if stop.here {
+        decision.turn != Turn::Met
     } else {
-        match read() {
-            Ok(unfiled) => unfiled,
-            Err(err) => return Some(block(&format!("done could not read the reply: {err:#}"))),
-        }
+        decision.turn.holds()
     };
     // The hook's exit is 0 and its verdict is the JSON; the outcome of
     // recording it is neither.
-    let recorded = stop_reading(here.as_ref(), manifest, &snapshot, unmet, checkouts.len())
-        .and_then(|r| {
-            // The Stop's verdict carries the session: what marks a later
-            // turn's close as this turn's and not an earlier one's.
-            let mut r = called(r, caller);
-            stop.session_id.clone_into(&mut r.session);
-            let mut readings = vec![r];
-            if let Some(unfiled) = &unfiled {
-                readings.push(unfiled.reading(&snapshot, &stop.session_id)?);
-            }
-            store.record(&readings)
-        });
+    let turn = (!stop.here).then_some(&decision);
+    let over = (here.as_ref(), checkouts.len());
+    let recorded = stop_reading(over, manifest, &snapshot, counts, turn).and_then(|r| {
+        // The Stop's verdict carries the session, as each reading of
+        // the store says who it was taken for.
+        let mut r = called(r, caller);
+        stop.session_id.clone_into(&mut r.session);
+        stop.count_waiting(&mut r, &checkouts)?;
+        store.record(&[r])
+    });
     if let Err(err) = recorded {
         eprintln!("xtask done: the verdict stands but was not recorded: {err:#}");
     }
-    if let Some(unfiled) = unfiled {
-        reasons.push(unfiled.render());
-    }
-    (!reasons.is_empty()).then(|| {
-        let mut held = block(&reasons.join("\n"));
+    holds.then(|| {
+        let mut held = block(&decision.list);
         // The count, for the Stop that handed this checkout over.
         if stop.here {
-            held["unmet"] = json!(unmet);
+            held["unmet"] = json!(counts.total());
+            held["kinds"] = counts.to_json();
         }
         held
     })
+}
+
+/// `checkout`, which the session wrote in and the hook does not stand in,
+/// judged by its own build (#3619): what it counted and what it gave. A
+/// build older than the kinds hands the count alone, and one that could
+/// not judge is unjudged, counted as one unmet, each counted unkinded.
+fn handed_over(checkout: &Path, stop: &StopStdin) -> (Counts, Part) {
+    let handed = json!({"session_id": stop.session_id, "hook_event_name": stop.hook_event_name,
+        "here": true});
+    let args = ["done", "--hook"];
+    let adapter = crate::permit::Adapter::CommandHook;
+    let unjudged = |reason: String| {
+        let counts = Counts {
+            unkinded: 1,
+            ..Counts::default()
+        };
+        (counts, Part::Unjudged { reason })
+    };
+    let out = match crate::permit::walk(checkout, adapter, &args, &handed.to_string()) {
+        Ok(out) => out,
+        Err(last) => {
+            return unjudged(format!(
+                "done could not judge {}: {last}",
+                checkout.display()
+            ));
+        }
+    };
+    match handed_back(&out) {
+        Ok(None) => (Counts::default(), Part::Met),
+        Ok(Some((held, reason))) => {
+            let counts = Counts::from_json(&held["kinds"]).unwrap_or_else(|| {
+                let n = held["unmet"].as_u64().and_then(|n| usize::try_from(n).ok());
+                Counts {
+                    unkinded: n.unwrap_or(1),
+                    ..Counts::default()
+                }
+            });
+            let list = format!("In {}:\n{reason}", checkout.display());
+            (counts, Part::handed(checkout, list))
+        }
+        Err(why) => unjudged(format!(
+            "done could not read {}'s verdict: {why}",
+            checkout.display()
+        )),
+    }
+}
+
+/// What a checkout's build printed for the Stop handed to it: nothing,
+/// which is its pass, or the hook's object with its reason. Anything
+/// else is no verdict, and holds.
+fn handed_back(out: &[u8]) -> Result<Option<(Value, String)>, String> {
+    if out.trim_ascii().is_empty() {
+        return Ok(None);
+    }
+    let held: Value = serde_json::from_slice(out).map_err(|err| {
+        let printed = String::from_utf8_lossy(out);
+        format!(
+            "its build printed what is not the hook's JSON ({err}): {}",
+            printed.trim()
+        )
+    })?;
+    match held["reason"].as_str() {
+        Some(reason) => {
+            let reason = reason.to_owned();
+            Ok(Some((held, reason)))
+        }
+        None => Err(format!(
+            "its build printed an object with no reason: {held}"
+        )),
+    }
 }
 
 /// Whether `a` and `b` are one directory.
@@ -1444,17 +1890,37 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 /// The Stop's one reading: this checkout's verdict where it was judged,
-/// otherwise one over the checkouts the session wrote in; `unmet` counted
-/// over them all.
+/// otherwise one over the checkouts the session wrote in; `counts` and
+/// `unmet` counted over them all. What the other checkouts hold is said
+/// beside this one's verdict, so a failing row never says every
+/// condition is met. A judged Stop that decided its turn counts the
+/// bullets `added` and `removed` against the last judged Stop's and
+/// whether it passed as a `repeat` (Round 1, Q13 (d), Q15 (a)), and its
+/// message says a repeat: the reading fails as any list does.
 fn stop_reading(
-    here: Option<&Verdict>,
+    (here, checkouts): (Option<&Verdict>, usize),
     manifest: &Manifest,
     snapshot: &Snapshot,
-    unmet: usize,
-    checkouts: usize,
+    counts: Counts,
+    turn: Option<&turn::Decision>,
 ) -> Result<Reading> {
+    let unmet = counts.total();
     let mut reading = if let Some(verdict) = here {
-        verdict.reading(manifest, snapshot)?
+        let mut reading = verdict.reading(manifest, snapshot)?;
+        let elsewhere = unmet.saturating_sub(verdict.unmet.len());
+        if elsewhere > 0 {
+            let others = checkouts.saturating_sub(1);
+            let over = format!(
+                "{elsewhere} unmet over the {others} other checkout{} the session wrote in",
+                plural(others)
+            );
+            reading.message = if verdict.met() {
+                format!("{over}; this one is met since {}", verdict.base)
+            } else {
+                format!("{}; {over}", reading.message)
+            };
+        }
+        reading
     } else {
         let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, snapshot)?;
         reading.message = format!(
@@ -1465,20 +1931,31 @@ fn stop_reading(
     };
     reading.status = Status::of(unmet == 0);
     reading.count("unmet", unmet as u64)?;
+    counts.count_on(&mut reading)?;
+    if let Some(decision) = turn {
+        let repeat = decision.turn == Turn::Repeat;
+        reading.count("added", decision.added as u64)?;
+        reading.count("removed", decision.removed as u64)?;
+        reading.count("repeat", u64::from(repeat))?;
+        if repeat {
+            reading.message = format!(
+                "{}; passed, a repeat of the last judged Stop",
+                reading.message
+            );
+        }
+    }
     Ok(reading)
 }
 
 /// The second Stop's release, recorded (#3618 M4): `done` over `released`,
-/// failed, with the count of the block this session's last Stop wrote.
-fn released(store: &Store, stop: &StopStdin, caller: Caller) -> Result<()> {
-    let log = store.history(INSTRUMENT)?;
-    let last = log.readings.iter().rev().find(|r| {
-        r.scope == WORKSPACE && r.session == stop.session_id && !stop.session_id.is_empty()
-    });
-    let unmet = last.and_then(|r| r.int("unmet")).unwrap_or_default();
-    let mut reading = Reading::new(INSTRUMENT, RELEASED);
+/// failed, with the count of the block, which the turn's memory at
+/// `memory` kept (Round 1, Q15 (a)). It is timed as it is made and
+/// carries no key, since the release judged no tree.
+fn released(store: &Store, memory: Option<&Path>, stop: &StopStdin, caller: Caller) -> Result<()> {
+    let unmet = memory.and_then(Memory::read).map_or(0, |m| m.unmet);
+    let mut reading = Reading::keyed(INSTRUMENT, RELEASED, String::new())?;
     reading.status = Status::Fail;
-    reading.count("unmet", u64::try_from(unmet).unwrap_or_default())?;
+    reading.count("unmet", unmet as u64)?;
     reading.message = format!("the second Stop released a block of {unmet} unmet");
     stop.session_id.clone_into(&mut reading.session);
     store.record(&[called(reading, caller)])?;
@@ -1503,8 +1980,8 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 #[cfg(test)]
 mod tests {
     use super::{
-        Slack, met_without_passing, miri_unsupported, no_binary_yet, owed, porting_meter,
-        rule_absent, slack_porting,
+        Slack, command_taking, handed_back, met_without_passing, miri_unsupported, no_binary_yet,
+        owed, porting_meter, rule_absent, slack_porting,
     };
     use crate::carried::Carried;
     use crate::manifest::{Crate, Manifest, Owed, Rule};
@@ -1924,6 +2401,78 @@ crates = ["php_heap"]                      # design §9's memory model; also wha
         assert!(!rule_absent(&without, &reading), "a fail is held");
     }
 
+    /// c2.e: the command of every tracked `[[owed]]` row, for crates of
+    /// each shape it covers, an engine crate, the memory model, the lock's
+    /// home, an extension, a host and the harness, is a command line
+    /// `xtask` parses and one `permit` allows, in main's checkout and in a
+    /// ticketed one, where `lanes.builder-subset` denies a bare `phpt`; a
+    /// clap test alone would pass one of those. `fold` and `ticket` name
+    /// their commands at their sites, and `crosscheck` none for a crate
+    /// that is no extension.
+    #[cfg(tracked)]
+    #[test]
+    fn every_owed_reading_names_a_command_xtask_parses_and_permit_allows() {
+        use clap::Parser;
+        let root = crate::package_dir().parent().unwrap();
+        let manifest = Manifest::load(root).unwrap();
+        let checkout = |name: &str, ticket: Option<&str>| {
+            let tree = crate::scratch::Tree::new(name).unwrap();
+            crate::git::git(tree.path(), &["init", "-q", "-b", "main"]).unwrap();
+            if let Some(ticket) = ticket {
+                crate::git::git(tree.path(), &["config", "branch.main.ticket", ticket]).unwrap();
+            }
+            tree
+        };
+        let checkouts = [
+            checkout("done-commands-main", None),
+            checkout("done-commands-ticketed", Some("4251")),
+        ];
+        let shapes = [
+            "php_engine",
+            "php_heap",
+            "php_ext",
+            "ext/pcre",
+            "sapi/cli",
+            "sapi/makala",
+            "xtask",
+        ];
+        let denied = |command: &str, checkout: &std::path::Path| {
+            let call = serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": command, "description": "take the reading" }
+            });
+            let call = crate::permit::Call::parse(&call.to_string()).unwrap();
+            let judgement = crate::permit::judge(&manifest, checkout, &call).unwrap();
+            judgement.denial().map(|finding| finding.rule.clone())
+        };
+        let mut judged = 0;
+        for row in &manifest.owed {
+            let instrument = row.instrument.name();
+            for krate in shapes.into_iter().filter(|k| row.covers(k)) {
+                let command = command_taking(instrument, krate)
+                    .unwrap_or_else(|| panic!("{instrument} names no command for {krate}"));
+                let words: Vec<&str> = command.split_whitespace().collect();
+                assert_eq!(words[..2], ["cargo", "xtask"], "{command}");
+                let parsed = crate::cli::Cli::try_parse_from(&words[1..]);
+                assert!(parsed.is_ok(), "{command}: {}", parsed.unwrap_err());
+                for tree in &checkouts {
+                    let denial = denied(&command, tree.path());
+                    assert_eq!(denial, None, "{command} in {}", tree.path().display());
+                }
+                judged += 1;
+            }
+        }
+        assert!(judged >= manifest.owed.len(), "{judged} commands judged");
+        // The ticketed checkout is one: the lane without a subset is
+        // denied there and not in main's.
+        let ticketed = denied("cargo xtask phpt", checkouts[1].path());
+        assert_eq!(ticketed.as_deref(), Some("lanes.builder-subset"));
+        assert_eq!(denied("cargo xtask phpt", checkouts[0].path()), None);
+        assert_eq!(command_taking(crate::fold::INSTRUMENT, "sapi/cli"), None);
+        assert_eq!(command_taking(crate::ticket::INSTRUMENT, "xtask"), None);
+        assert_eq!(command_taking("crosscheck", "php_engine"), None);
+    }
+
     /// #3206: the tracked manifest's `[[owed]]` rows ask every crate of it
     /// for what `done` asked before the rows, when `done.rs` carried the
     /// list as `FRESH` and narrowed it in `instruments_of` (at 3e9e33de6):
@@ -1965,5 +2514,23 @@ crates = ["php_heap"]                      # design §9's memory model; also wha
             let asked = owed(&manifest, krate, &carried);
             assert_eq!(asked, asked_before, "{name}");
         }
+    }
+
+    /// A checkout's build that printed nothing passed; one that printed
+    /// what is not the hook's object, or an object with no reason, gave
+    /// no verdict and holds (Round 1, Q23, c7), where it used to pass.
+    #[test]
+    fn a_handed_checkout_passes_on_empty_stdout_and_holds_on_garbage() {
+        assert_eq!(handed_back(b""), Ok(None));
+        assert_eq!(handed_back(b"\n"), Ok(None));
+        let garbage = handed_back(b"warning: unused import").unwrap_err();
+        assert!(garbage.contains("not the hook's JSON"), "{garbage}");
+        assert!(garbage.contains("unused import"), "{garbage}");
+        let reasonless = handed_back(b"{\"decision\":\"block\"}").unwrap_err();
+        assert!(reasonless.contains("no reason"), "{reasonless}");
+        let held = handed_back(b"{\"decision\":\"block\",\"reason\":\"1 unmet\",\"unmet\":1}");
+        let (value, reason) = held.unwrap().unwrap();
+        assert_eq!(reason, "1 unmet");
+        assert_eq!(value["unmet"], 1);
     }
 }

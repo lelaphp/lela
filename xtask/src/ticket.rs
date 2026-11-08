@@ -49,9 +49,8 @@
 //! from prose here.
 //!
 //! Which criterion asks for the write is a heuristic, and one that says
-//! what it matched rather than one that stays silent, the shape
-//! `ticket.reply-unfiled` has: a false positive costs one hold and the
-//! recovery is a person's word on the label. A criterion is read to its
+//! what it matched rather than one that stays silent: a false positive
+//! costs one hold and the recovery is a person's word on the label. A criterion is read to its
 //! main clause, what stands before its first comma, colon or
 //! subordinating word, since
 //! a path named after one is a path the clause describes something else
@@ -1843,14 +1842,14 @@ fn branch_ticket(branch: &str) -> Option<u64> {
     }
 }
 
-/// What `done` names of the merges since `base` (#2358): each ticket a
-/// merge commit's subject names whose last `ticket` reading says
+/// What `done` names of the merges since `base` (#2358): the last `ticket`
+/// reading of each ticket a merge commit's subject names, where it says
 /// [`merged`] left it [`unclosed`], until a close replaces it. Where `base` is `HEAD`, as on `main`, the merges are
 /// `HEAD`'s own, so the session that made the merge reads what it
 /// stranded, and a branch laid on that tip with no commit of its own
 /// reads it the same; a branch reads the merges it carries, `main`'s
 /// being behind its base. The store is read, never the tracker.
-pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Result<Vec<String>> {
+pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Result<Vec<Reading>> {
     let head = crate::git::rev_parse(root, &["HEAD"])?;
     let range = if head != base {
         format!("{base}..HEAD")
@@ -1862,10 +1861,10 @@ pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Resul
     };
     let mut unmet = Vec::new();
     for ticket in named_by_merges(root, &range)? {
-        if let Some(reading) = store.read(INSTRUMENT, &scope(ticket))?
+        if let Some(reading) = store.last_of_readable(INSTRUMENT, &scope(ticket))?
             && reading.numbers.contains_key(UNCLOSED)
         {
-            unmet.push(format!("ticket: {}", reading.message));
+            unmet.push(reading);
         }
     }
     Ok(unmet)
@@ -1922,6 +1921,7 @@ fn unmet_here(root: &Path, manifest: &Manifest, reading: &Reading) -> Result<()>
     let registry = crate::divergence::Registry::load(root)?;
     let snapshot = Snapshot::disk(root)?;
     let verdict = crate::done::judge(&snapshot, manifest, &registry, &store, None, &[])?;
+    crate::permit::settle(&store, root)?;
     if !verdict.met() {
         bail!("done is unmet in this worktree:\n{}", verdict.render());
     }

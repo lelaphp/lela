@@ -74,7 +74,7 @@
 //! that is fresh for nothing (§5, "Worktrees"; #35). What the log
 //! carries is found at the branch's merge in the index, by the tree each
 //! reading was taken over, so a pass over what the merge stages is not run again
-//! there (`Store::latest_over`, #1252). The worktree's kept phpt runs
+//! there (`Store::over`, #1252). The worktree's kept phpt runs
 //! are carried into the main worktree's beside the log, each one main
 //! keeps none of: a run is keyed by the engine's tree and not by the
 //! checkout, so it is the same run wherever it was taken, and one main

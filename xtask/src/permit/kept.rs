@@ -35,6 +35,14 @@ pub(crate) struct Kept {
     call: String,
 }
 
+impl Kept {
+    /// The file, relative to its checkout: the scope `done`'s typed list
+    /// gives the item (#3494).
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+}
+
 impl std::fmt::Display for Kept {
     /// The file, the call it moved under, what it was before and how a
     /// person settles it.
@@ -65,10 +73,14 @@ pub(super) fn before_the_call(was: Option<&str>) -> String {
 /// stands for the file until it is settled, since a second one moved a
 /// file the first had already moved, and a change that is already
 /// settled, the file at `HEAD`'s blob as a merge leaves it, is no record.
+/// An earlier record stood before this call where `was` is not `HEAD`'s
+/// blob; one whose file was at it is spent, though no [`settle`] has
+/// removed it yet, and this change replaces it.
 pub(super) fn keep(checkout: &Path, path: &str, was: Option<&str>, call: &str) -> Result<()> {
     let file = record_of(&Store::of_workspace(checkout), path);
-    if let Some(earlier) = read(&file)?
-        && stands(checkout, &earlier)?
+    if read(&file)?.is_some()
+        && was != blob_at(checkout, "HEAD", path)?.as_deref()
+        && !at_head(checkout, path)?
     {
         return Ok(());
     }
@@ -84,29 +96,49 @@ pub(super) fn keep(checkout: &Path, path: &str, was: Option<&str>, call: &str) -
     reading::replace(&file, text.as_bytes())
 }
 
-/// Every kept change in `store` that still stands in `checkout`, by path.
-/// A record settled since, the file committed or restored, is spent and
-/// removed, as a call's record is once `--after` took it, so a later edit
-/// of the file is not read as this change; this is the one write a
-/// reader of the records makes. A store that cannot be read is an error,
+/// Every kept change in `store` that still stands in `checkout`, by path,
+/// read and nothing written: a record settled since stays until
+/// [`settle`] removes it, so `done --peek` leaves the store as it found
+/// it (Round 1, Q12, c2.h). A store that cannot be read is an error,
 /// never an empty list: `done` does not pass on no evidence.
 pub(crate) fn kept_changes(store: &Store, checkout: &Path) -> Result<Vec<Kept>> {
     let mut standing = Vec::new();
-    for file in crate::entries(&dir_of(store))? {
-        if file.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        let Some(kept) = read(&file)? else {
-            continue;
-        };
+    for (_, kept) in records(store)? {
         if stands(checkout, &kept)? {
             standing.push(kept);
-        } else {
-            crate::remove(&file)?;
         }
     }
     standing.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(standing)
+}
+
+/// Remove each record in `store` that `checkout` has settled, the file
+/// committed or restored: it is spent, as a call's record is once
+/// `--after` took it, so a later edit of the file is not read as this
+/// change. The one write a reader of the records makes, which each
+/// caller of `done::judge` that writes makes after it: `done`, its hook,
+/// and `ticket ready`.
+pub(crate) fn settle(store: &Store, checkout: &Path) -> Result<()> {
+    for (file, kept) in records(store)? {
+        if !stands(checkout, &kept)? {
+            crate::remove(&file)?;
+        }
+    }
+    Ok(())
+}
+
+/// Every record in `store`, with its file.
+fn records(store: &Store) -> Result<Vec<(PathBuf, Kept)>> {
+    let mut records = Vec::new();
+    for file in crate::entries(&dir_of(store))? {
+        if file.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        if let Some(kept) = read(&file)? {
+            records.push((file, kept));
+        }
+    }
+    Ok(records)
 }
 
 /// Whether the change stands: the file is not at `HEAD`'s blob. A commit

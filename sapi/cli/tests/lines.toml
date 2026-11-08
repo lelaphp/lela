@@ -684,6 +684,13 @@ args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protectio
 name = "a-shutdown-function-under-r-takes-pcre-s-in-shutdown-pair"
 args = ["-n", "-r", '''register_shutdown_function(function () { preg_match("/(a)?(b)?c/", "c", $n, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL); gc_collect_cycles(); unset($n); $f = gc_status()["roots"]; preg_match("/(x)?(y)/", "y", $m, PREG_OFFSET_CAPTURE); gc_collect_cycles(); unset($m); var_dump($f, gc_status()["roots"]); }); preg_match("/(x)?(y)/", "y", $o, PREG_OFFSET_CAPTURE);''']
 
+# What `-r`'s code returns is `zend_eval_stringl`'s local `retval`, given
+# up by `zval_ptr_dtor` once the code has run and its frame is gone, so a
+# returned object's destructor runs from no frame of the program (#4156).
+[[line]]
+name = "what-r-returns-is-given-up-after-its-frame"
+args = ["-n", "-r", '''class D { function __destruct() { echo "D: "; debug_print_backtrace(); } } echo "x\n"; return new D;''']
+
 # php 8.5.12's hard memory limit `_exit(137)`s in `zend_mm_hard_limit_error`
 # (`Z/Zend/zend_alloc.c:519`), before `php_request_shutdown` deactivates
 # the output and sends the head, so the callback `header_register_callback`

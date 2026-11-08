@@ -1,0 +1,10 @@
+# Must be refused: one id names two programs.
+[[program]]
+id = "same"
+form = "grows"
+code = "echo 1;"
+
+[[program]]
+id = "same"
+form = "unsets"
+code = "echo 2;"

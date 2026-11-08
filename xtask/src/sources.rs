@@ -107,10 +107,10 @@ pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<Stri
 /// The readings that stand for a commit (#1143): of one instrument, each
 /// that passes and was taken over exactly what the index holds of its
 /// scope and of its dependency closure ([`key::Snapshot::key`], #1318), by scope, so pre-commit measures what none covers and writes no
-/// reading for the rest. The one asked is the latest reading over that
-/// content, [`Store::latest_over`]'s: the scope's file, or a line of the
-/// log, which is where a retired worktree's pass is when its branch is
-/// merged (#1252). A reading taken over a working tree that differs
+/// reading for the rest. The one asked is the reading that stands over
+/// that content, [`Store::over`]'s: the scope's file, or the index's
+/// entry for the key, which is where a retired worktree's pass is landed
+/// (#1252). A reading taken over a working tree that differs
 /// from the index there is over content the commit does not take, and
 /// stands for nothing. A staged file outside every crate is stamped into
 /// no reading, so each voids the readings it can change, as [`Reach`]
@@ -250,11 +250,13 @@ impl Standing {
             }
         }
         let index = key::Snapshot::index(root, &git::Index::read(root)?)?;
-        let trees = (scopes.iter())
-            .map(|(scope, path)| Ok((scope.clone(), index.key(path)?)))
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        let mut standing = store.latest_over(instrument, &trees, manifest.pin_digest())?;
-        standing.retain(|_, reading| reading.status == Status::Pass);
+        let mut standing = BTreeMap::new();
+        for (scope, path) in scopes {
+            let over = store.over(instrument, scope, &index.key(path)?, manifest.pin_digest())?;
+            if let Some(reading) = over.fresh().filter(|r| r.status == Status::Pass) {
+                standing.insert(scope.clone(), reading);
+            }
+        }
         if let Some(path) = harness
             && standing.remove("xtask").is_some()
         {

@@ -15,7 +15,7 @@ use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, walk};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{
-    C14nOut, C14nSelect, C14nTarget, Kind, NewDoc, Node, Ns, Object, Save, XPath,
+    C14nOut, C14nSelect, C14nTarget, Kind, NewDoc, Node, Ns, Object, Raised, Save, XPath,
 };
 
 use crate::document::{XML_NS, XMLNS_NS};
@@ -719,15 +719,21 @@ pub(crate) fn locate_namespace(node: Node, prefix: Option<&[u8]>) -> Option<Vec<
 
 // ---- C14N
 
+/// A node set the `xpath` option of `C14N` answered, kept alive with its
+/// evaluator.
+type NodeSet = (XPath, Object);
+
 /// The `xpath` option of `C14N`: its query evaluated from `node`, the
-/// node set it answers kept alive with its evaluator.
+/// node set it answers kept alive with its evaluator, none where it
+/// answers no node set, and the errors libxml raised evaluating it, for
+/// the caller to raise ([`Raising`]).
 fn c14n_query(
     req: &mut Request,
     doc: Node,
     node: Node,
     xpath: PhpArray,
     base: u32,
-) -> Result<(XPath, Object), Thrown> {
+) -> Result<(Option<NodeSet>, Vec<Raised>), Thrown> {
     let Some(query) = xpath.find(b"query").map(|v| v.deref()) else {
         return Err(arg_value_error(req, 3 + base, "have a \"query\" key"));
     };
@@ -757,16 +763,60 @@ fn c14n_query(
         }
     }
     let (found, raised) = XPath::c14n_query(doc, node, &q, &namespaces);
-    Errors::route(req, raised);
-    let ce = Throwables::of(req)?;
-    match found {
-        Some(pair) if pair.1.is_node_set() => Ok(pair),
-        _ => Err(throw_error(
-            req,
-            ce.error,
-            "XPath query did not return a nodeset",
-        )),
+    Ok((found.filter(|pair| pair.1.is_node_set()), raised))
+}
+
+/// What `C14N` raises before it canonicalizes, the query's libxml errors
+/// and the inclusive-prefixes notice, raised in php's order. While
+/// [`NsLinks`] has the tree relinked they are held until it is put back,
+/// so no handler they call runs over a relinked tree. Where the tree is
+/// not relinked, each is raised at once.
+struct Raising {
+    held: bool,
+    query: Vec<Raised>,
+    notice: bool,
+}
+
+impl Raising {
+    fn new(relinked: bool) -> Raising {
+        Raising {
+            held: relinked,
+            query: Vec::new(),
+            notice: false,
+        }
     }
+
+    fn query(&mut self, req: &mut Request, raised: Vec<Raised>) {
+        if self.held {
+            self.query = raised;
+        } else {
+            Errors::route(req, raised);
+        }
+    }
+
+    fn notice(&mut self, req: &mut Request) {
+        if self.held {
+            self.notice = true;
+        } else {
+            inclusive_notice(req);
+        }
+    }
+
+    /// What was held raised, the tree put back.
+    fn raise(self, req: &mut Request) {
+        Errors::route(req, self.query);
+        if self.notice {
+            inclusive_notice(req);
+        }
+    }
+}
+
+fn inclusive_notice(req: &mut Request) {
+    docref(
+        req,
+        Level::Notice,
+        "Inclusive namespace prefixes only allowed in exclusive mode.",
+    );
 }
 
 /// What `dom_relink_ns_decls` lent C14N, which reads namespace
@@ -938,8 +988,23 @@ fn canonicalization(
             "Node must be associated with a document",
         ));
     };
+    let mut raising = Raising::new(links.is_some());
     let query_holder = match xpath {
-        Some(xpath) => Some(c14n_query(req, doc, node, xpath, base)?),
+        Some(xpath) => {
+            let (found, raised) = c14n_query(req, doc, node, xpath, base)?;
+            raising.query(req, raised);
+            let Some(pair) = found else {
+                drop(links);
+                raising.raise(req);
+                let ce = Throwables::of(req)?;
+                return Err(throw_error(
+                    req,
+                    ce.error,
+                    "XPath query did not return a nodeset",
+                ));
+            };
+            Some(pair)
+        }
         None => None,
     };
     let select = match &query_holder {
@@ -955,11 +1020,7 @@ fn canonicalization(
                 .collect();
             inclusive = Some(list);
         } else {
-            docref(
-                req,
-                Level::Notice,
-                "Inclusive namespace prefixes only allowed in exclusive mode.",
-            );
+            raising.notice(req);
         }
     }
     // A wrapper's `stream_open`, `stream_write` and `stream_close` are PHP
@@ -982,6 +1043,7 @@ fn canonicalization(
     );
     drop(query_holder);
     drop(links);
+    raising.raise(req);
     Errors::settle(req, raised, thrown)?;
     let (Some(path), C14nOut::Bytes(bytes)) = (restored_first, &out) else {
         return Ok(out);
@@ -1466,6 +1528,35 @@ impl DOMNode {
     /// <p:c xmlns:p="urn:p"></p:c>
     /// 4
     /// Canonicalization can only happen on nodes attached to a document.
+    /// ```
+    ///
+    /// What it raises before it canonicalizes, the query's libxml errors
+    /// and the inclusive-prefixes notice, comes before the `Error` for
+    /// what is no node set and before the value, for a document that
+    /// follows the standard and a legacy one alike ([`Raising`]):
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $str) { echo "handler: $str\n"; return true; });
+    /// $m = Dom\XMLDocument::createFromString('<root xmlns="urn:a" xmlns:p="urn:p" p:x="1"><c/></root>');
+    /// var_dump($m->C14N(false, false, null, ['p']));
+    /// try { $m->C14N(false, false, ['query' => '//*[']); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+    /// var_dump($m->C14N(false, false, ['query' => '//*'], ['p']));
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r xmlns:p="urn:p" p:x="1"/>');
+    /// var_dump($d->C14N(false, false, null, ['p']));
+    /// try { $d->C14N(false, false, ['query' => '//*[']); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// handler: Dom\Node::C14N(): Inclusive namespace prefixes only allowed in exclusive mode.
+    /// string(58) "<root xmlns="urn:a" xmlns:p="urn:p" p:x="1"><c></c></root>"
+    /// handler: Dom\Node::C14N(): Invalid expression
+    /// Error: XPath query did not return a nodeset
+    /// handler: Dom\Node::C14N(): Inclusive namespace prefixes only allowed in exclusive mode.
+    /// string(20) "<root><c></c></root>"
+    /// handler: DOMNode::C14N(): Inclusive namespace prefixes only allowed in exclusive mode.
+    /// string(31) "<r xmlns:p="urn:p" p:x="1"></r>"
+    /// handler: DOMNode::C14N(): Invalid expression
+    /// Error: XPath query did not return a nodeset
     /// ```
     #[php(tentative)]
     fn C14N(

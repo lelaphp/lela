@@ -100,6 +100,7 @@ pub use ini::IniEntry;
 pub(crate) use ini::{CoreQuantity, TypedIni};
 pub use ini_files::IniFiles;
 mod hold;
+pub(crate) use hold::NamedRow;
 mod hooks;
 mod inspect;
 mod lazy;

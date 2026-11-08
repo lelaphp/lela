@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=d3d6f42db9e84d8390a4fc8a4dca727a59cd6d854802c9d6567d221b254f2125 out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
+<!-- /computed in=14c3fe3ddbea3f18e8356a6942fda239f15e8ae5cc88cb5c675765d2111af515 out=6ba0892c9255d463a40e6c1df9a6c86358dea5a0b2a04df470497c174dc89391 -->
 
 ## What makes the third engine special?
 
@@ -65,6 +65,7 @@ A session stops where `permit` denies an edit, and at an act harness §11 gives 
 - `cargo xtask <instrument>` runs one instrument; `cargo xtask --help` lists the ones built so far. The smallest proof is the instrument for the crate you touched. The harness itself is tested by `cargo test -p xtask`, and every manifest rule has a fixture under `xtask/fixtures/` that must fail.
 - A change to behaviour comes with a witness beside the kernel or native, pinned by `--accept`. The witness is the test; write it before the body when you can. The phpt subset for an extension is every `.phpt` under `php-src/ext/<name>`, as run-tests.php walks the directory. A bench number is a claim a person signs off, with the A/A control read by a person: state the measurement, never the conclusion.
 - Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: `git add -A`, `git add .` or a commit that names no path takes whatever else stands in the index, a person's work among it. One session writes in a checkout, its owner: `xtask worktree add` records the session that lays a worktree down, `xtask worktree own` claims main's checkout or the merge worktree and `--release` lets one go, and `permit` and pre-commit refuse another session's writes and commits there. Your subagents are your session; a person is refused nowhere. The shell is zsh, which does not split an unquoted `$P`: write the paths out, or use an array, `P=(a b)` and `git add -- "${P[@]}"`. A merge, cherry-pick, revert or rebase in progress commits the whole index, and it is its checkout's owner's to commit or abort; in a checkout you do not own, `permit` refuses the git commands that write its index or step it, so work in your own worktree. The message file is named for the branch or its ticket, never `msg.txt`: the scratchpad is shared across the checkout's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box in an agent's ticket that waits on a person's decision closes nothing however finished the code is.
+- Commit messages and pull request descriptions carry no `Claude-Session` line or session link.
 
 ## Documentation and where code lives
 
@@ -89,7 +90,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=eaca31fc4eff31cffa3cd804223672e5038bb5cf7b0b530dbbe2a23a6cc58369 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=6e958c4962a918a6e27774250a57c8f490bff2ac7ed520abeadb32d38a3f5b90 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -125,9 +126,9 @@ third-engine-design.md
 | tier | tier.lock | 237 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 40 |  |
-| harness | xtask.lock | 464 |  |
+| harness | xtask.lock | 492 |  |
 
-<!-- /computed in=f9a72faac5d6308872c02b299b0a3b20eb255722ac9b9fddf5cfccfdcd49c339 out=a21e83c3de9866ea7aa492e1d13f198e9ed902f79e335275d9b632aed2e01cc2 -->
+<!-- /computed in=cfd30cad122f494ba1832dd0b6d352e2ddb4351ce76bced0093aaaf195e4f6bc out=dbf30645fcb8622f279eb8503c6d6376344d58c89fa4b030534dbe2e196fc8a3 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -143,6 +144,7 @@ Commands:
   worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` say its owner, `queue` and `land` run the merge queue
   ticket             A ticket, one GitHub issue: `read`, `ready` and `close` hold it to its boxes; `view` and `brief` are what a builder reads; `parent` measures a chart sheet
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
+  review             What a review found and whether each merge into `main` was reviewed: `record`, `resolve`, `cover` and `class`; it refuses nothing
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
   bench              Measure one bar under the protocol: paired reps with the A/A control and the load average, one reading per bar, exit 0 always
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code, a stale generated file and a `build.rs` that bakes its crate's directory in
@@ -154,6 +156,7 @@ Commands:
   compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, and hold every file to byte-identity; one reading per corpus, scoped to the corpus
   crosscheck         Hold each default extension's `--re` and `--ri` rendering to the oracle's bytes, kept in the store; one reading per extension per flag
   trace-dump         Hold the engine's `TRACE` lines under `jit.mode=force` to the oracle's under `[regime.jit-inline]` on the seven kernels, kept in the store; one reading per kernel
+  hostile            Hold the engine to the oracle on `data/hostile.toml`'s programs, whose error handlers disturb an opline mid-step; one reading per crate that owes it
   fold               Hold the release `serve_frame` to LLVM's fold of a request field's address into each access; one reading, at `sapi/cli`
   fpm-compare        Hold makala to the pinned php-fpm: each request of the HTTP-served subset served by both, the status, header lines and body compared; one reading, at makala's crate
   soak               Many clients against one makala for a fixed time, each response held to the request served alone; one reading, at makala's crate
@@ -170,7 +173,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=26e20ab2f7b6b875432a77f85355c3efc2cc47e48402aab52f6320d7278e2be1 out=e34ef8e9246393b1ec3edba92a1a290a8f2f5e0898c8771118d3513f337bb0bd -->
+<!-- /computed in=befcd868f70733c0cd5bb65b5281a73654ae9f0572b5bcf40d70c9c10e9e5b82 out=69934e7bfc56ad3d2df8e71046ae048496bedb686737de018dd76c1aadb449d5 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

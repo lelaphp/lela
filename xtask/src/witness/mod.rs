@@ -1426,9 +1426,8 @@ fn unmeasured(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<Str
     let mut left = Vec::new();
     for krate in manifest.crates.iter().filter(|k| sources::exists(root, k)) {
         let tree = snapshot.key(&krate.path())?;
-        let stands = store
-            .read(INSTRUMENT, &krate.name)?
-            .is_some_and(|r| r.status == Status::Pass && r.fresh_for(&tree, manifest.pin_digest()));
+        let over = store.over(INSTRUMENT, &krate.name, &tree, manifest.pin_digest())?;
+        let stands = over.fresh().is_some_and(|r| r.status == Status::Pass);
         if !stands {
             left.push(krate.name.clone());
         }

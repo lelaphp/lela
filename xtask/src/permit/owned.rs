@@ -9,24 +9,25 @@
 //! whose`), and a checkout no record names is no session's, and nothing
 //! is refused there.
 //!
-//! An `Edit` or a `Write` is placed by its file. A shell line is placed
-//! where each command the rule fires on runs or reaches ([`fired_in`]),
-//! and, for `where = "owned"`, where each redirection it makes writes,
-//! read where its shell stands; a target spelled through a variable or
-//! `~` is no place the line says, and is not read. For `where =
-//! "operating"` a command is placed where git reads its repository, in
-//! the git dir `GIT_DIR` or `--git-dir` names in place of where it runs
-//! ([`Places::Repositories`], #3271).
+//! An `Edit` or a `Write` is placed by its file. For `where = "owned"` a
+//! shell line is placed where each of its writes lands ([`writes::of`],
+//! #4250): a listed program by what it names, any other where it runs or
+//! reaches, and a redirection on its target, read where its own command's
+//! shell stands. For `where = "operating"` a command the rule fires on is
+//! placed where git reads its repository, in the git dir `GIT_DIR` or
+//! `--git-dir` names in place of where it runs ([`Places::Repositories`],
+//! #3271).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::argv::{Argv, Line};
+use super::argv::Argv;
 use super::call::Call;
 use super::operation::Operation;
-use super::rules::{Places, fired_in, runs_in};
+use super::shell::{Places, Walk};
+use super::writes;
 use crate::git;
 use crate::owner::{self, SessionId};
 
@@ -65,29 +66,24 @@ pub(super) enum Scope {
 }
 
 /// The first checkout another session owns among those `call` would write
-/// in, for the commands of `line` that `fires`; `None` where every one is
+/// in, for the commands of the line `walk` reads that `fires`, or for the
+/// file `call` names under `root`; `None` where every one is
 /// the caller's or no session's, or the call names no session. A record
 /// that does not read is an error, so the call is judged by no build
 /// rather than let through.
 pub(super) fn owned(
     root: &Path,
     call: &Call,
-    line: Option<&Line>,
+    walk: &Walk,
     scope: Scope,
     fires: impl Fn(&Argv) -> bool,
 ) -> Result<Option<Owned>> {
     let Some(caller) = SessionId::new(&call.session_id) else {
         return Ok(None);
     };
-    let places = match (line, call.tool_input.file_path.as_deref()) {
-        (Some(line), _) if scope == Scope::Operating => {
-            fired_in(root, line, Places::Repositories, fires)
-        }
-        (Some(line), _) => {
-            let mut places = fired_in(root, line, Places::Every, fires);
-            places.extend(redirected(root, line));
-            places
-        }
+    let places = match (walk.line(), call.tool_input.file_path.as_deref()) {
+        (Some(_), _) if scope == Scope::Operating => walk.fired_in(Places::Repositories, fires),
+        (Some(_), _) => writes::of(walk),
         (None, Some(file)) => vec![root.join(file)],
         (None, None) => vec![root.to_path_buf()],
     };
@@ -115,30 +111,16 @@ pub(super) fn owned(
     Ok(None)
 }
 
-/// Where the redirections of `line` write, each target read where the
-/// line's shell stands ([`runs_in`]): one spelled through a variable or
-/// `~`, a file descriptor (`>&2`) and a device are no file of a checkout.
-pub(super) fn redirected(root: &Path, line: &Line) -> Vec<PathBuf> {
-    let at = runs_in(root, Some(line));
-    line.written()
-        .iter()
-        .filter(|target| {
-            !target.starts_with(['$', '~', '&', '-'])
-                && !target.starts_with("/dev/")
-                && !target.chars().all(|c| c.is_ascii_digit())
-        })
-        .map(|target| at.join(target))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{Line, Operation, Owned, Scope, owned};
+    use super::{Operation, Owned, Scope, owned};
     use crate::owner::{self, SessionId};
+    use crate::permit::argv::Line;
     use crate::permit::call::Call;
+    use crate::permit::shell::Walk;
     use crate::permit::writes::changes;
     use crate::scratch::Tree;
 
@@ -177,7 +159,14 @@ mod tests {
     fn written(dir: &Path, session: &str, line: &str) -> Option<Owned> {
         let call = call(session, &serde_json::json!({"command": line}));
         let line = Line::read(line);
-        owned(dir, &call, Some(&line), Scope::Owned, changes).unwrap()
+        owned(
+            dir,
+            &call,
+            &Walk::of(dir, Some(&line)),
+            Scope::Owned,
+            changes,
+        )
+        .unwrap()
     }
 
     /// #3621: another session's write in an owned checkout is placed there
@@ -195,7 +184,7 @@ mod tests {
                 &serde_json::json!({"file_path": file,
                 "old_string": "a", "new_string": "b"}),
             );
-            owned(&dir, &call, None, Scope::Owned, changes).unwrap()
+            owned(&dir, &call, &Walk::of(&dir, None), Scope::Owned, changes).unwrap()
         };
         let named = edit("another", &dir.join("AGENTS.md")).unwrap();
         assert_eq!(named.checkout, top);
@@ -250,7 +239,14 @@ mod tests {
                 session,
                 &serde_json::json!({"command": "git merge --abort"}),
             );
-            owned(&dir, &call, Some(&line), Scope::Operating, |_| true).unwrap()
+            owned(
+                &dir,
+                &call,
+                &Walk::of(&dir, Some(&line)),
+                Scope::Operating,
+                |_| true,
+            )
+            .unwrap()
         };
         assert_eq!(stepped("another"), None);
         std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();

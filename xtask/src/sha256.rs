@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 const PREFIX: &str = "sha256:";
 
 /// A SHA-256 digest, read and written as `sha256:<64 lowercase hex>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(into = "String", try_from = "String")]
 pub struct Sha256([u8; 32]);
 

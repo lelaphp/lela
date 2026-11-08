@@ -4,13 +4,14 @@
 //! with what ran, failed and was ignored in its numbers. The crate is
 //! `php_heap` unless `--crate` names others.
 //!
-//! **What a run is.** `cargo miri test` on the pinned nightly
-//! ([`TOOLCHAIN`]), one test at a time. Miri ends the whole test binary at
-//! the first undefined behaviour or unsupported operation it meets, so one
-//! such test would hide every test after it: the test the run ended in is
-//! the last line libtest began and never finished, and the run goes again
-//! with that test and every test already judged skipped, until a run ends
-//! with none in flight. The doctests are not run.
+//! **What a run is.** `cargo miri nextest run` on the pinned nightly
+//! ([`TOOLCHAIN`]) and cargo-nextest ([`NEXTEST`]): each test in a Miri
+//! process of its own, as many at once as the instrument's seat is a share
+//! of the machine's cores ([`crate::seat::jobs`], the reading's `jobs`), so
+//! the lane is not one core for the whole suite (#4117). Miri ends a
+//! process at the first undefined behaviour or unsupported operation it
+//! meets, which now ends only the test that met it; the test is judged by
+//! the error it printed on its own stderr. The doctests are not run.
 //!
 //! **What it runs under, said and never chosen silently.** Tree Borrows
 //! ([`MODEL`]) with permissive provenance, as #2415 ruled: `php_heap`'s
@@ -31,6 +32,7 @@ use crate::carried::Carried;
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status};
+use crate::seat;
 use crate::sources;
 
 /// The instrument name the reading carries.
@@ -41,6 +43,11 @@ pub(crate) const INSTRUMENT: &str = "miri";
 /// compiler does, with no feature turned on and no `rust-version` waived
 /// (#2417). CI's job installs the same one with its `miri` component.
 pub const TOOLCHAIN: &str = "nightly-2026-02-20";
+
+/// The cargo-nextest the lane runs each test under Miri with, one Miri
+/// process a test (#4117). CI's job installs this release; on a machine
+/// without one the reading is a skip naming the command that does.
+pub const NEXTEST: &str = "0.9.127";
 
 /// The aliasing model every run stands under, ruled on #2415; on
 /// [`TOOLCHAIN`] it takes exposed provenance.
@@ -76,9 +83,7 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
         let mut reading = Reading::for_crate(INSTRUMENT, krate, &snapshot)?;
         if let Err(why) = &installed {
             reading.status = Status::Skip;
-            reading.message = format!(
-                "{name}: not run, {why}; `rustup toolchain install {TOOLCHAIN} --profile minimal --component miri,rust-src` installs it"
-            );
+            reading.message = format!("{name}: not run, {why}");
             readings.push(reading);
             continue;
         }
@@ -89,16 +94,32 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
     Ok(readings)
 }
 
-/// Whether `cargo miri` answers on [`TOOLCHAIN`]; what it said where not.
+/// Whether `cargo miri` answers on [`TOOLCHAIN`], and `cargo nextest`
+/// beside it; what was missing and the command that installs it where not.
 fn installed(root: &Path) -> Result<(), String> {
+    answers(root, "miri").map_err(|said| {
+        format!(
+            "`cargo +{TOOLCHAIN} miri` is not here: {said}; `rustup toolchain install {TOOLCHAIN} --profile minimal --component miri,rust-src` installs it"
+        )
+    })?;
+    answers(root, "nextest").map_err(|said| nextest_missing(&said))
+}
+
+/// The refusal where `cargo nextest` does not answer, after what it said.
+fn nextest_missing(said: &str) -> String {
+    format!(
+        "`cargo nextest`, which runs each test in a Miri of its own, is not here: {said}; `cargo install --locked cargo-nextest@{NEXTEST}` installs it"
+    )
+}
+
+/// Whether `cargo +<TOOLCHAIN> <subcommand> --version` succeeds; what it
+/// said where not.
+fn answers(root: &Path, subcommand: &str) -> Result<(), String> {
     let mut asked = cargo(root);
-    asked.args(["miri", "--version"]);
+    asked.args([subcommand, "--version"]);
     match asked.output() {
         Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => Err(format!(
-            "`cargo +{TOOLCHAIN} miri` is not here: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
+        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_owned()),
         Err(why) => Err(format!("cargo did not start: {why}")),
     }
 }
@@ -122,17 +143,17 @@ fn cargo(root: &Path) -> Command {
     command
 }
 
-/// What Miri made of one crate's tests over every run it took.
+/// What Miri made of one crate's tests.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Suite {
     pub passed: u64,
     pub ignored: u64,
-    /// Each test that failed, by name, with what ended it.
+    /// Each test that failed, as nextest names it, with what ended it.
     pub failed: Vec<(String, Ended)>,
-    /// The runs it took: one, and one more per test that ended a run.
-    pub runs: u64,
-    /// What Miri said after the tests where no test was in flight, a leak
-    /// at the end of the run; or what cargo said where nothing ran.
+    /// How many Miri processes ran at once.
+    pub jobs: u64,
+    /// What cargo said where the tests did not build, or where the run
+    /// failed with no test failed or did not account for every test.
     pub after: Option<String>,
     /// The aliasing model and the provenance the runs stood under.
     pub under: String,
@@ -165,60 +186,27 @@ impl Ended {
     }
 }
 
-/// Every test of `krate` under Miri, a run again after each one that
-/// ended a run, until a run ends with no test in flight.
+/// Every test of `krate` under Miri, one Miri process a test and
+/// [`seat::jobs`] of them at once.
 fn suite(root: &Path, krate: &Crate) -> Result<Suite> {
     let extra = std::env::var("MIRIFLAGS").unwrap_or_default();
     let flags = format!("{MODEL} {extra}");
-    let mut suite = Suite {
-        under: under(&extra),
-        ..Suite::default()
-    };
-    let mut judged: Vec<String> = Vec::new();
-    loop {
-        let mut miri = cargo(root);
-        miri.args(["miri", "test", "-p", &krate.package()])
-            .args(["--lib", "--tests", "--no-fail-fast", "--color", "never"])
-            .env("MIRIFLAGS", flags.trim())
-            .args(["--", "--test-threads=1", "--exact"]);
-        for name in &judged {
-            miri.args(["--skip", name]);
-        }
-        let out = miri
-            .output()
-            .with_context(|| format!("running cargo +{TOOLCHAIN} miri test"))?;
-        suite.runs += 1;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let run = Run::of(&stdout, &stderr);
-        if !stdout.contains("running ") && !out.status.success() {
-            suite.after = Some(format!("the tests did not build\n{}", tail(&stderr, 40)));
-            return Ok(suite);
-        }
-        suite.passed += run.passed.len() as u64;
-        suite.ignored += run.ignored.len() as u64;
-        judged.extend(run.passed);
-        judged.extend(run.ignored);
-        for name in run.failed {
-            judged.push(name.clone());
-            suite.failed.push((name, Ended::Failed));
-        }
-        if run.ended.is_empty() {
-            if !out.status.success() && suite.failed.is_empty() {
-                suite.after = Some(tail(&stderr, 20));
-            }
-            return Ok(suite);
-        }
-        // A test the skip did not reach would end every run again.
-        if run.ended.iter().all(|(name, _)| judged.contains(name)) {
-            suite.after = Some(format!("a skipped test ran again\n{}", tail(&stderr, 20)));
-            return Ok(suite);
-        }
-        for (name, said) in run.ended {
-            judged.push(name.clone());
-            suite.failed.push((name, Ended::of(&said)));
-        }
-    }
+    let jobs = seat::jobs().get();
+    let mut miri = cargo(root);
+    miri.args(["miri", "nextest", "run", "-p", &krate.package()])
+        .args(["--lib", "--tests", "--no-fail-fast", "--color", "never"])
+        .args(["--retries", "0", "--status-level", "skip"])
+        .args(["--final-status-level", "none", "--success-output", "never"])
+        .args(["--failure-output", "immediate", "-j", &jobs.to_string()])
+        .env("MIRIFLAGS", flags.trim());
+    let out = miri
+        .output()
+        .with_context(|| format!("running cargo +{TOOLCHAIN} miri nextest run"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut suite = Suite::of(&Run::of(&stderr), out.status.success(), &stderr);
+    suite.under = under(&extra);
+    suite.jobs = jobs as u64;
+    Ok(suite)
 }
 
 /// The model and provenance a run stands under, [`MODEL`] and the `extra`
@@ -238,58 +226,138 @@ fn under(extra: &str) -> String {
     }
 }
 
-/// What one `cargo miri test` printed, read back: the tests libtest
-/// finished, by verdict, and those it began and never finished, each with
-/// the error Miri printed for it. libtest prints `test <name> ... ` and the
-/// verdict after it on stdout; Miri prints the error that ends the binary
-/// on stderr, one `error: ` line per ended binary in the order they ran.
+/// What one `cargo miri nextest run` printed on stderr, read back. nextest
+/// prints one line a test as it finishes, `PASS [ 1.2s] (3/5) <binary>
+/// <test>`, `SKIP` for one ignored and `FAIL` or the signal for one that
+/// failed, the test's own stdout and stderr under a failed one, then a
+/// `Summary` line counting the tests run.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Run {
+    /// Whether nextest began the tests: their `Starting` line.
+    started: bool,
     passed: Vec<String>,
     ignored: Vec<String>,
-    failed: Vec<String>,
-    ended: Vec<(String, String)>,
+    failed: Vec<(String, Ended)>,
+    /// The tests the `Summary` line says ran.
+    ran: Option<u64>,
+}
+
+/// What a test came to, by the word nextest's line for it begins with.
+enum Verdict {
+    Passed,
+    Ignored,
+    Failed,
 }
 
 impl Run {
-    fn of(stdout: &str, stderr: &str) -> Run {
+    fn of(stderr: &str) -> Run {
         let mut run = Run::default();
-        let mut began = Vec::new();
-        for line in stdout.lines() {
-            let Some(rest) = line.strip_prefix("test ") else {
-                continue;
-            };
-            let Some((name, verdict)) = rest.split_once(" ... ") else {
-                continue;
-            };
-            let name = name.to_owned();
-            match verdict.trim() {
-                "ok" => run.passed.push(name),
-                "FAILED" => run.failed.push(name),
-                v if v.starts_with("ignored") => run.ignored.push(name),
-                _ => began.push(name),
+        // The failed test whose own stdout and stderr are being read, and those lines.
+        let mut open: Option<(String, Vec<&str>)> = None;
+        for line in stderr.lines() {
+            let word = line.trim_start();
+            let verdict = verdict(word);
+            let summary = word.strip_prefix("Summary [");
+            if verdict.is_some() || summary.is_some() {
+                run.close(open.take());
+            }
+            if let Some((verdict, test)) = verdict {
+                match verdict {
+                    Verdict::Passed => run.passed.push(test),
+                    Verdict::Ignored => run.ignored.push(test),
+                    Verdict::Failed => open = Some((test, Vec::new())),
+                }
+            } else if let Some(rest) = summary {
+                run.ran = rest
+                    .split_once("] ")
+                    .and_then(|(_, said)| said.split_whitespace().next())
+                    .and_then(|n| n.parse().ok());
+            } else if let Some((_, said)) = &mut open {
+                said.push(word);
+            } else if word.starts_with("Starting ") {
+                run.started = true;
             }
         }
-        let mut errors = stderr.lines().filter(|line| {
-            line.starts_with("error: ")
-                && !line.starts_with("error: test failed")
-                && !line.starts_with("error: aborting due to")
-                && !line.contains("target failed")
-                && !line.contains("targets failed")
-        });
-        run.ended = began
-            .into_iter()
-            .map(|name| {
-                (
-                    name,
-                    errors
-                        .next()
-                        .unwrap_or("error: no word from Miri")
-                        .to_owned(),
-                )
-            })
-            .collect();
+        run.close(open);
         run
+    }
+
+    /// The failed test judged by what it printed: the error Miri ended it
+    /// with, libtest's `FAILED` where Miri said none, and the first other
+    /// error where neither.
+    fn close(&mut self, open: Option<(String, Vec<&str>)>) {
+        let Some((test, said)) = open else {
+            return;
+        };
+        let mut errors = said.iter().filter(|line| {
+            line.starts_with("error: ") && !line.starts_with("error: aborting due to")
+        });
+        let miri = errors
+            .clone()
+            .find(|line| !matches!(Ended::of(line), Ended::Aborted(_)));
+        let ended = match miri {
+            Some(line) => Ended::of(line),
+            None if said.iter().any(|line| line.ends_with(" ... FAILED")) => Ended::Failed,
+            None => Ended::of(errors.next().unwrap_or(&"error: no word from Miri")),
+        };
+        self.failed.push((test, ended));
+    }
+}
+
+/// The verdict and the test of one of nextest's status lines, `<WORD> [
+/// <time>] (<n>/<of>) <binary> <test>`, the count left out by some
+/// releases; none for any other line, and for the status of a test still
+/// running (`SLOW`).
+fn verdict(word: &str) -> Option<(Verdict, String)> {
+    let (status, rest) = word.split_once(" [")?;
+    if status.is_empty() || !status.bytes().all(|b| b.is_ascii_uppercase() || b == b'-') {
+        return None;
+    }
+    let (_, rest) = rest.split_once("] ")?;
+    let rest = match rest.strip_prefix('(') {
+        Some(counted) => counted.split_once(") ")?.1,
+        None => rest,
+    };
+    let (binary, test) = rest.trim().split_once(' ')?;
+    let verdict = match status {
+        "PASS" | "LEAK" => Verdict::Passed,
+        "SKIP" => Verdict::Ignored,
+        "FAIL" | "LEAK-FAIL" | "TIMEOUT" | "ABORT" => Verdict::Failed,
+        signal if signal.starts_with("SIG") => Verdict::Failed,
+        _ => return None,
+    };
+    Some((verdict, format!("{binary} {test}")))
+}
+
+impl Suite {
+    /// The suite one run came to, `succeeded` its exit: a run whose tests
+    /// did not build, one that failed with no test failed, and one whose
+    /// tests the `Summary` line counts otherwise than its lines did, each
+    /// say so with the end of what cargo printed.
+    fn of(run: &Run, succeeded: bool, stderr: &str) -> Suite {
+        let mut suite = Suite {
+            passed: run.passed.len() as u64,
+            ignored: run.ignored.len() as u64,
+            failed: run.failed.clone(),
+            ..Suite::default()
+        };
+        let read = suite.passed + suite.failed.len() as u64;
+        suite.after = if !run.started && !succeeded {
+            Some(format!("the tests did not build\n{}", tail(stderr, 40)))
+        } else if run.started && run.ran != Some(read) {
+            let ran = run
+                .ran
+                .map_or("an uncounted number of".to_owned(), |n| n.to_string());
+            Some(format!(
+                "nextest ran {ran} tests and {read} of them were read\n{}",
+                tail(stderr, 20)
+            ))
+        } else if !succeeded && suite.failed.is_empty() {
+            Some(tail(stderr, 20))
+        } else {
+            None
+        };
+        suite
     }
 }
 
@@ -305,7 +373,7 @@ impl Suite {
         reading.count("ignored", self.ignored)?;
         reading.count("undefined", count(|e| matches!(e, Ended::Undefined(_))))?;
         reading.count("unsupported", count(|e| matches!(e, Ended::Unsupported(_))))?;
-        reading.count("runs", self.runs)?;
+        reading.count("jobs", self.jobs)?;
         let under = &self.under;
         if self.failed.is_empty() && self.after.is_none() {
             reading.status = Status::Pass;
@@ -345,29 +413,169 @@ impl Suite {
 mod tests {
     use super::*;
 
-    /// A binary Miri ended in a test, and one that ran to its end: the
-    /// test in flight is the one begun and never finished, and the error
-    /// is the first Miri printed (#1916).
+    /// What nextest printed under Miri for a crate of six tests, from a run
+    /// of the use-after-free control with three tests and a second binary
+    /// added: one ignored, a read after a free, a foreign call, a panic,
+    /// and two that pass, one in an integration test.
+    const NEXTEST_RUN: &str = "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+────────────
+ Nextest run ID b6ba4551 with nextest profile: default-miri
+    Starting 5 tests across 2 binaries (1 test skipped)
+        SKIP [         ] (───) php_heap more::ignored_one
+        FAIL [   1.419s] (1/5) php_heap tests::a_read_after_the_free
+  stdout ───
+
+    running 1 test
+    test tests::a_read_after_the_free ... 
+  stderr ───
+    error: Undefined Behavior: memory access failed: alloc42301 has been freed, so this pointer is dangling
+      --> crates/php_heap/src/lib.rs:15:29
+       = note: this is on thread `tests::a_read_after_the_free`
+
+    error: aborting due to 1 previous error; 1 warning emitted
+
+    (test failed with exit code 1)
+
+        FAIL [   1.445s] (2/5) php_heap more::unsupported_one
+  stdout ───
+
+    running 1 test
+    test more::unsupported_one ... 
+  stderr ───
+    error: unsupported operation: can't call foreign function `mkfifo` on OS `macos`
+      --> crates/php_heap/src/lib.rs:39:26
+
+    error: aborting due to 1 previous error; 1 warning emitted
+
+    (test failed with exit code 1)
+
+        PASS [   1.545s] (3/5) php_heap tests::a_test_beside_it_still_runs
+        FAIL [   1.615s] (4/5) php_heap more::fails_one
+  stdout ───
+
+    running 1 test
+    test more::fails_one ... FAILED
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.20s
+
+  stderr ───
+    thread 'more::fails_one' (1) panicked at crates/php_heap/src/lib.rs:33:9:
+    assertion `left == right` failed: one is not two
+
+        PASS [   1.673s] (5/5) php_heap::integ integ_ok
+────────────
+     Summary [   3.099s] 5 tests run: 2 passed, 3 failed, 1 skipped
+error: test run failed
+";
+
+    /// Each test is its own Miri process, so a read after a free ends
+    /// only the test it is in: every line nextest printed is read, the
+    /// failed tests by what each printed of what ended it (#1916, #4117).
     #[test]
     fn a_run_reads_the_finished_tests_and_the_one_miri_ended() {
-        let stdout = "\nrunning 3 tests\ntest a::one ... ok\ntest a::two ... ignored, needs mmap\ntest a::three ... \nrunning 1 test\ntest b::four ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed;\n";
-        let stderr = "   Compiling php_heap\nerror: Undefined Behavior: attempting a read access\n  --> src/lib.rs:1:1\nerror: aborting due to 1 previous error\nerror: test failed, to rerun pass `-p php_heap --lib`\n";
-        let run = Run::of(stdout, stderr);
-        assert_eq!(run.passed, ["a::one"]);
-        assert_eq!(run.ignored, ["a::two"]);
-        assert_eq!(run.failed, ["b::four"]);
+        let run = Run::of(NEXTEST_RUN);
+        assert!(run.started);
         assert_eq!(
-            run.ended,
-            [(
-                "a::three".to_owned(),
-                "error: Undefined Behavior: attempting a read access".to_owned()
-            )]
+            run.passed,
+            [
+                "php_heap tests::a_test_beside_it_still_runs",
+                "php_heap::integ integ_ok"
+            ]
         );
-        assert!(matches!(Ended::of(&run.ended[0].1), Ended::Undefined(_)));
-        assert!(matches!(
-            Ended::of("error: unsupported operation: can't call foreign function"),
-            Ended::Unsupported(_)
-        ));
+        assert_eq!(run.ignored, ["php_heap more::ignored_one"]);
+        assert_eq!(run.ran, Some(5));
+        assert_eq!(
+            run.failed,
+            [
+                (
+                    "php_heap tests::a_read_after_the_free".to_owned(),
+                    Ended::Undefined(
+                        "error: Undefined Behavior: memory access failed: alloc42301 has been freed, so this pointer is dangling".to_owned()
+                    )
+                ),
+                (
+                    "php_heap more::unsupported_one".to_owned(),
+                    Ended::Unsupported(
+                        "error: unsupported operation: can't call foreign function `mkfifo` on OS `macos`".to_owned()
+                    )
+                ),
+                ("php_heap more::fails_one".to_owned(), Ended::Failed),
+            ]
+        );
+        let suite = Suite::of(&run, false, NEXTEST_RUN);
+        assert_eq!(suite.after, None, "{suite:#?}");
+        let mut reading = Reading::new(INSTRUMENT, "php_heap");
+        Suite {
+            under: under(""),
+            jobs: 4,
+            ..suite
+        }
+        .read_into(&mut reading, "php_heap")
+        .unwrap();
+        assert_eq!(reading.status, Status::Fail);
+        for (key, n) in [
+            ("ran", 5),
+            ("passed", 2),
+            ("failed", 3),
+            ("ignored", 1),
+            ("undefined", 1),
+            ("unsupported", 1),
+            ("jobs", 4),
+        ] {
+            assert_eq!(reading.int(key), Some(n), "{key} in {reading:#?}");
+        }
+        assert!(
+            reading.message.starts_with(
+                "php_heap: 3 of 5 tests fail under Miri (Tree Borrows, permissive provenance), 1 of them undefined behaviour and 1 an unsupported operation, 1 ignored\n"
+            ),
+            "{}",
+            reading.message
+        );
+        assert!(
+            reading.message.contains(
+                "php_heap tests::a_read_after_the_free: Undefined Behavior: memory access failed"
+            ),
+            "{}",
+            reading.message
+        );
+    }
+
+    /// A run whose tests did not build, and one whose `Summary` counts a
+    /// test no line was read for, fail with what cargo said, never as a
+    /// pass of the tests that were read.
+    #[test]
+    fn a_run_that_did_not_build_or_left_a_test_unread_says_so() {
+        let unbuilt = "   Compiling php_heap\nerror[E0425]: cannot find value `x`\nerror: could not compile `php_heap`\n";
+        let suite = Suite::of(&Run::of(unbuilt), false, unbuilt);
+        let after = suite.after.unwrap_or_default();
+        assert!(after.starts_with("the tests did not build\n"), "{after}");
+        assert!(after.contains("E0425"), "{after}");
+
+        let unread = "    Starting 2 tests across 1 binary\n        PASS [   1.0s] (1/2) php_heap a\n  CRASHED [   1.0s] (2/2) php_heap b\n     Summary [   2.0s] 2 tests run: 1 passed, 1 failed, 0 skipped\n";
+        let suite = Suite::of(&Run::of(unread), false, unread);
+        assert_eq!(suite.passed, 1);
+        let after = suite.after.unwrap_or_default();
+        assert!(
+            after.starts_with("nextest ran 2 tests and 1 of them were read\n"),
+            "{after}"
+        );
+
+        let passed = "    Starting 1 test across 1 binary\n        PASS [   1.0s] (1/1) php_heap a\n     Summary [   1.0s] 1 test run: 1 passed, 0 skipped\n";
+        assert_eq!(Suite::of(&Run::of(passed), true, passed).after, None);
+    }
+
+    /// The refusal where nextest is missing names the release CI installs
+    /// and the command that installs it.
+    #[test]
+    fn a_missing_nextest_is_refused_with_the_command_that_installs_it() {
+        let said = nextest_missing("error: no such command: `nextest`");
+        assert!(said.contains("no such command"), "{said}");
+        assert!(
+            said.contains(&format!(
+                "`cargo install --locked cargo-nextest@{NEXTEST}` installs it"
+            )),
+            "{said}"
+        );
     }
 
     /// The reading says what the runs stood under, the lane's model and

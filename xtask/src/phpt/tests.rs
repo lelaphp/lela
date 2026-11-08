@@ -335,6 +335,7 @@ fn a_missed_expectation_fails_with_the_difference() {
             expected: Some("five".to_owned()),
             actual: Some("four".to_owned()),
             signature: miss::Signature::Differs,
+            died: None,
         })
     );
 }
@@ -588,6 +589,62 @@ fn a_run_a_signal_ended_is_trimmed_after_its_termsig_line_as_upstream_trims_it()
     let (_tree, subset) = subset("termsig", &[("killed.phpt", test)]);
     let tally = run(&subset, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+}
+
+/// A test whose program a signal ended keeps how it died on its miss, and
+/// its note says so, with the last of what it wrote on stderr, whether
+/// stderr is the stream stdout is too or a pipe of its own; a test whose
+/// program exited as a run does, having written on stderr too, keeps none
+/// (#4130). Before, the miss kept the lines and the signature alone, and a
+/// run that read `Termsig=11` once kept nothing to say what ended it. The
+/// fixture is a program that kills itself, run the adapter's own way;
+/// SIGKILL, which leaves no crash log on the machine.
+#[test]
+fn a_program_a_signal_ended_keeps_its_ending_and_its_stderr_on_the_miss() {
+    if oracle().is_none() {
+        return;
+    }
+    let test = |capture: &str, end: &str| {
+        format!(
+            "--TEST--\nDies\n{capture}--FILE--\n<?php echo \"out\\n\"; fwrite(STDERR, \"first words\\nlast words\\n\"); {end}\n--EXPECT--\nnever\n"
+        )
+    };
+    let killed = "posix_kill(getmypid(), 9);";
+    let (_tree, subset) = subset(
+        "died",
+        &[
+            ("merged.phpt", &test("", killed)),
+            ("apart.phpt", &test("--CAPTURE_STDIO--\nSTDOUT\n", killed)),
+            ("exited.phpt", &test("", "exit(1);")),
+        ],
+    );
+    let tally = run(&subset, &registry(""));
+    let judged = |file: &str| {
+        let name = format!("ext/fixture/tests/{file}");
+        let found = tally.judged.iter().find(|j| j.name == name);
+        found.unwrap_or_else(|| panic!("{file}: {tally:#?}"))
+    };
+    let died = |stderr: &str| miss::Died {
+        ended: crate::oracle::Ended::Signal(9),
+        stderr: stderr.to_owned(),
+    };
+    for (file, stderr) in [
+        ("merged.phpt", "out\nfirst words\nlast words"),
+        ("apart.phpt", "first words\nlast words"),
+    ] {
+        let judged = judged(file);
+        assert_eq!(judged.judgement, Judgement::Fail, "{judged:#?}");
+        let miss = judged.miss.as_ref().unwrap();
+        assert_eq!(miss.died, Some(died(stderr)), "{judged:#?}");
+        let said = stderr.replace('\n', "\n    ");
+        let words = format!("the program was ended by signal 9, and its stderr ended:\n    {said}");
+        assert!(judged.note.ends_with(&words), "{}", judged.note);
+        assert!(judged.note.contains("+Termsig=9"), "{}", judged.note);
+    }
+    let exited = judged("exited.phpt");
+    assert_eq!(exited.judgement, Judgement::Fail, "{exited:#?}");
+    assert_eq!(exited.miss.as_ref().unwrap().died, None, "{exited:#?}");
+    assert!(!exited.note.contains("the program"), "{}", exited.note);
 }
 
 /// A test whose `--XFAIL--` section is there and which passes is
@@ -2673,16 +2730,15 @@ fn a_subset_a_full_volume_kept_from_running_is_a_skip_and_not_a_refusal() {
     assert_eq!(reading.message, "the server did not answer");
 }
 
-/// The dashboard's oracle job, the one CI job that runs the phpt lane on
+/// nightly.yml's oracle job, the one CI job that runs the phpt lane on
 /// `main`, stashes the runs it keeps beside its store (#2362, #3554): one
-/// put is the store's log, `oracle`, which `publish` folds, and one is
-/// [`against::RUNS`] under [`against::UPLOAD`], the name the fetch line
-/// reads, which `publish`'s get of the stores does not take. The job is
-/// the lines from its key to the next job's, each put the lines from its
+/// put is the store's log, `oracle`, and one is [`against::RUNS`] under
+/// [`against::UPLOAD`], the name the fetch line reads. The job is the
+/// lines from its key to the next job's, each put the lines from its
 /// `uses` to the next step.
 #[test]
 fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
-    let text = fs::read_to_string(workspace().join(".github/workflows/dashboard.yml")).unwrap();
+    let text = fs::read_to_string(workspace().join(".github/workflows/nightly.yml")).unwrap();
     assert!(
         !text.contains("upload-artifact") && !text.contains("download-artifact"),
         "the hand-offs are the stash's, not GitHub artifacts (#3554)"
@@ -2700,7 +2756,7 @@ fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
             .take_while(|(n, line)| *n == 0 || !key(line))
             .map(|(_, line)| line)
             .collect();
-        assert!(!job.is_empty(), "dashboard.yml has no {name} job");
+        assert!(!job.is_empty(), "nightly.yml has no {name} job");
         job.join("\n") + "\n"
     };
     let oracle = &job("oracle");
@@ -2729,14 +2785,5 @@ fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
     assert!(
         runs.contains(&format!("path: {}/\n", against::RUNS)),
         "the put is the kept runs: {runs}"
-    );
-    let publish = job("publish");
-    let stores = publish
-        .lines()
-        .find(|line| line.trim_start().starts_with("get:") && line.contains("measure"))
-        .expect("publish gets the stores by their names");
-    assert!(
-        stores.contains("oracle") && !stores.contains(against::UPLOAD),
-        "publish folds the store and not the runs: {stores}"
     );
 }
