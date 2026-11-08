@@ -194,7 +194,10 @@ pub fn render(
         s @ (Section::Bench | Section::PortMap | Section::Crosscheck) => {
             (instrument(&readings, &every::name(s)), INSTRUMENT)
         }
-        Section::Ticket => (instrument(&readings, "ticket"), TICKET),
+        Section::Ticket => (
+            instrument(&last_of_each(against, &readings, "ticket")?, "ticket"),
+            TICKET,
+        ),
         Section::Tickets => {
             let week = tickets::render(against.checkout()?, root, format)?;
             return Ok(match format {
@@ -869,6 +872,20 @@ fn count_lines(counts: &Counts) -> Vec<(&'static str, [u64; 3])> {
         lines.push((cause.as_str(), of(&|s| counts.of(cause, None, s))));
     }
     lines
+}
+
+/// Of `name`'s readings among `readings`, the scope files, each scope's
+/// last reading: its file's, or the index's latest where a land put a
+/// later one there ([`Store::last_of`]). What the `ticket` section
+/// renders, so a ticket whose close was landed reads as the close and not
+/// as the file's older box state (Round 1, Q12, c2.i).
+fn last_of_each(against: Against<'_>, readings: &[Reading], name: &str) -> Result<Vec<Reading>> {
+    let Against::Checkout(store) = against else {
+        return Ok(readings.to_vec());
+    };
+    (readings.iter().filter(|r| r.instrument == name))
+        .map(|r| Ok(store.last_of(name, &r.scope)?.unwrap_or_else(|| r.clone())))
+        .collect()
 }
 
 /// Every reading of one instrument, one row per scope, the numbers as
@@ -1848,6 +1865,38 @@ mod tests {
     fn opener<'a>(text: &'a str, name: &str) -> Option<&'a str> {
         text.lines()
             .find(|l| l.starts_with("<!-- computed ") && l.contains(&format!(" name={name}")))
+    }
+
+    /// The `ticket` section renders a ticket's last reading: a close
+    /// another checkout took after the file's failing read, landed in the
+    /// index and not the file, is the row (c2.i).
+    #[test]
+    fn the_ticket_section_renders_a_tickets_last_reading_a_landed_one_included() {
+        use crate::reading::{Reading, Status, Store};
+        use crate::scratch::Tree;
+        let ticket = |status: Status, at: &str| {
+            let mut reading = Reading::keyed("ticket", "3785", format!("{:040x}", 1)).unwrap();
+            reading.status = status;
+            reading.at = at.parse().unwrap();
+            reading
+        };
+        let dir = Tree::new("status-ticket-last").unwrap();
+        let store = Store::at(dir.path());
+        store
+            .record(&[ticket(Status::Fail, "2026-11-01T10:00:00Z")])
+            .unwrap();
+        let other = Tree::new("status-ticket-last-other").unwrap();
+        let theirs = Store::at(other.path());
+        let closed = ticket(Status::Pass, "2026-11-01T11:00:00Z");
+        theirs.record(std::slice::from_ref(&closed)).unwrap();
+        store.land(&theirs).unwrap();
+        let files = store.readings().unwrap().readings;
+        assert_eq!(files[0].status, Status::Fail, "the file is as it was");
+        let against = super::Against::Checkout(&store);
+        assert_eq!(
+            super::last_of_each(against, &files, "ticket").unwrap(),
+            [closed]
+        );
     }
 
     /// The sections `render` reads by their own name read the instrument

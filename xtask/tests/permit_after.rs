@@ -326,7 +326,7 @@ fn unmet(root: &Path) -> Vec<String> {
         &[],
     )
     .unwrap()
-    .unmet
+    .messages()
 }
 
 /// #1972: a change `--after` kept is one of `done`'s unmet conditions,
@@ -359,6 +359,9 @@ fn a_kept_change_is_unmet_in_done_until_a_person_commits_or_restores_it() {
     keep("toolu_kept_then_restored", "a regime a person drops");
     Repo::at(&root).git(&["checkout", "HEAD", "--", pin]);
     assert_eq!(unmet(&root), Vec::<String>::new(), "restored");
+    // `done` settles the spent record after it judges, where `judge`
+    // alone only reads it (c2.h).
+    Run::at(&root).args(["done", "--base", "HEAD"]).go();
     // An edit made outside any call is condition 6's note, not the spent
     // record's change.
     let edited = format!("{}\n# typed later\n", read(&root, pin));

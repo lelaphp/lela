@@ -147,6 +147,15 @@ pub(crate) enum Command {
         /// event it came in on.
         #[arg(long, value_enum, conflicts_with = "hook")]
         caller: Option<crate::done::Caller>,
+        /// The list as text, or with `json` as one object: each unmet
+        /// condition with its kind, instrument, scope, message and the
+        /// command that clears it (#3494).
+        #[arg(long, value_enum, default_value = "text", conflicts_with = "hook")]
+        format: crate::done::Format,
+        /// Judge and print, and write nothing: no reading, and no kept
+        /// change settled; the Stop's run stays the reading of record.
+        #[arg(long, conflicts_with = "hook")]
+        peek: bool,
     },
     /// Say the branch, the commit it was taken off main at, the store
     /// and the branch's ticket; as text or as one object. Writes no
