@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"mktemp notes.XXXXXX","description":"`mktemp` writes what it names inside the checkout another session owns (#4250)"}}

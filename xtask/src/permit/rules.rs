@@ -17,10 +17,10 @@ use super::argv::{Argv, Joint, Line, Move};
 use super::call::Call;
 use super::label;
 use super::operation;
-use super::owned::{self, Owned, Scope, redirected};
+use super::owned::{self, Owned, Scope};
 use super::region::region_body;
 use super::unless;
-use super::writes::changes;
+use super::writes::{self, changes};
 use crate::manifest::{Manifest, Rule, Runs, Where, scope_matches};
 use crate::owner::{self, SessionId};
 use crate::rust;
@@ -305,9 +305,10 @@ fn evaluate(
         true
     } else if p.writes == Some(true) {
         // A write: an edit's or a write's file, or a shell line that
-        // changes a checkout by a command or a redirection (#3621).
+        // lands a write somewhere, by a command or a redirection (#3621,
+        // #4250).
         match line {
-            Some(line) => line.commands().iter().any(changes) || !redirected(root, line).is_empty(),
+            Some(line) => !writes::of(root, line).is_empty(),
             None => call.tool_input.file_path.is_some(),
         }
     } else if let Some(types) = &p.deny_types {
@@ -677,6 +678,40 @@ pub(super) fn placed<'a>(root: &Path, line: &'a Line, asked: Places) -> Vec<(&'a
     kept.map(|p| (p.argv, p.dir)).collect()
 }
 
+/// Where the shell of each command of `line` may stand as the command runs
+/// ([`Walk::stood`]), before the command's own words move it, and where
+/// the line stands ([`runs_in`]), for a command its shell placed nowhere,
+/// past a change the line does not say where it goes: the places
+/// [`super::writes::of`] reads a command's words and its redirections
+/// from (#4250).
+pub(super) fn stood<'a>(root: &Path, line: &'a Line) -> Stood<'a> {
+    let walk = Walk::of(root, Some(line));
+    Stood {
+        line: walk.runs_in(root),
+        each: walk.stood,
+    }
+}
+
+/// What [`stood`] reads.
+pub(super) struct Stood<'a> {
+    line: PathBuf,
+    each: Vec<(&'a Argv, Vec<PathBuf>)>,
+}
+
+impl Stood<'_> {
+    /// Where the line stands.
+    pub(super) fn line(&self) -> &Path {
+        &self.line
+    }
+
+    /// Each place the shell of `argv`, one of the line's commands, may
+    /// stand as it runs; where the line stands for one placed nowhere.
+    pub(super) fn of(&self, argv: &Argv) -> Vec<PathBuf> {
+        let found = self.each.iter().find(|(a, _)| std::ptr::eq(*a, argv));
+        found.map_or_else(|| vec![self.line.clone()], |(_, at)| at.clone())
+    }
+}
+
 /// Which of a command's places a reader asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Places {
@@ -700,7 +735,7 @@ impl Places {
 
 /// How a command stands at a place the walk gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Via {
+pub(super) enum Via {
     /// It runs there, and reaches it by no word of its own.
     Runs,
     /// A word of its own reaches it ([`Move::Reaches`], [`Move::GitDir`]).
@@ -818,6 +853,10 @@ struct Walk<'a> {
     /// The first such change or program, as the line spells it: what a
     /// denial names when it cannot place a command past it.
     lost_by: Option<String>,
+    /// Each command its shell placed, with each place the shell may stand
+    /// as it runs, before the command's own words move it: where its
+    /// redirections land and its words are read (#4250).
+    stood: Vec<(&'a Argv, Vec<PathBuf>)>,
 }
 
 /// One place the walk gives a command, and how it stands there, which
@@ -946,6 +985,9 @@ impl<'a> Walk<'a> {
             }
             let shell = nested.last_mut().unwrap_or(&mut top);
             let at = shell.runs_at(joints.before);
+            if !shell.lost {
+                walk.stood.push((argv, at.clone()));
+            }
             let changes = matches!(argv.program(), "cd" | "pushd" | "popd");
             // A pipe's side runs in a shell of its own, unless the command
             // opens one, a subshell or a substitution, which its own
@@ -1041,7 +1083,7 @@ fn add<T: PartialEq>(set: &mut Vec<T>, one: T) {
 /// ([`Move::Reaches`], [`Move::GitDir`]), read from where the moves into
 /// left the program, as git reads `GIT_DIR` once its `-C` has moved it;
 /// each with how it stands there.
-fn moved(dir: &Path, argv: &Argv) -> Vec<(PathBuf, Via)> {
+pub(super) fn moved(dir: &Path, argv: &Argv) -> Vec<(PathBuf, Via)> {
     let mut runs = dir.to_path_buf();
     for one in argv.moves() {
         if let Move::Into(to) = one {

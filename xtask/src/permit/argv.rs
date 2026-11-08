@@ -44,6 +44,9 @@ use crate::manifest::OneOrMany;
 pub(super) struct Argv {
     words: Vec<String>,
     moves: Vec<Move>,
+    /// Its words past the program as the shell expands them as far as the
+    /// line says ([`Argv::named`]).
+    named: Vec<String>,
 }
 
 /// A directory a command's words move its program to, or reach, apart
@@ -104,7 +107,7 @@ pub(super) fn commands(line: &str) -> Vec<Argv> {
 
 /// A shell line as permit reads it: the simple commands it runs, its text
 /// less the heredoc bodies it carries as text, those bodies, and the files
-/// its redirections write.
+/// its redirections write, each with the command it stands on.
 #[derive(Debug)]
 pub(super) struct Line {
     commands: Vec<Argv>,
@@ -115,7 +118,19 @@ pub(super) struct Line {
     /// Whether a quote holds each byte of `subject`.
     quoted: Vec<bool>,
     bodies: Vec<Heretext>,
-    written: Vec<String>,
+    redirects: Vec<Redirect>,
+}
+
+/// A file one redirection writes (`>`, `>>`, `>|`, `&>`, `<>`): its target
+/// as the shell expands it as far as the line says, a variable the line
+/// assigned read as its value and `~/` as the home ([`Assigned::target`],
+/// #4250), and the command it stands on by its place in
+/// [`Line::commands`]; `None` for one on no command, a redirection alone or
+/// one after a subshell's `)`, which the line's shell makes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Redirect {
+    pub(super) target: String,
+    pub(super) command: Option<usize>,
 }
 
 /// One heredoc body its command reads as text, whole, beside the commands
@@ -146,7 +161,7 @@ impl Line {
             subject,
             quoted,
             bodies: lexer.bodies,
-            written: lexer.written,
+            redirects: lexer.redirects,
         }
     }
 
@@ -215,10 +230,16 @@ impl Line {
         &self.bodies
     }
 
-    /// The files the line's redirections write (`>`, `>>`, `>|`, `&>`,
-    /// `<>`), a nested line's included, as the line spells them.
-    pub(super) fn written(&self) -> &[String] {
-        &self.written
+    /// The files the line's redirections write, a nested line's included,
+    /// each target as [`Redirect`] expands it.
+    pub(super) fn written(&self) -> impl Iterator<Item = &String> {
+        self.redirects.iter().map(|r| &r.target)
+    }
+
+    /// Each redirection that writes a file, with the command it stands on
+    /// ([`Redirect`]).
+    pub(super) fn redirects(&self) -> &[Redirect] {
+        &self.redirects
     }
 }
 
@@ -277,6 +298,8 @@ struct Command {
     /// follows straight after its `)` (#3198): zsh ends the word there,
     /// and bash reads the word after as more of a scalar assignment.
     joined: Vec<usize>,
+    /// The files its redirections write, expanded ([`Redirect`]).
+    targets: Vec<String>,
 }
 
 impl Command {
@@ -332,8 +355,8 @@ struct Lexer {
     text_bodies: Vec<Range<usize>>,
     /// The variables the line has assigned so far ([`Assigned`]).
     assigned: Assigned,
-    /// The files the line's redirections write, in order.
-    written: Vec<String>,
+    /// The files the line's redirections write, in order ([`Redirect`]).
+    redirects: Vec<Redirect>,
     /// The heredoc bodies the line's commands read as text ([`Heretext`]).
     bodies: Vec<Heretext>,
     /// Whether a quote or an escape holds each of `chars`, as text.
@@ -398,7 +421,11 @@ impl Lexer {
         self.nested.push(nested.subject());
         let offset = self.commands.len();
         self.adopt(&mut nested);
-        self.written.extend(nested.written);
+        self.redirects
+            .extend(nested.redirects.into_iter().map(|r| Redirect {
+                target: r.target,
+                command: r.command.map(|at| at + offset),
+            }));
         self.bodies
             .extend(nested.bodies.into_iter().map(|body| Heretext {
                 commands: body.commands.start + offset..body.commands.end + offset,
@@ -691,7 +718,7 @@ impl Lexer {
         };
         match std::mem::replace(&mut command.next, Next::Argument) {
             Next::Argument => command.words.push(word.text),
-            Next::Target { writes: true } => self.written.push(word.text),
+            Next::Target { writes: true } => command.targets.push(self.assigned.target(&word.text)),
             Next::Target { writes: false } => {}
             Next::Delimiter { strip_tabs } => self.heredocs.push(Heredoc {
                 delimiter: word.text,
@@ -724,6 +751,7 @@ impl Lexer {
         let words = std::mem::take(&mut command.words);
         let redirected = std::mem::take(&mut command.redirected);
         let joined = std::mem::take(&mut command.joined);
+        let targets = std::mem::take(&mut command.targets);
         let mut bash = words.clone();
         for &at in joined.iter().rev() {
             if at + 1 < bash.len() {
@@ -732,21 +760,29 @@ impl Lexer {
             }
         }
         let before = self.before;
-        self.run(words, redirected, after);
+        self.run(words, redirected, targets, after);
         if !joined.is_empty() {
             let zsh = std::mem::replace(&mut self.before, before);
             let assigned = self.assigned.0.clone();
-            self.run(bash, redirected, after);
+            self.run(bash, redirected, Vec::new(), after);
             self.assigned.0 = assigned;
             self.before = zsh;
         }
     }
 
-    /// One reading of a command's words, ended by `after`.
-    fn run(&mut self, words: Vec<String>, redirected: bool, after: Joint) {
+    /// One reading of a command's words, ended by `after`, with the files
+    /// its redirections write, which stand on the program it runs, or on
+    /// none where it runs none.
+    fn run(&mut self, words: Vec<String>, redirected: bool, targets: Vec<String>, after: Joint) {
         self.assigned.read(&words);
         let empty = words.is_empty() && !redirected;
-        let Some(argv) = Argv::running(words, &self.assigned) else {
+        let argv = Argv::running(words, &self.assigned);
+        let command = argv.as_ref().map(|_| self.commands.len());
+        let targets = targets
+            .into_iter()
+            .map(|target| Redirect { target, command });
+        self.redirects.extend(targets);
+        let Some(argv) = argv else {
             let begins = !self.commands.is_empty()
                 && matches!(self.before, Joint::Then | Joint::Or | Joint::Background);
             self.before = match after {
@@ -908,6 +944,21 @@ impl Assigned {
             ),
         };
         Some(format!("{}{tail}", self.0.get(name)?))
+    }
+
+    /// A word as the shell expands it as far as the line says (#4250): led
+    /// by a variable the line assigned, its value ([`Assigned::directory`]),
+    /// and led by `~/`, the home; any other word as it is spelled, one led
+    /// by a variable the line never assigned among them, which says no
+    /// place.
+    fn target(&self, word: &str) -> String {
+        if let Some(expanded) = self.directory(word) {
+            return expanded;
+        }
+        match (word.strip_prefix("~/"), std::env::var("HOME")) {
+            (Some(rest), Ok(home)) => format!("{home}/{rest}"),
+            _ => word.to_owned(),
+        }
     }
 }
 
@@ -1211,7 +1262,12 @@ impl Argv {
             *word = dir;
         }
         moves.extend(Move::of(program, rest, assigned));
-        Some(Argv { words, moves })
+        let named = rest.iter().map(|w| assigned.target(w)).collect();
+        Some(Argv {
+            words,
+            moves,
+            named,
+        })
     }
 
     /// The directory a `cd` or `pushd` names to move into: its first word
@@ -1277,6 +1333,15 @@ impl Argv {
     /// The words, program first.
     pub(super) fn words(&self) -> &[String] {
         &self.words
+    }
+
+    /// The words past the program as the shell expands them as far as the
+    /// line says, a variable the line assigned read as its value and `~/`
+    /// as the home ([`Assigned::target`]), one for each of
+    /// [`Argv::words`] past the first: the names a program the owner lock
+    /// places by what it names lands on (#4250).
+    pub(super) fn named(&self) -> &[String] {
+        &self.named
     }
 
     /// The program's name without its directory; empty for no words.

@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"mkdir -p /tmp/t4250-never-made/d && cd /tmp/t4250-never-made/d; touch notes.txt","description":"A directory the line makes and enters is not one permit can see it enter, so what follows may run where the line started (#4250, Round 2 Q35.6)"}}

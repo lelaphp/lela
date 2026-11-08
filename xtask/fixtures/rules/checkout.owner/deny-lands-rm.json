@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"rm -f notes.txt","description":"`rm` writes what it names inside the checkout another session owns (#4250)"}}

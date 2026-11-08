@@ -9,14 +9,14 @@
 //! whose`), and a checkout no record names is no session's, and nothing
 //! is refused there.
 //!
-//! An `Edit` or a `Write` is placed by its file. A shell line is placed
-//! where each command the rule fires on runs or reaches ([`fired_in`]),
-//! and, for `where = "owned"`, where each redirection it makes writes,
-//! read where its shell stands; a target spelled through a variable or
-//! `~` is no place the line says, and is not read. For `where =
-//! "operating"` a command is placed where git reads its repository, in
-//! the git dir `GIT_DIR` or `--git-dir` names in place of where it runs
-//! ([`Places::Repositories`], #3271).
+//! An `Edit` or a `Write` is placed by its file. For `where = "owned"` a
+//! shell line is placed where each of its writes lands ([`writes::of`],
+//! #4250): a listed program by what it names, any other where it runs or
+//! reaches, and a redirection on its target, read where its own command's
+//! shell stands. For `where = "operating"` a command the rule fires on is
+//! placed where git reads its repository, in the git dir `GIT_DIR` or
+//! `--git-dir` names in place of where it runs ([`Places::Repositories`],
+//! #3271).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -26,7 +26,8 @@ use anyhow::Result;
 use super::argv::{Argv, Line};
 use super::call::Call;
 use super::operation::Operation;
-use super::rules::{Places, fired_in, runs_in};
+use super::rules::{Places, fired_in};
+use super::writes;
 use crate::git;
 use crate::owner::{self, SessionId};
 
@@ -83,11 +84,7 @@ pub(super) fn owned(
         (Some(line), _) if scope == Scope::Operating => {
             fired_in(root, line, Places::Repositories, fires)
         }
-        (Some(line), _) => {
-            let mut places = fired_in(root, line, Places::Every, fires);
-            places.extend(redirected(root, line));
-            places
-        }
+        (Some(line), _) => writes::of(root, line),
         (None, Some(file)) => vec![root.join(file)],
         (None, None) => vec![root.to_path_buf()],
     };
@@ -113,22 +110,6 @@ pub(super) fn owned(
         }
     }
     Ok(None)
-}
-
-/// Where the redirections of `line` write, each target read where the
-/// line's shell stands ([`runs_in`]): one spelled through a variable or
-/// `~`, a file descriptor (`>&2`) and a device are no file of a checkout.
-pub(super) fn redirected(root: &Path, line: &Line) -> Vec<PathBuf> {
-    let at = runs_in(root, Some(line));
-    line.written()
-        .iter()
-        .filter(|target| {
-            !target.starts_with(['$', '~', '&', '-'])
-                && !target.starts_with("/dev/")
-                && !target.chars().all(|c| c.is_ascii_digit())
-        })
-        .map(|target| at.join(target))
-        .collect()
 }
 
 #[cfg(test)]
