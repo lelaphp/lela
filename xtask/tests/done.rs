@@ -311,15 +311,16 @@ fn the_harness_crate_is_asked_for_clippy_test_api_check_budget_and_unsafe_audit_
         verdict
             .unmet
             .iter()
+            .map(|u| u.message.as_str())
             .all(|u| !u.starts_with("witness") && !u.starts_with("phpt")),
         "{verdict:#?}"
     );
-    assert_eq!(verdict.unmet.len(), 5, "{verdict:#?}");
+    assert_eq!(verdict.messages().len(), 5, "{verdict:#?}");
     let store = Store::of_workspace(&root);
     for instrument in ["clippy", "test", "api-check", "budget", "unsafe-audit"] {
         store.record(&[fresh(&root, instrument, "xtask")]).unwrap();
     }
-    assert!(judge(&root).unmet.is_empty(), "{:#?}", judge(&root));
+    assert!(judge(&root).messages().is_empty(), "{:#?}", judge(&root));
 }
 
 /// A commit that changes `seams.toml` alone touches xtask, whose tests
@@ -347,7 +348,7 @@ fn a_change_to_the_manifest_alone_stales_the_harness_test_reading() {
     let stale =
         "test: the reading for xtask is stale; xtask or seams.toml changed since it was taken";
     assert!(
-        verdict.unmet.iter().any(|u| u.starts_with(stale)),
+        verdict.messages().iter().any(|u| u.starts_with(stale)),
         "{verdict:#?}"
     );
 }
@@ -379,20 +380,25 @@ fn a_change_to_a_file_read_at_build_stales_the_crates_built_from_it() {
         store.record(&[fresh(&root, instrument, scope)]).unwrap();
     }
     let stands = |u: &String| !u.contains("is stale");
-    assert!(judge_since(&root, Some("HEAD~1")).unmet.iter().all(stands));
+    assert!(
+        judge_since(&root, Some("HEAD~1"))
+            .messages()
+            .iter()
+            .all(stands)
+    );
 
     write(&root, "ops.toml", &format!("{}# moved\n", read("ops.toml")));
     let verdict = judge(&root);
     assert_eq!(verdict.crates, ["php_engine"]);
     let engine = "test: the reading for php_engine is stale; php_engine or ops.toml changed";
     assert!(
-        verdict.unmet.iter().any(|u| u.starts_with(engine)),
+        verdict.messages().iter().any(|u| u.starts_with(engine)),
         "{verdict:#?}"
     );
     let verdict = judge_since(&root, Some("HEAD~1"));
     let built = "witness: the reading for ext/reflection is stale";
     assert!(
-        verdict.unmet.iter().any(|u| u.starts_with(built)),
+        verdict.messages().iter().any(|u| u.starts_with(built)),
         "{verdict:#?}"
     );
 }
@@ -407,14 +413,14 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
     for (instrument, scope) in asked_of(&root, "ext/pcre") {
         let line = format!("{instrument}: no reading for {scope}");
         let unmet = if instrument == "phpt" {
-            verdict.unmet.iter().any(unrun(&scope))
+            verdict.messages().iter().any(unrun(&scope))
         } else {
-            verdict.unmet.contains(&line)
+            verdict.messages().contains(&line)
         };
         assert!(unmet, "{line}\n{verdict:#?}");
     }
     assert_eq!(
-        verdict.unmet.len(),
+        verdict.messages().len(),
         asked_of(&root, "ext/pcre").len(),
         "{verdict:#?}"
     );
@@ -457,7 +463,7 @@ fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_cr
     assert_eq!(verdict.crates, ["php_ext"], "{verdict:#?}");
     assert!(
         verdict
-            .unmet
+            .messages()
             .contains(&"port-map: no reading for php_ext".to_owned()),
         "{verdict:#?}"
     );
@@ -469,6 +475,7 @@ fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_cr
         !verdict
             .unmet
             .iter()
+            .map(|u| u.message.as_str())
             .any(|u| u == "port-map: no reading for ext/pcre"),
         "{verdict:#?}"
     );
@@ -493,7 +500,7 @@ fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_cr
     write(&root, "crates/php_ext/api.lock", "api::Value\napi::Zval\n");
     let verdict = judge(&root);
     assert!(
-        verdict.unmet.iter().any(|u| u
+        verdict.messages().iter().any(|u| u
             == "port-map: the reading for php_ext is stale; php_ext changed since it was taken"),
         "{verdict:#?}"
     );
@@ -531,7 +538,7 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
         .unwrap();
     let verdict = judge(&root);
     assert!(
-        verdict.unmet.iter().all(|u| !u.starts_with(stale)),
+        verdict.messages().iter().all(|u| !u.starts_with(stale)),
         "{verdict:#?}"
     );
 
@@ -542,7 +549,7 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
     );
     let verdict = judge(&root);
     let named = format!("{stale}; ext/reflection or php_engine changed since it was taken");
-    assert!(verdict.unmet.contains(&named), "{verdict:#?}");
+    assert!(verdict.messages().contains(&named), "{verdict:#?}");
 }
 
 /// Condition 10 (#3372): a diff that changes `.cargo/config.toml` asks for
@@ -555,8 +562,8 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
 fn a_change_to_what_rustc_is_built_under_asks_for_a_fold_reading() {
     let root = scratch("fold");
     let asked = |verdict: &Verdict| -> Vec<String> {
-        let fold = verdict.unmet.iter().filter(|u| u.starts_with("fold: "));
-        fold.cloned().collect()
+        let fold = verdict.messages().into_iter();
+        fold.filter(|u| u.starts_with("fold: ")).collect()
     };
     write(
         &root,
@@ -659,8 +666,12 @@ fn a_row_held_at_the_merge_is_delegated_in_a_ticketed_checkout_and_held_in_mains
     };
     std::fs::write(root.join("seams.toml"), held).unwrap();
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
-    let crosscheck =
-        |verdict: &Verdict| verdict.unmet.iter().any(|u| u.starts_with("crosscheck: "));
+    let crosscheck = |verdict: &Verdict| {
+        verdict
+            .messages()
+            .iter()
+            .any(|u| u.starts_with("crosscheck: "))
+    };
 
     let on_main = judge(&root);
     assert!(crosscheck(&on_main), "{on_main:#?}");
@@ -922,12 +933,12 @@ fn fresh_passing_readings_for_the_touched_crate_pass_and_an_edit_after_them_is_s
     );
     let verdict = judge(&root);
     assert_eq!(
-        verdict.unmet.len(),
+        verdict.messages().len(),
         asked_of(&root, "ext/pcre").len(),
         "{verdict:#?}"
     );
     // The subset's run here is keyed by the engine's tree, which moved.
-    for line in &verdict.unmet {
+    for line in &verdict.messages() {
         assert!(
             line.contains("is stale; ext/pcre changed since it was taken")
                 || unrun("ext/pcre")(line),
@@ -974,7 +985,7 @@ fn a_pass_worktree_land_carried_for_a_scope_main_has_no_file_of_is_met_in_main()
     let merge = Tree::new("done-landed-unmeasured-merge").unwrap();
     let merged = Store::of_workspace(&merge);
     record_asked(&merged, &root, "ext/pcre");
-    let unmet = judge(&root).unmet;
+    let unmet = judge(&root).messages();
     assert!(
         unmet.contains(&"test: no reading for ext/pcre".into()),
         "{unmet:#?}"
@@ -1038,6 +1049,7 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
     let stale: Vec<&str> = verdict
         .unmet
         .iter()
+        .map(|u| u.message.as_str())
         .filter(|l| l.ends_with("is stale; ext/pcre changed since it was taken"))
         .map(|l| l.split(':').next().unwrap())
         .collect();
@@ -1047,7 +1059,10 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
         .filter(|i| *i != "phpt")
         .collect();
     assert_eq!(stale, asked, "{verdict:#?}");
-    assert!(verdict.unmet.iter().any(unrun("ext/pcre")), "{verdict:#?}");
+    assert!(
+        verdict.messages().iter().any(unrun("ext/pcre")),
+        "{verdict:#?}"
+    );
 }
 
 /// The touched crate's readings and kept runs met, then the pin rewritten
@@ -1069,6 +1084,7 @@ fn after_the_pin_moves(name: &str, edit: impl Fn(&str) -> String, stales: bool) 
     let mut stale: Vec<&str> = verdict
         .unmet
         .iter()
+        .map(|u| u.message.as_str())
         .filter(|l| l.ends_with("is stale; oracle.toml changed since it was taken"))
         .map(|l| l.split(':').next().unwrap())
         .collect();
@@ -1109,7 +1125,11 @@ fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
     let line = format!(
         "phpt: the run of ext/pcre kept at {base} is stale; oracle.toml changed since it was taken; take one with `cargo xtask phpt --base {base} --subset ext/pcre`"
     );
-    assert!(judge(&root).unmet.contains(&line), "{:#?}", judge(&root));
+    assert!(
+        judge(&root).messages().contains(&line),
+        "{:#?}",
+        judge(&root)
+    );
 }
 
 #[test]
@@ -1128,7 +1148,7 @@ fn a_failing_or_skipped_reading_is_unmet_with_its_message() {
     store.record(std::slice::from_ref(&reading)).unwrap();
     let verdict = judge(&root);
     assert_eq!(
-        verdict.unmet,
+        verdict.messages(),
         ["budget: ext/pcre fail: ext/pcre: 7000 lines over the ceiling of 6000"],
         "{verdict:#?}"
     );
@@ -1206,7 +1226,7 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
             base.trim()
         );
         let unmet = if held { vec![regressed] } else { vec![] };
-        assert_eq!(judge(&root).unmet, unmet, "{then} then, {now} now");
+        assert_eq!(judge(&root).messages(), unmet, "{then} then, {now} now");
     }
     let kept = xtask::phpt::kept_run(
         &xtask::key::Snapshot::commit(&root, &Repo::at(&root).git(&["rev-parse", "HEAD"])).unwrap(),
@@ -1217,9 +1237,9 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
     std::fs::remove_file(kept).unwrap();
     let verdict = judge(&root);
     assert!(
-        verdict.unmet.len() == 1
-            && verdict.unmet[0].starts_with("phpt: no run of ext/pcre is kept at ")
-            && verdict.unmet[0].contains("cargo xtask phpt --base "),
+        verdict.messages().len() == 1
+            && verdict.messages()[0].starts_with("phpt: no run of ext/pcre is kept at ")
+            && verdict.messages()[0].contains("cargo xtask phpt --base "),
         "{verdict:#?}"
     );
     // A run of none is no run (#3143), here as at the base.
@@ -1227,7 +1247,7 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
     keep_run(&root, Some("HEAD"), "ext/pcre", "");
     let verdict = judge(&root);
     assert!(
-        verdict.unmet.len() == 1 && unrun("ext/pcre")(&verdict.unmet[0]),
+        verdict.messages().len() == 1 && unrun("ext/pcre")(&verdict.messages()[0]),
         "{verdict:#?}"
     );
 }
@@ -1298,7 +1318,7 @@ fn a_porting_crates_crosscheck_readings_are_the_ports_meter() {
 
     red("budget", "ext/standard", "ext/standard: 31000 lines");
     keep_run(&root, None, "ext/standard", "fail");
-    let unmet = judge(&root).unmet;
+    let unmet = judge(&root).messages();
     assert_eq!(unmet.len(), 2, "{unmet:#?}");
     assert_eq!(
         unmet[0],
@@ -1309,7 +1329,7 @@ fn a_porting_crates_crosscheck_readings_are_the_ports_meter() {
     forget(&store, "crosscheck", "ext/standard");
     assert!(
         judge(&root)
-            .unmet
+            .messages()
             .contains(&"crosscheck: no reading for ext/standard".to_owned())
     );
 }
@@ -1358,7 +1378,7 @@ fn a_kernel_or_native_without_a_witness_is_unmet_from_the_witness_reading() {
     store.record(std::slice::from_ref(&reading)).unwrap();
     let verdict = judge(&root);
     assert_eq!(
-        verdict.unmet,
+        verdict.messages(),
         ["witness: 2 kernels or natives in ext/pcre without a witness"],
         "{verdict:#?}"
     );
@@ -1389,10 +1409,9 @@ fn a_lock_that_differs_must_be_in_the_diff_and_a_lock_in_the_diff_needs_its_read
     store.record(&[differs(&root)]).unwrap();
     let about_locks = |verdict: &Verdict| -> Vec<String> {
         verdict
-            .unmet
-            .iter()
+            .messages()
+            .into_iter()
             .filter(|l| l.contains(".lock"))
-            .cloned()
             .collect()
     };
     let verdict = judge(&root);
@@ -1414,7 +1433,7 @@ fn a_lock_that_differs_must_be_in_the_diff_and_a_lock_in_the_diff_needs_its_read
     assert!(about_locks(&verdict).is_empty(), "{verdict:#?}");
     assert!(
         verdict
-            .unmet
+            .messages()
             .contains(&"api-check: no reading for php_heap".into()),
         "{verdict:#?}"
     );
@@ -1455,14 +1474,17 @@ fn a_lock_whose_pass_worktree_land_carried_is_met_in_main() {
     write(&root, "crates/php_heap/heap.lock", "Gc\n");
     let predates = "crates/php_heap/heap.lock is in the diff and its api-check reading predates it";
     let verdict = judge(&root);
-    assert!(verdict.unmet.contains(&predates.into()), "{verdict:#?}");
+    assert!(
+        verdict.messages().contains(&predates.into()),
+        "{verdict:#?}"
+    );
 
     let merge = Tree::new("done-landed-lock-merge").unwrap();
     Store::of_workspace(&merge).record(&[pass(&root)]).unwrap();
     assert_eq!(store.land(&Store::of_workspace(&merge)).unwrap(), 1);
     let verdict = judge(&root);
     assert!(
-        verdict.unmet.iter().all(|l| !l.contains(".lock")),
+        verdict.messages().iter().all(|l| !l.contains(".lock")),
         "{verdict:#?}"
     );
 }
@@ -1475,7 +1497,10 @@ fn an_open_divergence_row_on_a_changed_scope_fails_and_on_another_scope_does_not
     write(&root, "crates/php_heap/src/lib.rs", "pub struct Zval;\n");
     let verdict = judge(&root);
     assert!(
-        verdict.unmet.iter().all(|l| !l.contains("open divergence")),
+        verdict
+            .messages()
+            .iter()
+            .all(|l| !l.contains("open divergence")),
         "the open row names ext/pcre, not php_heap: {verdict:#?}"
     );
 
@@ -1484,6 +1509,7 @@ fn an_open_divergence_row_on_a_changed_scope_fails_and_on_another_scope_does_not
     let line = verdict
         .unmet
         .iter()
+        .map(|u| u.message.as_str())
         .find(|l| l.starts_with("open divergence"))
         .unwrap_or_else(|| panic!("{verdict:#?}"));
     assert!(
@@ -1504,6 +1530,7 @@ fn a_row_the_diff_itself_proposes_touches_it_whatever_crate_it_names() {
     let line = verdict
         .unmet
         .iter()
+        .map(|u| u.message.as_str())
         .find(|l| l.starts_with("open divergence phpt:php-src/ext/spl"))
         .unwrap_or_else(|| panic!("{verdict:#?}"));
     assert!(
@@ -1514,6 +1541,7 @@ fn a_row_the_diff_itself_proposes_touches_it_whatever_crate_it_names() {
         verdict
             .unmet
             .iter()
+            .map(|u| u.message.as_str())
             .filter(|l| l.starts_with("open divergence"))
             .count()
             == 1,
@@ -1539,12 +1567,13 @@ fn permit_over_the_diff_denies_a_lock_in_an_extension_and_notes_the_harness_file
     let denied = verdict
         .unmet
         .iter()
+        .map(|u| u.message.as_str())
         .find(|l| l.starts_with("permit denies ext/pcre/src/lib.rs"))
         .unwrap_or_else(|| panic!("{verdict:#?}"));
     assert!(denied.contains("ext.no-locks"), "{denied}");
     assert!(denied.contains("ADR-0005"), "{denied}");
     assert!(
-        verdict.unmet.iter().all(|l| !l.contains("seams.toml")),
+        verdict.messages().iter().all(|l| !l.contains("seams.toml")),
         "the manifest is a note, not unmet: {verdict:#?}"
     );
     assert_eq!(
@@ -1580,6 +1609,7 @@ fn permit_over_the_diff_judges_a_binary_file_by_its_path_alone() {
         verdict
             .unmet
             .iter()
+            .map(|u| u.message.as_str())
             .all(|l| !l.starts_with("permit denies")),
         "{verdict:#?}"
     );
@@ -1625,6 +1655,7 @@ fn a_crate_whose_only_exit_is_one_accept_wrote_is_done() {
     let denied = verdict
         .unmet
         .iter()
+        .map(|u| u.message.as_str())
         .find(|l| l.starts_with("permit denies ext/pcre/src/lib.rs"))
         .unwrap_or_else(|| panic!("{verdict:#?}"));
     assert!(denied.contains("witness.exit-authored"), "{denied}");
@@ -1754,6 +1785,156 @@ fn a_checkout_written_elsewhere_is_handed_to_its_own_build() {
         out.contains(&format!("done could not judge {}", other.display())),
         "{out}"
     );
+    // The checkout that could not judge gave no kinds: it is counted
+    // unkinded, so the kinds and `unkinded` sum to `unmet` (c2.f).
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reading.numbers["unkinded"], 1.into(), "{reading:#?}");
+    assert_eq!(reading.numbers["unmet"], 1.into(), "{reading:#?}");
+}
+
+/// A Stop met where it stands and held in another checkout the session
+/// wrote in fails, and its reading says what the other holds rather than
+/// that every condition is met (Round 1, Q23, c7).
+#[test]
+fn a_stop_met_here_and_held_elsewhere_never_says_every_condition_is_met() {
+    let root = scratch("hook-met-here");
+    let tree = Tree::new("done-hook-met-here").unwrap();
+    let other = tree.join("t1");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t1", other.to_str().unwrap()]);
+    wrote_in(&root, &root, "s", None);
+    wrote_in(&root, &other, "s", None);
+    let out = stop_hook(&root, "{\"session_id\":\"s\"}").ok();
+    assert!(out.contains("done could not judge"), "{out}");
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(
+        !reading.message.contains("every condition"),
+        "{}",
+        reading.message
+    );
+    assert!(
+        reading.message.starts_with(
+            "stop: 1 unmet over the 1 other checkout the session wrote in; this one is met since "
+        ),
+        "{}",
+        reading.message
+    );
+}
+
+/// The Stop counts the host's waiting work on its reading (Round 1, Q23,
+/// c7): the tasks in flight, by type, the shell ones in a checkout it
+/// judged, and the session's crons, where the host sent each array, so a
+/// Stop whose host sent none says nothing of them. The counts hold
+/// nothing: the turn passes.
+#[test]
+fn the_stop_counts_the_hosts_background_tasks_and_session_crons() {
+    let root = scratch("hook-waiting");
+    let store = Store::of_workspace(&root);
+    let canonical = root.canonicalize().unwrap();
+    let stop = serde_json::json!({
+        "session_id": "s-waiting",
+        "hook_event_name": "Stop",
+        "background_tasks": [
+            {"id": "a", "type": "shell", "status": "running",
+             "command": format!("cd {} && cargo xtask test", canonical.display())},
+            {"id": "b", "type": "shell", "status": "running", "command": "tail -f /var/log/x"},
+            {"id": "c", "type": "subagent", "status": "running"},
+        ],
+        "session_crons": [{"id": "d", "schedule": "0 9 * * 1-5", "recurring": true}],
+    });
+    assert_eq!(hook(&root, &stop.to_string()).ok(), "");
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert_eq!(
+        reading.numbers["background_tasks"],
+        3.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        reading.numbers["background_in_checkouts"],
+        1.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(reading.numbers["session_crons"], 1.into(), "{reading:#?}");
+    assert_eq!(
+        reading.groups["background_tasks shell"],
+        2.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        reading.groups["background_tasks subagent"],
+        1.into(),
+        "{reading:#?}"
+    );
+
+    let empty = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
+    assert_eq!(hook(&root, &empty).ok(), "");
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert_eq!(
+        reading.numbers["background_tasks"],
+        0.into(),
+        "{reading:#?}"
+    );
+    assert_eq!(reading.numbers["session_crons"], 0.into(), "{reading:#?}");
+
+    // A shape the host has not documented blocks nothing.
+    let odd = "{\"session_id\":\"s-odd\",\"background_tasks\":{\"n\":1}}";
+    assert_eq!(hook(&root, odd).ok(), "");
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert!(
+        !reading.numbers.contains_key("background_tasks"),
+        "{reading:#?}"
+    );
+    assert!(
+        !reading.numbers.contains_key("session_crons"),
+        "{reading:#?}"
+    );
+}
+
+/// A checkout the session wrote in and that was removed since is none
+/// the Stop judges, and none its reading counts (Round 1, Q23, c7).
+#[test]
+fn a_checkout_removed_since_the_session_wrote_in_it_is_not_counted() {
+    let root = scratch("hook-removed");
+    let tree = Tree::new("done-hook-removed").unwrap();
+    let gone = tree.join("t1");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t1", gone.to_str().unwrap()]);
+    wrote_in(&root, &gone, "s", None);
+    Repo::at(&root).git(&["worktree", "remove", "--force", gone.to_str().unwrap()]);
+    assert_eq!(stop_hook(&root, "{\"session_id\":\"s\"}").ok(), "");
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert!(
+        reading
+            .message
+            .starts_with("stop: 0 unmet over the 0 checkouts"),
+        "{}",
+        reading.message
+    );
+}
+
+/// A checkout handed over judges itself and hands back its count and its
+/// kinds, which sum to it, so the Stop that handed it over counts kinds
+/// and not only a total (c2.f).
+#[test]
+fn a_checkout_handed_over_hands_back_its_kinds() {
+    let root = scratch("hook-here");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let here = "{\"session_id\":\"s\",\"hook_event_name\":\"Stop\",\"here\":true}";
+    let held: serde_json::Value = serde_json::from_str(&stop_hook(&root, here).ok()).unwrap();
+    let unmet = held["unmet"].as_u64().unwrap();
+    assert!(unmet > 0, "{held:#}");
+    let kinds = held["kinds"].as_object().unwrap();
+    let sum: u64 = kinds.values().map(|n| n.as_u64().unwrap()).sum();
+    assert_eq!(sum, unmet, "{held:#}");
+    assert_eq!(kinds["missing"].as_u64(), Some(unmet), "{held:#}");
 }
 
 /// The second Stop releases a held turn and records that it did, with the
@@ -1776,6 +1957,7 @@ fn a_block_the_second_stop_released_is_a_reading_with_its_count() {
         .rfind(|r| r.scope == "released");
     let release = release.expect("the release was recorded");
     assert_eq!(release.status, Status::Fail);
+    assert!(!release.at.to_string().starts_with("1970-"), "{release:#?}");
     assert_eq!(release.numbers["unmet"], held.numbers["unmet"]);
     assert!(
         release
@@ -1786,12 +1968,234 @@ fn a_block_the_second_stop_released_is_a_reading_with_its_count() {
     );
 }
 
+/// A scratch repository whose `ext/pcre` is unmet in each way a run
+/// clears and one it does not: no `witness` reading, a `test` reading
+/// over another tree whose run failed, a `clippy` reading failing over
+/// the tree now, and the fixture's open divergence row on the subset.
+fn unmet_four_ways(name: &str) -> Tree {
+    let root = scratch_with_an_open_row(name);
+    let store = Store::of_workspace(&root);
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let mut failed = fresh(&root, "test", "ext/pcre");
+    failed.status = Status::Fail;
+    store.record(&[failed]).unwrap();
+    write(
+        &root,
+        "ext/pcre/src/lib.rs",
+        "pub fn preg_match() -> u8 { 0 }\n",
+    );
+    for (instrument, scope) in asked_of(&root, "ext/pcre") {
+        if !["test", "witness"].contains(&instrument) {
+            met(&store, &root, instrument, &scope);
+        }
+    }
+    let mut failing = fresh(&root, "clippy", "ext/pcre");
+    failing.status = Status::Fail;
+    failing.message = "ext/pcre: 1 warning".into();
+    store.record(&[failing]).unwrap();
+    root
+}
+
+/// `done --format json` over `root`, which is unmet: the object it prints.
+fn typed_list(root: &Path) -> serde_json::Value {
+    let ran = xtask(root, &["done", "--base", "HEAD", "--format", "json"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    serde_json::from_str(&ran.stdout).unwrap()
+}
+
+/// `done --format json` (#3494, Round 1, Q11 (a)): one object, `v` its
+/// shape's version, with the base, the changed files and crates, the
+/// counts by kind, and each unmet condition as `{ kind, instrument, scope,
+/// message, command }`. A reading never taken is `missing` with the
+/// command that takes it, one over another tree whose last run failed is
+/// `stale` with the clause that says so (c2.f), one failing over the tree
+/// now is `failing`, and an open divergence is `refused` with no
+/// instrument, scope or command.
+#[test]
+fn the_list_as_json_types_each_unmet_condition() {
+    let root = unmet_four_ways("json");
+    let list = typed_list(&root);
+    assert_eq!(list["v"], done::JSON_V, "{list:#}");
+    assert_eq!(list["base"]["since"], "HEAD", "{list:#}");
+    assert_eq!(list["changed"], serde_json::json!(["ext/pcre/src/lib.rs"]));
+    assert_eq!(list["crates"], serde_json::json!(["ext/pcre"]));
+    assert_eq!(list["met"], false);
+    let unmet = list["unmet"].as_array().unwrap();
+    for item in unmet {
+        let mut keys: Vec<&str> = item
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["command", "instrument", "kind", "message", "scope"],
+            "{item:#}"
+        );
+    }
+    let item = |instrument: &str| {
+        let found = unmet.iter().find(|i| i["instrument"] == instrument);
+        found.unwrap_or_else(|| panic!("no {instrument} item: {list:#}"))
+    };
+    let typed = |item: &serde_json::Value| {
+        let field = |name: &str| item[name].as_str().map(str::to_owned);
+        (field("kind"), field("scope"), field("command"))
+    };
+    let some = |s: &str| Some(s.to_owned());
+    assert_eq!(
+        typed(item("witness")),
+        (
+            some("missing"),
+            some("ext/pcre"),
+            some("cargo xtask witness --crate ext/pcre")
+        )
+    );
+    assert_eq!(
+        typed(item("test")),
+        (
+            some("stale"),
+            some("ext/pcre"),
+            some("cargo xtask test --crate ext/pcre")
+        )
+    );
+    let stale = item("test")["message"].as_str().unwrap();
+    assert!(stale.ends_with("; its last reading failed"), "{stale}");
+    assert_eq!(
+        typed(item("clippy")),
+        (
+            some("failing"),
+            some("ext/pcre"),
+            some("cargo xtask clippy --crate ext/pcre")
+        )
+    );
+    let open = unmet.iter().find(|i| i["instrument"].is_null());
+    let open = open.unwrap_or_else(|| panic!("no open divergence: {list:#}"));
+    assert_eq!(typed(open), (some("refused"), None, None), "{open:#}");
+    assert!(
+        open["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("open divergence")
+    );
+    let counts = &list["counts"];
+    for kind in ["failing", "stale", "missing", "refused"] {
+        let items = unmet.iter().filter(|i| i["kind"] == kind).count() as u64;
+        assert_eq!(counts[kind].as_u64(), Some(items), "{kind}: {list:#}");
+    }
+    assert_eq!(counts["unkinded"], 0, "{list:#}");
+}
+
+/// The text over the same list (c2.f): the head line counts the kinds the
+/// JSON counts, the bullets are its messages in its order, and the
+/// reading carries each kind's count and `unkinded` as numbers.
+#[test]
+fn the_head_line_and_the_reading_count_the_kinds_the_json_does() {
+    let root = unmet_four_ways("json-text");
+    let list = typed_list(&root);
+    let unmet = list["unmet"].as_array().unwrap();
+    let count = |kind: &str| list["counts"][kind].as_u64().unwrap();
+    let ran = xtask(&root, &["done", "--base", "HEAD"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    let head = format!(
+        "; {} unmet: {} failing, {} stale, {} missing, {} refused",
+        unmet.len(),
+        count("failing"),
+        count("stale"),
+        count("missing"),
+        count("refused")
+    );
+    let first = ran.stdout.lines().next().unwrap_or_default();
+    assert!(first.ends_with(&head), "{head}: {}", ran.stdout);
+    let bullets: Vec<&str> = (ran.stdout.lines())
+        .skip_while(|l| *l != "unmet:")
+        .skip(1)
+        .map_while(|l| l.strip_prefix("- "))
+        .collect();
+    let messages: Vec<&str> = unmet
+        .iter()
+        .map(|i| i["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(bullets, messages, "{}", ran.stdout);
+    let store = Store::of_workspace(&root);
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    for kind in ["failing", "stale", "missing", "refused", "unkinded"] {
+        let n = i64::try_from(count(kind)).unwrap();
+        assert_eq!(reading.numbers[kind], n.into(), "{kind}: {reading:#?}");
+    }
+}
+
+/// Every file of `root`'s store with its bytes.
+fn store_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut dirs = vec![Store::of_workspace(root).root().to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+/// `done --peek` (#3494, Round 1, Q12, c2.h): judged and printed, under
+/// either format, and nothing written: the store is byte for byte as it
+/// was, a spent kept-change record included, and the exit is the
+/// verdict's. `done` and its Stop hook settle the record after they judge,
+/// and `done` records its reading.
+#[test]
+fn done_peek_writes_nothing_and_done_and_its_hook_settle_a_spent_kept_change() {
+    let root = scratch("peek");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    // The pin is at HEAD's blob: the change the record names is settled.
+    let spent = "target/harness/permit/kept/spent.json";
+    let record = r#"{"path":"oracle.toml","was":null,"call":"Bash `git status`"}"#;
+    write(&root, spent, record);
+    let before = store_bytes(&root);
+    for format in ["text", "json"] {
+        let ran = xtask(
+            &root,
+            &["done", "--base", "HEAD", "--peek", "--format", format],
+        );
+        assert_eq!(ran.code(), 1, "{ran}");
+        assert!(ran.stdout.contains("no reading for ext/pcre"), "{ran}");
+        assert_eq!(
+            store_bytes(&root),
+            before,
+            "{format}: the store moved: {ran}"
+        );
+    }
+
+    let ran = xtask(&root, &["done", "--base", "HEAD"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(!root.join(spent).exists(), "done settled the record");
+    let store = Store::of_workspace(&root);
+    assert!(
+        store.read("done", "workspace").unwrap().is_some(),
+        "and recorded"
+    );
+
+    write(&root, spent, record);
+    let stop = "{\"session_id\":\"s-peek\",\"hook_event_name\":\"Stop\"}";
+    assert!(hook(&root, stop).ok().contains("block"));
+    assert!(!root.join(spent).exists(), "the hook settled the record");
+}
+
 /// Each reading names its caller (#3619): pre-push says so on the command
-/// line, and a run that names none is a hand's outside CI.
+/// line, and a run that names none is a hand's outside CI. Land is
+/// `worktree land`'s alone, which no command line offers (c11.b).
 #[test]
 fn a_done_reading_carries_its_caller() {
     let root = scratch("caller");
     let store = Store::of_workspace(&root);
+    let land = xtask(&root, &["done", "--base", "HEAD", "--caller", "land"]);
+    assert_eq!(land.code(), 2, "{land}");
+    assert!(store.read("done", "workspace").unwrap().is_none(), "{land}");
     xtask(&root, &["done", "--base", "HEAD", "--caller", "pre-push"]).ok();
     let reading = store.read("done", "workspace").unwrap().unwrap();
     assert!(
@@ -1973,10 +2377,11 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
 
 /// CI per commit runs on a push to `main` alone, since branch tracks are
 /// gone and a ticket's branch reaches CI as a pull request (ADR-0009,
-/// #1757), and judges each since the base its Stop hook took
-/// (harness-design.md §4.5, §7). A push passes no base, so `done` takes
-/// the merge base with `main`; a pull request's checkout is a detached
-/// merge commit, so the step passes the ref the pull request targets.
+/// #1757), and judges a pull request since the ref it targets, its
+/// checkout being a detached merge commit (harness-design.md §4.5, §7).
+/// A push runs no `done`: pre-push and `land` judged what it carries
+/// (Round 1, Q21), so the step is the pull request's alone and every
+/// `done` it runs passes the base.
 #[test]
 fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
     let text = read(".github/workflows/harness.yml");
@@ -2005,16 +2410,73 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
         "the base is passed as the ref, which merge_base resolves on origin: {step}"
     );
     assert!(
-        step.lines()
-            .any(|l| l.contains("cargo xtask done") && !l.contains("--base")),
-        "a push passes nothing and gets the merge base with main: {step}"
+        step.contains("\n        if: ${{ github.event_name == 'pull_request' }}\n"),
+        "a push runs no done: {step}"
+    );
+    let runs = step
+        .lines()
+        .filter(|l| l.contains("cargo xtask done"))
+        .collect::<Vec<_>>();
+    assert!(
+        !runs.is_empty() && runs.iter().all(|l| l.contains("--base")),
+        "every done the step runs passes the base: {step}"
+    );
+    assert_eq!(
+        text.matches("xtask done").count(),
+        1,
+        "the pull request's step is the one done CI runs: {text}"
     );
 }
 
+/// A pull request's `done` names `phpt` `--not-run` whatever else ran
+/// (Round 1, Q22): no job of the workflow runs the corpus through the
+/// engine, so a missing run is a note there and not unmet.
+#[test]
+fn a_pull_request_names_phpt_not_run() {
+    let text = read(".github/workflows/harness.yml");
+    let step = &text[text.find("- name: done").unwrap()..];
+    let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
+    let first = step
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("set --"))
+        .unwrap_or_else(|| panic!("the step sets its arguments: {step}"));
+    assert_eq!(first, "set -- --not-run phpt", "{step}");
+    assert!(
+        step.find("set -- --not-run phpt\n").unwrap()
+            < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
+        "phpt is named before the oracle job is asked about: {step}"
+    );
+}
+
+/// The red-main ticket `scripts/ci/red.sh` files quotes no `done` lines
+/// and holds its builder to no `done` box, since a push runs no `done`
+/// (Round 1, Q21), and the `done` job hands the red-main job no list.
+#[test]
+fn a_red_main_carries_no_done_lines() {
+    let text = read(".github/workflows/harness.yml");
+    for gone in ["UNMET", "outputs.unmet", "done.txt"] {
+        assert!(
+            !text.contains(gone),
+            "harness.yml still hands on {gone}: {text}"
+        );
+    }
+    let red = read("scripts/ci/red.sh");
+    let code = red
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for gone in ["UNMET", "xtask done", "done_lines", "unmet"] {
+        assert!(!code.contains(gone), "red.sh still reads {gone}: {code}");
+    }
+}
+
 /// While `DAX_BUILD_RUNNER` is set the oracle job is skipped, and the done
-/// step names as `--not-run` exactly the instruments of condition 1 that
-/// job's steps run, so a lane added there is named here or `done` is red
-/// for its absence (#2477). No instrument without an owed row is named.
+/// step names as `--not-run`, beside the `phpt` every pull request names,
+/// exactly the instruments of condition 1 that job's steps run, so a lane
+/// added there is named here or `done` is red for its absence (#2477). No
+/// instrument without an owed row is named.
 #[test]
 fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -2042,19 +2504,21 @@ fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
             && step.contains("if [ \"$ORACLE\" = skipped ]; then"),
         "the step reads whether the oracle job was skipped: {step}"
     );
-    let named: std::collections::BTreeSet<&str> = step
+    // What the skipped branch adds, beyond the `phpt` every pull request
+    // names (Round 1, Q22).
+    let asked = step.find("if [ \"$ORACLE\" = skipped ]; then").unwrap();
+    let skipped = &step[asked..];
+    let skipped = &skipped[..skipped.find("\n          fi\n").unwrap_or(skipped.len())];
+    let named: std::collections::BTreeSet<&str> = skipped
         .split("--not-run ")
         .skip(1)
         .filter_map(|rest| rest.split_whitespace().next())
         .collect();
     assert_eq!(named, runs, "{step}");
-    let empty = step
-        .find("set --\n")
-        .expect("no instrument is excluded before the oracle job is tested");
-    assert!(
-        empty < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
-        "{step}"
-    );
+    let before = step
+        .find("set -- --not-run phpt\n")
+        .expect("no instrument but phpt is excluded before the oracle job is tested");
+    assert!(before < asked, "{step}");
     assert!(
         step.contains("::warning title=the oracle lane did not run::"),
         "{step}"
@@ -2079,7 +2543,10 @@ fn a_crate_with_a_row_and_no_reading_is_unmet_the_way_an_extension_is() {
     );
     let verdict = judge(&root);
     assert_eq!(verdict.crates, ["php_heap"], "{verdict:#?}");
-    assert!(verdict.unmet.iter().any(unrun("php_heap")), "{verdict:#?}");
+    assert!(
+        verdict.messages().iter().any(unrun("php_heap")),
+        "{verdict:#?}"
+    );
 }
 
 // ---------------------------------------------------------------- the reply (#32)
@@ -2355,10 +2822,9 @@ fn ticket_act(root: &Path, number: u64, body: &str, act: xtask::ticket::Act) -> 
 
 fn about_the_ticket(verdict: &Verdict) -> Vec<String> {
     verdict
-        .unmet
-        .iter()
+        .messages()
+        .into_iter()
         .filter(|l| l.starts_with("ticket"))
-        .cloned()
         .collect()
 }
 
@@ -2382,7 +2848,7 @@ fn the_tracks_ticket_is_held_to_its_boxes_from_the_store_and_stale_after_an_edit
     let ran = xtask(&root, &["done", "--base", "HEAD"]);
     assert_eq!(ran.code(), 1, "{ran}");
     let out = ran.stdout;
-    assert!(out.contains("for #31\n"), "the head line names it: {out}");
+    assert!(out.contains("for #31; "), "the head line names it: {out}");
     assert!(out.contains("- ticket: no reading for #31"), "{out}");
 
     ticket_read(&root, 31, "unticked.md");
@@ -2450,6 +2916,53 @@ fn a_branch_that_records_no_ticket_is_not_asked_and_says_nothing_about_tickets()
     let verdict = judge(&root);
     assert_eq!(verdict.ticket, None);
     assert!(verdict.met(), "{verdict:#?}");
+}
+
+/// Condition 7 reads the ticket's last reading, a later one a land put
+/// in the index included: an unticked read in the file gives way to the
+/// ticked one another checkout took after it over the same tree. A tree
+/// that returns to an earlier state does not revive the box state read
+/// over it, which a lookup by the key would (#31).
+#[test]
+fn the_ticket_is_held_to_its_last_reading_and_never_one_found_by_the_key() {
+    let root = scratch("ticket-last");
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
+    let mut ticked = ticket_act(&root, 31, "ticked.md", xtask::ticket::Act::Read);
+    ticket_read(&root, 31, "unticked.md");
+    assert_eq!(about_the_ticket(&judge(&root)).len(), 1);
+    ticked.at = "2099-01-01T00:00:00Z".parse().unwrap();
+    let other = Tree::new("done-ticket-last-other").unwrap();
+    let theirs = Store::at(other.to_path_buf());
+    theirs.record(&[ticked]).unwrap();
+    Store::of_workspace(&root).land(&theirs).unwrap();
+    let verdict = judge(&root);
+    assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
+
+    let root = scratch("ticket-returns");
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
+    let tree = || {
+        let snapshot = xtask::key::Snapshot::disk(&root).unwrap();
+        snapshot.key(Path::new(".")).unwrap()
+    };
+    let (before, file) = (tree(), root.join("ext/pcre/src/lib.rs"));
+    let was = std::fs::read(&file).unwrap();
+    ticket_read(&root, 31, "ticked.md");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    ticket_read(&root, 31, "unticked.md");
+    std::fs::write(&file, was).unwrap();
+    assert_eq!(
+        tree(),
+        before,
+        "the tree is back where the ticked read was taken"
+    );
+    let verdict = judge(&root);
+    assert_eq!(
+        about_the_ticket(&verdict),
+        [
+            "ticket: the reading for #31 is stale; the tree changed since it was read; its last reading failed; run `cargo xtask ticket read`"
+        ],
+        "{verdict:#?}"
+    );
 }
 
 /// The Stop hook holds the turn on the ticket's boxes as it holds it on
@@ -2756,8 +3269,8 @@ fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not(
         )])
         .unwrap();
     let verdict = judge(&root);
-    assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
-    assert!(unrun("ext/pcre")(&verdict.unmet[0]), "{verdict:#?}");
+    assert_eq!(verdict.messages().len(), 1, "{verdict:#?}");
+    assert!(unrun("ext/pcre")(&verdict.messages()[0]), "{verdict:#?}");
 
     // A witness skip is unmet on the numbers that once excused it: the
     // binary is no longer why a witness reading is a skip, so what is left
@@ -2777,9 +3290,9 @@ fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not(
         ])
         .unwrap();
     let verdict = judge(&root);
-    assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
+    assert_eq!(verdict.messages().len(), 1, "{verdict:#?}");
     assert!(
-        verdict.unmet[0].starts_with("witness: ext/pcre skip:"),
+        verdict.messages()[0].starts_with("witness: ext/pcre skip:"),
         "{verdict:#?}"
     );
 }
@@ -2824,7 +3337,7 @@ mod tracked {
         store.record(std::slice::from_ref(&red)).unwrap();
         let verdict = judge(&root);
         assert_eq!(
-            verdict.unmet,
+            verdict.messages(),
             [
                 "crosscheck: ext/pcre/ri fail: ext/pcre/ri: the oracle rendered 200 bytes under `php -n --ri pcre`"
             ],
@@ -2834,7 +3347,7 @@ mod tracked {
         forget(&store, "crosscheck", "ext/pcre/ri");
         let verdict = judge(&root);
         assert_eq!(
-            verdict.unmet,
+            verdict.messages(),
             ["crosscheck: no reading for ext/pcre/ri"],
             "{verdict:#?}"
         );
@@ -2869,7 +3382,7 @@ mod tracked {
         forget(&store, "clippy", "ext/pcre/release");
         let verdict = judge(&root);
         assert_eq!(
-            verdict.unmet,
+            verdict.messages(),
             ["clippy: no reading for ext/pcre/release"],
             "{verdict:#?}"
         );

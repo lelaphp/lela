@@ -173,6 +173,12 @@
 //! not judge the close of an issue labelled `frontier:chart` (CONTEXT.md,
 //! Chart; harness-design.md ledger 53).
 //!
+//! Two readers write no reading (#4263): `brief <n>` renders the brief a
+//! spawned builder starts with from a skill's template ([`brief`]), and
+//! `view <n>` prints the ticket with the comments a builder may act on,
+//! counting what it withheld ([`view`]), which `ready` prints too for the
+//! comments written since the branch's first commit.
+//!
 //! What the seam does not cover, written down rather than pretended: the
 //! rule is judged by `permit`, whose tools are `Edit`, `Write` and `Bash`,
 //! so a GitHub MCP server attached later would close a ticket unjudged.
@@ -191,6 +197,9 @@ use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status, joined, millis};
 use crate::track::{MAIN, Ticket, Track};
 use crate::track_next::{READY, TRACK_LABEL, tracks_of};
+
+pub mod brief;
+pub mod view;
 
 /// The instrument name every reading of ticket carries.
 pub(crate) const INSTRUMENT: &str = "ticket";
@@ -1062,6 +1071,18 @@ impl Gh {
         Ok((issue.state != State::Merged).then_some(issue))
     }
 
+    /// `gh issue view <n> --json …,comments`: one issue and its comments,
+    /// which `view` and `ready` print as [`view`] says.
+    pub fn thread(&self, root: &Path, ticket: Ticket) -> Result<view::Thread> {
+        let number = ticket.number().to_string();
+        let fields = "number,title,body,state,url,labels,comments";
+        let text = self
+            .read(root, &["issue", "view", &number, "--json", fields])
+            .with_context(|| format!("{ticket}'s comments could not be read from the tracker"))?;
+        serde_json::from_str(&text)
+            .with_context(|| format!("{ticket}: gh's answer is not an issue with its comments"))
+    }
+
     /// `gh issue list --state open --json …`: every open issue with its
     /// labels and what blocks it, the one call `track next` makes (#73).
     /// Every open issue, not the labelled ones alone, so the frontier's
@@ -1806,14 +1827,14 @@ fn branch_ticket(branch: &str) -> Option<u64> {
     }
 }
 
-/// What `done` names of the merges since `base` (#2358): each ticket a
-/// merge commit's subject names whose last `ticket` reading says
+/// What `done` names of the merges since `base` (#2358): the last `ticket`
+/// reading of each ticket a merge commit's subject names, where it says
 /// [`merged`] left it [`unclosed`], until a close replaces it. Where `base` is `HEAD`, as on `main`, the merges are
 /// `HEAD`'s own, so the session that made the merge reads what it
 /// stranded, and a branch laid on that tip with no commit of its own
 /// reads it the same; a branch reads the merges it carries, `main`'s
 /// being behind its base. The store is read, never the tracker.
-pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Result<Vec<String>> {
+pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Result<Vec<Reading>> {
     let head = crate::git::rev_parse(root, &["HEAD"])?;
     let range = if head != base {
         format!("{base}..HEAD")
@@ -1825,10 +1846,10 @@ pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Resul
     };
     let mut unmet = Vec::new();
     for ticket in named_by_merges(root, &range)? {
-        if let Some(reading) = store.read(INSTRUMENT, &scope(ticket))?
+        if let Some(reading) = store.last_of_readable(INSTRUMENT, &scope(ticket))?
             && reading.numbers.contains_key(UNCLOSED)
         {
-            unmet.push(format!("ticket: {}", reading.message));
+            unmet.push(reading);
         }
     }
     Ok(unmet)
@@ -1872,6 +1893,7 @@ fn unmet_here(root: &Path, manifest: &Manifest, reading: &Reading) -> Result<()>
     let registry = crate::divergence::Registry::load(root)?;
     let snapshot = Snapshot::disk(root)?;
     let verdict = crate::done::judge(&snapshot, manifest, &registry, &store, None, &[])?;
+    crate::permit::settle(&store, root)?;
     if !verdict.met() {
         bail!("done is unmet in this worktree:\n{}", verdict.render());
     }

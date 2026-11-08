@@ -1,0 +1,13 @@
+title = "dax-php"
+[extend]
+useDefault = true
+[allowlist]
+description = "test keys and test data, not secrets; one reason per path"
+# A path is allowed whole, so a real key added to one later, ext/openssl/src/key.rs the likeliest, is hidden too; that is accepted.
+paths = [
+  '''^sapi/makala/tests/tls/[ab]\.test\.key$''',  # throwaway keys for makala's TLS tests, signed by its test CA
+  '''^ext/fileinfo/data_file\.c$''',              # php-src's libmagic database as C bytes; the hits are its patterns for PEM key headers
+  '''^ext/openssl/src/key\.rs$''',                # a witness's expect fence prints PEM header lines the private-key rule reads as one key; no key was ever here
+  '''^ext/uri/src/whatwg\.rs$''',                 # witnesses whose URLs carry placeholder userinfo, user:pass@host
+  '''^ext/uri/tests/proof/updates\.php$''',       # a proof test with the same user:pass@host URLs, since moved under data/, which the export leaves out
+]

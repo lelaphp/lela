@@ -23,6 +23,7 @@ mod facts;
 mod graph;
 mod invocation;
 mod parity;
+mod review;
 mod tickets;
 pub(crate) use every::PerReading;
 
@@ -33,7 +34,7 @@ use crate::git::git;
 use crate::layout;
 use crate::manifest::{LockCeiling, Manifest, SCRIPTS, Seam};
 use crate::oracle::hosts::{EngineHost, HOSTS};
-use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, Platform, TREE_VARIABLE};
+use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, Platform, TREE_VARIABLE, Through};
 use crate::permit;
 use crate::phpt;
 use crate::reading::{self, Log, Reading, Store, joined};
@@ -48,18 +49,22 @@ pub(crate) const MAP: &str = "AGENTS.md";
 /// The local region file, gitignored, rendered only by name (§5).
 pub(crate) const LOCAL: &str = ".claude/harness.local.md";
 /// The volatile sections of the local file, in the order it renders them:
-/// §5's eight, the instrument readings first and `port-map` with them
-/// since #148, a reading that moves with the store like the others and is
-/// otherwise renderable only by name. `mutants` waits on its instrument and
-/// `permits` is rendered by name, its "this session" line kept (#3620 D1).
-/// `ci` and `tickets` come last, which ask GitHub, so they are read where
-/// the local file renders and never at a prompt (#3619).
-pub(crate) const LOCAL_SECTIONS: [&str; 8] = [
+/// §5's eight and the review coverage line, the instrument readings first
+/// and `port-map` with them since #148, a reading that moves with the store
+/// like the others and is otherwise renderable only by name. `review`,
+/// one line of the coverage `worktree land` writes, is the ninth, as Round
+/// 4's Q35 ruled; §5's sentence that counts them waits on a person's
+/// wording. `mutants` waits on its instrument and `permits` is rendered by
+/// name, its "this session" line kept (#3620 D1). `ci` and `tickets` come
+/// last, which ask GitHub, so they are read where the local file renders
+/// and never at a prompt (#3619).
+pub(crate) const LOCAL_SECTIONS: [&str; 9] = [
     "budget",
     "phpt",
     "witness",
     "port-map",
     "divergence",
+    "review",
     "git",
     "ci",
     "tickets",
@@ -132,6 +137,7 @@ fn refuse_under_tracked(section: Section, against: Against<'_>) -> Result<()> {
             | Section::Parity
             | Section::Tickets
             | Section::Ci
+            | Section::Review
     );
     if alone && matches!(against, Against::Tree) {
         bail!(
@@ -194,7 +200,10 @@ pub fn render(
         s @ (Section::Bench | Section::PortMap | Section::Crosscheck) => {
             (instrument(&readings, &every::name(s)), INSTRUMENT)
         }
-        Section::Ticket => (instrument(&readings, "ticket"), TICKET),
+        Section::Ticket => (
+            instrument(&last_of_each(against, &readings, "ticket")?, "ticket"),
+            TICKET,
+        ),
         Section::Tickets => {
             let week = tickets::render(against.checkout()?, root, format)?;
             return Ok(match format {
@@ -203,6 +212,7 @@ pub fn render(
             });
         }
         Section::Ci => return Ok(facts::ci(root)),
+        Section::Review => return review::render(manifest, against.checkout()?, root, format),
         Section::Track => (
             last_run(&against.checkout()?.history(track_work::INSTRUMENT)?),
             TRACK,
@@ -871,6 +881,20 @@ fn count_lines(counts: &Counts) -> Vec<(&'static str, [u64; 3])> {
     lines
 }
 
+/// Of `name`'s readings among `readings`, the scope files, each scope's
+/// last reading: its file's, or the index's latest where a land put a
+/// later one there ([`Store::last_of`]). What the `ticket` section
+/// renders, so a ticket whose close was landed reads as the close and not
+/// as the file's older box state (Round 1, Q12, c2.i).
+fn last_of_each(against: Against<'_>, readings: &[Reading], name: &str) -> Result<Vec<Reading>> {
+    let Against::Checkout(store) = against else {
+        return Ok(readings.to_vec());
+    };
+    (readings.iter().filter(|r| r.instrument == name))
+        .map(|r| Ok(store.last_of(name, &r.scope)?.unwrap_or_else(|| r.clone())))
+        .collect()
+}
+
 /// Every reading of one instrument, one row per scope, the numbers as
 /// `key=value` pairs; a `witness` record of the verdicts `--accept` wrote
 /// is no crate's reading and is left out ([`crate::witness::is_accepted`]). Sections whose instrument does not exist yet
@@ -1424,10 +1448,11 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// The `oracle` section: the pin as this machine has it (#36), from the
 /// pin and the process's environment alone. Seven rows: the tree's
 /// variable by name, its value and whether it is set; the promise's
-/// likewise; the pin's path and whether it is a directory; its tag and
-/// commit as `[source]` states them, which the corpus section clones at
-/// (#66); where [`crate::oracle::Source::tree`] found the tree, the
-/// variable's or the pin's, or the absence it named; and the pinned php,
+/// likewise; the pin's path and whether it is a directory, or that the
+/// pin states none (#4260); its tag and commit as `[source]` states
+/// them, which the corpus section clones at (#66); where
+/// [`crate::oracle::Source::tree`] found the tree, the variable's or the
+/// pin's, or the absence it named; and the pinned php,
 /// its version, keg path and md5. An eighth, `closure`, names the kegs
 /// `[closure]` records php loading, each at its version, where the pin
 /// records them (#2657), with the record's digest, and a `variant` row
@@ -1448,10 +1473,10 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let named = source.named();
     let promise = std::env::var_os(PROMISE_VARIABLE).map(|v| v.to_string_lossy().into_owned());
     let pinned = source.path();
-    let found = source.tree();
+    let found = source.found();
     let at = match &found {
-        Ok(tree) if named == Some(tree.as_path()) => Some("variable"),
-        Ok(_) => Some("pin"),
+        Ok((Through::Variable, _)) => Some("variable"),
+        Ok((Through::Pin, _)) => Some("pin"),
         Err(_) => None,
     };
     let set = |is: bool| if is { "set" } else { "unset" };
@@ -1469,13 +1494,13 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "set": promise.is_some(),
             },
             "pin": {
-                "path": pinned.display().to_string(),
-                "directory": pinned.is_dir(),
+                "path": display(pinned),
+                "directory": pinned.is_some_and(Path::is_dir),
                 "tag": source.tag,
                 "commit": source.commit,
             },
             "found": {
-                "path": found.as_ref().ok().map(|p| p.display().to_string()),
+                "path": found.as_ref().ok().map(|(_, p)| p.display().to_string()),
                 "at": at,
                 "error": found.as_ref().err().map(|e| format!("{e:#}")),
             },
@@ -1506,22 +1531,16 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 promised,
                 set(promise.is_some()),
             );
-            let dir = if pinned.is_dir() {
-                "a directory"
-            } else {
-                "not a directory"
+            let dir = match pinned {
+                Some(pinned) if pinned.is_dir() => "a directory",
+                Some(_) => "not a directory",
+                None => "not stated",
             };
-            row(o, "pin", "", &pinned.display().to_string(), dir);
+            row(o, "pin", "", &display(pinned).unwrap_or_default(), dir);
             row(o, "tag", "", &source.tag, "the pin's");
             row(o, "commit", "", &source.commit, "the pin's");
             let (path, state) = match &found {
-                Ok(tree) => (
-                    tree.display().to_string(),
-                    match at {
-                        Some("variable") => format!("named by {TREE_VARIABLE}"),
-                        _ => "the pin's path".to_owned(),
-                    },
-                ),
+                Ok((place, tree)) => (tree.display().to_string(), place.to_string()),
                 Err(e) => (String::new(), format!("absent: {e:#}")),
             };
             row(o, "found", "", &path, &state);
@@ -1850,6 +1869,38 @@ mod tests {
             .find(|l| l.starts_with("<!-- computed ") && l.contains(&format!(" name={name}")))
     }
 
+    /// The `ticket` section renders a ticket's last reading: a close
+    /// another checkout took after the file's failing read, landed in the
+    /// index and not the file, is the row (c2.i).
+    #[test]
+    fn the_ticket_section_renders_a_tickets_last_reading_a_landed_one_included() {
+        use crate::reading::{Reading, Status, Store};
+        use crate::scratch::Tree;
+        let ticket = |status: Status, at: &str| {
+            let mut reading = Reading::keyed("ticket", "3785", format!("{:040x}", 1)).unwrap();
+            reading.status = status;
+            reading.at = at.parse().unwrap();
+            reading
+        };
+        let dir = Tree::new("status-ticket-last").unwrap();
+        let store = Store::at(dir.path());
+        store
+            .record(&[ticket(Status::Fail, "2026-11-01T10:00:00Z")])
+            .unwrap();
+        let other = Tree::new("status-ticket-last-other").unwrap();
+        let theirs = Store::at(other.path());
+        let closed = ticket(Status::Pass, "2026-11-01T11:00:00Z");
+        theirs.record(std::slice::from_ref(&closed)).unwrap();
+        store.land(&theirs).unwrap();
+        let files = store.readings().unwrap().readings;
+        assert_eq!(files[0].status, Status::Fail, "the file is as it was");
+        let against = super::Against::Checkout(&store);
+        assert_eq!(
+            super::last_of_each(against, &files, "ticket").unwrap(),
+            [closed]
+        );
+    }
+
     /// The sections `render` reads by their own name read the instrument
     /// of that name, so the two spellings are held to each other here.
     #[test]
@@ -1868,9 +1919,13 @@ mod tests {
     }
 
     #[test]
-    fn the_local_template_is_the_eight_volatile_sections() {
+    fn the_local_template_is_the_nine_volatile_sections() {
         let template = local_template();
-        assert_eq!(LOCAL_SECTIONS.len(), 8, "harness-design.md §5 says eight");
+        assert_eq!(
+            LOCAL_SECTIONS.len(),
+            9,
+            "harness-design.md §5's eight and the review line Round 4's Q35 added"
+        );
         for name in LOCAL_SECTIONS {
             let line = opener(&template, name).unwrap();
             assert!(line.contains(" volatile "), "{line}");

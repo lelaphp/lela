@@ -147,6 +147,15 @@ pub(crate) enum Command {
         /// event it came in on.
         #[arg(long, value_enum, conflicts_with = "hook")]
         caller: Option<crate::done::Caller>,
+        /// The list as text, or with `json` as one object: each unmet
+        /// condition with its kind, instrument, scope, message and the
+        /// command that clears it (#3494).
+        #[arg(long, value_enum, default_value = "text", conflicts_with = "hook")]
+        format: crate::done::Format,
+        /// Judge and print, and write nothing: no reading, and no kept
+        /// change settled; the Stop's run stays the reading of record.
+        #[arg(long, conflicts_with = "hook")]
+        peek: bool,
     },
     /// Say the branch, the commit it was taken off main at, the store
     /// and the branch's ticket; as text or as one object. Writes no
@@ -192,9 +201,9 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
-    /// A ticket, one GitHub issue: `read <n>` holds it to its acceptance
-    /// criteria, `close <n>` closes it naming what it opened, `parent <n>`
-    /// says whether a chart sheet is at the cap.
+    /// A ticket, one GitHub issue: `read`, `ready` and `close` hold it to
+    /// its boxes; `view` and `brief` are what a builder reads; `parent`
+    /// measures a chart sheet.
     ///
     /// `read <n>` writes the reading of the boxes under the ticket's
     /// `## Acceptance criteria` heading, and `parent <n>` the reading of
@@ -228,6 +237,21 @@ pub(crate) enum Command {
     Usage {
         #[command(subcommand)]
         command: UsageCommand,
+    },
+    /// What a review found and whether each merge into `main` was
+    /// reviewed: `record`, `resolve`, `cover` and `class`; it refuses
+    /// nothing
+    ///
+    /// `record` writes a reviewer's findings file as one reading of the
+    /// range it read and one per finding; `resolve` applies a vote, a
+    /// reproduction, a fix or a ticket to one finding; `cover` writes the
+    /// coverage of each merge not yet judged, which `worktree land` runs
+    /// after it moves `main`; `class` prints a branch's class and writes
+    /// no reading. Every reading lands in the main checkout's store, and
+    /// none is a hold on anything (Round 2, Q33 (a)).
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
     },
     /// Render the named files' regions with `computed run` and say what it
     /// did, one line per file, for pre-commit to re-stage. Writes no reading.
@@ -351,6 +375,16 @@ pub(crate) enum Command {
     /// held through the registry under `trace:dump/<kernel>`; the engine's
     /// side is `php` built with the tier's feature.
     TraceDump(crate::trace_dump::Ask),
+    /// Hold the engine to the oracle on `data/hostile.toml`'s programs, whose
+    /// error handlers disturb an opline mid-step; one reading per crate that
+    /// owes it.
+    ///
+    /// A fault fails the run, under the interpreter or under
+    /// `[regime.jit-force]`, as does a program that met php at the merge
+    /// base and differs now; any other difference is counted. The oracle's
+    /// side is kept per pin, and the interpreter's verdicts at
+    /// `target/harness/hostile-runs/<engine tree>.json` (#4265).
+    Hostile,
     /// Hold the release `serve_frame` to LLVM's fold of a request field's
     /// address into each access; one reading, at `sapi/cli`.
     ///
@@ -815,7 +849,9 @@ pub(crate) enum TicketCommand {
     /// ticket (#2358), which the merge into `main` closes the ticket by
     /// (#2270, #2311); refuse while a box is unticked,
     /// while a successor is closed or missing, and without `--opens` or
-    /// `--opens-nothing`. Nothing at the tracker changes.
+    /// `--opens-nothing`. Nothing at the tracker changes. Prints the
+    /// comments written on the ticket since the branch's first commit, as
+    /// `view` prints them, whether or not the record is written.
     Ready {
         /// The issue number; without it, the branch's recorded ticket.
         number: Option<u64>,
@@ -874,6 +910,39 @@ pub(crate) enum TicketCommand {
         #[arg(long = "withdrawn", value_name = "REASON")]
         withdrawn: Option<String>,
     },
+    /// Render the brief a spawned builder starts with, from the template
+    /// `.claude/skills/build/brief.md`, the ticket and the branch that
+    /// records it; refuse a build apart from the tree, and a ticket no
+    /// branch records. Writes no reading.
+    Brief {
+        /// The issue number.
+        number: u64,
+        /// The scratchpad the builder's files go under, in `t<n>/`; its
+        /// line is left out without one.
+        #[arg(long, value_name = "DIR")]
+        scratch: Option<PathBuf>,
+        /// What the builder owns, a path or a slice of code; once per
+        /// thing owned. Its line is left out without one, for the
+        /// dispatcher's own text to say.
+        #[arg(long, value_name = "WHAT")]
+        owns: Vec<String>,
+        /// What the ticket does not say: its track, the neighbouring slots
+        /// and what they own, the counts measured at the cut.
+        #[arg(long, value_name = "TEXT")]
+        spec: Option<String>,
+    },
+    /// Print the ticket's body and the comments a builder may act on, a
+    /// maintainer's or CI's, and count what it withheld: outsiders'
+    /// comments, hidden ones, CI's "Still red" lines and, with `--since`,
+    /// those written before it. Writes no reading.
+    View {
+        /// The issue number; without it, the branch's recorded ticket.
+        number: Option<u64>,
+        /// Leave out the comments written before this time,
+        /// `2026-11-03T13:15:14Z` or a date.
+        #[arg(long, value_name = "TIME")]
+        since: Option<String>,
+    },
     /// Say how many sub-issues one chart sheet holds and whether the
     /// tracker will take another, before a ticket is filed against it;
     /// exit 1 at GitHub's cap of 100 and for a sheet that is closed.
@@ -904,6 +973,38 @@ pub(crate) enum UsageCommand {
         /// The turn's number in the session, counted by the plugin.
         #[arg(long, value_name = "N")]
         turn: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ReviewCommand {
+    /// Write a reviewer's findings file, JSON, as one reading of the range
+    /// it read and one per finding, each scoped `<ticket>/<head7>-<hash>`.
+    Record {
+        /// The findings file.
+        file: PathBuf,
+    },
+    /// Apply one act to the finding recorded under a scope and write it
+    /// again there; a refute by the branch's builder is refused.
+    Resolve {
+        /// The finding's scope, `<ticket>/<head7>-<hash>`.
+        scope: String,
+        #[command(subcommand)]
+        act: crate::review::Act,
+    },
+    /// Write the coverage reading of each merge into `main` of the last
+    /// seven days that has none, or of the merge named.
+    Cover {
+        /// One merge to judge, judged again where it was.
+        #[arg(long, value_name = "REV")]
+        merge: Option<String>,
+    },
+    /// Print the class of a branch's diff since its merge base with
+    /// `main`; writes no reading.
+    Class {
+        /// The branch's head.
+        #[arg(long, value_name = "REV", default_value = "HEAD")]
+        head: String,
     },
 }
 
@@ -947,6 +1048,11 @@ pub enum Section {
     /// one line (#1157); and the tracker's week beside it, tickets created
     /// against closed and how many are open (#3619).
     Tickets,
+    /// The review coverage of the last 7 days in one line: the class A
+    /// merges covered, partial and unreviewed, and the class B merges
+    /// beside them, from the readings `worktree land` writes of each merge
+    /// in the main worktree's store and this checkout's (Round 4, Q35).
+    Review,
     /// Whether CI runs and passes on `main`: the last run that executed a
     /// job and the last that passed, from GitHub, unknown where it cannot
     /// be asked (#3619).

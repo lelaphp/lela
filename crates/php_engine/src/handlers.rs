@@ -70,7 +70,7 @@ use crate::api::raising::{
     Thrown, error, non_static_method_call, none_pending, type_error, undefined_method,
 };
 use crate::api::request::ropes::RopeAt;
-use crate::api::request::{CodeFrom, ConstantRead, Opened, Raised, Request};
+use crate::api::request::{CodeFrom, ConstantRead, NamedRow, Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
     ClosureInfo, Left, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
@@ -5141,6 +5141,58 @@ fn return_mask_holds(slots: &[Zval], code: &OpArray, op: &Opline) -> bool {
 /// (`SAVE_OPLINE()`): `zend_check_type_slow` over the declared type,
 /// the coercion beside it and the `TypeError`, out of line so the hit
 /// saves no register for it and writes no position.
+///
+/// A by-reference return of a reference a typed property holds is never
+/// coerced: `zend_check_type_slow` answers false where
+/// `ZEND_REF_HAS_TYPE_SOURCES(ref)` (`Z/Zend/zend_execute.c:1197`), so the
+/// `TypeError` is raised and the property keeps what it held. A
+/// reference no property types is coerced through, as before:
+///
+/// ```php
+/// class C { public string $p = "1.5"; public int $q = 7; }
+/// function &r2(): int { global $c; $r = &$c->p; return $r; }
+/// function &r4(): string { global $c; $r = &$c->q; return $r; }
+/// function &r5(): int { global $c; $r = &$c->q; return $r; }
+/// function &r6(): int { static $x = "15"; return $x; }
+/// $c = new C;
+/// try { var_dump(r2()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->p);
+/// try { var_dump(r4()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->q, r5(), r6(), r6());
+/// ```
+/// ```expect
+/// r2(): Return value must be of type int, string returned
+/// string(3) "1.5"
+/// r4(): Return value must be of type string, int returned
+/// int(7)
+/// int(7)
+/// int(15)
+/// int(15)
+/// ```
+///
+/// The same where a trace serves the calls:
+///
+/// ```php
+/// class C { public string $p = "1.5"; public int $q = 7; }
+/// function &r2(): int { global $c; $r = &$c->p; return $r; }
+/// function &r4(): string { global $c; $r = &$c->q; return $r; }
+/// $c = new C;
+/// for ($i = 0; $i < 3; $i++) {
+///     try { var_dump(r2()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+///     try { var_dump(r4()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// var_dump($c->p, $c->q);
+/// ```
+/// ```expect regime=jit-force process
+/// r2(): Return value must be of type int, string returned
+/// r4(): Return value must be of type string, int returned
+/// r2(): Return value must be of type int, string returned
+/// r4(): Return value must be of type string, int returned
+/// r2(): Return value must be of type int, string returned
+/// r4(): Return value must be of type string, int returned
+/// string(3) "1.5"
+/// int(7)
+/// ```
 #[cold]
 #[inline(never)]
 fn return_mask_missed(
@@ -5186,6 +5238,10 @@ fn return_mask_missed(
     let held = crate::api::coerce::holding(req, &returned, declared_again(req, frame)?, scopes);
     if held.resolve(req, &returned, scopes) {
         return Ok(advance(req, frame));
+    }
+    if by_ref && returns_typed_reference(req, frame, op, indirect) {
+        let thrown = return_type_error(req, frame, Some(&returned))?;
+        return threw(req, frame, &thrown);
     }
     let strict = req.frame_strict_types(frame);
     let mask = code.return_mask;
@@ -5239,6 +5295,33 @@ fn return_mask_missed(
     }
     req.replace_slot(frame, slot, coerced);
     Ok(advance(req, frame))
+}
+
+/// Whether a by-reference return's operand holds a reference with type
+/// sources (`ref && ZEND_REF_HAS_TYPE_SOURCES(ref)`, `zend_check_type_slow`):
+/// the reference `VERIFY_RETURN_TYPE` finds where its `CV` or its `VAR`
+/// stands, the place a `VAR` fetched read through (`Z_INDIRECT_P`), as
+/// php's `retval_ref` is. A `TMP` and a `CONST` are dereferenced by no
+/// one, so they hold none.
+fn returns_typed_reference(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    indirect: Option<php_heap::ZvalRef>,
+) -> bool {
+    if !matches!(op.op1_type, OperandKind::Cv | OperandKind::Var) {
+        return false;
+    }
+    let held = match indirect {
+        Some(place) => place.read(),
+        None => match req.slot_ptr(frame, op.op1) {
+            Some(at) => at.read(),
+            None => return false,
+        },
+    };
+    Value::of_slot(held)
+        .as_php_ref()
+        .is_some_and(|cell| cell.heap().sources() != 0)
 }
 
 /// `EX(func)->common.arg_info - 1` of the frame's function where it
@@ -7776,9 +7859,10 @@ fn fetch_named(
                 if Value::of_slot(place.read()).tag() == TypeTag::Undef {
                     place.write(php_heap::Zval::null());
                 }
-                // A place of a table no owner is noted for, so no
-                // walk an earlier fetch noted answers for it.
-                req.note_walk(None);
+                // A row of a table no owner keeps, noted so a step past
+                // PHP code finds it again where it stands, and no walk an
+                // earlier fetch noted answers for it.
+                req.note_named(place, table);
                 if let Some(var) = req.slot_ptr(frame, out) {
                     var.write(php_heap::Zval::indirect(place));
                 }
@@ -11442,6 +11526,29 @@ fn write_place(
     }
 }
 
+/// The row a fetch by name laid `op1`'s place down in, taken by a step
+/// over a `VAR` before it reaches PHP code ([`Request::hold_named`]):
+/// none for any other place.
+fn named_operand(req: &mut Request, frame: FrameRef, op: &Opline) -> Option<NamedRow> {
+    if op.op1_type != OperandKind::Var {
+        return None;
+    }
+    let place = write_place(req, frame, op.op1_type, op.op1)?;
+    req.hold_named(place)
+}
+
+/// Where a step writes `place` past the PHP code it reached: the place
+/// itself, or where a fetch by name laid it down as a row, the row as
+/// [`Request::named_place`] finds it, none where the table moved or
+/// emptied it.
+fn place_past(
+    req: &Request,
+    place: php_heap::ZvalRef,
+    named: Option<NamedRow>,
+) -> Option<php_heap::ZvalRef> {
+    named.map_or(Some(place), |row| req.named_place(row))
+}
+
 /// `ZEND_FETCH_DIM_REF`, `ZEND_FETCH_DIM_DIM` and `ZEND_FETCH_DIM_OBJ`
 /// (`Z/Zend/zend_compile.h:1095`), the `extended_value` values the
 /// compiler puts on a `FETCH_DIM_W`: what `zend_wrong_string_offset_error`
@@ -14269,6 +14376,66 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// ran
 /// 1
 /// ```
+///
+/// What the native throws stands pending while its operands are freed,
+/// as php's `EG(exception)` stands over its `FREE_OP*`s, so a
+/// destructor the frees serve, an array's element's or an operand's
+/// own, throws with it as its previous
+/// (`zend_objects_destroy_object`'s `old_exception`):
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class T { function __toString(): string { throw new Exception("tostring"); } }
+/// class D { function __toString(): string { return "d"; } function __destruct() { echo "D gone\n"; throw new Exception("dtor"); } }
+/// function f() {
+///     try { implode(',', [new T, new D]); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+///     try { str_contains(new T, new D); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f(); }
+/// echo "end\n";
+/// ```
+/// ```expect
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// end
+/// ```
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class T { function __toString(): string { throw new Exception("tostring"); } }
+/// class D { function __toString(): string { return "d"; } function __destruct() { echo "D gone\n"; throw new Exception("dtor"); } }
+/// function f() {
+///     try { implode(',', [new T, new D]); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+///     try { str_contains(new T, new D); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f(); }
+/// echo "end\n";
+/// ```
+/// ```expect regime=jit-force process
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// end
+/// ```
 #[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
 fn frameless_call<const N: usize>(
     req: &mut Request,
@@ -14300,20 +14467,24 @@ fn frameless_call<const N: usize>(
         };
     // `if (EG(exception))` past the fetch: a handler threw at an undefined
     // operand's warning, so the native is not served.
+    // The throwable left pending before the operands are freed, as php's
+    // `EG(exception)` stands over its `FREE_OP*`s.
     if let Err(thrown) = none_pending(req) {
+        req.leave_pending(&thrown);
         free_operands(req, frame, (&operands, owned), &arguments);
-        checked_after_throw(req, &thrown)?;
+        checked_while_pending(req)?;
         return Ok(Stepped::Threw(frame).into());
     }
     let served = frameless_native(req, op.extended_value, &operands);
+    if let Err(thrown) = &served {
+        req.leave_pending(thrown);
+    }
     free_operands(req, frame, (&operands, owned), &arguments);
-    let value = match served {
-        Ok(value) => value.hand_on(),
-        Err(thrown) => {
-            checked_after_throw(req, &thrown)?;
-            return Ok(Stepped::Threw(frame).into());
-        }
+    let Ok(value) = served else {
+        checked_while_pending(req)?;
+        return Ok(Stepped::Threw(frame).into());
     };
+    let value = value.hand_on();
     // The interrupt read once, as php's handler reads `EG(vm_interrupt)`
     // once after the native, and its check out of line: made with a
     // handler's throwable pending before the value is written, as
@@ -14562,6 +14733,51 @@ pub(super) fn frameless_native(
 /// #1 %SCRATCH%/witness.php(10): str_replace(7, Object(T), 'x')
 /// #2 %SCRATCH%/witness.php(13): f(1)
 /// ```
+///
+/// The owner taken of a variable is given up before the first operand
+/// is freed, as php's handler holds none: a temporary's destructor that
+/// writes the variable, through a reference or through `$GLOBALS`, frees
+/// what it held inside that destructor, in a trace as in the handler:
+///
+/// ```php
+/// class B { function __construct(public $n) {} function __destruct() { if ($this->n >= 10) echo "B{$this->n} gone\n"; } function __toString(): string { return "ab"; } }
+/// class T { function __construct(public $w) {} function __destruct() { global $g; if ($this->w) { echo "T start\n"; if ($this->w === 'y') unset($GLOBALS['y']); else $g = "zz"; echo "T end\n"; } } function __toString(): string { return "ab"; } }
+/// function f(&$x, $n) { global $g; for ($i = 0; $i < $n; $i++) { $g = new B($i); str_contains(new T($i == $n - 1 ? 'g' : ''), $x); } }
+/// $g = new B(0);
+/// f($g, 11);
+/// $y = new B(20);
+/// str_contains(new T('y'), $y);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// T start
+/// B10 gone
+/// T end
+/// T start
+/// B20 gone
+/// T end
+/// end
+/// ```
+///
+/// ```php
+/// class B { function __construct(public $n) {} function __destruct() { if ($this->n >= 10) echo "B{$this->n} gone\n"; } function __toString(): string { return "ab"; } }
+/// class T { function __construct(public $w) {} function __destruct() { global $g; if ($this->w) { echo "T start\n"; if ($this->w === 'y') unset($GLOBALS['y']); else $g = "zz"; echo "T end\n"; } } function __toString(): string { return "ab"; } }
+/// function f(&$x, $n) { global $g; for ($i = 0; $i < $n; $i++) { $g = new B($i); str_contains(new T($i == $n - 1 ? 'g' : ''), $x); } }
+/// $g = new B(0);
+/// f($g, 11);
+/// $y = new B(20);
+/// str_contains(new T('y'), $y);
+/// echo "end\n";
+/// ```
+/// ```expect regime=jit-force process
+/// T start
+/// B10 gone
+/// T end
+/// T start
+/// B20 gone
+/// T end
+/// end
+/// ```
 #[inline(always)] // the frameless handler's hot path
 fn free_operands<const N: usize>(
     req: &mut Request,
@@ -14569,10 +14785,14 @@ fn free_operands<const N: usize>(
     (operands, owned): (&[Value; N], u8),
     slots: &[(OperandKind, u32); N],
 ) {
-    for (at, (operand, &(kind, field))) in operands.iter().zip(slots).enumerate() {
+    for (at, operand) in operands.iter().enumerate() {
         if owned >> at & 1 != 0 {
             req.release_zval_nogc(operand.to_zval());
-        } else if matches!(kind, OperandKind::Tmp | OperandKind::Var)
+        }
+    }
+    for (at, (operand, &(kind, field))) in operands.iter().zip(slots).enumerate() {
+        if owned >> at & 1 == 0
+            && matches!(kind, OperandKind::Tmp | OperandKind::Var)
             && let Some(object) = operand.to_zval().as_obj()
         {
             req.destruct_in_place(object);
@@ -14709,8 +14929,32 @@ pub(crate) fn assign<T: Tier, A: Operand + Default, B: Operand + Default, R: Ret
 /// `zend_assign_to_variable` takes it, into the CV or the place a fetch
 /// by name left, what stood there given up last. A call of its own, so
 /// that the inline path before it keeps to the registers it needs.
+///
+/// A variable by name is a row of the symbol table, taken before the
+/// warning an undefined value raises. Where the row no longer stands
+/// past the warning, its table grown or the row emptied by an `unset`,
+/// the value lands nowhere and the temporary takes it
+/// ([`Request::named_place`]).
+///
+/// ```php
+/// set_error_handler(function () { static $k = 0; for ($i = 0; $i < 3000; $i++) $GLOBALS["g" . $k++] = 1; return true; });
+/// $n = "fr" . "esh"; $$n = str_repeat("x", 40); $$n = $undef; var_dump($GLOBALS[$n]);
+/// $n = "mo" . "re"; $$n = str_repeat("x", 40); $r = $$n = $undef; var_dump($r, $GLOBALS[$n]);
+/// set_error_handler(function () { unset($GLOBALS[$GLOBALS["n"]]); return true; });
+/// $n = "go" . "ne"; $$n = str_repeat("x", 40); $$n = $undef; var_dump($GLOBALS[$n] ?? "unset");
+/// ```
+/// ```expect
+/// string(40) "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+/// NULL
+/// string(40) "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+/// string(5) "unset"
+/// ```
 #[inline(never)]
 fn assigned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    // A row a fetch by name laid down, past the warning an undefined
+    // value raises; any other value reaches no PHP code before the write.
+    let warns = op.op2_type == OperandKind::Cv && req.slot(frame, op.op2).tag() == TypeTag::Undef;
+    let row = warns.then(|| named_operand(req, frame, op)).flatten();
     let value = exec::take_operand(req, frame, code, op.op2_type, op.op2);
     // `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`: a CV, or the place a fetch
     // by name left in its `VAR` as an `IS_INDIRECT`.
@@ -14718,6 +14962,11 @@ fn assigned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> 
         return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN over a variable the frame does not have",
         ));
+    };
+    let Some(at) = place_past(req, at, row) else {
+        write_out(req, frame, op, &value);
+        req.release(value);
+        return Ok(advance(req, frame));
     };
     // php copies into `result` what the write landed, which a typed
     // cell may have converted, so the copy is after the write and not
@@ -14998,6 +15247,34 @@ fn appended(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> 
 /// `ASSIGN_OP` past its inline path: both operands read as values, the
 /// kernel over them, and what it came to written to the place
 /// ([`assign_to_place`]). A call of its own, as [`assigned_dim_op`] is.
+///
+/// A variable by name is a row of the symbol table, taken before the
+/// value's warning or the operator's conversion can reach PHP code.
+/// Where the row no longer stands past it, its table grown or the row
+/// emptied by an `unset`, the step lands nowhere, over `null` where the
+/// row went before the variable was read, and the temporary takes what
+/// it came to ([`Request::named_place`]).
+///
+/// ```php
+/// set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS[$GLOBALS["n"]]); return true; });
+/// class S { function __toString(): string { unset($GLOBALS[$GLOBALS["n"]]); return "s"; } }
+/// $n = "go" . "ne"; $$n = str_repeat("x", 40); $$n .= []; var_dump($GLOBALS[$n] ?? "unset");
+/// $n = "le" . "ft"; $$n = str_repeat("x", 40); $r = ($$n .= new S); var_dump(strlen($r), $GLOBALS[$n] ?? "unset");
+/// $n = "th" . "en"; $$n = str_repeat("x", 40); $r = ($$n .= $undef); var_dump($r, $GLOBALS[$n] ?? "unset");
+/// set_error_handler(function () { static $k = 0; for ($i = 0; $i < 3000; $i++) $GLOBALS["g" . $k++] = 1; return true; });
+/// $n = "fr" . "esh"; $$n = "5 apples"; $r = ($$n += 1); var_dump($r, $GLOBALS[$n]);
+/// ```
+/// ```expect
+/// [Array to string conversion]
+/// string(5) "unset"
+/// int(41)
+/// string(5) "unset"
+/// [Undefined variable $undef]
+/// string(0) ""
+/// string(5) "unset"
+/// int(6)
+/// string(8) "5 apples"
+/// ```
 #[inline(never)]
 fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     if let Some(edge) = appended(req, frame, code, op) {
@@ -15009,9 +15286,16 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
             op.extended_value
         )));
     };
+    // A row a fetch by name laid down, which a handler the value's
+    // warning or the operator's conversion reaches can move or empty.
+    let row = named_operand(req, frame, op);
     let value = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let place = |req: &mut Request| {
+        write_place(req, frame, op.op1_type, op.op1).and_then(|at| place_past(req, at, row))
+    };
     // A CV, or under a `VAR` the place `FETCH_RW` by name left there,
-    // which it has already made `null` where nothing was written.
+    // which it has already made `null` where nothing was written, and
+    // which the step is over `null` past a handler that took it away.
     let held = if op.op1_type == OperandKind::Cv {
         let held = exec::operand(req, frame, code, op.op1_type, op.op1);
         // What the read warned of is `null`, so only then is the slot
@@ -15021,13 +15305,10 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
         }
         held
     } else {
-        write_place(req, frame, op.op1_type, op.op1)
-            .map_or_else(Value::null, |place| Value::of_slot(place.read()))
+        place(req).map_or_else(Value::null, |place| Value::of_slot(place.read()))
     };
     let computed = if grows_in_place(req, op.extended_value, &held) {
-        concat_over(req, &held, &value, |req| {
-            write_place(req, frame, op.op1_type, op.op1)
-        })
+        concat_over(req, &held, &value, place)
     } else {
         kernel(req, &held, &value)
     };
@@ -15035,7 +15316,7 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     let stepped = match computed {
         Ok(stepped) => stepped,
         Err(thrown) => {
-            let thrown = match write_place(req, frame, op.op1_type, op.op1) {
+            let thrown = match place(req) {
                 Some(at) => {
                     let strict = req.frame_strict_types(frame);
                     land_failed_step(req, at, (None, strict), thrown)
@@ -15049,6 +15330,13 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
         return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_OP over a variable the frame does not have",
         ));
+    };
+    // A row that no longer stands takes nothing, and the temporary
+    // takes what the step came to.
+    let Some(at) = place_past(req, at, row) else {
+        write_out(req, frame, op, &stepped);
+        req.release(stepped);
+        return Ok(advance(req, frame));
     };
     // php's `ZEND_REF_HAS_TYPE_SOURCES` arm,
     // `zend_binary_assign_op_typed_ref`: the operation is over what the
@@ -15294,6 +15582,47 @@ fn bind_ref(
 /// [Only variables should be assigned by reference]
 /// int(1)
 /// ```
+///
+/// A variable by name, `$$n = &f()`, is a row of the symbol table, taken
+/// before the notice. Where the row no longer stands past it, its table
+/// grown or the row emptied by an `unset`, the value lands nowhere and
+/// the temporary takes it ([`Request::named_place`]).
+///
+/// ```php
+/// function f() { return str_repeat("v", 90); }
+/// set_error_handler(function ($n, $m) { echo "[$m]\n"; for ($i = 0; $i < 3000; $i++) $GLOBALS["g$i"] = $i; return true; });
+/// $n = "fr" . "esh"; $$n = &f(); var_dump(strlen($GLOBALS[$n] ?? ""), count($GLOBALS) > 100);
+/// ```
+/// ```expect
+/// [Only variables should be assigned by reference]
+/// int(0)
+/// bool(true)
+/// ```
+///
+/// ```php
+/// function f() { return str_repeat("v", 90); }
+/// set_error_handler(function ($n, $m) { echo "[$m]\n"; unset($GLOBALS[$GLOBALS["n"]]); return true; });
+/// $n = "go" . "ne"; $$n = 1; $$n = &f(); var_dump(strlen($GLOBALS[$n] ?? ""));
+/// ```
+/// ```expect
+/// [Only variables should be assigned by reference]
+/// int(0)
+/// ```
+///
+/// The temporary takes the value all the same, and a name the frame
+/// compiled a CV for is that CV, which the table's growth does not move:
+///
+/// ```php
+/// function f() { return str_repeat("v", 9); }
+/// set_error_handler(function () { static $k = 0; for ($i = 0; $i < 3000; $i++) $GLOBALS["g" . $k++] = 1; return true; });
+/// $n = "fr" . "esh"; $$n = 1; $r = $$n = &f(); var_dump($r, $GLOBALS["fresh"]);
+/// $x = 1; $n = "x"; $$n = &f(); var_dump($x);
+/// ```
+/// ```expect
+/// string(9) "vvvvvvvvv"
+/// int(1)
+/// string(9) "vvvvvvvvv"
+/// ```
 #[cold]
 fn assign_returned(
     req: &mut Request,
@@ -15302,13 +15631,20 @@ fn assign_returned(
     target: php_heap::ZvalRef,
     held: Value,
 ) -> Result<(), Thrown> {
-    let table = (op.op1_type == OperandKind::Var)
-        .then(|| req.hold_walk(target))
-        .flatten();
+    let (table, named) = if op.op1_type == OperandKind::Var {
+        (req.hold_walk(target), req.hold_named(target))
+    } else {
+        (None, None)
+    };
     crate::api::raising::notice(req, "Only variables should be assigned by reference");
     let landed = none_pending(req).and_then(|()| {
         let value = held.undef_as_null();
         req.addref(&value);
+        let Some(target) = place_past(req, target, named) else {
+            write_out(req, frame, op, &value);
+            req.release(value);
+            return Ok(());
+        };
         let pair = assign_to_place(req, frame, target, (value, OperandKind::Tmp))?;
         landed_out(req, frame, op, pair);
         Ok(())
@@ -19582,7 +19918,11 @@ pub(crate) fn assign_obj_op<T: Tier>(
     let name = member.name(req, frame, code, op);
     let read = undefined_cv(req, frame, data.op1_type, data.op1);
     let in_table = (read && op.op1_type == OperandKind::Var)
-        .then(|| entry_past_warning(req, frame, code, op, data))
+        .then(|| {
+            entry_past_warning(req, frame, code, op, |req| {
+                exec::operand(req, frame, code, data.op1_type, data.op1);
+            })
+        })
         .transpose()?;
     if read && in_table.is_none() {
         exec::operand(req, frame, code, data.op1_type, data.op1);
@@ -19643,9 +19983,10 @@ pub(crate) fn assign_obj_op<T: Tier>(
     Ok(advance_over_data(req, frame))
 }
 
-/// An undefined `OP_DATA` warned of over the entry a `VAR` points at, and
-/// what stands there after it, as `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF` reads
-/// it past `GET_OP_DATA_ZVAL_PTR`: a handler's write is seen. Where the
+/// What `warn` raises, an undefined `OP_DATA`'s warning or a name's, over
+/// the entry a `VAR` points at, and what stands there after it, as
+/// `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF` is read past `GET_OP_DATA_ZVAL_PTR`
+/// and `GET_OP2_ZVAL_PTR`: a handler's write is seen. Where the
 /// handler freed the entry or moved it, what the entry held is held.
 /// The owner is the caller's, past the step, with the collector's count
 /// from where it was taken.
@@ -19758,10 +20099,11 @@ fn entry_past_warning(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    data: Opline,
+    warn: impl FnOnce(&mut Request),
 ) -> Result<(Owner<Value>, u32), Fatal> {
+    let opcode = op.opcode.name();
     let runs = req.heap_mut().gc_runs();
-    let held = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
+    let held = exec::container(req, frame, op.op1_type, op.op1, opcode)?;
     let held = Owner::take(req, held);
     let place = req
         .slot_ptr(frame, op.op1)
@@ -19775,7 +20117,7 @@ fn entry_past_warning(
     };
     let table = table.filter(|table| place.is_some_and(|place| table.holds_row(place)));
     let rows = table.map(|t| (req.heap_mut().iterator_add(t, 0), t, t.rows_at()));
-    exec::operand(req, frame, code, data.op1_type, data.op1);
+    warn(req);
     let moved = rows.is_some_and(|(at, table, rows)| {
         !req.heap_mut().iterator_on(at, table) || table.rows_at() != rows
     });
@@ -19784,7 +20126,7 @@ fn entry_past_warning(
         req.heap_mut().iterator_del(at);
     }
     let now = if stands {
-        let now = exec::container(req, frame, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?;
+        let now = exec::container(req, frame, op.op1_type, op.op1, opcode)?;
         let now = Owner::take(req, now);
         let taken = req.heap_mut().gc_runs();
         hold_given_up(req, held, runs);
@@ -20945,6 +21287,106 @@ fn incdec_obj(
 /// its own, as [`fetched_obj`] is: laid in the handler beside the inline
 /// paths at each kind, its registers were saved before they ran, four
 /// instructions on a step.
+///
+/// The name is read, an undefined CV's warning raised, before the
+/// container is looked at (`Z/Zend/zend_vm_def.h:1301-1305`), so a
+/// handler that replaced what the container names is what the step
+/// meets; over a `VAR` the entry it points at is read past the warning
+/// ([`entry_past_warning`]):
+///
+/// ```php
+/// class C { public $i = 1; public $q; }
+/// function t($f) { try { $f(); echo "stepped\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+/// set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = null; return true; });
+/// t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; $GLOBALS['a'][0]->q->$n++; });
+/// set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = 5; return true; });
+/// t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; ++$GLOBALS['a'][0]->q->$n; });
+/// set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['o'] = null; return true; });
+/// t(function () { global $o; $o = new C; $o->$n--; });
+/// t(function () { $GLOBALS['o'] = new C; --$GLOBALS['o']->$n; });
+/// set_error_handler(function ($no, $m) { echo "[$m]\n"; return true; });
+/// t(function () { $u->$n++; });
+/// t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; $GLOBALS['a'][0]->q->$n--; var_dump($GLOBALS['a'][0]->q); });
+/// ```
+/// ```expect
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// [Undefined variable $u]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// [Creation of dynamic property C::$ is deprecated]
+/// [Undefined property: C::$]
+/// [Decrement on type null has no effect, this will change in the next major version of PHP]
+/// object(C)#5 (3) {
+///   ["i"]=>
+///   int(1)
+///   ["q"]=>
+///   NULL
+///   [""]=>
+///   NULL
+/// }
+/// stepped
+/// ```
+///
+/// The same where a trace serves the step, the closure's body entered
+/// three times:
+///
+/// ```php
+/// class C { public $i = 1; public $q; }
+/// function t($f) { try { $f(); echo "stepped\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+/// for ($k = 0; $k < 3; $k++) {
+///     set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = null; return true; });
+///     t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; $GLOBALS['a'][0]->q->$n++; });
+///     set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = 5; return true; });
+///     t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; ++$GLOBALS['a'][0]->q->$n; });
+/// }
+/// ```
+/// ```expect regime=jit-force process
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// ```
+///
+/// ```php
+/// class C { public $i = 1; public $q; }
+/// function t($f) { try { $f(); echo "stepped\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+/// for ($k = 0; $k < 3; $k++) {
+///     set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = null; return true; });
+///     t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; $GLOBALS['a'][0]->q->$n++; });
+///     set_error_handler(function ($no, $m) { echo "[$m]\n"; $GLOBALS['a'][0]->q = 5; return true; });
+///     t(function () { $GLOBALS['a'] = [new C]; $GLOBALS['a'][0]->q = new C; ++$GLOBALS['a'][0]->q->$n; });
+/// }
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on null
+/// [Undefined variable $n]
+/// Attempt to increment/decrement property "" on int
+/// ```
 #[inline(never)]
 fn stepped_obj(
     req: &mut Request,
@@ -20953,13 +21395,25 @@ fn stepped_obj(
     op: &Opline,
     step: IncDec,
 ) -> Edge {
-    let container = match op.op1_type {
-        OperandKind::Cv => exec::operand(req, frame, code, op.op1_type, op.op1),
-        _ => exec::container(req, frame, op.op1_type, op.op1, "ZEND_PRE_INC_OBJ")?,
-    }
-    .deref();
     let mut member = exec::Member::default();
-    let stepped = match (member.name(req, frame, code, op), container.as_object()) {
+    let mut read = None;
+    let in_table = (op.op1_type == OperandKind::Var && name_calls_code(req, frame, code, op))
+        .then(|| {
+            entry_past_warning(req, frame, code, op, |req| {
+                read = Some(member.name(req, frame, code, op));
+            })
+        })
+        .transpose()?;
+    let name = match read {
+        Some(name) => name,
+        None => member.name(req, frame, code, op),
+    };
+    let container = match (&in_table, op.op1_type) {
+        (Some((held, _)), _) => held.deref(),
+        (None, OperandKind::Cv) => exec::operand(req, frame, code, op.op1_type, op.op1).deref(),
+        (None, kind) => exec::container(req, frame, kind, op.op1, "ZEND_PRE_INC_OBJ")?.deref(),
+    };
+    let stepped = match (name, container.as_object()) {
         (Ok(name), Some(object)) => {
             prime_constant(req, frame, op, property_cache_slot(op), object, &name);
             let mut held = StepHold::taken(req, frame, op, object);
@@ -20978,9 +21432,27 @@ fn stepped_obj(
             Err(thrown)
         }
     };
+    let stepped = req.freed_after(stepped, |req| {
+        if let Some((held, runs)) = in_table {
+            hold_given_up(req, held, runs);
+        }
+    });
     member.release(req, frame, op);
     exec::free_operand(req, frame, op.op1_type, op.op1);
     settled(req, frame, stepped)
+}
+
+/// Whether reading a property opline's name can call user code before
+/// the container is read: an undefined CV's warning, which an error
+/// handler answers, or the conversion of what is no string
+/// (`zval_try_get_tmp_string`), an array's warning or a `__toString`. A
+/// string, and a constant, call nothing.
+fn name_calls_code(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> bool {
+    op.op2_type != OperandKind::Const
+        && exec::operand_undef(req, frame, code, op.op2_type, op.op2)
+            .deref()
+            .as_str_bytes()
+            .is_none()
 }
 
 /// The inline path of the four `*_INC_OBJ`/`*_DEC_OBJ` over a constant
@@ -27069,11 +27541,47 @@ fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at:
 /// #0 %SCRATCH%/witness.php(13): D->__destruct()
 /// #1 %SCRATCH%/witness.php(14): r()
 /// ```
+///
+/// The entry frame of a serving that reads no return is one such: the
+/// primary file, which `zend_execute_scripts` serves with a `NULL`
+/// `return_value` ([`crate::engine::ScriptRetval::Null`]), frees a
+/// temporary it returns at its `RETURN`, the frame standing, and keeps
+/// nothing of it once it is served:
+///
+/// ```php
+/// class D { function __destruct() { echo "D: "; debug_print_backtrace(); } }
+/// echo "main\n";
+/// return new D;
+/// ```
+/// ```expect
+/// main
+/// D: #0 %SCRATCH%/witness.php(4): D->__destruct()
+/// ```
+///
+/// ```php
+/// class D { function __destruct() { echo "D: "; debug_print_backtrace(); } }
+/// function f() { $s = 0; for ($i = 0; $i < 20; $i++) { $s += $i; } return $s; }
+/// echo f(), "\n";
+/// return new D;
+/// ```
+/// ```expect regime=jit-force process
+/// 190
+/// D: #0 %SCRATCH%/witness.php(5): D->__destruct()
+/// ```
 fn temporary_discarded(req: &mut Request, frame: FrameRef, op: &Opline) -> bool {
     matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var)
-        && req.stack_mut().entry() != frame
+        && (req.stack_mut().entry() != frame || returns_nowhere(req, frame))
         && !crate::observer::observing(req)
         && req.returning(frame).1.is_none()
+}
+
+/// Whether `frame` is an entry frame whose serving reads nothing it
+/// returns, php's `EX(return_value) == NULL` at a `ZEND_CALL_TOP_CODE`
+/// frame: one [`crate::engine::serve_unit`] marked `RETURN_UNUSED`.
+fn returns_nowhere(req: &Request, frame: FrameRef) -> bool {
+    req.vm()
+        .at(frame)
+        .is_some_and(|header| header.info.top_code() && !header.info.return_used())
 }
 
 /// The temporary [`temporary_discarded`] found given up, with the frame
@@ -28020,6 +28528,29 @@ fn step_through_typed_ref(
 /// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
 /// ```
 ///
+/// A variable by name is a row of the symbol table, taken before the
+/// step's diagnostic can reach PHP code. Where the row no longer stands
+/// past it, its table grown or the row emptied by an `unset`, the step
+/// lands nowhere and the temporary is written as for any other step
+/// ([`Request::named_place`]).
+///
+/// ```php
+/// set_error_handler(function () { static $k = 0; for ($i = 0; $i < 3000; $i++) $GLOBALS["g" . $k++] = 1; return true; });
+/// $n = "fr" . "esh"; $$n = "a "; $$n++; var_dump($GLOBALS[$n]);
+/// $n = "mo" . "re"; $$n = str_repeat("a", 30) . "!"; $x = --$$n; var_dump($x, $GLOBALS[$n]);
+/// set_error_handler(function () { unset($GLOBALS[$GLOBALS["n"]]); return true; });
+/// $n = "go" . "ne"; $$n = "a "; $$n++; var_dump($GLOBALS[$n] ?? "unset");
+/// $n = "le" . "ft"; $$n = str_repeat("a", 30) . "!"; $x = $$n++; var_dump($x, $GLOBALS[$n] ?? "unset");
+/// ```
+/// ```expect
+/// string(2) "a "
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// string(5) "unset"
+/// string(31) "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+/// string(5) "unset"
+/// ```
+///
 /// ```php
 /// class P { public array $held = [1]; }
 /// class A implements ArrayAccess {
@@ -28053,6 +28584,9 @@ fn incdec(
         OperandKind::Var => write_place(req, frame, op.op1_type, op.op1),
         _ => None,
     };
+    // A row a fetch by name laid down, which the diagnostic's handler can
+    // move or empty before the step lands.
+    let row = named_operand(req, frame, op);
     let named = match place {
         Some(place) => Value::of_slot(place.read()).undef_as_null(),
         None => exec::operand(req, frame, code, op.op1_type, op.op1),
@@ -28077,9 +28611,14 @@ fn incdec(
             if let Some(cell) = cell {
                 req.reference_set(cell.heap(), stepped);
             } else if let Some(place) = place {
-                let previous = Value::of_slot(place.read());
-                place.write(stepped.into_zval());
-                req.release(previous);
+                match place_past(req, place, row) {
+                    Some(place) => {
+                        let previous = Value::of_slot(place.read());
+                        place.write(stepped.into_zval());
+                        req.release(previous);
+                    }
+                    None => req.release(stepped),
+                }
             } else {
                 req.replace_slot(frame, op.op1, stepped);
             }

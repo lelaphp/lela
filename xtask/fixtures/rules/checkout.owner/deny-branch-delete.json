@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"git branch -D t4162","description":"Delete a branch from a checkout another session owns (#4162)"}}

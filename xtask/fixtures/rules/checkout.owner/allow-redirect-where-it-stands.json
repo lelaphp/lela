@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"ls; cd /tmp; echo x > t4250-redirect.txt","description":"A redirection read where its own command stands, past a change of directory (#4250, Round 1 Q20)"}}

@@ -460,10 +460,11 @@ impl Request {
             self.release(throwable.as_value());
             return Ok(());
         }
-        self.end_in_uncaught(compile_time.unwrap_or(Level::Error), &message, &file, line);
-        // `zend_exception_error` ends with `OBJ_RELEASE(ex)`: the pending
-        // slot's owner, given up once the rendering has read it.
-        self.release(throwable.as_value());
+        self.end_in_uncaught_releasing(
+            compile_time.unwrap_or(Level::Error),
+            (&message, &file, line),
+            throwable.as_value(),
+        );
         Err(Leaving)
     }
 

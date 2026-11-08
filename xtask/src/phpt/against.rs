@@ -25,7 +25,8 @@
 //!
 //! **What a miss keeps.** Beside its verdict, each test that missed keeps
 //! its first differing lines and its signature under `misses`, by the same
-//! key (#1185), so a run says why a test missed without being run again.
+//! key (#1185), and how its program died where a signal ended it (#4130),
+//! so a run says why a test missed without being run again.
 //! A run kept before the field was is read with none. Each test that
 //! skipped keeps the reason it was given under `skips`, so a target says
 //! why the oracle left a test out of it (#2033).

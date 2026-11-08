@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"git branch --list && git -C . branch --list 't*'","description":"List branches, also through git -C, in a checkout another session owns (#4162)"}}

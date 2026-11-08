@@ -153,9 +153,20 @@ impl Scratch {
         )
         .unwrap();
         fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+        self.plugins(true);
         scratch::cargo(
             &self.dir.join("bin"),
             scratch::xtask(env!("CARGO_BIN_EXE_xtask")),
+        )
+        .unwrap();
+    }
+
+    /// What `claude plugin list --json` answers: the harness's plugin,
+    /// enabled or not, as Claude Code lists it.
+    fn plugins(&self, enabled: bool) {
+        fs::write(
+            self.dir.join("plugins.json"),
+            format!(r#"[{{"id":"computed@computed","enabled":true}},{{"id":"harness@dax-php","scope":"project","enabled":{enabled}}}]"#),
         )
         .unwrap();
     }
@@ -239,6 +250,12 @@ impl Scratch {
     /// The command, this crate's own binary, run against the checkout
     /// with the stand-ins first on `PATH`, `args` after `track work`.
     fn run(&self, args: &[&str]) -> (i32, String) {
+        self.run_bare(args, false)
+    }
+
+    /// [`Scratch::run`], with `CLAUDE_CODE_SIMPLE` set where `bare` says,
+    /// as `claude --bare` sets it for what it starts.
+    fn run_bare(&self, args: &[&str], bare: bool) -> (i32, String) {
         let path = format!(
             "{}:{}:{}",
             self.dir.join("bin").display(),
@@ -255,6 +272,7 @@ impl Scratch {
             .env_remove("CARGO_MANIFEST_DIR")
             .env_remove("CLAUDE_CODE_SUBAGENT_MODEL")
             .env_remove(xtask::owner::SESSION_VARIABLE)
+            .env("CLAUDE_CODE_SIMPLE", if bare { "1" } else { "" })
             .env("PATH", path)
             .env("STAND_IN_TRACKER", self.tracker.bin())
             .env("GIT_AUTHOR_NAME", "x")
@@ -464,6 +482,48 @@ fn a_ready_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
     );
     assert_eq!(out.matches("computed trust").count(), 1, "{out}");
     assert!(scratch.tracker.calls().is_empty(), "{out}");
+}
+
+/// A session the `harness` plugin would not load in fires no hook, so
+/// the run is refused before anything is laid down (Round 3, Q15): with
+/// the plugin disabled where the session would start, and with the
+/// environment bare, as `--bare` leaves it. With the plugin enabled the
+/// same run works its ticket.
+#[test]
+fn a_run_without_the_harness_plugin_is_refused_before_a_worktree() {
+    let scratch = Scratch::lay("unharnessed");
+    scratch.tracker(&[20], 20);
+    scratch.act("commit ready");
+    scratch.plugins(false);
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("refused, nothing laid down: `harness@dax-php` is installed and not enabled"),
+        "{out}"
+    );
+    fs::remove_file(scratch.dir.join("plugins.json")).unwrap();
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("names no `harness@dax-php`"), "{out}");
+    scratch.plugins(true);
+    let models = ["--model", "claude-opus-5", "--one"];
+    let (code, out) = scratch.run_bare(&models, true);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("CLAUDE_CODE_SIMPLE is set, so a session started from here runs bare"),
+        "{out}"
+    );
+    assert_eq!(
+        scratch.wrote("session.args"),
+        "",
+        "no session started: {out}"
+    );
+    assert_eq!(scratch.worktrees().len(), 1, "nothing laid down: {out}");
+    assert!(!has_ref(&scratch.root, "refs/heads/t20"), "{out}");
+
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("track work: #20 ready at"), "{out}");
 }
 
 /// A worktree left standing whose ticket a person closes later is not

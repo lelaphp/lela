@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"perl -pi -e 's/one/two/' notes.txt","description":"`perl` writes what it names inside the checkout another session owns (#4250)"}}

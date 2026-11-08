@@ -30,7 +30,7 @@
 # Both jobs take the literal label and never DAX_BUILD_RUNNER: a hosted
 # reading is noise, and `xtask bench` refuses a GitHub-hosted runner
 # whatever job runs it (#2477). One runner runs one job at a time, so
-# nothing of harness.yml or dashboard.yml runs beside them. A bench number
+# nothing of harness.yml or nightly.yml runs beside them. A bench number
 # is a claim a person signs off beside its A/A control (harness §4.2,
 # §11): the job states the measurement, and fails only where a bar refused
 # the run (protocol §1).

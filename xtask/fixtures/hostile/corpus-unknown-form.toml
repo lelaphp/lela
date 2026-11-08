@@ -1,0 +1,5 @@
+# Must be refused: a form the corpus does not list.
+[[program]]
+id = "frees"
+form = "frees"
+code = "echo 1;"

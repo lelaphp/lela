@@ -50,6 +50,7 @@ mod fold;
 pub mod generated;
 mod git;
 mod glossary;
+pub mod hostile;
 /// What a build of the harness judges by, digested: the seam manifest and
 /// `xtask`'s own sources (harness-design.md §4.4, #16). Shared with
 /// `build.rs`, which includes the file rather than importing it.
@@ -71,6 +72,7 @@ pub mod port_map;
 pub mod queue;
 pub mod reading;
 mod reply;
+pub mod review;
 mod rust;
 pub mod scratch;
 mod seat;
@@ -100,7 +102,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use cli::{Cli, Command, TicketCommand, TrackCommand, UsageCommand, WorktreeCommand};
+use cli::{
+    Cli, Command, ReviewCommand, TicketCommand, TrackCommand, UsageCommand, WorktreeCommand,
+};
 use divergence::Registry;
 use manifest::Manifest;
 use owner::SessionId;
@@ -336,6 +340,7 @@ fn command_line() -> Result<()> {
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
         Command::CompileIdentity(ask) => compile_identity::command(&root, &manifest, &store, &ask),
         Command::TraceDump(ask) => trace_dump::command(&root, &manifest, &store, &ask),
+        Command::Hostile => hostile::command(&root, &manifest, &store),
         Command::Fold(ask) => fold::command(&root, &manifest, &store, &ask),
         Command::Crosscheck { ext, staged } => {
             crosscheck_command(&root, &manifest, &store, ext, staged)
@@ -366,6 +371,7 @@ fn command_line() -> Result<()> {
         Command::Regions { .. } => bail!("regions: answered above"),
         Command::Worktree { .. } => bail!("worktree: answered above"),
         Command::Steer { .. } => bail!("steer: answered above"),
+        Command::Review { .. } => bail!("review: answered above"),
     }
 }
 
@@ -487,18 +493,25 @@ fn ticket_command(
             let successors = ticket::Successors::named(ticket, &opens, opens_nothing)?;
             (ticket::Act::Ready(successors), ticket, session_id)
         }
-        TicketCommand::Parent { .. } | TicketCommand::Merged { .. } => {
-            bail!("ticket parent and merged: answered above")
+        TicketCommand::Parent { .. }
+        | TicketCommand::Merged { .. }
+        | TicketCommand::Brief { .. }
+        | TicketCommand::View { .. } => {
+            bail!("ticket parent, merged, brief and view: answered above")
         }
     };
-    let reading = ticket::run(
-        root,
-        manifest,
-        &ticket::Gh::on_path(),
-        act,
-        ticket,
-        session_id.as_deref(),
-    )?;
+    let asks_ready = matches!(act, ticket::Act::Ready(_));
+    let gh = ticket::Gh::on_path();
+    let reading = ticket::run(root, manifest, &gh, act, ticket, session_id.as_deref())?;
+    // What was said on the ticket since its work began, printed and never
+    // a refusal (Round 3, Q16 (c)): a builder that comments on its own
+    // ticket is as common as one that does not.
+    if asks_ready {
+        match ticket::view::newer_than_the_work(root, &gh, ticket) {
+            Ok(said) => print!("{said}"),
+            Err(err) => println!("{ticket}: the comments could not be read: {err:#}"),
+        }
+    }
     record(store, std::slice::from_ref(&reading))
 }
 
@@ -637,6 +650,12 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         } => Some(track_work::command(root, run, *one)),
         Command::Track { branch, json, .. } => Some(track_command(root, branch.as_deref(), *json)),
         Command::Regions { staged, files } => Some(computed::command(root, files, *staged)),
+        Command::Review { command } => Some(match command {
+            ReviewCommand::Record { file } => review::record(root, file),
+            ReviewCommand::Resolve { scope, act } => review::resolve(root, scope, act),
+            ReviewCommand::Cover { merge } => review::cover(root, merge.as_deref()),
+            ReviewCommand::Class { head } => review::class(root, head),
+        }),
         Command::Steer {
             file,
             from,
@@ -681,9 +700,51 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         } => Some(queue::claim(root, SessionId::current().as_ref()).map(|_| ())),
         Command::Worktree {
             command: WorktreeCommand::Land,
-        } => Some(queue::land(root)),
+        } => Some(queue::land(root).inspect(|()| review::after_land(root))),
+        Command::Ticket {
+            command:
+                TicketCommand::Brief {
+                    number,
+                    scratch,
+                    owns,
+                    spec,
+                },
+        } => Some(brief_command(
+            root,
+            *number,
+            scratch.as_deref(),
+            owns,
+            spec.as_deref(),
+        )),
+        Command::Ticket {
+            command: TicketCommand::View { number, since },
+        } => Some(ticket::ticket_of(root, *number).and_then(|ticket| {
+            let shown = ticket::view::view(root, &ticket::Gh::on_path(), ticket, since.as_deref())?;
+            print!("{shown}");
+            Ok(())
+        })),
         _ => None,
     }
+}
+
+/// `xtask ticket brief`: the brief printed whole, by this build only
+/// where it is the tree's; writes no reading.
+fn brief_command(
+    root: &Path,
+    number: u64,
+    scratch: Option<&Path>,
+    owns: &[String],
+    spec: Option<&str>,
+) -> Result<()> {
+    let ask = ticket::brief::Ask {
+        scratch: scratch.map(Path::to_path_buf),
+        owns: owns.to_vec(),
+        spec: spec.map(str::to_owned),
+    };
+    let gh = ticket::Gh::on_path();
+    let brief = ticket::brief::brief(root, &built_root(), &gh, track::Ticket::new(number), &ask)?;
+    print!("{brief}");
+    Ok(())
 }
 
 /// `xtask track`: the facts as text, or as one object; no reading.

@@ -30,7 +30,7 @@ loop at 0, recursive return, interrupt none
   -> #5 f0.T5 [packed array]
 0013 f0 ADD_ARRAY_ELEMENT #5 step unwinds -> unwind 0
   -> #6 f0.T4 [array]
-0014 f0 RETURN #6 inline in-place moved
+0014 f0 RETURN #6 inline in-place moved unwinds -> unwind 0
      f2 back to #7 escapes unless e1 0009
   -> #7 f2.T3 [array]
 0009 f2 INIT_ARRAY #7 step unwinds -> unwind 0
@@ -78,12 +78,12 @@ loop at 0, recursive return, interrupt none
   -> #18 f3.T5 [packed array]
 0013 f3 ADD_ARRAY_ELEMENT #18 step unwinds -> unwind 1
   -> #19 f3.T4 [array]
-0014 f3 RETURN #19 inline in-place moved
+0014 f3 RETURN #19 inline in-place moved unwinds -> unwind 1
      f2 back to #20
   -> #20 f2.T5 [array]
 0013 f2 ADD_ARRAY_ELEMENT #20 step unwinds -> unwind 0
   -> #21 f2.T4 [array]
-0014 f2 RETURN #21 inline in-place moved
+0014 f2 RETURN #21 inline in-place moved unwinds -> unwind 0
      f6 back to #22 escapes unless e1 0009
   -> #22 f6.T3 [array]
 end: back to 0

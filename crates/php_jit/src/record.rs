@@ -785,7 +785,7 @@ pub(crate) fn landings(
 /// Whether a frame goes on past `opcode` from something the opline left
 /// it for: php's list where its code generator arms the opline past
 /// one (`Z/ext/opcache/jit/zend_jit_trace.c:7322-7368`).
-fn lands_past(opcode: Opcode) -> bool {
+pub(crate) fn lands_past(opcode: Opcode) -> bool {
     matches!(
         opcode,
         Opcode::DoUcall

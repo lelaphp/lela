@@ -29,7 +29,7 @@
 //! own is left out, since one process serves every request under one ini.
 //!
 //! **Its length and lane** are #2336's ruling: [`NIGHTLY`] and
-//! [`CLIENTS`], nightly on `dax-build` (`dashboard.yml`'s `soak` job, which
+//! [`CLIENTS`], nightly on `dax-build` (`nightly.yml`'s `soak` job, which
 //! asks for it with `--nightly`, a flag `lanes.nightly-soak` denies outside
 //! CI); a bare call is the smoke's [`SMOKE`], as makala's own test runs it
 //! (#2632). `--seconds` and `--clients` take another run over either. The ruling's "debug

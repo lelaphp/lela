@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"cargo xtask --help && cargo xtask budget --help","description":"Ask xtask and one instrument for their help, in a checkout another session owns (#4162)"}}

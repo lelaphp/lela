@@ -1594,6 +1594,16 @@ impl<'a> Builder<'a> {
                     // as may the receiver's, which it gives up after them.
                     || (matches!(in_place, Some(InPlace::Leave))
                         && (!self.uncounted(frame) || self.receives(frame)))
+                    // A temporary moved out where the caller reads no
+                    // return is given up by the leave kernel the leave
+                    // falls back to, and its destructor may throw.
+                    || matches!(
+                        line.imm,
+                        Imm::Leave {
+                            value: Returned::Moved,
+                            ..
+                        }
+                    )
                     // A call pushed under its slot's pair goes to its
                     // handler where the slot holds another, which looks
                     // the class and the method up and may throw; an

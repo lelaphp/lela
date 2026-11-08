@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"for n in a b; do touch $n; done","description":"A for loop whose body writes, in a checkout another session owns (#4162)"}}

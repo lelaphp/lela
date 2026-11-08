@@ -4,7 +4,8 @@
 //! loads with no pin, and [`Manifest::pin`] refuses whatever asks for one.
 //!
 //! The grammar is `[oracle] [budget] [telemetry] [[crate]] [[seam]]
-//! [[edge]] [[rule]] [[bench]]`, each rule carrying exactly one predicate.
+//! [[edge]] [[rule]] [[bench]] [review]`, each rule carrying exactly one
+//! predicate.
 //! A manifest with a key outside the grammar is refused with the offending
 //! key named; so is a rule with zero or two predicates. The numbers live
 //! in the file; nothing here restates one, and an optional table that is
@@ -25,8 +26,10 @@ use crate::track::Ticket;
 pub use crate::layout::Layout;
 pub(crate) use owed::of_the_engine;
 pub use owed::{HeldAt, Instrument, Owed, When};
+pub use review::Review;
 
 mod owed;
+mod review;
 
 /// The file name of the manifest at the workspace root.
 pub const FILE: &str = "seams.toml";
@@ -75,6 +78,10 @@ pub struct Manifest {
     /// (#3130); a bar without a row is a series held to none.
     #[serde(rename = "bench", default)]
     pub(crate) tolerances: Vec<Tolerance>,
+    /// `[review]`: what makes a diff review class A ([`Review`], Round 3
+    /// Q27 (c), Q28 (a)); `None` where the file has no table, which the
+    /// review module reads as no diff being class A and says so.
+    pub review: Option<Review>,
     /// The pin the `[oracle]` row names, loaded from that file by the
     /// oracle module, whose grammar it is; absent with the row, and read
     /// through [`Manifest::pin`].
@@ -1261,6 +1268,7 @@ impl Manifest {
         }
         manifest.parity.hold(&manifest.crates)?;
         owed::hold(&manifest.owed, &manifest.crates)?;
+        review::hold(manifest.review.as_ref(), &manifest.crates)?;
         Ok(manifest)
     }
 
