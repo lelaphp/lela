@@ -5141,6 +5141,58 @@ fn return_mask_holds(slots: &[Zval], code: &OpArray, op: &Opline) -> bool {
 /// (`SAVE_OPLINE()`): `zend_check_type_slow` over the declared type,
 /// the coercion beside it and the `TypeError`, out of line so the hit
 /// saves no register for it and writes no position.
+///
+/// A by-reference return of a reference a typed property holds is never
+/// coerced: `zend_check_type_slow` answers false where
+/// `ZEND_REF_HAS_TYPE_SOURCES(ref)` (`Z/Zend/zend_execute.c:1197`), so the
+/// `TypeError` is raised and the property keeps what it held. A
+/// reference no property types is coerced through, as before:
+///
+/// ```php
+/// class C { public string $p = "1.5"; public int $q = 7; }
+/// function &r2(): int { global $c; $r = &$c->p; return $r; }
+/// function &r4(): string { global $c; $r = &$c->q; return $r; }
+/// function &r5(): int { global $c; $r = &$c->q; return $r; }
+/// function &r6(): int { static $x = "15"; return $x; }
+/// $c = new C;
+/// try { var_dump(r2()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->p);
+/// try { var_dump(r4()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->q, r5(), r6(), r6());
+/// ```
+/// ```expect
+/// r2(): Return value must be of type int, string returned
+/// string(3) "1.5"
+/// r4(): Return value must be of type string, int returned
+/// int(7)
+/// int(7)
+/// int(15)
+/// int(15)
+/// ```
+///
+/// The same where a trace serves the calls:
+///
+/// ```php
+/// class C { public string $p = "1.5"; public int $q = 7; }
+/// function &r2(): int { global $c; $r = &$c->p; return $r; }
+/// function &r4(): string { global $c; $r = &$c->q; return $r; }
+/// $c = new C;
+/// for ($i = 0; $i < 3; $i++) {
+///     try { var_dump(r2()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+///     try { var_dump(r4()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// var_dump($c->p, $c->q);
+/// ```
+/// ```expect regime=jit-force process
+/// r2(): Return value must be of type int, string returned
+/// r4(): Return value must be of type string, int returned
+/// r2(): Return value must be of type int, string returned
+/// r4(): Return value must be of type string, int returned
+/// r2(): Return value must be of type int, string returned
+/// r4(): Return value must be of type string, int returned
+/// string(3) "1.5"
+/// int(7)
+/// ```
 #[cold]
 #[inline(never)]
 fn return_mask_missed(
@@ -5186,6 +5238,10 @@ fn return_mask_missed(
     let held = crate::api::coerce::holding(req, &returned, declared_again(req, frame)?, scopes);
     if held.resolve(req, &returned, scopes) {
         return Ok(advance(req, frame));
+    }
+    if by_ref && returns_typed_reference(req, frame, op, indirect) {
+        let thrown = return_type_error(req, frame, Some(&returned))?;
+        return threw(req, frame, &thrown);
     }
     let strict = req.frame_strict_types(frame);
     let mask = code.return_mask;
@@ -5239,6 +5295,33 @@ fn return_mask_missed(
     }
     req.replace_slot(frame, slot, coerced);
     Ok(advance(req, frame))
+}
+
+/// Whether a by-reference return's operand holds a reference with type
+/// sources (`ref && ZEND_REF_HAS_TYPE_SOURCES(ref)`, `zend_check_type_slow`):
+/// the reference `VERIFY_RETURN_TYPE` finds where its `CV` or its `VAR`
+/// stands, the place a `VAR` fetched read through (`Z_INDIRECT_P`), as
+/// php's `retval_ref` is. A `TMP` and a `CONST` are dereferenced by no
+/// one, so they hold none.
+fn returns_typed_reference(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    indirect: Option<php_heap::ZvalRef>,
+) -> bool {
+    if !matches!(op.op1_type, OperandKind::Cv | OperandKind::Var) {
+        return false;
+    }
+    let held = match indirect {
+        Some(place) => place.read(),
+        None => match req.slot_ptr(frame, op.op1) {
+            Some(at) => at.read(),
+            None => return false,
+        },
+    };
+    Value::of_slot(held)
+        .as_php_ref()
+        .is_some_and(|cell| cell.heap().sources() != 0)
 }
 
 /// `EX(func)->common.arg_info - 1` of the frame's function where it
@@ -14293,6 +14376,66 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// ran
 /// 1
 /// ```
+///
+/// What the native throws stands pending while its operands are freed,
+/// as php's `EG(exception)` stands over its `FREE_OP*`s, so a
+/// destructor the frees serve, an array's element's or an operand's
+/// own, throws with it as its previous
+/// (`zend_objects_destroy_object`'s `old_exception`):
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class T { function __toString(): string { throw new Exception("tostring"); } }
+/// class D { function __toString(): string { return "d"; } function __destruct() { echo "D gone\n"; throw new Exception("dtor"); } }
+/// function f() {
+///     try { implode(',', [new T, new D]); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+///     try { str_contains(new T, new D); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f(); }
+/// echo "end\n";
+/// ```
+/// ```expect
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// end
+/// ```
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', 1);
+/// class T { function __toString(): string { throw new Exception("tostring"); } }
+/// class D { function __toString(): string { return "d"; } function __destruct() { echo "D gone\n"; throw new Exception("dtor"); } }
+/// function f() {
+///     try { implode(',', [new T, new D]); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+///     try { str_contains(new T, new D); } catch (Exception $e) { echo "caught ", $e->getMessage(), " prev=", $e->getPrevious()?->getMessage() ?? 'none', "\n"; }
+/// }
+/// for ($i = 0; $i < 3; $i++) { f(); }
+/// echo "end\n";
+/// ```
+/// ```expect regime=jit-force process
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// D gone
+/// caught dtor prev=tostring
+/// end
+/// ```
 #[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
 fn frameless_call<const N: usize>(
     req: &mut Request,
@@ -14324,20 +14467,24 @@ fn frameless_call<const N: usize>(
         };
     // `if (EG(exception))` past the fetch: a handler threw at an undefined
     // operand's warning, so the native is not served.
+    // The throwable left pending before the operands are freed, as php's
+    // `EG(exception)` stands over its `FREE_OP*`s.
     if let Err(thrown) = none_pending(req) {
+        req.leave_pending(&thrown);
         free_operands(req, frame, (&operands, owned), &arguments);
-        checked_after_throw(req, &thrown)?;
+        checked_while_pending(req)?;
         return Ok(Stepped::Threw(frame).into());
     }
     let served = frameless_native(req, op.extended_value, &operands);
+    if let Err(thrown) = &served {
+        req.leave_pending(thrown);
+    }
     free_operands(req, frame, (&operands, owned), &arguments);
-    let value = match served {
-        Ok(value) => value.hand_on(),
-        Err(thrown) => {
-            checked_after_throw(req, &thrown)?;
-            return Ok(Stepped::Threw(frame).into());
-        }
+    let Ok(value) = served else {
+        checked_while_pending(req)?;
+        return Ok(Stepped::Threw(frame).into());
     };
+    let value = value.hand_on();
     // The interrupt read once, as php's handler reads `EG(vm_interrupt)`
     // once after the native, and its check out of line: made with a
     // handler's throwable pending before the value is written, as
@@ -14586,6 +14733,51 @@ pub(super) fn frameless_native(
 /// #1 %SCRATCH%/witness.php(10): str_replace(7, Object(T), 'x')
 /// #2 %SCRATCH%/witness.php(13): f(1)
 /// ```
+///
+/// The owner taken of a variable is given up before the first operand
+/// is freed, as php's handler holds none: a temporary's destructor that
+/// writes the variable, through a reference or through `$GLOBALS`, frees
+/// what it held inside that destructor, in a trace as in the handler:
+///
+/// ```php
+/// class B { function __construct(public $n) {} function __destruct() { if ($this->n >= 10) echo "B{$this->n} gone\n"; } function __toString(): string { return "ab"; } }
+/// class T { function __construct(public $w) {} function __destruct() { global $g; if ($this->w) { echo "T start\n"; if ($this->w === 'y') unset($GLOBALS['y']); else $g = "zz"; echo "T end\n"; } } function __toString(): string { return "ab"; } }
+/// function f(&$x, $n) { global $g; for ($i = 0; $i < $n; $i++) { $g = new B($i); str_contains(new T($i == $n - 1 ? 'g' : ''), $x); } }
+/// $g = new B(0);
+/// f($g, 11);
+/// $y = new B(20);
+/// str_contains(new T('y'), $y);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// T start
+/// B10 gone
+/// T end
+/// T start
+/// B20 gone
+/// T end
+/// end
+/// ```
+///
+/// ```php
+/// class B { function __construct(public $n) {} function __destruct() { if ($this->n >= 10) echo "B{$this->n} gone\n"; } function __toString(): string { return "ab"; } }
+/// class T { function __construct(public $w) {} function __destruct() { global $g; if ($this->w) { echo "T start\n"; if ($this->w === 'y') unset($GLOBALS['y']); else $g = "zz"; echo "T end\n"; } } function __toString(): string { return "ab"; } }
+/// function f(&$x, $n) { global $g; for ($i = 0; $i < $n; $i++) { $g = new B($i); str_contains(new T($i == $n - 1 ? 'g' : ''), $x); } }
+/// $g = new B(0);
+/// f($g, 11);
+/// $y = new B(20);
+/// str_contains(new T('y'), $y);
+/// echo "end\n";
+/// ```
+/// ```expect regime=jit-force process
+/// T start
+/// B10 gone
+/// T end
+/// T start
+/// B20 gone
+/// T end
+/// end
+/// ```
 #[inline(always)] // the frameless handler's hot path
 fn free_operands<const N: usize>(
     req: &mut Request,
@@ -14593,10 +14785,14 @@ fn free_operands<const N: usize>(
     (operands, owned): (&[Value; N], u8),
     slots: &[(OperandKind, u32); N],
 ) {
-    for (at, (operand, &(kind, field))) in operands.iter().zip(slots).enumerate() {
+    for (at, operand) in operands.iter().enumerate() {
         if owned >> at & 1 != 0 {
             req.release_zval_nogc(operand.to_zval());
-        } else if matches!(kind, OperandKind::Tmp | OperandKind::Var)
+        }
+    }
+    for (at, (operand, &(kind, field))) in operands.iter().zip(slots).enumerate() {
+        if owned >> at & 1 == 0
+            && matches!(kind, OperandKind::Tmp | OperandKind::Var)
             && let Some(object) = operand.to_zval().as_obj()
         {
             req.destruct_in_place(object);
@@ -27345,11 +27541,47 @@ fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at:
 /// #0 %SCRATCH%/witness.php(13): D->__destruct()
 /// #1 %SCRATCH%/witness.php(14): r()
 /// ```
+///
+/// The entry frame of a serving that reads no return is one such: the
+/// primary file, which `zend_execute_scripts` serves with a `NULL`
+/// `return_value` ([`crate::engine::ScriptRetval::Null`]), frees a
+/// temporary it returns at its `RETURN`, the frame standing, and keeps
+/// nothing of it once it is served:
+///
+/// ```php
+/// class D { function __destruct() { echo "D: "; debug_print_backtrace(); } }
+/// echo "main\n";
+/// return new D;
+/// ```
+/// ```expect
+/// main
+/// D: #0 %SCRATCH%/witness.php(4): D->__destruct()
+/// ```
+///
+/// ```php
+/// class D { function __destruct() { echo "D: "; debug_print_backtrace(); } }
+/// function f() { $s = 0; for ($i = 0; $i < 20; $i++) { $s += $i; } return $s; }
+/// echo f(), "\n";
+/// return new D;
+/// ```
+/// ```expect regime=jit-force process
+/// 190
+/// D: #0 %SCRATCH%/witness.php(5): D->__destruct()
+/// ```
 fn temporary_discarded(req: &mut Request, frame: FrameRef, op: &Opline) -> bool {
     matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var)
-        && req.stack_mut().entry() != frame
+        && (req.stack_mut().entry() != frame || returns_nowhere(req, frame))
         && !crate::observer::observing(req)
         && req.returning(frame).1.is_none()
+}
+
+/// Whether `frame` is an entry frame whose serving reads nothing it
+/// returns, php's `EX(return_value) == NULL` at a `ZEND_CALL_TOP_CODE`
+/// frame: one [`crate::engine::serve_unit`] marked `RETURN_UNUSED`.
+fn returns_nowhere(req: &Request, frame: FrameRef) -> bool {
+    req.vm()
+        .at(frame)
+        .is_some_and(|header| header.info.top_code() && !header.info.return_used())
 }
 
 /// The temporary [`temporary_discarded`] found given up, with the frame

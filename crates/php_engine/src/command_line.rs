@@ -218,6 +218,11 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
     // What a fatal left standing above the main frame, as
     // `serve_unit` pops it.
     req.leave_code(standing, frame);
+    // `zend_eval_stringl`'s `zval_ptr_dtor(&local_retval)`: what the code
+    // returned is given up once its frame is gone, before what it left
+    // uncaught is rendered.
+    let returned = req.take_returned();
+    req.release(returned);
     if let Err(fatal) = served {
         req.end_in(&fatal);
         return false;

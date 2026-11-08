@@ -6043,7 +6043,7 @@ impl Engine {
             req.note_compiled_program();
         }
         let ran = match compiled {
-            Some(Ok(unit)) => serve_unit(req, &unit),
+            Some(Ok(unit)) => serve_unit(req, &unit, ScriptRetval::Null),
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
             // request ends before a frame is pushed.
@@ -6259,7 +6259,7 @@ impl Engine {
             .expand_filepath(router)
             .unwrap_or_else(|| router.to_vec());
         let ran = match Engine::compile_program(req, &path, router, HandlePath::Kept) {
-            Some(Ok(unit)) => serve_unit(req, &unit),
+            Some(Ok(unit)) => serve_unit(req, &unit, ScriptRetval::Read),
             Some(Err(refused)) => {
                 refused_program(req, &refused, &path);
                 false
@@ -6849,8 +6849,10 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8]) -> bool {
     };
     let file = file.to_vec();
     match req.require_kept(&file) {
-        Ok(crate::api::request::Opened::Unit(unit)) => serve_unit(req, &unit),
-        Ok(crate::api::request::Opened::Declared(unit)) => serve_declared(req, &unit),
+        Ok(crate::api::request::Opened::Unit(unit)) => serve_unit(req, &unit, ScriptRetval::Null),
+        Ok(crate::api::request::Opened::Declared(unit)) => {
+            serve_declared(req, &unit, ScriptRetval::Null)
+        }
         Ok(_) => true,
         Err(thrown) => {
             req.leave_pending(&thrown);
@@ -6914,13 +6916,28 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8]) -> bool {
 /// Whether the program ran to its end: not a fatal, a refused
 /// declaration or an `exit`, each of which php leaves by `zend_bailout`,
 /// and not a throwable no handler took.
-pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit) -> bool {
-    note_compiled(req, unit, SourceKind::File) && serve_declared(req, unit)
+pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, retval: ScriptRetval) -> bool {
+    note_compiled(req, unit, SourceKind::File) && serve_declared(req, unit, retval)
+}
+
+/// Whether the serving of a file reads what its code returns,
+/// `zend_execute_script`'s `retval` (`Z/Zend/zend.c:1981`): `NULL` for
+/// the primary file, `auto_prepend_file`, `auto_append_file`
+/// (`Z/main/main.c:2685-2691`) and the preload file
+/// (`Z/ext/opcache/ZendAccelerator.c:4656`), and the built-in server's
+/// router alone handing one (`Z/sapi/cli/php_cli_server.c:2287`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScriptRetval {
+    /// `NULL`: the frame's `EX(return_value)` is none, so its `RETURN`
+    /// frees a temporary with the frame standing.
+    Null,
+    /// What the code returns is read once it is served.
+    Read,
 }
 
 /// [`serve_unit`] past [`note_compiled`], for a unit whose compile
 /// declared it already ([`crate::api::request::Opened::Declared`]).
-fn serve_declared(req: &mut Request, unit: &PublishedUnit) -> bool {
+fn serve_declared(req: &mut Request, unit: &PublishedUnit, retval: ScriptRetval) -> bool {
     let standing = req.vm().depth();
     // The op array `zend_accel_load_script` copies out of the cache, or
     // `zend_compile` made, and its runtime cache, the request's while
@@ -6940,6 +6957,12 @@ fn serve_declared(req: &mut Request, unit: &PublishedUnit) -> bool {
     if req.hold_op_array(frame, copy).is_err() {
         req.leave_frame(frame);
         return false;
+    }
+    // `zend_execute(op_array, NULL)`: no caller reads the return.
+    if retval == ScriptRetval::Null
+        && let Some(header) = req.vm_mut().at_mut(frame)
+    {
+        header.info.set_return_used(false);
     }
     // The request's loop as the serving starts: a file served before it
     // that handed its frame to the tier's loop leaves this one there.
