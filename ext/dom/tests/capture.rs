@@ -274,3 +274,74 @@ fn a_handler_that_frees_the_root_at_c14ns_query_error_frees_a_restored_tree() {
     );
     assert_eq!(served.exit_code, 0);
 }
+
+/// A class `registerNodeClass()` maps elements to, whose default property
+/// names a class that is not there: the engine throws the `Error` the
+/// evaluation raised and goes on (#3912).
+#[test]
+fn a_registered_class_whose_default_cannot_be_evaluated_throws() {
+    let engine = support::engine();
+    let served = engine.serve_capture(
+        r#"<?php
+class MyEl extends DOMElement { public $x = Foo::BAR; }
+$d = new DOMDocument;
+$d->loadXML('<r/>');
+$d->registerNodeClass('DOMElement', 'MyEl');
+try {
+    var_dump($d->documentElement);
+} catch (Error $e) {
+    echo get_class($e), ': ', $e->getMessage(), "\n";
+}
+echo "end\n";
+"#,
+        Capture::default(),
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "Error: Class \"Foo\" not found\nend\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
+
+/// `Dom\XMLDocument::C14NFile()` into a file, then the root's attributes,
+/// and a declaration attribute held across the call whose element is
+/// removed after it: the engine canonicalizes into memory, puts the tree
+/// back, then writes the file, so it reads `int(3)`, and `ownerElement`
+/// reads `NULL` (#3959).
+#[test]
+fn c14nfile_puts_a_modern_tree_back() {
+    let engine = support::engine();
+    let reproducer = engine.serve_capture(
+        r#"<?php
+$doc = Dom\XMLDocument::createFromString('<root xmlns="urn:a" xmlns:p="urn:p" p:x="1"><c/></root>');
+$file = tempnam(sys_get_temp_dir(), 'c14n');
+var_dump($doc->C14NFile($file));
+echo file_get_contents($file), "\n";
+unlink($file);
+var_dump($doc->documentElement->attributes->length);
+foreach ($doc->documentElement->attributes as $attr) {
+    echo $attr->name, "\n";
+}
+"#,
+        Capture::default(),
+    );
+    assert_eq!(
+        reproducer.stdout_text(),
+        "int(58)\n<root xmlns=\"urn:a\" xmlns:p=\"urn:p\" p:x=\"1\"><c></c></root>\nint(3)\nxmlns\nxmlns:p\np:x\n"
+    );
+    assert_eq!(reproducer.exit_code, 0);
+    let dangling = engine.serve_capture(
+        r#"<?php
+$doc = Dom\XMLDocument::createFromString('<root xmlns="urn:a"/>');
+$attr = $doc->documentElement->getAttributeNode('xmlns');
+$file = tempnam(sys_get_temp_dir(), 'c14n');
+var_dump($doc->C14NFile($file));
+unlink($file);
+$doc->documentElement->remove();
+var_dump($attr->ownerElement?->localName);
+"#,
+        Capture::default(),
+    );
+    assert_eq!(dangling.stdout_text(), "int(27)\nNULL\n");
+    assert_eq!(dangling.exit_code, 0);
+}
