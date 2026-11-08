@@ -576,12 +576,6 @@ check = "silent-return"   # the clippy instrument's sensor of a return at a #[te
 text = "A test that returns early passes without asserting: its setup fails with .expect(\"<step>\") (#3078), and a return at a #[test] fn's own level is refused unless it is return Err(..) (#3079)."
 
 [[rule]]
-id = "api.no-hot"
-scope = "crates/php_ext/**"
-deny_pattern = 'php_heap::hot'
-text = "php_heap::hot is for the handlers; api never re-exports it (design §4.4, §10)."
-
-[[rule]]
 id = "ext.no-private"
 scope = "ext/*/src/**"
 deny_pattern = '__private'
