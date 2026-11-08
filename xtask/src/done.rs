@@ -35,9 +35,11 @@
 //!
 //! With `--hook` the command reads the Stop hook's stdin (the shape in
 //! `data/pre-day-1.md` §4): exit 0 and nothing printed when
-//! `stop_hook_active` is true, otherwise `{"decision":"block","reason":…}`
-//! with the list while anything is unmet. Every verdict is one reading,
-//! `done` over `workspace`.
+//! `stop_hook_active` is true, and when the list repeats or shrinks the
+//! last judged Stop's of the same session and agent ([`crate::turn`]),
+//! otherwise `{"decision":"block","reason":…}` with the list while
+//! anything is unmet. Every verdict is one reading, `done` over
+//! `workspace`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -62,6 +64,7 @@ use crate::port_map;
 use crate::reading::{Freshness, Moved, Number, Outcome, Reading, Status, Store, plural};
 use crate::ticket;
 use crate::track::{self, MAIN, Ticket, merge_base, short};
+use crate::turn::{self, Memory, Part, Turn};
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "done";
@@ -1683,14 +1686,20 @@ const UNREAD_STDIN: &str = "done could not read the Stop hook's stdin";
 /// `--hook`: judge the Stop hook's stdin text and give the hook's stdout,
 /// `None` for a pass. The second Stop (`stop_hook_active`) passes without
 /// judging and records the release with the count the block had (#3618
-/// M4); whatever goes wrong before a verdict is a block that says so,
-/// since the second Stop releases a held turn and nothing releases a
-/// silent pass.
+/// M4, Round 1, Q15 (a)); whatever goes wrong before a verdict is a block
+/// that says so, since the second Stop releases a held turn and nothing
+/// releases a silent pass.
 ///
 /// What is judged is each checkout the session's own calls wrote in, as
-/// permit placed them (harness-design.md §4.5, #3618 ruling 1): this one
-/// here, another by its own build, handed the Stop with `here`. A session
-/// that wrote in none passes.
+/// permit placed them (harness-design.md §4.5, #3618 ruling 1, Round 2,
+/// Q34 (a)), less the merge worktree, the checkout on `staging` (Round 1,
+/// Q14 (b)): this one here, another by its own build, handed the Stop with
+/// `here`. A session that wrote in none passes. How the Stop ends is
+/// [`turn::decide`]'s, over what each checkout gave and the memory of the
+/// last judged Stop of the same session and agent: a list that repeats or
+/// shrinks that one's passes and is recorded (Round 1, Q13 (d)). A
+/// checkout handed the Stop keeps no memory and holds on anything unmet,
+/// since the Stop that handed it over decides.
 pub(crate) fn hook(
     root: &Path,
     manifest: &Manifest,
@@ -1703,8 +1712,12 @@ pub(crate) fn hook(
         Err(err) => return Some(block(&format!("{UNREAD_STDIN}: {err}"))),
     };
     let caller = Caller::of_hook(stop.hook_event_name.as_deref());
+    let agent = stop.agent_id.as_deref();
+    let memory = (!stop.here)
+        .then(|| turn::path(root, &stop.session_id, agent))
+        .flatten();
     if stop.stop_hook_active {
-        if let Err(err) = released(store, &stop, caller) {
+        if let Err(err) = released(store, memory.as_deref(), &stop, caller) {
             eprintln!("xtask done: the release was not recorded: {err:#}");
         }
         return None;
@@ -1718,55 +1731,80 @@ pub(crate) fn hook(
     let checkouts: Vec<PathBuf> = if stop.here {
         vec![root.to_path_buf()]
     } else {
-        let agent = stop.agent_id.as_deref().unwrap_or_default();
-        crate::permit::written(root, &stop.session_id, agent)
+        crate::permit::written(root, &stop.session_id, agent.unwrap_or_default())
+            .into_iter()
+            .filter(|c| track::head_branch(c).as_deref() != Some(crate::queue::STAGING))
+            .collect()
     }
     .into_iter()
     .filter(|c| c.is_dir())
     .collect();
-    let mut reasons = Vec::new();
+    let mut parts = Vec::new();
     let mut counts = Counts::default();
     let mut here = None;
     for checkout in &checkouts {
-        if same_dir(checkout, root) {
-            match judge(&snapshot, manifest, registry, store, None, &[]) {
-                Ok(verdict) => {
-                    if let Err(err) = permit::settle(store, root) {
-                        eprintln!("xtask done: a settled kept change was not removed: {err:#}");
-                    }
-                    counts.merge(Counts::of(&verdict.unmet));
-                    if !verdict.met() {
-                        reasons.push(verdict.render());
-                    }
-                    here = Some(verdict);
-                }
-                Err(err) => {
-                    return Some(block(&format!("done could not judge the changes: {err:#}")));
-                }
-            }
+        if !same_dir(checkout, root) {
+            let (held, part) = handed_over(checkout, &stop);
+            counts.merge(held);
+            parts.push(part);
             continue;
         }
-        if let Some((held, reason)) = handed_over(checkout, &stop) {
-            counts.merge(held);
-            reasons.push(reason);
+        match judge(&snapshot, manifest, registry, store, None, &[]) {
+            Ok(verdict) => {
+                if let Err(err) = permit::settle(store, root) {
+                    eprintln!("xtask done: a settled kept change was not removed: {err:#}");
+                }
+                counts.merge(Counts::of(&verdict.unmet));
+                parts.push(if verdict.met() {
+                    Part::Met
+                } else {
+                    Part::Held {
+                        checkout: checkout.clone(),
+                        bullets: verdict.messages(),
+                        list: verdict.render(),
+                    }
+                });
+                here = Some(verdict);
+            }
+            Err(err) => {
+                counts.unkinded += 1;
+                let reason = format!("done could not judge the changes: {err:#}");
+                parts.push(Part::Unjudged { reason });
+            }
         }
     }
+    let decision = turn::decide(
+        memory.as_deref().and_then(Memory::read).as_ref(),
+        &parts,
+        counts.total(),
+    );
+    if let Some(path) = &memory
+        && let Err(err) = Memory::keep(path, decision.memory.as_ref())
+    {
+        eprintln!("xtask done: the turn's memory was not kept: {err:#}");
+    }
+    let holds = if stop.here {
+        decision.turn != Turn::Met
+    } else {
+        decision.turn.holds()
+    };
     // The hook's exit is 0 and its verdict is the JSON; the outcome of
     // recording it is neither.
-    let recorded = stop_reading(here.as_ref(), manifest, &snapshot, counts, checkouts.len())
-        .and_then(|r| {
-            // The Stop's verdict carries the session: what the release of
-            // its block, at the second Stop, finds it by.
-            let mut r = called(r, caller);
-            stop.session_id.clone_into(&mut r.session);
-            stop.count_waiting(&mut r, &checkouts)?;
-            store.record(&[r])
-        });
+    let turn = (!stop.here).then_some(&decision);
+    let over = (here.as_ref(), checkouts.len());
+    let recorded = stop_reading(over, manifest, &snapshot, counts, turn).and_then(|r| {
+        // The Stop's verdict carries the session, as each reading of
+        // the store says who it was taken for.
+        let mut r = called(r, caller);
+        stop.session_id.clone_into(&mut r.session);
+        stop.count_waiting(&mut r, &checkouts)?;
+        store.record(&[r])
+    });
     if let Err(err) = recorded {
         eprintln!("xtask done: the verdict stands but was not recorded: {err:#}");
     }
-    (!reasons.is_empty()).then(|| {
-        let mut held = block(&reasons.join("\n"));
+    holds.then(|| {
+        let mut held = block(&decision.list);
         // The count, for the Stop that handed this checkout over.
         if stop.here {
             held["unmet"] = json!(counts.total());
@@ -1777,41 +1815,46 @@ pub(crate) fn hook(
 }
 
 /// `checkout`, which the session wrote in and the hook does not stand in,
-/// judged by its own build (#3619): what it counted and why it holds, or
-/// `None` where it holds nothing. A build older than the kinds hands the
-/// count alone, and one that could not judge holds as one unmet, each
-/// counted unkinded.
-fn handed_over(checkout: &Path, stop: &StopStdin) -> Option<(Counts, String)> {
+/// judged by its own build (#3619): what it counted and what it gave. A
+/// build older than the kinds hands the count alone, and one that could
+/// not judge is unjudged, counted as one unmet, each counted unkinded.
+fn handed_over(checkout: &Path, stop: &StopStdin) -> (Counts, Part) {
     let handed = json!({"session_id": stop.session_id, "hook_event_name": stop.hook_event_name,
         "here": true});
     let args = ["done", "--hook"];
     let adapter = crate::permit::Adapter::CommandHook;
-    let unkinded = |n: usize| Counts {
-        unkinded: n,
-        ..Counts::default()
+    let unjudged = |reason: String| {
+        let counts = Counts {
+            unkinded: 1,
+            ..Counts::default()
+        };
+        (counts, Part::Unjudged { reason })
     };
     let out = match crate::permit::walk(checkout, adapter, &args, &handed.to_string()) {
         Ok(out) => out,
         Err(last) => {
-            let why = format!("done could not judge {}: {last}", checkout.display());
-            return Some((unkinded(1), why));
+            return unjudged(format!(
+                "done could not judge {}: {last}",
+                checkout.display()
+            ));
         }
     };
     match handed_back(&out) {
-        Ok(None) => None,
+        Ok(None) => (Counts::default(), Part::Met),
         Ok(Some((held, reason))) => {
             let counts = Counts::from_json(&held["kinds"]).unwrap_or_else(|| {
                 let n = held["unmet"].as_u64().and_then(|n| usize::try_from(n).ok());
-                unkinded(n.unwrap_or(1))
+                Counts {
+                    unkinded: n.unwrap_or(1),
+                    ..Counts::default()
+                }
             });
-            Some((counts, format!("In {}:\n{reason}", checkout.display())))
+            let list = format!("In {}:\n{reason}", checkout.display());
+            (counts, Part::handed(checkout, list))
         }
-        Err(why) => Some((
-            unkinded(1),
-            format!(
-                "done could not read {}'s verdict: {why}",
-                checkout.display()
-            ),
+        Err(why) => unjudged(format!(
+            "done could not read {}'s verdict: {why}",
+            checkout.display()
         )),
     }
 }
@@ -1850,13 +1893,16 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// otherwise one over the checkouts the session wrote in; `counts` and
 /// `unmet` counted over them all. What the other checkouts hold is said
 /// beside this one's verdict, so a failing row never says every
-/// condition is met.
+/// condition is met. A judged Stop that decided its turn counts the
+/// bullets `added` and `removed` against the last judged Stop's and
+/// whether it passed as a `repeat` (Round 1, Q13 (d), Q15 (a)), and its
+/// message says a repeat: the reading fails as any list does.
 fn stop_reading(
-    here: Option<&Verdict>,
+    (here, checkouts): (Option<&Verdict>, usize),
     manifest: &Manifest,
     snapshot: &Snapshot,
     counts: Counts,
-    checkouts: usize,
+    turn: Option<&turn::Decision>,
 ) -> Result<Reading> {
     let unmet = counts.total();
     let mut reading = if let Some(verdict) = here {
@@ -1886,22 +1932,30 @@ fn stop_reading(
     reading.status = Status::of(unmet == 0);
     reading.count("unmet", unmet as u64)?;
     counts.count_on(&mut reading)?;
+    if let Some(decision) = turn {
+        let repeat = decision.turn == Turn::Repeat;
+        reading.count("added", decision.added as u64)?;
+        reading.count("removed", decision.removed as u64)?;
+        reading.count("repeat", u64::from(repeat))?;
+        if repeat {
+            reading.message = format!(
+                "{}; passed, a repeat of the last judged Stop",
+                reading.message
+            );
+        }
+    }
     Ok(reading)
 }
 
 /// The second Stop's release, recorded (#3618 M4): `done` over `released`,
-/// failed, with the count of the block this session's last Stop wrote.
-/// It is timed as it is made and carries no key, since the release
-/// judged no tree.
-fn released(store: &Store, stop: &StopStdin, caller: Caller) -> Result<()> {
-    let log = store.history(INSTRUMENT)?;
-    let last = log.readings.iter().rev().find(|r| {
-        r.scope == WORKSPACE && r.session == stop.session_id && !stop.session_id.is_empty()
-    });
-    let unmet = last.and_then(|r| r.int("unmet")).unwrap_or_default();
+/// failed, with the count of the block, which the turn's memory at
+/// `memory` kept (Round 1, Q15 (a)). It is timed as it is made and
+/// carries no key, since the release judged no tree.
+fn released(store: &Store, memory: Option<&Path>, stop: &StopStdin, caller: Caller) -> Result<()> {
+    let unmet = memory.and_then(Memory::read).map_or(0, |m| m.unmet);
     let mut reading = Reading::keyed(INSTRUMENT, RELEASED, String::new())?;
     reading.status = Status::Fail;
-    reading.count("unmet", u64::try_from(unmet).unwrap_or_default())?;
+    reading.count("unmet", unmet as u64)?;
     reading.message = format!("the second Stop released a block of {unmet} unmet");
     stop.session_id.clone_into(&mut reading.session);
     store.record(&[called(reading, caller)])?;
