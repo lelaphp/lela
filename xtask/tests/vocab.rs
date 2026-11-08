@@ -142,9 +142,10 @@ fn prose_using_an_avoided_word_fails_and_the_same_word_as_a_type_name_passes() {
     );
 }
 
-/// The glossary's Ticket entry (#27): the two words that hide whether a
-/// thing found and not done was filed, `leftover` and `follow-up`, fire in
-/// a public name and in prose, and the finding names the term. A hyphen
+/// The glossary's Ticket entry (#27), and its Found work entry since: the
+/// two words that hide whether a thing found and not done was filed,
+/// `leftover` and `follow-up`, fire in a public name and in prose, and the
+/// finding names both terms that avoid them. A hyphen
 /// in the glossary's phrase is a word boundary, so `follow-up` in prose is
 /// the phrase as written.
 #[test]
@@ -152,8 +153,8 @@ fn a_thing_found_and_not_done_is_a_ticket_and_the_words_that_hide_it_fail() {
     let reading = fixture_reading("ticket");
     let found = findings(&reading);
     for line in [
-        "src/lib.rs:28: \"follow-up\" in rustdoc prose; the glossary says \"Ticket\"",
-        "src/lib.rs:29: \"leftover\" names `pub struct Leftover`; the glossary says \"Ticket\"",
+        "src/lib.rs:28: \"follow-up\" in rustdoc prose; the glossary says \"Found work\" or \"Ticket\"",
+        "src/lib.rs:29: \"leftover\" names `pub struct Leftover`; the glossary says \"Found work\" or \"Ticket\"",
     ] {
         assert!(found.contains(&line), "{line}: {found:#?}");
     }

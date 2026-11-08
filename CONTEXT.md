@@ -198,6 +198,38 @@ _Avoid_: suggestion
 What a person's file carries that parses but does not validate across files, such as a variant's build made against a closure the pin has moved past (`manifest::Defect`). Only the instruments that read the failing part refuse; permit and `done` judge by what loaded and note it, and the session's facts list it. A file that does not parse is no defect: loading it fails.
 _Avoid_: broken pin, invalid pin
 
+**Merge check**:
+The verdict `land` asks for after `done`: whether a head's kept runs pass every lane it owes, which decides whether main moves. Not built yet: coordinators run the lanes and judge them by eye.
+_Avoid_: batch check, merge gate
+
+**Hostile lane**:
+The instrument `hostile`, not built yet: a fixed corpus of PHP programs whose error handlers disturb an opline mid-step, each held to the oracle. A program fails it on a fault, or by differing now where it met php at the merge base.
+_Avoid_: differential fuzz (the `fuzz` instrument's)
+
+**Unmet item**:
+One entry of `done`'s list, with a kind: failing, stale, missing or refused. It is not a divergence's kind, which names a lane.
+_Avoid_: unmet line
+
+**Repeat**:
+A Stop's list that names nothing the last judged Stop of this session and agent did not: the same list or a shrunk one. A repeat passes and is recorded.
+_Avoid_: nothing-new pass
+
+**Found work**:
+Something a session met that its ticket did not ask for. It is verified, then built on the same ticket before the ticket lands, or filed.
+_Avoid_: leftover, follow-up
+
+**Verifying**:
+The step in which a spawned agent checks each item of found work against the tree and the tracker, and says whether a fresh builder builds it or it is filed. The verifying agent edits nothing.
+_Avoid_: triage (G7's sorting of what outsiders file)
+
+**Brief**:
+What a spawned builder starts with, rendered from its ticket by `xtask ticket brief`.
+_Avoid_: builder prompt
+
+**Role**:
+One of builder, reviewer and advisor: a file under `.claude/agents/` that sets a spawned agent's default model and effort, and its tools. It is a person's file.
+_Avoid_: agent type (Claude Code's `agentType`)
+
 **Seat**:
 One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `fold`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`, #2982). A bench on a dedicated machine takes every seat (`bench --machine dedicated`, #3767).
 _Avoid_: lease
@@ -225,6 +257,9 @@ _Avoid_: backlog (everything not yet done; a frontier is what is workable now), 
 **Chart**:
 One issue on the tracker, labelled `frontier:chart`, that says where one track is going: a Destination taken from the row of design §11 the engine stands at, the route walked as a line per closed ticket, the fog of work not yet sharp enough to ticket, and what is ruled past the destination. Its open sub-issues are the tickets, so the chart indexes and never restates, and a session loads it cold in one read. `/frontier chart <track> <days>` lays it down and files the first batch; `/frontier work <track>` files the next when the frontier empties. The noun is the verb that writes it.
 _Avoid_: roadmap, board, a track's map (revision 22 settled the word on `AGENTS.md`)
+
+**Spec**:
+A spec is the long form of a chart: a reviewed issue that no builder takes.
 
 **Divergence**:
 One accepted difference from the oracle, a row in `docs/divergence.toml` keyed by a witness hash, a phpt path, a compile-identity path, an extension's name, a trace site, a conformance suite's case or a test the production server answers otherwise by design, with a kind (the lane that reads it), a cause (whether it is parity debt: `debt` by default, while `php-ub`, `by-design` and `oracle-build` are counted apart from the day-30 target), a reason, a status and a date. The oracle module consults the registry on every comparison; a person writes the reason.
