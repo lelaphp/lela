@@ -191,7 +191,7 @@ finish() {
 # bench series; and a rented Apple-silicon Mac mini, labelled `dax-oracle`,
 # for the oracle job against the pinned keg. This walks the steps only a
 # person can take (ordering each machine, the SSH key, the registration
-# token, auto-login, the Cloudflare secret, billing) and runs
+# token, auto-login, the stash, billing) and runs
 # scripts/ci/runner.sh on each machine over SSH for the rest. Its last stage
 # deletes DAX_BUILD_RUNNER, the variable that held the Linux jobs on a
 # GitHub-hosted image until the server was online (#2477,
@@ -227,7 +227,7 @@ token() {
   gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token
 }
 
-TOTAL_STAGES=12
+TOTAL_STAGES=11
 
 banner "dax-php CI: the Hetzner server and the Mac mini as runners"
 
@@ -345,20 +345,6 @@ step "A runner missing here: run its stage again; runner.sh keeps what already s
 pause
 
 # ── 9 ─────────────────────────────────────────────────────────────────────
-stage "The Cloudflare token the dashboard publishes with"
-say "dashboard.yml reads one secret, CLOUDFLARE_API_TOKEN (dashboard/README.md)."
-if gh secret list --repo "$REPO" 2>/dev/null | grep -q '^CLOUDFLARE_API_TOKEN'; then
-  printf '  %s✓%s CLOUDFLARE_API_TOKEN is set; kept\n' "$GREEN" "$RESET"
-else
-  open_url "https://dash.cloudflare.com/profile/api-tokens"
-  step "Create Token → the 'Edit Cloudflare Workers' template → the account wrangler.jsonc names."
-  ask_secret CLOUDFLARE_API_TOKEN "Paste the token:"
-  if [[ "${DRY_RUN:-}" == 1 ]]; then note "dry run, not set: gh secret set CLOUDFLARE_API_TOKEN"
-  else set_secret CLOUDFLARE_API_TOKEN "$CLOUDFLARE_API_TOKEN"; fi
-fi
-pause
-
-# ── 10 ────────────────────────────────────────────────────────────────────
 stage "The stash every job hands off through"
 say "The jobs keep what they hand each other on the server (scripts/ci/stash.sh),"
 say "not as GitHub artifacts, which count against the account's storage (#3554)."
@@ -408,7 +394,7 @@ else
 fi
 pause
 
-# ── 11 ────────────────────────────────────────────────────────────────────
+# ── 10 ────────────────────────────────────────────────────────────────────
 stage "Billing"
 say "Self-hosted jobs spend no Actions minutes, but GitHub started no job at all while"
 say "the account's billing failed (#2218)."
@@ -418,7 +404,7 @@ step "Hosted macOS minutes are no longer used; a budget of 0 for them is safe."
 step "Hosted Linux minutes stop once the next stage deletes DAX_BUILD_RUNNER."
 pause "Press Enter once billing is settled"
 
-# ── 12 ────────────────────────────────────────────────────────────────────
+# ── 11 ────────────────────────────────────────────────────────────────────
 stage "The Linux jobs come home: DAX_BUILD_RUNNER deleted, then the first run"
 say "While DAX_BUILD_RUNNER is set, the Linux jobs run on a GitHub-hosted image and"
 say "both oracle jobs are skipped (scripts/ci/README.md). With both runners online"
@@ -438,10 +424,10 @@ else
   warn "DAX_BUILD_RUNNER is still set: the Linux jobs stay hosted and the oracle jobs skipped."
   SKIPPED+=("delete the variable: gh variable delete DAX_BUILD_RUNNER --repo $REPO")
 fi
-if confirm "Run the dashboard workflow on main now (Linux measure, Mac oracle)?"; then
-  act gh workflow run dashboard.yml --repo "$REPO" --ref main
-  open_url "$REPO_URL/actions/workflows/dashboard.yml"
-  step "Its 'measure' job should start on dax-build and 'oracle' on dax-oracle."
+if confirm "Run the nightly workflow on main now (its Mac oracle job)?"; then
+  act gh workflow run nightly.yml --repo "$REPO" --ref main
+  open_url "$REPO_URL/actions/workflows/nightly.yml"
+  step "Its 'oracle' job should start on dax-oracle; the next push to main runs harness.yml on dax-build."
   step "Post the run's link on the ticket this wizard came with, so its boxes can be ticked."
 fi
 

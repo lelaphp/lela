@@ -5,11 +5,11 @@
 #                       as Mitchell adopted on #1151): the verdict is this
 #                       run's, and the one before it the newest finished
 #                       harness run of a push to main other than this one.
-#   red.sh nightly JOB  dashboard.yml's last job, once for `soak` and once for
+#   red.sh nightly JOB  nightly.yml's last job, once for `soak` and once for
 #                       `tailcall`, nightly and by hand with `full` (#2980):
 #                       the verdict is JOB's in this run, and the one before
-#                       it JOB's in the newest finished dashboard run, nightly
-#                       or by hand, that ran it.
+#                       it JOB's in the newest finished nightly.yml run,
+#                       nightly or by hand, that ran it.
 #
 # A cancelled run, and a run whose JOB was skipped or cancelled, is passed
 # over. Each subject has a label of its own, `ci:red-main` or `ci:red-JOB`:
@@ -44,16 +44,16 @@ main)
     heading="harness.yml: main"
     ;;
 nightly)
-    job=${2:?nightly names a job of dashboard.yml}
-    workflow=dashboard.yml label=ci:red-$job
+    job=${2:?nightly names a job of nightly.yml}
+    workflow=nightly.yml label=ci:red-$job
     # The job's `name:`, unquoted, which is what the API reports a job by.
     job_name=$(awk -v key="  $job:" '$0 == key { inside = 1; next }
         inside && /^  [^ #]/ { exit }
         inside && sub(/^    name: /, "") { gsub(/^["'\'']|["'\'']$/, ""); print; exit }' \
         "$(dirname "$0")/../../.github/workflows/$workflow")
     [ -n "$job_name" ] || { echo "red.sh: $workflow has no job $job with a name" >&2; exit 2; }
-    what="dashboard.yml's \`$job\` job" runs_of="nightlies" cause="#2980"
-    heading="dashboard.yml: the $job nightly"
+    what="nightly.yml's \`$job\` job" runs_of="nightlies" cause="#2980"
+    heading="nightly.yml: the $job nightly"
     ;;
 *)
     echo "usage: red.sh main | red.sh nightly JOB" >&2
@@ -79,7 +79,7 @@ write() {
 
 # The earlier verdicts, newest first, each `{conclusion, headSha, url}`:
 # main's are the finished runs of a push to main; a nightly JOB's are its
-# own in each finished dashboard run of main, of the schedule or by hand,
+# own in each finished nightly.yml run of main, of the schedule or by hand,
 # read back to its last green. A job that ran out of its time is red: the
 # API says `timed_out`, or `cancelled` in a run nobody cancelled. This run,
 # and a verdict neither green nor red, are left out.
@@ -91,7 +91,7 @@ verdicts() {
                 and (.conclusion == "success" or .conclusion == "failure"))]'
         return
     fi
-    # Asked by event, since a dashboard run follows every push to main too.
+    # Asked by event, since a nightly.yml run follows every push to main too.
     # Bash clears -e in the command substitution this runs in, so each call
     # that fails ends it by hand rather than read as a run with no verdict.
     local nightlies event id ran head url conclusion
