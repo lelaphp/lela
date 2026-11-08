@@ -90,7 +90,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=596420b8d2481756ec6e3fc73e24ad135b837d8e01156e5e5f1c5762ea60ac12 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=7123209406fe455dd33890bcfb98c02daee92032e16e3db29688f69587542fb7 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -126,9 +126,9 @@ third-engine-design.md
 | tier | tier.lock | 237 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 40 |  |
-| harness | xtask.lock | 461 |  |
+| harness | xtask.lock | 464 |  |
 
-<!-- /computed in=e94737cc525bee8f8a10656f1b5c0b187d93b90496a0c3ee5667f6ae9e7fe489 out=a895d65b04a6b91ca7c7360fbffa4c3ac8aff602abe0b5b2ecf1eb85b739dfc0 -->
+<!-- /computed in=f5c9a5ded8bdcf4521e8c95e294a655c7e4d99b5ad3ee3034b355b04f792dcd5 out=a21e83c3de9866ea7aa492e1d13f198e9ed902f79e335275d9b632aed2e01cc2 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -155,6 +155,7 @@ Commands:
   compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, and hold every file to byte-identity; one reading per corpus, scoped to the corpus
   crosscheck         Hold each default extension's `--re` and `--ri` rendering to the oracle's bytes, kept in the store; one reading per extension per flag
   trace-dump         Hold the engine's `TRACE` lines under `jit.mode=force` to the oracle's under `[regime.jit-inline]` on the seven kernels, kept in the store; one reading per kernel
+  hostile            Hold the engine to the oracle on `data/hostile.toml`'s programs, whose error handlers disturb an opline mid-step; one reading per crate that owes it
   fold               Hold the release `serve_frame` to LLVM's fold of a request field's address into each access; one reading, at `sapi/cli`
   fpm-compare        Hold makala to the pinned php-fpm: each request of the HTTP-served subset served by both, the status, header lines and body compared; one reading, at makala's crate
   soak               Many clients against one makala for a fixed time, each response held to the request served alone; one reading, at makala's crate
@@ -171,7 +172,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=d493c5ce3d5ce57264018eaa381348bb7958d58c35308736e0362ec4a9f6c165 out=e34ef8e9246393b1ec3edba92a1a290a8f2f5e0898c8771118d3513f337bb0bd -->
+<!-- /computed in=a4bbec7487102320b4cad3f7454627e804e22bf37671592a8e01daf5b631ad66 out=4890c46e3cf818724053edaab215fe5b203cecc1148d2dc2c117f2b7b6be56e3 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

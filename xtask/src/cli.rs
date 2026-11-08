@@ -351,6 +351,16 @@ pub(crate) enum Command {
     /// held through the registry under `trace:dump/<kernel>`; the engine's
     /// side is `php` built with the tier's feature.
     TraceDump(crate::trace_dump::Ask),
+    /// Hold the engine to the oracle on `data/hostile.toml`'s programs, whose
+    /// error handlers disturb an opline mid-step; one reading per crate that
+    /// owes it.
+    ///
+    /// A fault fails the run, under the interpreter or under
+    /// `[regime.jit-force]`, as does a program that met php at the merge
+    /// base and differs now; any other difference is counted. The oracle's
+    /// side is kept per pin, and the interpreter's verdicts at
+    /// `target/harness/hostile-runs/<engine tree>.json` (#4265).
+    Hostile,
     /// Hold the release `serve_frame` to LLVM's fold of a request field's
     /// address into each access; one reading, at `sapi/cli`.
     ///

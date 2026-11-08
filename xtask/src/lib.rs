@@ -50,6 +50,7 @@ mod fold;
 pub mod generated;
 mod git;
 mod glossary;
+pub mod hostile;
 /// What a build of the harness judges by, digested: the seam manifest and
 /// `xtask`'s own sources (harness-design.md §4.4, #16). Shared with
 /// `build.rs`, which includes the file rather than importing it.
@@ -336,6 +337,7 @@ fn command_line() -> Result<()> {
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
         Command::CompileIdentity(ask) => compile_identity::command(&root, &manifest, &store, &ask),
         Command::TraceDump(ask) => trace_dump::command(&root, &manifest, &store, &ask),
+        Command::Hostile => hostile::command(&root, &manifest, &store),
         Command::Fold(ask) => fold::command(&root, &manifest, &store, &ask),
         Command::Crosscheck { ext, staged } => {
             crosscheck_command(&root, &manifest, &store, ext, staged)

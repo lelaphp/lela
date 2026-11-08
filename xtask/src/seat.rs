@@ -213,6 +213,7 @@ pub(crate) fn of_command(command: &crate::cli::Command) -> Option<Seat> {
         Command::CompileIdentity(_) => "compile-identity",
         Command::Crosscheck { .. } => "crosscheck",
         Command::TraceDump(_) => "trace-dump",
+        Command::Hostile => "hostile",
         Command::Fold(_) => "fold",
         Command::FpmCompare { .. } | Command::Soak { .. } => "makala",
         Command::Witness(_) => "witness",

@@ -1,0 +1,8 @@
+# Must be refused: a hostile id is covered by trace rows alone.
+[[divergence]]
+id = "witness:0000000000000000000000000000000000000000"
+kind = "witness"
+reason = "fixture"
+status = "accepted"
+since = "2026-11-07"
+covers = ["hostile:kept-met"]

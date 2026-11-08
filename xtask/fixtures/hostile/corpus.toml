@@ -1,0 +1,17 @@
+# Two programs that decode.
+[[program]]
+id = "grows-one"
+form = "grows"
+code = '''
+set_error_handler(function () { for ($i = 0; $i < 9; $i++) { $GLOBALS["g$i"] = $i; } return true; });
+$a = []; $a['k'] .= 'v'; var_dump($a);
+'''
+
+[[program]]
+id = "throws-two"
+form = "throws"
+from = "a fixture"
+code = '''
+set_error_handler(function ($n, $m) { throw new ErrorException($m); });
+try { $x = $u; } catch (ErrorException $e) { echo $e->getMessage(), "\n"; }
+'''
