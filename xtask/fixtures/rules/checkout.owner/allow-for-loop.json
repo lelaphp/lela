@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"for n in 4160 4162; do gh issue view $n; done","description":"A for loop whose body only reads the tracker, in a checkout another session owns (#4162)"}}

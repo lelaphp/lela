@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-session","tool_input":{"command":"git remote set-head origin main && git symbolic-ref -q --short refs/remotes/origin/HEAD","description":"Write only refs/remotes/origin/HEAD, a shared ref, and read it, in a checkout another session owns (#4066)"}}

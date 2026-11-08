@@ -97,7 +97,7 @@ const READERS: [(&str, &[&str]); 30] = [
 /// settings and a new worktree beside them; what reaches the tracker alone;
 /// and the instruments that say where things stand. Each with the words
 /// that would make it write.
-const LEAVES: [(&str, &[&str]); 34] = [
+const LEAVES: [(&str, &[&str]); 38] = [
     ("cd", &[]),
     ("pushd", &[]),
     ("popd", &[]),
@@ -114,6 +114,9 @@ const LEAVES: [(&str, &[&str]); 34] = [
     ("tr", &[]),
     ("jq", &[]),
     ("sort", &["-o", "--output"]),
+    // `-exec` stands for `-execdir` too, `-ok` for `-okdir`, `-fprint` for
+    // `-fprint0` and `-fprintf` (#4162).
+    ("find", &["-delete", "-exec", "-ok", "-fprint", "-fls"]),
     ("gh", &["checkout", "clone"]),
     ("git rev-parse", &[]),
     ("git rev-list", &[]),
@@ -123,6 +126,10 @@ const LEAVES: [(&str, &[&str]); 34] = [
     ("git describe", &[]),
     ("git for-each-ref", &[]),
     ("git fetch", &[]),
+    // It writes `refs/remotes/<name>/HEAD` alone (#4066).
+    ("git remote set-head", &[]),
+    // git refuses every other mode of `branch` beside `--list` (#4162).
+    ("git branch --list", &[]),
     ("git config --get", &[]),
     ("git config --get-all", &[]),
     ("git config --get-regexp", &[]),
@@ -133,7 +140,11 @@ const LEAVES: [(&str, &[&str]); 34] = [
     // `track work` runs sessions in the checkout it stands in.
     ("xtask track", &["work"]),
     ("xtask status", &[]),
+    ("xtask ticket read", &[]),
 ];
+
+/// `git symbolic-ref`'s options that leave the ref it names as it was.
+const READS_REF: [&str; 5] = ["-q", "--quiet", "--short", "--recurse", "--no-recurse"];
 
 /// Commands whose last operand is the one they write.
 const COPIES: [&str; 5] = ["cp", "install", "ln", "rsync", "scp"];
@@ -215,16 +226,29 @@ pub(super) fn can_write(line: &Line, place: &impl Place) -> bool {
 /// Whether `argv` can change the checkout it runs in (#3621, #3755): its
 /// working tree, its index, its HEAD or its operation files. Every command can but a reader that
 /// leaves the index alone ([`READERS`] less git's `add` and `commit`),
-/// `sed` without `-i`, and what [`LEAVES`] names; a redirection the line
-/// makes is the line's, and read beside its commands.
+/// `sed` without `-i`, what [`LEAVES`] names, a `git symbolic-ref` that
+/// reads ([`reads_ref`]) and an `xtask` that asks for its help; a
+/// redirection the line makes is the line's, and read beside its commands.
 pub(super) fn changes(argv: &Argv) -> bool {
     let index = argv.runs("git add") || argv.runs("git commit");
     let leaves = || {
         LEAVES
             .iter()
             .any(|(phrase, writing)| argv.runs(phrase) && !carries(argv, writing))
+            || reads_ref(argv)
+            || (argv.runs("xtask") && argv.asks_help())
     };
     index || !(operands_of(argv) == Operands::None || leaves())
+}
+
+/// Whether `argv` is a `git symbolic-ref` that reads the one ref it names
+/// (#4066), its options all [`READS_REF`]: with a second operand it points
+/// the first, `HEAD` among them, at it, and `-d` deletes the first.
+fn reads_ref(argv: &Argv) -> bool {
+    argv.after("git symbolic-ref").is_some_and(|own| {
+        let (options, operands): (Vec<&String>, _) = own.iter().partition(|w| w.starts_with('-'));
+        operands.len() == 1 && options.iter().all(|o| READS_REF.contains(&o.as_str()))
+    })
 }
 
 /// Whether one of `argv`'s words is one of `options` or begins with one.
@@ -431,6 +455,23 @@ mod tests {
             "git worktree remove wt",
             "cargo xtask track work --track x",
             "cargo xtask worktree own",
+            // #4066: what can point the checkout's HEAD elsewhere or delete it.
+            "git symbolic-ref HEAD refs/heads/x",
+            "git symbolic-ref -m why HEAD refs/heads/x",
+            "git symbolic-ref -d HEAD",
+            "git symbolic-ref --delete HEAD",
+            "git symbolic-ref -qd HEAD",
+            // #4160, #4162.
+            "cargo xtask ticket close 4160 --opens-nothing",
+            "for n in a b; do touch $n; done",
+            "find . -name '*.orig' -delete",
+            "find . -exec rm {} +",
+            "find . -execdir rm {} ;",
+            "find . -okdir rm {} ;",
+            "find . -fprint list",
+            "git branch -D t1",
+            "git -C wt branch -m t2",
+            "git branch t3",
         ] {
             assert!(changes(line), "{line}");
         }
@@ -454,6 +495,21 @@ mod tests {
             "cargo xtask worktree whose",
             "cargo xtask track",
             "cargo xtask status --section git",
+            // #4066: what writes only `refs/remotes/<name>/HEAD`, or reads a ref.
+            "git remote set-head origin main",
+            "git remote set-head origin --auto",
+            "git remote set-head origin -d",
+            "git symbolic-ref refs/remotes/origin/HEAD",
+            "git -C wt symbolic-ref -q --short HEAD",
+            // #4160, #4162.
+            "cargo xtask ticket read 4160",
+            "for n in 4160 4162; do gh issue view $n; done",
+            "find . -name '*.rs' -type f -newer a",
+            "git branch --list",
+            "git -C wt branch -a --list 't*'",
+            "cargo xtask --help",
+            "cargo xtask budget --help",
+            "cargo xtask ticket close -h",
         ] {
             assert!(!changes(line), "{line}");
         }
