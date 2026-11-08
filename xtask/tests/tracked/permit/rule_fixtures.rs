@@ -139,9 +139,7 @@ fn fires_as_a_monitor(manifest: &Manifest, workspace: &Path, rule: &Rule, fires:
 
 /// Every rule with a `tool` or a `scope` is either judged here, with its
 /// fixture, or carries one of the five predicates that read the tree after
-/// the write, or is read at the Stop alone (`tool = "Stop"`, #32), which
-/// `permit` never judges and no after-the-write sensor reads; a fourth
-/// kind cannot fall between the three.
+/// the write; a third kind cannot fall between the two.
 #[test]
 fn every_rule_with_a_tool_or_a_scope_is_judged_or_is_an_after_the_write_sensor() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -156,16 +154,6 @@ fn every_rule_with_a_tool_or_a_scope_is_judged_or_is_an_after_the_write_sensor()
             || p.deny_lints.is_some()
             || p.avoid_from.is_some()
             || p.generated.is_some();
-        if rule.tool.iter().any(|t| t == "Stop") {
-            assert!(
-                !judged_at_the_call(rule) && !after_the_write,
-                "{}: a Stop rule is judged at the call {}, after the write {}",
-                rule.id,
-                judged_at_the_call(rule),
-                after_the_write
-            );
-            continue;
-        }
         assert!(
             judged_at_the_call(rule) != after_the_write,
             "{}: judged {}, after the write {}",

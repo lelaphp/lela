@@ -696,13 +696,6 @@ text = "The same act through `gh api`: an issue's state is set by `xtask ticket 
 remedy = "`cargo xtask ticket close <n>`"                 # #3618 ruling 3
 
 [[rule]]
-id = "ticket.reply-unfiled"
-tool = "Stop"
-deny_pattern = '(?i)\b(left (for|to) a person|for a person to|handed (off )?to a person|a person (decides|must|should|will|would|has to)|is a person.?s( alone)?|worth (filing|a ticket)|(needs|deserves|wants) (a|its own) ticket|should be filed|not (yet )?filed|left open|leaves? open|open question|still to (do|decide)|not (yet )?done|remains? (to be|to do|undone|open)|in a later (commit|turn|session|ticket)|next turn|future work|follow[- ]?ups?|leftovers?|out of scope|todo)\b'
-text = "A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes."
-remedy = "file it with `gh issue create`, `ready-for-agent` or `for-a-person`, and name its number in the reply"                 # #3627
-
-[[rule]]
 id = "lanes.nightly"
 tool = "Bash"
 deny_pattern = '(?m)(\A|[|;&]\s*)"?(\S*\bphp[0-9.]*|\$\{?\w+\}?)"?(\s+[^|;&\s]+)*?\s+\S*run-tests\.php|(\A|[|;&]\s*)\S*run-tests\.php|compile-identity --corpus'   # upstream's runner where it is run (first in the call, after a separator, or under php), never where it is cited, a message's line included (#790); the lane's flags are lanes.nightly-flags (#1860)

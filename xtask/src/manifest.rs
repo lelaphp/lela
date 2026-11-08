@@ -885,13 +885,6 @@ impl Predicates {
 }
 
 impl Rule {
-    /// Whether the rule reads the reply at the Stop rather than a call:
-    /// `tool = "Stop"`, the hook event where it is read, so `permit` never
-    /// judges it and `done --hook` does (#32).
-    pub(crate) fn at_the_stop(&self) -> bool {
-        self.tool.iter().any(|t| t == "Stop")
-    }
-
     /// A rule by id alone over `scope`, carrying `deny = true`, the one
     /// predicate with nothing to name, so the row passes the grammar
     /// `parse` holds a rule to; its text is its id.

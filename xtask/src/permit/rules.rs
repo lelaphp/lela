@@ -193,10 +193,9 @@ pub(super) fn deny_output(reason: &str) -> Value {
 }
 
 /// Whether a rule describes a write or a command, so permit can judge it
-/// before the call runs. A rule at the Stop (`tool = "Stop"`) describes
-/// the reply that ends a turn, which `done --hook` reads, and is not one.
+/// before the call runs.
 pub fn judged_at_the_call(rule: &Rule) -> bool {
-    rule.predicate.describes_a_call() && !rule.at_the_stop()
+    rule.predicate.describes_a_call()
 }
 
 /// Judge one call: the region-body rule, then the manifest's rules in
