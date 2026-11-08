@@ -274,3 +274,31 @@ fn a_handler_that_frees_the_root_at_c14ns_query_error_frees_a_restored_tree() {
     );
     assert_eq!(served.exit_code, 0);
 }
+
+/// A class `registerNodeClass()` maps elements to, whose default property
+/// names a class that is not there: the engine throws the `Error` the
+/// evaluation raised and goes on (#3912).
+#[test]
+fn a_registered_class_whose_default_cannot_be_evaluated_throws() {
+    let engine = support::engine();
+    let served = engine.serve_capture(
+        r#"<?php
+class MyEl extends DOMElement { public $x = Foo::BAR; }
+$d = new DOMDocument;
+$d->loadXML('<r/>');
+$d->registerNodeClass('DOMElement', 'MyEl');
+try {
+    var_dump($d->documentElement);
+} catch (Error $e) {
+    echo get_class($e), ': ', $e->getMessage(), "\n";
+}
+echo "end\n";
+"#,
+        Capture::default(),
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "Error: Class \"Foo\" not found\nend\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
