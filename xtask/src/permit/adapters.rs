@@ -237,38 +237,48 @@ fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
     }
 }
 
-/// The checkout an admitted writing call is placed in, kept under its
+/// The checkouts an admitted writing call is placed in, kept under its
 /// session and agent for the Stop to hold (#3618 ruling 1): a file's by
-/// the file, a `Bash` line's where it runs from where the call starts
-/// ([`Call::start`], [`Walk::ran_in`]) unless it only reads ([`writes::reads_only`]);
-/// a place in no checkout of the repository is none. Best effort, as
-/// recording the decision is.
+/// the file, and a `Bash` line's each checkout its writes land in, read
+/// from where the call starts ([`Call::start`], [`writes::of`], Round 2,
+/// Q34 (a)), unless it only reads ([`writes::reads_only`], which the
+/// builds and instruments of `STILL` pass); a place in no checkout of the
+/// repository is none. Best effort, as recording the decision is.
 fn record_the_write(workspace: &Path, call: &Call, judgement: &Judgement) {
     if judgement.denial().is_some() {
         return;
     }
-    let checkout = match (call.command(), call.path(workspace)) {
+    let checkouts = match (call.command(), call.path(workspace)) {
         (Some(command), _) => {
             let line = Line::read(command);
             if writes::reads_only(&line, workspace) {
                 return;
             }
             let start = call.start(workspace);
-            Walk::of(&start, Some(&line)).ran_in(&start)
+            let places = writes::of(&Walk::of(&start, Some(&line)));
+            let mut checkouts: Vec<PathBuf> = Vec::new();
+            for checkout in places.iter().filter_map(|p| crate::owner::checkout_of(p)) {
+                if !checkouts.contains(&checkout) {
+                    checkouts.push(checkout);
+                }
+            }
+            checkouts
         }
         (None, Some(path)) => match path.ancestors().find(|dir| dir.is_dir()) {
-            Some(dir) => Walk::of(dir, None).ran_in(dir),
+            Some(dir) => vec![Walk::of(dir, None).ran_in(dir)],
             None => return,
         },
         (None, None) => return,
     };
-    let ours = crate::track::worktrees(workspace).is_ok_and(|all| {
-        all.iter()
-            .any(|(dir, _)| dir.canonicalize().ok().as_ref() == Some(&checkout))
-    });
+    let Ok(all) = crate::track::worktrees(workspace) else {
+        return;
+    };
     let agent = call.agent_id.as_deref().unwrap_or_default();
-    if ours && let Err(err) = ledger::wrote(workspace, &call.session_id, agent, checkout) {
-        eprintln!("xtask permit: the checkout this call wrote in was not recorded: {err:#}");
+    for checkout in checkouts {
+        let ours = (all.iter()).any(|(dir, _)| dir.canonicalize().ok().as_ref() == Some(&checkout));
+        if ours && let Err(err) = ledger::wrote(workspace, &call.session_id, agent, checkout) {
+            eprintln!("xtask permit: the checkout this call wrote in was not recorded: {err:#}");
+        }
     }
 }
 

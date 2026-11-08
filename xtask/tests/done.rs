@@ -152,8 +152,14 @@ fn stop_hook(root: &Path, event: &str) -> Ran {
 /// A writing call of `agent` of `session` in `checkout`, admitted by the
 /// permit of `root`, which records where it wrote.
 fn wrote_in(root: &Path, checkout: &Path, session: &str, agent: Option<&str>) {
+    wrote_by(root, checkout, session, agent, "touch written");
+}
+
+/// The `Bash` call `command` of `agent` of `session`, standing in `cwd`,
+/// admitted by the permit of `root`, which records where its writes land.
+fn wrote_by(root: &Path, cwd: &Path, session: &str, agent: Option<&str>, command: &str) {
     let call = serde_json::json!({"session_id": session, "agent_id": agent, "tool_name": "Bash",
-        "cwd": checkout.to_str().unwrap(), "tool_input": {"command": "touch written"}});
+        "cwd": cwd.to_str().unwrap(), "tool_input": {"command": command}});
     // A build that cannot judge records nothing, as the hook's would not.
     Run::at(root).args(["permit"]).stdin(call.to_string()).go();
 }
@@ -1965,6 +1971,147 @@ fn a_block_the_second_stop_released_is_a_reading_with_its_count() {
             .starts_with("stop: the second Stop released"),
         "{}",
         release.message
+    );
+}
+
+/// A Stop whose list repeats or shrinks the last judged Stop's of the
+/// same session and agent passes and is recorded, at both Stop events; a
+/// new bullet holds with the whole list; and a met Stop clears the
+/// memory, so the list after it is new again (Round 1, Q13 (d), Q15 (a);
+/// Round 2, Q32 (b)).
+#[test]
+fn a_repeated_or_shrunk_list_passes_and_a_new_bullet_holds_with_the_whole_list() {
+    for (event, agent) in [("Stop", None), ("SubagentStop", Some("builder"))] {
+        let root = scratch(&format!("hook-repeat-{event}"));
+        let store = Store::of_workspace(&root);
+        let stop = serde_json::json!({"session_id": "s-repeat", "agent_id": agent,
+            "hook_event_name": event})
+        .to_string();
+        let file = match agent {
+            None => "main.json".to_owned(),
+            Some(agent) => format!("agent-{agent}.json"),
+        };
+        let memory = store.root().join("turn/s-repeat").join(file);
+        let last = || store.read("done", "workspace").unwrap().unwrap();
+
+        write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+        let first = hook(&root, &stop).ok();
+        assert!(
+            first.contains("no reading for ext/pcre"),
+            "{event}: {first}"
+        );
+        let held = last();
+        assert_eq!(held.numbers["added"], held.numbers["unmet"], "{held:#?}");
+        assert_eq!(held.numbers["repeat"], 0.into(), "{held:#?}");
+        assert!(memory.is_file(), "{event}: {}", memory.display());
+
+        assert_eq!(hook(&root, &stop).ok(), "", "{event}: the same list passes");
+        let repeat = last();
+        assert_eq!(repeat.status, Status::Fail, "{repeat:#?}");
+        assert_eq!(repeat.numbers["repeat"], 1.into(), "{repeat:#?}");
+        assert_eq!(repeat.numbers["added"], 0.into(), "{repeat:#?}");
+        assert_eq!(repeat.numbers["removed"], 0.into(), "{repeat:#?}");
+        assert!(
+            repeat
+                .message
+                .contains("passed, a repeat of the last judged Stop"),
+            "{}",
+            repeat.message
+        );
+
+        // One bullet fewer: a fresh clippy reading over the crate.
+        met(&store, &root, "clippy", "ext/pcre");
+        assert_eq!(hook(&root, &stop).ok(), "", "{event}: a shrunk list passes");
+        let shrunk = last();
+        assert_eq!(shrunk.numbers["removed"], 1.into(), "{shrunk:#?}");
+        assert_eq!(shrunk.numbers["added"], 0.into(), "{shrunk:#?}");
+
+        // The clippy reading gone again is a bullet that left and came
+        // back: new, so the turn holds with the whole list.
+        forget(&store, "clippy", "ext/pcre");
+        let again = hook(&root, &stop).ok();
+        assert!(again.contains("\"decision\":\"block\""), "{event}: {again}");
+        assert!(
+            again.contains("witness: no reading for ext/pcre"),
+            "{again}"
+        );
+        assert_eq!(last().numbers["added"], 1.into(), "{:#?}", last());
+
+        // A met Stop clears the memory.
+        Repo::at(&root).git(&["checkout", "-q", "--", "ext/pcre/src/lib.rs"]);
+        assert_eq!(hook(&root, &stop).ok(), "", "{event}: nothing unmet");
+        assert!(!memory.exists(), "{event}: the met Stop cleared the memory");
+    }
+}
+
+/// The coordinator is not held on the merge worktree: a checkout on
+/// `staging` that the session wrote in is none the Stop judges (Round 1,
+/// Q14 (b)).
+#[test]
+fn the_merge_worktree_on_staging_is_not_judged_at_the_stop() {
+    let root = scratch("hook-merge");
+    let tree = Tree::new("done-hook-merge").unwrap();
+    let merge = tree.join("_merge");
+    Repo::at(&root).git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "staging",
+        merge.to_str().unwrap(),
+    ]);
+    wrote_in(&root, &merge, "s", None);
+    assert_eq!(stop_hook(&root, "{\"session_id\":\"s\"}").ok(), "");
+    let reading = Store::of_workspace(&root)
+        .read("done", "workspace")
+        .unwrap()
+        .unwrap();
+    assert!(
+        reading
+            .message
+            .starts_with("stop: 0 unmet over the 0 checkouts"),
+        "{}",
+        reading.message
+    );
+    // A checkout on another branch, written the same way, is judged.
+    let other = tree.join("t1");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t1", other.to_str().unwrap()]);
+    wrote_in(&root, &other, "s", None);
+    let out = stop_hook(&root, "{\"session_id\":\"s\"}").ok();
+    assert!(out.contains("done could not judge"), "{out}");
+    assert!(out.contains("t1"), "{out}");
+    assert!(!out.contains("_merge"), "{out}");
+}
+
+/// The Stop's record keeps the checkouts a line's writes land in, from
+/// where it starts, and not the one it runs in (Round 2, Q34 (a)): a write
+/// into another checkout holds that one, a write outside every checkout
+/// holds none, and a build `STILL` lists holds none.
+#[test]
+fn the_stop_holds_the_checkout_a_lines_writes_land_in() {
+    let root = scratch("hook-lands");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let tree = Tree::new("done-hook-lands").unwrap();
+    let other = tree.join("t1");
+    Repo::at(&root).git(&["worktree", "add", "-q", "-b", "t1", other.to_str().unwrap()]);
+    let other = other.canonicalize().unwrap();
+    let elsewhere = tree.join("outside");
+    let lines = [
+        format!("touch {}/written", other.display()),
+        format!("mkdir -p {}", elsewhere.display()),
+        "cargo test -p xtask".to_owned(),
+    ];
+    for line in &lines {
+        wrote_by(&root, &root, "s", None, line);
+    }
+    let out = stop_hook(&root, "{\"session_id\":\"s\"}").ok();
+    assert!(
+        out.contains(&format!("done could not judge {}", other.display())),
+        "{out}"
+    );
+    assert!(
+        !out.contains("no reading for ext/pcre"),
+        "the line ran here: {out}"
     );
 }
 
