@@ -58,7 +58,7 @@ use crate::phpt::file::Phpt;
 use crate::phpt::{Test, adapter, cgi, http};
 use crate::reading::{Reading, plural};
 use crate::witness::makala::Http;
-use crate::workloads::{self, Declaration, Text};
+use crate::workloads::{self, Declaration, Run, Text};
 
 /// The crate both instruments' readings are scoped to.
 pub(crate) const SCOPE: &str = "sapi/makala";
@@ -164,19 +164,20 @@ fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
 /// The bench workloads the declaration at `root` gives a served request,
 /// each a `GET` with no ini of its own, in the declaration's order, written
 /// under the recipe's `script_name`, the request the server's bench series
-/// has sent since it began (#2351). A request is a run of a file that takes
-/// no arguments: a served request has no `$argv`, so a profiled run waits
-/// on #4366's ruling, and a pinned file or declared code is no file of the
+/// has sent since it began (#2351). A request is the bare run of a file:
+/// a served request has no `$argv`, so a profiled run waits on #4366's
+/// ruling, and a pinned file or declared code is no file of the
 /// directory, which is what a host serves.
 pub(crate) fn workloads(root: &Path) -> Result<Vec<Entry>> {
     let script = Manifest::load(root)?.pin()?.recipe.script_name.clone();
     let declared = Declaration::load(root)?;
-    let served = (declared.runs())
-        .filter(|run| run.args().is_empty())
-        .filter_map(|run| match run.workload.text() {
-            Text::File(path) => Some((run.workload.stem.as_str(), path)),
-            Text::Pinned(_) | Text::Code(_) => None,
-        });
+    let served =
+        (declared.runs())
+            .filter(Run::is_bare)
+            .filter_map(|run| match run.workload.text() {
+                Text::File(path) => Some((run.workload.stem.as_str(), path)),
+                Text::Pinned(_) | Text::Code(_) => None,
+            });
     served
         .map(|(stem, path)| {
             Ok(Entry {

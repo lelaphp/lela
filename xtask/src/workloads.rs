@@ -169,6 +169,12 @@ impl Run<'_> {
         &self.workload.text
     }
 
+    /// Whether it runs under no profile, as a served request does, which
+    /// has no `$argv`.
+    pub(crate) fn is_bare(&self) -> bool {
+        self.profile.is_none()
+    }
+
     /// The arguments after the program's path.
     pub(crate) fn args(&self) -> &[String] {
         self.profile.map_or(&[], |profile| &profile.args)
