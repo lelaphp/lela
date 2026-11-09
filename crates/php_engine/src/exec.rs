@@ -2311,7 +2311,11 @@ impl Cached {
     }
 
     /// The frame a slot whose answer the access rule decides was primed
-    /// from; none for a slot that answers every scope alike.
+    /// from, which [`crate::api::request::Request::cached_in_scope`]
+    /// reads back by; none for a slot that answers every scope alike,
+    /// and none for [`Cached::Property`], whose place is read back by
+    /// scope through [`crate::api::request::Request::cached_property`],
+    /// which also tests the object's class and the fake scope.
     #[inline]
     pub(crate) fn primed_from(self) -> Option<PrimedFrom> {
         match self {
