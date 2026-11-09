@@ -11,19 +11,17 @@
 //! the oracle's host from `[sapi]` beside the engine's witness build, the
 //! response's head let go and its body held.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
 use super::Column;
 use crate::oracle::hosts::CLI;
 use crate::oracle::{self, Ended, Observation, Oracle, normalise_in};
 use crate::scratch::Tree;
+use crate::server::Server;
 use crate::witness::{self, fence::Served};
 
 /// What serves a module's rendering.
@@ -186,116 +184,19 @@ pub(crate) fn served_by_server(
     crate::write(&program, format!("{}{snippet}", recipe.preamble))?;
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
     let started = Instant::now();
-    let mut refused = Vec::new();
-    for _ in 0..witness::ATTEMPTS {
-        let port = witness::free_port()?;
+    let command = || -> Result<Command> {
         let mut server = Command::new(php);
         server.args(&recipe.args);
-        witness::under_recipe(recipe, &mut server, &[], &[])?.stderr(Stdio::piped());
-        server
-            .arg("-S")
-            .arg(format!("127.0.0.1:{port}"))
-            .arg("-t")
-            .arg(own.path());
-        let mut server = Server(
-            server
-                .spawn()
-                .with_context(|| format!("running {}", php.display()))?,
-        );
-        if let Err(said) = server.listening(port, timeout)? {
-            refused.push(said);
-            continue;
-        }
-        let (status, body) = get(port, &recipe.script_name, timeout)?;
-        return Ok(Observation {
-            stdout: normalise_in(&recipe.normalise, own.path(), body),
-            stderr: Vec::new(),
-            exit: Ended::Status(if status == 200 { 0 } else { i32::from(status) }),
-            wall: started.elapsed(),
-        });
-    }
-    bail!(
-        "{} listened on none of {} ports: {}",
-        php.display(),
-        witness::ATTEMPTS,
-        refused.join("; ")
-    )
-}
-
-/// A server that is killed and reaped when it goes out of scope.
-struct Server(Child);
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.0.kill().ok();
-        self.0.wait().ok();
-    }
-}
-
-impl Server {
-    /// Whether the server says it listens on `port`: `Ok(Ok(()))` once its
-    /// `Development Server (http://127.0.0.1:<port>) started` line is on
-    /// its second stream, `Ok(Err(said))` where it ended first, with what
-    /// it said.
-    fn listening(&mut self, port: u16, timeout: Duration) -> Result<Result<(), String>> {
-        let stderr = self
-            .0
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow!("the server's second stream is not piped"))?;
-        let (lines, said) = mpsc::channel();
-        // The stream is read to its end, past the line waited for: a
-        // server whose log has no reader dies of `SIGPIPE` at the next
-        // request it logs.
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { return };
-                lines.send(line).ok();
-            }
-        });
-        let started = format!("(http://127.0.0.1:{port}) started");
-        let deadline = Instant::now() + timeout;
-        let mut heard = Vec::new();
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match said.recv_timeout(left) {
-                Ok(line) if line.contains(&started) => return Ok(Ok(())),
-                Ok(line) => heard.push(line),
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Err(heard.join(" "))),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    bail!("the server did not listen on {port} within {timeout:?}")
-                }
-            }
-        }
-    }
-}
-
-/// `GET /<script>` over HTTP/1.0 to the server on `port`, and the
-/// response's status and body.
-fn get(port: u16, script: &str, timeout: Duration) -> Result<(u16, Vec<u8>)> {
-    let mut stream =
-        TcpStream::connect(("127.0.0.1", port)).with_context(|| format!("connecting to {port}"))?;
-    stream.set_read_timeout(Some(timeout))?;
-    // One write: a request that reaches php's server in small pieces can
-    // be refused as `Malformed HTTP request`, and the connection closed
-    // with nothing written.
-    let request = format!("GET /{script} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
-    stream
-        .write_all(request.as_bytes())
-        .context("writing the request")?;
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .context("reading the server's response")?;
-    let end = response
-        .windows(4)
-        .position(|four| four == b"\r\n\r\n")
-        .ok_or_else(|| anyhow!("the server's response has no end of its head"))?;
-    let status = response
-        .split(|b| *b == b' ')
-        .nth(1)
-        .and_then(|code| std::str::from_utf8(code).ok())
-        .and_then(|code| code.parse().ok())
-        .ok_or_else(|| anyhow!("the server's response has no status"))?;
-    Ok((status, response[end + 4..].to_vec()))
+        witness::under_recipe(recipe, &mut server, &[], &[])?;
+        Ok(server)
+    };
+    let server = Server::start(command, own.path(), timeout)
+        .with_context(|| format!("serving through {}", php.display()))?;
+    let (status, body) = server.get(&format!("/{}", recipe.script_name), timeout)?;
+    Ok(Observation {
+        stdout: normalise_in(&recipe.normalise, own.path(), body),
+        stderr: Vec::new(),
+        exit: Ended::Status(if status == 200 { 0 } else { i32::from(status) }),
+        wall: started.elapsed(),
+    })
 }

@@ -76,6 +76,7 @@ pub mod review;
 mod rust;
 pub mod scratch;
 mod seat;
+mod server;
 pub mod sha256;
 mod sources;
 pub mod status;
