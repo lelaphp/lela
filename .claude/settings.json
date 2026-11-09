@@ -1,6 +1,7 @@
 {
   "env": {
-    "BASH_MAX_TIMEOUT_MS": "2700000"
+    "BASH_MAX_TIMEOUT_MS": "2700000",
+    "TEST_PHP_SRCDIR": "~/Projects/php-src-8.5.12"
   },
   "permissions": {
     "allow": [
