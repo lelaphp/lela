@@ -202,7 +202,7 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     // the lists may place.
     let served: Vec<&str> = calls
         .iter()
-        .filter(|call| !call.text.starts_with("Err("))
+        .filter(|call| call.serves == Serves::Handler)
         .flat_map(|call| call.served.iter().map(|(variant, _)| variant.as_str()))
         .collect();
     arms::held(&served, bodies)?;
@@ -217,13 +217,10 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
         for Variant { name: variant, .. } in variants(spec)? {
             serve(
                 &mut calls,
-                Arm {
+                Arm::refusal(
                     variant,
-                    placement: Placement::Cold,
-                    text: "Err(crate::tier::dispatch::refused(op, \"has no handler in this engine yet\"))"
-                        .to_owned(),
-                    turbofish: String::new(),
-                },
+                    "Err(crate::tier::dispatch::refused(op, \"has no handler in this engine yet\"))",
+                ),
             );
         }
     }
@@ -234,16 +231,13 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     // holds before publication, and it is still the fatal, never a panic.
     serve(
         &mut calls,
-        Arm {
-            variant: "Unresolved".to_owned(),
-            placement: Placement::Cold,
-            text: "Err(crate::tier::dispatch::refused(\n\
+        Arm::refusal(
+            "Unresolved".to_owned(),
+            "Err(crate::tier::dispatch::refused(\n\
              \x20           op,\n\
              \x20           \"is served from a unit never published, so no handler is resolved for it\",\n\
-             \x20       ))"
-                .to_owned(),
-            turbofish: String::new(),
-        },
+             \x20       ))",
+        ),
     );
     // `become` is refused by a stable parser even where a `cfg` leaves it
     // out, so the threaded calls are written only into the build that sets
@@ -305,12 +299,39 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
 }
 
 /// One `php_unit::Handler` the dispatch serves: the variant, where it is
-/// placed, and the call that serves it at its turbofish ([`Call`]).
+/// placed, and the call that serves it at its turbofish and what that
+/// call is ([`Call`]).
 struct Arm {
     variant: String,
     placement: Placement,
     text: String,
     turbofish: String,
+    serves: Serves,
+}
+
+impl Arm {
+    /// `variant` refused with `text`, the internal-error fatal, which is
+    /// called out of line and names no handler to take a turbofish.
+    fn refusal(variant: String, text: &str) -> Self {
+        Self {
+            variant,
+            placement: Placement::Cold,
+            text: text.to_owned(),
+            turbofish: String::new(),
+            serves: Serves::Refusal,
+        }
+    }
+}
+
+/// What a dispatch call is, said where the call is made: the handler at
+/// the tier, or the internal-error fatal for a variant no handler serves,
+/// which reads nothing the dispatch hands it and no list places.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Serves {
+    /// The handler, at its kinds and turbofish, whose answer the loop reads.
+    Handler,
+    /// `crate::tier::dispatch::refused`, the internal-error fatal.
+    Refusal,
 }
 
 /// `arm` into `calls`: under its call where that is there, and as a call
@@ -322,6 +343,7 @@ fn serve(
         placement,
         text,
         turbofish,
+        serves,
     }: Arm,
 ) {
     match calls.iter_mut().find(|call| call.text == text) {
@@ -329,6 +351,7 @@ fn serve(
         None => calls.push(Call {
             text,
             turbofish,
+            serves,
             served: vec![(variant, placement)],
         }),
     }
@@ -336,11 +359,13 @@ fn serve(
 
 /// One call the dispatch makes: its text, the generic arguments after the
 /// tier it names its handler at, as a turbofish its inline paths take too,
-/// empty for the internal-error fatal, and every `php_unit::Handler` it
-/// serves with that variant's placement ([`arms::place`]).
+/// empty for the internal-error fatal, what the call is ([`Serves`]), and
+/// every `php_unit::Handler` it serves with that variant's placement
+/// ([`arms::place`]).
 struct Call {
     text: String,
     turbofish: String,
+    serves: Serves,
     served: Vec<(String, Placement)>,
 }
 
@@ -524,7 +549,10 @@ fn tails(calls: &[Call]) -> String {
     for (
         number,
         Call {
-            text: call, served, ..
+            text: call,
+            serves,
+            served,
+            ..
         },
     ) in calls.iter().enumerate()
     {
@@ -536,10 +564,9 @@ fn tails(calls: &[Call]) -> String {
             .ok();
         }
         // A call that is the internal error reads nothing it is handed.
-        let (unread, body) = if call.starts_with("Err(") {
-            ("#[allow(unused_variables)]\n", format!("    {call}\n"))
-        } else {
-            (
+        let (unread, body) = match serves {
+            Serves::Refusal => ("#[allow(unused_variables)]\n", format!("    {call}\n")),
+            Serves::Handler => (
                 "",
                 format!(
                     "    let next = {call}?;\n\
@@ -551,7 +578,7 @@ fn tails(calls: &[Call]) -> String {
                      \x20   }};\n\
                      \x20   become (table.of(op.handler))(req, frame, code, oplines, op, at, told, table)\n"
                 ),
-            )
+            ),
         };
         write!(
             bodies,
@@ -738,13 +765,11 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
 /// does not list, which no unit the compiler wrote has, and no list
 /// places.
 fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<Arm>, String> {
-    let unlisted = |variant: Variant| Arm {
-        variant: variant.name,
-        placement: Placement::Cold,
-        text:
-            "Err(crate::tier::dispatch::refused(op, \"over operand kinds ops.toml does not list\"))"
-                .to_owned(),
-        turbofish: String::new(),
+    let unlisted = |variant: Variant| {
+        Arm::refusal(
+            variant.name,
+            "Err(crate::tier::dispatch::refused(op, \"over operand kinds ops.toml does not list\"))",
+        )
     };
     // The variant served at `generics` after the tier, where it is placed.
     let served = |variant: Variant, generics: &str| {
@@ -754,6 +779,7 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<Arm>, String> {
             placement,
             text: call(handler, placement, generics),
             turbofish: turbofish(generics),
+            serves: Serves::Handler,
         }
     };
     // The branch a handler generic over it is served at, after its kinds.
