@@ -4,7 +4,9 @@
 //! [`Declaration`] (#4335, #4344). The declaration gives each program its
 //! [`Role`], the runs it is measured by and the status each ends on, and
 //! `bench`, `dispatch-census` and `trace-dump` reach a program only
-//! through the [`Run`]s it yields, each with its arguments. `budget` holds
+//! through the [`Run`]s it yields, each with its arguments. It also
+//! declares the bench's pages ([`Pages`]), served from a rig kept off the
+//! repository, which `dispatch-census` counts (#4364, #4367). `budget` holds
 //! the programs under `[budget] workloads` apart from `docs` where that
 //! row stands (#4341), and the declaration under `docs`. makala's bench
 //! and soak serve, each as a request, the runs of a file that take no
@@ -31,9 +33,8 @@ pub(crate) fn file(root: &Path) -> PathBuf {
     root.join(format!("{DIR}.toml"))
 }
 
-/// What a workload is measured for, as #4335 ruled the roles: every role
-/// but [`Role::Native`] is a dispatch role, whose counts vote in
-/// `IN_THE_LOOP`'s criterion ([`Role::votes`]).
+/// What a workload is measured for, as #4335 ruled the roles; which of
+/// them votes in `IN_THE_LOOP`'s criterion is [`Role::votes`]'s alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Role {
@@ -61,11 +62,15 @@ impl Role {
         }
     }
 
-    /// Whether a run of this role votes in `IN_THE_LOOP`'s criterion.
+    /// Whether a run of this role votes in `IN_THE_LOOP`'s criterion, as
+    /// #4364 amended #4335's ruling: a kernel and the bench do; a probe,
+    /// which holds one mechanism by construction and would vote in
+    /// whatever it probes, does not, nor a shape, kept for timing alone,
+    /// nor a native, whose time is spent outside the loop.
     pub(crate) fn votes(self) -> bool {
         match self {
-            Role::Kernel | Role::Bench | Role::Shape | Role::Probe => true,
-            Role::Native => false,
+            Role::Kernel | Role::Bench => true,
+            Role::Shape | Role::Probe | Role::Native => false,
         }
     }
 }
@@ -211,16 +216,79 @@ struct Row {
     profile: Option<Vec<Profile>>,
 }
 
+/// The status a page answers, or its counts are out of the vote.
+pub(crate) const ANSWERS: u16 = 200;
+
+/// One page of the bench: what names its runs' scope, and the target of
+/// its request.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Page {
+    pub(crate) name: String,
+    /// The request's target, its path and query: `/?p=1`.
+    pub(crate) path: String,
+}
+
+/// The bench's pages (#4364): requests served by the CLI's built-in
+/// server from a copy of the rig, each on a server of its own over a
+/// fresh copy of the rig's database, the counted request after `warm`
+/// that are not.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Pages {
+    /// The ticket that first read them.
+    pub(crate) first_read: u32,
+    /// What they are, for a person.
+    pub(crate) about: String,
+    pub(crate) role: Role,
+    /// The requests of a page served before the one counted.
+    pub(crate) warm: u32,
+    /// The settings the server runs under, each passed as `-d` after `-n`.
+    pub(crate) ini: Vec<String>,
+    /// Each page, in the order served.
+    pub(crate) page: Vec<Page>,
+}
+
+impl Pages {
+    /// The pages as the file spells them, refused where they list no page,
+    /// name one twice or misspelt, or give one a target that is not a
+    /// path an HTTP request line carries.
+    fn held(self) -> Result<Pages> {
+        if self.page.is_empty() {
+            bail!("[pages] lists no page");
+        }
+        let mut names = BTreeSet::new();
+        for page in &self.page {
+            let name = spelt(&page.name, "page")?;
+            if !names.insert(name.clone()) {
+                bail!("[pages] names the page {name:?} twice");
+            }
+            let carried = |c: char| c.is_ascii_graphic();
+            if !page.path.starts_with('/') || !page.path.chars().all(carried) {
+                bail!(
+                    "the page {name:?} is served at {:?}, which is no path starting with `/` in printable ASCII",
+                    page.path
+                );
+            }
+        }
+        Ok(self)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
     workload: Vec<Row>,
+    #[serde(default)]
+    pages: Option<Pages>,
 }
 
-/// The declaration: every workload, in the file's order.
+/// The declaration: every workload, in the file's order, and the bench's
+/// pages where it declares them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Declaration {
     pub(crate) workloads: Vec<Workload>,
+    pub(crate) pages: Option<Pages>,
 }
 
 impl Declaration {
@@ -246,13 +314,15 @@ impl Declaration {
     /// refused where it holds no workload, names a stem or a workload's
     /// profile twice, spells one with other than lowercase letters,
     /// digits, `_` and `-`, gives a workload both `pinned` and `code`, or
-    /// lists its profiles empty.
+    /// lists its profiles empty, and where its pages are refused
+    /// ([`Pages::held`]).
     pub(crate) fn parse(text: &str, root: &Path) -> Result<Declaration> {
-        let File { workload } = toml::from_str(text)?;
+        let File { workload, pages } = toml::from_str(text)?;
         if workload.is_empty() {
             bail!("it declares no [[workload]]");
         }
         let mut stems = BTreeSet::new();
+        let pages = pages.map(Pages::held).transpose()?;
         let workloads = workload.into_iter().map(|row| {
             let stem = spelt(&row.stem, "stem")?;
             if !stems.insert(stem.clone()) {
@@ -292,7 +362,7 @@ impl Declaration {
             })
         });
         let workloads = workloads.collect::<Result<_>>()?;
-        Ok(Declaration { workloads })
+        Ok(Declaration { workloads, pages })
     }
 
     /// Every run, workload by workload in the file's order.
@@ -388,6 +458,14 @@ first_read = 3273
 about = "a loop"
 role = "probe"
 code = "for ($i = 0; $i < 3; $i++) {}\n"
+
+[pages]
+first_read = 4329
+about = "pages"
+role = "bench"
+warm = 3
+ini = ["opcache.enable=1"]
+page = [{ name = "front", path = "/" }, { name = "post", path = "/?p=1" }]
 "#;
 
     /// Each row decodes to its role, where its text is, how it ends, zero
@@ -434,6 +512,19 @@ code = "for ($i = 0; $i < 3; $i++) {}\n"
         let kernels: Vec<String> = declared.runs_of(Role::Kernel).map(|r| r.name()).collect();
         assert_eq!(kernels, ["fib"]);
         assert!(declared.runs().nth(3).unwrap().file().is_err());
+        let pages = declared.pages.unwrap();
+        assert_eq!((pages.role, pages.warm), (Role::Bench, 3));
+        assert_eq!(pages.ini, ["opcache.enable=1"]);
+        let served: Vec<(&str, &str)> = (pages.page.iter())
+            .map(|p| (p.name.as_str(), p.path.as_str()))
+            .collect();
+        assert_eq!(served, [("front", "/"), ("post", "/?p=1")]);
+    }
+
+    /// Which role votes is decided here alone, as #4364 ruled: a kernel
+    /// and the bench vote, and a shape, a probe and a native do not.
+    #[test]
+    fn a_kernel_and_the_bench_vote_and_no_other_role_does() {
         let roles = [
             Role::Kernel,
             Role::Bench,
@@ -441,13 +532,14 @@ code = "for ($i = 0; $i < 3; $i++) {}\n"
             Role::Probe,
             Role::Native,
         ];
-        assert_eq!(roles.map(Role::votes), [true, true, true, true, false]);
+        assert_eq!(roles.map(Role::votes), [true, true, false, false, false]);
     }
 
     /// A row the file does not spell as a declaration is refused, naming
     /// what is wrong: a field it does not know, a role none of the five,
-    /// a stem twice or misspelt, both `pinned` and `code`, and profiles
-    /// listed empty or one named twice.
+    /// a stem twice or misspelt, both `pinned` and `code`, profiles
+    /// listed empty or one named twice, and pages listed empty, one named
+    /// twice or one served at no path.
     #[test]
     fn a_misdeclared_row_is_refused_naming_what_is_wrong() {
         let refused = |rows: &str| {
@@ -482,6 +574,32 @@ code = "for ($i = 0; $i < 3; $i++) {}\n"
             let why = refused(rows);
             assert!(why.contains(said), "{rows}: {why}");
         }
+        let listing = |pages: &str| {
+            let rows = format!(
+                "stem = \"a\"\nrole = \"kernel\"\n[pages]\nfirst_read = 1\nabout = \"x\"\n\
+                 role = \"bench\"\nwarm = 3\nini = []\npage = [{pages}]\n"
+            );
+            refused(&rows)
+        };
+        let misdeclared = [
+            ("", "[pages] lists no page"),
+            (
+                "{ name = \"a\", path = \"/\" }, { name = \"a\", path = \"/b\" }",
+                "names the page \"a\" twice",
+            ),
+            (
+                "{ name = \"a\", path = \"b\" }",
+                "the page \"a\" is served at \"b\"",
+            ),
+            (
+                "{ name = \"a\", path = \"/ b\" }",
+                "the page \"a\" is served at \"/ b\"",
+            ),
+        ];
+        for (pages, said) in misdeclared {
+            let why = listing(pages);
+            assert!(why.contains(said), "{pages}: {why}");
+        }
     }
 
     /// A program under the directory with no row is refused by name, and a
@@ -500,8 +618,9 @@ code = "for ($i = 0; $i < 3; $i++) {}\n"
     /// The workspace's declaration holds every program under the directory
     /// and no row without one, each in the role #4335 ruled: the three
     /// programs that take arguments and the six `uri-*` are native, each
-    /// of the three run under the profiles its record ran it with, and
-    /// every other workload votes.
+    /// of the three run under the profiles its record ran it with; the
+    /// seven kernels and `bench_quiet` are the workloads that vote, as
+    /// #4364 ruled, and the four bench pages vote beside them.
     #[cfg(tracked)]
     #[test]
     fn the_declaration_is_the_directorys_with_the_ruled_roles() {
@@ -525,7 +644,15 @@ code = "for ($i = 0; $i < 3; $i++) {}\n"
         assert_eq!(taking.map(profiled), [4, 7, 8]);
         let kernels: Vec<String> = declared.runs_of(Role::Kernel).map(|r| r.name()).collect();
         assert_eq!(kernels.len(), 7, "{kernels:?}");
-        let voting = declared.workloads.iter().filter(|w| w.role.votes()).count();
-        assert_eq!(voting, declared.workloads.len() - ruled.len());
+        let voting: Vec<&str> = (declared.workloads.iter())
+            .filter(|w| w.role.votes())
+            .map(|w| w.stem.as_str())
+            .collect();
+        assert_eq!(voting.len(), 8, "{voting:?}");
+        assert!(voting.contains(&"bench_quiet"), "{voting:?}");
+        let pages = declared.pages.unwrap();
+        assert!(pages.role.votes());
+        let served: Vec<&str> = pages.page.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(served, ["/", "/?p=1", "/?s=hello", "/wp-login.php"]);
     }
 }

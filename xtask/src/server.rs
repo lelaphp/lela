@@ -1,8 +1,9 @@
 //! The CLI's built-in server, `php -S`, as the harness drives it: started
 //! on a free loopback port, held until it says on its second stream that
 //! it listens there, so a response is this server's and no other
-//! process's, and asked over HTTP/1.0. `crosscheck` renders
-//! `cli_server` through it (#1496).
+//! process's, asked over HTTP/1.0, and its log read line by line after.
+//! `crosscheck` renders `cli_server` through it (#1496), and
+//! `dispatch-census` serves the bench pages through it (#4367).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -14,6 +15,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::witness;
+
+/// What the server's log says as a connection it served ends, after the
+/// request's own lines: `[<date>] 127.0.0.1:<port> Closing`.
+const CLOSING: &str = " Closing";
 
 /// A server that is killed and reaped when it goes out of scope, with its
 /// log's lines as they come.
@@ -109,6 +114,17 @@ impl Server {
     /// `GET <target>` over HTTP/1.0, so the response ends at the close,
     /// and the response's status and body.
     pub(crate) fn get(&self, target: &str, timeout: Duration) -> Result<(u16, Vec<u8>)> {
+        self.get_as(&format!("127.0.0.1:{}", self.port), target, timeout)
+    }
+
+    /// [`Server::get`] with `host` the request's `Host`, for a site that
+    /// answers only to its own address, wherever it is served from.
+    pub(crate) fn get_as(
+        &self,
+        host: &str,
+        target: &str,
+        timeout: Duration,
+    ) -> Result<(u16, Vec<u8>)> {
         let port = self.port;
         let mut stream = TcpStream::connect(("127.0.0.1", port))
             .with_context(|| format!("connecting to {port}"))?;
@@ -116,7 +132,7 @@ impl Server {
         // One write: a request that reaches php's server in small pieces can
         // be refused as `Malformed HTTP request`, and the connection closed
         // with nothing written.
-        let request = format!("GET {target} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        let request = format!("GET {target} HTTP/1.0\r\nHost: {host}\r\n\r\n");
         stream
             .write_all(request.as_bytes())
             .context("writing the request")?;
@@ -135,5 +151,29 @@ impl Server {
             .and_then(|code| code.parse().ok())
             .ok_or_else(|| anyhow!("the server's response has no status"))?;
         Ok((status, response[end + 4..].to_vec()))
+    }
+
+    /// The log's lines since the last read, through the one that says the
+    /// connection served ends: what one request of [`Server::get`] logged,
+    /// read once its response has come, its own lines among them.
+    pub(crate) fn logged(&self, timeout: Duration) -> Result<Vec<String>> {
+        let deadline = Instant::now() + timeout;
+        let mut logged = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) if line.ends_with(CLOSING) => {
+                    logged.push(line);
+                    return Ok(logged);
+                }
+                Ok(line) => logged.push(line),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!("the server ended before it logged the connection's end")
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    bail!("the server logged no connection's end within {timeout:?}")
+                }
+            }
+        }
     }
 }

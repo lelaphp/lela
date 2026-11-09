@@ -176,26 +176,32 @@ pub fn held(served: &[&str], bodies: &std::path::Path) -> Result<(), String> {
 const ASSIGNED: [&str; 4] = ["ADD", "SUB", "MUL", "DIV"];
 
 /// The variants whose arms are in the loop's body (design §5.8), by the
-/// criterion #4335 ruled, in its words:
+/// criterion #4335 ruled and #4364 amended, in its words:
 ///
 /// ```text
 /// every variant met in more than a quarter of a percent of the oplines
-/// dispatched by any program docs/perf/workloads.toml declares in a
-/// dispatch role, run with the arguments it declares and ending as it
-/// declares
+/// dispatched by any run docs/perf/workloads.toml declares in a role that
+/// votes, a kernel's or the bench's: a program run with the arguments it
+/// declares and ending as it declares, or a bench page served from the
+/// rig as it declares and answering 200
 /// ```
 ///
+/// A workload written to hold one mechanism of the loop does not vote,
+/// since it would vote in whatever it holds, nor the shape written to the
+/// pages' mix, which is kept for timing alone, the four bench pages
+/// voting in its place.
 /// The list was first taken from a counting build of the loop (#3285);
 /// `xtask dispatch-census` takes that count again, a reading for each
-/// profile a program declares, on the engine built with its
-/// `dispatch-census` feature, and names the variants its vote would add
-/// to the list and take from it (#4328, #4344). The list is a person's to
-/// change. The arm of every other variant calls its handler out of line,
-/// through a call the optimiser reads as cold, so that the loop's body is
-/// the arms programs meet and the register allocator, which weighs every
-/// arm of the `match` alike, places the loop's values for them: with all
-/// 526 generic and `#[inline(always)]` arms in its body, `serve_frame` was
-/// 270 KB and the arms programs meet paid for the ones they do not.
+/// profile a program declares and each page, on the engine built with
+/// its `dispatch-census` feature, and names the variants its vote would
+/// add to the list and take from it (#4328, #4344, #4367). The list is
+/// a person's to change. The arm of every other variant calls its
+/// handler out of line, through a call the optimiser reads as cold, so
+/// that the loop's body is the arms programs meet and the register
+/// allocator, which weighs every arm of the `match` alike, places the
+/// loop's values for them: with all 526 generic and `#[inline(always)]`
+/// arms in its body, `serve_frame` was 270 KB and the arms programs meet
+/// paid for the ones they do not.
 /// A name that is no variant the dispatch serves is a build error.
 const IN_THE_LOOP: &[&str] = &[
     "AddArrayElement",

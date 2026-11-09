@@ -1,10 +1,12 @@
 //! `xtask dispatch-census`, the census behind `IN_THE_LOOP` (design §5.8,
 //! #4328): each variant's share of the oplines the loop dispatched, over
 //! every run of every program `docs/perf/workloads.toml` declares
-//! ([`crate::workloads`]), each with the arguments it declares. The
-//! list's doc admits [`CRITERION`] (#4335), so a run votes where its
-//! program's role is a dispatch role and it ended as its program declares,
-//! and a variant over [`THRESHOLD`] in any run that votes is voted in.
+//! ([`crate::workloads`]), each with the arguments it declares, and over
+//! each of the bench's pages it declares, served from the rig ([`pages`]).
+//! The list's doc admits [`CRITERION`] (#4335, as #4364 amended it), so a
+//! run votes where its role votes ([`Role::votes`]) and it ended as
+//! declared, and a variant over [`THRESHOLD`] in any run that votes is
+//! voted in.
 //!
 //! **The counting build.** `php` built in release with the bundle's
 //! [`FEATURE`], into a target directory of its own, so the default build
@@ -18,14 +20,18 @@
 //! runs nothing. Each writes one reading, scoped `workloads/<run>`, the
 //! run's name being its workload's stem and `/<profile>` after it where it
 //! runs under one, or `program/<stem>` for a program named on the command
-//! line, which votes nothing. The reading's `numbers` hold `oplines`, the
+//! line, which votes nothing. A page is served by the counting build's
+//! built-in server, and its reading is scoped `pages/<name>`; where no rig
+//! is described on this machine, each page is a skip that says so. The
+//! reading's `numbers` hold `oplines`, the
 //! oplines the loop dispatched; `variants`, how many variants served them;
 //! and `over`, how many of those are over the threshold. Its `groups` hold
 //! each variant's share of `oplines` in percent. Its message names the
 //! variants over the threshold, the largest share first. A run the engine
 //! wrote no counts for fails, and so does one that ended otherwise than
-//! its program declares, its counts kept out of the vote; a program whose
-//! tree is not on this machine is a skip.
+//! declared, a program on another status or a page answering other than
+//! 200, its counts kept out of the vote; a program whose tree is not on
+//! this machine is a skip.
 //!
 //! **The vote.** Over the declared set, one more reading, scoped
 //! [`VOTE`], names the variants the vote would put in the loop's body and
@@ -48,7 +54,9 @@ use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{Ended, Invocation, Oracle, Program, hosts::CLI, profile};
 use crate::reading::{Number, Reading, Status, Store, joined, plural};
-use crate::workloads::{Declaration, Role, Text};
+use crate::workloads::{ANSWERS, Declaration, Page, Pages, Role, Text};
+
+mod pages;
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "dispatch-census";
@@ -66,9 +74,9 @@ const LINE: &str = "dispatch-census ";
 /// [`ARMS`], admits it: "more than a quarter of a percent".
 pub(crate) const THRESHOLD: f64 = 0.25;
 
-/// `IN_THE_LOOP`'s criterion, word for word as #4335 ruled it, which the
-/// list's doc in [`ARMS`] and design §5.8 carry.
-pub(crate) const CRITERION: &str = "every variant met in more than a quarter of a percent of the oplines dispatched by any program docs/perf/workloads.toml declares in a dispatch role, run with the arguments it declares and ending as it declares";
+/// `IN_THE_LOOP`'s criterion, word for word as #4335 ruled it and #4364
+/// amended it, which the list's doc in [`ARMS`] and design §5.8 carry.
+pub(crate) const CRITERION: &str = "every variant met in more than a quarter of a percent of the oplines dispatched by any run docs/perf/workloads.toml declares in a role that votes, a kernel's or the bench's: a program run with the arguments it declares and ending as it declares, or a bench page served from the rig as it declares and answering 200";
 
 /// The file whose doc of `IN_THE_LOOP` states [`CRITERION`], and whose
 /// `IN_THE_LOOP` and `PATH_IN_THE_LOOP` are the build's placement.
@@ -101,20 +109,31 @@ enum Source {
     File(PathBuf),
     /// Code the recipe's preamble opens, run as a witness's snippet is.
     Snippet(String),
+    /// A page of the bench, served from the rig.
+    Page(Page),
     /// Nowhere on this machine, and why.
     Unfound(String),
 }
 
-/// One run the census counts: its reading's scope, its program's text,
-/// the arguments after it, how it should end, and its program's role,
+/// One run the census counts: its reading's scope, its program's text or
+/// its page, the arguments after it, how it should end, and its role,
 /// none for a program named on the command line, which votes nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Counted {
     scope: String,
     source: Source,
     args: Vec<String>,
-    ends: Ended,
+    ends: Ends,
     role: Option<Role>,
+}
+
+/// How a counted run should end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ends {
+    /// A program's, on this status.
+    Exits(Ended),
+    /// A page's, answering this status.
+    Answers(u16),
 }
 
 impl Counted {
@@ -127,8 +146,14 @@ impl Counted {
 impl Ask {
     /// The runs the census counts: the programs named, each held to end on
     /// status 0, or every run `declared` yields, a pinned file of it read
-    /// from `tree`, the pinned php-src where it was found.
-    fn programs(&self, declared: &Declaration, tree: &Result<PathBuf>) -> Result<Vec<Counted>> {
+    /// from `tree`, the pinned php-src where it was found, and then each
+    /// page it declares, a skip where `rig` is absent.
+    fn programs(
+        &self,
+        declared: &Declaration,
+        tree: &Result<PathBuf>,
+        rig: &Result<pages::Located>,
+    ) -> Result<Vec<Counted>> {
         if !self.program.is_empty() {
             let named = |path: &PathBuf| {
                 let stem = path.file_stem().and_then(|s| s.to_str());
@@ -138,7 +163,7 @@ impl Ask {
                     scope: format!("program/{stem}"),
                     source: Source::File(std::path::absolute(path)?),
                     args: Vec::new(),
-                    ends: Ended::Status(0),
+                    ends: Ends::Exits(Ended::Status(0)),
                     role: None,
                 })
             };
@@ -157,11 +182,24 @@ impl Ask {
                 scope: format!("workloads/{}", run.name()),
                 source,
                 args: run.args().to_vec(),
-                ends: run.workload.ends,
+                ends: Ends::Exits(run.workload.ends),
                 role: Some(run.workload.role),
             }
         });
-        Ok(counted.collect())
+        let mut counted: Vec<Counted> = counted.collect();
+        if let Some(pages) = &declared.pages {
+            counted.extend(pages.page.iter().map(|page| Counted {
+                scope: format!("pages/{}", page.name),
+                source: match rig {
+                    Ok(pages::Located::Absent(why)) => Source::Unfound(why.clone()),
+                    Ok(pages::Located::Here(_)) | Err(_) => Source::Page(page.clone()),
+                },
+                args: Vec::new(),
+                ends: Ends::Answers(ANSWERS),
+                role: Some(pages.role),
+            }));
+        }
+        Ok(counted)
     }
 }
 
@@ -222,21 +260,24 @@ impl Census {
     }
 
     /// The reading's numbers, groups, status and message for `scope`,
-    /// whose run ended as `ended` where it should have ended as `ends`:
-    /// a pass where it ended so, and a fail, its counts kept, where it
-    /// did not. A run with no counts fails.
+    /// whose run ended as declared where `otherwise` is none, and as it
+    /// says where it is one: a pass where it ended so, and a fail, its
+    /// counts kept, where it did not. A run with no counts fails.
     fn written_into(
         &self,
         scope: &str,
-        (ended, ends): (Ended, Ended),
+        otherwise: Option<&str>,
         reading: &mut Reading,
     ) -> Result<()> {
         let oplines = self.oplines();
         if oplines == 0 {
             reading.status = Status::Fail;
             reading.message = format!(
-                "{scope}: the engine wrote no counts, so it is not built with the bundle's `{FEATURE}` feature or the run ended before its request did; it ended on {ended}"
+                "{scope}: the engine wrote no counts, so it is not built with the bundle's `{FEATURE}` feature or the run ended before its request did"
             );
+            if let Some(otherwise) = otherwise {
+                write!(reading.message, "; {otherwise}").ok();
+            }
             return Ok(());
         }
         let over = self.over();
@@ -263,13 +304,9 @@ impl Census {
             }
         );
         reading.status = Status::Pass;
-        if ended != ends {
+        if let Some(otherwise) = otherwise {
             reading.status = Status::Fail;
-            write!(
-                said,
-                "; the run ended on {ended} where its program declares {ends}, so its counts are out of the vote"
-            )
-            .ok();
+            write!(said, "; {otherwise}, so its counts are out of the vote").ok();
         }
         reading.message = said;
         Ok(())
@@ -335,7 +372,7 @@ impl Vote {
         };
         reading.status = Status::Pass;
         reading.message = format!(
-            "{} run{} of a dispatch role voted {} variant{} over a quarter of a percent, against the build's {} placed by {} in {ARMS}; {} would enter: {}; {} would leave: {}; this informs and fails nothing",
+            "{} run{} of a role that votes voted {} variant{} over a quarter of a percent, against the build's {} placed by {} in {ARMS}; {} would enter: {}; {} would leave: {}; this informs and fails nothing",
             self.voters,
             plural(self.voters),
             voted.len(),
@@ -417,11 +454,14 @@ pub fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Vec<Reading>> 
     let pin = manifest.pin()?;
     let snapshot = Snapshot::disk(root)?;
     let declared = Declaration::load(root)?;
-    let programs = ask.programs(&declared, &pin.source.tree())?;
+    let rig = pages::located();
+    let programs = ask.programs(&declared, &pin.source.tree(), &rig)?;
     let oracle = pin.oracle();
     let engine = engine(root, ask);
     let mut readings = Vec::new();
     let mut vote = Vote::default();
+    // The rig is copied once, before the first page served.
+    let mut copied: Option<Result<pages::Copied, String>> = None;
     // What a program dispatches is a function of the whole engine and the
     // program, so each reading is stamped over the workspace.
     let stamped = |scope: &str| -> Result<Reading> {
@@ -438,10 +478,24 @@ pub fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Vec<Reading>> 
                 continue;
             }
             (Err(why), _) => Err(anyhow::anyhow!("the counting build did not build: {why:#}")),
+            (Ok(engine), Source::Page(page)) => {
+                let copied = copied.get_or_insert_with(|| match &rig {
+                    Ok(pages::Located::Here(rig)) => rig.copied().map_err(|e| format!("{e:#}")),
+                    Ok(pages::Located::Absent(why)) => Err(why.clone()),
+                    Err(why) => Err(format!("{why:#}")),
+                });
+                match (copied, &declared.pages) {
+                    (Ok(copied), Some(declared)) => {
+                        served(copied, engine, (declared, page), counted.ends)
+                    }
+                    (Err(why), _) => Err(anyhow::anyhow!("the rig: {why}")),
+                    (Ok(_), None) => Err(anyhow::anyhow!("no pages are declared")),
+                }
+            }
             (Ok(engine), _) => counts(&oracle, engine, counted),
         };
-        let written = counts.and_then(|(census, ended)| {
-            census.written_into(scope, (ended, counted.ends), &mut reading)?;
+        let written = counts.and_then(|(census, otherwise)| {
+            census.written_into(scope, otherwise.as_deref(), &mut reading)?;
             if reading.status == Status::Pass && counted.votes() {
                 vote.cast(scope, &census);
             }
@@ -468,14 +522,20 @@ pub fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Vec<Reading>> 
 }
 
 /// The counts `counted` dispatched on `engine` under the recipe and
-/// [`MEMORY`], with the arguments it declares, and how its run ended.
-fn counts(oracle: &Oracle<'_>, engine: &Path, counted: &Counted) -> Result<(Census, Ended)> {
+/// [`MEMORY`], with the arguments it declares, and how its run ended
+/// where it ended otherwise than declared.
+fn counts(
+    oracle: &Oracle<'_>,
+    engine: &Path,
+    counted: &Counted,
+) -> Result<(Census, Option<String>)> {
     let program = match &counted.source {
         Source::File(path) => {
             ensure!(path.is_file(), "there is no program at {}", path.display());
             Program::File(path)
         }
         Source::Snippet(code) => Program::Snippet(code),
+        Source::Page(page) => anyhow::bail!("the page {} is served, not run", page.path),
         Source::Unfound(why) => anyhow::bail!("{why}"),
     };
     let ini = [MEMORY.to_owned()];
@@ -484,7 +544,35 @@ fn counts(oracle: &Oracle<'_>, engine: &Path, counted: &Counted) -> Result<(Cens
         args: &counted.args,
         ..Invocation::new(engine, program)
     })?;
-    Ok((Census::read(&ran.stderr)?, ran.exit))
+    let otherwise = match counted.ends {
+        Ends::Exits(ends) if ran.exit == ends => None,
+        Ends::Exits(ends) => Some(format!(
+            "the run ended on {} where its program declares {ends}",
+            ran.exit
+        )),
+        Ends::Answers(_) => anyhow::bail!("a program ends on a status, not an answer"),
+    };
+    Ok((Census::read(&ran.stderr)?, otherwise))
+}
+
+/// The counts `page` dispatched on `engine`, served from the rig's copy
+/// as `declared` says, and what it answered where it answered otherwise
+/// than `ends`.
+fn served(
+    copied: &pages::Copied,
+    engine: &Path,
+    (declared, page): (&Pages, &Page),
+    ends: Ends,
+) -> Result<(Census, Option<String>)> {
+    let (census, status) = copied.count(engine, declared, page)?;
+    let otherwise = match ends {
+        Ends::Answers(answers) if status == answers => None,
+        Ends::Answers(answers) => Some(format!(
+            "the page answered {status} where it should answer {answers}"
+        )),
+        Ends::Exits(_) => bail!("a page ends on an answer, not a status"),
+    };
+    Ok((census, otherwise))
 }
 
 #[cfg(test)]
@@ -516,9 +604,8 @@ mod tests {
         let over: Vec<&str> = census.over().into_iter().map(|(name, _)| name).collect();
         assert_eq!(over, ["Bulk"]);
         let mut reading = Reading::new(INSTRUMENT, "workloads/loop-empty");
-        let ended = (Ended::Status(0), Ended::Status(0));
         census
-            .written_into("workloads/loop-empty", ended, &mut reading)
+            .written_into("workloads/loop-empty", None, &mut reading)
             .unwrap();
         assert_eq!(reading.status, Status::Pass);
         assert_eq!(reading.int("oplines"), Some(10000));
@@ -534,25 +621,26 @@ mod tests {
     }
 
     /// A run the engine wrote no counts for fails, naming the feature;
-    /// one that ended otherwise than its program declares fails, saying
-    /// how, its counts kept and out of the vote; and one that ended on a
-    /// status its program declares passes, as #4335's (c) ruled.
+    /// one that ended otherwise than declared fails, saying how, its
+    /// counts kept and out of the vote; and one that ended as declared
+    /// passes, as #4335's (c) ruled.
     #[test]
     fn a_run_fails_with_no_counts_or_an_end_other_than_its_declared() {
         let mut reading = Reading::new(INSTRUMENT, "workloads/fib");
-        let (zero, other) = (Ended::Status(0), Ended::Status(255));
+        let otherwise = "the run ended on status 255 where its program declares status 0";
         Census::default()
-            .written_into("workloads/fib", (other, zero), &mut reading)
+            .written_into("workloads/fib", Some(otherwise), &mut reading)
             .unwrap();
         assert_eq!(reading.status, Status::Fail);
         assert!(
-            reading.message.contains("`dispatch-census` feature"),
+            reading.message.contains("`dispatch-census` feature")
+                && reading.message.ends_with(otherwise),
             "{}",
             reading.message
         );
         let census = Census::read(b"dispatch-census Jmp 1\n").unwrap();
         census
-            .written_into("workloads/fib", (other, zero), &mut reading)
+            .written_into("workloads/fib", Some(otherwise), &mut reading)
             .unwrap();
         assert_eq!(reading.status, Status::Fail, "{}", reading.message);
         assert_eq!(reading.int("oplines"), Some(1));
@@ -565,20 +653,13 @@ mod tests {
         );
         let mut declared = Reading::new(INSTRUMENT, "workloads/fib");
         census
-            .written_into("workloads/fib", (other, other), &mut declared)
+            .written_into("workloads/fib", None, &mut declared)
             .unwrap();
         assert_eq!(declared.status, Status::Pass, "{}", declared.message);
     }
 
-    /// Without a program named, the census counts every run the
-    /// declaration yields: a file in place, a pinned file from the tree or
-    /// a skip naming why it is not here, and code as a snippet, each with
-    /// the arguments and the end it declares; a native votes nothing. A
-    /// program named is counted alone, scoped by its stem, held to end on
-    /// 0 and voting nothing.
-    #[test]
-    fn the_census_counts_every_declared_run_with_its_arguments() {
-        let text = r#"
+    /// A declaration of a program of each kind and one page.
+    const DECLARED: &str = r#"
 [[workload]]
 stem = "fib"
 first_read = 1
@@ -606,20 +687,46 @@ first_read = 1
 about = "x"
 role = "probe"
 code = "k(1);\n"
+
+[pages]
+first_read = 1
+about = "x"
+role = "bench"
+warm = 3
+ini = []
+page = [{ name = "front", path = "/" }]
 "#;
-        let declared = Declaration::parse(text, Path::new("/w")).unwrap();
+
+    /// A rig described as here.
+    fn here() -> Result<pages::Located> {
+        let described = "rig = \"/r\"\ncopy = [\"d\"]\nroot = \"d\"\nsnapshot = \"s\"\n\
+                         database = \"d/b\"\nhost = \"h:1\"\n";
+        let rig = pages::Rig::parse(described, Path::new("/m"))?;
+        Ok(pages::Located::Here(rig))
+    }
+
+    /// Without a program named, the census counts every run the
+    /// declaration yields: a file in place, a pinned file from the tree or
+    /// a skip naming why it is not here, and code as a snippet, each with
+    /// the arguments and the end it declares; a kernel votes, and a native
+    /// and a probe do not.
+    #[test]
+    fn the_census_counts_every_declared_run_with_its_arguments() {
+        let declared = Declaration::parse(DECLARED, Path::new("/w")).unwrap();
         let tree = PathBuf::from("/src");
-        let programs = Ask::default().programs(&declared, &Ok(tree)).unwrap();
+        let programs = Ask::default()
+            .programs(&declared, &Ok(tree), &here())
+            .unwrap();
         let counted = |scope: &str, source, args: &[&str], ends, role| Counted {
             scope: scope.to_owned(),
             source,
             args: args.iter().map(|a| (*a).to_owned()).collect(),
-            ends: Ended::Status(ends),
+            ends: Ends::Exits(Ended::Status(ends)),
             role: Some(role),
         };
         let file = |path: &str| Source::File(PathBuf::from(path));
         assert_eq!(
-            programs,
+            programs[..4],
             [
                 counted(
                     "workloads/fib",
@@ -651,26 +758,53 @@ code = "k(1);\n"
                 ),
             ]
         );
-        let votes: Vec<bool> = programs.iter().map(Counted::votes).collect();
-        assert_eq!(votes, [true, false, true, true]);
+        let votes: Vec<bool> = programs[..4].iter().map(Counted::votes).collect();
+        assert_eq!(votes, [true, false, false, false]);
         let absent = Ask::default()
-            .programs(&declared, &Err(anyhow::anyhow!("gone")))
+            .programs(&declared, &Err(anyhow::anyhow!("gone")), &here())
             .unwrap();
         assert!(matches!(&absent[2].source, Source::Unfound(why) if why.contains("gone")));
+    }
+
+    /// After the programs, each page is counted, served from the rig, held
+    /// to answer 200 and voting as a bench's, or a skip saying why where
+    /// no rig is here. A program named is counted alone, scoped by its
+    /// stem, held to end on 0 and voting nothing.
+    #[test]
+    fn each_page_is_counted_from_the_rig_and_a_named_program_alone() {
+        let declared = Declaration::parse(DECLARED, Path::new("/w")).unwrap();
+        let tree = Ok(PathBuf::from("/src"));
+        let programs = Ask::default().programs(&declared, &tree, &here()).unwrap();
+        let front = Page {
+            name: "front".to_owned(),
+            path: "/".to_owned(),
+        };
+        assert_eq!(
+            programs[4..],
+            [Counted {
+                scope: "pages/front".to_owned(),
+                source: Source::Page(front),
+                args: Vec::new(),
+                ends: Ends::Answers(200),
+                role: Some(Role::Bench),
+            }]
+        );
+        assert!(programs[4].votes());
+        let nowhere = Ok(pages::Located::Absent("no rig".to_owned()));
+        let absent = Ask::default().programs(&declared, &tree, &nowhere).unwrap();
+        assert!(matches!(&absent[4].source, Source::Unfound(why) if why == "no rig"));
         let named = Ask {
             program: vec![PathBuf::from("/w/wordpress.php")],
             ..Ask::default()
         };
-        let named = named
-            .programs(&declared, &Ok(PathBuf::from("/src")))
-            .unwrap();
+        let named = named.programs(&declared, &tree, &nowhere).unwrap();
         assert_eq!(
             named,
             [Counted {
                 scope: "program/wordpress".to_owned(),
                 source: Source::File(PathBuf::from("/w/wordpress.php")),
                 args: Vec::new(),
-                ends: Ended::Status(0),
+                ends: Ends::Exits(Ended::Status(0)),
                 role: None,
             }]
         );
