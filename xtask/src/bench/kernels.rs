@@ -38,6 +38,7 @@ use crate::carried::BUNDLE;
 use crate::manifest::Manifest;
 use crate::oracle::{Pin, hosts::CLI, profile};
 use crate::phpt::Lane;
+use crate::workloads;
 
 /// The programs, by stem under `docs/perf/workloads/`: the seven kernels
 /// (#2736, #2740), and `bench_quiet.php`, php-src's `Zend/bench.php` at the
@@ -148,10 +149,9 @@ pub(crate) fn bar(
             clear: pin.recipe.env_clear,
             set: pin.recipe.environment()?,
         };
-        let workloads = root.join("docs/perf/workloads");
         let mut set = Vec::new();
         for program in programs {
-            let script = workloads.join(format!("{program}.php"));
+            let script = workloads::program(&root, program);
             let [a, b] = &arms;
             let under = |regime| {
                 let php = Php {
@@ -692,7 +692,7 @@ mod tests {
     fn each_program_is_committed_and_run_under_the_recipe_then_the_regime() {
         let root = crate::package_dir().parent().unwrap().to_path_buf();
         for program in PROGRAMS {
-            let path = root.join(format!("docs/perf/workloads/{program}.php"));
+            let path = workloads::program(&root, program);
             assert!(path.is_file(), "{}", path.display());
         }
         let pin = Manifest::load(&root).unwrap().pin.unwrap();
@@ -702,7 +702,7 @@ mod tests {
             regimes: vec!["jit-off"],
             ini: vec!["opcache.jit_buffer_size=0".to_owned()],
         };
-        let script = root.join("docs/perf/workloads/fib.php");
+        let script = workloads::program(&root, "fib");
         let arm = php.running(&pin, &script, &Environment::default()).unwrap();
         let args = arm.args.join(" ");
         let (recipe, regime) = (

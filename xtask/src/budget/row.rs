@@ -50,6 +50,9 @@ pub(crate) struct Workspace {
     total: Pool,
     bindings: Option<Pool>,
     docs: Option<Pool>,
+    /// The workload programs, where `[budget] workloads` holds them apart
+    /// from `docs`.
+    workloads: Option<Pool>,
     harness: Option<Pool>,
     lock_packages: Option<Pool>,
     /// `[budget] new`, stated and not yet measured.
@@ -82,6 +85,7 @@ impl PerReading for Row {
                 total,
                 bindings: pool(numbers::BINDINGS),
                 docs: pool(numbers::DOCS),
+                workloads: pool(numbers::WORKLOADS),
                 harness: pool(numbers::HARNESS),
                 lock_packages: pool(numbers::LOCK_PACKAGES),
                 new_ceiling: count(reading, numbers::NEW_CEILING),
@@ -137,6 +141,8 @@ mod tests {
                 ("total_ceiling", 440_000),
                 ("bindings", 26027),
                 ("bindings_ceiling", 32000),
+                ("workloads", 1562),
+                ("workloads_ceiling", 2500),
             ],
         ));
         let pools = workspace.workspace.unwrap();
@@ -161,6 +167,14 @@ mod tests {
             )
         );
         assert_eq!(pools.docs, None, "a pool the reading does not keep");
+        assert_eq!(
+            pools.workloads,
+            Some(Pool {
+                n: 1562,
+                ceiling: Some(2500)
+            }),
+            "the workload programs, held apart from docs"
+        );
         let uncreated = Row::of(&reading("php_jit", &[("ceiling", 9000)]));
         assert_eq!((uncreated.lines, uncreated.ceiling), (None, Some(9000)));
         let generated = serde_json::to_value(Row::of(&reading("ext/clippy.toml", &[]))).unwrap();

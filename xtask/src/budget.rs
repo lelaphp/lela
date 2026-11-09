@@ -22,6 +22,7 @@ use crate::lock::CargoLock;
 use crate::manifest::{self, Budget, Crate, Generated, Manifest, OneOrMany};
 use crate::reading::{Reading, Status, Store, joined, plural};
 use crate::sources::{self, Standing};
+use crate::workloads;
 
 /// The instrument whose readings this module writes.
 pub(crate) const INSTRUMENT: &str = "budget";
@@ -42,8 +43,12 @@ pub(crate) mod numbers {
     pub(crate) const FILES: &str = "files";
     /// The workspace's every counted line, against `[budget] total`.
     pub(crate) const TOTAL: &str = "total";
-    /// `docs/**` and the living documents, against `[budget] docs`.
+    /// `docs/**` and the living documents, less the workload programs
+    /// where `[budget] workloads` holds them, against `[budget] docs`.
     pub(crate) const DOCS: &str = "docs";
+    /// The workload programs, `docs/perf/workloads/**`, against
+    /// `[budget] workloads`.
+    pub(crate) const WORKLOADS: &str = "workloads";
     /// `.claude/**` and `harness-plugins/**`, less the desk where
     /// `[budget] harness-desk` holds it, against `[budget] harness`.
     pub(crate) const HARNESS: &str = "harness";
@@ -252,10 +257,22 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
     }
     ceiling(
         numbers::DOCS,
-        docs(root)?,
+        docs(root, budget.workloads.is_some())?,
         budget.docs,
-        "docs/** and the living documents",
+        if budget.workloads.is_some() {
+            "docs/** and the living documents, less the workload programs"
+        } else {
+            "docs/** and the living documents"
+        },
     )?;
+    if let Some(limit) = budget.workloads {
+        ceiling(
+            numbers::WORKLOADS,
+            sum(root, &git::files(root, Path::new(workloads::DIR))?)?,
+            limit,
+            &format!("{}/** lines", workloads::DIR),
+        )?;
+    }
     ceiling(
         numbers::HARNESS,
         harness(root, budget.harness_desk.is_some())?,
@@ -406,9 +423,12 @@ pub(crate) fn count(root: &Path, krate: &Crate) -> Result<Count> {
     Ok(out)
 }
 
-/// `docs/**` and the living documents at the root (`*-design.md`).
-fn docs(root: &Path) -> Result<u64> {
+/// `docs/**` and the living documents at the root (`*-design.md`), the
+/// workload programs left out where `workloads_apart`, as
+/// `[budget] workloads` holds them on their own (#4341).
+fn docs(root: &Path, workloads_apart: bool) -> Result<u64> {
     let mut paths = git::files(root, Path::new("docs"))?;
+    paths.retain(|p| !(workloads_apart && Path::new(p).starts_with(workloads::DIR)));
     paths.extend(
         git::files(root, Path::new("."))?
             .into_iter()

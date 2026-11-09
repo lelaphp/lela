@@ -94,6 +94,7 @@ pub mod unsafe_audit;
 pub mod usage;
 pub mod vocab;
 pub mod witness;
+mod workloads;
 pub mod worktree;
 
 use std::io::Write;

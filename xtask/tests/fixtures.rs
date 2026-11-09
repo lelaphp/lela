@@ -97,6 +97,29 @@ fn scripts_over_their_ceiling_fail_naming_each_counted_file_and_the_generator_le
     assert!(!scripts.key().is_empty(), "stamped over scripts/");
 }
 
+/// `docs/perf/workloads/**` against `[budget] workloads` (#4341): the
+/// program's three lines are over a row of two, the workspace reading
+/// fails naming the directory, and `docs` no longer counts them.
+#[test]
+fn workloads_over_their_row_fail_the_workspace_and_leave_docs() {
+    let root = fixture("budget", "workloads");
+    let manifest = Manifest::load(&root).unwrap();
+    assert_eq!(manifest.budget.workloads, Some(2));
+    let readings = budget::run(&root, &manifest).unwrap();
+    let workspace = readings.iter().find(|r| r.scope == "workspace").unwrap();
+    assert_eq!(workspace.status, Status::Fail, "{workspace:#?}");
+    assert_eq!(workspace.numbers["workloads"], 3.into());
+    assert_eq!(workspace.numbers["workloads_ceiling"], 2.into());
+    assert_eq!(workspace.numbers["docs"], 0.into());
+    assert!(
+        workspace
+            .message
+            .contains("docs/perf/workloads/** lines: 3 over the ceiling of 2"),
+        "{}",
+        workspace.message
+    );
+}
+
 #[test]
 fn committed_generated_code_outside_the_declared_exception_fails_the_workspace() {
     let root = fixture("budget", "generated-code");
