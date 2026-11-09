@@ -35,6 +35,13 @@
 //
 // The desk counts in `$.store` each ruling a later #2247 question names,
 // the number stage two's ticket cites.
+//
+// And the band (#3497, items 3 and 12 of research/harness-mods.r1.md §5,
+// ruled 2026-10-25): above the prompt, `done`'s unmet conditions and the
+// branch ticket's unticked boxes, from `xtask done --format json --peek`
+// (#3494), which judges and writes no reading; asked again only where the
+// tree's fingerprint moved or a `Bash` call ran an instrument. In the
+// status line, the branch ticket's spend, from its last `usage` reading.
 
 import type { EngineInterface, Register, ToolCallInput } from 'claude-code';
 
@@ -258,11 +265,127 @@ async function sweep($: EngineInterface): Promise<void> {
     swept = failed === undefined ? { at } : { at: swept.at, failed: `the sweep at ${at} failed: ${failed}` };
     const rows = rowsOf(await $.store.get('queue')).length;
     const stale = failed === undefined ? '' : `, stale since ${swept.at ?? 'an earlier session'}`;
-    $.ui.status(rows === 0 && stale === '' ? undefined : `harness: ${rows} decision${rows === 1 ? '' : 's'} waiting${stale}`);
+    queueLine = rows === 0 && stale === '' ? undefined : `harness: ${rows} decision${rows === 1 ? '' : 's'} waiting${stale}`;
+    showStatus($);
     $.ui.invalidate('ui.render');
   } finally {
     sweeping = false;
   }
+}
+
+/// The status line: the queue's count and the branch ticket's spend, one
+/// line, since a plugin has one.
+let queueLine: string | undefined;
+let spendLine: string | undefined;
+const showStatus = ($: EngineInterface) => {
+  const parts = [queueLine, spendLine].filter((p): p is string => p !== undefined);
+  $.ui.status(parts.length === 0 ? undefined : parts.join(' · '));
+};
+
+/// The shape of `done --format json` the band reads (`JSON_V` in
+/// xtask/src/done.rs); an object of another `v` is refused, not guessed at.
+const DONE_V = 1;
+type Unmet = { kind: string; instrument: string | null; scope: string | null; message: string; command: string | null };
+type Done = { v: number; base: { since: string }; ticket: number | null; met: boolean; counts: Record<string, number>; unmet: Unmet[] };
+
+/// A Bash command that ran an instrument, as harness.ts tells one, less the
+/// subcommands that read and write no reading.
+const RAN_AN_INSTRUMENT = /(^|[\s;&|])(cargo\s+xtask|xtask|\S*\/xtask)\s+(?!(?:status|track|help|--help|-h)\b)/;
+
+/// The band's state, this session's: the last list `done` printed or why
+/// none was read, the fingerprint it was asked over, whether an instrument
+/// ran since, and the one refresh at a time.
+let band: { done?: Done; failed?: string } = {};
+let printed: string | undefined;
+let instrumentRan = false;
+let refreshing = false;
+let again = false;
+let folded = false;
+
+/// The tree's fingerprint: `HEAD`, the status with every untracked path,
+/// and the diff against `HEAD`, read with no optional lock so the read
+/// writes not even the index, folded by FNV-1a.
+async function fingerprint($: EngineInterface): Promise<string> {
+  const cwd = await $.session.cwd();
+  const git = (args: string[]) =>
+    $.process.run(['git', '--no-optional-locks', ...args], { cwd, timeoutMs: 60_000 }).then(
+      (r) => `${r.exitCode}\n${r.stdout}`,
+      (err: unknown) => String(err),
+    );
+  const read = await Promise.all([git(['status', '--porcelain=v2', '--branch', '--untracked-files=all']), git(['diff', '--no-ext-diff', '--binary', 'HEAD'])]);
+  const all = read.join('\0');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < all.length; i += 1) h = Math.imul(h ^ all.charCodeAt(i), 0x01000193) >>> 0;
+  return h.toString(16);
+}
+
+/// `done --format json --peek`: the list as one object, nothing written.
+/// Its exit is the verdict's, so a candidate is read by its JSON; one that
+/// prints no object of `DONE_V`, a build older than `--peek`, hands on.
+async function peek($: EngineInterface): Promise<Done | string> {
+  const cwd = await $.session.cwd();
+  let why = 'no xtask ran done';
+  for (const bin of await xtask($)) {
+    const run = await $.process.run([...bin, 'done', '--format', 'json', '--peek'], { cwd, timeoutMs: 120_000 }).catch((err: unknown) => String(err));
+    if (typeof run === 'string') {
+      why = run;
+      continue;
+    }
+    const list = parsed<Done>(run.stdout.trim().split('\n').at(-1) ?? '');
+    if (list?.v === DONE_V && Array.isArray(list.unmet)) return list;
+    why = list?.v === undefined ? `done exited ${run.exitCode}: ${firstLine(run.stderr)}` : `done printed shape v${String(list.v)}; the band reads v${DONE_V}`;
+  }
+  return why;
+}
+
+/// The branch ticket's spend: its scope's last `usage` reading, which
+/// `xtask status` reads off the store and `track work` joins to the ticket.
+async function spend($: EngineInterface): Promise<void> {
+  const n = band.done?.ticket;
+  if (typeof n !== 'number') return;
+  const rows = await xtaskJson<{ scope: string; reading?: { numbers?: Record<string, number> } }[]>($, ['status', '--section', 'usage', '--format', 'json']);
+  const last = Array.isArray(rows) ? rows.find((r) => r.scope === String(n))?.reading?.numbers : undefined;
+  if (typeof last?.usd === 'number') spendLine = `#${n}: $${last.usd.toFixed(2)} spent${typeof last.turn === 'number' ? ` by turn ${last.turn}` : ''}`;
+  showStatus($);
+}
+
+/// One refresh: `done` peeked where the fingerprint moved or an instrument
+/// ran since the last ask, then the spend. One at a time: a refresh asked
+/// meanwhile folds into one more pass, and the redraw is `invalidate`'s,
+/// which the engine folds to ten a second, thirty for the band (REF#limits).
+async function refresh($: EngineInterface): Promise<void> {
+  if (refreshing) return void (again = true);
+  refreshing = true;
+  try {
+    do {
+      again = false;
+      const now = await fingerprint($);
+      if (now === printed && !instrumentRan) continue;
+      [printed, instrumentRan] = [now, false];
+      const got = await peek($);
+      band = typeof got === 'string' ? { done: band.done, failed: got } : { done: got };
+      $.ui.invalidate('ui.render');
+    } while (again);
+    await spend($);
+  } finally {
+    refreshing = false;
+  }
+}
+const refreshSoon = ($: EngineInterface) => void $.clock.after(1, () => void refresh($).catch(() => undefined));
+
+/// The band's rows: a head that counts, then the conditions and the
+/// ticket's unticked boxes, at most `room` of them, the last saying how
+/// many more where they do not fit.
+function bandRows(done: Done, room: number): { head: string; rows: string[] } {
+  const own = done.unmet.find((u) => u.instrument === 'ticket' && u.scope === String(done.ticket));
+  const boxes = /unticked: (.*)$/.exec(own?.message ?? '')?.[1]?.split(/;\s+(?=\(\d+\)\s)/) ?? [];
+  const conditions = done.unmet.filter((u) => boxes.length === 0 || u !== own).map((u) => `${u.kind}: ${u.message}`);
+  const kinds = Object.entries(done.counts).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`);
+  const ticket = boxes.length === 0 ? '' : `; #${done.ticket}: ${boxes.length} box${boxes.length === 1 ? '' : 'es'} unticked`;
+  const head = `done: ${done.unmet.length} unmet since ${done.base.since}${kinds.length === 0 ? '' : ` (${kinds.join(', ')})`}${ticket}`;
+  const all = [...conditions, ...boxes.map((b) => `#${done.ticket} ${b}`)];
+  const rows = all.length <= room ? all : [...all.slice(0, room - 1), `+${all.length - room + 1} more; cargo xtask done lists them`];
+  return { head, rows };
 }
 
 /// The counsel's system prompt: the case for each option, cited, and a
@@ -460,7 +583,38 @@ export const register: Register = (on) => {
     // a sweep outlasts a hook's budget, so it runs on the clock.
     $.clock.after(1, () => void sweep($).catch(() => undefined));
     $.clock.every(EVERY_MS, () => void sweep($).catch(() => undefined));
+    refreshSoon($);
     return out;
+  });
+
+  // An instrument run may have moved a reading `done` reads, whatever the
+  // fingerprint says: the band asks again.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const out = await next(e);
+    if (RAN_AN_INSTRUMENT.test(e.command)) {
+      instrumentRan = true;
+      refreshSoon($);
+    }
+    return out;
+  });
+
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    const { done, failed } = band;
+    if (e.props.hasSurvey || (done?.met !== false && failed === undefined)) return next(e);
+    const { Box, Text, Button } = $.ui.resolve(e);
+    const { head, rows } = done === undefined ? { head: 'done: not read', rows: [] } : bandRows(done, failed === undefined ? 2 : 1);
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row" gap={1}>
+          <Text bold wrap="truncate-end">{head}</Text>
+          {rows.length > 0 && (
+            <Button key="band-fold" onPress={() => ((folded = !folded), $.ui.invalidate('ui.render'))}>{folded ? 'more' : 'less'}</Button>
+          )}
+        </Box>
+        {failed !== undefined && <Text color="yellow" wrap="truncate-end">{done === undefined ? '' : 'stale: '}{failed}</Text>}
+        {!folded && rows.map((row) => <Text dimColor wrap="truncate-end">{row}</Text>)}
+      </Box>
+    );
   });
 
   on('command.run', { command: 'decide' }, async ($) => {
@@ -495,9 +649,10 @@ export const register: Register = (on) => {
   );
 
   // A counsel's answer: its turn counted, its latest draft kept for Rule.
+  // Any other turn's end refreshes the band and the spend.
   on('turn.complete', async ($, e, next) => {
     const out = await next(e);
-    if (e.agentId === undefined || !counselIds.has(e.agentId)) return out;
+    if (e.agentId === undefined || !counselIds.has(e.agentId)) return (refreshSoon($), out);
     const counsels = counselsOf(await $.store.get('counsels'));
     const was = counsels[e.agentId];
     if (was === undefined) return out;

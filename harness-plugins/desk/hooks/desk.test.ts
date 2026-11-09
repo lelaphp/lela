@@ -78,6 +78,8 @@ function beneath(on: On, counsel = 'desk:counsel') {
   const agents: AgentSpec[] = [];
   const built = new Set<string>();
   const tracker = { list: undefined as string | undefined, comment: 'posts' as 'posts' | 'times out' | 'fails' };
+  // What the band reads: `done`'s JSON, the tree git shows, the usage readings.
+  const desk = { done: undefined as string | undefined, status: '# branch.oid 91ef0c0\n', diff: '', usage: '[]' };
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 31, 12) });
   const session = mock.session(on);
   on('session.start', (_$, e) => ({ cwd: e.cwd }));
@@ -126,6 +128,10 @@ function beneath(on: On, counsel = 'desk:counsel') {
     if (line.startsWith('gh issue view') && issue !== undefined) return ran(JSON.stringify({ updatedAt: issue.updatedAt, body: issue.body }));
     if (line.includes('ticket read')) return ran(`fail ticket ${e.argv.at(-1)}: 0 of 1 criteria ticked\n`, 1);
     if (line.includes('ticket close')) return ran(`fail ticket 3765: 1 of 2 criteria ticked\n`, 1);
+    if (line.endsWith(' done --format json --peek') && desk.done !== undefined) return ran(`${desk.done}\n`, 1, 'xtask: 5 conditions of done unmet\n');
+    if (line.endsWith(' status --section usage --format json')) return ran(desk.usage);
+    if (line.startsWith('git --no-optional-locks status')) return ran(desk.status);
+    if (line.startsWith('git --no-optional-locks diff')) return ran(desk.diff);
     // xtask's own flags: `track --json`, and an unknown one refused as clap does.
     if (/(?:^|\/| -- )xtask track --json$|^cargo run -q -p xtask -- track --json$/.test(line)) return ran('{"base":"7a8ddbc","branch":"t3496","ticket":3496}\n');
     if (line.includes(' track ')) return ran('', 2, "error: unexpected argument '--format' found\n");
@@ -133,7 +139,7 @@ function beneath(on: On, counsel = 'desk:counsel') {
     return ran('');
   });
   const posts = () => runs.filter((r) => r.argv.join(' ').startsWith('gh issue comment'));
-  return { down, listed, saved, runs, writes, statuses, opened, views, spawns, agents, clock, session, posts, issues, tracker, built };
+  return { down, listed, saved, runs, writes, statuses, opened, views, spawns, agents, clock, session, posts, issues, tracker, built, desk };
 }
 
 /// A session started and its first sweep run.
@@ -402,4 +408,121 @@ test('past twenty turns the row says the soft cap is passed, and Discuss continu
   expect(world.spawns.length).toBe(1);
   expect(world.views).toEqual([{ agentId: 'counsel-1' }, { agentId: 'counsel-1' }]);
   await ui.unmount();
+});
+
+/// `done --format json --peek` as t4251's build printed it on a ticket's
+/// worktree, with the four kinds its test pins (#3494).
+const DONE = {
+  v: 1,
+  base: { commit: '91ef0c0ed9629f22e3a81b165d20ac412fc6fd28', since: 'main' },
+  changed: ['ext/pcre/src/lib.rs'],
+  counts: { failing: 2, stale: 1, missing: 1, refused: 1, unkinded: 0 },
+  crates: ['ext/pcre'],
+  delegated: [],
+  met: false,
+  not_run: [],
+  notes: [],
+  ticket: 3497,
+  unmet: [
+    { command: 'cargo xtask clippy --crate ext/pcre', instrument: 'clippy', kind: 'failing', message: 'clippy: ext/pcre fails', scope: 'ext/pcre' },
+    { command: 'cargo xtask test --crate ext/pcre', instrument: 'test', kind: 'stale', message: 'test: ext/pcre is stale; its last reading failed', scope: 'ext/pcre' },
+    { command: null, instrument: null, kind: 'refused', message: 'open divergence pcre-jit on ext/pcre', scope: null },
+    { command: 'cargo xtask witness --crate ext/pcre', instrument: 'witness', kind: 'missing', message: 'witness: no reading for ext/pcre', scope: 'ext/pcre' },
+    {
+      command: 'cargo xtask ticket read',
+      instrument: 'ticket',
+      kind: 'failing',
+      message: 'ticket: #3497: 1 of 3 criteria ticked; unticked: (2) The band does not run `done`; twice; (3) The status line shows the spend',
+      scope: '3497',
+    },
+  ],
+};
+const ABOVE = {
+  plugin: 'desk',
+  component: 'AbovePrompt',
+  props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 100, scroll: { offset: 0, bodyRows: 11 }, view: {} },
+} as const;
+const mainTurn = (turnId: string) => answered(undefined as never, 'Done.', turnId);
+
+test('the band draws done --format json --peek: a count, then the conditions and the unticked boxes, folded to the count, and writes no reading', async ($, on) => {
+  const world = beneath(on);
+  world.tracker.list = '[]';
+  world.desk.done = JSON.stringify(DONE);
+  await started($, world);
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...ABOVE, surface });
+    const shown = async () => (await ui.findAll({ type: 'Text' })).map((t) => t.text);
+    const head = 'done: 5 unmet since main (2 failing, 1 stale, 1 missing, 1 refused); #3497: 2 boxes unticked';
+    expect(await shown()).toEqual([head, 'failing: clippy: ext/pcre fails', '+5 more; cargo xtask done lists them']);
+    await ui.press({ key: 'band-fold' });
+    expect(await shown()).toEqual([head]);
+    await ui.press({ key: 'band-fold' });
+    await ui.unmount();
+  }
+  // The boxes, each its own row where there is room, a `;` inside one kept.
+  world.desk.done = JSON.stringify({ ...DONE, unmet: DONE.unmet.slice(4), counts: { failing: 1 } });
+  await $.tool.call({ tool: 'Bash', command: 'cargo xtask ticket read' });
+  await world.clock.advance(1);
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'terminal' });
+  expect((await ui.findAll({ type: 'Text' })).map((t) => t.text).slice(1)).toEqual(['#3497 (2) The band does not run `done`; twice', '#3497 (3) The status line shows the spend']);
+  await ui.unmount();
+  // Each xtask the band ran reads: `done` peeked, and the usage readings.
+  const asked = world.runs.map((r) => r.argv.join(' ')).filter((l) => l.includes('xtask')).map((l) => l.replace(/^.*?xtask (?:-- )?/, ''));
+  expect([...new Set(asked)]).toEqual(['done --format json --peek', 'status --section usage --format json']);
+  expect(world.runs.filter((r) => r.argv[0] === 'git').every((r) => r.argv[1] === '--no-optional-locks')).toBe(true);
+  expect(world.writes).toEqual([]);
+});
+
+test('the band asks done again only where the fingerprint moved or a Bash call ran an instrument', async ($, on) => {
+  const world = beneath(on);
+  // Beneath the desk, the engine's own band: an empty one, reached once the desk passes.
+  let passed = 0;
+  on('ui.render', { component: 'AbovePrompt' }, () => ((passed += 1), h('Box', null) as never));
+  world.desk.done = JSON.stringify(DONE);
+  await started($, world);
+  const peeks = () => world.runs.filter((r) => r.argv.includes('--peek')).length;
+  const turn = async (id: string) => ($.turn.complete(mainTurn(id)), world.clock.advance(1));
+  expect(peeks()).toBe(1);
+  await turn('t1');
+  expect(peeks()).toBe(1);
+  // A read runs no instrument.
+  await $.tool.call({ tool: 'Bash', command: 'cargo xtask status --section phpt' });
+  await world.clock.advance(1);
+  expect(peeks()).toBe(1);
+  world.desk.diff = 'diff --git a/ext/pcre/src/lib.rs b/ext/pcre/src/lib.rs\n+pub fn preg_split() {}\n';
+  await turn('t2');
+  expect(peeks()).toBe(2);
+  await turn('t3');
+  expect(peeks()).toBe(2);
+  // A commit moves HEAD with no diff left.
+  [world.desk.diff, world.desk.status] = ['', '# branch.oid 7a8ddbc\n'];
+  await turn('t4');
+  expect(peeks()).toBe(3);
+  // An instrument over the same tree is asked again, and its list redrawn: met, the band passes.
+  world.desk.done = JSON.stringify({ ...DONE, met: true, unmet: [], counts: {} });
+  await $.tool.call({ tool: 'Bash', command: 'target/debug/xtask witness --crate ext/pcre' });
+  await world.clock.advance(1);
+  expect(peeks()).toBe(4);
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' });
+  expect([passed, (await ui.findAll({ type: 'Text' })).length]).toEqual([1, 0]);
+  await ui.unmount();
+});
+
+test("the status line shows the branch ticket's spend, from its last usage reading, beside the queue's count", async ($, on) => {
+  const world = beneath(on);
+  world.desk.done = JSON.stringify(DONE);
+  const usage = (usd: number, turn: number) =>
+    JSON.stringify([
+      { scope: '3496', reading: { instrument: 'usage', numbers: { usd: 99, turn: 3 } } },
+      { scope: '3497', reading: { instrument: 'usage', numbers: { usd, turn, tokens: 152_000 } } },
+    ]);
+  world.desk.usage = usage(3.2146, 14);
+  await started($, world);
+  expect(world.statuses.at(-1)).toBe('harness: 2 decisions waiting · #3497: $3.21 spent by turn 14');
+  // A turn whose tree did not move reads the spend again, and not done.
+  world.desk.usage = usage(4.5, 15);
+  await $.turn.complete(mainTurn('t1'));
+  await world.clock.advance(1);
+  expect(world.statuses.at(-1)).toBe('harness: 2 decisions waiting · #3497: $4.50 spent by turn 15');
+  expect(world.runs.filter((r) => r.argv.includes('--peek')).length).toBe(1);
 });
