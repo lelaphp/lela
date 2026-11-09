@@ -40,7 +40,14 @@
 //! and that run ([`Vote`]). The placement is `IN_THE_LOOP` and
 //! `PATH_IN_THE_LOOP` in [`ARMS`], a variant of the second counting as
 //! in. That reading informs and fails nothing: the list is a person's to
-//! change (#4335), and the instrument decides nothing.
+//! change (#4335), and the instrument decides nothing. It names each
+//! declared run of a role that votes that did not vote, a skip, such as a
+//! page where no rig is here, or a fail, its `missed` number counting
+//! them, and where there is one it is a skip, not a pass: a vote over part
+//! of the criterion's runs would name as leaving a variant only a missing
+//! run meets, and a fail would hold a machine without the rig to a
+//! reading that decides nothing, each missing run's own reading already
+//! saying why it did not vote.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -314,14 +321,30 @@ impl Census {
 }
 
 /// The vote over the runs that vote: each variant met in one, with its
-/// highest share in any of them and that run's scope.
+/// highest share in any of them and that run's scope, and each declared
+/// run of a role that votes that did not vote, with its reading's status.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Vote {
     met: BTreeMap<String, (f64, String)>,
     voters: usize,
+    missed: Vec<(String, Status)>,
 }
 
 impl Vote {
+    /// `counted`, whose reading is `reading` and whose counts are
+    /// `census` where it wrote any: cast where its role votes and its
+    /// reading passed, and missed where its role votes and it did not,
+    /// a skip or a fail.
+    fn take(&mut self, counted: &Counted, reading: &Reading, census: Option<&Census>) {
+        if !counted.votes() {
+            return;
+        }
+        match (reading.status, census) {
+            (Status::Pass, Some(census)) => self.cast(&counted.scope, census),
+            (status, _) => self.missed.push((counted.scope.clone(), status)),
+        }
+    }
+
     /// `census`, the counts of the run `scope`, cast.
     fn cast(&mut self, scope: &str, census: &Census) {
         self.voters += 1;
@@ -363,6 +386,7 @@ impl Vote {
         reading.count("placed", placed.len() as u64)?;
         reading.count("enter", enter.len() as u64)?;
         reading.count("leave", leave.len() as u64)?;
+        reading.count("missed", self.missed.len() as u64)?;
         let listed = |names: &[&String]| {
             if names.is_empty() {
                 "none".to_owned()
@@ -370,9 +394,8 @@ impl Vote {
                 joined(names.iter().map(|name| shown(name)), ", ")
             }
         };
-        reading.status = Status::Pass;
-        reading.message = format!(
-            "{} run{} of a role that votes voted {} variant{} over a quarter of a percent, against the build's {} placed by {} in {ARMS}; {} would enter: {}; {} would leave: {}; this informs and fails nothing",
+        let mut said = format!(
+            "{} run{} of a role that votes voted {} variant{} over a quarter of a percent, against the build's {} placed by {} in {ARMS}; {} would enter: {}; {} would leave: {}",
             self.voters,
             plural(self.voters),
             voted.len(),
@@ -384,8 +407,53 @@ impl Vote {
             leave.len(),
             listed(&leave),
         );
+        reading.status = if self.missed.is_empty() {
+            Status::Pass
+        } else {
+            Status::Skip
+        };
+        if self.missed.is_empty() {
+            said.push_str("; this informs and fails nothing");
+        } else {
+            let missed = (self.missed.iter())
+                .map(|(scope, status)| format!("{scope} ({})", status.as_str()));
+            write!(
+                said,
+                "; {} declared run{} of a role that votes did not vote: {}; so this is a vote over part of the criterion's runs, a skip, and what it says would enter or leave is unread",
+                self.missed.len(),
+                plural(self.missed.len()),
+                joined(missed, ", ")
+            )
+            .ok();
+        }
+        reading.message = said;
         Ok(())
     }
+}
+
+/// `counts`, what `counted` dispatched and how it ended where it ended
+/// otherwise than declared, written into its `reading` and taken by
+/// `vote`: a run that could not be counted fails, naming why.
+fn tallied(
+    counted: &Counted,
+    counts: Result<(Census, Option<String>)>,
+    reading: &mut Reading,
+    vote: &mut Vote,
+) {
+    let scope = &counted.scope;
+    let written = counts.and_then(|(census, otherwise)| {
+        census.written_into(scope, otherwise.as_deref(), reading)?;
+        Ok(census)
+    });
+    let census = match written {
+        Ok(census) => Some(census),
+        Err(trouble) => {
+            reading.status = Status::Fail;
+            reading.message = format!("{scope}: {trouble:#}");
+            None
+        }
+    };
+    vote.take(counted, reading, census.as_ref());
 }
 
 /// The variants the build at `root` places in the loop's body: every
@@ -474,6 +542,7 @@ pub fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Vec<Reading>> 
         let counts = match (&engine, &counted.source) {
             (_, Source::Unfound(why)) => {
                 reading.message = format!("{scope}: nothing ran; {why}");
+                vote.take(counted, &reading, None);
                 readings.push(reading);
                 continue;
             }
@@ -494,17 +563,7 @@ pub fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Vec<Reading>> 
             }
             (Ok(engine), _) => counts(&oracle, engine, counted),
         };
-        let written = counts.and_then(|(census, otherwise)| {
-            census.written_into(scope, otherwise.as_deref(), &mut reading)?;
-            if reading.status == Status::Pass && counted.votes() {
-                vote.cast(scope, &census);
-            }
-            Ok(())
-        });
-        if let Err(trouble) = written {
-            reading.status = Status::Fail;
-            reading.message = format!("{scope}: {trouble:#}");
-        }
+        tallied(counted, counts, &mut reading, &mut vote);
         if let Some(role) = counted.role.filter(|role| !role.votes()) {
             let said = format!("; its role, {}, votes nothing", role.name());
             reading.message.push_str(&said);
@@ -847,6 +906,75 @@ page = [{ name = "front", path = "/" }]
             "{said}"
         );
         assert!(!said.contains("Jmp 99.900% workloads/a"), "{said}");
+    }
+
+    /// A declared run of a role that votes is cast where its reading
+    /// passes, and named as missed where it is a skip, a page with no rig
+    /// here, or a fail, a page that answered 301 or a run that could not
+    /// be counted; a run whose role votes nothing is neither. With one
+    /// missed the vote's reading is a skip naming each, and with none a
+    /// pass.
+    #[test]
+    fn the_vote_names_each_declared_voter_that_did_not_vote() {
+        let run = |scope: &str, role| Counted {
+            scope: scope.to_owned(),
+            source: Source::Unfound(String::new()),
+            args: Vec::new(),
+            ends: Ends::Answers(ANSWERS),
+            role: Some(role),
+        };
+        let counts = |otherwise: Option<&str>| -> Result<(Census, Option<String>)> {
+            let census = Census::read(b"dispatch-census Jmp 4\n").unwrap();
+            Ok((census, otherwise.map(str::to_owned)))
+        };
+        let mut vote = Vote::default();
+        let mut take = |counted: &Counted, counts| {
+            let mut reading = Reading::new(INSTRUMENT, &counted.scope);
+            tallied(counted, counts, &mut reading, &mut vote);
+            reading.status
+        };
+        let fib = run("workloads/fib", Role::Kernel);
+        assert_eq!(take(&fib, counts(None)), Status::Pass);
+        let answered = Some("the page answered 301 where it should answer 200");
+        let post = run("pages/post", Role::Bench);
+        assert_eq!(take(&post, counts(answered)), Status::Fail);
+        let login = run("pages/login", Role::Bench);
+        let gone = Err(anyhow::anyhow!("the rig: gone"));
+        assert_eq!(take(&login, gone), Status::Fail);
+        let shapes = run("workloads/shapes", Role::Shape);
+        assert_eq!(take(&shapes, counts(answered)), Status::Fail);
+        let front = run("pages/front", Role::Bench);
+        let mut skipped = Reading::new(INSTRUMENT, "pages/front");
+        skipped.message = "pages/front: nothing ran; no rig".to_owned();
+        vote.take(&front, &skipped, None);
+        assert_eq!(vote.voters, 1);
+        let placed: BTreeSet<String> = ["Jmp".to_owned()].into();
+        let mut reading = Reading::new(INSTRUMENT, VOTE);
+        vote.written_into(&placed, &mut reading).unwrap();
+        assert_eq!(reading.status, Status::Skip);
+        assert_eq!(reading.int("voters"), Some(1));
+        assert_eq!(reading.int("missed"), Some(3));
+        assert!(
+            reading.message.contains(
+                "; 3 declared runs of a role that votes did not vote: pages/post (fail), pages/login (fail), pages/front (skip); "
+            ),
+            "{}",
+            reading.message
+        );
+        let mut whole = Vote::default();
+        whole.cast(
+            "workloads/fib",
+            &Census::read(b"dispatch-census Jmp 4\n").unwrap(),
+        );
+        let mut reading = Reading::new(INSTRUMENT, VOTE);
+        whole.written_into(&placed, &mut reading).unwrap();
+        assert_eq!(reading.status, Status::Pass);
+        assert_eq!(reading.int("missed"), Some(0));
+        assert!(
+            reading
+                .message
+                .ends_with("; this informs and fails nothing")
+        );
     }
 
     /// One place per rule: the criterion is the one `IN_THE_LOOP`'s doc
