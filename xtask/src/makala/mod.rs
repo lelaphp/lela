@@ -58,15 +58,13 @@ use crate::phpt::file::Phpt;
 use crate::phpt::{Test, adapter, cgi, http};
 use crate::reading::{Reading, plural};
 use crate::witness::makala::Http;
+use crate::workloads;
 
 /// The crate both instruments' readings are scoped to.
 pub(crate) const SCOPE: &str = "sapi/makala";
 
 /// The sections whose test the corpus leaves out, the reasons above.
 const LEFT_OUT: [&str; 5] = ["REDIRECTTEST", "CLEAN", "GZIP_POST", "DEFLATE_POST", "ARGS"];
-
-/// Where the bench workloads stand, relative to the workspace root.
-const WORKLOADS: &str = "docs/perf/workloads";
 
 /// One request of the corpus: what names it, the whole file it runs and
 /// the name it is written under, the request as a client sends it and the
@@ -169,7 +167,7 @@ fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
 /// began (#2351).
 pub(crate) fn workloads(root: &Path) -> Result<Vec<Entry>> {
     let script = Manifest::load(root)?.pin()?.recipe.script_name.clone();
-    let dir = root.join(WORKLOADS);
+    let dir = workloads::dir(root);
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .with_context(|| format!("reading {}", dir.display()))?
         .filter_map(|found| found.ok().map(|found| found.path()))
@@ -181,7 +179,7 @@ pub(crate) fn workloads(root: &Path) -> Result<Vec<Entry>> {
         .map(|path| {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             Ok(Entry {
-                id: format!("{WORKLOADS}/{name}"),
+                id: format!("{}/{name}", workloads::DIR),
                 program: std::fs::read(&path)
                     .with_context(|| format!("reading {}", path.display()))?,
                 script: script.clone(),

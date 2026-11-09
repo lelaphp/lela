@@ -43,6 +43,7 @@ use crate::manifest::Manifest;
 use crate::oracle::{self, Ended, Invocation, Observation, Oracle, Program, Regime, Verdict};
 use crate::phpt::{Build, Lane};
 use crate::reading::{Reading, Status, Store, joined};
+use crate::workloads;
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "trace-dump";
@@ -116,8 +117,7 @@ impl Ask {
         } else {
             &named[..]
         };
-        let workloads = root.join("docs/perf/workloads");
-        let at = |k: &&str| traced(k, workloads.join(format!("{k}.php")));
+        let at = |k: &&str| traced(k, workloads::program(root, k));
         Ok(kernels.iter().map(at).collect())
     }
 }
@@ -366,14 +366,14 @@ mod tests {
         let programs = Ask::default().programs(root).unwrap();
         let scopes: Vec<&str> = programs.iter().map(|t| t.scope.as_str()).collect();
         assert_eq!(scopes, KERNELS);
-        assert_eq!(programs[0].path, root.join("docs/perf/workloads/fib.php"));
+        assert_eq!(programs[0].path, workloads::program(root, "fib"));
         let ask = |kernel: &str| Ask {
             kernel: vec![kernel.to_owned()],
             ..Ask::default()
         };
         let nbody = Traced {
             scope: "nbody".to_owned(),
-            path: root.join("docs/perf/workloads/nbody.php"),
+            path: workloads::program(root, "nbody"),
         };
         assert_eq!(ask("nbody").programs(root).unwrap(), [nbody]);
         let typo = ask("nbdy").programs(root).unwrap_err().to_string();

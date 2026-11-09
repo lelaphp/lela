@@ -41,6 +41,7 @@ use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{Ended, Invocation, Oracle, Program, hosts::CLI, profile};
 use crate::reading::{Number, Reading, Status, Store, joined, plural};
+use crate::workloads;
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "dispatch-census";
@@ -60,9 +61,6 @@ pub(crate) const THRESHOLD: f64 = 0.25;
 
 /// The file whose doc of `IN_THE_LOOP` states [`THRESHOLD`].
 const ARMS: &str = "crates/php_engine/build/arms.rs";
-
-/// The workloads, each program of the directory a reading of its own.
-const WORKLOADS: &str = "docs/perf/workloads";
 
 /// php-src's micro-benchmark, by its path in the pinned tree.
 const MICRO_BENCH: &str = "Zend/micro_bench.php";
@@ -127,7 +125,7 @@ impl Ask {
             };
             return self.program.iter().map(named).collect();
         }
-        let dir = root.join(WORKLOADS);
+        let dir = workloads::dir(root);
         let mut workloads: Vec<PathBuf> = std::fs::read_dir(&dir)
             .with_context(|| format!("reading {}", dir.display()))?
             .map(|entry| entry.map(|entry| entry.path()))

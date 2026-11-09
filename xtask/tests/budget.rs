@@ -134,6 +134,53 @@ fn a_budget_without_the_php_measures_holds_nothing_to_them() {
     }
 }
 
+/// `[budget] workloads` holds `docs/perf/workloads/**` apart from `docs`
+/// (#4341): with no row the programs' lines are `docs`'s and no workloads
+/// count is read; a row of 3 holds a 3-line program and `docs` leaves it
+/// out; a row of 2 fails the workspace reading on it.
+#[test]
+fn the_workloads_row_holds_the_programs_apart_from_docs() {
+    let root = scratch("workloads");
+    let repo = common::repo::scratch_workspace(workspace(), &root);
+    // A manifest of no row: what is measured here is the tree.
+    Tracked::minimal().write(&root);
+    std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    repo.write(
+        "docs/perf/workloads/loop.php",
+        "<?php\n\nfor ($i = 0; $i < 3; $i++) {}\necho $i, \"\\n\";\n",
+    );
+    repo.commit("a workload");
+
+    let mut manifest = Manifest::load(&root).unwrap();
+    assert_eq!(manifest.budget.workloads, None);
+    let readings = budget::run(&root, &manifest).unwrap();
+    let without = &workspace_reading(&readings).numbers;
+    assert!(!without.contains_key("workloads"), "{without:?}");
+
+    manifest.budget.workloads = Some(3);
+    let readings = budget::run(&root, &manifest).unwrap();
+    let ws = workspace_reading(&readings);
+    assert!(!ws.message.contains("docs/perf/workloads"), "{ws:#?}");
+    assert_eq!(ws.numbers["workloads"], 3.into());
+    assert_eq!(ws.numbers["workloads_ceiling"], 3.into());
+    assert_eq!(
+        int(&ws.numbers["docs"]) + 3,
+        int(&without["docs"]),
+        "the programs' lines leave docs's count"
+    );
+
+    manifest.budget.workloads = Some(2);
+    let readings = budget::run(&root, &manifest).unwrap();
+    let ws = workspace_reading(&readings);
+    assert_eq!(ws.status, Status::Fail, "{ws:#?}");
+    assert!(
+        ws.message
+            .contains("docs/perf/workloads/** lines: 3 over the ceiling of 2"),
+        "{}",
+        ws.message
+    );
+}
+
 /// `[budget] harness-desk` holds `harness-plugins/desk/**` apart from
 /// `harness` (#3491): a 1301-line module under the desk fails a row of
 /// 1300 and leaves `harness`'s count without it, and with no row the
@@ -705,9 +752,11 @@ mod tracked {
         let ws = readings.iter().find(|r| r.scope == "workspace").unwrap();
         assert_eq!(ws.status, Status::Pass, "{}", ws.message);
         let desk = manifest.budget.harness_desk.map(|_| "harness_desk");
+        let workloads = manifest.budget.workloads.map(|_| "workloads");
         for key in ["total", "bindings", "docs", "harness", "lock_packages"]
             .into_iter()
             .chain(desk)
+            .chain(workloads)
         {
             assert!(ws.numbers.contains_key(key), "{key}: {:?}", ws.numbers);
             assert!(
