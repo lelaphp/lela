@@ -9308,6 +9308,24 @@ fn inline_fetch_obj_r(
 ) -> Option<Edge> {
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
     let (place, _) = opline_place(req, (frame, code, op), b, object, false)?;
+    copied_out(req, frame, op, place, container)
+}
+
+/// The end a property read's inline path shares, `FETCH_OBJ_R`'s and
+/// `FETCH_OBJ_IS`'s: the value `place` holds, `ZVAL_COPY_DEREF` into
+/// the temporary, and the container given up (`FREE_OP1`). `None`, with
+/// nothing touched, where the place holds nothing, whose read is
+/// `__get`'s, `__isset`'s or a diagnostic's, where the temporary holds
+/// an owner, and where the container holds the object's last owner,
+/// whose release is the kernel's.
+#[inline(always)] // as `inline_fetch_obj_r`
+fn copied_out(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    place: php_heap::ZvalRef,
+    container: Held,
+) -> Option<Edge> {
     let z = crate::operand::deref(place.read());
     if z.is_undef() {
         return None;
@@ -9835,13 +9853,76 @@ impl Held {
 /// Warning: Undefined array key "missing" in %s on line 6
 /// NULL
 /// ```
+///
+/// Over a constant name the handler reads its cache slot first
+/// ([`inline_fetch_obj_is`]), and a declared slot that holds a value is
+/// copied out with no find of the name. Every other case is the
+/// kernel's, each site below read twice: a typed slot nothing has
+/// written, a hooked property, a dynamic one, a name nothing declares,
+/// `__isset` and `__get`, an object of another class at a site its
+/// first object primed, and a container that is `null` or no object.
+///
+/// ```php
+/// class C { public $p = 1; public int $t; public $h { get => "hook"; } public $n = null; }
+/// class M { private $k = ['m' => 'magic'];
+///     function __isset($n) { echo "isset $n,"; return isset($this->k[$n]); }
+///     function __get($n) { echo "get $n,"; return $this->k[$n]; } }
+/// function f($o) { $r = []; for ($i = 0; $i < 2; $i++) {
+///     $r[] = [$o->p ?? 'd', $o->t ?? 'd', $o->h ?? 'd', $o->n ?? 'd', $o->dyn ?? 'd', $o->none ?? 'd', $o->m ?? 'd',
+///         isset($o->p), isset($o->t), isset($o->h), isset($o->dyn), isset($o->m), isset($o->p->q)]; }
+///     return json_encode($r[0]) . (($r[0] === $r[1]) ? " twice\n" : " differs\n"); }
+/// $c = new C; $d = new stdClass; $d->dyn = 'dyn'; $d->p = 2;
+/// echo f($c), f($d), f(new M), f(null), f(5);
+/// ```
+/// ```expect
+/// [1,"d","hook","d","d","d","d",true,false,true,false,false,false] twice
+/// [2,"d","d","d","dyn","d","d",true,false,false,true,false,false] twice
+/// isset p,isset t,isset h,isset n,isset dyn,isset none,isset m,get m,isset p,isset t,isset h,isset dyn,isset m,isset p,isset p,isset t,isset h,isset n,isset dyn,isset none,isset m,get m,isset p,isset t,isset h,isset dyn,isset m,isset p,["d","d","d","d","d","d","magic",false,false,false,false,true,false] twice
+/// ["d","d","d","d","d","d","d",false,false,false,false,false,false] twice
+/// ["d","d","d","d","d","d","d",false,false,false,false,false,false] twice
+/// ```
 pub(crate) fn fetch_obj_is<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if op.op2_type == OperandKind::Const {
+        let inline = over_container!(op.op1_type, |a| inline_fetch_obj_is(
+            req, frame, code, op, a
+        ));
+        if let Some(edge) = inline {
+            return edge;
+        }
+    }
     fetch_obj(req, frame, code, op, PropertyRead::Silent)
+}
+
+/// The cached arm of `ZEND_FETCH_OBJ_IS` over a constant name
+/// (`Z/Zend/zend_vm_def.h:2311-2325`): on the receiver
+/// [`inline_receiver`] reads, where the opline's cache slot holds the
+/// object's class (`zobj->ce == CACHED_PTR_EX(cache_slot)`) and a
+/// declared offset beside it, the slot at that offset copied out as
+/// [`copied_out`] copies it. `None`, with nothing touched, where the
+/// slot names another class or no declared slot, a dynamic property's
+/// among them, and where [`inline_receiver`] or [`copied_out`] refuses,
+/// which is the kernel's.
+#[inline(always)] // inlined into the handler, as php's cached arm is in its handler
+fn inline_fetch_obj_is(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    let (object, container) = inline_receiver(req, frame, code, op, a, crate::operand::Const)?;
+    let class = crate::api::values::ClassId(object.class());
+    let exec::PropertyOffset::Declared { slot, .. } =
+        req.cached_property(frame, property_cache_slot(op), class)?
+    else {
+        return None;
+    };
+    copied_out(req, frame, op, object.slot_ref(slot)?, container)
 }
 
 /// The body `FETCH_OBJ_R` and `FETCH_OBJ_IS` share, which is php's one
@@ -9870,6 +9951,12 @@ fn fetch_obj(
     }
     .deref();
     let read = if let Some(object) = container.as_object() {
+        // The find by name a cached arm spares, counted where the tests
+        // read it ([`exec::Vm::lookups`]).
+        #[cfg(test)]
+        {
+            req.vm_mut().lookups = req.vm_mut().lookups.saturating_add(1);
+        }
         name.name(req, frame, code, op).and_then(|name| {
             prime_constant(req, frame, op, property_cache_slot(op), object, &name);
             req.read_operand_property(object, &name, fetch)
