@@ -2,9 +2,10 @@
 // enabled by .claude/settings.json as harness@dax-php from the repository's
 // own marketplace (.claude-plugin/marketplace.json).
 //
-// Three hooks, and nothing the shipped command hooks do not also do
+// Four hooks, and nothing the shipped command hooks do not also do
 // except the refresh, in-process latency, the one figure only this
-// layer has and the denials kept for a desk. `tool.call` on Edit, Write and Bash
+// layer has, the denials kept for a desk and a builder's spawn.
+// `tool.call` on Edit, Write and Bash
 // hands the call to `xtask permit` on stdin, the shape the command hook
 // reads, and returns its deny, or the tool's result with the notes as
 // context; after a Bash call that ran an instrument it invalidates
@@ -47,6 +48,25 @@
 // person sets it false, the module registers nothing and the command
 // hooks alone are exercised; undeclared, the module is on.
 //
+// `agent.spawn` starts a builder from its brief (#4270; Round 2, Q24 (a)):
+// a prompt whose first line is `/build <n>` alone is expanded to what
+// `xtask ticket brief <n>` renders, the rest of the prompt kept under a
+// `## Coordinator` heading after it, and the spawn retyped to `builder`,
+// whose role file stops on a prompt with no brief. A prompt marked so that
+// cannot expand, the line not `/build <n>`, a fork, a brief no candidate
+// rendered or the hook failing, is refused by name and nothing starts,
+// since a spawn that failed open would start a builder with no worktree
+// line. An unmarked prompt and a resumed run pass untouched. A workflow
+// agent cannot be retyped or placed, so its prompt alone is expanded and
+// a script passes `agentType: 'builder'` itself.
+//
+// Every hook here runs xtask from the session root and names its built
+// binaries under it (Round 3, Q14 (a′)): a builder spawned into its
+// worktree (`cwd`, the brief's `Worktree:` line) still has its calls
+// judged by the root's build, and the call's `cwd` on permit's stdin is
+// the subagent's own, which `Call::nested` reads to judge the line by the
+// root's manifest while it is read from where the shell stands.
+//
 // Types: types/claude-code.d.ts beside this folder is the declarations of
 // the Claude Code this checkout runs, a tracked file the tsconfig includes,
 // kept current at every commit that stages the plugin and failing the
@@ -68,17 +88,21 @@ const CARGO_XTASK = ['cargo', 'run', '-q', '-p', 'xtask', '--'] as const;
 /// them together.
 const BUILT = ['target/debug/xtask', 'target/release/xtask'] as const;
 
-/// The built binaries that stand, then cargo. A binary built before the
-/// manifest it reads, or before the harness's own sources moved, exits
-/// without judging, so cargo closes the list rather than the last build
-/// standing for it (§4.4). The order of the built two is this adapter's
-/// own; the candidate that closes the list is shared, so when every build
-/// is stale both adapters still end at the same rebuild.
-async function xtask($: EngineInterface): Promise<readonly (readonly string[])[]> {
+/// The built binaries that stand under the session root `root`, by
+/// absolute path, then cargo, which every caller runs in `root`. A binary
+/// built before the manifest it reads, or before the harness's own sources
+/// moved, exits without judging, so cargo closes the list rather than the
+/// last build standing for it (§4.4). The order of the built two is this
+/// adapter's own; the candidate that closes the list is shared, so when
+/// every build is stale both adapters still end at the same rebuild. Under
+/// the root and never the session's directory, which in a subagent is its
+/// worktree, whose build is not the one that judges it (Round 3, Q14 (a′)).
+async function xtask($: EngineInterface, root: string): Promise<readonly (readonly string[])[]> {
   const built = await Promise.all(
-    BUILT.map(async (path) =>
-      (await $.fs.exists(path).catch(() => false)) ? ([path] as readonly string[]) : undefined,
-    ),
+    BUILT.map(async (rel) => {
+      const path = `${root}/${rel}`;
+      return (await $.fs.exists(path).catch(() => false)) ? ([path] as readonly string[]) : undefined;
+    }),
   );
   return [...built.filter((bin): bin is readonly string[] => bin !== undefined), CARGO_XTASK];
 }
@@ -171,6 +195,56 @@ async function record($: EngineInterface, tool: string, reason: string): Promise
   await $.store.set('denials', [...(Array.isArray(kept) ? kept : []), { rule, adr, tool, at }].slice(-KEPT));
 }
 
+/// A prompt marked for a builder: its first line opens with `/build`. Only
+/// `/build <n>` alone on that line expands (BUILD); any other marked line
+/// is refused rather than passed on as an unmarked prompt would be.
+const MARKED = /^\/build(\s|$)/;
+const BUILD = /^\/build (\d+)\s*$/;
+
+/// The agent type a marked spawn is retyped to: `.claude/agents/builder.md`.
+const BUILDER = 'builder';
+
+/// The line the brief opens with (`ticket::brief::HEADING`), the heading
+/// the coordinator's own text stands under after it, and the brief's line
+/// that names the worktree the builder starts in (Round 2, Q25 (a) keeps it).
+const BRIEF = '## Brief';
+const COORDINATOR = '## Coordinator';
+const WORKTREE = /^Worktree: (\/.+?), on branch /m;
+
+/// The brief for `ticket` as `xtask ticket brief` renders it in `root`,
+/// walked over the candidates as permit is, since a stale build refuses
+/// to render; with the worktree it names. Otherwise why no brief stands.
+async function briefOf(
+  $: EngineInterface,
+  root: string,
+  ticket: string,
+): Promise<{ text: string; worktree: string } | { refused: string }> {
+  let last = 'no candidate ran';
+  for (const bin of await xtask($, root)) {
+    const run = await $.process
+      .run([...bin, 'ticket', 'brief', ticket], { cwd: root, timeoutMs: 120_000 })
+      .catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: String(err) }));
+    if (run.exitCode !== 0) {
+      last = `${bin.join(' ')} exited ${run.exitCode}: ${run.stderr.trim().slice(-600)}`;
+      continue;
+    }
+    if (!run.stdout.startsWith(BRIEF)) {
+      return { refused: `\`xtask ticket brief ${ticket}\` printed no \`${BRIEF}\` line first` };
+    }
+    const worktree = WORKTREE.exec(run.stdout)?.[1];
+    if (worktree === undefined) {
+      return { refused: `\`xtask ticket brief ${ticket}\` names no \`Worktree:\` line to start the builder in` };
+    }
+    return { text: run.stdout, worktree };
+  }
+  return { refused: `\`xtask ticket brief ${ticket}\` rendered no brief (${last})` };
+}
+
+/// The refusal of a marked spawn, naming its line and why.
+const unexpanded = (first: string, why: string) => ({
+  deny: `harness: this spawn's first line \`${first.trim()}\` marks a builder, and ${why}; nothing was started. Spawn \`/build <n>\` alone on the first line, with the ticket's worktree laid (Round 2, Q24 (a)).`,
+});
+
 /// The turn `usage record` is told, counted here from the module's load:
 /// a reload of the plugin starts it over, and the last reading under a
 /// scope is still the session's final figure, since the ledger it carries
@@ -186,7 +260,8 @@ export const register: Register = (on, options) => {
     let decision: Decision = {};
     let judged = false;
     try {
-      const [cwd, id, bins] = await Promise.all([$.session.cwd(), $.session.id(), xtask($)]);
+      const [cwd, root, id] = await Promise.all([$.session.cwd(), $.session.root(), $.session.id()]);
+      const bins = await xtask($, root);
       // permit's exit is 0 whatever it decides, so a non-zero one is a
       // permit that never judged: the build is older than the manifest it
       // reads, or than the harness's own sources. The next candidate
@@ -196,7 +271,7 @@ export const register: Register = (on, options) => {
       for (let asked = false; ; asked = true) {
         for (const bin of bins) {
           const run = await $.process.run([...bin, 'permit', '--above-the-command-hook'], {
-            cwd,
+            cwd: root,
             stdin,
             timeoutMs: 60_000,
           });
@@ -235,17 +310,44 @@ export const register: Register = (on, options) => {
         },
   );
 
+  on('agent.spawn', async ($, e, next) => {
+    const [first = '', ...later] = e.prompt.split('\n');
+    if (e.resume !== undefined || !MARKED.test(first)) return next(e);
+    const ticket = BUILD.exec(first)?.[1];
+    if (ticket === undefined) return unexpanded(first, 'is not `/build <n>` alone');
+    if (e.fork) return unexpanded(first, 'a fork cannot be retyped to `builder`');
+    const brief = await briefOf($, await $.session.root(), ticket);
+    if ('refused' in brief) return unexpanded(first, brief.refused);
+    const rest = later.join('\n').trim();
+    const prompt =
+      rest === '' ? brief.text : `${brief.text.trimEnd()}\n\n${COORDINATOR}\n\n${rest}\n`;
+    // A workflow agent takes its prompt alone; a teammate runs in the
+    // session's directory, so its `cwd` would be left out with a line said.
+    if (e.workflow !== undefined) return next({ ...e, prompt });
+    if (e.isTeammate) return next({ ...e, prompt, subagentType: BUILDER });
+    return next({ ...e, prompt, subagentType: BUILDER, cwd: brief.worktree });
+  }).catch(async (_$, e, next) => {
+    // A marked spawn the hook failed on is refused, not started with no
+    // brief, which is what failing open would do.
+    const [first = ''] = e.prompt.split('\n');
+    if (next.called || e.resume !== undefined || !MARKED.test(first)) return next(e);
+    return unexpanded(
+      first,
+      `the agent.spawn hook failed (${next.error.kind}${next.error.message ? `: ${next.error.message}` : ''}) before its brief was rendered`,
+    );
+  });
+
   on('turn.complete', async ($, e, next) => {
     const out = await next(e);
     turns += 1;
     const turn = turns;
     try {
-      const [cwd, id, bins, usage] = await Promise.all([
-        $.session.cwd(),
+      const [root, id, usage] = await Promise.all([
+        $.session.root(),
         $.session.id(),
-        xtask($),
         $.session.usage(),
       ]);
+      const bins = await xtask($, root);
       const stdin = JSON.stringify(usage);
       // The candidates as permit walks them, the built binaries and then
       // cargo; a build that does not know `usage` exits without writing,
@@ -254,7 +356,7 @@ export const register: Register = (on, options) => {
       for (const bin of bins) {
         const run = await $.process.run(
           [...bin, 'usage', 'record', '--session', id, '--turn', String(turn)],
-          { cwd, stdin, timeoutMs: 120_000 },
+          { cwd: root, stdin, timeoutMs: 120_000 },
         );
         if (run.exitCode === 0) {
           recorded = true;
@@ -272,7 +374,7 @@ export const register: Register = (on, options) => {
 
   on('prompt.context', async ($, e, next) => {
     const out = await next(e);
-    const cwd = await $.session.cwd();
+    const cwd = await $.session.root();
     const id = await $.session.id();
     // The local file's regions are volatile: rendered by name, never by
     // discovery (§5). A computed that is missing or fails leaves the
