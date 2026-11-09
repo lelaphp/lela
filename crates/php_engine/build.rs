@@ -24,9 +24,10 @@
 //! it; every other arm writes the position first, php's `SAVE_OPLINE()`
 //! (`crate::tier::Next`).
 //!
-//! The arms of the variants [`IN_THE_LOOP`] names call their handlers in
-//! the loop's body, and every other arm calls its handler out of line
-//! (#3285).
+//! Where each variant's arm sits, in the loop's body or out of line
+//! (#3285), is its placement, `arms::place`'s answer from the lists of
+//! `build/arms.rs`, and every point of generation below reads that and
+//! none of the lists.
 //!
 //! Written to `OUT_DIR/dispatch.rs` and included, never committed (design
 //! §10).
@@ -43,6 +44,8 @@
 //! each stamped here once for every host, every constant and phpinfo to
 //! read ([`build_defs`]), the install layout among them ([`layout`]).
 
+#[path = "build/arms.rs"]
+mod arms;
 #[path = "src/api/request/build_defs/layout.rs"]
 mod layout;
 #[path = "build/rustflags.rs"]
@@ -54,6 +57,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use arms::{Answer, InlinePath, Placement, Reads};
 
 fn main() {
     // Design §10 Profiles: a release-like build without the LLVM option
@@ -177,21 +182,10 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     let handlers = handlers(bodies)?;
     undispatched(bodies, &opcodes, &handlers)?;
     // Each call the dispatch makes, with every `php_unit::Handler` it
-    // serves, in the order first met: one arm per call, so a handler that
-    // serves two variants, a `SEND_VAL` whose handler is generic over
-    // `op1` alone, is one body under both.
-    let mut calls: Vec<(String, Vec<String>)> = Vec::new();
-    // The inline path a variant in the loop's body serves first, by the
-    // variant: one call may serve two, an arithmetic alone and fused to
-    // the `ASSIGN` after it ([`ASSIGNED`]), each by a path of its own.
-    let mut inlines: BTreeMap<String, Inlined> = BTreeMap::new();
-    let mut serve = |variant: String, call: String| match calls
-        .iter_mut()
-        .find(|(served, _)| *served == call)
-    {
-        Some((_, variants)) => variants.push(variant),
-        None => calls.push((call, vec![variant])),
-    };
+    // serves and its placement, in the order first met: one arm per call,
+    // so a handler that serves two variants, a `SEND_VAL` whose handler
+    // is generic over `op1` alone, is one body under both.
+    let mut calls: Vec<Call> = Vec::new();
     for handler in &handlers {
         let Some(spec) = opcodes.get(&handler.name) else {
             return Err(format!(
@@ -200,15 +194,18 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
                 handler.ident
             ));
         };
-        for (variant, call, inline) in
-            arms(handler, spec).map_err(|e| format!("{}: {e}", bodies.display()))?
-        {
-            if let Some(inline) = inline {
-                inlines.insert(variant.clone(), inline);
-            }
-            serve(variant, call);
+        for arm in arms(handler, spec).map_err(|e| format!("{}: {e}", bodies.display()))? {
+            serve(&mut calls, arm);
         }
     }
+    // The variants a handler serves at kinds the spec lists, every one
+    // the lists may place.
+    let served: Vec<&str> = calls
+        .iter()
+        .filter(|call| call.serves == Serves::Handler)
+        .flat_map(|call| call.served.iter().map(|(variant, _)| variant.as_str()))
+        .collect();
+    arms::held(&served, bodies)?;
     // Every handler of an opcode the engine serves none of, named in one
     // arm, so that the `match` names every variant and its jump table
     // needs no test of the handler's range ahead of it.
@@ -219,9 +216,11 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     {
         for Variant { name: variant, .. } in variants(spec)? {
             serve(
-                variant,
-                "Err(crate::tier::dispatch::refused(op, \"has no handler in this engine yet\"))"
-                    .to_owned(),
+                &mut calls,
+                Arm::refusal(
+                    variant,
+                    "Err(crate::tier::dispatch::refused(op, \"has no handler in this engine yet\"))",
+                ),
             );
         }
     }
@@ -231,32 +230,15 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     // The arm stays because `Unresolved` stays a variant, what an opline
     // holds before publication, and it is still the fatal, never a panic.
     serve(
-        "Unresolved".to_owned(),
-        "Err(crate::tier::dispatch::refused(\n\
-         \x20           op,\n\
-         \x20           \"is served from a unit never published, so no handler is resolved for it\",\n\
-         \x20       ))"
-            .to_owned(),
+        &mut calls,
+        Arm::refusal(
+            "Unresolved".to_owned(),
+            "Err(crate::tier::dispatch::refused(\n\
+             \x20           op,\n\
+             \x20           \"is served from a unit never published, so no handler is resolved for it\",\n\
+             \x20       ))",
+        ),
     );
-    if let Some(twice) = PATH_IN_THE_LOOP
-        .iter()
-        .find(|name| IN_THE_LOOP.contains(name))
-    {
-        return Err(format!(
-            "`{twice}` is named by both `IN_THE_LOOP` and `PATH_IN_THE_LOOP`, which say where its handler is called two ways"
-        ));
-    }
-    edges_in_the_loop()?;
-    if let Some(stray) = IN_THE_LOOP.iter().chain(PATH_IN_THE_LOOP).find(|name| {
-        !calls.iter().any(|(call, variants)| {
-            !call.starts_with("Err(") && variants.iter().any(|variant| variant == *name)
-        })
-    }) {
-        return Err(format!(
-            "`{stray}` is in the loop's body by `IN_THE_LOOP` and is no variant a handler of {} serves",
-            bodies.display()
-        ));
-    }
     // `become` is refused by a stable parser even where a `cfg` leaves it
     // out, so the threaded calls are written only into the build that sets
     // the `cfg`, which cargo names to a build script in its environment.
@@ -265,7 +247,7 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     } else {
         String::new()
     };
-    let (arms, held) = arms_of(&calls, &inlines);
+    let (arms, held) = arms_of(&calls);
     let held = held_macro(&held);
     Ok(format!(
         "/// The one dispatch (design §4.3 seam 7, §5.8), generated from\n\
@@ -316,48 +298,82 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     ))
 }
 
-/// The call edges' lists held to the loop's: a name of [`ENTERS`] is one
-/// of [`WAY_IN_THE_ARM`], and a name of that one of [`IN_THE_LOOP`].
-fn edges_in_the_loop() -> Result<(), String> {
-    if let Some((stray, ..)) = ENTERS
-        .iter()
-        .find(|(name, ..)| !WAY_IN_THE_ARM.contains(name))
-    {
-        return Err(format!(
-            "`{stray}` is named by `ENTERS` and not by `WAY_IN_THE_ARM`, whose arms alone read the push"
-        ));
-    }
-    if let Some(stray) = WAY_IN_THE_ARM
-        .iter()
-        .find(|name| !IN_THE_LOOP.contains(name))
-    {
-        return Err(format!(
-            "`{stray}` is named by `WAY_IN_THE_ARM` and not by `IN_THE_LOOP`, whose arms alone are in the loop's body"
-        ));
-    }
-    Ok(())
+/// One `php_unit::Handler` the dispatch serves: the variant, where it is
+/// placed, and the call that serves it at its turbofish and what that
+/// call is ([`Call`]).
+struct Arm {
+    variant: String,
+    placement: Placement,
+    text: String,
+    turbofish: String,
+    serves: Serves,
 }
 
-/// How an arm that calls its handler reads the answer ([`held_arm`]).
-#[derive(Clone, Copy)]
-enum Answer {
-    /// As the loop reads every arm's, where the arms meet.
-    Cold,
-    /// As a way, in the arm: a call edge's ([`WAY_IN_THE_ARM`]).
-    Way,
-    /// The push first, whether the handler's `INIT` flags the callee and
-    /// php's name of the opcode, then as a way ([`ENTERS`]).
-    Pushed { flagged: bool, opcode: &'static str },
+impl Arm {
+    /// `variant` refused with `text`, the internal-error fatal, which is
+    /// called out of line and names no handler to take a turbofish.
+    fn refusal(variant: String, text: &str) -> Self {
+        Self {
+            variant,
+            placement: Placement::Cold,
+            text: text.to_owned(),
+            turbofish: String::new(),
+            serves: Serves::Refusal,
+        }
+    }
+}
+
+/// What a dispatch call is, said where the call is made: the handler at
+/// the tier, or the internal-error fatal for a variant no handler serves,
+/// which reads nothing the dispatch hands it and no list places.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Serves {
+    /// The handler, at its kinds and turbofish, whose answer the loop reads.
+    Handler,
+    /// `crate::tier::dispatch::refused`, the internal-error fatal.
+    Refusal,
+}
+
+/// `arm` into `calls`: under its call where that is there, and as a call
+/// of its own after them where it is not.
+fn serve(
+    calls: &mut Vec<Call>,
+    Arm {
+        variant,
+        placement,
+        text,
+        turbofish,
+        serves,
+    }: Arm,
+) {
+    match calls.iter_mut().find(|call| call.text == text) {
+        Some(call) => call.served.push((variant, placement)),
+        None => calls.push(Call {
+            text,
+            turbofish,
+            serves,
+            served: vec![(variant, placement)],
+        }),
+    }
+}
+
+/// One call the dispatch makes: its text, the generic arguments after the
+/// tier it names its handler at, as a turbofish its inline paths take too,
+/// empty for the internal-error fatal, what the call is ([`Serves`]), and
+/// every `php_unit::Handler` it serves with that variant's placement
+/// ([`arms::place`]).
+struct Call {
+    text: String,
+    turbofish: String,
+    serves: Serves,
+    served: Vec<(String, Placement)>,
 }
 
 /// The arms of `dispatch`'s `match`, one per call, and of `held!`'s, one
-/// per call and inline path among its variants (`inlines`, by the
-/// variant), so that an arithmetic alone and fused to the `ASSIGN` after
-/// it ([`ASSIGNED`]), which make one call, are two arms of the loop's.
-fn arms_of(
-    calls: &[(String, Vec<String>)],
-    inlines: &BTreeMap<String, Inlined>,
-) -> (String, String) {
+/// per call and placement among its variants, so that an arithmetic
+/// alone and fused to the `ASSIGN` after it, which make one call and are
+/// served first by two inline paths, are two arms of the loop's.
+fn arms_of(calls: &[Call]) -> (String, String) {
     let mut arms = String::new();
     let mut held = String::new();
     let pattern = |variants: &[&String]| {
@@ -367,57 +383,41 @@ fn arms_of(
             .collect::<Vec<_>>()
             .join("\n        | ")
     };
-    for (call, variants) in calls {
-        let all: Vec<&String> = variants.iter().collect();
-        writeln!(arms, "        {} => {call},", pattern(&all)).ok();
-        // The loop's arms, one per inline path among the call's variants.
-        let mut paths: Vec<Option<&Inlined>> = Vec::new();
-        for variant in variants {
-            let path = inlines.get(variant);
-            if !paths.contains(&path) {
-                paths.push(path);
+    for call in calls {
+        let all: Vec<&String> = call.served.iter().map(|(variant, _)| variant).collect();
+        writeln!(arms, "        {} => {},", pattern(&all), call.text).ok();
+        // The loop's arms, one per placement among the call's variants.
+        let mut placements: Vec<Placement> = Vec::new();
+        for &(_, placement) in &call.served {
+            if !placements.contains(&placement) {
+                placements.push(placement);
             }
         }
-        for path in paths {
-            let served: Vec<&String> = variants
+        for placement in placements {
+            let served: Vec<&String> = call
+                .served
                 .iter()
-                .filter(|variant| inlines.get(*variant) == path)
+                .filter(|(_, placed)| *placed == placement)
+                .map(|(variant, _)| variant)
                 .collect();
-            let aside = served
-                .iter()
-                .any(|variant| PATH_IN_THE_LOOP.contains(&variant.as_str()));
-            let entered = ENTERS
-                .iter()
-                .find(|(name, ..)| served.iter().any(|variant| variant == name));
-            let answer = match entered {
-                Some(&(_, flagged, opcode)) => Answer::Pushed { flagged, opcode },
-                None if served
-                    .iter()
-                    .any(|variant| WAY_IN_THE_ARM.contains(&variant.as_str())) =>
-                {
-                    Answer::Way
-                }
-                None => Answer::Cold,
-            };
-            held.push_str(&held_arm(&pattern(&served), call, path, aside, answer));
+            held.push_str(&held_arm(&pattern(&served), call, placement));
         }
     }
     (arms, held)
 }
 
 /// One arm of [`held_macro`]'s `match`: `pattern`'s variants served by
-/// `call`, and first by the inline path `inline` where it has one, over
-/// the slots the loop holds; for a variant whose path alone is in the
-/// loop's body, `aside` ([`PATH_IN_THE_LOOP`]), a hit goes on as `call`'s
-/// answer would; the handler's answer read as `answer` says.
-fn held_arm(
-    pattern: &str,
-    call: &str,
-    inline: Option<&Inlined>,
-    aside: bool,
-    answer: Answer,
-) -> String {
+/// `call` where they sit, `placement`: first by the inline path a
+/// placement in the loop names, over the slots the loop holds; for a
+/// variant whose path alone is in the loop's body, a hit goes on as the
+/// call's answer would; the handler's answer read as the placement says.
+fn held_arm(pattern: &str, call: &Call, placement: Placement) -> String {
     let pattern = pattern.replace("Handler::", "php_unit::Handler::");
+    let (inline, aside, answer) = match placement {
+        Placement::Cold => (None, false, Answer::Cold),
+        Placement::PathInTheLoop(path) => (Some(path), true, Answer::Cold),
+        Placement::InTheLoop { path, answer } => (path, false, answer),
+    };
     let read = |call: &str| {
         format!(
             "match {call} {{\n\
@@ -438,8 +438,8 @@ fn held_arm(
                 "crate::handlers::inline_path::past_the_push(req, (frame, at), op, \"{opcode}\")"
             ))
         ),
-        Answer::Way => read(call),
-        Answer::Cold => format!("crate::tier::Dispatched::Cold({call})"),
+        Answer::Way => read(&call.text),
+        Answer::Cold => format!("crate::tier::Dispatched::Cold({})", call.text),
     };
     let cold = format!(
         "{{\n\
@@ -452,20 +452,16 @@ fn held_arm(
     // A fused path serves the `ASSIGN` after its opline unseen, so the
     // loop of an engine whose observers declared `ASSIGN` serves the
     // opline alone, through its handler, and tells them of the `ASSIGN`.
-    // A path over the call being built ([`CALL_PATHS`]) is handed it
-    // with the slots, both taken up from one look at the frame table in
-    // the arm, and stands aside where no call is being built.
-    let guarded = |Inlined {
-                       path,
-                       assigned,
-                       call,
-                   }: &Inlined| {
-        if *assigned {
-            format!(
+    // A path over the call being built is handed it with the slots, both
+    // taken up from one look at the frame table in the arm, and stands
+    // aside where no call is being built.
+    let guarded = |InlinePath { name, reads }: InlinePath| {
+        let path = format!("crate::handlers::inline_path::{name}{}", call.turbofish);
+        match reads {
+            Reads::Assign => format!(
                 "if $declared.tells(php_unit::Opcode::Assign) {{ None }} else {{ {path}(&mut *$slots, code, op, at) }}"
-            )
-        } else if *call {
-            format!(
+            ),
+            Reads::Call => format!(
                 "{{\n\
                  \x20                   let (slots, call) = $req.slots_and_call(frame);\n\
                  \x20                   $slots = slots;\n\
@@ -474,9 +470,8 @@ fn held_arm(
                  \x20                       None => None,\n\
                  \x20                   }}\n\
                  \x20               }}"
-            )
-        } else {
-            format!("{path}(&mut *$slots, code, op, at)")
+            ),
+            Reads::Slots => format!("{path}(&mut *$slots, code, op, at)"),
         }
     };
     match inline.map(guarded) {
@@ -537,18 +532,31 @@ fn held_macro(held: &str) -> String {
 /// by `php_unit::Handler`, one entry per variant, so that an index past
 /// it is a build error in the table's constant and an entry no variant
 /// names is the unresolved handler's internal error.
-fn tails(calls: &[(String, Vec<String>)]) -> String {
-    let handlers: usize = calls.iter().map(|(_, variants)| variants.len()).sum();
+fn tails(calls: &[Call]) -> String {
+    let handlers: usize = calls.iter().map(|call| call.served.len()).sum();
     // An entry the table's assignments leave is the unresolved handler's,
     // whose internal error names the opcode, never another opcode's body.
     let unfilled = calls
         .iter()
-        .position(|(_, variants)| variants.iter().any(|variant| variant == "Unresolved"))
+        .position(|call| {
+            call.served
+                .iter()
+                .any(|(variant, _)| variant == "Unresolved")
+        })
         .unwrap_or_default();
     let mut table = String::new();
     let mut bodies = String::new();
-    for (number, (call, variants)) in calls.iter().enumerate() {
-        for variant in variants {
+    for (
+        number,
+        Call {
+            text: call,
+            serves,
+            served,
+            ..
+        },
+    ) in calls.iter().enumerate()
+    {
+        for (variant, _) in served {
             writeln!(
                 table,
                 "        table[Handler::{variant} as usize] = tail_{number}::<T, D>;"
@@ -556,10 +564,9 @@ fn tails(calls: &[(String, Vec<String>)]) -> String {
             .ok();
         }
         // A call that is the internal error reads nothing it is handed.
-        let (unread, body) = if call.starts_with("Err(") {
-            ("#[allow(unused_variables)]\n", format!("    {call}\n"))
-        } else {
-            (
+        let (unread, body) = match serves {
+            Serves::Refusal => ("#[allow(unused_variables)]\n", format!("    {call}\n")),
+            Serves::Handler => (
                 "",
                 format!(
                     "    let next = {call}?;\n\
@@ -571,7 +578,7 @@ fn tails(calls: &[(String, Vec<String>)]) -> String {
                      \x20   }};\n\
                      \x20   become (table.of(op.handler))(req, frame, code, oplines, op, at, told, table)\n"
                 ),
-            )
+            ),
         };
         write!(
             bodies,
@@ -638,7 +645,7 @@ struct Variant {
     /// handler is served at, where the row says `RETVAL`.
     retval: Option<&'static str>,
     /// Whether the variant is the one fused to the `ASSIGN` of its
-    /// temporary to a CV after it ([`ASSIGNED`]).
+    /// temporary to a CV after it (`arms::fuses`).
     assigned: bool,
 }
 
@@ -647,17 +654,9 @@ struct Variant {
 /// that serves it, which are one name.
 const RETVALS: [&str; 2] = ["RetvalUnused", "RetvalUsed"];
 
-/// The arithmetic `php_unit` resolves over whether the opline after it
-/// is the `ASSIGN` of its temporary to a CV, which its `build.rs` names
-/// in the same list: each such variant's call is its unfused one's, so
-/// that `dispatch`, which a stepping host and the tier's recorder serve
-/// an opline through, serves the arithmetic alone and the `ASSIGN` after
-/// it as php does, and the loop's arm serves both by the fused inline
-/// path where [`IN_THE_LOOP`] names the variant ([`inline_of`]).
-const ASSIGNED: [&str; 4] = ["ADD", "SUB", "MUL", "DIV"];
-
-/// The two ways of an arithmetic of [`ASSIGNED`], each the part of the
-/// variant's name `php_unit` gives it and whether it is fused.
+/// The two ways of an arithmetic `php_unit` fuses to the `ASSIGN` after
+/// it (`arms::fuses`), each the part of the variant's name `php_unit`
+/// gives it and whether it is fused.
 const ASSIGNS: [(&str, bool); 2] = [("", false), ("AssignCv", true)];
 
 /// The branches of a `SMART_BRANCH` comparison, each the part of the
@@ -684,13 +683,7 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         _ => None,
     };
     let ways: &[(&str, &str)] = if spec.smart { &BRANCHES } else { &[("", "")] };
-    // One of [`ASSIGNED`]'s arithmetic, over which `php_unit` resolves
-    // each handler twice, alone and fused to the `ASSIGN` after it.
-    let assigns: &[(&str, bool)] = if ASSIGNED.iter().any(|name| camel(name) == spec.variant) {
-        &ASSIGNS
-    } else {
-        &[("", false)]
-    };
+    let assigns = spec.assigns;
     let branched = |name: String, kinds: Option<Vec<String>>, retval: Option<&'static str>| {
         ways.iter().flat_map(move |(part, ty)| {
             let (name, kinds) = (name.clone(), kinds.clone());
@@ -764,15 +757,31 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
     Ok(out)
 }
 
-/// One opcode's arms, each a `php_unit::Handler` and the call that
-/// serves it: the handler at the tier for an opcode it serves at any
-/// kinds, and, for a handler generic over its operands' kinds, the
-/// handler at the kinds each variant names, with the internal-error
-/// fatal for the kinds the spec does not list, which no unit the
-/// compiler wrote has.
-fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String, Option<Inlined>)>, String> {
-    let unlisted =
-        "Err(crate::tier::dispatch::refused(op, \"over operand kinds ops.toml does not list\"))";
+/// One opcode's arms, each a `php_unit::Handler`, its placement and the
+/// call that serves it ([`Arm`]): the handler
+/// at the tier for an opcode it serves at any kinds, and, for a handler
+/// generic over its operands' kinds, the handler at the kinds each
+/// variant names, with the internal-error fatal for the kinds the spec
+/// does not list, which no unit the compiler wrote has, and no list
+/// places.
+fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<Arm>, String> {
+    let unlisted = |variant: Variant| {
+        Arm::refusal(
+            variant.name,
+            "Err(crate::tier::dispatch::refused(op, \"over operand kinds ops.toml does not list\"))",
+        )
+    };
+    // The variant served at `generics` after the tier, where it is placed.
+    let served = |variant: Variant, generics: &str| {
+        let placement = arms::place(&variant.name, &handler.ident, variant.assigned);
+        Arm {
+            variant: variant.name,
+            placement,
+            text: call(handler, placement, generics),
+            turbofish: turbofish(generics),
+            serves: Serves::Handler,
+        }
+    };
     // The branch a handler generic over it is served at, after its kinds.
     let branch = |variant: &Variant| -> Result<String, String> {
         match (handler.branched, variant.branch) {
@@ -788,13 +797,11 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String, Option<In
         let mut out = Vec::new();
         for variant in variants(spec)? {
             if variant.kinds.is_none() && spec.specialise {
-                out.push((variant.name, unlisted.to_owned(), None));
+                out.push(unlisted(variant));
                 continue;
             }
             let generics = branch(&variant)?;
-            let call = call(handler, &variant.name, &generics);
-            let inline = inline_of(handler, &variant, &generics);
-            out.push((variant.name, call, inline));
+            out.push(served(variant, &generics));
         }
         return Ok(out);
     }
@@ -814,7 +821,7 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String, Option<In
     let mut out = Vec::new();
     for variant in variants(spec)? {
         let Some(kinds) = &variant.kinds else {
-            out.push((variant.name, unlisted.to_owned(), None));
+            out.push(unlisted(variant));
             continue;
         };
         let mut params = String::new();
@@ -840,335 +847,21 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String, Option<In
                 ));
             }
         }
-        let call = call(handler, &variant.name, &params);
-        let inline = inline_of(handler, &variant, &params);
-        out.push((variant.name, call, inline));
+        out.push(served(variant, &params));
     }
     Ok(out)
 }
 
-/// The variants whose arms are in the loop's body (design §5.8): every
-/// variant met in more than a quarter of a percent of the oplines
-/// dispatched by any program of `docs/perf/workloads`, by php-src's
-/// `Zend/micro_bench.php` or by the four counting loops of #3273, as
-/// a counting build of the loop told them over each (#3285). The arm of
-/// every other variant calls its handler out of line, through a call the
-/// optimiser reads as cold, so that the loop's body is the arms programs
-/// meet and the register allocator, which weighs every arm of the
-/// `match` alike, places the loop's values for them: with all 526
-/// generic and `#[inline(always)]` arms in its body, `serve_frame` was
-/// 270 KB and the arms programs meet paid for the ones they do not.
-/// A name that is no variant the dispatch serves is a build error.
-const IN_THE_LOOP: &[&str] = &[
-    "AddArrayElement",
-    "AddConstVar",
-    "AddCvConst",
-    "AddCvCv",
-    "AddCvCvAssignCv",
-    "AddTmpConst",
-    "AddTmpCv",
-    "AddTmpCvAssignCv",
-    "AddTmpTmp",
-    "AddTmpTmpAssignCv",
-    "AddTmpVar",
-    "AddVarVar",
-    "ArrayKeyExists",
-    "AssignCvConstRetvalUnused",
-    "AssignCvCvRetvalUnused",
-    "AssignCvTmpRetvalUnused",
-    "AssignCvVarRetvalUnused",
-    "AssignDimCvConstOpDataTmp",
-    "AssignDimCvConstOpDataVar",
-    "AssignDimCvCvOpDataConst",
-    "AssignDimCvCvOpDataCv",
-    "AssignDimCvCvOpDataTmp",
-    "AssignDimCvTmpOpDataCv",
-    "AssignDimOpCvCv",
-    "AssignObjOp",
-    "AssignObjUnusedConstOpDataConst",
-    "AssignOpCvConst",
-    "AssignOpCvCv",
-    "AssignOpCvTmp",
-    "AssignOpCvVar",
-    "AssignStaticProp",
-    "Bool",
-    "BoolNot",
-    "BwAnd",
-    "Cast",
-    "CheckFuncArg",
-    "Coalesce",
-    "ConcatConstTmp",
-    "ConcatCvCv",
-    "ConcatTmpConst",
-    "ConcatTmpTmp",
-    "Div",
-    "DivAssignCv",
-    "DoFcall",
-    "DoFcallByName",
-    "DoIcall",
-    "DoUcall",
-    "Echo",
-    "FeFetchRVar",
-    "FeFree",
-    "FeResetR",
-    "FetchClass",
-    "FetchClassConstant",
-    "FetchConstant",
-    "FetchDimFuncArgCvConst",
-    "FetchDimIs",
-    "FetchDimRCvConst",
-    "FetchDimRCvCv",
-    "FetchDimRCvTmp",
-    "FetchDimRTmpCv",
-    "FetchDimRwCvCv",
-    "FetchObjRCvConst",
-    "FetchObjRUnusedConst",
-    "FetchR",
-    "FetchStaticPropR",
-    "FetchThis",
-    "FramelessIcall1",
-    "FramelessIcall2",
-    "FramelessIcall3",
-    "Free",
-    "FuncNumArgs",
-    "InArray",
-    "InitArray",
-    "InitDynamicCall",
-    "InitFcallByName",
-    "InitFcallConst",
-    "InitMethodCall",
-    "InitStaticMethodCall",
-    "IsEqualCvConstJmpz",
-    "IsIdenticalCvConst",
-    "IsIdenticalCvCv",
-    "IsIdenticalTmpConst",
-    "IsNotIdentical",
-    "IssetIsemptyPropObj",
-    "IssetIsemptyStaticProp",
-    "IsSmallerConstCv",
-    "IsSmallerConstTmpJmpz",
-    "IsSmallerCvConst",
-    "IsSmallerCvConstJmpnzBack",
-    "IsSmallerCvConstJmpz",
-    "IsSmallerCvCvJmpnzBack",
-    "IsSmallerCvCvJmpz",
-    "IsSmallerCvTmpJmpz",
-    "IsSmallerOrEqualJmpnzBack",
-    "IsSmallerTmpConst",
-    "Jmp",
-    "JmpnzConst",
-    "JmpnzEx",
-    "JmpnzTmp",
-    "JmpSet",
-    "JmpzCv",
-    "JmpzEx",
-    "JmpzTmp",
-    "Mod",
-    "MulCvConst",
-    "MulCvCv",
-    "MulCvCvAssignCv",
-    "MulCvTmp",
-    "MulCvTmpAssignCv",
-    "MulCvVar",
-    "MulTmpConst",
-    "MulTmpTmp",
-    "MulVarTmp",
-    "New",
-    "PreDecCvRetvalUnused",
-    "PreDecObj",
-    "PreDecVarRetvalUnused",
-    "PreIncCvRetvalUnused",
-    "PreIncObj",
-    "QmAssign",
-    "ReturnConst",
-    "ReturnCv",
-    "ReturnTmp",
-    "RopeAddTmpConst",
-    "RopeAddTmpCv",
-    "RopeEndTmpConst",
-    "RopeInitUnusedConst",
-    "SendFuncArg",
-    "SendRef",
-    "SendValConstUnused",
-    "SendValExConstUnused",
-    "SendValExTmpUnused",
-    "SendValTmpUnused",
-    "SendVarCvUnused",
-    "SendVarEx",
-    "Strlen",
-    "SubCvConst",
-    "SubCvCv",
-    "SubTmpConst",
-    "SubTmpTmp",
-    "SubTmpTmpAssignCv",
-    "TypeCheck",
-];
-
-/// The variants whose arms serve their handler's inline path in the
-/// loop's body and leave it as an arm outside [`IN_THE_LOOP`] does: a
-/// miss calls the handler out of line, and a hit lets the slots go and
-/// goes on as such a call's answer does, the slots taken up again for
-/// the frame ([`held_arm`]). So the path is one test in the loop, and the
-/// loop's own way on from an inline path, which the optimiser copies
-/// into the arms that take it while few enough do, gains no arm.
-/// `VERIFY_RETURN_TYPE`'s mask test taking that way stopped those copies
-/// (48 to 7 in `serve_frame`) and read fannkuch, which serves it once,
-/// at 1.08 of the base's cycles; taking this one, 0.99 (#3978). A name
-/// here is no name of `IN_THE_LOOP`, and one that is no variant the
-/// dispatch serves is a build error.
-const PATH_IN_THE_LOOP: &[&str] = &["VerifyReturnType"];
-
-/// The variants of the call edges, whose arms read their handler's answer
-/// as a way in the arm ([`held_arm`]): a call's push and a return's pop,
-/// php's `ZEND_VM_ENTER` and `ZEND_VM_LEAVE`. The way is a constant of
-/// each path through the handler, so the loop goes from the push or the
-/// pop straight to its take-up of the callee or the caller, as php's
-/// handler goes straight to the callee's or the caller's next opline;
-/// read where the arms meet, the answer was one word of every arm, made
-/// and searched again (#3995). A name here is a name of [`IN_THE_LOOP`],
-/// and one that is not is a build error.
-const WAY_IN_THE_ARM: &[&str] = &[
-    "DoFcall",
-    "DoFcallByName",
-    "DoUcall",
-    "ReturnConst",
-    "ReturnCv",
-    "ReturnTmp",
-];
-
-/// The calls of [`WAY_IN_THE_ARM`] whose arm serves the push first,
-/// `crate::handlers::inline_path::enter`, each with whether its handler
-/// enters a callee whose `INIT` flagged it and php's name of its opcode:
-/// a handler that answers the push or another edge on its two paths makes
-/// one answer of them where it returns, so its arm reads the push apart,
-/// as an inline path, and serves what the push stands aside for past it
-/// (`crate::handlers::inline_path::past_the_push`), the handler's own two
-/// halves, so no call is pushed twice.
-const ENTERS: &[(&str, bool, &str)] = &[
-    ("DoFcall", true, "ZEND_DO_FCALL"),
-    ("DoFcallByName", true, "ZEND_DO_FCALL_BY_NAME"),
-    ("DoUcall", false, "ZEND_DO_UCALL"),
-];
-
-/// The handlers with an inline path, a function of
-/// `crate::handlers::inline_path` named as the handler and generic over
-/// what it is generic over but its tier, which the loop serves over the
-/// slots it holds ([`inline_of`]). A name here that has no such function
-/// is a build error of the crate, an unresolved path; a function there
-/// that no name here reaches is one only where its handler does not
-/// serve it too, an unused item (`div`, `jmp`), so a name left out of
-/// the list leaves every other path served by its handler alone.
-const INLINE_PATHS: &[&str] = &[
-    "add",
-    "add_assign_cv",
-    "assign",
-    "assign_dim",
-    "assign_dim_op",
-    "assign_op",
-    "check_func_arg",
-    "div",
-    "div_assign_cv",
-    "fetch_dim_func_arg",
-    "fetch_dim_r",
-    "is_equal",
-    "is_identical",
-    "is_not_equal",
-    "is_not_identical",
-    "is_smaller",
-    "is_smaller_or_equal",
-    "jmp",
-    "jmpnz",
-    "jmpnz_ex",
-    "jmpz",
-    "jmpz_ex",
-    "mul",
-    "mul_assign_cv",
-    "pre_dec",
-    "pre_inc",
-    "qm_assign",
-    "send_func_arg",
-    "send_val",
-    "send_val_ex",
-    "send_var",
-    "send_var_ex",
-    "sub",
-    "sub_assign_cv",
-    "type_check",
-    "verify_return_type",
-];
-
-/// The inline paths of [`INLINE_PATHS`] that read and write the call
-/// being built as well as the frame's slots, php's `EX(call)`: each takes
-/// the call after the slots (`&mut crate::exec::HeapFrame`), which its
-/// arm takes up with the slots from one look at the frame table
-/// (`Request::slots_and_call`) and lets go at the arm's end, so the call
-/// an arm is handed is the one on top of the stack whatever `INIT_*`
-/// pushed or `DO_*CALL` popped before it. Held across the loop's arms
-/// instead, refreshed where an arm took the request, it put the frame's
-/// number out of its register: single-stepped, `DO_UCALL` 103 to 111,
-/// `RETURN` 128 to 133 and `INIT_FCALL` 101 to 105 instructions (#4099).
-/// A name here that is not in [`INLINE_PATHS`] is served by its handler
-/// alone.
-const CALL_PATHS: &[&str] = &[
-    "check_func_arg",
-    "fetch_dim_func_arg",
-    "send_func_arg",
-    "send_val",
-    "send_val_ex",
-    "send_var",
-    "send_var_ex",
-];
-
-/// An inline path the loop's arm serves first: the function's path, and
-/// whether it serves the `ASSIGN` after its opline too ([`ASSIGNED`]).
-#[derive(PartialEq)]
-struct Inlined {
-    path: String,
-    assigned: bool,
-    /// Whether the path reads the call being built too ([`CALL_PATHS`]).
-    call: bool,
-}
-
-/// The inline path the loop's arm for `variant` serves first, over the
-/// slots it holds: `handler`'s, at `generics` after the tier, where the
-/// variant or its path alone is in the loop's body ([`IN_THE_LOOP`],
-/// [`PATH_IN_THE_LOOP`]) and the handler has one ([`INLINE_PATHS`]),
-/// and its `_assign_cv` path for a variant fused
-/// to the `ASSIGN` after it ([`ASSIGNED`]).
-fn inline_of(handler: &Handler, variant: &Variant, generics: &str) -> Option<Inlined> {
-    let path = if variant.assigned {
-        format!("{}_assign_cv", handler.ident)
-    } else {
-        handler.ident.clone()
-    };
-    let name = variant.name.as_str();
-    let in_the_loop = IN_THE_LOOP.contains(&name) || PATH_IN_THE_LOOP.contains(&name);
-    if !in_the_loop || !INLINE_PATHS.contains(&path.as_str()) {
-        return None;
-    }
-    let generics = generics.trim_start_matches(", ");
-    let turbofish = if generics.is_empty() {
-        String::new()
-    } else {
-        format!("::<{generics}>")
-    };
-    let call = CALL_PATHS.contains(&path.as_str());
-    Some(Inlined {
-        path: format!("crate::handlers::inline_path::{path}{turbofish}"),
-        assigned: variant.assigned,
-        call,
-    })
-}
-
-/// The call one arm makes to `handler` at `generics` for `variant`:
-/// in the loop's body for a variant [`IN_THE_LOOP`] names, and out of
-/// line through the dispatch's `aside` for every other. A handler that
-/// takes the opline's place stands the frame there itself, where
-/// something outside the loop can read it; every other is entered with
-/// the frame stood there, php's `SAVE_OPLINE()`.
-fn call(handler: &Handler, variant: &str, generics: &str) -> String {
+/// The call one arm makes to `handler` at `generics` for a variant
+/// placed at `placement`: in the loop's body where the placement says
+/// the handler is called there, and out of line through the dispatch's
+/// `aside` for every other. A handler that takes the opline's place
+/// stands the frame there itself, where something outside the loop can
+/// read it; every other is entered with the frame stood there, php's
+/// `SAVE_OPLINE()`.
+fn call(handler: &Handler, placement: Placement, generics: &str) -> String {
     let path = format!("crate::handlers::{}::<T{generics}>", handler.ident);
-    match (IN_THE_LOOP.contains(&variant), handler.at) {
+    match (placement.in_the_loop(), handler.at) {
         (true, true) => format!("{path}(req, frame, code, op, at)"),
         (true, false) => format!(
             "{{\n\
@@ -1183,6 +876,17 @@ fn call(handler: &Handler, variant: &str, generics: &str) -> String {
              \x20           {path}(req, frame, code, op)\n\
              \x20       }})"
         ),
+    }
+}
+
+/// `generics`, the arguments after the tier, as the turbofish of an
+/// inline path, which is generic over them alone.
+fn turbofish(generics: &str) -> String {
+    let generics = generics.trim_start_matches(", ");
+    if generics.is_empty() {
+        String::new()
+    } else {
+        format!("::<{generics}>")
     }
 }
 
@@ -1255,6 +959,11 @@ struct Spec {
     /// list specialises by kind, over which `php_unit` resolves each
     /// kind's handler twice.
     retval: bool,
+    /// The ways `php_unit` resolves the opcode's handler over the opline
+    /// after it: [`ASSIGNS`] for an arithmetic it fuses to the `ASSIGN` of
+    /// its temporary to a CV (`arms::fuses`), and the one unfused way for
+    /// every other.
+    assigns: &'static [(&'static str, bool)],
 }
 
 /// php's opcode names against what the dispatch reads of their rows.
@@ -1326,6 +1035,11 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
                 smart: words.contains(&"SMART_BRANCH"),
                 op_data,
                 retval,
+                assigns: if arms::fuses(name) {
+                    &ASSIGNS
+                } else {
+                    &[("", false)]
+                },
             },
         );
     }
