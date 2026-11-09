@@ -58,7 +58,7 @@ A session here runs on its own, and a turn ends at a hold, never at a question. 
 
 The request sets the scope, and all of it is the deliverable. Take each reversible step it implies without asking. A problem described or a question asked gets an assessment, and the tree changes only when a change is asked for. Before a command changes the system's state, check that the evidence supports that act. End on finished work: a last paragraph that plans, promises or asks is work to do now, with tool calls. Where one part is blocked, finish the rest and say what waits on what.
 
-A session stops where `permit` denies an edit, and at an act harness §11 gives a person, such as a manifest row, a divergence reason or an oracle bump. File each as a `for-a-person` ticket, name its number, and wire the work that waits on it with `gh issue edit <ticket> --add-blocking <n>`. Whatever else you find beyond the task, file a ticket and name its number before the turn ends, `ready-for-agent` when an agent may take it. A ticket carries what the task did not ask for, never a part of it.
+A session stops where `permit` denies an edit, and at an act harness §11 gives a person, such as a manifest row, a divergence reason or an oracle bump. File each as a `for-a-person` ticket, name its number, and wire the work that waits on it with `gh issue edit <ticket> --add-blocking <n>`. Whatever else you find beyond the task is verified before your ready record and filed as its outcome says; a person's act or a blocker is filed at once. A session with no ticket files what it finds. A ticket carries what the task did not ask for, never a part of it.
 
 ## Verifying and committing
 
@@ -90,7 +90,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=90f1ba2945270a8218d583dcc2d12258cb4887125406aceb6856bd330ddd13ab out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=fe604bfc530e60af6a05aba3790e9eab5619584259cdd7c06193c8885dcdb406 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -126,9 +126,9 @@ third-engine-design.md
 | tier | tier.lock | 237 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 40 |  |
-| harness | xtask.lock | 488 |  |
+| harness | xtask.lock | 492 |  |
 
-<!-- /computed in=1cc20da480cfa953d62e29403694146fd20ee20ca63a2aae5879c5d934c13687 out=21ff4caea3324b2c1726935e9c28d543960d224d5eeccb269b9819c77ea2e319 -->
+<!-- /computed in=b2dcecf9499673ed8bdfdfdcb91bc91267e02545fc287f7bb02a2794ca61cf8a out=dbf30645fcb8622f279eb8503c6d6376344d58c89fa4b030534dbe2e196fc8a3 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -173,7 +173,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=ef240a8a1bf6ed34e4f0c0ebff064d153b44dbc1882396ae02ff8c87e74e9ad1 out=69934e7bfc56ad3d2df8e71046ae048496bedb686737de018dd76c1aadb449d5 -->
+<!-- /computed in=befcd868f70733c0cd5bb65b5281a73654ae9f0572b5bcf40d70c9c10e9e5b82 out=69934e7bfc56ad3d2df8e71046ae048496bedb686737de018dd76c1aadb449d5 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

@@ -413,6 +413,10 @@ ticket::brief::TEMPLATE
 ticket::brief::brief
 ticket::brief::render
 ticket::denied
+ticket::found::Found
+ticket::found::Found::named
+ticket::found::Item
+ticket::found::Outcome
 ticket::merged
 ticket::parent
 ticket::parent_scope

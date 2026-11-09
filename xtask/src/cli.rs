@@ -847,9 +847,11 @@ pub(crate) enum TicketCommand {
     /// Read as `read` does, then record the ticket ready to merge on the
     /// branch with what the work opened, `branch.<name>.ready-<n>`, one per
     /// ticket (#2358), which the merge into `main` closes the ticket by
-    /// (#2270, #2311); refuse while a box is unticked,
-    /// while a successor is closed or missing, and without `--opens` or
-    /// `--opens-nothing`. Nothing at the tracker changes. Prints the
+    /// (#2270, #2311), counting the found work by outcome on the reading;
+    /// refuse while a box is unticked, while a successor is closed or
+    /// missing, while the found work names a filed ticket `--opens` does
+    /// not, and without `--opens` or `--opens-nothing` and `--found` or
+    /// `--found-nothing`. Nothing at the tracker changes. Prints the
     /// comments written on the ticket since the branch's first commit, as
     /// `view` prints them, whether or not the record is written.
     Ready {
@@ -866,6 +868,14 @@ pub(crate) enum TicketCommand {
         /// The assertion that the work found nothing to file.
         #[arg(long = "opens-nothing")]
         opens_nothing: bool,
+        /// The handback's `## Found work` section with each item's outcome
+        /// first, as its verifier gave it: `absorb`, `build`, `file #<n>`,
+        /// `person #<n>`, `refuted` or `noted`, one item per line.
+        #[arg(long = "found", value_name = "FILE")]
+        found: Option<PathBuf>,
+        /// The assertion that the work found nothing, its section `None.`.
+        #[arg(long = "found-nothing")]
+        found_nothing: bool,
     },
     /// Close each open ticket the merge commits since `--since` name as
     /// `#n`, with the successors its ready record names; one with no ready
