@@ -260,10 +260,11 @@ end on and the ticket that first read it (#4335, #4344). `xtask bench`,
 `xtask dispatch-census`, `xtask trace-dump` and makala's bars and soak
 reach a program only through that declaration, a program under the
 directory with no row is refused, and the table below is rendered from it.
-A served request has no command line, so makala serves only the runs of a
-file that take no arguments; how a request carries a profile waits on
-#4366. A program the dispatch census counts
-that lives elsewhere, php-src's `Zend/micro_bench.php` or a counting loop
+makala's bars and soak serve the files of every role but native, as #4366
+ruled: a native's time is spent in an extension's natives, and what a
+served request adds the other bars measure already. A served request has
+no command line, so they serve only a run that takes no arguments. A
+program the dispatch census counts that lives elsewhere, php-src's `Zend/micro_bench.php` or a counting loop
 given whole, is declared there too, and so are the four WordPress bench
 pages the census counts, each served from a copy of a rig kept off the
 repository, which `XTASK_RIG` describes on the machine that has one
@@ -306,7 +307,7 @@ counts vote, and a shape's, a probe's and a native's do not.
 | page `/?s=hello` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them |
 | page `/wp-login.php` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them |
 
-<!-- /computed in=99b0ec357099a9f321073ac09ec943e967f710328f582be9f6353ae7501d1fae out=2036378befcd468e9639c1641482dcd656e0a14b924c32b149e155a4575da81a -->
+<!-- /computed in=8aff696063de8249780291430694d58df653b8367d1881a6311b79b63ce275b0 out=2036378befcd468e9639c1641482dcd656e0a14b924c32b149e155a4575da81a -->
 
 ## 12. The tolerance a nightly bar is held to
 

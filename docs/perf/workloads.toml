@@ -21,7 +21,10 @@
 # give: a workload added later votes only once a person gives it a role that
 # votes. `exit` is the status each of its runs ends on, 0 where it states
 # none. Each `profile` is one run, its `name` and the `args` after the
-# program's path; a workload that lists none runs once, with none.
+# program's path; a workload that lists none runs once, with none. makala's
+# bars and soak serve each file of every role but native as a request, which
+# carries no arguments, so only its runs that take none (#4366);
+# `Role::served` is where the role is decided.
 #
 # `[pages]` declares the bench's pages, which `xtask dispatch-census` counts
 # beside the programs (#4364, #4367). The site that serves them is kept off

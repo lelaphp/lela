@@ -9,8 +9,9 @@
 //! repository, which `dispatch-census` counts (#4364, #4367). `budget` holds
 //! the programs under `[budget] workloads` apart from `docs` where that
 //! row stands (#4341), and the declaration under `docs`. makala's bench
-//! and soak serve, each as a request, the runs of a file that take no
-//! arguments, since a served request has no `$argv` (#4366).
+//! and soak serve, each as a request, the runs of every role
+//! [`Role::served`] serves, a native's none (#4366), each run that takes
+//! no arguments, since a served request has no `$argv`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -71,6 +72,18 @@ impl Role {
         match self {
             Role::Kernel | Role::Bench => true,
             Role::Shape | Role::Probe | Role::Native => false,
+        }
+    }
+
+    /// Whether a run of this role is served as a request on makala's web
+    /// bars and its soak, as #4366 ruled: a native's is not, its time
+    /// spent in an extension's natives, and what a served request adds to
+    /// it, its startup, its teardown and the response it writes, the
+    /// other roles' bars measure already; every other role's is.
+    pub(crate) fn served(self) -> bool {
+        match self {
+            Role::Kernel | Role::Bench | Role::Shape | Role::Probe => true,
+            Role::Native => false,
         }
     }
 }
@@ -533,6 +546,20 @@ page = [{ name = "front", path = "/" }, { name = "post", path = "/?p=1" }]
             Role::Native,
         ];
         assert_eq!(roles.map(Role::votes), [true, true, false, false, false]);
+    }
+
+    /// Which role makala serves on its web bars and soak is decided here
+    /// alone, as #4366 ruled: every role but a native.
+    #[test]
+    fn every_role_but_a_native_is_served_on_the_web_bars() {
+        let roles = [
+            Role::Kernel,
+            Role::Bench,
+            Role::Shape,
+            Role::Probe,
+            Role::Native,
+        ];
+        assert_eq!(roles.map(Role::served), [true, true, true, true, false]);
     }
 
     /// A row the file does not spell as a declaration is refused, naming
