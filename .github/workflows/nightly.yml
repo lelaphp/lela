@@ -1,7 +1,7 @@
 # The lanes that measure main beyond harness.yml's per-commit run. The
 # `oracle` job runs beside every harness run of a push to main, nightly and
-# by hand; `soak`, `bench`, `tailcall` and `red-nightly` run nightly and by
-# hand with `full`. Every job measures main.
+# by hand; `soak`, `bench`, `tailcall`, `deny` and `red-nightly` run nightly
+# and by hand with `full`. Every job measures main.
 # - `oracle`, on the Mac mini: the phpt lane and the witnesses need the
 #   pinned php, a macOS keg (oracle.toml), which that runner keeps as poured
 #   byte for byte from homebrew-core's bottle of the pinned version, beside
@@ -15,8 +15,10 @@
 #   php-fpm (#2351);
 # - `tailcall`, on the Mac after the bench: the threaded dispatch's corpus
 #   (#2970);
-# - `red-nightly`: a red `soak` or `tailcall` filed on the tracker after two
-#   nightlies in a row (#2980).
+# - `deny`, on the Linux server: `cargo deny` over the dependency graph,
+#   the advisories and crates.io as the only source (#4372);
+# - `red-nightly`: a red `soak`, `tailcall` or `deny` filed on the tracker
+#   after two nightlies in a row (#2980).
 #
 # This workflow was the dashboard's, whose three other jobs built its site
 # from these jobs' stores and put it on Cloudflare. Mitchell ruled the site
@@ -38,8 +40,7 @@ on:
   workflow_run:
     workflows: [harness]
     types: [requested]
-    # A pull request's harness run measures a merge commit off main, and a
-    # push to any other branch is not main's.
+    # A push to any other branch is not main's.
     branches: [main]
   schedule:
     - cron: "23 2 * * *" # the nightly lane
@@ -399,6 +400,30 @@ jobs:
           put: tailcall
           path: target/harness/log/
 
+  deny:
+    name: the dependency graph's advisories and sources
+    # `cargo deny check advisories sources` under deny.toml, as Mitchell
+    # ruled on #4348 (ruling 5; #4372): a crate with a RustSec advisory, or
+    # one from anywhere but crates.io, fails the job, and `red-nightly`
+    # files it. `xtask worktree land` runs the same check where a merge
+    # moves Cargo.lock, under main's deny.toml, on the release installed
+    # here, which `xtask/src/queue/judge.rs`'s `DENY` names and its test
+    # holds this line to: an older one cannot read the database's CVSS 4.0
+    # scores. It reads neither the oracle nor the corpus, so while
+    # DAX_BUILD_RUNNER is set the hosted image runs it as it runs the other
+    # Linux jobs (#2477).
+    if: ${{ github.event_name == 'schedule' || inputs.full }}
+    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - run: cargo install --locked cargo-deny@0.20.2
+      - run: cargo deny check advisories sources
+
   # A red nightly filed (#2980), as harness.yml's `red-main` files a red
   # main (#1156): `soak` and `tailcall` fail no per-commit run, so their
   # verdicts are read on the tracker. For each, two red nightlies in a row
@@ -412,7 +437,7 @@ jobs:
   # commit, whose workflow named the jobs the script reads back by name.
   red-nightly:
     name: a red nightly, filed
-    needs: [soak, tailcall]
+    needs: [soak, tailcall, deny]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || inputs.full) }}
     runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     permissions:
@@ -422,7 +447,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job: [soak, tailcall]
+        job: [soak, tailcall, deny]
     steps:
       - uses: actions/checkout@v4
         with:

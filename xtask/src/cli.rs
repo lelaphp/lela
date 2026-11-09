@@ -848,8 +848,8 @@ pub(crate) enum WorktreeCommand {
     /// (#4372): the harness's own files read, refused with the two steps a
     /// grammar change lands in where one does not; `budget`, `api-check`
     /// and `unsafe-audit` taken; each harness file changed since the base
-    /// judged by steer; then `done` as land's caller, whose verdict is the
-    /// exit.
+    /// judged by steer; `cargo deny` where `Cargo.lock` moved; then `done`
+    /// as land's caller, whose verdict is the exit.
     Judge {
         /// The commit judged since, main's tip.
         #[arg(long, value_name = "COMMIT")]

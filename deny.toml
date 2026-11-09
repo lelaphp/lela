@@ -1,0 +1,23 @@
+# What `cargo deny check advisories sources` holds the dependency graph to,
+# as Mitchell ruled on #4348 (ruling 5; #4372): no crate with a RustSec
+# advisory, and crates.io the only source a crate comes from. It runs at
+# `xtask worktree land` where `Cargo.lock` differs from main's, read from
+# main's tip so a branch does not loosen the file that judges it, and in
+# nightly.yml's `deny` job. The `bans` and `licenses` checks are not run.
+
+[graph]
+all-features = true
+
+[advisories]
+# Every advisory kind the database carries is a finding, a yanked crate
+# among them; an exception is a person's, an `ignore` entry with its reason.
+version = 2
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

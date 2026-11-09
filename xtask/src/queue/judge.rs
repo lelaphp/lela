@@ -10,7 +10,8 @@
 //! What that build runs is `xtask worktree judge` ([`run`]): it reads the
 //! harness's own files with main's readers, takes `budget`, `api-check`
 //! and `unsafe-audit` over `_merge`'s tree, judges each harness file the
-//! merge changed with steer's judge ([`crate::steer::since`]), and asks
+//! merge changed with steer's judge ([`crate::steer::since`]), runs `cargo
+//! deny` where `Cargo.lock` differs from main's ([`deny`]), and asks
 //! `done` since main's tip. `test`, `clippy`, `witness` and `miri` still
 //! build and measure the change, as the merge lanes take them, and `done`
 //! holds their readings as ever.
@@ -27,6 +28,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 
 use crate::divergence::Registry;
+use crate::git::git;
 use crate::manifest::Manifest;
 use crate::reading::{Reading, Status, Store};
 use crate::track::short;
@@ -44,6 +46,11 @@ const HOME: &str = "target/judge";
 pub(crate) const TWO_STEPS: &str = "a change to the grammar of the harness's own files lands in two \
      steps: first the xtask that reads the new grammar, merged and landed with no row that uses it; \
      then, once main's xtask reads it, the row that does (.claude/skills/specs/merging.md)";
+
+/// The cargo-deny release land runs and nightly.yml installs: one older
+/// cannot read the advisory database's CVSS 4.0 scores, and so judges
+/// nothing.
+pub(crate) const DENY: &str = "0.20.2";
 
 /// What the judges say a line as.
 const JUDGE: &str = "worktree judge";
@@ -208,9 +215,8 @@ fn remove_dir(dir: &Path) -> Result<()> {
 /// recorded in its store, whichever way they read, since `done` decides
 /// what a failing one holds; each harness file the commits since `base`
 /// changed judged by steer, printed and not recorded, a proposal that
-/// would not load refused;
-/// and `done` since `base`, as
-/// land's caller, whose verdict is the exit.
+/// would not load refused; `cargo deny` where `Cargo.lock` moved; and
+/// `done` since `base`, as land's caller, whose verdict is the exit.
 pub(crate) fn run(root: &Path, base: &str) -> Result<()> {
     let manifest = Manifest::load(root).map_err(|err| unread(root, base, &err))?;
     let registry = Registry::load(root).map_err(|err| unread(root, base, &err))?;
@@ -225,6 +231,7 @@ pub(crate) fn run(root: &Path, base: &str) -> Result<()> {
     if let Some(unloaded) = steered.iter().find(|r| r.status == Status::Fail) {
         bail!("{}", unloaded.message);
     }
+    deny(root, base)?;
     done::run(
         root,
         &manifest,
@@ -261,9 +268,92 @@ fn tell(readings: &[Reading]) {
     }
 }
 
+/// `cargo deny check advisories sources` over the checkout at `root`
+/// under the `deny.toml` `base` carries, where `Cargo.lock` differs from
+/// `base`'s: refused where it finds anything, where `cargo-deny` is not
+/// the [`DENY`] release or is not installed, and where `base` carries no
+/// `deny.toml`, since a land that cannot judge the graph does not pass
+/// it. The `deny.toml` read is `base`'s, so a merge does not loosen what
+/// judges it.
+fn deny(root: &Path, base: &str) -> Result<()> {
+    let moved = git(
+        root,
+        &["diff", "--name-only", base, "HEAD", "--", "Cargo.lock"],
+    )?;
+    if moved.trim().is_empty() {
+        return Ok(());
+    }
+    let refuse = |why: String| -> Result<()> {
+        bail!(
+            "Cargo.lock differs from main's at {}, and {why}; land refuses rather than pass",
+            short(base)
+        )
+    };
+    let Some(config) = crate::git::show(root, base, "deny.toml")? else {
+        return refuse("main carries no deny.toml for cargo deny to read".to_owned());
+    };
+    let installed = match Command::new("cargo-deny").arg("--version").output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return refuse(format!(
+                "cargo-deny is not installed: `cargo install --locked cargo-deny@{DENY}`"
+            ));
+        }
+        Err(err) => return Err(err).context("running cargo-deny --version"),
+    };
+    if installed != format!("cargo-deny {DENY}") {
+        return refuse(format!(
+            "`cargo-deny --version` says {installed:?}, not cargo-deny {DENY}: `cargo install --locked cargo-deny@{DENY}`"
+        ));
+    }
+    let path = root.join("target").join(format!("deny-{base}.toml"));
+    crate::make_parent(&path)?;
+    crate::write(&path, config)?;
+    say!(JUDGE, "Cargo.lock moved since {}: cargo deny", short(base));
+    let status = Command::new("cargo-deny")
+        .arg("check")
+        .arg("--config")
+        .arg(&path)
+        .args(["advisories", "sources"])
+        .current_dir(root)
+        .status()
+        .context("running cargo-deny check")?;
+    crate::remove(&path)?;
+    if !status.success() {
+        return refuse(format!(
+            "cargo deny check advisories sources finds what main's deny.toml refuses ({status})"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// nightly.yml installs the cargo-deny land runs, named once in
+    /// [`DENY`], and runs the check land runs, so a release moved in one
+    /// and not the other fails here.
+    #[test]
+    fn nightly_installs_the_cargo_deny_land_runs_and_runs_its_check() {
+        let text =
+            fs::read_to_string(crate::built_root().join(".github/workflows/nightly.yml")).unwrap();
+        let at = text
+            .find("\n  deny:\n")
+            .expect("nightly.yml has a deny job");
+        let job: Vec<&str> = (text[at + 1..].lines().skip(1))
+            .take_while(|l| l.is_empty() || l.starts_with("    "))
+            .collect();
+        let job = job.join("\n") + "\n";
+        assert!(
+            job.contains(&format!("cargo install --locked cargo-deny@{DENY}\n")),
+            "{job}"
+        );
+        assert!(
+            job.contains("run: cargo deny check advisories sources\n"),
+            "{job}"
+        );
+    }
 
     /// Building a judge keeps the current tip's alone: every other tip's
     /// directory goes, and what is not a tip's stays.

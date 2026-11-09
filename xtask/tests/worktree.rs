@@ -1387,3 +1387,98 @@ fn a_manifest_mains_xtask_cannot_read_is_refused_with_the_two_steps() {
     assert!(out.contains("main is untouched"), "{out}");
     assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
 }
+
+/// `land` from main's checkout with a `cargo-deny` on `PATH` whose body
+/// is `body`, ahead of the build's stand-in.
+fn land_with_deny(root: &Path, body: &str) -> (i32, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let (_bin, path) = stand_in();
+    let deny = Tree::new("worktree-deny").unwrap();
+    write(&deny, "cargo-deny", &format!("#!/bin/sh\n{body}"));
+    fs::set_permissions(deny.join("cargo-deny"), fs::Permissions::from_mode(0o755)).unwrap();
+    let mut on = OsString::from(deny.as_os_str());
+    on.push(":");
+    on.push(&path);
+    let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
+        .arg("--root")
+        .arg(root)
+        .args(["worktree", "land"])
+        .current_dir(root)
+        .env("PATH", &on)
+        .env(xtask::owner::SESSION_VARIABLE, "the-coordinator")
+        .env_remove("CARGO_MANIFEST_DIR")
+        .output()
+        .unwrap();
+    joined(&out)
+}
+
+/// Where `Cargo.lock` differs from main's, the land runs `cargo deny
+/// check advisories sources` under main's `deny.toml`, never the merge's
+/// (#4372, #4348 ruling 5): a release other than the one nightly.yml
+/// installs refuses, and so does a check that finds anything; one that
+/// finds nothing hands the merge on to `done`. A merge that leaves the
+/// lock alone runs no check.
+#[test]
+fn a_merge_that_moves_the_lock_is_held_to_cargo_deny_under_mains_config() {
+    let root = repository("land-deny");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let before = sh(&root, &["git", "rev-parse", "main"]);
+    judged_by_this_build(&root);
+    let read = |path: &str| fs::read_to_string(merge.join(path)).unwrap();
+    let mains = read("deny.toml");
+    let lock = read("Cargo.lock");
+    write(
+        &merge,
+        "Cargo.lock",
+        &format!("{lock}# a lock the merge moved\n"),
+    );
+    write(
+        &merge,
+        "deny.toml",
+        &format!("{mains}\n# the merge's own config\n"),
+    );
+    commit_all(&merge, "a lock and a config the merge moved");
+    let seen = root.with_file_name("seen");
+    let version = "if [ \"$1\" = --version ]; then echo 'cargo-deny 0.20.2'; exit 0; fi\n";
+    let check = |exit: u8| {
+        format!(
+            "{version}echo \"$*\" > '{seen}'\nwhile [ $# -gt 0 ]; do [ \"$1\" = --config ] && cat \"$2\" >> '{seen}'; shift; done\nexit {exit}\n",
+            seen = seen.display()
+        )
+    };
+
+    let (code, old) = land_with_deny(&root, "echo 'cargo-deny 0.18.3'\n");
+    assert_eq!(code, 1, "{old}");
+    assert!(old.contains("not cargo-deny 0.20.2"), "{old}");
+    assert!(old.contains("land refuses rather than pass"), "{old}");
+
+    let (code, found) = land_with_deny(&root, &check(1));
+    assert_eq!(code, 1, "{found}");
+    assert!(
+        found.contains("finds what main's deny.toml refuses"),
+        "{found}"
+    );
+    let asked = fs::read_to_string(&seen).unwrap();
+    assert!(asked.starts_with("check --config "), "{asked}");
+    assert!(asked.contains(" advisories sources\n"), "{asked}");
+    assert!(asked.ends_with(&mains), "main's config: {asked}");
+    assert!(!asked.contains("the merge's own config"), "{asked}");
+    assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{found}");
+
+    let (_, passed) = land_with_deny(&root, &check(0));
+    assert!(passed.contains("Cargo.lock moved since"), "{passed}");
+    assert!(
+        !passed.contains("land refuses rather than pass"),
+        "{passed}"
+    );
+
+    sh(&merge, &["git", "reset", "-q", "--keep", "main"]);
+    write(&merge, "notes/deny.md", "A note no lock holds.\n");
+    commit_all(&merge, "a change that leaves the lock alone");
+    fs::remove_file(&seen).unwrap();
+    let (_, alone) = land_with_deny(&root, &check(1));
+    assert!(!alone.contains("Cargo.lock moved since"), "{alone}");
+    assert!(!seen.exists(), "{alone}");
+}
