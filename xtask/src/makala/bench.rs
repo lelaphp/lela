@@ -1,8 +1,10 @@
 //! The production server's bars of `xtask bench` (#2351): makala against
-//! php-fpm behind a `FastCGI` client, over each bench workload committed
-//! under `docs/perf/workloads/` (measurement protocol §11), and makala
-//! against itself over the same, the A/A control that says what the rig
-//! can resolve at that scale.
+//! php-fpm behind a `FastCGI` client, over each bench workload
+//! `docs/perf/workloads.toml` declares to run as a file with no arguments
+//! (measurement protocol §11, [`workloads`]), and makala against itself
+//! over the same, the A/A control that says what the rig can resolve at
+//! that scale. A profiled workload has no bar until #4366 rules how a
+//! served request carries its arguments.
 //!
 //! **The arms.** One makala, built in `release`, the bench lane's profile,
 //! serving the workload as the recipe's `script_name` in a directory of its
@@ -365,8 +367,9 @@ mod tests {
 
     /// Each workload is four bars: the latency series against php-fpm and
     /// its A/A control, and the throughput series at [`CLIENTS`] clients
-    /// and its control, named by the workload's file and stating their
-    /// clients (#2660).
+    /// and its control, named by the workload's stem and stating their
+    /// clients (#2660); a workload declared with profiles, a pinned file or
+    /// code of its own has none (#4366).
     #[cfg(tracked)]
     #[test]
     fn each_workload_is_a_latency_and_a_throughput_series_each_with_its_control() {
@@ -383,6 +386,10 @@ mod tests {
             assert!(named.contains(&(bar, held)), "{bar}: {named:?}");
         }
         assert_eq!(bars.len(), 4 * workloads(&root).unwrap().len());
+        for unserved in ["fileinfo", "compression", "micro_bench", "loop-add"] {
+            let id = format!("makala-fpm/{unserved}");
+            assert!(!bars.iter().any(|bar| bar.id == id), "{id}");
+        }
         let c8 = bars
             .iter()
             .find(|bar| bar.id == "makala-fpm-c8/ucall")

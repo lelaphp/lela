@@ -257,9 +257,12 @@ a header comment the file did not carry then is not added now. What a file
 cannot say of itself is declared once in `docs/perf/workloads.toml`, beside
 the directory: its role, the arguments of each of its runs, the status they
 end on and the ticket that first read it (#4335, #4344). `xtask bench`,
-`xtask dispatch-census` and `xtask trace-dump` reach a program only through
-that declaration, a program under the directory with no row is refused, and
-the table below is rendered from it. A program the dispatch census counts
+`xtask dispatch-census`, `xtask trace-dump` and makala's bars and soak
+reach a program only through that declaration, a program under the
+directory with no row is refused, and the table below is rendered from it.
+A served request has no command line, so makala serves only the runs of a
+file that take no arguments; how a request carries a profile waits on
+#4366. A program the dispatch census counts
 that lives elsewhere, php-src's `Zend/micro_bench.php` or a counting loop
 given whole, is declared there too. A role is a person's to give.
 
@@ -295,7 +298,7 @@ given whole, is declared there too. A role is a person's to give.
 | `uri-whatwg-unicode.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` host mapping, NFC and deviation inputs at the pin, not modern IDNA |
 | `uri-whatwg-validation.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` special, opaque, file, IP and malformed inputs |
 
-<!-- /computed in=8ed51a69c1e1b98cfa2f3c172a5607b63880630e14a22baee951f65b1da2452f out=ea437975d9d77a0258c689c9e32a2e5a3b805f5a7f6fef6e842783d710fe336d -->
+<!-- /computed in=817b7ad6499816602260ebd27f149078c4fb84140b1bb541c00756e49b1ff25a out=ea437975d9d77a0258c689c9e32a2e5a3b805f5a7f6fef6e842783d710fe336d -->
 
 ## 12. The tolerance a nightly bar is held to
 

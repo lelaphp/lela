@@ -6,8 +6,9 @@
 //! `bench`, `dispatch-census` and `trace-dump` reach a program only
 //! through the [`Run`]s it yields, each with its arguments. `budget` holds
 //! the programs under `[budget] workloads` apart from `docs` where that
-//! row stands (#4341), and the declaration under `docs`; makala's bench
-//! serves each file of the directory as a request.
+//! row stands (#4341), and the declaration under `docs`. makala's bench
+//! and soak serve, each as a request, the runs of a file that take no
+//! arguments, since a served request has no `$argv` (#4366).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
