@@ -2491,9 +2491,9 @@ pub(crate) struct Vm {
     /// innermost frame.
     switches: Vec<Switch>,
     /// How many times a kernel has looked a name up among the linked
-    /// functions, the linked classes or a receiver's methods, which is
-    /// what a primed cache slot spares: the tests count it across two
-    /// passes of one opline.
+    /// functions, the linked classes, a receiver's methods or its
+    /// properties, which is what a primed cache slot spares: the tests
+    /// count it across two passes of one opline.
     #[cfg(test)]
     pub(crate) lookups: u32,
 }

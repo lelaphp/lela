@@ -27,6 +27,7 @@ mod class_slots;
 mod frameless;
 mod function_slots;
 mod object_walk;
+mod property_slots;
 mod safepoints;
 mod writes;
 
