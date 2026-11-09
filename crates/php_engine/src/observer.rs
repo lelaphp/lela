@@ -539,25 +539,8 @@ pub(crate) fn frameless_observed(req: &Request, function: Function) -> bool {
 
 /// The call home: `frame` pushed, its prologue not yet served. One load and
 /// one compare while no observer is declared.
-///
-/// Every entry into a user frame raises it, a call's, a callback's, an
-/// included or evaluated file's, so it is where the request is held to
-/// stand under no fake scope: a write that names its own scope
-/// (`EG(fake_scope)`, [`Request::in_fake_scope`]) is put back to none
-/// for every call it serves, so no user frame runs under one. Compiled
-/// code's guard on a runtime-cache slot rests on that: it tests the
-/// slot's tag and that its class is the object's, where the
-/// interpreter's read-back also tests the scope
-/// ([`Request::cached_property`], [`Request::cached_callee`]), and is
-/// as good only because the recorder takes no op array whose scope is
-/// not fixed and no frame it enters runs under a fake scope
-/// (`jit-design.md` §4.3).
 #[inline(always)] // design §4.3 seam 9: the home pays the load and the branch, never a call
 pub(crate) fn call(req: &mut Request, frame: FrameRef) {
-    debug_assert!(
-        !req.fakes_scope(),
-        "a user frame entered under a fake scope, which compiled code's cache guard does not test"
-    );
     if req.observers() != 0 {
         begin(req, Observable::Code(frame));
     }

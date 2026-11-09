@@ -7,10 +7,11 @@
 //! slot holds, the slot's class against the object's and the scope the
 //! reading frame stands in, and holds that a passing guard is a hit
 //! wherever the recorder takes the frame: a frame of the function that
-//! wrote the slot, its op array's scope fixed, under no fake scope
-//! ([`crate::observer::call`]'s assertion). Outside that, a passing guard
-//! misses only where the slot was written from another scope, which is
-//! why the recorder takes no op array whose scope is not fixed.
+//! wrote the slot, its op array's scope fixed (`tier::view::scoped_code`),
+//! under a fake scope or none, which [`Request::cached_callee`] does not
+//! test. Outside that, a passing guard misses only where the slot was
+//! written from another scope, which is why the recorder takes no op
+//! array whose scope is not fixed.
 //!
 //! A slot's bytes are read as compiled code reads them only where
 //! `unsafe` may stand, so the guard here reads the variant RFC 2195's
@@ -69,8 +70,8 @@ enum Scope {
     /// array whose scope is fixed is that to every other, and it is the
     /// one frame the recorder takes.
     Own,
-    /// The same, with a fake scope standing, which no user frame is
-    /// entered under.
+    /// The same, with a fake scope standing, as a resumed generator's or
+    /// fiber's frame may stand under one, as php's does.
     Faked,
     /// A frame of the scope the slot was written from but of another
     /// function: the slot a closure's frame wrote.

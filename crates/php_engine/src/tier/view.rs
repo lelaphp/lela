@@ -307,6 +307,17 @@ fn own_row<'r>(
 /// op array runs it in one scope ([`super::published::Func::fixes_scope`]):
 /// so it is no closure's and no trait method's copy's, and a slot of its
 /// cache answers each frame alike.
+///
+/// The recorder admits only these op arrays, and compiled code's guard
+/// on a method's pair rests on that refusal (`jit-design.md` §4.3): it
+/// tests the slot's tag and that the class past it is the object's
+/// (`php_jit`'s `cache_guard`), where [`Request::cached_callee`] also
+/// tests that the frame reads the slot back, by its function or its
+/// scope, and a frame of an op array whose scope is fixed reads back
+/// every pair its op array's frames wrote. `cached_callee` never tests
+/// the fake scope (`EG(fake_scope)`, [`Request::in_fake_scope`]), and a
+/// resumed generator or fiber may stand under one, as php's does, so the
+/// guard asks nothing of it either.
 fn scoped_code(req: &Request, frame: FrameRef) -> Option<(FuncRef, &OpArray)> {
     let header = req.vm().at(frame)?;
     let func = own_row(req, header).filter(|func| func.fixes_scope())?;

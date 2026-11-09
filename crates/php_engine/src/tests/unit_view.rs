@@ -11,8 +11,8 @@
 use std::sync::atomic::Ordering;
 
 use php_macros::php_function;
-use php_unit::CacheSlot;
 use php_unit::decl::Bare;
+use php_unit::{CacheSlot, Opcode, OplineIdx};
 
 use crate::api::abi::{Admission, Extension, ExtensionBuilder, Lookup, Validation};
 use crate::api::request::Request;
@@ -56,6 +56,24 @@ fn hold_class_named(req: &mut Request, name: PhpString) -> bool {
     view.hold_class(req, class) && view.class(class).is_some()
 }
 
+/// `hold_callee_here(): bool`: whether a view takes the pair the calling
+/// frame's first `INIT_METHOD_CALL` wrote into its slot
+/// ([`UnitView::hold_callee`]).
+#[php_function]
+fn hold_callee_here(req: &mut Request) -> bool {
+    let Some(frame) = req.innermost_user_frame() else {
+        return false;
+    };
+    let Some(at) = req.served_op_array(frame).and_then(|code| {
+        (code.oplines.iter())
+            .position(|op| op.opcode == Opcode::InitMethodCall)
+            .and_then(|at| u32::try_from(at).ok())
+    }) else {
+        return false;
+    };
+    UnitView::new(req).hold_callee(req, frame, OplineIdx(at))
+}
+
 /// `bump_entry(): int`: the calling function's entry word, its first half
 /// bumped as the tier bumps a cold word, and what it holds after; -1 for
 /// a sealed word, which nothing writes.
@@ -94,6 +112,7 @@ fn viewing() -> Extension {
             hold_caller::DECLARED,
             hold_class_named::DECLARED,
             bump_entry::DECLARED,
+            hold_callee_here::DECLARED,
         ])
         .request_state::<Views>()
         .build("viewing")
@@ -320,4 +339,32 @@ fn a_held_functions_constant_string_reads_through_a_view_past_its_engine() {
         "read while the engine stands: {before:?}"
     );
     assert_eq!(strings(&views), before, "read past the engine");
+}
+
+/// A view takes a method's pair only from an op array whose scope is
+/// fixed (`tier::view::scoped_code`), which compiled code's guard on the
+/// pair rests on: a class's method is taken; a file's own code and a
+/// closure, whose frames read their op array's own cache in a scope the
+/// op array does not fix, are refused by `fixes_scope`; and a trait's
+/// method, whose copy reads a cache that is no op array's own, is
+/// refused too. Each frame primed its slot by the call before it asks.
+#[test]
+fn a_view_takes_a_methods_pair_only_where_the_scope_is_fixed() {
+    let callee = "$o->n(); return hold_callee_here();";
+    let inc = format!(
+        "<?php $o = new Callee; $o->n(); $main = hold_callee_here();\n\
+         class Callee {{ function n() {{ return 1; }} }}\n\
+         class Fixed {{ function m($o) {{ {callee} }} }}\n\
+         trait T {{ function m($o) {{ {callee} }} }}\n\
+         class UsesT {{ use T; }}\n\
+         var_dump((new Fixed)->m($o), $main, (new UsesT)->m($o), (function ($o) {{ {callee} }})($o));"
+    );
+    let files = Files::new("unit-view-callee", &[("inc.php", inc.as_str())]);
+    let dir = files.path();
+    let engine = Engine::cli_builder().extensions(&[viewing()]).build();
+    let out = serve(&engine, dir, "<?php include __DIR__ . '/inc.php';");
+    assert_eq!(
+        out, "bool(true)\nbool(false)\nbool(false)\nbool(false)\n",
+        "the class's method, the file's own code, the trait's method, the closure"
+    );
 }
