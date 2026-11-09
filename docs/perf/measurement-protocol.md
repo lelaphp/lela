@@ -270,6 +270,7 @@ says which ticket first read each.
 | `spectralnorm.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/spectralnorm.php` with `$N` at §9.2's size |
 | `string_munge.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/string_munge.php` with `$N` at §9.2's size |
 | `ucall.php` | #1901 | micro.php's `ucall` kernel with nothing timed in the bytes |
+| `wordpress_shapes.php` | #4329 | original code, written from the opline counts, its side panels' sizes and sort orders following WordPress's widget defaults, with the mix a counting build of the loop met over the four WordPress bench pages; #4329's last comment sets their top twenty variants side by side |
 
 ## 12. The tolerance a nightly bar is held to
 
