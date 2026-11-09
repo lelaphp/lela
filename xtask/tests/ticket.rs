@@ -9,8 +9,10 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use xtask::manifest::Manifest;
+use xtask::owner::SESSION_VARIABLE;
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::ticket::brief;
@@ -28,7 +30,7 @@ mod common {
     pub mod tracker;
 }
 use common::manifest::of_rows;
-use common::repo::Repo;
+use common::repo::{Repo, scratch_workspace};
 use common::tracker::{Tracker, blocked_by, issue, labels, open};
 
 fn workspace() -> &'static Path {
@@ -1401,6 +1403,77 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
         "{}",
         unnamed.message
     );
+}
+
+/// `ticket` resolves its session at dispatch (Round 1, Q7 (a)): a close
+/// naming none is taken in the Claude Code session its process runs in,
+/// so the reading and its assertion of what it opens name that session;
+/// one naming a session keeps it; and in a person's terminal the reading
+/// names none and the assertion says so. The binary is run over a scratch
+/// workspace, so each reading lands in its store.
+#[test]
+fn a_ticket_call_naming_no_session_is_taken_in_the_session_its_process_runs_in() {
+    let dir = Tree::new("ticket-dispatch").unwrap();
+    let workspace_dir = dir.join("workspace");
+    scratch_workspace(workspace(), &workspace_dir);
+    let tracker = Tracker::empty("dispatch");
+    tracker.with_issue(&with_body(8, TICKED));
+    let path = format!(
+        "{}:{}",
+        tracker.bin().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let close = |named: &[&str], running: Option<&str>| {
+        let mut command = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")));
+        command
+            .arg("--root")
+            .arg(&workspace_dir)
+            .args(["ticket", "close", "8", "--opens-nothing"])
+            .args(named)
+            .env("PATH", &path);
+        match running {
+            Some(id) => command.env(SESSION_VARIABLE, id),
+            None => command.env_remove(SESSION_VARIABLE),
+        };
+        let out = command.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let store = Store::of_workspace(&workspace_dir);
+        store.read("ticket", "8").unwrap().unwrap()
+    };
+
+    let running = close(&[], Some("s-running"));
+    assert_eq!(running.session, "s-running");
+    assert!(
+        running
+            .message
+            .contains("opens nothing, asserted in session s-running"),
+        "{}",
+        running.message
+    );
+    let named = close(&["--session-id", "s-named"], Some("s-running"));
+    assert_eq!(named.session, "s-named");
+    assert!(
+        named
+            .message
+            .contains("opens nothing, asserted in session s-named"),
+        "{}",
+        named.message
+    );
+    let person = close(&[], None);
+    assert_eq!(person.session, "");
+    assert!(
+        person
+            .message
+            .contains("opens nothing, asserted with no session named"),
+        "{}",
+        person.message
+    );
+    assert_eq!(tracker.calls().len(), 3, "{:?}", tracker.calls());
 }
 
 /// A successor that is closed and was filed before the ticket it would

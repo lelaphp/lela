@@ -152,9 +152,12 @@
 //!
 //! A close that went through records what closed it: the commit and
 //! tree it was stamped at, the way every reading is, and the session the
-//! call named, the way a `permit` reading carries the hook's `session_id`
-//! (harness-design.md §4.2); the tracker gets the same in the closing
-//! comment. A close the tracker refused is a failed reading carrying `gh`'s
+//! call was taken in, the way a `permit` reading carries the hook's
+//! `session_id` (harness-design.md §4.2); the tracker gets the same in the
+//! closing comment. That session is resolved at dispatch ([`dispatched`]):
+//! the one the call named, or else the Claude Code session its process
+//! runs in, so a builder's `ticket ready` says who asserted what it opens
+//! without naming itself (Round 1, Q7 (a)). A close the tracker refused is a failed reading carrying `gh`'s
 //! text.
 //!
 //! The tracker is `gh` and nothing else: no trait, no second adapter, until
@@ -203,6 +206,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
+use crate::owner::SessionId;
 use crate::reading::{Reading, Status, joined, millis};
 use crate::track::{MAIN, Ticket, Track};
 use crate::track_next::{READY, TRACK_LABEL, tracks_of};
@@ -1324,6 +1328,18 @@ pub fn ticket_of(root: &Path, number: Option<u64>) -> Result<Ticket> {
         ),
         (None, None) => bail!("HEAD is detached and records no ticket; name one"),
     }
+}
+
+/// The session a `ticket` call is taken in, resolved where the command is
+/// dispatched (Round 1, Q7 (a)): the one the caller named, or else the
+/// Claude Code session the process runs in; none in a person's terminal.
+/// [`run`] and [`parent`] take what this resolves, since a close's comment
+/// and a ready record's message say the session before the store's writer,
+/// which fills a reading naming none, ever sees it. `merged` takes none:
+/// a merge asserts nothing of the work it closes, and its comment says
+/// what the ready record said.
+pub(crate) fn dispatched(named: Option<&str>) -> Option<SessionId> {
+    named.and_then(SessionId::new).or_else(SessionId::current)
 }
 
 /// `xtask ticket read` and `close`: the issue fetched through `gh`, the

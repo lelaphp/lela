@@ -840,7 +840,8 @@ pub(crate) enum TicketCommand {
         /// The issue number; without it, the branch's recorded ticket.
         number: Option<u64>,
         /// The session the reading carries, the way a `permit` reading
-        /// carries the hook's `session_id`; empty when none is named.
+        /// carries the hook's `session_id`; without it, the Claude Code
+        /// session the call runs in, and none in a person's terminal.
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
     },
@@ -858,7 +859,8 @@ pub(crate) enum TicketCommand {
         /// The issue number; without it, the branch's recorded ticket.
         number: Option<u64>,
         /// The session the reading carries, the way a `permit` reading
-        /// carries the hook's `session_id`; empty when none is named.
+        /// carries the hook's `session_id`; without it, the Claude Code
+        /// session the call runs in, and none in a person's terminal.
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
         /// A ticket filed for what this work found and did not do; once
@@ -900,7 +902,8 @@ pub(crate) enum TicketCommand {
         /// The issue number; without it, the branch's recorded ticket.
         number: Option<u64>,
         /// The session the reading carries, the way a `permit` reading
-        /// carries the hook's `session_id`; empty when none is named.
+        /// carries the hook's `session_id`; without it, the Claude Code
+        /// session the call runs in, and none in a person's terminal.
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
         /// A ticket filed for what this work found and did not do; once
@@ -964,7 +967,8 @@ pub(crate) enum TicketCommand {
         /// The sheet's issue number.
         number: u64,
         /// The session the reading carries, the way a `permit` reading
-        /// carries the hook's `session_id`; empty when none is named.
+        /// carries the hook's `session_id`; without it, the Claude Code
+        /// session the call runs in, and none in a person's terminal.
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
     },
