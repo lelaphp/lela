@@ -9,8 +9,9 @@
 # writes a reading, so `done` has the readings its condition 1 asks a
 # touched crate for, and witness is left to `done` (#2982). With `--staged` each leaves out a crate whose
 # reading passes and was taken over exactly what is staged, naming the
-# reading (#1143), a retired worktree's included, which is how a branch's
-# passes stand at its merge (#1252). crosscheck is not run here: its exit
+# reading (#1143), a retired worktree's included; that reading lands in
+# main's store, so `done` in `_merge` does not find it (#1252, #4216).
+# crosscheck is not run here: its exit
 # was never read, so it refused nothing and cost a release build of every
 # extension per engine commit; `done` asks a touched extension for its
 # row, and `cargo xtask crosscheck --ext <name>` takes it (revision 140).
