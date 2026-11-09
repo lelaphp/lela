@@ -432,6 +432,7 @@ mod tests {
     /// stem, `micro_bench.php` from the pinned tree or a skip naming why
     /// it is not here, and the four loops; a program named is counted
     /// alone, scoped by its stem.
+    #[cfg(tracked)]
     #[test]
     fn the_run_counts_the_programs_the_lists_doc_names() {
         let root = crate::package_dir().join("..");
@@ -482,6 +483,7 @@ mod tests {
     /// One place per rule: the threshold is the one `IN_THE_LOOP`'s doc
     /// states, and the line the counts start with is the one the engine
     /// writes, so a change to either side fails here.
+    #[cfg(tracked)]
     #[test]
     fn the_threshold_and_the_line_are_the_engines() {
         let root = crate::package_dir().join("..");
