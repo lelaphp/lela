@@ -13,8 +13,9 @@
 //! database each page starts on; `database`, where in the copy the
 //! snapshot is copied before each page; and `host`, the address the site
 //! answers to, which each request names as its `Host` wherever the copy
-//! is served from, since a site asked for another address redirects
-//! there.
+//! is served from, since of the four pages `/` and `/?p=1` answer 301 to
+//! a `Host` other than the site's own, while `/?s=hello` and
+//! `/wp-login.php` answer 200 under either.
 //!
 //! **A page.** Each page is served by a server of its own, the counting
 //! build's built-in server under `-n` and the declared settings, with the
