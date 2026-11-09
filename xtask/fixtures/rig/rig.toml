@@ -1,0 +1,6 @@
+rig = "."
+copy = ["site"]
+root = "site"
+snapshot = "start.txt"
+database = "site/live.txt"
+host = "127.0.0.1:8099"

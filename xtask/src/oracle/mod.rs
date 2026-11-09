@@ -540,14 +540,21 @@ impl Source {
     /// value, its home expanded, where it is set, and the pin's path where
     /// the pin states one.
     pub(crate) fn places(&self) -> Vec<(Through, PathBuf)> {
-        let home = std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .map(PathBuf::from);
-        let named = (self.named.as_deref()).map(|named| expanded(named, home.as_deref()));
+        let named = self.named.as_deref().map(at_home);
         let named = named.map(|tree| (Through::Variable, tree));
         let pinned = self.path.clone().map(|path| (Through::Pin, path));
         named.into_iter().chain(pinned).collect()
     }
+}
+
+/// `value` with a leading `~/` or `$HOME/` read as this process's home
+/// directory, as [`expanded`] reads it: how a variable that names a place
+/// on this machine is read, [`TREE_VARIABLE`] and the rig's (#4367).
+pub(crate) fn at_home(value: &Path) -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from);
+    expanded(value, home.as_deref())
 }
 
 /// `value` with a leading `~/` or `$HOME/` read as `home`, and taken as

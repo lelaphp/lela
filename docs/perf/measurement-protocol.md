@@ -264,7 +264,11 @@ A served request has no command line, so makala serves only the runs of a
 file that take no arguments; how a request carries a profile waits on
 #4366. A program the dispatch census counts
 that lives elsewhere, php-src's `Zend/micro_bench.php` or a counting loop
-given whole, is declared there too. A role is a person's to give.
+given whole, is declared there too, and so are the four WordPress bench
+pages the census counts, each served from a copy of a rig kept off the
+repository, which `XTASK_RIG` describes on the machine that has one
+(#4364, #4367). A role is a person's to give; a kernel's and the bench's
+counts vote, and a shape's, a probe's and a native's do not.
 
 <!-- computed exec cmd="cargo xtask status --section workloads --tracked" inputs=workloads.toml,workloads/*.php,../../xtask/src/workloads.rs,../../xtask/src/status/workloads.rs name=workloads | do not edit; run computed -->
 
@@ -297,8 +301,12 @@ given whole, is declared there too. A role is a person's to give.
 | `uri-whatwg-read-update.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` ordered reads, immutable updates and a relative base |
 | `uri-whatwg-unicode.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` host mapping, NFC and deviation inputs at the pin, not modern IDNA |
 | `uri-whatwg-validation.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` special, opaque, file, IP and malformed inputs |
+| page `/` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them |
+| page `/?p=1` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them |
+| page `/?s=hello` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them |
+| page `/wp-login.php` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them |
 
-<!-- /computed in=3b0b76bd06bf5f421e6790385b5e44ab6dfdaf4dacd7102aeb5bf64cb1bae859 out=ea437975d9d77a0258c689c9e32a2e5a3b805f5a7f6fef6e842783d710fe336d -->
+<!-- /computed in=99b0ec357099a9f321073ac09ec943e967f710328f582be9f6353ae7501d1fae out=2036378befcd468e9639c1641482dcd656e0a14b924c32b149e155a4575da81a -->
 
 ## 12. The tolerance a nightly bar is held to
 
