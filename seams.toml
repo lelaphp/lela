@@ -22,7 +22,7 @@ pin = "oracle.toml"                        # the only statement of version, dige
 [budget]
 total = 630000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this; 560000, the +40k step at the measured weekly rate, for php_ssa's 9,000 (#3174) and the tier's queue; #2971's dedupe freed 93 (#3565, 2026-10-26); 630000, four weeks at the measured rate (#4163, 2026-11-05)
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
-docs = 6500                                # design §10; `docs/**` plus the three living documents
+docs = 6500                                # design §10; `docs/**` plus the three living documents, less `docs/perf/workloads/**` where `workloads` holds it (#4341)
 harness = 4800                             # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded, less the desk where `harness-desk` holds it; 1600 for the readiness-update skill (2026-10-24); 4800 for the vendored skills (#3620 D2, 2026-10-30)
 harness-desk = 1300                        # harness §12 item 6: `harness-plugins/desk/**` hand-written, tests included; 1300 for the desk's estimated 980 and its tests (#3491, ruled 2026-10-25)
 lock_packages = 190                        # design §4.1: third-party `Cargo.lock` packages (those with a `source`); a workspace crate is held by its [[crate]] row and ceiling (#1335); 164 is stage 1's TLS as #2333 ruled, 190 adds the compiled tier's Cranelift core set and rustix as #2945 ruled
