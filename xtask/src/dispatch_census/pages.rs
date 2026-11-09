@@ -367,4 +367,70 @@ host = "127.0.0.1:8099"
         assert_eq!(kept, "fresh");
         assert!(!fixture.join("site/live.txt").exists());
     }
+
+    /// A page asked for under a `Host` other than the site's own answers
+    /// 301, as the fixture rig's page does, so the census's reading of it
+    /// fails, its counts kept and out of the vote, which names it as a
+    /// declared run that did not vote and is a skip.
+    /// Served by the oracle's built-in server, as above.
+    #[test]
+    fn a_page_asked_for_under_another_host_answers_301_and_stays_out_of_the_vote() {
+        use super::super::{Counted, Ends, INSTRUMENT, Source, VOTE, Vote, served, tallied};
+        use crate::reading::{Reading, Status};
+        let manifest = crate::manifest::Manifest::load(&crate::package_dir().join("..")).unwrap();
+        let pin = manifest.pin().unwrap();
+        let file = pin.oracle.file().map(Path::to_path_buf);
+        let Some(php) = Promise::Oracle.or_skip(file).unwrap() else {
+            return;
+        };
+        let fixture = crate::package_dir().join("fixtures/rig");
+        let described = crate::read(&fixture.join("rig.toml")).unwrap();
+        let elsewhere = described.replace("127.0.0.1:8099", "127.0.0.1:8098");
+        assert_ne!(described, elsewhere);
+        let rig = Rig::parse(&elsewhere, &fixture).unwrap();
+        let page = Page {
+            name: "front".to_owned(),
+            path: "/".to_owned(),
+        };
+        let pages = Pages {
+            first_read: 1,
+            about: String::new(),
+            role: Role::Bench,
+            warm: 3,
+            ini: vec!["memory_limit=64M".to_owned()],
+            page: vec![page.clone()],
+        };
+        let counted = Counted {
+            scope: "pages/front".to_owned(),
+            source: Source::Page(page.clone()),
+            args: Vec::new(),
+            ends: Ends::Answers(ANSWERS),
+            role: Some(pages.role),
+        };
+        let copied = rig.copied().unwrap();
+        let counts = served(&copied, &php, (&pages, &page), counted.ends);
+        let mut reading = Reading::new(INSTRUMENT, &counted.scope);
+        let mut vote = Vote::default();
+        tallied(&counted, counts, &mut reading, &mut vote);
+        assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+        assert_eq!(reading.int("oplines"), Some(1), "{}", reading.message);
+        assert!(
+            reading.message.ends_with(
+                "; the page answered 301 where it should answer 200, so its counts are out of the vote"
+            ),
+            "{}",
+            reading.message
+        );
+        let mut said = Reading::new(INSTRUMENT, VOTE);
+        vote.written_into(&std::collections::BTreeSet::new(), &mut said)
+            .unwrap();
+        assert_eq!(said.status, Status::Skip, "{}", said.message);
+        assert_eq!(said.int("voters"), Some(0));
+        assert_eq!(said.int("voted"), Some(0));
+        assert!(
+            said.message.contains("did not vote: pages/front (fail);"),
+            "{}",
+            said.message
+        );
+    }
 }
