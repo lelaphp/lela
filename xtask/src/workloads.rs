@@ -2,8 +2,7 @@
 //! harness's readers reach them through, named once. `bench`,
 //! `dispatch-census`, `trace-dump` and makala's bench run them, and
 //! `budget` holds them under `[budget] workloads` apart from `docs` where
-//! that row stands (#4341). A file that declares the programs sits beside
-//! the directory, at [`DIR`] with a `.toml` extension.
+//! that row stands (#4341).
 
 use std::path::{Path, PathBuf};
 
