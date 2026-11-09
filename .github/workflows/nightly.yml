@@ -277,8 +277,8 @@ jobs:
     # the worker-throughput series `makala-fpm-c8/<workload>` with
     # `makala-c8-aa/<workload>` in requests a second (#2660), each read
     # as how far makala stands from php-fpm. `xtask bench` runs every bar
-    # it declares; the throughput bars, about 80 minutes over the 21
-    # workloads on a quiet machine, are what the timeout below makes room
+    # it declares; the throughput bars, about 80 minutes over the
+    # workloads served bare on a quiet machine, are what the timeout below makes room
     # for. Under the measurement protocol, each bar held to its tolerance once
     # `[[bench]]` gives it one from its first two weeks (#2659). It needs the pinned php-fpm, a macOS keg, so it runs on
     # the Mac and after the oracle job, the machine quiet with nothing else

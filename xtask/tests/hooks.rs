@@ -31,11 +31,12 @@ fn workspace() -> &'static Path {
 
 /// The region files pre-commit renders, in the order it names them; the
 /// gitignored local file is not one of them (#1312).
-const REGIONS: [&str; 6] = [
+const REGIONS: [&str; 7] = [
     "AGENTS.md",
     "ext/AGENTS.md",
     "data/INDEX.md",
     "docs/divergence.md",
+    "docs/perf/measurement-protocol.md",
     "harness-design.md",
     "third-engine-design.md",
 ];
@@ -125,7 +126,7 @@ fn executable(path: &Path, body: &str) {
     }
 }
 
-/// The scratch repository: the workspace's manifest and pin, the six
+/// The scratch repository: the workspace's manifest and pin, the seven
 /// region files, one crate file, one plugin manifest, one commit, and the real hooks under
 /// `scripts/hooks` as its `core.hooksPath`.
 fn scratch(name: &str, computed: &Computed) -> Scratch {
@@ -783,7 +784,7 @@ fn an_untrusted_root_refuses_the_commit_naming_computed_trust() {
 
 /// A scratch whose region files the real `computed` reads: `AGENTS.md`
 /// holds one tree region over `crates`, rendered and committed, the other
-/// five no region; then a new crate is staged and committed by pathspec,
+/// six no region; then a new crate is staged and committed by pathspec,
 /// the shape AGENTS.md asks for, and `clippy` refuses it after the hook
 /// has rendered the region and staged it. The refusal rolls the commit's
 /// index back, so the render stands in the working copy alone, which is

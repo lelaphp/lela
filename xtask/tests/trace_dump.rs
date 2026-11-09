@@ -58,7 +58,13 @@ struct Scratch {
 impl Scratch {
     fn new(name: &str) -> Scratch {
         let root = Tree::new(&format!("trace-dump-{name}")).unwrap();
-        scratch_workspace(workspace(), &root);
+        let repo = scratch_workspace(workspace(), &root);
+        // The run reads the kernels' names from the declaration, so a
+        // program named is never scoped as one.
+        let declared =
+            "[[workload]]\nstem = \"fib\"\nfirst_read = 1\nabout = \"x\"\nrole = \"kernel\"\n";
+        repo.write("docs/perf/workloads.toml", declared);
+        repo.write("docs/perf/workloads/fib.php", "<?php\n");
         let store = Store::at(root.join("target/harness"));
         Scratch {
             root,

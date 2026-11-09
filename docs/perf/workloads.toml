@@ -1,0 +1,219 @@
+# The workloads (measurement protocol §11; #4335 ruled it, #4344 built it):
+# every program under docs/perf/workloads/, and the programs the dispatch
+# census counts that live elsewhere, each declared once. `xtask bench`, `xtask
+# dispatch-census` and `xtask trace-dump` reach a program only through its row
+# here, by xtask/src/workloads.rs, and §11's table is rendered from it.
+#
+# One `[[workload]]` per program. `stem` names it: its file is
+# docs/perf/workloads/<stem>.php, unless `pinned` names a file of the pinned
+# php-src or `code` gives it whole, run as a witness's snippet is, with `<?php`
+# on the line above it. `first_read` is the ticket that first read it and
+# `about` what it is. `role` is one of
+#   kernel   one of the seven kernels the tier's gates are measured on
+#   bench    a program the bench's bars run beside the kernels
+#   shape    a program written to the opline mix of real pages
+#   probe    a program that holds one mechanism of the loop to a count or a bar
+#   native   a program whose time is spent in an extension's natives
+# Every role but `native` is a dispatch role, whose counts vote in
+# IN_THE_LOOP's criterion (crates/php_engine/build/arms.rs). A role is a
+# person's to give: a workload added later votes only once a person gives it
+# a dispatch role (#4335). `exit` is the status each of its runs ends on, 0
+# where it states none. Each `profile` is one run, its `name` and the `args`
+# after the program's path; a workload that lists none runs once, with none.
+
+[[workload]]
+stem = "fib"
+first_read = 2740
+about = "one of the seven kernels, Mahout's `benchmarks/src/fib.php` with `$N` at the size `third-engine-design.md` §9.2 names"
+role = "kernel"
+
+[[workload]]
+stem = "nbody"
+first_read = 2740
+about = "one of the seven kernels, Mahout's `benchmarks/src/nbody.php` with `$N` at §9.2's size"
+role = "kernel"
+
+[[workload]]
+stem = "mandelbrot"
+first_read = 2740
+about = "one of the seven kernels, Mahout's `benchmarks/src/mandelbrot.php` with `$N` at §9.2's size"
+role = "kernel"
+
+[[workload]]
+stem = "spectralnorm"
+first_read = 2740
+about = "one of the seven kernels, Mahout's `benchmarks/src/spectralnorm.php` with `$N` at §9.2's size"
+role = "kernel"
+
+[[workload]]
+stem = "binary_trees"
+first_read = 2740
+about = "one of the seven kernels, Mahout's `benchmarks/src/binary_trees.php` with `$N` at §9.2's size"
+role = "kernel"
+
+[[workload]]
+stem = "fannkuch"
+first_read = 2740
+about = "one of the seven kernels, Mahout's `benchmarks/src/fannkuch.php` with `$N` at §9.2's size"
+role = "kernel"
+
+[[workload]]
+stem = "string_munge"
+first_read = 2740
+about = "one of the seven kernels, Mahout's `benchmarks/src/string_munge.php` with `$N` at §9.2's size"
+role = "kernel"
+
+[[workload]]
+stem = "bench_quiet"
+first_read = 1808
+about = "php-src's `Zend/bench.php` with `end_test` and `total` printing names only, so its bytes are deterministic"
+role = "bench"
+
+[[workload]]
+stem = "wordpress_shapes"
+first_read = 4329
+about = "original code, written from the opline counts, its side panels' sizes and sort orders following WordPress's widget defaults, with the mix a counting build of the loop met over the four WordPress bench pages; #4329's last comment sets their top twenty variants side by side"
+role = "shape"
+
+[[workload]]
+stem = "calls"
+first_read = 2011
+about = "#1808's `calls.php` rebuilt from #1808's comment, not #1809's file, so its medians are not comparable to #1809's rows"
+role = "probe"
+
+[[workload]]
+stem = "frame_chain"
+first_read = 1301
+about = "recursive user calls, then a loop of native calls: the bar #1384 holds the readable frame header to"
+role = "probe"
+
+[[workload]]
+stem = "natives"
+first_read = 2209
+about = "a loop of native calls, each return kind #2209 names"
+role = "probe"
+
+[[workload]]
+stem = "ucall"
+first_read = 1901
+about = "micro.php's `ucall` kernel with nothing timed in the bytes"
+role = "probe"
+
+[[workload]]
+stem = "micro_bench"
+first_read = 3285
+about = "php-src's `Zend/micro_bench.php` at the pin, run whole"
+role = "probe"
+pinned = "Zend/micro_bench.php"
+
+[[workload]]
+stem = "loop-empty"
+first_read = 3273
+about = "#3273's counting loop, a million rounds of an empty body"
+role = "probe"
+code = "function k($n){ $s=0.0; for($i=1;$i<$n;$i++){  } return $s; } k(1000000);\n"
+
+[[workload]]
+stem = "loop-add"
+first_read = 3273
+about = "#3273's counting loop, a million rounds of `$s = $i + 1;`"
+role = "probe"
+code = "function k($n){ $s=0.0; for($i=1;$i<$n;$i++){ $s = $i + 1; } return $s; } k(1000000);\n"
+
+[[workload]]
+stem = "loop-add-assign"
+first_read = 3273
+about = "#3273's counting loop, a million rounds of `$s += $i;`"
+role = "probe"
+code = "function k($n){ $s=0.0; for($i=1;$i<$n;$i++){ $s += $i; } return $s; } k(1000000);\n"
+
+[[workload]]
+stem = "loop-mul"
+first_read = 3273
+about = "#3273's counting loop, a million rounds of `$s = $s * 1.0000001;`"
+role = "probe"
+code = "function k($n){ $s=0.0; for($i=1;$i<$n;$i++){ $s = $s * 1.0000001; } return $s; } k(1000000);\n"
+
+# The profiles below are the runs each program's own record made of it, which
+# stays where it is: data/compression-2826/workloads.json's `recipe`,
+# scripts/fileinfo-proof.py's workload profiles and
+# data/mbstring-2831/proof_capture.py's workload cases.
+
+[[workload]]
+stem = "compression"
+first_read = 2826
+about = "zlib's raw deflate, incremental deflate, gzip, zip and mysql payload over generated text and bytes, the mode and an iteration count its arguments"
+role = "native"
+profile = [
+  { name = "small", args = ["small", "1"] },
+  { name = "large", args = ["large", "1"] },
+  { name = "incompressible", args = ["incompressible", "1"] },
+  { name = "incremental", args = ["incremental", "1"] },
+  { name = "gzip", args = ["gzip", "1"] },
+  { name = "zip", args = ["zip", "1"] },
+  { name = "mysql", args = ["mysql", "1"] },
+]
+
+[[workload]]
+stem = "fileinfo"
+first_read = 2827
+about = "`finfo` over a buffer, a file, a stream wrapper and a cold database, 256 times each, the profile its one argument"
+role = "native"
+profile = [
+  { name = "buffer", args = ["buffer"] },
+  { name = "file", args = ["file"] },
+  { name = "wrapper", args = ["wrapper"] },
+  { name = "cold", args = ["cold"] },
+]
+
+[[workload]]
+stem = "mbstring_profiles_2831"
+first_read = 2831
+about = "mbstring's conversion, MIME header encoding, `mb_strcut` and output handler over a small and a large input, the mode and the size its arguments"
+role = "native"
+profile = [
+  { name = "convert-small", args = ["convert", "small"] },
+  { name = "convert-large", args = ["convert", "large"] },
+  { name = "mime-small", args = ["mime", "small"] },
+  { name = "mime-large", args = ["mime", "large"] },
+  { name = "cut-small", args = ["cut", "small"] },
+  { name = "cut-large", args = ["cut", "large"] },
+  { name = "http-small", args = ["http", "small"] },
+  { name = "http-large", args = ["http", "large"] },
+]
+
+[[workload]]
+stem = "uri-rfc-read-update"
+first_read = 2832
+about = "`Uri\\Rfc3986\\Uri` raw, normalised, cloned with an update and resolved"
+role = "native"
+
+[[workload]]
+stem = "uri-rfc-unicode"
+first_read = 2832
+about = "`Uri\\Rfc3986\\Uri` byte and percent normalisation, not WHATWG or IDNA"
+role = "native"
+
+[[workload]]
+stem = "uri-rfc-validation"
+first_read = 2832
+about = "`Uri\\Rfc3986\\Uri` over valid and malformed inputs"
+role = "native"
+
+[[workload]]
+stem = "uri-whatwg-read-update"
+first_read = 2832
+about = "`Uri\\WhatWg\\Url` ordered reads, immutable updates and a relative base"
+role = "native"
+
+[[workload]]
+stem = "uri-whatwg-unicode"
+first_read = 2832
+about = "`Uri\\WhatWg\\Url` host mapping, NFC and deviation inputs at the pin, not modern IDNA"
+role = "native"
+
+[[workload]]
+stem = "uri-whatwg-validation"
+first_read = 2832
+about = "`Uri\\WhatWg\\Url` special, opaque, file, IP and malformed inputs"
+role = "native"

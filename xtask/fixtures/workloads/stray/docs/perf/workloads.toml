@@ -1,0 +1,5 @@
+[[workload]]
+stem = "a"
+first_read = 1
+about = "a program its row declares"
+role = "probe"

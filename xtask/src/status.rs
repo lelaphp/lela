@@ -25,6 +25,7 @@ mod invocation;
 mod parity;
 mod review;
 mod tickets;
+mod workloads;
 pub(crate) use every::PerReading;
 
 use crate::api_check::{self, lock::Lock};
@@ -245,6 +246,7 @@ pub fn render(
         Section::Corpus => return corpus_section(manifest.pin()?, format),
         Section::Invocation => return invocation::render(root, format),
         Section::Conditions => return conditions::render(root, format),
+        Section::Workloads => return workloads::render(root, format),
         Section::Parity => {
             return parity::render(manifest, against.checkout()?, root, format);
         }

@@ -1,7 +1,8 @@
 //! `xtask trace-dump`, the trace-dump diff (`jit-design.md` §4.1;
 //! harness §7): which roots and side traces the tier records, how each
 //! recording ends, and which exits fire, held to php's. Each of the seven
-//! kernels ([`KERNELS`]) is run by the oracle under the recipe and
+//! kernels, the declaration's kernel role ([`Programs::Kernels`]), is
+//! run with the arguments it declares by the oracle under the recipe and
 //! `[regime.jit-inline]`, whose `opcache.jit_debug` asks php for its
 //! `TRACE` lines on the second stream, and by the engine built with the
 //! tier's feature, the build the phpt lane's `--jit` and the witness
@@ -35,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
-use crate::bench::kernels::{KERNELS, MEMORY};
+use crate::bench::kernels::{MEMORY, Programs};
 use crate::crosscheck::first_difference;
 use crate::divergence::{DUMP_PREFIX, Digests, Registry, Side};
 use crate::key::Snapshot;
@@ -43,7 +44,7 @@ use crate::manifest::Manifest;
 use crate::oracle::{self, Ended, Invocation, Observation, Oracle, Program, Regime, Verdict};
 use crate::phpt::{Build, Lane};
 use crate::reading::{Reading, Status, Store, joined};
-use crate::workloads;
+use crate::workloads::{Declaration, Run};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "trace-dump";
@@ -72,23 +73,24 @@ pub struct Ask {
     pub engine: Option<PathBuf>,
 }
 
-/// One program a run holds: its reading's scope and its path.
+/// One program a run holds: its reading's scope, its path and the
+/// arguments after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Traced {
     scope: String,
     path: PathBuf,
+    args: Vec<String>,
 }
 
 impl Ask {
     /// Each program the run holds: the programs named, or the kernels
-    /// named or all seven. A kernel name [`KERNELS`] lacks, a program with
-    /// no stem and one whose stem is a kernel's are refused, so a reading
-    /// stands under no scope a typo made and none shadows a kernel's.
-    fn programs(&self, root: &Path) -> Result<Vec<Traced>> {
-        let traced = |scope: &str, path: PathBuf| Traced {
-            scope: scope.to_owned(),
-            path,
-        };
+    /// `declared` named or all seven, each run as it declares. A kernel
+    /// name the declaration lacks, a program with no stem and one whose
+    /// stem is a kernel's are refused, so a reading stands under no scope
+    /// a typo made and none shadows a kernel's.
+    fn programs(&self, declared: &Declaration) -> Result<Vec<Traced>> {
+        let kernels = Programs::Kernels.runs(declared);
+        let stems: Vec<String> = kernels.iter().map(Run::name).collect();
         if !self.program.is_empty() {
             let named = |path: &PathBuf| {
                 let stem = path
@@ -97,28 +99,34 @@ impl Ask {
                     .unwrap_or_default();
                 ensure!(!stem.is_empty(), "{} names no program", path.display());
                 ensure!(
-                    !KERNELS.contains(&stem),
+                    !stems.iter().any(|name| name == stem),
                     "{} is scoped {stem}, a kernel's name",
                     path.display()
                 );
-                Ok(traced(stem, path.clone()))
+                Ok(Traced {
+                    scope: stem.to_owned(),
+                    path: path.clone(),
+                    args: Vec::new(),
+                })
             };
             return self.program.iter().map(named).collect();
         }
-        let named: Vec<&str> = self.kernel.iter().map(String::as_str).collect();
-        if let Some(unknown) = named.iter().find(|k| !KERNELS.contains(k)) {
+        if let Some(unknown) = (self.kernel.iter()).find(|k| !stems.contains(k)) {
             bail!(
                 "{unknown} is not one of the seven kernels: {}",
-                KERNELS.join(", ")
+                stems.join(", ")
             );
         }
-        let kernels = if named.is_empty() {
-            KERNELS
-        } else {
-            &named[..]
-        };
-        let at = |k: &&str| traced(k, workloads::program(root, k));
-        Ok(kernels.iter().map(at).collect())
+        let asked = |name: &String| self.kernel.is_empty() || self.kernel.contains(name);
+        let traced = kernels.iter().zip(&stems).filter(|(_, name)| asked(name));
+        let traced = traced.map(|(run, name)| {
+            Ok(Traced {
+                scope: name.clone(),
+                path: run.file()?.to_path_buf(),
+                args: run.args().to_vec(),
+            })
+        });
+        traced.collect()
     }
 }
 
@@ -197,7 +205,7 @@ pub fn run(
     let oracle = pin.oracle();
     let mut built = None;
     let mut readings = Vec::new();
-    for traced in ask.programs(root)? {
+    for traced in ask.programs(&Declaration::load(root)?)? {
         let scope = &traced.scope;
         // What the lines are a function of is the whole engine and the
         // program, so the reading is stamped over the workspace.
@@ -257,6 +265,7 @@ impl Sides<'_> {
             self.oracle.run_under(&Invocation {
                 regimes: &[REGIME],
                 ini: self.ini,
+                args: &traced.args,
                 ..Invocation::new(binary, Program::File(program))
             })
         };
@@ -356,27 +365,45 @@ mod tests {
         assert!(none.contains("sets no opcache.jit_debug"), "{none}");
     }
 
-    /// Without a program named, the run holds the seven kernels, each by
-    /// its name, at its path under the workloads; a program named is
-    /// scoped by its stem; an unknown kernel, a program with no stem and
-    /// one scoped as a kernel are refused.
+    /// Without a program named, the run holds the declaration's kernels,
+    /// each by its name, at its path under the workloads and with the
+    /// arguments it declares, and no workload of another role; a program
+    /// named is scoped by its stem; an unknown kernel, a program with no
+    /// stem and one scoped as a kernel are refused.
     #[test]
-    fn the_run_holds_the_seven_kernels_unless_a_program_is_named() {
-        let root = Path::new("/w");
-        let programs = Ask::default().programs(root).unwrap();
+    fn the_run_holds_the_declared_kernels_unless_a_program_is_named() {
+        let row = |stem: &str, role: &str, more: &str| {
+            format!(
+                "[[workload]]\nstem = \"{stem}\"\nfirst_read = 1\nabout = \"x\"\nrole = \"{role}\"\n{more}"
+            )
+        };
+        let text = [
+            row("fib", "kernel", ""),
+            row("bench_quiet", "bench", ""),
+            row(
+                "nbody",
+                "kernel",
+                "profile = [{ name = \"n\", args = [\"9\"] }]\n",
+            ),
+        ]
+        .concat();
+        let declared = Declaration::parse(&text, Path::new("/w")).unwrap();
+        let programs = Ask::default().programs(&declared).unwrap();
         let scopes: Vec<&str> = programs.iter().map(|t| t.scope.as_str()).collect();
-        assert_eq!(scopes, KERNELS);
-        assert_eq!(programs[0].path, workloads::program(root, "fib"));
+        assert_eq!(scopes, ["fib", "nbody/n"]);
+        let fib = PathBuf::from("/w/docs/perf/workloads/fib.php");
+        assert_eq!((&programs[0].path, &programs[0].args[..]), (&fib, &[][..]));
         let ask = |kernel: &str| Ask {
             kernel: vec![kernel.to_owned()],
             ..Ask::default()
         };
         let nbody = Traced {
-            scope: "nbody".to_owned(),
-            path: workloads::program(root, "nbody"),
+            scope: "nbody/n".to_owned(),
+            path: PathBuf::from("/w/docs/perf/workloads/nbody.php"),
+            args: vec!["9".to_owned()],
         };
-        assert_eq!(ask("nbody").programs(root).unwrap(), [nbody]);
-        let typo = ask("nbdy").programs(root).unwrap_err().to_string();
+        assert_eq!(ask("nbody/n").programs(&declared).unwrap(), [nbody]);
+        let typo = ask("nbdy").programs(&declared).unwrap_err().to_string();
         assert!(
             typo.contains("nbdy is not one of the seven kernels"),
             "{typo}"
@@ -386,11 +413,11 @@ mod tests {
             ..Ask::default()
         };
         assert_eq!(
-            program("x/fiber_hot_loop.php").programs(root).unwrap()[0].scope,
+            program("x/fiber_hot_loop.php").programs(&declared).unwrap()[0].scope,
             "fiber_hot_loop"
         );
         for refused in ["x/fib.php", "/"] {
-            assert!(program(refused).programs(root).is_err(), "{refused}");
+            assert!(program(refused).programs(&declared).is_err(), "{refused}");
         }
         assert_eq!(id_of("fib"), "trace:dump/fib");
     }

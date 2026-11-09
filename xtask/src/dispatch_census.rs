@@ -1,11 +1,10 @@
 //! `xtask dispatch-census`, the census behind `IN_THE_LOOP` (design §5.8,
 //! #4328): each variant's share of the oplines the loop dispatched, over
-//! every program the list's doc names. Those are each program of
-//! `docs/perf/workloads`, php-src's `Zend/micro_bench.php` at the pin, and
-//! the four counting loops of #3273 ([`LOOPS`]). The list's doc admits a
-//! variant met in more than a quarter of a percent of the oplines any of
-//! them dispatched ([`THRESHOLD`]), "as a counting build of the loop told
-//! them over each" (#3285).
+//! every run of every program `docs/perf/workloads.toml` declares
+//! ([`crate::workloads`]), each with the arguments it declares. The
+//! list's doc admits [`CRITERION`] (#4335), so a run votes where its
+//! program's role is a dispatch role and it ended as its program declares,
+//! and a variant over [`THRESHOLD`] in any run that votes is voted in.
 //!
 //! **The counting build.** `php` built in release with the bundle's
 //! [`FEATURE`], into a target directory of its own, so the default build
@@ -14,26 +13,34 @@
 //! writes the counts to the error stream where it ends, one line per
 //! variant met ([`LINE`]; `php_engine`'s `api::request::census`).
 //!
-//! **The run.** Each program runs on that build under the oracle's recipe
+//! **The run.** Each run is run on that build under the oracle's recipe
 //! and [`MEMORY`], as the bench's arms run the kernels; the oracle itself
-//! runs nothing. Each program writes one reading, scoped `workloads/<stem>`,
-//! `Zend/micro_bench` or `loops/<name>`, or `program/<stem>` for a program
-//! named on the command line. The reading's `numbers` hold `oplines`, the
+//! runs nothing. Each writes one reading, scoped `workloads/<run>`, the
+//! run's name being its workload's stem and `/<profile>` after it where it
+//! runs under one, or `program/<stem>` for a program named on the command
+//! line, which votes nothing. The reading's `numbers` hold `oplines`, the
 //! oplines the loop dispatched; `variants`, how many variants served them;
 //! and `over`, how many of those are over the threshold. Its `groups` hold
 //! each variant's share of `oplines` in percent. Its message names the
-//! variants over the threshold, the largest share first. A program the
-//! engine wrote no counts for fails, and one whose tree is not on this
-//! machine is a skip.
+//! variants over the threshold, the largest share first. A run the engine
+//! wrote no counts for fails, and so does one that ended otherwise than
+//! its program declares, its counts kept out of the vote; a program whose
+//! tree is not on this machine is a skip.
 //!
-//! The instrument decides nothing: the threshold is the one the list's doc
-//! states, and the list is a person's to change.
+//! **The vote.** Over the declared set, one more reading, scoped
+//! [`VOTE`], names the variants the vote would put in the loop's body and
+//! the build's own placement does not, and those the placement puts there
+//! and the vote does not, each with its highest share in a run that votes
+//! and that run ([`Vote`]). The placement is `IN_THE_LOOP` and
+//! `PATH_IN_THE_LOOP` in [`ARMS`], a variant of the second counting as
+//! in. That reading informs and fails nothing: the list is a person's to
+//! change (#4335), and the instrument decides nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::bench::kernels::MEMORY;
 use crate::carried::BUNDLE;
@@ -41,7 +48,7 @@ use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{Ended, Invocation, Oracle, Program, hosts::CLI, profile};
 use crate::reading::{Number, Reading, Status, Store, joined, plural};
-use crate::workloads;
+use crate::workloads::{Declaration, Role, Text};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "dispatch-census";
@@ -59,29 +66,25 @@ const LINE: &str = "dispatch-census ";
 /// [`ARMS`], admits it: "more than a quarter of a percent".
 pub(crate) const THRESHOLD: f64 = 0.25;
 
-/// The file whose doc of `IN_THE_LOOP` states [`THRESHOLD`].
+/// `IN_THE_LOOP`'s criterion, word for word as #4335 ruled it, which the
+/// list's doc in [`ARMS`] and design §5.8 carry.
+pub(crate) const CRITERION: &str = "every variant met in more than a quarter of a percent of the oplines dispatched by any program docs/perf/workloads.toml declares in a dispatch role, run with the arguments it declares and ending as it declares";
+
+/// The file whose doc of `IN_THE_LOOP` states [`CRITERION`], and whose
+/// `IN_THE_LOOP` and `PATH_IN_THE_LOOP` are the build's placement.
 const ARMS: &str = "crates/php_engine/build/arms.rs";
 
-/// php-src's micro-benchmark, by its path in the pinned tree.
-const MICRO_BENCH: &str = "Zend/micro_bench.php";
+/// The two lists of [`ARMS`] that place a variant in the loop's body.
+const PLACED: [&str; 2] = ["IN_THE_LOOP", "PATH_IN_THE_LOOP"];
 
-/// The four counting loops of #3273, each by its name and the body of
-/// `k`'s loop ([`counting_loop`]).
-pub(crate) const LOOPS: [(&str, &str); 4] = [
-    ("empty", ""),
-    ("add", "$s = $i + 1;"),
-    ("add-assign", "$s += $i;"),
-    ("mul", "$s = $s * 1.0000001;"),
-];
-
-/// How many times a counting loop goes round.
-const ROUNDS: u32 = 1_000_000;
+/// The scope of the vote's reading.
+pub(crate) const VOTE: &str = "vote";
 
 /// What one `xtask dispatch-census` run was asked for.
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct Ask {
-    /// A program by its path, repeatable, run in place of the ones the
-    /// list's doc names: its reading is scoped `program/<stem>`.
+    /// A program by its path, repeatable, run in place of the declared
+    /// ones: its reading is scoped `program/<stem>`, and it votes nothing.
     #[arg(long, value_name = "PATH")]
     pub program: Vec<PathBuf>,
     /// The counting build to run; without it, `php` built in release with
@@ -102,66 +105,64 @@ enum Source {
     Unfound(String),
 }
 
-/// One program a run counts: its reading's scope and its text.
+/// One run the census counts: its reading's scope, its program's text,
+/// the arguments after it, how it should end, and its program's role,
+/// none for a program named on the command line, which votes nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Counted {
     scope: String,
     source: Source,
+    args: Vec<String>,
+    ends: Ended,
+    role: Option<Role>,
+}
+
+impl Counted {
+    /// Whether its counts vote, where its run ends as declared.
+    fn votes(&self) -> bool {
+        self.role.is_some_and(Role::votes)
+    }
 }
 
 impl Ask {
-    /// The programs the run counts: those named, or every program the
-    /// list's doc names, the workloads by name, `micro_bench.php` from
-    /// `tree`, the pinned php-src where it was found, and the four loops.
-    fn programs(&self, root: &Path, tree: Result<PathBuf>) -> Result<Vec<Counted>> {
-        let counted = |scope: String, source: Source| Counted { scope, source };
+    /// The runs the census counts: the programs named, each held to end on
+    /// status 0, or every run `declared` yields, a pinned file of it read
+    /// from `tree`, the pinned php-src where it was found.
+    fn programs(&self, declared: &Declaration, tree: &Result<PathBuf>) -> Result<Vec<Counted>> {
         if !self.program.is_empty() {
             let named = |path: &PathBuf| {
                 let stem = path.file_stem().and_then(|s| s.to_str());
                 let stem = stem.filter(|stem| !stem.is_empty());
                 let stem = stem.with_context(|| format!("{} names no program", path.display()))?;
-                let path = std::path::absolute(path)?;
-                Ok(counted(format!("program/{stem}"), Source::File(path)))
+                Ok(Counted {
+                    scope: format!("program/{stem}"),
+                    source: Source::File(std::path::absolute(path)?),
+                    args: Vec::new(),
+                    ends: Ended::Status(0),
+                    role: None,
+                })
             };
             return self.program.iter().map(named).collect();
         }
-        let dir = workloads::dir(root);
-        let mut workloads: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .with_context(|| format!("reading {}", dir.display()))?
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<std::io::Result<_>>()?;
-        workloads.retain(|path| path.extension().is_some_and(|ext| ext == "php"));
-        workloads.sort();
-        let mut programs = Vec::new();
-        for path in workloads {
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default();
-            programs.push(counted(
-                format!("workloads/{stem}"),
-                Source::File(path.clone()),
-            ));
-        }
-        let micro = match tree {
-            Ok(tree) => Source::File(tree.join(MICRO_BENCH)),
-            Err(why) => Source::Unfound(format!("the pinned php-src is not here: {why:#}")),
-        };
-        let scope = MICRO_BENCH.trim_end_matches(".php").to_owned();
-        programs.push(counted(scope, micro));
-        for (name, body) in LOOPS {
-            let source = Source::Snippet(counting_loop(body));
-            programs.push(counted(format!("loops/{name}"), source));
-        }
-        Ok(programs)
+        let counted = declared.runs().map(|run| {
+            let source = match run.text() {
+                Text::File(path) => Source::File(path.clone()),
+                Text::Code(code) => Source::Snippet(code.clone()),
+                Text::Pinned(path) => match tree {
+                    Ok(tree) => Source::File(tree.join(path)),
+                    Err(why) => Source::Unfound(format!("the pinned php-src is not here: {why:#}")),
+                },
+            };
+            Counted {
+                scope: format!("workloads/{}", run.name()),
+                source,
+                args: run.args().to_vec(),
+                ends: run.workload.ends,
+                role: Some(run.workload.role),
+            }
+        });
+        Ok(counted.collect())
     }
-}
-
-/// The counting loop of #3273 over `body`, after the recipe's preamble.
-fn counting_loop(body: &str) -> String {
-    format!(
-        "function k($n){{ $s=0.0; for($i=1;$i<$n;$i++){{ {body} }} return $s; }} k({ROUNDS});\n"
-    )
 }
 
 /// The counts one program's run wrote: each variant's name and the
@@ -221,8 +222,15 @@ impl Census {
     }
 
     /// The reading's numbers, groups, status and message for `scope`,
-    /// whose run ended as `ended`.
-    fn written_into(&self, scope: &str, ended: Ended, reading: &mut Reading) -> Result<()> {
+    /// whose run ended as `ended` where it should have ended as `ends`:
+    /// a pass where it ended so, and a fail, its counts kept, where it
+    /// did not. A run with no counts fails.
+    fn written_into(
+        &self,
+        scope: &str,
+        (ended, ends): (Ended, Ended),
+        reading: &mut Reading,
+    ) -> Result<()> {
         let oplines = self.oplines();
         if oplines == 0 {
             reading.status = Status::Fail;
@@ -254,13 +262,125 @@ impl Census {
                 format!(": {}", joined(named, ", "))
             }
         );
-        if ended != Ended::Status(0) {
-            write!(said, "; the run ended on {ended}").ok();
-        }
         reading.status = Status::Pass;
+        if ended != ends {
+            reading.status = Status::Fail;
+            write!(
+                said,
+                "; the run ended on {ended} where its program declares {ends}, so its counts are out of the vote"
+            )
+            .ok();
+        }
         reading.message = said;
         Ok(())
     }
+}
+
+/// The vote over the runs that vote: each variant met in one, with its
+/// highest share in any of them and that run's scope.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Vote {
+    met: BTreeMap<String, (f64, String)>,
+    voters: usize,
+}
+
+impl Vote {
+    /// `census`, the counts of the run `scope`, cast.
+    fn cast(&mut self, scope: &str, census: &Census) {
+        self.voters += 1;
+        for (name, share) in census.shares() {
+            let highest = self.met.get(name).is_some_and(|(had, _)| *had >= share);
+            if !highest {
+                self.met.insert(name.to_owned(), (share, scope.to_owned()));
+            }
+        }
+    }
+
+    /// The variants over [`THRESHOLD`] in a run that voted.
+    fn voted(&self) -> impl Iterator<Item = (&String, &(f64, String))> {
+        self.met.iter().filter(|(_, (share, _))| *share > THRESHOLD)
+    }
+
+    /// `names`, the highest share in a run that voted first, and in order
+    /// among equal shares.
+    fn by_share<'n>(&self, names: impl Iterator<Item = &'n String>) -> Vec<&'n String> {
+        let share = |name: &String| self.met.get(name).map_or(0.0, |(share, _)| *share);
+        let mut names: Vec<&String> = names.collect();
+        names.sort_by(|a, b| share(b).total_cmp(&share(a)).then(a.cmp(b)));
+        names
+    }
+
+    /// The vote against `placed`, the variants the build places in the
+    /// loop's body, as `reading`'s numbers and message: the variants that
+    /// would enter, the largest share first, and those that would leave.
+    fn written_into(&self, placed: &BTreeSet<String>, reading: &mut Reading) -> Result<()> {
+        let shown = |name: &str| match self.met.get(name) {
+            Some((share, scope)) => format!("{name} {share:.3}% {scope}"),
+            None => format!("{name} met in no run that votes"),
+        };
+        let voted: BTreeSet<&String> = self.voted().map(|(name, _)| name).collect();
+        let enter = self.by_share(voted.iter().copied().filter(|n| !placed.contains(*n)));
+        let leave = self.by_share(placed.iter().filter(|n| !voted.contains(n)));
+        reading.count("voters", self.voters as u64)?;
+        reading.count("voted", voted.len() as u64)?;
+        reading.count("placed", placed.len() as u64)?;
+        reading.count("enter", enter.len() as u64)?;
+        reading.count("leave", leave.len() as u64)?;
+        let listed = |names: &[&String]| {
+            if names.is_empty() {
+                "none".to_owned()
+            } else {
+                joined(names.iter().map(|name| shown(name)), ", ")
+            }
+        };
+        reading.status = Status::Pass;
+        reading.message = format!(
+            "{} run{} of a dispatch role voted {} variant{} over a quarter of a percent, against the build's {} placed by {} in {ARMS}; {} would enter: {}; {} would leave: {}; this informs and fails nothing",
+            self.voters,
+            plural(self.voters),
+            voted.len(),
+            plural(voted.len()),
+            placed.len(),
+            PLACED.join(" and "),
+            enter.len(),
+            listed(&enter),
+            leave.len(),
+            listed(&leave),
+        );
+        Ok(())
+    }
+}
+
+/// The variants the build at `root` places in the loop's body: every
+/// name of [`PLACED`]'s lists in [`ARMS`].
+fn placed(root: &Path) -> Result<BTreeSet<String>> {
+    let text = crate::read(&root.join(ARMS))?;
+    let file = syn::parse_file(&text).with_context(|| format!("parsing {ARMS}"))?;
+    let mut placed = BTreeSet::new();
+    for list in PLACED {
+        let item = file.items.iter().find_map(|item| match item {
+            syn::Item::Const(c) if c.ident == list => Some(&c.expr),
+            _ => None,
+        });
+        let item = item.with_context(|| format!("{ARMS} has no const {list}"))?;
+        let syn::Expr::Reference(reference) = item.as_ref() else {
+            bail!("{ARMS}'s {list} is no `&[..]`");
+        };
+        let syn::Expr::Array(array) = reference.expr.as_ref() else {
+            bail!("{ARMS}'s {list} is no `&[..]`");
+        };
+        for name in &array.elems {
+            let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(name),
+                ..
+            }) = name
+            else {
+                bail!("{ARMS}'s {list} holds other than string literals");
+            };
+            placed.insert(name.value());
+        }
+    }
+    Ok(placed)
 }
 
 /// A share in percent to six places, as the reading keeps it.
@@ -290,23 +410,27 @@ fn engine(root: &Path, ask: &Ask) -> Result<PathBuf> {
     )
 }
 
-/// Run what was asked for: one reading per program, written by the
-/// caller through `record`, and one line naming every variant over the
-/// threshold in any of them.
+/// Run what was asked for: one reading per run, and over the declared
+/// set the vote's, written by the caller through `record`; the vote's
+/// message is printed.
 pub fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Vec<Reading>> {
     let pin = manifest.pin()?;
     let snapshot = Snapshot::disk(root)?;
-    let programs = ask.programs(root, pin.source.tree())?;
+    let declared = Declaration::load(root)?;
+    let programs = ask.programs(&declared, &pin.source.tree())?;
     let oracle = pin.oracle();
     let engine = engine(root, ask);
     let mut readings = Vec::new();
-    let mut over_any = BTreeSet::new();
-    for counted in programs {
-        let scope = &counted.scope;
-        // What a program dispatches is a function of the whole engine and
-        // the program, so the reading is stamped over the workspace.
+    let mut vote = Vote::default();
+    // What a program dispatches is a function of the whole engine and the
+    // program, so each reading is stamped over the workspace.
+    let stamped = |scope: &str| -> Result<Reading> {
         let reading = Reading::stamped_over(INSTRUMENT, scope, &snapshot, Path::new("."))?;
-        let mut reading = reading.under(pin);
+        Ok(reading.under(pin))
+    };
+    for counted in &programs {
+        let scope = &counted.scope;
+        let mut reading = stamped(scope)?;
         let counts = match (&engine, &counted.source) {
             (_, Source::Unfound(why)) => {
                 reading.message = format!("{scope}: nothing ran; {why}");
@@ -314,32 +438,39 @@ pub fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Vec<Reading>> 
                 continue;
             }
             (Err(why), _) => Err(anyhow::anyhow!("the counting build did not build: {why:#}")),
-            (Ok(engine), source) => counts(&oracle, engine, source),
+            (Ok(engine), _) => counts(&oracle, engine, counted),
         };
-        let counted = counts.and_then(|(census, ended)| {
-            census.written_into(scope, ended, &mut reading)?;
-            over_any.extend(census.over().into_iter().map(|(name, _)| name.to_owned()));
+        let written = counts.and_then(|(census, ended)| {
+            census.written_into(scope, (ended, counted.ends), &mut reading)?;
+            if reading.status == Status::Pass && counted.votes() {
+                vote.cast(scope, &census);
+            }
             Ok(())
         });
-        if let Err(trouble) = counted {
+        if let Err(trouble) = written {
             reading.status = Status::Fail;
             reading.message = format!("{scope}: {trouble:#}");
         }
+        if let Some(role) = counted.role.filter(|role| !role.votes()) {
+            let said = format!("; its role, {}, votes nothing", role.name());
+            reading.message.push_str(&said);
+        }
         readings.push(reading);
     }
-    println!(
-        "{INSTRUMENT}: {} variant{} over a quarter of a percent, the threshold `IN_THE_LOOP`'s doc in {ARMS} states, in any program: {}",
-        over_any.len(),
-        plural(over_any.len()),
-        joined(&over_any, ", ")
-    );
+    if ask.program.is_empty() {
+        let mut reading = stamped(VOTE)?;
+        vote.written_into(&placed(root)?, &mut reading)?;
+        println!("{INSTRUMENT}: `IN_THE_LOOP` admits {CRITERION}");
+        println!("{INSTRUMENT}: {}", reading.message);
+        readings.push(reading);
+    }
     Ok(readings)
 }
 
-/// The counts `source` dispatched on `engine` under the recipe and
-/// [`MEMORY`], and how its run ended.
-fn counts(oracle: &Oracle<'_>, engine: &Path, source: &Source) -> Result<(Census, Ended)> {
-    let program = match source {
+/// The counts `counted` dispatched on `engine` under the recipe and
+/// [`MEMORY`], with the arguments it declares, and how its run ended.
+fn counts(oracle: &Oracle<'_>, engine: &Path, counted: &Counted) -> Result<(Census, Ended)> {
+    let program = match &counted.source {
         Source::File(path) => {
             ensure!(path.is_file(), "there is no program at {}", path.display());
             Program::File(path)
@@ -350,6 +481,7 @@ fn counts(oracle: &Oracle<'_>, engine: &Path, source: &Source) -> Result<(Census
     let ini = [MEMORY.to_owned()];
     let ran = oracle.run_under(&Invocation {
         ini: &ini,
+        args: &counted.args,
         ..Invocation::new(engine, program)
     })?;
     Ok((Census::read(&ran.stderr)?, ran.exit))
@@ -383,9 +515,10 @@ mod tests {
         census.served.insert("Bulk".to_owned(), 9972);
         let over: Vec<&str> = census.over().into_iter().map(|(name, _)| name).collect();
         assert_eq!(over, ["Bulk"]);
-        let mut reading = Reading::new(INSTRUMENT, "loops/empty");
+        let mut reading = Reading::new(INSTRUMENT, "workloads/loop-empty");
+        let ended = (Ended::Status(0), Ended::Status(0));
         census
-            .written_into("loops/empty", Ended::Status(0), &mut reading)
+            .written_into("workloads/loop-empty", ended, &mut reading)
             .unwrap();
         assert_eq!(reading.status, Status::Pass);
         assert_eq!(reading.int("oplines"), Some(10000));
@@ -400,14 +533,16 @@ mod tests {
         );
     }
 
-    /// A run the engine wrote no counts for fails, naming the feature,
-    /// and one that ended otherwise than with 0 says how.
+    /// A run the engine wrote no counts for fails, naming the feature;
+    /// one that ended otherwise than its program declares fails, saying
+    /// how, its counts kept and out of the vote; and one that ended on a
+    /// status its program declares passes, as #4335's (c) ruled.
     #[test]
-    fn a_run_with_no_counts_fails_naming_the_feature() {
+    fn a_run_fails_with_no_counts_or_an_end_other_than_its_declared() {
         let mut reading = Reading::new(INSTRUMENT, "workloads/fib");
-        let ended = Ended::Status(255);
+        let (zero, other) = (Ended::Status(0), Ended::Status(255));
         Census::default()
-            .written_into("workloads/fib", ended, &mut reading)
+            .written_into("workloads/fib", (other, zero), &mut reading)
             .unwrap();
         assert_eq!(reading.status, Status::Fail);
         assert!(
@@ -417,81 +552,193 @@ mod tests {
         );
         let census = Census::read(b"dispatch-census Jmp 1\n").unwrap();
         census
-            .written_into("workloads/fib", ended, &mut reading)
+            .written_into("workloads/fib", (other, zero), &mut reading)
             .unwrap();
+        assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+        assert_eq!(reading.int("oplines"), Some(1));
         assert!(
-            reading.message.ends_with("; the run ended on status 255"),
+            reading.message.ends_with(
+                "; the run ended on status 255 where its program declares status 0, so its counts are out of the vote"
+            ),
             "{}",
             reading.message
         );
+        let mut declared = Reading::new(INSTRUMENT, "workloads/fib");
+        census
+            .written_into("workloads/fib", (other, other), &mut declared)
+            .unwrap();
+        assert_eq!(declared.status, Status::Pass, "{}", declared.message);
     }
 
-    /// Without a program named, the run counts every workload by its
-    /// stem, `micro_bench.php` from the pinned tree or a skip naming why
-    /// it is not here, and the four loops; a program named is counted
-    /// alone, scoped by its stem.
-    #[cfg(tracked)]
+    /// Without a program named, the census counts every run the
+    /// declaration yields: a file in place, a pinned file from the tree or
+    /// a skip naming why it is not here, and code as a snippet, each with
+    /// the arguments and the end it declares; a native votes nothing. A
+    /// program named is counted alone, scoped by its stem, held to end on
+    /// 0 and voting nothing.
     #[test]
-    fn the_run_counts_the_programs_the_lists_doc_names() {
-        let root = crate::package_dir().join("..");
+    fn the_census_counts_every_declared_run_with_its_arguments() {
+        let text = r#"
+[[workload]]
+stem = "fib"
+first_read = 1
+about = "x"
+role = "kernel"
+
+[[workload]]
+stem = "modes"
+first_read = 1
+about = "x"
+role = "native"
+exit = 3
+profile = [{ name = "small", args = ["small", "1"] }]
+
+[[workload]]
+stem = "micro_bench"
+first_read = 1
+about = "x"
+role = "probe"
+pinned = "Zend/micro_bench.php"
+
+[[workload]]
+stem = "loop-add"
+first_read = 1
+about = "x"
+role = "probe"
+code = "k(1);\n"
+"#;
+        let declared = Declaration::parse(text, Path::new("/w")).unwrap();
         let tree = PathBuf::from("/src");
-        let programs = Ask::default().programs(&root, Ok(tree.clone())).unwrap();
-        let scopes: Vec<&str> = programs.iter().map(|c| c.scope.as_str()).collect();
-        assert!(scopes.contains(&"workloads/fib"), "{scopes:?}");
-        let tail = &scopes[scopes.len() - 5..];
+        let programs = Ask::default().programs(&declared, &Ok(tree)).unwrap();
+        let counted = |scope: &str, source, args: &[&str], ends, role| Counted {
+            scope: scope.to_owned(),
+            source,
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+            ends: Ended::Status(ends),
+            role: Some(role),
+        };
+        let file = |path: &str| Source::File(PathBuf::from(path));
         assert_eq!(
-            tail,
+            programs,
             [
-                "Zend/micro_bench",
-                "loops/empty",
-                "loops/add",
-                "loops/add-assign",
-                "loops/mul"
+                counted(
+                    "workloads/fib",
+                    file("/w/docs/perf/workloads/fib.php"),
+                    &[],
+                    0,
+                    Role::Kernel
+                ),
+                counted(
+                    "workloads/modes/small",
+                    file("/w/docs/perf/workloads/modes.php"),
+                    &["small", "1"],
+                    3,
+                    Role::Native
+                ),
+                counted(
+                    "workloads/micro_bench",
+                    file("/src/Zend/micro_bench.php"),
+                    &[],
+                    0,
+                    Role::Probe
+                ),
+                counted(
+                    "workloads/loop-add",
+                    Source::Snippet("k(1);\n".to_owned()),
+                    &[],
+                    0,
+                    Role::Probe
+                ),
             ]
         );
-        let micro = &programs[programs.len() - 5].source;
-        assert_eq!(micro, &Source::File(tree.join("Zend/micro_bench.php")));
-        let Source::Snippet(add) = &programs[programs.len() - 3].source else {
-            panic!("a loop is a snippet");
-        };
-        assert_eq!(
-            add,
-            "function k($n){ $s=0.0; for($i=1;$i<$n;$i++){ $s = $i + 1; } return $s; } k(1000000);\n"
-        );
+        let votes: Vec<bool> = programs.iter().map(Counted::votes).collect();
+        assert_eq!(votes, [true, false, true, true]);
         let absent = Ask::default()
-            .programs(&root, Err(anyhow::anyhow!("gone")))
+            .programs(&declared, &Err(anyhow::anyhow!("gone")))
             .unwrap();
-        assert!(
-            matches!(&absent[absent.len() - 5].source, Source::Unfound(why) if why.contains("gone"))
-        );
+        assert!(matches!(&absent[2].source, Source::Unfound(why) if why.contains("gone")));
         let named = Ask {
             program: vec![PathBuf::from("/w/wordpress.php")],
             ..Ask::default()
         };
-        let named = named.programs(&root, Ok(tree)).unwrap();
+        let named = named
+            .programs(&declared, &Ok(PathBuf::from("/src")))
+            .unwrap();
         assert_eq!(
             named,
             [Counted {
                 scope: "program/wordpress".to_owned(),
                 source: Source::File(PathBuf::from("/w/wordpress.php")),
+                args: Vec::new(),
+                ends: Ended::Status(0),
+                role: None,
             }]
         );
+        assert!(!named[0].votes());
     }
 
-    /// One place per rule: the threshold is the one `IN_THE_LOOP`'s doc
-    /// states, and the line the counts start with is the one the engine
-    /// writes, so a change to either side fails here.
+    /// The vote keeps each variant's highest share among the runs cast and
+    /// that run; against the placement, a variant over the threshold in a
+    /// run and not placed would enter, and a placed one over it in none
+    /// would leave, met or not, each with its share and run; the reading
+    /// passes whatever it names.
+    #[test]
+    fn the_vote_names_who_would_enter_and_leave_against_the_placement() {
+        let census = |lines: &[u8]| Census::read(lines).unwrap();
+        let mut vote = Vote::default();
+        vote.cast(
+            "workloads/a",
+            &census(b"dispatch-census Jmp 999\ndispatch-census Rare 1\n"),
+        );
+        vote.cast(
+            "workloads/b",
+            &census(b"dispatch-census Jmp 1\ndispatch-census New 3\n"),
+        );
+        let placed: BTreeSet<String> = ["Jmp", "Rare", "Unmet"].map(str::to_owned).into();
+        let mut reading = Reading::new(INSTRUMENT, VOTE);
+        vote.written_into(&placed, &mut reading).unwrap();
+        assert_eq!(reading.status, Status::Pass);
+        assert_eq!(reading.int("voters"), Some(2));
+        assert_eq!(reading.int("enter"), Some(1));
+        assert_eq!(reading.int("leave"), Some(2));
+        let said = &reading.message;
+        assert!(
+            said.contains("1 would enter: New 75.000% workloads/b;"),
+            "{said}"
+        );
+        assert!(
+            said.contains(
+                "2 would leave: Rare 0.100% workloads/a, Unmet met in no run that votes;"
+            ),
+            "{said}"
+        );
+        assert!(!said.contains("Jmp 99.900% workloads/a"), "{said}");
+    }
+
+    /// One place per rule: the criterion is the one `IN_THE_LOOP`'s doc
+    /// and design §5.8 state word for word, its threshold the
+    /// instrument's, the line the counts start with is the one the engine
+    /// writes, and the placement is the build's two lists, so a change to
+    /// either side fails here.
     #[cfg(tracked)]
     #[test]
-    fn the_threshold_and_the_line_are_the_engines() {
+    fn the_criterion_the_threshold_and_the_line_are_the_engines() {
         let root = crate::package_dir().join("..");
         let arms = std::fs::read_to_string(root.join(ARMS)).unwrap();
         let doc = arms.split("const IN_THE_LOOP").next().unwrap();
+        let doc = doc.replace("\n/// ", " ");
         assert!(
-            doc.replace("\n/// ", " ")
-                .contains("more than a quarter of a percent"),
-            "{ARMS} no longer states the threshold {THRESHOLD}%"
+            doc.contains(CRITERION),
+            "{ARMS} no longer states the criterion"
         );
+        let design = std::fs::read_to_string(root.join("third-engine-design.md")).unwrap();
+        let section = design.split("### 5.8 Dispatch").nth(1).unwrap();
+        let section = section.split("\n### ").next().unwrap();
+        assert!(
+            section.contains(CRITERION),
+            "design §5.8 no longer states the criterion"
+        );
+        assert!(CRITERION.contains("more than a quarter of a percent"));
         assert!((THRESHOLD - 0.25).abs() < f64::EPSILON);
         let census = root.join("crates/php_engine/src/api/request/census.rs");
         let census = std::fs::read_to_string(census).unwrap();
@@ -501,5 +748,8 @@ mod tests {
             bundle.contains(&format!("\n{FEATURE} = [")),
             "the bundle has no {FEATURE}"
         );
+        let placed = placed(&root).unwrap();
+        assert!(placed.contains("VerifyReturnType") && placed.contains("Jmp"));
+        assert!(placed.len() > 100, "{}", placed.len());
     }
 }

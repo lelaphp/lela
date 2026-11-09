@@ -269,9 +269,10 @@ fn xtask_args(opener: &str) -> Vec<String> {
 }
 
 /// A scratch workspace holding what the tracked regions read: the tracked
-/// locks, and each file a region names among its inputs as the tree holds
-/// it, so a section that reads one, `invocation` the type's source,
-/// renders it.
+/// locks, and each tracked file a region names or matches among its
+/// inputs as the tree holds it, so a section that reads one renders it:
+/// `invocation` the type's source, `workloads` the declaration and its
+/// programs.
 fn tracked_tree(root: &Path, regions: &[(String, String)]) {
     scratch_workspace(workspace(), root);
     let locks = Command::new("git")
@@ -287,9 +288,10 @@ fn tracked_tree(root: &Path, regions: &[(String, String)]) {
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
         std::fs::copy(workspace().join(lock), to).unwrap();
     }
-    // An input is relative to its region's file.
+    // An input is relative to its region's file, and a pattern names each
+    // tracked file it matches.
     for (file, opener) in regions {
-        for input in inputs(opener).filter(|i| !i.contains('*')) {
+        for input in inputs(opener) {
             let mut path = std::path::PathBuf::new();
             for part in Path::new(file).parent().unwrap().join(input).components() {
                 match part {
@@ -299,9 +301,18 @@ fn tracked_tree(root: &Path, regions: &[(String, String)]) {
                     other => path.push(other),
                 }
             }
-            let to = root.join(&path);
-            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-            std::fs::copy(workspace().join(&path), to).unwrap();
+            let matched = Command::new("git")
+                .args(["ls-files", "-z", "--"])
+                .arg(&path)
+                .current_dir(workspace())
+                .output()
+                .unwrap();
+            let matched = String::from_utf8(matched.stdout).unwrap();
+            for tracked in matched.split('\0').filter(|m| !m.is_empty()) {
+                let to = root.join(tracked);
+                std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+                std::fs::copy(workspace().join(tracked), to).unwrap();
+            }
         }
     }
 }
