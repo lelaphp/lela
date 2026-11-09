@@ -1331,27 +1331,24 @@ impl Request {
     /// (`ZEND_FETCH_OBJ_R`, `ZEND_ASSIGN_OBJ`): where objects of `class`
     /// hold the property the fetch at `slot` placed on an earlier pass,
     /// where `frame` is one the placement holds for
-    /// ([`exec::Cached::Property`]): a frame of the function that placed
-    /// it, no closure's, or one of the scope it was placed from, a
-    /// closure's among them, as [`Request::cached_in_scope`] reads a slot
-    /// back; and no write names its own scope. None otherwise, and the
-    /// fetch places the name.
+    /// ([`exec::Cached::Property`]): a frame that reads it back
+    /// ([`Request::reads_back`]), a frame of the function that placed it,
+    /// no closure's, or one of the scope it was placed from, a closure's
+    /// among them; and no write names its own scope. None otherwise, and
+    /// the fetch places the name.
     pub(crate) fn cached_property(
         &self,
         frame: FrameRef,
         slot: CacheSlot,
         class: crate::api::values::ClassId,
     ) -> Option<exec::PropertyOffset> {
-        let header = self.vm.at(frame)?;
-        let exec::Cached::Property(place) = self.map.slot(header.cache_base(), slot)? else {
+        let state = self.frame_at(frame)?;
+        let exec::Cached::Property(place) = self.map.slot(state.header().cache_base(), slot)?
+        else {
             return None;
         };
-        let same = place.class == class
-            && !self.fakes_scope()
-            && (place.function.is_some()
-                && header.closure().is_none()
-                && header.function() == place.function
-                || self.frame_scope(frame) == place.scope);
+        let same =
+            place.class == class && !self.fakes_scope() && self.reads_back(state, place.primed);
         same.then_some(place.offset)
     }
 
@@ -1388,12 +1385,11 @@ impl Request {
         object: PhpObject,
         name: PhpString,
     ) {
-        let Some(header) = self.vm.at(frame) else {
+        if self.vm.at(frame).is_none() {
             return;
-        };
-        let function = header.function().filter(|_| header.closure().is_none());
-        let scope = self.frame_scope(frame);
-        if self.property_scope() != scope {
+        }
+        let primed = self.primed_from(frame);
+        if self.property_scope() != primed.scope {
             return;
         }
         let Some(offset) = self.cacheable_offset(object, name) else {
@@ -1401,9 +1397,8 @@ impl Request {
         };
         let cached = exec::Cached::Property(exec::PropertyPlace {
             class: object.class(),
-            function,
-            scope,
             offset,
+            primed,
         });
         self.prime(frame, slot, cached);
     }
