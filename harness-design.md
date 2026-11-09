@@ -608,7 +608,7 @@ Two tables beside the rules. `[telemetry]` carries the sensor telemetry's one nu
 
 ```toml
 v = 2                                      # the version of the shape; a reading with no `v` is the first, which spells `key` as `tree`
-instrument = "witness"                     # api-check | permit | done | track-work | ticket | usage | review | bench | budget | clippy | test | miri | phpt | port-map | compile-identity | crosscheck | trace-dump | fold | dispatch-census | fpm-compare | soak | unsafe-audit | steer | divergence-reason | witness | vocab, the subcommands that write one, in cli order; fuzz | mutants are named here and not built yet
+instrument = "witness"                     # api-check | permit | done | track-work | ticket | usage | review | bench | budget | clippy | test | miri | phpt | port-map | compile-identity | crosscheck | trace-dump | hostile | fold | dispatch-census | fpm-compare | soak | unsafe-audit | steer | divergence-reason | witness | vocab, the subcommands that write one, in cli order; fuzz | mutants are named here and not built yet
 scope = "ext/pcre"                         # a crate, a corpus subset, a gate id, or "workspace"
 rule = "witness.coverage"                  # a manifest rule id when one applies
 status = "fail"                            # pass | fail | skip
