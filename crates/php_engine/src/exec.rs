@@ -2337,8 +2337,9 @@ impl Cached {
 }
 
 /// The frame a slot whose answer the access rule decides was written
-/// from, [`Cached::ClassAndCallee`], [`Cached::StaticProperty`] and
-/// [`Cached::ClassConstant`]: the frame's scope, and its function where
+/// from, kept by [`Cached::ClassAndCallee`], [`Cached::StaticProperty`]
+/// and [`Cached::ClassConstant`], and by the [`PropertyPlace`] a
+/// [`Cached::Property`] holds: the frame's scope, and its function where
 /// the frame is no closure's, which fixes the scope. php keys on no
 /// scope because its cache is one per scope: a trait's method is copied
 /// into each class that uses it with a cache of its own
