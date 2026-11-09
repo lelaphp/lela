@@ -7,6 +7,7 @@
 //! reading ([`Store`], revision 83). The clock a reading's `at` is taken
 //! from, and the calendar that reads it back, live here too.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -20,6 +21,7 @@ use toml::value::{Datetime, Offset, Time};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::Pin;
+use crate::owner::SessionId;
 use crate::sources;
 
 /// Where the store lives, relative to the workspace root.
@@ -124,11 +126,14 @@ pub struct Reading {
     pub commit: String,
     #[serde(deserialize_with = "either_at")]
     pub at: Datetime,
-    /// The session of the call a `permit` reading judged, from the
-    /// hook's `session_id`; the session a `ticket` close named, the one a
-    /// `done --hook` verdict was taken in, and the one a `usage` reading
-    /// measured; empty for every other instrument, and for a call that
-    /// carried none.
+    /// The Claude Code session the process ran in, or the session a hook
+    /// or caller named; empty where there was none, which says nothing of
+    /// who ran it (harness-design.md §4.2). An instrument names one where
+    /// it has one: the call a `permit` reading judged, from the hook's
+    /// `session_id`, the session a `ticket` call named or was dispatched
+    /// in, the one a `done --hook` verdict was taken in, the one a `usage`
+    /// reading measured. A reading handed to the writer naming none is
+    /// given the session the writer runs in ([`Store::record`]).
     #[serde(default)]
     pub session: String,
     /// A lane's named groups: one count per key, where the keys are the
@@ -525,6 +530,9 @@ impl std::fmt::Display for Number {
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
+    /// The Claude Code session the process writes in, which the writer
+    /// gives every reading that names none; `None` in a person's terminal.
+    session: Option<SessionId>,
 }
 
 /// How many keys of one scope the index keeps, newest first: `done`
@@ -540,9 +548,20 @@ impl Store {
         Store::at(root.join(DIR))
     }
 
-    /// A store rooted at `dir`, whether or not it exists yet.
+    /// A store rooted at `dir`, whether or not it exists yet, written in
+    /// the session the process runs in ([`SessionId::current`]).
     pub fn at(dir: impl Into<PathBuf>) -> Store {
-        Store { root: dir.into() }
+        Store {
+            root: dir.into(),
+            session: SessionId::current(),
+        }
+    }
+
+    /// The same store written in `session` instead: what a test names in
+    /// place of the session its own process runs in.
+    #[cfg(test)]
+    pub(crate) fn in_session(self, session: Option<SessionId>) -> Store {
+        Store { session, ..self }
     }
 
     pub fn root(&self) -> &Path {
@@ -600,7 +619,10 @@ impl Store {
     /// Record what an instrument held: every reading written, in order,
     /// as its file, overwritten, its index entry and one line of its log,
     /// and the exit the instrument owes for them. The one writer of the
-    /// store (harness-design.md §4.2); an instrument that ignores the
+    /// store (harness-design.md §4.2), and so the one place a reading is
+    /// given the session it was taken in: a reading that names none is
+    /// written with the store's, the session the process runs in, and one
+    /// a hook or caller named keeps it (Round 1, Q7 (a)). An instrument that ignores the
     /// outcome says so, as `permit` does, whose exit is 0 whatever it
     /// decides (§4.4), and a measurement records through
     /// [`Store::record_measurement`], which owes none.
@@ -624,10 +646,12 @@ impl Store {
         self.record(readings).map(|_| ())
     }
 
-    /// One reading: its file, replaced whole through [`replace`], its
-    /// index entry, and its line of the log, which goes through
-    /// [`Store::append_line`], the one append.
+    /// One reading, given the store's session where it names none
+    /// ([`Store::in_its_session`]): its file, replaced whole through
+    /// [`replace`], its index entry, and its line of the log, which goes
+    /// through [`Store::append_line`], the one append.
     fn write(&self, reading: &Reading) -> Result<()> {
+        let reading = &*self.in_its_session(reading);
         let path = self.path(&reading.instrument, &reading.scope)?;
         let text = toml::to_string(reading).context("rendering the reading")?;
         replace(&path, text.as_bytes())?;
@@ -638,6 +662,19 @@ impl Store {
         let mut line = reading.to_json()?.to_string();
         line.push('\n');
         Self::append_line(&self.shard(&reading.instrument)?, line.as_bytes())
+    }
+
+    /// `reading` with the session the store writes in, where it names
+    /// none and the store has one; as it was handed otherwise.
+    fn in_its_session<'a>(&self, reading: &'a Reading) -> Cow<'a, Reading> {
+        match &self.session {
+            Some(session) if reading.session.is_empty() => {
+                let mut taken = reading.clone();
+                session.as_str().clone_into(&mut taken.session);
+                Cow::Owned(taken)
+            }
+            _ => Cow::Borrowed(reading),
+        }
     }
 
     /// Every reading another store's log holds, landed in this one's log
@@ -653,8 +690,9 @@ impl Store {
     /// a scope's last run over a tree the store landed in may not have
     /// (#35). Its log is read whole, the file of each instrument, and each
     /// is emptied once landed, so a retire that refuses after this and the
-    /// call that follows cannot land a reading twice. How many lines
-    /// were landed.
+    /// call that follows cannot land a reading twice. A line lands as it
+    /// was written, its session the one it was taken in and never the
+    /// session that lands it. How many lines were landed.
     pub fn land(&self, from: &Store) -> Result<usize> {
         let mut landed = 0;
         for source in shards(&from.root.join(LOG))? {
@@ -1480,14 +1518,21 @@ mod tests {
         Freshness, KEPT, Log, Moved, Reading, Status, Store, V, civil_from_days, days_from_civil,
         listed,
     };
+    use crate::owner::SessionId;
     use crate::scratch::Tree;
+
+    /// A store at `dir` written in no session, so a reading read back is
+    /// the reading handed in, whatever session the test runs in.
+    fn unnamed(dir: &std::path::Path) -> Store {
+        Store::at(dir).in_session(None)
+    }
 
     /// `reading` as a run in another checkout leaves it, landed here by
     /// `worktree retire` or `land`: in the index and the log, and not in
     /// the scope's file (#1252, #3804).
     fn landed(store: &Store, name: &str, reading: &Reading) {
         let other = Tree::new(name).unwrap();
-        let other = Store::at(other.path());
+        let other = unnamed(other.path());
         other.record(std::slice::from_ref(reading)).unwrap();
         store.land(&other).unwrap();
     }
@@ -1502,7 +1547,7 @@ mod tests {
     #[test]
     fn the_reading_over_a_key_is_the_file_or_the_index_and_else_the_last_judged() {
         let dir = Tree::new("store-over").unwrap();
-        let store = Store::at(dir.path());
+        let store = unnamed(dir.path());
         let at = |m: u32| format!("2026-11-07T10:{m:02}:00Z");
         let fresh_key = |f: Freshness| f.fresh().map(|r| r.key().to_owned());
 
@@ -1590,7 +1635,7 @@ mod tests {
     #[test]
     fn a_landed_reading_later_than_the_file_over_the_same_key_stands() {
         let dir = Tree::new("store-over-later").unwrap();
-        let store = Store::at(dir.path());
+        let store = unnamed(dir.path());
         let mut failed = over("test", "xtask", &key(1), "2026-11-07T10:00:00Z");
         failed.status = Status::Fail;
         store.record(&[failed]).unwrap();
@@ -1613,7 +1658,7 @@ mod tests {
     #[test]
     fn an_entry_prune_let_go_is_answered_from_a_file_over_the_key() {
         let dir = Tree::new("store-over-pruned").unwrap();
-        let store = Store::at(dir.path());
+        let store = unnamed(dir.path());
         let reading = over("test", "xtask", &key(1), "2026-11-07T10:00:00Z");
         store.record(std::slice::from_ref(&reading)).unwrap();
         let entry = store.indexed(&reading).unwrap().unwrap();
@@ -1667,6 +1712,49 @@ mod tests {
         );
     }
 
+    /// The writer fills `session` on every reading it writes that names
+    /// none, in the scope's file, the index entry and the line of the log
+    /// alike, and keeps the session a hook or caller named; a store with
+    /// no session, a person's terminal, writes the blank it was handed
+    /// (harness-design.md §4.2; Round 1, Q7 (a)).
+    #[test]
+    fn the_writer_fills_the_session_of_a_reading_naming_none_and_keeps_a_named_one() {
+        let dir = Tree::new("store-session").unwrap();
+        let store = Store::at(dir.join("agent")).in_session(SessionId::new("s-writer"));
+        let at = "2026-11-09T08:00:00Z";
+        let mut named = over("permit", "rule", &key(2), at);
+        "s-hook".clone_into(&mut named.session);
+        store
+            .record(&[over("test", "xtask", &key(1), at), named])
+            .unwrap();
+        let file = |store: &Store, instrument: &str, scope: &str| {
+            store.read(instrument, scope).unwrap().unwrap().session
+        };
+        let entry = |store: &Store, instrument: &str, scope: &str, key: &str| {
+            let found = store.over(instrument, scope, key, "").unwrap();
+            found.fresh().unwrap().session
+        };
+        let logged = |store: &Store, instrument: &str| {
+            let log = store.history(instrument).unwrap();
+            log.readings
+                .iter()
+                .map(|r| r.session.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(file(&store, "test", "xtask"), "s-writer");
+        assert_eq!(entry(&store, "test", "xtask", &key(1)), "s-writer");
+        assert_eq!(logged(&store, "test"), ["s-writer"]);
+        assert_eq!(file(&store, "permit", "rule"), "s-hook");
+        assert_eq!(logged(&store, "permit"), ["s-hook"]);
+
+        let person = Store::at(dir.join("person")).in_session(None);
+        person
+            .record(&[over("test", "xtask", &key(1), at)])
+            .unwrap();
+        assert_eq!(file(&person, "test", "xtask"), "");
+        assert_eq!(logged(&person, "test"), [""]);
+    }
+
     /// A passing reading of `instrument` over `scope`, taken over `key`
     /// at `at`.
     fn over(instrument: &str, scope: &str, key: &str, at: &str) -> Reading {
@@ -1697,7 +1785,7 @@ mod tests {
     #[test]
     fn a_reading_is_found_by_its_key_and_the_newest_keys_stay() {
         let dir = Tree::new("store-index").unwrap();
-        let store = Store::at(dir.path());
+        let store = unnamed(dir.path());
         for n in 0..KEPT + 8 {
             let at = format!("2026-10-06T10:{n:02}:00Z");
             store
@@ -1757,7 +1845,7 @@ mod tests {
     #[test]
     fn a_key_the_index_let_go_is_found_in_a_line_of_either_version() {
         let dir = Tree::new("store-versions").unwrap();
-        let store = Store::at(dir.path());
+        let store = unnamed(dir.path());
         let v2 = over("budget", "xtask", &key(2), "2026-10-08T01:00:00Z");
         let v1 = first_version(&over("budget", "xtask", &key(1), "2026-10-08T00:00:00Z"));
         let log = format!("{v1}\n{}\n", v2.to_json().unwrap());
