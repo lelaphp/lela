@@ -468,7 +468,7 @@ to = ["php_compile", "php_unit", "php_link", "php_heap", "php_macros", "php_proc
 adr = "0007"
 [[edge]]
 from = "php_streams"
-to = ["php_engine", "php_macros"]
+to = ["php_engine"]
 [[edge]]
 from = "php_ext"
 to = ["php_engine", "php_macros", "php_streams"]
@@ -485,7 +485,7 @@ order = "registration"
 adr = ["0004", "0006"]
 [[edge]]
 from = "php_jit"
-to = ["php_engine", "php_unit", "php_link", "php_heap", "php_ssa"]
+to = ["php_engine", "php_unit", "php_heap", "php_ssa"]
 allowlist = "tier.lock"
 adr = "0006"
 [[edge]]
