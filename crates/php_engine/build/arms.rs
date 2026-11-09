@@ -179,7 +179,9 @@ const ASSIGNED: [&str; 4] = ["ADD", "SUB", "MUL", "DIV"];
 /// variant met in more than a quarter of a percent of the oplines
 /// dispatched by any program of `docs/perf/workloads`, by php-src's
 /// `Zend/micro_bench.php` or by the four counting loops of #3273, as
-/// a counting build of the loop told them over each (#3285). The arm of
+/// a counting build of the loop told them over each (#3285); `xtask
+/// dispatch-census` takes that count again, each program's a reading, on
+/// the engine built with its `dispatch-census` feature (#4328). The arm of
 /// every other variant calls its handler out of line, through a call the
 /// optimiser reads as cold, so that the loop's body is the arms programs
 /// meet and the register allocator, which weighs every arm of the

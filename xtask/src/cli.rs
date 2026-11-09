@@ -400,6 +400,19 @@ pub(crate) enum Command {
     /// an offset `[<request>, #C + offset]` could encode, the shape #3345
     /// found; an `aarch64` Mac alone, a skip elsewhere.
     Fold(crate::fold::Ask),
+    /// Each variant's share of the oplines the loop dispatched, over every
+    /// program `IN_THE_LOOP`'s doc names; one reading per program.
+    ///
+    /// The engine is `php` built in release with the bundle's
+    /// `dispatch-census` feature, whose loop counts each opline it
+    /// dispatches and whose request writes the counts where it ends. Each
+    /// program of `docs/perf/workloads`, php-src's `Zend/micro_bench.php`
+    /// and the four counting loops of #3273 runs on it under the recipe;
+    /// its reading is scoped `workloads/<stem>`, `Zend/micro_bench` or
+    /// `loops/<name>`, holds each variant's share in percent in its
+    /// groups and names those over a quarter of a percent, the threshold
+    /// the list's doc states. It changes no list.
+    DispatchCensus(crate::dispatch_census::Ask),
     /// Hold makala to the pinned php-fpm: each request of the HTTP-served
     /// subset served by both, the status, header lines and body compared;
     /// one reading, at makala's crate.
