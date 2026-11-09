@@ -12,7 +12,7 @@
 //! the same pair and control on the engine built with the tier's feature,
 //! what the engine's tier buys. G1 (#2947, [`door`]): the engine built
 //! with the tier's feature against the engine built without it over the
-//! seven kernels alone, [`KERNELS`], each kernel's row held to a bound,
+//! seven kernels alone, [`Programs::Kernels`], each kernel's row held to a bound,
 //! one plus the tolerance of its `[[bench]]` row in `seams.toml` (#3130),
 //! and its geomean to nothing (#3280).
 //!
@@ -38,26 +38,38 @@ use crate::carried::BUNDLE;
 use crate::manifest::Manifest;
 use crate::oracle::{Pin, hosts::CLI, profile};
 use crate::phpt::Lane;
-use crate::workloads;
+use crate::workloads::{Declaration, Role, Run};
 
-/// The programs, by stem under `docs/perf/workloads/`: the seven kernels
-/// (#2736, #2740), and `bench_quiet.php`, php-src's `Zend/bench.php` at the
-/// pinned tag with its two timing lines printing names alone, so the arms'
-/// bytes can be held equal (protocol §5, §11).
-pub(crate) const PROGRAMS: &[&str] = &[
-    "fib",
-    "nbody",
-    "mandelbrot",
-    "spectralnorm",
-    "binary_trees",
-    "fannkuch",
-    "string_munge",
-    "bench_quiet",
-];
+/// The programs a bar runs, each a role of the declaration
+/// (`docs/perf/workloads.toml`, [`crate::workloads`]), its runs in the
+/// declaration's order with the arguments it declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Programs {
+    /// The seven kernels (#2736, #2740) and `bench_quiet.php`, php-src's
+    /// `Zend/bench.php` at the pinned tag with its two timing lines
+    /// printing names alone, so the arms' bytes can be held equal
+    /// (protocol §5, §11): the kernel role and the bench role.
+    Benched,
+    /// The seven kernels alone, the kernel role: G1's programs, and the
+    /// trace-dump diff's (`jit-design.md` §4.1).
+    Kernels,
+}
 
-/// The seven kernels alone, [`PROGRAMS`] less `bench_quiet.php`: G1's
-/// programs, and the trace-dump diff's (`jit-design.md` §4.1).
-pub(crate) const KERNELS: &[&str] = PROGRAMS.split_at(7).0;
+impl Programs {
+    /// The roles whose runs it is, in the order it runs them.
+    fn roles(self) -> &'static [Role] {
+        match self {
+            Programs::Benched => &[Role::Kernel, Role::Bench],
+            Programs::Kernels => &[Role::Kernel],
+        }
+    }
+
+    /// Its runs in `declared`.
+    pub(crate) fn runs(self, declared: &Declaration) -> Vec<Run<'_>> {
+        let runs = self.roles().iter().map(|role| declared.runs_of(*role));
+        runs.flatten().collect()
+    }
+}
 
 /// The ini every arm runs each program under after the recipe's and its
 /// regimes': [`PRODUCTION`] and the memory limit the module's rustdoc
@@ -69,7 +81,7 @@ const INI: [&str; 3] = [PRODUCTION[0], PRODUCTION[1], MEMORY];
 /// under too.
 pub(crate) const MEMORY: &str = "memory_limit=512M";
 
-/// One arm of a bar over [`PROGRAMS`]: its name, the php binary, the
+/// One arm of a bar over [`Programs`]: its name, the php binary, the
 /// pin's regimes it runs each program under in order, and ini after
 /// theirs, G1's `opcache.jit_buffer_size=0` on its jit arm.
 #[derive(Clone)]
@@ -81,11 +93,13 @@ pub(crate) struct Php {
 }
 
 impl Php {
-    /// The arm running `script`: the recipe's arguments and the regimes',
+    /// The arm running `run`: the recipe's arguments and the regimes',
     /// then the recipe's ini, the regimes', [`INI`] and the arm's own as
-    /// `-d`, as the oracle module composes a run (`Oracle::run_under`), in
-    /// the recipe's environment.
-    fn running(&self, pin: &Pin, script: &Path, env: &Environment) -> Result<Arm> {
+    /// `-d`, as the oracle module composes a run (`Oracle::run_under`),
+    /// then the program's path and the arguments the run declares, in the
+    /// recipe's environment.
+    fn running(&self, pin: &Pin, run: &Run<'_>, env: &Environment) -> Result<Arm> {
+        let script = run.file()?;
         let regimes = (self.regimes.iter())
             .map(|name| pin.regime(name))
             .collect::<Result<Vec<_>>>()?;
@@ -99,6 +113,7 @@ impl Php {
             .chain(self.ini.iter().cloned());
         args.extend(ini.flat_map(|line| ["-d".to_owned(), line]));
         args.push(script.display().to_string());
+        args.extend(run.args().iter().cloned());
         let (name, env) = (self.name.clone(), env.clone());
         let (program, reads) = (self.binary.clone(), vec![script.to_path_buf()]);
         Ok(Arm {
@@ -127,12 +142,12 @@ pub(crate) enum Read {
     Code,
 }
 
-/// A bar over `programs`, [`PROGRAMS`] or a part of it, its arms named by
+/// A bar over `programs`, its arms named by
 /// `arms` from the pin once it is measured, or why this machine has none,
 /// which is its skip; each run read as `read` says.
 pub(crate) fn bar(
     root: &Path,
-    (id, programs, read): (&str, &'static [&'static str], Read),
+    (id, programs, read): (&str, Programs, Read),
     about: String,
     held: Held,
     arms: impl FnOnce(&Path, &Pin) -> Result<Result<[Php; 2], String>> + 'static,
@@ -149,21 +164,22 @@ pub(crate) fn bar(
             clear: pin.recipe.env_clear,
             set: pin.recipe.environment()?,
         };
+        let declared = Declaration::load(&root)?;
         let mut set = Vec::new();
-        for program in programs {
-            let script = workloads::program(&root, program);
+        for run in programs.runs(&declared) {
+            let program = run.name();
             let [a, b] = &arms;
             let under = |regime| {
                 let php = Php {
                     regimes: vec![regime],
                     ..a.clone()
                 };
-                php.running(pin, &script, &env)
+                php.running(pin, &run, &env)
             };
-            let count = || counted(program, ["jit-tracing", "jit-off"].map(under));
+            let count = || counted(&program, ["jit-tracing", "jit-off"].map(under));
             let oplines = (read == Read::PerOpline).then(count).transpose()?;
             let side = |php: &Php| -> Result<Box<dyn Side>> {
-                let mut arm = php.running(pin, &script, &env)?;
+                let mut arm = php.running(pin, &run, &env)?;
                 arm.retired = matches!(read, Read::PerOpline | Read::Peak);
                 let side = Spawned::from(arm);
                 Ok(match (read, oplines) {
@@ -176,7 +192,8 @@ pub(crate) fn bar(
                     _ => Box::new(side),
                 })
             };
-            set.push(((*program).to_owned(), [side(a)?, side(b)?]));
+            let sides = [side(a)?, side(b)?];
+            set.push((program, sides));
         }
         Ok(Ok(Arms::Set(set)))
     };
@@ -197,7 +214,7 @@ type Binary = fn(&Path, &Pin) -> Result<Result<PathBuf, String>>;
 fn tracing(
     root: &Path,
     (id, whose): (&str, &str),
-    (programs, read): (&'static [&'static str], Read),
+    (programs, read): (Programs, Read),
     binary: Binary,
 ) -> [Declared; 2] {
     [
@@ -240,7 +257,7 @@ fn tracing(
 /// measures neither, each a skip that says so.
 pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
     let bar = ("oracle-jit", "the pinned php");
-    tracing(root, bar, (PROGRAMS, Read::Time), pinned::php)
+    tracing(root, bar, (Programs::Benched, Read::Time), pinned::php)
 }
 
 /// G2 and its control (#2965): the tier of the engine built with its
@@ -250,7 +267,7 @@ pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
 /// `jit.compile` asks by default.
 pub(crate) fn compiled(root: &Path) -> [Declared; 2] {
     let bar = ("engine-jit", "the engine built as jit-feature");
-    tracing(root, bar, (PROGRAMS, Read::Time), |root, _| {
+    tracing(root, bar, (Programs::Benched, Read::Time), |root, _| {
         Build::Jit.built(root).map(Ok)
     })
 }
@@ -414,7 +431,7 @@ fn builds(
         let about = about(a_name, b_name);
         bar(
             root,
-            (id, KERNELS, Read::Time),
+            (id, Programs::Kernels, Read::Time),
             about,
             held,
             move |root, _| {
@@ -443,9 +460,12 @@ fn builds(
 /// binds `execute::<Nop>`, per opline of what the stepping run counted.
 pub(crate) fn stepping(root: &Path) -> [Declared; 2] {
     let bar = ("step", "the stepping build");
-    tracing(root, bar, (KERNELS, Read::PerOpline), |root, _| {
-        Build::Stepping.built(root).map(Ok)
-    })
+    tracing(
+        root,
+        bar,
+        (Programs::Kernels, Read::PerOpline),
+        |root, _| Build::Stepping.built(root).map(Ok),
+    )
 }
 
 /// G4, memory and code (#2961, `research/jit-research.r1.md` §E.11), on
@@ -460,13 +480,13 @@ pub(crate) fn g4(root: &Path) -> [Declared; 3] {
     let [rss, rss_aa] = tracing(
         root,
         ("g4-rss", "the usage build"),
-        (KERNELS, Read::Peak),
+        (Programs::Kernels, Read::Peak),
         |root, _| Build::Usage.built(root).map(Ok),
     );
     let about = "the usage build's code per opline compiled against the pinned php's under [regime.jit-tracing] over the seven kernels".to_owned();
     let code = bar(
         root,
-        ("g4-code", KERNELS, Read::Code),
+        ("g4-code", Programs::Kernels, Read::Code),
         about,
         Held::Series,
         |root, pin| {
@@ -684,17 +704,31 @@ mod tests {
         assert_eq!(bars, tiers);
     }
 
-    /// Each program is committed where the protocol keeps its workloads
-    /// (§11), and each arm runs it under the recipe, its regime and
-    /// [`INI`], in that order, with the program's path last.
+    /// The bars run the seven kernels and `bench_quiet.php` as the
+    /// declaration's roles give them, G1's the kernels alone, each
+    /// committed where the protocol keeps its workloads (§11); each arm
+    /// runs a program under the recipe, its regime and [`INI`], in that
+    /// order, then the program's path and the arguments its run declares.
     #[cfg(tracked)]
     #[test]
-    fn each_program_is_committed_and_run_under_the_recipe_then_the_regime() {
+    fn each_program_is_declared_and_run_under_the_recipe_then_the_regime() {
         let root = crate::package_dir().parent().unwrap().to_path_buf();
-        for program in PROGRAMS {
-            let path = workloads::program(&root, program);
-            assert!(path.is_file(), "{}", path.display());
-        }
+        let declared = Declaration::load(&root).unwrap();
+        let named = |programs: Programs| -> Vec<String> {
+            programs.runs(&declared).iter().map(Run::name).collect()
+        };
+        let kernels = [
+            "fib",
+            "nbody",
+            "mandelbrot",
+            "spectralnorm",
+            "binary_trees",
+            "fannkuch",
+            "string_munge",
+        ];
+        assert_eq!(named(Programs::Kernels), kernels);
+        assert_eq!(named(Programs::Benched)[..7], kernels);
+        assert_eq!(named(Programs::Benched)[7..], ["bench_quiet"]);
         let pin = Manifest::load(&root).unwrap().pin.unwrap();
         let php = Php {
             name: "jit-off".to_owned(),
@@ -702,8 +736,8 @@ mod tests {
             regimes: vec!["jit-off"],
             ini: vec!["opcache.jit_buffer_size=0".to_owned()],
         };
-        let script = workloads::program(&root, "fib");
-        let arm = php.running(&pin, &script, &Environment::default()).unwrap();
+        let fib = Programs::Kernels.runs(&declared)[0];
+        let arm = php.running(&pin, &fib, &Environment::default()).unwrap();
         let args = arm.args.join(" ");
         let (recipe, regime) = (
             args.find("-d memory_limit=128M"),
@@ -718,8 +752,18 @@ mod tests {
         assert!(args.ends_with("fib.php"), "{args}");
         assert_eq!(
             arm.reads,
-            [script],
+            [fib.file().unwrap()],
             "the script is pinned beside the binary"
+        );
+        let text = "[[workload]]\nstem = \"fib\"\nfirst_read = 1\nabout = \"x\"\n\
+                    role = \"kernel\"\nprofile = [{ name = \"n\", args = [\"30\", \"q\"] }]\n";
+        let profiled = Declaration::parse(text, &root).unwrap();
+        let run = Programs::Kernels.runs(&profiled)[0];
+        let arm = php.running(&pin, &run, &Environment::default()).unwrap();
+        assert!(
+            arm.args.join(" ").ends_with("fib.php 30 q"),
+            "{:?}",
+            arm.args
         );
     }
 }

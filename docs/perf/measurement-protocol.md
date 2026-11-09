@@ -253,24 +253,49 @@ that ran it, since its arms name that machine's binaries. A workload kept
 out of the repository is lost: #1808's `calls.php` was.
 
 Each workload is byte-identical to the copy its first reading ran over, so
-a header comment the file did not carry then is not added now. The table
-says which ticket first read each.
+a header comment the file did not carry then is not added now. What a file
+cannot say of itself is declared once in `docs/perf/workloads.toml`, beside
+the directory: its role, the arguments of each of its runs, the status they
+end on and the ticket that first read it (#4335, #4344). `xtask bench`,
+`xtask dispatch-census` and `xtask trace-dump` reach a program only through
+that declaration, a program under the directory with no row is refused, and
+the table below is rendered from it. A program the dispatch census counts
+that lives elsewhere, php-src's `Zend/micro_bench.php` or a counting loop
+given whole, is declared there too. A role is a person's to give.
 
-| workload | first read by | what it is |
-|---|---|---|
-| `bench_quiet.php` | #1808 | php-src's `Zend/bench.php` with `end_test` and `total` printing names only, so its bytes are deterministic |
-| `binary_trees.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/binary_trees.php` with `$N` at the size `third-engine-design.md` §9.2 names |
-| `calls.php` | #2011 | #1808's `calls.php` rebuilt from #1808's comment, not #1809's file, so its medians are not comparable to #1809's rows |
-| `fannkuch.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/fannkuch.php` with `$N` at §9.2's size |
-| `fib.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/fib.php` with `$N` at §9.2's size |
-| `frame_chain.php` | #1301 | recursive user calls, then a loop of native calls: the bar #1384 holds the readable frame header to |
-| `mandelbrot.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/mandelbrot.php` with `$N` at §9.2's size |
-| `natives.php` | #2209 | a loop of native calls, each return kind #2209 names |
-| `nbody.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/nbody.php` with `$N` at §9.2's size |
-| `spectralnorm.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/spectralnorm.php` with `$N` at §9.2's size |
-| `string_munge.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/string_munge.php` with `$N` at §9.2's size |
-| `ucall.php` | #1901 | micro.php's `ucall` kernel with nothing timed in the bytes |
-| `wordpress_shapes.php` | #4329 | original code, written from the opline counts, its side panels' sizes and sort orders following WordPress's widget defaults, with the mix a counting build of the loop met over the four WordPress bench pages; #4329's last comment sets their top twenty variants side by side |
+<!-- computed exec cmd="cargo xtask status --section workloads --tracked" inputs=workloads.toml,workloads/*.php,../../xtask/src/workloads.rs,../../xtask/src/status/workloads.rs name=workloads | do not edit; run computed -->
+
+| workload | role | each run's arguments | ends on | first read by | what it is |
+|---|---|---|---|---|---|
+| `fib.php` | kernel | none | status 0 | #2740 | one of the seven kernels, Mahout's `benchmarks/src/fib.php` with `$N` at the size `third-engine-design.md` §9.2 names |
+| `nbody.php` | kernel | none | status 0 | #2740 | one of the seven kernels, Mahout's `benchmarks/src/nbody.php` with `$N` at §9.2's size |
+| `mandelbrot.php` | kernel | none | status 0 | #2740 | one of the seven kernels, Mahout's `benchmarks/src/mandelbrot.php` with `$N` at §9.2's size |
+| `spectralnorm.php` | kernel | none | status 0 | #2740 | one of the seven kernels, Mahout's `benchmarks/src/spectralnorm.php` with `$N` at §9.2's size |
+| `binary_trees.php` | kernel | none | status 0 | #2740 | one of the seven kernels, Mahout's `benchmarks/src/binary_trees.php` with `$N` at §9.2's size |
+| `fannkuch.php` | kernel | none | status 0 | #2740 | one of the seven kernels, Mahout's `benchmarks/src/fannkuch.php` with `$N` at §9.2's size |
+| `string_munge.php` | kernel | none | status 0 | #2740 | one of the seven kernels, Mahout's `benchmarks/src/string_munge.php` with `$N` at §9.2's size |
+| `bench_quiet.php` | bench | none | status 0 | #1808 | php-src's `Zend/bench.php` with `end_test` and `total` printing names only, so its bytes are deterministic |
+| `wordpress_shapes.php` | shape | none | status 0 | #4329 | original code, written from the opline counts, its side panels' sizes and sort orders following WordPress's widget defaults, with the mix a counting build of the loop met over the four WordPress bench pages; #4329's last comment sets their top twenty variants side by side |
+| `calls.php` | probe | none | status 0 | #2011 | #1808's `calls.php` rebuilt from #1808's comment, not #1809's file, so its medians are not comparable to #1809's rows |
+| `frame_chain.php` | probe | none | status 0 | #1301 | recursive user calls, then a loop of native calls: the bar #1384 holds the readable frame header to |
+| `natives.php` | probe | none | status 0 | #2209 | a loop of native calls, each return kind #2209 names |
+| `ucall.php` | probe | none | status 0 | #1901 | micro.php's `ucall` kernel with nothing timed in the bytes |
+| `Zend/micro_bench.php` of the pinned php-src | probe | none | status 0 | #3285 | php-src's `Zend/micro_bench.php` at the pin, run whole |
+| `loop-empty`, its code in the declaration | probe | none | status 0 | #3273 | #3273's counting loop, a million rounds of an empty body |
+| `loop-add`, its code in the declaration | probe | none | status 0 | #3273 | #3273's counting loop, a million rounds of `$s = $i + 1;` |
+| `loop-add-assign`, its code in the declaration | probe | none | status 0 | #3273 | #3273's counting loop, a million rounds of `$s += $i;` |
+| `loop-mul`, its code in the declaration | probe | none | status 0 | #3273 | #3273's counting loop, a million rounds of `$s = $s * 1.0000001;` |
+| `compression.php` | native | `small 1`, `large 1`, `incompressible 1`, `incremental 1`, `gzip 1`, `zip 1`, `mysql 1` | status 0 | #2826 | zlib's raw deflate, incremental deflate, gzip, zip and mysql payload over generated text and bytes, the mode and an iteration count its arguments |
+| `fileinfo.php` | native | `buffer`, `file`, `wrapper`, `cold` | status 0 | #2827 | `finfo` over a buffer, a file, a stream wrapper and a cold database, 256 times each, the profile its one argument |
+| `mbstring_profiles_2831.php` | native | `convert small`, `convert large`, `mime small`, `mime large`, `cut small`, `cut large`, `http small`, `http large` | status 0 | #2831 | mbstring's conversion, MIME header encoding, `mb_strcut` and output handler over a small and a large input, the mode and the size its arguments |
+| `uri-rfc-read-update.php` | native | none | status 0 | #2832 | `Uri\Rfc3986\Uri` raw, normalised, cloned with an update and resolved |
+| `uri-rfc-unicode.php` | native | none | status 0 | #2832 | `Uri\Rfc3986\Uri` byte and percent normalisation, not WHATWG or IDNA |
+| `uri-rfc-validation.php` | native | none | status 0 | #2832 | `Uri\Rfc3986\Uri` over valid and malformed inputs |
+| `uri-whatwg-read-update.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` ordered reads, immutable updates and a relative base |
+| `uri-whatwg-unicode.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` host mapping, NFC and deviation inputs at the pin, not modern IDNA |
+| `uri-whatwg-validation.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` special, opaque, file, IP and malformed inputs |
+
+<!-- /computed in=8ed51a69c1e1b98cfa2f3c172a5607b63880630e14a22baee951f65b1da2452f out=ea437975d9d77a0258c689c9e32a2e5a3b805f5a7f6fef6e842783d710fe336d -->
 
 ## 12. The tolerance a nightly bar is held to
 

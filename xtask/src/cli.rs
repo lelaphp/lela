@@ -1143,6 +1143,11 @@ pub enum Section {
     /// variant of `done::Condition`, read from its source and numbered;
     /// harness-design.md §4.5's region (#2309).
     Conditions,
+    /// The workloads `docs/perf/workloads.toml` declares, each with where
+    /// its text is, its role, its runs' arguments, how they end, the
+    /// ticket that first read it and what it is; measurement protocol
+    /// §11's region (#4344).
+    Workloads,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

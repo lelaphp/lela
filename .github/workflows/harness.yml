@@ -67,7 +67,7 @@ jobs:
           fetch-depth: 0 # one history the runner keeps, fetched incrementally
       - uses: ./.github/actions/workspace
       - run: cargo install computed --locked
-      - run: computed check AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md harness-design.md third-engine-design.md
+      - run: computed check AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md docs/perf/measurement-protocol.md harness-design.md third-engine-design.md
   per-commit:
     name: the instruments
     # Ubuntu 26.04 for libtidy 5.8, the oracle's (#1724); runner.sh refuses
