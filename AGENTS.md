@@ -90,7 +90,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=e583bfe8efd07cb67c704d443e53ea6c3e8c5a9d5a27e5bba03777afd402e1c7 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=cd8c45f710d006a6b7abf7993960f40b33b286436be6f5e816d3bd0184bcd9b3 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -126,9 +126,9 @@ third-engine-design.md
 | tier | tier.lock | 237 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 40 |  |
-| harness | xtask.lock | 492 |  |
+| harness | xtask.lock | 494 |  |
 
-<!-- /computed in=639f0c793249e3767fbe2d5539ece545029fa82c135c78dd041851f5a6d50758 out=dbf30645fcb8622f279eb8503c6d6376344d58c89fa4b030534dbe2e196fc8a3 -->
+<!-- /computed in=ac2222d832b007a374478867ce9bb918f79c27c66c7a78b70278d6165e24bc51 out=9cb14d3cff4770288fc38c2ab999eec674489f78addae89921e13d655515a818 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -158,6 +158,7 @@ Commands:
   trace-dump         Hold the engine's `TRACE` lines under `jit.mode=force` to the oracle's under `[regime.jit-inline]` on the seven kernels, kept in the store; one reading per kernel
   hostile            Hold the engine to the oracle on `data/hostile.toml`'s programs, whose error handlers disturb an opline mid-step; one reading per crate that owes it
   fold               Hold the release `serve_frame` to LLVM's fold of a request field's address into each access; one reading, at `sapi/cli`
+  dispatch-census    Each variant's share of the oplines the loop dispatched, over every program `IN_THE_LOOP`'s doc names; one reading per program
   fpm-compare        Hold makala to the pinned php-fpm: each request of the HTTP-served subset served by both, the status, header lines and body compared; one reading, at makala's crate
   soak               Many clients against one makala for a fixed time, each response held to the request served alone; one reading, at makala's crate
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
@@ -173,7 +174,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=9f2dda1a6c49b7cf3ec440a1d84d6ffc2bdd20a03fd7eed73b0d72590c6fb88f out=69934e7bfc56ad3d2df8e71046ae048496bedb686737de018dd76c1aadb449d5 -->
+<!-- /computed in=c63cee0b4588ca9dbf2bd0caacc98474780ef81ecda9cdb73d98c1cb9fec8d60 out=2b0f8d23eca10460d934cafadd8569942498ddfcc4c6db0478f9986e505504a6 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

@@ -1402,6 +1402,9 @@ fn serve_frame<T: Tier, D: Telling>(
 // the loop out of line, one copy for both callers, measured the call
 // edges 3 to 6% higher (#3051).
 #[allow(clippy::too_many_lines)]
+// The counting build takes the slots up at every opline, so the arms'
+// letting them go is never read there.
+#[cfg_attr(feature = "dispatch-census", allow(unused_assignments))]
 fn serve_held<'u, T: Tier, D: Telling>(
     req: &mut Request,
     first: Stepped,
@@ -1517,6 +1520,13 @@ fn serve_held<'u, T: Tier, D: Telling>(
                 let Some(op) = oplines.get(at as usize) else {
                     return Err(past_the_end(frame, at));
                 };
+                // The counting build: the opline counted by its variant,
+                // and the slots taken up again past the request it took.
+                #[cfg(feature = "dispatch-census")]
+                {
+                    req.count_dispatched(op.handler);
+                    slots = req.slots_mut(frame);
+                }
                 if declared.tells(op.opcode) {
                     declared.before(req, frame, at, op.opcode);
                     slots = req.slots_mut(frame);

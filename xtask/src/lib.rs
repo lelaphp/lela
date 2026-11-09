@@ -44,6 +44,7 @@ pub mod clippy;
 pub mod compile_identity;
 pub mod computed;
 pub mod crosscheck;
+pub mod dispatch_census;
 pub mod divergence;
 pub mod done;
 mod fold;
@@ -342,6 +343,7 @@ fn command_line() -> Result<()> {
         Command::TraceDump(ask) => trace_dump::command(&root, &manifest, &store, &ask),
         Command::Hostile => hostile::command(&root, &manifest, &store),
         Command::Fold(ask) => fold::command(&root, &manifest, &store, &ask),
+        Command::DispatchCensus(ask) => dispatch_census::command(&root, &manifest, &store, &ask),
         Command::Crosscheck { ext, staged } => {
             crosscheck_command(&root, &manifest, &store, ext, staged)
         }

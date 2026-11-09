@@ -42,6 +42,10 @@ jit = ["dep:php_jit"]
 # engine of `enabled()`, which an extension's own tests and the harness's
 # witness lane serve a snippet through. Off by default.
 test = ["php_ext/test"]
+# The counting build of the loop (design §5.8, #4328): `php_engine`'s
+# `dispatch-census`, which `xtask dispatch-census` builds `php` with into a
+# target directory of its own. Off by default.
+dispatch-census = ["php_ext/dispatch-census"]
 # The set every host links beside `default`, which a host's dependency
 # keeps on (#1477, #3081): the twenty-six php's configure builds for the
 # oracle beyond it that no host leaves out, and each crate `new-ext` has

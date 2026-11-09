@@ -19,6 +19,11 @@ workspace = true
 # `Engine::serve_capture`, enabled by an extension's dev-dependency on
 # php_ext with its `test` feature.
 test = []
+# The counting build of the loop (design §5.8, #4328): each opline the
+# loop dispatches counted by its `php_unit::Handler`, and the counts written
+# to the host's error stream where the request ends, which `xtask
+# dispatch-census` reads. Off by default, and in no host's default build.
+dispatch-census = []
 
 [dependencies]
 php_compile = { path = "../php_compile" }

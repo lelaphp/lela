@@ -25,6 +25,8 @@ crosscheck::Column::flag
 crosscheck::Column::kept
 crosscheck::kept
 crosscheck::run
+dispatch_census::Ask
+dispatch_census::run
 divergence::Cause
 divergence::Cause::ALL
 divergence::Cause::as_str
