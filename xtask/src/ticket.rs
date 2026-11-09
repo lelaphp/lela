@@ -157,7 +157,8 @@
 //! closing comment. That session is resolved at dispatch ([`dispatched`]):
 //! the one the call named, or else the Claude Code session its process
 //! runs in, so a builder's `ticket ready` says who asserted what it opens
-//! without naming itself (Round 1, Q7 (a)). A close the tracker refused is a failed reading carrying `gh`'s
+//! without naming itself (Round 1, Q7 (a)), save `ticket merged`'s close,
+//! which names none ([`dispatched`] says why). A close the tracker refused is a failed reading carrying `gh`'s
 //! text.
 //!
 //! The tracker is `gh` and nothing else: no trait, no second adapter, until
@@ -1334,7 +1335,7 @@ pub fn ticket_of(root: &Path, number: Option<u64>) -> Result<Ticket> {
 /// dispatched (Round 1, Q7 (a)): the one the caller named, or else the
 /// Claude Code session the process runs in; none in a person's terminal.
 /// [`run`] and [`parent`] take what this resolves, since a close's comment
-/// and a ready record's message say the session before the store's writer,
+/// and a ready reading's message say the session before the store's writer,
 /// which fills a reading naming none, ever sees it. `merged` takes none:
 /// a merge asserts nothing of the work it closes, so its comment names no
 /// session, and the session that asserted what the work opens stays in
