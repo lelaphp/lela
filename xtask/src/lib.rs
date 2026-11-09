@@ -445,7 +445,8 @@ fn recorded(store: &Store, readings: &[Reading]) -> Result<Outcome> {
 /// close names what it opened before anything is fetched, and the
 /// branch's track, read once here, says which label its successors carry.
 /// `parent` measures a sheet against the cap and reads no criteria, so it
-/// answers above the two that do.
+/// answers above the two that do. Each is taken in the session
+/// [`ticket::dispatched`] resolves from what the call named.
 fn ticket_command(
     root: &Path,
     manifest: &Manifest,
@@ -454,7 +455,9 @@ fn ticket_command(
 ) -> Result<()> {
     if let TicketCommand::Parent { number, session_id } = command {
         let sheet = ticket::ticket_of(root, Some(number))?;
-        let reading = ticket::parent(root, &ticket::Gh::on_path(), sheet, session_id.as_deref())?;
+        let session = ticket::dispatched(session_id.as_deref());
+        let session = session.as_ref().map(SessionId::as_str);
+        let reading = ticket::parent(root, &ticket::Gh::on_path(), sheet, session)?;
         return record(store, std::slice::from_ref(&reading));
     }
     if let TicketCommand::Merged { since } = command {
@@ -505,7 +508,9 @@ fn ticket_command(
     };
     let asks_ready = matches!(act, ticket::Act::Ready(..));
     let gh = ticket::Gh::on_path();
-    let reading = ticket::run(root, manifest, &gh, act, ticket, session_id.as_deref())?;
+    let session = ticket::dispatched(session_id.as_deref());
+    let session = session.as_ref().map(SessionId::as_str);
+    let reading = ticket::run(root, manifest, &gh, act, ticket, session)?;
     // What was said on the ticket since its work began, printed and never
     // a refusal (Round 3, Q16 (c)): a builder that comments on its own
     // ticket is as common as one that does not.

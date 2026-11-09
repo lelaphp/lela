@@ -1883,12 +1883,12 @@ mod tests {
             reading
         };
         let dir = Tree::new("status-ticket-last").unwrap();
-        let store = Store::at(dir.path());
+        let store = Store::at(dir.path()).in_session(None);
         store
             .record(&[ticket(Status::Fail, "2026-11-01T10:00:00Z")])
             .unwrap();
         let other = Tree::new("status-ticket-last-other").unwrap();
-        let theirs = Store::at(other.path());
+        let theirs = Store::at(other.path()).in_session(None);
         let closed = ticket(Status::Pass, "2026-11-01T11:00:00Z");
         theirs.record(std::slice::from_ref(&closed)).unwrap();
         store.land(&theirs).unwrap();

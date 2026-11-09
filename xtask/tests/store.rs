@@ -19,7 +19,9 @@ fn scratch(name: &str) -> Tree {
 /// A reading of the shape §4.2 draws, stamped through the constructor
 /// over the crate; the commit and the time are pinned, since the lines
 /// the tests read back are those, and the tree is whatever the crate's
-/// sources hash to today.
+/// sources hash to today. It names a session of its own, which the writer
+/// keeps, so a reading read back is the one handed in whatever session
+/// the test runs in.
 fn reading(status: Status, failed: i64) -> Reading {
     static NOW: std::sync::OnceLock<xtask::key::Snapshot> = std::sync::OnceLock::new();
     let krate = Crate::named("ext/pcre");
@@ -33,6 +35,7 @@ fn reading(status: Status, failed: i64) -> Reading {
     reading.adr = "0004".into();
     reading.commit = "0b62ae0".into();
     reading.at = "2026-09-07T01:05:49Z".parse().unwrap();
+    reading.session = "s-witness".into();
     reading
 }
 

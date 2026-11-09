@@ -764,7 +764,7 @@ mod tests {
                 .unwrap()
                 .key
         );
-        let store = Store::at(root.path());
+        let store = Store::at(root.path()).in_session(None);
         assert_eq!(
             store.record(std::slice::from_ref(&reading)).unwrap(),
             Outcome::Met

@@ -1038,7 +1038,9 @@ fn a_binary_the_merge_takes_whole_is_the_merged_branchs() {
 
 /// The hook's stdin carries `session_id`; a reading carries it, so the
 /// `permits` section can count denials per session (harness-design.md
-/// §4.6, §10 rule 6).
+/// §4.6, §10 rule 6). A call whose stdin names none is recorded in the
+/// session its process runs in, which the store's writer fills, and in a
+/// person's terminal without one (§4.2).
 #[test]
 fn a_denial_carries_the_session_of_the_call() {
     let root = scratch("session");
@@ -1050,19 +1052,30 @@ fn a_denial_carries_the_session_of_the_call() {
         .expect("the denial was recorded");
     assert_eq!(reading.session, "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11");
 
-    permit(
-        &root,
-        "",
-        &[
+    let unnamed = |session: Option<&str>| {
+        let run = Run::at(&root).args([
+            "permit",
             "--json",
             r#"{"tool_name":"Edit","tool_input":{"file_path":"seams.toml","old_string":"a","new_string":"b"}}"#,
-        ],
-    ).ok();
-    let log = Store::of_workspace(&root).history("permit").unwrap();
+        ]);
+        match session {
+            Some(id) => run.env(SESSION_VARIABLE, id),
+            None => run.env_remove(SESSION_VARIABLE),
+        }
+        .go()
+        .ok();
+        let log = Store::of_workspace(&root).history("permit").unwrap();
+        log.readings.last().unwrap().session.clone()
+    };
     assert_eq!(
-        log.readings.last().unwrap().session,
+        unnamed(Some("s-process")),
+        "s-process",
+        "a call naming no session is recorded in its process's"
+    );
+    assert_eq!(
+        unnamed(None),
         "",
-        "a call without a session is recorded without one"
+        "a call in a person's terminal is recorded without one"
     );
 }
 
