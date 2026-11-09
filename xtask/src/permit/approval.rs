@@ -122,7 +122,7 @@ pub(super) struct Approvals(Vec<Approval>);
 impl Approvals {
     /// What the call's adapter reads ([`Evidence`]); none in a subagent.
     pub(super) fn of(call: &Call) -> Approvals {
-        if call.agent_id.as_deref().is_some_and(|id| !id.is_empty()) {
+        if call.in_subagent() {
             return Approvals::default();
         }
         let asked = match call.evidence {

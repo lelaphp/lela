@@ -13,7 +13,8 @@ use super::approval::{Approvals, Asked, Evidence};
 use crate::{git, manifest};
 
 /// One intended call, as the hook receives it on stdin. `cwd` places
-/// a call without a file in a worktree; `session_id` is what a reading
+/// a main loop's call without a file in a worktree, and a subagent's
+/// line in the checkout it starts in; `session_id` is what a reading
 /// carries so denials count per session (§10 rule 6); the other keys of
 /// the recorded shape (`permission_mode`, …) are carried by the JSON and
 /// not read.
@@ -40,7 +41,8 @@ pub struct Call {
     /// answers ([`super::approval`]); the hook's, which in a subagent is
     /// the main session's.
     pub transcript_path: Option<String>,
-    /// The subagent the call runs in, absent on the main loop.
+    /// The subagent the call runs in, absent on the main loop: a call of
+    /// one without a file is judged at the session root ([`Call::nested`]).
     pub agent_id: Option<String>,
     /// The hook event the call came in on, which the hook's answer names
     /// again: `PostToolUse`, or `PostToolUseFailure` for a `Bash` call that
@@ -194,6 +196,12 @@ impl Call {
         }
     }
 
+    /// Whether the call runs in a subagent: an `agent_id` the hook set,
+    /// which the main loop's calls carry none of.
+    pub(super) fn in_subagent(&self) -> bool {
+        self.agent_id.as_deref().is_some_and(|id| !id.is_empty())
+    }
+
     pub(super) fn command(&self) -> Option<&str> {
         self.tool_input.command.as_deref()
     }
@@ -238,8 +246,13 @@ impl Call {
     /// is: a file in `root` is `root`'s whatever directory the shell stands
     /// in, since a worktree's build handed a call in its own tree would
     /// otherwise place it by the session's directory in the checkout that
-    /// handed it over (#1047). A call without one is placed by its `cwd`
-    /// in a checkout alone, the nearest
+    /// handed it over (#1047). A call without one in a subagent, one whose
+    /// `agent_id` is set, is `root`'s wherever its shell stands, so a
+    /// builder whose shell starts in its worktree is judged by the session
+    /// root's manifest and build, and a branch's `seams.toml` never judges
+    /// its own builder's lines (Round 3, Q14 (a′)); [`Call::start`] still
+    /// reads the line from that worktree. Any other call without one is
+    /// placed by its `cwd` in a checkout alone, the nearest
     /// ancestor with a manifest that also has a `.git`: a `Bash` call whose
     /// shell stands in a fixture directory is the checkout's, whose
     /// manifest carries the shell rules, since a fixture's manifest
@@ -265,6 +278,7 @@ impl Call {
                 };
                 nearest(&root, place, &[manifest::FILE])
             }
+            (None, Some(_)) if self.in_subagent() => None,
             (None, Some(cwd)) => nearest(
                 &root,
                 &canonical(&root.join(cwd)),
@@ -291,16 +305,20 @@ impl Call {
     /// `permit` holds a `Bash` call in before and after it, and the write
     /// the Stop keeps are read from (Round 1, Q17 (a)). The `workspace`
     /// whose manifest judges the call, for a call with no line and for one
-    /// whose `cwd` stands outside that workspace; the `cwd`, resolved, for
-    /// a line whose shell stands under it, so `cd ..` and a relative word
-    /// are read from where the shell is. Told by the paths alone, with no
-    /// subprocess.
+    /// whose `cwd` stands in no checkout of its repository; the `cwd`,
+    /// resolved, for a line whose shell stands under that workspace or in
+    /// another checkout of the repository ([`nearest`]), such as the
+    /// worktree of a subagent whose line the session root judges
+    /// ([`Call::nested`]), so `cd ..` and a relative word are read from
+    /// where the shell is. Told by the paths and `.git` files alone, with
+    /// no subprocess.
     pub(super) fn start(&self, workspace: &Path) -> PathBuf {
         let Some(cwd) = self.cwd.as_deref().filter(|_| self.command().is_some()) else {
             return workspace.to_path_buf();
         };
         let (cwd, top) = (canonical(&workspace.join(cwd)), canonical(workspace));
-        if cwd.starts_with(&top) && cwd != top {
+        let placed = cwd.starts_with(&top) || nearest(&top, &cwd, &[".git"]).is_some();
+        if placed && cwd != top {
             cwd
         } else {
             workspace.to_path_buf()
@@ -371,9 +389,10 @@ fn canonical(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::Call;
+    use crate::manifest;
     use crate::permit::argv::Line;
     use crate::permit::shell::Walk;
     use crate::scratch::Tree;
@@ -389,6 +408,78 @@ mod tests {
         let call = serde_json::json!({"tool_name": tool, "cwd": cwd.to_str().unwrap(),
             "tool_input": input});
         Call::parse(&call.to_string()).unwrap()
+    }
+
+    /// A checkout `root` with a manifest, and a worktree of its repository
+    /// beside it with a manifest of its own and a directory `sub`, laid by
+    /// the `.git` files git reads and no git, both canonical.
+    fn beside(tree: &Tree) -> (PathBuf, PathBuf) {
+        let (root, worktree) = (tree.join("repo"), tree.join("repo-worktrees/t-x"));
+        let link = root.join(".git/worktrees/t-x");
+        for dir in [&link, &worktree.join("sub")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(link.join("commondir"), "../..\n").unwrap();
+        let gitdir = format!("gitdir: {}\n", link.display());
+        std::fs::write(worktree.join(".git"), gitdir).unwrap();
+        for checkout in [&root, &worktree] {
+            std::fs::write(checkout.join(manifest::FILE), "").unwrap();
+        }
+        (
+            root.canonicalize().unwrap(),
+            worktree.canonicalize().unwrap(),
+        )
+    }
+
+    /// The call `bash` builds, in the subagent `agent`.
+    fn in_agent(mut call: Call, agent: &str) -> Call {
+        call.agent_id = Some(agent.to_owned());
+        call
+    }
+
+    /// Round 3, Q14 (a′): a subagent's line whose shell stands in a
+    /// worktree is judged at the session root, by its manifest and in its
+    /// checkout, and is still read from where its shell stands; the main
+    /// loop's is the worktree's, as before.
+    #[test]
+    fn a_subagents_line_in_a_worktree_is_judged_at_the_session_root() {
+        let tree = Tree::new("call-nested").unwrap();
+        let (root, worktree) = beside(&tree);
+        let sub = worktree.join("sub");
+        let agents = in_agent(bash(&sub, Some("git status")), "a1b2c3");
+        assert_eq!(agents.nested(&root), None);
+        assert_eq!(agents.workspace(&root), root);
+        assert_eq!(agents.checkout(&root), root);
+        assert_eq!(agents.start(&agents.workspace(&root)), sub);
+        let mains = bash(&sub, Some("git status"));
+        assert_eq!(mains.workspace(&root), worktree);
+        assert_eq!(mains.checkout(&root), worktree);
+        assert_eq!(mains.start(&mains.workspace(&root)), sub);
+    }
+
+    /// Round 3, Q14 (a′): a subagent's line with no `cwd`, or one whose
+    /// `cwd` stands in no checkout of the repository, is judged and starts
+    /// at the session root, as the main loop's; a subagent's file still
+    /// places its call in the worktree it is in.
+    #[test]
+    fn a_subagents_call_with_no_cwd_outside_the_workspace_or_with_a_file_is_placed_as_before() {
+        let tree = Tree::new("call-nested-else").unwrap();
+        let (root, worktree) = beside(&tree);
+        let mut unplaced = in_agent(bash(&root, Some("git status")), "a1b2c3");
+        unplaced.cwd = None;
+        assert_eq!(unplaced.workspace(&root), root);
+        assert_eq!(unplaced.start(&root), root);
+        let outside = tree.canonicalize().unwrap();
+        for call in [bash(&outside, Some("ls")), bash(Path::new("/"), Some("ls"))] {
+            for call in [in_agent(call.clone(), "a1b2c3"), call] {
+                assert_eq!(call.workspace(&root), root);
+                assert_eq!(call.start(&root), root);
+            }
+        }
+        let mut edit = in_agent(bash(&worktree, None), "a1b2c3");
+        edit.tool_input.file_path = Some(worktree.join("sub/x").display().to_string());
+        assert_eq!(edit.workspace(&root), worktree);
+        assert_eq!(edit.checkout(&root), worktree);
     }
 
     /// Round 1, Q17 (a): a call with no line, and a line whose `cwd`

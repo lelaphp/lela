@@ -219,10 +219,11 @@ fn hook_stdin(tool: &str, cwd: &Path, input: &serde_json::Value) -> String {
 /// it carries: the checkout's build hands a call there to the worktree's
 /// own, which judges it against its own tree, and returns its decision
 /// (#1047). A rule only the worktree's manifest carries fires on a write
-/// there and not on the same write in the checkout; a Bash call is placed
-/// by its working directory the same way, and a row the worktree words
-/// differently is denied in the worktree's words; the readings are the
-/// worktree's build's, in its store. The walk in the worktree passes over
+/// there and not on the same write in the checkout; the main loop's Bash
+/// call is placed by its working directory the same way, and a row the
+/// worktree words differently is denied in the worktree's words, while a
+/// subagent's is the checkout's, in its words (Round 3, Q14 (a′)); the
+/// readings are the worktree's build's, in its store. The walk in the worktree passes over
 /// the checkout's build seeded into its `target/debug`, which refuses a
 /// manifest it was not compiled against, and `cargo run` there builds the
 /// harness under test against the worktree's manifest.
@@ -312,6 +313,15 @@ remedy = "write it in your own worktree"
     assert!(ran.stdout.contains(marker), "the worktree's rule: {ran}");
     ran.ok();
     let out = permit(&root, &commit(&root), &["--above-the-command-hook"]).ok();
+    assert!(out.contains("git.no-verify"), "{out}");
+    assert!(!out.contains(marker), "the checkout's rule: {out}");
+
+    // A subagent's line in the worktree is the session root's to judge, by
+    // the checkout's build and in the checkout's words, so the worktree's
+    // manifest never judges its own builder's shell (Round 3, Q14 (a′)).
+    let mut agents: serde_json::Value = serde_json::from_str(&commit(&beside)).unwrap();
+    agents["agent_id"] = "a1b2c3d4e5f6a7b8c".into();
+    let out = permit(&root, &agents.to_string(), &[]).ok();
     assert!(out.contains("git.no-verify"), "{out}");
     assert!(!out.contains(marker), "the checkout's rule: {out}");
 }
