@@ -1336,8 +1336,10 @@ pub fn ticket_of(root: &Path, number: Option<u64>) -> Result<Ticket> {
 /// [`run`] and [`parent`] take what this resolves, since a close's comment
 /// and a ready record's message say the session before the store's writer,
 /// which fills a reading naming none, ever sees it. `merged` takes none:
-/// a merge asserts nothing of the work it closes, and its comment says
-/// what the ready record said.
+/// a merge asserts nothing of the work it closes, so its comment names no
+/// session, and the session that asserted what the work opens stays in
+/// the message of the ready reading, since the ready record on the branch
+/// keeps the successors alone ([`Successors::record`]).
 pub(crate) fn dispatched(named: Option<&str>) -> Option<SessionId> {
     named.and_then(SessionId::new).or_else(SessionId::current)
 }
