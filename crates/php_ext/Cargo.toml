@@ -18,6 +18,9 @@ workspace = true
 # The test face (design §4.3 seam 4): `php_ext::test::{Capture, Engine}`,
 # enabled by an extension's dev-dependency alone.
 test = ["php_engine/test"]
+# The counting build of the loop (#4328), `php_engine`'s feature, which the
+# bundle's turns on.
+dispatch-census = ["php_engine/dispatch-census"]
 
 [dependencies]
 php_engine = { path = "../php_engine" }

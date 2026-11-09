@@ -6419,6 +6419,10 @@ impl Engine {
         if !req.output().headers_sent() && !req.terminated() {
             req.send_header_block().ok();
         }
+        // The counting build's counts, after everything the request
+        // served (`dispatch-census`).
+        #[cfg(feature = "dispatch-census")]
+        req.write_census();
         let sink = req.release_sink();
         // What the request entered, taken last, so a destructor or a
         // shutdown function served above is in it.

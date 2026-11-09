@@ -56,6 +56,8 @@ pub use hooks::HookedTable;
 pub(crate) use hooks::{HookedBuild, HookedDeclared, HookedRows};
 pub(crate) use objects::placed_of;
 mod calls;
+#[cfg(feature = "dispatch-census")]
+mod census;
 pub use calls::Supplier;
 pub(crate) use calls::{Callee, Family, Retval};
 mod class_constants;
@@ -433,6 +435,10 @@ pub struct Request {
     /// ([`sensing::Sensing`]).
     #[cfg(debug_assertions)]
     sensing: sensing::Sensing,
+    /// The counting build's count of each variant the loop dispatched
+    /// ([`census::Census`]).
+    #[cfg(feature = "dispatch-census")]
+    census: census::Census,
     /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into ([`hold::Holding`]).
     hold: hold::Holding,
     /// The buffers a backtrace's walk lays its links and rows in, kept
@@ -1340,6 +1346,8 @@ impl Request {
             early_bound: None,
             #[cfg(debug_assertions)]
             sensing: sensing::Sensing::default(),
+            #[cfg(feature = "dispatch-census")]
+            census: census::Census::default(),
             hold: hold::Holding::default(),
             traces: traces::Scratch::default(),
             foreign: foreign::Table::default(),
