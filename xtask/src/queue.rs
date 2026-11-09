@@ -10,11 +10,12 @@
 //! each build the merge lanes run, and records the calling session as
 //! its owner ([`crate::owner`]); where it stands already, the call claims
 //! it, refused where another session owns it. `xtask worktree land`
-//! ([`land`]) is the one step that moves `main`: it asks `done` in
-//! `_merge` since main's tip, and on a pass lands `_merge`'s readings in
-//! main's store, as a retire does, then fast-forwards `main` to the
-//! commit judged. The worktree stays, since the queue is persistent, and
-//! its per-key files stay with it, so `done` there still finds them.
+//! ([`land`]) is the one step that moves `main`, run in main's checkout:
+//! it has an xtask built at main's tip judge `_merge` since that tip
+//! ([`judge`], #4372), and on a pass lands `_merge`'s readings in main's
+//! store, as a retire does, then fast-forwards `main` to the commit
+//! judged. The worktree stays, since the queue is persistent, and its
+//! per-key files stay with it, so `done` there still finds them.
 //!
 //! Each step is the one GitHub's merge queue takes, so moving there later
 //! replaces the runner and not the protocol: `staging` is the queue's
@@ -27,14 +28,13 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::divergence::Registry;
-use crate::done;
 use crate::git::{git, has_ref};
-use crate::manifest::Manifest;
 use crate::owner::{self, SessionId};
 use crate::reading::Store;
 use crate::track::{self, MAIN, short};
 use crate::worktree::{self, say};
+
+pub(crate) mod judge;
 
 /// The branch the queue's merges are made on, which `main` is
 /// fast-forwarded to: GitHub's `gh-readonly-queue/main/…`.
@@ -115,19 +115,19 @@ pub fn claim(root: &Path, owner: Option<&SessionId>) -> Result<PathBuf> {
     worktree::make_ready(dir, &main, &homes, QUEUE, &BUILDS)
 }
 
-/// A commit of [`STAGING`] that `done` was met at in the merge worktree,
-/// since main's tip: the one thing `main` is fast-forwarded to.
+/// A commit of [`STAGING`] that main's judges passed in the merge
+/// worktree since main's tip: the one thing `main` is fast-forwarded to.
 struct Passed {
     head: String,
 }
 
 impl Passed {
-    /// `done` over the merge worktree since `tip`, its reading written
-    /// to that worktree's store and its list printed; the head it judged,
-    /// or the refusal that leaves `main` at `tip`. Work standing
-    /// uncommitted there is refused first: it would be judged and not
-    /// landed.
-    fn judge(merge: &Path, tip: &str) -> Result<Passed> {
+    /// The merge worktree judged since `tip` by the xtask built at `tip`
+    /// ([`judge::Judge`]), whose readings are written to that worktree's
+    /// store and whose lines are printed; the head it judged, or the
+    /// refusal that leaves `main` at `tip`. Work standing uncommitted
+    /// there is refused first: it would be judged and not landed.
+    fn judge(main: &Path, merge: &Path, tip: &str) -> Result<Passed> {
         let untouched = format!("{MAIN} is untouched at {}", short(tip));
         let standing = git(merge, &["status", "--porcelain", "--untracked-files=no"])?;
         if !standing.trim().is_empty() {
@@ -137,33 +137,35 @@ impl Passed {
             );
         }
         let head = track::rev(merge, "HEAD")?;
-        done::run(
-            merge,
-            &Manifest::load(merge)?,
-            &Registry::load(merge)?,
-            &Store::of_workspace(merge),
-            (Some(tip), done::Caller::Land),
-            &[],
-        )
-        .with_context(|| {
-            format!(
-                "done is unmet in {} since {MAIN}; {untouched}",
-                merge.display()
-            )
-        })?;
+        judge::Judge::at(main, tip)
+            .and_then(|judge| judge.over(merge))
+            .with_context(|| {
+                format!(
+                    "main's judges refuse {} since {MAIN}; {untouched}",
+                    merge.display()
+                )
+            })?;
         Ok(Passed { head })
     }
 }
 
-/// Fast-forward `main` to the merge worktree's head once `done` is met
-/// there since main's tip ([`Passed`]), landing the worktree's readings
-/// in main's store first, so the hooks the fast-forward runs and
-/// everything after them find them by key (ADR-0011). A `main` that moved
-/// past what `staging` holds, a person's commit there, is refused, and
-/// so is a main checkout off `main`. With nothing to fast-forward, the
-/// readings are landed alone.
+/// Fast-forward `main` to the merge worktree's head once main's judges
+/// pass it there since main's tip ([`Passed`]), landing the worktree's
+/// readings in main's store first, so the hooks the fast-forward runs and
+/// everything after them find them by key (ADR-0011). Run anywhere but
+/// main's checkout it is refused: the xtask `_merge` builds is the
+/// merge's own. A `main` that moved past what `staging` holds, a person's
+/// commit there, is refused, and so is a main checkout off `main`. With
+/// nothing to fast-forward, the readings are landed alone.
 pub fn land(root: &Path) -> Result<()> {
     let main = track::main_worktree(root)?;
+    if !same(root, &main) {
+        bail!(
+            "land runs in main's checkout, {}, and this is {}, whose xtask is its own branch's; nothing was landed",
+            main.display(),
+            root.display()
+        );
+    }
     let merge = standing(&main)?.with_context(|| {
         format!("no merge worktree stands on {STAGING}; `xtask worktree queue` lays it down")
     })?;
@@ -181,7 +183,7 @@ pub fn land(root: &Path) -> Result<()> {
         );
     }
     let passed = (head != tip)
-        .then(|| Passed::judge(&merge, &tip))
+        .then(|| Passed::judge(&main, &merge, &tip))
         .transpose()?;
     append(&merge, &main)?;
     let Some(Passed { head }) = passed else {

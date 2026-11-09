@@ -340,6 +340,68 @@ pub fn run(
     Ok(reading)
 }
 
+/// Each of the harness's own files the commits since `base` changed,
+/// judged as a proposal against the file `base` carries, the land's steer
+/// (#4372, #4348 ruling 5): the files are those `base`'s `harness.self`
+/// names, read with this build's judge, so a merge is held by main's tip
+/// and not by the steer it carries. A proposal that adds alone passes; one
+/// that would not load fails, and the land refuses it; one that changes
+/// what binds is a skip that names each path, since a person's commit
+/// does that, and nothing yet tells it from an agent's (#4370, #4371).
+/// The readings are unstamped and the land records none of them: a
+/// passing steer reading over a file is what `permit` reads as steer's
+/// write of it, and the land writes nothing.
+pub(crate) fn since(root: &Path, base: &str) -> Result<Vec<Reading>> {
+    let text = git::show(root, base, manifest::FILE)?
+        .with_context(|| format!("{base} carries no {}", manifest::FILE))?;
+    let binding = Manifest::parse(&text)?;
+    let files = (binding.rule(RULE).into_iter())
+        .flat_map(|rule| rule.scope.iter())
+        .filter(|file| steerable(&binding, file));
+    let mut readings = Vec::new();
+    for file in files {
+        let (tracked, proposed) = (git::show(root, base, file)?, git::show(root, "HEAD", file)?);
+        if tracked == proposed {
+            continue;
+        }
+        let (tracked, proposed) = (tracked.unwrap_or_default(), proposed.unwrap_or_default());
+        let mut reading = Reading::new(INSTRUMENT, file);
+        if let Err(unread) = loads(&binding, file, &tracked, &proposed) {
+            reading.status = Status::Fail;
+            reading.message = format!(
+                "{file} as the merge carries it would not load under main's tip: {unread:#}"
+            );
+            readings.push(reading);
+            continue;
+        }
+        match judge(&tracked, &proposed)? {
+            Verdict::Refused(changed) => {
+                reading.status = Status::Skip;
+                reading.count("changed", changed.len() as u64)?;
+                reading.message = format!(
+                    "{file}: {} of what main's tip carries changed since, which is a person's \
+                     (harness §11), read as theirs until a person's signature can be asked \
+                     for (#4371): {}",
+                    changed.len(),
+                    changed.join(", ")
+                );
+            }
+            verdict => {
+                let added = verdict.additions();
+                reading.status = Status::Pass;
+                reading.count("added", added.len() as u64)?;
+                reading.message = format!(
+                    "{file}: {} added since main's tip, and nothing it carried changed: {}",
+                    added.len(),
+                    added.join(", ")
+                );
+            }
+        }
+        readings.push(reading);
+    }
+    Ok(readings)
+}
+
 /// Whether the proposal loads as the file it would replace, through the
 /// reader the harness reads that file with: the registry, whose rows
 /// decode their ids, so a `covers` list on a new row is held to its kind

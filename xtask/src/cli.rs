@@ -838,10 +838,23 @@ pub(crate) enum WorktreeCommand {
     /// on `staging`, its builds seeded from main's, owned by the calling
     /// session; or claim the one that stands (#3622).
     Queue,
-    /// Fast-forward `main` to `staging`'s head once `done` is met in
-    /// `_merge` since main's tip, landing `_merge`'s log in main's store
-    /// first; refused, `main` untouched, while anything is unmet (#3622).
+    /// Fast-forward `main` to `staging`'s head once an xtask built at
+    /// main's tip judges `_merge` since that tip (`judge`), landing
+    /// `_merge`'s log in main's store first; run in main's checkout, and
+    /// refused, `main` untouched, while anything is unmet (#3622, #4372).
     Land,
+    /// The land's judgement of the checkout this runs in since `--base`,
+    /// which `land` asks of `_merge` from an xtask built at main's tip
+    /// (#4372): the harness's own files read, refused with the two steps a
+    /// grammar change lands in where one does not; `budget`, `api-check`
+    /// and `unsafe-audit` taken; each harness file changed since the base
+    /// judged by steer; then `done` as land's caller, whose verdict is the
+    /// exit.
+    Judge {
+        /// The commit judged since, main's tip.
+        #[arg(long, value_name = "COMMIT")]
+        base: String,
+    },
 }
 
 /// Read the criteria, or read them and close.

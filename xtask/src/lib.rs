@@ -713,6 +713,9 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         Command::Worktree {
             command: WorktreeCommand::Land,
         } => Some(queue::land(root).inspect(|()| review::after_land(root))),
+        Command::Worktree {
+            command: WorktreeCommand::Judge { base },
+        } => Some(queue::judge::run(root, base)),
         Command::Ticket {
             command:
                 TicketCommand::Brief {

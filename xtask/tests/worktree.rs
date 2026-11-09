@@ -1204,14 +1204,37 @@ fn the_queue_lays_the_merge_worktree_on_staging_owned_and_seeded_from_mains() {
     assert!(other.contains("is session the-coordinator's"), "{other}");
 }
 
-/// `land` is the one step that moves `main` (#3622). A harness source
-/// committed on `staging` with no reading over it is unmet in `done`, so
-/// the land refuses and `main` stands where it was, its store unwritten.
-/// Once `staging` is reset to `main` with `--keep` and holds a change
-/// `done` meets, `main` is fast-forwarded to it and `_merge`'s log is
-/// landed in main's store and emptied, the worktree standing. A person's
-/// commit on `main` refuses the next land, `main` untouched. Each
-/// verdict's reading names land as its caller (Round 1, Q23, c11.b).
+/// The judge `land` finds kept for main's tip in `root`, written as a
+/// shell file at `target/judge/<tip>/xtask` with `body` after its first
+/// line, so the land builds nothing (#4372); the tip.
+fn judge_kept(root: &Path, body: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let tip = sh(root, &["git", "rev-parse", "main"]).trim().to_owned();
+    let path = format!("target/judge/{tip}/xtask");
+    write(root, &path, &format!("#!/bin/sh\n{body}"));
+    fs::set_permissions(root.join(&path), fs::Permissions::from_mode(0o755)).unwrap();
+    tip
+}
+
+/// [`judge_kept`] by the xtask under test, which is what a build of
+/// main's tip is in a scratch repository of this working tree.
+fn judged_by_this_build(root: &Path) -> String {
+    let xtask = scratch::xtask(env!("CARGO_BIN_EXE_xtask"))
+        .display()
+        .to_string();
+    judge_kept(root, &format!("exec '{xtask}' \"$@\"\n"))
+}
+
+/// `land` is the one step that moves `main` (#3622), run in main's
+/// checkout and refused in `_merge`'s, whose xtask is the merge's own
+/// (#4372). A harness source committed on `staging` with no reading over
+/// it is unmet in `done`, as main's judges read it, so the land refuses
+/// and `main` stands where it was, its store unwritten. Once `staging` is
+/// reset to `main` with `--keep` and holds a change `done` meets, `main`
+/// is fast-forwarded to it and `_merge`'s log is landed in main's store
+/// and emptied, the worktree standing. A person's commit on `main`
+/// refuses the next land, `main` untouched. Each verdict's reading names
+/// land as its caller (Round 1, Q23, c11.b).
 #[test]
 fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
     let root = repository("land");
@@ -1220,12 +1243,16 @@ fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
     let merge = worktree_of(&root, "_merge");
     let main_at = || sh(&root, &["git", "rev-parse", "main"]);
     let before = main_at();
+    judged_by_this_build(&root);
 
     write(&merge, "xtask/src/queued.rs", "pub fn queued() {}\n");
     commit_all(&merge, "a harness source no reading measured");
-    let (code, red) = by("the-coordinator", &merge, "land");
+    let (code, there) = by("the-coordinator", &merge, "land");
+    assert_eq!(code, 1, "{there}");
+    assert!(there.contains("land runs in main's checkout"), "{there}");
+    let (code, red) = by("the-coordinator", &root, "land");
     assert_eq!(code, 1, "{red}");
-    assert!(red.contains("done is unmet"), "{red}");
+    assert!(red.contains("main's judges refuse"), "{red}");
     assert!(red.contains("main is untouched"), "{red}");
     assert_eq!(main_at(), before, "{red}");
     assert!(!root.join("target/harness/log").exists(), "{red}");
@@ -1271,8 +1298,92 @@ fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
     let person = main_at();
     write(&merge, "notes/second.md", "A second note.\n");
     commit_all(&merge, "a second change");
-    let (code, moved) = by("the-coordinator", &merge, "land");
+    let (code, moved) = by("the-coordinator", &root, "land");
     assert_eq!(code, 1, "{moved}");
     assert!(moved.contains("main moved"), "{moved}");
     assert_eq!(main_at(), person, "{moved}");
+}
+
+/// The judges a land runs are main's tip's and never the branch's
+/// (#4372, #4348 ruling 5): a branch that changes `budget`'s source, and
+/// stands a passing judge at its own head beside it, is judged by the
+/// one kept for main's tip, which refuses here, and the call it was asked
+/// is `_merge`'s judgement since that tip.
+#[test]
+fn a_branchs_change_to_a_judge_does_not_judge_that_branch() {
+    let root = repository("land-judge");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let before = sh(&root, &["git", "rev-parse", "main"]);
+    let asked = root.with_file_name("asked");
+    let tip = judge_kept(
+        &root,
+        &format!(
+            "echo \"$*\" >> '{}'\necho \"main's judge refuses\" >&2\nexit 1\n",
+            asked.display()
+        ),
+    );
+
+    let budget = fs::read_to_string(merge.join("xtask/src/budget.rs")).unwrap();
+    write(
+        &merge,
+        "xtask/src/budget.rs",
+        &format!("{budget}\n// The branch's budget, which passes what it is handed.\n"),
+    );
+    let head = commit_all(&merge, "the branch's budget");
+    for at in [&*root, &*merge] {
+        write(
+            at,
+            &format!("target/judge/{head}/xtask"),
+            "#!/bin/sh\nexit 0\n",
+        );
+    }
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("main's judge refuses"), "{out}");
+    assert!(
+        out.contains(&format!("main's xtask at {} refuses", &tip[..7])),
+        "{out}"
+    );
+    assert!(out.contains("main is untouched"), "{out}");
+    assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
+    assert_eq!(
+        fs::read_to_string(&asked).unwrap(),
+        format!("--root {} worktree judge --base {tip}\n", merge.display()),
+        "{out}"
+    );
+}
+
+/// A merge whose `seams.toml` main's xtask cannot read is refused with
+/// the two steps such a change lands in, `main` untouched (#4372): the
+/// fixture is a table no reader at main's tip knows, the row of a grammar
+/// change merged before the xtask that reads it, as #4343's was.
+#[test]
+fn a_manifest_mains_xtask_cannot_read_is_refused_with_the_two_steps() {
+    let root = repository("land-grammar");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let before = sh(&root, &["git", "rev-parse", "main"]);
+    judged_by_this_build(&root);
+    let manifest = fs::read_to_string(merge.join("seams.toml")).unwrap();
+    let row = fs::read_to_string(workspace().join("xtask/fixtures/land/grammar.toml")).unwrap();
+    write(&merge, "seams.toml", &format!("{manifest}\n{row}"));
+    commit_all(&merge, "a row of a grammar main's xtask does not read");
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("cannot read"), "{out}");
+    assert!(out.contains("a_table_mains_xtask_does_not_read"), "{out}");
+    assert!(out.contains("lands in two steps"), "{out}");
+    assert!(
+        out.contains("first the xtask that reads the new grammar"),
+        "{out}"
+    );
+    assert!(
+        out.contains("then, once main's xtask reads it, the row that does"),
+        "{out}"
+    );
+    assert!(out.contains("main is untouched"), "{out}");
+    assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
 }
