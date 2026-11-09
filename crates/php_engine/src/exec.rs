@@ -2037,12 +2037,12 @@ pub(crate) enum Cached {
     /// scope that reaches it, and a name no class of the chain declares
     /// ([`crate::api::request::Request::cacheable_offset`]).
     ///
-    /// `function` and `scope` are the frame's that placed it, its
-    /// function where it is no closure's: php's cache is one per scope,
-    /// and this engine's one per op array, so the slot is read back from
-    /// a frame of the same function, which fixes the scope, and from any
-    /// other, a closure's or an included or evaluated file's, only where
-    /// its scope is `scope` too.
+    /// The place's `primed` is the frame that placed it, its function
+    /// where it is no closure's ([`PrimedFrom`]): php's cache is one per
+    /// scope, and this engine's one per op array, so the slot is read
+    /// back from a frame of the same function, which fixes the scope, and
+    /// from any other, a closure's or an included or evaluated file's,
+    /// only where its scope is the place's too.
     Property(PropertyPlace) = PROPERTY,
     /// The user function one of the same three resolved on its first
     /// pass, with what each pass after pushes its call with. Compiled
@@ -2171,8 +2171,7 @@ pub(crate) const CALL: u32 = 8;
 pub(crate) struct PropertyPlace {
     pub(crate) class: ClassId,
     pub(crate) offset: PropertyOffset,
-    pub(crate) function: Option<Function>,
-    pub(crate) scope: Option<ClassId>,
+    pub(crate) primed: PrimedFrom,
 }
 
 /// [`Cached::Constant`] as RFC 2195 lays it out.
@@ -2312,7 +2311,11 @@ impl Cached {
     }
 
     /// The frame a slot whose answer the access rule decides was primed
-    /// from; none for a slot that answers every scope alike.
+    /// from, which [`crate::api::request::Request::cached_in_scope`]
+    /// reads back by; none for a slot that answers every scope alike,
+    /// and none for [`Cached::Property`], whose place is read back by
+    /// scope through [`crate::api::request::Request::cached_property`],
+    /// which also tests the object's class and the fake scope.
     #[inline]
     pub(crate) fn primed_from(self) -> Option<PrimedFrom> {
         match self {
@@ -2334,8 +2337,9 @@ impl Cached {
 }
 
 /// The frame a slot whose answer the access rule decides was written
-/// from, [`Cached::ClassAndCallee`], [`Cached::StaticProperty`] and
-/// [`Cached::ClassConstant`]: the frame's scope, and its function where
+/// from, kept by [`Cached::ClassAndCallee`], [`Cached::StaticProperty`]
+/// and [`Cached::ClassConstant`], and by the [`PropertyPlace`] a
+/// [`Cached::Property`] holds: the frame's scope, and its function where
 /// the frame is no closure's, which fixes the scope. php keys on no
 /// scope because its cache is one per scope: a trait's method is copied
 /// into each class that uses it with a cache of its own
@@ -2346,7 +2350,8 @@ impl Cached {
 /// still read back only from the scope that wrote it
 /// ([`Request::cached_in_scope`]): a frame of the
 /// function that wrote it without asking its scope, as
-/// [`Cached::Property`]'s `function` is read.
+/// [`Cached::Property`]'s place is read back
+/// ([`Request::cached_property`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PrimedFrom {
     pub(crate) function: Option<Function>,

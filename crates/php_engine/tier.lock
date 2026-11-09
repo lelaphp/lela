@@ -111,6 +111,15 @@ tier::MapPtrRaw
 tier::PLACE
 tier::Parked
 tier::PlaceLayout
+tier::PlaceLayout::call
+tier::PlaceLayout::call_record
+tier::PlaceLayout::pair
+tier::PlaceLayout::pair_class
+tier::PlaceLayout::pair_function
+tier::PlaceLayout::pair_record
+tier::PlaceLayout::property
+tier::PlaceLayout::tag
+tier::PlaceLayout::unprimed
 tier::PlainCall
 tier::PlainCall::activation
 tier::PlainCall::callee

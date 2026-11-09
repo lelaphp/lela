@@ -19,13 +19,15 @@
 //! generator's resume (#2738), and the request's storage as a native
 //! holds it, an `Emalloc` and a `FreshString` (design §5.13), and a
 //! call's closure taken for the closure `CALLABLE_CONVERT` writes
-//! (#3335), and php's typed throws held to their typed functions
-//! across the workspace (#3261).
+//! (#3335), php's typed throws held to their typed functions across
+//! the workspace (#3261), and compiled code's guard on a method's pair
+//! held to the interpreter's read-back of it (#4326).
 
 use crate::api;
 
 mod allocations;
 mod body;
+mod cache_guard;
 mod call_closure;
 mod dropped_frames;
 mod frame_writes;

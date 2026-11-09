@@ -200,6 +200,8 @@ impl Emit<'_> {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`, and a method's
     /// call, `zend_jit_init_method_call`, `:9025-9056`). The tag is tested
     /// before anything past it is read; the slot's address is answered.
+    /// A method's pair is guarded no further than this because only an op
+    /// array of one scope is taken ([`php_engine::tier::UnitView::hold_callee`]).
     pub(super) fn cache_guard(
         &mut self,
         line: &Line,

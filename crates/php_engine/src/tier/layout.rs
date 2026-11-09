@@ -402,6 +402,13 @@ impl FrameLayout {
 /// it reads past them, and the bit of a slot's type that says it has
 /// none. One value, [`PLACE`], every offset `offset_of!` over the
 /// interpreter's own types and RFC 2195's mirror of their variants.
+///
+/// The accessors of the tag's place, of the tags of a slot nothing was
+/// written to and of a property's place, of a method's pair and of a
+/// call's record are items of `tier.lock`, as [`FrameLayout`]'s are, so
+/// a change to those layouts compiled code reads is a diff of that file.
+/// The accessors past a property's tag, and those of a constant's slot
+/// and of a `static` property's, are not listed there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaceLayout {
     tag: u32,
