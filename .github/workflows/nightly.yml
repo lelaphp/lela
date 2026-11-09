@@ -236,8 +236,8 @@ jobs:
   soak:
     name: the concurrency soak
     # `xtask soak --nightly` as #2336 rules it (#2350, #2632): nightly, ten minutes, 64
-    # clients, over the HTTP-served subset and the bench workloads, against
-    # a build with debug assertions, which arm the request leak sensor: the
+    # clients, over the HTTP-served subset and the workload files of every
+    # role but native (#4366), against a build with debug assertions, which arm the request leak sensor: the
     # harness builds makala in the lanes' profile, release-da. It reads the
     # pinned tree and never the oracle, so it is a Linux job, and its
     # reading counts defects rather than timing anything, so while
@@ -270,15 +270,16 @@ jobs:
     name: makala against php-fpm, the server's bench series
     # `xtask bench` as #2336 rules the server's bar (#2351): a nightly
     # series of makala against the pinned php-fpm behind a FastCGI client
-    # over each bench workload, beside makala's A/A control over the same,
+    # over each workload file of every role but native (#4366), beside
+    # makala's A/A control over the same,
     # each under two loads: one request a rep, the latency series
     # `makala-fpm/<workload>` with `makala-aa/<workload>`, and 8 clients
     # for 3 s a rep against 8 request threads and `pm.max_children = 8`,
     # the worker-throughput series `makala-fpm-c8/<workload>` with
     # `makala-c8-aa/<workload>` in requests a second (#2660), each read
     # as how far makala stands from php-fpm. `xtask bench` runs every bar
-    # it declares; the throughput bars, about 80 minutes over the
-    # workloads served bare on a quiet machine, are what the timeout below makes room
+    # it declares; the throughput bars over those workloads on a quiet
+    # machine are what the timeout below makes room
     # for. Under the measurement protocol, each bar held to its tolerance once
     # `[[bench]]` gives it one from its first two weeks (#2659). It needs the pinned php-fpm, a macOS keg, so it runs on
     # the Mac and after the oracle job, the machine quiet with nothing else

@@ -482,6 +482,42 @@ fn mb_http_input(
 /// 21
 /// 1b24422422
 /// ```
+///
+/// Served as a request of the web, the `http` runs of
+/// `docs/perf/workloads/mbstring_profiles_2831.php`, its two arguments in
+/// the query where the CLI reads them from `$argv`, are the one web-only
+/// path among the native workloads, which makala's bars do not serve
+/// (#4366): the `START` call's `Content-Type`, the charset of the
+/// response encoding, is the response's, held to the pinned php-fpm's.
+///
+/// ```php
+/// $mode = $_GET['mode'];
+/// $size = $_GET['size'];
+/// $count = $size === 'small' ? 16 : 32768;
+/// $iterations = $size === 'small' ? 1000 : 8;
+/// $input = str_repeat('あ€', $count);
+/// $checksum = 0;
+/// mb_internal_encoding('UTF-8');
+/// mb_substitute_character(0x3f);
+/// for ($i = 0; $i < $iterations; $i++) {
+///     mb_http_output('JIS');
+///     $out = mb_output_handler($input, PHP_OUTPUT_HANDLER_START);
+///     $out .= mb_output_handler($input, PHP_OUTPUT_HANDLER_FINAL);
+///     $checksum += strlen($out);
+/// }
+/// echo $mode, ':', $size, ':', $checksum, ':', hash('sha256', $out), "\n";
+/// ```
+/// ```request makala
+/// --GET--
+/// mode=http&size=small
+/// ```
+/// ```expect capture
+/// 200
+/// x-powered-by: PHP/8.5.12
+/// content-type: text/html; charset=ISO-2022-JP
+///
+/// http:small:288000:56b7af5df18fbafd639d3da61593060ad06f9704db152f73b2a060380d8ab56b
+/// ```
 #[php_function]
 fn mb_output_handler(
     req: &mut Request,
