@@ -151,8 +151,11 @@ impl std::fmt::Display for Base {
     }
 }
 
-/// What `done` found over one diff.
+/// What `done` found over one diff. A verdict dropped unread refuses
+/// nothing: [`run`] hands one back whether or not anything is unmet, so
+/// its caller holds it to [`Verdict::exit`] or reads its list.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "a verdict refuses nothing until its exit is taken or its list is read"]
 pub struct Verdict {
     /// What the changes are measured since.
     pub base: Base,
