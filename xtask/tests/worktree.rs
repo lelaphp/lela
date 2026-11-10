@@ -1416,8 +1416,11 @@ fn land_with_deny(root: &Path, body: &str) -> (i32, String) {
 /// check advisories sources` under main's `deny.toml`, never the merge's
 /// (#4372, #4348 ruling 5): a release other than the one nightly.yml
 /// installs refuses, and so does a check that finds anything; one that
-/// finds nothing hands the merge on to `done`. A merge that leaves the
-/// lock alone runs no check.
+/// finds nothing hands the merge on to `done`. The stand-in refuses
+/// `check --config` with a usage error, exit 2, as 0.20.2 does, so the
+/// argv is held to `--config <path> check advisories sources`, and a
+/// usage error refuses as a check that judged nothing, never as a
+/// finding. A merge that leaves the lock alone runs no check.
 #[test]
 fn a_merge_that_moves_the_lock_is_held_to_cargo_deny_under_mains_config() {
     let root = repository("land-deny");
@@ -1442,9 +1445,12 @@ fn a_merge_that_moves_the_lock_is_held_to_cargo_deny_under_mains_config() {
     commit_all(&merge, "a lock and a config the merge moved");
     let seen = root.with_file_name("seen");
     let version = "if [ \"$1\" = --version ]; then echo 'cargo-deny 0.20.2'; exit 0; fi\n";
+    // As 0.20.2 does: `--config` is cargo-deny's own option, and after
+    // the subcommand it is a usage error, exit 2.
+    let usage = "case \" $* \" in *\" check \"*\" --config \"*) echo \"error: unexpected argument '--config' found\" >&2; exit 2;; esac\n";
     let check = |exit: u8| {
         format!(
-            "{version}echo \"$*\" > '{seen}'\nwhile [ $# -gt 0 ]; do [ \"$1\" = --config ] && cat \"$2\" >> '{seen}'; shift; done\nexit {exit}\n",
+            "{version}{usage}echo \"$*\" > '{seen}'\nwhile [ $# -gt 0 ]; do [ \"$1\" = --config ] && cat \"$2\" >> '{seen}'; shift; done\nexit {exit}\n",
             seen = seen.display()
         )
     };
@@ -1461,11 +1467,20 @@ fn a_merge_that_moves_the_lock_is_held_to_cargo_deny_under_mains_config() {
         "{found}"
     );
     let asked = fs::read_to_string(&seen).unwrap();
-    assert!(asked.starts_with("check --config "), "{asked}");
-    assert!(asked.contains(" advisories sources\n"), "{asked}");
+    assert!(asked.starts_with("--config "), "{asked}");
+    assert!(asked.contains(" check advisories sources\n"), "{asked}");
     assert!(asked.ends_with(&mains), "main's config: {asked}");
     assert!(!asked.contains("the merge's own config"), "{asked}");
     assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{found}");
+
+    // A usage error judged nothing, and says so rather than a finding.
+    let (code, unjudged) = land_with_deny(&root, &check(2));
+    assert_eq!(code, 1, "{unjudged}");
+    assert!(unjudged.contains("cargo-deny judged nothing"), "{unjudged}");
+    assert!(
+        !unjudged.contains("finds what main's deny.toml refuses"),
+        "{unjudged}"
+    );
 
     let (_, passed) = land_with_deny(&root, &check(0));
     assert!(passed.contains("Cargo.lock moved since"), "{passed}");

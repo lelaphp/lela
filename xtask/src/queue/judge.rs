@@ -309,21 +309,52 @@ fn deny(root: &Path, base: &str) -> Result<()> {
     crate::make_parent(&path)?;
     crate::write(&path, config)?;
     say!(JUDGE, "Cargo.lock moved since {}: cargo deny", short(base));
+    // `--config` is cargo-deny's own option, before the subcommand: 0.20.2
+    // refuses `check --config` as a usage error.
     let status = Command::new("cargo-deny")
-        .arg("check")
         .arg("--config")
         .arg(&path)
-        .args(["advisories", "sources"])
+        .args(["check", "advisories", "sources"])
         .current_dir(root)
         .status()
         .context("running cargo-deny check")?;
     crate::remove(&path)?;
-    if !status.success() {
-        return refuse(format!(
+    match Denied::of(status.code()) {
+        Denied::Nothing => Ok(()),
+        Denied::Found => refuse(format!(
             "cargo deny check advisories sources finds what main's deny.toml refuses ({status})"
-        ));
+        )),
+        Denied::Unjudged => refuse(format!(
+            "cargo-deny judged nothing ({status}): no exit of a finding in advisories or sources, so a usage error or a failure to run, which its output above names"
+        )),
     }
-    Ok(())
+}
+
+/// What one `cargo-deny check advisories sources` said, read from its
+/// exit once. cargo-deny exits with a bit per check that failed,
+/// advisories 1 and sources 8 among them ([`DENY_FOUND`]), and clap's
+/// usage error is 2, the bit of `bans`, which this check never runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Denied {
+    /// Exit 0: neither check found anything.
+    Nothing,
+    /// An exit made only of the bits of the checks it ran.
+    Found,
+    /// Any other exit, or none (a signal): the run judged nothing.
+    Unjudged,
+}
+
+/// The exit bits of the two checks the land runs: advisories and sources.
+const DENY_FOUND: i32 = 1 | 8;
+
+impl Denied {
+    fn of(code: Option<i32>) -> Denied {
+        match code {
+            Some(0) => Denied::Nothing,
+            Some(bits) if bits & !DENY_FOUND == 0 => Denied::Found,
+            _ => Denied::Unjudged,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +383,18 @@ mod tests {
             job.contains("run: cargo deny check advisories sources\n"),
             "{job}"
         );
+    }
+
+    /// cargo-deny's exit is read once: its usage error is no finding.
+    #[test]
+    fn a_usage_error_is_no_finding_and_a_findings_bits_are_the_checks_run() {
+        assert_eq!(Denied::of(Some(0)), Denied::Nothing);
+        for found in [1, 8, 9] {
+            assert_eq!(Denied::of(Some(found)), Denied::Found, "{found}");
+        }
+        for unjudged in [Some(2), Some(3), Some(101), None] {
+            assert_eq!(Denied::of(unjudged), Denied::Unjudged, "{unjudged:?}");
+        }
     }
 
     /// Building a judge keeps the current tip's alone: every other tip's
