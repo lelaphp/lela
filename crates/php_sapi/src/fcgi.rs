@@ -64,10 +64,15 @@ impl Conn {
     }
 }
 
-/// `fcgi_set_allowed_clients`: the addresses `list` names, a comma
-/// between two, each one that is no address handed to `wrong` for the
-/// host to log as its own; an empty list lets nothing in.
-pub fn allowed_clients(list: &[u8], mut wrong: impl FnMut(&[u8])) -> Vec<IpAddr> {
+/// `fcgi_set_allowed_clients`, and `fcgi_listen`'s read of
+/// `FCGI_WEB_SERVER_ADDRS`, which is the same: the addresses `list`
+/// names, a comma between two. Each word that is no address is handed to
+/// `log`, the host's `fcgi_log`, as `Wrong IP address '<word>' in
+/// listen.allowed_clients`, and a list that names none as `There are no
+/// allowed addresses`, with no newline after either
+/// (`Z/main/fastcgi.c:793`, `:800`, `:853`, `:860`); an empty list lets
+/// nothing in.
+pub fn allowed_clients(list: &[u8], mut log: impl FnMut(&[u8])) -> Vec<IpAddr> {
     let mut allowed = Vec::new();
     for word in list.split(|b| *b == b',') {
         match std::str::from_utf8(word)
@@ -75,10 +80,36 @@ pub fn allowed_clients(list: &[u8], mut wrong: impl FnMut(&[u8])) -> Vec<IpAddr>
             .and_then(|w| w.parse::<IpAddr>().ok())
         {
             Some(ip) => allowed.push(ip),
-            None => wrong(word),
+            None => log(&[
+                &b"Wrong IP address '"[..],
+                word,
+                b"' in listen.allowed_clients",
+            ]
+            .concat()),
         }
     }
+    if allowed.is_empty() {
+        log(b"There are no allowed addresses");
+    }
     allowed
+}
+
+/// `fcgi_accept_request`'s check of an accepted connection: whether
+/// `peer` may connect ([`allowed`]), one that may not handed to `log`,
+/// the host's `fcgi_log`, as `Connection disallowed: IP address '<peer>'
+/// has been dropped.` with no newline after it
+/// (`Z/main/fastcgi.c:1402`), for the host to close.
+#[must_use]
+pub fn admitted(list: Option<&[IpAddr]>, peer: Option<IpAddr>, log: impl FnOnce(&[u8])) -> bool {
+    if allowed(list, peer) {
+        return true;
+    }
+    log(format!(
+        "Connection disallowed: IP address '{}' has been dropped.",
+        client_ip(peer).unwrap_or_default()
+    )
+    .as_bytes());
+    false
 }
 
 /// `fcgi_is_allowed`: whether `peer` may connect, every peer where no
@@ -87,8 +118,7 @@ pub fn allowed_clients(list: &[u8], mut wrong: impl FnMut(&[u8])) -> Vec<IpAddr>
 /// octets of an IPv4 and all sixteen of an IPv6 (`sizeof(sin6_addr)`,
 /// `Z/main/fastcgi.c:1334`), and an IPv4-mapped IPv6 peer by the IPv4
 /// it maps, its last four octets (`Z/main/fastcgi.c:1338-1341`).
-#[must_use]
-pub fn allowed(allowed: Option<&[IpAddr]>, peer: Option<IpAddr>) -> bool {
+fn allowed(allowed: Option<&[IpAddr]>, peer: Option<IpAddr>) -> bool {
     let (Some(list), Some(peer)) = (allowed, peer) else {
         return true;
     };
@@ -115,7 +145,7 @@ pub fn client_ip(peer: Option<IpAddr>) -> Option<String> {
 mod tests {
     use std::net::IpAddr;
 
-    use super::allowed;
+    use super::{admitted, allowed, allowed_clients};
 
     fn ip(text: &str) -> IpAddr {
         text.parse().expect("the test names an address")
@@ -159,5 +189,50 @@ mod tests {
         assert!(allowed(None, Some(ip("::1"))));
         assert!(allowed(Some(&[]), None));
         assert!(!allowed(Some(&[]), Some(ip("::1"))));
+    }
+
+    /// What `list` logs, each message as the host's `fcgi_log` is handed
+    /// it, and the addresses it names.
+    fn logged(list: &[u8]) -> (Vec<String>, Vec<IpAddr>) {
+        let mut log = Vec::new();
+        let named = allowed_clients(list, |message| {
+            log.push(String::from_utf8_lossy(message).into_owned());
+        });
+        (log, named)
+    }
+
+    /// Each word that is no address is logged with php's words, and a
+    /// list naming none, the empty one among them, is logged once more.
+    #[test]
+    fn a_wrong_word_and_a_list_naming_none_are_logged_with_php_s_words() {
+        let wrong = |word: &str| format!("Wrong IP address '{word}' in listen.allowed_clients");
+        let none = "There are no allowed addresses".to_owned();
+        assert_eq!(
+            logged(b"bogus,::1x"),
+            (vec![wrong("bogus"), wrong("::1x"), none.clone()], vec![])
+        );
+        assert_eq!(logged(b""), (vec![wrong(""), none], vec![]));
+        assert_eq!(
+            logged(b"127.0.0.1,,::1"),
+            (vec![wrong("")], vec![ip("127.0.0.1"), ip("::1")])
+        );
+    }
+
+    /// A peer the list refuses is logged by the address a log names, a
+    /// mapped IPv4 as its IPv4, and one it lets in is not.
+    #[test]
+    fn a_refused_peer_is_logged_by_its_address() {
+        let mut log = Vec::new();
+        let list = [ip("192.0.2.1")];
+        assert!(!admitted(Some(&list), Some(ip("::ffff:127.0.0.1")), |m| {
+            log.push(m.to_vec());
+        }));
+        assert!(admitted(Some(&list), Some(ip("192.0.2.1")), |m| {
+            log.push(m.to_vec());
+        }));
+        assert_eq!(
+            log,
+            [b"Connection disallowed: IP address '127.0.0.1' has been dropped.".to_vec()]
+        );
     }
 }

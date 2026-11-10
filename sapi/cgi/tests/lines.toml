@@ -266,6 +266,22 @@ env = { PHP_FCGI_CHILDREN = "-1" }
 args = ["-n", "-b", "127.0.0.1:{port}"]
 env = { PHP_FCGI_CHILDREN = "", PHP_FCGI_MAX_REQUESTS = "-2" }
 
+# `FCGI_WEB_SERVER_ADDRS` is read once a TCP socket is bound and before
+# `PHP_FCGI_MAX_REQUESTS` is: each word that is no address is said as
+# `fcgi_log` says it, on stderr with no newline after it, and a list that
+# names none, the empty one among them, is said once more
+# (`Z/main/fastcgi.c:793`, `:800`). A Unix socket reads no list (#4398).
+[[line]]
+name = "fastcgi-a-wrong-allowed-address-is-said"
+args = ["-n", "-b", "127.0.0.1:{port}"]
+env = { FCGI_WEB_SERVER_ADDRS = "bogus,::1x", PHP_FCGI_MAX_REQUESTS = "-1" }
+[[line.then]]
+args = ["-n", "-b", "127.0.0.1:{port}"]
+env = { FCGI_WEB_SERVER_ADDRS = "" }
+[[line.then]]
+args = ["-n", "-b", "{dir}/php.sock"]
+env = { FCGI_WEB_SERVER_ADDRS = "bogus" }
+
 # `PHP_FCGI_MAX_REQUESTS=1`: the process serves one request and ends, with
 # the request's exit status.
 [[line]]

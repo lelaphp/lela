@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Kind, Outgoing};
 use php_sapi::cgi::{C_NUMBER, CachedDisk, ini_text};
-use php_sapi::fcgi::{Conn, allowed, client_ip};
+use php_sapi::fcgi::{Conn, admitted, client_ip};
 use php_sapi::{
     Aborted, Body, Chdir, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, NotAlone,
     OutputSink, ProgramFile, RequestDescription, ResponseHead, WebRequest,
@@ -249,20 +249,16 @@ fn log_fastcgi(_level: Level, message: &[u8]) {
     let _ = wire.write(Kind::Stderr, message);
 }
 
-/// `fcgi_set_allowed_clients` over `listen.allowed_clients`, each wrong
-/// address logged as the child logs it; `None` lets every address in.
+/// `fcgi_set_allowed_clients` over `listen.allowed_clients`, what it says
+/// logged as the child logs it; `None` lets every address in.
 fn allowed_clients(list: Option<&[u8]>) -> Option<Vec<IpAddr>> {
-    let allowed = php_sapi::fcgi::allowed_clients(list?, |word| {
-        zlog!(
-            Error @ (crate::zlog::Site::FCGI),
-            "Wrong IP address '{}' in listen.allowed_clients",
-            String::from_utf8_lossy(word)
-        );
-    });
-    if allowed.is_empty() {
-        zlog!(Error @ (crate::zlog::Site::FCGI), "There are no allowed addresses");
-    }
-    Some(allowed)
+    Some(php_sapi::fcgi::allowed_clients(list?, fcgi_log))
+}
+
+/// `fpm_fcgi_log`: a line `fastcgi.c` says, at `ZLOG_ERROR` from
+/// [`crate::zlog::Site::FCGI`].
+fn fcgi_log(message: &[u8]) {
+    zlog!(Error @ (crate::zlog::Site::FCGI), "{}", String::from_utf8_lossy(message));
 }
 
 /// An entry of the `.user.ini` cache, `user_config_cache_entry`.
@@ -505,12 +501,7 @@ impl Worker {
                     continue;
                 }
             };
-            if !allowed(self.allowed.as_deref(), peer) {
-                zlog!(
-                    Error @ (crate::zlog::Site::FCGI),
-                    "Connection disallowed: IP address '{}' has been dropped.",
-                    client_ip(peer).unwrap_or_default()
-                );
+            if !admitted(self.allowed.as_deref(), peer, fcgi_log) {
                 conn.close(true);
                 continue;
             }
