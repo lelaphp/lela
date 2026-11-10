@@ -1,7 +1,7 @@
 //! `xtask done`, the definition of done (harness-design.md §4.5): the
 //! conditions unmet for the changes since a base commit, computed from git
 //! and the store and nothing else, so its three callers (§4.5: the Stop
-//! command hook, pre-push, and CI per commit) read one list. The base is
+//! command hook, pre-push, and `worktree land`) read one list. The base is
 //! the merge base of `HEAD` with `main` ([`Base`]), or with `--base`; the
 //! changes are every file the working tree differs in from it, committed
 //! since or not, plus the untracked files.
@@ -165,11 +165,8 @@ pub struct Verdict {
     /// Each unmet condition, typed, in the order of the conditions.
     pub unmet: Vec<Unmet>,
     /// What the hook cannot tell: the harness's own files in the diff,
-    /// and the readings of an instrument this run did not take.
+    /// among them.
     pub notes: Vec<String>,
-    /// The instruments the caller said this run did not take (`--not-run`),
-    /// whose missing readings are notes and not unmet (#2477).
-    pub not_run: Vec<String>,
     /// The readings a ticketed checkout leaves to the merge check, each
     /// `<instrument> for <scope>`: its `[[owed]]` row is held at the merge
     /// (#3618 ruling 2).
@@ -209,12 +206,8 @@ impl Verdict {
                 format!("; {}", Counts::of(&self.unmet))
             }
         );
-        if self.met() && self.not_run.is_empty() {
+        if self.met() {
             out.push_str("every condition of done is met\n");
-        } else if self.met() {
-            out.push_str("every condition of done is met over what ran; ");
-            out.push_str(&self.did_not_run());
-            out.push('\n');
         } else {
             bullets(&mut out, "unmet", &self.messages());
         }
@@ -237,7 +230,6 @@ impl Verdict {
         reading.count("unmet", self.unmet.len() as u64)?;
         Counts::of(&self.unmet).count_on(&mut reading)?;
         reading.count("notes", self.notes.len() as u64)?;
-        reading.count("not_run", self.not_run.len() as u64)?;
         reading.message = if self.met() {
             format!("every condition of done is met since {}", self.base)
         } else {
@@ -248,23 +240,16 @@ impl Verdict {
                 self.messages().join("; ")
             )
         };
-        if !self.not_run.is_empty() {
-            reading.message = format!("{}; {}", reading.message, self.did_not_run());
-        }
         Ok(reading)
-    }
-
-    /// What the head line and the reading say of `--not-run`, so a pass
-    /// beside it never reads as one over those instruments' readings.
-    fn did_not_run(&self) -> String {
-        format!("{} did not run in this run", self.not_run.join(" and "))
     }
 
     /// The list as one object, `done --format json` (#3494): the base,
     /// the changed files and crates, the branch's ticket, the counts by
     /// kind, each unmet condition as `{ kind, instrument, scope, message,
-    /// command }`, and the notes, the delegated readings and `--not-run`;
-    /// `v` is the shape's version ([`JSON_V`]).
+    /// command }`, and the notes and the delegated readings; `v` is the
+    /// shape's version ([`JSON_V`]). `not_run` is the empty list: it named
+    /// the instruments `--not-run` named, and that went with CI's `done`
+    /// (#4372), so the field stays, empty, while the shape is version 1.
     pub fn to_json(&self) -> Value {
         json!({
             "v": JSON_V,
@@ -277,7 +262,7 @@ impl Verdict {
             "unmet": self.unmet,
             "notes": self.notes,
             "delegated": self.delegated,
-            "not_run": self.not_run,
+            "not_run": [],
         })
     }
 }
@@ -518,10 +503,7 @@ pub(crate) enum Condition {
     /// unsupported operations is met, [`miri_unsupported`], and every other is
     /// held (#2416). A crate whose library or binary sources name
     /// `debug_assertions` is asked for `clippy` twice, at its name and at
-    /// `<name>/release`, the release profile's lint ([`scopes_of`], #2392). A
-    /// caller's `--not-run` moves an instrument's missing reading off this list
-    /// and onto the notes, as CI's does for the oracle job's two while that job
-    /// is skipped (#2477).
+    /// `<name>/release`, the release profile's lint ([`scopes_of`], #2392).
     Fresh,
     /// Every kernel or native added in the diff has a witness: the
     /// `witness` reading's `missing` is zero for the crate.
@@ -565,8 +547,8 @@ pub(crate) enum Condition {
     /// record, the way `xtask` is not asked for a witness (#31). In
     /// practice this is the Stop hook's and pre-push's condition: the
     /// record is the clone's own configuration, which a push does not
-    /// carry, and a pull request's checkout is detached, so CI's `done` is
-    /// not asked and has no store to answer from if it were.
+    /// carry, and `_merge`'s branch, `staging`, records none, so the
+    /// land's `done` is not asked.
     TicketBoxes,
     /// A change `permit --after` kept, one no call's line could write, is
     /// unmet until a person commits it or restores it to `HEAD`, read from
@@ -622,18 +604,13 @@ impl Condition {
 
 /// Judge the changes since the merge base with `base`, `main`
 /// ([`Base::of`]) when none is given, each key held to the one `snapshot`
-/// gives: the tree is read once, before anything is judged. A reading of
-/// an instrument in `not_run` that the store does not hold is a note and
-/// not unmet: the caller says the run that would write it did not run,
-/// as CI's `done` says of the oracle job's while that job is skipped
-/// (#2477). One the store holds is judged as any other.
+/// gives: the tree is read once, before anything is judged.
 pub fn judge(
     snapshot: &Snapshot,
     manifest: &Manifest,
     registry: &Registry,
     store: &Store,
     base: Option<&str>,
-    not_run: &[String],
 ) -> Result<Verdict> {
     let root = snapshot.root();
     let base = Base::of(root, base)?;
@@ -644,7 +621,6 @@ pub fn judge(
     let ticket = track::head_ticket(root)?;
     let mut unmet = Vec::new();
     let mut notes = Vec::new();
-    let mut not_judged = Vec::new();
 
     let carried = Carried::binary(root)?;
     let asking = Asking {
@@ -653,7 +629,6 @@ pub fn judge(
         store,
         base: &base.commit,
         carried: &carried,
-        not_run,
         ticketed: ticket.is_some(),
     };
     let mut delegated = Vec::new();
@@ -666,24 +641,9 @@ pub fn judge(
                         &asking,
                         krate,
                         &now,
-                        &mut not_judged,
                         (&mut unmet, &mut delegated),
                         &mut notes,
                     )?;
-                }
-                if !not_run.is_empty() {
-                    notes.push(format!(
-                        "{} did not run in this run, so condition 1 judged {}",
-                        not_run.join(" and "),
-                        if not_judged.is_empty() {
-                            "no reading of theirs: no touched crate is asked for one".to_owned()
-                        } else {
-                            format!(
-                                "none of the readings it asks for: {}",
-                                not_judged.join(", ")
-                            )
-                        }
-                    ));
                 }
             }
             Condition::Witnessed | Condition::APersonsFiles => {}
@@ -736,7 +696,6 @@ pub fn judge(
         ticket,
         unmet,
         notes,
-        not_run: not_run.to_vec(),
         delegated,
     })
 }
@@ -744,8 +703,7 @@ pub fn judge(
 /// Condition 10: on a diff that moves the part of a file of
 /// [`key::BUILT_UNDER`] that decides, `built_under` ([`key::moved`]), the
 /// `fold` reading of `sapi/cli`, fresh over its key now and passing. A skip, the reading of a host that is not `aarch64`, is met and a note
-/// naming why, and where the caller says `fold` did not run, a missing
-/// reading is a note.
+/// naming why.
 fn folded(
     asking: &Asking,
     built_under: &[&str],
@@ -770,7 +728,6 @@ fn folded(
         );
         Unmet::over(kind, instrument, scope, message).cleared_by(command.clone())
     };
-    let not_run = asking.not_run.iter().any(|n| n == instrument);
     match asking.store.over(instrument, scope, &key, pin)? {
         Freshness::Fresh(reading) if reading.status == Status::Pass => {}
         // The sensor reads an `aarch64` Mac alone: a host it cannot read has
@@ -787,9 +744,6 @@ fn folded(
             );
             unmet.push(Unmet::over(Kind::Failing, instrument, scope, message).cleared_by(command));
         }
-        Freshness::Stale { .. } | Freshness::Never if not_run => notes.push(format!(
-            "{instrument} did not run in this run, so condition 10 judged no reading of it"
-        )),
         Freshness::Stale { last, .. } => unmet.push(unread(Kind::Stale, last_failed(&last))),
         Freshness::Never => unmet.push(unread(Kind::Missing, "")),
     }
@@ -1034,8 +988,6 @@ struct Asking<'a> {
     store: &'a Store,
     base: &'a str,
     carried: &'a Carried,
-    /// The instruments the caller's run did not take (#2477).
-    not_run: &'a [String],
     /// Whether the checkout's branch records a ticket, where the rows held
     /// at the merge are delegated.
     ticketed: bool,
@@ -1045,16 +997,10 @@ struct Asking<'a> {
 /// subset held to no regression against the base, from the two kept runs
 /// [`against::regressed`] diffs, and never from a `phpt` reading but the
 /// one excused skip: where no run is kept here, a fresh skip the missing
-/// engine binary causes is met ([`no_binary_yet`], #132), and a caller
-/// that names `phpt` not run has it noted. An oracle variant the pin does
-/// not carry is unmet, naming it, as `Oracles::of` refuses one.
-fn no_regression(
-    asking: &Asking,
-    krate: &Crate,
-    key: &str,
-    not_judged: &mut Vec<String>,
-    unmet: &mut Vec<Unmet>,
-) -> Result<()> {
+/// engine binary causes is met ([`no_binary_yet`], #132). An oracle
+/// variant the pin does not carry is unmet, naming it, as `Oracles::of`
+/// refuses one.
+fn no_regression(asking: &Asking, krate: &Crate, key: &str, unmet: &mut Vec<Unmet>) -> Result<()> {
     let (scope, pin) = (&krate.name, asking.manifest.pin()?);
     let held = |kind: Kind, message: String| {
         let command = command_taking(phpt::INSTRUMENT, scope);
@@ -1080,9 +1026,7 @@ fn no_regression(
             let digest = asking.manifest.pin_digest();
             let read = asking.store.over("phpt", scope, key, digest)?.fresh();
             let excused = read.as_ref().is_some_and(no_binary_yet);
-            if asking.not_run.iter().any(|n| n == "phpt") {
-                not_judged.push(format!("phpt for {scope}"));
-            } else if !excused {
+            if !excused {
                 unmet.push(held(Kind::Missing, format!("phpt: {why}")));
             }
         }
@@ -1139,19 +1083,17 @@ impl KeyNow {
 }
 
 /// Conditions 1 and 2 for one touched crate, held to its key now, so a
-/// reading taken before a crate it is built from changed is stale. A
-/// missing reading of an instrument in `not_run` goes to `not_judged`,
-/// and a fresh passing `test` reading whose tests skipped for a fact this
+/// reading taken before a crate it is built from changed is stale, and a
+/// fresh passing `test` reading whose tests skipped for a fact this
 /// machine did not promise is a note naming how many (#3085).
 fn fresh_readings(
     asking: &Asking,
     krate: &Crate,
     now: &KeyNow,
-    not_judged: &mut Vec<String>,
     (unmet, delegated): (&mut Vec<Unmet>, &mut Vec<String>),
     notes: &mut Vec<String>,
 ) -> Result<()> {
-    let (root, store, not_run) = (asking.snapshot.root(), asking.store, asking.not_run);
+    let (root, store) = (asking.snapshot.root(), asking.store);
     let pin = asking.manifest.pin_digest();
     let key = &now.key;
     let name = &krate.name;
@@ -1187,12 +1129,8 @@ fn fresh_readings(
         let reading = match store.over(instrument, &scope, key, pin)? {
             Freshness::Fresh(reading) => reading,
             Freshness::Never => {
-                if not_run.iter().any(|n| n == instrument) {
-                    not_judged.push(format!("{instrument} for {scope}"));
-                } else {
-                    let message = format!("{instrument}: no reading for {scope}");
-                    unmet.push(held(Kind::Missing, message));
-                }
+                let message = format!("{instrument}: no reading for {scope}");
+                unmet.push(held(Kind::Missing, message));
                 continue;
             }
             Freshness::Stale { last, moved } => {
@@ -1245,7 +1183,7 @@ fn fresh_readings(
         }
     }
     if phpt {
-        no_regression(asking, krate, key, not_judged, unmet)?;
+        no_regression(asking, krate, key, unmet)?;
     }
     Ok(())
 }
@@ -1487,7 +1425,6 @@ pub(crate) fn command(
 ) -> Result<()> {
     let crate::cli::Command::Done {
         base,
-        not_run,
         caller,
         format,
         peek,
@@ -1501,7 +1438,6 @@ pub(crate) fn command(
     answer(
         (root, manifest, &registry, store),
         (base.as_deref(), caller),
-        &not_run,
         (format, peek),
     )
 }
@@ -1515,18 +1451,16 @@ pub enum Format {
 }
 
 /// The command: judge, write the reading, print the list, fail while
-/// anything is unmet. An instrument `not_run` names that no `[[owed]]`
-/// row does is refused, naming the ones the rows do.
+/// anything is unmet.
 pub fn run(
     root: &Path,
     manifest: &Manifest,
     registry: &Registry,
     store: &Store,
     (base, caller): (Option<&str>, Caller),
-    not_run: &[String],
 ) -> Result<()> {
     let asked = (root, manifest, registry, store);
-    answer(asked, (base, caller), not_run, (Format::Text, false))
+    answer(asked, (base, caller), (Format::Text, false))
 }
 
 /// [`run`] in `format`, and where `peek`, writing nothing: no reading and
@@ -1535,18 +1469,10 @@ pub fn run(
 fn answer(
     (root, manifest, registry, store): (&Path, &Manifest, &Registry, &Store),
     (base, caller): (Option<&str>, Caller),
-    not_run: &[String],
     (format, peek): (Format, bool),
 ) -> Result<()> {
-    if let Some(unowed) = not_run.iter().find(|n| manifest.owing(n).is_none()) {
-        let owed: Vec<&str> = manifest.owed.iter().map(|r| r.instrument.name()).collect();
-        bail!(
-            "--not-run {unowed}: no [[owed]] row names it, so no crate is asked for its reading; the rows name {}",
-            owed.join(", ")
-        );
-    }
     let snapshot = Snapshot::disk(root)?;
-    let verdict = judge(&snapshot, manifest, registry, store, base, not_run)?;
+    let verdict = judge(&snapshot, manifest, registry, store, base)?;
     let reading = called(verdict.reading(manifest, &snapshot)?, caller);
     let outcome = if peek {
         Outcome::of(&[reading])
@@ -1749,7 +1675,7 @@ pub(crate) fn hook(
             parts.push(part);
             continue;
         }
-        match judge(&snapshot, manifest, registry, store, None, &[]) {
+        match judge(&snapshot, manifest, registry, store, None) {
             Ok(verdict) => {
                 if let Err(err) = permit::settle(store, root) {
                     eprintln!("xtask done: a settled kept change was not removed: {err:#}");

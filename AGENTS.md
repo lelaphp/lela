@@ -139,7 +139,7 @@ Commands:
   api-check          Hold the seams: regenerate and diff each lock, hold crate edges, `use` paths and the bundle order; one reading per seam and per crate
   status             Render one section from the manifest, registry, store, repository and pinned tree; computes nothing else
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
-  done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
+  done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and `land` read the list
   track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
   worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` say its owner, `queue` and `land` run the merge queue
   ticket             A ticket, one GitHub issue: `read`, `ready` and `close` hold it to its boxes; `view` and `brief` are what a builder reads; `parent` measures a chart sheet
@@ -174,7 +174,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=6f7d466bce8af055e99b87705ef91d53e8c9fba5f5e45a77420d53832f998faf out=2b0f8d23eca10460d934cafadd8569942498ddfcc4c6db0478f9986e505504a6 -->
+<!-- /computed in=846194222b5ea3438e0d01f5f84eedb0c4f92f593cf92385d3a01765ac245526 out=6d7323f3774cb04413d9909d5cf1d31315ef9b1d87bffedb520314341d496897 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

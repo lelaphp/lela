@@ -243,7 +243,7 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
 fn judged(root: &Path, manifest: &Manifest, store: &Store) -> done::Verdict {
     let registry = Registry::load(root).expect("the registry");
     let snapshot = xtask::key::Snapshot::disk(root).expect("the tree");
-    done::judge(&snapshot, manifest, &registry, store, Some("HEAD"), &[]).expect("the verdict")
+    done::judge(&snapshot, manifest, &registry, store, Some("HEAD")).expect("the verdict")
 }
 
 /// A fresh passing reading of `php_heap` for each instrument condition 1

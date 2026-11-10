@@ -238,7 +238,6 @@ pub(crate) fn run(root: &Path, base: &str) -> Result<()> {
         &registry,
         &store,
         (Some(base), done::Caller::Land),
-        &[],
     )
 }
 

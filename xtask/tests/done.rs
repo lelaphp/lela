@@ -128,7 +128,6 @@ fn judge_since(root: &Path, base: Option<&str>) -> Verdict {
         &registry,
         &store,
         base,
-        &[],
     )
     .unwrap()
 }
@@ -846,81 +845,6 @@ fn an_unchanged_tree_is_done() {
     assert!(verdict.crates.is_empty());
     let out = xtask(&root, &["done", "--base", "HEAD"]).ok();
     assert!(out.contains("every condition of done is met"), "{out}");
-}
-
-/// CI's `done` while the oracle job is skipped (#2477): the instruments
-/// that job runs are named `--not-run`, so their missing readings are a
-/// note that they did not run, the exit is not red for their absence, and
-/// the head line and the reading say a pass is over what ran and nothing
-/// else. A reading of one that the store does hold is judged as any other.
-#[test]
-fn an_instrument_named_not_run_is_a_note_and_never_a_silent_pass() {
-    const ORACLE_JOB: [&str; 4] = ["--not-run", "witness", "--not-run", "crosscheck"];
-    let root = scratch("not-run");
-    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
-    let store = Store::of_workspace(&root);
-    for (instrument, scope) in asked_of(&root, "ext/pcre") {
-        if instrument != "witness" && instrument != "crosscheck" {
-            met(&store, &root, instrument, &scope);
-        }
-    }
-    let ran = xtask(&root, &["done", "--base", "HEAD"]);
-    assert_eq!(ran.code(), 1, "{ran}");
-    let out = ran.stdout;
-    assert!(out.contains("- witness: no reading for ext/pcre"), "{out}");
-
-    let mut args = vec!["done", "--base", "HEAD"];
-    args.extend(ORACLE_JOB);
-    let out = xtask(&root, &args).ok();
-    assert!(
-        out.contains("every condition of done is met over what ran; witness and crosscheck did not run in this run\n"),
-        "{out}"
-    );
-    assert!(
-        out.contains("judged none of the readings it asks for: witness for ext/pcre, crosscheck for ext/pcre, crosscheck for ext/pcre/ri"),
-        "{out}"
-    );
-    let reading = store.read("done", "workspace").unwrap().unwrap();
-    assert_eq!(reading.status, Status::Pass);
-    assert_eq!(reading.numbers["not_run"], 2.into());
-    assert!(
-        reading
-            .message
-            .ends_with("; witness and crosscheck did not run in this run"),
-        "{}",
-        reading.message
-    );
-
-    // A reading the store holds is judged: the lane ran and failed.
-    let mut failed = fresh(&root, "witness", "ext/pcre");
-    failed.status = Status::Fail;
-    failed.message = "1 fence failed".into();
-    store.record(&[failed]).unwrap();
-    let ran = xtask(&root, &args);
-    assert_eq!(ran.code(), 1, "{ran}");
-    let out = ran.stdout;
-    assert!(
-        out.contains("- witness: ext/pcre fail: 1 fence failed"),
-        "{out}"
-    );
-
-    // With no crate touched the note still says what did not run.
-    let unchanged = scratch("not-run-unchanged");
-    let mut args = vec!["done", "--base", "HEAD"];
-    args.extend(ORACLE_JOB);
-    let out = xtask(&unchanged, &args).ok();
-    assert!(out.contains("no touched crate is asked for one"), "{out}");
-
-    // What `--not-run` names is an instrument an `[[owed]]` row names
-    // (#3206), and the refusal names the rows' instruments.
-    let ran = xtask(&unchanged, &["done", "--not-run", "oracle"]);
-    assert_eq!(ran.code(), 1, "{ran}");
-    assert!(
-        ran.stderr
-            .contains("--not-run oracle: no [[owed]] row names it")
-            && ran.stderr.contains("the rows name clippy, test, witness"),
-        "{ran}"
-    );
 }
 
 #[test]

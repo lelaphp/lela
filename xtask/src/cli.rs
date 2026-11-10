@@ -126,7 +126,7 @@ pub(crate) enum Command {
         bar: f64,
     },
     /// The definition of done: the conditions unmet since the base, and
-    /// exit 1 while any is; the Stop hook, pre-push and CI read the list.
+    /// exit 1 while any is; the Stop hook, pre-push and `land` read the list.
     Done {
         /// Measure the changes since the merge base with this ref;
         /// default `main`, or `origin`'s where the checkout has none.
@@ -136,12 +136,6 @@ pub(crate) enum Command {
         /// otherwise print the block JSON with the list while anything is unmet.
         #[arg(long)]
         hook: bool,
-        /// An instrument this run did not take: a missing reading of it is
-        /// a note that it did not run, never unmet and never met. CI names
-        /// the oracle job's two while that job is skipped (#2477).
-        /// An `[[owed]]` row names it, or the run is refused.
-        #[arg(long = "not-run", value_name = "INSTRUMENT", conflicts_with = "hook")]
-        not_run: Vec<String>,
         /// Who asks, which the reading carries (#3619); CI where
         /// `GITHUB_ACTIONS` is set, a hand otherwise. The hook's is the
         /// event it came in on.

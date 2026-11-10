@@ -1939,7 +1939,7 @@ fn unmet_here(root: &Path, manifest: &Manifest, reading: &Reading) -> Result<()>
     store.record(std::slice::from_ref(reading))?;
     let registry = crate::divergence::Registry::load(root)?;
     let snapshot = Snapshot::disk(root)?;
-    let verdict = crate::done::judge(&snapshot, manifest, &registry, &store, None, &[])?;
+    let verdict = crate::done::judge(&snapshot, manifest, &registry, &store, None)?;
     crate::permit::settle(&store, root)?;
     if !verdict.met() {
         bail!("done is unmet in this worktree:\n{}", verdict.render());
