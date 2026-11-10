@@ -21,8 +21,8 @@ use std::ffi::{CStr, CString, c_char};
 use std::ptr;
 
 /// ICU's C functions under the names `urename.h` gives them, the major
-/// version appended (`u_errorName_78`), which `build.rs` hands over as
-/// `INTL_ICU_SUFFIX`.
+/// version appended (`u_errorName_<major>`), which `build.rs` hands over
+/// as `INTL_ICU_SUFFIX`, the major the pin's `[closure]` names.
 macro_rules! icu {
     ($( $(#[$meta:meta])* fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?; )*) => {
         unsafe extern "C" { $(

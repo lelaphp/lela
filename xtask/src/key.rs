@@ -494,11 +494,14 @@ pub(crate) const READ_BY_TESTS: [(&str, &[&str]); 2] = [
 /// `php_unit`'s and `php_engine`'s generate the opcode enum and the
 /// dispatch from `ops.toml`, `php_ssa`'s php's table of natives from
 /// `data/func-infos.toml`; `php_engine`'s also digests four crates'
-/// sources, which its closure holds.
-pub(crate) const READ_BY_BUILDS: [(&str, &[&str]); 3] = [
+/// sources, which its closure holds. `ext/intl`'s reads the ICU major
+/// from the pin's `[closure]`, and its tests hold that reading to the pin
+/// (#4406).
+pub(crate) const READ_BY_BUILDS: [(&str, &[&str]); 4] = [
     ("crates/php_unit", &["ops.toml"]),
     ("crates/php_engine", &["ops.toml"]),
     ("crates/php_ssa", &["data/func-infos.toml"]),
+    ("ext/intl", &["oracle.toml"]),
 ];
 
 /// The files `list`, [`READ_BY_TESTS`] or [`READ_BY_BUILDS`], names for

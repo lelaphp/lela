@@ -1289,6 +1289,7 @@ dependencies = [
  "cc",
  "php_ext",
  "php_ext_date",
+ "toml",
 ]
 
 [[package]]

@@ -1,8 +1,9 @@
 //! The `intl` extension: `php-src/ext/intl` as one crate under `ext/`
 //! (ADR-0004), behind the `intl` feature as php builds it `--enable-intl`,
-//! over the ICU4C the pinned keg links (icu4c@78), found through
-//! `pkg-config` and bound in [`ffi`], never vendored; php's intl C++ over
-//! ICU's C++ classes is reached through the `extern "C"` shim in
+//! over the ICU4C the pinned keg links (`icu4c@<major>`, the major the
+//! pin's `[closure]` names; #4406), found through `pkg-config` and bound
+//! in [`ffi`], never vendored; php's intl C++ over ICU's C++ classes is
+//! reached through the `extern "C"` shim in
 //! `src/ffi/shim/` (design §7.2, revision 75; #1573). Its state on the
 //! value (ADR-0005). The phpt subset is `php-src/ext/intl/tests`, through
 //! `xtask phpt --subset`.
