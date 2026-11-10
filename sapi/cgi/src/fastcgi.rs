@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use php_proto::cgi::{Environment, RequestInfo};
 use php_proto::fcgi::{self, Kind, Outgoing};
 use php_sapi::cgi::{C_NUMBER, CachedDisk};
-use php_sapi::fcgi::{Conn, allowed, allowed_clients};
+use php_sapi::fcgi::{Conn, admitted, allowed_clients};
 use php_sapi::{
     Aborted, Body, Chdir, Engine, Forked, HostServes, IniOrigin, OutputSink, RequestDescription,
     ResponseHead, WebRequest,
@@ -35,37 +35,47 @@ const MAX_REQUESTS: i32 = 500;
 /// `main` returning `FAILURE`, which the process ends with.
 const FAILURE: i32 = 255;
 
-/// The socket `fcgi_listen` bound.
+/// The socket `fcgi_listen` bound: over TCP with the web servers
+/// `FCGI_WEB_SERVER_ADDRS` allows, every one where it names none, and a
+/// Unix socket, which any process that can open it may connect to.
 enum Listening {
-    Tcp(TcpListener),
+    Tcp {
+        socket: TcpListener,
+        allowed: Option<Vec<IpAddr>>,
+    },
     Unix(UnixListener),
 }
 
 impl Listening {
-    /// `fcgi_accept_request`'s `accept`: a connection and its peer, which
-    /// a Unix socket's names none; `None` once a `SIGTERM` has asked the
-    /// process to finish or the socket fails.
+    /// `fcgi_accept_request`'s `accept`: a connection a web server opened
+    /// that the socket lets in, one it does not logged and closed as
+    /// `fcgi_accept_request` drops it ([`admitted`]); `None` once a
+    /// `SIGTERM` has asked the process to finish or the socket fails.
     ///
     /// A stop handled after the check and before `accept` has made the
     /// number name a socket listening on nothing
     /// ([`crate::ffi::accepting_on`]), so `accept` fails and the loop ends
     /// as the check would have ended it.
-    fn accept(&self) -> Option<(Conn, Option<IpAddr>)> {
+    fn accept(&self) -> Option<Conn> {
         loop {
             if crate::ffi::shutting_down() {
                 return None;
             }
             match crate::ffi::accept(self.fd()) {
                 Ok(fd) => match self {
-                    Listening::Tcp(_) => {
+                    Listening::Tcp { allowed, .. } => {
                         let s = std::net::TcpStream::from(fd);
                         let Ok(peer) = s.peer_addr() else {
                             continue;
                         };
-                        return Some((Conn::Tcp(s), Some(peer.ip())));
+                        let conn = Conn::Tcp(s);
+                        if admitted(allowed.as_deref(), Some(peer.ip()), fcgi_log) {
+                            return Some(conn);
+                        }
+                        conn.close(true);
                     }
                     Listening::Unix(_) => {
-                        return Some((Conn::Unix(std::os::unix::net::UnixStream::from(fd)), None));
+                        return Some(Conn::Unix(std::os::unix::net::UnixStream::from(fd)));
                     }
                 },
                 Err(nix::errno::Errno::EINTR | nix::errno::Errno::ECONNABORTED) => {}
@@ -77,7 +87,7 @@ impl Listening {
     fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
         use std::os::fd::AsFd as _;
         match self {
-            Listening::Tcp(socket) => socket.as_fd(),
+            Listening::Tcp { socket, .. } => socket.as_fd(),
             Listening::Unix(socket) => socket.as_fd(),
         }
     }
@@ -91,9 +101,18 @@ impl Drop for Listening {
     }
 }
 
+/// php-cgi's `fcgi_log`, `vfprintf(stderr, …)`: what `fastcgi.c` says,
+/// on stderr with no newline after it.
+fn fcgi_log(message: &[u8]) {
+    std::io::stderr().lock().write_all(message).ok();
+}
+
 /// `fcgi_listen(path, backlog)`: `host:port` and a bare `port` bind TCP,
-/// every address where the host is empty or `*`, and anything else names
-/// a Unix socket, which is opened to everyone (`chmod(path, 0777)`). A
+/// every address where the host is empty or `*`, and once bound read
+/// `allowed`, `FCGI_WEB_SERVER_ADDRS`, as [`allowed_clients`] reads it,
+/// what it says logged before `PHP_FCGI_MAX_REQUESTS` is read
+/// (`Z/main/fastcgi.c:760-803`). Anything else names a Unix socket,
+/// which is opened to everyone (`chmod(path, 0777)`) and reads no list. A
 /// path `sun_path` cannot hold is refused with `Listening socket's path
 /// name is too long.` before a socket is made, as php's
 /// `path_len >= sizeof(sa.sa_unix.sun_path)` refuses it. A path it holds
@@ -108,7 +127,7 @@ impl Drop for Listening {
 /// is refused as a path too long and never resolved. The bound is the
 /// engine's one `MAXPATHLEN`, the host's `PATH_MAX`, which
 /// `PHP_MAXPATHLEN` says.
-fn listen(path: &[u8], backlog: i32) -> Option<Listening> {
+fn listen(path: &[u8], backlog: i32, allowed: Option<&[u8]>) -> Option<Listening> {
     use nix::sys::socket::{AddressFamily, Backlog, SockaddrIn, UnixAddr};
     use php_ext::request::MAXPATHLEN;
     let tcp = match path.iter().position(|b| *b == b':') {
@@ -127,8 +146,12 @@ fn listen(path: &[u8], backlog: i32) -> Option<Listening> {
         };
         let address = SockaddrIn::from(std::net::SocketAddrV4::new(ip, port.get()));
         let fd = bound(AddressFamily::Inet, &address, backlog)?;
+        let allowed = allowed.map(|list| allowed_clients(list, fcgi_log));
         crate::ffi::shutdown_on_term();
-        return Some(Listening::Tcp(TcpListener::from(fd)));
+        return Some(Listening::Tcp {
+            socket: TcpListener::from(fd),
+            allowed,
+        });
     }
     let name = php_sapi::cgi::path_of(path);
     // `UnixAddr::new` refuses a path of `sun_path`'s length or more, as
@@ -398,7 +421,7 @@ pub(crate) fn serve(engine: &Engine, path: &[u8], env: &Environment) -> i32 {
         eprintln!("Invalid backlog {backlog}, needs to be between -1 and {SOMAXCONN}");
         return FAILURE;
     }
-    let Some(listening) = listen(path, backlog) else {
+    let Some(listening) = listen(path, backlog, env.get(b"FCGI_WEB_SERVER_ADDRS")) else {
         eprintln!(
             "Couldn't create FastCGI listen socket on port {}",
             String::from_utf8_lossy(path)
@@ -411,9 +434,6 @@ pub(crate) fn serve(engine: &Engine, path: &[u8], env: &Environment) -> i32 {
     };
     let accepting = Accepting {
         listening,
-        allowed: env
-            .get(b"FCGI_WEB_SERVER_ADDRS")
-            .map(|list| allowed_clients(list, |_| {})),
         values: Limits::values(env),
         max_requests: limits.max_requests,
     };
@@ -474,7 +494,6 @@ fn keep_children(children: i32) -> Option<()> {
 /// One process's requests.
 struct Accepting {
     listening: Listening,
-    allowed: Option<Vec<IpAddr>>,
     values: Vec<(Vec<u8>, Vec<u8>)>,
     max_requests: i32,
 }
@@ -491,7 +510,7 @@ impl Accepting {
             let mut conn = match kept.take() {
                 Some(_) if crate::ffi::shutting_down() => return exit_status,
                 Some(conn) => conn,
-                None => match self.accept() {
+                None => match self.listening.accept() {
                     Some(conn) => conn,
                     None => return exit_status,
                 },
@@ -536,23 +555,6 @@ impl Accepting {
             }
             w.finish(false);
             kept = w.conn.take();
-        }
-    }
-
-    /// A connection a web server opened that `FCGI_WEB_SERVER_ADDRS`
-    /// lets in; one it does not is logged and closed, as
-    /// `fcgi_accept_request` drops it.
-    fn accept(&self) -> Option<Conn> {
-        loop {
-            let (conn, peer) = self.listening.accept()?;
-            if allowed(self.allowed.as_deref(), peer) {
-                return Some(conn);
-            }
-            eprintln!(
-                "Connection disallowed: IP address '{}' has been dropped.",
-                php_sapi::fcgi::client_ip(peer).unwrap_or_default()
-            );
-            conn.close(true);
         }
     }
 }
