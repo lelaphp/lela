@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git merge --ff-only staging","description":"Fast-forward main by hand rather than through worktree land"}}

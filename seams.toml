@@ -837,7 +837,7 @@ id = "git.main-ff-only"
 tool = "Bash"
 where = "main"   # grammar: where, the repository's main checkout and never a linked worktree (#2751)
 deny_pattern = '(?m)(\A|[|;&(\n]\s*)git(\s+-[cC]\s+\S+|\s+--?[\w.-]+(=\S+)?)*\s+merge(\s|$)'   # git merge where it is run, as git.merge-commits-itself reads it
-unless_pattern = '\s--(ff-only|abort|continue|quit|help)\b|\s-h\b'   # a fast-forward, which commits nothing, or the end of a merge that stands, its owner's (#3621)
+unless_pattern = '\s--(abort|continue|quit|help)\b|\s-h\b'   # the end of a merge that stands, its owner's (#3621); a fast-forward is `worktree land`'s alone (Round 5, Q6 (a))
 text = "main moves only by a fast-forward to a commit the merge queue judged (#3618 M2, #3622)."
 remedy = "merge in the merge worktree on staging, then `xtask worktree land`"                 # #3627
 

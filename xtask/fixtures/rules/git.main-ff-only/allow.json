@@ -1,1 +1,1 @@
-{"tool_name":"Bash","tool_input":{"command":"git merge --ff-only staging","description":"Fast-forward main to staging"}}
+{"tool_name":"Bash","tool_input":{"command":"git merge --quit","description":"Leave a merge standing in main, which commits nothing"}}

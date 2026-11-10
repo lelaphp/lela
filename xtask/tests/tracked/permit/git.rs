@@ -229,7 +229,7 @@ fn a_merge_is_refused_in_main_alone_and_a_builders_goes_through() {
             .any(|f| f.rule.starts_with("git.m") && f.kind == Kind::Deny)
     };
     assert!(refused(main.path(), "git merge --no-ff t1234"));
-    assert!(!refused(main.path(), "git merge --ff-only t1234"));
+    assert!(refused(main.path(), "git merge --ff-only t1234"));
     assert!(!refused(&linked, "git merge main"));
     let apart = format!(
         "git -C {} merge --abort; git -C {} merge main",
@@ -303,14 +303,15 @@ fn a_line_permit_cannot_place_is_denied_saying_so_only_where_an_operation_stands
 
 /// The merge queue's rows (#3618 M2, #3622) as tracked:
 /// `git.main-ff-only`, and `git.merge-commits-itself` on `where =
-/// "staging"` as #3639 ruled. Main's checkout refuses every merge but a
-/// fast-forward or the end of one, and the merge worktree refuses a merge
+/// "staging"` as #3639 ruled. Main's checkout refuses every merge but the
+/// end of one, a fast-forward among them, since `worktree land` moves main
+/// and no hand does (Round 5, Q6 (a)), and the merge worktree refuses a merge
 /// that commits itself and lets one through that leaves its commit to
 /// `git commit`. Each fixture of `git.main-ff-only` holds in main, and
 /// each of `git.merge-commits-itself` in the merge worktree, its
 /// `deny-after-cd.json` a `cd` into it.
 #[test]
-fn a_merge_is_refused_in_main_but_a_fast_forward_and_in_the_merge_worktree() {
+fn a_merge_is_refused_in_main_but_the_end_of_one_and_in_the_merge_worktree() {
     let tracked = Manifest::load(workspace()).unwrap();
     let within = |id: &str| tracked.rule(id).map(|r| r.within);
     assert_eq!(within("git.merge-commits-itself"), Some(Where::Staging));
@@ -329,7 +330,7 @@ fn a_merge_is_refused_in_main_but_a_fast_forward_and_in_the_merge_worktree() {
         "git merge --no-ff --no-commit t1234",
         "git.main-ff-only"
     ));
-    assert!(!in_main("git merge --ff-only staging", "git.main-ff-only"));
+    assert!(in_main("git merge --ff-only staging", "git.main-ff-only"));
     assert!(!in_main(
         "git merge --ff-only staging",
         "git.merge-commits-itself"
