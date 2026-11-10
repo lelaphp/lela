@@ -1,0 +1,44 @@
+# The pin of a bottle Homebrew made again (#4383): php 8.5.13 poured from
+# the formula's first revision, whose keg is `Cellar/php@8.5/8.5.13_1`.
+# `[oracle].version` is php's and says no revision, so the bottle is read
+# off the path: it loads with no defect, `status --section oracle` names
+# the bottle `8.5.13_1`, and `scripts/ci/pinned-php.sh` says under
+# DRY_RUN=1 that it would pour that one (xtask/tests/oracle.rs,
+# xtask/tests/status.rs). Its `[recipe.env]` exports php from the same
+# keg, as the tracked pin's does.
+[oracle]
+version = "8.5.13"
+formula = "php@8.5"
+path = "/nowhere/Cellar/php@8.5/8.5.13_1/bin/php"
+md5 = "00000000000000000000000000000000"
+
+[sapi]
+cgi = { path = "/nowhere/Cellar/php@8.5/8.5.13_1/bin/php-cgi", md5 = "00000000000000000000000000000000" }
+fpm = { path = "/nowhere/Cellar/php@8.5/8.5.13_1/sbin/php-fpm", md5 = "00000000000000000000000000000000" }
+phpdbg = { path = "/nowhere/Cellar/php@8.5/8.5.13_1/bin/phpdbg", md5 = "00000000000000000000000000000000" }
+
+[source]
+tag = "php-8.5.13"
+commit = "00000000"
+path = "/nowhere/php-src"
+phpt_files = 0
+
+[recipe]
+script_name = "witness.php"
+preamble = "<?php\n"
+args = ["-n"]
+ini = []
+env_clear = true
+[recipe.env]
+TEST_PHP_EXECUTABLE = "/nowhere/Cellar/php@8.5/8.5.13_1/bin/php"
+
+[recipe.limits]
+timeout_s = 60
+
+[recipe.normalise]
+crlf_to_lf = true
+trim = " \t\n\r\u0000\u000B"
+scratch_token = "%SCRATCH%"
+
+[closure]
+zstd = "1.5.7_1"

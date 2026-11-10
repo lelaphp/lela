@@ -21,10 +21,14 @@
 //! `brew pin`ned, a link under `<prefix>/var/homebrew/pinned/`, so a `brew
 //! upgrade` run for another reason passes it over (#3468). The walk sees a
 //! keg move only after it moved, by when the recorded version is gone from
-//! the Cellar; an unpinned keg is refused before it can. A machine with no
-//! Homebrew prefix under its binaries, a Linux runner, holds neither, and a
-//! macOS runner is held as the oracle's machine is, since
-//! `scripts/ci/pinned-php.sh` pins each keg it pours before any lane.
+//! the Cellar; an unpinned keg is refused before it can. So is the keg the
+//! pinned binaries stand in themselves, php's own (#4383): the md5 sees it
+//! move as the walk sees the others, after, when the pinned path is gone.
+//! A machine with no Homebrew prefix under its binaries, a Linux runner,
+//! holds neither, a binary under no Cellar, a variant's build, stands in
+//! no keg to pin, and a macOS runner is held as the oracle's machine is,
+//! since `scripts/ci/pinned-php.sh` pins php's keg and each keg it pours
+//! before any lane.
 //!
 //! **What a build was made against** is the record's digest, [`Closure::digest`]: a
 //! variant's macOS build is made against the Homebrew the record names, so
@@ -67,8 +71,9 @@ impl Closure {
     /// name, and a keg it names installed at another version or not at
     /// all each refuse, every one named in the one refusal with both
     /// versions; so does a keg it names, installed at its version, that is
-    /// not pinned, with the `brew pin` that pins it. A keg that drifted is
-    /// not offered the pin, which would hold it where it drifted to.
+    /// not pinned, and the keg a binary stands in itself, with the `brew
+    /// pin` that pins them. A keg that drifted is not offered the pin,
+    /// which would hold it where it drifted to.
     pub(crate) fn held(&self, binaries: &[&Path]) -> Result<()> {
         let walked = Walked::from(binaries)?;
         let (mut drift, mut drifted) = (Vec::new(), BTreeSet::new());
@@ -80,7 +85,7 @@ impl Closure {
             }
             drifted.insert(keg.as_str());
         }
-        let mut unpinned = Vec::new();
+        let (mut own, mut unpinned) = (Vec::new(), Vec::new());
         if let Some(prefix) = &walked.prefix {
             let unloaded = self.0.iter().filter(|(keg, _)| !walked.names(keg));
             for (keg, recorded) in unloaded {
@@ -92,9 +97,12 @@ impl Closure {
                 drifted.insert(keg.as_str());
             }
             let pins = prefix.join("var/homebrew/pinned");
+            let loose = |keg: &&String| pins.join(keg).symlink_metadata().is_err();
             let at_record = self.0.keys().filter(|keg| !drifted.contains(keg.as_str()));
-            let loose = at_record.filter(|keg| pins.join(keg).symlink_metadata().is_err());
-            unpinned.extend(loose.map(String::as_str));
+            unpinned.extend(at_record.filter(loose).map(String::as_str));
+            // A keg the record names too is held as the record's.
+            let stood_in = walked.own.iter().filter(|keg| !self.0.contains_key(*keg));
+            own.extend(stood_in.filter(loose).map(String::as_str));
         }
         let mut refusal = Vec::new();
         if !drift.is_empty() {
@@ -103,16 +111,28 @@ impl Closure {
                 drift.join("; ")
             ));
         }
-        if !unpinned.is_empty() {
-            let (is, it) = if unpinned.len() == 1 {
+        if !own.is_empty() || !unpinned.is_empty() {
+            let (is, it) = if own.len() + unpinned.len() == 1 {
                 ("is", "it")
             } else {
                 ("are", "them")
             };
+            let mut loose = Vec::new();
+            if !own.is_empty() {
+                let comma = if unpinned.is_empty() { "," } else { "" };
+                loose.push(format!(
+                    "{}, where the pinned binaries stand{comma}",
+                    own.join(", ")
+                ));
+            }
+            if !unpinned.is_empty() {
+                loose.push(format!("{} of the pin's [closure]", unpinned.join(", ")));
+            }
+            own.append(&mut unpinned);
             refusal.push(format!(
-                "{} of the pin's [closure] {is} not `brew pin`ned, so a `brew upgrade` can move {it} before this walk sees the move (#3468): `brew pin {}`",
-                unpinned.join(", "),
-                unpinned.join(" ")
+                "{} {is} not `brew pin`ned, so a `brew upgrade` can move {it} before this walk sees the move (#3468): `brew pin {}`",
+                loose.join(", and "),
+                own.join(" ")
             ));
         }
         if !refusal.is_empty() {
@@ -123,11 +143,13 @@ impl Closure {
 }
 
 /// What a walk from the binaries found: every keg a library of theirs
-/// resolved into, at the version it resolved to, and the Homebrew prefix
-/// the first keg or binary stands under, none where nothing does.
+/// resolved into, at the version it resolved to, the kegs the binaries
+/// stand in themselves, and the Homebrew prefix the first keg or binary
+/// stands under, none where nothing does.
 #[derive(Debug, Default)]
 struct Walked {
     kegs: BTreeSet<(String, String)>,
+    own: BTreeSet<String>,
     prefix: Option<PathBuf>,
 }
 
@@ -139,8 +161,9 @@ impl Walked {
         for binary in binaries {
             let real = fs::canonicalize(binary)
                 .with_context(|| format!("resolving the pinned binary {}", binary.display()))?;
-            if let Some((prefix, _)) = in_cellar(&real) {
+            if let Some((prefix, (keg, _))) = in_cellar(&real) {
                 walked.prefix.get_or_insert(prefix);
+                walked.own.insert(keg);
             }
             queue.push(real);
         }
@@ -605,6 +628,55 @@ mod tests {
             "{err}"
         );
         assert!(err.ends_with("`brew pin zip zstd`"), "{err}");
+    }
+
+    /// The keg the pinned php stands in is held pinned as each keg of the
+    /// record is (#4383): unpinned, it refuses with its `brew pin`, alone
+    /// and beside a keg of the record, in the one sentence.
+    #[test]
+    fn the_keg_the_pinned_php_stands_in_refuses_unpinned_naming_the_pin() {
+        let tree = Tree::new("closure-own").unwrap();
+        let (php, root) = prefix(&tree);
+        let walked = Walked::from(&[&php]).unwrap();
+        assert_eq!(walked.own, BTreeSet::from(["php".to_owned()]));
+        fs::remove_file(root.join("var/homebrew/pinned/php")).unwrap();
+        let err = closure(&RECORD).held(&[&php]).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "php, where the pinned binaries stand, is not `brew pin`ned, so a `brew upgrade` can \
+             move it before this walk sees the move (#3468): `brew pin php`"
+        );
+        fs::remove_file(root.join("var/homebrew/pinned/zip")).unwrap();
+        let err = closure(&RECORD).held(&[&php]).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "php, where the pinned binaries stand, and zip of the pin's [closure] are not `brew \
+             pin`ned, so a `brew upgrade` can move them before this walk sees the move (#3468): \
+             `brew pin php zip`"
+        );
+    }
+
+    /// A php built outside the Cellar, a variant's, stands in no keg: it
+    /// loads the record's kegs, which are held pinned, and no pin is
+    /// asked for the php the prefix holds beside them.
+    #[test]
+    fn a_php_under_no_cellar_stands_in_no_keg_to_pin() {
+        let tree = Tree::new("closure-built").unwrap();
+        let (poured, root) = prefix(&tree);
+        let built = tree.path().join("built/bin/php");
+        fs::create_dir_all(built.parent().unwrap()).unwrap();
+        fs::copy(&poured, &built).unwrap();
+        fs::remove_file(root.join("var/homebrew/pinned/php")).unwrap();
+        let walked = Walked::from(&[&built]).unwrap();
+        assert_eq!(walked.own, BTreeSet::new());
+        assert_eq!(walked.kegs.len(), 2, "{walked:?}");
+        closure(&RECORD).held(&[&built]).unwrap();
+        fs::remove_file(root.join("var/homebrew/pinned/zip")).unwrap();
+        let err = closure(&RECORD).held(&[&built]).unwrap_err().to_string();
+        assert!(
+            err.starts_with("zip of the pin's [closure] is not"),
+            "{err}"
+        );
     }
 
     #[test]

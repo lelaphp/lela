@@ -1455,8 +1455,10 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// them, which the corpus section clones at (#66); where
 /// [`crate::oracle::Source::tree`] found the tree, the variable's or the
 /// pin's, or the absence it named; and the pinned php, its version, keg
-/// path and md5, and the Homebrew formula the keg is poured from, `php`
-/// where the pin names none (#4383). An eighth, `closure`, names the kegs
+/// path and md5, the Homebrew formula the keg is poured from, `php`
+/// where the pin names none, and the bottle of it the keg path names,
+/// the version with the formula's revision where it has one (#4383). An
+/// eighth, `closure`, names the kegs
 /// `[closure]` records php loading, each at its version, where the pin
 /// records them (#2657), with the record's digest, and a `variant` row
 /// per `[variant.<name>]` that pins a build for this machine's platform,
@@ -1464,9 +1466,9 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// CI reads the two names off the JSON, `tree.variable` and
 /// `promise.variable`, and sets them under those names, so the workflow
 /// spells neither; the oracle runner pours the formula `binary` names at
-/// its version and holds the keg's php to that md5 (#2253), pours and pins
-/// each keg `closure` names at its version, and lays each of `variants` at
-/// its path by its md5.
+/// its bottle, holds the keg's php to that md5 (#2253) and pins the keg
+/// (#4383), pours and pins each keg `closure` names at its version, and
+/// lays each of `variants` at its path by its md5.
 fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let php = &pin.oracle;
@@ -1511,6 +1513,7 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
             "binary": {
                 "version": php.version,
                 "formula": php.formula.to_string(),
+                "bottle": php.bottle(),
                 "path": php.path.display().to_string(),
                 "md5": php.md5,
             },
