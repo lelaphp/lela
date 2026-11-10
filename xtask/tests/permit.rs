@@ -560,20 +560,32 @@ fn scratch(name: &str) -> Tree {
     dir
 }
 
+/// The stdin `name` under `fixtures/hooks` records, with its `cwd` the
+/// scratch workspace `root` the test runs as the project directory: the
+/// hook's `cwd` is where the session stands and a relative `file_path`
+/// is read from there (#4430), and the checkout it was recorded in is
+/// not the scratch one.
+fn recorded(name: &str, root: &Path) -> String {
+    let text = std::fs::read_to_string(fixtures().join("hooks").join(name)).unwrap();
+    let mut call: serde_json::Value = serde_json::from_str(&text).unwrap();
+    call["cwd"] = serde_json::Value::String(root.display().to_string());
+    call.to_string()
+}
+
 /// The stdin shapes recorded on Claude Code 2.1.263 (data/pre-day-1.md §4)
 /// produce the recorded stdout shapes.
 #[test]
 fn the_recorded_stdin_shapes_produce_the_recorded_stdout_shapes() {
     let root = scratch("shapes");
     let dir = fixtures().join("hooks");
-    let stdin = std::fs::read_to_string(dir.join("pretooluse-allow.json")).unwrap();
+    let stdin = recorded("pretooluse-allow.json", &root);
     let out = permit(&root, &stdin, &[]).ok();
     assert!(
         out.trim().is_empty(),
         "an allow with nothing to say prints nothing: {out}"
     );
 
-    let stdin = std::fs::read_to_string(dir.join("pretooluse-deny.json")).unwrap();
+    let stdin = recorded("pretooluse-deny.json", &root);
     let out = permit(&root, &stdin, &[]).ok();
     let got: serde_json::Value = serde_json::from_str(&out).unwrap();
     let want: serde_json::Value = serde_json::from_str(
@@ -603,7 +615,7 @@ fn the_recorded_stdin_shapes_produce_the_recorded_stdout_shapes() {
 #[test]
 fn a_denial_is_a_reading_with_instrument_permit_and_the_rule_id() {
     let root = scratch("reading");
-    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let stdin = recorded("pretooluse-deny.json", &root);
     permit(&root, &stdin, &[]).ok();
     let reading = Store::of_workspace(&root)
         .read("permit", "harness.self")
@@ -663,7 +675,7 @@ fn above_the_command_hook_a_denial_is_recorded_and_a_note_is_left_to_it() {
         "the note is the command hook's to record"
     );
 
-    let stdin = std::fs::read_to_string(dir.join("hooks/pretooluse-deny.json")).unwrap();
+    let stdin = recorded("pretooluse-deny.json", &root);
     let out = permit(&root, &stdin, &["--above-the-command-hook"]).ok();
     assert!(out.contains("\"deny\""), "{out}");
     let reading = store
@@ -1044,7 +1056,7 @@ fn a_binary_the_merge_takes_whole_is_the_merged_branchs() {
 #[test]
 fn a_denial_carries_the_session_of_the_call() {
     let root = scratch("session");
-    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let stdin = recorded("pretooluse-deny.json", &root);
     permit(&root, &stdin, &[]).ok();
     let reading = Store::of_workspace(&root)
         .read("permit", "harness.self")
@@ -1393,7 +1405,7 @@ fn bash_call(command: &str) -> Call {
 #[test]
 fn a_build_the_manifest_moved_under_refuses_to_judge_rather_than_judging_stale() {
     let root = scratch_with_a_stale_manifest("stale");
-    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let stdin = recorded("pretooluse-deny.json", &root);
     let ran = permit(&root, &stdin, &[]);
     assert_ne!(
         ran.code(),
@@ -1425,7 +1437,7 @@ fn a_build_the_manifest_moved_under_refuses_to_judge_rather_than_judging_stale()
 #[test]
 fn the_refusal_that_hands_the_call_on_is_a_skip_that_names_the_next_candidate() {
     let root = scratch_with_a_stale_manifest("stale-reading");
-    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let stdin = recorded("pretooluse-deny.json", &root);
     let ran = permit(&root, &stdin, &[]);
     assert_ne!(ran.code(), 0, "{ran}");
     let reading = Store::of_workspace(&root)
@@ -1577,7 +1589,7 @@ fn a_pin_that_does_not_validate_refuses_only_what_reads_it() {
     let refused = format!("{:#}", manifest.pin().unwrap_err());
     assert!(refused.contains("predates the closure"), "{refused}");
 
-    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let stdin = recorded("pretooluse-deny.json", &root);
     let out = permit(&root, &stdin, &[]).ok();
     assert!(
         out.contains("harness.self") && out.contains(said),
@@ -1664,7 +1676,7 @@ fn a_manifest_no_candidate_can_read_is_a_failure_the_build_records() {
 #[test]
 fn a_denial_is_still_a_failing_reading_under_the_rule_that_denied_it() {
     let root = scratch("denial-reading");
-    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let stdin = recorded("pretooluse-deny.json", &root);
     let out = permit(&root, &stdin, &[]).ok();
     assert!(out.contains("harness.self"), "{out}");
     let reading = Store::of_workspace(&root)
@@ -1681,7 +1693,7 @@ fn a_denial_is_still_a_failing_reading_under_the_rule_that_denied_it() {
 #[test]
 fn a_build_over_the_manifest_it_was_compiled_against_judges_as_it_did() {
     let root = scratch("stale-control");
-    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let stdin = recorded("pretooluse-deny.json", &root);
     let out = permit(&root, &stdin, &[]).ok();
     assert!(out.contains("harness.self"), "{out}");
     for rule in ["permit.stale-build", "permit.unjudged-call"] {
