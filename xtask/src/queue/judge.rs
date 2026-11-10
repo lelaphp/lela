@@ -33,6 +33,13 @@
 //! readings by main's build ([`Retaken`]), over `_merge`'s tree and under
 //! main's rules; the merge lands on them, and they are stale on `main`
 //! once its xtask is the merge's.
+//!
+//! What the merge's xtask rendered into the tree is held the same way:
+//! a lock or a generated file it renders otherwise fails main's
+//! `api-check` or `budget`, which the judge takes itself, and no reading
+//! taken again clears a file of the tree. The land refuses and names the
+//! two steps such a change lands in ([`Held`]): first the xtask that
+//! changes the instrument, over a tree main's passes, then the tree.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -69,6 +76,24 @@ pub(crate) const RETAKEN: &str = "the merge changes the harness's own sources, s
      key it computes and reads it in the shape it writes, and a reading the merge's lanes took under \
      another keying or shape is stale or missing here and stays so however often they take it. Such \
      a merge lands on readings main's xtask takes (.claude/skills/specs/merging.md)";
+
+/// The instruments the judge takes itself over the merged tree ([`run`]),
+/// in the order it takes them.
+const TAKEN: [&str; 3] = [
+    budget::INSTRUMENT,
+    api_check::INSTRUMENT,
+    unsafe_audit::INSTRUMENT,
+];
+
+/// What a land refuses with where the merge changes the harness's own
+/// sources and an instrument of [`TAKEN`] fails ([`Held`]): the case, and
+/// the two steps such a change lands in (merging.md).
+pub(crate) const HELD: &str = "where the merge's own xtask passes it over the merged tree, the merge \
+     changes what the instrument holds a tree to, a lock's rendering or a generated file's among it, \
+     and the land holds the tree to main's, which no run clears. Such a change lands in two steps: \
+     first the xtask that changes the instrument, merged and landed over a tree main's xtask passes; \
+     then, once main's xtask is that one, what the tree changes by, in a batch of its own \
+     (.claude/skills/specs/merging.md)";
 
 /// The cargo-deny release land runs and nightly.yml installs: one older
 /// cannot read the advisory database's CVSS 4.0 scores, and so judges
@@ -245,9 +270,11 @@ fn remove_dir(dir: &Path) -> Result<()> {
 /// what a failing one holds; each harness file the commits since `base`
 /// changed judged by steer, printed and not recorded, a proposal that
 /// would not load refused; `cargo deny` where `Cargo.lock` moved; and
-/// `done` since `base`, as land's caller, whose verdict is the exit,
-/// said with [`RETAKEN`] and the commands where the merge changes the
-/// harness and a reading is stale or missing ([`Retaken`]).
+/// `done` since `base`, as land's caller, whose verdict is the exit.
+/// Where the merge changes the harness, the refusal says more than the
+/// count: [`HELD`] where an instrument taken here fails ([`Held`]), and
+/// [`RETAKEN`] and the commands where a reading is stale or missing
+/// ([`Retaken`]).
 pub(crate) fn run(root: &Path, base: &str) -> Result<()> {
     let manifest = Manifest::load(root).map_err(|err| unread(root, base, &err))?;
     let registry = Registry::load(root).map_err(|err| unread(root, base, &err))?;
@@ -265,9 +292,61 @@ pub(crate) fn run(root: &Path, base: &str) -> Result<()> {
     deny(root, base)?;
     let land = (Some(base), done::Caller::Land);
     let verdict = done::run(root, &manifest, &registry, &store, land)?;
-    match (verdict.exit(), Retaken::of(root, &verdict)?) {
-        (Err(unmet), Some(retaken)) => bail!("{unmet}. {retaken}"),
-        (exit, _) => exit,
+    let held = Held::of(&verdict).map(|held| held.to_string());
+    let retaken = Retaken::of(root, &verdict)?.map(|retaken| retaken.to_string());
+    let said: Vec<String> = held.into_iter().chain(retaken).collect();
+    match verdict.exit() {
+        Err(unmet) if !said.is_empty() => bail!("{unmet}. {}", said.join(". ")),
+        exit => exit,
+    }
+}
+
+/// Whether the merge `verdict` judges changes the harness: only then can
+/// its own xtask differ from this build, main's, in what it writes for
+/// the judge to read and in what it passes.
+fn of_the_harness(verdict: &done::Verdict) -> bool {
+    verdict.crates.iter().any(|name| name == HARNESS)
+}
+
+/// The instruments of [`TAKEN`] a verdict holds failing where the merge
+/// changes the harness: what a land that refuses such a merge says
+/// beside `done`'s count ([`HELD`], #4378). The merge's commits passed
+/// each under the merge's own xtask, in pre-commit, so one failing here
+/// over the same tree is the two builds holding the tree to different
+/// things, and the land holds it to main's.
+#[derive(Debug, PartialEq)]
+struct Held<'a> {
+    /// Each failing instrument once, in the list's order.
+    instruments: Vec<&'a str>,
+}
+
+impl<'a> Held<'a> {
+    /// What of `verdict` is held to main's: none where the merge leaves
+    /// the harness as main has it, a failing reading there being the
+    /// tree's own to mend, and none where no instrument of [`TAKEN`]
+    /// fails.
+    fn of(verdict: &'a done::Verdict) -> Option<Held<'a>> {
+        let mut instruments: Vec<&str> = Vec::new();
+        for unmet in &verdict.unmet {
+            let failing = unmet.kind == done::Kind::Failing;
+            let taken = (unmet.instrument.as_deref())
+                .filter(|instrument| failing && TAKEN.contains(instrument));
+            if let Some(instrument) = taken.filter(|instrument| !instruments.contains(instrument)) {
+                instruments.push(instrument);
+            }
+        }
+        (of_the_harness(verdict) && !instruments.is_empty()).then_some(Held { instruments })
+    }
+}
+
+impl std::fmt::Display for Held<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the merge changes the harness's own sources, and main's xtask, which judges, fails {} \
+             here: {HELD}",
+            self.instruments.join(" and ")
+        )
     }
 }
 
@@ -295,7 +374,7 @@ impl<'a> Retaken<'a> {
     /// and the list's own commands clear it; and none where no reading is
     /// stale or missing, a failing one being the merge's to mend.
     fn of(root: &'a Path, verdict: &'a done::Verdict) -> Result<Option<Retaken<'a>>> {
-        if !verdict.crates.iter().any(|name| name == HARNESS) {
+        if !of_the_harness(verdict) {
             return Ok(None);
         }
         let mut asks: Vec<&str> = Vec::new();
@@ -487,7 +566,8 @@ mod tests {
     }
 
     /// A verdict over `crates` whose unmet conditions are `unmet`, each a
-    /// kind and the command that clears it.
+    /// kind and the command that clears it, whose third word is its
+    /// instrument.
     fn verdict(crates: &[&str], unmet: &[(done::Kind, &str)]) -> done::Verdict {
         let base = "a".repeat(40);
         done::Verdict {
@@ -501,7 +581,7 @@ mod tests {
             unmet: (unmet.iter())
                 .map(|&(kind, command)| done::Unmet {
                     kind,
-                    instrument: None,
+                    instrument: command.split(' ').nth(2).map(str::to_owned),
                     scope: None,
                     message: String::new(),
                     command: Some(command.to_owned()),
@@ -548,6 +628,35 @@ mod tests {
             "{said}"
         );
         assert!(said.contains("then land again"), "{said}");
+    }
+
+    /// Only a merge of the harness is told the two steps, and only for
+    /// an instrument the judge takes that fails, each named once: a
+    /// failing `clippy` is the merge's code to mend, and a stale
+    /// `api-check` is a reading to take.
+    #[test]
+    fn a_merge_of_the_harness_that_fails_an_instrument_the_judge_takes_is_held_to_mains() {
+        use done::Kind::{Failing, Stale};
+        let list = [
+            (Failing, "cargo xtask api-check"),
+            (Failing, "cargo xtask clippy --crate xtask"),
+            (Failing, "cargo xtask api-check"),
+            (Stale, "cargo xtask unsafe-audit"),
+            (Failing, "cargo xtask budget"),
+        ];
+        assert_eq!(Held::of(&verdict(&["php_engine"], &list)), None);
+        assert_eq!(Held::of(&verdict(&[HARNESS], &list[1..2])), None);
+        assert_eq!(Held::of(&verdict(&[HARNESS], &list[3..4])), None);
+
+        let harness = verdict(&[HARNESS], &list);
+        let held = Held::of(&harness).expect("held");
+        assert_eq!(held.instruments, ["api-check", "budget"]);
+        let said = held.to_string();
+        assert!(
+            said.contains("fails api-check and budget here: where the merge's own xtask passes"),
+            "{said}"
+        );
+        assert!(said.ends_with(HELD), "{said}");
     }
 
     /// Building a judge keeps the current tip's alone: every other tip's

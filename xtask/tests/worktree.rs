@@ -1473,6 +1473,53 @@ fn a_merge_that_rekeys_its_readings_lands_once_mains_xtask_took_them() {
     assert_eq!(main_at().trim(), head, "{out}");
 }
 
+/// A merge whose lock main's xtask renders otherwise is refused with the
+/// two steps such a change lands in, `main` untouched (#4378):
+/// `xtask/src/api_check/mod.rs` is changed on `staging` and `xtask.lock`
+/// committed as the branch's rendering has it, its lines in the other
+/// order. Main's `api-check`, which the judge takes itself, regenerates
+/// the lock and fails it, and since the merge changes the harness the
+/// refusal names the instrument and the steps beside `done`'s count.
+#[test]
+fn a_lock_mains_xtask_renders_otherwise_is_refused_with_the_two_steps() {
+    let root = repository("land-lock");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let before = sh(&root, &["git", "rev-parse", "main"]);
+    judged_by_this_build(&root);
+    let source = fs::read_to_string(merge.join("xtask/src/api_check/mod.rs")).unwrap();
+    write(
+        &merge,
+        "xtask/src/api_check/mod.rs",
+        &format!("{source}\n// The branch's rendering, a lock's lines in the other order.\n"),
+    );
+    let lock = fs::read_to_string(merge.join("xtask/xtask.lock")).unwrap();
+    let mut lines: Vec<&str> = lock.lines().collect();
+    lines.reverse();
+    write(&merge, "xtask/xtask.lock", &(lines.join("\n") + "\n"));
+    commit_all(&merge, "the branch's rendering of a lock");
+
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("fail api-check harness"), "{out}");
+    assert!(
+        out.contains("main's xtask, which judges, fails api-check here"),
+        "{out}"
+    );
+    assert!(out.contains("lands in two steps"), "{out}");
+    assert!(
+        out.contains("first the xtask that changes the instrument"),
+        "{out}"
+    );
+    assert!(
+        out.contains("then, once main's xtask is that one, what the tree changes by"),
+        "{out}"
+    );
+    assert!(out.contains("main is untouched"), "{out}");
+    assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
+}
+
 /// `land` from main's checkout with a `cargo-deny` on `PATH` whose body
 /// is `body`, ahead of the build's stand-in.
 fn land_with_deny(root: &Path, body: &str) -> (i32, String) {
