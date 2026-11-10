@@ -34,7 +34,8 @@
 //! stop = "SIGQUIT"                     # sent again while it stands asleep 2s after
 //! settled = ["fpm.log", '(?s)started.*started']  # matched once answered, before the stop
 //! [[line.serve.request]]
-//! http = "GET / HTTP/1.0\r\n\r\n"      # or `params` and `body`, as FastCGI records
+//! http = "GET / HTTP/1.0\r\n\r\n"      # or `params` and `body`, as FastCGI records,
+//!                                     # whose connection dropped unanswered is the answer
 //! shut = true                         # the client's half shut once sent
 //! [[line.then]]                        # a command line run after it, in the same
 //! args = ["-n", "u.php"]               # directory and under its env with this one's
@@ -64,6 +65,7 @@ use nix::unistd::Pid;
 use regex_lite::Regex;
 use serde::Deserialize;
 
+use super::fpm::Closed;
 use super::{Judged, Judgement, Scope};
 use crate::divergence::Registry;
 use crate::manifest::Crate;
@@ -164,7 +166,8 @@ struct Serve {
 /// One request: the bytes of an HTTP one, or the parameters and body of a
 /// `FastCGI` one, and whether the client shuts its half of the connection
 /// once the request is written, as a server that sends nothing more does
-/// (#3457).
+/// (#3457). A `FastCGI` one the server drops unanswered is answered by
+/// that ([`DROPPED`]).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -754,7 +757,8 @@ impl std::error::Error for Refused {}
 
 /// One request on a connection of its own to `listen`, and the answer
 /// read to its end: an HTTP response's bytes, or a `FastCGI` response's
-/// `FCGI_STDOUT` with its `FCGI_STDERR` after.
+/// `FCGI_STDOUT` with its `FCGI_STDERR` after, and [`DROPPED`] last where
+/// the server ended the connection before its `FCGI_END_REQUEST`.
 fn answered(request: &Request, listen: &str, fill: &dyn Fn(&str) -> String) -> Result<String> {
     let wait = Some(Duration::from_mins(1));
     match (&request.http, &request.params) {
@@ -776,33 +780,56 @@ fn answered(request: &Request, listen: &str, fill: &dyn Fn(&str) -> String) -> R
             let body = body.as_deref().map(str::as_bytes);
             let written = super::fpm::request(pairs, body);
             // A path is a Unix socket, and anything else `host:port`.
-            let (stdout, stderr) = if listen.starts_with('/') {
+            let round = if listen.starts_with('/') {
                 let stream = UnixStream::connect(listen).map_err(Refused)?;
                 stream.set_read_timeout(wait)?;
-                fastcgi_round(stream, &written, request.shut, UnixStream::shutdown)?
+                fastcgi_round(stream, &written, request.shut, UnixStream::shutdown)
             } else {
                 let stream = TcpStream::connect(listen).map_err(Refused)?;
                 stream.set_read_timeout(wait)?;
-                fastcgi_round(stream, &written, request.shut, TcpStream::shutdown)?
+                fastcgi_round(stream, &written, request.shut, TcpStream::shutdown)
             };
-            Ok(format!("{}\n-- stderr\n{}", shown(&stdout), shown(&stderr)))
+            let ((stdout, stderr), dropped) = match round {
+                Ok(streams) => (streams, ""),
+                Err(error) => {
+                    let closed = error.downcast::<Closed>()?;
+                    ((closed.stdout, closed.stderr), DROPPED)
+                }
+            };
+            Ok(format!(
+                "{}\n-- stderr\n{}{dropped}",
+                shown(&stdout),
+                shown(&stderr)
+            ))
         }
         (None, None) => bail!("a request is `http` or `params`"),
     }
 }
 
+/// What a `FastCGI` request's answer ends with where the server ended the
+/// connection, closed or reset, before its `FCGI_END_REQUEST`
+/// ([`Closed`], #4397), after what it wrote in whole records until then.
+/// It names neither a close nor a reset, nor whether a read met it or a
+/// write: php drops a peer its `listen.allowed_clients` does not name
+/// with a bare `close` (`Z/main/fastcgi.c:1401-1405`), which resets the
+/// connection where the request has arrived unread and ends it cleanly
+/// where it has not, so which one a client meets is the two processes'
+/// timing and no behaviour of the host's.
+const DROPPED: &str = "\n-- closed before FCGI_END_REQUEST";
+
 /// One `FastCGI` request's records written to `stream`, the client's half
-/// shut after them where the line asks, and the answer read.
+/// shut after them where the line asks, and the answer read; a write or a
+/// shut the server refused is the answer's to say, as
+/// [`sent`](super::fpm::sent) takes it.
 fn fastcgi_round<S: Read + Write>(
     mut stream: S,
     written: &[u8],
     shut: bool,
     shutdown: fn(&S, std::net::Shutdown) -> std::io::Result<()>,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    stream.write_all(written).context("writing the request")?;
-    if shut {
-        shutdown(&stream, std::net::Shutdown::Write).context("shutting the request's half")?;
-    }
+    let half = std::net::Shutdown::Write;
+    let shut = |stream: &S| if shut { shutdown(stream, half) } else { Ok(()) };
+    super::fpm::sent(stream.write_all(written).and_then(|()| shut(&stream)))?;
     super::fpm::answer(stream)
 }
 
@@ -1130,6 +1157,80 @@ mod tests {
         assert_eq!(note, "the engine's host ended only on its stop sent again");
         let (judgement, note) = judged(text, &pin(&loses, None), &ends);
         assert_eq!((judgement, note.as_str()), (Judgement::Pass, ""));
+    }
+
+    /// A stand-in server: it listens on the loopback port its argument
+    /// names, writes `up` once it does, and runs `each` over every
+    /// connection `$c` it accepts before it closes it, where `whole($c)`
+    /// reads a request to its empty `FCGI_STDIN` record and `record` is
+    /// one record of request 1.
+    fn server(hosts: &Tree, name: &str, each: &str) -> PathBuf {
+        let program = format!(
+            "#!/usr/bin/perl\nuse Socket;\n\
+             socket(my $s, PF_INET, SOCK_STREAM, 0) or die;\n\
+             setsockopt($s, SOL_SOCKET, SO_REUSEADDR, 1) or die;\n\
+             bind($s, sockaddr_in($ARGV[0], INADDR_LOOPBACK)) or die;\nlisten($s, 5) or die;\n\
+             sub full {{ my ($c, $n) = @_; my $b = '';\n\
+               while (length($b) < $n) {{ return undef unless sysread($c, $b, $n - length($b), length($b)); }}\n\
+               return $b; }}\n\
+             sub whole {{ my ($c) = @_;\n\
+               while (defined(my $h = full($c, 8))) {{ my ($v, $type, $id, $len, $pad) = unpack('CCnnC', $h);\n\
+                 full($c, $len + $pad); last if $type == 5 && $len == 0; }} }}\n\
+             sub record {{ my ($type, $content) = @_; pack('CCnnCC', 1, $type, 1, length($content), 0, 0) . $content }}\n\
+             open(my $up, '>', 'up') or die; print $up \"up\\n\"; close($up);\n\
+             while (1) {{ accept(my $c, $s) or next; {each}; close($c); }}\n"
+        );
+        let path = hosts.write(name, program).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// A `FastCGI` request whose server ends the connection before
+    /// `FCGI_END_REQUEST` is answered by that, and the answer is held
+    /// between the two hosts (#4397). The pinned stand-in closes each
+    /// connection with the request unread, as php drops a peer its
+    /// `listen.allowed_clients` does not name, which the client meets as a
+    /// reset or, its request longer than the socket holds, as a write
+    /// refused; the engine's reads the request whole and closes, an end of
+    /// file: one answer, so the line passes either way. A host that
+    /// answers where the other drops fails the line, and so does one that
+    /// writes a record the other does not before it drops.
+    #[test]
+    fn a_fastcgi_connection_dropped_unanswered_is_the_request_s_answer() {
+        if !oracle() {
+            return;
+        }
+        let hosts = Tree::new("host-line-dropped").unwrap();
+        let line = |body: &str| {
+            format!(
+                "[[line]]\nname = \"one\"\nargs = [\"{{port}}\"]\n[line.serve]\n\
+                 listen = \"127.0.0.1:{{port}}\"\nready = [\"up\", \"up\"]\nstop = \"SIGTERM\"\n\
+                 [[line.serve.request]]\nparams = [[\"REQUEST_METHOD\", \"POST\"]]\nbody = \"{body}\"\n"
+            )
+        };
+        let unread = server(&hosts, "php-cgi", "select(undef, undef, undef, 0.2)");
+        let unread = pin(&unread, None);
+        let read = server(&hosts, "read", "whole($c)");
+        // More than a loopback connection's two buffers hold of a request
+        // nobody reads, so the client's write is still under way when the
+        // server closes.
+        let long = "b".repeat(16 << 20);
+        for (name, body) in [("reset", "b"), ("refused", long.as_str())] {
+            let (judgement, note) = judged(&line(body), &unread, &read);
+            assert_eq!(judgement, Judgement::Pass, "{name}: {note}");
+        }
+        let read = pin(&server(&hosts, "php-cgi", "whole($c)"), None);
+        let dropped = "closed before FCGI_END_REQUEST";
+        let wrote = "whole($c); syswrite($c, record(6, \"x\\n\"))";
+        let ended = format!("{wrote}; syswrite($c, record(3, \"\\0\" x 8))");
+        for (name, each, answered) in [("wrote", wrote, false), ("answered", ended.as_str(), true)]
+        {
+            let (judgement, note) = judged(&line("b"), &read, &server(&hosts, name, each));
+            assert_eq!(judgement, Judgement::Fail, "{name}: {note}");
+            assert!(note.contains("+x"), "{name}: {note}");
+            let only_theirs = format!("--- {dropped}");
+            assert_eq!(note.contains(&only_theirs), answered, "{name}: {note}");
+        }
     }
 
     /// What a server's line that missed keeps for its reading (#3846): a
