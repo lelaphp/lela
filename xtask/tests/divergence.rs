@@ -7,8 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use xtask::divergence::{self, Cause, Digests, Kind, Registry, Retires, Status};
+use xtask::divergence::{self, Cause, Digests, Kind, Registry, Release, Retires, Status};
 use xtask::manifest::Manifest;
+use xtask::oracle::Pin;
 use xtask::scratch::Tree;
 use xtask::sha256::Sha256;
 
@@ -738,14 +739,74 @@ fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_o
     assert!(md.contains("| total | 0 | 1 | 0 | 1 |"), "{md}");
 }
 
-/// The guard's two refusals beyond a missing reason (#2462), each with a
-/// fixture under the rule's own that must fail: an accepted `by-design`
-/// row whose reason cites no design section or ADR, and an accepted
-/// `oracle-build` row with no `retires`. The row beside each, in order,
-/// is not named, and the rule's text is printed.
+/// `fixed_in` (#4373's ruling, point 5) is a php release spelt
+/// `<major>.<minor>.<patch>`, ordered by its numbers, and stands only
+/// beside `retires = "pin"`; any other spelling, and a `fixed_in` on a
+/// row that retires at something else or at nothing, is refused when the
+/// registry decodes, and a row writes it back as it was read.
 #[test]
-fn the_guard_refuses_an_uncited_by_design_row_an_unretired_oracle_build_row_and_an_unpinned_dump() {
-    let manifest = reasoned();
+fn fixed_in_decodes_as_a_release_beside_retires_pin_and_anything_else_is_refused() {
+    let row = |retires: &str, fixed_in: &str| {
+        format!(
+            "[[divergence]]\nid = \"trace:fixture\"\nkind = \"trace\"\ncause = \"php-ub\"\n{retires}fixed_in = \"{fixed_in}\"\nreason = \"r\"\nstatus = \"accepted\"\nsince = \"2026-11-10\"\n"
+        )
+    };
+    let pin = "retires = \"pin\"\n";
+    let parsed = Registry::parse(&row(pin, "8.5.13")).unwrap();
+    let fixed: Release = "8.5.13".parse().unwrap();
+    assert_eq!(parsed.rows()[0].fixed_in, Some(fixed));
+    let written = toml::to_string(&parsed.rows()[0]).unwrap();
+    assert!(
+        written.contains("retires = \"pin\"\nfixed_in = \"8.5.13\"\n"),
+        "{written}"
+    );
+    for spelt in [
+        "8.5", "8.5.13.1", "8.6.0RC1", "8.5.x", "8..13", "v8.5.13", "",
+    ] {
+        let err = format!("{:#}", Registry::parse(&row(pin, spelt)).unwrap_err());
+        assert!(
+            err.contains("is not a php release spelt <major>.<minor>.<patch>"),
+            "{spelt:?}: {err}"
+        );
+    }
+    for retires in ["", "retires = \"fixture\"\n"] {
+        let err = format!(
+            "{:#}",
+            Registry::parse(&row(retires, "8.5.13")).unwrap_err()
+        );
+        assert!(
+            err.contains("trace:fixture names `fixed_in` and does not retire at the pin"),
+            "{retires:?}: {err}"
+        );
+    }
+
+    // The order is the numbers', not the text's.
+    let release = |text: &str| text.parse::<Release>().unwrap();
+    assert!(release("8.5.9") < release("8.5.12"));
+    assert!(release("8.5.12") < release("8.6.0"));
+    assert!(release("8.10.0") > release("8.9.99"));
+    assert_eq!(release("8.5.12"), release("8.5.12"));
+}
+
+/// The manifest of [`reasoned`] with the tracked pin beside it, which a
+/// row's `fixed_in` is held to.
+fn reasoned_and_pinned() -> Manifest {
+    let mut manifest = reasoned();
+    let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
+    manifest.pin = Some(Pin::parse(&text).unwrap());
+    manifest
+}
+
+/// The guard's refusals beyond a missing reason (#2462, #3291, #4373),
+/// each with a fixture under the rule's own that must fail: an accepted
+/// `by-design` row whose reason cites no design section or ADR, an
+/// accepted `oracle-build` row with no `retires`, an unpinned trace dump
+/// and an accepted row whose `fixed_in` the pin has reached. The row
+/// beside each, in order, is not named, and the rule's text is printed.
+#[test]
+fn the_guard_refuses_an_uncited_by_design_row_an_unretired_oracle_build_row_an_unpinned_dump_and_a_reached_release()
+ {
+    let manifest = reasoned_and_pinned();
     for (file, number, named, says) in [
         (
             "by-design-uncited.toml",
@@ -764,6 +825,12 @@ fn the_guard_refuses_an_uncited_by_design_row_an_unretired_oracle_build_row_and_
             "unpinned",
             "trace:dump/fixture-unpinned",
             "pins neither side's lines",
+        ),
+        (
+            "fixed-in-reached.toml",
+            "reached",
+            "trace:fixture-reached (fixed in 8.5.0, the pin ",
+            "whose `fixed_in` the pin has reached",
         ),
     ] {
         let path = fixture("divergence.reason").with_file_name(file);
@@ -825,6 +892,26 @@ since = "2026-10-09"
         "an ADR is its number: {}",
         reading.message
     );
+
+    // A release the pin has reached is refused on an accepted row alone:
+    // a fixed row keeps it as the record, and with no pin standing
+    // nothing is reached.
+    let reached = std::fs::read_to_string(
+        fixture("divergence.reason").with_file_name("fixed-in-reached.toml"),
+    )
+    .unwrap();
+    let fixed = reached.replacen("status = \"accepted\"", "status = \"fixed\"", 1);
+    let reading =
+        divergence::reason(&Registry::parse(&fixed).unwrap(), &manifest, workspace()).unwrap();
+    assert_eq!(reading.status, xtask::reading::Status::Pass, "{reading:?}");
+    let reading = divergence::reason(
+        &Registry::parse(&reached).unwrap(),
+        &reasoned(),
+        workspace(),
+    )
+    .unwrap();
+    assert_eq!(reading.status, xtask::reading::Status::Pass, "{reading:?}");
+    assert_eq!(reading.numbers["reached"], 0.into());
 }
 
 #[test]

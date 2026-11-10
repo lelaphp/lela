@@ -57,6 +57,7 @@ divergence::Registry::parse
 divergence::Registry::propose
 divergence::Registry::row
 divergence::Registry::rows
+divergence::Release
 divergence::Retires
 divergence::Retires::as_str
 divergence::Side

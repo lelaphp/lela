@@ -24,8 +24,10 @@
 //! one with status `open` and an empty reason; the `divergence-reason`
 //! instrument fails an accepted row without a reason, a `by-design` row
 //! whose reason cites no design section or ADR, and an `oracle-build` row
-//! that names nothing it retires at, and an accepted `trace:dump/` row
-//! that names no digests. The TOML is the truth;
+//! that names nothing it retires at, an accepted `trace:dump/` row
+//! that names no digests, and an accepted row whose `fixed_in`, the php
+//! release that carries its fix, the pin has reached (#4373's ruling,
+//! point 5). The TOML is the truth;
 //! `status --section divergence` is the rendering.
 
 use std::borrow::Borrow;
@@ -128,6 +130,11 @@ pub struct Divergence {
     /// What the row stops being needed at, where it names one: an
     /// `oracle-build` row must, a `php-ub` row reported upstream may.
     pub retires: Option<Retires>,
+    /// The php release that carries the fix of what the row records,
+    /// where one is known, named only beside `retires = "pin"`: once the
+    /// pin has reached it, `divergence-reason` refuses the row while it
+    /// stands accepted (#4373's ruling, point 5).
+    pub fixed_in: Option<Release>,
     /// Written by a person; empty on a proposed row.
     pub reason: String,
     pub status: Status,
@@ -281,6 +288,8 @@ struct Row {
     cause: Option<Cause>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     retires: Option<Retires>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixed_in: Option<Release>,
     reason: String,
     status: Status,
     since: String,
@@ -333,11 +342,17 @@ impl TryFrom<Row> for Divergence {
                 "the row {id} names `proven_at`, and an id it holds is no fence; the witness lane runs a fence again under a regime, and no lane runs another id so (#3369)"
             );
         }
+        if row.fixed_in.is_some() && row.retires != Some(Retires::Pin) {
+            bail!(
+                "the row {id} names `fixed_in` and does not retire at the pin; a release retires only a row that names `retires = \"pin\"` (#4373)"
+            );
+        }
         Ok(Divergence {
             id,
             kind,
             cause,
             retires: row.retires,
+            fixed_in: row.fixed_in,
             reason: row.reason,
             status: row.status,
             since: row.since,
@@ -355,6 +370,7 @@ impl From<Divergence> for Row {
             kind: row.kind.as_str().to_owned(),
             cause: (row.cause != Cause::Debt).then_some(row.cause),
             retires: row.retires,
+            fixed_in: row.fixed_in,
             reason: row.reason,
             status: row.status,
             since: row.since,
@@ -498,7 +514,8 @@ impl Cause {
 pub enum Retires {
     /// The oracle rebuilt under the pin it has, linking what the engine does.
     OracleRebuild,
-    /// The pin moved to a php that carries the fix upstream.
+    /// The pin moved to a php that carries the fix upstream; the row's
+    /// `fixed_in` names that release where one is known (#4373).
     Pin,
     /// The fixture the row names changed.
     Fixture,
@@ -514,6 +531,65 @@ impl Retires {
             Retires::Fixture => "fixture",
             Retires::Platform => "platform",
         }
+    }
+}
+
+/// A php release, `<major>.<minor>.<patch>` as `oracle.toml`'s `[oracle]
+/// version` and a row's `fixed_in` spell it, ordered by its numbers, so
+/// 8.4.9 is below 8.4.10: what a row's `fixed_in` is held to the pin by
+/// (#4373). A pre-release, `8.4.0RC1`, is no release and is refused. No
+/// example here is of the 8.5 line, since no source states the pin's
+/// version (`tests/manifest.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Release {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl std::str::FromStr for Release {
+    type Err = anyhow::Error;
+
+    fn from_str(text: &str) -> Result<Release> {
+        let refused =
+            || anyhow!("{text:?} is not a php release spelt <major>.<minor>.<patch>, as 8.4.10");
+        let mut numbers = text.split('.').map(|part| {
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(refused());
+            }
+            part.parse::<u32>().map_err(|_| refused())
+        });
+        let mut next = || numbers.next().ok_or_else(refused)?;
+        let release = Release {
+            major: next()?,
+            minor: next()?,
+            patch: next()?,
+        };
+        match numbers.next() {
+            None => Ok(release),
+            Some(_) => Err(refused()),
+        }
+    }
+}
+
+impl TryFrom<String> for Release {
+    type Error = anyhow::Error;
+
+    fn try_from(text: String) -> Result<Release> {
+        text.parse()
+    }
+}
+
+impl From<Release> for String {
+    fn from(release: Release) -> String {
+        release.to_string()
+    }
+}
+
+impl fmt::Display for Release {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
     }
 }
 
@@ -742,6 +818,7 @@ impl Registry {
             kind,
             cause: Cause::Debt,
             retires: None,
+            fixed_in: None,
             reason: String::new(),
             status: Status::Open,
             since,
@@ -761,12 +838,13 @@ impl Registry {
         self.hold(row)
     }
 
-    /// The accepted rows the guard refuses, each with what it lacks.
-    pub(crate) fn refused(&self) -> Vec<(&Divergence, Lack)> {
+    /// The accepted rows the guard refuses, each with what it lacks,
+    /// `pin` being the pinned php's release where a pin stands.
+    pub(crate) fn refused(&self, pin: Option<Release>) -> Vec<(&Divergence, Lack)> {
         self.rows
             .iter()
             .filter(|r| r.status == Status::Accepted)
-            .filter_map(|r| r.lack().map(|lack| (r, lack)))
+            .filter_map(|r| r.lack(pin).map(|lack| (r, lack)))
             .collect()
     }
 
@@ -799,11 +877,21 @@ pub(crate) enum Lack {
     Retires,
     /// A `trace:dump/` row that names no digests (#3291).
     Digests,
+    /// A row whose `fixed_in` the pin has reached: it lacks a release
+    /// still ahead of the oracle, so what it accepts php no longer does
+    /// (#4373).
+    Reached,
 }
 
 impl Lack {
     /// Each lack, in the order the guard's message names them.
-    const ALL: [Lack; 4] = [Lack::Reason, Lack::Citation, Lack::Retires, Lack::Digests];
+    const ALL: [Lack; 5] = [
+        Lack::Reason,
+        Lack::Citation,
+        Lack::Retires,
+        Lack::Digests,
+        Lack::Reached,
+    ];
 
     /// The reading's number counting the rows that lack it.
     fn number(self) -> &'static str {
@@ -812,6 +900,7 @@ impl Lack {
             Lack::Citation => "uncited",
             Lack::Retires => "unretired",
             Lack::Digests => "unpinned",
+            Lack::Reached => "reached",
         }
     }
 
@@ -823,6 +912,9 @@ impl Lack {
             Lack::Retires => "of cause oracle-build that carries no `retires`",
             Lack::Digests => {
                 "of a trace dump that pins neither side's lines, its `oracle` and `engine` digests"
+            }
+            Lack::Reached => {
+                "whose `fixed_in` the pin has reached, the release that retires it (#4373)"
             }
         }
     }
@@ -838,8 +930,9 @@ impl Divergence {
     }
 
     /// What the guard finds missing from the row were it accepted: a
-    /// reason, then what its cause asks for, then a dump's digests.
-    fn lack(&self) -> Option<Lack> {
+    /// reason, then what its cause asks for, then a dump's digests, then
+    /// a `fixed_in` the pin, where one stands, has not yet reached.
+    fn lack(&self, pin: Option<Release>) -> Option<Lack> {
         if self.reason.trim().is_empty() {
             Some(Lack::Reason)
         } else if self.cause == Cause::ByDesign && !cites_design(&self.reason) {
@@ -848,9 +941,19 @@ impl Divergence {
             Some(Lack::Retires)
         } else if self.must_pin() && self.digests.is_none() {
             Some(Lack::Digests)
+        } else if self.reached(pin) {
+            Some(Lack::Reached)
         } else {
             None
         }
+    }
+
+    /// Whether the pin, `pin`, is at or past the row's `fixed_in`; a row
+    /// naming none, or a workspace with no pin, has reached nothing.
+    fn reached(&self, pin: Option<Release>) -> bool {
+        self.fixed_in
+            .zip(pin)
+            .is_some_and(|(fixed, pin)| fixed <= pin)
     }
 }
 
@@ -930,11 +1033,16 @@ impl Counts {
 /// The `divergence-reason` instrument's reading over the workspace: fail
 /// when an accepted row lacks what the guard asks ([`Lack`]): a reason,
 /// a design citation on a `by-design` row, a `retires` on an
-/// `oracle-build` row, the digests of a `trace:dump/` row. It names each such row, how many ids it covers
+/// `oracle-build` row, the digests of a `trace:dump/` row, a `fixed_in`
+/// the manifest's pin has not reached (#4373). It names each such row, how many ids it covers
 /// where it covers any, and prints the text of the manifest rule whose
 /// `check` predicate names this instrument. A covering row is held to the
 /// rule once, as one reason. The counts are the numbers.
 pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<Reading> {
+    let pin = (manifest.pin.as_ref())
+        .map(|pin| pin.oracle.version.parse::<Release>())
+        .transpose()
+        .context("the pin's `[oracle] version`")?;
     let rule = manifest.rule_checked_by(INSTRUMENT);
     let mut reading =
         Reading::for_scope(INSTRUMENT, "workspace", manifest, &Snapshot::disk(root)?)?;
@@ -944,7 +1052,7 @@ pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<R
     }
     let rows = registry.rows().len();
     let counts = registry.counts();
-    let refused = registry.refused();
+    let refused = registry.refused(pin);
     reading.count("rows", u64::try_from(rows)?)?;
     reading.count("ids", counts.ids)?;
     for status in Status::ALL {
@@ -956,9 +1064,18 @@ pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<R
         let named: Vec<String> = refused
             .iter()
             .filter(|(_, l)| *l == lack)
-            .map(|(r, _)| match r.covers.len() {
-                0 => r.id.to_string(),
-                n => format!("{} (covering {n} ids)", r.id),
+            .map(|(r, _)| {
+                let covering = match r.covers.len() {
+                    0 => String::new(),
+                    n => format!(" (covering {n} ids)"),
+                };
+                let reached = match (lack, r.fixed_in, pin) {
+                    (Lack::Reached, Some(fixed), Some(pin)) => {
+                        format!(" (fixed in {fixed}, the pin {pin})")
+                    }
+                    _ => String::new(),
+                };
+                format!("{}{covering}{reached}", r.id)
             })
             .collect();
         reading.count(lack.number(), u64::try_from(named.len())?)?;
@@ -975,7 +1092,7 @@ pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<R
     if failures.is_empty() {
         reading.status = reading::Status::Pass;
         reading.message = format!(
-            "{FILE}: {rows} rows holding {} ids, every accepted row has a reason, every by-design row a citation, every oracle-build row a `retires` and every trace dump its digests",
+            "{FILE}: {rows} rows holding {} ids, every accepted row has a reason, every by-design row a citation, every oracle-build row a `retires`, every trace dump its digests and no row a `fixed_in` the pin has reached",
             counts.ids
         );
     } else {
