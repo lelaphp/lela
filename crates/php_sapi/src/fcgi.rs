@@ -95,7 +95,9 @@ pub fn allowed_clients(list: &[u8], mut log: impl FnMut(&[u8])) -> Vec<IpAddr> {
 }
 
 /// `fcgi_accept_request`'s check of an accepted connection: whether
-/// `peer` may connect ([`allowed`]), one that may not handed to `log`,
+/// `peer` may connect, as `fcgi_is_allowed` judges it (every peer where
+/// no list was set, every connection over a Unix socket, which names no
+/// peer, and otherwise a peer the list names), one that may not handed to `log`,
 /// the host's `fcgi_log`, as `Connection disallowed: IP address '<peer>'
 /// has been dropped.` with no newline after it
 /// (`Z/main/fastcgi.c:1402`), for the host to close.
