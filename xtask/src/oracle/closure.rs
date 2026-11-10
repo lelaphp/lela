@@ -224,7 +224,7 @@ fn installed(prefix: &Path, keg: &str) -> Option<String> {
 }
 
 /// The prefix, keg and version of a file under `<prefix>/Cellar/<keg>/<version>/`.
-fn in_cellar(real: &Path) -> Option<(PathBuf, (String, String))> {
+pub(super) fn in_cellar(real: &Path) -> Option<(PathBuf, (String, String))> {
     let parts: Vec<Component<'_>> = real.components().collect();
     let at = parts.iter().position(|part| part.as_os_str() == "Cellar")?;
     let name = |n: usize| Some(parts.get(n)?.as_os_str().to_string_lossy().into_owned());

@@ -1,0 +1,37 @@
+# The grammar's least pin poured from Homebrew's `php` (#4383): it names no
+# formula, which is `php`, and its php and its hosts stand in that keg. It
+# loads with no defect, and `scripts/ci/pinned-php.sh` says under DRY_RUN=1
+# that it would pour `php` (xtask/tests/oracle.rs, xtask/tests/status.rs).
+[oracle]
+version = "8.5.12"
+path = "/nowhere/Cellar/php/8.5.12/bin/php"
+md5 = "00000000000000000000000000000000"
+
+[sapi]
+cgi = { path = "/nowhere/Cellar/php/8.5.12/bin/php-cgi", md5 = "00000000000000000000000000000000" }
+fpm = { path = "/nowhere/Cellar/php/8.5.12/sbin/php-fpm", md5 = "00000000000000000000000000000000" }
+phpdbg = { path = "/nowhere/Cellar/php/8.5.12/bin/phpdbg", md5 = "00000000000000000000000000000000" }
+
+[source]
+tag = "php-8.5.12"
+commit = "00000000"
+path = "/nowhere/php-src"
+phpt_files = 0
+
+[recipe]
+script_name = "witness.php"
+preamble = "<?php\n"
+args = ["-n"]
+ini = []
+env_clear = true
+
+[recipe.limits]
+timeout_s = 60
+
+[recipe.normalise]
+crlf_to_lf = true
+trim = " \t\n\r\u0000\u000B"
+scratch_token = "%SCRATCH%"
+
+[closure]
+zstd = "1.5.7_1"

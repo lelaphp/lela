@@ -1454,17 +1454,19 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// pin states none (#4260); its tag and commit as `[source]` states
 /// them, which the corpus section clones at (#66); where
 /// [`crate::oracle::Source::tree`] found the tree, the variable's or the
-/// pin's, or the absence it named; and the pinned php,
-/// its version, keg path and md5. An eighth, `closure`, names the kegs
+/// pin's, or the absence it named; and the pinned php, its version, keg
+/// path and md5, and the Homebrew formula the keg is poured from, `php`
+/// where the pin names none (#4383). An eighth, `closure`, names the kegs
 /// `[closure]` records php loading, each at its version, where the pin
 /// records them (#2657), with the record's digest, and a `variant` row
 /// per `[variant.<name>]` that pins a build for this machine's platform,
 /// its path and md5 (#2298), and the macOS build's closure digest (#2935).
 /// CI reads the two names off the JSON, `tree.variable` and
 /// `promise.variable`, and sets them under those names, so the workflow
-/// spells neither; the oracle runner pours the keg `binary` names and
-/// holds it to that md5 (#2253), pours and pins each keg `closure` names
-/// at its version, and lays each of `variants` at its path by its md5.
+/// spells neither; the oracle runner pours the formula `binary` names at
+/// its version and holds the keg's php to that md5 (#2253), pours and pins
+/// each keg `closure` names at its version, and lays each of `variants` at
+/// its path by its md5.
 fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let php = &pin.oracle;
@@ -1508,6 +1510,7 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
             },
             "binary": {
                 "version": php.version,
+                "formula": php.formula.to_string(),
                 "path": php.path.display().to_string(),
                 "md5": php.md5,
             },
@@ -1546,7 +1549,10 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 Err(e) => (String::new(), format!("absent: {e:#}")),
             };
             row(o, "found", "", &path, &state);
-            let binary = format!("php {}, md5 {}", php.version, php.md5);
+            let binary = format!(
+                "php {}, md5 {}, poured from the formula {}",
+                php.version, php.md5, php.formula
+            );
             row(o, "binary", "", &php.path.display().to_string(), &binary);
             closure_row(o, pin.closure.as_ref());
             for (name, build) in &builds {

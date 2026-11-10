@@ -29,6 +29,7 @@ mod closure;
 mod dockerfile;
 pub(crate) mod expect;
 mod fastcgi;
+mod formula;
 pub(crate) mod hosts;
 pub(crate) mod linked;
 pub(crate) mod profile;
@@ -39,6 +40,7 @@ use built_from::BuiltFrom;
 pub(crate) use closure::stand_in;
 pub(crate) use closure::{Closure, Minos, Own};
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
+pub(crate) use formula::Formula;
 pub use variant::{Build, Oracles, Platform, Provenance, Variant};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -374,6 +376,13 @@ impl Clone for Asserted {
 #[serde(deny_unknown_fields)]
 pub struct Binary {
     pub version: String,
+    /// The Homebrew formula the binary's keg is poured from, `php` where
+    /// the pin names none (#4383): what `scripts/ci/pinned-php.sh` pours,
+    /// and the keg [`Pin::defects`] holds the pinned paths to. A
+    /// variant's binary is built and not poured, and keeps the main
+    /// oracle's.
+    #[serde(default)]
+    pub(crate) formula: Formula,
     pub path: PathBuf,
     pub md5: String,
     /// The oracle variant this binary is, none for `[oracle]`'s own: set
@@ -881,8 +890,29 @@ impl Pin {
             .filter_map(|(name, variant)| variant.held(name, closure.as_ref()).err())
             .map(|err| format!("{err:#}"))
             .collect();
+        let poured = pin
+            .oracle
+            .formula
+            .held(&pin.oracle.version, &pin.binaries());
+        pin.defects.extend(poured);
         pin.digest = digest(text)?;
         Ok(pin)
+    }
+
+    /// The pinned binaries a keg holds, `php` and each host `[sapi]`
+    /// names, each by the key that names its path.
+    fn binaries(&self) -> Vec<(&'static str, &Path)> {
+        let hosts = [
+            ("[sapi].cgi.path", &self.sapi.cgi),
+            ("[sapi].fpm.path", &self.sapi.fpm),
+            ("[sapi].phpdbg.path", &self.sapi.phpdbg),
+        ];
+        let hosts = hosts
+            .into_iter()
+            .filter_map(|(key, host)| Some((key, host.as_ref()?.path.as_path())));
+        std::iter::once(("[oracle].path", self.oracle.path.as_path()))
+            .chain(hosts)
+            .collect()
     }
 
     /// What parses in the pin but does not validate, a cross-file check's
@@ -975,6 +1005,7 @@ impl Pin {
         pin.sapi = Sapi::default();
         pin.oracle = Binary {
             version: self.oracle.version.clone(),
+            formula: self.oracle.formula,
             path: build.map(|b| b.path.clone()).unwrap_or_default(),
             md5: build.map(|b| b.md5.clone()).unwrap_or_default(),
             variant: Some(name.to_owned()),

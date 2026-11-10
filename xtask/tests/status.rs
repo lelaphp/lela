@@ -249,6 +249,11 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     assert_eq!(json["binary"]["version"], oracle.version.as_str());
     assert_eq!(json["binary"]["path"], path.as_str());
     assert_eq!(json["binary"]["md5"], oracle.md5.as_str());
+    // The formula the keg is poured from (#4383), which is the keg's name
+    // in the path the section states beside it.
+    let formula = json["binary"]["formula"].as_str().unwrap();
+    let mut parts = oracle.path.iter().skip_while(|part| *part != "Cellar");
+    assert_eq!(parts.nth(1).and_then(|keg| keg.to_str()), Some(formula));
     for name in pin.variant.keys() {
         let built = pin.variant(name).unwrap().oracle;
         let laid = &json["variants"][name.as_str()];
@@ -285,7 +290,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     let md = status_with_pin(&root, &["--section", "oracle"], None, None).ok();
     assert!(
         md.contains(&format!(
-            "| binary |  | {path} | php {}, md5 {} |",
+            "| binary |  | {path} | php {}, md5 {}, poured from the formula {formula} |",
             oracle.version, oracle.md5
         )),
         "{md}"
