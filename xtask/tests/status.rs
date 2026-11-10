@@ -308,6 +308,97 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     }
 }
 
+/// A scratch workspace whose pin is `fixture` of
+/// `xtask/fixtures/oracle/formula/`, in place of the tracked one.
+fn scratch_poured(name: &str, fixture: &str) -> Tree {
+    let root = scratch(name);
+    let fixture = xtask::package_dir()
+        .join("fixtures/oracle/formula")
+        .join(fixture);
+    std::fs::copy(fixture, root.join("oracle.toml")).unwrap();
+    root
+}
+
+/// What a runner pours php from (#4383): the section names the formula
+/// beside the keg path, `php` for a pin that names none and `php@8.5` for
+/// one that names it, and `scripts/ci/pinned-php.sh` under `DRY_RUN=1`
+/// says it would pour that formula at the pin's version and path, after
+/// the one keg of the fixture's `[closure]`. The dry run asks `brew` for
+/// its prefix and nothing else, and fetches nothing: the `brew` and the
+/// `curl` it finds are stand-ins that fail any other call. No keg stands
+/// under the fixtures' `/nowhere`, so nothing here reads this machine's
+/// Cellar.
+#[test]
+fn oracle_names_the_formula_a_runner_pours_and_the_dry_run_says_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let script = workspace().join("scripts/ci/pinned-php.sh");
+    for (fixture, formula, at) in [
+        (
+            "php.toml",
+            "php",
+            "8.5.12 at /nowhere/Cellar/php/8.5.12/bin/php",
+        ),
+        (
+            "line.toml",
+            "php@8.5",
+            "8.5.13 at /nowhere/Cellar/php@8.5/8.5.13/bin/php",
+        ),
+    ] {
+        let root = scratch_poured(&format!("oracle-poured-{formula}"), fixture);
+        let section = ["--section", "oracle", "--format", "json"];
+        let rendered = status_with_pin(&root, &section, None, None).ok();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(json["binary"]["formula"], formula, "{fixture}");
+        let pin = root.join("oracle.json");
+        std::fs::write(&pin, rendered).unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let prefix = root.join("brew").display().to_string();
+        let brew = format!(
+            "#!/bin/sh\n[ \"$*\" = --prefix ] && echo {prefix} && exit 0\necho \"brew $*\" >&2\nexit 1\n"
+        );
+        let curl = "#!/bin/sh\necho \"curl $*\" >&2\nexit 1\n".to_owned();
+        for (name, body) in [("brew", brew), ("curl", curl)] {
+            std::fs::write(bin.join(name), body).unwrap();
+            let mode = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(bin.join(name), mode).unwrap();
+        }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)));
+        let out = std::process::Command::new("bash")
+            .arg(&script)
+            .arg(&pin)
+            .env("DRY_RUN", "1")
+            .env("PATH", path.unwrap())
+            .env_remove("GH_TOKEN")
+            .output()
+            .unwrap();
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert!(out.status.success(), "{fixture}: {stdout}{stderr}");
+        assert_eq!(
+            stdout,
+            format!("zstd: would pour 1.5.7_1 in place of nothing\n{formula}: would pour {at}\n"),
+            "{fixture}: {stderr}"
+        );
+        assert_eq!(stderr, "", "{fixture}");
+    }
+    // The negative control: the paths under `Cellar/php@8.5/` and no
+    // formula named. The section renders none of it, so a runner is
+    // handed no pin to pour `php` from into a keg the paths do not name.
+    let root = scratch_poured("oracle-poured-moved", "moved.toml");
+    let section = ["--section", "oracle", "--format", "json"];
+    let refused = status_with_pin(&root, &section, None, None).failed();
+    assert!(
+        refused.contains(
+            "[oracle].path /nowhere/Cellar/php@8.5/8.5.13/bin/php stands in the keg php@8.5, and the pin is poured from the formula php,"
+        ),
+        "{refused}"
+    );
+}
+
 /// The pin's tag and commit as `[source]` states them (#66), beside its
 /// path: the section names the pin whole, which the corpus section clones
 /// at, so no reader parses `oracle.toml` for either.
