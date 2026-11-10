@@ -330,7 +330,8 @@ fn scratch_poured(name: &str, fixture: &str) -> Tree {
 /// succeed, `tap-new` and `--repository` give the tap `@prefix@/tap`,
 /// and `install` lays the keg the tap's formula file bottles,
 /// `Cellar/<formula>/<bottle>/bin/php`, as brew lands a bottle where its
-/// formula and its version say. Any other call fails.
+/// formula and its version say, with the receipt brew writes beside it
+/// naming the tap it was poured from. Any other call fails.
 const BREW: &str = r#"#!/bin/sh
 [ "$*" = --prefix ] && echo "@prefix@" && exit 0
 if [ -z "$DRY_RUN" ]; then
@@ -342,8 +343,9 @@ if [ -z "$DRY_RUN" ]; then
     "install --ignore-dependencies dax/pin/"*)
         name=${3#dax/pin/}
         bottle=$(sed -n 's/^# bottled-//p' "@prefix@/tap/Formula/$name.rb")
-        keg="@prefix@/Cellar/$name/$bottle/bin"
-        [ -n "$bottle" ] && mkdir -p "$keg" && : >"$keg/php" && exit 0
+        keg="@prefix@/Cellar/$name/$bottle"
+        [ -n "$bottle" ] && mkdir -p "$keg/bin" && : >"$keg/bin/php" &&
+            echo '{"source":{"tap":"dax/pin"}}' >"$keg/INSTALL_RECEIPT.json" && exit 0
         ;;
     esac
 fi
@@ -434,9 +436,9 @@ fn pinned_php(root: &Path, dry: bool) -> (serde_json::Value, String, String) {
 
 /// A scratch workspace whose pin is `fixture` with its Cellar under the
 /// stand-in prefix `<root>/brew`, in place of `/nowhere`, and the one keg
-/// of its `[closure]` linked there at its record, so
-/// `scripts/ci/pinned-php.sh` finds that one poured and php wherever the
-/// test lays it.
+/// of its `[closure]` linked there at its record, poured from
+/// homebrew-core as its receipt says, so `scripts/ci/pinned-php.sh` finds
+/// that one poured and php wherever the test lays it.
 fn scratch_kegged(name: &str, fixture: &str) -> Tree {
     let root = scratch_poured(name, fixture);
     let prefix = root.join("brew");
@@ -445,8 +447,18 @@ fn scratch_kegged(name: &str, fixture: &str) -> Tree {
     let pin = pin.replace("/nowhere/Cellar", &cellar);
     std::fs::write(root.join("oracle.toml"), pin).unwrap();
     std::fs::create_dir_all(prefix.join("opt")).unwrap();
+    receipt(&prefix.join("Cellar/zstd/1.5.7_1"), "homebrew/core");
     std::os::unix::fs::symlink("../Cellar/zstd/1.5.7_1", prefix.join("opt/zstd")).unwrap();
     root
+}
+
+/// The receipt brew writes in a keg it pours, `INSTALL_RECEIPT.json`,
+/// naming the tap the formula was poured from, which a pin names the
+/// formula by (#4423).
+fn receipt(keg: &Path, tap: &str) {
+    std::fs::create_dir_all(keg).unwrap();
+    let json = serde_json::json!({ "source": { "tap": tap } }).to_string();
+    std::fs::write(keg.join("INSTALL_RECEIPT.json"), json).unwrap();
 }
 
 /// What a runner pours php from (#4383): the section names the formula
@@ -523,15 +535,22 @@ fn oracle_names_the_formula_a_runner_pours_and_the_dry_run_says_it() {
 /// stands under the stand-in prefix at the pin's md5, and the one keg of
 /// its `[closure]` at its record, so `scripts/ci/pinned-php.sh` pours
 /// neither, says so, and asks `brew` for two pins and nothing else, the
-/// closure's keg and then the formula the pin names. Under `DRY_RUN=1` it
-/// says the same and asks nothing ([`pinned_php`]).
+/// closure's keg and then the formula the pin names. Each is named as
+/// brew names the formula its receipt says it was poured from (#4423):
+/// `zstd`, homebrew-core's, bare, and php's by the tap, `dax/pin/php@8.5`,
+/// where it was poured from the tap, so homebrew-core's alias `php@8.5`
+/// of `php` cannot stand in for it; and bare where its receipt names
+/// homebrew-core, as a php poured by `brew install php` is. Under
+/// `DRY_RUN=1` it says the same and asks nothing ([`pinned_php`]).
 #[test]
 fn the_keg_of_the_pinned_php_is_brew_pinned_where_it_is_already_poured() {
     let root = scratch_kegged("oracle-pinned", "revised.toml");
     let prefix = root.join("brew");
-    let php = prefix.join("Cellar/php@8.5/8.5.13_1/bin/php");
+    let keg = prefix.join("Cellar/php@8.5/8.5.13_1");
+    let php = keg.join("bin/php");
     std::fs::create_dir_all(php.parent().unwrap()).unwrap();
     std::fs::write(&php, "").unwrap();
+    receipt(&keg, "dax/pin");
     let poured = format!(
         "zstd 1.5.7_1: the record's; already poured\n{}: md5 {}, the pin's; already poured\n",
         php.display(),
@@ -546,6 +565,14 @@ fn the_keg_of_the_pinned_php_is_brew_pinned_where_it_is_already_poured() {
     assert_eq!((stdout.as_str(), stderr.as_str()), (poured.as_str(), ""));
     assert_eq!(
         std::fs::read_to_string(&calls).unwrap(),
+        "brew pin zstd\nbrew pin dax/pin/php@8.5\n"
+    );
+    std::fs::remove_file(&calls).unwrap();
+    receipt(&keg, "homebrew/core");
+    let (_, stdout, stderr) = pinned_php(&root, false);
+    assert_eq!((stdout.as_str(), stderr.as_str()), (poured.as_str(), ""));
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap(),
         "brew pin zstd\nbrew pin php@8.5\n"
     );
 }
@@ -555,9 +582,16 @@ fn the_keg_of_the_pinned_php_is_brew_pinned_where_it_is_already_poured() {
 /// the commits of the formula the pin names and no other, takes the one
 /// that bottles the keg the pin's path names, an `update` for the revised
 /// bottle of `revised.toml` and the formula's `add` for the first bottle
-/// of `line.toml`, and unpins, uninstalls, installs from the local tap
-/// and pins that formula, in that order, with homebrew/core's packages as
-/// the formula file's `root_url`. The stand-in `brew` lands the keg where
+/// of `line.toml`, writes that formula into the local tap with
+/// homebrew/core's packages as its `root_url`, and unpins, uninstalls,
+/// installs and pins it, in that order. Each call names the keg so that
+/// homebrew-core's alias `php@8.5` of `php` cannot stand in for it
+/// (#4423): the unpin, the install and the pin name the tap's formula,
+/// `dax/pin/php@8.5`, and the uninstall, which takes every keg of the
+/// name whichever tap poured it, is asked by the bare name only where a
+/// keg of that name stands, `8.5.13` before the revised bottle, since
+/// brew finds the rack of a name before any alias and resolves a name
+/// with no rack through the aliases. The stand-in `brew` lands the keg where
 /// the formula and the commit it was handed say ([`BREW`]), so a pour
 /// of another formula or another bottle misses the pin's path and the
 /// md5 that follows the pour stops it. The pour is macOS's, `sed -i ''` in it, so
@@ -570,11 +604,21 @@ fn the_formula_and_the_bottle_the_pin_names_are_what_a_runner_pours() {
         {"sha": "bottled-8.5.13_1", "commit": {"message": "php@8.5: update 8.5.13_1 bottle."}},
         {"sha": "bottled-8.5.13", "commit": {"message": "php@8.5: add 8.5.13 bottle."}}
     ]"#;
-    for (fixture, bottle) in [("revised.toml", "8.5.13_1"), ("line.toml", "8.5.13")] {
+    for (fixture, bottle, before) in [
+        ("revised.toml", "8.5.13_1", Some("8.5.13")),
+        ("line.toml", "8.5.13", None),
+    ] {
         let root = scratch_kegged(&format!("oracle-pour-{fixture}"), fixture);
         let prefix = root.join("brew");
         std::fs::create_dir_all(prefix.join("api")).unwrap();
         std::fs::write(prefix.join("api/php@8.5.json"), COMMITS).unwrap();
+        let uninstall = match before {
+            Some(at) => {
+                receipt(&prefix.join("Cellar/php@8.5").join(at), "dax/pin");
+                "brew uninstall --ignore-dependencies --force php@8.5\n"
+            }
+            None => "",
+        };
         let php = prefix.join(format!("Cellar/php@8.5/{bottle}/bin/php"));
         let php = php.display();
         let calls = prefix.join("calls");
@@ -596,14 +640,14 @@ fn the_formula_and_the_bottle_the_pin_names_are_what_a_runner_pours() {
         let asked = format!(
             "brew pin zstd\n\
              curl -sSfL https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/p/php@8.5.rb&per_page=100\n\
-             brew unpin php@8.5\n\
-             brew uninstall --ignore-dependencies --force php@8.5\n\
              brew tap\n\
              brew tap-new --no-git dax/pin\n\
              brew --repository dax/pin\n\
              curl -sSfL -o {} https://raw.githubusercontent.com/Homebrew/homebrew-core/bottled-{bottle}/Formula/p/php@8.5.rb\n\
+             brew unpin dax/pin/php@8.5\n\
+             {uninstall}\
              brew install --ignore-dependencies dax/pin/php@8.5\n\
-             brew pin php@8.5\n",
+             brew pin dax/pin/php@8.5\n",
             file.display()
         );
         assert_eq!(std::fs::read_to_string(&calls).unwrap(), asked, "{fixture}");

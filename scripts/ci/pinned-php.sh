@@ -31,6 +31,17 @@
 # where the pin's path names it, and xtask refuses a run over one that is
 # not (#4383).
 #
+# A keg is named to brew so that no alias of homebrew-core's stands in for
+# it (#4423): `php@8.5` is an alias of `php` there until Homebrew makes it
+# a formula, and brew resolves a bare name through those aliases before
+# the tap's formula wherever no keg of that name stands. So a pin names the
+# formula a keg was poured from as brew itself names it, `dax/pin/php@8.5`
+# for one poured here and `zstd` for one of homebrew-core's, by the tap its
+# receipt records, as xtask's remedy for an unpinned keg names it; the
+# unpin before a pour names the tap's formula; and the uninstall, which
+# takes every keg of the name whichever tap poured it, is asked only where
+# a keg of that name stands, where brew finds it before any alias.
+#
 # DRY_RUN=1 reads the pin and the machine and says what it would pour, each
 # keg and php by its formula and its bottle, and pours, pins and fetches
 # nothing.
@@ -69,17 +80,33 @@ pour() {
             '[.[] | select(.commit.message | startswith($update) or startswith($add))][0].sha // empty')
     [ -n "$sha" ] || { echo "::error::no homebrew-core commit bottles $name $at"; exit 1; }
     echo "$name $at from homebrew-core $sha"
-    brew unpin "$name" >/dev/null 2>&1 || true
-    brew uninstall --ignore-dependencies --force "$name" >/dev/null 2>&1 || true
+    # The tap's formula is written first, so the unpin names it.
     brew tap | grep -qx dax/pin || brew tap-new --no-git dax/pin >/dev/null
     file="$(brew --repository dax/pin)/Formula/$name.rb"
     curl -sSfL -o "$file" "https://raw.githubusercontent.com/Homebrew/homebrew-core/$sha/Formula/$shard/$name.rb"
     # A tap's bottles are the tap's own packages by default; these are homebrew/core's.
     sed -i '' 's|^  bottle do$|  bottle do\n    root_url "https://ghcr.io/v2/homebrew/core"|' "$file"
+    brew unpin "dax/pin/$name" >/dev/null 2>&1 || true
+    if [ -d "$prefix/Cellar/$name" ]; then
+        brew uninstall --ignore-dependencies --force "$name" >/dev/null 2>&1 || true
+    fi
     # Every keg php loads is poured here at its record, so none is brew's to
     # resolve: --ignore-dependencies keeps brew from upgrading one to its
     # newest, and from refusing a pour over a pinned one it would call old.
     brew install --ignore-dependencies "dax/pin/$name"
+}
+
+# named <keg> <formula>: the formula the keg at that directory was poured
+# from, as brew names a formula (`Formula#full_name`): `<tap>/<formula>`
+# for a tap's, `dax/pin/php@8.5`, and the bare name for homebrew-core's or
+# a keg whose receipt names no tap.
+named() {
+    local tap
+    tap=$(jq -r '.source.tap // empty' "$1/INSTALL_RECEIPT.json" 2>/dev/null) || tap=
+    case $tap in
+    "" | homebrew/core) echo "$2" ;;
+    *) echo "$tap/$2" ;;
+    esac
 }
 
 # The version Homebrew's `opt` link points a keg at, empty where none is.
@@ -102,7 +129,7 @@ while read -r keg at; do
         now=$(linked "$keg")
         [ "$now" = "$at" ] || { echo "::error::$keg is ${now:-not installed}; the record is $at"; exit 1; }
     fi
-    [ -n "$dry" ] || brew pin "$keg"
+    [ -n "$dry" ] || brew pin "$(named "$prefix/opt/$keg" "$keg")"
 done <<<"$kegs"
 
 if [ -f "$path" ] && [ "$(md5 -q "$path")" = "$md5" ]; then
@@ -118,4 +145,4 @@ else
 fi
 # The keg stands at the pin's md5 here, poured now or before, as a keg of
 # the closure stands at its record where the loop above pins it.
-[ -n "$dry" ] || brew pin "$formula"
+[ -n "$dry" ] || brew pin "$(named "${path%%/Cellar/*}/Cellar/$formula/$bottle" "$formula")"
