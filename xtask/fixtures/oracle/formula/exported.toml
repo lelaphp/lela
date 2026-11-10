@@ -1,0 +1,44 @@
+# The pin after a bump that left `[recipe.env]` behind (#4383): php and
+# its hosts stand in `Cellar/php@8.5/8.5.13`, and `TEST_PHP_EXECUTABLE`
+# still names the keg before, `Cellar/php/8.5.12`, which stays installed
+# and pinned after the move, so a program that spawns php by that name
+# would run the old one with no digest asserted. It is a defect of the
+# pin: another formula's keg, no bottle of `[oracle].version`, and a
+# second keg where a runner pours one (xtask/tests/oracle.rs,
+# xtask/tests/status.rs).
+[oracle]
+version = "8.5.13"
+formula = "php@8.5"
+path = "/nowhere/Cellar/php@8.5/8.5.13/bin/php"
+md5 = "00000000000000000000000000000000"
+
+[sapi]
+cgi = { path = "/nowhere/Cellar/php@8.5/8.5.13/bin/php-cgi", md5 = "00000000000000000000000000000000" }
+fpm = { path = "/nowhere/Cellar/php@8.5/8.5.13/sbin/php-fpm", md5 = "00000000000000000000000000000000" }
+phpdbg = { path = "/nowhere/Cellar/php@8.5/8.5.13/bin/phpdbg", md5 = "00000000000000000000000000000000" }
+
+[source]
+tag = "php-8.5.13"
+commit = "00000000"
+path = "/nowhere/php-src"
+phpt_files = 0
+
+[recipe]
+script_name = "witness.php"
+preamble = "<?php\n"
+args = ["-n"]
+ini = []
+env_clear = true
+[recipe.env]
+TEST_PHP_EXECUTABLE = "/nowhere/Cellar/php/8.5.12/bin/php"
+
+[recipe.limits]
+timeout_s = 60
+
+[recipe.normalise]
+crlf_to_lf = true
+trim = " \t\n\r\u0000\u000B"
+scratch_token = "%SCRATCH%"
+
+[closure]
+zstd = "1.5.7_1"

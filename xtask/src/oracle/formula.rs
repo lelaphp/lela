@@ -8,12 +8,16 @@
 //! **What is held** is that the pin says one thing: a pinned binary whose
 //! path stands under a Cellar stands in the formula's keg, at a bottle of
 //! `[oracle].version`, the one bottle for them all, and the formula of one
-//! line is the line of that version. Each disagreement is a defect of the pin
-//! ([`super::Pin::defects`]), read off the file alone, so it is refused on
-//! a machine with no keg at all, a runner before its pour: `status
-//! --section oracle` renders no pin whose formula and paths name two kegs,
-//! or whose path names a bottle of another version, and a runner is handed
-//! none to pour.
+//! line is the line of that version. The binaries are php, each host of
+//! `[sapi]`, and php as `[recipe.env]` exports it, `TEST_PHP_EXECUTABLE`.
+//! Each disagreement is a defect of the pin, read off the file alone, on
+//! a machine with no keg at all as on one with it, a runner before its
+//! pour: [`super::Pin::parse`] records it ([`super::Pin::defects`]) and
+//! loads the pin, `Manifest::pin` refuses it with the first defect for
+//! every instrument that asks for the pin, and `permit` and `done` note
+//! it. So `status --section oracle` renders no pin whose formula and
+//! paths name two kegs, or whose path names a bottle of another version,
+//! and a runner is handed none to pour.
 //!
 //! **The bottle** is the keg's version as Homebrew names it, its
 //! `pkg_version`: php's version, and the formula's revision after `_` where

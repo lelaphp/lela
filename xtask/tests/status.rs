@@ -436,6 +436,16 @@ fn oracle_names_the_formula_a_runner_pours_and_the_dry_run_says_it() {
         ),
         "{refused}"
     );
+    // So is a pin whose `[recipe.env]` still exports php from the keg
+    // before: no runner pours a pin that would run two.
+    let root = scratch_poured("oracle-poured-exported", "exported.toml");
+    let refused = status_with_pin(&root, &section, None, None).failed();
+    assert!(
+        refused.contains(
+            "[recipe.env].TEST_PHP_EXECUTABLE /nowhere/Cellar/php/8.5.12/bin/php stands in the keg php, and the pin is poured from the formula php@8.5,"
+        ),
+        "{refused}"
+    );
 }
 
 /// php's own keg is `brew pin`ned as each keg of `[closure]` is (#4383),

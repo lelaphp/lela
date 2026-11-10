@@ -900,7 +900,11 @@ impl Pin {
     }
 
     /// The pinned binaries a keg holds, `php` and each host `[sapi]`
-    /// names, each by the key that names its path.
+    /// names, each by the key that names its path, and php again where
+    /// `[recipe.env]` exports it to the programs it runs, as
+    /// run-tests.php exports the binary under test. No digest is asserted
+    /// at that one, so a bump that left it behind, as the last left the
+    /// hosts (#3374), would run the keg before it, which stays installed.
     fn binaries(&self) -> Vec<(&'static str, &Path)> {
         let hosts = [
             ("[sapi].cgi.path", &self.sapi.cgi),
@@ -910,8 +914,11 @@ impl Pin {
         let hosts = hosts
             .into_iter()
             .filter_map(|(key, host)| Some((key, host.as_ref()?.path.as_path())));
+        let exported = self.recipe.env.get("TEST_PHP_EXECUTABLE").map(Path::new);
+        let exported = exported.map(|path| ("[recipe.env].TEST_PHP_EXECUTABLE", path));
         std::iter::once(("[oracle].path", self.oracle.path.as_path()))
             .chain(hosts)
+            .chain(exported)
             .collect()
     }
 

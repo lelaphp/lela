@@ -4,7 +4,8 @@
 # off the path: it loads with no defect, `status --section oracle` names
 # the bottle `8.5.13_1`, and `scripts/ci/pinned-php.sh` says under
 # DRY_RUN=1 that it would pour that one (xtask/tests/oracle.rs,
-# xtask/tests/status.rs).
+# xtask/tests/status.rs). Its `[recipe.env]` exports php from the same
+# keg, as the tracked pin's does.
 [oracle]
 version = "8.5.13"
 formula = "php@8.5"
@@ -28,6 +29,8 @@ preamble = "<?php\n"
 args = ["-n"]
 ini = []
 env_clear = true
+[recipe.env]
+TEST_PHP_EXECUTABLE = "/nowhere/Cellar/php@8.5/8.5.13_1/bin/php"
 
 [recipe.limits]
 timeout_s = 60
