@@ -1,0 +1,24 @@
+# A negative control for the manifest rule `divergence.reason` (#4385): an
+# accepted row whose `fixed_in` the pin has reached, beside one whose
+# release is still ahead of it. 8.5.0 is at or below any pin of the 8.5
+# line and after it; 99.0.0 is above any pin there will be.
+
+[[divergence]]
+id = "trace:fixture-reached"
+kind = "trace"
+cause = "php-ub"
+retires = "pin"
+fixed_in = "8.5.0"
+reason = "php's behaviour is undefined here, and 8.5.0 carries the fix (fixture)."
+status = "accepted"
+since = "2026-11-10"
+
+[[divergence]]
+id = "trace:fixture-in-order"
+kind = "trace"
+cause = "php-ub"
+retires = "pin"
+fixed_in = "99.0.0"
+reason = "php's behaviour is undefined here, and the release that carries the fix is ahead of the pin (fixture)."
+status = "accepted"
+since = "2026-11-10"

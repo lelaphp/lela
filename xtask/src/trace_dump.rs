@@ -504,6 +504,6 @@ mod tests {
         );
         let registry = Registry::parse(&format!("[[divergence]]{cause}")).unwrap();
         assert!(said_of(&registry, id, engine.as_bytes()).contains("at line 3"));
-        assert_eq!(registry.refused().len(), 1);
+        assert_eq!(registry.refused(None).len(), 1);
     }
 }
