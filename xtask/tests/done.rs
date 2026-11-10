@@ -2450,13 +2450,13 @@ fn ci_typechecks_the_module_against_the_committed_declarations_before_the_tests(
 }
 
 /// CI per commit (harness-design.md §7): the same instruments over the
-/// workspace, then `done`; the reading store is the only thing the run
-/// keeps; what it renders is the permits section. The instruments run
-/// on two runners, the build runner's and the oracle runner's (#2253),
-/// and each job stashes its own store for `done`'s job, which joins them
-/// and stashes the one store the run keeps, `harness` (#3554).
+/// workspace; the reading store is the only thing the run keeps; what it
+/// renders is the permits section. The instruments run on two runners,
+/// the build runner's and the oracle runner's (#2253), and each job
+/// stashes its own store for the store job, which joins them and stashes
+/// the one store the run keeps, `harness` (#3554).
 #[test]
-fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
+fn ci_per_commit_runs_the_instruments_and_uploads_only_the_store() {
     let text = read(".github/workflows/harness.yml");
     let mut last = 0;
     for step in [
@@ -2468,7 +2468,6 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
         "xtask unsafe-audit",
         "xtask vocab",
         "xtask crosscheck",
-        "xtask done",
         "status --section permits",
     ] {
         let at = text
@@ -2518,21 +2517,19 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     assert_eq!(kept, 1, "one store is the run's: {text}");
     assert!(
         text.contains("fetch-depth: 0"),
-        "done needs the merge base with main: {text}"
+        "a runner keeps one history: {text}"
     );
 }
 
-/// CI per commit runs on a push to `main` alone, since branch tracks are
-/// gone and a ticket's branch reaches CI as a pull request (ADR-0009,
-/// #1757), and judges a pull request since the ref it targets, its
-/// checkout being a detached merge commit (harness-design.md §4.5, §7).
-/// A push runs no `done`: pre-push and `land` judged what it carries
-/// (Round 1, Q21), so the step is the pull request's alone and every
-/// `done` it runs passes the base.
+/// CI per commit runs on a push to `main` alone, and runs no `done`, as
+/// Mitchell ruled on #4348 (ruling 5; #4372): a ticket's branch is judged
+/// at pre-push and by `land`, whose judges are main's tip's, and a pull
+/// request runs nothing, so neither the trigger nor the `done` step that
+/// went with it stands (harness-design.md §4.5, §7).
 #[test]
-fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
+fn ci_runs_on_a_push_to_main_alone_and_runs_no_done() {
     let text = read(".github/workflows/harness.yml");
-    let on = &text[text.find("on:").unwrap()..text.find("jobs:").unwrap()];
+    let on = &text[text.find("\non:").unwrap()..text.find("\njobs:").unwrap()];
     let branches = on
         .lines()
         .find(|l| l.trim_start().starts_with("branches:"))
@@ -2542,63 +2539,69 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
         Some("branches: [main]"),
         "a push to main alone: {branches}"
     );
-    assert!(
-        on.lines().any(|l| l.trim() == "pull_request:"),
-        "a ticket's branch reaches CI as a pull request: {on}"
-    );
-    let step = &text[text.find("- name: done").unwrap()..];
-    let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
-    assert!(
-        step.contains("GITHUB_BASE_REF"),
-        "a pull request is judged since the ref it targets: {step}"
-    );
-    assert!(
-        step.contains("done --base \"$GITHUB_BASE_REF\""),
-        "the base is passed as the ref, which merge_base resolves on origin: {step}"
-    );
-    assert!(
-        step.contains("\n        if: ${{ github.event_name == 'pull_request' }}\n"),
-        "a push runs no done: {step}"
-    );
-    let runs = step
+    let code = text
         .lines()
-        .filter(|l| l.contains("cargo xtask done"))
-        .collect::<Vec<_>>();
-    assert!(
-        !runs.is_empty() && runs.iter().all(|l| l.contains("--base")),
-        "every done the step runs passes the base: {step}"
-    );
-    assert_eq!(
-        text.matches("xtask done").count(),
-        1,
-        "the pull request's step is the one done CI runs: {text}"
-    );
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for gone in ["pull_request", "xtask done", "GITHUB_BASE_REF"] {
+        assert!(
+            !code.contains(gone),
+            "harness.yml still names {gone}: {code}"
+        );
+    }
 }
 
-/// A pull request's `done` names `phpt` `--not-run` whatever else ran
-/// (Round 1, Q22): no job of the workflow runs the corpus through the
-/// engine, so a missing run is a note there and not unmet.
+/// The secret that reaches the stash is set on each step that stashes
+/// and on no other, never in a workflow's or a job's `env` (#4348 ruling
+/// 5; #4372), in every workflow: each `uses: ./.github/actions/stash` step
+/// carries it in its own `env`, and the secret is named nowhere else in
+/// the file. A step is the lines after its `uses:` indented under it, so
+/// a job's last step does not reach into the next job.
 #[test]
-fn a_pull_request_names_phpt_not_run() {
-    let text = read(".github/workflows/harness.yml");
-    let step = &text[text.find("- name: done").unwrap()..];
-    let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
-    let first = step
-        .lines()
-        .map(str::trim)
-        .find(|l| l.starts_with("set --"))
-        .unwrap_or_else(|| panic!("the step sets its arguments: {step}"));
-    assert_eq!(first, "set -- --not-run phpt", "{step}");
-    assert!(
-        step.find("set -- --not-run phpt\n").unwrap()
-            < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
-        "phpt is named before the oracle job is asked about: {step}"
-    );
+fn the_stash_key_is_set_on_the_stash_steps_alone() {
+    let secret = "DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}";
+    let dir = workspace().join(".github/workflows");
+    let mut workflows: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "yml"))
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    workflows.sort();
+    let mut stashing = 0;
+    for name in &workflows {
+        let text = read(&format!(".github/workflows/{name}"));
+        let steps: Vec<String> = text
+            .match_indices("uses: ./.github/actions/stash")
+            .map(|(at, _)| {
+                text[at..]
+                    .lines()
+                    .skip(1)
+                    .take_while(|l| l.is_empty() || l.starts_with("        "))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect();
+        stashing += steps.len();
+        for step in &steps {
+            assert!(
+                step.contains(&format!("        env:\n          {secret}")),
+                "{name}: the step sets the secret itself: {step}"
+            );
+        }
+        assert_eq!(
+            text.matches("secrets.DAX_STASH_KEY").count(),
+            steps.len(),
+            "{name}: the secret is set on the stash steps and nowhere else: {text}"
+        );
+    }
+    assert!(stashing > 0, "the workflows stash: {workflows:?}");
 }
 
 /// The red-main ticket `scripts/ci/red.sh` files quotes no `done` lines
 /// and holds its builder to no `done` box, since a push runs no `done`
-/// (Round 1, Q21), and the `done` job hands the red-main job no list.
+/// (Round 1, Q21), and the store job hands the red-main job no list.
 #[test]
 fn a_red_main_carries_no_done_lines() {
     let text = read(".github/workflows/harness.yml");
@@ -2617,59 +2620,6 @@ fn a_red_main_carries_no_done_lines() {
     for gone in ["UNMET", "xtask done", "done_lines", "unmet"] {
         assert!(!code.contains(gone), "red.sh still reads {gone}: {code}");
     }
-}
-
-/// While `DAX_BUILD_RUNNER` is set the oracle job is skipped, and the done
-/// step names as `--not-run`, beside the `phpt` every pull request names,
-/// exactly the instruments of condition 1 that job's steps run, so a lane
-/// added there is named here or `done` is red for its absence (#2477). No
-/// instrument without an owed row is named.
-#[test]
-fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
-    let manifest = Manifest::load(workspace()).unwrap();
-    let text = read(".github/workflows/harness.yml");
-    let oracle = &text[text.find("\n  oracle:\n").unwrap()..text.find("\n  done:\n").unwrap()];
-    assert!(
-        oracle.contains("    if: ${{ !vars.DAX_BUILD_RUNNER }}\n"),
-        "the oracle job is skipped while the variable is set: {oracle}"
-    );
-    let runs: std::collections::BTreeSet<&str> = oracle
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("- run: cargo xtask "))
-        .filter_map(|l| l.split_whitespace().next())
-        .filter(|i| manifest.owing(i).is_some())
-        .collect();
-    assert_eq!(
-        runs,
-        ["crosscheck", "witness"].into(),
-        "the oracle job's instruments: {oracle}"
-    );
-    let step = &text[text.find("- name: done").unwrap()..];
-    let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
-    assert!(
-        step.contains("ORACLE: ${{ needs.oracle.result }}")
-            && step.contains("if [ \"$ORACLE\" = skipped ]; then"),
-        "the step reads whether the oracle job was skipped: {step}"
-    );
-    // What the skipped branch adds, beyond the `phpt` every pull request
-    // names (Round 1, Q22).
-    let asked = step.find("if [ \"$ORACLE\" = skipped ]; then").unwrap();
-    let skipped = &step[asked..];
-    let skipped = &skipped[..skipped.find("\n          fi\n").unwrap_or(skipped.len())];
-    let named: std::collections::BTreeSet<&str> = skipped
-        .split("--not-run ")
-        .skip(1)
-        .filter_map(|rest| rest.split_whitespace().next())
-        .collect();
-    assert_eq!(named, runs, "{step}");
-    let before = step
-        .find("set -- --not-run phpt\n")
-        .expect("no instrument but phpt is excluded before the oracle job is tested");
-    assert!(before < asked, "{step}");
-    assert!(
-        step.contains("::warning title=the oracle lane did not run::"),
-        "{step}"
-    );
 }
 
 /// #18's other half: the row is what asks, so a crate that is no

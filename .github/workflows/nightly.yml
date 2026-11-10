@@ -56,11 +56,13 @@ permissions:
 
 # The stash every hand-off between jobs goes through (.github/actions/stash,
 # #3554): the repository's to configure once, for every runner, and unset
-# on a fork, where the hand-off is a GitHub artifact.
+# on a fork, where the hand-off is a GitHub artifact. The two variables are
+# every job's; the secret, the key that reaches the stash, is set on each
+# step that stashes and on no other, so no other step's process holds it
+# (#4348 ruling 5; #4372).
 env:
   DAX_STASH: ${{ vars.DAX_STASH }}
   DAX_STASH_HOST_KEY: ${{ vars.DAX_STASH_HOST_KEY }}
-  DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
 jobs:
   oracle:
     name: phpt and witnesses under the pinned oracle
@@ -146,6 +148,8 @@ jobs:
           $XTASK status --section parity --format json > "$RUNNER_TEMP/parity/rendering"
           mv "$RUNNER_TEMP/parity/rendering" "$RUNNER_TEMP/parity/parity.json"
       - uses: ./.github/actions/stash
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: parity
           path: ${{ runner.temp }}/parity/parity.json
@@ -218,6 +222,8 @@ jobs:
         if: github.event_name == 'schedule' || inputs.full
         run: $XTASK phpt --full || true
       - uses: ./.github/actions/stash
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: oracle
           path: target/harness/log/
@@ -230,6 +236,8 @@ jobs:
       # so this holds every tree it has run, and the latest is the one to
       # fetch.
       - uses: ./.github/actions/stash
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: phpt-runs
           path: target/harness/phpt-runs/
@@ -263,6 +271,8 @@ jobs:
       - run: cargo xtask soak --nightly
       - uses: ./.github/actions/stash
         if: always()
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: soak
           path: target/harness/log/
@@ -338,6 +348,8 @@ jobs:
           done
       - uses: ./.github/actions/stash
         if: always()
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: bench
           path: target/harness/log/
@@ -396,6 +408,8 @@ jobs:
         run: scripts/ci/tailcall.sh restore
       - uses: ./.github/actions/stash
         if: always()
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: tailcall
           path: target/harness/log/

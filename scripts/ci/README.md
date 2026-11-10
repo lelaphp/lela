@@ -19,7 +19,7 @@ Until `dax-build` is online (#2296), the Linux jobs run on GitHub-hosted Linux, 
 runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
 ```
 
-That is `regions`, `per-commit`, `miri`, `tailcall`, `done` and `red-main` in `harness.yml`, and `soak`, `deny` and `red-nightly` in `nightly.yml`.
+That is `regions`, `per-commit`, `miri`, `tailcall`, `store` and `red-main` in `harness.yml`, and `soak`, `deny` and `red-nightly` in `nightly.yml`.
 
 - **Unset** (or empty), every job runs on `[self-hosted, linux, dax-build]`, as before the variable existed.
 - **Set**, its value is a JSON list of runner labels. The value to set is the hosted Ubuntu 26.04 image, the release `packages.txt` names (#1724):
@@ -28,12 +28,12 @@ That is `regions`, `per-commit`, `miri`, `tailcall`, `done` and `red-main` in `h
   gh variable set DAX_BUILD_RUNNER --body '["ubuntu-26.04"]'
   ```
 
-  A set variable also says the self-hosted pair is not online. So the jobs only the Mac can run, both `oracle` jobs and nightly.yml's `bench` and `tailcall`, are skipped. Queued instead, each would wait the 24 hours GitHub holds a job no runner takes, and harness.yml's `done`, which needs its `oracle` job, would wait with it.
+  A set variable also says the self-hosted pair is not online. So the jobs only the Mac can run, both `oracle` jobs and nightly.yml's `bench` and `tailcall`, are skipped. Queued instead, each would wait the 24 hours GitHub holds a job no runner takes, and harness.yml's `store` job, which needs its `oracle` job, would wait with it.
 - **Deleted** once both runners are registered. The wizard's last stage does this: `gh variable delete DAX_BUILD_RUNNER`. Nothing in the workflows is reverted.
 
 ### What a skipped oracle job means
 
-- **`done`** (harness.yml), which runs on a pull request alone and always names `--not-run phpt`, adds `--not-run witness --not-run crosscheck`, the two instruments the oracle job writes readings for. A missing reading of either is a note that it did not run, not an unmet condition. The head line reads "every condition of done is met over what ran; phpt and witness and crosscheck did not run in this run". The `done` reading counts `not_run` and its message says the same. The step adds a warning annotation, "the oracle lane did not run", and a line in the run's summary. Every other condition is judged as always, so `done` is red for anything else that is unmet. An oracle job that ran and failed is not skipped, so `done` judges the store it left.
+- **The run's store** (harness.yml's `store` job) holds no witness or crosscheck reading, the two instruments the oracle job writes readings for, and nothing in the run judges their absence: CI runs no `done`, since a push to `main` was judged at pre-push and by `land`, and no pull request runs harness.yml (#4372). The merge check takes both in `_merge` before the land, which holds them as ever.
 
 ### What the hosted image needs that the server has
 
@@ -67,8 +67,8 @@ Every runner reaches the stash the same way, over rsync and SSH, so its configur
 | `DAX_STASH_HOST_KEY` | variable | the server's `known_hosts` line, so no job takes the first host key it is offered |
 | `DAX_STASH_KEY` | secret | the private key every job reaches the stash with |
 
-Each workflow hands its jobs the three as environment of the same names, and `.github/actions/stash` writes the key and the host key into the step's temporary directory for that step alone. The server holds the key in `~runner/.ssh/authorized_keys` as `restrict,command="rrsync /home/runner/dax-stash"`, so it reads and writes that directory and runs nothing else. A person's key is held the same way with `rrsync -ro`, for `xtask phpt --against`'s fetch line, which reads `latest/phpt-runs.tar.gz` from `DAX_STASH`: `export DAX_STASH=runner@<server> RSYNC_RSH='ssh -i ~/.ssh/dax-ci'` where the wizard's key is not ssh's default.
+Each workflow hands its jobs the two variables as environment of the same names. The secret is set on each step that stashes, in every workflow, and on no other (#4372), so no other step's process holds it. `.github/actions/stash` writes the key and the host key into the step's temporary directory for that step alone. The server holds the key in `~runner/.ssh/authorized_keys` as `restrict,command="rrsync /home/runner/dax-stash"`, so it reads and writes that directory and runs nothing else. A person's key is held the same way with `rrsync -ro`, for `xtask phpt --against`'s fetch line, which reads `latest/phpt-runs.tar.gz` from `DAX_STASH`: `export DAX_STASH=runner@<server> RSYNC_RSH='ssh -i ~/.ssh/dax-ci'` where the wizard's key is not ssh's default.
 
 The wizard's stage 9 makes the key, authorizes both keys on the server, reads the host key over the connection stage 4 checked, and sets the three; stage 5, run again on a server laid before #3554, installs rsync and rrsync, the directory and the prune timer. Changing the server is the stage again, and changing the key is the stage after deleting `~/.ssh/dax-stash-ci`, with the old line taken out of `authorized_keys`.
 
-Where `DAX_STASH` is unset, as on a fork, the action hands off through GitHub's artifacts as before #3554, with a warning on each step that they count against the account's storage. A secret reaches a run of a pull request from this repository's branches, and never one from a fork.
+Where `DAX_STASH` is unset, as on a fork, the action hands off through GitHub's artifacts as before #3554, with a warning on each step that they count against the account's storage. No workflow runs on a pull request (#4372), so no secret reaches a run of one.
