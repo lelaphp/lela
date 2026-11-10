@@ -1401,7 +1401,14 @@ fn a_manifest_mains_xtask_cannot_read_is_refused_with_the_two_steps() {
 /// judged, over `_merge`, and `main` is untouched. With each reading
 /// taken over the key main's xtask computes, which in a scratch
 /// repository of this working tree is this build's, the land
-/// fast-forwards `main`.
+/// fast-forwards `main`. Those readings are stamped by this process and
+/// the printed commands are not run here: `test --crate xtask` in a
+/// scratch repository builds and runs the harness's whole suite. What
+/// holds the commands' own run is outside this test: main's judge built
+/// at 402d853c9, run with `--root` over this branch's worktree as `done
+/// --peek --base 4731cc5f0`, read the worktree's readings and said every
+/// condition of done was met, and a copy of this branch's xtask outside
+/// its tree took `clippy --crate xtask` there the same way.
 #[test]
 fn a_merge_that_rekeys_its_readings_lands_once_mains_xtask_took_them() {
     let root = repository("land-keying");
@@ -1473,13 +1480,17 @@ fn a_merge_that_rekeys_its_readings_lands_once_mains_xtask_took_them() {
     assert_eq!(main_at().trim(), head, "{out}");
 }
 
-/// A merge whose lock main's xtask renders otherwise is refused with the
-/// two steps such a change lands in, `main` untouched (#4378):
+/// A merge of the harness whose lock fails main's `api-check` is told,
+/// beside `done`'s count, the instrument, the two things the failure can
+/// be and the two steps, `main` untouched (#4378):
 /// `xtask/src/api_check/mod.rs` is changed on `staging` and `xtask.lock`
-/// committed as the branch's rendering has it, its lines in the other
-/// order. Main's `api-check`, which the judge takes itself, regenerates
-/// the lock and fails it, and since the merge changes the harness the
-/// refusal names the instrument and the steps beside `done`'s count.
+/// committed with its lines in the other order. What this holds is that
+/// the text is said and names the tree's own case first. It does not
+/// stand the case the two steps are for, a lock the merge's own xtask
+/// passes and main's fails: the judge here is the build under test, so
+/// the merge's xtask and main's are one, and a lock out of order fails
+/// both. Two builds that render a lock differently, and the steps
+/// themselves, are #4405's to stand.
 #[test]
 fn a_lock_mains_xtask_renders_otherwise_is_refused_with_the_two_steps() {
     let root = repository("land-lock");
@@ -1507,9 +1518,19 @@ fn a_lock_mains_xtask_renders_otherwise_is_refused_with_the_two_steps() {
         out.contains("main's xtask, which judges, fails api-check here"),
         "{out}"
     );
-    assert!(out.contains("lands in two steps"), "{out}");
+    let own = out
+        .find("where the merge's own xtask fails it over this tree as well")
+        .expect("the tree's own case");
+    let steps = out
+        .find("is meant to land in two steps")
+        .expect("the two steps");
+    assert!(own < steps, "{out}");
     assert!(
         out.contains("first the xtask that changes the instrument"),
+        "{out}"
+    );
+    assert!(
+        out.contains("which that xtask has to pass as well"),
         "{out}"
     );
     assert!(

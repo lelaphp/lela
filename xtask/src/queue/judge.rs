@@ -14,32 +14,38 @@
 //! deny` where `Cargo.lock` differs from main's ([`deny`]), and asks
 //! `done` since main's tip. `test`, `clippy`, `witness` and `miri` still
 //! build and measure the change, as the merge lanes take them, and `done`
-//! holds their readings as ever.
+//! holds their readings as ever; a merge that changes `xtask/` is the one
+//! whose readings of them the land may have main's build take instead
+//! ([`Retaken`]).
 //!
 //! A merge whose harness files main's readers cannot read is refused with
 //! the two steps that land it ([`TWO_STEPS`]): first the xtask that reads
 //! the new grammar, then the row that uses it. #4343 was such a merge, and
 //! landed from `_merge` by hand.
 //!
-//! A merge that changes the harness itself is judged the same way, and
-//! what its own xtask wrote for the judge to read is not what main's
-//! reads (#4378): a reading it keyed under a rule of `key.rs` it changed
-//! is stale here, and one it wrote in a shape of `reading.rs` main's does
-//! not read is missing. The judge keeps its own keying and its own
-//! reader, since one that held a reading to the key the merge computes
-//! would let a merge whose key is a constant land on readings of another
-//! tree, which is the branch deciding its own land again. So the land
-//! refuses, names the case and prints the commands that take those
-//! readings by main's build ([`Retaken`]), over `_merge`'s tree and under
-//! main's rules; the merge lands on them, and they are stale on `main`
-//! once its xtask is the merge's.
+//! A merge that changes the harness itself, a file under `xtask/`
+//! ([`of_the_harness`]), is judged the same way, and what its own xtask
+//! wrote for the judge to read is not what main's reads (#4378): a
+//! reading it keyed under a rule of `key.rs` it changed is stale here,
+//! and one it wrote in a shape of `reading.rs` main's does not read is
+//! missing. The judge keeps its own keying and its own reader, since one
+//! that held a reading to the key the merge computes would let a merge
+//! whose key is a constant land on readings of another tree, which is
+//! the branch deciding its own land again. So the land refuses, names
+//! the case and prints the commands that take those readings by main's
+//! build ([`Retaken`]), over `_merge`'s tree and under main's rules; the
+//! merge lands on them, and where it changed the keying they are stale
+//! on `main` once its xtask is the merge's.
 //!
 //! What the merge's xtask rendered into the tree is held the same way:
 //! a lock or a generated file it renders otherwise fails main's
 //! `api-check` or `budget`, which the judge takes itself, and no reading
-//! taken again clears a file of the tree. The land refuses and names the
-//! two steps such a change lands in ([`Held`]): first the xtask that
-//! changes the instrument, over a tree main's passes, then the tree.
+//! taken again clears a file of the tree. The judge cannot tell that
+//! from a merged tree the merge's own xtask fails as well, so the land
+//! refuses and says both ([`Held`]): such a tree is the batch's to mend,
+//! and a change to what an instrument holds a tree to is meant to land
+//! in two steps, first the xtask that changes the instrument, over a
+//! tree both builds pass, then the tree. Nobody has walked them (#4405).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -86,14 +92,18 @@ const TAKEN: [&str; 3] = [
 ];
 
 /// What a land refuses with where the merge changes the harness's own
-/// sources and an instrument of [`TAKEN`] fails ([`Held`]): the case, and
-/// the two steps such a change lands in (merging.md).
-pub(crate) const HELD: &str = "where the merge's own xtask passes it over the merged tree, the merge \
-     changes what the instrument holds a tree to, a lock's rendering or a generated file's among it, \
-     and the land holds the tree to main's, which no run clears. Such a change lands in two steps: \
-     first the xtask that changes the instrument, merged and landed over a tree main's xtask passes; \
-     then, once main's xtask is that one, what the tree changes by, in a batch of its own \
-     (.claude/skills/specs/merging.md)";
+/// sources and an instrument of [`TAKEN`] fails ([`Held`]): the two
+/// cases the judge cannot tell apart, the one the batch mends first, and
+/// the two steps the other is meant to land in (merging.md), which #4405
+/// has yet to walk.
+pub(crate) const HELD: &str = "where the merge's own xtask fails it over this tree as well, the tree \
+     is the batch's to mend, and nothing here changes that. Where the merge's own passes it, the \
+     merge changes what the instrument holds a tree to, a lock's rendering or a generated file's \
+     among it, and the land holds the tree to main's, which no run clears. Such a change is meant to \
+     land in two steps: first the xtask that changes the instrument, merged and landed over a tree \
+     main's xtask passes, which that xtask has to pass as well, so it takes the tree either way; \
+     then, once main's xtask is that one, what the tree changes by, in a batch of its own. Nobody \
+     has walked the two steps yet (#4405, .claude/skills/specs/merging.md)";
 
 /// The cargo-deny release land runs and nightly.yml installs: one older
 /// cannot read the advisory database's CVSS 4.0 scores, and so judges
@@ -315,10 +325,14 @@ fn of_the_harness(verdict: &done::Verdict) -> bool {
 
 /// The instruments of [`TAKEN`] a verdict holds failing where the merge
 /// changes the harness: what a land that refuses such a merge says
-/// beside `done`'s count ([`HELD`], #4378). The merge's commits passed
-/// each under the merge's own xtask, in pre-commit, so one failing here
-/// over the same tree is the two builds holding the tree to different
-/// things, and the land holds it to main's.
+/// beside `done`'s count ([`HELD`], #4378). Where the merge's own xtask
+/// passes one over the same tree, the two builds hold the tree to
+/// different things, and the land holds it to main's. Nothing here says
+/// that it does: a merge commit git makes itself runs pre-merge-commit,
+/// which takes none of the three, so two branches each under a ceiling
+/// whose union is over it fail `budget` under both builds. The judge
+/// does not run the merge's xtask to find out, so the text names both
+/// cases and the tree's own first.
 #[derive(Debug, PartialEq)]
 struct Held<'a> {
     /// Each failing instrument once, in the list's order.
@@ -326,10 +340,10 @@ struct Held<'a> {
 }
 
 impl<'a> Held<'a> {
-    /// What of `verdict` is held to main's: none where the merge leaves
-    /// the harness as main has it, a failing reading there being the
-    /// tree's own to mend, and none where no instrument of [`TAKEN`]
-    /// fails.
+    /// What of `verdict` may be held to main's alone: none where the
+    /// merge leaves `xtask/` as main has it, a failing reading there
+    /// being the tree's own to mend, and none where no instrument of
+    /// [`TAKEN`] fails.
     fn of(verdict: &'a done::Verdict) -> Option<Held<'a>> {
         let mut instruments: Vec<&str> = Vec::new();
         for unmet in &verdict.unmet {
@@ -649,10 +663,12 @@ mod tests {
     }
 
     /// Only a merge that changes a file under `xtask/` is told the two
-    /// steps, and only for an instrument the judge takes that fails, each
-    /// named once: a merge that changes `seams.toml` alone fails `budget`
-    /// by its tree, a failing `clippy` is the merge's code to mend, and a
-    /// stale `api-check` is a reading to take.
+    /// cases and the two steps, and only for an instrument the judge
+    /// takes that fails, each named once: a merge that changes `seams.toml`
+    /// alone fails `budget` by its tree, a failing `clippy` is the
+    /// merge's code to mend, and a stale `api-check` is a reading to
+    /// take. The text says the tree's own case before the two steps, and
+    /// what the first step needs of the new xtask.
     #[test]
     fn a_merge_of_the_harness_that_fails_an_instrument_the_judge_takes_is_held_to_mains() {
         use done::Kind::{Failing, Stale};
@@ -672,8 +688,15 @@ mod tests {
         let held = Held::of(&harness).expect("held");
         assert_eq!(held.instruments, ["api-check", "budget"]);
         let said = held.to_string();
+        let (own, steps) = (
+            said.find("fails api-check and budget here: where the merge's own xtask fails it")
+                .expect("the tree's own case"),
+            said.find("Such a change is meant to land in two steps")
+                .expect("the two steps"),
+        );
+        assert!(own < steps, "{said}");
         assert!(
-            said.contains("fails api-check and budget here: where the merge's own xtask passes"),
+            said.contains("which that xtask has to pass as well, so it takes the tree either way"),
             "{said}"
         );
         assert!(said.ends_with(HELD), "{said}");
