@@ -27,8 +27,8 @@
 //! ([`of_the_harness`]), is judged the same way, and what its own xtask
 //! wrote for the judge to read is not what main's reads (#4378): a
 //! reading it keyed under a rule of `key.rs` it changed is stale here,
-//! and one it wrote in a shape of `reading.rs` main's does not read is
-//! missing. The judge keeps its own keying and its own reader, since one
+//! and one it wrote under a `v` of `reading.rs` main's does not know is
+//! missing; a field added under the same `v` main's reads past (#4404). The judge keeps its own keying and its own reader, since one
 //! that held a reading to the key the merge computes would let a merge
 //! whose key is a constant land on readings of another tree, which is
 //! the branch deciding its own land again. So the land refuses, names
@@ -78,10 +78,11 @@ pub(crate) const TWO_STEPS: &str = "a change to the grammar of the harness's own
 /// sources and `done` holds a reading stale or missing ([`Retaken`]): the
 /// case, and what such a merge lands on (merging.md).
 pub(crate) const RETAKEN: &str = "the merge changes the harness's own sources, so its xtask may key a \
-     reading or write it otherwise than main's, which judges: main's xtask holds each reading to the \
-     key it computes and reads it in the shape it writes, and a reading the merge's lanes took under \
-     another keying or shape is stale or missing here and stays so however often they take it. Such \
-     a merge lands on readings main's xtask takes (.claude/skills/specs/merging.md)";
+     reading otherwise than main's, which judges, or write it under a new `v`: main's xtask holds \
+     each reading to the key it computes and refuses a `v` it does not know, and a reading the \
+     merge's lanes took under another keying or a new `v` is stale or missing here and stays so \
+     however often they take it. Such a merge lands on readings main's xtask takes \
+     (.claude/skills/specs/merging.md)";
 
 /// The instruments the judge takes itself over the merged tree ([`run`]),
 /// in the order it takes them.

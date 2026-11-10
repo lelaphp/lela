@@ -274,6 +274,16 @@ fn the_run_kept_at_the_bases_engine_tree_is_the_one_a_run_is_held_to() {
     );
     assert_eq!(kept::at(root, "main", "another").unwrap(), Base::Stale);
 
+    // A newer harness's run, carrying a field this one does not know, is
+    // the run all the same, so the base's verdicts still hold (#4404).
+    let mut newer = serde_json::to_value(&run).unwrap();
+    newer["later"] = "a field this harness does not know".into();
+    fs::write(&file, newer.to_string()).unwrap();
+    assert_eq!(
+        kept::at(root, "main", "fixture").unwrap(),
+        Base::Kept(run.clone())
+    );
+
     fs::write(tree.join("b.txt"), "b\n").unwrap();
     crate::git::git(&tree, &["add", "--", "b.txt"]).unwrap();
     crate::scratch::committing(&tree, &["commit", "-q", "-m", "beside"]);

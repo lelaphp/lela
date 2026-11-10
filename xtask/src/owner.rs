@@ -112,7 +112,11 @@ impl fmt::Display for SessionId {
     }
 }
 
-/// The owner record as it is kept.
+/// The owner record as it is kept. A field it does not know is refused,
+/// unlike a reading's (harness-design.md §4.2, #4404): the record is a
+/// lock with no `v`, and one that does not read is an error, which
+/// refuses, never an owner nobody holds. Read past, a field a newer
+/// harness wrote could admit a write that harness refuses.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
@@ -130,7 +134,9 @@ impl Record {
 }
 
 /// One process, by its pid and when it started, which together tell it
-/// from a later process given the same pid.
+/// from a later process given the same pid. Strict as the [`Record`] it
+/// is part of: it says when the lock lapses, and a field read past could
+/// have an older harness judge a live process ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Process {
