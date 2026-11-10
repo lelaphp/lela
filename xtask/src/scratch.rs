@@ -308,7 +308,12 @@ fn volume(path: &Path) -> PathBuf {
 /// answer for, in the time a file takes to write. `cargo xtask …`, which
 /// `scripts/worktree-add.sh` and `worktree-retire.sh` fall back to in a
 /// clone with no build and always call from its root, runs that binary
-/// rooted there in the same way. Any other `cargo` call goes to the
+/// rooted there in the same way. [`REBUILD`], the release judge that
+/// `post-merge` and `post-commit` rebuild in the background after a merge
+/// that changed the harness, is answered with nothing: no test reads that
+/// judge, and handed on, it was a cold release build started detached in a
+/// scratch repository its test then removed under it, which left the tree
+/// half removed (#4437). Any other `cargo` call goes to the
 /// `cargo` this process was started by, or to the one on `PATH` where
 /// `CARGO` names none by its absolute path (#3683). The one test that
 /// holds the build itself, the seeded worktree's, runs without it.
@@ -354,6 +359,7 @@ fn stand_in(
          \x20   shift\n\
          \x20   exec '{xtask}' --root \"$(pwd -P)\" \"$@\"\n\
          fi\n\
+         [ \"$*\" = '{REBUILD}' ] && exit 0\n\
          exec '{cargo}' \"$@\"\n"
     );
     std::fs::create_dir_all(dir)
@@ -367,6 +373,11 @@ fn stand_in(
     paths.extend(std::env::split_paths(path));
     std::env::join_paths(paths).context("joining the stand-in's directory onto PATH")
 }
+
+/// The call `scripts/hooks/post-merge` and `post-commit` make in the
+/// background after a merge that changed the harness, rebuilding main's
+/// release judge (#2982): what the stand-in answers with nothing.
+const REBUILD: &str = "build -q --release -p xtask";
 
 /// The cargo `named` says, as an absolute path: `named` itself where it is
 /// one, and otherwise the first file of that name on `path`; `cargo` where
@@ -1042,6 +1053,75 @@ mod tests {
         assert!(out.stdout.starts_with(b"cargo "), "{out:?}");
         let again = super::stand_in(&dir, xtask, Some("cargo".into()), &first);
         assert!(again.is_err(), "the stand-in named itself: {again:?}");
+    }
+
+    /// A land's fast-forward of a harness change in a scratch repository
+    /// starts no build of the release judge (#4437): `main` is
+    /// fast-forwarded over a change to `xtask/src` with the stand-in first
+    /// on `PATH`, as a land test runs it, and the real `post-merge` runs,
+    /// as the ticket it names reaching the harness says; the build it
+    /// starts in the background is answered by the stand-in and never
+    /// reaches the cargo behind it, which here writes down each call it
+    /// is handed. Started, that build ran cold in the repository while its
+    /// test removed the tree under it, and the tree stood half removed.
+    #[test]
+    fn a_fast_forward_of_a_harness_change_in_a_scratch_repository_starts_no_build() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        let tree = Tree::new("rebuild").unwrap();
+        let repo = tree.join("repo");
+        let workspace = crate::package_dir().parent().unwrap();
+        super::repository(workspace, &repo, &["scripts/hooks", "xtask/src"]).unwrap();
+        let (handed, merged) = (tree.join("handed"), tree.join("merged"));
+        let script = |name: &str, record: &std::path::Path| {
+            let file = tree.join(name);
+            let body = format!("#!/bin/sh\necho \"$*\" >> '{}'\n", record.display());
+            std::fs::write(&file, body).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            file
+        };
+        let cargo = script("cargo-behind", &handed);
+        let xtask = script("xtask", &merged);
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = super::stand_in(&tree.join("bin"), &xtask, Some(cargo.into()), &path).unwrap();
+
+        super::committing(&repo, &["checkout", "-q", "-b", "staging"]);
+        let lib = repo.join("xtask/src/lib.rs");
+        let text = std::fs::read_to_string(&lib).unwrap();
+        std::fs::write(&lib, format!("{text}\n// The branch's harness.\n")).unwrap();
+        super::committing(&repo, &["commit", "-q", "-am", "the branch's harness"]);
+        super::committing(&repo, &["checkout", "-q", "main"]);
+        let out = std::process::Command::new("git")
+            .args(["merge", "-q", "--ff-only", "staging"])
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env_remove("CARGO")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let merged = std::fs::read_to_string(&merged).unwrap_or_default();
+        assert!(
+            merged.contains("ticket merged --since ORIG_HEAD"),
+            "post-merge did not run: {merged:?}"
+        );
+        // The build is detached, so it is given the time a started one
+        // takes to reach the cargo behind the stand-in.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !handed.exists() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let handed = std::fs::read_to_string(&handed).unwrap_or_default();
+        assert_eq!(
+            handed, "",
+            "the cargo behind the stand-in was handed a call"
+        );
+        // A merge committed by `git commit` rebuilds through post-commit,
+        // by the same call.
+        for hook in ["post-merge", "post-commit"] {
+            let text = std::fs::read_to_string(workspace.join("scripts/hooks").join(hook)).unwrap();
+            let call = format!("nohup cargo {} ", super::REBUILD);
+            assert!(text.contains(&call), "{hook} rebuilds by another call");
+        }
     }
 
     /// A sweep never meets a lock before it is held (#1252): one thread
