@@ -843,7 +843,10 @@ pub(crate) enum WorktreeCommand {
     /// grammar change lands in where one does not; `budget`, `api-check`
     /// and `unsafe-audit` taken; each harness file changed since the base
     /// judged by steer; `cargo deny` where `Cargo.lock` moved; then `done`
-    /// as land's caller, whose verdict is the exit.
+    /// as land's caller, whose verdict is the exit. Where the merge
+    /// changes the harness, the refusal names the two steps for an
+    /// instrument taken here that fails, and prints the commands that
+    /// take a stale or missing reading by this build (#4378).
     Judge {
         /// The commit judged since, main's tip.
         #[arg(long, value_name = "COMMIT")]

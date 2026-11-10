@@ -1388,6 +1388,197 @@ fn a_manifest_mains_xtask_cannot_read_is_refused_with_the_two_steps() {
     assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
 }
 
+/// A merge that changes how the harness keys and writes its readings is
+/// refused naming the case and the commands that take them by main's
+/// xtask, and lands once they are taken (#4378). `xtask/src/key.rs` is
+/// changed on `staging`; the harness's `clippy` readings stand over the
+/// merged tree under another keying, a crate's `src` alone, as the
+/// merge's own xtask would key them, and its `test` reading is written
+/// in a version of the shape no reader at main's tip knows. Main's judge
+/// holds the first stale and the second missing, as it must, since a
+/// judge that read them by the merge's rules would be the merge's; the
+/// refusal says so and names each command once, by the build that
+/// judged, over `_merge`, and `main` is untouched. With each reading
+/// taken over the key main's xtask computes, which in a scratch
+/// repository of this working tree is this build's, the land
+/// fast-forwards `main`. Those readings are stamped by this process and
+/// the printed commands are not run here: `test --crate xtask` in a
+/// scratch repository builds and runs the harness's whole suite. What
+/// holds the commands' own run is outside this test: main's judge built
+/// at 402d853c9, run with `--root` over this branch's worktree as `done
+/// --peek --base 4731cc5f0`, read the worktree's readings and said every
+/// condition of done was met, and a copy of this branch's xtask outside
+/// its tree took `clippy --crate xtask` there the same way.
+#[test]
+fn a_merge_that_rekeys_its_readings_lands_once_mains_xtask_took_them() {
+    let root = repository("land-keying");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let main_at = || sh(&root, &["git", "rev-parse", "main"]);
+    let before = main_at();
+    judged_by_this_build(&root);
+    let key = fs::read_to_string(merge.join("xtask/src/key.rs")).unwrap();
+    write(
+        &merge,
+        "xtask/src/key.rs",
+        &format!("{key}\n// The branch's keying, which hashes a crate's `src` alone.\n"),
+    );
+    let head = commit_all(&merge, "the branch's keying");
+
+    let manifest = Manifest::load(&merge).unwrap();
+    let harness = manifest.crate_named("xtask").unwrap();
+    let store = Store::of_workspace(&merge);
+    let snapshot = xtask::key::Snapshot::disk(&merge).unwrap();
+    let taken = |instrument: &str, scope: &str, over: &Path| {
+        let mut reading = Reading::stamped_over(instrument, scope, &snapshot, over).unwrap();
+        reading.status = Status::Pass;
+        reading
+    };
+    let lints = xtask::done::scopes_of(&merge, "clippy", harness).unwrap();
+    let rekeyed: Vec<Reading> = (lints.iter())
+        .map(|scope| taken("clippy", scope, Path::new("xtask/src")))
+        .collect();
+    store.record(&rekeyed).unwrap();
+    write(
+        &merge,
+        "target/harness/test/xtask.toml",
+        "v = 3\ninstrument = \"test\"\nscope = \"xtask\"\nstatus = \"pass\"\n",
+    );
+
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("clippy: the reading for xtask is stale"),
+        "{out}"
+    );
+    assert!(out.contains("test: no reading for xtask"), "{out}");
+    assert!(
+        out.contains("the merge changes the harness's own sources"),
+        "{out}"
+    );
+    assert!(
+        out.contains("lands on readings main's xtask takes"),
+        "{out}"
+    );
+    let judge = scratch::xtask(env!("CARGO_BIN_EXE_xtask"));
+    for ask in ["clippy --crate xtask", "test --crate xtask"] {
+        let line = format!("  {} --root {} {ask}\n", judge.display(), merge.display());
+        assert_eq!(out.matches(&line).count(), 1, "{line}{out}");
+    }
+    assert!(out.contains("then land again"), "{out}");
+    assert!(out.contains("main is untouched"), "{out}");
+    assert_eq!(main_at(), before, "{out}");
+
+    let mut retaken: Vec<Reading> = (lints.iter())
+        .map(|scope| taken("clippy", scope, &harness.path()))
+        .collect();
+    retaken.push(taken("test", "xtask", &harness.path()));
+    store.record(&retaken).unwrap();
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(main_at().trim(), head, "{out}");
+}
+
+/// A merge of the harness whose lock fails main's `api-check` is told,
+/// beside `done`'s count, the instrument, the two things the failure can
+/// be and the two steps, `main` untouched (#4378):
+/// `xtask/src/api_check/mod.rs` is changed on `staging` and `xtask.lock`
+/// committed with its lines in the other order. What this holds is that
+/// the text is said and names the tree's own case first. It does not
+/// stand the case the two steps are for, a lock the merge's own xtask
+/// passes and main's fails: the judge here is the build under test, so
+/// the merge's xtask and main's are one, and a lock out of order fails
+/// both. Two builds that render a lock differently, and the steps
+/// themselves, are #4405's to stand.
+#[test]
+fn a_lock_mains_xtask_renders_otherwise_is_refused_with_the_two_steps() {
+    let root = repository("land-lock");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let before = sh(&root, &["git", "rev-parse", "main"]);
+    judged_by_this_build(&root);
+    let source = fs::read_to_string(merge.join("xtask/src/api_check/mod.rs")).unwrap();
+    write(
+        &merge,
+        "xtask/src/api_check/mod.rs",
+        &format!("{source}\n// The branch's rendering, a lock's lines in the other order.\n"),
+    );
+    let lock = fs::read_to_string(merge.join("xtask/xtask.lock")).unwrap();
+    let mut lines: Vec<&str> = lock.lines().collect();
+    lines.reverse();
+    write(&merge, "xtask/xtask.lock", &(lines.join("\n") + "\n"));
+    commit_all(&merge, "the branch's rendering of a lock");
+
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("fail api-check harness"), "{out}");
+    assert!(
+        out.contains("main's xtask, which judges, fails api-check here"),
+        "{out}"
+    );
+    let own = out
+        .find("where the merge's own xtask fails it over this tree as well")
+        .expect("the tree's own case");
+    let steps = out
+        .find("is meant to land in two steps")
+        .expect("the two steps");
+    assert!(own < steps, "{out}");
+    assert!(
+        out.contains("first the xtask that changes the instrument"),
+        "{out}"
+    );
+    assert!(
+        out.contains("which that xtask has to pass as well"),
+        "{out}"
+    );
+    assert!(
+        out.contains("then, once main's xtask is that one, what the tree changes by"),
+        "{out}"
+    );
+    assert!(out.contains("main is untouched"), "{out}");
+    assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
+}
+
+/// A merge that leaves `xtask/` alone is told neither text, though
+/// `done` counts the harness as touched (#4378): `docs/divergence.toml`
+/// is a file xtask's tests read (`key::READ_BY_TESTS`), so a merge that
+/// changes it alone is asked the harness's readings, missing here, and
+/// its xtask is the one main has, which keys and writes them as the
+/// judge does. The refusal is `done`'s list and count, and the list's
+/// own commands clear it.
+#[test]
+fn a_merge_that_changes_only_a_file_the_harnesss_tests_read_is_told_neither_text() {
+    let root = repository("land-read-by-tests");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let before = sh(&root, &["git", "rev-parse", "main"]);
+    judged_by_this_build(&root);
+    let registry = fs::read_to_string(merge.join("docs/divergence.toml")).unwrap();
+    write(
+        &merge,
+        "docs/divergence.toml",
+        &format!("{registry}\n# A comment no row reads.\n"),
+    );
+    commit_all(&merge, "a comment in the registry");
+
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("test: no reading for xtask"), "{out}");
+    assert!(out.contains("of done unmet"), "{out}");
+    for told in [
+        "the merge changes the harness's own sources",
+        "then land again",
+        "in two steps",
+    ] {
+        assert!(!out.contains(told), "{told}: {out}");
+    }
+    assert!(out.contains("main is untouched"), "{out}");
+    assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
+}
+
 /// `land` from main's checkout with a `cargo-deny` on `PATH` whose body
 /// is `body`, ahead of the build's stand-in.
 fn land_with_deny(root: &Path, body: &str) -> (i32, String) {
