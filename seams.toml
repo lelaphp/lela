@@ -848,6 +848,14 @@ unless_pattern = '\s--(abort|continue|quit|help)\b|\s-h\b'   # the end of a merg
 text = "main moves only by a fast-forward to a commit the merge queue judged (#3618 M2, #3622)."
 remedy = "merge in the merge worktree on staging, then `xtask worktree land`"                 # #3627
 
+[[rule]]
+id = "upstream.private"
+tool = ["Edit", "Write"]
+scope = "upstream/**"   # the folder left the tree at f9c488392 (#4380, ruled 2026-11-10); a file staged under it refuses an agent's commit as a harness.self file does (#3644 ruling 3)
+deny = true
+text = "Nothing is written under upstream/ in this repository: a defect in php-src, or in a library it links, goes in the private upstream project, and nothing here states it until Mitchell has reported it (#4380)."
+remedy = "write it in the private upstream project, as AGENTS.md says of a defect in php-src"                 # #4414
+
 # ---------------------------------------------------------------- owed
 # What a crate owes before done (harness §4.5 condition 1): one row per
 # instrument, the crates a glob or a list less `exempt`, and `when` a

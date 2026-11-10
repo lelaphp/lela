@@ -8,3 +8,4 @@ mod lanes;
 mod replay;
 mod rule_fixtures;
 mod sources;
+mod upstream;
