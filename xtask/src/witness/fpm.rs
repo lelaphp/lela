@@ -19,6 +19,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use nix::errno::Errno;
 
 use crate::oracle::{Observation, Oracle};
 use crate::scratch::Tree;
@@ -310,16 +311,15 @@ fn exchange(
 
 /// Request 1 written to `stream` with `pairs` as its `FCGI_PARAMS` and
 /// `stdin` as its `FCGI_STDIN`, and what php-fpm writes back on
-/// `FCGI_STDOUT` and `FCGI_STDERR` until `FCGI_END_REQUEST`: a fence's
-/// request and a host line's (`super::host`, #1975).
+/// `FCGI_STDOUT` and `FCGI_STDERR` until `FCGI_END_REQUEST`, or [`Closed`]
+/// where it ends the connection first: a fence's request, and a host
+/// line's by its parts (`super::host`, #1975).
 pub(super) fn round<'a>(
     mut stream: impl Read + Write,
     pairs: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
     stdin: Option<&[u8]>,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    stream
-        .write_all(&request(pairs, stdin))
-        .context("writing the request")?;
+    sent(stream.write_all(&request(pairs, stdin)))?;
     answer(stream)
 }
 
@@ -343,14 +343,22 @@ pub(super) fn request<'a>(
 }
 
 /// What the server writes back on `FCGI_STDOUT` and `FCGI_STDERR` until
-/// `FCGI_END_REQUEST`, [`round`]'s; [`Closed`], with what it wrote, where
-/// the connection ends at a record's edge before that record.
+/// `FCGI_END_REQUEST`, [`round`]'s; [`Closed`], with the records it wrote
+/// whole, where the connection ends before that record.
 pub(super) fn answer(mut stream: impl Read) -> Result<(Vec<u8>, Vec<u8>)> {
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     loop {
         let mut header = [0u8; 8];
-        if let Err(error) = stream.read_exact(&mut header) {
-            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+        let record = stream.read_exact(&mut header).and_then(|()| {
+            let len = usize::from(u16::from_be_bytes([header[4], header[5]]));
+            let mut content = vec![0u8; len + usize::from(header[6])];
+            stream.read_exact(&mut content)?;
+            content.truncate(len);
+            Ok(content)
+        });
+        let content = match record {
+            Ok(content) => content,
+            Err(error) if gone(&error) => {
                 return Err(Closed {
                     stdout,
                     stderr,
@@ -358,14 +366,10 @@ pub(super) fn answer(mut stream: impl Read) -> Result<(Vec<u8>, Vec<u8>)> {
                 }
                 .into());
             }
-            return Err(anyhow::Error::from(error).context("reading php-fpm's response"));
-        }
-        let len = usize::from(u16::from_be_bytes([header[4], header[5]]));
-        let mut content = vec![0u8; len + usize::from(header[6])];
-        stream
-            .read_exact(&mut content)
-            .context("reading php-fpm's response")?;
-        content.truncate(len);
+            Err(error) => {
+                return Err(anyhow::Error::from(error).context("reading php-fpm's response"));
+            }
+        };
         match header[1] {
             STDOUT => stdout.extend_from_slice(&content),
             STDERR => stderr.extend_from_slice(&content),
@@ -375,11 +379,45 @@ pub(super) fn answer(mut stream: impl Read) -> Result<(Vec<u8>, Vec<u8>)> {
     }
 }
 
-/// A connection php-fpm closed before its `FCGI_END_REQUEST`, as its
-/// child does where it `_exit`s under a request, the pinned php's hard memory
-/// limit among them (`Z/Zend/zend_alloc.c:519`): what it wrote on
-/// `FCGI_STDOUT` and `FCGI_STDERR` until then, and the read that met the
-/// end, whose error a `request fpm` fence fails with.
+/// Whether `error` is a read or a write meeting a connection its peer has
+/// ended, and no trouble of the client's own, a read past its time among
+/// them. A peer that closes a socket holding bytes it has not read resets
+/// the connection, and one that closes having read them ends it cleanly,
+/// so which of the two a client meets is how far its request had come
+/// when the server closed: an end of file or a reset on a read, a broken
+/// pipe or a reset on a write, a socket no longer connected on a shut
+/// half, and on macOS `EPROTOTYPE` on a write to a socket the reset is
+/// taking down.
+fn gone(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{
+        BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected, UnexpectedEof,
+    };
+    matches!(
+        error.kind(),
+        UnexpectedEof | ConnectionReset | ConnectionAborted | BrokenPipe | NotConnected
+    ) || error.raw_os_error().map(Errno::from_raw) == Some(Errno::EPROTOTYPE)
+}
+
+/// A request's write, or its half's shut, as a round takes it: one the
+/// server refused, having ended the connection ([`gone`]), is no failure
+/// of the round, since what the server wrote before then is [`answer`]'s
+/// to read, which meets the end itself and says [`Closed`].
+pub(super) fn sent(written: std::io::Result<()>) -> Result<()> {
+    match written {
+        Err(refused) if gone(&refused) => Ok(()),
+        written => written.context("writing the request"),
+    }
+}
+
+/// A connection the server ended, closed or reset, before its
+/// `FCGI_END_REQUEST`: php-fpm's child where it `_exit`s under a request,
+/// the pinned php's hard memory limit among them
+/// (`Z/Zend/zend_alloc.c:519`), and where it drops a peer its
+/// `listen.allowed_clients` does not name, with a bare `close` and no
+/// record (`Z/main/fastcgi.c:1401-1405`). It holds what the server wrote on
+/// `FCGI_STDOUT` and `FCGI_STDERR` in whole records until then, and the
+/// read that met the end, whose error a `request fpm` fence fails with; a
+/// host line holds it as the request's answer (`super::host`, #4397).
 #[derive(Debug)]
 pub(super) struct Closed {
     pub(super) stdout: Vec<u8>,
@@ -481,6 +519,67 @@ mod tests {
                 "{name}: {said}"
             );
         }
+    }
+
+    /// A connection the server ends before `FCGI_END_REQUEST` is
+    /// [`super::Closed`] however the client meets the end (#4397), an end
+    /// of file or a reset, at a record's edge or inside one, and holds the
+    /// records that came whole; a read past its time is the client's own
+    /// trouble and no end. A write the server refused is left to the read
+    /// to say, and one that failed otherwise fails the round.
+    #[test]
+    fn a_connection_ended_before_its_last_record_is_closed_however_it_ends() {
+        use std::io::{Cursor, Error, ErrorKind, Read};
+
+        /// What a server wrote, and what the read after it meets.
+        struct Ends(Cursor<Vec<u8>>, Option<ErrorKind>);
+        impl Read for Ends {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                match (self.0.read(buf)?, self.1.take()) {
+                    (0, Some(met)) => Err(met.into()),
+                    (got, met) => {
+                        self.1 = met;
+                        Ok(got)
+                    }
+                }
+            }
+        }
+        let whole = super::record(super::STDOUT, b"out");
+        let partway = [
+            whole.as_slice(),
+            &super::record(super::STDERR, b"err")[..10],
+        ]
+        .concat();
+        for (wrote, met) in [
+            (&whole, None),
+            (&whole, Some(ErrorKind::ConnectionReset)),
+            (&partway, None),
+            (&partway, Some(ErrorKind::ConnectionReset)),
+        ] {
+            let ended = super::answer(Ends(Cursor::new(wrote.clone()), met)).unwrap_err();
+            let closed = ended.downcast::<super::Closed>().unwrap();
+            assert_eq!(
+                (closed.stdout.as_slice(), closed.stderr.as_slice()),
+                (&b"out"[..], &b""[..])
+            );
+        }
+        let late =
+            super::answer(Ends(Cursor::new(whole), Some(ErrorKind::WouldBlock))).unwrap_err();
+        assert!(!late.is::<super::Closed>(), "{late:#}");
+
+        let prototype = Error::from_raw_os_error(nix::errno::Errno::EPROTOTYPE as i32);
+        for refused in [
+            ErrorKind::BrokenPipe.into(),
+            ErrorKind::ConnectionReset.into(),
+            prototype,
+        ] {
+            assert!(super::sent(Err(refused)).is_ok());
+        }
+        let failed = super::sent(Err(ErrorKind::TimedOut.into())).unwrap_err();
+        assert!(
+            format!("{failed:#}").contains("writing the request"),
+            "{failed:#}"
+        );
     }
 
     /// What the child appends after the response has ended is there when
