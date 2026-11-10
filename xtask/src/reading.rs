@@ -36,10 +36,13 @@ pub const UNREAD: &str = "unread";
 /// (harness-design.md §4.2): 2 since the scope's key is spelled `key`
 /// (#1719). A reading written before carries no `v` and is version 1,
 /// which spells the key `tree`; the store reads both, and refuses a `v` it
-/// does not know. A field a reading may omit, whose absence a reader of
-/// the earlier shape already handles correctly, is added under the same
-/// `v`; a field removed, renamed or retyped, or a meaning changed, is a
-/// new `v` (§4.6, revision 76).
+/// does not know. A field it does not know it ignores, in the store's
+/// files and the log's lines alike, as a handed-in line and a `--format
+/// jsonl` row are read (§4.2, #4404). So a field is added under the same
+/// `v` only where a reading without it is never read as fresher than one
+/// with it, since an older harness reads the newer reading as if the field
+/// were absent; a field removed, renamed or retyped, a meaning changed, or
+/// a field whose absence would read fresher is a new `v`.
 pub const V: u32 = 2;
 
 /// The `v` of a reading: written as [`V`] whatever version it was read
@@ -85,9 +88,9 @@ fn either_at<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Dateti
     deserializer.deserialize_any(Either)
 }
 
-/// One reading, the one shape every instrument writes.
+/// One reading, the one shape every instrument writes. Read back, a field
+/// it does not know is ignored and a `v` it does not know refused ([`V`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Reading {
     /// The version of the shape, [`V`]; absent on a reading of the first.
     #[serde(default)]
@@ -342,7 +345,8 @@ impl Reading {
 impl Reading {
     /// One line of the log back into a reading; the inverse of `to_json`,
     /// in one pass: `at` is read from the text `to_json` writes (#2164).
-    /// A field the reading has not is refused, as in the store.
+    /// A field the reading has not is ignored and a `v` this harness does
+    /// not know refused, as in the store ([`V`]).
     pub fn from_json(line: &str) -> Result<Reading> {
         serde_json::from_str(line).context("a log line that is not a reading")
     }
@@ -715,10 +719,14 @@ impl Store {
     /// and the latest reading of each scope over each key put in the
     /// index unless the index holds a later one: what [`Store::land`] does
     /// with each file of another store's log. The index is written once
-    /// per key, the newest [`KEPT`] of each scope, after the lines. How
+    /// per key, the newest [`KEPT`] of each scope, after the lines, each
+    /// entry the reading with every other field of its line kept beside it
+    /// ([`entry_of`]). A line of a `v` this harness
+    /// does not know is no reading, and is kept in [`UNREAD`]'s log. How
     /// many lines.
     fn split(&self, lines: &[u8]) -> Result<usize> {
-        let mut latest: BTreeMap<PathBuf, Reading> = BTreeMap::new();
+        type Entry<'a> = (String, PathBuf, Reading, &'a str);
+        let mut latest: BTreeMap<PathBuf, (Reading, &str)> = BTreeMap::new();
         let mut count = 0;
         for line in lines.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
             count += 1;
@@ -726,35 +734,35 @@ impl Store {
             whole.push(b'\n');
             let read = std::str::from_utf8(line)
                 .ok()
-                .and_then(|text| Reading::from_json(text).ok());
-            let Some(reading) = read else {
+                .and_then(|text| Some((Reading::from_json(text).ok()?, text)));
+            let Some((reading, text)) = read else {
                 Self::append_line(&self.shard(UNREAD)?, &whole)?;
                 continue;
             };
             Self::append_line(&self.shard(&reading.instrument)?, &whole)?;
             if let Some(entry) = self.indexed(&reading)? {
-                let later = |held: &Reading| reading.at.to_string() >= held.at.to_string();
+                let later =
+                    |(held, _): &(Reading, &str)| reading.at.to_string() >= held.at.to_string();
                 if latest.get(&entry).is_none_or(later) {
-                    latest.insert(entry, reading);
+                    latest.insert(entry, (reading, text));
                 }
             }
         }
         // The newest of each scope, by the time each reading was taken.
-        let mut by_dir: BTreeMap<PathBuf, Vec<(String, PathBuf, Reading)>> = BTreeMap::new();
-        for (entry, reading) in latest {
+        let mut by_dir: BTreeMap<PathBuf, Vec<Entry>> = BTreeMap::new();
+        for (entry, (reading, text)) in latest {
             let dir = entry.parent().unwrap_or(&self.root).to_path_buf();
             by_dir
                 .entry(dir)
                 .or_default()
-                .push((reading.at.to_string(), entry, reading));
+                .push((reading.at.to_string(), entry, reading, text));
         }
         for (dir, mut entries) in by_dir {
             entries.sort_by(|a, b| b.0.cmp(&a.0));
-            for (_, entry, reading) in entries.into_iter().take(KEPT) {
+            for (_, entry, reading, text) in entries.into_iter().take(KEPT) {
                 let held = Self::read_file(&entry).ok();
                 if held.is_none_or(|held| reading.at.to_string() >= held.at.to_string()) {
-                    let text = toml::to_string(&reading).context("rendering the reading")?;
-                    replace(&entry, text.as_bytes())?;
+                    replace(&entry, entry_of(text, &reading)?.as_bytes())?;
                 }
             }
             prune(&dir)?;
@@ -1137,6 +1145,31 @@ fn index_key(path: &Path) -> Option<&str> {
     let rest = &stem[40..];
     (key.chars().all(|c| c.is_ascii_hexdigit()) && (rest.is_empty() || rest.starts_with('-')))
         .then_some(key)
+}
+
+/// The index entry [`Store::land`] writes of `line`, a line of another
+/// store's log that reads as `reading`: `reading` in this harness's shape,
+/// `v` and `key` as [`V`] spells them and `at` as TOML's datetime, with
+/// every other field of the line kept beside it, so a field this harness
+/// does not know is kept and not dropped, and the harness that wrote it
+/// finds it in the entry (#4404). The first version's `tree`, which
+/// `reading` reads as its `key`, is not kept beside it. A line TOML cannot
+/// hold whole, a null or an integer past `i64`, which no writer of this
+/// store writes, is entered as this harness reads it.
+fn entry_of(line: &str, reading: &Reading) -> Result<String> {
+    let read = toml::Table::try_from(reading).context("rendering the reading")?;
+    let whole = serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| toml::Value::try_from(value).ok());
+    let table = match whole {
+        Some(toml::Value::Table(mut table)) => {
+            table.remove("tree");
+            table.extend(read);
+            table
+        }
+        _ => read,
+    };
+    toml::to_string(&table).context("rendering the reading")
 }
 
 /// The index of one scope cut to its newest [`KEPT`] entries, by the time
@@ -1880,6 +1913,79 @@ mod tests {
         ));
         assert_eq!(log.readings, [v2.clone(), v2]);
         assert_eq!(log.unreadable, [3]);
+    }
+
+    /// A reading carrying a field this harness does not know reads, from
+    /// the store's file and from a line of the log, as the reading without
+    /// it; a land indexes such a line, its entry keeping the field, and
+    /// keeps nothing of it in `unread`. A reading of a `v` this harness
+    /// does not know is refused in either, and a land keeps its line in
+    /// `unread` and indexes nothing (#4404).
+    #[test]
+    fn a_field_it_does_not_know_is_ignored_and_a_v_it_does_not_know_refused() {
+        let dir = Tree::new("store-unknown").unwrap();
+        let store = unnamed(&dir.join("main"));
+        let reading = over("test", "xtask", &key(1), "2026-11-10T09:00:00Z");
+        let mut newer = reading.to_json().unwrap();
+        newer["later"] = serde_json::json!({ "count": 1, "said": "kept" });
+        newer["future"] = "kept".into();
+        let mut unknown = reading.to_json().unwrap();
+        unknown["v"] = (V + 1).into();
+        unknown["scope"] = "unknown".into();
+        let old = over("test", "first", &key(2), "2026-11-10T08:00:00Z");
+        let first = first_version(&old);
+
+        assert_eq!(Reading::from_json(&newer.to_string()).unwrap(), reading);
+        assert!(Reading::from_json(&unknown.to_string()).is_err());
+
+        let file = store.path("test", "xtask").unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let text = toml::to_string(&reading).unwrap();
+        std::fs::write(
+            &file,
+            format!("future = \"kept\"\n{text}\n[later]\ncount = 1\n"),
+        )
+        .unwrap();
+        assert_eq!(store.read("test", "xtask").unwrap(), Some(reading.clone()));
+        std::fs::write(
+            &file,
+            text.replace(&format!("v = {V}"), &format!("v = {}", V + 1)),
+        )
+        .unwrap();
+        assert!(store.read("test", "xtask").is_err());
+        std::fs::remove_file(&file).unwrap();
+
+        let other = unnamed(&dir.join("other"));
+        std::fs::create_dir_all(other.root().join("log")).unwrap();
+        std::fs::write(
+            other.root().join("log/test.jsonl"),
+            format!("{newer}\n{unknown}\n{first}\n"),
+        )
+        .unwrap();
+        assert_eq!(store.land(&other).unwrap(), 3);
+        assert_eq!(
+            store.over("test", "xtask", &key(1), "").unwrap(),
+            Freshness::Fresh(reading.clone())
+        );
+        assert_eq!(
+            store.over("test", "first", &key(2), "").unwrap(),
+            Freshness::Fresh(old),
+            "a line of the first version is entered in this version's shape and read back"
+        );
+        let entry = store.indexed(&reading).unwrap().unwrap();
+        let kept: toml::Table = toml::from_str(&std::fs::read_to_string(entry).unwrap()).unwrap();
+        assert_eq!(kept["future"].as_str(), Some("kept"));
+        assert_eq!(kept["later"]["count"].as_integer(), Some(1));
+        assert_eq!(
+            kept["at"].as_datetime().map(ToString::to_string),
+            Some(reading.at.to_string())
+        );
+        let unread = std::fs::read_to_string(store.root().join("log/unread.jsonl")).unwrap();
+        assert_eq!(unread, format!("{unknown}\n"));
+        assert_eq!(
+            store.over("test", "unknown", &key(1), "").unwrap(),
+            Freshness::Never
+        );
     }
 
     #[test]
