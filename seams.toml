@@ -816,7 +816,7 @@ remedy = "keep working material in the session's scratchpad"                 # #
 id = "divergence.reason"
 scope = "docs/divergence.toml"
 check = "divergence-reason"
-text = "A divergence row with status accepted has a reason a person wrote, a by-design row's citing the design section or ADR that chose it, and an oracle-build row carries what it retires at; done fails while an open row touches the scope (harness §4.3)."
+text = "A divergence row with status accepted has a reason a person wrote, a by-design row's citing the design section or ADR that chose it, an oracle-build row carries what it retires at, a trace dump's row pins both sides' lines by their digests, and no accepted row's `fixed_in` is a release the pin has reached; done fails while an open row touches the scope (harness §4.3)."
 
 [[rule]]
 id = "checkout.owner"
