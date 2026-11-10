@@ -301,11 +301,16 @@ pub(crate) fn run(root: &Path, base: &str) -> Result<()> {
     }
 }
 
-/// Whether the merge `verdict` judges changes the harness: only then can
-/// its own xtask differ from this build, main's, in what it writes for
-/// the judge to read and in what it passes.
+/// Whether the merge `verdict` judges changes the harness, a file under
+/// `xtask/`: only then can its own xtask differ from this build, main's,
+/// in what it writes for the judge to read and in what it passes. The
+/// verdict's crates do not say it, since `done` counts the harness as
+/// touched by every file its tests read ([`crate::key::READ_BY_TESTS`]),
+/// the manifest, the registry, `data/` and `scripts/` among them, and a
+/// merge that changes one of those alone builds the xtask main has.
 fn of_the_harness(verdict: &done::Verdict) -> bool {
-    verdict.crates.iter().any(|name| name == HARNESS)
+    let under = |change: &crate::git::Change| Path::new(&change.path).starts_with(HARNESS);
+    verdict.changed.iter().any(under)
 }
 
 /// The instruments of [`TAKEN`] a verdict holds failing where the merge
@@ -369,7 +374,7 @@ struct Retaken<'a> {
 impl<'a> Retaken<'a> {
     /// What of `verdict`, judged over `root`, is retaken: each stale or
     /// missing reading a command takes, where the merge changes the
-    /// harness. None where the merge leaves the harness as main has it,
+    /// harness. None where the merge leaves `xtask/` as main has it,
     /// since its xtask then keys and writes a reading as this build does
     /// and the list's own commands clear it; and none where no reading is
     /// stale or missing, a failing one being the merge's to mend.
@@ -565,18 +570,24 @@ mod tests {
         }
     }
 
-    /// A verdict over `crates` whose unmet conditions are `unmet`, each a
-    /// kind and the command that clears it, whose third word is its
-    /// instrument.
-    fn verdict(crates: &[&str], unmet: &[(done::Kind, &str)]) -> done::Verdict {
+    /// A verdict over a diff of `changed` whose unmet conditions are
+    /// `unmet`, each a kind and the command that clears it, whose third
+    /// word is its instrument. The harness is among its crates whatever
+    /// changed, as `done` counts it for a file its tests read.
+    fn verdict(changed: &[&str], unmet: &[(done::Kind, &str)]) -> done::Verdict {
         let base = "a".repeat(40);
         done::Verdict {
             base: done::Base {
                 since: base.clone(),
                 commit: base,
             },
-            changed: Vec::new(),
-            crates: crates.iter().map(|&name| name.to_owned()).collect(),
+            changed: (changed.iter())
+                .map(|&path| crate::git::Change {
+                    path: path.to_owned(),
+                    deleted: false,
+                })
+                .collect(),
+            crates: vec![HARNESS.to_owned()],
             ticket: None,
             unmet: (unmet.iter())
                 .map(|&(kind, command)| done::Unmet {
@@ -592,10 +603,12 @@ mod tests {
         }
     }
 
-    /// Only a merge of the harness is told to take its readings by
-    /// main's build, and only the stale and the missing ones, each
-    /// command once: a merge that leaves the harness alone clears its
-    /// list by its own xtask, and a failing reading is no run's to clear.
+    /// Only a merge that changes a file under `xtask/` is told to take
+    /// its readings by main's build, and only the stale and the missing
+    /// ones, each command once: a merge that changes the registry and an
+    /// engine source, which touches the harness crate for `done` and
+    /// builds main's xtask all the same, clears its list by its own, and
+    /// a failing reading is no run's to clear.
     #[test]
     fn a_merge_of_the_harness_retakes_its_stale_and_missing_readings_by_mains_build() {
         use done::Kind::{Failing, Missing, Refused, Stale};
@@ -607,12 +620,17 @@ mod tests {
             (Missing, "cargo xtask test --crate xtask"),
             (Refused, "cargo xtask ticket read"),
         ];
-        let engine = verdict(&["php_engine"], &list);
-        assert_eq!(Retaken::of(root, &engine).unwrap(), None);
-        let failing = verdict(&[HARNESS, "php_engine"], &list[2..3]);
+        let read = [
+            "docs/divergence.toml",
+            "scripts/census.sh",
+            "crates/php_engine/src/lib.rs",
+        ];
+        let source = "xtask/src/key.rs";
+        assert_eq!(Retaken::of(root, &verdict(&read, &list)).unwrap(), None);
+        let failing = verdict(&[source], &list[2..3]);
         assert_eq!(Retaken::of(root, &failing).unwrap(), None);
 
-        let harness = verdict(&["php_engine", HARNESS], &list);
+        let harness = verdict(&[read[0], source], &list);
         let retaken = Retaken::of(root, &harness).unwrap().expect("retaken");
         assert_eq!(retaken.asks, ["clippy --crate xtask", "test --crate xtask"]);
         let judge = retaken.judge.display().to_string();
@@ -630,10 +648,11 @@ mod tests {
         assert!(said.contains("then land again"), "{said}");
     }
 
-    /// Only a merge of the harness is told the two steps, and only for
-    /// an instrument the judge takes that fails, each named once: a
-    /// failing `clippy` is the merge's code to mend, and a stale
-    /// `api-check` is a reading to take.
+    /// Only a merge that changes a file under `xtask/` is told the two
+    /// steps, and only for an instrument the judge takes that fails, each
+    /// named once: a merge that changes `seams.toml` alone fails `budget`
+    /// by its tree, a failing `clippy` is the merge's code to mend, and a
+    /// stale `api-check` is a reading to take.
     #[test]
     fn a_merge_of_the_harness_that_fails_an_instrument_the_judge_takes_is_held_to_mains() {
         use done::Kind::{Failing, Stale};
@@ -644,11 +663,12 @@ mod tests {
             (Stale, "cargo xtask unsafe-audit"),
             (Failing, "cargo xtask budget"),
         ];
-        assert_eq!(Held::of(&verdict(&["php_engine"], &list)), None);
-        assert_eq!(Held::of(&verdict(&[HARNESS], &list[1..2])), None);
-        assert_eq!(Held::of(&verdict(&[HARNESS], &list[3..4])), None);
+        let source = "xtask/src/api_check/mod.rs";
+        assert_eq!(Held::of(&verdict(&["seams.toml"], &list)), None);
+        assert_eq!(Held::of(&verdict(&[source], &list[1..2])), None);
+        assert_eq!(Held::of(&verdict(&[source], &list[3..4])), None);
 
-        let harness = verdict(&[HARNESS], &list);
+        let harness = verdict(&[source], &list);
         let held = Held::of(&harness).expect("held");
         assert_eq!(held.instruments, ["api-check", "budget"]);
         let said = held.to_string();

@@ -1520,6 +1520,44 @@ fn a_lock_mains_xtask_renders_otherwise_is_refused_with_the_two_steps() {
     assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
 }
 
+/// A merge that leaves `xtask/` alone is told neither text, though
+/// `done` counts the harness as touched (#4378): `docs/divergence.toml`
+/// is a file xtask's tests read (`key::READ_BY_TESTS`), so a merge that
+/// changes it alone is asked the harness's readings, missing here, and
+/// its xtask is the one main has, which keys and writes them as the
+/// judge does. The refusal is `done`'s list and count, and the list's
+/// own commands clear it.
+#[test]
+fn a_merge_that_changes_only_a_file_the_harnesss_tests_read_is_told_neither_text() {
+    let root = repository("land-read-by-tests");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let before = sh(&root, &["git", "rev-parse", "main"]);
+    judged_by_this_build(&root);
+    let registry = fs::read_to_string(merge.join("docs/divergence.toml")).unwrap();
+    write(
+        &merge,
+        "docs/divergence.toml",
+        &format!("{registry}\n# A comment no row reads.\n"),
+    );
+    commit_all(&merge, "a comment in the registry");
+
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("test: no reading for xtask"), "{out}");
+    assert!(out.contains("of done unmet"), "{out}");
+    for told in [
+        "the merge changes the harness's own sources",
+        "then land again",
+        "in two steps",
+    ] {
+        assert!(!out.contains(told), "{told}: {out}");
+    }
+    assert!(out.contains("main is untouched"), "{out}");
+    assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
+}
+
 /// `land` from main's checkout with a `cargo-deny` on `PATH` whose body
 /// is `body`, ahead of the build's stand-in.
 fn land_with_deny(root: &Path, body: &str) -> (i32, String) {
