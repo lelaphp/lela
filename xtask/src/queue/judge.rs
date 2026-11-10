@@ -93,8 +93,14 @@ impl Judge {
         lay(main, tip, &src)?;
         let built = build(&src, &home.join("build"))?;
         crate::make_parent(&binary)?;
-        fs::copy(&built, &binary)
-            .with_context(|| format!("copying {} to {}", built.display(), binary.display()))?;
+        // A copy cut short leaves a partial file, which the next land at
+        // this tip would take for the judge; a rename in one directory
+        // is whole or absent.
+        let partial = binary.with_extension("partial");
+        fs::copy(&built, &partial)
+            .with_context(|| format!("copying {} to {}", built.display(), partial.display()))?;
+        fs::rename(&partial, &binary)
+            .with_context(|| format!("renaming {} to {}", partial.display(), binary.display()))?;
         remove_dir(&src)?;
         prune(&home, tip)?;
         Ok(judge)
