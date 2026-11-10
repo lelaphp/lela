@@ -368,6 +368,10 @@ budget = 1500     # 921; no tests directory
 name = "sapi/makala"
 budget = 4000     # a host php does not ship, so #727's rule has no C to multiply: php -S's port is 1,510 lines, with TLS, the request pool and its configuration on top; ratcheted to the measured size at stage 1's close (#2332, Mitchell 2026-10-09). Its HTTP-served lane is #2334's subset, not a phpt row of its own
 porting = false   # it ports nothing of php-src's
+[[crate]]
+name = "fuzz/targets"
+budget = 350      # the eight libFuzzer targets, package php_fuzz_targets; 302 measured in preparation (#3612, ruled 2026-10-28)
+feature = "fuzz"  # libfuzzer-sys is behind it, so a default workspace build never compiles libFuzzer (#3612, 2026-10-31)
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
@@ -375,7 +379,7 @@ porting = false   # it ports nothing of php-src's
 [[seam]]
 name = "heap"
 producer = "php_heap"
-consumers = ["php_unit", "php_compile", "php_link", "php_engine", "php_jit", "php_ssa"]
+consumers = ["php_unit", "php_compile", "php_link", "php_engine", "php_jit", "php_ssa", "fuzz/targets"]   # fuzz/targets is a test adapter over the locked items, not a production consumer (#3612)
 lock = "heap.lock"
 adr = "0003"
 [[seam]]
@@ -505,6 +509,9 @@ deny = true # design §4.2: keeps a later main/-style split possible
 from = "sapi/*"
 to = ["php_sapi", "php_proto", "php_bundle", "php_ext"]
 adr = "0008" # a host reaches the engine through php_sapi; php_ext to declare natives of its own (#1348) and to read frames, op arrays and the linked tables as an extension does (#1911); never php_engine or ext/*
+[[edge]]
+from = "fuzz/targets"
+to = ["php_syntax", "php_heap", "php_bundle"]   # #3612, ruled 2026-10-28
 
 # ---------------------------------------------------------------- rules
 # Each rule: an `id`, a `scope` or a `tool`, one predicate, an optional `adr`,
