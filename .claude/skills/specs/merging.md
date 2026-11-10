@@ -1,6 +1,6 @@
 # Conflicts that recur
 
-Read when a merge in `_merge` conflicts, or the build or the hook refuses a merge that git took cleanly. Merges are made on `staging` (SKILL.md, step 5), so `--ours` is `staging`, main's tip with the batch's merges before this one, and `--theirs` is the branch.
+Read when a merge in `_merge` conflicts, when the build or the hook refuses a merge that git took cleanly, or when `land` refuses one. Merges are made on `staging` (SKILL.md, step 5), so `--ours` is `staging`, main's tip with the batch's merges before this one, and `--theirs` is the branch.
 
 ## The ones git shows
 
@@ -17,3 +17,12 @@ Git merges these cleanly and the result doesn't build, or builds and fails a wit
 - **An enum variant gained a field** (`Link::Frame`'s stack), and matches written on the other side don't bind it. Bind it at each match, and read what the new field means there before choosing `..`.
 - **A harness file both sides changed** (`seams.toml`, `oracle.toml`, `docs/divergence.toml`), as when `staging` carries a person's `seams.toml` commit and the branch a steered row. Pre-commit, or pre-merge-commit for a merge git commits itself, refuses an agent's merge naming the file and #3644, even where git merged it cleanly, since the merge's content is neither side's commit. While the merge stands, copy the merged file to your scratchpad and write it back through steer, `cargo xtask steer seams.toml --from <copy>`, which judges a merge in progress against the union of what each side added (#3633) and stamps its reading over that blob; then `git add -- seams.toml` and `git commit`. A side that changed or dropped a row the other kept is not a union, steer writes nothing, and the merge waits on a person.
 - **Two branches encoding one state two ways**, as `fe_pos` was between #681's hash iterators and #658's foreach over a Traversable. Resolve to one typed representation that serves both, never a third encoding beside the two: the standard in [builder-prompt.md](builder-prompt.md) holds a merge as it holds a builder.
+
+## The ones the land shows
+
+`cargo xtask worktree land` runs in main's checkout and is refused anywhere else. Its judges are an xtask built at main's tip, once per tip under main's `target/judge/` (#4372), never the xtask `_merge` builds, which is the merge's own: `budget`, `api-check` and `unsafe-audit` over `_merge`'s tree, steer over each harness file the batch changed, `cargo deny` where `Cargo.lock` moved, then `done`, with `permit --diff` inside it.
+
+- **A harness file main's xtask cannot read.** A branch that adds a table or a key to `seams.toml`, `oracle.toml` or `docs/divergence.toml` that main's reader does not know yet is refused at the land, naming the file, the key and the two steps. A change to the grammar lands in two steps: first the xtask that reads the new grammar, merged and landed with no row that uses it; then, once main's tip carries that xtask, the row that uses it, in a batch of its own. Take the row's merge back out of `staging` (`git reset --keep main` and merge the rest again), land the reader, and merge the row after it. Never land such a batch from `_merge`: the land refuses there, and its build is the branch's, which is how #4343 landed by hand.
+- **`Cargo.lock` moved.** The land runs `cargo deny check advisories sources` under main's `deny.toml`, never the batch's, with the cargo-deny release `DENY` names in `xtask/src/queue/judge.rs` (`cargo install --locked cargo-deny@<that release>`); a missing or older cargo-deny refuses rather than passes. A finding is the batch's to fix by updating the crate the advisory names, or a person's `ignore` entry with its reason; never a `deny.toml` the batch carries, which the land does not read.
+- **A harness file changed in what binds**, a ceiling raised or a row dropped, is printed as a skip naming each path and does not refuse: a person's commit does that, and nothing yet tells it from an agent's (#4371). Read the lines before the push.
+
