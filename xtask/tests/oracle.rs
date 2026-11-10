@@ -530,6 +530,7 @@ fn the_fixture_pins_keep_their_path_and_load() {
         "closure/moved.toml",
         "formula/php.toml",
         "formula/line.toml",
+        "formula/revised.toml",
         "formula/moved.toml",
         "variant-drift/oracle.toml",
     ] {
@@ -542,15 +543,20 @@ fn the_fixture_pins_keep_their_path_and_load() {
 /// `xtask/fixtures/oracle/formula/`, since no keg of `php@8.5` stands on a
 /// machine before Homebrew makes that formula. A pin that names `php@8.5`
 /// is accepted with its php and its three hosts under `Cellar/php@8.5/`,
-/// as one that names no formula is with them under `Cellar/php/`; and the
-/// negative control, the paths moved to `Cellar/php@8.5/` under a pin
-/// that still pours `php`, is a defect for each binary, naming its key,
-/// its path and both kegs.
+/// as one that names no formula is with them under `Cellar/php/`, and as
+/// one whose keg is a bottle Homebrew made again, `8.5.13_1` of php
+/// 8.5.13; and the negative control, the paths moved to `Cellar/php@8.5/`
+/// under a pin that still pours `php`, is a defect for each binary, naming
+/// its key, its path and both kegs.
 #[test]
 fn the_pinned_binaries_stand_in_the_keg_of_the_formula_the_pin_names() {
     let root = xtask::package_dir().join("fixtures/oracle/formula");
     let load = |pin: &str| Pin::load(&root.join(pin)).unwrap_or_else(|e| panic!("{pin}: {e:#}"));
-    for (pin, keg) in [("php.toml", "php"), ("line.toml", "php@8.5")] {
+    for (pin, keg) in [
+        ("php.toml", "php/8.5.12"),
+        ("line.toml", "php@8.5/8.5.13"),
+        ("revised.toml", "php@8.5/8.5.13_1"),
+    ] {
         let loaded = load(pin);
         assert_eq!(loaded.defects(), &[] as &[String], "{pin}");
         let cellar = Path::new("/nowhere/Cellar").join(keg);

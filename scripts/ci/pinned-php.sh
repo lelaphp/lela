@@ -9,8 +9,8 @@
 #   scripts/ci/pinned-php.sh <oracle.json>
 #
 # <oracle.json> is `xtask status --section oracle --format json`: its
-# `binary` names php's version, the Homebrew formula it is poured from, its
-# keg path and md5, and its `closure` each keg php loads and the version
+# `binary` names the Homebrew formula php is poured from, the bottle of it,
+# its keg path and md5, and its `closure` each keg php loads and the version
 # recorded for it; oracle.toml is read by xtask alone and this script spells
 # none of them. Each keg is poured first, where Homebrew's `opt` link points
 # at another version, and `brew pin`ned, so no later `brew upgrade` moves
@@ -18,13 +18,19 @@
 # formula the pin names: `php` while that is Homebrew's formula of the
 # pinned line, and `php@8.5` once Homebrew's `php` has moved to the next
 # (#4383), whose keg is `Cellar/php@8.5`; xtask renders no pin whose formula
-# and keg path name two kegs. A keg already at the path with the pin's md5
-# is left as it is, so the oracle runner pours once and every job after it
-# checks; a pour whose md5 is not the pin's, or a keg that lands at another
-# version, exits 1 before any lane, and xtask would refuse the run anyway.
+# and keg path name two kegs. The bottle is the keg the path names, php's
+# version with the formula's revision where Homebrew bottled that version
+# again: `Cellar/php@8.5/8.5.13_1` is poured from `php@8.5: update 8.5.13_1
+# bottle.`, where the pin's version says 8.5.13, and xtask renders no pin
+# whose path names a bottle of another version. A keg already at the path
+# with the pin's md5 is left as it is, so the oracle runner pours once and
+# every job after it checks; a pour whose md5 is not the pin's, or a keg
+# that lands at another version, exits 1 before any lane, and xtask would
+# refuse the run anyway.
 #
 # DRY_RUN=1 reads the pin and the machine and says what it would pour, each
-# keg and php by its formula, and pours, pins and fetches nothing.
+# keg and php by its formula and its bottle, and pours, pins and fetches
+# nothing.
 #
 # Used by .github/actions/pinned-php in CI and by scripts/ci/runner.sh when
 # the Mac is set up. GH_TOKEN, where set, raises GitHub's API rate limit for
@@ -32,8 +38,8 @@
 set -euo pipefail
 
 pin=${1:?usage: pinned-php.sh <oracle.json from xtask status --section oracle --format json>}
-version=$(jq -er .binary.version "$pin")
 formula=$(jq -er .binary.formula "$pin")
+bottle=$(jq -er .binary.bottle "$pin")
 path=$(jq -er .binary.path "$pin")
 md5=$(jq -er .binary.md5 "$pin")
 kegs=$(jq -r '.closure // {} | to_entries[] | "\(.key) \(.value)"' "$pin")
@@ -46,11 +52,11 @@ prefix=$(brew --prefix)
 auth=()
 [ -z "${GH_TOKEN:-}" ] || auth=(-H "Authorization: Bearer $GH_TOKEN")
 
-# pour <formula> <version>: the formula from the homebrew-core commit whose
-# message bottles that version, installed in place of what stands. A
-# formula's first bottle is added and each later one updates it: homebrew-core
-# has `php@8.4: add 8.4.15 bottle.` from the day it made that formula, and
-# `php@8.4: update 8.4.16 bottle.` after it.
+# pour <formula> <bottle>: the formula from the homebrew-core commit whose
+# message bottles that version, its revision with it, installed in place of
+# what stands. A formula's first bottle is added and each later one updates
+# it: homebrew-core has `php@8.4: add 8.4.15 bottle.` from the day it made
+# that formula, and `php@8.4: update 8.4.16 bottle.` after it.
 pour() {
     local name=$1 at=$2 shard sha file
     case $name in lib*) shard=lib ;; *) shard=${name:0:1} ;; esac
@@ -101,11 +107,11 @@ if [ -f "$path" ] && [ "$(md5 -q "$path")" = "$md5" ]; then
     exit 0
 fi
 if [ -n "$dry" ]; then
-    echo "$formula: would pour $version at $path"
+    echo "$formula: would pour $bottle at $path"
     exit 0
 fi
 
-pour "$formula" "$version"
+pour "$formula" "$bottle"
 
 got=$(md5 -q "$path")
 [ "$got" = "$md5" ] || { echo "::error::$path has md5 $got; the pin is $md5"; exit 1; }

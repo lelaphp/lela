@@ -250,10 +250,14 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     assert_eq!(json["binary"]["path"], path.as_str());
     assert_eq!(json["binary"]["md5"], oracle.md5.as_str());
     // The formula the keg is poured from (#4383), which is the keg's name
-    // in the path the section states beside it.
+    // in the path the section states beside it, and the bottle of it, the
+    // directory the keg stands in.
     let formula = json["binary"]["formula"].as_str().unwrap();
+    let bottle = json["binary"]["bottle"].as_str();
     let mut parts = oracle.path.iter().skip_while(|part| *part != "Cellar");
     assert_eq!(parts.nth(1).and_then(|keg| keg.to_str()), Some(formula));
+    assert_eq!(parts.next().and_then(|at| at.to_str()), bottle);
+    assert!(bottle.unwrap().starts_with(&oracle.version), "{bottle:?}");
     for name in pin.variant.keys() {
         let built = pin.variant(name).unwrap().oracle;
         let laid = &json["variants"][name.as_str()];
@@ -321,8 +325,10 @@ fn scratch_poured(name: &str, fixture: &str) -> Tree {
 
 /// What a runner pours php from (#4383): the section names the formula
 /// beside the keg path, `php` for a pin that names none and `php@8.5` for
-/// one that names it, and `scripts/ci/pinned-php.sh` under `DRY_RUN=1`
-/// says it would pour that formula at the pin's version and path, after
+/// one that names it, and the bottle the path names, `8.5.13_1` where the
+/// keg is the formula's first revision and the pin's version says 8.5.13;
+/// and `scripts/ci/pinned-php.sh` under `DRY_RUN=1` says it would pour
+/// that formula at that bottle and the pin's path, after
 /// the one keg of the fixture's `[closure]`. The dry run asks `brew` for
 /// its prefix and nothing else, and fetches nothing: the `brew` and the
 /// `curl` it finds are stand-ins that fail any other call. No keg stands
@@ -332,23 +338,32 @@ fn scratch_poured(name: &str, fixture: &str) -> Tree {
 fn oracle_names_the_formula_a_runner_pours_and_the_dry_run_says_it() {
     use std::os::unix::fs::PermissionsExt;
     let script = workspace().join("scripts/ci/pinned-php.sh");
-    for (fixture, formula, at) in [
+    for (fixture, formula, bottle, php) in [
         (
             "php.toml",
             "php",
-            "8.5.12 at /nowhere/Cellar/php/8.5.12/bin/php",
+            "8.5.12",
+            "/nowhere/Cellar/php/8.5.12/bin/php",
         ),
         (
             "line.toml",
             "php@8.5",
-            "8.5.13 at /nowhere/Cellar/php@8.5/8.5.13/bin/php",
+            "8.5.13",
+            "/nowhere/Cellar/php@8.5/8.5.13/bin/php",
+        ),
+        (
+            "revised.toml",
+            "php@8.5",
+            "8.5.13_1",
+            "/nowhere/Cellar/php@8.5/8.5.13_1/bin/php",
         ),
     ] {
-        let root = scratch_poured(&format!("oracle-poured-{formula}"), fixture);
+        let root = scratch_poured(&format!("oracle-poured-{fixture}"), fixture);
         let section = ["--section", "oracle", "--format", "json"];
         let rendered = status_with_pin(&root, &section, None, None).ok();
         let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(json["binary"]["formula"], formula, "{fixture}");
+        assert_eq!(json["binary"]["bottle"], bottle, "{fixture}");
         let pin = root.join("oracle.json");
         std::fs::write(&pin, rendered).unwrap();
         let bin = root.join("bin");
@@ -380,7 +395,9 @@ fn oracle_names_the_formula_a_runner_pours_and_the_dry_run_says_it() {
         assert!(out.status.success(), "{fixture}: {stdout}{stderr}");
         assert_eq!(
             stdout,
-            format!("zstd: would pour 1.5.7_1 in place of nothing\n{formula}: would pour {at}\n"),
+            format!(
+                "zstd: would pour 1.5.7_1 in place of nothing\n{formula}: would pour {bottle} at {php}\n"
+            ),
             "{fixture}: {stderr}"
         );
         assert_eq!(stderr, "", "{fixture}");
