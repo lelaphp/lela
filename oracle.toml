@@ -9,6 +9,12 @@
 
 [oracle]
 version = "8.5.12"
+# The Homebrew formula the keg is poured from (#4383, ruled on #4373): `php`
+# while that is Homebrew's formula of this line, and `php@8.5` once Homebrew
+# moves `php` to 8.6, whose keg is `Cellar/php@8.5/<version>`.
+# `scripts/ci/pinned-php.sh` pours it, and xtask refuses a pin whose paths
+# below stand in another formula's keg.
+formula = "php"
 # The keg path, not `/opt/homebrew/bin/php`: the bare name is a symlink the
 # package manager re-points on upgrade (Dax's oracle.toml records it moving
 # 8.5.9 → 8.5.10 mid-run on 2026-09-01). The digest is the identity; the path is
