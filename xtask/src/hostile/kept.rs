@@ -37,9 +37,13 @@ pub(crate) enum Verdict {
     Fault,
 }
 
-/// One run as it is kept.
+/// One run as it is kept. A field it does not know is ignored, as a
+/// reading's is (harness-design.md §4.2, #4404): a run passed over is no
+/// base, and with no base a program that met php there and differs now
+/// refuses nothing, so refusing a newer harness's run would loosen the
+/// lane it is meant to hold. So a field is added only where the run read
+/// without it refuses no less than the run read with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Run {
     /// The commit the workspace stood at.
     pub commit: String,
