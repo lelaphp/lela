@@ -528,10 +528,51 @@ fn the_fixture_pins_keep_their_path_and_load() {
         "closure/linux.toml",
         "closure/unnamed.toml",
         "closure/moved.toml",
+        "formula/php.toml",
+        "formula/line.toml",
+        "formula/moved.toml",
         "variant-drift/oracle.toml",
     ] {
         let pin = Pin::load(&root.join(pin)).unwrap_or_else(|e| panic!("{pin}: {e:#}"));
         assert_eq!(pin.source.path(), Some(Path::new("/nowhere/php-src")));
+    }
+}
+
+/// The formula the pin is poured from (#4383), over the fixtures under
+/// `xtask/fixtures/oracle/formula/`, since no keg of `php@8.5` stands on a
+/// machine before Homebrew makes that formula. A pin that names `php@8.5`
+/// is accepted with its php and its three hosts under `Cellar/php@8.5/`,
+/// as one that names no formula is with them under `Cellar/php/`; and the
+/// negative control, the paths moved to `Cellar/php@8.5/` under a pin
+/// that still pours `php`, is a defect for each binary, naming its key,
+/// its path and both kegs.
+#[test]
+fn the_pinned_binaries_stand_in_the_keg_of_the_formula_the_pin_names() {
+    let root = xtask::package_dir().join("fixtures/oracle/formula");
+    let load = |pin: &str| Pin::load(&root.join(pin)).unwrap_or_else(|e| panic!("{pin}: {e:#}"));
+    for (pin, keg) in [("php.toml", "php"), ("line.toml", "php@8.5")] {
+        let loaded = load(pin);
+        assert_eq!(loaded.defects(), &[] as &[String], "{pin}");
+        let cellar = Path::new("/nowhere/Cellar").join(keg);
+        assert!(loaded.oracle.path.starts_with(&cellar), "{pin}");
+        let hosts = [&loaded.sapi.cgi, &loaded.sapi.fpm, &loaded.sapi.phpdbg];
+        for host in hosts.map(|host| host.as_ref().unwrap()) {
+            assert!(host.path.starts_with(&cellar), "{pin}: {host:?}");
+        }
+    }
+    let moved = load("moved.toml");
+    let keys = [
+        "[oracle].path /nowhere/Cellar/php@8.5/8.5.13/bin/php",
+        "[sapi].cgi.path /nowhere/Cellar/php@8.5/8.5.13/bin/php-cgi",
+        "[sapi].fpm.path /nowhere/Cellar/php@8.5/8.5.13/sbin/php-fpm",
+        "[sapi].phpdbg.path /nowhere/Cellar/php@8.5/8.5.13/bin/phpdbg",
+    ];
+    assert_eq!(moved.defects().len(), keys.len(), "{:?}", moved.defects());
+    for (defect, key) in moved.defects().iter().zip(keys) {
+        let says = format!(
+            "{key} stands in the keg php@8.5, and the pin is poured from the formula php, into the keg of that name"
+        );
+        assert!(defect.starts_with(&says), "{defect}");
     }
 }
 
