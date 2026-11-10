@@ -131,9 +131,9 @@ pub struct Divergence {
     /// `oracle-build` row must, a `php-ub` row reported upstream may.
     pub retires: Option<Retires>,
     /// The php release that carries the fix of what the row records,
-    /// where one is known, named only beside `retires = "pin"`: once the
-    /// pin has reached it, `divergence-reason` refuses the row while it
-    /// stands accepted (#4373's ruling, point 5).
+    /// where one is known: once the pin has reached it,
+    /// `divergence-reason` refuses the row while it stands accepted
+    /// (#4373's ruling, point 5).
     pub fixed_in: Option<Release>,
     /// Written by a person; empty on a proposed row.
     pub reason: String,
@@ -340,11 +340,6 @@ impl TryFrom<Row> for Divergence {
         if row.proven_at.is_some() && !fences {
             bail!(
                 "the row {id} names `proven_at`, and an id it holds is no fence; the witness lane runs a fence again under a regime, and no lane runs another id so (#3369)"
-            );
-        }
-        if row.fixed_in.is_some() && row.retires != Some(Retires::Pin) {
-            bail!(
-                "the row {id} names `fixed_in` and does not retire at the pin; a release retires only a row that names `retires = \"pin\"` (#4373)"
             );
         }
         Ok(Divergence {

@@ -740,12 +740,11 @@ fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_o
 }
 
 /// `fixed_in` (#4373's ruling, point 5) is a php release spelt
-/// `<major>.<minor>.<patch>`, ordered by its numbers, and stands only
-/// beside `retires = "pin"`; any other spelling, and a `fixed_in` on a
-/// row that retires at something else or at nothing, is refused when the
-/// registry decodes, and a row writes it back as it was read.
+/// `<major>.<minor>.<patch>`, ordered by its numbers; any other spelling
+/// is refused when the registry decodes, and a row writes it back as it
+/// was read.
 #[test]
-fn fixed_in_decodes_as_a_release_beside_retires_pin_and_anything_else_is_refused() {
+fn fixed_in_decodes_as_a_release_and_any_other_spelling_is_refused() {
     let row = |retires: &str, fixed_in: &str| {
         format!(
             "[[divergence]]\nid = \"trace:fixture\"\nkind = \"trace\"\ncause = \"php-ub\"\n{retires}fixed_in = \"{fixed_in}\"\nreason = \"r\"\nstatus = \"accepted\"\nsince = \"2026-11-10\"\n"
@@ -767,16 +766,6 @@ fn fixed_in_decodes_as_a_release_beside_retires_pin_and_anything_else_is_refused
         assert!(
             err.contains("is not a php release spelt <major>.<minor>.<patch>"),
             "{spelt:?}: {err}"
-        );
-    }
-    for retires in ["", "retires = \"fixture\"\n"] {
-        let err = format!(
-            "{:#}",
-            Registry::parse(&row(retires, "8.5.13")).unwrap_err()
-        );
-        assert!(
-            err.contains("trace:fixture names `fixed_in` and does not retire at the pin"),
-            "{retires:?}: {err}"
         );
     }
 
@@ -912,6 +901,40 @@ since = "2026-10-09"
     .unwrap();
     assert_eq!(reading.status, xtask::reading::Status::Pass, "{reading:?}");
     assert_eq!(reading.numbers["reached"], 0.into());
+}
+
+/// A bump that lands exactly on the release a row names is the ruling's
+/// main case (#4373, point 5): a `fixed_in` equal to the pin's own
+/// version, read from the pin at run time since no source states it, is
+/// reached and refused, and the row beside it, ahead of the pin, is not.
+#[test]
+fn a_row_fixed_in_the_pins_own_release_is_reached() {
+    let manifest = reasoned_and_pinned();
+    let version = &manifest.pin.as_ref().unwrap().oracle.version;
+    let path = fixture("divergence.reason").with_file_name("fixed-in-reached.toml");
+    let text = std::fs::read_to_string(path).unwrap();
+    assert_eq!(text.matches("fixed_in = \"8.5.0\"").count(), 1, "{text}");
+    let at_the_pin = text.replace("fixed_in = \"8.5.0\"", &format!("fixed_in = \"{version}\""));
+    let reading = divergence::reason(
+        &Registry::parse(&at_the_pin).unwrap(),
+        &manifest,
+        workspace(),
+    )
+    .unwrap();
+    assert_eq!(reading.status, xtask::reading::Status::Fail, "{reading:?}");
+    assert_eq!(reading.numbers["reached"], 1.into());
+    assert!(
+        reading.message.contains(&format!(
+            "trace:fixture-reached (fixed in {version}, the pin {version})"
+        )),
+        "{}",
+        reading.message
+    );
+    assert!(
+        !reading.message.contains("fixture-in-order"),
+        "{}",
+        reading.message
+    );
 }
 
 #[test]
