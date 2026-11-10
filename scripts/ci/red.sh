@@ -5,8 +5,9 @@
 #                       as Mitchell adopted on #1151): the verdict is this
 #                       run's, and the one before it the newest finished
 #                       harness run of a push to main other than this one.
-#   red.sh nightly JOB  nightly.yml's last job, once for `soak` and once for
-#                       `tailcall`, nightly and by hand with `full` (#2980):
+#   red.sh nightly JOB  nightly.yml's last job, once each for `soak`,
+#                       `tailcall` and `deny` (#4372), nightly and by hand
+#                       with `full` (#2980):
 #                       the verdict is JOB's in this run, and the one before
 #                       it JOB's in the newest finished nightly.yml run,
 #                       nightly or by hand, that ran it.

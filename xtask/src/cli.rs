@@ -126,7 +126,7 @@ pub(crate) enum Command {
         bar: f64,
     },
     /// The definition of done: the conditions unmet since the base, and
-    /// exit 1 while any is; the Stop hook, pre-push and CI read the list.
+    /// exit 1 while any is; the Stop hook, pre-push and `land` read the list.
     Done {
         /// Measure the changes since the merge base with this ref;
         /// default `main`, or `origin`'s where the checkout has none.
@@ -136,12 +136,6 @@ pub(crate) enum Command {
         /// otherwise print the block JSON with the list while anything is unmet.
         #[arg(long)]
         hook: bool,
-        /// An instrument this run did not take: a missing reading of it is
-        /// a note that it did not run, never unmet and never met. CI names
-        /// the oracle job's two while that job is skipped (#2477).
-        /// An `[[owed]]` row names it, or the run is refused.
-        #[arg(long = "not-run", value_name = "INSTRUMENT", conflicts_with = "hook")]
-        not_run: Vec<String>,
         /// Who asks, which the reading carries (#3619); CI where
         /// `GITHUB_ACTIONS` is set, a hand otherwise. The hook's is the
         /// event it came in on.
@@ -838,10 +832,23 @@ pub(crate) enum WorktreeCommand {
     /// on `staging`, its builds seeded from main's, owned by the calling
     /// session; or claim the one that stands (#3622).
     Queue,
-    /// Fast-forward `main` to `staging`'s head once `done` is met in
-    /// `_merge` since main's tip, landing `_merge`'s log in main's store
-    /// first; refused, `main` untouched, while anything is unmet (#3622).
+    /// Fast-forward `main` to `staging`'s head once an xtask built at
+    /// main's tip judges `_merge` since that tip (`judge`), landing
+    /// `_merge`'s log in main's store first; run in main's checkout, and
+    /// refused, `main` untouched, while anything is unmet (#3622, #4372).
     Land,
+    /// The land's judgement of the checkout this runs in since `--base`,
+    /// which `land` asks of `_merge` from an xtask built at main's tip
+    /// (#4372): the harness's own files read, refused with the two steps a
+    /// grammar change lands in where one does not; `budget`, `api-check`
+    /// and `unsafe-audit` taken; each harness file changed since the base
+    /// judged by steer; `cargo deny` where `Cargo.lock` moved; then `done`
+    /// as land's caller, whose verdict is the exit.
+    Judge {
+        /// The commit judged since, main's tip.
+        #[arg(long, value_name = "COMMIT")]
+        base: String,
+    },
 }
 
 /// Read the criteria, or read them and close.

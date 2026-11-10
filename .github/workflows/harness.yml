@@ -2,9 +2,10 @@
 # held by `computed check`, which runs no loader and needs no trust grant;
 # the harness's own tests hold the map, the hook wiring and the rules'
 # negative controls; and per commit the instruments run over the whole
-# workspace, then, on a pull request, `done` judges the changes since the
-# ref it targets; a push to `main` runs no `done`, since pre-push and
-# `land` judged what it carries (Round 1, Q21; harness-design.md §4.5).
+# workspace. It runs on a push to `main` alone and runs no `done`: what a
+# push carries was judged at pre-push and by `land`, whose judges are
+# main's tip's (Round 1, Q21; harness-design.md §4.5); a pull request
+# runs nothing here, as Mitchell ruled on #4348 (ruling 5; #4372).
 # The reading store is the only thing the run keeps, and the permits
 # section is the summary. A ticket is closed by
 # the session that worked it, through `xtask ticket close`, the instrument
@@ -17,7 +18,7 @@
 # build, clippy, the tests and the rest of the instruments; and
 # `dax-oracle`, a Mac mini, which has the pinned php, a macOS keg
 # (oracle.toml), for the witnesses, the crosscheck and the tests that spawn
-# the oracle (#678, #2200). The two stores meet in `done`, handed to it
+# the oracle (#678, #2200). The stores meet in the `store` job, handed to it
 # through the stash on `dax-build` rather than as GitHub artifacts, which
 # count against the account's storage (.github/actions/stash, #3554); the
 # stash is the repository's to configure, in the `env` below. A runner keeps its
@@ -31,7 +32,7 @@
 # dax-build]`, so nothing here is reverted when the server comes. Set, the
 # self-hosted pair is not online: the `oracle` job, which only the Mac can
 # run, is skipped rather than queued for the 24 hours GitHub holds a job no
-# runner takes, and `done` says its lane did not run (scripts/ci/README.md).
+# runner takes (scripts/ci/README.md).
 # `bench` and the nightly series (#2259) are no job here, and when they are
 # one they take the self-hosted label and not the variable: their numbers
 # need the quiet machine, and a hosted reading is noise a person could
@@ -40,22 +41,21 @@
 name: harness
 on:
   push:
-    branches: [main] # a ticket's branch reaches CI as a pull request (ADR-0009)
-  pull_request:
-# A push to a pull request supersedes the run of the push before it, which
-# is cancelled: a run nobody reads holds a runner for nothing. A run of
-# `main` is never cancelled once it runs; of the runs waiting behind it,
-# GitHub keeps the newest and cancels the rest.
+    branches: [main] # a ticket's branch is judged at pre-push and by `land` (#4372)
+# A run of `main` is never cancelled once it runs; of the runs waiting
+# behind it, GitHub keeps the newest and cancels the rest.
 concurrency:
   group: harness-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: false
 # The stash every hand-off between jobs goes through (.github/actions/stash,
 # #3554): the repository's to configure once, for every runner, and unset
-# on a fork, where the hand-off is a GitHub artifact.
+# on a fork, where the hand-off is a GitHub artifact. The two variables are
+# every job's; the secret, the key that reaches the stash, is set on each
+# step that stashes and on no other, so no other step's process holds it
+# (#4348 ruling 5; #4372).
 env:
   DAX_STASH: ${{ vars.DAX_STASH }}
   DAX_STASH_HOST_KEY: ${{ vars.DAX_STASH_HOST_KEY }}
-  DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
 jobs:
   regions:
     name: computed check
@@ -167,10 +167,12 @@ jobs:
       - name: this job's readings
         if: always()
         uses: ./.github/actions/stash
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: store-build
           path: target/harness
-          retention-days: 1 # read by `done`'s job, minutes later
+          retention-days: 1 # read by the store job, minutes later
 
   miri:
     name: Miri on php_heap
@@ -197,14 +199,16 @@ jobs:
       - name: this job's readings
         if: always()
         uses: ./.github/actions/stash
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: store-miri
           path: target/harness
           # The phpt runs the workspace keeps are the build job's to hand
-          # `done`: this job takes none, and its runner's would be another
+          # on: this job takes none, and its runner's would be another
           # machine's or an older job's runs of the same tree.
           exclude: phpt-runs/
-          retention-days: 1 # read by `done`'s job, minutes later
+          retention-days: 1 # read by the store job, minutes later
 
   tailcall:
     name: the threaded dispatch, checked on its dated nightly
@@ -228,7 +232,7 @@ jobs:
   oracle:
     name: the witnesses, the crosscheck and the oracle's tests
     # Skipped while DAX_BUILD_RUNNER is set: the Mac is not online, and a
-    # job queued for it would hold `done` for GitHub's 24 hours (#2477).
+    # job queued for it would hold the store job for GitHub's 24 hours (#2477).
     if: ${{ !vars.DAX_BUILD_RUNNER }}
     runs-on: [self-hosted, macos, dax-oracle]
     # The dashboard's oracle job runs every lane in 150; this one runs the
@@ -271,75 +275,49 @@ jobs:
       # The harness's tests that spawn the oracle, which skip on the build
       # runner. Plain `cargo test`, which writes no reading: the `test`
       # reading is the build runner's, and the two stores keep one
-      # instrument each so they meet in `done` whole.
+      # instrument each so they meet in the run's store whole.
       - run: cargo test -p xtask
       - name: this job's readings
         if: always()
         uses: ./.github/actions/stash
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: store-oracle
           path: target/harness
           # The phpt runs the workspace keeps are the build job's to hand
-          # `done`: this job takes none, and its runner's would be another
+          # on: this job takes none, and its runner's would be another
           # machine's or an older job's runs of the same tree.
           exclude: phpt-runs/
-          retention-days: 1 # read by `done`'s job, minutes later
+          retention-days: 1 # read by the store job, minutes later
 
-  done:
-    name: done
+  store:
+    name: the run's store
+    # The three jobs' stores joined into the one the run keeps, and its
+    # permits section as the summary, whatever the three found. It judges
+    # nothing: the `done` step it ran on a pull request went with the
+    # trigger (#4348 ruling 5; #4372), and a push runs no `done`.
     needs: [per-commit, miri, oracle]
-    # Run whatever the three found, so its list names every unmet condition.
     if: ${{ !cancelled() }}
     runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
           clean: false
-          fetch-depth: 0 # done measures since the merge base with main
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
       - uses: ./.github/actions/workspace
       # The three jobs' stores, one store again: each instrument keeps its
       # own files, and no instrument ran on both runners. A job that kept
       # none, the oracle job while it is skipped, is passed over.
       - name: the three jobs' readings, one store
         uses: ./.github/actions/stash
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           get: store-build store-miri store-oracle
           merge: true
           optional: true
           path: target/harness
-      # A ticket's branch is judged on its pull request, whose checkout is
-      # a detached merge commit, so the base is the ref the pull request
-      # targets (§4.5, ADR-0009). A push to `main` runs no `done`: what
-      # the push carries was judged at pre-push and by `land`, and the
-      # step's verdict on a push would be the push measured against
-      # itself (Round 1, Q21). The job still runs on a push, for the
-      # store and the summary, so on a push it passes having judged
-      # nothing, and a check that requires it holds a push to nothing.
-      # Every pull request names `phpt` `--not-run`: no job here runs the
-      # corpus through the engine, so the subsets' kept runs are the merge
-      # check's to hold (Round 1, Q22; harness-design.md §4.5), and a
-      # missing run is `done`'s note and not unmet.
-      # While the oracle job is skipped (DAX_BUILD_RUNNER set, #2477), the
-      # two instruments its steps write readings for are named `--not-run`
-      # too: a missing reading of either is `done`'s note and not unmet,
-      # its head line and its reading say the pass is over what ran, and
-      # the run carries a warning that the lane did not run. An oracle job
-      # that ran and failed is judged on the store it left, as ever.
-      - name: done
-        if: ${{ github.event_name == 'pull_request' }}
-        shell: bash
-        env:
-          ORACLE: ${{ needs.oracle.result }}
-        run: |
-          set -- --not-run phpt
-          if [ "$ORACLE" = skipped ]; then
-            set -- "$@" --not-run witness --not-run crosscheck
-            said="the oracle job was skipped while DAX_BUILD_RUNNER is set, so done judged no witness or crosscheck reading (scripts/ci/README.md)"
-            echo "::warning title=the oracle lane did not run::$said"
-            echo "**The oracle lane did not run**: $said." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          # shellcheck disable=SC1010 # `done` is xtask's instrument, not the loop's keyword
-          cargo xtask done --base "$GITHUB_BASE_REF" "$@"
       - name: the summary
         if: always()
         run: |
@@ -349,6 +327,8 @@ jobs:
       - name: the reading store, the only one the run keeps
         if: always()
         uses: ./.github/actions/stash
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: harness
           path: target/harness
@@ -364,7 +344,7 @@ jobs:
   # write.
   red-main:
     name: a red main, filed
-    needs: [regions, per-commit, miri, tailcall, oracle, done]
+    needs: [regions, per-commit, miri, tailcall, oracle, store]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     permissions:

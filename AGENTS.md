@@ -90,7 +90,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=321cddadd3e13436f34f1f614114b71719fd1dbed8da1242da1fbab8a9aa5b06 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=4c96d823c9faeb76bb470a2338a504460e4788fe1b057ceeb7a83a4c609e7d69 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -139,7 +139,7 @@ Commands:
   api-check          Hold the seams: regenerate and diff each lock, hold crate edges, `use` paths and the bundle order; one reading per seam and per crate
   status             Render one section from the manifest, registry, store, repository and pinned tree; computes nothing else
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
-  done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
+  done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and `land` read the list
   track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
   worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` say its owner, `queue` and `land` run the merge queue
   ticket             A ticket, one GitHub issue: `read`, `ready` and `close` hold it to its boxes; `view` and `brief` are what a builder reads; `parent` measures a chart sheet
@@ -174,7 +174,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=a7f18ab02f6871b4b5a7ceb9b7fad39e7d89b97ba8474ac211136de3f2052feb out=2b0f8d23eca10460d934cafadd8569942498ddfcc4c6db0478f9986e505504a6 -->
+<!-- /computed in=846194222b5ea3438e0d01f5f84eedb0c4f92f593cf92385d3a01765ac245526 out=6d7323f3774cb04413d9909d5cf1d31315ef9b1d87bffedb520314341d496897 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

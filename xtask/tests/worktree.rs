@@ -1204,14 +1204,37 @@ fn the_queue_lays_the_merge_worktree_on_staging_owned_and_seeded_from_mains() {
     assert!(other.contains("is session the-coordinator's"), "{other}");
 }
 
-/// `land` is the one step that moves `main` (#3622). A harness source
-/// committed on `staging` with no reading over it is unmet in `done`, so
-/// the land refuses and `main` stands where it was, its store unwritten.
-/// Once `staging` is reset to `main` with `--keep` and holds a change
-/// `done` meets, `main` is fast-forwarded to it and `_merge`'s log is
-/// landed in main's store and emptied, the worktree standing. A person's
-/// commit on `main` refuses the next land, `main` untouched. Each
-/// verdict's reading names land as its caller (Round 1, Q23, c11.b).
+/// The judge `land` finds kept for main's tip in `root`, written as a
+/// shell file at `target/judge/<tip>/xtask` with `body` after its first
+/// line, so the land builds nothing (#4372); the tip.
+fn judge_kept(root: &Path, body: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let tip = sh(root, &["git", "rev-parse", "main"]).trim().to_owned();
+    let path = format!("target/judge/{tip}/xtask");
+    write(root, &path, &format!("#!/bin/sh\n{body}"));
+    fs::set_permissions(root.join(&path), fs::Permissions::from_mode(0o755)).unwrap();
+    tip
+}
+
+/// [`judge_kept`] by the xtask under test, which is what a build of
+/// main's tip is in a scratch repository of this working tree.
+fn judged_by_this_build(root: &Path) -> String {
+    let xtask = scratch::xtask(env!("CARGO_BIN_EXE_xtask"))
+        .display()
+        .to_string();
+    judge_kept(root, &format!("exec '{xtask}' \"$@\"\n"))
+}
+
+/// `land` is the one step that moves `main` (#3622), run in main's
+/// checkout and refused in `_merge`'s, whose xtask is the merge's own
+/// (#4372). A harness source committed on `staging` with no reading over
+/// it is unmet in `done`, as main's judges read it, so the land refuses
+/// and `main` stands where it was, its store unwritten. Once `staging` is
+/// reset to `main` with `--keep` and holds a change `done` meets, `main`
+/// is fast-forwarded to it and `_merge`'s log is landed in main's store
+/// and emptied, the worktree standing. A person's commit on `main`
+/// refuses the next land, `main` untouched. Each verdict's reading names
+/// land as its caller (Round 1, Q23, c11.b).
 #[test]
 fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
     let root = repository("land");
@@ -1220,12 +1243,16 @@ fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
     let merge = worktree_of(&root, "_merge");
     let main_at = || sh(&root, &["git", "rev-parse", "main"]);
     let before = main_at();
+    judged_by_this_build(&root);
 
     write(&merge, "xtask/src/queued.rs", "pub fn queued() {}\n");
     commit_all(&merge, "a harness source no reading measured");
-    let (code, red) = by("the-coordinator", &merge, "land");
+    let (code, there) = by("the-coordinator", &merge, "land");
+    assert_eq!(code, 1, "{there}");
+    assert!(there.contains("land runs in main's checkout"), "{there}");
+    let (code, red) = by("the-coordinator", &root, "land");
     assert_eq!(code, 1, "{red}");
-    assert!(red.contains("done is unmet"), "{red}");
+    assert!(red.contains("main's judges refuse"), "{red}");
     assert!(red.contains("main is untouched"), "{red}");
     assert_eq!(main_at(), before, "{red}");
     assert!(!root.join("target/harness/log").exists(), "{red}");
@@ -1271,8 +1298,202 @@ fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
     let person = main_at();
     write(&merge, "notes/second.md", "A second note.\n");
     commit_all(&merge, "a second change");
-    let (code, moved) = by("the-coordinator", &merge, "land");
+    let (code, moved) = by("the-coordinator", &root, "land");
     assert_eq!(code, 1, "{moved}");
     assert!(moved.contains("main moved"), "{moved}");
     assert_eq!(main_at(), person, "{moved}");
+}
+
+/// The judges a land runs are main's tip's and never the branch's
+/// (#4372, #4348 ruling 5): a branch that changes `budget`'s source, and
+/// stands a passing judge at its own head beside it, is judged by the
+/// one kept for main's tip, which refuses here, and the call it was asked
+/// is `_merge`'s judgement since that tip.
+#[test]
+fn a_branchs_change_to_a_judge_does_not_judge_that_branch() {
+    let root = repository("land-judge");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let before = sh(&root, &["git", "rev-parse", "main"]);
+    let asked = root.with_file_name("asked");
+    let tip = judge_kept(
+        &root,
+        &format!(
+            "echo \"$*\" >> '{}'\necho \"main's judge refuses\" >&2\nexit 1\n",
+            asked.display()
+        ),
+    );
+
+    let budget = fs::read_to_string(merge.join("xtask/src/budget.rs")).unwrap();
+    write(
+        &merge,
+        "xtask/src/budget.rs",
+        &format!("{budget}\n// The branch's budget, which passes what it is handed.\n"),
+    );
+    let head = commit_all(&merge, "the branch's budget");
+    for at in [&*root, &*merge] {
+        write(
+            at,
+            &format!("target/judge/{head}/xtask"),
+            "#!/bin/sh\nexit 0\n",
+        );
+    }
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("main's judge refuses"), "{out}");
+    assert!(
+        out.contains(&format!("main's xtask at {} refuses", &tip[..7])),
+        "{out}"
+    );
+    assert!(out.contains("main is untouched"), "{out}");
+    assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
+    assert_eq!(
+        fs::read_to_string(&asked).unwrap(),
+        format!("--root {} worktree judge --base {tip}\n", merge.display()),
+        "{out}"
+    );
+}
+
+/// A merge whose `seams.toml` main's xtask cannot read is refused with
+/// the two steps such a change lands in, `main` untouched (#4372): the
+/// fixture is a table no reader at main's tip knows, the row of a grammar
+/// change merged before the xtask that reads it, as #4343's was.
+#[test]
+fn a_manifest_mains_xtask_cannot_read_is_refused_with_the_two_steps() {
+    let root = repository("land-grammar");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let before = sh(&root, &["git", "rev-parse", "main"]);
+    judged_by_this_build(&root);
+    let manifest = fs::read_to_string(merge.join("seams.toml")).unwrap();
+    let row = fs::read_to_string(workspace().join("xtask/fixtures/land/grammar.toml")).unwrap();
+    write(&merge, "seams.toml", &format!("{manifest}\n{row}"));
+    commit_all(&merge, "a row of a grammar main's xtask does not read");
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("cannot read"), "{out}");
+    assert!(out.contains("a_table_mains_xtask_does_not_read"), "{out}");
+    assert!(out.contains("lands in two steps"), "{out}");
+    assert!(
+        out.contains("first the xtask that reads the new grammar"),
+        "{out}"
+    );
+    assert!(
+        out.contains("then, once main's xtask reads it, the row that does"),
+        "{out}"
+    );
+    assert!(out.contains("main is untouched"), "{out}");
+    assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
+}
+
+/// `land` from main's checkout with a `cargo-deny` on `PATH` whose body
+/// is `body`, ahead of the build's stand-in.
+fn land_with_deny(root: &Path, body: &str) -> (i32, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let (_bin, path) = stand_in();
+    let deny = Tree::new("worktree-deny").unwrap();
+    write(&deny, "cargo-deny", &format!("#!/bin/sh\n{body}"));
+    fs::set_permissions(deny.join("cargo-deny"), fs::Permissions::from_mode(0o755)).unwrap();
+    let mut on = OsString::from(deny.as_os_str());
+    on.push(":");
+    on.push(&path);
+    let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
+        .arg("--root")
+        .arg(root)
+        .args(["worktree", "land"])
+        .current_dir(root)
+        .env("PATH", &on)
+        .env(xtask::owner::SESSION_VARIABLE, "the-coordinator")
+        .env_remove("CARGO_MANIFEST_DIR")
+        .output()
+        .unwrap();
+    joined(&out)
+}
+
+/// Where `Cargo.lock` differs from main's, the land runs `cargo deny
+/// check advisories sources` under main's `deny.toml`, never the merge's
+/// (#4372, #4348 ruling 5): a release other than the one nightly.yml
+/// installs refuses, and so does a check that finds anything; one that
+/// finds nothing hands the merge on to `done`. The stand-in refuses
+/// `check --config` with a usage error, exit 2, as 0.20.2 does, so the
+/// argv is held to `--config <path> check advisories sources`, and a
+/// usage error refuses as a check that judged nothing, never as a
+/// finding. A merge that leaves the lock alone runs no check.
+#[test]
+fn a_merge_that_moves_the_lock_is_held_to_cargo_deny_under_mains_config() {
+    let root = repository("land-deny");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let before = sh(&root, &["git", "rev-parse", "main"]);
+    judged_by_this_build(&root);
+    let read = |path: &str| fs::read_to_string(merge.join(path)).unwrap();
+    let mains = read("deny.toml");
+    let lock = read("Cargo.lock");
+    write(
+        &merge,
+        "Cargo.lock",
+        &format!("{lock}# a lock the merge moved\n"),
+    );
+    write(
+        &merge,
+        "deny.toml",
+        &format!("{mains}\n# the merge's own config\n"),
+    );
+    commit_all(&merge, "a lock and a config the merge moved");
+    let seen = root.with_file_name("seen");
+    let version = "if [ \"$1\" = --version ]; then echo 'cargo-deny 0.20.2'; exit 0; fi\n";
+    // As 0.20.2 does: `--config` is cargo-deny's own option, and after
+    // the subcommand it is a usage error, exit 2.
+    let usage = "case \" $* \" in *\" check \"*\" --config \"*) echo \"error: unexpected argument '--config' found\" >&2; exit 2;; esac\n";
+    let check = |exit: u8| {
+        format!(
+            "{version}{usage}echo \"$*\" > '{seen}'\nwhile [ $# -gt 0 ]; do [ \"$1\" = --config ] && cat \"$2\" >> '{seen}'; shift; done\nexit {exit}\n",
+            seen = seen.display()
+        )
+    };
+
+    let (code, old) = land_with_deny(&root, "echo 'cargo-deny 0.18.3'\n");
+    assert_eq!(code, 1, "{old}");
+    assert!(old.contains("not cargo-deny 0.20.2"), "{old}");
+    assert!(old.contains("land refuses rather than pass"), "{old}");
+
+    let (code, found) = land_with_deny(&root, &check(1));
+    assert_eq!(code, 1, "{found}");
+    assert!(
+        found.contains("finds what main's deny.toml refuses"),
+        "{found}"
+    );
+    let asked = fs::read_to_string(&seen).unwrap();
+    assert!(asked.starts_with("--config "), "{asked}");
+    assert!(asked.contains(" check advisories sources\n"), "{asked}");
+    assert!(asked.ends_with(&mains), "main's config: {asked}");
+    assert!(!asked.contains("the merge's own config"), "{asked}");
+    assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{found}");
+
+    // A usage error judged nothing, and says so rather than a finding.
+    let (code, unjudged) = land_with_deny(&root, &check(2));
+    assert_eq!(code, 1, "{unjudged}");
+    assert!(unjudged.contains("cargo-deny judged nothing"), "{unjudged}");
+    assert!(
+        !unjudged.contains("finds what main's deny.toml refuses"),
+        "{unjudged}"
+    );
+
+    let (_, passed) = land_with_deny(&root, &check(0));
+    assert!(passed.contains("Cargo.lock moved since"), "{passed}");
+    assert!(
+        !passed.contains("land refuses rather than pass"),
+        "{passed}"
+    );
+
+    sh(&merge, &["git", "reset", "-q", "--keep", "main"]);
+    write(&merge, "notes/deny.md", "A note no lock holds.\n");
+    commit_all(&merge, "a change that leaves the lock alone");
+    fs::remove_file(&seen).unwrap();
+    let (_, alone) = land_with_deny(&root, &check(1));
+    assert!(!alone.contains("Cargo.lock moved since"), "{alone}");
+    assert!(!seen.exists(), "{alone}");
 }

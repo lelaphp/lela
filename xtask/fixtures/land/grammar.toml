@@ -1,0 +1,6 @@
+# A table appended to seams.toml that no reader at main's tip knows: the
+# row of a grammar change merged before the xtask that reads it, which
+# `xtask worktree land` refuses with the two steps named (#4372).
+# xtask/tests/worktree.rs appends it to a scratch repository's manifest.
+[a_table_mains_xtask_does_not_read]
+reads = "nothing at main's tip"
