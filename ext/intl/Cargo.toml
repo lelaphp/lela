@@ -21,13 +21,17 @@ php_ext = { path = "../../crates/php_ext" }
 # time and zone (design §4.10).
 php_ext_date = { path = "../date" }
 
-# ICU is the keg the oracle links (icu4c@78), found by `build.rs` through
-# pkg-config and bound in `src/ffi/` alone, and php's intl C++ is built by
-# `cc` in C++ mode as `src/ffi/shim/` (`unsafe.homes`; design §7.2,
-# revision 75).
+# ICU is the keg the oracle links, of the major the pin's `[closure]` names
+# (`icu4c@<major>`, which `build.rs` reads from `oracle.toml` with `toml`;
+# #4406), found by `build.rs` through pkg-config and bound in `src/ffi/`
+# alone, and php's intl C++ is built by `cc` in C++ mode as
+# `src/ffi/shim/` (`unsafe.homes`; design §7.2, revision 75).
 [build-dependencies]
 cc = { workspace = true }
+toml = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
+# `tests/pin.rs`, which holds `build/pin.rs`'s reading of the pin.
+toml = { workspace = true }
