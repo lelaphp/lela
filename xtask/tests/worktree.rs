@@ -1388,6 +1388,91 @@ fn a_manifest_mains_xtask_cannot_read_is_refused_with_the_two_steps() {
     assert_eq!(sh(&root, &["git", "rev-parse", "main"]), before, "{out}");
 }
 
+/// A merge that changes how the harness keys and writes its readings is
+/// refused naming the case and the commands that take them by main's
+/// xtask, and lands once they are taken (#4378). `xtask/src/key.rs` is
+/// changed on `staging`; the harness's `clippy` readings stand over the
+/// merged tree under another keying, a crate's `src` alone, as the
+/// merge's own xtask would key them, and its `test` reading is written
+/// in a version of the shape no reader at main's tip knows. Main's judge
+/// holds the first stale and the second missing, as it must, since a
+/// judge that read them by the merge's rules would be the merge's; the
+/// refusal says so and names each command once, by the build that
+/// judged, over `_merge`, and `main` is untouched. With each reading
+/// taken over the key main's xtask computes, which in a scratch
+/// repository of this working tree is this build's, the land
+/// fast-forwards `main`.
+#[test]
+fn a_merge_that_rekeys_its_readings_lands_once_mains_xtask_took_them() {
+    let root = repository("land-keying");
+    let (code, out) = by("the-coordinator", &root, "queue");
+    assert_eq!(code, 0, "{out}");
+    let merge = worktree_of(&root, "_merge");
+    let main_at = || sh(&root, &["git", "rev-parse", "main"]);
+    let before = main_at();
+    judged_by_this_build(&root);
+    let key = fs::read_to_string(merge.join("xtask/src/key.rs")).unwrap();
+    write(
+        &merge,
+        "xtask/src/key.rs",
+        &format!("{key}\n// The branch's keying, which hashes a crate's `src` alone.\n"),
+    );
+    let head = commit_all(&merge, "the branch's keying");
+
+    let manifest = Manifest::load(&merge).unwrap();
+    let harness = manifest.crate_named("xtask").unwrap();
+    let store = Store::of_workspace(&merge);
+    let snapshot = xtask::key::Snapshot::disk(&merge).unwrap();
+    let taken = |instrument: &str, scope: &str, over: &Path| {
+        let mut reading = Reading::stamped_over(instrument, scope, &snapshot, over).unwrap();
+        reading.status = Status::Pass;
+        reading
+    };
+    let lints = xtask::done::scopes_of(&merge, "clippy", harness).unwrap();
+    let rekeyed: Vec<Reading> = (lints.iter())
+        .map(|scope| taken("clippy", scope, Path::new("xtask/src")))
+        .collect();
+    store.record(&rekeyed).unwrap();
+    write(
+        &merge,
+        "target/harness/test/xtask.toml",
+        "v = 3\ninstrument = \"test\"\nscope = \"xtask\"\nstatus = \"pass\"\n",
+    );
+
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("clippy: the reading for xtask is stale"),
+        "{out}"
+    );
+    assert!(out.contains("test: no reading for xtask"), "{out}");
+    assert!(
+        out.contains("the merge changes the harness's own sources"),
+        "{out}"
+    );
+    assert!(
+        out.contains("lands on readings main's xtask takes"),
+        "{out}"
+    );
+    let judge = scratch::xtask(env!("CARGO_BIN_EXE_xtask"));
+    for ask in ["clippy --crate xtask", "test --crate xtask"] {
+        let line = format!("  {} --root {} {ask}\n", judge.display(), merge.display());
+        assert_eq!(out.matches(&line).count(), 1, "{line}{out}");
+    }
+    assert!(out.contains("then land again"), "{out}");
+    assert!(out.contains("main is untouched"), "{out}");
+    assert_eq!(main_at(), before, "{out}");
+
+    let mut retaken: Vec<Reading> = (lints.iter())
+        .map(|scope| taken("clippy", scope, &harness.path()))
+        .collect();
+    retaken.push(taken("test", "xtask", &harness.path()));
+    store.record(&retaken).unwrap();
+    let (code, out) = by("the-coordinator", &root, "land");
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(main_at().trim(), head, "{out}");
+}
+
 /// `land` from main's checkout with a `cargo-deny` on `PATH` whose body
 /// is `body`, ahead of the build's stand-in.
 fn land_with_deny(root: &Path, body: &str) -> (i32, String) {

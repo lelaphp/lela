@@ -20,6 +20,19 @@
 //! the two steps that land it ([`TWO_STEPS`]): first the xtask that reads
 //! the new grammar, then the row that uses it. #4343 was such a merge, and
 //! landed from `_merge` by hand.
+//!
+//! A merge that changes the harness itself is judged the same way, and
+//! what its own xtask wrote for the judge to read is not what main's
+//! reads (#4378): a reading it keyed under a rule of `key.rs` it changed
+//! is stale here, and one it wrote in a shape of `reading.rs` main's does
+//! not read is missing. The judge keeps its own keying and its own
+//! reader, since one that held a reading to the key the merge computes
+//! would let a merge whose key is a constant land on readings of another
+//! tree, which is the branch deciding its own land again. So the land
+//! refuses, names the case and prints the commands that take those
+//! readings by main's build ([`Retaken`]), over `_merge`'s tree and under
+//! main's rules; the merge lands on them, and they are stale on `main`
+//! once its xtask is the merge's.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,6 +42,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::divergence::Registry;
 use crate::git::git;
+use crate::layout::HARNESS;
 use crate::manifest::Manifest;
 use crate::reading::{Reading, Status, Store};
 use crate::track::short;
@@ -46,6 +60,15 @@ const HOME: &str = "target/judge";
 pub(crate) const TWO_STEPS: &str = "a change to the grammar of the harness's own files lands in two \
      steps: first the xtask that reads the new grammar, merged and landed with no row that uses it; \
      then, once main's xtask reads it, the row that does (.claude/skills/specs/merging.md)";
+
+/// What a land refuses with where the merge changes the harness's own
+/// sources and `done` holds a reading stale or missing ([`Retaken`]): the
+/// case, and what such a merge lands on (merging.md).
+pub(crate) const RETAKEN: &str = "the merge changes the harness's own sources, so its xtask may key a \
+     reading or write it otherwise than main's, which judges: main's xtask holds each reading to the \
+     key it computes and reads it in the shape it writes, and a reading the merge's lanes took under \
+     another keying or shape is stale or missing here and stays so however often they take it. Such \
+     a merge lands on readings main's xtask takes (.claude/skills/specs/merging.md)";
 
 /// The cargo-deny release land runs and nightly.yml installs: one older
 /// cannot read the advisory database's CVSS 4.0 scores, and so judges
@@ -222,7 +245,9 @@ fn remove_dir(dir: &Path) -> Result<()> {
 /// what a failing one holds; each harness file the commits since `base`
 /// changed judged by steer, printed and not recorded, a proposal that
 /// would not load refused; `cargo deny` where `Cargo.lock` moved; and
-/// `done` since `base`, as land's caller, whose verdict is the exit.
+/// `done` since `base`, as land's caller, whose verdict is the exit,
+/// said with [`RETAKEN`] and the commands where the merge changes the
+/// harness and a reading is stale or missing ([`Retaken`]).
 pub(crate) fn run(root: &Path, base: &str) -> Result<()> {
     let manifest = Manifest::load(root).map_err(|err| unread(root, base, &err))?;
     let registry = Registry::load(root).map_err(|err| unread(root, base, &err))?;
@@ -238,13 +263,71 @@ pub(crate) fn run(root: &Path, base: &str) -> Result<()> {
         bail!("{}", unloaded.message);
     }
     deny(root, base)?;
-    done::run(
-        root,
-        &manifest,
-        &registry,
-        &store,
-        (Some(base), done::Caller::Land),
-    )
+    let land = (Some(base), done::Caller::Land);
+    let verdict = done::run(root, &manifest, &registry, &store, land)?;
+    match (verdict.exit(), Retaken::of(root, &verdict)?) {
+        (Err(unmet), Some(retaken)) => bail!("{unmet}. {retaken}"),
+        (exit, _) => exit,
+    }
+}
+
+/// The readings of a verdict that no run of the merge's own xtask is
+/// sure to clear, and the commands that take them by this build, main's:
+/// what a land that refuses a merge of the harness says beside `done`'s
+/// count ([`RETAKEN`], #4378).
+#[derive(Debug, PartialEq)]
+struct Retaken<'a> {
+    /// The checkout judged, `_merge`.
+    root: &'a Path,
+    /// This build, as the land ran it: `target/judge/<tip>/xtask` of
+    /// main's checkout.
+    judge: PathBuf,
+    /// The words of each command after `cargo xtask`, once each, in the
+    /// list's order.
+    asks: Vec<&'a str>,
+}
+
+impl<'a> Retaken<'a> {
+    /// What of `verdict`, judged over `root`, is retaken: each stale or
+    /// missing reading a command takes, where the merge changes the
+    /// harness. None where the merge leaves the harness as main has it,
+    /// since its xtask then keys and writes a reading as this build does
+    /// and the list's own commands clear it; and none where no reading is
+    /// stale or missing, a failing one being the merge's to mend.
+    fn of(root: &'a Path, verdict: &'a done::Verdict) -> Result<Option<Retaken<'a>>> {
+        if !verdict.crates.iter().any(|name| name == HARNESS) {
+            return Ok(None);
+        }
+        let mut asks: Vec<&str> = Vec::new();
+        for unmet in &verdict.unmet {
+            let taken = matches!(unmet.kind, done::Kind::Stale | done::Kind::Missing);
+            if let Some(ask) = unmet.asks().filter(|ask| taken && !asks.contains(ask)) {
+                asks.push(ask);
+            }
+        }
+        if asks.is_empty() {
+            return Ok(None);
+        }
+        let judge = std::env::current_exe().context("locating this binary")?;
+        Ok(Some(Retaken { root, judge, asks }))
+    }
+}
+
+impl std::fmt::Display for Retaken<'_> {
+    /// [`RETAKEN`], each command on a line of its own as a shell takes
+    /// it, and what follows the land.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (root, judge) = (self.root.display(), self.judge.display());
+        writeln!(f, "{RETAKEN}: in {root}, run")?;
+        for ask in &self.asks {
+            writeln!(f, "  {judge} --root {root} {ask}")?;
+        }
+        write!(
+            f,
+            "then land again. Once main is fast-forwarded its xtask is the merge's own, and the push's \
+             `done` names each reading that build holds stale, to take in main's checkout before the push"
+        )
+    }
 }
 
 /// The refusal of a merge whose harness files this build cannot read.
@@ -401,6 +484,70 @@ mod tests {
         for unjudged in [Some(2), Some(3), Some(101), None] {
             assert_eq!(Denied::of(unjudged), Denied::Unjudged, "{unjudged:?}");
         }
+    }
+
+    /// A verdict over `crates` whose unmet conditions are `unmet`, each a
+    /// kind and the command that clears it.
+    fn verdict(crates: &[&str], unmet: &[(done::Kind, &str)]) -> done::Verdict {
+        let base = "a".repeat(40);
+        done::Verdict {
+            base: done::Base {
+                since: base.clone(),
+                commit: base,
+            },
+            changed: Vec::new(),
+            crates: crates.iter().map(|&name| name.to_owned()).collect(),
+            ticket: None,
+            unmet: (unmet.iter())
+                .map(|&(kind, command)| done::Unmet {
+                    kind,
+                    instrument: None,
+                    scope: None,
+                    message: String::new(),
+                    command: Some(command.to_owned()),
+                })
+                .collect(),
+            notes: Vec::new(),
+            delegated: Vec::new(),
+        }
+    }
+
+    /// Only a merge of the harness is told to take its readings by
+    /// main's build, and only the stale and the missing ones, each
+    /// command once: a merge that leaves the harness alone clears its
+    /// list by its own xtask, and a failing reading is no run's to clear.
+    #[test]
+    fn a_merge_of_the_harness_retakes_its_stale_and_missing_readings_by_mains_build() {
+        use done::Kind::{Failing, Missing, Refused, Stale};
+        let root = Path::new("/the/merge");
+        let list = [
+            (Stale, "cargo xtask clippy --crate xtask"),
+            (Stale, "cargo xtask clippy --crate xtask"),
+            (Failing, "cargo xtask api-check"),
+            (Missing, "cargo xtask test --crate xtask"),
+            (Refused, "cargo xtask ticket read"),
+        ];
+        let engine = verdict(&["php_engine"], &list);
+        assert_eq!(Retaken::of(root, &engine).unwrap(), None);
+        let failing = verdict(&[HARNESS, "php_engine"], &list[2..3]);
+        assert_eq!(Retaken::of(root, &failing).unwrap(), None);
+
+        let harness = verdict(&["php_engine", HARNESS], &list);
+        let retaken = Retaken::of(root, &harness).unwrap().expect("retaken");
+        assert_eq!(retaken.asks, ["clippy --crate xtask", "test --crate xtask"]);
+        let judge = retaken.judge.display().to_string();
+        let said = retaken.to_string();
+        assert!(said.starts_with(RETAKEN), "{said}");
+        let lines: Vec<&str> = said.lines().filter(|l| l.starts_with("  ")).collect();
+        assert_eq!(
+            lines,
+            [
+                format!("  {judge} --root /the/merge clippy --crate xtask"),
+                format!("  {judge} --root /the/merge test --crate xtask"),
+            ],
+            "{said}"
+        );
+        assert!(said.contains("then land again"), "{said}");
     }
 
     /// Building a judge keeps the current tip's alone: every other tip's

@@ -61,7 +61,7 @@ use crate::permit;
 use crate::phpt;
 use crate::phpt::against::{self, Against};
 use crate::port_map;
-use crate::reading::{Freshness, Moved, Number, Outcome, Reading, Status, Store, plural};
+use crate::reading::{Freshness, Moved, Number, Reading, Status, Store, plural};
 use crate::ticket;
 use crate::track::{self, MAIN, Ticket, merge_base, short};
 use crate::turn::{self, Memory, Part, Turn};
@@ -176,6 +176,16 @@ pub struct Verdict {
 impl Verdict {
     pub fn met(&self) -> bool {
         self.unmet.is_empty()
+    }
+
+    /// The verdict as its command's return: an error counting the unmet
+    /// conditions while any is, so `main` exits 1.
+    pub(crate) fn exit(&self) -> Result<()> {
+        let unmet = self.unmet.len();
+        if unmet > 0 {
+            bail!("{unmet} condition{} of done unmet", plural(unmet));
+        }
+        Ok(())
     }
 
     /// Each unmet condition's line, in the order of the list.
@@ -336,7 +346,18 @@ impl Unmet {
         self.command = command;
         self
     }
+
+    /// The words of the command that clears it after [`CARGO_XTASK`],
+    /// where a run does: what a build of the harness other than the
+    /// checkout's own is asked them by, as the land's judge is (#4378).
+    pub(crate) fn asks(&self) -> Option<&str> {
+        self.command.as_deref()?.strip_prefix(CARGO_XTASK)
+    }
 }
+
+/// What every command that clears a condition opens with: the checkout's
+/// own build of the harness.
+const CARGO_XTASK: &str = "cargo xtask ";
 
 /// How many unmet conditions of each kind, and how many a checkout handed
 /// over without kinds, its build older than the kinds or its run failed:
@@ -721,7 +742,7 @@ fn folded(
     let key = asking.snapshot.key(&krate.path())?;
     let pin = asking.manifest.pin_digest();
     // fold's command is said at its site, and is no crate's (c2.e).
-    let command = Some(format!("cargo xtask {instrument}"));
+    let command = Some(format!("{CARGO_XTASK}{instrument}"));
     let unread = |kind: Kind, clause: &str| {
         let message = format!(
             "{instrument}: no reading for {scope} over the tree now, and {changed} changed; `cargo xtask fold` takes it, building the release {scope} first (minutes){clause}"
@@ -771,7 +792,7 @@ fn boxes(
     let scope = ticket::scope(ticket);
     // ticket's command is said at its site, and is no crate's (c2.e).
     let held = |kind: Kind, message: String| {
-        let command = Some("cargo xtask ticket read".to_owned());
+        let command = Some(format!("{CARGO_XTASK}ticket read"));
         Unmet::over(kind, ticket::INSTRUMENT, &scope, message).cleared_by(command)
     };
     let last = store.last_of_readable(ticket::INSTRUMENT, &scope)?;
@@ -1224,7 +1245,7 @@ pub fn scopes_of(root: &Path, instrument: &str, krate: &Crate) -> Result<Vec<Str
 /// crate that is no extension; `fold`'s and `ticket`'s commands are said
 /// at their own sites.
 pub(crate) fn command_taking(instrument: &str, krate: &str) -> Option<String> {
-    let flagged = |flag: &str, value: &str| format!("cargo xtask {instrument} {flag} {value}");
+    let flagged = |flag: &str, value: &str| format!("{CARGO_XTASK}{instrument} {flag} {value}");
     match instrument {
         clippy::INSTRUMENT
         | crate::test::INSTRUMENT
@@ -1238,7 +1259,7 @@ pub(crate) fn command_taking(instrument: &str, krate: &str) -> Option<String> {
         | crate::unsafe_audit::INSTRUMENT
         | port_map::INSTRUMENT
         | crate::makala::compare::INSTRUMENT
-        | crate::makala::soak::INSTRUMENT => Some(format!("cargo xtask {instrument}")),
+        | crate::makala::soak::INSTRUMENT => Some(format!("{CARGO_XTASK}{instrument}")),
         _ => None,
     }
 }
@@ -1450,42 +1471,52 @@ pub enum Format {
     Json,
 }
 
-/// The command: judge, write the reading, print the list, fail while
-/// anything is unmet.
+/// `done` as `worktree land`'s judge asks it, its one caller: judge, write
+/// the reading, print the list. The verdict is handed back and the exit
+/// left to the judge ([`Verdict::exit`]), which says what clears a list
+/// the merge's own harness cannot (#4378).
 pub fn run(
     root: &Path,
     manifest: &Manifest,
     registry: &Registry,
     store: &Store,
     (base, caller): (Option<&str>, Caller),
-) -> Result<()> {
+) -> Result<Verdict> {
     let asked = (root, manifest, registry, store);
-    answer(asked, (base, caller), (Format::Text, false))
+    told(asked, (base, caller), (Format::Text, false))
 }
 
-/// [`run`] in `format`, and where `peek`, writing nothing: no reading and
-/// no settled kept change, so a band that polls it leaves the store as it
-/// found it (Round 1, Q12, c2.h). The exit is the verdict's either way.
+/// The command's whole run in `format`, failing while anything is unmet;
+/// where `peek`, writing nothing: no reading and no settled kept change,
+/// so a band that polls it leaves the store as it found it (Round 1, Q12,
+/// c2.h). The exit is the verdict's either way.
 fn answer(
+    asked: (&Path, &Manifest, &Registry, &Store),
+    by: (Option<&str>, Caller),
+    how: (Format, bool),
+) -> Result<()> {
+    told(asked, by, how)?.exit()
+}
+
+/// The verdict judged, its reading written unless `peek`, and its list
+/// printed in `format`.
+fn told(
     (root, manifest, registry, store): (&Path, &Manifest, &Registry, &Store),
     (base, caller): (Option<&str>, Caller),
     (format, peek): (Format, bool),
-) -> Result<()> {
+) -> Result<Verdict> {
     let snapshot = Snapshot::disk(root)?;
     let verdict = judge(&snapshot, manifest, registry, store, base)?;
     let reading = called(verdict.reading(manifest, &snapshot)?, caller);
-    let outcome = if peek {
-        Outcome::of(&[reading])
-    } else {
+    if !peek {
         permit::settle(store, root)?;
-        store.record(&[reading])?
-    };
+        store.record(&[reading])?;
+    }
     match format {
         Format::Text => print!("{}", verdict.render()),
         Format::Json => println!("{}", verdict.to_json()),
     }
-    let unmet = verdict.unmet.len();
-    outcome.exit_saying(|| format!("{unmet} condition{} of done unmet", plural(unmet)))
+    Ok(verdict)
 }
 
 /// Who asked `done`, a label and nothing more: it heads each `done`
