@@ -7,8 +7,8 @@
 //!
 //! **What is held** is that the pin says one thing: a pinned binary whose
 //! path stands under a Cellar stands in the formula's keg, at a bottle of
-//! `[oracle].version`, and the formula of one line is the line of that
-//! version. Each disagreement is a defect of the pin
+//! `[oracle].version`, the one bottle for them all, and the formula of one
+//! line is the line of that version. Each disagreement is a defect of the pin
 //! ([`super::Pin::defects`]), read off the file alone, so it is refused on
 //! a machine with no keg at all, a runner before its pour: `status
 //! --section oracle` renders no pin whose formula and paths name two kegs,
@@ -27,6 +27,7 @@
 //! first names its formula, and with the paths and the md5 when the
 //! formula changes.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
@@ -70,8 +71,9 @@ impl Formula {
     /// `version` where the formula is another line's, and each of
     /// `binaries`, a pinned binary by the key that names it, whose path
     /// stands in another formula's keg, or in a keg that is no bottle of
-    /// `version`. A path under no Cellar, a Linux build's or a test's
-    /// stand-in, stands in no keg and is held to none.
+    /// `version`; and the binaries together where they stand at two
+    /// bottles, since a runner pours one. A path under no Cellar, a Linux
+    /// build's or a test's stand-in, stands in no keg and is held to none.
     pub(super) fn held(self, version: &str, binaries: &[(&str, &Path)]) -> Vec<String> {
         let mut defects = Vec::new();
         if !self.pours(version) {
@@ -80,10 +82,12 @@ impl Formula {
                 Formula::KEY
             ));
         }
+        let mut kegs = BTreeSet::new();
         for (key, path) in binaries {
             let Some((_, (keg, bottle))) = in_cellar(path) else {
                 continue;
             };
+            kegs.insert(format!("{keg}/{bottle}"));
             if keg != self.to_string() {
                 defects.push(format!(
                     "{key} {} stands in the keg {keg}, and the pin is poured from the formula {self}, into the keg of that name: [oracle].{} names the formula, `php` where the pin names none (#4383); the pin moves only by a person's hand",
@@ -97,6 +101,14 @@ impl Formula {
                     path.display()
                 ));
             }
+        }
+        if kegs.len() > 1 {
+            let kegs: Vec<String> = kegs.into_iter().collect();
+            defects.push(format!(
+                "the pinned binaries stand in {} kegs, {}, and `scripts/ci/pinned-php.sh` pours one, the bottle [oracle].path names (#4383); the pin moves only by a person's hand",
+                kegs.len(),
+                kegs.join(" and ")
+            ));
         }
         defects
     }
@@ -314,6 +326,38 @@ mod tests {
         assert_eq!(revised.defects(), &[] as &[String]);
         assert_eq!(revised.oracle.bottle(), "8.5.2_1");
         assert_eq!(revised.oracle.version, "8.5.2");
+    }
+
+    /// One bottle is poured, the one `[oracle].path` names, so a host at
+    /// another bottle of the same version than php's would stand in a keg
+    /// no runner pours: the pin is refused where its binaries stand at
+    /// two, and a binary under no Cellar counts for none.
+    #[test]
+    fn the_pinned_binaries_stand_at_the_one_bottle_a_runner_pours() {
+        let line = Formula::Line { major: 8, minor: 5 };
+        let at = |keg: &str, file: &str| format!("/opt/homebrew/Cellar/php@8.5/{keg}/{file}");
+        let (php, cgi) = (at("8.5.2_1", "bin/php"), at("8.5.2_1", "bin/php-cgi"));
+        let held = |fpm: &str| {
+            let binaries = [
+                ("[oracle].path", Path::new(&php)),
+                ("[sapi].cgi.path", Path::new(&cgi)),
+                ("[sapi].fpm.path", Path::new(fpm)),
+            ];
+            line.held("8.5.2", &binaries)
+        };
+        let none = Vec::<String>::new();
+        assert_eq!(held("/opt/dax-php/oracle/sbin/php-fpm"), none);
+        assert_eq!(held(&at("8.5.2_1", "sbin/php-fpm")), none);
+        let defects = held(&at("8.5.2", "sbin/php-fpm"));
+        let [defect] = &defects[..] else {
+            panic!("{defects:?}");
+        };
+        assert!(
+            defect.starts_with(
+                "the pinned binaries stand in 2 kegs, php@8.5/8.5.2 and php@8.5/8.5.2_1, and `scripts/ci/pinned-php.sh` pours one,"
+            ),
+            "{defect}"
+        );
     }
 
     /// The negative control: a keg that is no bottle of the pinned
