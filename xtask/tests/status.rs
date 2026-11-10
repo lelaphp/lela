@@ -323,21 +323,74 @@ fn scratch_poured(name: &str, fixture: &str) -> Tree {
     root
 }
 
+/// `scripts/ci/pinned-php.sh` over the pin of `root` as `status --section
+/// oracle --format json` renders it, on a machine of stand-ins, and what
+/// it printed on each stream. The `brew` it finds answers `--prefix` with
+/// `<root>/brew` and, outside a dry run, takes `brew pin <keg>` by writing
+/// the keg to `<root>/brew/pinned`; the `md5` answers the fixtures' digest
+/// for whatever file it is asked, as macOS's `md5 -q` prints one; and any
+/// other call, every `curl` among them, fails. So nothing here pours,
+/// fetches or pins a keg of this machine.
+fn pinned_php(root: &Path, dry: bool) -> (serde_json::Value, String, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let section = ["--section", "oracle", "--format", "json"];
+    let rendered = status_with_pin(root, &section, None, None).ok();
+    let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let pin = root.join("oracle.json");
+    std::fs::write(&pin, rendered).unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let prefix = root.join("brew").display().to_string();
+    let brew = format!(
+        "#!/bin/sh\n[ \"$*\" = --prefix ] && echo {prefix} && exit 0\n\
+         [ -z \"$DRY_RUN\" ] && [ \"$#\" = 2 ] && [ \"$1\" = pin ] && echo \"$2\" >>{prefix}/pinned && exit 0\n\
+         echo \"brew $*\" >&2\nexit 1\n"
+    );
+    let md5 = format!(
+        "#!/bin/sh\n[ \"$#\" = 2 ] && [ \"$1\" = -q ] && [ -f \"$2\" ] && echo {} && exit 0\n\
+         echo \"md5 $*\" >&2\nexit 1\n",
+        "0".repeat(32)
+    );
+    let curl = "#!/bin/sh\necho \"curl $*\" >&2\nexit 1\n".to_owned();
+    for (name, body) in [("brew", brew), ("md5", md5), ("curl", curl)] {
+        std::fs::write(bin.join(name), body).unwrap();
+        let mode = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(bin.join(name), mode).unwrap();
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)));
+    let mut script = std::process::Command::new("bash");
+    script
+        .arg(workspace().join("scripts/ci/pinned-php.sh"))
+        .arg(&pin)
+        .env("PATH", path.unwrap())
+        .env_remove("GH_TOKEN");
+    if dry {
+        script.env("DRY_RUN", "1");
+    } else {
+        script.env_remove("DRY_RUN");
+    }
+    let out = script.output().unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    );
+    assert!(out.status.success(), "{stdout}{stderr}");
+    (json, stdout, stderr)
+}
+
 /// What a runner pours php from (#4383): the section names the formula
 /// beside the keg path, `php` for a pin that names none and `php@8.5` for
 /// one that names it, and the bottle the path names, `8.5.13_1` where the
 /// keg is the formula's first revision and the pin's version says 8.5.13;
 /// and `scripts/ci/pinned-php.sh` under `DRY_RUN=1` says it would pour
-/// that formula at that bottle and the pin's path, after
-/// the one keg of the fixture's `[closure]`. The dry run asks `brew` for
-/// its prefix and nothing else, and fetches nothing: the `brew` and the
-/// `curl` it finds are stand-ins that fail any other call. No keg stands
+/// that formula at that bottle and the pin's path, after the one keg of
+/// the fixture's `[closure]`. The dry run asks `brew` for its prefix and
+/// nothing else, and fetches nothing ([`pinned_php`]). No keg stands
 /// under the fixtures' `/nowhere`, so nothing here reads this machine's
 /// Cellar.
 #[test]
 fn oracle_names_the_formula_a_runner_pours_and_the_dry_run_says_it() {
-    use std::os::unix::fs::PermissionsExt;
-    let script = workspace().join("scripts/ci/pinned-php.sh");
     for (fixture, formula, bottle, php) in [
         (
             "php.toml",
@@ -359,40 +412,9 @@ fn oracle_names_the_formula_a_runner_pours_and_the_dry_run_says_it() {
         ),
     ] {
         let root = scratch_poured(&format!("oracle-poured-{fixture}"), fixture);
-        let section = ["--section", "oracle", "--format", "json"];
-        let rendered = status_with_pin(&root, &section, None, None).ok();
-        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let (json, stdout, stderr) = pinned_php(&root, true);
         assert_eq!(json["binary"]["formula"], formula, "{fixture}");
         assert_eq!(json["binary"]["bottle"], bottle, "{fixture}");
-        let pin = root.join("oracle.json");
-        std::fs::write(&pin, rendered).unwrap();
-        let bin = root.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let prefix = root.join("brew").display().to_string();
-        let brew = format!(
-            "#!/bin/sh\n[ \"$*\" = --prefix ] && echo {prefix} && exit 0\necho \"brew $*\" >&2\nexit 1\n"
-        );
-        let curl = "#!/bin/sh\necho \"curl $*\" >&2\nexit 1\n".to_owned();
-        for (name, body) in [("brew", brew), ("curl", curl)] {
-            std::fs::write(bin.join(name), body).unwrap();
-            let mode = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(bin.join(name), mode).unwrap();
-        }
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)));
-        let out = std::process::Command::new("bash")
-            .arg(&script)
-            .arg(&pin)
-            .env("DRY_RUN", "1")
-            .env("PATH", path.unwrap())
-            .env_remove("GH_TOKEN")
-            .output()
-            .unwrap();
-        let (stdout, stderr) = (
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        assert!(out.status.success(), "{fixture}: {stdout}{stderr}");
         assert_eq!(
             stdout,
             format!(
@@ -414,6 +436,44 @@ fn oracle_names_the_formula_a_runner_pours_and_the_dry_run_says_it() {
         ),
         "{refused}"
     );
+}
+
+/// php's own keg is `brew pin`ned as each keg of `[closure]` is (#4383),
+/// on a machine where it is already poured too: the fixture pin's keg
+/// stands under the scratch prefix at the pin's md5, and the one keg of
+/// its `[closure]` at its record, so `scripts/ci/pinned-php.sh` pours
+/// neither, says so, and pins both, the closure's keg and then the
+/// formula the pin names. Under `DRY_RUN=1` it says the same and pins
+/// nothing: the stand-in `brew` refuses a pin there ([`pinned_php`]).
+#[test]
+fn the_keg_of_the_pinned_php_is_brew_pinned_where_it_is_already_poured() {
+    let root = scratch_poured("oracle-pinned", "revised.toml");
+    let prefix = root.join("brew");
+    let pin = std::fs::read_to_string(root.join("oracle.toml")).unwrap();
+    let cellar = prefix.join("Cellar").display().to_string();
+    std::fs::write(
+        root.join("oracle.toml"),
+        pin.replace("/nowhere/Cellar", &cellar),
+    )
+    .unwrap();
+    let php = prefix.join("Cellar/php@8.5/8.5.13_1/bin/php");
+    std::fs::create_dir_all(php.parent().unwrap()).unwrap();
+    std::fs::write(&php, "").unwrap();
+    std::fs::create_dir_all(prefix.join("opt")).unwrap();
+    std::os::unix::fs::symlink("../Cellar/zstd/1.5.7_1", prefix.join("opt/zstd")).unwrap();
+    let poured = format!(
+        "zstd 1.5.7_1: the record's; already poured\n{}: md5 {}, the pin's; already poured\n",
+        php.display(),
+        "0".repeat(32)
+    );
+    let pinned = prefix.join("pinned");
+    let (_, stdout, stderr) = pinned_php(&root, true);
+    assert_eq!((stdout.as_str(), stderr.as_str()), (poured.as_str(), ""));
+    assert!(!pinned.exists(), "the dry run pinned a keg");
+    let (json, stdout, stderr) = pinned_php(&root, false);
+    assert_eq!(json["binary"]["formula"], "php@8.5");
+    assert_eq!((stdout.as_str(), stderr.as_str()), (poured.as_str(), ""));
+    assert_eq!(std::fs::read_to_string(&pinned).unwrap(), "zstd\nphp@8.5\n");
 }
 
 /// The pin's tag and commit as `[source]` states them (#66), beside its

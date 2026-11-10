@@ -26,7 +26,10 @@
 # with the pin's md5 is left as it is, so the oracle runner pours once and
 # every job after it checks; a pour whose md5 is not the pin's, or a keg
 # that lands at another version, exits 1 before any lane, and xtask would
-# refuse the run anyway.
+# refuse the run anyway. php's keg is `brew pin`ned as each keg it loads
+# is, poured here or found already poured, so a `brew upgrade` leaves it
+# where the pin's path names it, and xtask refuses a run over one that is
+# not (#4383).
 #
 # DRY_RUN=1 reads the pin and the machine and says what it would pour, each
 # keg and php by its formula and its bottle, and pours, pins and fetches
@@ -104,15 +107,15 @@ done <<<"$kegs"
 
 if [ -f "$path" ] && [ "$(md5 -q "$path")" = "$md5" ]; then
     echo "$path: md5 $md5, the pin's; already poured"
-    exit 0
-fi
-if [ -n "$dry" ]; then
+elif [ -n "$dry" ]; then
     echo "$formula: would pour $bottle at $path"
     exit 0
+else
+    pour "$formula" "$bottle"
+    got=$(md5 -q "$path")
+    [ "$got" = "$md5" ] || { echo "::error::$path has md5 $got; the pin is $md5"; exit 1; }
+    echo "$path: md5 $got, the pin's"
 fi
-
-pour "$formula" "$bottle"
-
-got=$(md5 -q "$path")
-[ "$got" = "$md5" ] || { echo "::error::$path has md5 $got; the pin is $md5"; exit 1; }
-echo "$path: md5 $got, the pin's"
+# The keg stands at the pin's md5 here, poured now or before, as a keg of
+# the closure stands at its record where the loop above pins it.
+[ -n "$dry" ] || brew pin "$formula"

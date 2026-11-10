@@ -1466,9 +1466,9 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// CI reads the two names off the JSON, `tree.variable` and
 /// `promise.variable`, and sets them under those names, so the workflow
 /// spells neither; the oracle runner pours the formula `binary` names at
-/// its bottle and holds the keg's php to that md5 (#2253), pours and pins
-/// each keg `closure` names at its version, and lays each of `variants` at
-/// its path by its md5.
+/// its bottle, holds the keg's php to that md5 (#2253) and pins the keg
+/// (#4383), pours and pins each keg `closure` names at its version, and
+/// lays each of `variants` at its path by its md5.
 fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let php = &pin.oracle;

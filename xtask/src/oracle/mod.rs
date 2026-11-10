@@ -1054,7 +1054,8 @@ impl Pin {
     }
 
     /// The binary's digest against the pin's, and the kegs it and the
-    /// `[sapi]` hosts load against `[closure]`; a mismatch refuses the run.
+    /// `[sapi]` hosts load against `[closure]`, each `brew pin`ned as the
+    /// keg they stand in is; a mismatch refuses the run.
     fn assert_digest(&self) -> Result<()> {
         self.asserted.0.fetch_add(1, Ordering::Relaxed);
         if let Some(why) = &self.oracle.unpinned {
