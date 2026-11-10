@@ -584,7 +584,8 @@ fn beside(tree: &Path, suffix: &str) -> PathBuf {
 /// every test running beside the one that spawned a child — out of each
 /// other's way. A tree with no lock beside it was kept on purpose and is
 /// never a candidate. Every sweep takes it shared, so one holding it is
-/// never a live run to another reading it (#2942).
+/// never a live run to another reading it (#2942). A tree that will not go
+/// keeps its lock ([`removed`]), so the next sweep tries it again.
 ///
 /// Nothing here reports. A temporary directory this process may not read,
 /// a lock another run took between the listing and the open, a tree
@@ -611,8 +612,21 @@ fn reap(base: &Path) {
         if file.try_lock_shared().is_err() || !names(&lock, &file) {
             continue;
         }
-        std::fs::remove_dir_all(base.join(tree)).ok();
-        std::fs::remove_file(&lock).ok();
+        if removed(&base.join(tree)) {
+            std::fs::remove_file(&lock).ok();
+        }
+    }
+}
+
+/// Whether `tree` is gone: removed now, or not there to remove. A tree
+/// whose removal failed part way, as it does while something still writes
+/// into it, is not, and keeps its lock: a lock removed with its tree
+/// standing left a tree no sweep reads, since the sweep reads the locks,
+/// and it stood half removed for good (#4437).
+fn removed(tree: &Path) -> bool {
+    match std::fs::remove_dir_all(tree) {
+        Ok(()) => true,
+        Err(err) => err.kind() == std::io::ErrorKind::NotFound,
     }
 }
 
@@ -967,8 +981,11 @@ impl Drop for Tree {
         // `KEEP` there is no lock and the tree stays. The lock goes after
         // the tree, so a sweep arriving in between finds a lock whose tree
         // is already gone and removes the lock, which is the same ending.
-        if let Some((lock, _)) = &self.held {
-            std::fs::remove_dir_all(&self.path).ok();
+        // A tree that will not go keeps its lock ([`removed`]), which this
+        // process lets go as the file closes, so the next sweep takes it.
+        if let Some((lock, _)) = &self.held
+            && removed(&self.path)
+        {
             std::fs::remove_file(lock).ok();
         }
     }
@@ -1122,6 +1139,62 @@ mod tests {
             let call = format!("nohup cargo {} ", super::REBUILD);
             assert!(text.contains(&call), "{hook} rebuilds by another call");
         }
+    }
+
+    /// A tree that will not go keeps its lock (#4437): a directory in it
+    /// that may not be written holds a file, so removing the tree fails
+    /// part way, as it did under a build writing into it. Dropped, the
+    /// tree stands with its lock beside it, which a sweep can take; swept
+    /// while it still will not go, it keeps the lock again; swept once it
+    /// can go, it goes, lock and all. A lock removed with its tree
+    /// standing left a tree no sweep reads.
+    #[test]
+    fn a_tree_that_will_not_go_keeps_its_lock_until_a_sweep_takes_it() {
+        use std::os::unix::fs::PermissionsExt;
+        /// The directory made writable again however the test ends, so a
+        /// failing run leaves nothing a sweep cannot take.
+        struct Writable(PathBuf);
+        impl Drop for Writable {
+            fn drop(&mut self) {
+                let mode = std::fs::Permissions::from_mode(0o755);
+                std::fs::set_permissions(&self.0, mode).ok();
+            }
+        }
+        let base = Tree::new("stuck-base").unwrap();
+        let tree = Tree::under(&base, "stuck").unwrap();
+        let (path, lock) = (tree.path().to_path_buf(), beside(tree.path(), LOCK));
+        let shut = tree.join("shut");
+        std::fs::create_dir(&shut).unwrap();
+        std::fs::write(shut.join("held"), b"").unwrap();
+        let writable = Writable(shut.clone());
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        drop(tree);
+        assert!(path.is_dir(), "the tree went though a file in it could not");
+        assert!(lock.is_file(), "the lock went with the tree standing");
+        // A child another test forked while the tree was held keeps its
+        // lock until that child execs, and a sweep passes a held lock by;
+        // none can take it now the tree is dropped, so once it comes, each
+        // sweep below takes it and tries the tree.
+        let came = (0..500).any(|_| {
+            let probe = std::fs::File::open(&lock).unwrap();
+            if probe.try_lock_shared().is_ok() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            false
+        });
+        assert!(came, "the dropped tree's lock never came");
+        reap(&base);
+        assert!(path.is_dir(), "the sweep removed what could not be removed");
+        assert!(
+            lock.is_file(),
+            "the sweep removed the lock with the tree standing"
+        );
+        drop(writable);
+        reap(&base);
+        assert!(!path.exists(), "the sweep left a tree it could take");
+        assert!(!lock.exists(), "the sweep left the lock of a tree it took");
     }
 
     /// A sweep never meets a lock before it is held (#1252): one thread
