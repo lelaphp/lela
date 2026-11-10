@@ -282,9 +282,10 @@ const showStatus = ($: EngineInterface) => {
   $.ui.status(parts.length === 0 ? undefined : parts.join(' · '));
 };
 
-/// The shape of `done --format json` the band reads (`JSON_V` in
-/// xtask/src/done.rs); an object of another `v` is refused, not guessed at.
-const DONE_V = 1;
+/// The shapes of `done --format json` the band reads (`JSON_V` in
+/// xtask/src/done.rs): 2, and 1 as a worktree laid before the bump prints
+/// it, the fields below the same in both; another `v` is refused, not guessed at.
+const DONE_V: readonly number[] = [1, 2];
 type Unmet = { kind: string; instrument: string | null; scope: string | null; message: string; command: string | null };
 type Done = { v: number; base: { since: string }; ticket: number | null; met: boolean; counts: Record<string, number>; unmet: Unmet[] };
 
@@ -332,8 +333,8 @@ async function peek($: EngineInterface): Promise<Done | string> {
       continue;
     }
     const list = parsed<Done>(run.stdout.trim().split('\n').at(-1) ?? '');
-    if (list?.v === DONE_V && Array.isArray(list.unmet)) return list;
-    why = list?.v === undefined ? `done exited ${run.exitCode}: ${firstLine(run.stderr)}` : `done printed shape v${String(list.v)}; the band reads v${DONE_V}`;
+    if (list !== undefined && DONE_V.includes(list.v) && Array.isArray(list.unmet)) return list;
+    why = list?.v === undefined ? `done exited ${run.exitCode}: ${firstLine(run.stderr)}` : `done printed shape v${String(list.v)}; the band reads v${DONE_V.join(' and v')}`;
   }
   return why;
 }

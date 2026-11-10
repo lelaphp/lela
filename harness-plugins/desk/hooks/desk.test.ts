@@ -413,14 +413,13 @@ test('past twenty turns the row says the soft cap is passed, and Discuss continu
 /// `done --format json --peek` as t4251's build printed it on a ticket's
 /// worktree, with the four kinds its test pins (#3494).
 const DONE = {
-  v: 1,
+  v: 2,
   base: { commit: '91ef0c0ed9629f22e3a81b165d20ac412fc6fd28', since: 'main' },
   changed: ['ext/pcre/src/lib.rs'],
   counts: { failing: 2, stale: 1, missing: 1, refused: 1, unkinded: 0 },
   crates: ['ext/pcre'],
   delegated: [],
   met: false,
-  not_run: [],
   notes: [],
   ticket: 3497,
   unmet: [

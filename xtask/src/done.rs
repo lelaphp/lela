@@ -247,9 +247,7 @@ impl Verdict {
     /// the changed files and crates, the branch's ticket, the counts by
     /// kind, each unmet condition as `{ kind, instrument, scope, message,
     /// command }`, and the notes and the delegated readings; `v` is the
-    /// shape's version ([`JSON_V`]). `not_run` is the empty list: it named
-    /// the instruments `--not-run` named, and that went with CI's `done`
-    /// (#4372), so the field stays, empty, while the shape is version 1.
+    /// shape's version ([`JSON_V`]).
     pub fn to_json(&self) -> Value {
         json!({
             "v": JSON_V,
@@ -262,7 +260,6 @@ impl Verdict {
             "unmet": self.unmet,
             "notes": self.notes,
             "delegated": self.delegated,
-            "not_run": [],
         })
     }
 }
@@ -270,7 +267,7 @@ impl Verdict {
 /// The version of `done --format json`'s shape, `v` on its object: a field
 /// added is the same version, and one removed, renamed or retyped, or a
 /// meaning changed, is the next (Round 1, Q11 (a)).
-pub const JSON_V: u32 = 1;
+pub const JSON_V: u32 = 2;
 
 /// What clears one unmet condition: the kind it carries in the typed list
 /// (Round 1, Q11 (a), c2.d).
