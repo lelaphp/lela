@@ -47,13 +47,17 @@ auth=()
 [ -z "${GH_TOKEN:-}" ] || auth=(-H "Authorization: Bearer $GH_TOKEN")
 
 # pour <formula> <version>: the formula from the homebrew-core commit whose
-# message bottles that version, installed in place of what stands.
+# message bottles that version, installed in place of what stands. A
+# formula's first bottle is added and each later one updates it: homebrew-core
+# has `php@8.4: add 8.4.15 bottle.` from the day it made that formula, and
+# `php@8.4: update 8.4.16 bottle.` after it.
 pour() {
     local name=$1 at=$2 shard sha file
     case $name in lib*) shard=lib ;; *) shard=${name:0:1} ;; esac
     sha=$(curl -sSfL ${auth[@]+"${auth[@]}"} \
         "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/$shard/$name.rb&per_page=100" |
-        jq -r --arg m "$name: update $at bottle." '[.[] | select(.commit.message | startswith($m))][0].sha // empty')
+        jq -r --arg update "$name: update $at bottle." --arg add "$name: add $at bottle." \
+            '[.[] | select(.commit.message | startswith($update) or startswith($add))][0].sha // empty')
     [ -n "$sha" ] || { echo "::error::no homebrew-core commit bottles $name $at"; exit 1; }
     echo "$name $at from homebrew-core $sha"
     brew unpin "$name" >/dev/null 2>&1 || true
