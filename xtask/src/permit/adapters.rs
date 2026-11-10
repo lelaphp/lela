@@ -120,6 +120,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
             return Ok(());
         }
     };
+    let text = call.anchor(root, text);
     // Each adapter reads the person's answers where its own caller put
     // them: the command hook from the transcript Claude Code writes, the
     // function hook from the records it read from the engine (#2247).

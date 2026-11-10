@@ -81,10 +81,10 @@ pub(super) fn owned(
     let Some(caller) = SessionId::new(&call.session_id) else {
         return Ok(None);
     };
-    let places = match (walk.line(), call.tool_input.file_path.as_deref()) {
+    let places = match (walk.line(), call.file(root)) {
         (Some(_), _) if scope == Scope::Operating => walk.fired_in(Places::Repositories, fires),
         (Some(_), _) => writes::of(walk),
-        (None, Some(file)) => vec![root.join(file)],
+        (None, Some(file)) => vec![file],
         (None, None) => vec![root.to_path_buf()],
     };
     for place in places {

@@ -208,20 +208,58 @@ impl Call {
 
     /// The file the call touches, relative to the workspace root; `None`
     /// for a call without one or for a file outside the workspace, which
-    /// no rule of the manifest describes.
+    /// no rule of the manifest describes. Read off [`Call::file`], so
+    /// `seams.toml`, `./seams.toml` and `docs/../seams.toml` are one path
+    /// and every scope sees it as such (#4430).
     pub fn path(&self, root: &Path) -> Option<PathBuf> {
-        let given = Path::new(self.tool_input.file_path.as_deref()?);
-        let relative = if given.is_absolute() {
-            let root = canonical(root);
-            canonical(given).strip_prefix(&root).ok()?.to_path_buf()
-        } else {
-            given.to_path_buf()
+        let file = self.file(root)?;
+        Some(file.strip_prefix(canonical(root)).ok()?.to_path_buf())
+    }
+
+    /// The call, and the `text` it was read from, returned, with a
+    /// relative `file_path` made the absolute file it names
+    /// ([`Call::file`]), once, where the call comes in: the workspace that
+    /// places the call, the scopes that judge it, the reading that names
+    /// it and the worktree's build it is handed to each read the path
+    /// under a root of its own, to which a relative one would be a place
+    /// of its own (#4430). Both as they came where the path is absent or
+    /// absolute already, or resolves to a name that is not UTF-8.
+    pub(super) fn anchor(&mut self, root: &Path, text: String) -> String {
+        let given = self.tool_input.file_path.as_deref();
+        let relative = given.is_some_and(|file| Path::new(file).is_relative());
+        let Some(file) = self.file(root).filter(|_| relative) else {
+            return text;
         };
-        let clean: PathBuf = relative
-            .components()
-            .filter(|c| !matches!(c, Component::CurDir))
-            .collect();
-        Some(clean)
+        let Ok(file) = file.into_os_string().into_string() else {
+            return text;
+        };
+        self.tool_input.file_path = Some(file.clone());
+        let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return text;
+        };
+        let Some(slot) = (json.get_mut("tool_input")).and_then(|input| input.get_mut("file_path"))
+        else {
+            return text;
+        };
+        *slot = serde_json::Value::String(file);
+        json.to_string()
+    }
+
+    /// The file the call touches as the one place it names, absolute and
+    /// [`canonical`]: a relative `file_path` is read from the directory the
+    /// call runs in, the hook's `cwd` where it carries one and `root`
+    /// otherwise, as the tool that runs it reads it, and an absolute one
+    /// as it stands. Every spelling of a file is that file, a `..` climbing
+    /// out of `root` among them, which names the place it climbs to and
+    /// is judged where that place is (#4430). `None` for a call without
+    /// one.
+    pub(super) fn file(&self, root: &Path) -> Option<PathBuf> {
+        let given = Path::new(self.tool_input.file_path.as_deref()?);
+        let from = match self.cwd.as_deref() {
+            Some(cwd) => root.join(cwd),
+            None => root.to_path_buf(),
+        };
+        Some(canonical(&from.join(given)))
     }
 
     /// The workspace whose manifest judges the call: the nearest ancestor
@@ -263,9 +301,8 @@ impl Call {
     /// control is its test, every rule having a fixture that must fail.
     pub(super) fn nested(&self, root: &Path) -> Option<PathBuf> {
         let root = canonical(root);
-        match (self.tool_input.file_path.as_deref(), self.cwd.as_deref()) {
+        match (self.file(&root), self.cwd.as_deref()) {
             (Some(file), _) => {
-                let file = canonical(&root.join(file));
                 let place = match file.parent() {
                     Some(dir)
                         if file.file_name() == Some(manifest::FILE.as_ref())
@@ -376,15 +413,37 @@ fn nearest_under(root: &Path, place: &Path, names: &[&str]) -> Option<PathBuf> {
 
 /// The path with its deepest existing ancestor resolved, so that a file
 /// under `/tmp` and one under `/private/tmp` compare equal on macOS and a
-/// file that does not exist yet still has a place.
+/// file that does not exist yet still has a place. Read a component at a
+/// time from the left, each prefix resolved where it is on disk, so a `..`
+/// steps up from the place a link leads, as the kernel steps, and steps
+/// up lexically past a directory not made yet: no `.` or `..` is left in
+/// what it returns, for `docs/../seams.toml` and `new/../seams.toml` alike
+/// (#4430).
 fn canonical(path: &Path) -> PathBuf {
     if let Ok(real) = path.canonicalize() {
         return real;
     }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => canonical(parent).join(name),
-        _ => path.to_path_buf(),
+    let mut place = PathBuf::new();
+    let mut on_disk = true;
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                place.pop();
+                on_disk = true;
+            }
+            other => {
+                place.push(other);
+                if on_disk {
+                    match place.canonicalize() {
+                        Ok(real) => place = real,
+                        Err(_) => on_disk = false,
+                    }
+                }
+            }
+        }
     }
+    place
 }
 
 #[cfg(test)]
@@ -480,6 +539,82 @@ mod tests {
         edit.tool_input.file_path = Some(worktree.join("sub/x").display().to_string());
         assert_eq!(edit.workspace(&root), worktree);
         assert_eq!(edit.checkout(&root), worktree);
+    }
+
+    /// An `Edit` of `file`, read from `cwd` where it is given.
+    fn edit(file: &str, cwd: Option<&Path>) -> Call {
+        let mut call = bash(cwd.unwrap_or(Path::new("/")), None);
+        call.tool_input.file_path = Some(file.to_owned());
+        call.cwd = cwd.map(|cwd| cwd.display().to_string());
+        call
+    }
+
+    /// #4430: every spelling of a file is the one path, a `..` through a
+    /// directory on disk, one not made yet and one under a link alike,
+    /// read from the call's `cwd` where it carries one and from the root
+    /// otherwise.
+    #[test]
+    fn every_spelling_of_a_file_is_one_path() {
+        let tree = Tree::new("call-spelling").unwrap();
+        let (root, _) = beside(&tree);
+        std::fs::create_dir_all(root.join("docs/deep")).unwrap();
+        let seams = Some(PathBuf::from(manifest::FILE));
+        for file in [
+            "seams.toml",
+            "./seams.toml",
+            "docs/../seams.toml",
+            "docs/deep/../../seams.toml",
+            "not-made-yet/../seams.toml",
+            "not/made/../../seams.toml",
+            "docs/./../docs/.././seams.toml",
+        ] {
+            assert_eq!(edit(file, None).path(&root), seams, "{file}");
+        }
+        let absolute = format!("{}/not-made-yet/../seams.toml", root.display());
+        assert_eq!(edit(&absolute, None).path(&root), seams);
+        let deep = root.join("docs/deep");
+        assert_eq!(edit("../../seams.toml", Some(&deep)).path(&root), seams);
+        assert_eq!(
+            edit("x.md", Some(&deep)).path(&root),
+            Some(PathBuf::from("docs/deep/x.md"))
+        );
+        // A `..` under a link steps up from where the link leads, as the
+        // kernel does, and the absolute spelling is resolved the same.
+        std::os::unix::fs::symlink(&deep, root.join("link")).unwrap();
+        let through = |file: &str| edit(file, None).path(&root);
+        assert_eq!(through("link/../x.md"), Some(PathBuf::from("docs/x.md")));
+        let linked = format!("{}/link/../x.md", root.display());
+        assert_eq!(through(&linked), Some(PathBuf::from("docs/x.md")));
+    }
+
+    /// #4430: a relative path that climbs out of the workspace names the
+    /// place it climbs to, judged as that absolute path is: in a worktree
+    /// of the repository, by that worktree's manifest and as its file;
+    /// anywhere else, as no file of the manifest.
+    #[test]
+    fn a_relative_path_climbing_out_of_the_workspace_is_the_absolute_path_it_names() {
+        let tree = Tree::new("call-climbing").unwrap();
+        let (root, worktree) = beside(&tree);
+        let named = worktree.join("seams.toml").display().to_string();
+        let text =
+            r#"{"tool_name":"Edit","tool_input":{"file_path":"../repo-worktrees/t-x/seams.toml"}}"#;
+        let mut climbing = Call::parse(text).unwrap();
+        let anchored = Call::parse(&climbing.anchor(&root, text.to_owned())).unwrap();
+        let absolute = edit(&named, None);
+        for call in [&climbing, &anchored, &absolute] {
+            assert_eq!(call.tool_input.file_path.as_deref(), Some(named.as_str()));
+            assert_eq!(call.workspace(&root), worktree);
+            assert_eq!(call.checkout(&root), worktree);
+            assert_eq!(call.path(&worktree), Some(PathBuf::from(manifest::FILE)));
+            assert_eq!(call.path(&root), None);
+        }
+        let away = edit("../elsewhere/seams.toml", None);
+        assert_eq!(away.workspace(&root), root);
+        assert_eq!(away.path(&root), None);
+        let sub = worktree.join("sub");
+        let from_sub = edit("../../../repo/docs/../seams.toml", Some(&sub));
+        assert_eq!(from_sub.workspace(&root), root);
+        assert_eq!(from_sub.path(&root), Some(PathBuf::from(manifest::FILE)));
     }
 
     /// Round 1, Q17 (a): a call with no line, and a line whose `cwd`
