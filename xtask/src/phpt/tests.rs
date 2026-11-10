@@ -2174,30 +2174,37 @@ nothing
 /// the group kill 13 times in 200 at twelve jobs, the oracle's as often as
 /// the engine's. One that still holds the pipe at the limit leaves what
 /// came by then and goes with its group, so it neither holds the run nor
-/// outlives it. The first half's limit is one the 300 ms child meets with
-/// room under any load, since a run read to its end pays none of it; two
-/// seconds was not, at a load average of 80 to 108 (#2293).
+/// outlives it. The first half's child writes once its program has exited,
+/// which it sees as the program's number leaving its `posix_getppid()`, so
+/// its `child` comes after the program's `parent` and after the program's
+/// end under any load; a 300 ms sleep let it come first at a load average
+/// of 30 to 38 (#4421). Its limit is one that child meets with room, since
+/// a run read to its end pays none of it; two seconds was not, at a load
+/// average of 80 to 108 (#2293).
 #[test]
 fn a_child_sharing_stdout_is_read_to_the_end_and_killed_at_the_limit() {
     if oracle().is_none() {
         return;
     }
+    // `child` is the PHP expression whose string the child runs.
     let shares = |child: &str| {
         format!(
             "--TEST--\nshares stdout\n--FILE--\n<?php\n\
-             $p = proc_open([PHP_BINARY, '-n', '-r', '{child}'], [1 => STDOUT, 2 => STDOUT], $pipes);\n\
+             $p = proc_open([PHP_BINARY, '-n', '-r', {child}], [1 => STDOUT, 2 => STDOUT], $pipes);\n\
              file_put_contents(__DIR__ . '/child.pid', proc_get_status($p)['pid']);\n\
              echo \"parent\\n\";\n--EXPECT--\nparent\nchild\n"
         )
     };
     let (_root, subset) = rooted(
         "writes-after",
-        &shares(r#"usleep(300000); echo "child\n";"#),
+        &shares(
+            r#"'while (posix_getppid() === ' . getmypid() . ') usleep(10000); echo "child\n";'"#,
+        ),
     );
     let tally = run_on(&subset, 1, 30);
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
 
-    let (root, subset) = rooted("holds-past-limit", &shares("sleep(120);"));
+    let (root, subset) = rooted("holds-past-limit", &shares("'sleep(120);'"));
     let since = std::time::Instant::now();
     let tally = run_on(&subset, 1, 2);
     assert!(
