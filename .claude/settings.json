@@ -1,7 +1,8 @@
 {
   "env": {
     "BASH_MAX_TIMEOUT_MS": "2700000",
-    "TEST_PHP_SRCDIR": "~/Projects/php-src-8.5.12"
+    "TEST_PHP_SRCDIR": "~/Projects/php-src-8.5.12",
+    "XTASK_RIG": "~/Projects/dax-php-worktrees/wp-bench-1103/rig.toml"
   },
   "permissions": {
     "allow": [
@@ -11,7 +12,9 @@
     ],
     "deny": [
       "Edit(~/.claude.json)",
-      "Edit(~/.claude/**)"
+      "Edit(~/.claude/**)",
+      "mcp__cmux-cua",
+      "mcp__cmux-cua__*"
     ]
   },
   "enabledPlugins": {
