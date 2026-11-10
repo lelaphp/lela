@@ -9,6 +9,7 @@
 )]
 
 use std::io::{Read, Write};
+use std::net::{Ipv6Addr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -287,7 +288,15 @@ fn request_within(stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) ->
 /// What request 1 with `pairs` as its parameters writes on
 /// `FCGI_STDOUT` and on `FCGI_STDERR`, read off `stream` to its end,
 /// waiting up to `wait` for each read.
-fn exchange(mut stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) -> (Vec<u8>, Vec<u8>) {
+fn exchange(stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) -> (Vec<u8>, Vec<u8>) {
+    stream
+        .set_read_timeout(Some(wait))
+        .expect("the reply's reads are timed");
+    exchange_on(stream, pairs)
+}
+
+/// [`exchange`] on a stream whose reads are already timed.
+fn exchange_on(mut stream: impl Read + Write, pairs: &[(&str, &str)]) -> (Vec<u8>, Vec<u8>) {
     let mut params = Vec::new();
     for &(name, value) in pairs {
         fcgi::put_pair(&mut params, name.as_bytes(), value.as_bytes());
@@ -297,9 +306,6 @@ fn exchange(mut stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) -> (
     out.extend(record(Kind::Params, &[]));
     out.extend(record(Kind::Stdin, &[]));
     stream.write_all(&out).expect("the request is written");
-    stream
-        .set_read_timeout(Some(wait))
-        .expect("the reply's reads are timed");
     let (mut body, mut stderr) = (Vec::new(), Vec::new());
     loop {
         let mut bytes = [0u8; 8];
@@ -353,6 +359,87 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
     master.stop();
     let body = String::from_utf8_lossy(&body);
     assert!(body.ends_with("\r\n\r\nfpm-fcgi 1"), "{body:?}");
+}
+
+/// A pool listening on the IPv6 loopback whose `listen.allowed_clients`
+/// is `allowed`, the master started, and a connection to it from `::1`,
+/// tried for ten seconds.
+fn on_ipv6_loopback(name: &str, allowed: &str) -> (Master, TcpStream) {
+    let port = TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+        .and_then(|probe| probe.local_addr())
+        .expect("the IPv6 loopback has a port free")
+        .port();
+    let directives = format!(
+        "listen = [::1]:{port}\nlisten.allowed_clients = {allowed}\ncatch_workers_output = yes\n"
+    );
+    let master = Master::start(
+        name,
+        &Pool {
+            directives: &directives,
+            ..Pool::default()
+        },
+    );
+    let started = Instant::now();
+    let stream = loop {
+        match TcpStream::connect((Ipv6Addr::LOCALHOST, port)) {
+            Ok(stream) => break stream,
+            Err(refused) => {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "nothing listens at [::1]:{port} after ten seconds: {refused}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("the reply's reads are timed");
+    (master, stream)
+}
+
+/// `listen.allowed_clients` lets an IPv6 peer in by all sixteen octets of
+/// its address, as `fcgi_is_allowed` compares `sizeof(sin6_addr)`
+/// (`Z/main/fastcgi.c:1334`): `::1` connecting where only `::2`, in its
+/// /96, is allowed is dropped before a byte is read, with php's line in
+/// the pool's log as the child said it into stderr, and where `::1`
+/// itself is allowed it is served. No witness can name the refused peer:
+/// a fence's pool listens on a Unix socket, and a host line's client
+/// fails on a connection closed unanswered.
+#[test]
+fn an_ipv6_peer_is_let_in_by_all_sixteen_octets_of_its_address() {
+    let (master, mut refused) = on_ipv6_loopback("acl6-refused", "::2");
+    let read = refused.read(&mut [0u8; 8]);
+    let dropped = "Connection disallowed: IP address '::1' has been dropped.";
+    let started = Instant::now();
+    while !std::fs::read_to_string(master.dir().join(FPM_LOG)).is_ok_and(|l| l.contains(dropped))
+        && started.elapsed() < Duration::from_secs(10)
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let log = master.stop().fpm;
+    assert!(
+        matches!(&read, Ok(0))
+            || matches!(&read, Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset),
+        "{read:?}"
+    );
+    assert!(log.contains(dropped), "{log}");
+
+    let (master, served) = on_ipv6_loopback("acl6-served", "::2,::1");
+    let script = master.dir().join("index.php");
+    std::fs::write(&script, "<?php echo 'served';").expect("the script");
+    let script = script.display().to_string();
+    let (body, _) = exchange_on(
+        served,
+        &[
+            ("SCRIPT_FILENAME", script.as_str()),
+            ("REQUEST_METHOD", "GET"),
+        ],
+    );
+    let log = master.stop().fpm;
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.ends_with("\r\n\r\nserved"), "{body:?}");
+    assert!(!log.contains("Connection disallowed"), "{log}");
 }
 
 /// A test that panics while its master serves leaves neither the master,

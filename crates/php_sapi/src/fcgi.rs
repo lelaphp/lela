@@ -83,7 +83,10 @@ pub fn allowed_clients(list: &[u8], mut wrong: impl FnMut(&[u8])) -> Vec<IpAddr>
 
 /// `fcgi_is_allowed`: whether `peer` may connect, every peer where no
 /// list was set and every connection over a Unix socket, which names no
-/// peer.
+/// peer. An address is let in by an equal one of its family, all four
+/// octets of an IPv4 and all sixteen of an IPv6 (`sizeof(sin6_addr)`,
+/// `Z/main/fastcgi.c:1334`), and an IPv4-mapped IPv6 peer by the IPv4
+/// it maps, its last four octets (`Z/main/fastcgi.c:1338-1341`).
 #[must_use]
 pub fn allowed(allowed: Option<&[IpAddr]>, peer: Option<IpAddr>) -> bool {
     let (Some(list), Some(peer)) = (allowed, peer) else {
@@ -91,7 +94,7 @@ pub fn allowed(allowed: Option<&[IpAddr]>, peer: Option<IpAddr>) -> bool {
     };
     list.iter().any(|ip| match (ip, peer) {
         (IpAddr::V4(a), IpAddr::V4(p)) => *a == p,
-        (IpAddr::V6(a), IpAddr::V6(p)) => a.octets()[..12] == p.octets()[..12],
+        (IpAddr::V6(a), IpAddr::V6(p)) => *a == p,
         (IpAddr::V4(a), IpAddr::V6(p)) => p.to_ipv4_mapped() == Some(*a),
         (IpAddr::V6(_), IpAddr::V4(_)) => false,
     })
@@ -106,4 +109,55 @@ pub fn client_ip(peer: Option<IpAddr>) -> Option<String> {
             .map_or_else(|| v6.to_string(), |v4| v4.to_string()),
         IpAddr::V4(v4) => v4.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use super::allowed;
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("the test names an address")
+    }
+
+    fn lets_in(list: &[&str], peer: &str) -> bool {
+        let list: Vec<IpAddr> = list.iter().map(|text| ip(text)).collect();
+        allowed(Some(&list), Some(ip(peer)))
+    }
+
+    /// An IPv6 peer is let in by the address it is, all sixteen octets of
+    /// it, as `fcgi_is_allowed`'s `memcmp` of `sizeof(sin6_addr)` judges
+    /// it: one in the allowed address's /96 that differs in its last 32
+    /// bits is refused.
+    #[test]
+    fn an_ipv6_peer_is_let_in_by_all_sixteen_octets() {
+        assert!(lets_in(&["2001:db8::1"], "2001:db8::1"));
+        assert!(!lets_in(&["2001:db8::1"], "2001:db8::2"));
+        assert!(!lets_in(&["2001:db8::1"], "2001:db8::ffff:ffff"));
+        assert!(!lets_in(&["::2"], "::1"));
+        assert!(lets_in(&["::2", "::1"], "::1"));
+    }
+
+    /// An IPv4-mapped IPv6 peer is let in by the IPv4 it maps or by its
+    /// own IPv6, and an IPv4 peer never by an IPv6, mapped or not.
+    #[test]
+    fn a_mapped_peer_is_let_in_by_its_ipv4_and_an_ipv4_peer_by_no_ipv6() {
+        assert!(lets_in(&["192.0.2.1"], "::ffff:192.0.2.1"));
+        assert!(!lets_in(&["192.0.2.1"], "::ffff:192.0.2.2"));
+        assert!(lets_in(&["::ffff:192.0.2.1"], "::ffff:192.0.2.1"));
+        assert!(!lets_in(&["::ffff:192.0.2.1"], "192.0.2.1"));
+        assert!(!lets_in(&["192.0.2.1"], "::192.0.2.1"));
+        assert!(lets_in(&["192.0.2.1"], "192.0.2.1"));
+        assert!(!lets_in(&["192.0.2.1"], "192.0.2.2"));
+    }
+
+    /// No list lets every peer in, a Unix socket's connection names no
+    /// peer and is let in, and an empty list lets no peer in.
+    #[test]
+    fn no_list_and_no_peer_let_in_and_an_empty_list_does_not() {
+        assert!(allowed(None, Some(ip("::1"))));
+        assert!(allowed(Some(&[]), None));
+        assert!(!allowed(Some(&[]), Some(ip("::1"))));
+    }
 }

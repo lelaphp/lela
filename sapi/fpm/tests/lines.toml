@@ -29,6 +29,24 @@ params = [["SCRIPT_FILENAME", "{dir}/writer.php"], ["REQUEST_METHOD", "GET"], ["
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/reader.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
 
+# `listen.allowed_clients` lets a peer over IPv6 in by its whole address, as
+# `fcgi_is_allowed` compares `sizeof(sin6_addr)` (`Z/main/fastcgi.c:1334`):
+# `::1`, connecting to a pool on the IPv6 loopback that allows `::2`, in its
+# /96, and `::1`, is served (#4349). The refusal of `::1` where only `::2`
+# is allowed closes the connection unanswered, which a line's client cannot
+# take as an answer, so `tests/serve.rs` holds it.
+[[line]]
+name = "an-ipv6-peer-allowed-by-its-whole-address-is-served"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = [::1]:{port}\nlisten.allowed_clients = ::2,::1\npm = static\npm.max_children = 1\ncatch_workers_output = yes\n", "index.php" = "<?php echo \"served\\n\";" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "[::1]:{port}"
+ready = ["fpm.log", "ready to handle connections"]
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
 # A request whose start fails, session's `rinit` raising under
 # `session.auto_start` over a session file whose `DateTime` does not
 # unserialize (#1775): the child renders the uncaught fatal and session's
