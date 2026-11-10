@@ -334,8 +334,8 @@ mod tests {
 
     /// One bottle is poured, the one `[oracle].path` names, so a host at
     /// another bottle of the same version than php's would stand in a keg
-    /// no runner pours: the pin is refused where its binaries stand at
-    /// two, and a binary under no Cellar counts for none.
+    /// no runner pours: it is a defect of the pin where its binaries
+    /// stand at two, and a binary under no Cellar counts for none.
     #[test]
     fn the_pinned_binaries_stand_at_the_one_bottle_a_runner_pours() {
         let line = Formula::Line { major: 8, minor: 5 };
