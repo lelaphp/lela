@@ -57,11 +57,12 @@ the text `git merge-file` gives of them as well:
 | `head-reworded.toml` | `merged.toml` | a copy of the staged file, `clean.toml` | written, naming `divergence[trace:fixture-base].reason` as `HEAD`'s and `divergence[trace:fixture-merged]` as brought; pre-commit then admits the agent's merge |
 | `head-reworded.toml` | `merged.toml` | `merged.toml`: `HEAD`'s reason put back | refused at `divergence[trace:fixture-base].reason` |
 | `head-reworded.toml` | `merged.toml` | `head-reworded.toml`: the branch's row dropped | refused at `divergence[trace:fixture-merged] dropped` |
+| `head-reworded.toml` | `merged.toml` | `clean.toml` with the branch's row's `since` moved: a change neither side made | refused at `divergence[trace:fixture-merged].since`, and as not the text git's three-way merge gives |
 | `head-reworded.toml` | `merged.toml` | `clean.toml` and a comment: the union in another text | refused as not the text git's three-way merge gives |
 | `head-reworded.toml` and `head.toml`'s row | `merged.toml`, merged with `-X theirs` | a copy of the staged file | refused at `divergence[trace:fixture-head] dropped`, and as a merge a strategy option took |
 
 `xtask/tests/steer.rs` lays each merge in a scratch repository and runs
-all five, the first through the `steer` and `permit --diff` binaries.
+all six, the first through the `steer` and `permit --diff` binaries.
 
 ## An `[[owed]]` row (#3636)
 

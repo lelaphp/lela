@@ -716,7 +716,8 @@ fn a_cleanly_merged_harness_file_is_covered_by_steering_its_merged_copy() {
 /// The negative controls of a clean merge (xtask/fixtures/steer/README.md),
 /// each refused at what it names with nothing written: a proposal that
 /// puts back the reason HEAD's person reworded, one that drops the
-/// branch's row, one that is the union in another text than git merged,
+/// branch's row, one that changes a value neither side changed, one that
+/// is the union in another text than git merged,
 /// and the working copy of a merge `-X theirs` took, which dropped HEAD's
 /// row where git's three-way merge of the three files conflicts.
 #[test]
@@ -772,6 +773,19 @@ fn a_clean_merge_refuses_a_side_undone_and_a_text_git_did_not_merge() {
         &[],
         Some(&reworded),
         &["divergence[trace:fixture-merged] dropped"],
+    );
+    // A value neither side carries, the branch's row's date moved in the
+    // merged file before it was steered.
+    let neither = clean.replace("since = \"2026-10-18\"", "since = \"2026-11-11\"");
+    refused(
+        "neither",
+        sides,
+        &[],
+        Some(&neither),
+        &[
+            "divergence[trace:fixture-merged].since",
+            "is not the text git's three-way merge",
+        ],
     );
     let retyped = format!("{clean}# retyped\n");
     refused(
