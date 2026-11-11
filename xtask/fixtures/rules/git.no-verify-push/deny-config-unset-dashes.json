@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git config --unset -- core.hooksPath","description":"Unwire the hooks, the key after --"}}

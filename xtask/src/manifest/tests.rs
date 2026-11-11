@@ -145,3 +145,26 @@ fn a_pin_the_workspace_lacks_is_a_defect_and_only_pin_refuses() {
     assert!(manifest.rule("lanes.nightly").is_some());
     assert!(manifest.pin().is_err());
 }
+
+/// `adding` qualifies `deny = true` (#4363): beside it the row loads, and
+/// beside another predicate, `deny = false` or none at all, it is refused
+/// as an orphaned qualifier, naming the row and the key.
+#[test]
+fn adding_stands_beside_deny_and_nowhere_else() {
+    let row = |predicate: &str| {
+        format!(
+            "{MINIMAL}[[rule]]\nid = \"x.pipe\"\ntool = \"Write\"\nscope = \"ci/**\"\n{predicate}\nadding = 'x'\ntext = \"t\"\nremedy = \"r\"\n"
+        )
+    };
+    let manifest = Manifest::parse(&row("deny = true")).expect("beside deny = true");
+    let rule = manifest.rule("x.pipe").unwrap();
+    assert_eq!(rule.predicate.adding.as_deref(), Some("x"));
+    assert_eq!(rule.predicate.named(), ["deny"]);
+    for predicate in ["deny = false", "deny_pattern = 'y'", "writes = true"] {
+        let refused = format!("{:#}", Manifest::parse(&row(predicate)).unwrap_err());
+        assert!(
+            refused.contains("x.pipe") && refused.contains("`adding` beside"),
+            "{predicate}: {refused}"
+        );
+    }
+}

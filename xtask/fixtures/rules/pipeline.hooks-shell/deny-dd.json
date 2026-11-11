@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"dd if=/tmp/pre-commit of=scripts/hooks/pre-commit","description":"Write a hook with dd"}}

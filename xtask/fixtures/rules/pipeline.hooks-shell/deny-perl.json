@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"perl -pi -e 's/done/true/' ./scripts/hooks/pre-push","description":"Edit a hook in place with perl"}}
