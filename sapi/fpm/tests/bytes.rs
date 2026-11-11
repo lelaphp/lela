@@ -21,6 +21,11 @@
 //!   for the unknown entry.
 //! - `-h` under an `argv[0]` that is not UTF-8: the usage's first line,
 //!   which names the program (#4455).
+//! - a pool's `env[A] = $B\xff`, the master started with `B\xff` set to
+//!   `val`: php hands the bytes after `$` to `getenv`
+//!   (`Z/sapi/fpm/fpm/fpm_env.c:172`), so a request's `getenv("A")` is
+//!   the variable's value, and the request's body is held to the pinned
+//!   php-fpm's, `string(3) "val"`, written on 2026-11-11 (#4453).
 
 #![allow(
     clippy::disallowed_methods,
@@ -205,6 +210,100 @@ fn an_unknown_entry_is_named_with_its_own_bytes() {
         [r"ERROR: [{dir}/php-fpm.conf:7] unknown entry 'x\xffx'"]
     );
     assert_eq!(out.status.code(), Some(78));
+}
+
+/// What request 1, for `script`, writes on `FCGI_STDOUT` through the pool
+/// listening at `socket`, tried for ten seconds; empty where nothing
+/// listens or answers.
+fn served(socket: &Path, script: &Path) -> Vec<u8> {
+    use php_proto::fcgi::{self, Header, Kind};
+    use std::io::{Read, Write};
+    let record = |kind: Kind, content: &[u8]| {
+        let header = Header::make(kind, 1, content.len());
+        let mut out = header.encode().to_vec();
+        out.extend_from_slice(content);
+        out.resize(out.len() + usize::from(header.padding_length), 0);
+        out
+    };
+    let started = Instant::now();
+    let mut stream = loop {
+        match std::os::unix::net::UnixStream::connect(socket) {
+            Ok(stream) => break stream,
+            Err(_) if started.elapsed() < Duration::from_secs(10) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return Vec::new(),
+        }
+    };
+    let mut params = Vec::new();
+    let script = script.as_os_str().as_encoded_bytes();
+    fcgi::put_pair(&mut params, b"SCRIPT_FILENAME", script);
+    fcgi::put_pair(&mut params, b"REQUEST_METHOD", b"GET");
+    let mut out = record(Kind::BeginRequest, &[0, 1, 0, 0, 0, 0, 0, 0]);
+    out.extend(record(Kind::Params, &params));
+    out.extend(record(Kind::Params, &[]));
+    out.extend(record(Kind::Stdin, &[]));
+    if stream.write_all(&out).is_err()
+        || stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .is_err()
+    {
+        return Vec::new();
+    }
+    let mut body = Vec::new();
+    loop {
+        let mut bytes = [0u8; 8];
+        if stream.read_exact(&mut bytes).is_err() {
+            return body;
+        }
+        let header = Header::decode(bytes);
+        let len = usize::from(header.content_length);
+        let mut content = vec![0u8; len + usize::from(header.padding_length)];
+        if stream.read_exact(&mut content).is_err() {
+            return body;
+        }
+        match header.kind {
+            Kind::Stdout => body.extend_from_slice(&content[..len]),
+            Kind::EndRequest => return body,
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn an_env_value_naming_a_variable_finds_it_by_its_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tree("env");
+    let path = conf(
+        &dir,
+        b"[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\nenv[A] = $B\xff\n",
+    );
+    let script = dir.join("index.php");
+    std::fs::write(&script, "<?php var_dump(getenv(\"A\"));").expect("the script is written");
+    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+        .args(["-R", "-n", "-F", "-y"])
+        .arg(&path)
+        .env(std::ffi::OsStr::from_bytes(b"B\xff"), "val")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("php-fpm starts");
+    let response = served(&dir.join("fpm.sock"), &script);
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(master.id()).expect("a pid"));
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).ok();
+    master.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
+    let body = match response.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(at) => &response[at + 4..],
+        None => &response[..],
+    };
+    assert_eq!(
+        shown(body),
+        shown(b"string(3) \"val\"\n"),
+        "{}",
+        shown(&response)
+    );
 }
 
 /// `-h` names the program with what follows `argv[0]`'s last `/`, as its
