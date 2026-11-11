@@ -6209,8 +6209,7 @@ impl Engine {
     /// `ZMSG_FAILED_REQUIRE_FOPEN`'s `zend_throw_error` finds no frame, so
     /// it is `zend_error_noreturn(E_ERROR)`
     /// (`Z/main/main.c:1784-1787`, `Z/Zend/zend.c:1842-1850`), which ends
-    /// the request. A file the unit cache holds is not opened, as opcache
-    /// does not open it.
+    /// the request.
     fn unopened_passes(req: &mut Request, path: &[u8]) -> bool {
         /// `EPERM` and `EINVAL`, the `errno` the guard leaves.
         const EPERM: i32 = 1;
