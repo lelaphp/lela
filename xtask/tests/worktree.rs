@@ -1069,10 +1069,14 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
         &cargo,
         &corpus,
     );
-    let base = sh(&root, &["git", "rev-parse", "--short=7", "main"]);
-    let call = format!("cargo xtask phpt --base {} --subset ext/ctype", base.trim());
+    // The base named as xtask names it: git's `--short=7` grows past seven
+    // where the scratch's commit shares seven with an object of the
+    // workspace it borrows (#4442).
+    let base = sh(&root, &["git", "rev-parse", "main"]);
+    let base = xtask::track::short(base.trim());
+    let call = format!("cargo xtask phpt --base {base} --subset ext/ctype");
     assert!(unkept.contains("no run of ext/ctype is kept"), "{unkept}");
-    assert!(unkept.contains(&call), "{unkept}");
+    assert!(unkept.contains(&call), "looked for `{call}` in: {unkept}");
 
     let (code, out) = phpt_in(&dir, &["--base", "--jobs", "2"], &cargo, &corpus);
     assert_eq!(code, 0, "{out}");

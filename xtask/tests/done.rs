@@ -1050,8 +1050,8 @@ fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
     // under the old: the base's is stale and names the call that takes it
     // again (#2725).
     keep_run(&root, None, "ext/pcre", "pass");
-    let base = Repo::at(&root).git(&["rev-parse", "--short", "HEAD"]);
-    let base = base.trim();
+    let base = Repo::at(&root).git(&["rev-parse", "HEAD"]);
+    let base = xtask::track::short(&base);
     let line = format!(
         "phpt: the run of ext/pcre kept at {base} is stale; oracle.toml changed since it was taken; take one with `cargo xtask phpt --base {base} --subset ext/pcre`"
     );
@@ -1141,7 +1141,8 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
     let store = Store::of_workspace(&root);
     record_asked(&store, &root, "ext/pcre");
     assert!(judge(&root).met(), "{:#?}", judge(&root));
-    let base = Repo::at(&root).git(&["rev-parse", "--short", "HEAD"]);
+    let base = Repo::at(&root).git(&["rev-parse", "HEAD"]);
+    let base = xtask::track::short(&base);
     for (then, now, held) in [
         ("pass", "fail", true),
         ("diverged", "skip", true),
@@ -1152,8 +1153,7 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
         keep_run(&root, Some("HEAD"), "ext/pcre", then);
         keep_run(&root, None, "ext/pcre", now);
         let regressed = format!(
-            "phpt: ext/pcre: 1 of 1 tests met at {} are not met here: ext/pcre/tests/a.phpt",
-            base.trim()
+            "phpt: ext/pcre: 1 of 1 tests met at {base} are not met here: ext/pcre/tests/a.phpt"
         );
         let unmet = if held { vec![regressed] } else { vec![] };
         assert_eq!(judge(&root).messages(), unmet, "{then} then, {now} now");

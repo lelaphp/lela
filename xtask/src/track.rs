@@ -249,9 +249,13 @@ pub(crate) fn merge_base(root: &Path, from: &str, other: &str) -> Result<String>
         .with_context(|| format!("no merge base of {from} with {other}"))
 }
 
-/// The first seven characters, what `rev-parse --short` prints on a small
-/// repository; `track work` cites commits the same way.
-pub(crate) fn short(commit: &str) -> &str {
+/// The first seven characters, the one way xtask names a commit short;
+/// `track work` cites commits the same way. Seven is fixed, where git's
+/// `rev-parse --short=7` is a minimum that grows once seven characters
+/// are ambiguous among the repository's objects, so a test names the
+/// commit it looks for in a message through this and not through git
+/// (#4442).
+pub fn short(commit: &str) -> &str {
     &commit[..commit.len().min(7)]
 }
 

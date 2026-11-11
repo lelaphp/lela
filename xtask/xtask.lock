@@ -445,6 +445,7 @@ track::Track
 track::Track::of
 track::Track::render
 track::Track::to_json
+track::short
 track_chains::Chains
 track_chains::Chains::render
 track_chains::Row
