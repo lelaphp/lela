@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git config -- core.hooksPath /var/empty","description":"Point the hooks elsewhere, the key after --"}}

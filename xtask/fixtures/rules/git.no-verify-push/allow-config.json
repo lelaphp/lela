@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git config --get remote.origin.url","description":"Read the remote's address"}}
