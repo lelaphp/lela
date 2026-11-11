@@ -130,6 +130,28 @@ impl<T: ?Sized + Send + 'static> EngineState for PhantomData<T> {}
 #[cfg(unix)]
 impl EngineState for std::os::fd::OwnedFd {}
 
+/// Each listed socket of the standard library is engine state: it owns
+/// one open fd and nothing beside it, as an [`OwnedFd`] does.
+///
+/// [`OwnedFd`]: std::os::fd::OwnedFd
+macro_rules! sockets {
+    ($($socket:ty),* $(,)?) => {$(
+        // A socket is an fd, a number into the process's table, which carries
+        // nothing of a request's heap.
+        impl EngineState for $socket {}
+    )*};
+}
+
+sockets! {
+    std::net::TcpStream, std::net::TcpListener, std::net::UdpSocket,
+}
+
+#[cfg(unix)]
+sockets! {
+    std::os::unix::net::UnixStream, std::os::unix::net::UnixListener,
+    std::os::unix::net::UnixDatagram,
+}
+
 /// Each listed function pointer's type is engine state whatever it takes
 /// and answers: a function pointer is code the binary holds and carries no
 /// value. `#[derive(EngineState)]` passes a field written as `fn(..)`
