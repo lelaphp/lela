@@ -881,6 +881,16 @@ text = "A push runs the pre-push hook, which runs `done`, and the hooks run from
 remedy = "push as it is, and fix what pre-push names; core.hooksPath is the session hook's to set"
 
 [[rule]]
+id = "pipeline.self"
+tool = ["Edit", "Write"]
+where = "checkout"
+scope = [".github/**", "scripts/hooks/**", "scripts/ci/**", "Cargo.toml", "deny.toml", ".cargo/config.toml", "rust-toolchain.toml", "**/computed.toml"]
+deny = true
+adding = '<!--\s*computed\s+(?:exec|transcript)\b[^\n]*'
+text = "What main executes, or is read for when it judges, builds or runs CI, is a person's to change: the workflows, the git hooks, the CI scripts, the workspace's Cargo.toml, deny.toml, .cargo/config.toml, rust-toolchain.toml and a computed.toml, and an added `computed exec` or `computed transcript` opener line in any file (#4348 ruling 3, #4458, #4482)."
+remedy = "propose the change on a `for-a-person` ticket with its diff, and a person commits it; a crate's own Cargo.toml and a build.rs stay yours, and so does a `computed use` of a recipe a person wrote"
+
+[[rule]]
 id = "pipeline.hooks-shell"
 tool = "Bash"
 # The git hooks, written by a shell line (#4363, the second ruling

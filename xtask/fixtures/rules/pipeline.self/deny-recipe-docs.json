@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"docs/computed.toml","content":"[recipe.adrs]\ncmd = \"sh scripts/adr-index.sh\"\n"}}
