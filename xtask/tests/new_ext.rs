@@ -348,6 +348,24 @@ fn the_binary_prints_what_it_laid_down_and_exits_nonzero_on_a_refusal() {
     assert!(err.contains("exists"), "{err}");
 }
 
+/// A root whose `members` name `ext/*`, as the workspace's do (#4458),
+/// takes the crate in by the glob, so the binary lays it down and leaves
+/// the root manifest byte for byte as it was.
+#[test]
+fn a_glob_member_leaves_the_root_manifest_as_it_was() {
+    let root = scratch("glob");
+    let text = read(&root, "Cargo.toml").replace(
+        "members = [\"crates/php_ext\", \"crates/php_bundle\"]",
+        "members = [\"crates/*\", \"ext/*\", \"sapi/*\", \"xtask\"]",
+    );
+    assert!(text.contains("\"ext/*\""), "{text}");
+    std::fs::write(root.join("Cargo.toml"), &text).unwrap();
+    let stdout = xtask(&root, &["new-ext", "demo"]).ok();
+    assert!(stdout.contains("wrote ext/demo/Cargo.toml"), "{stdout}");
+    assert!(!stdout.lines().any(|l| l == "wrote Cargo.toml"), "{stdout}");
+    assert_eq!(read(&root, "Cargo.toml"), text);
+}
+
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
