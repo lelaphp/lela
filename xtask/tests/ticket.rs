@@ -949,11 +949,11 @@ fn a_commit_is_landed_once_main_contains_it_and_unmerged_before() {
 
     Repo::at(&root).git(&["checkout", "-q", "-b", "t7"]);
     Repo::at(&root).git(&["commit", "-q", "--allow-empty", "-m", "the work"]);
-    let tip = Repo::at(&root).git(&["rev-parse", "--short=7", "HEAD"]);
+    let tip = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     assert_eq!(
         Reach::of(&root).unwrap(),
         Reach::Unmerged {
-            commit: tip,
+            commit: xtask::track::short(&tip).to_owned(),
             branch: String::from("t7"),
         }
     );
@@ -2217,7 +2217,8 @@ fn ready_prints_the_comments_newer_than_the_branchs_first_commit() {
         ],
     });
     let said = view::newer_than_the_work(&root, &tracker.gh(), Ticket::new(7)).unwrap();
-    let first = repo.git(&["rev-parse", "--short=7", "HEAD"]);
+    let first = repo.git(&["rev-parse", "HEAD"]);
+    let first = xtask::track::short(&first);
     assert!(
         said.starts_with(&format!(
             "#7: the comments since #7's first commit, {first}:\n"
