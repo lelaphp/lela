@@ -32,8 +32,8 @@
 use std::fmt::Write as _;
 
 use php_ext::abi::{
-    Beneath, ExtensionBuilder, FiberStatus, IniStage, Observed, ObservedFiber, ObserverHandlers,
-    Opcodes, Refusal, Start, chain,
+    Beneath, EngineState, ExtensionBuilder, FiberStatus, IniStage, Observed, ObservedFiber,
+    ObserverHandlers, Opcodes, Refusal, Start, chain,
 };
 use php_ext::call::{Function, lookup_function};
 use php_ext::coerce::type_name;
@@ -126,7 +126,7 @@ fn ini() -> Vec<IniDecl> {
 
 /// The engine state: the switches and the classes the natives raise
 /// (`crate::throwables`), both as the engine started with them.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, EngineState)]
 pub(crate) struct Started {
     switches: Switches,
     pub(crate) throwables: Throwables,
@@ -149,6 +149,7 @@ impl Started {
     clippy::struct_excessive_bools,
     reason = "observer.c's switches, one `int` each in `zend_zend_test_globals`"
 )]
+#[derive(EngineState)]
 struct Switches {
     enabled: bool,
     show_output: bool,

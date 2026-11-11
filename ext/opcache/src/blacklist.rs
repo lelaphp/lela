@@ -10,11 +10,12 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use php_ext::abi::EngineState;
 use php_ext::request::MAXPATHLEN;
 
 /// The blacklist: each entry's path as `zend_accel_blacklist_loadone`
 /// expanded it, in the order the files and their lines gave them.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, EngineState)]
 pub(crate) struct Blacklist {
     entries: Vec<Vec<u8>>,
 }

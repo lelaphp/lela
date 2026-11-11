@@ -42,6 +42,7 @@ use crate::JitRequest;
 use crate::policy::{self, Holder, Policy, State};
 use crate::table::TraceId;
 use crate::types::{self, ExitId, Types};
+use php_engine::api::abi::EngineState;
 
 #[cfg(test)]
 mod tests;
@@ -2543,7 +2544,7 @@ fn reachable(code: &OpArray) -> Vec<bool> {
 /// 0007 RETURN null
 /// ---- TRACE 2 compiled
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) struct Folds(pub(crate) bool);
 
 impl Folds {

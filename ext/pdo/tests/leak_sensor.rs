@@ -6,7 +6,7 @@
 
 mod support;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::abi::{Dependency, DependencyKind, EngineState, Extension, ExtensionBuilder};
 use php_ext::request::Request;
 use php_ext::test::{Capture, Engine};
 use php_ext::values::PhpString;
@@ -14,6 +14,7 @@ use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
 
 /// The connector, `leaky:`, whose factory makes a string and drops its
 /// owner, faulty on purpose, then opens a connection that does nothing.
+#[derive(EngineState)]
 struct Leaky;
 
 static LEAKY: Leaky = Leaky;

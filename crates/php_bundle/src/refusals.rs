@@ -117,3 +117,21 @@
 //! fn f(#[php(default = null)] x: i64) -> i64 { x }
 //! # fn main() {}
 //! ```
+//!
+//! A pointer into a request's heap held in engine state (ADR-0005, #4348
+//! ruling 2), the `engine-state` rule's compile-fail fixtures under
+//! `xtask/fixtures/api-check/engine-state/`: a type derived over a field
+//! holding a request's value, refused at the field,
+//!
+//! ```compile_fail,E0277
+//! # fn main() {}
+//! include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../xtask/fixtures/api-check/engine-state/handle.rs"));
+//! ```
+//!
+//! and one with no derive handed to the engine start, refused by the
+//! entry's bound:
+//!
+//! ```compile_fail,E0277
+//! # fn main() {}
+//! include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../xtask/fixtures/api-check/engine-state/entry.rs"));
+//! ```

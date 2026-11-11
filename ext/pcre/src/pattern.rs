@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use php_ext::abi::{Cache, Start};
+use php_ext::abi::{Cache, EngineState, Start};
 use php_ext::coerce::is_space;
 use php_ext::raising::{Level, Thrown, docref, raise_while_pending};
 use php_ext::request::Request;
@@ -33,6 +33,7 @@ type Built = Option<Arc<Tables>>;
 
 /// One compiled pattern, a `pcre_cache_entry` less its refcount, which
 /// the `Arc` is.
+#[derive(EngineState)]
 pub(crate) struct Pattern {
     pub(crate) code: Code,
     /// `compile_options & PCRE2_UTF`, the `u` modifier, which is what
@@ -52,6 +53,7 @@ type Compiled = Result<Arc<Pattern>, String>;
 
 /// The extension's engine state (ADR-0005): the cache, and the three
 /// ini entries' startup values, the master column of `php --ri pcre`.
+#[derive(EngineState)]
 pub(crate) struct Patterns {
     cache: Cache<Box<[u8]>, Compiled>,
     tables: Cache<Box<[u8]>, Built>,

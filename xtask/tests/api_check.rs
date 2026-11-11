@@ -1124,3 +1124,125 @@ mod tracked {
         );
     }
 }
+
+/// The seal on `EngineState` (#4348 ruling 2, ADR-0005): the `engine-state`
+/// sensor over its fixture, under the rule the tracked manifest carries or,
+/// before it carries one, the row #4348 settled, laid on its copy.
+mod engine_state {
+    use super::*;
+
+    /// The tracked manifest with the rule whose `check` names the seal.
+    fn sealed() -> Manifest {
+        let mut manifest = Manifest::load(workspace()).unwrap();
+        if manifest.rule_checked_by("engine-state").is_none() {
+            let mut rule = Rule::named("state.engine", "crates/*");
+            rule.scope =
+                OneOrMany::Many(["crates/*", "ext/*", "sapi/*"].map(str::to_owned).to_vec());
+            rule.predicate.deny = None;
+            rule.predicate.check = Some("engine-state".to_owned());
+            manifest.rules.push(rule);
+        }
+        manifest
+    }
+
+    /// An extension's type made engine state by an impl written by hand
+    /// in its `src/lib.rs`, around the derive, fails the extension naming
+    /// the line, and so does each way around a reading of the text: a
+    /// rename, a macro's metavariable or a path its repetition builds, a
+    /// `build.rs` writing to `OUT_DIR`, a file outside every crate or in
+    /// another crate's `src/ffi/`, a spaced path, an `include!` the walk
+    /// cannot follow and a macro defined elsewhere. One in an extension's
+    /// own `src/ffi/`, a home `unsafe.homes` names, passes beside the
+    /// derive, local macros and an `OUT_DIR` file from a `build.rs` whose
+    /// closure holds a module naming the trait in no string; the failing
+    /// reading names the rule, the passing one not.
+    #[test]
+    fn engine_state_written_by_hand_outside_the_homes_fails_naming_its_line() {
+        let manifest = sealed();
+        let id = &manifest.rule_checked_by("engine-state").unwrap().id;
+        let readings = api_check::hold(&manifest, &fixture("engine-state"), false).unwrap();
+        let pcre = of(&readings, "ext/pcre");
+        assert_eq!(pcre.status, Status::Fail, "{}", pcre.message);
+        assert!(
+            pcre.message.starts_with(
+                "ext/pcre/src/lib.rs:15: EngineState implemented by hand outside the homes"
+            ),
+            "{}",
+            pcre.message
+        );
+        assert!(
+            pcre.message.contains(&format!("seams.toml rule {id}")),
+            "{}",
+            pcre.message
+        );
+        let json = of(&readings, "ext/json");
+        assert_eq!(json.status, Status::Pass, "{}", json.message);
+        assert!(pcre.rule.split(", ").any(|r| r == id), "{}", pcre.rule);
+        assert!(!json.rule.split(", ").any(|r| r == id), "{}", json.rule);
+        // Each way around a reading of the text (#4360): a site per crate.
+        for (krate, site) in [
+            ("ext/ctype", "ext/ctype/src/lib.rs:12: "),
+            (
+                "ext/bz2",
+                "ext/bz2/src/lib.rs:14 (its trait is a metavariable): ",
+            ),
+            (
+                "ext/calendar",
+                "ext/calendar/build.rs:7 (read in build.rs's closure, a string names the trait",
+            ),
+            (
+                "ext/sysvsem",
+                "ext/sysvsem/src/lib.rs:13 (its trait is a metavariable): ",
+            ),
+            ("ext/sysvshm", "ext/json/src/ffi/borrowed.rs:4: "),
+            ("ext/gettext", "elsewhere/also.rs:3, elsewhere/kept.rs:5: "),
+            ("ext/shmop", "ext/shmop/src/lib.rs:11: "),
+            (
+                "ext/sysvmsg",
+                "ext/sysvmsg/src/lib.rs:6 (an include! the walk cannot follow): ",
+            ),
+            (
+                "ext/posix",
+                "ext/posix/src/lib.rs:11 (the trait handed to a macro whose body",
+            ),
+        ] {
+            let reading = of(&readings, krate);
+            assert_eq!(reading.status, Status::Fail, "{krate}: {}", reading.message);
+            assert!(
+                reading.message.starts_with(site),
+                "{krate}: {}",
+                reading.message
+            );
+        }
+        assert_eq!(failures(&readings).len(), 10, "{readings:#?}");
+    }
+
+    /// Each compile-fail fixture beside the sensor's is compiled by
+    /// `php_bundle`'s `refusals` under a `compile_fail,E0277` fence, which
+    /// `xtask test` holds to the code (#2049).
+    #[test]
+    fn each_compile_fail_fixture_is_included_under_a_pinned_fence() {
+        let refusals =
+            fs::read_to_string(workspace().join("crates/php_bundle/src/refusals.rs")).unwrap();
+        let mut seen = 0;
+        for entry in fs::read_dir(fixture("engine-state")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            seen += 1;
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let named = format!("/xtask/fixtures/api-check/engine-state/{name}\"");
+            let at = refusals
+                .find(&named)
+                .unwrap_or_else(|| panic!("refusals.rs includes no {name}"));
+            let fence = refusals[..at].rfind("//! ```").unwrap();
+            assert!(
+                refusals[fence..].starts_with("//! ```compile_fail,E0277\n"),
+                "{name} is included under {}",
+                &refusals[fence..at]
+            );
+        }
+        assert_eq!(seen, 2, "handle.rs and entry.rs");
+    }
+}

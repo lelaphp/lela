@@ -49,7 +49,7 @@ use std::cmp::Ordering;
 
 use php_heap::{Arr, Obj, Ref, Res, Str, Zval, ZvalType};
 
-use crate::api::abi::{ClassRef, PropertiesFor, PropertyPurpose};
+use crate::api::abi::{ClassRef, EngineState, PropertiesFor, PropertyPurpose};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
@@ -96,7 +96,7 @@ pub enum TypeTag {
 /// it set, one of the request's own, numbered among its rows. Either
 /// stays the class's for as long as the request runs, whatever another
 /// request publishes or declares meanwhile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, EngineState)]
 pub struct ClassId(pub(crate) u32);
 
 impl ClassId {

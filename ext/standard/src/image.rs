@@ -11,7 +11,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::abi::{OrFalse, Path, Ref, Untyped};
+use php_ext::abi::{EngineState, OrFalse, Path, Ref, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::is_space;
 use php_ext::decl::{ConstDecl, ConstExpr, Name};
@@ -546,7 +546,7 @@ fn image_size(
 /// `IMAGE_FILETYPE_FIXED_COUNT` and its place among the bundle's handlers,
 /// its constant stands after every constant of this extension's own, and
 /// `IMAGETYPE_COUNT` counts it (ext/libxml's SVG reader is php-src's one).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, EngineState)]
 pub struct ImageHandler {
     pub mime_type: &'static str,
     /// With its dot, `".svg"`.

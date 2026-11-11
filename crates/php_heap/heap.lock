@@ -80,7 +80,11 @@ EmbeddedArr
 EmbeddedArr::arr
 EmbeddedArr::free_data
 EmbeddedArr::new
+EngineState
 EntryGuard
+Exclusive
+Exclusive::into_inner
+Exclusive::new
 Exponent
 Exponent::as_char
 FakeRoom
@@ -119,6 +123,13 @@ FreshStr::finish
 FreshStr::is_empty
 FreshStr::len
 FreshStr::set_len
+FrozenZval
+FrozenZval::bool
+FrozenZval::double
+FrozenZval::interned
+FrozenZval::long
+FrozenZval::null
+FrozenZval::zval
 GcStatus
 GcTable
 HEADER_AT

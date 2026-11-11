@@ -45,8 +45,8 @@ mod keys;
 mod throwables;
 
 use php_ext::abi::{
-    Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Raw, Ref, Refusal,
-    Refusals,
+    Dependency, DependencyKind, EngineState, Extension, ExtensionBuilder, ObjectHandlers, Raw, Ref,
+    Refusal, Refusals,
 };
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::raising::{Level, Thrown, argument_error, arity, throw};
@@ -259,6 +259,7 @@ static SODIUM_EXCEPTION: SodiumHandlers = SodiumHandlers;
 impl SodiumException {}
 
 /// The process scope's proof that libsodium is started (ADR-0010).
+#[derive(EngineState)]
 struct Initialized;
 
 /// `PHP_MINIT_FUNCTION(sodium)`'s first call, `sodium_init()`

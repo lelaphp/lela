@@ -12,7 +12,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use php_ext::abi::{Cache, Refusal, Start};
+use php_ext::abi::{Cache, EngineState, Refusal, Start};
 use php_ext::raising::{Level, warning};
 use php_ext::request::Request;
 
@@ -309,6 +309,7 @@ fn preload_warnings(path: &[u8], fail: &Fail) -> Vec<String> {
 /// What preloading made, for every request: the scopes `ffi.preload`
 /// loaded over one arena, and the cache the opcache preload's
 /// `FFI::load` registers its scopes in.
+#[derive(EngineState)]
 pub(crate) struct Preloads {
     types: Arc<Types>,
     startup: Vec<(Vec<u8>, Arc<Scope>)>,

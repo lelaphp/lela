@@ -15,6 +15,7 @@ use crate::record::{
 };
 use crate::table::TraceId;
 use crate::testing::{self, function_of};
+use php_engine::api::abi::EngineState;
 
 /// What php's default `opcache.optimization_level` folds, which a test's
 /// engine runs under where it sets none ([`Folds::of`]).
@@ -54,7 +55,7 @@ pub(crate) struct Kept {
 }
 
 /// The `Policy` the recording tier records under, the engine's.
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 pub(crate) struct Recorder(Policy);
 
 /// The tier that records once, where its plan says.

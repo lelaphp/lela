@@ -70,7 +70,7 @@ fn a_string_constant_is_interned_into_the_engine_at_build() {
     for (decl, row) in rows {
         let Some((value, _)) = row else { continue };
         let name = &decl.name.0;
-        if let Some(value) = value.as_str()
+        if let Some(value) = value.zval().as_str()
             && value.len() > 1
         {
             assert!(

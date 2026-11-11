@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, RequestConstants, SourceKind, StackLimit};
-use php_heap::{Intern, Strings, Zval};
+use php_heap::{FrozenZval, Intern, Strings, Zval};
 use php_link::{Exact, Folded, FoldedHash, Indexed, LinkedClass, NameMap, Names};
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, IniDecl, MethodDecl, Name,
@@ -880,12 +880,13 @@ pub(crate) struct Shared {
     /// interns php's at `MINIT`, so a request reading one allocates
     /// nothing and counts nothing; beside each, its `CONST_DEPRECATED`,
     /// decoded once from the declaration's attributes as `gen_stub.php`
-    /// writes it. None for a declaration whose value is no scalar.
-    constant_values: Vec<Option<(Zval, crate::attributes::Flags)>>,
+    /// writes it. None for a declaration whose value is no scalar. Each
+    /// is a [`FrozenZval`], so no request's value can stand here.
+    constant_values: Vec<Option<(FrozenZval, crate::attributes::Flags)>>,
     /// `PHP_SAPI`'s value under each host's name, interned at build with
     /// the other constants, so a request that reads the name its host
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
-    sapi_names: Vec<(Box<[u8]>, Zval)>,
+    sapi_names: Vec<(Box<[u8]>, FrozenZval)>,
     /// The build's facts ([`EngineBuilder::configure`]).
     pub(crate) build_defs: BuildDefs,
     /// `CG(skip_shebang)` for every file a request compiles, which the
@@ -2415,7 +2416,7 @@ impl Shared {
     fn sapi_named(&self, sapi: &[u8]) -> Option<Zval> {
         (self.sapi_names.iter())
             .find(|(n, _)| n.as_ref() == sapi)
-            .map(|(_, z)| *z)
+            .map(|(_, z)| z.zval())
     }
 
     /// The value of the constant `name` as the bundle declared it, or as
@@ -2437,7 +2438,7 @@ impl Shared {
     /// [`Shared::constant`] reads it.
     pub(crate) fn constant_at(&self, at: usize) -> Option<Value> {
         let (z, _) = self.constant_values.get(at)?.as_ref()?;
-        Some(Value::of_slot(*z))
+        Some(Value::of_slot(z.zval()))
     }
 
     /// `ZEND_CONSTANT_MODULE_NUMBER` of the constant `name` an extension
@@ -4723,17 +4724,19 @@ fn permanent_walk(
 /// `zend_register_constant` at `MINIT`: each constant's value, a string
 /// constant's interned into the permanent table once, before any request,
 /// so reading it later is a pointer and no allocation. A constant whose
-/// value is an expression, or a string the table refuses, has none.
+/// value is an expression, or a string the table refuses, has none. The
+/// one place a constant is published: each value is made a
+/// [`FrozenZval`] here, a scalar or a string of the permanent table.
 fn constant_values(
     constants: &[ConstDecl],
     strings: &mut Strings,
-) -> Vec<Option<(Zval, crate::attributes::Flags)>> {
+) -> Vec<Option<(FrozenZval, crate::attributes::Flags)>> {
     let value = |decl: &ConstDecl, strings: &mut Strings| match &decl.value {
-        ConstExpr::Null => Some(Zval::null()),
-        ConstExpr::Bool(b) => Some(Zval::bool(*b)),
-        ConstExpr::Long { value: n, .. } => Some(Zval::long(*n)),
-        ConstExpr::Double(f) => Some(Zval::double(*f)),
-        ConstExpr::Str(s) => strings.intern(s).ok().map(Zval::string),
+        ConstExpr::Null => Some(FrozenZval::null()),
+        ConstExpr::Bool(b) => Some(FrozenZval::bool(*b)),
+        ConstExpr::Long { value: n, .. } => Some(FrozenZval::long(*n)),
+        ConstExpr::Double(f) => Some(FrozenZval::double(*f)),
+        ConstExpr::Str(s) => FrozenZval::interned(strings, s).ok(),
         _ => None,
     };
     (constants.iter())

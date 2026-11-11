@@ -24,6 +24,7 @@ pub use crate::api::layer::Readiness;
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, Stream, StreamCtx};
 use crate::api::values::{Owner, PhpArray};
+use php_engine::api::abi::EngineState;
 
 /// One socket `transport` an extension hands the engine with
 /// [`ExtensionBuilder::register`], php's `php_stream_xport_register(name,
@@ -39,7 +40,7 @@ use crate::api::values::{Owner, PhpArray};
 /// (`php_openssl_ssl_socket_factory`) copies `php_stream_socket_ops`.
 ///
 /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, EngineState)]
 #[allow(clippy::type_complexity)] // php's factory, one function pointer
 pub struct XportFactory {
     pub name: &'static str,

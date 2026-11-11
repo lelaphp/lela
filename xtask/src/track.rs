@@ -249,10 +249,20 @@ pub(crate) fn merge_base(root: &Path, from: &str, other: &str) -> Result<String>
         .with_context(|| format!("no merge base of {from} with {other}"))
 }
 
-/// The first seven characters, what `rev-parse --short` prints on a small
-/// repository; `track work` cites commits the same way.
-pub(crate) fn short(commit: &str) -> &str {
-    &commit[..commit.len().min(7)]
+/// The first seven characters, the one way xtask names a commit short:
+/// a reading's stamp ([`crate::git::head_commit`] and
+/// [`crate::key::Snapshot::commit`]), the messages that cite a commit and
+/// `track work` all cut through this. Seven is fixed, where git's
+/// `rev-parse --short=7` is a minimum that grows once seven characters
+/// are ambiguous among the repository's objects, so a test names the
+/// commit it looks for in a message through this and not through git
+/// (#4442). Counted in characters, so a revision named by a ref that is
+/// not ASCII is cut and not refused.
+pub fn short(commit: &str) -> &str {
+    commit
+        .char_indices()
+        .nth(7)
+        .map_or(commit, |(end, _)| &commit[..end])
 }
 
 /// The main worktree of the repository `root` is in: the first entry of
@@ -307,4 +317,17 @@ pub(crate) fn rev(root: &Path, name: &str) -> Result<String> {
         &["--verify", "--quiet", &format!("{name}^{{commit}}")],
     )
     .with_context(|| format!("{name} names no commit"))
+}
+
+#[cfg(test)]
+mod tests {
+    /// A full id is cut to seven, a shorter name is kept whole, and a ref
+    /// that is not ASCII is cut at its seventh character, not refused.
+    #[test]
+    fn short_is_the_first_seven_characters() {
+        let full = "5abe8596d8e461c07e5086942cc3a2c29d56201917ccfe62d4a3d855fae32520";
+        assert_eq!(super::short(full), "5abe859");
+        assert_eq!(super::short("main"), "main");
+        assert_eq!(super::short("äöüßéèàç"), "äöüßéèà");
+    }
 }

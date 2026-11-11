@@ -11,7 +11,7 @@ mod mysql;
 mod support;
 
 use mysql::{MysqlRelay, MysqlServer};
-use php_ext::abi::{Dependency, DependencyKind, ExtensionBuilder};
+use php_ext::abi::{Dependency, DependencyKind, EngineState, ExtensionBuilder};
 use php_ext::request::Request;
 use php_ext::test::{Capture, Engine};
 use php_ext::values::{PhpArray, Value};
@@ -121,6 +121,7 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
 
 /// A connector of the test's own, `filler:`, whose persistent connections
 /// fill PDO's pool without a server.
+#[derive(EngineState)]
 struct Filler;
 
 static FILLER: Filler = Filler;

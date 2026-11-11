@@ -630,6 +630,19 @@ pub(crate) const AGAIN: &str = "the engine's host ended only on its stop sent ag
 /// gap is bounded at [`PATIENCE`], and one whose group has ended is waited
 /// for no longer.
 fn headed(running: &Running<'_>, head: u64) -> Result<()> {
+    headed_after(running, head, |quiet| quiet.elapsed() >= QUIET)
+}
+
+/// [`headed`] with the end of each quiet gap told by `passed`, which is
+/// given the instant the gap began: [`QUIET`] by the clock for every line,
+/// and for the test of a program asleep through the gap, the moment `ps`
+/// reads it stopped, so no margin of time orders the reading and the
+/// program's next write (#4436).
+fn headed_after(
+    running: &Running<'_>,
+    head: u64,
+    mut passed: impl FnMut(Instant) -> bool,
+) -> Result<()> {
     let group = Pid::from_raw(i32::try_from(running.pid).context("a process id past pid_t")?);
     // A program that ended on its own leaves a group of processes not yet
     // reaped, which answers ESRCH, or EPERM on macOS; its ending is held
@@ -637,7 +650,7 @@ fn headed(running: &Running<'_>, head: u64) -> Result<()> {
     let ended = |sent| matches!(sent, Err(Errno::ESRCH | Errno::EPERM));
     let (mut written, mut since, mut quiet) = (running.written(), Instant::now(), Instant::now());
     while written < head && since.elapsed() < PATIENCE && !ended(killpg(group, None)) {
-        if written > 0 && quiet.elapsed() >= QUIET {
+        if written > 0 && passed(quiet) {
             if !runnable(group) {
                 break;
             }
@@ -839,11 +852,14 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::time::Instant;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
 
-    use super::{Held, Judgement, hosts};
+    use nix::sys::signal::Signal;
+
+    use super::{Held, Judgement, hosts, signalled};
     use crate::divergence::Registry;
-    use crate::oracle::{Host, Pin, Promise};
+    use crate::oracle::{Host, Pin, Promise, Stdin, Streams};
     use crate::scratch::Tree;
 
     /// The tracked pin, whole.
@@ -985,13 +1001,22 @@ mod tests {
     /// other host wrote; one that ends on its own is not waited for. One
     /// runnable through a gap past [`super::QUIET`] between two writes, as
     /// a program busy or starved, keeps its next write (#3779), one asleep
-    /// through it is cut there, and one that spins for good is still killed.
+    /// through it is cut there whatever the machine's load, its gap an
+    /// event and not a margin of time ([`asleep`], #4436), and one that
+    /// spins for good is still killed.
     #[test]
     fn a_line_s_head_ends_a_program_that_does_not_end_on_its_own() {
         if !oracle() {
             return;
         }
         let hosts = Tree::new("host-line-head").unwrap();
+        let (told, stdout) = asleep(&hosts);
+        assert_ne!(
+            told,
+            Told::Waiting,
+            "asleep: never read stopped: {stdout:?}"
+        );
+        assert_eq!((told, stdout.as_str()), (Told::Passed, "x\n"), "asleep");
         let text = "[[line]]\nname = \"one\"\nargs = []\nhead = 8\n";
         const { assert!(super::QUIET.as_secs() + 1 < super::PATIENCE.as_secs()) };
         let gap = super::QUIET.as_secs() + 1;
@@ -999,7 +1024,6 @@ mod tests {
         let busy = format!(
             "echo x; yes >/dev/null & s=$!; sleep {gap}; kill $s; wait $s 2>/dev/null; echo y; sleep 60"
         );
-        let asleep = format!("echo x; sleep {gap}; echo y; sleep 60");
         let both = "echo x; echo y; sleep 60";
         for (name, pinned, engine) in [
             ("loops", "yes x", "yes x"),
@@ -1032,13 +1056,78 @@ mod tests {
         for (name, pinned, engine, differs) in [
             ("otherwise", "yes x", "yes y", "+y\n+y\n+y\n+y"),
             ("mute", "echo x; sleep 60", "sleep 60", "-x"),
-            ("asleep", both, asleep.as_str(), "-y"),
         ] {
             let pin = pin(&host(&hosts, "php-cgi", pinned), None);
             let (judgement, note) = judged(text, &pin, &host(&hosts, name, engine));
             assert_eq!(judgement, Judgement::Fail, "{name}: {note}");
             assert!(note.contains(differs), "{name}: {note}");
         }
+    }
+
+    /// Where a program asleep through the gap stands when its run ends:
+    /// waiting to stop, told the gap passed once it stood stopped, or
+    /// continued after a reading that kept it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Told {
+        Waiting,
+        Passed,
+        Continued,
+    }
+
+    /// A program asleep through a quiet gap, run under [`super::headed_after`]
+    /// with the gap's end an event and not a time (#4436): it writes `x` and
+    /// stops itself, the gap is told passed only once `ps` reads it stopped,
+    /// and a host that keeps it past that reading has it continued, so it
+    /// writes `y`. A host that cuts a program asleep keeps `x` alone; one
+    /// that keeps it keeps `y` too, however loaded the machine.
+    fn asleep(hosts: &Tree) -> (Told, String) {
+        let program = host(hosts, "asleep", "echo x; kill -STOP $$; echo y; sleep 60");
+        let pin = tracked();
+        let limit = Duration::from_mins(1);
+        let ended = pin
+            .oracle()
+            .to_end(
+                Command::new(program),
+                Streams::Pipes { merged: false },
+                Stdin::Null,
+                limit,
+                |running| {
+                    let pid = running.pid;
+                    let mut told = Told::Waiting;
+                    let cut = super::headed_after(running, 8, |quiet| match told {
+                        Told::Waiting => {
+                            if stopped(pid) {
+                                told = Told::Passed;
+                            }
+                            told == Told::Passed
+                        }
+                        Told::Passed => {
+                            told = Told::Continued;
+                            signalled(pid, Signal::SIGCONT).unwrap();
+                            false
+                        }
+                        Told::Continued => quiet.elapsed() >= super::QUIET,
+                    });
+                    cut.unwrap();
+                    told
+                },
+            )
+            .unwrap();
+        (
+            ended.during,
+            String::from_utf8_lossy(&ended.stdout).into_owned(),
+        )
+    }
+
+    /// Whether `ps` reads the process `pid` stopped (`T`).
+    fn stopped(pid: u32) -> bool {
+        let read = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&read.stdout)
+            .trim_start()
+            .starts_with('T')
     }
 
     /// A server's port taken by another process between the probe and the

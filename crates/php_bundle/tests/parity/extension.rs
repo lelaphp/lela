@@ -7,9 +7,9 @@
 use std::ops::ControlFlow;
 
 use php_ext::abi::{
-    Callable, ClassRef, ConstArray, ConstValue, ExtensionBuilder, False, Instance, Iterable,
-    NamedVariadic, Never, OrFalse, Passed, Raw, Ref, Static, This, True, Typed, Union, Untyped,
-    Variadic,
+    Callable, ClassRef, ConstArray, ConstValue, EngineState, ExtensionBuilder, False, Instance,
+    Iterable, NamedVariadic, Never, OrFalse, Passed, Raw, Ref, Static, This, True, Typed, Union,
+    Untyped, Variadic,
 };
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{identical, loose_eq, to_string};
@@ -617,6 +617,7 @@ fn proto_never(req: &mut Request) -> Result<Never, Thrown> {
 
 /// Core's `Exception` as the extension's engine start resolved it, the
 /// class `proto_never` throws.
+#[derive(EngineState)]
 struct Raised(php_ext::values::ClassId);
 
 /// `proto_false(): false`.
