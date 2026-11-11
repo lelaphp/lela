@@ -14,7 +14,8 @@
       "Edit(~/.claude.json)",
       "Edit(~/.claude/**)",
       "mcp__cmux-cua",
-      "mcp__cmux-cua__*"
+      "mcp__cmux-cua__*",
+      "NotebookEdit"
     ]
   },
   "enabledPlugins": {

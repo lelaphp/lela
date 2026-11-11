@@ -628,6 +628,13 @@ check = "witness-coverage"
 text = "A kernel or a native without a witness fails CI (design §8)."
 
 [[rule]]
+id = "state.engine"
+scope = ["crates/*", "ext/*", "sapi/*"]
+check = "engine-state"   # api-check's sensor: a hand-written `impl EngineState for` outside the unsafe.homes homes; the compile-fail fixtures are php_bundle's refusals.rs doctests (#4348 ruling 2, #4360)
+adr = "0005"
+text = "No handle into a request's heap enters engine-wide shared state: engine_state, process_state, register and constants_with take an EngineState, which #[derive(EngineState)] holds at every field, and an impl written by hand stands only where unsafe may (#4348 ruling 2)."
+
+[[rule]]
 id = "vocab.avoid"
 scope = ["crates/*", "ext/*"]
 avoid_from = "CONTEXT.md" # grammar: avoid_from, harness §5
@@ -855,6 +862,58 @@ scope = "upstream/**"   # the folder left the tree at f9c488392 (#4380, ruled 20
 deny = true
 text = "Nothing is written under upstream/ in this repository: a defect in php-src, or in a library it links, goes in the private upstream project, and nothing here states it until Mitchell has reported it (#4380)."
 remedy = "write it in the private upstream project, as AGENTS.md says of a defect in php-src"                 # #4414
+
+[[rule]]
+id = "git.no-verify-push"
+tool = "Bash"
+where = "checkout"   # as git.no-verify: a scratch repository outside every checkout has no hooks for the flag to skip (#3186, ruled 2026-10-21)
+# Not -n, which is --dry-run on push (#4348 ruling 3). The bare key is the
+# one `git config` sets, unsets or reads, named anywhere among its words in
+# any case, after a `--` too (grammar: a configuration key, #4363). A
+# section removed takes core.hooksPath with it, and a section renamed to
+# `core` brings one in (`git config foo.hooksPath x`, then
+# `--rename-section foo core`), and either names its section as an operand
+# a `--` may stand before, so the two are denied whole, as options and as
+# the subcommands later gits spell them (#4363).
+deny_argv = ["--no-verify", "-c core.hooksPath", "--config-env core.hooksPath", "core.hooksPath", "--remove-section", "--rename-section", "remove-section", "rename-section"]
+with = ["git push", "git config"]
+text = "A push runs the pre-push hook, which runs `done`, and the hooks run from where core.hooksPath points them; --no-verify on a push, core.hooksPath, and removing or renaming a configuration section are not available to agents (#4348 ruling 3)."
+remedy = "push as it is, and fix what pre-push names; core.hooksPath is the session hook's to set"
+
+[[rule]]
+id = "pipeline.hooks-shell"
+tool = "Bash"
+# The git hooks, written by a shell line (#4363, the second ruling
+# comment): core.hooksPath points this clone's every checkout at main's
+# checkout's scripts/hooks, so a write there governs the next commit, merge
+# and push of every checkout with no commit of its own, and in a fresh clone
+# the hook a worktree carries judges the commit that carries its edit. A
+# redirection into one, `tee` naming one, `sed -i` or `perl -i` over one,
+# `cp`, `ln`, `install` or `rsync` with one as the destination or the
+# `-t` target, `mv`, `rm`, `rmdir`, `unlink`, `chmod`, `chown`, `truncate`,
+# `patch`, or `git apply`, `checkout`, `restore`, `rm` or `mv` naming one,
+# or `dd of=` one; the path bare, relative or absolute, since a worktree reaches
+# main's checkout's hooks by an absolute path, and judged wherever the line
+# runs, since a line run outside every checkout reaches them by that path
+# too. Reading one, or running it, is none of these.
+deny_pattern = '''(?x)
+  [0-9&]?>>?\|?\s*['"]?
+    (?:[^\s'"|;&)<>=]*/)?scripts/hooks(?:/[^\s'"|;&)<>]*)?(?:$|[\s'"|;&)<>])
+| (?:^|[|;&(\n`'"]|\$\()\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:(?:sudo|command|exec|env|xargs(?:\s+-\S+)*)\s+)*(?:\S*/)?
+  (?:
+      tee\s(?:[^|;&\n]*[\s'"])?
+    | (?:sed|perl)\s(?:[^|;&\n]*\s)?(?:-[a-zA-Z]*i|--in-place)[^|;&\n]*[\s'"]
+    | (?:mv|rm|rmdir|unlink|chmod|chown|truncate|patch|git\s+(?:-C\s+\S+\s+)?(?:apply|checkout|restore|rm|mv))\s(?:[^|;&\n]*[\s'"=])?
+    | dd\s(?:[^|;&\n]*\s)?of=['"]?
+    | (?:cp|ln|install)\s(?:[^|;&\n]*\s)?(?:-t\s*|--target-directory[=\s]\s*)['"]?
+  )
+    (?:[^\s'"|;&)<>=]*/)?scripts/hooks(?:/[^\s'"|;&)<>]*)?(?:$|[\s'"|;&)<>])
+| (?:^|[|;&(\n`'"]|\$\()\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:(?:sudo|command|exec|env|xargs(?:\s+-\S+)*)\s+)*(?:\S*/)?
+  (?:cp|ln|install|rsync)\s(?:[^|;&\n]*[\s'"])?
+    (?:[^\s'"|;&)<>=]*/)?scripts/hooks(?:/[^\s'"|;&)<>]*)?['"]?(?:\s+(?:-\S*|[0-9]*>&?\S*))*\s*(?:$|[|;&\n)])
+'''
+text = "The git hooks under scripts/hooks judge every checkout's commits, merges and pushes, and a shell line does not write them (#4363)."
+remedy = "propose the hook's change on a `for-a-person` ticket with its diff, and a person commits it; a scratch repository's hooks go in a folder of another name"
 
 # ---------------------------------------------------------------- owed
 # What a crate owes before done (harness §4.5 condition 1): one row per

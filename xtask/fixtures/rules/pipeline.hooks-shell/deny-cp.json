@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cp /tmp/pre-commit scripts/hooks/pre-commit","description":"Copy a hook over"}}

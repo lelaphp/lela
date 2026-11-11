@@ -159,7 +159,7 @@ _Avoid_: transition, continuation, `Next` (the handler's return inside the loop)
 ### Harness
 
 **Instrument**:
-One `xtask` subcommand that measures or judges something and ends by writing a reading, in the order `cli::Command` has them: `api-check`, `permit`, `done`, `track-work`, `ticket`, `usage`, `review`, `bench`, `budget`, `clippy`, `test`, `miri`, `phpt`, `port-map`, `compile-identity`, `crosscheck`, `trace-dump`, `hostile`, `fold`, `dispatch-census`, `fpm-compare`, `soak`, `unsafe-audit`, `steer`, `divergence-reason`, `witness`, `vocab`; `fuzz` and `mutants` are named by `harness-design.md` §4.2 and not built yet. What an instrument does to a crate or a rule is to *hold* it. The design of record for the harness is `harness-design.md`.
+One `xtask` subcommand that measures or judges something and ends by writing a reading, in the order `cli::Command` has them: `api-check`, `permit`, `done`, `track-work`, `ticket`, `usage`, `review`, `bench`, `budget`, `clippy`, `test`, `miri`, `phpt`, `port-map`, `compile-identity`, `crosscheck`, `trace-dump`, `hostile`, `fuzz`, `fold`, `dispatch-census`, `fpm-compare`, `soak`, `unsafe-audit`, `steer`, `divergence-reason`, `witness`, `vocab`; `mutants` is named by `harness-design.md` §4.2 and not built yet. What an instrument does to a crate or a rule is to *hold* it. The design of record for the harness is `harness-design.md`.
 _Avoid_: check (the manifest's `check` predicate and `api_check`, its module), gate (that is a numbered pass/fail bar such as G1), tool (a rule's `tool`, and the hook's `tool_name` and `tool_input`, Claude Code's words), script (php's `script_name`)
 
 **Command**:

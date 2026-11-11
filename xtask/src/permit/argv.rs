@@ -1534,6 +1534,7 @@ impl Invocation<'_> {
                 })
             }
             Element::Subcommand(word) => follows(&self.words[self.own - 1..], &[word]).is_some(),
+            Element::Key(key) => self.own().iter().any(|word| word.eq_ignore_ascii_case(key)),
         }
     }
 }
@@ -1552,15 +1553,23 @@ pub(crate) enum Element<'a> {
     Valued { option: &'a str, name: &'a str },
     /// `close`: the subcommand standing after the phrase, `gh issue close`.
     Subcommand(&'a str),
+    /// `core.hooksPath`: a configuration key, a section and a name joined
+    /// by a dot, which one of the command's own words names wherever it
+    /// stands among them, whatever subcommand or option stands before it
+    /// (`set`, `--global`, `--unset`), and after a `--`, which introduces
+    /// operands rather than ending them; the key compares without ASCII
+    /// case, as git reads it (#4363).
+    Key(&'a str),
 }
 
 impl<'a> Element<'a> {
     /// The element a `deny_argv` string writes; `None` for a shape that is
-    /// none of the three, which the manifest refuses.
+    /// none of the four, which the manifest refuses.
     pub(crate) fn parse(text: &'a str) -> Option<Element<'a>> {
         let mut words = text.split_whitespace();
         match (words.next()?, words.next(), words.next()) {
             (option, None, None) if option.starts_with('-') => Some(Element::Option(option)),
+            (key, None, None) if key.contains('.') => Some(Element::Key(key)),
             (word, None, None) => Some(Element::Subcommand(word)),
             (option, Some(name), None) if option.starts_with('-') && !name.starts_with('-') => {
                 Some(Element::Valued { option, name })
@@ -2264,9 +2273,13 @@ mod tests {
     }
 
     #[test]
-    fn an_element_is_an_option_a_valued_option_or_a_subcommand() {
+    fn an_element_is_an_option_a_valued_option_a_subcommand_or_a_key() {
         assert_eq!(Element::parse("-n"), Some(Element::Option("-n")));
         assert_eq!(Element::parse("close"), Some(Element::Subcommand("close")));
+        assert_eq!(
+            Element::parse("core.hooksPath"),
+            Some(Element::Key("core.hooksPath"))
+        );
         assert_eq!(
             Element::parse("-c core.hooksPath"),
             Some(Element::Valued {
@@ -2278,6 +2291,39 @@ mod tests {
         assert_eq!(Element::parse("-c -n"), None);
         assert_eq!(Element::parse("-c a b"), None);
         assert_eq!(Element::parse(" "), None);
+    }
+
+    /// A configuration key is denied wherever the command's own words name
+    /// it, past any subcommand or option of the phrase's own and in any
+    /// case, as git reads the key, and after a `--`, since a key is an
+    /// operand and `--` is what introduces one; a key under another
+    /// phrase, or a word that only starts with it, is none of them.
+    #[test]
+    fn a_denied_key_is_one_of_the_commands_own_words_in_any_case() {
+        let denied = ["core.hooksPath"];
+        for line in [
+            "git config core.hooksPath /dev/null",
+            "git config core.hookspath /dev/null",
+            "git config --global CORE.HOOKSPATH x",
+            "git config set --local core.hooksPath x",
+            "git config --unset core.hooksPath",
+            "git config --file .git/config core.hooksPath x",
+            "git -C /tmp/x config core.hooksPath",
+            "cd x && git config core.hooksPath y",
+            "git config -- core.hooksPath /var/empty",
+            "git config --unset -- core.hooksPath",
+        ] {
+            assert!(denies(line, &denied, "git config"), "{line}");
+        }
+        for line in [
+            "git config user.name x",
+            "git config --list",
+            "git log --grep core.hooksPath",
+            "echo git config core.hooksPath",
+            "git config core.hooksPathx y",
+        ] {
+            assert!(!denies(line, &denied, "git config"), "{line}");
+        }
     }
 
     #[test]

@@ -58,7 +58,18 @@ impl Server {
     /// [`Server::with_args`], the process started in the working
     /// directory `dir`.
     pub fn in_dir(root: &Path, dir: &Path, args: &[&str]) -> Server {
+        Server::spawned(root, dir, args, &[])
+    }
+
+    /// [`Server::with_args`], the process started with `env` set over
+    /// the test's environment.
+    pub fn with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Server {
+        Server::spawned(root, &manifest_dir(), args, env)
+    }
+
+    fn spawned(root: &Path, dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_makala"))
+            .envs(env.iter().copied())
             .current_dir(dir)
             .args(["-n", "--listen", "127.0.0.1:0"])
             .args(args)

@@ -31,8 +31,8 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::api::abi::{
-    Beneath, Compiled, ErrorNotice, Extension, ExtensionBuilder, FiberStatus, Observed,
-    ObservedFiber, ObserverHandlers, Refusal, Start, Statement, ZendExtension, chain,
+    Beneath, Compiled, EngineState, ErrorNotice, Extension, ExtensionBuilder, FiberStatus,
+    Observed, ObservedFiber, ObserverHandlers, Refusal, Start, Statement, ZendExtension, chain,
 };
 use super::api::call::Function;
 use super::api::decl::IniDecl;
@@ -388,6 +388,7 @@ impl<const N: u8> ObserveAllocations for AllocationRecorder<N> {
 }
 
 /// Extension `N`'s process state, numbered as it is built.
+#[derive(EngineState)]
 pub(crate) struct ProcessSlot<const N: u8> {
     built: u32,
 }
@@ -399,6 +400,7 @@ impl<const N: u8> Drop for ProcessSlot<N> {
 }
 
 /// Extension `N`'s engine state, numbered as it is built.
+#[derive(EngineState)]
 pub(crate) struct EngineSlot<const N: u8> {
     engine: u32,
 }

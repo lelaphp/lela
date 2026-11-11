@@ -1,0 +1,30 @@
+# A manifest small enough to merge, seams.toml itself in a clean merge (README.md).
+
+[oracle]
+pin = "oracle.toml"
+
+[budget]
+total = 1
+new = 1
+docs = 1
+harness = 1
+lock_packages = 1
+clean_build_release_s = 1
+api_items = 1
+bindings = 1
+
+[[rule]]
+id = "harness.self"
+tool = ["Edit", "Write"]
+scope = ["seams.toml", "oracle.toml", "docs/divergence.toml"]
+deny = true
+text = "the harness's own files (fixture)"
+remedy = "steer"
+
+[[crate]]
+name = "crates/fixture_a"
+budget = 100
+
+[[crate]]
+name = "crates/fixture_b"
+budget = 200

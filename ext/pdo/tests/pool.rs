@@ -12,7 +12,7 @@ use std::io::Write as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::abi::{Dependency, DependencyKind, EngineState, Extension, ExtensionBuilder};
 use php_ext::request::Request;
 use php_ext::test::{Capture, Engine, Files};
 use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
@@ -20,6 +20,7 @@ use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
 /// The connector, `counted:<path>`: each connection appends `closed` to
 /// the file at `<path>` as PDO closes it, and one whose path ends in
 /// `dead` answers dead to every `check_liveness`.
+#[derive(EngineState)]
 struct Counted;
 
 static COUNTED: Counted = Counted;

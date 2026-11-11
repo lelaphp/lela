@@ -3,7 +3,7 @@
 //! SQLSTATE mapping of `pdo_sqlite_error` and the column types of
 //! `pdo_sqlite_stmt_get_col`.
 
-use php_ext::abi::Callable;
+use php_ext::abi::{Callable, EngineState};
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw_exception_ex, type_error, value_error};
 use php_ext::request::{Foreign, Request, Stream};
@@ -34,6 +34,7 @@ const ATTR_EXPLAIN_STATEMENT: i64 = Sqlite::ATTR_EXPLAIN_STATEMENT;
 const ATTR_TRANSACTION_MODE: i64 = Sqlite::ATTR_TRANSACTION_MODE;
 
 /// `pdo_sqlite_driver`.
+#[derive(EngineState)]
 pub(crate) struct Driver;
 
 pub(crate) static SQLITE: Driver = Driver;

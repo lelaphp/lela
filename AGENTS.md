@@ -12,7 +12,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=273819a1eaa1765bcf26d1f09bd04b54419dc554bf8367f816e0d30c124ac6af out=754ca578e0f983ef28c007d8cb97847977da87d9d80985ced7da0c0b946f2782 -->
+<!-- /computed in=0b258d17202b6278d88f9b2629271a1f25d2a17b1b658354daed35e6e6e65343 out=754ca578e0f983ef28c007d8cb97847977da87d9d80985ced7da0c0b946f2782 -->
 
 ## What makes the third engine special?
 
@@ -91,7 +91,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=b74d1577fccb4f07be16c71a4b058fa02fa6ea5c706ae664460be7fca26ca41f out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=1651a8628cbcac66c39d2bc3b2469a2aa6a7d2a31b13a039efe8b020bb12bda7 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -117,19 +117,19 @@ third-engine-design.md
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 597 |  |
+| heap | heap.lock | 608 |  |
 | process | process.lock | 41 |  |
 | unit | unit.lock | 192 |  |
 | link | link.lock | 69 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1550 | 1700 |
+| api | api.lock | 1551 | 1700 |
 | sapi | sapi.lock | 60 |  |
-| tier | tier.lock | 246 |  |
+| tier | tier.lock | 247 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 40 |  |
-| harness | xtask.lock | 497 |  |
+| harness | xtask.lock | 498 |  |
 
-<!-- /computed in=50c321d16c5a2098b9905f8b807f99ad0cba33cead6efd745ee0a0f62ed60771 out=5f3c10af9ee382585192a40df6c18302cf5f32cbfefe519e4824a2b48e8e39d6 -->
+<!-- /computed in=e0615ea6ec7ae85de194096037a917138474c37ef29d7b09f96dfd2affb3035f out=0e64a357fcfa21df8e3e9b6d0eea15163a325c2259519e490dd70e8c3c489d9e -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -158,6 +158,7 @@ Commands:
   crosscheck         Hold each default extension's `--re` and `--ri` rendering to the oracle's bytes, kept in the store; one reading per extension per flag
   trace-dump         Hold the engine's `TRACE` lines under `jit.mode=force` to the oracle's under `[regime.jit-inline]` on the seven kernels, kept in the store; one reading per kernel
   hostile            Hold the engine to the oracle on `data/hostile.toml`'s programs, whose error handlers disturb an opline mid-step; one reading per crate that owes it
+  fuzz               Hold the engine to the oracle on a corpus's programs and as many again drawn from a seed, generated or mutated; one reading per crate that owes it
   fold               Hold the release `serve_frame` to LLVM's fold of a request field's address into each access; one reading, at `sapi/cli`
   dispatch-census    Each variant's share of the oplines the loop dispatched, over every program `IN_THE_LOOP`'s doc names; one reading per program
   fpm-compare        Hold makala to the pinned php-fpm: each request of the HTTP-served subset served by both, the status, header lines and body compared; one reading, at makala's crate
@@ -176,7 +177,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=bb13ed1932197b20cda2b458af6c122e08a3fc8d4e6cf2d962a8fb51d8a6464c out=6ad00b9849b133d7b7b4569bfbc0c0cc146f70316c4d0d6214ada271c888d6df -->
+<!-- /computed in=2d18915a342e956e6a6978a49dd7518dd5418808184c28a2906e0a6dd53e90e1 out=a3273ba5a2d830e67a0f4c59d3e77d374ad4b8f77d61639592996b9933301eb2 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

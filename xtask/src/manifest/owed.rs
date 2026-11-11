@@ -47,7 +47,7 @@ pub enum HeldAt {
 pub struct Instrument(&'static str);
 
 /// The instruments a row may name, each module's `INSTRUMENT`.
-const OWABLE: [&str; 14] = [
+const OWABLE: [&str; 15] = [
     crate::clippy::INSTRUMENT,
     crate::test::INSTRUMENT,
     crate::witness::INSTRUMENT,
@@ -62,6 +62,7 @@ const OWABLE: [&str; 14] = [
     crate::makala::compare::INSTRUMENT,
     crate::makala::soak::INSTRUMENT,
     crate::hostile::INSTRUMENT,
+    crate::fuzz::INSTRUMENT,
 ];
 
 impl Instrument {

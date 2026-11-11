@@ -24,23 +24,28 @@ pub struct Stamp {
 }
 
 /// The short id of `HEAD`, seven characters, read from the repository's
-/// files; `git rev-parse --short=7` when the layout is one this reader does
-/// not know. Seven is fixed, not git's own `--short`, which grows with the
-/// repository (eight since `d32ff307`) and would make one commit two
-/// stamps. A stamp is taken at every denial, so it spawns git once
-/// (`ls-files`) and not four times. A repository with no commit yet has
-/// no `HEAD` to stamp with, and is refused in a sentence rather than in
-/// git's "Needed a single revision" (#3189).
+/// files; the full id `git rev-parse` prints, cut the same way, when the
+/// layout is one this reader does not know, such as a sha256 repository.
+/// Seven is fixed ([`crate::track::short`]), not git's own `--short`,
+/// which grows with the repository (eight since `d32ff307`), nor
+/// `--short=7`, a minimum that grows where seven characters are shared
+/// with another object (#4442): either would make one commit two stamps.
+/// A stamp is taken at every denial, so it spawns git once (`ls-files`)
+/// and not four times. A repository with no commit yet has no `HEAD` to
+/// stamp with, and is refused in a sentence rather than in git's "Needed
+/// a single revision" (#3189).
 pub fn head_commit(root: &Path) -> Result<String> {
     match read_head(root) {
         Some(id) => Ok(id),
-        None => rev_parse(root, &["--short=7", "HEAD"]).map_err(|err| match git_dir(root) {
-            Some(_) if !has_ref(root, "HEAD") => anyhow!(
-                "{} has no commit yet; a reading is stamped with one",
-                root.display()
-            ),
-            _ => err,
-        }),
+        None => rev_parse(root, &["--verify", "HEAD"])
+            .map(|full| crate::track::short(&full).to_owned())
+            .map_err(|err| match git_dir(root) {
+                Some(_) if !has_ref(root, "HEAD") => anyhow!(
+                    "{} has no commit yet; a reading is stamped with one",
+                    root.display()
+                ),
+                _ => err,
+            }),
     }
 }
 
@@ -99,7 +104,8 @@ fn read_head(root: &Path) -> Option<String> {
             }
         }
     };
-    (full.len() == 40 && full.chars().all(|c| c.is_ascii_hexdigit())).then(|| full[..7].to_owned())
+    (full.len() == 40 && full.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| crate::track::short(&full).to_owned())
 }
 
 /// Every file under `scope` (relative to `root`) that git does not ignore,
@@ -558,6 +564,39 @@ mod tests {
                 dir.display()
             )
         );
+    }
+
+    /// A sha256 repository is one [`super::read_head`] does not read, so
+    /// its stamp is the fallback's. Its two commits, found offline, share
+    /// their first seven characters, `5abe859`, so git's `--short=7` grows
+    /// to eight for either; the stamp is still seven, the full id cut as
+    /// `read_head` cuts it, by [`crate::track::short`] (#4442).
+    #[test]
+    fn a_repository_the_reader_does_not_read_is_stamped_at_seven_where_git_prints_more() {
+        let dir = crate::scratch::Tree::new("git-sha256").unwrap();
+        super::git(&dir, &["init", "-q", "--object-format=sha256"]).unwrap();
+        let tree = super::fed(&dir, &["mktree"], "").unwrap();
+        let commit = |message: &str| {
+            let body = format!(
+                "tree {}\nauthor t <t@t> 0 +0000\ncommitter t <t@t> 0 +0000\n\n{message}\n",
+                tree.trim()
+            );
+            let written = ["hash-object", "-t", "commit", "-w", "--stdin"];
+            super::fed(&dir, &written, &body).unwrap().trim().to_owned()
+        };
+        let (head, other) = (commit("4899"), commit("18269"));
+        assert_ne!(head, other);
+        assert_eq!((&head[..7], &other[..7]), ("5abe859", "5abe859"));
+        let update = [
+            &crate::scratch::UNHOOKED[..],
+            &["update-ref", "HEAD", &head],
+        ]
+        .concat();
+        super::git(&dir, &update).unwrap();
+        assert_eq!(super::read_head(&dir), None);
+        let git_says = super::rev_parse(&dir, &["--short=7", "HEAD"]).unwrap();
+        assert_eq!(git_says, "5abe8596");
+        assert_eq!(super::head_commit(&dir).unwrap(), "5abe859");
     }
 
     /// A file the commit lacks is none, whether the working tree holds it

@@ -278,7 +278,7 @@ impl Snapshot {
         memo(read, (root.to_path_buf(), commit.to_owned()), || {
             let mut files = git::blobs(root, commit, &[])?;
             files.sort_unstable();
-            let short = commit.chars().take(7).collect();
+            let short = crate::track::short(commit).to_owned();
             Ok(Arc::new(Snapshot::new(
                 (root, Source::Git),
                 short,

@@ -1259,7 +1259,8 @@ pub(crate) fn command_taking(instrument: &str, krate: &str) -> Option<String> {
         | crate::unsafe_audit::INSTRUMENT
         | port_map::INSTRUMENT
         | crate::makala::compare::INSTRUMENT
-        | crate::makala::soak::INSTRUMENT => Some(format!("{CARGO_XTASK}{instrument}")),
+        | crate::makala::soak::INSTRUMENT
+        | crate::fuzz::INSTRUMENT => Some(format!("{CARGO_XTASK}{instrument}")),
         _ => None,
     }
 }

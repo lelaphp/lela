@@ -684,7 +684,8 @@ pub enum Runs {
 /// `require_argv`, one phrase or a list of them, a word or a command and
 /// its subcommand (`"git add"`); `unless_argv` qualifies `deny_argv`;
 /// `deny_macros` qualifies `deny_types`; `allow_in_tests` qualifies
-/// `deny_lints`; each is refused beside any other predicate.
+/// `deny_lints`; `adding` qualifies `deny = true`; each is refused beside
+/// any other predicate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -721,6 +722,12 @@ pub struct Predicates {
     pub with: OneOrMany,
     pub on: Option<String>,
     pub deny: Option<bool>,
+    /// A pattern beside `deny = true`: a write to any file, in the scope
+    /// or out of it, that adds a hit of it is refused as a write into the
+    /// scope is, read as a `deny_pattern` over a write reads what the
+    /// write adds (#510): a `computed exec` opener line, which `computed
+    /// run` executes wherever it stands (#4363, #4348 ruling 3).
+    pub adding: Option<String>,
     /// `writes = true`: a call that writes, an `Edit`, a `Write`, or a
     /// shell command that can change the checkout it runs in or a
     /// redirection into a file (`permit::writes`); with `where = "owned"`
@@ -884,6 +891,8 @@ impl Predicates {
             Some("deny_macros")
         } else if self.allow_in_tests.is_some() && self.deny_lints.is_none() {
             Some("allow_in_tests")
+        } else if self.adding.is_some() && self.deny != Some(true) {
+            Some("adding")
         } else {
             None
         }
@@ -1196,7 +1205,7 @@ impl Manifest {
                 .find(|d| crate::permit::Element::parse(d).is_none())
             {
                 bail!(
-                    "rule \"{}\" has the `deny_argv` element {element:?}; an element is an option (`-n`), an option and the name its value sets (`-c core.hooksPath`), or a subcommand (`close`)",
+                    "rule \"{}\" has the `deny_argv` element {element:?}; an element is an option (`-n`), an option and the name its value sets (`-c core.hooksPath`), a subcommand (`close`), or a configuration key (`core.hooksPath`)",
                     rule.id
                 );
             }
@@ -1235,7 +1244,7 @@ impl Manifest {
             }
             if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
                 bail!(
-                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv, `unless_argv` qualifies deny_argv, `deny_macros` qualifies deny_types and `allow_in_tests` qualifies deny_lints",
+                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv, `unless_argv` qualifies deny_argv, `deny_macros` qualifies deny_types, `allow_in_tests` qualifies deny_lints and `adding` qualifies deny = true",
                     rule.id,
                     named[0]
                 );

@@ -1,0 +1,250 @@
+//! What may stand in engine state (ADR-0005; #4348 ruling 2): a value
+//! every request thread reads at once, so one that holds no pointer into a
+//! request's heap. A request's string, array, object, reference or
+//! resource moves with the request that owns it and is touched by its
+//! thread alone; one kept engine-wide would be read by another request's
+//! thread while its owner frees or writes it. `Send + Sync` cannot say
+//! so, since [`Zval`] is both for the frozen values a published unit
+//! shares, so [`EngineState`] says it, and the engine's four entries that
+//! keep a value engine-wide are bounded by it.
+//!
+//! A type is engine state by `#[derive(EngineState)]`, which holds every
+//! field to the bound, or by an impl written by hand where `unsafe` may
+//! stand (the homes `unsafe.homes` names), for a leaf the derive cannot
+//! read through: here, the primitives, the standard containers over
+//! engine state, a function pointer, [`Bytes`], [`FrozenZval`] and
+//! [`Exclusive`], which holds no field to the bound (#4474); in an
+//! extension's `src/ffi/`, a C library's immutable object, beside its
+//! `unsafe impl Sync`, which is the homes' prose and no check: there a
+//! hand-written impl stands for any type. The seal is the `engine-state`
+//! rule's sensor in `xtask api-check`. It reads the syntax of the sources
+//! a crate under `crates/`, `ext/` and `sapi/` compiles, and of what they
+//! reach by `mod`, `#[path]` and `include!`, a home covering the crate's
+//! own files only. It refuses a hand-written impl outside the homes whose
+//! trait path ends in the trait's name or one a `use .. as` gives it, in
+//! source or in a macro's tokens, and each place it cannot read: a macro's
+//! impl whose trait is a metavariable or a path a repetition builds, in a
+//! crate that names the trait; the trait handed to a macro defined
+//! elsewhere; an `include!` or `#[path]` it cannot follow; and a string
+//! naming the trait in the build's closure beside an `OUT_DIR` include.
+//! The derive's own expansion is exempt for every macro token in it. A
+//! `build.rs` that writes the impl without naming the trait, an impl a
+//! proc macro parses from a string, a local macro that forwards the trait
+//! to a macro outside the workspace, and a rename another crate exports
+//! stand outside what it reads (#4463). [`Zval`] and every pointer into a
+//! request's heap have no impl.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::ffi::{CString, OsString};
+use std::marker::PhantomData;
+use std::num::NonZeroU32;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant, SystemTime};
+
+use crate::{Bytes, Fatal, Intern, Strings, Zval};
+
+/// A value engine state may hold: shared by every request of the engine
+/// and holding no pointer into a request's heap, at any depth.
+///
+/// What it promises: nothing reachable from the value is a request's, no
+/// [`Zval`] a request made, no request string, array, object, reference
+/// or resource, and no pointer into a request's heap.
+/// `#[derive(EngineState)]` makes the promise by holding every field to
+/// this bound; a hand-written impl in a home makes it for a leaf the
+/// derive cannot read through.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot stand in engine state: it may hold a handle into a request's heap",
+    label = "not `EngineState`",
+    note = "engine state is shared by every request (ADR-0005); a type is engine state by `#[derive(EngineState)]`, which holds each field to this bound"
+)]
+pub trait EngineState: Send + Sync + 'static {}
+
+/// Each listed type is engine state as it stands.
+macro_rules! leaves {
+    ($($leaf:ty),* $(,)?) => {$(
+        // A primitive or a value of the standard library that owns no
+        // pointer a request could have made.
+        impl EngineState for $leaf {}
+    )*};
+}
+
+leaves! {
+    (), bool, char, u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64,
+    str, String, NonZeroU32, PathBuf, OsString, CString, Duration, Instant, SystemTime,
+    AtomicBool, AtomicU32, AtomicU64, AtomicUsize, AtomicI64, std::hash::RandomState,
+}
+
+/// Each listed container is engine state where what it holds is.
+macro_rules! containers {
+    ($(<$($held:ident $(: ?$sized:ident)?),*> $container:ty),* $(,)?) => {$(
+        // The container owns what it holds and no pointer beside it, and
+        // each thing it holds is engine state by its own bound.
+        impl<$($held: $(?$sized +)? EngineState),*> EngineState for $container {}
+    )*};
+}
+
+containers! {
+    <T> Option<T>,
+    <T, E> Result<T, E>,
+    <T: ?Sized> Box<T>,
+    <T: ?Sized> Arc<T>,
+    <T: ?Sized> &'static T,
+    <T> [T],
+    <T> Vec<T>,
+    <T> VecDeque<T>,
+    <T> BTreeSet<T>,
+    <K, V> BTreeMap<K, V>,
+    <T, S> HashSet<T, S>,
+    <K, V, S> HashMap<K, V, S>,
+    <T: ?Sized> Mutex<T>,
+    <T: ?Sized> RwLock<T>,
+    <T> OnceLock<T>,
+    <A, B> (A, B),
+    <A, B, C> (A, B, C),
+    <A, B, C, D> (A, B, C, D),
+}
+
+// An array owns its elements and nothing beside them, each engine state
+// by the bound.
+impl<T: EngineState, const N: usize> EngineState for [T; N] {}
+
+// A `PhantomData` holds nothing at all.
+impl<T: ?Sized + Send + Sync + 'static> EngineState for PhantomData<T> {}
+
+/// Each listed function pointer's type is engine state whatever it takes
+/// and answers: a function pointer is code the binary holds and carries no
+/// value. `#[derive(EngineState)]` passes a field written as `fn(..)`
+/// unread, so a shape is listed here only for a type alias of one held
+/// where the derive reads it, `Option<BufferInit>`, one line a shape.
+/// A by-value parameter where another listed shape borrows would make the
+/// two overlap (rustc's `coherence_leak_check`): such a field spells its
+/// `fn(..)` out instead.
+macro_rules! code {
+    ($(<$($p:ident $(: ?$sized:ident)?),*> fn($($arg:ty),*)),* $(,)?) => {$(
+        // A function pointer is an address of the binary's code and holds
+        // no data.
+        impl<R: 'static, $($p: $(?$sized +)? 'static),*> EngineState for fn($($arg),*) -> R {}
+    )*};
+}
+
+code! {
+    <A: ?Sized, B> fn(&mut A, B),
+    <A: ?Sized, B: ?Sized, C, D> fn(&mut A, &B, C, D),
+}
+
+// The bytes are the binary's, a box's or a share of a published block
+// (`bytes.rs`), never a request's heap.
+impl EngineState for Bytes {}
+
+/// A value no request owns: a scalar, or a string of the engine's
+/// permanent table, [`Strings`]. It is how engine state holds a value
+/// where a [`Zval`] could be a request's: `Engine::constant_values` is
+/// one per constant, made where the engine publishes the constant at
+/// `MINIT`, and a request reads it as the [`Zval`] it is. Made from
+/// nothing else, so no request's value can be one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrozenZval(Zval);
+
+impl FrozenZval {
+    /// `null`.
+    #[must_use]
+    pub const fn null() -> FrozenZval {
+        FrozenZval(Zval::null())
+    }
+
+    /// A boolean.
+    #[must_use]
+    pub const fn bool(b: bool) -> FrozenZval {
+        FrozenZval(Zval::bool(b))
+    }
+
+    /// An integer.
+    #[must_use]
+    pub const fn long(n: i64) -> FrozenZval {
+        FrozenZval(Zval::long(n))
+    }
+
+    /// A float.
+    #[must_use]
+    pub const fn double(f: f64) -> FrozenZval {
+        FrozenZval(Zval::double(f))
+    }
+
+    /// The string of `bytes` the permanent table holds, interned there on
+    /// the first ask, and the fatal the table raised where it had no room.
+    pub fn interned(strings: &mut Strings, bytes: &[u8]) -> Result<FrozenZval, Fatal> {
+        strings.intern(bytes).map(|s| FrozenZval(Zval::string(s)))
+    }
+
+    /// The value, for a request to read: a scalar, or an interned string
+    /// no request counts.
+    #[must_use]
+    pub const fn zval(self) -> Zval {
+        self.0
+    }
+}
+
+// A frozen value is a scalar or a string of the permanent table, which
+// is immutable, never refcounted and alive while the engine stands
+// (`Strings`); its constructors make nothing else.
+impl EngineState for FrozenZval {}
+
+/// A value one request holds at a time and none shares: kept by the
+/// engine between two requests, reached only by moving it in and out, so
+/// a `&Exclusive` lets no thread read what it holds. `api::Pool` keeps its
+/// idle entries in one, a persistent connection between the requests that
+/// take it up. Engine state for whatever it holds that may move between
+/// threads, holding nothing to the bound at its fields: an entry's lender
+/// gives it back with nothing of the request on it, which `pdo`'s and
+/// `mysqli`'s entries keep as a value and not as a type (their fields can
+/// hold a request's array, object or allocation while lent). No extension
+/// can name it: the api does not re-export it.
+pub struct Exclusive<T>(T);
+
+impl<T> Exclusive<T> {
+    /// `value`, kept.
+    pub const fn new(value: T) -> Exclusive<T> {
+        Exclusive(value)
+    }
+
+    /// What was kept, taken out.
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+// SAFETY: an `Exclusive` is reached only by value, never through `&self`,
+// so a `&Exclusive` on another thread reads nothing of what it holds.
+unsafe impl<T: Send> Sync for Exclusive<T> {}
+
+// Never shared: what it holds moves between requests whole, one request
+// holding it at a time.
+impl<T: Send + 'static> EngineState for Exclusive<T> {}
+
+#[cfg(test)]
+mod tests {
+    use super::{EngineState, FrozenZval};
+    use crate::{Strings, ZvalType};
+
+    fn held<T: ?Sized + EngineState>() {}
+
+    #[test]
+    fn the_leaves_and_containers_the_bundle_keeps_are_engine_state() {
+        held::<Option<Vec<(Box<[u8]>, std::sync::Arc<str>)>>>();
+        held::<std::collections::HashMap<Box<[u8]>, std::sync::Arc<FrozenZval>>>();
+        held::<&'static [&'static str]>();
+        held::<fn(&mut String, &[u8], i64, bool) -> Result<Vec<u8>, ()>>();
+    }
+
+    #[test]
+    fn a_frozen_string_is_the_permanent_tables_and_counted_by_no_request() {
+        let mut strings = Strings::new();
+        let frozen = FrozenZval::interned(&mut strings, b"PHP_EOL").expect("the table has room");
+        let z = frozen.zval();
+        assert_eq!(z.kind(), ZvalType::String);
+        assert!(!z.is_refcounted(), "an interned string is never counted");
+        assert_eq!(FrozenZval::long(7).zval().kind(), ZvalType::Long);
+    }
+}

@@ -559,7 +559,7 @@ impl<K, H> Default for Keyed<K, H> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::api::abi::{ExtensionBuilder, TreatDataHook};
+    use crate::api::abi::{EngineState, ExtensionBuilder, TreatDataHook};
     use crate::api::request::{Input, Request};
     use crate::{Engine, RequestDescription, WebRequest};
 
@@ -806,9 +806,9 @@ mod tests {
     /// key's values are not another's.
     #[test]
     fn a_keyed_kind_holds_each_key_s_suppliers_in_start_order() {
-        #[derive(Debug, PartialEq)]
+        #[derive(Debug, PartialEq, EngineState)]
         struct Driver(&'static str);
-        #[derive(Debug, PartialEq)]
+        #[derive(Debug, PartialEq, EngineState)]
         struct Other(u8);
         let extensions = [
             ExtensionBuilder::default()
@@ -886,7 +886,7 @@ mod tests {
     /// though what it installs moves after every other extension's.
     #[test]
     fn a_zend_extension_s_registrations_keep_their_start_order() {
-        #[derive(Debug, PartialEq)]
+        #[derive(Debug, PartialEq, EngineState)]
         struct Driver(&'static str);
         let extensions = [
             zend(ExtensionBuilder::default().register(Driver("zend")), "zend"),

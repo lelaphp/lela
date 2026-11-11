@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cat scripts/hooks/pre-commit","description":"Read the pre-commit hook"}}

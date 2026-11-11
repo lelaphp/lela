@@ -465,10 +465,14 @@ pub(crate) fn serve(engine: &Engine, path: &[u8], env: &Environment) -> i32 {
         return FAILURE;
     }
     let Some(listening) = listen(path, backlog, env.get(b"FCGI_WEB_SERVER_ADDRS")) else {
-        eprintln!(
-            "Couldn't create FastCGI listen socket on port {}",
-            String::from_utf8_lossy(path)
-        );
+        // php's `fprintf(stderr, "…%s\n", bindpath)`: the `-b` word's
+        // own bytes, which need not be UTF-8.
+        let line: &[&[u8]] = &[
+            b"Couldn't create FastCGI listen socket on port ",
+            path,
+            b"\n",
+        ];
+        std::io::stderr().lock().write_all(&line.concat()).ok();
         return FAILURE;
     };
     crate::ffi::accepting_on(listening.fd());

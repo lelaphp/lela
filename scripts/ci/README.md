@@ -28,7 +28,7 @@ That is `regions`, `per-commit`, `miri`, `tailcall`, `store` and `red-main` in `
   gh variable set DAX_BUILD_RUNNER --body '["ubuntu-26.04"]'
   ```
 
-  A set variable also says the self-hosted pair is not online. So the jobs only the Mac can run, both `oracle` jobs and nightly.yml's `bench` and `tailcall`, are skipped. Queued instead, each would wait the 24 hours GitHub holds a job no runner takes, and harness.yml's `store` job, which needs its `oracle` job, would wait with it.
+  A set variable also says the self-hosted pair is not online. So the jobs only the Mac can run, both `oracle` jobs and nightly.yml's `tailcall`, are skipped. Queued instead, each would wait the 24 hours GitHub holds a job no runner takes, and harness.yml's `store` job, which needs its `oracle` job, would wait with it.
 - **Deleted** once both runners are registered. The wizard's last stage does this: `gh variable delete DAX_BUILD_RUNNER`. Nothing in the workflows is reverted.
 
 ### What a skipped oracle job means

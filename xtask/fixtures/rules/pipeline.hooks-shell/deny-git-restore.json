@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git restore --source=other scripts/hooks/pre-push","description":"Restore a hook from another commit"}}

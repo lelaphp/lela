@@ -34,7 +34,7 @@ mod share;
 mod throwables;
 mod version;
 
-use php_ext::abi::{Extension, ExtensionBuilder, Lent, Pool, Refusal};
+use php_ext::abi::{EngineState, Extension, ExtensionBuilder, Lent, Pool, Refusal};
 use php_ext::attr::php_const;
 use php_ext::decl::IniDecl;
 
@@ -858,6 +858,7 @@ fn post_deactivate(req: &mut php_ext::request::Request) {
 
 /// The process scope's proof that libcurl's global state stands
 /// (ADR-0010).
+#[derive(EngineState)]
 struct Initialized;
 
 /// `PHP_MINIT_FUNCTION(curl)`'s `curl_global_init(CURL_GLOBAL_DEFAULT)`

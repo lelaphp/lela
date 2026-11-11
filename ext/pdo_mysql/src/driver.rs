@@ -25,6 +25,7 @@ use php_ext_pdo::connector::{
 
 use crate::Mysql;
 use crate::statement::Stmt;
+use php_ext::abi::EngineState;
 
 /// PDO's attributes this connector reads.
 pub(crate) mod attr {
@@ -61,6 +62,7 @@ mod flag {
 const IN_TRANS: u32 = 1;
 
 /// `pdo_mysql_driver`.
+#[derive(EngineState)]
 pub(crate) struct Driver;
 
 pub(crate) static MYSQL: Driver = Driver;

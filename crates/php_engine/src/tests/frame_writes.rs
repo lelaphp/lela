@@ -13,7 +13,7 @@
 //! the same program with the write and the evaluation typed into the
 //! paused frame by hand, where php's own code can reach that frame.
 
-use crate::api::abi::{ExtensionBuilder, Observed, ObserverHandlers};
+use crate::api::abi::{EngineState, ExtensionBuilder, Observed, ObserverHandlers};
 use crate::api::raising::{Cause, Thrown};
 use crate::api::request::{FrameId, Request};
 use crate::api::values::{Owner, Value};
@@ -21,13 +21,13 @@ use crate::engine::Engine;
 use crate::test::Capture;
 
 /// What the debugger does at every stop.
-trait Stop: Copy + Send + Sync + 'static {
+trait Stop: Copy + EngineState {
     fn stop(self, observed: &mut Observed<'_>);
 }
 
 /// What the debugger does at a stop: write and evaluate in the frame
 /// it names.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, EngineState)]
 struct Plan {
     /// How many frames below the caller of `pause()` the frame stands.
     depth: usize,
@@ -257,7 +257,7 @@ struct Kept(Option<FrameId>);
 /// What a debugger does whose first stop keeps its caller's frame and
 /// whose every stop after it writes `$x` of the kept frame and evaluates
 /// `code` there, its throwable shown with its trace where `traced`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, EngineState)]
 struct Revisit {
     code: &'static str,
     traced: bool,

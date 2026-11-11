@@ -40,7 +40,7 @@ mod fastcgi;
 mod ffi;
 mod natives;
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
@@ -329,17 +329,20 @@ fn decode(query: &[u8]) -> Vec<u8> {
 }
 
 /// `php_cgi_usage` (`Z/sapi/cgi/cgi_main.c:1015`), the program named by
-/// what follows the last `/` of `argv[0]`, or `php-cgi`.
+/// what follows the last `/` of `argv[0]`, written as its bytes, or
+/// `php-cgi`.
 #[must_use]
-pub fn usage_text(argv0: &OsStr) -> String {
-    let bytes = argv0.as_encoded_bytes();
-    let prog = match bytes.iter().rposition(|b| *b == b'/') {
-        Some(at) => String::from_utf8_lossy(&bytes[at + 1..]).into_owned(),
-        None => String::from("php-cgi"),
+pub fn usage_text(argv0: &[u8]) -> Vec<u8> {
+    let prog = match argv0.iter().rposition(|b| *b == b'/') {
+        Some(at) => &argv0[at + 1..],
+        None => b"php-cgi",
     };
-    format!(
-        "Usage: {prog} [-q] [-h] [-s] [-v] [-i] [-f <file>]\n\
-         \x20      {prog} <file> [args...]\n\
+    [
+        b"Usage: ",
+        prog,
+        b" [-q] [-h] [-s] [-v] [-i] [-f <file>]\n       ",
+        prog,
+        b" <file> [args...]\n\
          \x20 -a               Run interactively\n\
          \x20 -b <address:port>|<port> Bind Path for external FASTCGI Server mode\n\
          \x20 -C               Do not chdir to the script's directory\n\
@@ -356,8 +359,9 @@ pub fn usage_text(argv0: &OsStr) -> String {
          \x20 -s               Display colour syntax highlighted source.\n\
          \x20 -v               Version number\n\
          \x20 -w               Display source with stripped comments and whitespace.\n\
-         \x20 -T <count>       Measure execution time of script repeated <count> times.\n"
-    )
+         \x20 -T <count>       Measure execution time of script repeated <count> times.\n",
+    ]
+    .concat()
 }
 
 /// `php_print_version` for this host, [`php_sapi::version`] under its
@@ -838,7 +842,7 @@ pub fn main() -> ExitCode {
         Ask::Usage { stderr, exit_code } => {
             let engine = engine(&options.ini, Origin::Shell, false);
             std::io::stderr().lock().write_all(stderr.as_bytes()).ok();
-            php_sapi::stdio::write(usage_text(&argv0).as_bytes());
+            php_sapi::stdio::write(&usage_text(argv0.as_encoded_bytes()));
             drop(engine);
             *exit_code
         }

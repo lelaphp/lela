@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"patch scripts/hooks/pre-commit < /tmp/hook.diff","description":"Patch a hook"}}

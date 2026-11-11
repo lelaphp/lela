@@ -28,6 +28,7 @@ use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use pcre2_sys as sys;
+use php_ext::abi::EngineState;
 use php_ext::values::PhpString;
 
 pub(crate) use sys::{
@@ -65,6 +66,9 @@ pub(crate) struct Tables(NonNull<u8>);
 unsafe impl Send for Tables {}
 // SAFETY: as above; nothing writes them through `&Tables`.
 unsafe impl Sync for Tables {}
+// Engine state (ADR-0005): the library's bytes, allocated by the system
+// allocator, never a request's heap.
+impl EngineState for Tables {}
 
 impl Tables {
     /// The tables of the thread's `LC_CTYPE`, or `None` where the library
@@ -91,6 +95,11 @@ impl Drop for Tables {
 unsafe impl Send for Code {}
 // SAFETY: as above; nothing reachable through `&Code` writes the pattern.
 unsafe impl Sync for Code {}
+// Engine state (ADR-0005): the library's compiled pattern and the tables
+// it points into, allocated by the system allocator under the default
+// context, never a request's heap; a pattern compiled from a request's
+// string keeps no pointer to it.
+impl EngineState for Code {}
 
 impl Drop for Code {
     fn drop(&mut self) {
