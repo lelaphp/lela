@@ -6,19 +6,23 @@
 //! thread while its owner frees or writes it. `Send + Sync` cannot say
 //! so, since [`Zval`] is both for the frozen values a published unit
 //! shares, so [`EngineState`] says it, and the engine's four entries that
-//! keep a value engine-wide are bounded by it.
+//! keep a value engine-wide are bounded by it and by `Sync` beside it.
+//! The trait asks `Send` and not `Sync` (#4474): a value behind a `Mutex`,
+//! an idle entry `api::Pool` keeps, is moved and never shared, and is
+//! engine state all the same; where a value is shared, through an `Arc`,
+//! a `&'static` or one of the four entries, `Sync` is asked there.
 //!
 //! A type is engine state by `#[derive(EngineState)]`, which holds every
 //! field to the bound, or by an impl written by hand where `unsafe` may
 //! stand (the homes `unsafe.homes` names), for a leaf the derive cannot
-//! read through: here, the primitives, the standard containers over
-//! engine state, a function pointer, [`Bytes`], [`FrozenZval`] and
-//! [`Exclusive`], which holds no field to the bound (#4474); in an
-//! extension's `src/ffi/`, a C library's immutable object, beside its
-//! `unsafe impl Sync`, which is the homes' prose and no check: there a
-//! hand-written impl stands for any type. The seal is the `engine-state`
-//! rule's sensor in `xtask api-check`. It reads the syntax of the sources
-//! a crate under `crates/`, `ext/` and `sapi/` compiles, and of what they
+//! read through: here, the primitives, the standard containers over engine
+//! state, an owned fd, a function pointer, [`Bytes`],
+//! [`FrozenZval`] and [`Exclusive`], which holds no field to the bound
+//! (#4474); in an extension's `src/ffi/`, a C library's object, beside its
+//! `Send` or `Sync` argument, which is the homes' prose and no check: there
+//! a hand-written impl stands for any type. The seal is the `engine-state`
+//! rule's sensor in `xtask api-check`. It reads the syntax of the sources a
+//! crate under `crates/`, `ext/` and `sapi/` compiles, and of what they
 //! reach by `mod`, `#[path]` and `include!`, a home covering the crate's
 //! own files only. It refuses a hand-written impl outside the homes whose
 //! trait path ends in the trait's name or one a `use .. as` gives it, in
@@ -26,12 +30,12 @@
 //! impl whose trait is a metavariable or a path a repetition builds, in a
 //! crate that names the trait; the trait handed to a macro defined
 //! elsewhere; an `include!` or `#[path]` it cannot follow; and a string
-//! naming the trait in the build's closure beside an `OUT_DIR` include.
-//! The derive's own expansion is exempt for every macro token in it. A
-//! `build.rs` that writes the impl without naming the trait, an impl a
-//! proc macro parses from a string, a local macro that forwards the trait
-//! to a macro outside the workspace, and a rename another crate exports
-//! stand outside what it reads (#4463). [`Zval`] and every pointer into a
+//! naming the trait in the build's closure beside an `OUT_DIR` include. The
+//! derive's own expansion is exempt for every macro token in it. A
+//! `build.rs` that writes the impl without naming the trait, an impl a proc
+//! macro parses from a string, a local macro that forwards the trait to a
+//! macro outside the workspace, and a rename another crate exports stand
+//! outside what it reads (#4463). [`Zval`] and every pointer into a
 //! request's heap have no impl.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -45,7 +49,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::{Bytes, Fatal, Intern, Strings, Zval};
 
-/// A value engine state may hold: shared by every request of the engine
+/// A value engine state may hold: kept by the engine across requests
 /// and holding no pointer into a request's heap, at any depth.
 ///
 /// What it promises: nothing reachable from the value is a request's, no
@@ -53,13 +57,15 @@ use crate::{Bytes, Fatal, Intern, Strings, Zval};
 /// or resource, and no pointer into a request's heap.
 /// `#[derive(EngineState)]` makes the promise by holding every field to
 /// this bound; a hand-written impl in a home makes it for a leaf the
-/// derive cannot read through.
+/// derive cannot read through. It asks `Send` and not `Sync`: where every
+/// request reads the value at once, the entry that shares it asks `Sync`
+/// beside it.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot stand in engine state: it may hold a handle into a request's heap",
     label = "not `EngineState`",
     note = "engine state is shared by every request (ADR-0005); a type is engine state by `#[derive(EngineState)]`, which holds each field to this bound"
 )]
-pub trait EngineState: Send + Sync + 'static {}
+pub trait EngineState: Send + 'static {}
 
 /// Each listed type is engine state as it stands.
 macro_rules! leaves {
@@ -89,8 +95,6 @@ containers! {
     <T> Option<T>,
     <T, E> Result<T, E>,
     <T: ?Sized> Box<T>,
-    <T: ?Sized> Arc<T>,
-    <T: ?Sized> &'static T,
     <T> [T],
     <T> Vec<T>,
     <T> VecDeque<T>,
@@ -106,12 +110,25 @@ containers! {
     <A, B, C, D> (A, B, C, D),
 }
 
+// A share of what it points at, which is engine state by its own bound
+// and `Sync`, since every holder of the share reads it at once.
+impl<T: ?Sized + EngineState + Sync> EngineState for Arc<T> {}
+
+// A borrow every holder reads at once, of what is engine state by its
+// own bound and `Sync`.
+impl<T: ?Sized + EngineState + Sync> EngineState for &'static T {}
+
 // An array owns its elements and nothing beside them, each engine state
 // by the bound.
 impl<T: EngineState, const N: usize> EngineState for [T; N] {}
 
 // A `PhantomData` holds nothing at all.
-impl<T: ?Sized + Send + Sync + 'static> EngineState for PhantomData<T> {}
+impl<T: ?Sized + Send + 'static> EngineState for PhantomData<T> {}
+
+// An open file descriptor is the process's, a number into its table, and
+// carries nothing of a request's heap.
+#[cfg(unix)]
+impl EngineState for std::os::fd::OwnedFd {}
 
 /// Each listed function pointer's type is engine state whatever it takes
 /// and answers: a function pointer is code the binary holds and carries no

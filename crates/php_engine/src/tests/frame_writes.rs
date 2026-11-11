@@ -21,7 +21,7 @@ use crate::engine::Engine;
 use crate::test::Capture;
 
 /// What the debugger does at every stop.
-trait Stop: Copy + EngineState {
+trait Stop: Copy + EngineState + Sync {
     fn stop(self, observed: &mut Observed<'_>);
 }
 

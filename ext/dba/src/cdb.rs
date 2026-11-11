@@ -6,6 +6,7 @@
 //! opened `r` is read, one opened `n` is made, and the name decides only
 //! what `dba_handlers(true)` and `dba_fetch`'s skip notice say.
 
+use php_ext::abi::EngineState;
 use php_ext::raising::{Level, docref};
 use php_ext::request::{Request, Stream, Whence};
 
@@ -35,7 +36,7 @@ fn read(req: &mut Request, file: Stream, buf: &mut [u8]) -> usize {
 
 /// `struct cdb`, `cdb_findnext`'s search state, with what `dba_cdb.c`
 /// keeps beside it for `firstkey` and `nextkey`.
-#[derive(Default)]
+#[derive(Default, EngineState)]
 pub(crate) struct Reader {
     /// `loop`: the hash slots searched under the key so far.
     looped: u32,
@@ -222,7 +223,7 @@ fn read_full(req: &mut Request, file: Stream, buf: &mut [u8]) -> usize {
 }
 
 /// `struct cdb_hp`: a record's hash and position.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, EngineState)]
 struct Slot {
     h: u32,
     p: u32,
@@ -230,6 +231,7 @@ struct Slot {
 
 /// `struct cdb_make`: the records written so far, in the order added,
 /// and where the next one goes.
+#[derive(EngineState)]
 pub(crate) struct Maker {
     slots: Vec<Slot>,
     pos: u32,

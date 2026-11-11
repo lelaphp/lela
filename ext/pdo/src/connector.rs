@@ -35,7 +35,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRe
 /// `pdo_driver_t`: a connector's name, the class `PDO::connect()` makes
 /// for it, and its factory. Registered engine-wide, so engine state
 /// (ADR-0005).
-pub trait Connector: EngineState {
+pub trait Connector: EngineState + Sync {
     /// `driver_name`, the DSN prefix that selects the connector and what
     /// `PDO::getAvailableDrivers()` lists.
     fn name(&self) -> &'static str;

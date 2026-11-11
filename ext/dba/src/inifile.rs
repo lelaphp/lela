@@ -5,6 +5,7 @@
 //! touches on through php's temporary streams. Every string the C reads
 //! is a C string, so a line and a key end at their first NUL.
 
+use php_ext::abi::EngineState;
 use php_ext::coerce::c_str;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
@@ -25,7 +26,7 @@ fn etrim(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// `key_type`: a group and a name, either unset (`NULL`).
-#[derive(Default, Clone)]
+#[derive(Default, Clone, EngineState)]
 pub(crate) struct Key {
     group: Option<Vec<u8>>,
     name: Option<Vec<u8>>,
@@ -98,7 +99,7 @@ fn compare(a: &Key, b: &Key) -> Compared {
 }
 
 /// `line_type`: a key, its value and the position past its line.
-#[derive(Default)]
+#[derive(Default, EngineState)]
 struct Line {
     key: Key,
     value: Option<Vec<u8>>,
@@ -179,7 +180,7 @@ fn temp(req: &mut Request) -> Result<Option<Owner<Stream>>, Thrown> {
 }
 
 /// `inifile`: the walk's line and the line the last fetch found.
-#[derive(Default)]
+#[derive(Default, EngineState)]
 pub(crate) struct Inifile {
     curr: Line,
     next: Line,
