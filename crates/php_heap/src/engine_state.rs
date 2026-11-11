@@ -14,11 +14,18 @@
 //! read through: here, the primitives, the standard containers over
 //! engine state, a function pointer, [`Bytes`] and [`FrozenZval`]; in an
 //! extension's `src/ffi/`, a C library's immutable object, beside its
-//! `unsafe impl Sync`. The seal is the `engine-state` rule's sensor in
-//! `xtask api-check`, which refuses a hand-written impl anywhere else
-//! under `crates/`, `ext/` and `sapi/`, so outside the homes the derive
-//! is the one way a type comes to be engine state. [`Zval`] and every
-//! pointer into a request's heap have no impl.
+//! `unsafe impl Sync`, which is the homes' prose and no check: there a
+//! hand-written impl stands for any type. The seal is the `engine-state`
+//! rule's sensor in `xtask api-check`, which reads the syntax of every
+//! source a crate under `crates/`, `ext/` and `sapi/` compiles outside the
+//! homes, and refuses a hand-written impl there, whatever the trait's path
+//! or a `use .. as` renames it to, and each place it cannot read: a
+//! macro's impl whose trait is a metavariable, the trait handed to a macro
+//! defined elsewhere, an `include!` or `#[path]` it cannot follow, and a
+//! `build.rs` naming the trait beside an `OUT_DIR` include. A
+//! `build.rs` that writes the impl without naming the trait, and a rename
+//! another crate exports, stand outside what it reads (#4463). [`Zval`]
+//! and every pointer into a request's heap have no impl.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::{CString, OsString};
