@@ -8,13 +8,15 @@
 //! dropped, so a later body may reuse it.
 //!
 //! [`Pages`] is the seam under the arena, the one span and the cache
-//! maintenance between its two views, with three adapters: [`HeapPages`],
+//! maintenance between its two views, with four adapters: [`HeapPages`],
 //! the test adapter, one allocation of `UnsafeCell<u8>` with nothing to
 //! maintain, which tests the arena's bookkeeping under Miri; `MapJit`,
-//! macOS on x86-64 and aarch64, one `MAP_JIT` anonymous mapping whose two
-//! views are one address and, on Apple silicon, the per-thread
-//! `pthread_jit_write_protect_np` toggle around each write, with
-//! `sys_icache_invalidate` over the bytes written; and `Memfd`, Linux on
+//! macOS on aarch64, one `MAP_JIT` anonymous mapping whose two views are
+//! one address and the per-thread `pthread_jit_write_protect_np` toggle
+//! around each write, with `sys_icache_invalidate` over the bytes written;
+//! `Remapped`, macOS on x86-64, one anonymous mapping, never executed, and
+//! the second address `mach_vm_remap` gives its pages, never written, each
+//! held to its protection by its maximum (#4356); and `Memfd`, Linux on
 //! x86-64 and aarch64, one sealed `memfd` file mapped twice, written
 //! through the one view and executed through the other, with §4.4's cache
 //! maintenance over the executable addresses on aarch64. Where the build
@@ -65,6 +67,27 @@ pub(crate) trait Pages: Sized + Send + Sync {
     ///
     /// `range` lies inside the mapping.
     unsafe fn sync(&self, range: Range<usize>);
+
+    /// Makes an entry into `range`, a chunk the arena takes, reach what is
+    /// written there next and never what an earlier body there was
+    /// translated to: what
+    /// Rosetta 2 needs of the macOS x86-64 adapter, whose translations of
+    /// the executable view a write through the other view leaves standing.
+    /// Nothing for every other adapter.
+    ///
+    /// # Errors
+    ///
+    /// The OS error a protection change failed with; the chunk is then
+    /// not written.
+    ///
+    /// # Safety
+    ///
+    /// `range` lies inside the mapping, and no thread executes or reads
+    /// it: the arena takes only a chunk no `Code` names.
+    unsafe fn retaken(&self, range: Range<usize>) -> io::Result<()> {
+        let _ = range;
+        Ok(())
+    }
 
     /// The executable view's address of offset `at`, which lies inside the
     /// mapping; an address only, which reads and writes nothing.
@@ -363,7 +386,9 @@ impl<P: Pages> Arena<P> {
     }
 
     /// A free chunk, taken: its atomic cleared with an acquire that pairs
-    /// with the release of the last `Code` that left it.
+    /// with the release of the last `Code` that left it, and its pages
+    /// [`Pages::retaken`]; where they are refused, the chunk is let go
+    /// again, free, and nothing is taken.
     fn taken(&self) -> Result<Filling<P>, Full> {
         let index = (self.region.free.iter())
             .position(|flag| {
@@ -371,11 +396,17 @@ impl<P: Pages> Arena<P> {
                     .is_ok()
             })
             .ok_or(Full)?;
+        let chunk = Chunk {
+            region: Arc::clone(&self.region),
+            index: ChunkIdx(index),
+        };
+        let start = chunk.index.start();
+        let range = start..start + chunk.index.len(self.region.len);
+        // SAFETY: the chunk's range, inside the mapping; its flag was free,
+        // so no `Code` names it and no thread executes it.
+        unsafe { self.region.pages.retaken(range) }.map_err(|_| Full)?;
         Ok(Filling {
-            chunk: Arc::new(Chunk {
-                region: Arc::clone(&self.region),
-                index: ChunkIdx(index),
-            }),
+            chunk: Arc::new(chunk),
             cursor: 0,
         })
     }
@@ -471,8 +502,11 @@ impl HeapPages {
     }
 }
 
-#[cfg(all(php_jit_arena, target_os = "macos"))]
+#[cfg(all(php_jit_arena, target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use mac::MapJit;
+
+#[cfg(all(php_jit_arena, target_os = "macos", target_arch = "x86_64"))]
+pub(crate) use remap::Remapped;
 
 #[cfg(all(php_jit_arena, target_os = "linux"))]
 pub(crate) use linux::Memfd;
@@ -511,10 +545,10 @@ impl Pages for Unmapped {
 }
 
 /// One mapping an adapter owns, `len` bytes from `base`, unmapped when it
-/// drops: what `MapJit`'s one view, `Memfd`'s two and the jitdump's
-/// `mmap` event each are.
+/// drops: what `MapJit`'s one view, `Remapped`'s two and its fork's copy,
+/// `Memfd`'s two and the jitdump's `mmap` event each are.
 #[cfg(unix)]
-struct Mapping {
+pub(crate) struct Mapping {
     base: NonNull<u8>,
     len: usize,
 }
@@ -564,8 +598,9 @@ impl Mapping {
 #[cfg(unix)]
 impl Drop for Mapping {
     fn drop(&mut self) {
-        // SAFETY: the mapping this owns, made by `new` or by the Linux
-        // adapter's `view`, whose addresses nothing uses past its owner: an
+        // SAFETY: the mapping this owns, made by `new`, by the Linux
+        // adapter's `view` or by the macOS x86-64 adapter's `aliased`, and
+        // remapped only over itself, whose addresses nothing uses past its owner: an
         // arena's pages drop with their region, after the arena and the
         // last `Code`, each of which holds the region.
         unsafe { libc::munmap(self.base.as_ptr().cast(), self.len) };
@@ -690,20 +725,17 @@ pub(crate) fn thread_id() -> u32 {
     }
 }
 
-/// The macOS adapter (`jit-design.md` §4.4, `research/jit-research.r1.md`
-/// §B.8): one `MAP_JIT` mapping, the one span the platform allows, its
-/// two views one address, and no process-wide protection change after
-/// `map_pair`. Where the system has the per-thread write protection, as
-/// Apple silicon does, a thread writes the mapping only between its own
-/// `pthread_jit_write_protect_np(0)` and `(1)`, and every other thread
-/// sees it executable throughout. Where it has none, as Intel does, the
-/// mapping stays writable and executable on every thread as `mmap` made
-/// it, as php's ZTS buffer is only between `zend_jit_unprotect` and
-/// `zend_jit_protect`: php's `mprotect` back to `PROT_READ | PROT_EXEC`
-/// is the process-wide change §4.4 refuses, and Linux's write view
-/// stands writable the same way. `MAP_JIT` is what a hardened runtime with the
-/// `allow-jit` entitlement maps it under (#3524).
-#[cfg(all(php_jit_arena, target_os = "macos"))]
+/// The macOS aarch64 adapter (`jit-design.md` §4.4,
+/// `research/jit-research.r1.md` §B.8): one `MAP_JIT` mapping, the one
+/// span the platform allows, its two views one address, and no
+/// process-wide protection change after `map_pair`. Where the system has
+/// the per-thread write protection, as Apple silicon does, a thread writes
+/// the mapping only between its own `pthread_jit_write_protect_np(0)` and
+/// `(1)`, and every other thread sees it executable throughout. `MAP_JIT`
+/// is what a hardened runtime with the `allow-jit` entitlement maps it
+/// under (#3524). macOS x86-64 has no per-thread protection and takes the
+/// two views of `Remapped` instead (#4356).
+#[cfg(all(php_jit_arena, target_os = "macos", target_arch = "aarch64"))]
 mod mac {
     use std::io;
     use std::ops::Range;
@@ -711,7 +743,6 @@ mod mac {
 
     use super::{Mapping, Pages};
 
-    #[cfg(target_arch = "aarch64")]
     unsafe extern "C" {
         /// libSystem's cache maintenance over freshly written code:
         /// `<libkern/OSCacheControl.h>`.
@@ -732,8 +763,8 @@ mod mac {
         /// Apple silicon: executable on every thread but one that opened
         /// it for writing with `pthread_jit_write_protect_np(0)`.
         PerThread,
-        /// Intel: writable and executable on every thread as `mmap` made
-        /// it, with nothing to open.
+        /// A system without it: writable and executable on every thread
+        /// as `mmap` made it, with nothing to open.
         None,
     }
 
@@ -785,20 +816,12 @@ mod mac {
             unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), to, bytes.len()) };
         }
 
-        #[cfg(target_arch = "aarch64")]
         unsafe fn sync(&self, range: Range<usize>) {
             let start = self.rx(range.start).as_ptr().cast::<libc::c_void>();
             // SAFETY: the caller hands a range inside the mapping, which
             // lives as long as `self`.
             unsafe { sys_icache_invalidate(start, range.len()) };
         }
-
-        /// Nothing, as on Linux: x86-64's instruction caches are coherent
-        /// with stores, so php's `ir_mem_flush` does nothing there, its
-        /// `__builtin___clear_cache` emitting no instruction and its
-        /// `sys_icache_invalidate` on Apple aarch64 alone.
-        #[cfg(not(target_arch = "aarch64"))]
-        unsafe fn sync(&self, _: Range<usize>) {}
 
         fn rx(&self, at: usize) -> NonNull<u8> {
             self.map.at(at)
@@ -813,6 +836,328 @@ mod mac {
 
         unsafe fn adopt(&self, (): ()) -> io::Result<()> {
             Ok(())
+        }
+    }
+}
+
+/// The macOS x86-64 adapter (`jit-design.md` §4.4, #4356): one anonymous
+/// private mapping, `PROT_READ | PROT_WRITE`, the write view, and a second
+/// address of the same pages that `mach_vm_remap` makes without copying,
+/// `PROT_READ | PROT_EXEC`, the executable view; each view's maximum
+/// protection is then lowered to what it is, so neither is made writable
+/// and executable again, by `mprotect` or `mach_vm_protect`. The write view
+/// is written only by the thread holding the arena mutably and never
+/// executed, as Linux's is. Intel has no per-thread protection for a
+/// `MAP_JIT` mapping, and the kernel refuses to remap one, so this mapping
+/// is not `MAP_JIT`. A hardened runtime runs its pages only where the
+/// binary carries `com.apple.security.cs.allow-unsigned-executable-memory`
+/// and kills the process at the first instruction it runs there
+/// otherwise, `allow-jit` alone among it, so `map_pair` refuses where the
+/// system refuses an anonymous writable and executable page, which it does
+/// exactly then.
+///
+/// A fork copies each view on its own, so in its child the two views stop
+/// sharing pages: the child takes its own (`jit-design.md` §4.4), an
+/// anonymous mapping the chunks in use are copied into before the fork,
+/// remapped in the child over the executable view and then the write view.
+///
+/// Rosetta 2, which runs x86-64 code on Apple silicon, keeps what it
+/// translated at an executable address until that address is no longer executable,
+/// and a write through the write view is not seen there: a chunk is made
+/// read-only and executable again each time the arena takes it
+/// ([`Pages::retaken`]).
+#[cfg(all(php_jit_arena, target_os = "macos", target_arch = "x86_64"))]
+mod remap {
+    use std::io;
+    use std::ops::Range;
+    use std::ptr::NonNull;
+
+    use super::{Mapping, Pages, page_size};
+
+    /// `<mach/vm_inherit.h>`'s copy on fork, which `mmap` gives a private
+    /// mapping too.
+    const VM_INHERIT_COPY: libc::vm_inherit_t = 1;
+
+    /// `<mach/vm_statistics.h>`'s flags a remapping is placed by, which
+    /// the `libc` crate declares deprecated: at the address given, at one
+    /// the system chooses, and over what the address given maps.
+    const VM_FLAGS_FIXED: libc::c_int = 0x0000;
+    const VM_FLAGS_ANYWHERE: libc::c_int = 0x0001;
+    const VM_FLAGS_OVERWRITE: libc::c_int = 0x4000;
+
+    unsafe extern "C" {
+        /// This task's send right, which libSystem sets before `main` and again
+        /// in a fork's child: `<mach/mach_init.h>`'s `mach_task_self()`.
+        static mach_task_self_: libc::mach_port_t;
+
+        /// `<mach/mach_vm.h>`: `src_address`'s pages mapped at
+        /// `target_address`, shared where `copy` is false.
+        fn mach_vm_remap(
+            target_task: libc::vm_map_t,
+            target_address: *mut libc::mach_vm_address_t,
+            size: libc::mach_vm_size_t,
+            mask: libc::mach_vm_offset_t,
+            flags: libc::c_int,
+            src_task: libc::vm_map_t,
+            src_address: libc::mach_vm_address_t,
+            copy: libc::boolean_t,
+            cur_protection: *mut libc::vm_prot_t,
+            max_protection: *mut libc::vm_prot_t,
+            inheritance: libc::vm_inherit_t,
+        ) -> libc::kern_return_t;
+
+        /// `<mach/mach_vm.h>`: a range's protection, or its maximum where
+        /// `set_maximum` is true, which also lowers the protection to it.
+        fn mach_vm_protect(
+            target_task: libc::vm_map_t,
+            address: libc::mach_vm_address_t,
+            size: libc::mach_vm_size_t,
+            set_maximum: libc::boolean_t,
+            new_protection: libc::vm_prot_t,
+        ) -> libc::kern_return_t;
+    }
+
+    /// One anonymous mapping's two views.
+    pub(crate) struct Remapped {
+        written: Mapping,
+        executed: Mapping,
+    }
+
+    impl Pages for Remapped {
+        fn map_pair(len: usize) -> io::Result<Self> {
+            if !runs_unsigned_pages() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "a hardened runtime without allow-unsigned-executable-memory runs no code it wrote",
+                ));
+            }
+            let rw = libc::PROT_READ | libc::PROT_WRITE;
+            let written = Mapping::new(len, rw, libc::MAP_PRIVATE | libc::MAP_ANON, None)?;
+            let executed = aliased(&written)?;
+            // SAFETY: the views are fresh, so no thread runs or reads them.
+            unsafe { protect(executed.base, len, libc::PROT_READ | libc::PROT_EXEC) }?;
+            // SAFETY: the same.
+            unsafe { cap(&executed, libc::VM_PROT_READ | libc::VM_PROT_EXECUTE) }?;
+            // SAFETY: the same.
+            unsafe { cap(&written, libc::VM_PROT_READ | libc::VM_PROT_WRITE) }?;
+            Ok(Remapped { written, executed })
+        }
+
+        unsafe fn write(&self, at: usize, bytes: &[u8]) {
+            let to = self.written.at(at).as_ptr();
+            // SAFETY: the caller hands a range inside the mapping that no
+            // thread executes or reads, and `bytes` is not in it.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), to, bytes.len()) };
+        }
+
+        /// Nothing, as on Linux: x86-64's instruction caches are coherent
+        /// with stores, snooped by physical address, so a store through
+        /// either view is what the next fetch sees, and php's
+        /// `ir_mem_flush` does nothing there.
+        unsafe fn sync(&self, _: Range<usize>) {}
+
+        /// The chunk's executable addresses made read-only and then
+        /// readable and executable again, the change Rosetta 2 drops what
+        /// it translated there on; on Intel two calls that change nothing
+        /// a thread sees, since no thread runs the chunk.
+        unsafe fn retaken(&self, range: Range<usize>) -> io::Result<()> {
+            let at = self.executed.at(range.start);
+            // SAFETY: the caller hands a range inside the mapping that no
+            // thread executes or reads.
+            unsafe { protect(at, range.len(), libc::PROT_READ) }?;
+            // SAFETY: the same, back to what `map_pair` made it.
+            unsafe { protect(at, range.len(), libc::PROT_READ | libc::PROT_EXEC) }
+        }
+
+        fn rx(&self, at: usize) -> NonNull<u8> {
+            self.executed.at(at)
+        }
+
+        /// An anonymous mapping of the span's length.
+        type Own = Mapping;
+
+        fn own(&self, kept: &mut dyn Iterator<Item = Range<usize>>) -> io::Result<Mapping> {
+            let rw = libc::PROT_READ | libc::PROT_WRITE;
+            let own = Mapping::new(
+                self.written.len,
+                rw,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                None,
+            )?;
+            for range in kept {
+                let (from, to) = (self.written.at(range.start), own.at(range.start));
+                // SAFETY: `range` lies inside both mappings, of one length;
+                // no thread writes the write view while the arena's holder
+                // copies it, and `own` is fresh and this call's alone.
+                unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), to.as_ptr(), range.len()) };
+            }
+            Ok(own)
+        }
+
+        /// `own` made readable and executable and remapped over the
+        /// executable view, so its code never stands unexecutable, and
+        /// then over the write view, made readable and writable; each
+        /// view's maximum lowered again. `own`'s own address is unmapped
+        /// as it drops, and the views keep its pages. A refusal past the
+        /// first remapping leaves the code standing on the copy, and the
+        /// caller writes no more.
+        unsafe fn adopt(&self, own: Mapping) -> io::Result<()> {
+            // SAFETY: `own` is this call's alone, and no thread runs it.
+            unsafe { protect(own.base, own.len, libc::PROT_READ | libc::PROT_EXEC) }?;
+            // SAFETY: the caller hands a copy of every byte any thread
+            // executes, now executable, and the executable view is this
+            // adapter's own mapping, of `own`'s length.
+            unsafe { over(&own, &self.executed) }?;
+            // SAFETY: lowers the maximum to what the view is.
+            unsafe { cap(&self.executed, libc::VM_PROT_READ | libc::VM_PROT_EXECUTE) }?;
+            // SAFETY: the same copy, over the write view, which nothing
+            // executes and only the arena's holder, the caller, writes.
+            unsafe { over(&own, &self.written) }?;
+            let rw = libc::PROT_READ | libc::PROT_WRITE;
+            // SAFETY: the write view, which no thread executes.
+            unsafe { protect(self.written.base, self.written.len, rw) }?;
+            // SAFETY: lowers the maximum to what the view is.
+            unsafe { cap(&self.written, libc::VM_PROT_READ | libc::VM_PROT_WRITE) }
+        }
+    }
+
+    #[cfg(test)]
+    impl Remapped {
+        /// The write view's address of offset `at`.
+        pub(super) fn written(&self, at: usize) -> NonNull<u8> {
+            self.written.at(at)
+        }
+    }
+
+    /// Whether this process may enter pages it wrote and did not sign: what
+    /// the system answers a fresh anonymous writable and executable page,
+    /// never written and unmapped at once. A hardened runtime refuses it,
+    /// and kills the process at the first instruction it runs from the
+    /// executable view, unless the binary carries
+    /// `allow-unsigned-executable-memory`; the two agreed under each of
+    /// seven signings, measured under Rosetta 2 (#4356).
+    fn runs_unsigned_pages() -> bool {
+        let rwx = libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC;
+        Mapping::new(page_size(), rwx, libc::MAP_PRIVATE | libc::MAP_ANON, None).is_ok()
+    }
+
+    /// This task's send right, the one every call here maps in.
+    fn task() -> libc::vm_map_t {
+        // SAFETY: a word libSystem sets before any thread of the process
+        // runs, and before anything runs in a fork's child.
+        unsafe { mach_task_self_ }
+    }
+
+    /// `from`'s pages at a second address the system chooses, shared and
+    /// not copied, with `from`'s protection and maximum.
+    fn aliased(from: &Mapping) -> io::Result<Mapping> {
+        let mut at = 0;
+        // SAFETY: an address the system chooses, so it overlaps nothing.
+        unsafe { remapped(from, &mut at, VM_FLAGS_ANYWHERE) }?;
+        // The kernel's new mapping, whose address it hands back as a word,
+        // as `mmap` hands back its own.
+        let at = std::ptr::with_exposed_provenance_mut::<u8>(
+            usize::try_from(at).map_err(io::Error::other)?,
+        );
+        let base = NonNull::new(at).ok_or_else(|| io::Error::other("a mapping at null"))?;
+        Ok(Mapping {
+            base,
+            len: from.len,
+        })
+    }
+
+    /// `from`'s pages remapped over `view`, at its address and for its
+    /// length, replacing the pages behind it.
+    ///
+    /// # Safety
+    ///
+    /// `view` is a mapping of the adapter's of `from`'s length, and
+    /// wherever any thread reads or executes it, `from` holds the bytes
+    /// the view holds, executable where it is executed.
+    unsafe fn over(from: &Mapping, view: &Mapping) -> io::Result<()> {
+        let mut at = view.base.as_ptr().addr() as libc::mach_vm_address_t;
+        let flags = VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
+        // SAFETY: exactly the range `view` owns, which the caller has said
+        // holds what `from` holds wherever it is used.
+        unsafe { remapped(from, &mut at, flags) }?;
+        if at == view.base.as_ptr().addr() as libc::mach_vm_address_t {
+            Ok(())
+        } else {
+            Err(io::Error::other("a view remapped at another address"))
+        }
+    }
+
+    /// `mach_vm_remap` of `from` at `at` under `flags`, shared, a fork's
+    /// child taking a copy; `at` is where it landed.
+    ///
+    /// # Safety
+    ///
+    /// Where `flags` names a fixed address, what `at` names may be
+    /// replaced: [`over`]'s contract.
+    unsafe fn remapped(
+        from: &Mapping,
+        at: &mut libc::mach_vm_address_t,
+        flags: libc::c_int,
+    ) -> io::Result<()> {
+        let (mut cur, mut max) = (0, 0);
+        let source = from.base.as_ptr().addr() as libc::mach_vm_address_t;
+        let len = from.len as libc::mach_vm_size_t;
+        let task = task();
+        // SAFETY: `from` is a live mapping of `len` bytes, and the caller
+        // vouches for the target; the out-parameters are live locals.
+        let kr = unsafe {
+            mach_vm_remap(
+                task,
+                at,
+                len,
+                0,
+                flags,
+                task,
+                source,
+                0,
+                &raw mut cur,
+                &raw mut max,
+                VM_INHERIT_COPY,
+            )
+        };
+        match kr {
+            libc::KERN_SUCCESS => Ok(()),
+            kr => Err(io::Error::other(format!(
+                "mach_vm_remap: kern_return_t {kr}"
+            ))),
+        }
+    }
+
+    /// `mprotect` over `len` bytes from `at`.
+    ///
+    /// # Safety
+    ///
+    /// The range is inside one of the adapter's mappings, and wherever a
+    /// thread executes or reads it, `prot` keeps what that thread needs.
+    unsafe fn protect(at: NonNull<u8>, len: usize, prot: libc::c_int) -> io::Result<()> {
+        // SAFETY: the caller's contract.
+        match unsafe { libc::mprotect(at.as_ptr().cast(), len, prot) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    /// `view`'s maximum protection lowered to `prot`, and its protection
+    /// with it: what no later `mprotect` or `mach_vm_protect` may raise.
+    ///
+    /// # Safety
+    ///
+    /// [`protect`]'s contract, for the whole view.
+    unsafe fn cap(view: &Mapping, prot: libc::vm_prot_t) -> io::Result<()> {
+        let at = view.base.as_ptr().addr() as libc::mach_vm_address_t;
+        let len = view.len as libc::mach_vm_size_t;
+        let task = task();
+        // SAFETY: the caller's contract.
+        match unsafe { mach_vm_protect(task, at, len, 1, prot) } {
+            libc::KERN_SUCCESS => Ok(()),
+            kr => Err(io::Error::other(format!(
+                "mach_vm_protect: kern_return_t {kr}"
+            ))),
         }
     }
 }
@@ -1415,6 +1760,78 @@ mod native {
         assert_eq!(next.chunk(), filler.chunk());
         assert_eq!((entered(&before)(), entered(&next)()), (7, 9));
         drop(filler);
+        Ok(())
+    }
+
+    /// A chunk the arena takes again runs the body published into it and
+    /// never the one it held: 7 entered at the chunk's start until any
+    /// translation of it stands, dropped with the filler beside it, and 8
+    /// published at the same address. Under Rosetta 2 the macOS x86-64
+    /// adapter answers 7 here without [`Pages::retaken`]'s protection
+    /// change (#4356).
+    ///
+    /// [`Pages::retaken`]: super::Pages::retaken
+    #[test]
+    fn a_chunk_taken_again_runs_its_new_body_at_the_old_address() -> Result<(), String> {
+        let mut arena = arena(1)?;
+        let first = published(&mut arena, 7)?;
+        let filler = (arena.publish(&vec![0; CHUNK - 8], 1)).map_err(|Full| "no room")?;
+        let address = first.entry();
+        assert!((0..10_000).all(|_| entered(&first)() == 7));
+        drop((first, filler));
+        let second = published(&mut arena, 8)?;
+        assert_eq!(second.entry(), address, "the chunk taken again");
+        assert_eq!(entered(&second)(), 8);
+        Ok(())
+    }
+
+    /// macOS x86-64's two views (#4356): two addresses of one span, what
+    /// the write view holds the executable view reads and runs, and each
+    /// refuses, by `mprotect`'s answer, the protection that would make it
+    /// the other: the write view is never made executable and the
+    /// executable view never writable, their maxima lowered to what each
+    /// is. Built for `x86_64-apple-darwin` alone, which the host's reading
+    /// on Apple silicon does not build.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    #[test]
+    fn the_write_view_is_never_executable_and_the_executable_view_never_writable()
+    -> Result<(), String> {
+        use super::Pages;
+        let mut arena = arena(1)?;
+        let code = published(&mut arena, 7)?;
+        let pages = &arena.region.pages;
+        let at = code.entry().as_ptr().addr() - pages.rx(0).as_ptr().addr();
+        let written = pages.written(at);
+        assert_ne!(written, code.entry());
+        let body = returning(7);
+        // SAFETY: the write view's bytes of the body just published, which
+        // nothing writes while the arena is held here.
+        let seen = unsafe { std::slice::from_raw_parts(written.as_ptr(), body.len()) };
+        assert_eq!(seen, body);
+        assert_eq!(entered(&code)(), 7);
+        let (written, executed) = (pages.written(0), pages.rx(0));
+        let refused = |view: std::ptr::NonNull<u8>, prot| {
+            // SAFETY: a change of the whole one-chunk view, which its
+            // maximum refuses, so it changes nothing; were it allowed, the
+            // test fails here, and nothing runs or writes the arena again.
+            let changed = unsafe { libc::mprotect(view.as_ptr().cast(), CHUNK, prot) };
+            changed == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+        };
+        let (r, w, x) = (libc::PROT_READ, libc::PROT_WRITE, libc::PROT_EXEC);
+        assert!(
+            refused(written, r | w | x),
+            "the write view made writable and executable"
+        );
+        assert!(refused(written, r | x), "the write view made executable");
+        assert!(
+            refused(executed, r | w | x),
+            "the executable view made writable and executable"
+        );
+        assert!(
+            refused(executed, r | w),
+            "the executable view made writable"
+        );
+        assert_eq!(entered(&code)(), 7);
         Ok(())
     }
 
