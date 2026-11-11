@@ -266,6 +266,60 @@ fn fresh_but_test(root: &Path, manifest: &Manifest, store: &Store) {
     }
 }
 
+/// The fixture's crate with one test that passes only in a build of the
+/// workspace's `release-da` profile: its executable under that profile's
+/// directory, with debug assertions on.
+const RELEASE_DA: &str = r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn built_under_release_da() {
+        let exe = std::env::current_exe().expect("the executable");
+        let dir = exe.parent().and_then(|deps| deps.parent()).expect("its profile's directory");
+        assert_eq!(dir.file_name().and_then(|n| n.to_str()), Some("release-da"), "{}", exe.display());
+        assert!(cfg!(debug_assertions), "release-da keeps debug assertions on");
+    }
+}
+"#;
+
+/// A crate whose `[package.metadata.xtask.test]` names `profile =
+/// "release-da"` has its tests built and run under that profile, its
+/// doctests among them, so the debug build's sensors run at release
+/// optimisation (#4348's ruling 4, #4361); the same crate without the
+/// declaration is built under `cargo test`'s profile and fails, the
+/// negative control.
+#[test]
+fn a_crate_that_names_release_da_has_its_tests_built_under_it() {
+    let root = scratch("test-release-da");
+    let cargo = root.join("Cargo.toml");
+    let workspace = std::fs::read_to_string(&cargo).expect("the workspace's manifest");
+    std::fs::write(
+        &cargo,
+        format!(
+            "{workspace}\n[profile.release-da]\ninherits = \"release\"\ndebug-assertions = true\n"
+        ),
+    )
+    .expect("the profile");
+    std::fs::write(root.join("crates/php_heap/src/lib.rs"), RELEASE_DA).expect("the test");
+    let root = committed(root);
+    let manifest = Manifest::load(&root).expect("the manifest");
+    let readings = test::run(&root, &manifest, &[]).expect("the readings");
+    assert_eq!(readings[0].status, Status::Fail, "{readings:#?}");
+    assert!(
+        readings[0].message.contains("built_under_release_da"),
+        "{readings:#?}"
+    );
+    let package = root.join("crates/php_heap/Cargo.toml");
+    let text = std::fs::read_to_string(&package).expect("the package's manifest");
+    std::fs::write(
+        &package,
+        format!("{text}\n[package.metadata.xtask.test]\nprofile = \"release-da\"\n"),
+    )
+    .expect("the declaration");
+    let readings = test::run(&root, &manifest, &[]).expect("the readings");
+    assert_eq!(readings[0].status, Status::Pass, "{readings:#?}");
+    assert_eq!(int(&readings[0], "passed"), 1, "{readings:#?}");
+}
+
 /// The fixture's crate with three tests, two of which skip for a fact
 /// the machine did not promise, one of them twice, each line written to
 /// the file the variable names as `Promise::or_skip` and
