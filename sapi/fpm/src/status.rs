@@ -40,11 +40,99 @@ enum Form {
     OpenMetrics,
 }
 
+impl Form {
+    /// A request's `text` as the full page writes it in this form: through
+    /// [`escape_html`] in `charset` in the html and xml forms and
+    /// [`escape_json`] in the json form, as `fpm_status_handle_request`
+    /// writes the URI and the query (`Z/sapi/fpm/fpm/fpm_status.c:553-596`);
+    /// the plain form writes it decoded, and the openmetrics form writes no
+    /// process.
+    fn encode(self, text: &[u8], charset: Charset) -> Vec<u8> {
+        match self {
+            Form::Html | Form::Xml => escape_html(text, charset),
+            Form::Json => escape_json(text),
+            Form::Plain | Form::OpenMetrics => {
+                String::from_utf8_lossy(text).into_owned().into_bytes()
+            }
+        }
+    }
+}
+
+/// Whether the charset `php_escape_html_entities_ex` takes when it is
+/// named none, `determine_charset`'s, is UTF-8: `internal_encoding`
+/// where it is set, else `default_charset` (`get_default_charset`,
+/// `Z/ext/standard/html.c:77-85`), UTF-8 where neither names a charset
+/// of `charset_map`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Charset {
+    Utf8,
+    /// A charset of `charset_map` other than UTF-8.
+    Other,
+}
+
+impl Charset {
+    /// `charset_map`'s names other than `utf-8`
+    /// (`Z/ext/standard/html_tables.h:40-74`), matched without case.
+    const OTHERS: [&'static str; 32] = [
+        "ISO-8859-1",
+        "ISO8859-1",
+        "ISO-8859-15",
+        "ISO8859-15",
+        "cp1252",
+        "Windows-1252",
+        "1252",
+        "BIG5",
+        "950",
+        "GB2312",
+        "936",
+        "BIG5-HKSCS",
+        "Shift_JIS",
+        "SJIS",
+        "932",
+        "SJIS-win",
+        "CP932",
+        "EUCJP",
+        "EUC-JP",
+        "eucJP-win",
+        "KOI8-R",
+        "koi8-ru",
+        "koi8r",
+        "cp1251",
+        "Windows-1251",
+        "win-1251",
+        "iso8859-5",
+        "iso-8859-5",
+        "cp866",
+        "866",
+        "ibm866",
+        "MacRoman",
+    ];
+
+    /// `determine_charset` over `internal_encoding` and then
+    /// `default_charset`, each `None` or empty where it names nothing.
+    pub(crate) fn of(internal_encoding: Option<&[u8]>, default_charset: Option<&[u8]>) -> Charset {
+        let named = [internal_encoding, default_charset]
+            .into_iter()
+            .flatten()
+            .find(|name| !name.is_empty())
+            .unwrap_or_default();
+        if Self::OTHERS
+            .iter()
+            .any(|other| other.as_bytes().eq_ignore_ascii_case(named))
+        {
+            Charset::Other
+        } else {
+            Charset::Utf8
+        }
+    }
+}
+
 /// `php_escape_html_entities_ex` under `ENT_DISALLOWED | ENT_HTML_DOC_XML1
-/// | ENT_COMPAT` in UTF-8: `&`, `"`, `<` and `>` escaped, a character
-/// XML 1.0 does not allow as `&#xFFFD;`, and nothing where the text is
-/// not UTF-8.
-fn escape_html(text: &[u8]) -> Vec<u8> {
+/// | ENT_COMPAT`: `&`, `"`, `<` and `>` escaped, a character XML 1.0 does
+/// not allow written as the replacement `charset` takes, U+FFFD in UTF-8
+/// and `&#xFFFD;` in any other (`Z/ext/standard/html.c:1163-1171`), and
+/// nothing where the text is not UTF-8.
+fn escape_html(text: &[u8], charset: Charset) -> Vec<u8> {
     let Ok(text) = std::str::from_utf8(text) else {
         return Vec::new();
     };
@@ -56,9 +144,10 @@ fn escape_html(text: &[u8]) -> Vec<u8> {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '\t' | '\n' | '\r' => out.push(c),
-            c if (c as u32) < 0x20 || c == '\u{FFFE}' || c == '\u{FFFF}' => {
-                out.push_str("&#xFFFD;");
-            }
+            c if (c as u32) < 0x20 || c == '\u{FFFE}' || c == '\u{FFFF}' => match charset {
+                Charset::Utf8 => out.push('\u{FFFD}'),
+                Charset::Other => out.push_str("&#xFFFD;"),
+            },
             c => out.push(c),
         }
     }
@@ -67,7 +156,9 @@ fn escape_html(text: &[u8]) -> Vec<u8> {
 
 /// `php_json_encode_string` under `PHP_JSON_INVALID_UTF8_IGNORE`, without
 /// its quotes: `"`, `\\` and `/` escaped, a control character and every
-/// character past ASCII as `\uXXXX`, a byte that is not UTF-8 dropped.
+/// character past ASCII as `\uXXXX`, DEL as itself, which the encoder's
+/// `charmap` leaves (`Z/ext/json/json_encoder.c:404`), a byte that is
+/// not UTF-8 dropped.
 fn escape_json(text: &[u8]) -> Vec<u8> {
     let text = String::from_utf8_lossy(text).replace('\u{FFFD}', "");
     let mut out = String::new();
@@ -81,7 +172,7 @@ fn escape_json(text: &[u8]) -> Vec<u8> {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+            c if (c as u32) < 0x20 || (c as u32) > 0x7f => {
                 let mut units = [0u16; 2];
                 for unit in c.encode_utf16(&mut units) {
                     write!(out, "\\u{unit:04x}").ok();
@@ -120,9 +211,14 @@ fn internal_error() -> HostPage {
 
 /// `fpm_status_handle_request`'s status half over `board`, a copy taken
 /// with its slots where `$_GET` names `full`, none where the copy failed;
-/// `keys` are `$_GET`'s.
+/// `keys` are `$_GET`'s, and `charset` the html escape's.
 #[allow(clippy::too_many_lines)] // php's one function, kept as one
-pub(crate) fn status(board: Option<&BoardView>, keys: &[Vec<u8>], head_only: bool) -> HostPage {
+pub(crate) fn status(
+    board: Option<&BoardView>,
+    keys: &[Vec<u8>],
+    head_only: bool,
+    charset: Charset,
+) -> HostPage {
     let has = |key: &str| keys.iter().any(|k| k.as_slice() == key.as_bytes());
     let full = has("full");
     let mut headers = vec![EXPIRES.to_vec(), CACHE_CONTROL.to_vec()];
@@ -274,7 +370,7 @@ max children reached: {}\nslow requests:        {}\nmemory peak:          {}\n",
             body.extend_from_slice(separator);
         }
         first = false;
-        body.extend_from_slice(&process(form, proc, now, now_us));
+        body.extend_from_slice(&process(form, charset, proc, now, now_us));
     }
     body.extend_from_slice(post);
     HostPage {
@@ -284,59 +380,160 @@ max children reached: {}\nslow requests:        {}\nmemory peak:          {}\n",
     }
 }
 
-/// One process of the full page, `full_syntax`.
-fn process(form: Form, proc: &ProcView, now: i64, now_us: i64) -> Vec<u8> {
-    let encode = |text: &[u8]| match form {
-        Form::Html | Form::Xml => escape_html(text),
-        Form::Json => escape_json(text),
-        _ => text.to_vec(),
+/// The full page's process columns, as the json form and the html table's
+/// head name them; the xml form joins a name's words with `-`, and the
+/// plain form writes `request URI`.
+const COLUMNS: [&str; 13] = [
+    "pid",
+    "state",
+    "start time",
+    "start since",
+    "requests",
+    "request duration",
+    "request method",
+    "request uri",
+    "content length",
+    "user",
+    "script",
+    "last request cpu",
+    "last request memory",
+];
+
+/// One cell of a process row. What the request carried is a `Word` or the
+/// `Request`, which [`row`] writes through [`Form::encode`]; every other
+/// cell holds a number the engine counted, so no cell lays a request's
+/// bytes on the page as they came.
+enum Cell<'a> {
+    /// A word the request carried, `-` where it is empty.
+    Word(&'a [u8]),
+    /// The URI, `-` where it is empty, then `?` and the query where there
+    /// is one, each encoded on its own, as php encodes them.
+    Request { uri: &'a [u8], query: &'a [u8] },
+    /// A count, in decimal.
+    Count(i128),
+    /// A time, as [`when`] writes it in the form.
+    Time(i64),
+    /// A CPU share, to two places.
+    Cpu(f64),
+}
+
+impl Cell<'_> {
+    /// The cell's value as `form` writes it, without the json form's
+    /// quotes.
+    fn written(&self, form: Form, charset: Charset) -> Vec<u8> {
+        let word = |text: &[u8]| {
+            if text.is_empty() {
+                b"-".to_vec()
+            } else {
+                form.encode(text, charset)
+            }
+        };
+        match *self {
+            Cell::Word(text) => word(text),
+            Cell::Request { uri, query } => {
+                let mut out = word(uri);
+                if !query.is_empty() {
+                    out.push(b'?');
+                    out.extend(form.encode(query, charset));
+                }
+                out
+            }
+            Cell::Count(n) => n.to_string().into_bytes(),
+            Cell::Time(epoch) => when(form, epoch).into_bytes(),
+            Cell::Cpu(share) => format!("{share:.2}").into_bytes(),
+        }
+    }
+}
+
+/// One process of the full page, `full_syntax`: each of `cells` under its
+/// column of [`COLUMNS`], written as `form` lays a row out.
+fn row(form: Form, charset: Charset, cells: &[Cell; COLUMNS.len()]) -> Vec<u8> {
+    let mut out = match form {
+        Form::Html => b"<tr>".to_vec(),
+        Form::Xml => b"<process>".to_vec(),
+        Form::Json => b"{".to_vec(),
+        Form::Plain | Form::OpenMetrics => b"\n************************\n".to_vec(),
     };
-    let uri = if proc.request_uri.is_empty() {
-        b"-".to_vec()
-    } else {
-        encode(&proc.request_uri)
-    };
-    let query = (!proc.query_string.is_empty()).then(|| encode(&proc.query_string));
+    for (n, (name, cell)) in COLUMNS.iter().zip(cells).enumerate() {
+        let value = cell.written(form, charset);
+        match form {
+            Form::Html => {
+                out.extend_from_slice(b"<td>");
+                out.extend(value);
+                out.extend_from_slice(b"</td>");
+            }
+            Form::Xml => {
+                let tag = name.replace(' ', "-");
+                out.extend(format!("<{tag}>").into_bytes());
+                out.extend(value);
+                out.extend(format!("</{tag}>").into_bytes());
+            }
+            Form::Json => {
+                let quote: &[u8] = match cell {
+                    Cell::Word(_) | Cell::Request { .. } => b"\"",
+                    Cell::Count(_) | Cell::Time(_) | Cell::Cpu(_) => b"",
+                };
+                if n > 0 {
+                    out.push(b',');
+                }
+                out.extend(format!("\"{name}\":").into_bytes());
+                out.extend_from_slice(quote);
+                out.extend(value);
+                out.extend_from_slice(quote);
+            }
+            Form::Plain | Form::OpenMetrics => {
+                let label = if *name == "request uri" {
+                    "request URI"
+                } else {
+                    name
+                };
+                out.extend(format!("{:<22}", format!("{label}:")).into_bytes());
+                out.extend(value);
+                out.push(b'\n');
+            }
+        }
+    }
+    out.extend_from_slice(match form {
+        Form::Html => b"</tr>\n".as_slice(),
+        Form::Xml => b"</process>\n",
+        Form::Json => b"}",
+        Form::Plain | Form::OpenMetrics => b"",
+    });
+    out
+}
+
+/// One process of the full page, its cells from `proc`.
+fn process(form: Form, charset: Charset, proc: &ProcView, now: i64, now_us: i64) -> Vec<u8> {
     let idle = proc.stage() == Stage::Accepting;
     let duration = if idle {
         proc.duration_us
     } else {
         now_us - proc.accepted_us
     };
-    let cpu = if idle { proc.cpu() } else { 0.0 };
-    let memory = if idle { proc.memory } else { 0 };
-    let or_dash = |v: &[u8]| {
-        if v.is_empty() {
-            String::from("-")
-        } else {
-            String::from_utf8_lossy(v).into_owned()
-        }
-    };
-    let method = or_dash(&proc.request_method);
-    let user = or_dash(&proc.auth_user);
-    let script = or_dash(&proc.script_filename);
-    let request = format!(
-        "{}{}{}",
-        String::from_utf8_lossy(&uri),
-        if query.is_some() { "?" } else { "" },
-        String::from_utf8_lossy(query.as_deref().unwrap_or_default())
-    );
-    let start = when(form, proc.start_epoch);
-    let since = u64::try_from(now - proc.start_epoch).unwrap_or(0);
-    let (pid, state, requests, length) = (
-        proc.pid,
-        proc.stage().name(),
-        proc.requests,
-        proc.content_length,
-    );
-    let duration = u64::try_from(duration).unwrap_or(0);
-    match form {
-        Form::Html => format!("<tr><td>{pid}</td><td>{state}</td><td>{start}</td><td>{since}</td><td>{requests}</td><td>{duration}</td><td>{method}</td><td>{request}</td><td>{length}</td><td>{user}</td><td>{script}</td><td>{cpu:.2}</td><td>{memory}</td></tr>\n"),
-        Form::Xml => format!("<process><pid>{pid}</pid><state>{state}</state><start-time>{start}</start-time><start-since>{since}</start-since><requests>{requests}</requests><request-duration>{duration}</request-duration><request-method>{method}</request-method><request-uri>{request}</request-uri><content-length>{length}</content-length><user>{user}</user><script>{script}</script><last-request-cpu>{cpu:.2}</last-request-cpu><last-request-memory>{memory}</last-request-memory></process>\n"),
-        Form::Json => format!("{{\"pid\":{pid},\"state\":\"{state}\",\"start time\":{start},\"start since\":{since},\"requests\":{requests},\"request duration\":{duration},\"request method\":\"{method}\",\"request uri\":\"{request}\",\"content length\":{length},\"user\":\"{user}\",\"script\":\"{script}\",\"last request cpu\":{cpu:.2},\"last request memory\":{memory}}}"),
-        _ => format!("\n************************\npid:                  {pid}\nstate:                {state}\nstart time:           {start}\nstart since:          {since}\nrequests:             {requests}\nrequest duration:     {duration}\nrequest method:       {method}\nrequest URI:          {request}\ncontent length:       {length}\nuser:                 {user}\nscript:               {script}\nlast request cpu:     {cpu:.2}\nlast request memory:  {memory}\n"),
-    }
-    .into_bytes()
+    row(
+        form,
+        charset,
+        &[
+            Cell::Count(i128::from(proc.pid)),
+            Cell::Word(proc.stage().name().as_bytes()),
+            Cell::Time(proc.start_epoch),
+            Cell::Count(i128::from(
+                u64::try_from(now - proc.start_epoch).unwrap_or(0),
+            )),
+            Cell::Count(i128::from(proc.requests)),
+            Cell::Count(i128::from(u64::try_from(duration).unwrap_or(0))),
+            Cell::Word(&proc.request_method),
+            Cell::Request {
+                uri: &proc.request_uri,
+                query: &proc.query_string,
+            },
+            Cell::Count(i128::from(proc.content_length)),
+            Cell::Word(&proc.auth_user),
+            Cell::Word(&proc.script_filename),
+            Cell::Cpu(if idle { proc.cpu() } else { 0.0 }),
+            Cell::Count(i128::from(if idle { proc.memory } else { 0 })),
+        ],
+    )
 }
 
 /// `fpm_status_export_to_zval`: `fpm_get_status()`'s array.
