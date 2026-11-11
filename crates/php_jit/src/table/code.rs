@@ -1405,7 +1405,11 @@ mod linux {
 #[cfg(all(test, unix))]
 impl<T> NullTable<T> {
     /// How many of the table's pages are in memory, as `mincore` reads
-    /// them: none before a first write.
+    /// them: none before a first write. A page here is the kernel's, the
+    /// granule a write makes resident, of which `mincore` reports a byte
+    /// per page of the process's: an x86-64 process under Rosetta 2 reads
+    /// four 4 KiB bytes for each 16 KiB page, all four or none, counted
+    /// from the mapping's base (#4460).
     pub(crate) fn resident_pages(&self) -> usize {
         let Some(map) = &self.map else {
             return 0;
@@ -1421,9 +1425,39 @@ impl<T> NullTable<T> {
             )
         };
         assert_eq!(read, 0, "mincore: {}", io::Error::last_os_error());
+        let per = (kernel_page_size() / page_size()).max(1);
         // The low bit is "in core" on macOS and on Linux.
-        seen.iter().filter(|page| **page & 1 != 0).count()
+        seen.chunks(per)
+            .filter(|pages| pages.iter().any(|page| *page & 1 != 0))
+            .count()
     }
+}
+
+/// The kernel's page, the granule `mincore` reads residency in: on macOS
+/// libSystem's `vm_kernel_page_size`, which is the process's page natively
+/// and four of them for an x86-64 process under Rosetta 2, measured 16384
+/// there against `sysconf`'s 4096 (#4460); the process's page elsewhere,
+/// or where the word is no page.
+#[cfg(all(test, unix))]
+fn kernel_page_size() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: reads a word libSystem writes before `main` and never
+        // after, so the read races nothing.
+        let page = unsafe { vm_kernel_page_size };
+        if page.is_power_of_two() && page >= page_size() {
+            return page;
+        }
+    }
+    page_size()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+unsafe extern "C" {
+    /// `<mach/vm_page_size.h>`'s page of the kernel, which libSystem's
+    /// `mach_init` writes before `main`; the `libc` crate declares its
+    /// `vm_page_size` beside it and not this one.
+    static vm_kernel_page_size: libc::vm_size_t;
 }
 
 #[cfg(test)]
@@ -1444,7 +1478,7 @@ mod tests {
         for slot in table.iter() {
             slot.store(NonNull::dangling().as_ptr(), Ordering::Release);
         }
-        let pages = (100_000 * size_of::<usize>()).div_ceil(page_size());
+        let pages = (100_000 * size_of::<usize>()).div_ceil(kernel_page_size());
         assert_eq!(table.resident_pages(), pages);
     }
 
