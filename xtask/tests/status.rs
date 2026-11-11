@@ -326,8 +326,10 @@ fn scratch_poured(name: &str, fixture: &str) -> Tree {
 /// The stand-in `brew` of [`pinned_php`], `@prefix@` its Homebrew prefix.
 /// It answers `--prefix`, and under `DRY_RUN=1` nothing else. Outside a
 /// dry run it writes each call to `@prefix@/calls` and answers as far as
-/// a pour goes: a pin, an unpin, an uninstall and a tap listing no tap
-/// succeed, `tap-new` and `--repository` give the tap `@prefix@/tap`,
+/// a pour goes: a pin, an unpin and a tap listing no tap succeed, the
+/// forced uninstall of `php@8.5` drops the pin of `php`, as brew's
+/// `Uninstall.rm_pin` does while `php@8.5` is homebrew-core's alias of
+/// `php` (#4423), `tap-new` and `--repository` give the tap `@prefix@/tap`,
 /// and `install` lays the keg the tap's formula file bottles,
 /// `Cellar/<formula>/<bottle>/bin/php`, as brew lands a bottle where its
 /// formula and its version say, with the receipt brew writes beside it
@@ -337,7 +339,8 @@ const BREW: &str = r#"#!/bin/sh
 if [ -z "$DRY_RUN" ]; then
     echo "brew $*" >>"@prefix@/calls"
     case "$*" in
-    "pin "* | "unpin "* | "uninstall --ignore-dependencies --force "* | tap) exit 0 ;;
+    "pin "* | "unpin "* | tap) exit 0 ;;
+    "uninstall --ignore-dependencies --force php@8.5") rm -f "@prefix@/var/homebrew/pinned/php" && exit 0 ;;
     "tap-new --no-git dax/pin") mkdir -p "@prefix@/tap/Formula" && exit 0 ;;
     "--repository dax/pin") echo "@prefix@/tap" && exit 0 ;;
     "install --ignore-dependencies dax/pin/"*)
@@ -591,7 +594,9 @@ fn the_keg_of_the_pinned_php_is_brew_pinned_where_it_is_already_poured() {
 /// name whichever tap poured it, is asked by the bare name only where a
 /// keg of that name stands, `8.5.13` before the revised bottle, since
 /// brew finds the rack of a name before any alias and resolves a name
-/// with no rack through the aliases. The stand-in `brew` lands the keg where
+/// with no rack through the aliases. The pin of homebrew-core's `php`,
+/// which brew's own unpin after that uninstall drops through the alias,
+/// is put back by its bare name. The stand-in `brew` lands the keg where
 /// the formula and the commit it was handed say ([`BREW`]), so a pour
 /// of another formula or another bottle misses the pin's path and the
 /// md5 that follows the pour stops it. The pour is macOS's, `sed -i ''` in it, so
@@ -612,10 +617,17 @@ fn the_formula_and_the_bottle_the_pin_names_are_what_a_runner_pours() {
         let prefix = root.join("brew");
         std::fs::create_dir_all(prefix.join("api")).unwrap();
         std::fs::write(prefix.join("api/php@8.5.json"), COMMITS).unwrap();
+        // homebrew-core's php stands pinned beside it, the keg the alias
+        // names.
+        receipt(&prefix.join("Cellar/php/8.5.12"), "homebrew/core");
+        std::os::unix::fs::symlink("../Cellar/php/8.5.12", prefix.join("opt/php")).unwrap();
+        let pinned = prefix.join("var/homebrew/pinned");
+        std::fs::create_dir_all(&pinned).unwrap();
+        std::os::unix::fs::symlink("../../../Cellar/php/8.5.12", pinned.join("php")).unwrap();
         let uninstall = match before {
             Some(at) => {
                 receipt(&prefix.join("Cellar/php@8.5").join(at), "dax/pin");
-                "brew uninstall --ignore-dependencies --force php@8.5\n"
+                "brew uninstall --ignore-dependencies --force php@8.5\nbrew pin php\n"
             }
             None => "",
         };

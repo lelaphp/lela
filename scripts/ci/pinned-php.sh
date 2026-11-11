@@ -40,7 +40,9 @@
 # receipt records, as xtask's remedy for an unpinned keg names it; the
 # unpin before a pour names the tap's formula; and the uninstall, which
 # takes every keg of the name whichever tap poured it, is asked only where
-# a keg of that name stands, where brew finds it before any alias.
+# a keg of that name stands, where brew finds it before any alias. brew's
+# own unpin after that uninstall still goes through the alias, so a pin it
+# drops on another keg is put back.
 #
 # DRY_RUN=1 reads the pin and the machine and says what it would pour, each
 # keg and php by its formula and its bottle, and pours, pins and fetches
@@ -88,7 +90,18 @@ pour() {
     sed -i '' 's|^  bottle do$|  bottle do\n    root_url "https://ghcr.io/v2/homebrew/core"|' "$file"
     brew unpin "dax/pin/$name" >/dev/null 2>&1 || true
     if [ -d "$prefix/Cellar/$name" ]; then
+        # Once the rack is gone, the uninstall unpins the formula the bare
+        # name resolves to (`Uninstall.rm_pin`), another formula's while the
+        # name is an alias of homebrew-core's; each pin it drops beside the
+        # keg's own is put back, by the name a pin gives it.
+        local pins=$prefix/var/homebrew/pinned before other
+        before=$(ls "$pins" 2>/dev/null || true)
         brew uninstall --ignore-dependencies --force "$name" >/dev/null 2>&1 || true
+        for other in $before; do
+            [ "$other" != "$name" ] && [ ! -L "$pins/$other" ] || continue
+            brew pin "$(named "$prefix/opt/$other" "$other")" ||
+                echo "::warning::brew dropped the pin of $other with $name, and pinning it again failed"
+        done
     fi
     # Every keg php loads is poured here at its record, so none is brew's to
     # resolve: --ignore-dependencies keeps brew from upgrading one to its
