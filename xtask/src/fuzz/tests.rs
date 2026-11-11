@@ -131,6 +131,20 @@ fn a_run_cut_short_says_what_it_cut() {
     );
 }
 
+/// The command `done` names for a stale `fuzz` reading of each crate the
+/// lane owes, so the `[[owed]]` row a person lands needs nothing beside
+/// it: `cargo xtask fuzz`, which the command line parses.
+#[test]
+fn done_names_the_command_that_takes_the_lane_s_reading() {
+    use clap::Parser;
+    for krate in super::OWING {
+        let command = crate::done::command_taking(super::INSTRUMENT, krate);
+        assert_eq!(command.as_deref(), Some("cargo xtask fuzz"), "{krate}");
+    }
+    let parsed = crate::cli::Cli::try_parse_from(["xtask", "fuzz"]);
+    assert!(parsed.is_ok(), "{}", parsed.unwrap_err());
+}
+
 /// The row the lane is to be owed by decodes now, so the parser stands
 /// before a person lands the row, and covers each crate the run's verdict
 /// is written over and no other.
@@ -289,5 +303,36 @@ mod stood_in {
         assert!(hunt.findings.is_empty(), "{hunt:#?}");
         assert_eq!((hunt.met, hunt.unheld), (7, 0));
         assert!(!tree.join("found").exists());
+    }
+}
+
+/// `permit` allows the command `done` names for a stale `fuzz` reading,
+/// in main's checkout and in a ticketed one, as `done`'s own test asks of
+/// every landed `[[owed]]` row; a rule that keeps the lane off a local
+/// machine would deny it, and the row and the rule are one person's
+/// choice (#4487).
+#[cfg(tracked)]
+#[test]
+fn permit_allows_the_command_done_names_for_the_lane() {
+    let root = crate::package_dir().parent().unwrap();
+    let manifest = crate::manifest::Manifest::load(root).unwrap();
+    let command = crate::done::command_taking(super::INSTRUMENT, "php_engine").unwrap();
+    for ticket in [None, Some("4358")] {
+        let tree = crate::scratch::Tree::new("fuzz-permit").unwrap();
+        crate::git::git(tree.path(), &["init", "-q", "-b", "main"]).unwrap();
+        if let Some(ticket) = ticket {
+            crate::git::git(tree.path(), &["config", "branch.main.ticket", ticket]).unwrap();
+        }
+        let call = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": command, "description": "take the reading" }
+        });
+        let call = crate::permit::Call::parse(&call.to_string()).unwrap();
+        let judgement = crate::permit::judge(&manifest, tree.path(), &call).unwrap();
+        assert_eq!(
+            judgement.denial().map(|f| f.rule.clone()),
+            None,
+            "{ticket:?}"
+        );
     }
 }
