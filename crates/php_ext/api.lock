@@ -1291,6 +1291,7 @@ values::Emalloc::len
 values::Emalloc::new
 values::Emalloc::printf_buffer
 values::Emalloc::resize
+values::EngineClassId
 values::FreshString
 values::FreshString::bytes
 values::FreshString::bytes_mut

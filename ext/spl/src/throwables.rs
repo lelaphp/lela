@@ -8,7 +8,7 @@ use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::attr::php_class;
 use php_ext::raising::{self, Thrown};
 use php_ext::request::Request;
-use php_ext::values::ClassId;
+use php_ext::values::EngineClassId;
 
 use crate::Exception;
 use crate::exceptions::{
@@ -23,15 +23,15 @@ pub(crate) struct Error;
 /// The classes the natives raise, by their identity in this engine.
 #[derive(Clone, Copy, EngineState)]
 pub(crate) struct Throwables {
-    pub(crate) error: ClassId,
-    pub(crate) exception: ClassId,
-    pub(crate) logic_exception: ClassId,
-    pub(crate) bad_method_call_exception: ClassId,
-    pub(crate) invalid_argument_exception: ClassId,
-    pub(crate) out_of_range_exception: ClassId,
-    pub(crate) runtime_exception: ClassId,
-    pub(crate) out_of_bounds_exception: ClassId,
-    pub(crate) unexpected_value_exception: ClassId,
+    pub(crate) error: EngineClassId,
+    pub(crate) exception: EngineClassId,
+    pub(crate) logic_exception: EngineClassId,
+    pub(crate) bad_method_call_exception: EngineClassId,
+    pub(crate) invalid_argument_exception: EngineClassId,
+    pub(crate) out_of_range_exception: EngineClassId,
+    pub(crate) runtime_exception: EngineClassId,
+    pub(crate) out_of_bounds_exception: EngineClassId,
+    pub(crate) unexpected_value_exception: EngineClassId,
 }
 
 impl Throwables {

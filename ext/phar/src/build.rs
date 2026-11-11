@@ -10,7 +10,7 @@ use php_ext::call::{instantiate, lookup_class};
 use php_ext::coerce::{value_name, with_string};
 use php_ext::raising::{Thrown, arity, deprecated, throw_exception_ex};
 use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _};
-use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{EngineClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_spl::directory::{self as spl, Filesystem};
 
 use crate::archive::{
@@ -816,8 +816,9 @@ fn string_key(req: &mut Request, b: &Build, it: php_ext::call::Iter) -> Result<V
 fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Result<bool, Thrown> {
     let value = it.value(req)?;
     let current = value.deref();
-    let bad =
-        |req: &mut Request, class: ClassId, m: String| Err(throw_exception_ex(req, class, &m));
+    let bad = |req: &mut Request, class: EngineClassId, m: String| {
+        Err(throw_exception_ex(req, class, &m))
+    };
     let mut fname: Vec<u8>;
     let key: Vec<u8>;
     match current.as_ref() {

@@ -135,3 +135,13 @@
 //! # fn main() {}
 //! include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../xtask/fixtures/api-check/engine-state/entry.rs"));
 //! ```
+//!
+//! A class identity held in engine state is the `EngineClassId` an
+//! extension's start resolves (#4477), and a type derived over a field
+//! holding a `ClassId`, which may be a class of one request's own, is
+//! refused at the field:
+//!
+//! ```compile_fail,E0277
+//! # fn main() {}
+//! include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../xtask/fixtures/api-check/engine-state/class.rs"));
+//! ```

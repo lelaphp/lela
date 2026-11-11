@@ -7,7 +7,7 @@
 use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::raising::{self, Thrown};
 use php_ext::request::Request;
-use php_ext::values::ClassId;
+use php_ext::values::EngineClassId;
 
 use crate::preload::Preloads;
 use crate::{Error, Exception, ParserException};
@@ -15,9 +15,9 @@ use crate::{Error, Exception, ParserException};
 /// The classes the natives raise, by their identity in this engine.
 #[derive(Clone, Copy, EngineState)]
 pub(crate) struct Throwables {
-    pub(crate) error: ClassId,
-    pub(crate) exception: ClassId,
-    pub(crate) parser_exception: ClassId,
+    pub(crate) error: EngineClassId,
+    pub(crate) exception: EngineClassId,
+    pub(crate) parser_exception: EngineClassId,
 }
 
 impl Throwables {

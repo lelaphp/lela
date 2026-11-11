@@ -95,8 +95,9 @@ pub enum TypeTag {
 /// engine's published arena past them, the preload's among them; with
 /// it set, one of the request's own, numbered among its rows. Either
 /// stays the class's for as long as the request runs, whatever another
-/// request publishes or declares meanwhile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, EngineState)]
+/// request publishes or declares meanwhile, and no longer: it is not
+/// engine state, which holds an [`EngineClassId`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClassId(pub(crate) u32);
 
 impl ClassId {
@@ -130,6 +131,47 @@ impl ClassId {
     /// of them: the engine's own below the arena's.
     pub(crate) fn published_number(self) -> Option<u32> {
         self.is_published().then_some(self.0)
+    }
+}
+
+/// The identity of one of the engine's own classes, Core's or the
+/// bundle's, as [`Start::class`](crate::api::abi::Start::class) resolves
+/// it at an extension's engine start: the one class identity engine
+/// state holds (ADR-0005). A [`ClassId`] is not engine state, since
+/// neither of its other kinds outlives what engine state outlives: a
+/// class of a request's own is numbered among that request's rows and
+/// names another request's class, or none, in every other, and a row of
+/// the engine's published arena is gone or another class once a restart
+/// publishes the next arena. The engine's own classes are numbered from
+/// zero before both and stand as long as the engine does. Where a
+/// [`ClassId`] is asked for, this is one, by `From`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EngineState)]
+pub struct EngineClassId(u32);
+
+impl EngineClassId {
+    /// The class `id` names, which must be one of the engine's own: a
+    /// row of the table the engine linked before its first request.
+    pub(crate) fn engine_own(id: ClassId) -> EngineClassId {
+        debug_assert!(id.is_published(), "a class of a request's own");
+        EngineClassId(id.0)
+    }
+}
+
+impl From<EngineClassId> for ClassId {
+    fn from(class: EngineClassId) -> ClassId {
+        ClassId(class.0)
+    }
+}
+
+impl PartialEq<EngineClassId> for ClassId {
+    fn eq(&self, other: &EngineClassId) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl PartialEq<ClassId> for EngineClassId {
+    fn eq(&self, other: &ClassId) -> bool {
+        self.0 == other.0
     }
 }
 
@@ -1574,8 +1616,8 @@ impl PhpObject {
     /// of one that implements it: `instanceof`, `instanceof_function`
     /// over the linked table the request reads.
     #[must_use]
-    pub fn instance_of(&self, req: &Request, class: ClassId) -> bool {
-        req.symbols().instance_of(self.class(), class)
+    pub fn instance_of(&self, req: &Request, class: impl Into<ClassId>) -> bool {
+        req.symbols().instance_of(self.class(), class.into())
     }
 
     /// `zend_objects_clone_obj` for a class whose objects carry a

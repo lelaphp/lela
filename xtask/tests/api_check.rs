@@ -1254,6 +1254,6 @@ mod engine_state {
                 &text[fence..at]
             );
         }
-        assert_eq!(seen, 3, "handle.rs, entry.rs and epoch.rs");
+        assert_eq!(seen, 4, "handle.rs, entry.rs, epoch.rs and class.rs");
     }
 }
