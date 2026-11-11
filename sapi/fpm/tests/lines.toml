@@ -561,7 +561,9 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 # `catch_workers_output` logs (`Z/sapi/fpm/fpm/fpm_main.c:1879-1888`); its
 # warnings, named for `PHP Request Startup`, go only where `log_errors`
 # sends them (#4351); a directory, a FIFO or a device is resolved as a file
-# is and refused by the same check. A program within them runs.
+# is and refused by the same check. A program within them runs. Each request
+# that shows its warnings carries `log_errors` itself, since a value a
+# request carries ends with that request (#4353, design §4.8).
 [[line]]
 name = "a-program-outside-the-pool-s-open-basedir-is-not-opened"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -578,9 +580,9 @@ params = [["SCRIPT_FILENAME", "{dir}/base/in.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/out.php"], ["REQUEST_METHOD", "GET"], ["PHP_VALUE", "log_errors=1"]]
 [[line.serve.request]]
-params = [["SCRIPT_FILENAME", "{dir}/d.php"], ["REQUEST_METHOD", "GET"]]
+params = [["SCRIPT_FILENAME", "{dir}/d.php"], ["REQUEST_METHOD", "GET"], ["PHP_VALUE", "log_errors=1"]]
 [[line.serve.request]]
-params = [["SCRIPT_FILENAME", "{dir}/fifo.php"], ["REQUEST_METHOD", "GET"]]
+params = [["SCRIPT_FILENAME", "{dir}/fifo.php"], ["REQUEST_METHOD", "GET"], ["PHP_VALUE", "log_errors=1"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "/dev/null"], ["REQUEST_METHOD", "GET"]]
 
