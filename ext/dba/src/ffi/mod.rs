@@ -71,6 +71,13 @@ pub(crate) struct Ndbm {
 // thread at a time.
 unsafe impl Send for Ndbm {}
 
+// The `DBM *` is the C library's own state for one database file, its
+// buffers in the library's memory: `dbm_open` is handed a path, flags and
+// a mode, and every call after copies its key and value in and out
+// (`copied`), so nothing of a request's heap reaches it. Not `Sync`, and
+// not asked to be: the pool keeps it behind its `Mutex` and only moves it.
+impl php_ext::abi::EngineState for Ndbm {}
+
 impl Ndbm {
     /// `dbm_open(path, flags, mode)`, or `None` where the library refused
     /// or the path holds a NUL. The library's file is `<path>.db`; under

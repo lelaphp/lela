@@ -13,8 +13,8 @@ use php_ext::request::Request;
 use php_ext::test::{Capture, Engine};
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 use php_ext_pdo::connector::{
-    BindKind, Column, Connection, Connector, Executed, Failure, Orientation, Placeholders,
-    Prepared, Rowsets, Source, Statement,
+    BindKind, Column, Connection, Connector, Executed, Failure, IdleConnection, Orientation,
+    Placeholders, Prepared, Rowsets, Source, Statement,
 };
 
 /// The connector, `rowsets:`.
@@ -37,7 +37,20 @@ impl Connector for Stub {
 /// One connection of [`Stub`].
 struct Open;
 
+impl IdleConnection for Open {
+    fn take_up(self: Box<Self>, req: &mut Request) -> Box<dyn Connection> {
+        let _ = req;
+        self
+    }
+}
+
 impl Connection for Open {
+    /// Kept in PDO's pool as it stands: it holds nothing of a request's.
+    fn give_back(self: Box<Self>, req: &mut Request) -> Option<Box<dyn IdleConnection>> {
+        let _ = req;
+        Some(self)
+    }
+
     fn prepare(
         &mut self,
         req: &mut Request,

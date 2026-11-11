@@ -7,6 +7,7 @@
 //! heap grown to a length a record claims, so a length past the memory
 //! limit is php's fatal and a negative one stops the walk.
 
+use php_ext::abi::EngineState;
 use php_ext::coerce::atoi;
 use php_ext::raising::{Thrown, fatal};
 use php_ext::request::{Request, Stream, Whence};
@@ -96,7 +97,7 @@ fn field(req: &mut Request, file: Stream, buf: &mut Buffer) -> Result<Option<usi
 
 /// `flatfile`: where `nextkey` goes on from, `CurrentFlatFilePos`, and
 /// whether a walk is under way, `nextkey.dptr`.
-#[derive(Default)]
+#[derive(Default, EngineState)]
 pub(crate) struct Flatfile {
     position: i64,
     walking: bool,

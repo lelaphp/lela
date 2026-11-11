@@ -4,6 +4,7 @@
 
 use std::os::fd::OwnedFd;
 
+use php_ext::abi::EngineState;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{FdStream, OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::Owner;
@@ -17,7 +18,7 @@ use crate::inifile::Inifile;
 /// macOS, then the four php's own C provides. All take php's locks
 /// (`DBA_LOCK_ALL`); all but ndbm have their database stream opened for
 /// them (`DBA_STREAM_OPEN`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, EngineState)]
 pub(crate) enum Handler {
     #[cfg(target_os = "macos")]
     Ndbm,
@@ -81,7 +82,7 @@ impl Handler {
 }
 
 /// `dba_mode_t`, the first letter of `$mode`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, EngineState)]
 pub(crate) enum Access {
     /// `r`.
     Read,
@@ -125,7 +126,7 @@ pub(crate) enum Locking {
 }
 
 /// The `flock(2)` a link holds, `lock.mode`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, EngineState)]
 pub(crate) enum Held {
     #[default]
     None,
@@ -263,7 +264,9 @@ impl Mode {
 
 /// The handler's own state, `info->dbf`, with the database stream of a
 /// handler that has one opened for it, `info->fp`: a stream in a request,
-/// its owner, or its fd while the engine's pool keeps a persistent link.
+/// its owner, or its fd while the engine's pool keeps a persistent link,
+/// engine state as [`Kept`] holds it.
+#[derive(EngineState)]
 pub(crate) enum Store<F = Owner<Stream>> {
     /// The library's open database; `None` where `dbm_open` refused, which
     /// `dba_open_ndbm` answers as success all the same.
@@ -397,7 +400,8 @@ impl Link {
 /// php's persistent `dba_info`: the database's and the `.lck` file's fds,
 /// open so the `flock(2)` they hold stands, the path, the access, the
 /// handler and its walk state. The streams are made again over the fds by
-/// the request that takes it up.
+/// the request that takes it up. Engine state, as the pool keeps it.
+#[derive(EngineState)]
 pub(crate) struct Kept {
     path: Vec<u8>,
     access: Access,
@@ -409,6 +413,7 @@ pub(crate) struct Kept {
 
 /// A stream's fd between requests and the position the stream held,
 /// what php's persistent stream keeps in memory.
+#[derive(EngineState)]
 pub(crate) struct KeptFd {
     fd: OwnedFd,
     position: i64,

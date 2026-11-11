@@ -361,7 +361,7 @@ pub(crate) const NAMES: [&str; COUNT] = [
 
 /// `MYSQLND_STATS`: a connection's counters, and what it counted since
 /// the last [`Stats::flush`] for the request's table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, php_ext::abi::EngineState)]
 pub(crate) struct Stats {
     /// Whether `mysqlnd.collect_statistics` is on for the call in hand.
     pub(crate) enabled: bool,

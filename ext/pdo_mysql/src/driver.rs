@@ -18,9 +18,9 @@ use php_ext::request::Request;
 use php_ext::values::{Emalloc, FreshString, Owner, PhpString, Sizing, Value};
 use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Idle, Mysqlnd, Stmt as Ps};
 use php_ext_pdo::connector::{
-    BindType, Cause, Connection, Connector, Failure, NativeError, OnError, ParameterMap,
-    Placeholders, Prepared, Scanner, Source, SqlError, SqlState, Statement, bool_attribute,
-    long_attribute, option_long, option_string, parse_data_source, rewrite_named,
+    BindType, Cause, Connection, Connector, Failure, IdleConnection, NativeError, OnError,
+    ParameterMap, Placeholders, Prepared, Scanner, Source, SqlError, SqlState, Statement,
+    bool_attribute, long_attribute, option_long, option_string, parse_data_source, rewrite_named,
 };
 
 use crate::Mysql;
@@ -68,11 +68,13 @@ pub(crate) struct Driver;
 pub(crate) static MYSQL: Driver = Driver;
 
 /// `pdo_mysql_db_handle`, less its `einfo`, which its row of the request's
-/// table keeps beside it.
-#[derive(Debug, Clone, Copy)]
+/// table keeps beside it: `server` the connection's number in the
+/// request's table, and `()` while PDO's pool keeps the connection idle
+/// ([`IdleDb`]), when no request's table holds it.
+#[derive(Debug, Clone, Copy, EngineState)]
 #[allow(clippy::struct_excessive_bools)] // php's bit fields, one per name
-pub(crate) struct H {
-    pub(crate) server: Mysqlnd,
+pub(crate) struct H<S = Mysqlnd> {
+    pub(crate) server: S,
     pub(crate) assume_national_character_set_strings: bool,
     pub(crate) buffered: bool,
     pub(crate) emulate_prepare: bool,
@@ -82,6 +84,38 @@ pub(crate) struct H {
     pub(crate) auto_commit: bool,
     /// `dbh->alloc_own_columns`, set by the first native prepare.
     pub(crate) own_columns: bool,
+}
+
+impl H {
+    /// The attributes, apart from the request's number of the connection.
+    const fn idle(self) -> H<()> {
+        H {
+            server: (),
+            assume_national_character_set_strings: self.assume_national_character_set_strings,
+            buffered: self.buffered,
+            emulate_prepare: self.emulate_prepare,
+            fetch_table_names: self.fetch_table_names,
+            local_infile: self.local_infile,
+            auto_commit: self.auto_commit,
+            own_columns: self.own_columns,
+        }
+    }
+}
+
+impl H<()> {
+    /// The attributes over the connection the request took up.
+    const fn over(self, server: Mysqlnd) -> H {
+        H {
+            server,
+            assume_national_character_set_strings: self.assume_national_character_set_strings,
+            buffered: self.buffered,
+            emulate_prepare: self.emulate_prepare,
+            fetch_table_names: self.fetch_table_names,
+            local_infile: self.local_infile,
+            auto_commit: self.auto_commit,
+            own_columns: self.own_columns,
+        }
+    }
 }
 
 /// `sizeof(pdo_mysql_db_handle)`.
@@ -150,6 +184,43 @@ pub(crate) struct Einfo {
 enum Errmsg {
     Request(Emalloc),
     Process(Box<[u8]>),
+}
+
+/// An [`Einfo`] while PDO's pool keeps its connection: the message the
+/// process's, as a persistent connection's is.
+#[derive(EngineState)]
+struct IdleEinfo {
+    code: i64,
+    message: Option<Box<[u8]>>,
+}
+
+impl Einfo {
+    /// What the pool keeps of the `einfo`; a message on the request's
+    /// heap, which a persistent connection never makes, copied out and
+    /// freed with the request.
+    fn idle(self, req: &mut Request) -> IdleEinfo {
+        let message = self.message.map(|message| match message {
+            Errmsg::Process(bytes) => bytes,
+            Errmsg::Request(held) => {
+                let bytes = held.bytes().split_last().map_or(&[][..], |(_, m)| m).into();
+                held.free(req);
+                bytes
+            }
+        });
+        IdleEinfo {
+            code: self.code,
+            message,
+        }
+    }
+}
+
+impl From<IdleEinfo> for Einfo {
+    fn from(idle: IdleEinfo) -> Einfo {
+        Einfo {
+            code: idle.code,
+            message: idle.message.map(Errmsg::Process),
+        }
+    }
 }
 
 impl Einfo {
@@ -596,14 +667,38 @@ pub(crate) struct Db {
 enum Place {
     /// In the request's table, at this number.
     Held(usize),
-    /// A persistent connection the request gave back to the engine's
-    /// pool: out of the request's table, with the connection and its
-    /// socket, which wait in PDO's pool with it and in no other list
-    /// until a request takes them up, and its `einfo`, whose message a
-    /// persistent connection `malloc`s.
-    Idle(H, Idle, Einfo),
-    /// In no request's table: closed, or given back and not kept.
+    /// In no request's table: closed, or not taken up.
     Gone,
+}
+
+/// A persistent connection the request gave back to PDO's pool (#4474):
+/// out of the request's table, its `pdo_mysql_db_handle` with no number
+/// of a request's, the mysqlnd connection with its socket, which wait in
+/// PDO's pool with it and in no other list until a request takes them up,
+/// and its `einfo`, whose message a persistent connection `malloc`s.
+// The derive waits on mysqlnd's `Idle` being engine state (#4541).
+struct IdleDb {
+    h: H<()>,
+    conn: Idle,
+    einfo: IdleEinfo,
+}
+
+impl IdleConnection for IdleDb {
+    /// The connection held in the request's table again, over the socket
+    /// it kept, or gone where the request could not hold it, which
+    /// `check_liveness` then finds dead.
+    fn take_up(self: Box<Self>, req: &mut Request) -> Box<dyn Connection> {
+        let IdleDb { h, conn, einfo } = *self;
+        let place = match Mysqlnd::take_up(req, conn) {
+            Ok(server) => Place::Held(req.state::<State>().hold(
+                h.over(server),
+                None,
+                einfo.into(),
+            )),
+            Err(_) => Place::Gone,
+        };
+        Box::new(Db { place })
+    }
 }
 
 impl Db {
@@ -611,7 +706,7 @@ impl Db {
     fn id(&self) -> Option<usize> {
         match self.place {
             Place::Held(id) => Some(id),
-            Place::Idle(..) | Place::Gone => None,
+            Place::Gone => None,
         }
     }
 
@@ -970,7 +1065,6 @@ impl Connection for Db {
         }
         let id = match &self.place {
             Place::Held(id) => *id,
-            Place::Idle(_, _, einfo) => return einfo.fetch(req),
             Place::Gone => return Ok(None),
         };
         let mut einfo = match req.state::<State>().handles.get_mut(id) {
@@ -1027,7 +1121,6 @@ impl Connection for Db {
     /// int(1)
     /// ```
     fn check_liveness(&mut self, req: &mut Request) -> bool {
-        self.take_up(req);
         let Some(h) = self.handle(req) else {
             return false;
         };
@@ -1041,32 +1134,29 @@ impl Connection for Db {
         }
     }
 
-    /// The connection out of the request's tables, its
-    /// `pdo_mysql_db_handle` and the connection with its socket kept here,
-    /// in PDO's pool with it, for the next request to take up. One mysqlnd
-    /// did not keep, as no persistent connection that connected, is gone,
-    /// so the next request's `check_liveness` finds it dead.
-    fn give_back(&mut self, req: &mut Request) {
-        let Some(id) = self.id() else {
-            return;
-        };
-        let Some(h) = handle(req, id) else {
-            return;
-        };
+    /// The connection out of the request's tables, idle in PDO's pool
+    /// ([`IdleDb`]), its `pdo_mysql_db_handle` and the connection with its
+    /// socket, for the next request to take up. One mysqlnd did not keep,
+    /// as no persistent connection that connected, is gone, so the next
+    /// request finds it dead.
+    fn give_back(self: Box<Self>, req: &mut Request) -> Option<Box<dyn IdleConnection>> {
+        let id = self.id()?;
+        let h = handle(req, id)?;
         let kept = h.server.give_back(req);
         let mut einfo = unhold(req, id);
-        self.place = if let Some(kept) = kept {
-            Place::Idle(h, kept, einfo)
-        } else {
+        let Some(conn) = kept else {
             einfo.free(req);
-            Place::Gone
+            return None;
         };
+        Some(Box::new(IdleDb {
+            h: h.idle(),
+            conn,
+            einfo: einfo.idle(req),
+        }))
     }
 
-    /// `mysql_handle_closer`, over a connection the request gave back
-    /// taken up first, as PDO closes one past its pool's bound.
+    /// `mysql_handle_closer`.
     fn close(&mut self, req: &mut Request) {
-        self.take_up(req);
         let Some(id) = self.id() else {
             return;
         };
@@ -1081,24 +1171,6 @@ impl Connection for Db {
 }
 
 impl Db {
-    /// A connection given back to the engine's pool held in the request's
-    /// table again, over the socket it kept, or gone where the request
-    /// could not hold it; one not given back stays where it stands.
-    fn take_up(&mut self, req: &mut Request) {
-        if !matches!(self.place, Place::Idle(..)) {
-            return;
-        }
-        let Place::Idle(mut h, kept, einfo) = std::mem::replace(&mut self.place, Place::Gone)
-        else {
-            return;
-        };
-        let Ok(server) = Mysqlnd::take_up(req, kept) else {
-            return;
-        };
-        h.server = server;
-        self.place = Place::Held(req.state::<State>().hold(h, None, einfo));
-    }
-
     /// `mysql_handle_autocommit` after the attribute changed.
     fn set_attribute_autocommit(&self, req: &mut Request) -> Result<(), Failure> {
         let h = self.h(req)?;

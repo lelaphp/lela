@@ -24,14 +24,14 @@ use php_ext::values::{
 };
 
 use crate::connector::{
-    BindType, Cause, Connection, Connector, Failure, OnError, Source, SqlState,
+    BindType, Cause, Connection, Connector, Failure, IdleConnection, OnError, Source, SqlState,
 };
 use crate::error::{self, On};
 use crate::stmt::{DbLink, PDOStatement, Stmt};
 use crate::throwables::Throwables;
 
 /// `enum pdo_case_conversion`: what the column names are folded to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 pub(crate) enum Case {
     #[default]
     Natural,
@@ -51,7 +51,7 @@ impl Case {
 
 /// `enum pdo_null_handling`, as `PDO::ATTR_ORACLE_NULLS` sets it: php stores
 /// any number it is given and acts on two of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 pub(crate) enum Nulls {
     #[default]
     Natural,
@@ -153,6 +153,91 @@ impl DbhState {
             ..DbhState::default()
         }
     }
+
+    /// What the engine's pool keeps of a persistent `pdo_dbh_t` the
+    /// request gives back: the statement a failed `query()` left and the
+    /// statement class's arguments given up, as `persistent_shutdown`
+    /// gives them up, the constructor's copies freed, which a persistent
+    /// connection `pestrdup`s and so never holds, and the connection
+    /// given back by its connector ([`Connection::give_back`]).
+    fn idle(self, req: &mut Request) -> IdleDbh {
+        if let Some(stmt) = self.query_stmt {
+            stmt.give_up(req);
+        }
+        if let Some(args) = self.stmt_args {
+            args.give_up(req);
+        }
+        for copy in self.copies {
+            copy.free(req);
+        }
+        let conn = match self.conn {
+            Conn::Open(conn) => conn.give_back(req),
+            Conn::Closed | Conn::Lent => None,
+        };
+        IdleDbh {
+            driver: self.driver,
+            conn,
+            error_mode: self.error_mode,
+            error_code: self.error_code,
+            case: self.case,
+            nulls: self.nulls,
+            stringify: self.stringify,
+            default_fetch: self.default_fetch,
+            stmt_class: self.stmt_class,
+            in_txn: self.in_txn,
+            persistent: self.persistent,
+            describes_at_execute: self.describes_at_execute,
+        }
+    }
+
+    /// A `pdo_dbh_t` the pool kept, taken up by the request PDO lends it
+    /// to, its connection taken up with it
+    /// ([`IdleConnection::take_up`]), shared by no object yet.
+    fn take_up(req: &mut Request, idle: IdleDbh) -> DbhState {
+        DbhState {
+            driver: idle.driver,
+            conn: idle
+                .conn
+                .map_or(Conn::Closed, |conn| Conn::Open(conn.take_up(req))),
+            error_mode: idle.error_mode,
+            error_code: idle.error_code,
+            case: idle.case,
+            nulls: idle.nulls,
+            stringify: idle.stringify,
+            default_fetch: idle.default_fetch,
+            stmt_class: idle.stmt_class,
+            stmt_args: None,
+            in_txn: idle.in_txn,
+            persistent: idle.persistent,
+            shares: None,
+            holders: 0,
+            query_stmt: None,
+            describes_at_execute: idle.describes_at_execute,
+            copies: Vec::new(),
+        }
+    }
+}
+
+/// A persistent `pdo_dbh_t` while the engine's pool keeps it between
+/// requests (#4474): its attributes and its connection idle
+/// ([`IdleConnection`]), and no field of a request's, neither the
+/// statement a failed `query()` left, the statement class's arguments,
+/// the constructor's copies, nor the objects sharing it.
+// The derive waits on `IdleConnection` asking `EngineState` (#4541).
+#[allow(clippy::struct_excessive_bools)] // `DbhState`'s flags, one each
+pub(crate) struct IdleDbh {
+    driver: Option<&'static dyn Connector>,
+    conn: Option<Box<dyn IdleConnection>>,
+    error_mode: OnError,
+    error_code: Option<SqlState>,
+    case: Case,
+    nulls: Nulls,
+    stringify: bool,
+    default_fetch: u16,
+    stmt_class: Option<ClassId>,
+    in_txn: bool,
+    persistent: bool,
+    describes_at_execute: bool,
 }
 
 /// The payload, `pdo_dbh_object_t`'s `inner`: the pointer to the
@@ -194,7 +279,7 @@ fn share(req: &mut Request, object: PhpObject, at: usize) {
 /// engine's pool of persistent connections, keyed `PDO:DBH:DSN=…`.
 #[derive(EngineState)]
 pub(crate) struct Pooled {
-    pub(crate) pool: Pool<Vec<u8>, Box<DbhState>>,
+    pub(crate) pool: Pool<Vec<u8>, IdleDbh>,
     /// The classes the natives raise, resolved at the same start.
     pub(crate) throwables: Throwables,
 }
@@ -256,16 +341,14 @@ fn roll_back_open(req: &mut Request, conn: &mut dyn Connection, in_txn: bool) ->
 /// this request, the connector's `closer` as `dbh_free` calls it
 /// (ADR-0010's amendment of ADR-0005).
 pub(crate) fn post_deactivate(req: &mut Request) {
-    for (key, mut dbh) in req.state::<Persistent>().lent.drain() {
-        if let Conn::Open(conn) = &mut dbh.conn {
-            conn.give_back(req);
-        }
+    for (key, dbh) in req.state::<Persistent>().lent.drain() {
+        let idle = dbh.idle(req);
         let past = match req.engine::<Pooled>() {
-            Some(Pooled { pool, .. }) => pool.give_back(key, dbh),
-            None => Some(dbh),
+            Some(Pooled { pool, .. }) => pool.give_back(key, idle),
+            None => Some(idle),
         };
-        if let Some(mut dbh) = past {
-            close_pooled(req, &mut dbh);
+        if let Some(idle) = past {
+            close_pooled(req, idle);
         }
     }
 }
@@ -280,15 +363,16 @@ pub(crate) fn engine_end(req: &mut Request) {
         .engine::<Pooled>()
         .map(|Pooled { pool, .. }| pool.drain())
         .unwrap_or_default();
-    for (_, mut dbh) in idle {
-        close_pooled(req, &mut dbh);
+    for (_, idle) in idle {
+        close_pooled(req, idle);
     }
 }
 
 /// `dbh_free`'s `closer` over a persistent connection the pool will not
-/// keep, given back past its bound or drained at engine end.
-fn close_pooled(req: &mut Request, dbh: &mut DbhState) {
-    if let Conn::Open(conn) = &mut dbh.conn {
+/// keep, given back past its bound or drained at engine end: taken up by
+/// the request that closes it, then closed.
+fn close_pooled(req: &mut Request, idle: IdleDbh) {
+    if let Conn::Open(mut conn) = DbhState::take_up(req, idle).conn {
         conn.close(req);
     }
 }
@@ -836,12 +920,13 @@ fn lend(req: &mut Request, key: &[u8]) -> Result<usize, Option<usize>> {
         }
         return if alive { Ok(at) } else { Err(Some(at)) };
     }
-    let Some(mut dbh) = req
+    let Some(idle) = req
         .engine::<Pooled>()
         .and_then(|Pooled { pool, .. }| pool.take(&key.to_vec()))
     else {
         return Err(None);
     };
+    let mut dbh = Box::new(DbhState::take_up(req, idle));
     let (alive, conn) = alive(req, std::mem::take(&mut dbh.conn));
     dbh.conn = conn;
     if !alive {

@@ -6,6 +6,7 @@ use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
+use php_ext::abi::EngineState;
 use php_ext::raising::Thrown;
 use php_ext::request::{Foreign, ForeignId, Request};
 use php_ext::values::PhpObject;
@@ -476,8 +477,9 @@ impl ShareId {
 /// says when nothing of the request that held it reaches it
 /// ([`Persistent::alone`]). A `CurlSharePersistentHandle` owns none: it
 /// names the lending request's by the options it was made with, and is
-/// freed before the request gives its shares back.
-#[derive(Clone)]
+/// freed before the request gives its shares back. Engine state, as the
+/// pool keeps it between requests.
+#[derive(Clone, EngineState)]
 pub(crate) struct Persistent(Arc<Pooled>);
 
 /// The share the pool keeps.
@@ -487,6 +489,13 @@ pub(crate) struct Pooled(ShareHandle);
 // back only once no handle of the request that held it remains
 // (`Persistent::alone`), so libcurl never sees two threads in it at once.
 unsafe impl Sync for Pooled {}
+
+// A `CURLSH *` holds libcurl's own cookie, DNS, TLS-session and
+// connection caches, in the library's memory and never in a request's:
+// what `curl_share_setopt` sets on it is a `long`, and no callback,
+// `CURLSHOPT_USERDATA` or `CURLSHOPT_LOCKFUNC`, is ever set, so nothing
+// of a request reaches the share from the library's side either.
+impl EngineState for Pooled {}
 
 impl Persistent {
     /// `curl_share_init()`, for the pool.

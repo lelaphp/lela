@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use php_ext::abi::{Dependency, DependencyKind, EngineState, Extension, ExtensionBuilder};
 use php_ext::request::Request;
 use php_ext::test::{Capture, Engine, Files};
-use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
+use php_ext_pdo::connector::{Connection, Connector, Failure, IdleConnection, Prepared, Source};
 
 /// The connector, `counted:<path>`: each connection appends `closed` to
 /// the file at `<path>` as PDO closes it, and one whose path ends in
@@ -42,7 +42,20 @@ struct Link {
     log: PathBuf,
 }
 
+impl IdleConnection for Link {
+    fn take_up(self: Box<Self>, req: &mut Request) -> Box<dyn Connection> {
+        let _ = req;
+        self
+    }
+}
+
 impl Connection for Link {
+    /// Kept in PDO's pool as it stands: it holds nothing of a request's.
+    fn give_back(self: Box<Self>, req: &mut Request) -> Option<Box<dyn IdleConnection>> {
+        let _ = req;
+        Some(self)
+    }
+
     fn prepare(
         &mut self,
         req: &mut Request,

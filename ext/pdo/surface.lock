@@ -42,6 +42,8 @@ connector::Failure::raised
 connector::Failure::refused
 connector::Failure::silent
 connector::Failure::unsupported
+connector::IdleConnection
+connector::IdleConnection::take_up
 connector::NativeError
 connector::OnError
 connector::Orientation

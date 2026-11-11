@@ -154,7 +154,9 @@ impl Com {
 }
 
 /// `enum mysqlnd_connection_state`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, php_ext::abi::EngineState,
+)]
 pub(crate) enum ConnState {
     #[default]
     Alloced,
@@ -167,7 +169,7 @@ pub(crate) enum ConnState {
 }
 
 /// `enum mysqlnd_query_type`: what the last query answered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, php_ext::abi::EngineState)]
 pub(crate) enum QueryType {
     #[default]
     Upsert,

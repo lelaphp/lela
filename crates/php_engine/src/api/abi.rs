@@ -1580,7 +1580,7 @@ impl ExtensionBuilder {
     /// as [`Request::engine`] does, so the type is the extension's own.
     /// Declared twice, the later stands.
     #[must_use]
-    pub fn process_state<P: EngineState>(
+    pub fn process_state<P: EngineState + Sync>(
         mut self,
         build: fn() -> Result<P, Refusal>,
     ) -> ExtensionBuilder {
@@ -1598,7 +1598,7 @@ impl ExtensionBuilder {
     /// [`Refusal`] is php's `MINIT` failing: no later extension starts and
     /// the engine serves nothing. Declared twice, the later stands.
     #[must_use]
-    pub fn engine_state<E: EngineState>(
+    pub fn engine_state<E: EngineState + Sync>(
         mut self,
         build: fn(&Start) -> Result<E, Refusal>,
     ) -> ExtensionBuilder {
@@ -2170,7 +2170,7 @@ impl ExtensionBuilder {
     /// engine is built, and answered by [`Request::registered_by`] in bundle
     /// order, which is `MINIT` order (ADR-0005).
     #[must_use]
-    pub fn register<T: EngineState>(mut self, value: T) -> ExtensionBuilder {
+    pub fn register<T: EngineState + Sync>(mut self, value: T) -> ExtensionBuilder {
         self.entry
             .supplies
             .registered
@@ -2188,7 +2188,7 @@ impl ExtensionBuilder {
     /// and raise its `IMAGETYPE_COUNT`, is this rewrite done once, when
     /// the engine is built.
     #[must_use]
-    pub fn constants_with<T: EngineState>(
+    pub fn constants_with<T: EngineState + Sync>(
         mut self,
         link: fn(&mut [ConstDecl], &[&T]) -> Vec<ConstDecl>,
     ) -> ExtensionBuilder {

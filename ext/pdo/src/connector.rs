@@ -35,7 +35,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRe
 /// `pdo_driver_t`: a connector's name, the class `PDO::connect()` makes
 /// for it, and its factory. Registered engine-wide, so engine state
 /// (ADR-0005).
-pub trait Connector: EngineState {
+pub trait Connector: EngineState + Sync {
     /// `driver_name`, the DSN prefix that selects the connector and what
     /// `PDO::getAvailableDrivers()` lists.
     fn name(&self) -> &'static str;
@@ -140,7 +140,7 @@ pub fn long_attribute(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
 }
 
 /// `pdo_error_type`: the five characters of an SQLSTATE.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub struct SqlState(pub [u8; 5]);
 
 impl SqlState {
@@ -569,13 +569,28 @@ pub trait Connection: Any + Send {
     }
 
     /// A persistent connection given back to the engine's pool as the
-    /// request ends, after its objects are freed: what it holds in the
-    /// request's tables moved out of them, for the next request to take
-    /// up. php's `pdo_dbh_t` stands in `EG(persistent_list)` as it is,
-    /// which this default answers.
-    fn give_back(&mut self, req: &mut Request) {
-        let _ = req;
-    }
+    /// request ends, after its objects are freed and `persistent_shutdown`
+    /// ran: the connection as the pool keeps it, out of the request's
+    /// tables and holding nothing of a request's, for the next request to
+    /// take up ([`IdleConnection::take_up`]); `None` where nothing is left
+    /// to keep, which the next request finds dead. php's `pdo_dbh_t`
+    /// stands in `EG(persistent_list)` as it is; here the connector says
+    /// by its type what waits there (#4474).
+    fn give_back(self: Box<Self>, req: &mut Request) -> Option<Box<dyn IdleConnection>>;
+}
+
+/// A persistent connection while the engine's pool keeps it between
+/// requests, what [`Connection::give_back`] answers: the connector's
+/// library connection and what it records beside it, with no value or
+/// allocation of a request's and no number into a request's table, so
+/// give-back is the one place a connection is converted (#4474).
+// `EngineState` is the bound this asks once mysqlnd's idle connection,
+// which pdo_mysql's holds, is engine state (#4541).
+pub trait IdleConnection: Send {
+    /// The connection taken up by the request PDO lends it to, kept in
+    /// that request's tables again; one the request cannot keep answers
+    /// dead to `check_liveness`.
+    fn take_up(self: Box<Self>, req: &mut Request) -> Box<dyn Connection>;
 }
 
 /// `pdo_stmt_methods`: a prepared statement.
@@ -691,7 +706,7 @@ pub trait CursorCloser {
 }
 
 /// `enum pdo_error_mode`: what PDO does with an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 pub enum OnError {
     Silent,
     Warn,

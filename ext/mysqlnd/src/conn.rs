@@ -14,8 +14,8 @@ use crate::consts::{
     ASSEMBLED_PACKET_MAX_SIZE, CloseType, Com, ConnState, NET_CMD_BUFFER_MIN_SIZE, QueryType,
     ServerOption, client, cr, status, trans_cor, trans_start,
 };
-use crate::error::{ErrorInfo, OUT_OF_SYNC, SERVER_GONE, Upsert};
-use crate::net::{Net, SslPeer};
+use crate::error::{ErrorInfo, IdleError, OUT_OF_SYNC, SERVER_GONE, Upsert};
+use crate::net::{IdleNet, Net, SslPeer};
 use crate::result::Res;
 use crate::stats::{Stat, Stats};
 use crate::wire::RsetHeader;
@@ -260,7 +260,196 @@ struct Held {
     payload_decoder_factory: Alloc,
 }
 
+/// A persistent connection's [`ConnData`] while the engine's pool keeps
+/// it between requests, what `mysqlnd.h`'s persistent `MYSQLND *` is
+/// then: every field in what a persistent connection holds, `malloc`'s
+/// lengths and bytes, the socket the connection alone owns ([`IdleNet`]),
+/// and no field of a request's, so neither the request's last message
+/// nor the rows the last query left are here to wait (#4474).
+/// [`ConnData::idle`] makes one as the request gives the connection back
+/// and [`ConnData::take_up`] makes the connection again.
+// The derive waits on `Persisted` being engine state (#4541).
+pub struct IdleConn {
+    held: Option<IdleHeld>,
+    mysqlnd: Option<usize>,
+    net: IdleNet,
+    error: IdleError,
+    upsert: Upsert,
+    state: ConnState,
+    stats: Stats,
+    options: IdleOptions,
+    persistent: bool,
+    scheme: Option<Box<[u8]>>,
+    host_info: Option<Box<[u8]>>,
+    server_version: Option<Box<[u8]>>,
+    thread_id: u64,
+    protocol_version: u8,
+    server_capabilities: u32,
+    port: u32,
+    charset: Option<&'static Charset>,
+    greet_charset: Option<&'static Charset>,
+    field_count: u32,
+    last_query_type: QueryType,
+    auth_plugin_data: Option<Box<[u8]>>,
+}
+
+/// [`Held`] while the pool keeps the connection: each structure's
+/// `malloc`'d length.
+#[derive(php_ext::abi::EngineState)]
+struct IdleHeld {
+    data: usize,
+    stats: usize,
+    pfc: usize,
+    vio: usize,
+    payload_decoder_factory: usize,
+}
+
+/// [`Options`] while the pool keeps the connection: the strings and the
+/// init commands `malloc`'s, the attributes in pairs of the connection's
+/// own.
+#[derive(php_ext::abi::EngineState)]
+struct IdleOptions {
+    flags: u32,
+    /// The init commands' array's length and each command.
+    init_commands: (Option<usize>, Vec<Box<[u8]>>),
+    auth_protocol: Option<Box<[u8]>>,
+    connect_attr: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+    protocol: u32,
+    charset_name: Option<Box<[u8]>>,
+    max_allowed_packet: u32,
+    int_and_float_native: bool,
+    local_infile_directory: Option<Box<[u8]>>,
+}
+
+impl Options {
+    /// What the pool keeps of the options.
+    fn idle(self, req: &mut Request) -> IdleOptions {
+        let InitCommands { table, commands } = self.init_commands;
+        let commands = commands.into_iter().map(|c| c.idle(req)).collect();
+        let connect_attr = self.connect_attr.map(|attrs| match attrs {
+            ConnectAttr::Malloc(pairs) => pairs,
+            heap @ ConnectAttr::Heap(_) => {
+                let pairs = heap.pairs(req);
+                heap.free(req);
+                pairs
+            }
+        });
+        IdleOptions {
+            flags: self.flags,
+            init_commands: (table.map(|t| t.idle(req)), commands),
+            auth_protocol: Pstr::idle_field(req, self.auth_protocol),
+            connect_attr,
+            protocol: self.protocol,
+            charset_name: Pstr::idle_field(req, self.charset_name),
+            max_allowed_packet: self.max_allowed_packet,
+            int_and_float_native: self.int_and_float_native,
+            local_infile_directory: Pstr::idle_field(req, self.local_infile_directory),
+        }
+    }
+}
+
+impl From<IdleOptions> for Options {
+    fn from(idle: IdleOptions) -> Options {
+        let (table, commands) = idle.init_commands;
+        Options {
+            flags: idle.flags,
+            init_commands: InitCommands {
+                table: table.map(Alloc::Malloc),
+                commands: commands.into_iter().map(Pstr::Malloc).collect(),
+            },
+            auth_protocol: idle.auth_protocol.map(Pstr::Malloc),
+            connect_attr: idle.connect_attr.map(ConnectAttr::Malloc),
+            protocol: idle.protocol,
+            charset_name: idle.charset_name.map(Pstr::Malloc),
+            max_allowed_packet: idle.max_allowed_packet,
+            int_and_float_native: idle.int_and_float_native,
+            local_infile_directory: idle.local_infile_directory.map(Pstr::Malloc),
+        }
+    }
+}
+
 impl ConnData {
+    /// What the pool keeps of a persistent connection the request gives
+    /// back: the rows the last query left released, as their pool
+    /// is the request's heap's, and the last message freed, the request's
+    /// whatever the connection, as `end_psession` frees it; the socket
+    /// kept by the connection ([`Net::idle`]); every other field as a
+    /// persistent connection holds it.
+    pub(crate) fn idle(self, req: &mut Request) -> IdleConn {
+        if let Some(result) = self.current_result {
+            result.release(req);
+        }
+        if let Some(message) = self.last_message {
+            message.free(req);
+        }
+        let held = self.held.map(|held| IdleHeld {
+            data: held.data.idle(req),
+            stats: held.stats.idle(req),
+            pfc: held.pfc.idle(req),
+            vio: held.vio.idle(req),
+            payload_decoder_factory: held.payload_decoder_factory.idle(req),
+        });
+        IdleConn {
+            held,
+            mysqlnd: self.mysqlnd.map(|m| m.idle(req)),
+            net: self.net.idle(req),
+            error: self.error.idle(req),
+            upsert: self.upsert,
+            state: self.state,
+            stats: self.stats,
+            options: self.options.idle(req),
+            persistent: self.persistent,
+            scheme: Pstr::idle_field(req, self.scheme),
+            host_info: Pstr::idle_field(req, self.host_info),
+            server_version: Pstr::idle_field(req, self.server_version),
+            thread_id: self.thread_id,
+            protocol_version: self.protocol_version,
+            server_capabilities: self.server_capabilities,
+            port: self.port,
+            charset: self.charset,
+            greet_charset: self.greet_charset,
+            field_count: self.field_count,
+            last_query_type: self.last_query_type,
+            auth_plugin_data: Pstr::idle_field(req, self.auth_plugin_data),
+        }
+    }
+
+    /// A connection the pool kept, taken up by a request over the socket
+    /// it kept ([`Net::take_up`]), with no last message and no rows.
+    pub(crate) fn take_up(req: &mut Request, idle: IdleConn) -> Result<ConnData, Thrown> {
+        Ok(ConnData {
+            held: idle.held.map(|held| Held {
+                data: Alloc::Malloc(held.data),
+                stats: Alloc::Malloc(held.stats),
+                pfc: Alloc::Malloc(held.pfc),
+                vio: Alloc::Malloc(held.vio),
+                payload_decoder_factory: Alloc::Malloc(held.payload_decoder_factory),
+            }),
+            mysqlnd: idle.mysqlnd.map(Alloc::Malloc),
+            net: Net::take_up(req, idle.net)?,
+            error: idle.error.into(),
+            upsert: idle.upsert,
+            state: idle.state,
+            stats: idle.stats,
+            options: idle.options.into(),
+            persistent: idle.persistent,
+            scheme: idle.scheme.map(Pstr::Malloc),
+            host_info: idle.host_info.map(Pstr::Malloc),
+            server_version: idle.server_version.map(Pstr::Malloc),
+            thread_id: idle.thread_id,
+            protocol_version: idle.protocol_version,
+            server_capabilities: idle.server_capabilities,
+            port: idle.port,
+            charset: idle.charset,
+            greet_charset: idle.greet_charset,
+            last_message: None,
+            field_count: idle.field_count,
+            last_query_type: idle.last_query_type,
+            current_result: None,
+            auth_plugin_data: idle.auth_plugin_data.map(Pstr::Malloc),
+        })
+    }
+
     /// `mysqlnd_object_factory::get_connection` with `mysqlnd_vio::init`
     /// and `mysqlnd_pfc::init`: the structures allocated in php's order,
     /// on the request's heap unless `persistent`; the buffers and the read
