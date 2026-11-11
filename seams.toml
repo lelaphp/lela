@@ -628,6 +628,13 @@ check = "witness-coverage"
 text = "A kernel or a native without a witness fails CI (design §8)."
 
 [[rule]]
+id = "state.engine"
+scope = ["crates/*", "ext/*", "sapi/*"]
+check = "engine-state"   # api-check's sensor: a hand-written `impl EngineState for` outside the unsafe.homes homes; the compile-fail fixtures are php_bundle's refusals.rs doctests (#4348 ruling 2, #4360)
+adr = "0005"
+text = "No handle into a request's heap enters engine-wide shared state: engine_state, process_state, register and constants_with take an EngineState, which #[derive(EngineState)] holds at every field, and an impl written by hand stands only where unsafe may (#4348 ruling 2)."
+
+[[rule]]
 id = "vocab.avoid"
 scope = ["crates/*", "ext/*"]
 avoid_from = "CONTEXT.md" # grammar: avoid_from, harness §5

@@ -20,7 +20,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_heap::{Intern, Strings, Zval};
+use php_heap::{FrozenZval, Strings};
 use php_macros::php_const;
 
 /// `PHP_INCLUDE_PATH`, `.:${PEAR_INSTALLDIR}` of this build's layout
@@ -113,15 +113,15 @@ pub(crate) const HOSTS: [&str; 6] = [
 /// reads `PHP_SAPI` from, so the engine's own host is found without
 /// waiting on the table, which a compile holds while it asks
 /// ([`php_compile::Persistent::host`]).
-pub(crate) fn host_names(strings: &mut Strings, host: &str) -> Vec<(Box<[u8]>, Zval)> {
+pub(crate) fn host_names(strings: &mut Strings, host: &str) -> Vec<(Box<[u8]>, FrozenZval)> {
     let own = (!host.is_empty() && !HOSTS.contains(&host)).then_some(host);
     HOSTS
         .iter()
         .copied()
         .chain(own)
         .filter_map(|name| {
-            let interned = strings.intern(name.as_bytes()).ok()?;
-            Some((Box::from(name.as_bytes()), Zval::string(interned)))
+            let interned = FrozenZval::interned(strings, name.as_bytes()).ok()?;
+            Some((Box::from(name.as_bytes()), interned))
         })
         .collect()
 }

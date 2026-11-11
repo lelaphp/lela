@@ -10,9 +10,10 @@
 use std::collections::HashMap;
 
 use crate::types::{Field, Func, Int, Kind, Record, Type, TypeId, Types, attr, predefined};
+use php_ext::abi::EngineState;
 
 /// `zend_ffi_symbol_kind`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum SymbolKind {
     Type,
     Const,
@@ -22,7 +23,7 @@ pub(crate) enum SymbolKind {
 
 /// `zend_ffi_symbol`: a typedef, an enumerator, a variable or a function,
 /// and the address `dlsym` found for the last two.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EngineState)]
 pub(crate) struct Symbol {
     pub(crate) kind: SymbolKind,
     pub(crate) is_const: bool,
@@ -32,7 +33,7 @@ pub(crate) struct Symbol {
 }
 
 /// `zend_ffi_tag_kind`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum TagKind {
     Enum,
     Struct,
@@ -40,14 +41,14 @@ pub(crate) enum TagKind {
 }
 
 /// `zend_ffi_tag`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, EngineState)]
 pub(crate) struct Tag {
     pub(crate) kind: TagKind,
     pub(crate) ty: TypeId,
 }
 
 /// A `HashTable` keyed by name, in insertion order.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EngineState)]
 pub(crate) struct Table<T> {
     rows: Vec<(Vec<u8>, T)>,
     index: HashMap<Vec<u8>, usize>,
@@ -94,7 +95,7 @@ impl<T> Table<T> {
 /// What a declaration is parsed against and declares into: php's
 /// `FFI_G(symbols)` and `FFI_G(tags)`, each absent until the first
 /// declaration makes it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, EngineState)]
 pub(crate) struct Scope {
     pub(crate) symbols: Option<Table<Symbol>>,
     pub(crate) tags: Option<Table<Tag>>,

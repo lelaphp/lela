@@ -597,6 +597,7 @@ mod tests {
         #[php_ext::attr::php_class(extern)]
         struct Error;
         /// `Error` as the extension's engine start resolved it.
+        #[derive(php_ext::abi::EngineState)]
         struct Failing(php_ext::values::ClassId);
         fn throws(req: &mut php_ext::request::Request) -> Result<(), php_ext::raising::Thrown> {
             let Some(&Failing(error)) = req.engine::<Failing>() else {

@@ -53,7 +53,7 @@ mod header {
 
 use std::ffi::{c_int, c_ulong};
 
-use php_ext::abi::{Extension, ExtensionBuilder, IniStage, OrFalse, Refusals};
+use php_ext::abi::{EngineState, Extension, ExtensionBuilder, IniStage, OrFalse, Refusals};
 use php_ext::attr::{php_const, php_function};
 use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
@@ -463,6 +463,7 @@ fn on_update_libctx(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thr
 }
 
 /// The process scope's proof that the library is started (ADR-0010).
+#[derive(EngineState)]
 struct Initialized;
 
 /// `PHP_MINIT_FUNCTION(openssl)`'s `php_openssl_backend_init`

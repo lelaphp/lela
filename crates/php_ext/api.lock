@@ -98,6 +98,7 @@ abi::Encodings::list
 abi::Encodings::name
 abi::Encodings::unicode
 abi::EndHandler
+abi::EngineState
 abi::ErrorNotice
 abi::ErrorNotice::file
 abi::ErrorNotice::level

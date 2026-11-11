@@ -41,7 +41,9 @@ mod link;
 mod natives;
 mod throwables;
 
-use php_ext::abi::{Extension, ExtensionBuilder, Lent, ObjectHandlers, Pool, Refusals};
+use php_ext::abi::{
+    EngineState, Extension, ExtensionBuilder, Lent, ObjectHandlers, Pool, Refusals,
+};
 use php_ext::attr::php_class;
 use php_ext::decl::IniDecl;
 use php_ext::raising::{Level, Thrown, docref};
@@ -191,6 +193,7 @@ struct State {
 }
 
 /// The engine's pool of `dba_popen` links, keyed as php keys them.
+#[derive(EngineState)]
 struct Pooled {
     pool: Pool<Vec<u8>, link::Kept>,
     /// The classes the natives raise, resolved at the same start.

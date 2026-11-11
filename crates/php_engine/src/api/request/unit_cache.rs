@@ -16,7 +16,7 @@ use php_compile::SourceKind;
 use super::Code;
 use super::include::unreadable;
 use super::{AccelServed, Request, Unresolved, is_cacheable_stream_path, is_wrapper_url};
-use crate::api::abi::{Admission, FileCache, Lookup, Validation};
+use crate::api::abi::{Admission, EngineState, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
 use crate::c_number::c_str;
@@ -127,7 +127,7 @@ pub struct CacheStatus {
 /// reports every field zero, the default. A request holds its `JIT_G` as
 /// one of these ([`UnitCache::tier_setting`]), the buffer's fields as its
 /// engine's start laid them, before what any trace takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 pub struct TierStatus {
     /// `JIT_G(enabled)`: `opcache.jit` set the tier up and php's start
     /// kept it.

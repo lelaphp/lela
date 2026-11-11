@@ -8,7 +8,7 @@
 
 use php_heap::Heap;
 
-use crate::api::abi::Callable;
+use crate::api::abi::{Callable, EngineState};
 use crate::api::raising::Thrown;
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, adopted, adopted_some};
 use crate::engine::{Aborted, OutputSink, ResponseHead};
@@ -87,7 +87,7 @@ pub enum StartHandler {
 /// php-src makes through `php_output_handler_conflict`.
 ///
 /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, EngineState)]
 pub struct BufferHandler {
     pub name: &'static str,
     pub conflicts: &'static [&'static str],

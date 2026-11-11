@@ -53,7 +53,7 @@ mod stmt;
 mod throwables;
 
 use php_ext::abi::{
-    Dependency, DependencyKind, Extension, ExtensionBuilder, Lent, LongHandler, Pool,
+    Dependency, DependencyKind, EngineState, Extension, ExtensionBuilder, Lent, LongHandler, Pool,
 };
 use php_ext::attr::php_const;
 use php_ext::decl::IniDecl;
@@ -123,6 +123,7 @@ pub(crate) struct State {
 /// persistent connections, each key's a stack of free links, php's
 /// `plist->free_links`, each link the connection itself with its socket,
 /// in no other list between the requests that take it up.
+#[derive(EngineState)]
 pub(crate) struct Pooled {
     pub(crate) pool: Pool<Vec<u8>, Idle>,
     /// The classes the natives raise, resolved at the same start.

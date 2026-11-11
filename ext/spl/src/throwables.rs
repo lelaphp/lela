@@ -4,7 +4,7 @@
 //! a raise names its class by the identity, never by a name looked up as
 //! it throws (#3403).
 
-use php_ext::abi::{Refusal, Start};
+use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::attr::php_class;
 use php_ext::raising::{self, Thrown};
 use php_ext::request::Request;
@@ -21,7 +21,7 @@ use crate::exceptions::{
 pub(crate) struct Error;
 
 /// The classes the natives raise, by their identity in this engine.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, EngineState)]
 pub(crate) struct Throwables {
     pub(crate) error: ClassId,
     pub(crate) exception: ClassId,

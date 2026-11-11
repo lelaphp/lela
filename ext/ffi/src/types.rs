@@ -7,9 +7,10 @@
 //! for a type a `FFI\CData` still names.
 
 use crate::ffi::Layout;
+use php_ext::abi::EngineState;
 
 /// A type of the arena, php's `zend_ffi_type *`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, EngineState)]
 pub(crate) struct TypeId(u32);
 
 impl TypeId {
@@ -51,7 +52,7 @@ pub(crate) mod attr {
 }
 
 /// An integer kind, what an enumeration is stored as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Int {
     U8,
     I8,
@@ -92,7 +93,7 @@ pub(crate) enum Scalar {
 }
 
 /// `zend_ffi_type.kind` and the union beside it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EngineState)]
 pub(crate) enum Kind {
     Void,
     Float,
@@ -110,7 +111,7 @@ pub(crate) enum Kind {
 
 /// A function type: its return, its parameters (none for `(void)` and
 /// for `()`), and its calling convention as libffi numbers it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EngineState)]
 pub(crate) struct Func {
     pub(crate) ret: TypeId,
     pub(crate) args: Option<Vec<TypeId>>,
@@ -119,7 +120,7 @@ pub(crate) struct Func {
 
 /// A struct or a union: its tag and its fields in declaration order,
 /// an anonymous bit field keyed by no name.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, EngineState)]
 pub(crate) struct Record {
     pub(crate) tag: Option<Vec<u8>>,
     pub(crate) fields: Vec<(Option<Vec<u8>>, Field)>,
@@ -136,7 +137,7 @@ impl Record {
 }
 
 /// `zend_ffi_field`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, EngineState)]
 pub(crate) struct Field {
     pub(crate) offset: usize,
     pub(crate) is_const: bool,
@@ -147,7 +148,7 @@ pub(crate) struct Field {
 }
 
 /// `zend_ffi_type`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EngineState)]
 pub(crate) struct Type {
     pub(crate) kind: Kind,
     pub(crate) size: usize,
@@ -246,7 +247,7 @@ const LONG_DOUBLE: (usize, u32) = (16, 16);
 
 /// The arena: the predefined types at their fixed numbers, then every type
 /// a declaration made.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EngineState)]
 pub(crate) struct Types {
     all: Vec<Type>,
     /// The types a declaration made and php's `zend_ffi_type_dtor`
