@@ -1205,7 +1205,7 @@ impl Manifest {
                 .find(|d| crate::permit::Element::parse(d).is_none())
             {
                 bail!(
-                    "rule \"{}\" has the `deny_argv` element {element:?}; an element is an option (`-n`), an option and the name its value sets (`-c core.hooksPath`), or a subcommand (`close`)",
+                    "rule \"{}\" has the `deny_argv` element {element:?}; an element is an option (`-n`), an option and the name its value sets (`-c core.hooksPath`), a subcommand (`close`), or a configuration key (`core.hooksPath`)",
                     rule.id
                 );
             }
