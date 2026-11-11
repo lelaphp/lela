@@ -75,6 +75,7 @@ mod ini_syntax;
 mod interfaces;
 mod interrupt;
 pub mod layer;
+mod log_field;
 mod multibyte;
 mod natives;
 mod observer;
@@ -126,3 +127,4 @@ pub use engine::{
 };
 pub use fork::{Forked, HostThread, Pid, fork, host_thread, main_thread};
 pub use ini_syntax::{IniEvent, IniValue};
+pub use log_field::log_field;

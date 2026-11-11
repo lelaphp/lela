@@ -52,6 +52,7 @@ getopt::OptError
 getopt::Stopped
 getopt::Taken
 host_thread
+log_field
 main_thread
 readable::Callee
 readable::Code
