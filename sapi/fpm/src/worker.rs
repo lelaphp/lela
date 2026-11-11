@@ -290,9 +290,6 @@ pub(crate) struct Worker {
     ping: Option<(Vec<u8>, Vec<u8>)>,
     limit_extensions: Vec<Vec<u8>>,
     max_requests: i32,
-    /// What `PHP_VALUE` and `PHP_ADMIN_VALUE` set, which stays for the
-    /// child's later requests as php's master value does.
-    sticky: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     user_config: Vec<(Vec<u8>, UserConfig)>,
     get_values: Vec<(Vec<u8>, Vec<u8>)>,
 }
@@ -390,7 +387,6 @@ pub(crate) fn init(fpm: &mut Fpm, pool: usize, slot: usize) -> Worker {
         ping,
         limit_extensions: fpm.pools[pool].limit_extensions.clone(),
         max_requests: config.pm_max_requests,
-        sticky: Vec::new(),
         user_config: Vec::new(),
         get_values: vec![(b"FCGI_MPXS_CONNS".to_vec(), b"0".to_vec())],
         status_board,
@@ -707,7 +703,7 @@ impl Worker {
             &CachedDisk(&self.engine),
             C_NUMBER,
         );
-        self.request_values(&env);
+        let carried = self.request_values(&env);
         let now = crate::master::clock_us();
         if let Some(proc) = self.proc() {
             proc.info(
@@ -723,7 +719,7 @@ impl Worker {
             );
         }
         let head_only = info.method.as_deref() == Some(b"HEAD");
-        let description = self.describe(&env, &info, headers, wire);
+        let description = self.describe(&env, &info, carried, headers, wire);
         let response = Box::new(Response {
             wire: Arc::clone(wire),
             board: Some(self.board()),
@@ -883,8 +879,12 @@ impl Worker {
     }
 
     /// `PHP_VALUE` and `PHP_ADMIN_VALUE`, read as `fastcgi_ini_parser`
-    /// reads them and kept for the child's later requests.
-    fn request_values(&mut self, env: &Environment) {
+    /// reads them: the entries this request lays over the pool's, each
+    /// name once with the last value it carried. They end with the
+    /// request, as a value `ini_set` laid does, where php's child keeps
+    /// them for its later requests (php's bug #53611; design §4.8).
+    fn request_values(&self, env: &Environment) -> Vec<(Vec<u8>, Vec<u8>, IniOrigin)> {
+        let mut carried: Vec<(Vec<u8>, Vec<u8>, IniOrigin)> = Vec::new();
         for (var, mode) in [
             (&b"PHP_VALUE"[..], IniOrigin::Value),
             (b"PHP_ADMIN_VALUE", IniOrigin::Admin),
@@ -925,10 +925,11 @@ impl Worker {
                     );
                     continue;
                 }
-                self.sticky.retain(|(k, _, _)| *k != key);
-                self.sticky.push((key, value, mode));
+                carried.retain(|(k, _, _)| *k != key);
+                carried.push((key, value, mode));
             }
         }
+        carried
     }
 
     /// `sapi_cgi_pre_request_init`'s `.user.ini` files
@@ -966,7 +967,8 @@ impl Worker {
     }
 
     /// The request description of a request of the web: its entries the
-    /// `PHP_VALUE`s kept, then the php.ini's `[HOST=]` table of its
+    /// `carried` ones of [`Worker::request_values`], then the php.ini's
+    /// `[HOST=]` table of its
     /// `SERVER_NAME` and `[PATH=]` tables along its directory, which
     /// `sapi_cgi_activate` sets ([`Engine::activated_ini`]), then its
     /// `.user.ini` lines; `headers` are `apache_request_headers`', read
@@ -975,10 +977,11 @@ impl Worker {
         &mut self,
         env: &Environment,
         info: &php_proto::cgi::RequestInfo,
+        carried: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
         headers: Vec<(Vec<u8>, Vec<u8>)>,
         wire: &Arc<Mutex<Wire>>,
     ) -> RequestDescription {
-        let mut ini = self.sticky.clone();
+        let mut ini = carried;
         if let Some(path) = &info.path_translated {
             ini.extend(self.engine.activated_ini(env.get(b"SERVER_NAME"), path));
             ini.extend(

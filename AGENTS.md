@@ -91,7 +91,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=cbd73f8c25f1a5fd9c9a073eafeac747039487db3c5e3b56b5b3d841541059ea out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=e788f88de6346fd921fa4e4c688fa72e3b2366a92b70760afbb99670c5065f51 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
