@@ -11,10 +11,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use php_engine::tier::Epoch;
+use php_engine::tier::{Epoch, Inherited};
 use php_unit::{OpArray, OplineIdx, Unit};
 
-use super::code::{CHUNK, HeapPages, Unmapped};
+use super::code::{CHUNK, HalfAdopted, HeapPages, Uncopyable, Unmapped};
 use super::perf::{self, Captured, Loaded};
 use super::{Full, Perf, TraceId, TraceName, TraceTable, Unpublished};
 use crate::lower::Compiled;
@@ -423,6 +423,51 @@ fn a_table_with_no_arena_numbers_and_keeps_no_code() {
         table.publish(compiled(&[0; 4], vec![]), Start::Loop),
         Err(Unpublished::Full(Full::Traces))
     );
+}
+
+/// A fork's child whose second mapping, the write view's, was refused
+/// goes on: its executable view stands on the copy, so it enters every
+/// trace published before the fork at the address it was published at,
+/// and publishes no more code (`jit-design.md` §4.4, #4501's ruling). The
+/// process that asked lets its hold go and keeps its arena.
+#[test]
+fn a_child_whose_second_mapping_was_refused_enters_what_was_published_before() -> Result<(), String>
+{
+    goes_on::<HalfAdopted>()
+}
+
+/// A fork's child whose copy was refused before the fork keeps the
+/// pages it has, which its parent writes nowhere a trace stands, so it
+/// goes on as one whose second mapping was refused (`jit-design.md` §4.4).
+#[test]
+fn a_child_whose_copy_was_refused_enters_what_was_published_before() -> Result<(), String> {
+    goes_on::<Uncopyable>()
+}
+
+/// The child's half of a hold over `P`, which refuses the child its copy
+/// where the code stands, leaves it entering what was published before
+/// and publishing no code after; the asker's half publishes code still.
+fn goes_on<P: super::Pages + 'static>() -> Result<(), String> {
+    let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
+    let asker: TraceTable<P> = TraceTable::with_perf(&policy, Perf::none());
+    let child: TraceTable<P> = TraceTable::with_perf(&policy, Perf::none());
+    let (ours, before) = (loop_of(&asker)?, loop_of(&child)?);
+    let entry = |table: &TraceTable<P>, id| table.get(id).map(|trace| trace.code.entry());
+    let at = entry(&child, before);
+    drop(asker.hold());
+    child.hold()();
+    assert!(at.is_some(), "published with no code before the fork");
+    assert_eq!(entry(&child, before), at, "the child does not enter it");
+    let after = loop_of(&child)?;
+    assert!(child.get(after).is_none(), "published with code after");
+    let mine = loop_of(&asker)?;
+    assert!(asker.get(ours).is_some() && asker.get(mine).is_some());
+    Ok(())
+}
+
+/// One loop of one exit published into `table`.
+fn loop_of<P: super::Pages>(table: &TraceTable<P>) -> Result<TraceId, String> {
+    (table.publish(compiled(&[0; 8], vec![exit(None)]), Start::Loop)).map_err(|e| format!("{e:?}"))
 }
 
 /// What does not hold together is refused before anything is counted.

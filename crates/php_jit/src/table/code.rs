@@ -109,6 +109,12 @@ pub(crate) trait Pages: Sized + Send + Sync {
     /// other process maps, and every address into the span still names
     /// the byte it named.
     ///
+    /// # Errors
+    ///
+    /// The OS error a mapping was refused with, and whether the code
+    /// still stands where every address into the span names it
+    /// ([`Unadopted`]).
+    ///
     /// # Safety
     ///
     /// `own` was made by [`Pages::own`] of this span, no byte of the
@@ -116,7 +122,37 @@ pub(crate) trait Pages: Sized + Send + Sync {
     /// them is one any thread of this process executes or reads: what
     /// another process sharing the pages writes there meanwhile is never
     /// entered.
-    unsafe fn adopt(&self, own: Self::Own) -> io::Result<()>;
+    unsafe fn adopt(&self, own: Self::Own) -> Result<(), Unadopted>;
+}
+
+/// Why a fork's child could not take its copy ([`Pages::adopt`]), by
+/// whether its code still stands (`jit-design.md` §4.4, #4501's ruling).
+#[derive(Debug)]
+pub(crate) enum Unadopted {
+    /// Refused where every byte a `Code` names stands at its address: the
+    /// copy was not the arena's, nothing was mapped yet, or the
+    /// executable view was already laid over the copy.
+    Stands(io::Error),
+    /// Refused where the executable view may be gone: Linux takes the old
+    /// range away before it maps the view that replaces it, and may then
+    /// refuse that mapping.
+    #[cfg_attr(
+        not(any(test, all(php_jit_arena, target_os = "linux"))),
+        expect(
+            dead_code,
+            reason = "only the Linux adapter, and the tests' Unadoptable, refuse where the view may be gone"
+        )
+    )]
+    Lost(io::Error),
+}
+
+impl std::fmt::Display for Unadopted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unadopted::Stands(error) => write!(f, "{error}; the code stands"),
+            Unadopted::Lost(error) => write!(f, "{error}; the code may be gone"),
+        }
+    }
 }
 
 /// Why a body was not published: it is larger than a chunk, or every
@@ -369,13 +405,13 @@ impl<P: Pages> Arena<P> {
     /// arena's pages at their addresses: every `Code` still names its
     /// bytes, and from here on this process writes and runs pages its
     /// parent does not map. A copy of another arena, or of this one before
-    /// a later publish, is refused, and nothing is mapped.
-    pub(crate) fn adopt(&mut self, inheritance: Inheritance<P>) -> io::Result<()> {
+    /// a later publish, is refused, nothing mapped and the code standing.
+    pub(crate) fn adopt(&mut self, inheritance: Inheritance<P>) -> Result<(), Unadopted> {
         let ours = std::ptr::eq(inheritance.of.as_ptr(), Arc::as_ptr(&self.region));
         if !ours || inheritance.written != self.written {
-            return Err(io::Error::other(
+            return Err(Unadopted::Stands(io::Error::other(
                 "a copy of another arena, or of this one before its last publish",
-            ));
+            )));
         }
         // SAFETY: `inheritance` was made by `own` of this arena's pages,
         // and this arena wrote no body since, so no byte of a chunk it
@@ -496,7 +532,7 @@ impl Pages for HeapPages {
         Ok(())
     }
 
-    unsafe fn adopt(&self, (): ()) -> io::Result<()> {
+    unsafe fn adopt(&self, (): ()) -> Result<(), Unadopted> {
         Ok(())
     }
 }
@@ -508,6 +544,134 @@ impl HeapPages {
         // SAFETY: a test reads only bytes a publish has finished writing.
         unsafe { *self.bytes[at].get() }
     }
+}
+
+/// Where a test adapter refuses a fork's child its copy, with `ENOMEM`
+/// (`jit-design.md` §4.4).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// The copy, made before the fork: the child keeps the pages it has.
+    Copy,
+    /// The first mapping, the executable view's, as Linux refuses its
+    /// replacement once it may have taken the view away.
+    First,
+    /// The second mapping, the write view's, once the executable view
+    /// stands on the copy.
+    Second,
+}
+
+/// A test adapter's refusal, as a type ([`Refusing`]).
+#[cfg(test)]
+pub(crate) trait Refuses: Send + Sync + 'static {
+    /// Where it refuses.
+    const AT: Refused;
+}
+
+/// [`Refused::Copy`].
+#[cfg(test)]
+pub(crate) struct AtCopy;
+
+/// [`Refused::First`].
+#[cfg(test)]
+pub(crate) struct AtFirst;
+
+/// [`Refused::Second`].
+#[cfg(test)]
+pub(crate) struct AtSecond;
+
+#[cfg(test)]
+impl Refuses for AtCopy {
+    const AT: Refused = Refused::Copy;
+}
+
+#[cfg(test)]
+impl Refuses for AtFirst {
+    const AT: Refused = Refused::First;
+}
+
+#[cfg(test)]
+impl Refuses for AtSecond {
+    const AT: Refused = Refused::Second;
+}
+
+/// The heap adapter whose fork's child cannot take its copy, refused
+/// where `R` says.
+#[cfg(test)]
+pub(crate) struct Refusing<R>(HeapPages, std::marker::PhantomData<R>);
+
+/// The heap adapter whose fork's child's first mapping is refused, so its
+/// executable view may be gone.
+#[cfg(test)]
+pub(crate) type Unadoptable = Refusing<AtFirst>;
+
+/// The heap adapter whose fork's child's second mapping is refused, its
+/// code standing on the copy.
+#[cfg(test)]
+pub(crate) type HalfAdopted = Refusing<AtSecond>;
+
+/// The heap adapter whose copy for a fork's child is refused.
+#[cfg(test)]
+pub(crate) type Uncopyable = Refusing<AtCopy>;
+
+#[cfg(test)]
+impl<R: Refuses> Pages for Refusing<R> {
+    fn map_pair(len: usize) -> io::Result<Self> {
+        HeapPages::map_pair(len).map(|pages| Refusing(pages, std::marker::PhantomData))
+    }
+
+    unsafe fn write(&self, at: usize, bytes: &[u8]) {
+        // SAFETY: the caller's contract, the heap adapter's.
+        unsafe { self.0.write(at, bytes) };
+    }
+
+    unsafe fn sync(&self, _: Range<usize>) {}
+
+    fn rx(&self, at: usize) -> NonNull<u8> {
+        self.0.rx(at)
+    }
+
+    type Own = ();
+
+    fn own(&self, _: &mut dyn Iterator<Item = Range<usize>>) -> io::Result<()> {
+        match R::AT {
+            Refused::Copy => Err(io::Error::from_raw_os_error(libc::ENOMEM)),
+            Refused::First | Refused::Second => Ok(()),
+        }
+    }
+
+    unsafe fn adopt(&self, (): ()) -> Result<(), Unadopted> {
+        let refused = io::Error::from_raw_os_error(libc::ENOMEM);
+        match R::AT {
+            Refused::Copy => Ok(()),
+            Refused::First => Err(Unadopted::Lost(refused)),
+            Refused::Second => Err(Unadopted::Stands(refused)),
+        }
+    }
+}
+
+/// How the one child of this process ended, waited for: its exit status,
+/// or the signal that ended it; for a test that forks and reads the
+/// child's status.
+#[cfg(all(test, php_jit_arena, not(miri)))]
+pub(crate) fn waited() -> io::Result<Result<i32, i32>> {
+    let mut status = 0;
+    loop {
+        // SAFETY: `status` is a live `c_int` that `waitpid` writes once.
+        let child = unsafe { libc::waitpid(-1, &raw mut status, 0) };
+        if child != -1 {
+            break;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(if libc::WIFEXITED(status) {
+        Ok(libc::WEXITSTATUS(status))
+    } else {
+        Err(libc::WTERMSIG(status))
+    })
 }
 
 #[cfg(all(php_jit_arena, target_os = "macos", target_arch = "aarch64"))]
@@ -547,7 +711,7 @@ impl Pages for Unmapped {
         Ok(())
     }
 
-    unsafe fn adopt(&self, (): ()) -> io::Result<()> {
+    unsafe fn adopt(&self, (): ()) -> Result<(), Unadopted> {
         Ok(())
     }
 }
@@ -749,7 +913,7 @@ mod mac {
     use std::ops::Range;
     use std::ptr::NonNull;
 
-    use super::{Mapping, Pages};
+    use super::{Mapping, Pages, Unadopted};
 
     unsafe extern "C" {
         /// libSystem's cache maintenance over freshly written code:
@@ -842,7 +1006,7 @@ mod mac {
             Ok(())
         }
 
-        unsafe fn adopt(&self, (): ()) -> io::Result<()> {
+        unsafe fn adopt(&self, (): ()) -> Result<(), Unadopted> {
             Ok(())
         }
     }
@@ -880,7 +1044,7 @@ mod remap {
     use std::ops::Range;
     use std::ptr::NonNull;
 
-    use super::{Mapping, Pages, page_size};
+    use super::{Mapping, Pages, Unadopted, page_size};
 
     /// `<mach/vm_inherit.h>`'s copy on fork, which `mmap` gives a private
     /// mapping too.
@@ -1009,32 +1173,34 @@ mod remap {
         /// executable view, so its code never stands unexecutable, and
         /// then over the write view, made readable and writable; each
         /// view's maximum lowered again. `own`'s own address is unmapped
-        /// as it drops, and the views keep its pages. A refusal past the
-        /// first remapping leaves the code standing on the copy, and the
-        /// caller writes no more. One refusal is not covered, as on Linux:
-        /// the first remapping replaces the executable view with
-        /// `VM_FLAGS_OVERWRITE`, which removes the old mapping first, so a
-        /// kernel that removes it and then refuses leaves the view
-        /// unmapped; the caller then publishes no more, but every entry
-        /// published before the fork still points into it. Whether XNU
-        /// can refuse after the removal is not established (#4471).
-        unsafe fn adopt(&self, own: Mapping) -> io::Result<()> {
+        /// as it drops, and the views keep its pages. Every refusal leaves
+        /// the code standing, and the caller writes no more: past the
+        /// first remapping it stands on the copy, and the first remapping
+        /// replaces the executable view with `VM_FLAGS_OVERWRITE`, which
+        /// removes the old mapping first, and XNU links the new one before
+        /// it lets another call change the map, so no refusal leaves the
+        /// view unmapped (`jit-design.md` §4.4, #4471).
+        unsafe fn adopt(&self, own: Mapping) -> Result<(), Unadopted> {
+            let rx = libc::PROT_READ | libc::PROT_EXEC;
             // SAFETY: `own` is this call's alone, and no thread runs it.
-            unsafe { protect(own.base, own.len, libc::PROT_READ | libc::PROT_EXEC) }?;
+            unsafe { protect(own.base, own.len, rx) }.map_err(Unadopted::Stands)?;
             // SAFETY: the caller hands a copy of every byte any thread
             // executes, now executable, and the executable view is this
             // adapter's own mapping, of `own`'s length.
-            unsafe { over(&own, &self.executed) }?;
+            unsafe { over(&own, &self.executed) }.map_err(Unadopted::Stands)?;
+            let rx = libc::VM_PROT_READ | libc::VM_PROT_EXECUTE;
             // SAFETY: lowers the maximum to what the view is.
-            unsafe { cap(&self.executed, libc::VM_PROT_READ | libc::VM_PROT_EXECUTE) }?;
+            unsafe { cap(&self.executed, rx) }.map_err(Unadopted::Stands)?;
             // SAFETY: the same copy, over the write view, which nothing
             // executes and only the arena's holder, the caller, writes.
-            unsafe { over(&own, &self.written) }?;
+            unsafe { over(&own, &self.written) }.map_err(Unadopted::Stands)?;
             let rw = libc::PROT_READ | libc::PROT_WRITE;
             // SAFETY: the write view, which no thread executes.
-            unsafe { protect(self.written.base, self.written.len, rw) }?;
+            let protected = unsafe { protect(self.written.base, self.written.len, rw) };
+            protected.map_err(Unadopted::Stands)?;
+            let rw = libc::VM_PROT_READ | libc::VM_PROT_WRITE;
             // SAFETY: lowers the maximum to what the view is.
-            unsafe { cap(&self.written, libc::VM_PROT_READ | libc::VM_PROT_WRITE) }
+            unsafe { cap(&self.written, rw) }.map_err(Unadopted::Stands)
         }
     }
 
@@ -1206,7 +1372,7 @@ mod linux {
     use rustix::fs::{MemfdFlags, SealFlags};
     use rustix::mm::{MapFlags, ProtFlags};
 
-    use super::{Mapping, Pages};
+    use super::{Mapping, Pages, Unadopted};
 
     /// One sealed `memfd`'s two views.
     pub(crate) struct Memfd {
@@ -1285,18 +1451,22 @@ mod linux {
         /// more. A replaced page holds the byte the old held wherever code
         /// is, so a fetch through either sees one instruction, and Linux
         /// keeps a page's instruction and data caches coherent as it maps
-        /// the page executable. One refusal is not covered: a kernel that
-        /// unmaps the range before it refuses the executable view's
-        /// replacement leaves the code there unmapped, which only a kernel
-        /// out of memory for one mapping of the size it replaces does.
-        unsafe fn adopt(&self, file: OwnedFd) -> io::Result<()> {
+        /// the page executable. Linux unmaps the range before it maps the
+        /// executable view's replacement, and an allocation of its own
+        /// refused after that, `ENOMEM`, leaves the code there unmapped
+        /// (`jit-design.md` §4.4, #4471), so a refusal of the first
+        /// mapping is one where the code may be gone; the range is not
+        /// probed (#4501's ruling).
+        unsafe fn adopt(&self, file: OwnedFd) -> Result<(), Unadopted> {
+            let rx = ProtFlags::READ | ProtFlags::EXEC;
             // SAFETY: the caller hands a copy of every byte any thread
             // executes, and the executable view is this adapter's own
             // mapping, replaced over its own range.
-            unsafe { over(&self.executed, &file, ProtFlags::READ | ProtFlags::EXEC) }?;
+            unsafe { over(&self.executed, &file, rx) }.map_err(Unadopted::Lost)?;
+            let rw = ProtFlags::READ | ProtFlags::WRITE;
             // SAFETY: the same, for the write view, which nothing executes
             // and only the arena's holder, the caller, writes.
-            unsafe { over(&self.written, &file, ProtFlags::READ | ProtFlags::WRITE) }?;
+            unsafe { over(&self.written, &file, rw) }.map_err(Unadopted::Stands)?;
             #[cfg(test)]
             if let Ok(seals) = rustix::fs::fcntl_get_seals(&file) {
                 (self.seals).store(seals.bits(), std::sync::atomic::Ordering::Relaxed);

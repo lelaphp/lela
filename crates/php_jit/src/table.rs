@@ -41,11 +41,15 @@
 //! table is entered among what a fork holds ([`tier::Inherited`]), which
 //! takes its compile mutex for the fork and copies its arena's chunks in
 //! use, and the child maps the copy over its arena at the same addresses.
-//! Where the copy or the mapping is refused, the child's table keeps no
-//! arena and publishes no more code, so neither process writes a page the
-//! other runs: the one that asked writes only into chunks and tails that
-//! were free at the fork, which the child, publishing nothing, never
-//! enters, and no chunk of a standing table is freed before the table.
+//! Where the copy or the mapping is refused and the code stands, the
+//! child's table keeps no arena and publishes no more code, so neither
+//! process writes a page the other runs: the one that asked writes only
+//! into chunks and tails that were free at the fork, which the child,
+//! publishing nothing, never enters, and no chunk of a standing table is
+//! freed before the table. Where the mapping is refused and the kernel
+//! may have taken the executable view away ([`code::Unadopted::Lost`]),
+//! the child ends there, before it returns into any frame, with
+//! opcache's fatal line and status (#4501's ruling).
 //! The copy is the asking process's to pay, at each fork, for the chunks
 //! in use alone.
 
@@ -71,7 +75,7 @@ mod perf;
 #[cfg(test)]
 mod tests;
 
-use code::{Arena, Code, NullTable, Pages};
+use code::{Arena, Code, NullTable, Pages, Unadopted};
 pub(crate) use perf::{Outputs, Perf, Usage, Used};
 
 /// The `Pages` adapter a trace's code is mapped through on this target
@@ -902,21 +906,45 @@ impl<P: Pages> TraceTable<P> {
 impl<P: Pages + 'static> tier::Inherited for TraceTable<P> {
     /// The compile mutex, held for the fork, and the arena's chunks in use
     /// copied for the child ([`Arena::inheritance`]); in the child the copy
-    /// is mapped over the arena, or, where either was refused, the arena
-    /// let go, so the child writes no page its parent maps.
+    /// is mapped over the arena, or, where either was refused and the code
+    /// stands, the arena let go, so the child writes no page its parent
+    /// maps and enters every trace published before the fork. A refused
+    /// copy leaves the code where it stands, on Linux the pages it shares
+    /// with its parent and on macOS x86-64 the copy the fork gave it. A
+    /// mapping refused where the executable view may be gone ends the
+    /// child here, before it returns into any frame ([`code_lost`]).
     fn hold(&self) -> Box<dyn FnOnce() + '_> {
         let mut writer = self.writer();
         let inheritance = writer.arena.as_ref().map(Arena::inheritance);
-        Box::new(move || {
-            let adopted = match (writer.arena.as_mut(), inheritance) {
-                (Some(arena), Some(Ok(inheritance))) => arena.adopt(inheritance).is_ok(),
-                _ => false,
-            };
-            if !adopted {
-                writer.arena = None;
-            }
+        Box::new(move || match (writer.arena.as_mut(), inheritance) {
+            (Some(arena), Some(Ok(inheritance))) => match arena.adopt(inheritance) {
+                Ok(()) => {}
+                Err(Unadopted::Stands(_)) => writer.arena = None,
+                Err(Unadopted::Lost(refused)) => code_lost(&refused),
+            },
+            _ => writer.arena = None,
         })
     }
+}
+
+/// A fork's child whose executable view may be gone, ended before it
+/// returns into any frame (`jit-design.md` §4.4, #4501's ruling): one line
+/// on its error stream, `zend_accel_error`'s word for `ACCEL_LOG_FATAL`
+/// and the message, and opcache's fatal status, the `exit(-2)` php ends
+/// a process with that cannot use the tier's code buffer
+/// (`Z/ext/opcache/ZendAccelerator.c:3341`,
+/// `Z/ext/opcache/zend_accelerator_debug.c:92-93`). It runs no PHP after
+/// the fork, whether or not a trace stood on one of its stacks.
+fn code_lost(refused: &std::io::Error) -> ! {
+    use std::io::Write as _;
+    let said = refused.to_string();
+    let said = (refused.raw_os_error())
+        .and_then(|code| said.strip_suffix(&format!(" (os error {code})")))
+        .unwrap_or(&said);
+    let line =
+        format!("Fatal Error Could not keep JIT: the code buffer was lost at fork ({said})\n");
+    std::io::stderr().write_all(line.as_bytes()).ok();
+    std::process::exit(-2)
 }
 
 /// An epoch's table under `policy`, shared, and entered among what every
