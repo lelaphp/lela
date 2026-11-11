@@ -1003,7 +1003,13 @@ mod remap {
         /// view's maximum lowered again. `own`'s own address is unmapped
         /// as it drops, and the views keep its pages. A refusal past the
         /// first remapping leaves the code standing on the copy, and the
-        /// caller writes no more.
+        /// caller writes no more. One refusal is not covered, as on Linux:
+        /// the first remapping replaces the executable view with
+        /// `VM_FLAGS_OVERWRITE`, which removes the old mapping first, so a
+        /// kernel that removes it and then refuses leaves the view
+        /// unmapped; the caller then publishes no more, but every entry
+        /// published before the fork still points into it. Whether XNU
+        /// can refuse after the removal is not established (#4471).
         unsafe fn adopt(&self, own: Mapping) -> io::Result<()> {
             // SAFETY: `own` is this call's alone, and no thread runs it.
             unsafe { protect(own.base, own.len, libc::PROT_READ | libc::PROT_EXEC) }?;
