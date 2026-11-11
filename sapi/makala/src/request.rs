@@ -340,7 +340,9 @@ impl Refusal<'_> {
     }
 
     /// The line php-fpm logs for it, worded as its `zlog` words it, the
-    /// path's bytes as they came, and cut as `zlog_external` cuts a line
+    /// path's bytes as they came but for a line break, which the request's
+    /// path can carry decoded and which is written as two bytes
+    /// ([`php_sapi::log_field`], #4355), and cut as `zlog_external` cuts a line
     /// its buffer of [`ZLOG_BUFFER`] bytes does not hold: the bytes before
     /// the last three it has room for, then `...`.
     fn logged(&self) -> Vec<u8> {
@@ -348,13 +350,13 @@ impl Refusal<'_> {
             Refusal::Unknown => b"Primary script unknown".to_vec(),
             Refusal::Extension(path) => [
                 &b"Access to the script '"[..],
-                path,
+                &php_sapi::log_field(path),
                 b"' has been denied (see security.limit_extensions)",
             ]
             .concat(),
             Refusal::Unopened(path, error) => [
                 &b"Unable to open primary script: "[..],
-                path,
+                &php_sapi::log_field(path),
                 b" (",
                 php_sapi::strerror(error).as_bytes(),
                 b")",
