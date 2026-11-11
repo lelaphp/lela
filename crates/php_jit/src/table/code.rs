@@ -502,6 +502,40 @@ impl HeapPages {
     }
 }
 
+/// The heap adapter whose fork's child cannot take its copy: `adopt` is
+/// refused with `ENOMEM`, as Linux refuses the executable view's
+/// replacement after it has unmapped the view (`jit-design.md` §4.4).
+#[cfg(test)]
+pub(crate) struct Unadoptable(HeapPages);
+
+#[cfg(test)]
+impl Pages for Unadoptable {
+    fn map_pair(len: usize) -> io::Result<Self> {
+        HeapPages::map_pair(len).map(Unadoptable)
+    }
+
+    unsafe fn write(&self, at: usize, bytes: &[u8]) {
+        // SAFETY: the caller's contract, the heap adapter's.
+        unsafe { self.0.write(at, bytes) };
+    }
+
+    unsafe fn sync(&self, _: Range<usize>) {}
+
+    fn rx(&self, at: usize) -> NonNull<u8> {
+        self.0.rx(at)
+    }
+
+    type Own = ();
+
+    fn own(&self, _: &mut dyn Iterator<Item = Range<usize>>) -> io::Result<()> {
+        Ok(())
+    }
+
+    unsafe fn adopt(&self, (): ()) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(libc::ENOMEM))
+    }
+}
+
 #[cfg(all(php_jit_arena, target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use mac::MapJit;
 
@@ -1003,13 +1037,11 @@ mod remap {
         /// view's maximum lowered again. `own`'s own address is unmapped
         /// as it drops, and the views keep its pages. A refusal past the
         /// first remapping leaves the code standing on the copy, and the
-        /// caller writes no more. One refusal is not covered, as on Linux:
-        /// the first remapping replaces the executable view with
-        /// `VM_FLAGS_OVERWRITE`, which removes the old mapping first, so a
-        /// kernel that removes it and then refuses leaves the view
-        /// unmapped; the caller then publishes no more, but every entry
-        /// published before the fork still points into it. Whether XNU
-        /// can refuse after the removal is not established (#4471).
+        /// caller writes no more. The first remapping replaces the
+        /// executable view with `VM_FLAGS_OVERWRITE`, which removes the
+        /// old mapping first, and XNU links the new one before it lets
+        /// another call change the map, so no refusal leaves the view
+        /// unmapped (`jit-design.md` §4.4, #4471).
         unsafe fn adopt(&self, own: Mapping) -> io::Result<()> {
             // SAFETY: `own` is this call's alone, and no thread runs it.
             unsafe { protect(own.base, own.len, libc::PROT_READ | libc::PROT_EXEC) }?;
@@ -1277,10 +1309,11 @@ mod linux {
         /// more. A replaced page holds the byte the old held wherever code
         /// is, so a fetch through either sees one instruction, and Linux
         /// keeps a page's instruction and data caches coherent as it maps
-        /// the page executable. One refusal is not covered: a kernel that
-        /// unmaps the range before it refuses the executable view's
-        /// replacement leaves the code there unmapped, which only a kernel
-        /// out of memory for one mapping of the size it replaces does.
+        /// the page executable. Linux unmaps the range before it maps the
+        /// executable view's replacement, and an allocation of its own
+        /// refused after that, `ENOMEM`, leaves the code there unmapped
+        /// (`jit-design.md` §4.4, #4471): the caller then hands out no
+        /// entry into it.
         unsafe fn adopt(&self, file: OwnedFd) -> io::Result<()> {
             // SAFETY: the caller hands a copy of every byte any thread
             // executes, and the executable view is this adapter's own

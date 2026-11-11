@@ -11,10 +11,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use php_engine::tier::Epoch;
+use php_engine::tier::{Epoch, Inherited};
 use php_unit::{OpArray, OplineIdx, Unit};
 
-use super::code::{CHUNK, HeapPages, Unmapped};
+use super::code::{CHUNK, HeapPages, Unadoptable, Unmapped};
 use super::perf::{self, Captured, Loaded};
 use super::{Full, Perf, TraceId, TraceName, TraceTable, Unpublished};
 use crate::lower::Compiled;
@@ -423,6 +423,39 @@ fn a_table_with_no_arena_numbers_and_keeps_no_code() {
         table.publish(compiled(&[0; 4], vec![]), Start::Loop),
         Err(Unpublished::Full(Full::Traces))
     );
+}
+
+/// A fork's child whose copy of the arena could not be laid over it,
+/// where Linux may have unmapped the executable view first, enters no trace
+/// published before the fork: each reads as not compiled, and what it
+/// publishes after is numbered with no code (`jit-design.md` §4.4,
+/// #4471). The process that asked lets its hold go and keeps every
+/// trace, and a child that took its copy keeps every trace too.
+#[test]
+fn a_child_that_could_not_take_its_arena_enters_nothing_published_before() -> Result<(), String> {
+    let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
+    let lost: TraceTable<Unadoptable> = TraceTable::with_perf(&policy, Perf::none());
+    let kept = table(&[]);
+    let before = loop_of(&lost)?;
+    let ours = loop_of(&kept)?;
+    drop(lost.hold());
+    assert!(lost.get(before).is_some(), "the asker keeps its trace");
+    lost.hold()();
+    kept.hold()();
+    assert!(lost.get(before).is_none(), "the child enters it");
+    assert!(
+        kept.get(ours).is_some(),
+        "the child that took its copy lost it"
+    );
+    let after = loop_of(&lost)?;
+    assert_eq!(after, trace(2));
+    assert!(lost.get(after).is_none(), "published with code after");
+    Ok(())
+}
+
+/// One loop of one exit published into `table`.
+fn loop_of<P: super::Pages>(table: &TraceTable<P>) -> Result<TraceId, String> {
+    (table.publish(compiled(&[0; 8], vec![exit(None)]), Start::Loop)).map_err(|e| format!("{e:?}"))
 }
 
 /// What does not hold together is refused before anything is counted.

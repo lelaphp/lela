@@ -46,6 +46,9 @@
 //! other runs: the one that asked writes only into chunks and tails that
 //! were free at the fork, which the child, publishing nothing, never
 //! enters, and no chunk of a standing table is freed before the table.
+//! Where the mapping is refused, the kernel may have taken the code
+//! away with it, so the child's table is lost besides: it hands out no
+//! trace, and the child runs in the dispatch loop alone (#4471).
 //! The copy is the asking process's to pay, at each fork, for the chunks
 //! in use alone.
 
@@ -466,6 +469,11 @@ pub(crate) struct TraceTable<P: Pages = Native> {
     /// Whether a hot root found the table full: php's
     /// `ZCSG(jit_counters_stopped)`.
     stopped: AtomicBool,
+    /// Whether its code may be gone from where its entries point: set
+    /// once, in a fork's child whose copy of the arena could not be laid
+    /// over it ([`tier::Inherited`]), after which [`TraceTable::get`]
+    /// hands out no trace.
+    lost: AtomicBool,
     bounds: Bounds,
     compile: Mutex<Writer<P>>,
     /// What the published traces take, the counts of the `Perf` behind
@@ -629,6 +637,7 @@ impl<P: Pages> TraceTable<P> {
             entrances: NullTable::new(bounds.traces as usize),
             next: AtomicU32::new(1),
             stopped: AtomicBool::new(false),
+            lost: AtomicBool::new(false),
             bounds,
             compile: Mutex::new(Writer {
                 arena,
@@ -655,10 +664,16 @@ impl<P: Pages> TraceTable<P> {
         self.used.now()
     }
 
-    /// The trace `id` names: two acquire loads, nothing taken. None for
+    /// The trace `id` names: a relaxed load and two acquire loads,
+    /// nothing taken. None for
     /// an id no publish wrote, which is "not compiled" to every reader,
-    /// the window `jit-design.md` §3.2 names included.
+    /// the window `jit-design.md` §3.2 names included, and for every id
+    /// once the table's code is lost, so a fork's child that could not
+    /// take its arena runs in the dispatch loop alone (§4.4).
     pub(crate) fn get(&self, id: TraceId) -> Option<&Trace<P>> {
+        if self.lost.load(Ordering::Relaxed) {
+            return None;
+        }
         let (segment, slot) = id.slot();
         let slots = self.segments.get(segment)?.get()?;
         slots.get(slot)?.get().map(Box::as_ref)
@@ -903,17 +918,26 @@ impl<P: Pages + 'static> tier::Inherited for TraceTable<P> {
     /// The compile mutex, held for the fork, and the arena's chunks in use
     /// copied for the child ([`Arena::inheritance`]); in the child the copy
     /// is mapped over the arena, or, where either was refused, the arena
-    /// let go, so the child writes no page its parent maps.
+    /// let go, so the child writes no page its parent maps. A refused copy
+    /// leaves the code where it stands, the parent's; a refused mapping
+    /// may not, since Linux unmaps the executable view before it maps its
+    /// replacement and may then refuse it (`jit-design.md` §4.4), so the
+    /// child's table is lost and hands out no trace.
     fn hold(&self) -> Box<dyn FnOnce() + '_> {
         let mut writer = self.writer();
         let inheritance = writer.arena.as_ref().map(Arena::inheritance);
         Box::new(move || {
             let adopted = match (writer.arena.as_mut(), inheritance) {
-                (Some(arena), Some(Ok(inheritance))) => arena.adopt(inheritance).is_ok(),
-                _ => false,
+                (Some(arena), Some(Ok(inheritance))) => Some(arena.adopt(inheritance)),
+                _ => None,
             };
-            if !adopted {
-                writer.arena = None;
+            match adopted {
+                Some(Ok(())) => {}
+                Some(Err(_)) => {
+                    writer.arena = None;
+                    self.lost.store(true, Ordering::Relaxed);
+                }
+                None => writer.arena = None,
             }
         })
     }
