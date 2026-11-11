@@ -6190,11 +6190,52 @@ impl Engine {
         written: &[u8],
         handle: HandlePath,
     ) -> Option<Result<PublishedUnit, CompileRefused>> {
+        if handle == HandlePath::Kept && !Engine::unopened_passes(req, path) {
+            return None;
+        }
         req.compile_file(path, Some(written), handle)
             .unwrap_or_else(|thrown| {
                 req.leave_pending(&thrown);
                 None
             })
+    }
+
+    /// Whether a file the host handed unopened, the built-in server's
+    /// program and its router, passes the `open_basedir` guard its
+    /// compile opens it through: `zend_stream_open` in
+    /// `open_file_for_scanning`, the plain files opener's check
+    /// (`Z/main/streams/plain_wrapper.c:1265`). A refused file warns as the
+    /// opener warns, named for no function since none is running, and
+    /// `ZMSG_FAILED_REQUIRE_FOPEN`'s `zend_throw_error` finds no frame, so
+    /// it is `zend_error_noreturn(E_ERROR)`
+    /// (`Z/main/main.c:1784-1787`, `Z/Zend/zend.c:1842-1850`), which ends
+    /// the request. A file the unit cache holds is not opened, as opcache
+    /// does not open it.
+    fn unopened_passes(req: &mut Request, path: &[u8]) -> bool {
+        /// `EPERM` and `EINVAL`, the `errno` the guard leaves.
+        const EPERM: i32 = 1;
+        const EINVAL: i32 = 22;
+        if req.accelerator_holds(path) {
+            return true;
+        }
+        let errno = match req.environment_mut().check_open_basedir(path, true) {
+            Ok(_) => return true,
+            Err(crate::open_basedir::Refused::Outside) => EPERM,
+            Err(crate::open_basedir::Refused::TooLong) => EINVAL,
+        };
+        let reason = req.environment().os_error_text(errno);
+        crate::api::raising::docref(
+            req,
+            Level::Warning,
+            &format!("Failed to open stream: {reason}"),
+        );
+        let message = format!(
+            "Failed opening required '{}' (include_path='{}')",
+            String::from_utf8_lossy(crate::c_number::c_str(path)),
+            String::from_utf8_lossy(req.include_path()),
+        );
+        req.end_in_compile_time(Level::Error, &message, b"Unknown", 0);
+        false
     }
 
     /// `php_cli_server_dispatch` (`Z/sapi/cli/php_cli_server.c:2294`)

@@ -357,8 +357,12 @@ impl Request {
         };
         match self.code_mut().resolve_path(&script) {
             Ok(_) => {}
+            // `tsrm_realpath` resolves a directory, which the engine's
+            // resolution refuses as no regular file: php goes on to open
+            // it, through the guard, and the opener refuses it.
+            Err(Unresolved::Missing(_)) if self.names_directory(&script) => {}
             // The `errno` `tsrm_realpath` leaves, `ENOENT` where the
-            // reason carries none, a path that is no regular file.
+            // reason carries none.
             Err(Unresolved::Missing(error) | Unresolved::Url(error)) => {
                 const ENOENT: i32 = 2;
                 let errno = error.raw_os_error().unwrap_or(ENOENT);
@@ -389,6 +393,15 @@ impl Request {
             Err(thrown) => self.leave_pending(&thrown),
         }
         Ok(())
+    }
+
+    /// Whether `path` resolves, against the request's working directory,
+    /// to a directory, which `tsrm_realpath` resolves as it resolves a
+    /// file.
+    fn names_directory(&mut self, path: &[u8]) -> bool {
+        self.environment_mut()
+            .realpath(path)
+            .is_some_and(|real| real.is_dir())
     }
 
     /// The `*opened_path` of the program's stream, where
