@@ -206,6 +206,15 @@ struct Chunk {
     /// `num`: the order the chunk was mapped in, which decides which of
     /// two chunks the cache keeps.
     num: u32,
+    /// The first page past every page handed out since the chunk was
+    /// mapped or last zeroed, which php keeps no field for: the pages its
+    /// requests touched, freed ones among them, are the pages from
+    /// [`FIRST_PAGE`] up to it, since a `run` starts at the head of a
+    /// free stretch and the untouched pages are the free stretch at the
+    /// chunk's end. A chunk laid down again keeps it ([`Laid::Again`]),
+    /// and [`cache::Residue::Zeroed`] zeroes up to it as the chunk is kept
+    /// ([`Mm::keep`]).
+    touched: u32,
     /// `free_map`: one bit per page, set while the page is taken.
     free_map: [u64; PAGE_MAP_LEN],
     /// `map`: what starts at each page, `ZEND_MM_FRUN`, `ZEND_MM_LRUN`,
@@ -401,8 +410,16 @@ impl Mm {
             .filter(|_| zend)
             .and_then(|cache| cache.take());
         let (main, cached, avg_chunks_count) = match kept {
-            Some(kept) => (Some(kept.main), kept.cached, kept.avg_chunks_count),
-            None if zend => (chunk_alloc(), Vec::new(), 1.0),
+            Some(kept) => (
+                Some((kept.main, Laid::Again)),
+                kept.cached,
+                kept.avg_chunks_count,
+            ),
+            None if zend => (
+                chunk_alloc().map(|chunk| (chunk, Laid::Fresh)),
+                Vec::new(),
+                1.0,
+            ),
             None => (None, Vec::new(), 1.0),
         };
         let mut mm = Mm {
@@ -449,8 +466,8 @@ impl Mm {
         if crate::lend::standing() {
             mm.sensed.record(crate::sensed::Sensed::MadeUnderLend);
         }
-        if let Some(chunk) = main {
-            mm.chunk_init(chunk, 0);
+        if let Some((chunk, laid)) = main {
+            mm.chunk_init(chunk, 0, laid);
             mm.chunks.push(chunk);
             mm.peak_chunks_count = 1;
             mm.real_size = (mm.cached.len() + 1) * CHUNK_SIZE;
@@ -1347,6 +1364,7 @@ impl Mm {
                     self.peak = self.peak.max(self.size);
                     header.free_pages -= more;
                     bitset_set_range(&mut header.free_map, page_num + old_pages, more);
+                    header.touched = header.touched.max(page_num + new_pages);
                     header.map[page_num as usize] = IS_LRUN | new_pages;
                     return Ok(at);
                 }
@@ -1681,6 +1699,7 @@ impl Mm {
         let header = unsafe { &mut *chunk.as_ptr() };
         header.free_pages -= pages_count;
         bitset_set_range(&mut header.free_map, page_num, pages_count);
+        header.touched = header.touched.max(page_num + pages_count);
         header.map[page_num as usize] = IS_LRUN | pages_count;
         if page_num == header.free_tail {
             header.free_tail = page_num + pages_count;
@@ -1700,9 +1719,9 @@ impl Mm {
     /// taken from the cache; past the soft limit with nothing swept the
     /// chunk is mapped all the same, the delayed OOM recorded.
     fn grow(&mut self, asked: usize) -> Result<NonNull<Chunk>, Refused> {
-        let chunk = loop {
+        let (chunk, laid) = loop {
             if let Some(chunk) = self.cached.pop() {
-                break chunk;
+                break (chunk, Laid::Again);
             }
             if self.check_limit(CHUNK_SIZE, true)? {
                 continue;
@@ -1717,14 +1736,14 @@ impl Mm {
             };
             self.real_size += CHUNK_SIZE;
             self.real_peak = self.real_peak.max(self.real_size);
-            break chunk;
+            break (chunk, Laid::Fresh);
         };
         // SAFETY: the tail of the list is a chunk this heap initialised.
         let num = self
             .chunks
             .last()
             .map_or(0, |last| unsafe { &*last.as_ptr() }.num + 1);
-        self.chunk_init(chunk, num);
+        self.chunk_init(chunk, num, laid);
         self.chunks.push(chunk);
         self.peak_chunks_count = self.peak_chunks_count.max(self.chunks.len());
         Ok(chunk)
@@ -2167,7 +2186,11 @@ impl Mm {
     /// past its huge blocks: every chunk but the main one moved into the
     /// cached chunks, each to the head, the average taken with the
     /// request's peak, the cached chunks past what it keeps unmapped from
-    /// the head, and what is left kept in `cache` for the next heap.
+    /// the head, and what is left kept in `cache` for the next heap, the
+    /// pages each kept chunk touched zeroed first where the cache says so
+    /// ([`cache::Residue`]). A chunk unmapped here, a huge block and a
+    /// chunk the request gave back to the system are not kept, and so not
+    /// zeroed.
     fn keep(&mut self, cache: &ChunkCache) {
         let mut chunks = self.chunks.drain(..);
         let Some(main) = chunks.next() else {
@@ -2188,12 +2211,20 @@ impl Mm {
             chunk_free(chunk);
         }
         // php clears a cached chunk's header, `memset(p, 0,
-        // sizeof(zend_mm_chunk))`; its `num` is the one field read before
-        // `chunk_init` lays it down again.
+        // sizeof(zend_mm_chunk))`; its `num` and the mark of the pages it
+        // touched are the fields read before `chunk_init` lays it down
+        // again, and the mark is not php's to clear.
         for chunk in &self.cached {
             // SAFETY: a cached chunk is a mapping of this heap's that no
             // list names, so nothing else reads or writes its header.
             unsafe { (*chunk.as_ptr()).num = 0 };
+        }
+        // Zeroed here, before the cache's lock hands the chunks to the
+        // next heap, on whichever thread it starts.
+        if cache.residue() == cache::Residue::Zeroed {
+            for chunk in std::iter::once(&main).chain(&self.cached) {
+                zero_touched(*chunk);
+            }
         }
         cache.keep(cache::Kept {
             main,
@@ -2240,26 +2271,46 @@ impl Mm {
             reason = "only a debug build's chunk header names its heap's sensed record"
         )
     )]
-    fn chunk_init(&self, chunk: NonNull<Chunk>, num: u32) {
+    fn chunk_init(&self, chunk: NonNull<Chunk>, num: u32, laid: Laid) {
         #[cfg(debug_assertions)]
-        chunk_init(chunk, num, self.sensed.record_at(), origins::table());
+        chunk_init(chunk, num, laid, self.sensed.record_at(), origins::table());
         #[cfg(not(debug_assertions))]
-        chunk_init(chunk, num);
+        chunk_init(chunk, num, laid);
     }
 }
 
+/// Whether a chunk [`chunk_init`] lays down is a fresh mapping, whose
+/// pages nothing has touched, or one a heap of this process laid down
+/// before, kept between requests or emptied inside one, whose header
+/// still marks how far its pages were handed out ([`Chunk::touched`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Laid {
+    Fresh,
+    Again,
+}
+
 /// `zend_mm_chunk_init` (`Z/Zend/zend_alloc.c:870`): page zero is the
-/// header and every other page is free.
+/// header and every other page is free; a chunk laid down again keeps
+/// the mark of the pages it touched.
 fn chunk_init(
     chunk: NonNull<Chunk>,
     num: u32,
+    laid: Laid,
     #[cfg(debug_assertions)] sensed: *const crate::sensed::Record,
     #[cfg(debug_assertions)] origins: Option<NonNull<crate::sensed::Origin>>,
 ) {
+    let touched = match laid {
+        Laid::Fresh => FIRST_PAGE,
+        // SAFETY: a chunk laid down again is one an earlier
+        // `chunk_init` wrote the header of, which nothing has written
+        // over since, and no list names it while it is laid down.
+        Laid::Again => unsafe { (*chunk.as_ptr()).touched },
+    };
     let mut header = Chunk {
         free_pages: PAGES - FIRST_PAGE,
         free_tail: FIRST_PAGE,
         num,
+        touched,
         free_map: [0; PAGE_MAP_LEN],
         map: [0; PAGES as usize],
         #[cfg(debug_assertions)]
@@ -2273,6 +2324,29 @@ fn chunk_init(
     // and nothing has been carved out of it, so page zero is free to take
     // the header.
     unsafe { chunk.as_ptr().write(header) };
+}
+
+/// The pages of `chunk` its requests touched since it was mapped or last
+/// zeroed, written to zero, and its mark laid back at the first page
+/// ([`cache::Residue::Zeroed`]): one `memset` from [`FIRST_PAGE`] to
+/// [`Chunk::touched`], the cost the request's writes set. Page zero, the
+/// header, is left as it stands: it holds the heap's own record of which
+/// pages were taken and what each `run` was, which [`chunk_init`] lays
+/// down again before the next heap hands out a page, and the rest of the
+/// page past the header is never handed out.
+fn zero_touched(chunk: NonNull<Chunk>) {
+    // SAFETY: a chunk being kept is a mapping of the ending heap's that no
+    // list names, so nothing else reads or writes its header.
+    let touched = unsafe { (*chunk.as_ptr()).touched };
+    let pages = touched.saturating_sub(FIRST_PAGE) as usize;
+    // SAFETY: as above.
+    unsafe { (*chunk.as_ptr()).touched = FIRST_PAGE };
+    // SAFETY: page `FIRST_PAGE` is inside the chunk, which is one
+    // allocation of `CHUNK_SIZE` bytes.
+    let first = unsafe { chunk.cast::<u8>().add(FIRST_PAGE as usize * PAGE_SIZE) };
+    // SAFETY: the pages from `FIRST_PAGE` to `touched` lie inside the
+    // chunk, and its heap is ending, so no block of it is named any more.
+    unsafe { first.write_bytes(0, pages * PAGE_SIZE) };
 }
 
 /// The chunk an allocation belongs to: its address with the chunk's own
