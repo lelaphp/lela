@@ -136,8 +136,8 @@ pub(crate) fn status(board: Option<&BoardView>, keys: &[Vec<u8>], head_only: boo
     if board.idle < 0 || board.active < 0 {
         crate::zlog!(
             Error @ fpm_status_handle_request:188,
-            "[pool {}] invalid status values",
-            String::from_utf8_lossy(&board.pool)
+            bytes "[pool {}] invalid status values",
+            board.pool
         );
         return internal_error();
     }

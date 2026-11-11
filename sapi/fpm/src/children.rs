@@ -93,8 +93,8 @@ pub(crate) fn make(
         let Some(slot) = scoreboard.alloc() else {
             zlog!(
                 Error @ fpm_scoreboard_proc_alloc:493,
-                "[pool {}] no free scoreboard slot",
-                String::from_utf8_lossy(&scoreboard.pool())
+                bytes "[pool {}] no free scoreboard slot",
+                scoreboard.pool()
             );
             return Ok(Made::Failed);
         };
@@ -154,7 +154,7 @@ pub(crate) fn make(
                 } else {
                     Level::Notice
                 };
-                let line = format!(
+                let line = crate::zformat!(
                     "[pool {}] child {} started",
                     fpm.pools[pool].name(),
                     child.as_raw()
@@ -162,7 +162,7 @@ pub(crate) fn make(
                 crate::zlog::log(
                     level,
                     crate::zlog::Site::at("fpm_children_make", 479),
-                    line.as_bytes(),
+                    &line,
                     None,
                 );
             }
@@ -272,23 +272,26 @@ pub(crate) fn bury(fpm: &mut Fpm) -> Step {
             if fpm.state != State::Normal {
                 severity = Level::Debug;
             }
-            let line = format!(
-                "[pool {name}] child {pid} exited {how} after {}.{:06} seconds from start",
-                lived.as_secs(),
-                lived.subsec_micros()
+            let line = crate::zformat!(
+                "[pool {}] child {} exited {} after {} seconds from start",
+                name,
+                pid,
+                how,
+                seconds(lived)
             );
             crate::zlog::log(
                 severity,
                 crate::zlog::Site::at("fpm_children_bury", 300),
-                line.as_bytes(),
+                &line,
                 None,
             );
         } else {
             zlog!(
                 Debug @ fpm_children_bury:302,
-                "[pool {name}] child {pid} has been killed by the process management after {}.{:06} seconds from start",
-                lived.as_secs(),
-                lived.subsec_micros()
+                bytes "[pool {}] child {} has been killed by the process management after {} seconds from start",
+                name,
+                pid,
+                seconds(lived)
             );
         }
         close(fpm, p, &mut child);
@@ -321,4 +324,10 @@ fn close(fpm: &mut Fpm, pool: usize, child: &mut Child) {
     if let Some(stream) = &mut child.log_stream {
         stream.finish();
     }
+}
+
+/// How long a child lived, as `%ld.%06d` writes its seconds and
+/// microseconds.
+fn seconds(lived: std::time::Duration) -> String {
+    format!("{}.{:06}", lived.as_secs(), lived.subsec_micros())
 }

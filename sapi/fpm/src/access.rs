@@ -34,13 +34,13 @@ pub(crate) fn open(fpm: &mut Fpm, reopen: bool) -> i32 {
                 zlog_sys!(
                     Error @ fpm_log_open:43,
                     crate::conf::errno(&e),
-                    "failed to open access log ({})",
-                    String::from_utf8_lossy(&log)
+                    bytes "failed to open access log ({})",
+                    log
                 );
                 return -1;
             }
         };
-        zlog!(Debug @ fpm_log_open:46, "open access log ({})", String::from_utf8_lossy(&log));
+        zlog!(Debug @ fpm_log_open:46, bytes "open access log ({})", log);
         if reopen {
             if let Some(old) = &mut fpm.pools[p].access_log {
                 nix::unistd::dup2(std::os::fd::AsFd::as_fd(&file), old).ok();
@@ -163,9 +163,10 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
             let warn_modifier = |allowed: &str, line: u32| {
                 zlog!(
                     Warning @ (crate::zlog::Site::at("fpm_log_write", line)),
-                    "only {allowed} are allowed as a modifier for %{} ('{}')",
+                    bytes "only {} are allowed as a modifier for %{} ('{}')",
+                    allowed,
                     char::from(c),
-                    String::from_utf8_lossy(&m)
+                    m
                 );
             };
             match c {

@@ -97,8 +97,9 @@ impl Sockets {
                 let fd = atoi(&pair[eq + 1..]);
                 zlog!(
                     Notice @ fpm_sockets_init_main:485,
-                    "using inherited socket fd={fd}, \"{}\"",
-                    String::from_utf8_lossy(&key)
+                    bytes "using inherited socket fd={}, \"{}\"",
+                    fd,
+                    key
                 );
                 if let Some(sock) = crate::ffi::inherited(fd) {
                     self.list.push(Listening {
@@ -164,8 +165,8 @@ impl Sockets {
         if !(1..=65535).contains(&port) {
             zlog!(
                 Error @ fpm_socket_af_inet_listening_socket:365,
-                "invalid port value '{}'",
-                String::from_utf8_lossy(port_str)
+                bytes "invalid port value '{}'",
+                port_str
             );
             return None;
         }
@@ -226,8 +227,9 @@ impl Sockets {
                 if sock.is_some() {
                     zlog!(
                         Debug @ fpm_socket_af_inet_socket_by_addr:325,
-                        "Found address for {host_text}, socket opened on {}",
-                        address.ip()
+                        bytes "Found address for {}, socket opened on {}",
+                        host,
+                        address.ip().to_string()
                     );
                 }
             } else {
@@ -255,11 +257,12 @@ impl Sockets {
         if address.len() >= SUN_PATH {
             zlog!(
                 Warning @ fpm_socket_af_unix_listening_socket:416,
-                "[pool {}] cannot bind to UNIX socket '{}' as path is too long (found length: {}, maximal length: {SUN_PATH}), trying cut socket path instead '{}'",
-                String::from_utf8_lossy(name),
-                String::from_utf8_lossy(address),
+                bytes "[pool {}] cannot bind to UNIX socket '{}' as path is too long (found length: {}, maximal length: {}), trying cut socket path instead '{}'",
+                name,
+                address,
                 address.len(),
-                String::from_utf8_lossy(cut)
+                SUN_PATH,
+                cut
             );
         }
         let addr = UnixAddr::new(OsStr::from_bytes(cut)).ok()?;
@@ -398,8 +401,8 @@ fn new_listening(
         if std::os::unix::net::UnixStream::connect(OsStr::from_bytes(&path)).is_ok() {
             zlog!(
                 Error @ fpm_sockets_new_listening_socket:224,
-                "Another FPM instance seems to already listen on {}",
-                String::from_utf8_lossy(&path)
+                bytes "Another FPM instance seems to already listen on {}",
+                path
             );
             return None;
         }
@@ -417,8 +420,8 @@ fn new_listening(
         zlog_sys!(
             Error @ fpm_sockets_new_listening_socket:233,
             e,
-            "unable to bind listening socket for address '{}'",
-            String::from_utf8_lossy(listen_address)
+            bytes "unable to bind listening socket for address '{}'",
+            listen_address
         );
         if let Some(mask) = saved_umask {
             nix::sys::stat::umask(mask);
@@ -436,8 +439,8 @@ fn new_listening(
         zlog_sys!(
             Error @ fpm_sockets_new_listening_socket:253,
             e,
-            "failed to listen to address '{}'",
-            String::from_utf8_lossy(listen_address)
+            bytes "failed to listen to address '{}'",
+            listen_address
         );
         return None;
     }

@@ -147,8 +147,8 @@ pub(crate) fn open_error_log(fpm: &mut Fpm, reopen: bool) -> bool {
             zlog_sys!(
                 Error @ fpm_stdio_open_error_log:386,
                 conf::errno(&e),
-                "failed to open error_log ({})",
-                String::from_utf8_lossy(&error_log)
+                bytes "failed to open error_log ({})",
+                error_log
             );
             return false;
         }
@@ -363,15 +363,12 @@ fn said(
     let stdout = pipe == Pipe::Stdout;
     let config = &fpm.pools[pool].config;
     let what = pipe.name();
-    let prefix = format!(
-        "[pool {}] child {pid} said into {what}: ",
-        String::from_utf8_lossy(&config.name)
-    );
+    let prefix = crate::zformat!("[pool {}] child {} said into {}: ", config.name, pid, what);
     let create = stream.is_none();
     let log = stream.get_or_insert_with(|| {
         let mut s = Stream::stderr(Level::Warning);
         s.set_decorating(config.decorate_workers_output);
-        s.set_msg_prefix(prefix.as_bytes());
+        s.set_msg_prefix(&prefix);
         s.set_msg_quoting(true);
         s.is_stdout = stdout;
         s.child_pid = pid;
@@ -379,7 +376,7 @@ fn said(
     });
     if !create && (log.is_stdout != stdout || log.child_pid != pid) {
         log.finish();
-        log.set_msg_prefix(prefix.as_bytes());
+        log.set_msg_prefix(&prefix);
         log.is_stdout = stdout;
         log.child_pid = pid;
     }

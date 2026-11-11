@@ -490,8 +490,8 @@ impl Scoreboard {
             .or_else(|| {
                 crate::zlog!(
                     Debug @ fpm_scoreboard_proc_alloc:483,
-                    "[pool {}] the proc->free_slot was not free. Let's search",
-                    String::from_utf8_lossy(&self.pool())
+                    bytes "[pool {}] the proc->free_slot was not free. Let's search",
+                    self.pool()
                 );
                 self.procs
                     .iter()

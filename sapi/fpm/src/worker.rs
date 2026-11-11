@@ -258,7 +258,12 @@ fn allowed_clients(list: Option<&[u8]>) -> Option<Vec<IpAddr>> {
 /// `fpm_fcgi_log`: a line `fastcgi.c` says, at `ZLOG_ERROR` from
 /// [`crate::zlog::Site::FCGI`].
 fn fcgi_log(message: &[u8]) {
-    zlog!(Error @ (crate::zlog::Site::FCGI), "{}", String::from_utf8_lossy(message));
+    crate::zlog::log(
+        crate::zlog::Level::Error,
+        crate::zlog::Site::FCGI,
+        message,
+        None,
+    );
 }
 
 /// An entry of the `.user.ini` cache, `user_config_cache_entry`.
@@ -296,8 +301,8 @@ pub(crate) struct Worker {
 /// the master's engine with the pool's values laid over it ([`lay`]);
 /// the child exits with 70 where a step fails.
 pub(crate) fn init(fpm: &mut Fpm, pool: usize, slot: usize) -> Worker {
-    let failed = |name: &str| -> ! {
-        zlog!(Error @ fpm_child_init:202, "[pool {name}] child failed to initialize");
+    let failed = |name: &[u8]| -> ! {
+        zlog!(Error @ fpm_child_init:202, bytes "[pool {}] child failed to initialize", name);
         php_sapi::exit(i32::from(EXIT_SOFTWARE));
     };
     let name = fpm.pools[pool].name();
@@ -330,8 +335,9 @@ pub(crate) fn init(fpm: &mut Fpm, pool: usize, slot: usize) -> Worker {
         (Some(path), None) => {
             zlog!(
                 Error @ fpm_status_init_child:37,
-                "[pool {name}] ping is set ({}) but ping.response is not set.",
-                String::from_utf8_lossy(path)
+                bytes "[pool {}] ping is set ({}) but ping.response is not set.",
+                name,
+                path
             );
             failed(&name);
         }
@@ -422,8 +428,9 @@ fn lay(mut engine: Engine, config: &PoolConfig) -> Result<Engine, NotAlone> {
             if name.as_slice() != b"extension" && engine.ini_get(name).is_none() {
                 zlog!(
                     Error @ (crate::zlog::Site::at("fpm_php_apply_defines", line)),
-                    "Unable to set {kind} '{}'",
-                    String::from_utf8_lossy(name)
+                    bytes "Unable to set {} '{}'",
+                    kind,
+                    name
                 );
             }
         }
@@ -836,8 +843,8 @@ impl Worker {
         if !allowed {
             zlog!(
                 Notice @ fpm_php_limit_extensions:252,
-                "Access to the script '{}' has been denied (see security.limit_extensions)",
-                String::from_utf8_lossy(path)
+                bytes "Access to the script '{}' has been denied (see security.limit_extensions)",
+                path
             );
         }
         allowed
@@ -905,16 +912,16 @@ impl Worker {
                 let Some(value) = value else {
                     zlog!(
                         Error @ fastcgi_ini_parser:1420,
-                        "Passing INI directive through FastCGI: empty value for key '{}'",
-                        String::from_utf8_lossy(&key)
+                        bytes "Passing INI directive through FastCGI: empty value for key '{}'",
+                        key
                     );
                     continue;
                 };
                 if key.as_slice() != b"extension" && self.engine.ini_get(&key).is_none() {
                     zlog!(
                         Error @ fastcgi_ini_parser:1428,
-                        "Passing INI directive through FastCGI: unable to set '{}'",
-                        String::from_utf8_lossy(&key)
+                        bytes "Passing INI directive through FastCGI: unable to set '{}'",
+                        key
                     );
                     continue;
                 }
@@ -1088,8 +1095,8 @@ impl Read for Stdin {
 fn unopened(path: &[u8], error: &std::io::Error) -> HostPage {
     zlog!(
         Error @ main:1881,
-        "Unable to open primary script: {} ({})",
-        String::from_utf8_lossy(path),
+        bytes "Unable to open primary script: {} ({})",
+        path,
         php_sapi::strerror(error)
     );
     php_sapi::cgi::unopened(Some(error))

@@ -7,8 +7,10 @@
 //! pieces, wrapped or truncated at `log_limit`, what a child's stdout and stderr
 //! caught by the master and the access log are written through.
 
+use std::ffi::OsStr;
 use std::io::Write as _;
 use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt as _;
 use std::sync::{Mutex, MutexGuard};
 
 use nix::errno::Errno;
@@ -290,7 +292,7 @@ fn log_line(state: &State, level: Level, site: Site, message: &[u8], errno: Opti
         truncate(&mut buf, state.limit.min(MAX_BUF_LENGTH), 1);
     }
     if syslog {
-        nix::syslog::syslog(state.level.severity(), &*String::from_utf8_lossy(&buf)).ok();
+        nix::syslog::syslog(state.level.severity(), OsStr::from_bytes(&buf)).ok();
         buf.push(b'\n');
     } else {
         buf.push(b'\n');
@@ -305,11 +307,121 @@ fn log_line(state: &State, level: Level, site: Site, message: &[u8], errno: Opti
     }
 }
 
+/// What `%s`, `%d` or `%c` writes into a line of php-fpm's log: a word
+/// php keeps as bytes is written as its bytes, as `vsnprintf` copies a
+/// `char *`, never decoded on the way.
+pub(crate) trait Piece {
+    /// These bytes after what `out` holds.
+    fn put(&self, out: &mut Vec<u8>);
+}
+
+impl Piece for [u8] {
+    fn put(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self);
+    }
+}
+
+impl Piece for Vec<u8> {
+    fn put(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self);
+    }
+}
+
+impl Piece for str {
+    fn put(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.as_bytes());
+    }
+}
+
+impl Piece for String {
+    fn put(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.as_bytes());
+    }
+}
+
+impl<T: Piece + ?Sized> Piece for &T {
+    fn put(&self, out: &mut Vec<u8>) {
+        (**self).put(out);
+    }
+}
+
+/// A number or a character, as `%d` or `%c` writes it.
+macro_rules! shown_piece {
+    ($($t:ty),*) => {$(
+        impl Piece for $t {
+            fn put(&self, out: &mut Vec<u8>) {
+                out.extend_from_slice(self.to_string().as_bytes());
+            }
+        }
+    )*};
+}
+shown_piece!(char, i32, u32, i64, u64, usize, u16);
+
+/// How many `{}` holes `fmt` has, which [`zformat!`] holds to its
+/// pieces as it compiles.
+pub(crate) const fn holes(fmt: &str) -> usize {
+    let fmt = fmt.as_bytes();
+    let (mut at, mut found) = (0, 0);
+    while at + 1 < fmt.len() {
+        if fmt[at] == b'{' && fmt[at + 1] == b'}' {
+            found += 1;
+            at += 2;
+        } else {
+            at += 1;
+        }
+    }
+    found
+}
+
+/// `fmt`'s bytes with each `{}` in it the next piece's ([`zformat!`]).
+pub(crate) fn render(fmt: &str, pieces: &[&dyn Piece]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(fmt.len());
+    let mut pieces = pieces.iter();
+    let mut rest = fmt;
+    while let Some((before, after)) = rest.split_once("{}") {
+        out.extend_from_slice(before.as_bytes());
+        if let Some(piece) = pieces.next() {
+            piece.put(&mut out);
+        }
+        rest = after;
+    }
+    out.extend_from_slice(rest.as_bytes());
+    out
+}
+
+/// A message's bytes, as `vsnprintf` writes php-fpm's: `fmt` with each
+/// `{}` in it one piece's bytes in turn ([`Piece`]), the count of the two
+/// held equal as it compiles. A word that is not UTF-8 stays its own
+/// bytes, as php's `%s` keeps it.
+#[macro_export]
+macro_rules! zformat {
+    ($fmt:literal $(, $piece:expr)* $(,)?) => {{
+        const _: () = assert!(
+            $crate::zlog::holes($fmt) == <[&str]>::len(&[$(stringify!($piece)),*]),
+            "one hole for each piece"
+        );
+        $crate::zlog::render($fmt, &[$(&$piece as &dyn $crate::zlog::Piece),*])
+    }};
+}
+
 /// `zlog` with the message formatted, from the call `@ function:line`
 /// names in php-src, or `@ (site)` where the site is chosen as the program
-/// runs.
+/// runs. A message with a word php keeps as bytes, a pool's name, a path
+/// or an entry from the configuration or a request, is written `bytes
+/// "…{}…", word` ([`zformat!`]), which writes the word's own bytes.
 #[macro_export]
 macro_rules! zlog {
+    ($level:ident @ $function:ident : $line:literal, bytes $fmt:literal $(, $piece:expr)* $(,)?) => {
+        $crate::zlog::log(
+            $crate::zlog::Level::$level,
+            $crate::zlog::Site::at(stringify!($function), $line),
+            &$crate::zformat!($fmt $(, $piece)*),
+            None,
+        )
+    };
+    ($level:ident @ ($site:expr), bytes $fmt:literal $(, $piece:expr)* $(,)?) => {
+        $crate::zlog::log($crate::zlog::Level::$level, $site, &$crate::zformat!($fmt $(, $piece)*), None)
+    };
     ($level:ident @ $function:ident : $line:literal, $($arg:tt)*) => {
         $crate::zlog::log(
             $crate::zlog::Level::$level,
@@ -326,6 +438,17 @@ macro_rules! zlog {
 /// `zlog(ZLOG_SYSERROR, …)`: the message and the last error's text.
 #[macro_export]
 macro_rules! zlog_sys {
+    ($level:ident @ $function:ident : $line:literal, $errno:expr, bytes $fmt:literal $(, $piece:expr)* $(,)?) => {
+        $crate::zlog::log(
+            $crate::zlog::Level::$level,
+            $crate::zlog::Site::at(stringify!($function), $line),
+            &$crate::zformat!($fmt $(, $piece)*),
+            Some($errno),
+        )
+    };
+    ($level:ident @ ($site:expr), $errno:expr, bytes $fmt:literal $(, $piece:expr)* $(,)?) => {
+        $crate::zlog::log($crate::zlog::Level::$level, $site, &$crate::zformat!($fmt $(, $piece)*), Some($errno))
+    };
     ($level:ident @ $function:ident : $line:literal, $errno:expr, $($arg:tt)*) => {
         $crate::zlog::log(
             $crate::zlog::Level::$level,
@@ -625,8 +748,8 @@ impl Stream {
     /// head, and with its line end to the target.
     fn buf_flush(&mut self) {
         if self.use_syslog {
-            let line = String::from_utf8_lossy(&self.buf[..self.len]).into_owned();
-            nix::syslog::syslog(state().level.severity(), &*line).ok();
+            let line = OsStr::from_bytes(&self.buf[..self.len]);
+            nix::syslog::syslog(state().level.severity(), line).ok();
         }
         if self.use_external {
             let external = state().external;
@@ -851,7 +974,17 @@ impl Stream {
 
 #[cfg(test)]
 mod tests {
-    use super::{Level, Site, State, Target, prefix};
+    use super::{Level, Site, State, Target, holes, prefix};
+
+    #[test]
+    fn a_word_that_is_not_utf8_is_formatted_as_its_own_bytes() {
+        let word: &[u8] = b"\xff\xff";
+        assert_eq!(
+            crate::zformat!("[pool {}] child {} said '{}'", b"w\xffw".to_vec(), 7, word),
+            b"[pool w\xffw] child 7 said '\xff\xff'"
+        );
+        assert_eq!(holes("{{}}{} {"), 2);
+    }
 
     fn state(level: Level, is_child: bool) -> State {
         State {
