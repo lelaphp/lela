@@ -479,9 +479,13 @@ impl Joined {
     }
 }
 
-/// What a forked child would share with its parent and makes its own
-/// before anything else of it runs: the compiled tier's code arena on
-/// Linux, two views of one `memfd` mapped shared (`jit-design.md` §4.4).
+/// What a forked child would share with its parent, or would hold in
+/// pieces, and makes its own before anything else of it runs: the
+/// compiled tier's code arena, on Linux two views of one `memfd` mapped
+/// shared, and on macOS x86-64 an anonymous mapping and its
+/// `mach_vm_remap` alias, two views a fork copies apart, so that in the
+/// child they no longer share pages until the tier's `adopt` lays one copy
+/// under both (`jit-design.md` §4.4).
 /// The engine owns the fork and its order; the tier owns what it holds
 /// and how its child takes it, as a [`Parked`] body is the tier's on an
 /// engine's thread.
