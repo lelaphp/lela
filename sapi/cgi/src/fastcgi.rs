@@ -20,7 +20,7 @@ use php_sapi::{
     ResponseHead, WebRequest,
 };
 
-use crate::{NAME, refusal};
+use crate::{NAME, no_path, unopened};
 
 /// `MIN(SOMAXCONN, 128)`, `fcgi_listen`'s `backlog` where
 /// `PHP_FCGI_BACKLOG` names none.
@@ -610,6 +610,7 @@ fn serve_one(engine: &Engine, params: Environment, wire: &Arc<Mutex<Wire>>) -> O
         web: Some(web),
         script_name: path.clone(),
         ini,
+        unopened: Some(unopened),
         ..RequestDescription::default()
     };
     let logging = php_sapi::ini::enabled(engine, "fastcgi.logging");
@@ -618,7 +619,11 @@ fn serve_one(engine: &Engine, params: Environment, wire: &Arc<Mutex<Wire>>) -> O
         logging,
     });
     let (served, _) = engine.serve(description, sink, |_| {
-        refusal(path.as_deref()).map_or(HostServes::Program, HostServes::Page)
+        if path.is_some() {
+            HostServes::Program
+        } else {
+            no_path()
+        }
     });
     (!served.start_failed).then_some(served.exit_code)
 }

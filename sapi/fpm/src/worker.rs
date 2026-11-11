@@ -772,11 +772,10 @@ impl Worker {
     /// What the loop serves once `php_request_startup` has returned
     /// (`Z/sapi/fpm/fpm/fpm_main.c:1845-1903`): nothing for a request
     /// with no `REQUEST_METHOD`; the ping or the status page; `File not
-    /// found.` for a request with no path translated, `Access denied.`
-    /// past `security.limit_extensions`, and `Access denied.` or `No
-    /// input file specified.` for a file that does not open, each logged
-    /// as php logs it; and otherwise the file, the child's stage then
-    /// `Executing`.
+    /// found.` for a request with no path translated and `Access denied.`
+    /// past `security.limit_extensions`, each logged as php logs it; and
+    /// otherwise the file, the child's stage then `Executing`, which the
+    /// engine answers with [`unopened`] where it does not open.
     fn look(
         &self,
         info: &php_proto::cgi::RequestInfo,
@@ -803,15 +802,14 @@ impl Worker {
         if !self.extension_allowed(path) {
             return refused(403, b"Access denied.\n");
         }
-        match std::fs::File::open(crate::conf::path(path)) {
-            Ok(_) => {
-                if let Some(proc) = self.proc() {
-                    proc.set_stage(Stage::Executing, crate::master::clock_us());
-                }
-                HostServes::Program
-            }
-            Err(e) => HostServes::Page(unopened(path, &e)),
+        // The engine opens the file, through the request's `open_basedir`
+        // guard, and answers one that does not open with [`unopened`]
+        // (`RequestDescription::unopened`); the stage moves before that
+        // open, where php's moves after it.
+        if let Some(proc) = self.proc() {
+            proc.set_stage(Stage::Executing, crate::master::clock_us());
         }
+        HostServes::Program
     }
 
     /// An entry read as `OnUpdateBool` reads it.
@@ -1015,6 +1013,7 @@ impl Worker {
             script_name: info.path_translated.clone(),
             ini,
             program_file: ProgramFile::Listed,
+            unopened: Some(unopened),
             ..RequestDescription::default()
         }
     }

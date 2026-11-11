@@ -94,6 +94,17 @@ pub struct RequestDescription {
     /// How the host hands a wrapped program's file over, which decides
     /// whether the request holds it open, and until when.
     pub program_file: ProgramFile,
+    /// How a host that hands the program by its name answers one that
+    /// does not open as its `php_fopen_primary_script` opens it: the page
+    /// for the program's path and php's `errno`, as php-cgi and php-fpm
+    /// answer it (`Z/sapi/cgi/cgi_main.c:2478-2487`,
+    /// `Z/sapi/fpm/fpm/fpm_main.c:1879-1888`). Where it is set, the
+    /// program is opened first, through the request's `open_basedir`
+    /// guard, and nothing more is served of it where it did not open
+    /// ([`Observables::unopened`]); `None` has the program served whatever
+    /// its open did, as the CLI, which opens its own, and the in-process
+    /// hosts serve theirs.
+    pub unopened: Option<fn(&[u8], &std::io::Error) -> HostPage>,
     /// Whether a wrapped program is served in its own directory, the
     /// request starting in [`RequestDescription::cwd`] either way.
     pub chdir: Chdir,
@@ -670,7 +681,8 @@ pub enum Routed {
 /// has started ([`Engine::serve`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostServes {
-    /// The program the request description names.
+    /// The program the request description names, where it opens as its
+    /// host opens it ([`RequestDescription::unopened`]).
     Program,
     /// A page the host answers with in place of a program: php-fpm's ping
     /// and status pages, and its `File not found.` and its kin.
@@ -717,6 +729,11 @@ pub struct Observables {
     /// `FastCGI` request and ends the worker, and phpdbg prints `Could not
     /// startup`.
     pub start_failed: bool,
+    /// The program did not open as its host opens it, and the host's
+    /// page answered the request in its place
+    /// ([`RequestDescription::unopened`]),
+    /// after which php-cgi's `main` returns `FAILURE`.
+    pub unopened: bool,
 }
 
 impl Observables {
@@ -5712,21 +5729,36 @@ impl Engine {
     pub(crate) fn serve_in(&self, req: &mut Request, source: Option<&[u8]>, serves: HostServes) {
         match serves {
             HostServes::Program => {
-                self.execute_script(req, source);
-            }
-            // `sapi_add_header_ex(.., replace = 1)` for each line, the
-            // code, and `PUTS` of the body, as `fpm_status_handle_request`
-            // and the loop's refusals write them.
-            HostServes::Page(page) => {
-                for line in &page.headers {
-                    req.response_mut().header_add(line, true, 0);
+                if Engine::opened(req, source) {
+                    self.execute_script(req, source);
                 }
-                req.response_mut().set_response_code(page.code);
-                req.response_mut().write(&page.body);
             }
+            HostServes::Page(page) => answer(req, &page),
             HostServes::Nothing => {}
         }
         req.free_path_copies();
+    }
+
+    /// The program the request names opened first where its host opens
+    /// it as `php_fopen_primary_script` does, before anything is served
+    /// of it ([`RequestDescription::unopened`]), and whether it opened:
+    /// where it did not, the host's page answers the request in its place
+    /// ([`Observables::unopened`]). A source the host handed over, and a
+    /// host that answers no failed open, open nothing here.
+    fn opened(req: &mut Request, source: Option<&[u8]>) -> bool {
+        let Some(unopened) = req.unopened_page() else {
+            return true;
+        };
+        if source.is_some() || req.primary() != Primary::Wrapped {
+            return true;
+        }
+        let Err(errno) = req.open_primary_file() else {
+            return true;
+        };
+        let script = req.environment().script_name().unwrap_or_default();
+        let page = unopened(script, &errno);
+        answer(req, &page);
+        false
     }
 
     /// `php_lint_script` under the CLI's `-l` (`Z/main/main.c:2779-2798`,
@@ -5794,6 +5826,11 @@ impl Engine {
             Ok(req) => req,
             Err(refused) => return refused,
         };
+        // php-cgi opens the program before it reads its line's `-l` or
+        // `-s` (`Z/sapi/cgi/cgi_main.c:2478`).
+        if !Engine::opened(&mut req, source.as_deref()) {
+            return self.shutdown_untraced(&mut req);
+        }
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
         // engine's table and shared by every request that serves it,
@@ -5974,6 +6011,7 @@ impl Engine {
             memory_peak: req.memory().peak(true),
             uncaught: None,
             start_failed: true,
+            unopened: false,
         };
         (observed, req.release_sink())
     }
@@ -6011,7 +6049,10 @@ impl Engine {
             left = req.enter_program_dir(written.as_deref());
         }
         if script && source.is_none() {
-            req.open_primary_file();
+            // Opened here for a host that answers no failed open, which
+            // serves on whatever it did, and opened already for one that
+            // does ([`RequestDescription::unopened`]).
+            req.open_primary_file().ok();
         }
         let ran = self.execute_wrapped(req, source, script, written.as_deref());
         req.close_served_files();
@@ -6438,6 +6479,7 @@ impl Engine {
                 memory_peak: req.memory().peak(true),
                 uncaught: req.take_kept_uncaught(),
                 start_failed: false,
+                unopened: req.primary_unopened(),
             },
             trace,
             sink,
@@ -6764,6 +6806,17 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
         req.emit_recorded(recording);
     }
     declared
+}
+
+/// A host's page written in a started request: `sapi_add_header_ex(..,
+/// replace = 1)` for each of its lines, its code, and `PUTS` of its body,
+/// as `fpm_status_handle_request` and the loops' refusals write them.
+fn answer(req: &mut Request, page: &HostPage) {
+    for line in &page.headers {
+        req.response_mut().header_add(line, true, 0);
+    }
+    req.response_mut().set_response_code(page.code);
+    req.response_mut().write(&page.body);
 }
 
 /// A program in `file` the compiler refused: `php_error_cb` renders it

@@ -2757,6 +2757,13 @@ pub(crate) fn strerror(error: &std::io::Error) -> String {
         .map_or(text.clone(), |(text, _)| text.to_owned())
 }
 
+/// The plain files opener's failure with `error`: php's `errno` left
+/// where the request's streams keep it, and the text its warning shows.
+fn failed(req: &mut Request, error: &std::io::Error) -> String {
+    req.streams().errno = error.raw_os_error();
+    strerror(error)
+}
+
 /// A `zend_stat_t` as `php_fstat` lays it out, from what `fstat(2)`,
 /// `stat(2)` or `lstat(2)` answered.
 pub(crate) fn stat_buf(meta: &std::fs::Metadata) -> StatBuf {
@@ -3164,12 +3171,12 @@ fn plain_open(
     };
     let creates = matches!(mode.first(), Some(b'w' | b'a' | b'x' | b'c'))
         && std::fs::symlink_metadata(&host).is_err();
-    let mut file = options.open(&host).map_err(|error| strerror(&error))?;
+    let mut file = options.open(&host).map_err(|error| failed(req, &error))?;
     if creates {
         req.apply_umask(&host, 0o666);
     }
     if !for_include && !mode.contains(&b'e') {
-        crate::api::layer::inherit_fd(file.as_fd()).map_err(|error| strerror(&error))?;
+        crate::api::layer::inherit_fd(file.as_fd()).map_err(|error| failed(req, &error))?;
     }
     let is_seekable = file.metadata().map_or(true, |meta| {
         use std::os::unix::fs::FileTypeExt;
@@ -4656,6 +4663,7 @@ impl StreamLayer for Request {
         mode: &[u8],
         options: OpenOptions,
     ) -> Result<PhpStream, String> {
+        self.streams().errno = None;
         let guarded = if options.disable_open_basedir {
             Ok(self.unguarded_host_path(path))
         } else {
@@ -4663,7 +4671,7 @@ impl StreamLayer for Request {
         };
         match guarded {
             Ok(host) => plain_open(self, &host, mode, options.for_include && !options.held),
-            Err(refused) => Err(strerror(&refused.into())),
+            Err(refused) => Err(failed(self, &refused.into())),
         }
     }
 

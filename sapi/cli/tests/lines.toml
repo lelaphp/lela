@@ -520,6 +520,20 @@ name = "the-cli-notes-its-program-before-the-prepend-file"
 args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "t.php"]
 files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''', "t.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''' }
 
+# The CLI opens its program with `VCWD_FOPEN` in `cli_seek_file_begin`
+# (`Z/sapi/cli/php_cli.c:577`), not through the stream layer, so no
+# `open_basedir` check stands on it: a program outside the base directories
+# runs, by a whole path or a relative one, and `-l` reads it; an include
+# from it of a file outside them is refused as any include is (#4351).
+[[line]]
+name = "the-cli-runs-a-program-outside-open-basedir"
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "{dir}/out.php"]
+files = { "base/in.php" = "<?php echo \"in\\n\";", "out.php" = "<?php echo \"ran\\n\"; include __DIR__ . '/other.php';", "other.php" = "<?php echo \"other\\n\";" }
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "out.php"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-l", "{dir}/out.php"]
+
 [[line]]
 name = "the-built-in-server-notes-its-program-as-it-compiles"
 args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "-S", "127.0.0.1:{port}", "-t", "{dir}"]

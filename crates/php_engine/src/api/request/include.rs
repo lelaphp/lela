@@ -61,6 +61,22 @@ pub(super) struct Include {
     held: Vec<Held>,
     /// The include files listed so far ([`Listed`]), which names the next.
     listed: u64,
+    /// Where the open of the program's file as its host opens it stands,
+    /// which is made once ([`Request::open_primary_file`]).
+    primary: PrimaryOpen,
+}
+
+/// Where [`Request::open_primary_file`] stands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum PrimaryOpen {
+    /// Not made yet.
+    #[default]
+    Pending,
+    /// Made: the program opened, opcache answered it, or its host opens
+    /// nothing.
+    Made,
+    /// Made, and the program did not open.
+    Unopened,
 }
 
 /// A file one of the request's `zend_file_handle`s holds open past the
@@ -268,29 +284,111 @@ impl Request {
     /// int(1)
     /// int(0)
     /// ```
-    pub(crate) fn open_primary_file(&mut self) {
+    ///
+    /// Where the host hands its name, the open is `php_fopen_primary_script`'s
+    /// (`Z/main/fopen_wrappers.c:453-488`), made once, where the request
+    /// opens the program first: `zend_resolve_path`, which warns of
+    /// nothing, then `zend_stream_open` under `display_errors=0` while
+    /// the request is still starting, so what the stream layer raises,
+    /// the `open_basedir` guard's refusal among it, is logged as `PHP
+    /// Request Startup`'s and never shown. The `Err` is php's `errno`
+    /// where the file did not open, which the host answers
+    /// ([`RequestDescription::unopened`](crate::RequestDescription::unopened)).
+    /// php-fpm's request whose `PHP_VALUE` names an `open_basedir` the
+    /// program stands outside is answered with the page, its line on
+    /// `FCGI_STDERR`, and no program:
+    ///
+    /// ```php
+    /// echo "ran\n";
+    /// ```
+    /// ```request fpm
+    /// --ENV--
+    /// PHP_VALUE=open_basedir=/nonexistent-basedir
+    /// ```
+    /// ```expect exit=0
+    /// Status: 404 Not Found
+    /// X-Powered-By: PHP/8.5.12
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// No input file specified.
+    /// ```
+    /// ```stderr
+    /// Unable to open primary script: %s/witness.php (Operation not permitted)
+    /// ```
+    pub(crate) fn open_primary_file(&mut self) -> Result<(), std::io::Error> {
+        if self.include.primary != PrimaryOpen::Pending {
+            return Ok(());
+        }
+        self.include.primary = PrimaryOpen::Made;
+        let opened = self.open_primary_once();
+        if opened.is_err() {
+            self.include.primary = PrimaryOpen::Unopened;
+        }
+        opened
+    }
+
+    /// Whether the program did not open as its host opens it
+    /// ([`Request::open_primary_file`]).
+    pub(crate) fn primary_unopened(&self) -> bool {
+        self.include.primary == PrimaryOpen::Unopened
+    }
+
+    /// How the host answers a program that did not open
+    /// ([`RequestDescription::unopened`](crate::RequestDescription::unopened)).
+    pub(crate) fn unopened_page(&self) -> Option<fn(&[u8], &std::io::Error) -> crate::HostPage> {
+        self.description.unopened
+    }
+
+    /// [`Request::open_primary_file`] the once it is made.
+    fn open_primary_once(&mut self) -> Result<(), std::io::Error> {
         let Some(script) = self.description.script_name.clone() else {
-            return;
+            return Ok(());
         };
         let program_file = self.description.program_file;
         let until = match program_file {
-            ProgramFile::Opened => return self.hold_file(&script, Until::Served),
-            ProgramFile::Unopened => return,
-            _ if self.accelerator_holds(&script) => return,
+            ProgramFile::Opened => {
+                self.hold_file(&script, Until::Served);
+                return Ok(());
+            }
+            ProgramFile::Unopened => return Ok(()),
+            _ if self.accelerator_holds(&script) => return Ok(()),
             ProgramFile::Named => Until::Served,
             ProgramFile::Listed => Until::Ended,
         };
+        match self.code_mut().resolve_path(&script) {
+            Ok(_) => {}
+            // The `errno` `tsrm_realpath` leaves, `ENOENT` where the
+            // reason carries none, a path that is no regular file.
+            Err(Unresolved::Missing(error) | Unresolved::Url(error)) => {
+                const ENOENT: i32 = 2;
+                let errno = error.raw_os_error().unwrap_or(ENOENT);
+                return Err(std::io::Error::from_raw_os_error(errno));
+            }
+            Err(Unresolved::Threw(thrown)) => {
+                self.leave_pending(&thrown);
+                return Ok(());
+            }
+        }
         let Some(hooks) = self.stream_hooks() else {
-            return self.hold_file(&script, until);
+            self.hold_file(&script, until);
+            return Ok(());
         };
-        match (hooks.open_primary)(self, &script) {
-            Ok(Some(path)) => self.include.held.push(Held {
+        let display = self.diagnostics_mut().set_display_errors(0);
+        let phase = self.phase();
+        self.enter_phase(super::Phase::Startup);
+        let opened = (hooks.open_primary)(self, &script);
+        self.enter_phase(phase);
+        self.diagnostics_mut().set_display_errors(display);
+        match opened {
+            Ok(Ok(Some(path))) => self.include.held.push(Held {
                 holder: Holder::Stream(path),
                 until,
             }),
-            Ok(None) => {}
+            Ok(Ok(None)) => {}
+            Ok(Err(errno)) => return Err(errno),
             Err(thrown) => self.leave_pending(&thrown),
         }
+        Ok(())
     }
 
     /// The `*opened_path` of the program's stream, where
@@ -1617,13 +1715,21 @@ impl Request {
 
     /// The warning `php_stream_display_wrapper_errors` raises with
     /// `php_error_docref1`, the path its `estrdup` (`php_strip_url_passwd`)
-    /// standing across the raise as the parameter `function` names.
+    /// standing across the raise as the parameter `function` names; while
+    /// the request is still starting, `php_verror` names that phase and no
+    /// function, so the path is shown nowhere, as php-cgi's open of its
+    /// program warns (`Z/main/main.c:1119`).
     pub(crate) fn wrapper_warning(&mut self, function: &str, path: &[u8], text: &str) {
+        use crate::api::raising::Origin;
         let copy = self.heap_mut().block(path.len() + 1);
         let Ok(copy) = self.fatal_of(copy) else {
             return;
         };
-        let origin = crate::api::raising::Origin::Function(function);
+        let origin = if self.phase() == super::Phase::Startup {
+            Origin::Phase("PHP Request Startup")
+        } else {
+            Origin::Function(function)
+        };
         crate::api::raising::verror(self, Level::Warning, origin, path, text.as_bytes());
         self.heap_mut().free_block(copy);
     }

@@ -111,7 +111,9 @@ fn close_include(req: &mut Request, file: IncludeFile) {
 /// [`StreamHooks::open_primary`]: the program opened as
 /// `php_fopen_primary_script` opens it ([`ScannerFile::open_held`]) and
 /// held as the host's `zend_file_handle`, its `*opened_path` handed back;
-/// `None` where it did not open. The `Err` is what the open threw.
+/// where it did not open, php's `errno` after the failure, the plain files
+/// opener's, which `ENOENT` stands for where another wrapper failed. The
+/// outer `Err` is what the open threw.
 ///
 /// ```php
 /// var_dump(get_resources(), fopen('php://memory', 'r'));
@@ -130,13 +132,20 @@ fn close_include(req: &mut Request, file: IncludeFile) {
 /// }
 /// resource(3) of type (stream)
 /// ```
-fn open_primary(req: &mut Request, path: &[u8]) -> Result<Option<PhpString>, Thrown> {
+fn open_primary(
+    req: &mut Request,
+    path: &[u8],
+) -> Result<Result<Option<PhpString>, std::io::Error>, Thrown> {
+    /// `ENOENT`, the same number on every system the engine builds on.
+    const ENOENT: i32 = 2;
+    req.streams().errno = None;
     let Some(fh) = ScannerFile::open_held(req, path)? else {
-        return Ok(None);
+        let errno = req.streams().errno.take().unwrap_or(ENOENT);
+        return Ok(Err(std::io::Error::from_raw_os_error(errno)));
     };
     let opened_path = fh.opened_path();
     req.streams().primary = Some(fh);
-    Ok(opened_path)
+    Ok(Ok(opened_path))
 }
 
 /// [`StreamHooks::close_primary`]: `zend_destroy_file_handle` over the
