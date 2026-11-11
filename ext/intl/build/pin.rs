@@ -1,9 +1,15 @@
-//! The ICU major the pin asks for, read from `oracle.toml`'s `[closure]`:
-//! the one `icu4c@<major>` keg among the kegs the pinned binaries load
-//! (#4406). Included by `build.rs`, which holds the ICU `pkg-config` finds
-//! to it, and by `tests/pin.rs`, which holds this reading to fixture pins.
-//! Only `[closure]`'s key names are read, so a key of the pin this does
-//! not know is no concern of the build's.
+//! What ICU the build links, and the major it hands to the binding.
+//!
+//! On macOS that is the ICU the pin's `[closure]` names, the one
+//! `icu4c@<major>` keg among the kegs the pinned binaries load (#4406),
+//! and an ICU of another major, or none, is refused naming that keg. On
+//! any other target it is the ICU `pkg-config` finds, at or above php's
+//! own floor, `icu-uc >= 57.1` (`build/php.m4`'s `PHP_SETUP_ICU`), as
+//! php built on that host links it (#4428). Included by `build.rs`, which
+//! asks `pkg-config` and reads the pin, and by `tests/pin.rs`, which holds
+//! both readings to fixture pins and made-up versions. Only `[closure]`'s
+//! key names are read, so a key of the pin this does not know is no
+//! concern of the build's.
 
 use std::fmt;
 
@@ -93,5 +99,126 @@ pub(crate) fn icu_major(text: &str) -> Result<Major, Refusal> {
         more => Err(Refusal::Kegs(
             more.iter().map(|(k, _)| (*k).clone()).collect(),
         )),
+    }
+}
+
+/// php's floor for ICU, `icu-uc >= 57.1` (`build/php.m4`'s
+/// `PHP_SETUP_ICU`), held as `pkg-config --atleast-version` holds a
+/// dotted version, component by component.
+const FLOOR: [u32; 2] = [57, 1];
+
+/// Whether the build for `target_os` (`CARGO_CFG_TARGET_OS`) is held to
+/// the pin's ICU: on macOS, where the pin's `[closure]` names the kegs
+/// the oracle loads, and nowhere else (#4428).
+pub(crate) fn held_to_pin(target_os: &str) -> bool {
+    target_os == "macos"
+}
+
+/// What the build asks of the ICU `pkg-config` finds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Asked {
+    /// On macOS, the major of the keg the pin's closure names.
+    Keg(Major),
+    /// On any other target, php's floor, [`FLOOR`].
+    Floor,
+}
+
+/// Why the build links no ICU, each the build's refusal in its words
+/// ([`fmt::Display`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Unlinked {
+    /// `pkg-config icu-uc` found nothing.
+    Missing(Asked),
+    /// It found a version that is not dotted numbers.
+    NotAVersion(String),
+    /// On macOS, it found an ICU of another major than the pin's keg.
+    OtherMajor { found: String, keg: Major },
+    /// On any other target, it found an ICU below php's floor.
+    BelowFloor(String),
+}
+
+impl Asked {
+    /// The major to hand to the binding, of the ICU whose version
+    /// `pkg-config --modversion icu-uc` printed (`found`, none where it
+    /// found no ICU), or why the build links none.
+    pub(crate) fn linked(self, found: Option<&str>) -> Result<Major, Unlinked> {
+        let Some(found) = found else {
+            return Err(Unlinked::Missing(self));
+        };
+        let parts: Option<Vec<u32>> = found.split('.').map(|p| p.parse().ok()).collect();
+        let Some(&first) = parts.as_deref().and_then(<[u32]>::first) else {
+            return Err(Unlinked::NotAVersion(found.to_owned()));
+        };
+        let major = Major(first);
+        match self {
+            Asked::Keg(keg) if keg != major => Err(Unlinked::OtherMajor {
+                found: found.to_owned(),
+                keg,
+            }),
+            Asked::Floor if parts.as_deref() < Some(FLOOR.as_slice()) => {
+                Err(Unlinked::BelowFloor(found.to_owned()))
+            }
+            Asked::Keg(_) | Asked::Floor => Ok(major),
+        }
+    }
+
+    /// Where to put the ICU asked for, `ahead` of another where one was
+    /// found: the keg's `lib/pkgconfig` for the pin's, by Homebrew's name.
+    fn put(self, f: &mut fmt::Formatter<'_>, ahead: &str) -> fmt::Result {
+        write!(f, "put its lib/pkgconfig {ahead}on PKG_CONFIG_PATH")?;
+        match self {
+            Asked::Keg(major) => write!(
+                f,
+                " (Homebrew: `$(brew --prefix {})/lib/pkgconfig`)",
+                major.keg()
+            ),
+            Asked::Floor => Ok(()),
+        }
+    }
+}
+
+/// php's floor as `pkg-config` spells it, `57.1`.
+fn floor() -> String {
+    let parts: Vec<String> = FLOOR.iter().map(u32::to_string).collect();
+    parts.join(".")
+}
+
+impl fmt::Display for Unlinked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "pkg-config icu-uc: ")?;
+        match self {
+            Unlinked::Missing(asked @ Asked::Keg(major)) => {
+                write!(f, "no ICU found; the pin asks for {}: ", major.keg())?;
+                asked.put(f, "")
+            }
+            Unlinked::Missing(asked @ Asked::Floor) => {
+                let floor = floor();
+                write!(
+                    f,
+                    "no ICU found; php's intl asks for ICU {floor} or later: "
+                )?;
+                asked.put(f, "")
+            }
+            Unlinked::NotAVersion(found) => {
+                write!(f, "found ICU {found}, which is not a dotted version")
+            }
+            Unlinked::OtherMajor { found, keg } => {
+                let asked = Asked::Keg(*keg);
+                write!(
+                    f,
+                    "found ICU {found}, where the pin asks for {}: ",
+                    keg.keg()
+                )?;
+                asked.put(f, "ahead ")
+            }
+            Unlinked::BelowFloor(found) => {
+                let floor = floor();
+                write!(
+                    f,
+                    "found ICU {found}, below the {floor} php's intl asks for: "
+                )?;
+                Asked::Floor.put(f, "ahead ")
+            }
+        }
     }
 }
