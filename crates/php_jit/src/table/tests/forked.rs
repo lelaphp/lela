@@ -4,16 +4,21 @@
 //! that process runs and never what the other wrote. The fork is the one
 //! `pcntl_fork` asks, the request's, `Limits::fork`, asked from a tier's
 //! safepoint with that request alone inside the engine, so the test runs
-//! in a process of its own, this binary started again for it alone.
+//! in a process of its own, this binary started again for it alone. A
+//! child whose executable view may be gone ends at the fork, with
+//! opcache's fatal line and status, which its parent reads.
 
 use std::io::{Read, Write};
+use std::sync::{Arc, Weak};
 
 use php_engine::test::in_a_process_apart;
-use php_engine::tier::{self, Extension, ExtensionBuilder, Flow, FrameRef, Request, Site, Tier};
+use php_engine::tier::{
+    self, Extension, ExtensionBuilder, Flow, FrameRef, Inherited, Request, Site, Tier,
+};
 
-use super::super::code::{callable, returning};
-use super::super::{Outputs, Table, TraceId};
-use super::{compiled, trace};
+use super::super::code::{Unadoptable, callable, returning, waited};
+use super::super::{Outputs, Perf, Table, TraceId, TraceTable};
+use super::{compiled, exit, trace};
 use crate::record::Start;
 use crate::table;
 use crate::testing;
@@ -194,6 +199,77 @@ fn a_forks_child_runs_its_parents_code_and_neither_runs_what_the_other_publishes
     );
     in_a_process_apart(&name, "child 7 30 31 sealed 1, parent 7 20 21", || {
         let engine = testing::engine::<Forking>(&[]);
+        let scratch = testing::Scratch::new();
+        let (_, came) = scratch.serve_kept::<Came>(&engine, "function f() {} f();");
+        came.and_then(|came| came.0)
+            .ok_or_else(|| "the request kept nothing".to_owned())?
+    });
+}
+
+/// The tier that forks at a request's first activation with a table over
+/// [`Unadoptable`] entered among what the fork holds, so the child's
+/// first mapping is refused where its executable view may be gone.
+struct Losing;
+
+impl Tier for Losing {
+    type State = ();
+
+    fn safepoint(req: &mut Request, _: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
+        if site == Site::Entry && req.state::<Came>().0.is_none() {
+            let came = lost(req);
+            req.state::<Came>().0 = Some(came);
+        }
+        Flow::Continue
+    }
+
+    fn extension() -> Option<Extension> {
+        Some(
+            ExtensionBuilder::default()
+                .request_state::<Came>()
+                .build("losing"),
+        )
+    }
+}
+
+/// A table over [`Unadoptable`] holding one trace, entered among what
+/// the fork holds, and the request's fork asked: the child ends in the
+/// fork's child half and never returns here; the parent answers how it
+/// ended, and that it still holds its trace.
+fn lost(req: &mut Request) -> Result<String, String> {
+    let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
+    let table = Arc::new(TraceTable::<Unadoptable>::with_perf(&policy, Perf::none()));
+    let before = (table.publish(compiled(&[0; 8], vec![exit(None)]), Start::Loop))
+        .map_err(|refused| format!("the trace before the fork: {refused:?}"))?;
+    let entry: Weak<dyn Inherited> = Arc::downgrade(&table) as Weak<TraceTable<Unadoptable>>;
+    tier::inherit(entry);
+    let asker = std::process::id();
+    let _side = req.limits_mut().fork().map_err(|e| e.to_string())?;
+    if std::process::id() != asker {
+        // A child that went on past its hold says so by its status.
+        std::process::exit(0);
+    }
+    let ended = waited().map_err(|e| e.to_string())?;
+    match ended {
+        Ok(254) if table.get(before).is_some() => Ok("the child exited 254".to_owned()),
+        Ok(status) => Err(format!("the child exited {status}")),
+        Err(signal) => Err(format!("the child ended on signal {signal}")),
+    }
+}
+
+/// A fork's child whose first mapping was refused, where Linux may have
+/// taken its executable view away, writes opcache's fatal line and exits
+/// with its status, 254 (`exit(-2)`), before it returns into any frame
+/// (`jit-design.md` §4.4, #4501's ruling): the process apart passes only
+/// where its parent read that status, and printed holds the child's line.
+#[test]
+fn a_forks_child_whose_code_may_be_gone_ends_with_opcaches_fatal_line_and_status() {
+    let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    let name = format!(
+        "{module}::a_forks_child_whose_code_may_be_gone_ends_with_opcaches_fatal_line_and_status"
+    );
+    let line = "Fatal Error Could not keep JIT: the code buffer was lost at fork (Cannot allocate memory)\n";
+    in_a_process_apart(&name, line, || {
+        let engine = testing::engine::<Losing>(&[]);
         let scratch = testing::Scratch::new();
         let (_, came) = scratch.serve_kept::<Came>(&engine, "function f() {} f();");
         came.and_then(|came| came.0)

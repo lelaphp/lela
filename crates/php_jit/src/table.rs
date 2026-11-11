@@ -41,17 +41,15 @@
 //! table is entered among what a fork holds ([`tier::Inherited`]), which
 //! takes its compile mutex for the fork and copies its arena's chunks in
 //! use, and the child maps the copy over its arena at the same addresses.
-//! Where the copy or the mapping is refused, the child's table keeps no
-//! arena and publishes no more code, so neither process writes a page the
-//! other runs: the one that asked writes only into chunks and tails that
-//! were free at the fork, which the child, publishing nothing, never
-//! enters, and no chunk of a standing table is freed before the table.
-//! Where the mapping is refused, the kernel may have taken the code
-//! away with it, so the child's table is lost besides: it hands no
-//! trace to an entry ([`TraceTable::entry`]), and a child with no trace
-//! standing on a stack at the fork runs in the dispatch loop alone; one
-//! with a trace standing returns into its code, which no table state
-//! saves (#4471, #4501).
+//! Where the copy or the mapping is refused and the code stands, the
+//! child's table keeps no arena and publishes no more code, so neither
+//! process writes a page the other runs: the one that asked writes only
+//! into chunks and tails that were free at the fork, which the child,
+//! publishing nothing, never enters, and no chunk of a standing table is
+//! freed before the table. Where the mapping is refused and the kernel
+//! may have taken the executable view away ([`code::Unadopted::Lost`]),
+//! the child ends there, before it returns into any frame, with
+//! opcache's fatal line and status (#4501's ruling).
 //! The copy is the asking process's to pay, at each fork, for the chunks
 //! in use alone.
 
@@ -77,7 +75,7 @@ mod perf;
 #[cfg(test)]
 mod tests;
 
-use code::{Arena, Code, NullTable, Pages};
+use code::{Arena, Code, NullTable, Pages, Unadopted};
 pub(crate) use perf::{Outputs, Perf, Usage, Used};
 
 /// The `Pages` adapter a trace's code is mapped through on this target
@@ -472,11 +470,6 @@ pub(crate) struct TraceTable<P: Pages = Native> {
     /// Whether a hot root found the table full: php's
     /// `ZCSG(jit_counters_stopped)`.
     stopped: AtomicBool,
-    /// Whether its code may be gone from where its entries point: set
-    /// once, in a fork's child whose copy of the arena could not be laid
-    /// over it ([`tier::Inherited`]), after which [`TraceTable::entry`]
-    /// hands out no trace.
-    lost: AtomicBool,
     bounds: Bounds,
     compile: Mutex<Writer<P>>,
     /// What the published traces take, the counts of the `Perf` behind
@@ -640,7 +633,6 @@ impl<P: Pages> TraceTable<P> {
             entrances: NullTable::new(bounds.traces as usize),
             next: AtomicU32::new(1),
             stopped: AtomicBool::new(false),
-            lost: AtomicBool::new(false),
             bounds,
             compile: Mutex::new(Writer {
                 arena,
@@ -674,27 +666,6 @@ impl<P: Pages> TraceTable<P> {
         let (segment, slot) = id.slot();
         let slots = self.segments.get(segment)?.get()?;
         slots.get(slot)?.get().map(Box::as_ref)
-    }
-
-    /// The trace `id` names for an entry from the dispatch loop: what
-    /// [`TraceTable::get`] answers, behind a relaxed load of whether the
-    /// table is lost, and none for every id once it is, so a fork's child
-    /// that could not take its arena enters no trace published before the
-    /// fork (`jit-design.md` §4.4). A trace already running at the fork
-    /// still finds the traces it answers by and the words of its exits,
-    /// which ask `get`. Whether the third load stands against the two
-    /// §4.5 settles is #4520's.
-    pub(crate) fn entry(&self, id: TraceId) -> Option<&Trace<P>> {
-        if self.lost() {
-            return None;
-        }
-        self.get(id)
-    }
-
-    /// Whether the table's code is lost: a fork's child's whose copy of
-    /// the arena could not be laid over it.
-    pub(crate) fn lost(&self) -> bool {
-        self.lost.load(Ordering::Relaxed)
     }
 
     /// The number the next trace published takes, which a `TRACE start`
@@ -935,31 +906,45 @@ impl<P: Pages> TraceTable<P> {
 impl<P: Pages + 'static> tier::Inherited for TraceTable<P> {
     /// The compile mutex, held for the fork, and the arena's chunks in use
     /// copied for the child ([`Arena::inheritance`]); in the child the copy
-    /// is mapped over the arena, or, where either was refused, the arena
-    /// let go, so the child writes no page its parent maps. A refused copy
-    /// leaves the code where it stands, on Linux the pages it shares with
-    /// its parent and on macOS x86-64 the copy the fork gave it; a refused
-    /// mapping may not, since Linux unmaps the executable view before it
-    /// maps its replacement and may then refuse it (`jit-design.md`
-    /// §4.4), so the child's table is lost and enters no trace.
+    /// is mapped over the arena, or, where either was refused and the code
+    /// stands, the arena let go, so the child writes no page its parent
+    /// maps and enters every trace published before the fork. A refused
+    /// copy leaves the code where it stands, on Linux the pages it shares
+    /// with its parent and on macOS x86-64 the copy the fork gave it. A
+    /// mapping refused where the executable view may be gone ends the
+    /// child here, before it returns into any frame ([`code_lost`]).
     fn hold(&self) -> Box<dyn FnOnce() + '_> {
         let mut writer = self.writer();
         let inheritance = writer.arena.as_ref().map(Arena::inheritance);
-        Box::new(move || {
-            let adopted = match (writer.arena.as_mut(), inheritance) {
-                (Some(arena), Some(Ok(inheritance))) => Some(arena.adopt(inheritance)),
-                _ => None,
-            };
-            match adopted {
-                Some(Ok(())) => {}
-                Some(Err(_)) => {
-                    writer.arena = None;
-                    self.lost.store(true, Ordering::Relaxed);
-                }
-                None => writer.arena = None,
-            }
+        Box::new(move || match (writer.arena.as_mut(), inheritance) {
+            (Some(arena), Some(Ok(inheritance))) => match arena.adopt(inheritance) {
+                Ok(()) => {}
+                Err(Unadopted::Stands(_)) => writer.arena = None,
+                Err(Unadopted::Lost(refused)) => code_lost(&refused),
+            },
+            _ => writer.arena = None,
         })
     }
+}
+
+/// A fork's child whose executable view may be gone, ended before it
+/// returns into any frame (`jit-design.md` §4.4, #4501's ruling): one line
+/// on its error stream, `zend_accel_error`'s word for `ACCEL_LOG_FATAL`
+/// and the message, and opcache's fatal status, the `exit(-2)` php ends
+/// a process with that cannot use the tier's code buffer
+/// (`Z/ext/opcache/ZendAccelerator.c:3341`,
+/// `Z/ext/opcache/zend_accelerator_debug.c:92-93`). It runs no PHP after
+/// the fork, whether or not a trace stood on one of its stacks.
+fn code_lost(refused: &std::io::Error) -> ! {
+    use std::io::Write as _;
+    let said = refused.to_string();
+    let said = (refused.raw_os_error())
+        .and_then(|code| said.strip_suffix(&format!(" (os error {code})")))
+        .unwrap_or(&said);
+    let line =
+        format!("Fatal Error Could not keep JIT: the code buffer was lost at fork ({said})\n");
+    std::io::stderr().write_all(line.as_bytes()).ok();
+    std::process::exit(-2)
 }
 
 /// An epoch's table under `policy`, shared, and entered among what every
