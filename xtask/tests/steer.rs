@@ -807,6 +807,98 @@ fn a_clean_merge_refuses_a_side_undone_and_a_text_git_did_not_merge() {
     );
 }
 
+/// A clean merge whose `MERGE_HEAD` changed the file in a comment alone,
+/// as main merged into a branch that steered a row brings a person's
+/// comment: no value is brought to HEAD's file, and the text git merged,
+/// neither side's commit, is covered by a passing reading of no addition
+/// that names what HEAD carries.
+#[test]
+fn a_clean_merge_whose_merged_side_changed_a_comment_alone_is_covered() {
+    let file = xtask::divergence::FILE;
+    let base = fixture("merge/base.toml");
+    let commented = base.replacen("# A slice", "# A reworded slice", 1);
+    let root = scratch_at("clean-comment", file, "# no row yet\n");
+    cleanly(
+        &root,
+        &base,
+        [&fixture("merge/merged.toml"), &commented],
+        &[],
+    );
+    let staged = fs::read_to_string(root.join(file)).expect("the registry");
+    let at = root.join("proposed.toml");
+    fs::write(&at, &staged).expect("the proposal");
+
+    let reading = steer::run(&root, &harness(), file, &at, false).expect("the instrument runs");
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.numbers["added"], 0.into(), "{}", reading.message);
+    for named in [
+        "HEAD (divergence[trace:fixture-merged])",
+        "MERGE_HEAD bringing no value to HEAD's file",
+    ] {
+        assert!(
+            reading.message.contains(named),
+            "{named}: {}",
+            reading.message
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(root.join(file)).expect("the registry"),
+        staged
+    );
+}
+
+/// A criss-cross merge, whose `HEAD` and `MERGE_HEAD` have two merge
+/// bases, merged cleanly into a text neither side carries: git merged it
+/// over a base no commit carries, so steer refuses it, the merged copy
+/// and a row added to it alike, and writes nothing.
+#[test]
+fn a_criss_cross_merge_of_a_file_both_sides_changed_is_refused() {
+    let file = xtask::divergence::FILE;
+    let root = scratch_at("clean-crossed", file, &fixture("merge/base.toml"));
+    let repo = Repo::at(&root);
+    let commit = |name: &str, body: &str| {
+        fs::write(root.join(name), body).expect("the file");
+        repo.git(&["add", "--", name]);
+        repo.git(&["commit", "-q", "-m", name]);
+    };
+    // Two bases: each side's first commit, merged into the other.
+    repo.git(&["checkout", "-q", "-b", "merged"]);
+    commit("merged.txt", "the branch's first\n");
+    repo.git(&["checkout", "-q", "-"]);
+    commit("head.txt", "HEAD's first\n");
+    repo.git(&["tag", "head-first"]);
+    repo.git(&["merge", "-q", "--no-edit", "merged"]);
+    repo.git(&["checkout", "-q", "merged"]);
+    repo.git(&["merge", "-q", "--no-edit", "head-first"]);
+    commit(file, &fixture("merge/merged.toml"));
+    repo.git(&["checkout", "-q", "-"]);
+    commit(file, &fixture("merge/head-reworded.toml"));
+    repo.git(&["merge", "-q", "--no-ff", "--no-commit", "merged"]);
+    let bases = repo.git(&["merge-base", "--all", "HEAD", "MERGE_HEAD"]);
+    assert_eq!(bases.lines().count(), 2, "a criss-cross: {bases}");
+    let staged = fs::read_to_string(root.join(file)).expect("the registry");
+    assert_eq!(staged, fixture("merge/clean.toml"), "git merged it cleanly");
+
+    let row = "\n[[divergence]]\nid = \"trace:fixture-crossed\"\nkind = \"trace\"\n\
+               cause = \"php-ub\"\nreason = \"r (fixture).\"\nstatus = \"accepted\"\n\
+               since = \"2026-11-11\"\n";
+    for proposal in [staged.clone(), format!("{staged}{row}")] {
+        let at = root.join("proposed.toml");
+        fs::write(&at, &proposal).expect("the proposal");
+        let reading = steer::run(&root, &harness(), file, &at, false).expect("the instrument runs");
+        assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+        assert!(
+            reading.message.contains("several merge bases"),
+            "{}",
+            reading.message
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(file)).expect("the registry"),
+            staged
+        );
+    }
+}
+
 /// An `[[owed]]` row named by its instrument (#3636): `held_at` added to
 /// two rows is written, and the negative controls beside it, a changed
 /// `when` and a second row of one instrument, are refused with nothing

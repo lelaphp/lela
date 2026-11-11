@@ -62,7 +62,11 @@
 //! the proposal is held as well to the text git's own three-way merge of
 //! those three blobs gives (`Merged::Clean`): a proposal that differs from
 //! it by a byte, and a merge git took cleanly where that three-way merge
-//! conflicts, as `-X ours` takes one, are refused.
+//! conflicts, as `-X ours` takes one, are refused. Where `MERGE_HEAD`
+//! changed comments alone, the union brings no value and its reading
+//! still passes, since the merged text is neither side's commit. A
+//! criss-cross merge, of several bases, was merged over a base no commit
+//! carries, and is refused whatever the proposal (`Ground::Crossed`).
 //!
 //! An addition is not a decision. What a new row should say is a person's,
 //! settled on a ticket (`AGENTS.md`, *Documentation and where code lives*);
@@ -185,6 +189,13 @@ pub(crate) enum Ground {
         merged: String,
         git: Merged,
     },
+    /// A merge stands whose `HEAD` and `MERGE_HEAD` have several merge
+    /// bases, a criss-cross, and git merged the file cleanly into a text
+    /// neither side carries, the working copy here: git merged it over a
+    /// base of its own making that no commit carries, so no union of the
+    /// sides can be read, and every proposal is refused; a person commits
+    /// the merge.
+    Crossed(String),
 }
 
 /// How git left the file of a merge both sides changed, read once in
@@ -256,26 +267,32 @@ impl Ground {
     }
 
     /// The ground of `file` in a merge git merged it in cleanly (#4441):
-    /// where `HEAD` and `MERGE_HEAD` have one merge base and both changed
-    /// the file over it, differently, the three commits' files and the
-    /// text git's three-way merge of them gives; otherwise the merge took
-    /// one side's file whole, or the sides agree, and `text`, the working
-    /// copy, is the file as it stands. A criss-cross merge, of several
-    /// bases, is judged on its working copy too, since git merged it over
-    /// a base no commit carries.
+    /// where `HEAD` and `MERGE_HEAD` have one merge base, or none, and
+    /// both changed the file over it, differently, the three commits'
+    /// files and the text git's three-way merge of them gives; otherwise
+    /// the merge took one side's file whole, or the sides agree, and
+    /// `text`, the working copy, is the file as it stands. A criss-cross
+    /// merge, of several bases, whose working copy is neither side's file
+    /// is [`Ground::Crossed`].
     fn clean(root: &Path, file: &str, text: String) -> Result<Ground> {
-        let bases =
-            git::git(root, &["merge-base", "--all", "HEAD", "MERGE_HEAD"]).unwrap_or_default();
-        let [base] = bases.split_whitespace().collect::<Vec<_>>()[..] else {
-            return Ok(Ground::File(text));
-        };
-        let (base, head, merged) = (
-            git::show(root, base, file)?,
+        let (head, merged) = (
             git::show(root, "HEAD", file)?,
             git::show(root, "MERGE_HEAD", file)?,
         );
         let (Some(head), Some(merged)) = (head, merged) else {
             return Ok(Ground::File(text));
+        };
+        // Histories with no common commit merge over an empty base, as git
+        // merges them.
+        let bases =
+            git::git(root, &["merge-base", "--all", "HEAD", "MERGE_HEAD"]).unwrap_or_default();
+        let base = match bases.split_whitespace().collect::<Vec<_>>()[..] {
+            [] => None,
+            [base] => git::show(root, base, file)?,
+            _ if head == merged || text == head || text == merged => {
+                return Ok(Ground::File(text));
+            }
+            _ => return Ok(Ground::Crossed(text)),
         };
         if head == merged
             || [&head, &merged]
@@ -298,7 +315,9 @@ impl Ground {
     /// while a merge stands.
     fn tracked(&self) -> &str {
         match self {
-            Ground::File(tracked) | Ground::Merge { head: tracked, .. } => tracked,
+            Ground::File(tracked)
+            | Ground::Crossed(tracked)
+            | Ground::Merge { head: tracked, .. } => tracked,
         }
     }
 
@@ -311,14 +330,22 @@ impl Ground {
     /// differently, or one inside what the other changed, is refused by
     /// both sides' paths (#3633).
     pub(crate) fn judge(&self, proposed: &str) -> Result<Verdict> {
-        let Ground::Merge {
-            base,
-            head,
-            merged,
-            git,
-        } = self
-        else {
-            return judge(self.tracked(), proposed);
+        let (base, head, merged, git) = match self {
+            Ground::File(tracked) => return judge(tracked, proposed),
+            Ground::Crossed(_) => {
+                return Ok(Verdict::Refused(vec![
+                    "HEAD and MERGE_HEAD have several merge bases, so git merged the file over a \
+                     base no commit carries and no union of the sides can be read; a person \
+                     commits the merge"
+                        .to_owned(),
+                ]));
+            }
+            Ground::Merge {
+                base,
+                head,
+                merged,
+                git,
+            } => (base, head, merged, git),
         };
         let (ours, theirs) = (Walk::over(base, head)?, Walk::over(base, merged)?);
         let (over_head, over_merged) = (Walk::over(head, proposed)?, Walk::over(merged, proposed)?);
@@ -423,7 +450,21 @@ pub fn run(
                 changed.join(", ")
             );
         }
-        _ if verdict.additions().is_empty() => {
+        // A clean merge whose MERGE_HEAD changed the file in comments or
+        // layout alone brings no value to HEAD's file, and the text git
+        // merged is still neither side's commit: its reading covers it.
+        _ if verdict.additions().is_empty()
+            && !matches!(
+                (&verdict, &ground),
+                (
+                    Verdict::Union { .. },
+                    Ground::Merge {
+                        git: Merged::Clean(_),
+                        ..
+                    }
+                )
+            ) =>
+        {
             reading.status = Status::Skip;
             reading.message = format!("{file}: the proposal adds nothing to it; nothing to write");
         }
@@ -452,17 +493,27 @@ pub fn run(
                 Verdict::Union { head, .. } => format!(
                     ", judged against HEAD's file since a merge is in progress: the union of \
                      what HEAD ({}) and MERGE_HEAD each carry over their base, and nothing \
-                     beyond it{clean}, MERGE_HEAD's brought to HEAD's file",
-                    head.join(", ")
+                     beyond it{clean}, {}",
+                    head.join(", "),
+                    if added.is_empty() {
+                        "MERGE_HEAD bringing no value to HEAD's file, its change over the base \
+                         being comments or layout alone"
+                    } else {
+                        "MERGE_HEAD's brought to HEAD's file"
+                    }
                 ),
                 _ => ", and nothing the file already carried changed".to_owned(),
             };
             reading.status = Status::Pass;
             reading.count("added", added.len() as u64)?;
             reading.message = format!(
-                "{file}: {} added{dry}{union}: {}",
+                "{file}: {} added{dry}{union}{}",
                 added.len(),
-                added.join(", ")
+                if added.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", added.join(", "))
+                }
             );
         }
     }

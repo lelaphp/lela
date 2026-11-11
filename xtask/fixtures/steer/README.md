@@ -64,6 +64,15 @@ the text `git merge-file` gives of them as well:
 `xtask/tests/steer.rs` lays each merge in a scratch repository and runs
 all six, the first through the `steer` and `permit --diff` binaries.
 
+Two more clean merges are laid in the tests from these fixtures. A
+`MERGE_HEAD` that rewords only the header comment of `base.toml`, merged
+into `merged.toml`: the staged copy is written with no addition, and the
+reading passes, naming `divergence[trace:fixture-merged]` as `HEAD`'s. A
+criss-cross, each side's first commit merged into the other before
+`head-reworded.toml` and `merged.toml`: two merge bases, so the staged
+copy, `clean.toml`, and a row added to it are both refused, naming the
+several merge bases.
+
 ## An `[[owed]]` row (#3636)
 
 `owed/tracked.toml` is a slice of `seams.toml`'s `[[owed]]` rows, each
