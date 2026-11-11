@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"Cargo.lock","old_string":"[[package]]\nname = \"memoffset\"","new_string":"[[package]]\nname = \"left-pad\"\nversion = \"1.0.0\"\nsource = \"git+https://example.invalid/left-pad?rev=1a2b3c#1a2b3c4d5e6f\"\n\n[[package]]\nname = \"memoffset\""}}

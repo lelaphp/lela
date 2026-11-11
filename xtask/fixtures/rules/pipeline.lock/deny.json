@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"Cargo.lock","old_string":"[[package]]\nname = \"memoffset\"","new_string":"[[package]]\nname = \"left-pad\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0f0c4beb022d3b367256b91b87513d98cf8baf1c55e62ffcace7a9f06f4bd9cd\"\n\n[[package]]\nname = \"memoffset\""}}

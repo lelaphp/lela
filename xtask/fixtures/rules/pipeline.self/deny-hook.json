@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"scripts/hooks/pre-push","content":"#!/usr/bin/env bash\nexit 0\n"}}

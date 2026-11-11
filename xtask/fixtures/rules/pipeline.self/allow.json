@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"ext/standard/Cargo.toml","old_string":"[dependencies]","new_string":"[dependencies]\nmemchr = \"2\""}}
