@@ -111,10 +111,12 @@ impl Runs {
 
 /// This machine's architecture, as Rust names it: on macOS, whether the
 /// hardware is Apple silicon, which `hw.optional.arm64` says even to a
-/// translated process; elsewhere the one this harness was built for.
+/// translated process, asked of `sysctl` by its path so a `PATH` without
+/// `/usr/sbin` never labels a translated run native; elsewhere the one this
+/// harness was built for.
 fn hardware() -> &'static str {
     if cfg!(target_os = "macos") {
-        let asked = Command::new("sysctl")
+        let asked = Command::new("/usr/sbin/sysctl")
             .args(["-n", "hw.optional.arm64"])
             .output();
         if asked.is_ok_and(|out| out.stdout.trim_ascii() == b"1") {
