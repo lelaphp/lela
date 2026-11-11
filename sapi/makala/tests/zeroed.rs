@@ -1,4 +1,4 @@
-//! One request thread with `ZERO_TOUCHED_PAGES` on (#4348's ruling 4,
+//! One request thread with `LELA_ZERO_TOUCHED_PAGES` on (#4348's ruling 4,
 //! #4361): each request's heap zeroes the pages it touched before its
 //! chunks are kept for the next, which this one thread is then handed.
 //! What PHP reads moves for none of it, and a request that wrote across
@@ -18,7 +18,7 @@ use common::{Request, Server, read_response, root};
 /// The variable `php_heap` reads once per process, and a number that is
 /// not zero: a copy, since the constant is not `php_heap`'s to export,
 /// which [`the_variable_is_the_one_php_heap_reads`] holds to `php_heap`'s.
-const ZEROED: (&str, &str) = ("ZERO_TOUCHED_PAGES", "1");
+const ZEROED: (&str, &str) = ("LELA_ZERO_TOUCHED_PAGES", "1");
 
 /// The test below starts makala with the variable `php_heap` reads: one
 /// named otherwise would serve every request as it does with the opt-in
