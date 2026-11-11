@@ -1534,9 +1534,7 @@ impl Invocation<'_> {
                 })
             }
             Element::Subcommand(word) => follows(&self.words[self.own - 1..], &[word]).is_some(),
-            Element::Key(key) => options(self.own())
-                .iter()
-                .any(|word| word.eq_ignore_ascii_case(key)),
+            Element::Key(key) => self.own().iter().any(|word| word.eq_ignore_ascii_case(key)),
         }
     }
 }
@@ -1558,7 +1556,8 @@ pub(crate) enum Element<'a> {
     /// `core.hooksPath`: a configuration key, a section and a name joined
     /// by a dot, which one of the command's own words names wherever it
     /// stands among them, whatever subcommand or option stands before it
-    /// (`set`, `--global`, `--unset`); the key compares without ASCII
+    /// (`set`, `--global`, `--unset`), and after a `--`, which introduces
+    /// operands rather than ending them; the key compares without ASCII
     /// case, as git reads it (#4363).
     Key(&'a str),
 }
@@ -2296,8 +2295,9 @@ mod tests {
 
     /// A configuration key is denied wherever the command's own words name
     /// it, past any subcommand or option of the phrase's own and in any
-    /// case, as git reads the key; a key named after `--`, under
-    /// another phrase, or as the value of another key is none of them.
+    /// case, as git reads the key, and after a `--`, since a key is an
+    /// operand and `--` is what introduces one; a key under another
+    /// phrase, or a word that only starts with it, is none of them.
     #[test]
     fn a_denied_key_is_one_of_the_commands_own_words_in_any_case() {
         let denied = ["core.hooksPath"];
@@ -2310,6 +2310,8 @@ mod tests {
             "git config --file .git/config core.hooksPath x",
             "git -C /tmp/x config core.hooksPath",
             "cd x && git config core.hooksPath y",
+            "git config -- core.hooksPath /var/empty",
+            "git config --unset -- core.hooksPath",
         ] {
             assert!(denies(line, &denied, "git config"), "{line}");
         }
@@ -2318,7 +2320,6 @@ mod tests {
             "git config --list",
             "git log --grep core.hooksPath",
             "echo git config core.hooksPath",
-            "git config user.name -- core.hooksPath",
             "git config core.hooksPathx y",
         ] {
             assert!(!denies(line, &denied, "git config"), "{line}");
