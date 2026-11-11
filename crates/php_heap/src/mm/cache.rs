@@ -34,6 +34,16 @@
 //! that is not zero zeroes the pages each request touched before its
 //! chunks are kept, at a cost that follows the request's writes and not
 //! the chunk's size; nothing a request reads moves.
+//!
+//! It covers the chunks a heap keeps, and nothing else. Not kept, and so
+//! not zeroed: huge blocks and chunks given back to the system, which a
+//! mapping gets back zeroed (and the system allocator, where there is no
+//! `mmap`, is asked for zeroed). Outside it: a heap of the tracked
+//! allocator (`USE_ZEND_ALLOC=0` with `USE_TRACKED_ALLOC=1`), whose
+//! blocks are the system allocator's; an allocation ADR-0014's lend
+//! serves from the system allocator past the limit, and `emalloc` outside
+//! a lend; and every buffer that lives in the system allocator, the
+//! host's own and the compiler's among them.
 
 use std::ffi::OsStr;
 use std::ptr::NonNull;
@@ -368,6 +378,36 @@ mod tests {
         }
         let numbers = [0, 2 * CHUNK_SIZE, 2 * CHUNK_SIZE];
         assert_eq!(seen, vec![(numbers, Some(WRITTEN)), (numbers, Some(0))]);
+    }
+
+    /// With the cache zeroing, the first page of each block a request is
+    /// handed reads zero: in the main chunk and the cached one, zeroed as
+    /// they were kept, and in a chunk mapped fresh, which stands where the
+    /// one the first request's end gave back to the system stood. A mapping comes zeroed; where a chunk is the system
+    /// allocator's, under Miri and on a platform with no `mmap`, it is
+    /// asked for zeroed, and Miri reads the page as uninitialised where it
+    /// is not.
+    #[test]
+    fn a_chunk_mapped_fresh_reads_zero_as_a_kept_one_does() {
+        let _alone = alone();
+        let cache = Arc::new(ChunkCache::with(Residue::Zeroed));
+        let mut first = Mm::new_in(Arc::clone(&cache));
+        for _ in 0..3 {
+            let whole = first.alloc(MAX_LARGE_SIZE).expect("a chunk's run");
+            write(whole, PAGE_SIZE);
+        }
+        // Peaking at three chunks keeps one cached and gives the third back.
+        drop(first);
+        let mut second = Mm::new_in(Arc::clone(&cache));
+        let runs: Vec<NonNull<u8>> = (0..3)
+            .map(|_| second.alloc(MAX_LARGE_SIZE).expect("a chunk's run"))
+            .collect();
+        let read: Vec<Option<u8>> = runs.iter().map(|run| read(*run)).collect();
+        for run in runs {
+            // SAFETY: `run` is a block of `second`'s that nothing names.
+            unsafe { second.free(run) };
+        }
+        assert_eq!(read, vec![Some(0); 3]);
     }
 
     /// A chunk a request empties and is handed again keeps the mark of

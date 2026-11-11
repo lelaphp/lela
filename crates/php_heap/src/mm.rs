@@ -52,7 +52,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 #[cfg(any(not(unix), miri))]
-use std::alloc::{Layout, alloc, dealloc};
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 use std::sync::{Arc, OnceLock};
@@ -2190,7 +2190,8 @@ impl Mm {
     /// pages each kept chunk touched zeroed first where the cache says so
     /// ([`cache::Residue`]). A chunk unmapped here, a huge block and a
     /// chunk the request gave back to the system are not kept, and so not
-    /// zeroed.
+    /// zeroed; what the opt-in leaves out besides is listed at the top of
+    /// [`cache`].
     fn keep(&mut self, cache: &ChunkCache) {
         let mut chunks = self.chunks.drain(..);
         let Some(main) = chunks.next() else {
@@ -2463,12 +2464,16 @@ fn chunk_alloc_int(size: usize) -> Option<NonNull<u8>> {
 /// A platform with no `mmap`, and Miri, whose `munmap` takes a mapping
 /// only whole (the note at the top of this file), take a chunk and a
 /// huge block from the system allocator, aligned to a chunk; a huge
-/// block there is never grown or cut in place.
+/// block there is never grown or cut in place. It is asked for zeroed,
+/// as a mapping comes zeroed, so a fresh chunk's pages are untouched on
+/// every platform ([`Laid::Fresh`]) and carry nothing of a block an
+/// earlier request gave back to the system allocator.
 #[cfg(any(not(unix), miri))]
 fn chunk_alloc_int(size: usize) -> Option<NonNull<u8>> {
     let layout = Layout::from_size_align(size, CHUNK_SIZE).ok()?;
-    // SAFETY: the layout has a non-zero size, which is what `alloc` asks.
-    let at = NonNull::new(unsafe { alloc(layout) });
+    // SAFETY: the layout has a non-zero size, which is what
+    // `alloc_zeroed` asks.
+    let at = NonNull::new(unsafe { alloc_zeroed(layout) });
     #[cfg(test)]
     if at.is_some() {
         MAPPINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
