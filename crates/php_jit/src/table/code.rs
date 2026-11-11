@@ -886,9 +886,12 @@ mod remap {
     const VM_FLAGS_OVERWRITE: libc::c_int = 0x4000;
 
     unsafe extern "C" {
-        /// This task's send right, which libSystem sets before `main` and again
-        /// in a fork's child: `<mach/mach_init.h>`'s `mach_task_self()`.
-        static mach_task_self_: libc::mach_port_t;
+        /// This task's send right, `<mach/mach_init.h>`'s `mach_task_self()`:
+        /// libSystem writes it before `main` and again in a fork's child,
+        /// after Rust code has started in the process copied, so it is `mut`,
+        /// as the Reference's `items.extern.static.read-only` asks of a
+        /// static foreign code changes once Rust code runs.
+        static mut mach_task_self_: libc::mach_port_t;
 
         /// `<mach/mach_vm.h>`: `src_address`'s pages mapped at
         /// `target_address`, shared where `copy` is false.
@@ -1043,9 +1046,11 @@ mod remap {
 
     /// This task's send right, the one every call here maps in.
     fn task() -> libc::vm_map_t {
-        // SAFETY: a word libSystem sets before any thread of the process
-        // runs, and before anything runs in a fork's child.
-        unsafe { mach_task_self_ }
+        let word = &raw const mach_task_self_;
+        // SAFETY: reads the word libSystem writes before `main`, and again
+        // in a fork's child before `fork` returns there; no thread writes
+        // it while any other reads, so the read races nothing.
+        unsafe { word.read() }
     }
 
     /// `from`'s pages at a second address the system chooses, shared and
