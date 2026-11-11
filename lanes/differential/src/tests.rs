@@ -1,7 +1,35 @@
 //! The lane's pure part, held without a process: what a mutation does to
-//! a line.
+//! a line, and how far the minimiser shrinks a program.
+
+use std::cell::Cell;
 
 use crate::generate::{Rng, trapped};
+use crate::minimised;
+
+/// A program whose finding stands on one line shrinks to its tag and that
+/// line; with no trial left it is kept as it is; a budget spent after the
+/// first trial keeps what that trial left; and an error from the judge
+/// ends the loop with it.
+#[test]
+fn a_finding_shrinks_to_the_line_it_stands_on() {
+    let code = "<?php\n$a = 1;\n$b = 2;\necho $bad;\n$c = 3;\n$d = 4;\n";
+    let stands = |fewer: &str| Ok::<_, ()>(fewer.contains("$bad"));
+    assert_eq!(
+        minimised(code, 64, stands, || false).unwrap(),
+        "<?php\necho $bad;\n"
+    );
+    assert_eq!(minimised(code, 0, stands, || false).unwrap(), code);
+    let spent = Cell::new(false);
+    let once = |fewer: &str| {
+        spent.set(true);
+        stands(fewer)
+    };
+    assert_eq!(minimised(code, 64, once, || spent.get()).unwrap(), code);
+    assert_eq!(
+        minimised(code, 64, |_| Err("judge"), || false),
+        Err("judge")
+    );
+}
 
 /// A trap never lands on a line that names a loop, so no mutation takes
 /// a loop's bound or step away; a line that names none takes one.

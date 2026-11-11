@@ -404,9 +404,9 @@ impl Sides<'_> {
     }
 
     /// `code` with as many of its lines dropped as leave the disagreement
-    /// `judged` standing under `pass`, of the same kind: runs of lines
-    /// halving down to one, within [`TRIALS`] runs and the run's budget.
-    /// The opening tag stays. None for a time-out, each trial of which
+    /// `judged` standing under `pass`, of the same kind, by the lane's
+    /// loop ([`php_lanes_differential::minimised`]) within [`TRIALS`] runs
+    /// and the run's budget. None for a time-out, each trial of which
     /// would run to the recipe's limit, and where the budget is spent.
     pub(crate) fn minimised(
         &self,
@@ -418,37 +418,9 @@ impl Sides<'_> {
         if matches!(judged, Judged::Fault(Fault::PastLimit(_))) || spent() {
             return Ok(None);
         }
-        let render = |lines: &[&str]| {
-            lines.iter().fold(String::new(), |mut out, line| {
-                out.push_str(line);
-                out.push('\n');
-                out
-            })
-        };
-        let mut lines: Vec<&str> = code.lines().collect();
-        let head = usize::from(lines.first().is_some_and(|l| l.starts_with("<?php")));
-        let mut chunk = lines.len().saturating_sub(head).div_ceil(2).max(1);
-        let mut trials = 0;
-        loop {
-            let mut at = head;
-            while at < lines.len() && trials < TRIALS && !spent() {
-                let end = (at + chunk).min(lines.len());
-                let fewer: Vec<&str> = lines[..at].iter().chain(&lines[end..]).copied().collect();
-                trials += 1;
-                let now = self.judged(&render(&fewer), pass)?;
-                let same =
-                    |now: &Judged| std::mem::discriminant(now) == std::mem::discriminant(judged);
-                if now.as_ref().is_some_and(same) {
-                    lines = fewer;
-                } else {
-                    at = end;
-                }
-            }
-            if chunk == 1 || trials >= TRIALS || spent() {
-                return Ok(Some(render(&lines)));
-            }
-            chunk = chunk.div_ceil(2);
-        }
+        let same = |now: &Judged| std::mem::discriminant(now) == std::mem::discriminant(judged);
+        let stands = |fewer: &str| Ok(self.judged(fewer, pass)?.as_ref().is_some_and(same));
+        php_lanes_differential::minimised(code, TRIALS, stands, spent).map(Some)
     }
 }
 
