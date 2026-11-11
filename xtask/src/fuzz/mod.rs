@@ -7,7 +7,8 @@
 //! **What a run holds.** The corpus's programs as they stand, a directory
 //! of `.php` files ([`CORPUS`] unless one is named), then as many again
 //! as asked, each drawn from the run's seed and its place: the inherited
-//! grammar generator's or a mutation of a corpus program ([`generate`]).
+//! grammar generator's or a mutation of a corpus program, which the lane's
+//! pure part, `lanes/differential`, draws ([`php_lanes_differential`]).
 //! The seed is in the reading, so `--seed` draws the same programs again.
 //!
 //! **How a program is judged.** Both sides' first stream, second stream
@@ -40,7 +41,6 @@
 //! php, a skip where the pinned php is not
 //! on this machine.
 
-mod generate;
 #[cfg(test)]
 mod tests;
 
@@ -56,7 +56,7 @@ use crate::manifest::Manifest;
 use crate::oracle::hosts::CLI;
 use crate::oracle::{ENGINE, Ended, Oracle, profile};
 use crate::reading::{Reading, Status, joined};
-use generate::Rng;
+use php_lanes_differential::Rng;
 
 /// The instrument's name, the reading's `instrument` field.
 pub const INSTRUMENT: &str = "fuzz";
@@ -225,9 +225,12 @@ impl Corpus {
             let mut rng = Rng::new(u64::from(seed) << 32 | i as u64);
             let (label, code) = if rng.below(2) == 0 {
                 let (stem, code) = &self.programs[rng.below(self.programs.len())];
-                (format!("m{i}-{stem}"), generate::mutated(code, &mut rng))
+                (
+                    format!("m{i}-{stem}"),
+                    php_lanes_differential::mutated(code, &mut rng),
+                )
             } else {
-                (format!("g{i}"), generate::program(&mut rng))
+                (format!("g{i}"), php_lanes_differential::program(&mut rng))
             };
             drawn.push(Drawn { label, code });
         }

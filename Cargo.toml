@@ -1,10 +1,11 @@
 # The workspace (third-engine-design.md §4.2): members are `crates/*`, `ext/*`,
-# `sapi/*` (ADR-0008) and `xtask`. Every directory under the three globs is a
-# crate, since cargo refuses one that holds no `Cargo.toml`, so `xtask new-ext`
-# lays an extension down and writes nothing here (#4458).
+# `sapi/*` (ADR-0008), `lanes/*`, the harness's lanes (#3740), and `xtask`.
+# Every directory under the four globs is a crate, since cargo refuses one
+# that holds no `Cargo.toml`, so `xtask new-ext` lays an extension down and
+# writes nothing here (#4458).
 [workspace]
 resolver = "3"
-members = ["crates/*", "ext/*", "sapi/*", "xtask"]
+members = ["crates/*", "ext/*", "sapi/*", "lanes/*", "xtask"]
 
 # On macOS the dev profile's default, `split-debuginfo = "unpacked"`, keeps
 # every codegen unit's object in target/debug/deps for its debuginfo, under a
