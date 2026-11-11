@@ -19,6 +19,8 @@
 //!   nothing matches and the dump's lines for each.
 //! - `-t` over a pool entry whose name is not UTF-8: the reader's line
 //!   for the unknown entry.
+//! - `-h` under an `argv[0]` that is not UTF-8: the usage's first line,
+//!   which names the program (#4455).
 
 #![allow(
     clippy::disallowed_methods,
@@ -203,4 +205,29 @@ fn an_unknown_entry_is_named_with_its_own_bytes() {
         [r"ERROR: [{dir}/php-fpm.conf:7] unknown entry 'x\xffx'"]
     );
     assert_eq!(out.status.code(), Some(78));
+}
+
+/// `-h` names the program with what follows `argv[0]`'s last `/`, as its
+/// bytes, and `php` where `argv[0]` holds no `/` (`php_cgi_usage`,
+/// `Z/sapi/fpm/fpm/fpm_main.c:832-840`): each first line the bytes the
+/// pinned php-fpm 8.5.12 (md5 f7b17a549250f398e137eef2bd917f1c) wrote on
+/// 2026-11-11 under the same `argv[0]`.
+#[test]
+fn the_usage_names_the_program_with_argv0s_own_bytes() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::process::CommandExt;
+    let first = |argv0: &[u8]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+            .arg0(OsStr::from_bytes(argv0))
+            .args(["-n", "-h"])
+            .output()
+            .expect("php-fpm -h runs");
+        assert_eq!(out.status.code(), Some(0));
+        let line = out.stdout.split(|b| *b == b'\n').next().unwrap_or_default();
+        shown(line)
+    };
+    let options = "[-n] [-e] [-h] [-i] [-m] [-v] [-t] [-p <prefix>] [-g <pid>] [-c <file>] [-d foo[=bar]] [-y <file>] [-D] [-F [-O]]";
+    assert_eq!(first(b"/x/f\xffm"), format!(r"Usage: f\xffm {options}"));
+    assert_eq!(first(b"f\xffm"), format!("Usage: php {options}"));
 }

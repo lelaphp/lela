@@ -101,14 +101,14 @@ enum Ask {
 }
 
 /// `php_cgi_usage`, the program named by what follows the last `/` of
-/// `argv[0]`, or `php`.
-fn usage(argv0: &[u8]) -> String {
+/// `argv[0]`, written as its bytes, or `php`.
+fn usage(argv0: &[u8]) -> Vec<u8> {
     let prog = match argv0.iter().rposition(|b| *b == b'/') {
-        Some(at) => String::from_utf8_lossy(&argv0[at + 1..]).into_owned(),
-        None => String::from("php"),
+        Some(at) => &argv0[at + 1..],
+        None => b"php",
     };
-    format!(
-        "Usage: {prog} [-n] [-e] [-h] [-i] [-m] [-v] [-t] [-p <prefix>] [-g <pid>] [-c <file>] [-d foo[=bar]] [-y <file>] [-D] [-F [-O]]\n\
+    let rest = format!(
+        " [-n] [-e] [-h] [-i] [-m] [-v] [-t] [-p <prefix>] [-g <pid>] [-c <file>] [-d foo[=bar]] [-y <file>] [-D] [-F [-O]]\n\
          \x20 -c <path>|<file> Look for php.ini file in this directory\n\
          \x20 -n               No php.ini file will be used\n\
          \x20 -d foo[=bar]     Define INI entry foo with value 'bar'\n\
@@ -132,7 +132,8 @@ fn usage(argv0: &[u8]) -> String {
          \x20 -R, --allow-to-run-as-root\n\
          \x20                  Allow pool to run as root (disabled by default)\n",
         php_sapi::PHP_PREFIX
-    )
+    );
+    [b"Usage: ", prog, rest.as_bytes()].concat()
 }
 
 /// What `main`'s line set that php-fpm's engine is built under, the one
@@ -238,9 +239,9 @@ fn builder(startup: &Startup) -> php_sapi::EngineBuilder {
         .additional_extension(natives::extension())
 }
 
-/// `text` on stdout.
-fn print(text: &str) {
-    std::io::stdout().lock().write_all(text.as_bytes()).ok();
+/// `text` on stdout, as its bytes.
+fn print(text: impl AsRef<[u8]>) {
+    std::io::stdout().lock().write_all(text.as_ref()).ok();
 }
 
 /// php-fpm's `main`.
@@ -279,16 +280,16 @@ pub fn main() -> ExitCode {
         // so what C's `stdout` held is written after the usage.
         Ask::Usage(code) => {
             let engine = engine(&ini);
-            print(&usage(&argv0));
+            print(usage(&argv0));
             drop(engine);
             code
         }
         Ask::Modules => {
-            print(&php_sapi::modules(&engine(&ini)));
+            print(php_sapi::modules(&engine(&ini)));
             EXIT_OK
         }
         Ask::Version => {
-            print(&php_sapi::version(worker::NAME, &engine(&ini)));
+            print(php_sapi::version(worker::NAME, &engine(&ini)));
             EXIT_OK
         }
         Ask::Info => {
