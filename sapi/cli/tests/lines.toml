@@ -551,12 +551,15 @@ http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
 # check: a program outside the base directories warns, named for no
 # function, and `ZMSG_FAILED_REQUIRE_FOPEN`'s `zend_throw_error`, with no
 # frame standing, is a fatal error (`Z/main/main.c:1784-1787`,
-# `Z/Zend/zend.c:1842-1850`); the router is opened the same way (#4351). A
-# program within them runs.
+# `Z/Zend/zend.c:1842-1850`); the router is opened the same way (#4351). The
+# warning names the path the check resolved, and the fatal the file as the
+# server was handed it, relative or through a link. A program within them
+# runs.
 [[line]]
 name = "the-built-in-server-refuses-a-program-outside-open-basedir"
 args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
 files = { "base/in.php" = "<?php echo \"in\\n\";", "out.php" = "<?php echo \"ran\\n\";" }
+links = { "base/link-out.php" = "{dir}/out.php" }
 mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
 [line.serve]
 listen = "127.0.0.1:{port}"
@@ -564,12 +567,37 @@ stop = "SIGINT"
 [[line.serve.request]]
 http = "GET /out.php HTTP/1.0\r\nHost: x\r\n\r\n"
 [[line.serve.request]]
+http = "GET /base/link-out.php HTTP/1.0\r\nHost: x\r\n\r\n"
+[[line.serve.request]]
 http = "GET /base/in.php HTTP/1.0\r\nHost: x\r\n\r\n"
 
 [[line]]
 name = "the-built-in-server-refuses-a-router-outside-open-basedir"
 args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "-S", "127.0.0.1:{port}", "-t", "{dir}", "{dir}/router.php"]
 files = { "base/in.php" = "<?php echo \"in\\n\";", "router.php" = "<?php echo \"routed\\n\"; return false;" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /base/in.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+[[line]]
+name = "the-built-in-server-refuses-a-relative-router-outside-open-basedir"
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "-S", "127.0.0.1:{port}", "-t", "{dir}", "router.php"]
+files = { "base/in.php" = "<?php echo \"in\\n\";", "router.php" = "<?php echo \"routed\\n\"; return false;" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /base/in.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+[[line]]
+name = "the-built-in-server-refuses-a-router-through-a-link-outside-open-basedir"
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "-S", "127.0.0.1:{port}", "-t", "{dir}", "{dir}/base/rlink.php"]
+files = { "base/in.php" = "<?php echo \"in\\n\";", "router.php" = "<?php echo \"routed\\n\"; return false;" }
+links = { "base/rlink.php" = "{dir}/router.php" }
 mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
 [line.serve]
 listen = "127.0.0.1:{port}"

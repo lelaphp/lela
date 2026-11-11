@@ -6191,7 +6191,7 @@ impl Engine {
         written: &[u8],
         handle: HandlePath,
     ) -> Option<Result<PublishedUnit, CompileRefused>> {
-        if handle == HandlePath::Kept && !Engine::unopened_passes(req, path) {
+        if handle == HandlePath::Kept && !Engine::unopened_passes(req, path, written) {
             return None;
         }
         req.compile_file(path, Some(written), handle)
@@ -6210,8 +6210,10 @@ impl Engine {
     /// `ZMSG_FAILED_REQUIRE_FOPEN`'s `zend_throw_error` finds no frame, so
     /// it is `zend_error_noreturn(E_ERROR)`
     /// (`Z/main/main.c:1784-1787`, `Z/Zend/zend.c:1842-1850`), which ends
-    /// the request.
-    fn unopened_passes(req: &mut Request, path: &[u8]) -> bool {
+    /// the request. The warning names the path the guard resolved, and
+    /// the fatal the `zend_file_handle`'s filename, `written` as the host
+    /// gave it, relative or through a link.
+    fn unopened_passes(req: &mut Request, path: &[u8], written: &[u8]) -> bool {
         /// `EPERM` and `EINVAL`, the `errno` the guard leaves.
         const EPERM: i32 = 1;
         const EINVAL: i32 = 22;
@@ -6231,7 +6233,7 @@ impl Engine {
         );
         let message = format!(
             "Failed opening required '{}' (include_path='{}')",
-            String::from_utf8_lossy(crate::c_number::c_str(path)),
+            String::from_utf8_lossy(crate::c_number::c_str(written)),
             String::from_utf8_lossy(req.include_path()),
         );
         req.end_in_compile_time(Level::Error, &message, b"Unknown", 0);
