@@ -637,7 +637,8 @@ pub fn judge(
     let base = Base::of(root, base)?;
     let changed = git::changed_since(root, &base.commit)?;
     let paths: Vec<&str> = changed.iter().map(|c| c.path.as_str()).collect();
-    let crates: Vec<&Crate> = manifest.touched_by(root, &paths);
+    let moved = key::parts_moved(root, (&base.commit, key::Now::Disk), &paths)?;
+    let crates: Vec<&Crate> = manifest.touched_by(root, &paths, &moved);
     let built_under = key::moved(root, &base.commit, &paths)?;
     let ticket = track::head_ticket(root)?;
     let mut unmet = Vec::new();
@@ -657,7 +658,8 @@ pub fn judge(
         match condition {
             Condition::Fresh => {
                 for krate in &crates {
-                    let now = KeyNow::of(snapshot, krate, &crates, (&built_under, &paths))?;
+                    let diff = (&built_under[..], &paths[..], &moved[..]);
+                    let now = KeyNow::of(snapshot, krate, &crates, diff)?;
                     fresh_readings(
                         &asking,
                         krate,
@@ -1071,12 +1073,13 @@ impl KeyNow {
     /// covers: the crates of its closure, `built_under`, the files rustc
     /// is built under whose deciding part moved ([`key::moved`]), and the
     /// paths of the diff its tests or its `build.rs` read
-    /// ([`key::READ_BY_TESTS`], [`key::READ_BY_BUILDS`]).
+    /// ([`key::READ_BY_TESTS`], [`key::READ_BY_BUILDS`]), a part a
+    /// `build.rs` reads named only where it is among `moved`.
     fn of(
         snapshot: &Snapshot,
         krate: &Crate,
         touched: &[&Crate],
-        (built_under, diff): (&[&str], &[&str]),
+        (built_under, diff, moved): (&[&str], &[&str], &[key::FilePart]),
     ) -> Result<KeyNow> {
         let closure = key::Graph::of(snapshot.root())?.paths(&krate.path());
         let mut names = vec![krate.name.as_str()];
@@ -1090,7 +1093,7 @@ impl KeyNow {
         let root = snapshot.root();
         names.extend(
             diff.iter()
-                .filter(|p| key::read_by_tests(root, &krate.path(), p)),
+                .filter(|p| key::read_by_tests(root, &krate.path(), p, moved)),
         );
         let changed = match names.split_last() {
             Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),

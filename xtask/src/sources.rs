@@ -97,8 +97,9 @@ pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
 pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<String>> {
     let staged = git::staged(root)?;
     let paths: Vec<&str> = staged.iter().map(|c| c.path.as_str()).collect();
+    let moved = key::parts_moved(root, ("HEAD", key::Now::Index), &paths)?;
     Ok(manifest
-        .touched_by(root, &paths)
+        .touched_by(root, &paths, &moved)
         .into_iter()
         .map(|c| c.name.clone())
         .collect())

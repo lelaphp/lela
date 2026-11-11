@@ -50,7 +50,11 @@
 //! whose members and dependencies reach a key through the crates' own.
 //! Last, it covers the files beyond its directory its tests read
 //! ([`READ_BY_TESTS`], one list, #3646), and those the `build.rs` of each
-//! crate of its closure reads ([`READ_BY_BUILDS`], #3654).
+//! crate of its closure reads ([`READ_BY_BUILDS`], #3654): whole, or, of
+//! a file a `build.rs` reads one table of, that table alone, as of the
+//! files rustc is built under ([`Part`]): `ext/intl`'s reads the pin's
+//! `[closure]`, so an edit of the pin's `[regime.*]` tables moves no key
+//! built on it (#4429).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -107,12 +111,12 @@ pub struct Snapshot {
     /// one per set of sources a phpt run was kept over, for every touched
     /// crate ([`Snapshot::tracked_over`]).
     tracked_keys: Mutex<BTreeMap<Vec<PathBuf>, String>>,
-    /// Where the text of a file of [`BUILT_UNDER`] is read from.
+    /// Where the text of a file read for its part is read from.
     source: Source,
-    /// The listing entries of what decides in each file of
-    /// [`BUILT_UNDER`] read for its part, read once
-    /// ([`Snapshot::built_under`]).
-    built_under: OnceLock<Vec<(String, String)>>,
+    /// The listing entry of each file read for its part, of
+    /// [`BUILT_UNDER`] or [`READ_BY_BUILDS`], read once
+    /// ([`Snapshot::part_entry`]).
+    parts: Mutex<BTreeMap<FilePart, Option<(String, String)>>>,
 }
 
 /// Where a snapshot's files are: on disk, or in git's objects, as an
@@ -149,7 +153,7 @@ impl Snapshot {
             keys: Mutex::default(),
             tracked_keys: Mutex::default(),
             source,
-            built_under: OnceLock::new(),
+            parts: Mutex::default(),
         }
     }
 
@@ -297,38 +301,34 @@ impl Snapshot {
     /// hash over the files of the path and, when the path is a workspace
     /// crate's directory, of the directories of its dependency closure
     /// ([`Graph::paths`]), and of what decides in each file rustc is built
-    /// under ([`BUILT_UNDER`]). The graph is read only for a
-    /// directory with a manifest, the one kind of path it can widen. A
-    /// path outside what a [`Snapshot::disk_over`] was read under is
-    /// refused.
+    /// under ([`BUILT_UNDER`]) and in each part of a file its closure's
+    /// `build.rs` files read in part ([`READ_BY_BUILDS`]). The graph is
+    /// read only for a directory with a manifest, the one kind of path it
+    /// can widen. A path outside what a [`Snapshot::disk_over`] was read
+    /// under is refused.
     pub fn key(&self, path: &Path) -> Result<String> {
         memo(&self.keys, path.to_path_buf(), || {
             let paths = closure(&self.root, path)?;
             self.covering(&paths)?;
             let mut listing = under(&self.files, &paths);
             if crate_dir(&self.root, path) {
-                listing.extend(self.built_under()?.iter().cloned());
+                let built = BUILT_UNDER.into_iter().filter(|f| f.part != Part::Whole);
+                for file in built.chain(parts_read(&self.root, path)?) {
+                    listing.extend(self.part_entry(file)?);
+                }
                 listing.sort_unstable();
             }
             Ok(git::listing_id(&listing))
         })
     }
 
-    /// The listing entries a crate's key takes beside its closure's files
-    /// for each file of [`BUILT_UNDER`] read for its part: its path and
-    /// the blob id of what of it decides ([`BuiltUnder::part_of`]), none
-    /// where the file is absent or names nothing that does. Read from
-    /// disk for a snapshot of the working tree and from git's object
-    /// otherwise.
-    fn built_under(&self) -> Result<&[(String, String)]> {
-        if let Some(kept) = self.built_under.get() {
-            return Ok(kept);
-        }
-        let mut entries = Vec::new();
-        for file in BUILT_UNDER
-            .iter()
-            .filter(|f| !toolchain().any(|t| t == f.path))
-        {
+    /// The listing entry a crate's key takes beside its closure's files
+    /// for a file read for its part: its path and the blob id of what of
+    /// it decides ([`FilePart::part_of`]), none where the file is absent
+    /// or names nothing that does. Read from disk for a snapshot of the
+    /// working tree and from git's object otherwise, once.
+    fn part_entry(&self, file: FilePart) -> Result<Option<(String, String)>> {
+        memo(&self.parts, file, || {
             let text = match self.source {
                 Source::Disk => {
                     let at = self.root.join(file.path);
@@ -347,11 +347,9 @@ impl Snapshot {
                         .transpose()?
                 }
             };
-            if let Some(part) = text.as_deref().and_then(|t| file.part_of(t)) {
-                entries.push((file.path.to_owned(), git::blob_id(part.as_bytes())));
-            }
-        }
-        Ok(self.built_under.get_or_init(|| entries))
+            let part = text.as_deref().and_then(|t| file.part_of(t));
+            Ok(part.map(|part| (file.path.to_owned(), git::blob_id(part.as_bytes()))))
+        })
     }
 
     /// The stamp of the sources under `path`: its key, and the commit
@@ -411,22 +409,27 @@ impl Snapshot {
     }
 }
 
-/// What of a file of [`BUILT_UNDER`] decides how rustc compiles a crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What of a file outside a crate's directory decides how the crate is
+/// built: of a file of [`BUILT_UNDER`], how rustc compiles every crate;
+/// of one of [`READ_BY_BUILDS`], what a `build.rs` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Part {
-    /// The whole file: the toolchain.
+    /// The whole file: the toolchain, or a file a `build.rs` reads whole.
     Whole,
     /// Of the cargo configuration, `[build] rustflags`, each `[target.<t>]
     /// rustflags`, `[profile]` and each `[env]` variable of [`REKEYED`].
     Config,
     /// Of the workspace's manifest, `[profile]`.
     Manifest,
+    /// Of a TOML file, the one top-level table of this name: the pin's
+    /// `[closure]`, which `ext/intl`'s `build.rs` reads (#4429).
+    Table(&'static str),
 }
 
-/// One file outside every crate that decides how rustc compiles each one,
-/// and what of it does.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct BuiltUnder {
+/// One file outside a crate's directory, and the part of it that decides
+/// how the crate is built ([`Part`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct FilePart {
     pub(crate) path: &'static str,
     pub(crate) part: Part,
 }
@@ -435,11 +438,11 @@ pub(crate) struct BuiltUnder {
 /// each under every crate's key for its [`Part`] (design §10 Profiles,
 /// #3372): the toolchain, in either spelling rustup reads, the cargo
 /// configuration and the workspace's manifest.
-pub(crate) const BUILT_UNDER: [BuiltUnder; 4] = [
-    BuiltUnder::of("rust-toolchain.toml", Part::Whole),
-    BuiltUnder::of("rust-toolchain", Part::Whole),
-    BuiltUnder::of(".cargo/config.toml", Part::Config),
-    BuiltUnder::of("Cargo.toml", Part::Manifest),
+pub(crate) const BUILT_UNDER: [FilePart; 4] = [
+    FilePart::of("rust-toolchain.toml", Part::Whole),
+    FilePart::of("rust-toolchain", Part::Whole),
+    FilePart::of(".cargo/config.toml", Part::Config),
+    FilePart::of("Cargo.toml", Part::Manifest),
 ];
 
 /// The cargo configuration's `[env]` variables that decide how every
@@ -495,34 +498,77 @@ pub(crate) const READ_BY_TESTS: [(&str, &[&str]); 2] = [
 /// dispatch from `ops.toml`, `php_ssa`'s php's table of natives from
 /// `data/func-infos.toml`; `php_engine`'s also digests four crates'
 /// sources, which its closure holds. `ext/intl`'s reads the ICU major
-/// from the pin's `[closure]`, and its tests hold that reading to the pin
-/// (#4406).
-pub(crate) const READ_BY_BUILDS: [(&str, &[&str]); 4] = [
-    ("crates/php_unit", &["ops.toml"]),
-    ("crates/php_engine", &["ops.toml"]),
-    ("crates/php_ssa", &["data/func-infos.toml"]),
-    ("ext/intl", &["oracle.toml"]),
+/// from the pin's `[closure]` on macOS (#4406, #4428), and nothing else of
+/// the pin, so an edit of another table of it leaves every key built on
+/// `ext/intl` where it was (#4429); its tests hold that reading to the
+/// pin's `[closure]` alone.
+pub(crate) const READ_BY_BUILDS: [(&str, &[FilePart]); 4] = [
+    ("crates/php_unit", &[FilePart::of("ops.toml", Part::Whole)]),
+    (
+        "crates/php_engine",
+        &[FilePart::of("ops.toml", Part::Whole)],
+    ),
+    (
+        "crates/php_ssa",
+        &[FilePart::of("data/func-infos.toml", Part::Whole)],
+    ),
+    (
+        "ext/intl",
+        &[FilePart::of("oracle.toml", Part::Table("closure"))],
+    ),
 ];
 
-/// The files `list`, [`READ_BY_TESTS`] or [`READ_BY_BUILDS`], names for
+/// The entries `list`, [`READ_BY_TESTS`] or [`READ_BY_BUILDS`], names for
 /// the crate at `dir`.
-fn read_by(list: &'static [(&str, &[&str])], dir: &Path) -> impl Iterator<Item = &'static str> {
+fn read_by<T: Copy>(list: &'static [(&str, &[T])], dir: &Path) -> impl Iterator<Item = T> {
     let dir = normalize(dir);
     let of = list.iter().filter(move |(of, _)| Path::new(of) == dir);
     of.flat_map(|(_, files)| files.iter().copied())
 }
 
-/// Whether the tests or the `build.rs` of the crate at `root`'s `dir`
-/// read `path` beyond its directory ([`READ_BY_TESTS`],
-/// [`READ_BY_BUILDS`]), so a change to it touches the crate.
-pub(crate) fn read_by_tests(root: &Path, dir: &Path, path: &str) -> bool {
-    let mut read = read_by(&READ_BY_TESTS, dir).chain(read_by(&READ_BY_BUILDS, dir));
-    crate_dir(root, dir) && read.any(|f| Path::new(path).starts_with(f))
+/// Whether a change to `path` touches the crate at `root`'s `dir`: its
+/// tests read `path` beyond its directory ([`READ_BY_TESTS`]), or its
+/// `build.rs` reads it ([`READ_BY_BUILDS`]) whole, or in a part among
+/// `moved`, the parts the change moved ([`parts_moved`]).
+pub(crate) fn read_by_tests(root: &Path, dir: &Path, path: &str, moved: &[FilePart]) -> bool {
+    let tests = read_by(&READ_BY_TESTS, dir).any(|f| Path::new(path).starts_with(f));
+    let builds = read_by(&READ_BY_BUILDS, dir).any(|f| match f.part {
+        Part::Whole => Path::new(path).starts_with(f.path),
+        Part::Config | Part::Manifest | Part::Table(_) => moved.contains(&f),
+    });
+    crate_dir(root, dir) && (tests || builds)
+}
+
+/// Of the parts of files the `build.rs` of a crate reads in part
+/// ([`READ_BY_BUILDS`]), each among `paths` whose part differs between
+/// the commit `base` and `now`: what of a change touches a crate that
+/// reads only a part of the file it changed ([`read_by_tests`]).
+pub(crate) fn parts_moved(
+    root: &Path,
+    (base, now): (&str, Now),
+    paths: &[&str],
+) -> Result<Vec<FilePart>> {
+    let mut moved = BTreeSet::new();
+    let read = READ_BY_BUILDS.iter().flat_map(|(_, files)| files.iter());
+    for file in read.filter(|f| !matches!(f.part, Part::Whole) && paths.contains(&f.path)) {
+        if file.moved(root, base, now)? {
+            moved.insert(*file);
+        }
+    }
+    Ok(moved.into_iter().collect())
+}
+
+/// Where a change's text stands now: the working tree, `done`'s, or the
+/// index, pre-commit's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Now {
+    Disk,
+    Index,
 }
 
 /// The file of [`BUILT_UNDER`] at `path`, relative to the root, if it is
 /// one.
-pub(crate) fn built_under(path: &str) -> Option<BuiltUnder> {
+pub(crate) fn built_under(path: &str) -> Option<FilePart> {
     BUILT_UNDER.into_iter().find(|f| f.path == path)
 }
 
@@ -543,27 +589,35 @@ pub(crate) fn moved<'p>(root: &Path, base: &str, paths: &[&'p str]) -> Result<Ve
         let Some(file) = built_under(path) else {
             continue;
         };
-        let part = |text: Option<String>| text.as_deref().and_then(|t| file.part_of(t));
-        let now = fs::read_to_string(root.join(path)).ok();
-        if part(git::show(root, base, path)?) != part(now) {
+        if file.moved(root, base, Now::Disk)? {
             moved.push(*path);
         }
     }
     Ok(moved)
 }
 
-impl BuiltUnder {
-    const fn of(path: &'static str, part: Part) -> BuiltUnder {
-        BuiltUnder { path, part }
+impl FilePart {
+    const fn of(path: &'static str, part: Part) -> FilePart {
+        FilePart { path, part }
+    }
+
+    /// Whether what of the file decides differs between the commit `base`
+    /// and `now` ([`FilePart::part_of`]).
+    fn moved(self, root: &Path, base: &str, now: Now) -> Result<bool> {
+        let part = |text: Option<String>| text.as_deref().and_then(|t| self.part_of(t));
+        let now = match now {
+            Now::Disk => fs::read_to_string(root.join(self.path)).ok(),
+            Now::Index => git::staged_content(root, self.path)?,
+        };
+        Ok(part(git::show(root, base, self.path)?) != part(now))
     }
 
     /// What of `text`, the file's, decides, in one canonical rendering;
     /// none where it names nothing that does. A text that does not parse
     /// is taken whole, since what it says cannot be told apart.
     pub(crate) fn part_of(self, text: &str) -> Option<String> {
-        match self.part {
-            Part::Whole => return Some(text.to_owned()),
-            Part::Config | Part::Manifest => {}
+        if let Part::Whole = self.part {
+            return Some(text.to_owned());
         }
         let Ok(table) = text.parse::<toml::Table>() else {
             return Some(text.trim_end().to_owned());
@@ -574,7 +628,11 @@ impl BuiltUnder {
                 kept.insert(key, value.clone());
             }
         };
-        keep("profile".to_owned(), table.get("profile"));
+        match self.part {
+            Part::Table(name) => keep(name.to_owned(), table.get(name)),
+            Part::Config | Part::Manifest => keep("profile".to_owned(), table.get("profile")),
+            Part::Whole => {}
+        }
         match self.part {
             Part::Config => {
                 keep(
@@ -590,7 +648,7 @@ impl BuiltUnder {
                     keep(format!("env.{variable}"), env);
                 }
             }
-            Part::Manifest | Part::Whole => {}
+            Part::Manifest | Part::Table(_) | Part::Whole => {}
         }
         (!kept.is_empty()).then(|| kept.to_string())
     }
@@ -611,6 +669,7 @@ fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
         let mut paths = Graph::of(root)?.paths(path);
         let built: Vec<&str> = (paths.iter())
             .flat_map(|dir| read_by(&READ_BY_BUILDS, dir))
+            .filter_map(|f| matches!(f.part, Part::Whole).then_some(f.path))
             .collect();
         let read = toolchain().chain(read_by(&READ_BY_TESTS, path));
         paths.extend(read.chain(built).map(PathBuf::from));
@@ -618,6 +677,20 @@ fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
     } else {
         Ok(vec![path.to_path_buf()])
     }
+}
+
+/// The parts of files the `build.rs` of each crate of the closure of
+/// `path` reads in part ([`READ_BY_BUILDS`]), each once: none for a path
+/// that is no crate's directory.
+fn parts_read(root: &Path, path: &Path) -> Result<BTreeSet<FilePart>> {
+    if !crate_dir(root, path) {
+        return Ok(BTreeSet::new());
+    }
+    let paths = Graph::of(root)?.paths(path);
+    Ok((paths.iter())
+        .flat_map(|dir| read_by(&READ_BY_BUILDS, dir))
+        .filter(|f| !matches!(f.part, Part::Whole))
+        .collect())
 }
 
 /// Whether `path` names the whole tree.
@@ -1037,6 +1110,112 @@ mod tests {
         committing(&tree, &["add", "--", "."]);
         let index = Snapshot::index(&tree, &git::Index::read(&tree).unwrap()).unwrap();
         assert_eq!(index.key(ctype).unwrap(), now);
+    }
+
+    /// The closure fixture with `ext/intl`, whose `build.rs` reads the
+    /// pin's `[closure]`, and `crates/php_bundle` built from it, and a pin
+    /// of three tables, `[closure]` among them, committed.
+    fn pinned(name: &str) -> crate::scratch::Tree {
+        let tree = super::fixture(name);
+        let write = |file: &str, text: &str| {
+            let path = tree.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, text).unwrap();
+        };
+        let manifest = fs::read_to_string(tree.join("Cargo.toml")).unwrap();
+        let members = r#""ext/ctype"]"#;
+        write(
+            "Cargo.toml",
+            &manifest.replace(members, r#""ext/ctype", "ext/intl", "crates/php_bundle"]"#),
+        );
+        let package = |name: &str, on: &str| {
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\n{on}\n"
+            )
+        };
+        let on_ext = r#"php_ext = { path = "../../crates/php_ext" }"#;
+        write("ext/intl/Cargo.toml", &package("php_ext_intl", on_ext));
+        write("ext/intl/src/lib.rs", "pub fn intl() {}\n");
+        let on_intl = r#"php_ext_intl = { path = "../../ext/intl" }"#;
+        write(
+            "crates/php_bundle/Cargo.toml",
+            &package("php_bundle", on_intl),
+        );
+        write("crates/php_bundle/src/lib.rs", "pub fn bundle() {}\n");
+        write(
+            "oracle.toml",
+            &pin("8.4.1", "78.3", "opcache.jit = \"tracing\""),
+        );
+        committing(&tree, &["add", "--", "."]);
+        committing(&tree, &["commit", "-q", "-m", "intl and the pin"]);
+        tree
+    }
+
+    /// A pin of three tables: `[oracle]`, `[closure]` naming one ICU keg,
+    /// and a `[regime.jit]` of one line.
+    fn pin(version: &str, icu: &str, regime: &str) -> String {
+        let major = icu.split('.').next().unwrap();
+        format!(
+            "[oracle]\nversion = \"{version}\"\n\n[closure]\n\"icu4c@{major}\" = \"{icu}\"\nzstd = \"1.5.7_1\"\n\n[regime.jit]\n{regime}\n"
+        )
+    }
+
+    /// `ext/intl`'s `build.rs` reads the pin's `[closure]` and nothing
+    /// else of it (#4429): an edit of `[oracle]` or `[regime.*]` leaves the
+    /// key of `ext/intl` and of `php_bundle`, built from it, where it was,
+    /// and an edit of the closure moves both and not `ext/ctype`'s; the
+    /// index's key agrees with the working tree's.
+    #[test]
+    fn an_edit_of_the_pin_outside_its_closure_moves_no_key_built_on_ext_intl() {
+        let tree = pinned("pin-closure");
+        let scopes = ["ext/intl", "crates/php_bundle", "ext/ctype"].map(Path::new);
+        let keys = |tree: &Path| {
+            let now = Snapshot::disk(tree).unwrap();
+            scopes.map(|scope| now.key(scope).unwrap())
+        };
+        let before = keys(&tree);
+        let regime = "opcache.jit = \"function\"\n[regime.cgi]\nmemory_limit = \"-1\"";
+        fs::write(tree.join("oracle.toml"), pin("8.4.2", "78.3", regime)).unwrap();
+        assert_eq!(keys(&tree), before);
+        fs::write(tree.join("oracle.toml"), pin("8.4.2", "79.1", regime)).unwrap();
+        let [intl, bundle, ctype] = keys(&tree);
+        assert_ne!(intl, before[0]);
+        assert_ne!(bundle, before[1]);
+        assert_eq!(ctype, before[2]);
+        committing(&tree, &["add", "--", "oracle.toml"]);
+        let index = Snapshot::index(&tree, &git::Index::read(&tree).unwrap()).unwrap();
+        assert_eq!(index.key(scopes[0]).unwrap(), intl);
+    }
+
+    /// A change to the pin touches `ext/intl` only where it moves the
+    /// pin's `[closure]`, in the working tree against a commit, as `done`
+    /// asks, and in the index against `HEAD`, as pre-commit asks; the
+    /// harness, whose tests read the whole pin, is touched by either.
+    #[test]
+    fn a_change_to_the_pin_touches_ext_intl_only_where_it_moves_the_closure() {
+        use super::{Now, parts_moved, read_by_tests};
+        let tree = pinned("pin-touches");
+        let intl = Path::new("ext/intl");
+        let touched = |now: Now, base: &str| {
+            let moved = parts_moved(&tree, (base, now), &["oracle.toml"]).unwrap();
+            read_by_tests(&tree, intl, "oracle.toml", &moved)
+        };
+        fs::write(tree.join("oracle.toml"), pin("8.4.2", "78.3", "")).unwrap();
+        assert!(!touched(Now::Disk, "HEAD"));
+        committing(&tree, &["add", "--", "oracle.toml"]);
+        assert!(!touched(Now::Index, "HEAD"));
+        fs::write(tree.join("oracle.toml"), pin("8.4.2", "79.1", "")).unwrap();
+        assert!(touched(Now::Disk, "HEAD"));
+        assert!(!touched(Now::Index, "HEAD"));
+        committing(&tree, &["add", "--", "oracle.toml"]);
+        assert!(touched(Now::Index, "HEAD"));
+        fs::create_dir_all(tree.join("xtask")).unwrap();
+        fs::write(
+            tree.join("xtask/Cargo.toml"),
+            "[package]\nname = \"xtask\"\n",
+        )
+        .unwrap();
+        assert!(read_by_tests(&tree, Path::new("xtask"), "oracle.toml", &[]));
     }
 
     /// A key over one file reads no crate graph: no `cargo metadata` for
