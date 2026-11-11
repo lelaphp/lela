@@ -12,20 +12,27 @@
 //! field to the bound, or by an impl written by hand where `unsafe` may
 //! stand (the homes `unsafe.homes` names), for a leaf the derive cannot
 //! read through: here, the primitives, the standard containers over
-//! engine state, a function pointer, [`Bytes`] and [`FrozenZval`]; in an
+//! engine state, a function pointer, [`Bytes`], [`FrozenZval`] and
+//! [`Exclusive`], which holds no field to the bound (#4474); in an
 //! extension's `src/ffi/`, a C library's immutable object, beside its
 //! `unsafe impl Sync`, which is the homes' prose and no check: there a
 //! hand-written impl stands for any type. The seal is the `engine-state`
-//! rule's sensor in `xtask api-check`, which reads the syntax of every
-//! source a crate under `crates/`, `ext/` and `sapi/` compiles outside the
-//! homes, and refuses a hand-written impl there, whatever the trait's path
-//! or a `use .. as` renames it to, and each place it cannot read: a
-//! macro's impl whose trait is a metavariable, the trait handed to a macro
-//! defined elsewhere, an `include!` or `#[path]` it cannot follow, and a
-//! `build.rs` naming the trait beside an `OUT_DIR` include. A
-//! `build.rs` that writes the impl without naming the trait, and a rename
-//! another crate exports, stand outside what it reads (#4463). [`Zval`]
-//! and every pointer into a request's heap have no impl.
+//! rule's sensor in `xtask api-check`. It reads the syntax of the sources
+//! a crate under `crates/`, `ext/` and `sapi/` compiles, and of what they
+//! reach by `mod`, `#[path]` and `include!`, a home covering the crate's
+//! own files only. It refuses a hand-written impl outside the homes whose
+//! trait path ends in the trait's name or one a `use .. as` gives it, in
+//! source or in a macro's tokens, and each place it cannot read: a macro's
+//! impl whose trait is a metavariable or a path a repetition builds, in a
+//! crate that names the trait; the trait handed to a macro defined
+//! elsewhere; an `include!` or `#[path]` it cannot follow; and a string
+//! naming the trait in the build's closure beside an `OUT_DIR` include.
+//! The derive's own expansion is exempt for every macro token in it. A
+//! `build.rs` that writes the impl without naming the trait, an impl a
+//! proc macro parses from a string, a local macro that forwards the trait
+//! to a macro outside the workspace, and a rename another crate exports
+//! stand outside what it reads (#4463). [`Zval`] and every pointer into a
+//! request's heap have no impl.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::{CString, OsString};
