@@ -12,7 +12,7 @@ use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
-use crate::api::abi::{AfterLog, Callable, IniStage};
+use crate::api::abi::{AfterLog, Callable, EngineState, IniStage};
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{
@@ -67,7 +67,7 @@ pub(crate) enum Message<'a> {
 /// in UTC.
 ///
 /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, EngineState)]
 pub struct FormatDate(pub FormatDateFn);
 
 /// [`FormatDate`]'s function: the request, the format, the timestamp
@@ -81,7 +81,7 @@ type FormatDateFn = fn(&mut Request, &[u8], i64, bool) -> Result<Vec<u8>, Thrown
 /// An engine without it sends that entry to the host's log.
 ///
 /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, EngineState)]
 pub struct Syslog(pub fn(&mut Request, i32, &[u8]));
 
 impl Message<'_> {

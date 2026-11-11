@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use php_heap::{Fatal, Heap, Obj};
+use php_heap::{Exclusive, Fatal, Heap, Obj};
 use php_unit::decl::{
     ClassConstDecl, ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl, Name, PropertyDecl,
     Visibility,
@@ -62,6 +62,14 @@ pub use marshal::{
 /// which the compiler's scanner calls and an extension implements for
 /// [`ExtensionBuilder::encodings`].
 pub use php_compile::multibyte::{Encoding, Encodings, Unicode};
+/// What engine state, process state and a registered value may hold:
+/// no pointer into a request's heap, at any depth (ADR-0005, #4348), and
+/// its derive, which holds each field to it. The four entries that keep
+/// a value engine-wide, [`ExtensionBuilder::engine_state`],
+/// [`ExtensionBuilder::process_state`], [`ExtensionBuilder::register`]
+/// and [`ExtensionBuilder::constants_with`], are bounded by it.
+pub use php_heap::EngineState;
+pub use php_macros::EngineState;
 
 /// What an extension hands the engine with [`ExtensionBuilder::encodings`]:
 /// php's `zend_multibyte_functions` ([`Encodings`]), which the scanner
@@ -229,6 +237,7 @@ pub enum DependencyKind {
 /// extension holds as a field of its engine state (ADR-0005): the pcre
 /// pattern cache and the unit cache are its two users. The `Mutex`, the
 /// bound and the eviction are here and nowhere an extension can see.
+#[derive(EngineState)]
 pub struct Cache<K, V> {
     capacity: usize,
     entries: Mutex<HashMap<K, Arc<V>>>,
@@ -354,6 +363,10 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
 /// holds no request memory, only what the connection is: the socket, the
 /// `transport`'s and the crypto layer's state, a database connection.
 /// The `Mutex` and the bound are here and nowhere an extension can see.
+/// An idle entry is kept [`Exclusive`](php_heap::Exclusive), engine
+/// state for any `V` that moves between threads, since one request
+/// holds it at a time and none shares it.
+#[derive(EngineState)]
 pub struct Pool<K, V> {
     capacity: usize,
     idle: Mutex<Idle<K, V>>,
@@ -361,8 +374,9 @@ pub struct Pool<K, V> {
 
 /// What a [`Pool`]'s `Mutex` guards: the idle entries by key, each with
 /// the number of its give-back, and whether the pool was drained.
+#[derive(EngineState)]
 struct Idle<K, V> {
-    entries: HashMap<K, Vec<(u64, V)>>,
+    entries: HashMap<K, Vec<(u64, Exclusive<V>)>>,
     given: u64,
     drained: bool,
 }
@@ -400,7 +414,7 @@ impl<K: Hash + Eq, V> Pool<K, V> {
         if entries.is_empty() {
             idle.entries.remove(key);
         }
-        entry.map(|(_, entry)| entry)
+        entry.map(|(_, entry)| entry.into_inner())
     }
 
     /// The entries idle under every key, which php counts as a process's
@@ -425,7 +439,10 @@ impl<K: Hash + Eq, V> Pool<K, V> {
         }
         idle.given += 1;
         let given = idle.given;
-        idle.entries.entry(key).or_default().push((given, entry));
+        idle.entries
+            .entry(key)
+            .or_default()
+            .push((given, Exclusive::new(entry)));
         None
     }
 
@@ -452,7 +469,7 @@ impl<K: Hash + Eq, V> Pool<K, V> {
             .flat_map(|(key, entries)| {
                 entries
                     .into_iter()
-                    .map(move |(given, entry)| (given, key.clone(), entry))
+                    .map(move |(given, entry)| (given, key.clone(), entry.into_inner()))
             })
             .collect();
         drained.sort_unstable_by_key(|&(given, _, _)| std::cmp::Reverse(given));
@@ -1563,7 +1580,7 @@ impl ExtensionBuilder {
     /// as [`Request::engine`] does, so the type is the extension's own.
     /// Declared twice, the later stands.
     #[must_use]
-    pub fn process_state<P: Send + Sync + 'static>(
+    pub fn process_state<P: EngineState>(
         mut self,
         build: fn() -> Result<P, Refusal>,
     ) -> ExtensionBuilder {
@@ -1581,7 +1598,7 @@ impl ExtensionBuilder {
     /// [`Refusal`] is php's `MINIT` failing: no later extension starts and
     /// the engine serves nothing. Declared twice, the later stands.
     #[must_use]
-    pub fn engine_state<E: Send + Sync + 'static>(
+    pub fn engine_state<E: EngineState>(
         mut self,
         build: fn(&Start) -> Result<E, Refusal>,
     ) -> ExtensionBuilder {
@@ -2153,7 +2170,7 @@ impl ExtensionBuilder {
     /// engine is built, and answered by [`Request::registered_by`] in bundle
     /// order, which is `MINIT` order (ADR-0005).
     #[must_use]
-    pub fn register<T: Send + Sync + 'static>(mut self, value: T) -> ExtensionBuilder {
+    pub fn register<T: EngineState>(mut self, value: T) -> ExtensionBuilder {
         self.entry
             .supplies
             .registered
@@ -2171,7 +2188,7 @@ impl ExtensionBuilder {
     /// and raise its `IMAGETYPE_COUNT`, is this rewrite done once, when
     /// the engine is built.
     #[must_use]
-    pub fn constants_with<T: Send + Sync + 'static>(
+    pub fn constants_with<T: EngineState>(
         mut self,
         link: fn(&mut [ConstDecl], &[&T]) -> Vec<ConstDecl>,
     ) -> ExtensionBuilder {

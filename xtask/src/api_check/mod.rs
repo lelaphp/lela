@@ -53,6 +53,7 @@
 
 mod binding;
 mod bundle;
+mod engine_state;
 mod inventory;
 pub(crate) mod lock;
 mod mirrors;
@@ -801,6 +802,8 @@ fn crate_reading(
     problems.extend(held.problems);
     notes.extend(held.notes);
 
+    problems.extend(engine_state_held(manifest, crates, krate, &mut reading)?);
+
     if problems.is_empty() {
         reading.status = Status::Pass;
         notes.insert(
@@ -822,6 +825,47 @@ fn crate_reading(
         reading.message = problems.join("; ");
     }
     Ok(reading)
+}
+
+/// `EngineState` written by hand outside the homes, under the rule whose
+/// `check` names the seal ([`engine_state`]): the problem it makes of
+/// `krate`, and the rule's id added to `reading` where the rule covers any
+/// of its sources.
+fn engine_state_held(
+    manifest: &Manifest,
+    crates: &Crates,
+    krate: &Present,
+    reading: &mut Reading,
+) -> Result<Option<String>> {
+    let Some(rule) = manifest.rule_checked_by(engine_state::CHECK) else {
+        return Ok(None);
+    };
+    let Some(listed) = manifest.crates.iter().find(|c| c.name == krate.name) else {
+        return Ok(None);
+    };
+    let files: Vec<String> = (krate.sources()?.iter())
+        .map(|file| crates.relative(file).display().to_string())
+        .collect();
+    if !files.iter().any(|file| rule.covers(Path::new(file))) {
+        return Ok(None);
+    }
+    if reading.rule.is_empty() {
+        reading.rule.clone_from(&rule.id);
+    } else {
+        reading.rule = format!("{}, {}", reading.rule, rule.id);
+    }
+    let outside = engine_state::outside_the_homes(crates.root(), manifest, rule, listed, &files)?;
+    if outside.is_empty() {
+        return Ok(None);
+    }
+    let cited = rule.adr.adr_cited();
+    Ok(Some(format!(
+        "{}: EngineState implemented by hand outside the homes (seams.toml rule {}: {}{}{cited})",
+        list(&outside, 8),
+        rule.id,
+        rule.text,
+        if cited.is_empty() { "" } else { " " },
+    )))
 }
 
 /// The `use` paths of `krate` that cross a `deny = true` module edge such

@@ -26,14 +26,16 @@
 
 use std::any::Any;
 
+use php_ext::abi::EngineState;
 use php_ext::coerce::{to_long, value_name, with_string};
 use php_ext::raising::{Thrown, type_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 /// `pdo_driver_t`: a connector's name, the class `PDO::connect()` makes
-/// for it, and its factory.
-pub trait Connector: Send + Sync {
+/// for it, and its factory. Registered engine-wide, so engine state
+/// (ADR-0005).
+pub trait Connector: EngineState {
     /// `driver_name`, the DSN prefix that selects the connector and what
     /// `PDO::getAvailableDrivers()` lists.
     fn name(&self) -> &'static str;

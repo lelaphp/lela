@@ -23,7 +23,7 @@
 
 pub mod ffi;
 
-use php_ext::abi::{Extension, ExtensionBuilder, Refusal};
+use php_ext::abi::{EngineState, Extension, ExtensionBuilder, Refusal};
 use php_ext::raising::Level;
 use php_ext::request::Request;
 
@@ -54,6 +54,7 @@ pub fn extension() -> Extension {
 /// The process start, `PHP_MINIT_FUNCTION(lexbor)`: lexbor's allocator
 /// pointed at the request's heap ([`ffi::allocate_on_the_heap`]), once per
 /// process.
+#[derive(EngineState)]
 struct Heap;
 
 impl Heap {

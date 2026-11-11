@@ -1124,3 +1124,88 @@ mod tracked {
         );
     }
 }
+
+/// The seal on `EngineState` (#4348 ruling 2, ADR-0005): the `engine-state`
+/// sensor over its fixture, under the rule the tracked manifest carries or,
+/// before it carries one, the row #4348 settled, laid on its copy.
+mod engine_state {
+    use super::*;
+
+    /// The tracked manifest with the rule whose `check` names the seal.
+    fn sealed() -> Manifest {
+        let mut manifest = Manifest::load(workspace()).unwrap();
+        if manifest.rule_checked_by("engine-state").is_none() {
+            let mut rule = Rule::named("state.engine", "crates/*");
+            rule.scope =
+                OneOrMany::Many(["crates/*", "ext/*", "sapi/*"].map(str::to_owned).to_vec());
+            rule.predicate.deny = None;
+            rule.predicate.check = Some("engine-state".to_owned());
+            manifest.rules.push(rule);
+        }
+        manifest
+    }
+
+    /// An extension's type made engine state by an impl written by hand
+    /// in its `src/lib.rs`, around the derive, fails the extension naming
+    /// the line; one in an extension's `src/ffi/`, a home `unsafe.homes`
+    /// names, passes; both readings carry the rule.
+    #[test]
+    fn engine_state_written_by_hand_outside_the_homes_fails_naming_its_line() {
+        let manifest = sealed();
+        let id = &manifest.rule_checked_by("engine-state").unwrap().id;
+        let readings = api_check::hold(&manifest, &fixture("engine-state"), false).unwrap();
+        let pcre = of(&readings, "ext/pcre");
+        assert_eq!(pcre.status, Status::Fail, "{}", pcre.message);
+        assert!(
+            pcre.message.starts_with(
+                "ext/pcre/src/lib.rs:15: EngineState implemented by hand outside the homes"
+            ),
+            "{}",
+            pcre.message
+        );
+        assert!(
+            pcre.message.contains(&format!("seams.toml rule {id}")),
+            "{}",
+            pcre.message
+        );
+        let json = of(&readings, "ext/json");
+        assert_eq!(json.status, Status::Pass, "{}", json.message);
+        for reading in [pcre, json] {
+            assert!(
+                reading.rule.split(", ").any(|r| r == id),
+                "{}",
+                reading.rule
+            );
+        }
+        assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+    }
+
+    /// Each compile-fail fixture beside the sensor's is compiled by
+    /// `php_bundle`'s `refusals` under a `compile_fail,E0277` fence, which
+    /// `xtask test` holds to the code (#2049).
+    #[test]
+    fn each_compile_fail_fixture_is_included_under_a_pinned_fence() {
+        let refusals =
+            fs::read_to_string(workspace().join("crates/php_bundle/src/refusals.rs")).unwrap();
+        let mut seen = 0;
+        for entry in fs::read_dir(fixture("engine-state")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            seen += 1;
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let named = format!("/xtask/fixtures/api-check/engine-state/{name}\"");
+            let at = refusals
+                .find(&named)
+                .unwrap_or_else(|| panic!("refusals.rs includes no {name}"));
+            let fence = refusals[..at].rfind("//! ```").unwrap();
+            assert!(
+                refusals[fence..].starts_with("//! ```compile_fail,E0277\n"),
+                "{name} is included under {}",
+                &refusals[fence..at]
+            );
+        }
+        assert_eq!(seen, 2, "handle.rs and entry.rs");
+    }
+}

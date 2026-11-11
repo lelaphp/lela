@@ -5,7 +5,7 @@
 
 use std::mem;
 
-use php_ext::abi::{Refusal, Start};
+use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::attr::php_class;
 use php_ext::raising::{self, Cause, Thrown, leave_pending};
 use php_ext::request::Request;
@@ -28,7 +28,7 @@ pub(crate) struct TypeError;
 pub(crate) struct Exception;
 
 /// The classes the natives raise, by their identity in this engine.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, EngineState)]
 pub(crate) struct Throwables {
     pub(crate) error: ClassId,
     pub(crate) value_error: ClassId,

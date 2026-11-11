@@ -211,6 +211,14 @@ unsafe impl<P: Pages> Send for Code<P> {}
 // SAFETY: the same, and `&Code` hands out only the address and two counts.
 unsafe impl<P: Pages> Sync for Code<P> {}
 
+// The tier's engine state (ADR-0005, ADR-0006): the code this arena holds,
+// the code generator and the policy read at engine start, and the worker
+// that compiles a job past the request that submitted it, which is why a
+// job carries nothing of that request (`jit-design.md` §4.8). Here, with
+// the arena's `Send` and `Sync`, since the derive cannot read through the
+// code generator's types.
+impl php_engine::api::abi::EngineState for crate::JitEngine {}
+
 /// The chunk being filled, and where its next body may start.
 struct Filling<P: Pages> {
     chunk: Arc<Chunk<P>>,

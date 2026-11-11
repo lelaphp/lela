@@ -37,8 +37,8 @@ mod preload_user;
 mod startup;
 
 use php_ext::abi::{
-    Admission, Extension, ExtensionBuilder, Instance, Lookup, OrFalse, Start, Validation,
-    ZendExtension,
+    Admission, EngineState, Extension, ExtensionBuilder, Instance, Lookup, OrFalse, Start,
+    Validation, ZendExtension,
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{atoi, to_callable};
@@ -89,6 +89,7 @@ struct State {
 }
 
 /// Engine-scoped: `accel_blacklist`, loaded once from the startup ini.
+#[derive(EngineState)]
 struct Accelerator {
     blacklist: Blacklist,
 }

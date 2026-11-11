@@ -288,7 +288,7 @@ mod tests {
 
     use php_heap::FrameRef;
 
-    use crate::api::abi::{Extension, ExtensionBuilder};
+    use crate::api::abi::{EngineState, Extension, ExtensionBuilder};
     use crate::api::request::{Raised, Request};
     use crate::engine::Engine;
     use crate::tests::stepped::{Stepper, Stepping};
@@ -391,6 +391,7 @@ mod tests {
 
     /// The code the tier evaluates at the program's first entry, which
     /// the test registers with the engine.
+    #[derive(EngineState)]
     struct Code(Vec<&'static [u8]>);
 
     struct Initializer;

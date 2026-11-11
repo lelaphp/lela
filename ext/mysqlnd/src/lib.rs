@@ -41,7 +41,9 @@ mod result;
 mod stats;
 mod wire;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, LongHandler};
+use php_ext::abi::{
+    Dependency, DependencyKind, EngineState, Extension, ExtensionBuilder, LongHandler,
+};
 use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
@@ -101,7 +103,7 @@ struct Slot {
 /// `mysqlnd_reverse_api_register_api` keeps it and `MINFO` lists it under
 /// "API Extensions". An extension hands one over with
 /// `ExtensionBuilder::register`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub struct ReverseApi {
     pub extension: &'static str,
 }

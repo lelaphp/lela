@@ -23,8 +23,9 @@ mod ffi;
 mod throwables;
 
 use php_ext::abi::{
-    Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, GcTable, ObjectHandlers,
-    OrFalse, Path, PropertyPlace, PropertyRead, Raw, Refusals, Std, This, True, Union,
+    Callable, Dependency, DependencyKind, EngineState, Extension, ExtensionBuilder, GcTable,
+    ObjectHandlers, OrFalse, Path, PropertyPlace, PropertyRead, Raw, Refusals, Std, This, True,
+    Union,
 };
 use php_ext::attr::{php_class, php_const};
 use php_ext::call::{autoload, clone, new_object};
@@ -106,6 +107,7 @@ pub fn extension() -> Extension {
 
 /// The process scope's proof that libxslt and libexslt are started
 /// (ADR-0010).
+#[derive(EngineState)]
 struct Initialized;
 
 /// `PHP_MINIT_FUNCTION(xsl)`'s library half (`Z/ext/xsl/php_xsl.c:282-292`),

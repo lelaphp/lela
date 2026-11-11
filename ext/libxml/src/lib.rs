@@ -31,8 +31,8 @@ mod mime_sniff;
 pub mod table;
 
 use php_ext::abi::{
-    Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, Instance, OrFalse, Raw,
-    True, Untyped,
+    Callable, Dependency, DependencyKind, EngineState, Extension, ExtensionBuilder, Instance,
+    OrFalse, Raw, True, Untyped,
 };
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::write_prop;
@@ -111,6 +111,7 @@ pub fn extension() -> Extension {
 
 /// The process scope's proof that libxml2 is started (ADR-0010): built
 /// once per process, never ended, as php never calls `xmlCleanupParser`.
+#[derive(EngineState)]
 struct Initialized;
 
 /// `php_libxml_initialize` (`Z/ext/libxml/libxml.c:934-958`), which
@@ -618,6 +619,7 @@ pub type ExportNode = fn(&mut Request, PhpObject) -> Option<ffi::Exported>;
 /// name, and its export. An extension hands it to
 /// `ExtensionBuilder::register` at startup, so the table is immutable
 /// once the engine is built (ADR-0005).
+#[derive(EngineState)]
 pub struct Export {
     class: &'static [u8],
     answer: ExportNode,

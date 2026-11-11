@@ -21,7 +21,7 @@ use crate::ffi::onig::{
 use crate::settings::settings;
 use crate::text::{must_not_be_empty, new_string, value_error};
 use crate::throwables::Throwables;
-use php_ext::abi::{Callable, OrFalse, Ref, Union, Untyped};
+use php_ext::abi::{Callable, EngineState, OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::Request;
@@ -270,6 +270,7 @@ pub(crate) fn initialize() -> Initialized {
 }
 
 /// The process scope's proof that oniguruma is started.
+#[derive(EngineState)]
 pub(crate) struct Initialized;
 
 /// `PHP_MINFO_FUNCTION(mb_regex)`.

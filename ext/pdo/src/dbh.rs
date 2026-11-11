@@ -6,8 +6,8 @@
 use std::ops::ControlFlow;
 
 use php_ext::abi::{
-    GcTable, Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Refusals, Static, Std, This,
-    Variadic,
+    EngineState, GcTable, Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Refusals, Static,
+    Std, This, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, autoload, known_method, lookup_class, new_object};
@@ -192,6 +192,7 @@ fn share(req: &mut Request, object: PhpObject, at: usize) {
 
 /// `EG(persistent_list)` as far as PDO reaches it (design §4.10): the
 /// engine's pool of persistent connections, keyed `PDO:DBH:DSN=…`.
+#[derive(EngineState)]
 pub(crate) struct Pooled {
     pub(crate) pool: Pool<Vec<u8>, Box<DbhState>>,
     /// The classes the natives raise, resolved at the same start.

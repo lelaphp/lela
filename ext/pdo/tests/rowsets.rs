@@ -8,7 +8,7 @@
 
 mod support;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::abi::{Dependency, DependencyKind, EngineState, Extension, ExtensionBuilder};
 use php_ext::request::Request;
 use php_ext::test::{Capture, Engine};
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
@@ -18,6 +18,7 @@ use php_ext_pdo::connector::{
 };
 
 /// The connector, `rowsets:`.
+#[derive(EngineState)]
 struct Stub;
 
 static STUB: Stub = Stub;

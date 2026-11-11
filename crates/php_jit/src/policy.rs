@@ -32,6 +32,7 @@ use php_unit::decl::IniDecl;
 
 use crate::record::{self, Start, Stop};
 use crate::table::{TraceId, code};
+use php_engine::api::abi::EngineState;
 
 /// How a unit's words are laid where php hands it counters out of a
 /// pool no request start filled ([`Policy::laid`]): cold, with the heat
@@ -71,7 +72,7 @@ const HOT_TRACE: u32 = 5;
 
 /// How the tier traces where it traces, decided once at engine start;
 /// when it traces is [`Runs`]'s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Mode {
     /// A safepoint answers `Continue` before it reads a word.
     Off,
@@ -89,7 +90,7 @@ pub(crate) enum Mode {
 /// where it asks for a line the compile writes ([`JitDebug::on_request`]),
 /// which php writes on the request in one order a worker could not keep
 /// (`compiler::Submitter::submit`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Compile {
     Thread,
     Inline,
@@ -97,7 +98,7 @@ pub(crate) enum Compile {
 
 /// `opcache.jit_debug` by php's bit names (`Z/ext/opcache/jit/zend_jit.h:58-77`),
 /// the ones the tier reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 pub(crate) struct JitDebug(u32);
 
 impl JitDebug {
@@ -328,7 +329,7 @@ pub(crate) fn is_c_space(c: char) -> bool {
 
 /// When a tier that is not `Off` traces, decided once at engine start
 /// ([`Policy::bound`], [`Policy::laid`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 enum Runs {
     /// From the start: `opcache.jit` turns php's tier on at startup, so
     /// `JIT_G(on)` holds at every request start, which fills php's pool of
@@ -390,7 +391,7 @@ impl std::fmt::Display for Note {
 /// (`Z/ext/opcache/ZendAccelerator.c:3210-3220`, `:3253-3254`). Only a
 /// tier set up is refused with php's warning; under any other, nothing
 /// reads `opcache.jit_debug` and nothing is raised.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum SetUp {
     /// opcache does not start for the host: `opcache.enable` is off, or
     /// the host is the command line or phpdbg (`accel_sapi_is_cli`) and
@@ -430,7 +431,7 @@ impl SetUp {
 /// raised once through the startup diagnostics, whatever
 /// `opcache.jit_debug` asks, since it is php's `zend_error` and not a
 /// `TRACE` line; the tier then runs `Off` ([`Policy::check_support`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Refused {
     /// An extension observes an opcode other than the two silence
     /// opcodes (design §7.1).
@@ -500,7 +501,7 @@ pub(crate) fn ini() -> Vec<IniDecl> {
 }
 
 /// The tier's configuration, read once from the startup ini.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, EngineState)]
 pub(crate) struct Policy {
     mode: Mode,
     compile: Compile,

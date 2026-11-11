@@ -2,6 +2,7 @@
 [face]
 api::abi::Admission
 api::abi::Beneath
+api::abi::EngineState
 api::abi::Lookup
 api::abi::Observed
 api::abi::ObserverHandlers

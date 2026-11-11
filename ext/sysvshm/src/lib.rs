@@ -29,7 +29,7 @@ mod ffi;
 mod throwables;
 
 use php_ext::abi::{
-    Extension, ExtensionBuilder, Instance, OrFalse, Refusal, Refusals, Start, True,
+    EngineState, Extension, ExtensionBuilder, Instance, OrFalse, Refusal, Refusals, Start, True,
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
@@ -54,6 +54,7 @@ const MAGIC: &[u8; 7] = b"PHP_SM\0";
 /// Engine-scoped (ADR-0005): `php_sysvshm.init_mem`, the size
 /// `shm_attach` makes a segment without `$size`, read once from the
 /// startup configuration as `cfg_get_long` reads `sysvshm.init_mem`.
+#[derive(EngineState)]
 struct Config {
     init_mem: i64,
     throwables: Throwables,

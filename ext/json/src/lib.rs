@@ -33,7 +33,7 @@
 mod decode;
 mod encode;
 
-use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Start};
+use php_ext::abi::{EngineState, Extension, ExtensionBuilder, OrFalse, Start};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error, fatal, new_throwable, pending, throw_value};
 use php_ext::request::Request;
@@ -210,7 +210,7 @@ fn error_message(code: i64) -> &'static str {
 /// `php_json_exception_ce`, resolved once as the engine starts
 /// (ADR-0005: engine state, immutable), so a raise names the class by
 /// its identity, never by a name looked up as it throws (#3403).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, EngineState)]
 struct Raised(ClassId);
 
 /// `zend_throw_exception(php_json_exception_ce, msg, error_code)`: the

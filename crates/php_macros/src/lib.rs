@@ -14,6 +14,8 @@
 //!   function's is, as php's `INIT_CLASS_ENTRY` and `register_class_*`
 //!   hold them. A Rust `enum` is a PHP enum.
 //! - `#[php_const]` on a `const` or an inline `mod` declares constants.
+//! - `#[derive(EngineState)]` on a `struct` or an `enum` makes it engine
+//!   state, each field held to the bound (ADR-0005, #4348).
 //!
 //! Beside them, `#[mirrors]` on an item of an extension's surface names
 //! the php-src declaration it stands for and expands to the item as
@@ -45,6 +47,7 @@ use syn::{Attribute, Ident};
 
 mod class;
 mod constant;
+mod engine_state;
 mod expr;
 mod function;
 mod keys;
@@ -68,6 +71,15 @@ pub fn php_class(attribute: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Engine state (ADR-0005): a `struct` or an `enum` whose every field is
+/// engine state, held to the bound at the field.
+#[proc_macro_derive(EngineState)]
+pub fn engine_state(item: TokenStream) -> TokenStream {
+    engine_state::expand(item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Constants: one `const`, or every item of an inline `mod` in order.
 #[proc_macro_attribute]
 pub fn php_const(attribute: TokenStream, item: TokenStream) -> TokenStream {
@@ -87,17 +99,18 @@ pub fn mirrors(attribute: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Where the expansion's paths start: `crate::api` while `php_engine`
-/// itself is compiled, whose natives are Core's, and the facade
-/// everywhere else (ADR-0007).
+/// itself is compiled, whose natives are Core's, `php_engine::api` in
+/// the tier and the stream layer, which reach the engine directly and
+/// derive engine state there, and the facade everywhere else (ADR-0007).
 fn root() -> Tokens {
     root_for(std::env::var("CARGO_CRATE_NAME").ok().as_deref())
 }
 
 fn root_for(crate_name: Option<&str>) -> Tokens {
-    if crate_name == Some("php_engine") {
-        quote!(crate::api)
-    } else {
-        quote!(::php_ext)
+    match crate_name {
+        Some("php_engine") => quote!(crate::api),
+        Some("php_jit" | "php_streams") => quote!(::php_engine::api),
+        _ => quote!(::php_ext),
     }
 }
 
@@ -145,6 +158,14 @@ mod tests {
     #[test]
     fn the_crate_being_compiled_picks_the_root() {
         assert_eq!(root_for(Some("php_engine")).to_string(), "crate :: api");
+        assert_eq!(
+            root_for(Some("php_jit")).to_string(),
+            ":: php_engine :: api"
+        );
+        assert_eq!(
+            root_for(Some("php_streams")).to_string(),
+            ":: php_engine :: api"
+        );
         assert_eq!(root_for(Some("php_ext_ctype")).to_string(), ":: php_ext");
         assert_eq!(root_for(None).to_string(), ":: php_ext");
     }
