@@ -15,7 +15,7 @@ use php_ext::abi::{Dependency, DependencyKind, EngineState, ExtensionBuilder};
 use php_ext::request::Request;
 use php_ext::test::{Capture, Engine};
 use php_ext::values::{PhpArray, Value};
-use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
+use php_ext_pdo::connector::{Connection, Connector, Failure, IdleConnection, Prepared, Source};
 
 #[test]
 fn the_extension_is_loaded() {
@@ -140,7 +140,20 @@ impl Connector for Filler {
 /// One connection of [`Filler`].
 struct Filled;
 
+impl IdleConnection for Filled {
+    fn take_up(self: Box<Self>, req: &mut Request) -> Box<dyn Connection> {
+        let _ = req;
+        self
+    }
+}
+
 impl Connection for Filled {
+    /// Kept in PDO's pool as it stands: it holds nothing of a request's.
+    fn give_back(self: Box<Self>, req: &mut Request) -> Option<Box<dyn IdleConnection>> {
+        let _ = req;
+        Some(self)
+    }
+
     fn prepare(
         &mut self,
         req: &mut Request,

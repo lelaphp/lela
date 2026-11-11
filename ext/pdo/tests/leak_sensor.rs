@@ -10,7 +10,7 @@ use php_ext::abi::{Dependency, DependencyKind, EngineState, Extension, Extension
 use php_ext::request::Request;
 use php_ext::test::{Capture, Engine};
 use php_ext::values::PhpString;
-use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
+use php_ext_pdo::connector::{Connection, Connector, Failure, IdleConnection, Prepared, Source};
 
 /// The connector, `leaky:`, whose factory makes a string and drops its
 /// owner, faulty on purpose, then opens a connection that does nothing.
@@ -38,7 +38,20 @@ impl Connector for Leaky {
 /// One connection of [`Leaky`].
 struct Quiet;
 
+impl IdleConnection for Quiet {
+    fn take_up(self: Box<Self>, req: &mut Request) -> Box<dyn Connection> {
+        let _ = req;
+        self
+    }
+}
+
 impl Connection for Quiet {
+    /// Kept in PDO's pool as it stands: it holds nothing of a request's.
+    fn give_back(self: Box<Self>, req: &mut Request) -> Option<Box<dyn IdleConnection>> {
+        let _ = req;
+        Some(self)
+    }
+
     fn prepare(
         &mut self,
         req: &mut Request,

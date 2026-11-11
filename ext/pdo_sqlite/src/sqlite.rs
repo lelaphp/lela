@@ -10,8 +10,8 @@ use php_ext::request::{Foreign, Request, Stream};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_pdo::connector::{
     BindEvent, BindKind, BindType, Binding, Column, Connection, Connector, CursorCloser, Executed,
-    Failure, NativeError, OnError, Orientation, Placeholders, Prepared, Source, SqlError, SqlState,
-    Statement, long_attribute, option_long,
+    Failure, IdleConnection, NativeError, OnError, Orientation, Placeholders, Prepared, Source,
+    SqlError, SqlState, Statement, long_attribute, option_long,
 };
 
 use crate::Sqlite;
@@ -88,6 +88,46 @@ pub(crate) struct Einfo {
 enum Errmsg {
     Request(Emalloc),
     Process(Box<[u8]>),
+}
+
+/// An [`Einfo`] while PDO's pool keeps its connection: the message the
+/// process's, as a persistent connection's is.
+#[derive(Default, EngineState)]
+pub(crate) struct IdleEinfo {
+    persistent: bool,
+    code: i32,
+    message: Option<Box<[u8]>>,
+}
+
+impl Einfo {
+    /// What the pool keeps of the `einfo`; a message on the request's
+    /// heap, which a persistent connection never makes, copied out and
+    /// freed with the request.
+    pub(crate) fn idle(self, req: &mut Request) -> IdleEinfo {
+        let message = self.message.map(|message| match message {
+            Errmsg::Process(bytes) => bytes,
+            Errmsg::Request(held) => {
+                let bytes = held.bytes().split_last().map_or(&[][..], |(_, m)| m).into();
+                held.free(req);
+                bytes
+            }
+        });
+        IdleEinfo {
+            persistent: self.persistent,
+            code: self.code,
+            message,
+        }
+    }
+}
+
+impl From<IdleEinfo> for Einfo {
+    fn from(idle: IdleEinfo) -> Einfo {
+        Einfo {
+            persistent: idle.persistent,
+            code: idle.code,
+            message: idle.message.map(Errmsg::Process),
+        }
+    }
 }
 
 impl Einfo {
@@ -338,15 +378,42 @@ pub(crate) struct Handle {
 const DB_HANDLE: usize = 96;
 
 /// Where a connection's [`Conn`] stands: kept by the request the
-/// connection serves (ADR-0013), or, given back with a persistent
-/// connection to PDO's pool, held here for the next request to take up,
-/// as `pdo_mysql` holds its connection idle.
+/// connection serves (ADR-0013), or gone.
 enum Place {
     Request(Foreign<Conn>),
-    Idle(Conn),
     /// Given up: closed, or kept past the request by a call still holding
     /// it.
     Gone,
+}
+
+/// A persistent connection while PDO's pool keeps it between requests
+/// (#4474): the connection idle ([`ffi::IdleConn`]) and the transaction
+/// style, and no function, collation or authorizer a request registered,
+/// which `persistent_shutdown` gave up as php's
+/// `pdo_sqlite_request_shutdown` cleans them up, nor `H`'s allocation, which
+/// a persistent connection makes with `malloc`.
+#[derive(EngineState)]
+struct IdleHandle {
+    conn: ffi::IdleConn,
+    transaction_mode: i64,
+}
+
+impl IdleConnection for IdleHandle {
+    /// The connection kept by the request PDO lends it to.
+    fn take_up(self: Box<Self>, req: &mut Request) -> Box<dyn Connection> {
+        let IdleHandle {
+            conn,
+            transaction_mode,
+        } = *self;
+        Box::new(Handle {
+            place: Place::Request(req.memory_mut().adopt(conn.take_up())),
+            funcs: Vec::new(),
+            collations: Vec::new(),
+            authorizer: None,
+            transaction_mode,
+            allocation: None,
+        })
+    }
 }
 
 impl Handle {
@@ -354,7 +421,7 @@ impl Handle {
     pub(crate) fn db(&self) -> Option<Db> {
         match &self.place {
             Place::Request(owner) => Some(Db::of(owner)),
-            Place::Idle(_) | Place::Gone => None,
+            Place::Gone => None,
         }
     }
 
@@ -368,14 +435,6 @@ impl Handle {
                 "InternalError: a pdo_sqlite connection is used outside the request that keeps it",
             ))
         })
-    }
-
-    /// A connection given back to the pool kept by this request again.
-    fn take_up(&mut self, req: &mut Request) {
-        self.place = match std::mem::replace(&mut self.place, Place::Gone) {
-            Place::Idle(conn) => Place::Request(req.memory_mut().adopt(conn)),
-            other => other,
-        };
     }
 
     /// A statement served for its effect under the request, the failure
@@ -721,11 +780,8 @@ impl Connection for Handle {
     }
 
     /// `sqlite_handle_closer`: the callbacks cleaned up, the connection
-    /// closed with `sqlite3_close_v2` and `H`'s allocation given back;
-    /// one given back to the pool taken up first, as PDO closes one past
-    /// its bound.
+    /// closed with `sqlite3_close_v2` and `H`'s allocation given back.
     fn close(&mut self, req: &mut Request) {
-        self.take_up(req);
         self.persistent_shutdown(req);
         if let Place::Request(owner) = std::mem::replace(&mut self.place, Place::Gone) {
             Db::of(&owner)
@@ -738,23 +794,33 @@ impl Connection for Handle {
         }
     }
 
-    /// A persistent connection found in the pool kept by this request
-    /// again, and alive: php's null `check_liveness`.
+    /// A persistent connection found in the pool and kept by this
+    /// request again, alive: php's null `check_liveness`.
     fn check_liveness(&mut self, req: &mut Request) -> bool {
-        self.take_up(req);
+        let _ = req;
         true
     }
 
-    /// The connection out of the request's keeping, held here in PDO's
-    /// pool for the next request to take up.
-    fn give_back(&mut self, req: &mut Request) {
-        self.place = match std::mem::replace(&mut self.place, Place::Gone) {
-            Place::Request(owner) => req
-                .memory_mut()
-                .disown(owner)
-                .map_or(Place::Gone, Place::Idle),
-            other => other,
+    /// The connection out of the request's keeping, idle in PDO's pool for
+    /// the next request to take up: the callbacks the request registered
+    /// cleaned up first, as php's `pdo_sqlite_request_shutdown` cleans them
+    /// so that they do not linger for the next request, and `H`'s
+    /// allocation, which a persistent connection never makes on the
+    /// request's heap, freed. One the request cannot let go of, a call
+    /// still holding it, is gone.
+    fn give_back(mut self: Box<Self>, req: &mut Request) -> Option<Box<dyn IdleConnection>> {
+        self.persistent_shutdown(req);
+        if let Some(allocation) = self.allocation.take() {
+            allocation.free(req);
+        }
+        let Place::Request(owner) = std::mem::replace(&mut self.place, Place::Gone) else {
+            return None;
         };
+        let conn = req.memory_mut().disown(owner)?;
+        Some(Box::new(IdleHandle {
+            conn: conn.idle(req),
+            transaction_mode: self.transaction_mode,
+        }))
     }
 }
 

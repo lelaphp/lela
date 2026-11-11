@@ -347,6 +347,47 @@ impl Drop for Conn {
     }
 }
 
+/// A persistent connection while PDO's pool keeps it between requests
+/// ([`Conn::idle`]): the `sqlite3 *` with its lend, and `H->einfo` as a
+/// persistent connection records it. Taken up into a [`Conn`] again
+/// ([`IdleConn::take_up`]); dropped, closed with `sqlite3_close_v2`.
+pub(crate) struct IdleConn {
+    raw: Raw<sys::sqlite3>,
+    lend: Raw<Lend>,
+    einfo: crate::sqlite::IdleEinfo,
+}
+
+impl Drop for IdleConn {
+    fn drop(&mut self) {
+        // SAFETY: the connection's one owner, closed once.
+        unsafe { sqlite3_close_v2(self.raw.get()) };
+    }
+}
+
+// The `sqlite3 *` is the library's, and so is the lend it keeps as the
+// connection's client data, a value of this crate's in the library's
+// keeping: `Conn::idle`, the one place an `IdleConn` is made, empties the
+// lend's `req`, its `pending` throwable and its authorizer's view of a
+// request's callable, and the handlers of the functions and collations
+// the request registered were taken out of their data
+// (`Kind::take_handlers`) as `persistent_shutdown` gave them up, which
+// `give_back` runs first; what is left is the library's state, the static
+// `callbacks` and data that serves no handler. `Send` by `Raw`'s argument.
+impl php_ext::abi::EngineState for IdleConn {}
+
+impl IdleConn {
+    /// The connection a request takes up, for the request to keep.
+    pub(crate) fn take_up(self) -> Conn {
+        let mut idle = ManuallyDrop::new(self);
+        let einfo = std::mem::take(&mut idle.einfo).into();
+        Conn {
+            raw: idle.raw,
+            lend: idle.lend,
+            einfo,
+        }
+    }
+}
+
 impl Conn {
     /// `sqlite3_open_v2(filename, &db, flags, NULL)`, the library
     /// serializing every call on it (`SQLITE_OPEN_NOMUTEX` dropped), with
@@ -423,6 +464,25 @@ impl Conn {
         }
         let raw = conn.raw.get();
         Err((ManuallyDrop::into_inner(conn), errcode(raw), errmsg(raw)))
+    }
+
+    /// What PDO's pool keeps of a persistent connection the request gives
+    /// back (#4474): the library's connection, its lend emptied of what a
+    /// request put there, the authorizer's view of its callable and a
+    /// throwable a callback left, and `H->einfo` with its message the
+    /// process's.
+    pub(crate) fn idle(self, req: &mut Request) -> IdleConn {
+        let mut conn = ManuallyDrop::new(self);
+        let lend = conn.lend();
+        lend.authorizer = None;
+        lend.pending = None;
+        lend.req = ptr::null_mut();
+        let einfo = std::mem::take(&mut conn.einfo).idle(req);
+        IdleConn {
+            raw: conn.raw,
+            lend: conn.lend,
+            einfo,
+        }
     }
 
     /// The lend, through the connection's one owner.
