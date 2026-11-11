@@ -120,7 +120,9 @@ fn child(
     let third = publish(table, 31)?;
     let last = ran(table, third).unwrap_or(0);
     let placed = address(table, third)?;
-    // A `MAP_PRIVATE` arena is copied by the fork and maps no file.
+    // Elsewhere the arena maps no file: macOS aarch64's `MAP_JIT` mapping is
+    // copied by the fork, and macOS x86-64's two views are anonymous, laid
+    // again over one copy by the child's adopt.
     #[cfg(not(target_os = "linux"))]
     let sealed = table.writer().arena.is_some();
     #[cfg(target_os = "linux")]

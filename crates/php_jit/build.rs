@@ -1,7 +1,8 @@
 //! `php_jit_arena`, set where the target has a `Pages` adapter that maps
 //! code (`jit-design.md` §4.4), the four targets §4.3 names: macOS, one
-//! `MAP_JIT` mapping, and Linux, one sealed `memfd` mapped twice, each on
-//! x86-64 and aarch64. This is the one place in the code the set is named;
+//! `MAP_JIT` mapping on aarch64 and one anonymous mapping and its
+//! `mach_vm_remap` alias on x86-64, and Linux, one sealed `memfd` mapped
+//! twice, on x86-64 and aarch64. This is the one place in the code the set is named;
 //! the adapters, the `Native` alias and the tests that enter published code
 //! read it. A dependency cannot hang on it in Cargo, so `Cargo.toml`'s Linux
 //! table, which brings `rustix` for the `memfd`, says the Linux half again.
