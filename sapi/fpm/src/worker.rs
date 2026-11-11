@@ -879,7 +879,16 @@ impl Worker {
         let keys = get_keys(query.unwrap_or_default(), &separators);
         let full = keys.iter().any(|k| k.as_slice() == b"full");
         let board = self.board().copy(full);
-        Some(crate::status::status(board.as_ref(), &keys, head_only))
+        let charset = crate::status::Charset::of(
+            self.engine.ini_get(b"internal_encoding").as_deref(),
+            self.engine.ini_get(b"default_charset").as_deref(),
+        );
+        Some(crate::status::status(
+            board.as_ref(),
+            &keys,
+            head_only,
+            charset,
+        ))
     }
 
     /// `PHP_VALUE` and `PHP_ADMIN_VALUE`, read as `fastcgi_ini_parser`
