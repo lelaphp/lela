@@ -11,33 +11,45 @@
 //! covers, one fails the crate's reading, naming its line.
 //!
 //! The sensor reads syntax, with `syn`, and follows what the compiler
-//! follows: every source of the crate, each `mod` file, `#[path]` and
-//! literal `include!` it reaches, inside the crate directory or out of
-//! it. An impl is one whose trait path ends in `EngineState` or in a name
-//! a `use .. as` in the crate gives it, however the path is spaced. In a
-//! macro's tokens, a definition's or a call's, `impl .. X for` is read
-//! the same way. What the sensor cannot read fails the crate, naming the
-//! line, in place of an impl it might hide:
+//! follows: every source under the crate's `src/`, `tests/`, `benches/`
+//! and `examples/` and its `build.rs` (a target path the crate's
+//! `Cargo.toml` sets elsewhere is not walked), and each `mod` file,
+//! `#[path]` and literal `include!` they reach, inside the crate directory
+//! or out of it. A home covers the crate's own files only: a file reached
+//! in another crate's `src/ffi/`, or outside every crate, is held like the
+//! rest. An impl is one whose trait path ends in `EngineState` or in a
+//! name a `use .. as` in the crate gives it, however the path is spaced,
+//! in source or in a macro's tokens, a definition's or a call's. What the
+//! sensor cannot read fails the crate, naming the line, in place of an
+//! impl it might hide:
 //!
 //! - an `impl $t for` (or `impl #t for` in a `quote!`), whose trait is a
-//!   metavariable, in a crate that names the trait;
+//!   metavariable or a path a repetition builds (`$($p)::+`, `#(#p)::*`),
+//!   in a crate that names the trait;
 //! - the trait handed to a macro the crate does not define, whose body is
 //!   in no source it holds;
-//! - a `#[path]` or `include!` naming a file that is not there or is not
-//!   a literal path, and a source that is not Rust;
-//! - a `build.rs` that names the trait, where the crate includes a file
-//!   from `OUT_DIR`, since what it writes is in no source.
+//! - a `#[path]` or `include!` naming a file that is not there, or not by
+//!   a literal path (an `include!` other than the two-part `OUT_DIR`
+//!   form), and a source that is not Rust; a `#[path]` inside an inline
+//!   module resolves as in a `mod.rs` file, so under a file that is not
+//!   one it may read the wrong file or refuse the line;
+//! - a string literal naming the trait in a file of the build's closure,
+//!   `build.rs` and what it reaches, where the crate includes a file from
+//!   `OUT_DIR`, since what the build writes is in no source. A module of
+//!   the crate the build reaches is judged by its strings, so a comment,
+//!   a doc or a derive there does not fail it.
 //!
-//! The derive's own expansion, in [`DERIVE`], is the one source whose
-//! macro tokens name the trait by right; a hand-written impl there fails
-//! as anywhere.
+//! The derive's own expansion, in [`DERIVE`], is exempt for every macro
+//! token in it: an impl or a call any `quote!` there writes passes.
 //!
 //! What reading the source cannot hold, #4463 carries: a `build.rs`
 //! that writes the impl without naming the trait (the name spelled in
-//! pieces, or read from a file), a rename another crate exports, which is
-//! a line of that crate's lock, and the homes themselves: in an
-//! extension's `src/ffi/` a hand-written impl stands for any type, with
-//! no marker, and "a C library's object" is the homes' prose, not a check.
+//! pieces, or read from a file), an impl a proc macro parses from a
+//! string, a local macro that forwards the trait to a macro outside the
+//! workspace, a rename another crate exports, which is a line of that
+//! crate's lock, and the homes themselves: in an extension's `src/ffi/` a
+//! hand-written impl stands for any type, with no marker, and "a C
+//! library's object" is the homes' prose, not a check.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -99,7 +111,10 @@ pub(crate) fn outside_the_homes(
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {shown}"))?;
         let read = Reader::read(&path, &text);
         queue.extend(read.follow.iter().map(|next| (next.clone(), build)));
-        let held = !homes.iter().any(|h| h.covers(krate, &shown));
+        // A home covers the crate's own files: one it reaches in another
+        // crate's `src/ffi/`, or outside every crate, is held.
+        let own = Path::new(&shown).starts_with(krate.path());
+        let held = !own || !homes.iter().any(|h| h.covers(krate, &shown));
         sources.insert(
             path,
             Source {
@@ -172,10 +187,15 @@ fn found(sources: &BTreeMap<PathBuf, Source>) -> Vec<String> {
                 );
             }
         }
-        if s.build && out_dir && names.iter().any(|n| word(&s.text, n)) {
+        // A file of the build's closure, a module of the crate among them,
+        // by its strings alone: what build.rs writes is text it holds.
+        let strings = (s.read.strings.iter()).filter(|(_, lit)| names.iter().any(|n| word(lit, n)));
+        for (line, _) in strings.filter(|_| s.build && out_dir) {
             site(
-                1,
-                Some("build.rs names the trait, and what it writes to OUT_DIR is in no source"),
+                *line,
+                Some(
+                    "read in build.rs's closure, a string names the trait, and what build.rs writes to OUT_DIR is in no source",
+                ),
             );
         }
     }
@@ -197,6 +217,8 @@ struct Read {
     follow: Vec<PathBuf>,
     /// Whether it includes a file from `OUT_DIR`.
     out_dir: bool,
+    /// Each string literal outside a doc comment, with its line.
+    strings: Vec<(usize, String)>,
 }
 
 /// An `impl .. X for`, by the last segment of `X`.
@@ -320,6 +342,9 @@ impl Reader {
                         self.include(args.stream(), i.span());
                     }
                 }
+                TokenTree::Literal(lit) => {
+                    (self.read.strings).push((lit.span().start().line, lit.to_string()));
+                }
                 _ => {}
             }
         }
@@ -422,6 +447,22 @@ impl<'ast> Visit<'ast> for Reader {
     fn visit_use_rename(&mut self, node: &'ast syn::UseRename) {
         (self.read.renames).push((node.ident.to_string(), node.rename.to_string()));
     }
+
+    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+        (self.read.strings).push((node.span().start().line, node.value()));
+    }
+
+    fn visit_lit_byte_str(&mut self, node: &'ast syn::LitByteStr) {
+        let text = String::from_utf8_lossy(&node.value()).into_owned();
+        (self.read.strings).push((node.span().start().line, text));
+    }
+
+    /// A doc comment's text is no string the build can write.
+    fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+        if !node.path().is_ident("doc") {
+            visit::visit_attribute(self, node);
+        }
+    }
 }
 
 /// The trait of `impl <rest>`: the last name before `for` outside angle
@@ -438,6 +479,11 @@ fn trait_after(rest: &[TokenTree]) -> Option<Trait> {
             TokenTree::Ident(i) if i == "for" => return last,
             TokenTree::Ident(i) if i == "where" => return None,
             TokenTree::Punct(p) if p.as_char() == ';' => return None,
+            // A path a repetition builds, `$($p)::+` or `#(#p)::*`.
+            TokenTree::Group(_) if matches!(prev, Some(TokenTree::Punct(p)) if matches!(p.as_char(), '$' | '#')) =>
+            {
+                last = Some(Trait::Meta);
+            }
             TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => return None,
             TokenTree::Ident(i) => {
                 let meta =
@@ -523,6 +569,10 @@ mod tests {
             Some("EngineState")
         );
         assert_eq!(of("impl $t<X> for $x {}").as_deref(), Some("$"));
+        // A path a repetition builds is a metavariable too (#4360).
+        assert_eq!(of("impl $($p)::+ for $x {}").as_deref(), Some("$"));
+        assert_eq!(of("impl #(#p)::* for #x {}").as_deref(), Some("$"));
+        assert_eq!(of("impl $($t)* { fn f() {} }"), None);
     }
 
     #[test]

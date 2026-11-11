@@ -1148,12 +1148,14 @@ mod engine_state {
     /// An extension's type made engine state by an impl written by hand
     /// in its `src/lib.rs`, around the derive, fails the extension naming
     /// the line, and so does each way around a reading of the text: a
-    /// rename, a macro's metavariable, a `build.rs` writing to `OUT_DIR`, a file
-    /// outside every crate, a spaced path, an `include!` the walk cannot
-    /// follow and a macro defined elsewhere. One in an extension's
-    /// `src/ffi/`, a home `unsafe.homes` names, passes beside the derive,
-    /// local macros and an `OUT_DIR` file from a `build.rs` that does not
-    /// name the trait; the failing reading names the rule, the passing one not.
+    /// rename, a macro's metavariable or a path its repetition builds, a
+    /// `build.rs` writing to `OUT_DIR`, a file outside every crate or in
+    /// another crate's `src/ffi/`, a spaced path, an `include!` the walk
+    /// cannot follow and a macro defined elsewhere. One in an extension's
+    /// own `src/ffi/`, a home `unsafe.homes` names, passes beside the
+    /// derive, local macros and an `OUT_DIR` file from a `build.rs` whose
+    /// closure holds a module naming the trait in no string; the failing
+    /// reading names the rule, the passing one not.
     #[test]
     fn engine_state_written_by_hand_outside_the_homes_fails_naming_its_line() {
         let manifest = sealed();
@@ -1186,8 +1188,13 @@ mod engine_state {
             ),
             (
                 "ext/calendar",
-                "ext/calendar/build.rs:1 (build.rs names the trait",
+                "ext/calendar/build.rs:7 (read in build.rs's closure, a string names the trait",
             ),
+            (
+                "ext/sysvsem",
+                "ext/sysvsem/src/lib.rs:13 (its trait is a metavariable): ",
+            ),
+            ("ext/sysvshm", "ext/json/src/ffi/borrowed.rs:4: "),
             ("ext/gettext", "elsewhere/also.rs:3, elsewhere/kept.rs:5: "),
             ("ext/shmop", "ext/shmop/src/lib.rs:11: "),
             (
@@ -1207,7 +1214,7 @@ mod engine_state {
                 reading.message
             );
         }
-        assert_eq!(failures(&readings).len(), 8, "{readings:#?}");
+        assert_eq!(failures(&readings).len(), 10, "{readings:#?}");
     }
 
     /// Each compile-fail fixture beside the sensor's is compiled by

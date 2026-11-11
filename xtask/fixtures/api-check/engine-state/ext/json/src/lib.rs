@@ -3,8 +3,10 @@
 //! names; the derive; a macro whose impl names its trait, and one whose
 //! impl is inherent on a metavariable; a call that hands the trait to a
 //! macro the crate defines; and a file included from `OUT_DIR`, written by
-//! a build script that does not name the trait.
+//! a `build.rs` whose closure, `src/depth.rs` among it, holds no string
+//! naming the trait, though that module's doc, comment and derive do.
 
+mod depth;
 mod ffi;
 
 use php_ext::abi::EngineState;
