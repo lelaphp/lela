@@ -56,16 +56,16 @@ pub(crate) fn check_timed_out(
     let child = &fpm.pools[p].children[c];
     let pid = child.pid;
     let name = fpm.pools[p].name();
-    let request = format!(
+    let request = crate::zformat!(
         "\"{} {}{}{}\"",
-        String::from_utf8_lossy(&proc.request_method),
-        String::from_utf8_lossy(&proc.request_uri),
+        proc.request_method,
+        proc.request_uri,
         if proc.query_string.is_empty() {
             ""
         } else {
             "?"
         },
-        String::from_utf8_lossy(&proc.query_string)
+        proc.query_string
     );
     let script = purify(&proc.script_filename);
     if child.slow_logged.is_none()
@@ -78,13 +78,23 @@ pub(crate) fn check_timed_out(
         crate::ffi::trace::signal(pid);
         zlog!(
             Warning @ fpm_request_check_timed_out:268,
-            "[pool {name}] child {pid}, script '{script}' (request: {request}) executing too slow ({secs}.{micros:06} sec), logging"
+            bytes "[pool {}] child {}, script '{}' (request: {}) executing too slow ({} sec), logging",
+            name,
+            pid,
+            script,
+            request,
+            format!("{secs}.{micros:06}")
         );
     } else if terminate != 0 && secs >= i64::from(terminate) {
         kill(Pid::from_raw(pid), Signal::SIGTERM).ok();
         zlog!(
             Warning @ fpm_request_check_timed_out:279,
-            "[pool {name}] child {pid}, script '{script}' (request: {request}) execution timed out ({secs}.{micros:06} sec), terminating"
+            bytes "[pool {}] child {}, script '{}' (request: {}) execution timed out ({} sec), terminating",
+            name,
+            pid,
+            script,
+            request,
+            format!("{secs}.{micros:06}")
         );
     }
 }
@@ -126,8 +136,8 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
             crate::zlog_sys!(
                 Error @ fpm_php_trace:200,
                 crate::conf::errno(&e),
-                "unable to open slowlog ({})",
-                String::from_utf8_lossy(&path)
+                bytes "unable to open slowlog ({})",
+                path
             );
         }
     }
@@ -150,14 +160,11 @@ fn dump(fpm: &Fpm, p: usize, c: usize, memory: &crate::ffi::trace::Memory) -> Ve
         .unwrap_or_default();
     let mut entry = b"\n".to_vec();
     entry.extend_from_slice(&crate::zlog::time_now());
-    entry.extend_from_slice(
-        format!(
-            "[pool {}] pid {}\nscript_filename = ",
-            fpm.pools[p].name(),
-            child.pid
-        )
-        .as_bytes(),
-    );
+    entry.extend_from_slice(&crate::zformat!(
+        "[pool {}] pid {}\nscript_filename = ",
+        fpm.pools[p].name(),
+        child.pid
+    ));
     entry.extend_from_slice(&script);
     entry.push(b'\n');
     let depth = fpm.pools[p].config.request_slowlog_trace_depth;

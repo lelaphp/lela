@@ -553,12 +553,8 @@ pub(crate) fn is_dir(bytes: &[u8]) -> bool {
 
 impl Reader<'_> {
     /// The file and line an error names.
-    fn at(&self) -> String {
-        format!(
-            "[{}:{}]",
-            String::from_utf8_lossy(&self.filename),
-            self.lineno
-        )
+    fn at(&self) -> Vec<u8> {
+        crate::zformat!("[{}:{}]", self.filename, self.lineno)
     }
 
     /// `fpm_conf_ini_parser`: one event of a line.
@@ -600,7 +596,7 @@ impl Reader<'_> {
         let Some(value) = value else {
             zlog!(
                 Error @ fpm_conf_ini_parser_entry:1469,
-                "{} value is NULL for a ZEND_INI_PARSER_ENTRY",
+                bytes "{} value is NULL for a ZEND_INI_PARSER_ENTRY",
                 self.at()
             );
             self.error = true;
@@ -608,7 +604,7 @@ impl Reader<'_> {
         };
         if name == b"include" {
             if self.include.is_some() {
-                zlog!(Error @ fpm_conf_ini_parser_entry:1476, "{} two includes at the same time !", self.at());
+                zlog!(Error @ fpm_conf_ini_parser_entry:1476, bytes "{} two includes at the same time !", self.at());
                 self.error = true;
                 return;
             }
@@ -626,9 +622,9 @@ impl Reader<'_> {
         else {
             zlog!(
                 Error @ fpm_conf_ini_parser_entry:1514,
-                "{} unknown entry '{}'",
+                bytes "{} unknown entry '{}'",
                 self.at(),
-                String::from_utf8_lossy(name)
+                name
             );
             self.error = true;
             return;
@@ -642,8 +638,10 @@ impl Reader<'_> {
             Err(why) => {
                 zlog!(
                     Error @ fpm_conf_ini_parser_entry:1503,
-                    "{} unable to parse value for entry '{option}': {why}",
-                    self.at()
+                    bytes "{} unable to parse value for entry '{}': {}",
+                    self.at(),
+                    option,
+                    why
                 );
                 self.error = true;
             }
@@ -652,12 +650,11 @@ impl Reader<'_> {
 
     /// `fpm_conf_ini_parser_array`.
     fn array(&mut self, name: &[u8], key: &[u8], value: &[u8]) {
-        let name_text = String::from_utf8_lossy(name).into_owned();
         if name == b"access.suppress_path" {
             if !key.is_empty() {
                 zlog!(
                     Error @ fpm_conf_ini_parser_array:1527,
-                    "{} Keys provided to field 'access.suppress_path' are ignored",
+                    bytes "{} Keys provided to field 'access.suppress_path' are ignored",
                     self.at()
                 );
                 self.error = true;
@@ -665,7 +662,7 @@ impl Reader<'_> {
             if value.first() != Some(&b'/') {
                 zlog!(
                     Error @ fpm_conf_ini_parser_array:1531,
-                    "{} Values provided to field 'access.suppress_path' must begin with '/'",
+                    bytes "{} Values provided to field 'access.suppress_path' must begin with '/'",
                     self.at()
                 );
                 self.error = true;
@@ -676,8 +673,9 @@ impl Reader<'_> {
         } else if key.is_empty() {
             zlog!(
                 Error @ fpm_conf_ini_parser_array:1538,
-                "{} You must provide a key for field '{name_text}'",
-                self.at()
+                bytes "{} You must provide a key for field '{}'",
+                self.at(),
+                name
             );
             self.error = true;
             return;
@@ -685,7 +683,7 @@ impl Reader<'_> {
         let Some(at) = self.current else {
             zlog!(
                 Error @ fpm_conf_ini_parser_array:1544,
-                "{} Array are not allowed in the global section",
+                bytes "{} Array are not allowed in the global section",
                 self.at()
             );
             self.error = true;
@@ -721,19 +719,21 @@ impl Reader<'_> {
         match made {
             Ok(()) => {}
             Err("") => {
-                zlog!(Error @ fpm_conf_ini_parser_array:1551, "{} empty value", self.at());
+                zlog!(Error @ fpm_conf_ini_parser_array:1551, bytes "{} empty value", self.at());
                 self.error = true;
             }
             Err("unknown") => {
-                zlog!(Error @ fpm_conf_ini_parser_array:1579, "{} unknown directive '{name_text}'", self.at());
+                zlog!(Error @ fpm_conf_ini_parser_array:1579, bytes "{} unknown directive '{}'", self.at(), name);
                 self.error = true;
             }
             Err(why) => {
                 zlog!(
                     Error @ fpm_conf_ini_parser_array:1585,
-                    "{} error while parsing '{name_text}[{}]' : {why}",
+                    bytes "{} error while parsing '{}[{}]' : {}",
                     self.at(),
-                    String::from_utf8_lossy(key)
+                    name,
+                    key,
+                    why
                 );
                 self.error = true;
             }
@@ -753,8 +753,8 @@ impl Reader<'_> {
                 zlog_sys!(
                     Error @ fpm_conf_load_ini_file:1636,
                     errno(&e),
-                    "failed to open configuration file '{}'",
-                    String::from_utf8_lossy(filename)
+                    bytes "failed to open configuration file '{}'",
+                    filename
                 );
                 return false;
             }
@@ -818,9 +818,10 @@ impl Reader<'_> {
         if matches.is_empty() {
             zlog!(
                 Warning @ fpm_conf_ini_parser_include:1400,
-                "Nothing matches the include pattern '{}' from {} at line {lineno}.",
-                String::from_utf8_lossy(pattern),
-                String::from_utf8_lossy(&filename)
+                bytes "Nothing matches the include pattern '{}' from {} at line {}.",
+                pattern,
+                filename,
+                lineno
             );
             return true;
         }
@@ -831,9 +832,9 @@ impl Reader<'_> {
             if !self.load(&file) {
                 zlog!(
                     Error @ fpm_conf_ini_parser_include:1414,
-                    "Unable to include {} from {} at line {}",
-                    String::from_utf8_lossy(&file),
-                    String::from_utf8_lossy(&filename),
+                    bytes "Unable to include {} from {} at line {}",
+                    file,
+                    filename,
                     self.lineno
                 );
                 return false;
@@ -929,11 +930,8 @@ pub(crate) fn default_config(prefix: Option<&[u8]>) -> Vec<u8> {
 }
 
 /// `STR2STR`.
-fn show(value: Option<&[u8]>) -> String {
-    value.map_or_else(
-        || String::from("undefined"),
-        |v| String::from_utf8_lossy(v).into_owned(),
-    )
+fn show(value: Option<&[u8]>) -> &[u8] {
+    value.unwrap_or(b"undefined")
 }
 
 /// `BOOL2STR`.
@@ -962,248 +960,297 @@ pub(crate) fn dump(
     mechanism: &str,
     pools: &[(&PoolConfig, bool)],
 ) {
-    let notice = |line: u32, text: String| {
-        zlog!(Notice @ (crate::zlog::Site::at("fpm_conf_dump", line)), "{text}");
+    let notice = |line: u32, text: Vec<u8>| {
+        crate::zlog::log(
+            Level::Notice,
+            crate::zlog::Site::at("fpm_conf_dump", line),
+            &text,
+            None,
+        );
     };
-    notice(1714, String::from("[global]"));
+    notice(1714, crate::zformat!("[global]"));
     notice(
         1715,
-        format!("\tpid = {}", show(global.pid_file.as_deref())),
+        crate::zformat!("\tpid = {}", show(global.pid_file.as_deref())),
     );
     notice(
         1716,
-        format!("\terror_log = {}", show(global.error_log.as_deref())),
+        crate::zformat!("\terror_log = {}", show(global.error_log.as_deref())),
     );
     notice(
         1718,
-        format!("\tsyslog.ident = {}", show(global.syslog_ident.as_deref())),
+        crate::zformat!("\tsyslog.ident = {}", show(global.syslog_ident.as_deref())),
     );
     notice(
         1719,
-        format!("\tsyslog.facility = {}", global.syslog_facility),
+        crate::zformat!("\tsyslog.facility = {}", global.syslog_facility),
     );
     notice(
         1721,
-        format!("\tlog_buffering = {}", yes(global.log_buffering)),
+        crate::zformat!("\tlog_buffering = {}", yes(global.log_buffering)),
     );
-    notice(1722, format!("\tlog_level = {}", level_name(log_level)));
-    notice(1723, format!("\tlog_limit = {}", global.log_limit));
+    notice(
+        1722,
+        crate::zformat!("\tlog_level = {}", level_name(log_level)),
+    );
+    notice(1723, crate::zformat!("\tlog_limit = {}", global.log_limit));
     notice(
         1724,
-        format!(
+        crate::zformat!(
             "\temergency_restart_interval = {}s",
             global.emergency_restart_interval
         ),
     );
     notice(
         1725,
-        format!(
+        crate::zformat!(
             "\temergency_restart_threshold = {}",
             global.emergency_restart_threshold
         ),
     );
     notice(
         1726,
-        format!(
+        crate::zformat!(
             "\tprocess_control_timeout = {}s",
             global.process_control_timeout
         ),
     );
-    notice(1727, format!("\tprocess.max = {}", global.process_max));
+    notice(
+        1727,
+        crate::zformat!("\tprocess.max = {}", global.process_max),
+    );
     if global.process_priority == 64 {
-        notice(1729, String::from("\tprocess.priority = undefined"));
+        notice(1729, crate::zformat!("\tprocess.priority = undefined"));
     } else {
         notice(
             1731,
-            format!("\tprocess.priority = {}", global.process_priority),
+            crate::zformat!("\tprocess.priority = {}", global.process_priority),
         );
     }
-    notice(1733, format!("\tdaemonize = {}", yes(global.daemonize)));
-    notice(1734, format!("\trlimit_files = {}", global.rlimit_files));
-    notice(1735, format!("\trlimit_core = {}", global.rlimit_core));
-    notice(1736, format!("\tevents.mechanism = {mechanism}"));
-    notice(1740, String::from(" "));
+    notice(
+        1733,
+        crate::zformat!("\tdaemonize = {}", yes(global.daemonize)),
+    );
+    notice(
+        1734,
+        crate::zformat!("\trlimit_files = {}", global.rlimit_files),
+    );
+    notice(
+        1735,
+        crate::zformat!("\trlimit_core = {}", global.rlimit_core),
+    );
+    notice(1736, crate::zformat!("\tevents.mechanism = {}", mechanism));
+    notice(1740, crate::zformat!(" "));
     for &(pool, shared) in pools {
         if shared {
             continue;
         }
-        let s = |v: &Option<Vec<u8>>| show(v.as_deref());
-        notice(1749, format!("[{}]", String::from_utf8_lossy(&pool.name)));
-        notice(1750, format!("\tprefix = {}", s(&pool.prefix)));
-        notice(1751, format!("\tuser = {}", s(&pool.user)));
-        notice(1752, format!("\tgroup = {}", s(&pool.group)));
-        notice(1753, format!("\tlisten = {}", s(&pool.listen_address)));
-        notice(1754, format!("\tlisten.backlog = {}", pool.listen_backlog));
-        notice(1759, format!("\tlisten.owner = {}", s(&pool.listen_owner)));
-        notice(1760, format!("\tlisten.group = {}", s(&pool.listen_group)));
-        notice(1761, format!("\tlisten.mode = {}", s(&pool.listen_mode)));
+        notice(1749, crate::zformat!("[{}]", &pool.name));
+        notice(
+            1750,
+            crate::zformat!("\tprefix = {}", show(pool.prefix.as_deref())),
+        );
+        notice(
+            1751,
+            crate::zformat!("\tuser = {}", show(pool.user.as_deref())),
+        );
+        notice(
+            1752,
+            crate::zformat!("\tgroup = {}", show(pool.group.as_deref())),
+        );
+        notice(
+            1753,
+            crate::zformat!("\tlisten = {}", show(pool.listen_address.as_deref())),
+        );
+        notice(
+            1754,
+            crate::zformat!("\tlisten.backlog = {}", pool.listen_backlog),
+        );
+        notice(
+            1759,
+            crate::zformat!("\tlisten.owner = {}", show(pool.listen_owner.as_deref())),
+        );
+        notice(
+            1760,
+            crate::zformat!("\tlisten.group = {}", show(pool.listen_group.as_deref())),
+        );
+        notice(
+            1761,
+            crate::zformat!("\tlisten.mode = {}", show(pool.listen_mode.as_deref())),
+        );
         notice(
             1762,
-            format!(
+            crate::zformat!(
                 "\tlisten.allowed_clients = {}",
-                s(&pool.listen_allowed_clients)
+                show(pool.listen_allowed_clients.as_deref())
             ),
         );
         if pool.process_priority == 64 {
-            notice(1767, String::from("\tprocess.priority = undefined"));
+            notice(1767, crate::zformat!("\tprocess.priority = undefined"));
         } else {
             notice(
                 1769,
-                format!("\tprocess.priority = {}", pool.process_priority),
+                crate::zformat!("\tprocess.priority = {}", pool.process_priority),
             );
         }
         notice(
             1771,
-            format!("\tprocess.dumpable = {}", yes(pool.process_dumpable)),
+            crate::zformat!("\tprocess.dumpable = {}", yes(pool.process_dumpable)),
         );
         notice(
             1772,
-            format!("\tpm = {}", pool.pm.map_or("(null)", Pm::name)),
+            crate::zformat!("\tpm = {}", pool.pm.map_or("(null)", Pm::name)),
         );
         notice(
             1773,
-            format!("\tpm.max_children = {}", pool.pm_max_children),
+            crate::zformat!("\tpm.max_children = {}", pool.pm_max_children),
         );
         notice(
             1774,
-            format!("\tpm.start_servers = {}", pool.pm_start_servers),
+            crate::zformat!("\tpm.start_servers = {}", pool.pm_start_servers),
         );
         notice(
             1775,
-            format!("\tpm.min_spare_servers = {}", pool.pm_min_spare_servers),
+            crate::zformat!("\tpm.min_spare_servers = {}", pool.pm_min_spare_servers),
         );
         notice(
             1776,
-            format!("\tpm.max_spare_servers = {}", pool.pm_max_spare_servers),
+            crate::zformat!("\tpm.max_spare_servers = {}", pool.pm_max_spare_servers),
         );
         notice(
             1777,
-            format!("\tpm.max_spawn_rate = {}", pool.pm_max_spawn_rate),
+            crate::zformat!("\tpm.max_spawn_rate = {}", pool.pm_max_spawn_rate),
         );
         notice(
             1778,
-            format!(
+            crate::zformat!(
                 "\tpm.process_idle_timeout = {}",
                 pool.pm_process_idle_timeout
             ),
         );
         notice(
             1779,
-            format!("\tpm.max_requests = {}", pool.pm_max_requests),
+            crate::zformat!("\tpm.max_requests = {}", pool.pm_max_requests),
         );
         notice(
             1780,
-            format!("\tpm.status_path = {}", s(&pool.pm_status_path)),
+            crate::zformat!(
+                "\tpm.status_path = {}",
+                show(pool.pm_status_path.as_deref())
+            ),
         );
         notice(
             1781,
-            format!("\tpm.status_listen = {}", s(&pool.pm_status_listen)),
+            crate::zformat!(
+                "\tpm.status_listen = {}",
+                show(pool.pm_status_listen.as_deref())
+            ),
         );
-        notice(1782, format!("\tping.path = {}", s(&pool.ping_path)));
+        notice(
+            1782,
+            crate::zformat!("\tping.path = {}", show(pool.ping_path.as_deref())),
+        );
         notice(
             1783,
-            format!("\tping.response = {}", s(&pool.ping_response)),
+            crate::zformat!("\tping.response = {}", show(pool.ping_response.as_deref())),
         );
-        notice(1784, format!("\taccess.log = {}", s(&pool.access_log)));
+        notice(
+            1784,
+            crate::zformat!("\taccess.log = {}", show(pool.access_log.as_deref())),
+        );
         notice(
             1785,
-            format!("\taccess.format = {}", s(&pool.access_format)),
+            crate::zformat!("\taccess.format = {}", show(pool.access_format.as_deref())),
         );
         for path in &pool.access_suppress_paths {
-            notice(
-                1787,
-                format!(
-                    "\taccess.suppress_path[] = {}",
-                    String::from_utf8_lossy(path)
-                ),
-            );
+            notice(1787, crate::zformat!("\taccess.suppress_path[] = {}", path));
         }
-        notice(1789, format!("\tslowlog = {}", s(&pool.slowlog)));
+        notice(
+            1789,
+            crate::zformat!("\tslowlog = {}", show(pool.slowlog.as_deref())),
+        );
         notice(
             1790,
-            format!(
+            crate::zformat!(
                 "\trequest_slowlog_timeout = {}s",
                 pool.request_slowlog_timeout
             ),
         );
         notice(
             1791,
-            format!(
+            crate::zformat!(
                 "\trequest_slowlog_trace_depth = {}",
                 pool.request_slowlog_trace_depth
             ),
         );
         notice(
             1792,
-            format!(
+            crate::zformat!(
                 "\trequest_terminate_timeout = {}s",
                 pool.request_terminate_timeout
             ),
         );
         notice(
             1793,
-            format!(
+            crate::zformat!(
                 "\trequest_terminate_timeout_track_finished = {}",
                 yes(pool.request_terminate_timeout_track_finished)
             ),
         );
-        notice(1794, format!("\trlimit_files = {}", pool.rlimit_files));
-        notice(1795, format!("\trlimit_core = {}", pool.rlimit_core));
-        notice(1796, format!("\tchroot = {}", s(&pool.chroot)));
-        notice(1797, format!("\tchdir = {}", s(&pool.chdir)));
+        notice(
+            1794,
+            crate::zformat!("\trlimit_files = {}", pool.rlimit_files),
+        );
+        notice(
+            1795,
+            crate::zformat!("\trlimit_core = {}", pool.rlimit_core),
+        );
+        notice(
+            1796,
+            crate::zformat!("\tchroot = {}", show(pool.chroot.as_deref())),
+        );
+        notice(
+            1797,
+            crate::zformat!("\tchdir = {}", show(pool.chdir.as_deref())),
+        );
         notice(
             1798,
-            format!(
+            crate::zformat!(
                 "\tcatch_workers_output = {}",
                 yes(pool.catch_workers_output)
             ),
         );
         notice(
             1799,
-            format!(
+            crate::zformat!(
                 "\tdecorate_workers_output = {}",
                 yes(pool.decorate_workers_output)
             ),
         );
-        notice(1800, format!("\tclear_env = {}", yes(pool.clear_env)));
+        notice(
+            1800,
+            crate::zformat!("\tclear_env = {}", yes(pool.clear_env)),
+        );
         notice(
             1801,
-            format!(
+            crate::zformat!(
                 "\tsecurity.limit_extensions = {}",
-                s(&pool.security_limit_extensions)
+                show(pool.security_limit_extensions.as_deref())
             ),
         );
         for (key, value) in &pool.env {
-            notice(
-                1804,
-                format!(
-                    "\tenv[{}] = {}",
-                    String::from_utf8_lossy(key),
-                    String::from_utf8_lossy(value)
-                ),
-            );
+            notice(1804, crate::zformat!("\tenv[{}] = {}", key, value));
         }
         for (key, value) in &pool.php_values {
-            notice(
-                1808,
-                format!(
-                    "\tphp_value[{}] = {}",
-                    String::from_utf8_lossy(key),
-                    String::from_utf8_lossy(value)
-                ),
-            );
+            notice(1808, crate::zformat!("\tphp_value[{}] = {}", key, value));
         }
         for (key, value) in &pool.php_admin_values {
             notice(
                 1812,
-                format!(
-                    "\tphp_admin_value[{}] = {}",
-                    String::from_utf8_lossy(key),
-                    String::from_utf8_lossy(value)
-                ),
+                crate::zformat!("\tphp_admin_value[{}] = {}", key, value),
             );
         }
-        notice(1814, String::from(" "));
+        notice(1814, crate::zformat!(" "));
     }
 }
 

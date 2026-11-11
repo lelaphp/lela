@@ -92,8 +92,8 @@ pub(crate) struct Pool {
 }
 
 impl Pool {
-    pub(crate) fn name(&self) -> String {
-        String::from_utf8_lossy(&self.config.name).into_owned()
+    pub(crate) fn name(&self) -> Vec<u8> {
+        self.config.name.clone()
     }
 
     pub(crate) fn pm(&self) -> Pm {
@@ -302,8 +302,8 @@ impl Fpm {
         {
             zlog!(
                 Error @ fpm_conf_init_main:1824,
-                "the global prefix '{}' does not exist or is not a directory",
-                String::from_utf8_lossy(prefix)
+                bytes "the global prefix '{}' does not exist or is not a directory",
+                prefix
             );
             return false;
         }
@@ -311,8 +311,8 @@ impl Fpm {
         let Some(parsed) = conf::read(engine, &self.config_path, self.prefix.as_deref()) else {
             zlog!(
                 Error @ fpm_conf_init_main:1859,
-                "failed to load configuration file '{}'",
-                String::from_utf8_lossy(&self.config_path)
+                bytes "failed to load configuration file '{}'",
+                self.config_path
             );
             return false;
         };
@@ -363,8 +363,8 @@ impl Fpm {
             }
             zlog!(
                 Notice @ fpm_conf_init_main:1878,
-                "configuration file {} test is successful",
-                String::from_utf8_lossy(&self.config_path)
+                bytes "configuration file {} test is successful",
+                self.config_path
             );
             self.test_successful = true;
             return false;
@@ -430,8 +430,8 @@ impl Fpm {
         {
             zlog!(
                 Error @ fpm_event_pre_init:298,
-                "event mechanism '{}' is not available on this system",
-                String::from_utf8_lossy(mechanism)
+                bytes "event mechanism '{}' is not available on this system",
+                mechanism
             );
             return false;
         }
@@ -452,9 +452,9 @@ impl Fpm {
             if !crate::access::check(format) {
                 zlog!(
                     Error @ fpm_conf_post_process:1359,
-                    "[pool {}] wrong format for access.format '{}'",
+                    bytes "[pool {}] wrong format for access.format '{}'",
                     pool.name(),
-                    String::from_utf8_lossy(format)
+                    format
                 );
                 return false;
             }
@@ -605,7 +605,7 @@ impl Fpm {
             let Ok(nprocs) = usize::try_from(pool.config.pm_max_children) else {
                 zlog!(
                     Error @ fpm_scoreboard_init_main:47,
-                    "[pool {}] Unable to create scoreboard SHM because max_client is not set",
+                    bytes "[pool {}] Unable to create scoreboard SHM because max_client is not set",
                     pool.name()
                 );
                 return false;
@@ -613,7 +613,7 @@ impl Fpm {
             if nprocs < 1 {
                 zlog!(
                     Error @ fpm_scoreboard_init_main:47,
-                    "[pool {}] Unable to create scoreboard SHM because max_client is not set",
+                    bytes "[pool {}] Unable to create scoreboard SHM because max_client is not set",
                     pool.name()
                 );
                 return false;
@@ -763,8 +763,8 @@ impl Fpm {
                 zlog_sys!(
                     Error @ fpm_conf_write_pid:1261,
                     conf::errno(&e),
-                    "Unable to create the PID file ({}).",
-                    String::from_utf8_lossy(pid_file)
+                    bytes "Unable to create the PID file ({}).",
+                    pid_file
                 );
                 return false;
             }
@@ -785,8 +785,8 @@ impl Fpm {
             zlog_sys!(
                 Error @ fpm_conf_unlink_pid:1242,
                 conf::errno(&e),
-                "Unable to remove the PID file ({}).",
-                String::from_utf8_lossy(pid_file)
+                bytes "Unable to remove the PID file ({}).",
+                pid_file
             );
         }
     }
