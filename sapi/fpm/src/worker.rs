@@ -825,7 +825,9 @@ impl Worker {
         self.status_board
     }
 
-    /// `fpm_php_limit_extensions`.
+    /// `fpm_php_limit_extensions`: a path the list refuses is logged with
+    /// each `\r` and `\n` of it written as two bytes
+    /// ([`php_sapi::log_field`], #4355), so it is one line of the log.
     fn extension_allowed(&self, path: &[u8]) -> bool {
         if self.limit_extensions.is_empty() {
             return true;
@@ -838,7 +840,7 @@ impl Worker {
             zlog!(
                 Notice @ fpm_php_limit_extensions:252,
                 bytes "Access to the script '{}' has been denied (see security.limit_extensions)",
-                path
+                &*php_sapi::log_field(path)
             );
         }
         allowed
@@ -1108,13 +1110,14 @@ impl Read for Stdin {
 
 /// A program that did not open with `error`
 /// (`Z/sapi/fpm/fpm/fpm_main.c:1879-1888`): the line php-fpm logs for it,
-/// then its page, `Access denied.` for `EACCES` alone
-/// ([`php_sapi::cgi::unopened`]).
+/// the path's `\r` and `\n` written as two bytes each
+/// ([`php_sapi::log_field`], #4355), then its page, `Access denied.` for
+/// `EACCES` alone ([`php_sapi::cgi::unopened`]).
 fn unopened(path: &[u8], error: &std::io::Error) -> HostPage {
     zlog!(
         Error @ main:1881,
         bytes "Unable to open primary script: {} ({})",
-        path,
+        &*php_sapi::log_field(path),
         php_sapi::strerror(error)
     );
     php_sapi::cgi::unopened(Some(error))
