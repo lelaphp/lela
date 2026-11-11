@@ -2,9 +2,21 @@
 //! held by the master to `request_slowlog_timeout`, which writes the
 //! request to the pool's slow log once, and to
 //! `request_terminate_timeout`, which ends the child with `SIGTERM`.
+//!
+//! Two things differ from php on purpose (#4355). The request's fields,
+//! the method, path and query of the line naming a slow or timed-out
+//! request, and the slow log's `script_filename` and each frame's name
+//! and file, which hold the program's path, have each
+//! `\r` and `\n` written as two bytes ([`php_sapi::log_field`]), so a
+//! request cannot write a line of its own into either log. And a slow log
+//! the trace finds gone is made owner-only, `0600`, as the configuration
+//! makes it at the start.
+
+use std::os::unix::fs::OpenOptionsExt as _;
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use php_sapi::log_field as field;
 
 use crate::master::Fpm;
 use crate::scoreboard::{Action, Stage, Update};
@@ -56,16 +68,19 @@ pub(crate) fn check_timed_out(
     let child = &fpm.pools[p].children[c];
     let pid = child.pid;
     let name = fpm.pools[p].name();
+    // The request's method, path and query are its own, each with a line
+    // break escaped (#4355).
+    let (method, uri, query) = (
+        field(&proc.request_method),
+        field(&proc.request_uri),
+        field(&proc.query_string),
+    );
     let request = crate::zformat!(
         "\"{} {}{}{}\"",
-        proc.request_method,
-        proc.request_uri,
-        if proc.query_string.is_empty() {
-            ""
-        } else {
-            "?"
-        },
-        proc.query_string
+        method.as_ref(),
+        uri.as_ref(),
+        if query.is_empty() { "" } else { "?" },
+        query.as_ref()
     );
     let script = purify(&proc.script_filename);
     if child.slow_logged.is_none()
@@ -120,11 +135,13 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
     let pid = fpm.pools[p].children[c].pid;
     zlog!(Notice @ fpm_php_trace:195, "about to trace {pid}");
     let path = fpm.pools[p].config.slowlog.clone().unwrap_or_default();
-    // `fopen(slowlog, "a+")`.
+    // `fopen(slowlog, "a+")`; the trace makes a slow log it finds gone
+    // `0600`, as the configuration's open made it (#4355).
     let opened = std::fs::OpenOptions::new()
         .read(true)
         .append(true)
         .create(true)
+        .mode(0o600)
         .open(crate::conf::path(&path));
     match opened {
         Ok(mut file) => {
@@ -165,7 +182,7 @@ fn dump(fpm: &Fpm, p: usize, c: usize, memory: &crate::ffi::trace::Memory) -> Ve
         fpm.pools[p].name(),
         child.pid
     ));
-    entry.extend_from_slice(&script);
+    entry.extend_from_slice(&field(&script));
     entry.push(b'\n');
     let depth = fpm.pools[p].config.request_slowlog_trace_depth;
     let read = |at: u64, into: &mut [u8]| memory.read(at, into);
@@ -253,7 +270,7 @@ fn frames(
             b"???".to_vec()
         };
         out.extend_from_slice(format!("[0x{at:016x}] ").as_bytes());
-        out.extend_from_slice(&name);
+        out.extend_from_slice(&field(&name));
         out.extend_from_slice(b"()");
         let (mut file, mut lineno) = (Vec::new(), 0u32);
         let mut below = frame.below;
@@ -278,7 +295,12 @@ fn frames(
             below = down.below;
         }
         out.push(b' ');
-        out.extend_from_slice(if file.is_empty() { b"unknown" } else { &file });
+        let file = if file.is_empty() {
+            std::borrow::Cow::Borrowed(&b"unknown"[..])
+        } else {
+            field(&file)
+        };
+        out.extend_from_slice(&file);
         out.extend_from_slice(format!(":{lineno}\n").as_bytes());
         at = frame.below;
         limit -= 1;

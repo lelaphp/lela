@@ -49,7 +49,8 @@ pub use php_engine::{
     IniFile, IniFiles, IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink,
     PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR,
     PHP_VERSION, Pid, Primary, ProcessEnd, ProcessTitle, ProgramFile, ProgramServed,
-    RequestDescription, ResponseHead, Routed, Uncaught, WebRequest, fork, host_thread, main_thread,
+    RequestDescription, ResponseHead, Routed, Uncaught, WebRequest, fork, host_thread, log_field,
+    main_thread,
 };
 
 /// C's `strtol(s, NULL, 10)` and `atoi` as php's hosts call them on what

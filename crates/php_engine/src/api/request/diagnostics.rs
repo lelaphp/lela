@@ -834,7 +834,8 @@ impl Request {
         let said = |before: String, after: &str| said_as(whole, before, after);
         let site = format!(" in {named} on line {line}{trace}");
         if self.log_errors() {
-            let text = said_as(to_nul, format!("PHP {name}:  "), &site);
+            let mut text = said_as(to_nul, format!("PHP {name}:  "), "");
+            text.extend_from_slice(&log_site(named.as_bytes(), line, &trace));
             // `spprintf(&log_buffer, …)`, freed once it is logged.
             let Ok(buffer) = crate::api::raising::printf_buffer(self, text.len()) else {
                 return;
@@ -1697,6 +1698,16 @@ const E_ALL: i64 = 32767 & !Level::Strict.bit();
 /// trace for under `fatal_error_backtraces`.
 pub(super) fn fatal_errors(level: Level) -> bool {
     level.bit() & crate::exec::E_FATAL_ERRORS != 0
+}
+
+/// What follows a diagnostic's message in its log form, ` in <file> on
+/// line <n>` and the trace: the file is the one field there a request can
+/// name, the program a host found from its path, so a line break in it is
+/// written as two bytes ([`crate::log_field`], #4355); the message before
+/// it and the trace are php's and keep theirs.
+fn log_site(file: &[u8], line: u32, trace: &str) -> Vec<u8> {
+    let after = format!(" on line {line}{trace}");
+    [b" in ", &*crate::log_field(file), after.as_bytes()].concat()
 }
 
 fn level_name(level: Level) -> &'static str {

@@ -13,6 +13,16 @@
 //!
 //! An error line is the time it was written for and the entry, whole.
 //!
+//! No request writes a line of its own into either log (#4355). The
+//! request line cannot hold a `\r` or `\n`: the parser refuses a head
+//! with one before its line is begun, and `Method` and `Uri` hold
+//! neither, so a `%0D%0A` is written as the client sent it. An entry
+//! php hands over is written whole, a message over several lines among
+//! them, the file it names escaped by the engine; and a refusal escapes
+//! the path it names, which the request's decoded path can carry
+//! ([`php_sapi::log_field`]). A file the log thread makes is its
+//! owner's alone, `0600`.
+//!
 //! No line is written where it is made. Each goes onto one bounded queue
 //! that one log thread empties into the destinations, so a request thread
 //! or the connection side never waits on a disk or a pipe, as the BEAM's
@@ -35,6 +45,7 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::net::SocketAddr;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
@@ -259,11 +270,18 @@ impl Log {
 }
 
 /// `to` opened for appending, or refused, said on stderr, where it will
-/// not open.
+/// not open. A file it makes is its owner's alone, `0600` whatever the
+/// umask, since a line names a client's address and the path and query
+/// it asked for (#4355); a file that stands already keeps its permissions.
 fn open(to: &Destination) -> Out {
     match to {
         Destination::Stderr => Out::Open(Box::new(io::stderr())),
-        Destination::File(path) => match File::options().create(true).append(true).open(path) {
+        Destination::File(path) => match File::options()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+        {
             Ok(file) => Out::Open(Box::new(BufWriter::new(file))),
             Err(e) => {
                 let refusal = format!("makala: cannot open the log {}: {e}\n", path.display());
