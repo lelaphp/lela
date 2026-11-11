@@ -28,7 +28,9 @@
 //! holds neither, a binary under no Cellar, a variant's build, stands in
 //! no keg to pin, and a macOS runner is held as the oracle's machine is,
 //! since `scripts/ci/pinned-php.sh` pins php's keg and each keg it pours
-//! before any lane.
+//! before any lane. A refusal's `brew pin` names each keg as
+//! `pinned-php.sh` pins it, by the tap its receipt records, so no alias of homebrew-core's
+//! stands in for a keg poured from another tap (#4423).
 //!
 //! **What a build was made against** is the record's digest, [`Closure::digest`]: a
 //! variant's macOS build is made against the Homebrew the record names, so
@@ -85,7 +87,7 @@ impl Closure {
             }
             drifted.insert(keg.as_str());
         }
-        let (mut own, mut unpinned) = (Vec::new(), Vec::new());
+        let (mut own, mut unpinned, mut pin) = (Vec::new(), Vec::new(), Vec::new());
         if let Some(prefix) = &walked.prefix {
             let unloaded = self.0.iter().filter(|(keg, _)| !walked.names(keg));
             for (keg, recorded) in unloaded {
@@ -97,13 +99,27 @@ impl Closure {
                 drifted.insert(keg.as_str());
             }
             let pins = prefix.join("var/homebrew/pinned");
-            let loose = |keg: &&String| pins.join(keg).symlink_metadata().is_err();
-            let at_record = self.0.keys().filter(|keg| !drifted.contains(keg.as_str()));
-            unpinned.extend(at_record.filter(loose).map(String::as_str));
+            let loose = |(keg, _): &(&str, &str)| pins.join(keg).symlink_metadata().is_err();
             // A keg the record names too is held as the record's.
-            let stood_in = walked.own.iter().filter(|keg| !self.0.contains_key(*keg));
-            own.extend(stood_in.filter(loose).map(String::as_str));
+            let stood_in = walked
+                .own
+                .iter()
+                .filter(|(keg, _)| !self.0.contains_key(keg));
+            let stood_in = stood_in.map(|(keg, version)| (keg.as_str(), version.as_str()));
+            own.extend(stood_in.filter(loose));
+            let at_record = self
+                .0
+                .iter()
+                .filter(|(keg, _)| !drifted.contains(keg.as_str()));
+            let at_record = at_record.map(|(keg, version)| (keg.as_str(), version.as_str()));
+            unpinned.extend(at_record.filter(loose));
+            let named = own.iter().chain(&unpinned);
+            pin.extend(named.map(|(keg, version)| full_name(prefix, keg, version)));
         }
+        let (own, unpinned): (Vec<_>, Vec<_>) = (
+            own.into_iter().map(|(keg, _)| keg).collect(),
+            unpinned.into_iter().map(|(keg, _)| keg).collect(),
+        );
         let mut refusal = Vec::new();
         if !drift.is_empty() {
             refusal.push(format!(
@@ -128,11 +144,10 @@ impl Closure {
             if !unpinned.is_empty() {
                 loose.push(format!("{} of the pin's [closure]", unpinned.join(", ")));
             }
-            own.append(&mut unpinned);
             refusal.push(format!(
                 "{} {is} not `brew pin`ned, so a `brew upgrade` can move {it} before this walk sees the move (#3468): `brew pin {}`",
                 loose.join(", and "),
-                own.join(" ")
+                pin.join(" ")
             ));
         }
         if !refusal.is_empty() {
@@ -144,12 +159,12 @@ impl Closure {
 
 /// What a walk from the binaries found: every keg a library of theirs
 /// resolved into, at the version it resolved to, the kegs the binaries
-/// stand in themselves, and the Homebrew prefix the first keg or binary
+/// stand in themselves, each at its version, and the Homebrew prefix the first keg or binary
 /// stands under, none where nothing does.
 #[derive(Debug, Default)]
 struct Walked {
     kegs: BTreeSet<(String, String)>,
-    own: BTreeSet<String>,
+    own: BTreeSet<(String, String)>,
     prefix: Option<PathBuf>,
 }
 
@@ -161,7 +176,7 @@ impl Walked {
         for binary in binaries {
             let real = fs::canonicalize(binary)
                 .with_context(|| format!("resolving the pinned binary {}", binary.display()))?;
-            if let Some((prefix, (keg, _))) = in_cellar(&real) {
+            if let Some((prefix, keg)) = in_cellar(&real) {
                 walked.prefix.get_or_insert(prefix);
                 walked.own.insert(keg);
             }
@@ -237,6 +252,36 @@ impl Own {
     pub(crate) fn keg_at(&self, path: &Path) -> Option<String> {
         let (prefix, (keg, _)) = in_cellar(&fs::canonicalize(path).ok()?)?;
         (prefix == self.prefix).then_some(keg)
+    }
+}
+
+/// The name a `brew pin` of the keg `<prefix>/Cellar/<keg>/<version>`
+/// gives the formula it was poured from, as `scripts/ci/pinned-php.sh`
+/// pins it (#4423) and as brew names a formula (`Formula#full_name`):
+/// `<tap>/<keg>` where the keg's receipt records a tap other than
+/// homebrew-core, `dax/pin/php@8.5` for one `pinned-php.sh` poured, and the
+/// bare name otherwise. A bare name brew resolves through homebrew-core's
+/// aliases before a tap's formula, so `php@8.5` would pin `php` while it
+/// is an alias of `php` there.
+fn full_name(prefix: &Path, keg: &str, version: &str) -> String {
+    #[derive(Deserialize)]
+    struct Receipt {
+        source: Source,
+    }
+    #[derive(Deserialize)]
+    struct Source {
+        tap: Option<String>,
+    }
+    let receipt = prefix
+        .join("Cellar")
+        .join(keg)
+        .join(version)
+        .join("INSTALL_RECEIPT.json");
+    let read = fs::read_to_string(receipt).ok();
+    let receipt = read.and_then(|text| serde_json::from_str::<Receipt>(&text).ok());
+    match receipt.and_then(|receipt| receipt.source.tap).as_deref() {
+        None | Some("homebrew/core") => keg.to_owned(),
+        Some(tap) => format!("{tap}/{keg}"),
     }
 }
 
@@ -638,7 +683,8 @@ mod tests {
         let tree = Tree::new("closure-own").unwrap();
         let (php, root) = prefix(&tree);
         let walked = Walked::from(&[&php]).unwrap();
-        assert_eq!(walked.own, BTreeSet::from(["php".to_owned()]));
+        let own = ("php".to_owned(), "1".to_owned());
+        assert_eq!(walked.own, BTreeSet::from([own]));
         fs::remove_file(root.join("var/homebrew/pinned/php")).unwrap();
         let err = closure(&RECORD).held(&[&php]).unwrap_err().to_string();
         assert_eq!(
@@ -653,6 +699,38 @@ mod tests {
             "php, where the pinned binaries stand, and zip of the pin's [closure] are not `brew \
              pin`ned, so a `brew upgrade` can move them before this walk sees the move (#3468): \
              `brew pin php zip`"
+        );
+    }
+
+    /// The pin a refusal asks for names each keg as brew names the formula
+    /// its receipt says it was poured from, as `scripts/ci/pinned-php.sh`
+    /// pins it (#4423): a php poured from the tap `dax/pin` by its tap, so
+    /// homebrew-core's alias of the same name, `php@8.5` of `php`, cannot
+    /// stand in for it, and a keg of homebrew-core's bare; the sentence
+    /// names each by its keg.
+    #[test]
+    fn the_pin_a_refusal_asks_for_names_the_tap_a_keg_was_poured_from() {
+        let tree = Tree::new("closure-tapped").unwrap();
+        let (php, root) = prefix(&tree);
+        let receipt = |keg: &str, tap: &str| {
+            let json = format!(r#"{{"source":{{"tap":"{tap}"}}}}"#);
+            fs::write(
+                root.join("Cellar").join(keg).join("INSTALL_RECEIPT.json"),
+                json,
+            )
+            .unwrap();
+        };
+        receipt("php/1", "dax/pin");
+        receipt("zip/1.12_1", "homebrew/core");
+        for keg in ["php", "zip"] {
+            fs::remove_file(root.join("var/homebrew/pinned").join(keg)).unwrap();
+        }
+        let err = closure(&RECORD).held(&[&php]).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "php, where the pinned binaries stand, and zip of the pin's [closure] are not `brew \
+             pin`ned, so a `brew upgrade` can move them before this walk sees the move (#3468): \
+             `brew pin dax/pin/php zip`"
         );
     }
 
