@@ -144,10 +144,7 @@ fn served(argv: &[OsString]) -> i32 {
     let options = match Options::parse(argv, &|startup| cli(startup).has_shell()) {
         Ok(options) => options,
         Err(refused) => {
-            std::io::stderr()
-                .lock()
-                .write_all(refused.stderr.as_bytes())
-                .ok();
+            std::io::stderr().lock().write_all(&refused.stderr).ok();
             std::io::stdout()
                 .lock()
                 .write_all(refused.stdout.as_bytes())

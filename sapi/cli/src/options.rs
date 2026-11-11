@@ -170,7 +170,7 @@ pub struct Options {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refused {
     pub stdout: String,
-    pub stderr: String,
+    pub stderr: Vec<u8>,
     pub exit_code: i32,
 }
 
@@ -305,7 +305,7 @@ impl Options {
             if programs.is_empty() {
                 return Err(Refused {
                     stdout: error.to_owned(),
-                    stderr: String::new(),
+                    stderr: Vec::new(),
                     exit_code: 1,
                 });
             }
@@ -642,7 +642,7 @@ pub fn usage_text() -> String {
 fn usage(exit_code: i32) -> Refused {
     Refused {
         stdout: usage_text(),
-        stderr: String::new(),
+        stderr: Vec::new(),
         exit_code,
     }
 }
@@ -657,7 +657,7 @@ mod tests {
     }
 
     /// What the line asks of a binary whose engine has a shell.
-    fn ask_shell(words: &[&str]) -> Result<(bool, Ask), (String, String, i32)> {
+    fn ask_shell(words: &[&str]) -> Result<(bool, Ask), (String, Vec<u8>, i32)> {
         let argv: Vec<OsString> = words.iter().map(OsString::from).collect();
         Options::parse(&argv, &|_| true)
             .map(|o| (o.interactive, o.ask))
@@ -704,16 +704,16 @@ mod tests {
         ));
     }
 
-    fn ask(words: &[&str]) -> Result<Ask, (String, String, i32)> {
+    fn ask(words: &[&str]) -> Result<Ask, (String, Vec<u8>, i32)> {
         parse(words)
             .map(|o| o.ask)
             .map_err(|r| (r.stdout, r.stderr, r.exit_code))
     }
 
     /// Whether the refusal is the usage on stdout, its stderr and its exit.
-    fn refused(words: &[&str]) -> (bool, String, i32) {
+    fn refused(words: &[&str]) -> (bool, Vec<u8>, i32) {
         match parse(words) {
-            Ok(options) => (false, format!("{:?}", options.ask), 0),
+            Ok(options) => (false, format!("{:?}", options.ask).into_bytes(), 0),
             Err(r) => (r.stdout == usage_text(), r.stderr, r.exit_code),
         }
     }
@@ -764,13 +764,13 @@ mod tests {
             parse(&["-r", "echo 1;", "-f", "a.php"]),
             Err(Refused {
                 stdout: CONFLICT.to_owned(),
-                stderr: String::new(),
+                stderr: Vec::new(),
                 exit_code: 1
             })
         );
         assert_eq!(
             ask(&["-r", "echo 1;", "-r", "echo 2;"]),
-            Err(("You can use -r only once.\n".to_owned(), String::new(), 1))
+            Err(("You can use -r only once.\n".to_owned(), Vec::new(), 1))
         );
     }
 
@@ -802,7 +802,7 @@ mod tests {
             refused(&["-n", "-x", "-v"]),
             (
                 true,
-                "Error in argument 2, char 2: option not found x\n".to_owned(),
+                b"Error in argument 2, char 2: option not found x\n".to_vec(),
                 1
             )
         );
@@ -815,52 +815,52 @@ mod tests {
         let line = |words: &[&str]| refused(words).1;
         assert_eq!(
             line(&["-x"]),
-            "Error in argument 1, char 2: option not found x\n"
+            b"Error in argument 1, char 2: option not found x\n"
         );
         assert_eq!(
             line(&["-nx"]),
-            "Error in argument 1, char 3: option not found x\n"
+            b"Error in argument 1, char 3: option not found x\n"
         );
         assert_eq!(
             line(&["-n", "-nx"]),
-            "Error in argument 2, char 3: option not found x\n"
+            b"Error in argument 2, char 3: option not found x\n"
         );
         assert_eq!(
             line(&["-d"]),
-            "Error in argument 1, char 2: no argument for option d\n"
+            b"Error in argument 1, char 2: no argument for option d\n"
         );
         assert_eq!(
             line(&["-nd"]),
-            "Error in argument 1, char 3: no argument for option d\n"
+            b"Error in argument 1, char 3: no argument for option d\n"
         );
         assert_eq!(
             line(&["-n", "-c"]),
-            "Error in argument 2, char 2: no argument for option c\n"
+            b"Error in argument 2, char 2: no argument for option c\n"
         );
         assert_eq!(
             line(&["--foo"]),
-            "Error in argument 1, char 1: no argument for option -\n"
+            b"Error in argument 1, char 1: no argument for option -\n"
         );
         assert_eq!(
             line(&["--foo=bar"]),
-            "Error in argument 1, char 1: no argument for option -\n"
+            b"Error in argument 1, char 1: no argument for option -\n"
         );
         assert_eq!(
             line(&["-n", "--foo"]),
-            "Error in argument 2, char 2: no argument for option -\n"
+            b"Error in argument 2, char 2: no argument for option -\n"
         );
         assert_eq!(
             line(&["-nn", "--foo"]),
-            "Error in argument 2, char 3: no argument for option f\n"
+            b"Error in argument 2, char 3: no argument for option f\n"
         );
         assert_eq!(
             line(&["-n", "-dx", "--foo"]),
-            "Error in argument 3, char 2: no argument for option -\n"
+            b"Error in argument 3, char 2: no argument for option -\n"
         );
-        assert_eq!(line(&["-:"]), "Error in argument 1, char 2: : in flags\n");
+        assert_eq!(line(&["-:"]), b"Error in argument 1, char 2: : in flags\n");
         assert_eq!(
             line(&["-n", "-x", "-d"]),
-            "Error in argument 2, char 2: option not found x\n"
+            b"Error in argument 2, char 2: option not found x\n"
         );
     }
 
@@ -899,21 +899,21 @@ mod tests {
     fn the_shell_is_phps_sentence_for_a_build_without_readline() {
         assert_eq!(
             ask(&["-n", "-a"]),
-            Err((NO_SHELL.to_owned(), String::new(), 1))
+            Err((NO_SHELL.to_owned(), Vec::new(), 1))
         );
         assert_eq!(ask(&["-n", "-a", "-v"]), Ok(Ask::Version));
         assert_eq!(
             ask(&["-n", "-r", "echo 1;", "-a"]),
-            Err((NO_SHELL.to_owned(), String::new(), 1))
+            Err((NO_SHELL.to_owned(), Vec::new(), 1))
         );
     }
 
     #[test]
     fn ini_diff_is_refused_with_the_usage_and_any_other_value_in_phps_words() {
-        assert_eq!(refused(&["-n", "--ini=diff"]), (true, String::new(), 1));
+        assert_eq!(refused(&["-n", "--ini=diff"]), (true, Vec::new(), 1));
         assert_eq!(
             ask(&["-n", "--ini=x"]),
-            Err(("Unknown argument for --ini\n".to_owned(), String::new(), 1))
+            Err(("Unknown argument for --ini\n".to_owned(), Vec::new(), 1))
         );
     }
 
@@ -944,7 +944,7 @@ mod tests {
 
     #[test]
     fn highlight_and_strip_after_r_are_phps_sentences_and_r_after_them_the_conflict() {
-        let sentence = |text: &str| Err((text.to_owned(), String::new(), 1));
+        let sentence = |text: &str| Err((text.to_owned(), Vec::new(), 1));
         assert_eq!(
             ask(&["-n", "-r", "echo 1;", "-s"]),
             sentence("Source highlighting only works for files.\n")
@@ -994,7 +994,7 @@ mod tests {
         );
         assert_eq!(
             ask(&["-n", "-l", "-r", "echo 1;"]),
-            Err((CONFLICT.to_owned(), String::new(), 1))
+            Err((CONFLICT.to_owned(), Vec::new(), 1))
         );
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
         // The file `-f` named is not among them: `goto err` skips it.
         assert_eq!(
             ask(&["-n", "-l", "-a", "-f", "a.php"]),
-            Err((NO_SHELL.to_owned(), String::new(), 1))
+            Err((NO_SHELL.to_owned(), Vec::new(), 1))
         );
     }
 
@@ -1065,7 +1065,7 @@ mod tests {
     /// last sentence set is the one put.
     #[test]
     fn process_stdin_refuses_a_second_switch_in_phps_words() {
-        let sentence = |text: &str| Err((text.to_owned(), String::new(), 1));
+        let sentence = |text: &str| Err((text.to_owned(), Vec::new(), 1));
         let r_or_f = "You can use -R or -F only once.\n";
         assert_eq!(ask(&["-n", "-F", "a", "-F", "a"]), sentence(r_or_f));
         assert_eq!(ask(&["-n", "-F", "a", "-R", "a"]), sentence(r_or_f));

@@ -13,6 +13,9 @@
 //! - `env -i php-cgi -n -h` with an `argv[0]` of `/x/p\xe9`, on stdout:
 //!   `php_cgi_usage` (`Z/sapi/cgi/cgi_main.c:1015`) names the program by
 //!   what follows `argv[0]`'s last `/` through `printf`'s `%s`.
+//! - `env -i php-cgi -n $'-\xe9'`, on stderr: `php_opt_error` names the
+//!   switch it did not find as the one byte it was given, through
+//!   `fprintf(stderr, "…option not found %c\n", …)` (`Z/main/getopt.c:39`).
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt as _;
@@ -43,6 +46,10 @@ const PINNED_USAGE: &[u8] = b"Usage: p\xe9 [-q] [-h] [-s] [-v] [-i] [-f <file>]\
     \x20 -v               Version number\n\
     \x20 -w               Display source with stripped comments and whitespace.\n\
     \x20 -T <count>       Measure execution time of script repeated <count> times.\n";
+
+/// What the pinned php-cgi wrote on stderr, whole, for a switch of `\xe9`;
+/// its usage followed on stdout and it ended with 1.
+const PINNED_NOT_FOUND: &[u8] = b"Error in argument 2, char 2: option not found \xe9\n";
 
 /// `bytes` as text, each byte past ASCII written `\xNN` and a `\` as
 /// `\\`, so no two outputs differing show alike.
@@ -91,4 +98,16 @@ fn the_usage_names_a_program_that_is_not_utf8_with_its_own_bytes() {
         (shown(PINNED_USAGE), String::new())
     );
     assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn a_switch_that_is_not_utf8_is_named_with_its_own_byte() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+        .arg("-n")
+        .arg(OsStr::from_bytes(b"-\xe9"))
+        .env_clear()
+        .output()
+        .unwrap();
+    assert_eq!(shown(&out.stderr), shown(PINNED_NOT_FOUND));
+    assert_eq!(out.status.code(), Some(1));
 }
