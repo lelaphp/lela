@@ -106,7 +106,8 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 use cli::{
-    Cli, Command, ReviewCommand, TicketCommand, TrackCommand, UsageCommand, WorktreeCommand,
+    Cli, Command, OracleCommand, ReviewCommand, TicketCommand, TrackCommand, UsageCommand,
+    WorktreeCommand,
 };
 use divergence::Registry;
 use manifest::Manifest;
@@ -375,6 +376,7 @@ fn command_line() -> Result<()> {
         Command::Regions { .. } => bail!("regions: answered above"),
         Command::Worktree { .. } => bail!("worktree: answered above"),
         Command::Steer { .. } => bail!("steer: answered above"),
+        Command::Oracle { .. } => bail!("oracle: answered above"),
         Command::Review { .. } => bail!("review: answered above"),
     }
 }
@@ -388,6 +390,17 @@ fn said(laid: Result<new_ext::Laid>) -> Result<()> {
     for note in &laid.notes {
         println!("{note}");
     }
+    Ok(())
+}
+
+/// `oracle propose`: the diff on stdout and the notes on stderr, and
+/// nothing written, the pin read whatever its defects.
+fn oracle_propose(root: &Path, keg: Option<&Path>, source: Option<&Path>) -> Result<()> {
+    let proposal = oracle::propose(root, keg, source)?;
+    for note in &proposal.notes {
+        eprintln!("{note}");
+    }
+    print!("{}", proposal.diff);
     Ok(())
 }
 
@@ -679,6 +692,9 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             from,
             *dry_run,
         )),
+        Command::Oracle {
+            command: OracleCommand::Propose { keg, source },
+        } => Some(oracle_propose(root, keg.as_deref(), source.as_deref())),
         Command::Worktree {
             command: WorktreeCommand::Add { branch, ticket },
         } => Some(

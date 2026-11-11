@@ -91,7 +91,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=4065080b1aae6696e88a377328dbcd90dadf4b64f458f6b4da96d10da16b57d3 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=559f450646de9e7b5c1b15da1e26b1ea82863a917d68ee6a0b481f8820f8d8c9 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -127,9 +127,9 @@ third-engine-design.md
 | tier | tier.lock | 246 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 40 |  |
-| harness | xtask.lock | 495 |  |
+| harness | xtask.lock | 497 |  |
 
-<!-- /computed in=1bb152e164ccc239b873239a071509cb5e845f51aae52d168a77e4c97c1212f3 out=7ded9658e5c28ded725b7a9f02b3e8f481bece363c5cce5805d52aee471dfcbc -->
+<!-- /computed in=50c321d16c5a2098b9905f8b807f99ad0cba33cead6efd745ee0a0f62ed60771 out=5f3c10af9ee382585192a40df6c18302cf5f32cbfefe519e4824a2b48e8e39d6 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -165,6 +165,7 @@ Commands:
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   steer              Apply a proposal to one of the harness's own files, and only where it adds: one changed value writes nothing
+  oracle             The oracle's pin: `propose` prints the whole diff a bump writes, after a person has poured the new keg. Writes no reading
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
   new-ext            Lay one extension crate down at ext/<name> from the template, with its `php_bundle` line, ext/clippy.toml and ext/AGENTS.md row; refuses an existing one
   new-sapi           Lay one host crate down at sapi/<name> as the CLI and CGI are laid, with its binary and test; refuses an existing one or one without its `[[crate]]` row (ADR-0008)
@@ -175,7 +176,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=ad3682913b1c9fe73e65c3fce0a60ac1826c8723c23c014776ec640edbf42b35 out=6d7323f3774cb04413d9909d5cf1d31315ef9b1d87bffedb520314341d496897 -->
+<!-- /computed in=bb13ed1932197b20cda2b458af6c122e08a3fc8d4e6cf2d962a8fb51d8a6464c out=6ad00b9849b133d7b7b4569bfbc0c0cc146f70316c4d0d6214ada271c888d6df -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

@@ -121,7 +121,7 @@ impl Formula {
 /// Whether a keg at `bottle` holds php `version`: the version itself, or
 /// the version and a revision as Homebrew writes one, `8.5.2_1`. `_0` and
 /// `_01` are not how it writes one, and `8.5.20` is another version.
-fn bottles(version: &str, bottle: &str) -> bool {
+pub(super) fn bottles(version: &str, bottle: &str) -> bool {
     let revised = |revision: &str| {
         let written = revision.strip_prefix('_')?.parse::<u32>().ok()?;
         Some(written > 0 && format!("_{written}") == revision)

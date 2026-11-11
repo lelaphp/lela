@@ -1,0 +1,59 @@
+# A pin of oracle.toml's shape for `oracle propose`'s test (#4384), at a
+# version no pin names. `{name}` is filled by the test from the machine it
+# lays down: the prefix, the trees, each binary's md5 and the commit.
+
+[oracle]
+version = "9.1.1"
+# The Homebrew formula the keg is poured from.
+formula = "php"
+# The keg path, not the bare name.
+path = "{prefix}/Cellar/php/9.1.1/bin/php"
+md5 = "{md5:php}"
+
+[closure]
+# The kegs the pinned binaries load, and the receipt's other runtime kegs;
+# frozen as the Cellar stood on 2026-01-01, each `brew pin`ned.
+ca-certificates = "2026-01-01"
+"icu4c@78" = "78.1"
+zip = "1.0"
+
+[source]
+# The php-src tree at the same tag.
+tag = "php-9.1.1"
+commit = "{short}"
+path = "{src}/php-src-9.1.1"
+phpt_files = 2    # `find . -name '*.phpt' | wc -l` at the tag
+
+[recipe]
+script_name = "witness.php"
+preamble = "<?php\n"
+args = ["-n"]
+ini = [
+    "display_errors=1",
+    "date.timezone=UTC",
+]
+env_clear = true
+[recipe.env]
+TEST_PHP_EXECUTABLE = "{prefix}/Cellar/php/9.1.1/bin/php"
+TZ = "UTC"
+
+[recipe.limits]
+timeout_s = 60
+
+[recipe.normalise]
+crlf_to_lf = true
+trim = " \t\n\r\u0000\u000B"
+scratch_token = "%SCRATCH%"
+
+[variant.zend-test]
+# Made from the tag and, on macOS, against [closure]: rebuilt, never proposed.
+flags = ["--enable-zend-test"]
+darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "0", closure = "{closure}" }
+linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "1", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
+
+[sapi]
+# The oracle's other hosts, from the keg [oracle] pins.
+cgi = { path = "{prefix}/Cellar/php/9.1.1/bin/php-cgi", md5 = "{md5:php-cgi}" }
+fpm = { path = "{prefix}/Cellar/php/9.1.1/sbin/php-fpm", md5 = "{md5:php-fpm}" }
+phpdbg = { path = "{prefix}/Cellar/php/9.1.1/bin/phpdbg", md5 = "{md5:phpdbg}" }
+

@@ -1,0 +1,9 @@
+{
+  "env": {
+    "BASH_MAX_TIMEOUT_MS": "2700000",
+    "TEST_PHP_SRCDIR": "{src}/php-src-9.1.2"
+  },
+  "permissions": {
+    "allow": []
+  }
+}

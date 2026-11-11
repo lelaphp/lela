@@ -155,6 +155,33 @@ impl Closure {
         }
         Ok(())
     }
+
+    /// The record `binaries` stand to on this machine, walked as
+    /// [`Closure::held`] walks them, which a bump writes (#4384): each keg
+    /// they load at the version it resolved to, and each keg of `named`,
+    /// the runtime kegs of their keg's receipt, that none loads, at the
+    /// version `<prefix>/opt/<keg>` points at; nothing else. A keg
+    /// loaded at two versions and a named keg not installed each refuse,
+    /// since no record holds either.
+    pub(crate) fn walked(binaries: &[&Path], named: &[String]) -> Result<Closure> {
+        let walked = Walked::from(binaries)?;
+        let mut kegs = BTreeMap::new();
+        for (keg, version) in &walked.kegs {
+            if let Some(other) = kegs.insert(keg.clone(), version.clone()) {
+                bail!("{keg} is loaded at two versions, {other} and {version}");
+            }
+        }
+        for keg in named.iter().filter(|keg| !walked.names(keg)) {
+            let version = walked.prefix.as_deref().and_then(|p| installed(p, keg));
+            let Some(version) = version else {
+                bail!(
+                    "{keg}, a runtime keg of the receipt, is loaded by none of the binaries and installed at no version"
+                );
+            };
+            kegs.insert(keg.clone(), version);
+        }
+        Ok(Closure(kegs))
+    }
 }
 
 /// What a walk from the binaries found: every keg a library of theirs

@@ -226,6 +226,7 @@ oracle::Promised::holds
 oracle::Promised::load
 oracle::Promised::or_skip
 oracle::Promised::parse
+oracle::Proposal
 oracle::Provenance
 oracle::Recipe
 oracle::Regime
@@ -255,6 +256,7 @@ oracle::compare
 oracle::diff
 oracle::normalise
 oracle::normalise_in
+oracle::propose
 oracle::run_by
 oracle::verdict
 owner::SESSION_VARIABLE

@@ -32,7 +32,7 @@ pub enum Platform {
 }
 
 impl Platform {
-    const ALL: [Platform; 3] = [
+    pub(super) const ALL: [Platform; 3] = [
         Platform::DarwinArm64,
         Platform::LinuxX86_64,
         Platform::LinuxAarch64,

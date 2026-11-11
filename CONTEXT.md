@@ -163,7 +163,7 @@ One `xtask` subcommand that measures or judges something and ends by writing a r
 _Avoid_: check (the manifest's `check` predicate and `api_check`, its module), gate (that is a numbered pass/fail bar such as G1), tool (a rule's `tool`, and the hook's `tool_name` and `tool_input`, Claude Code's words), script (php's `script_name`)
 
 **Command**:
-One `xtask` subcommand that acts or answers and writes no reading: `track` and its `next` and `chains`, `worktree`, `regions`, `new-ext`, `generate`, `status`. What decides which of the two a subcommand is, is the reading and never the name it hangs under, so `track work` is the one subcommand of a command that is an instrument: it judges what it lands and writes a `track-work` reading. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
+One `xtask` subcommand that acts or answers and writes no reading: `track` and its `next` and `chains`, `worktree`, `regions`, `new-ext`, `generate`, `status`, `oracle propose`. What decides which of the two a subcommand is, is the reading and never the name it hangs under, so `track work` is the one subcommand of a command that is an instrument: it judges what it lands and writes a `track-work` reading. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
 _Avoid_: helper, utility, subtool
 
 **Tally**:
