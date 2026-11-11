@@ -142,7 +142,7 @@ fn listen(path: &[u8], backlog: i32, allowed: Option<&[u8]>) -> Option<Listening
         let ip = if host.is_empty() || host.starts_with(b"*") {
             std::net::Ipv4Addr::UNSPECIFIED
         } else {
-            resolve(host)?
+            resolve(host, addresses, fcgi_log)?
         };
         let address = SockaddrIn::from(std::net::SocketAddrV4::new(ip, port.get()));
         let fd = bound(AddressFamily::Inet, &address, backlog)?;
@@ -213,25 +213,68 @@ fn bound(
     }
 }
 
-/// `inet_addr(host)`, and `gethostbyname` where it is no address:
-/// `fcgi_listen`'s `Cannot resolve host name` where neither answers.
-fn resolve(host: &[u8]) -> Option<std::net::Ipv4Addr> {
-    let text = std::str::from_utf8(host).ok()?;
-    if let Ok(ip) = text.parse() {
+/// `MAXFQDNLEN` (`Z/main/php_network.h:365`), the longest name
+/// `fcgi_listen` hands the lookup.
+const MAXFQDNLEN: usize = 255;
+
+/// `fcgi_listen`'s address for a host that is neither empty nor `*`
+/// (`Z/main/fastcgi.c:684-699`), in php's order: a dotted address, as
+/// `inet_pton(AF_INET, host)` reads one; else the name looked up, one of
+/// more than `MAXFQDNLEN` bytes never asked, and its one IPv4 address. A
+/// name that answers none is refused with `Cannot resolve host name
+/// '<host>'!`, and one that answers more than one with `Host '<host>' has
+/// multiple addresses. You must choose one explicitly!`, each said through
+/// `log` with its newline, as `fcgi_log` says them. `lookup` is the name's
+/// IPv4 addresses in the resolver's order: [`addresses`] where php-cgi
+/// serves.
+fn resolve(
+    host: &[u8],
+    lookup: impl FnOnce(&[u8]) -> Vec<std::net::Ipv4Addr>,
+    mut log: impl FnMut(&[u8]),
+) -> Option<std::net::Ipv4Addr> {
+    if let Some(ip) = std::str::from_utf8(host).ok().and_then(|t| t.parse().ok()) {
         return Some(ip);
     }
-    let found = std::net::ToSocketAddrs::to_socket_addrs(&(text, 0))
-        .ok()
-        .and_then(|mut addrs| {
-            addrs.find_map(|addr| match addr.ip() {
-                IpAddr::V4(ip) => Some(ip),
-                IpAddr::V6(_) => None,
-            })
-        });
-    if found.is_none() {
-        eprintln!("Cannot resolve host name '{text}'!");
-    }
-    found
+    let found = if host.len() > MAXFQDNLEN {
+        Vec::new()
+    } else {
+        lookup(host)
+    };
+    let line: &[&[u8]] = match found[..] {
+        [ip] => return Some(ip),
+        [] => &[b"Cannot resolve host name '", host, b"'!\n"],
+        [_, _, ..] => &[
+            b"Host '",
+            host,
+            b"' has multiple addresses. You must choose one explicitly!\n",
+        ],
+    };
+    log(&line.concat());
+    None
+}
+
+/// `php_network_gethostbyname(host)` (`Z/main/network.c:1410`), which is
+/// `gethostbyname(3)` on darwin, read as its `h_addr_list` where
+/// `h_addrtype` is `AF_INET`: the IPv4 addresses `getaddrinfo` lists for
+/// the name, one per address since std asks for `SOCK_STREAM` alone, as
+/// ext/standard's `gethostbynamel` reads the same list. None where the
+/// lookup fails or answers IPv6 alone, which `gethostbyname` answers with
+/// no `AF_INET` entry; a name that is no UTF-8 is none any resolver
+/// answers.
+fn addresses(host: &[u8]) -> Vec<std::net::Ipv4Addr> {
+    let Ok(text) = std::str::from_utf8(host) else {
+        return Vec::new();
+    };
+    std::net::ToSocketAddrs::to_socket_addrs(&(text, 0))
+        .map(|found| {
+            found
+                .filter_map(|addr| match addr.ip() {
+                    IpAddr::V4(ip) => Some(ip),
+                    IpAddr::V6(_) => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What one process serves through: the connection, the request's
@@ -660,4 +703,76 @@ fn drain(wire: &mut Wire) {
         Conn::Unix(s) => s.set_nonblocking(false),
     }
     .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::net::Ipv4Addr;
+
+    use super::resolve;
+
+    /// What `resolve` gave and what it said, under a lookup that answers
+    /// `answer` and counts how often it was asked.
+    fn resolved(host: &[u8], answer: &[Ipv4Addr]) -> (Option<Ipv4Addr>, Vec<u8>, u32) {
+        let asked = Cell::new(0);
+        let mut said = Vec::new();
+        let lookup = |_: &[u8]| {
+            asked.set(asked.get() + 1);
+            answer.to_vec()
+        };
+        let ip = resolve(host, lookup, |line| said.extend_from_slice(line));
+        (ip, said, asked.get())
+    }
+
+    /// The pinned php-cgi 8.5.12's stderr, before its `Couldn't create`
+    /// line, for `env -i php-cgi -n -b dns.google:19999`, a name whose two
+    /// A records the resolver answered (#4402).
+    #[test]
+    fn a_name_with_two_addresses_is_refused_with_php_s_line() {
+        let two = [Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(8, 8, 4, 4)];
+        let (ip, said, asked) = resolved(b"dns.google", &two);
+        assert_eq!(ip, None);
+        assert_eq!(
+            said,
+            b"Host 'dns.google' has multiple addresses. You must choose one explicitly!\n"
+        );
+        assert_eq!(asked, 1);
+    }
+
+    /// The pinned php-cgi's line for `-b no.such.name.invalid:19999`.
+    #[test]
+    fn a_name_with_no_address_is_refused_with_php_s_line() {
+        let (ip, said, _) = resolved(b"no.such.name.invalid", &[]);
+        assert_eq!(ip, None);
+        assert_eq!(said, b"Cannot resolve host name 'no.such.name.invalid'!\n");
+    }
+
+    #[test]
+    fn a_name_with_one_address_is_that_address() {
+        let (ip, said, asked) = resolved(b"localhost", &[Ipv4Addr::LOCALHOST]);
+        assert_eq!(ip, Some(Ipv4Addr::LOCALHOST));
+        assert!(said.is_empty());
+        assert_eq!(asked, 1);
+    }
+
+    /// `inet_pton` reads a dotted address before any lookup, and
+    /// `MAXFQDNLEN` keeps a longer name from the lookup.
+    #[test]
+    fn a_dotted_address_and_a_name_past_maxfqdnlen_are_never_looked_up() {
+        let two = [Ipv4Addr::LOCALHOST, Ipv4Addr::LOCALHOST];
+        let (ip, said, asked) = resolved(b"192.0.2.1", &two);
+        assert_eq!(ip, Some(Ipv4Addr::new(192, 0, 2, 1)));
+        assert_eq!((said.len(), asked), (0, 0));
+        let long = [b'a'; 256];
+        let (ip, said, asked) = resolved(&long, &two);
+        assert_eq!(ip, None);
+        assert_eq!(
+            said,
+            [&b"Cannot resolve host name '"[..], &long, b"'!\n"].concat()
+        );
+        assert_eq!(asked, 0);
+        let (_, _, asked) = resolved(&long[..255], &two);
+        assert_eq!(asked, 1);
+    }
 }
