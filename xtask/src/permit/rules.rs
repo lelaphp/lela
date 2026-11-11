@@ -227,13 +227,14 @@ pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement>
 }
 
 /// Whether `rule` judges the call at all: its tool, a file its exempt does
-/// not cover and its scope does (#23), and a predicate that describes a
-/// call.
+/// not cover and its scope does (#23), or any file where the row's `adding`
+/// reaches past its scope (#4363), and a predicate that describes a call.
 fn applies(rule: &Rule, call: &Call, path: Option<&Path>) -> bool {
+    let reached = |path: &Path| rule.covers(path) || rule.predicate.adding.is_some();
     (rule.tool.is_empty() || rule.tool.iter().any(|t| t == call.judged_as()))
         && !(rule.runs == Runs::Foreground && call.in_background())
         && !path.is_some_and(|path| rule.exempts(path))
-        && (rule.scope.is_empty() || path.is_some_and(|path| rule.covers(path)))
+        && (rule.scope.is_empty() || path.is_some_and(reached))
         && rule.predicate.describes_a_call()
 }
 
@@ -296,7 +297,20 @@ fn evaluate(
             }),
         }
     } else if p.deny == Some(true) {
-        true
+        // The scope whole; past it, with `adding`, a write that adds a hit
+        // of its pattern to the file it leaves, as a `deny_pattern` over a
+        // write is read (#510, #4363).
+        let added = |pattern: &str| -> Result<bool> {
+            let regex = Regex::new(pattern)
+                .with_context(|| format!("rule \"{}\": adding is not a regex", rule.id))?;
+            Ok(call
+                .rewrite(root, path)
+                .is_some_and(|(before, after)| adds(&regex, &after, &before)))
+        };
+        match &p.adding {
+            Some(pattern) if !path.is_some_and(|path| rule.covers(path)) => added(pattern)?,
+            _ => true,
+        }
     } else if p.writes == Some(true) {
         // A write: an edit's or a write's file, or a shell line that
         // lands a write somewhere, by a command or a redirection (#3621,
@@ -757,6 +771,88 @@ mod tests {
         assert!(!m("seams.toml", "docs/seams.toml"));
         assert!(m("ext/*/src/ffi/", "ext/curl/src/ffi/bindings.rs"));
         assert!(!m("ext/*/src/ffi/", "ext/curl/src/lib.rs"));
+    }
+
+    /// A `deny = true` row with `adding` (#4363): every write into its
+    /// scope is refused, and past the scope a write that adds a hit of the
+    /// pattern to the file it leaves, while one that leaves each hit as it
+    /// stood, or adds none, is no finding of the row's; a row without
+    /// `adding` judges nothing past its scope. The pattern here is a
+    /// stand-in, so this file carries no line the tracked row refuses.
+    #[test]
+    fn a_deny_row_with_adding_refuses_its_scope_and_an_added_hit_anywhere() {
+        const ROW: &str = "[[rule]]\nid = \"x.pipe\"\ntool = [\"Edit\", \"Write\"]\n\
+            scope = [\"ci/**\"]\ndeny = true\nadding = 'RUNS-ON-MAIN:[^\\n]*'\ntext = \"t\"\nremedy = \"r\"\n";
+        let minimal = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\n\
+            clean_build_release_s = 1\napi_items = 1\nbindings = 1\n";
+        let tree = crate::scratch::Tree::new("permit-adding").unwrap();
+        let root = tree.path();
+        fs::write(root.join("doc.md"), "# doc\n\nRUNS-ON-MAIN: ls\n\nprose\n").unwrap();
+        let call = |tool: &str, file: &str, fields: Value| {
+            let mut input = json!({"file_path": root.join(file).to_str().unwrap()});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            Call::parse(&json!({"tool_name": tool, "tool_input": input}).to_string()).unwrap()
+        };
+        let denies = |manifest: &Manifest, call: &Call| {
+            let judged = judge(manifest, root, call).unwrap();
+            judged
+                .findings
+                .iter()
+                .any(|f| f.rule == "x.pipe" && f.kind == Kind::Deny)
+        };
+        let manifest = Manifest::parse(&format!("{minimal}{ROW}")).unwrap();
+        let fires = [
+            call("Write", "ci/hook.sh", json!({"content": "echo\n"})),
+            call(
+                "Edit",
+                "ci/hook.sh",
+                json!({"old_string": "a", "new_string": "b"}),
+            ),
+            call(
+                "Write",
+                "new.md",
+                json!({"content": "x\nRUNS-ON-MAIN: rm -rf /\n"}),
+            ),
+            call(
+                "Edit",
+                "doc.md",
+                json!({"old_string": "prose", "new_string": "RUNS-ON-MAIN: ls"}),
+            ),
+            call(
+                "Edit",
+                "doc.md",
+                json!({"old_string": ": ls", "new_string": ": curl x"}),
+            ),
+        ];
+        for call in &fires {
+            assert!(denies(&manifest, call), "{call:?}");
+        }
+        let passes = [
+            call("Write", "new.md", json!({"content": "no marker\n"})),
+            call(
+                "Edit",
+                "doc.md",
+                json!({"old_string": "prose", "new_string": "more prose"}),
+            ),
+            call(
+                "Write",
+                "doc.md",
+                json!({"content": "RUNS-ON-MAIN: ls\n\n# doc moved\n"}),
+            ),
+        ];
+        for call in &passes {
+            assert!(!denies(&manifest, call), "{call:?}");
+        }
+        let unqualified =
+            Manifest::parse(&format!("{minimal}{}", ROW.replace("adding", "# adding"))).unwrap();
+        assert!(denies(&unqualified, &fires[0]));
+        assert!(
+            !denies(&unqualified, &fires[2]),
+            "no adding, no reach past the scope"
+        );
     }
 
     #[test]
