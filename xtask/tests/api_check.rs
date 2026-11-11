@@ -563,22 +563,32 @@ mod tracked {
     }
 
     /// A crate no `[[edge]]` row names may depend on no workspace crate
-    /// (design §4.2): the harness, which the tracked manifest gives no row
-    /// since #2213, linking `php_bundle` back in fails naming the missing
-    /// row, and nothing else in the fixture does.
+    /// (design §4.2): a lane, which depends on none (#3740), linking
+    /// `php_bundle` fails naming the missing row; the harness linking it
+    /// back in fails naming the one edge it has, to its lanes; and
+    /// nothing else in the fixture fails.
     #[test]
     fn a_crate_with_no_edge_row_depending_on_a_workspace_crate_fails() {
         let readings = readings("harness-edge");
+        let lane = of(&readings, "lanes/differential");
+        assert_eq!(lane.status, Status::Fail, "{}", lane.message);
+        assert!(
+            lane.message.contains(
+                "lanes/differential depends on php_bundle; no [[edge]] row gives lanes/differential a dependency"
+            ),
+            "{}",
+            lane.message
+        );
         let harness = of(&readings, "xtask");
         assert_eq!(harness.status, Status::Fail, "{}", harness.message);
         assert!(
             harness
                 .message
-                .contains("xtask depends on php_bundle; no [[edge]] row gives xtask a dependency"),
+                .contains("xtask depends on php_bundle; its [[edge]] rows permit lanes/*"),
             "{}",
             harness.message
         );
-        assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+        assert_eq!(failures(&readings).len(), 2, "{readings:#?}");
     }
 
     /// The workspace's lints reach a member only through its own

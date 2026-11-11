@@ -1,0 +1,10 @@
+[package]
+name = "php_lanes_differential"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+php_bundle = { path = "../../crates/php_bundle" }
+
+[lints]
+workspace = true

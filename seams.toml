@@ -372,6 +372,15 @@ porting = false   # it ports nothing of php-src's
 name = "fuzz/targets"
 budget = 350      # the eight libFuzzer targets, package php_fuzz_targets; 302 measured in preparation (#3612, ruled 2026-10-28)
 feature = "fuzz"  # libfuzzer-sys is behind it, so a default workspace build never compiles libFuzzer (#3612, 2026-10-31)
+[[crate]]
+name = "lanes/fuzz"
+budget = 300      # #3607's fuzz instrument, its logic; xtask/src holds the adapter (#3740, #3750)
+[[crate]]
+name = "lanes/framework"
+budget = 400      # #2140's framework lane, its logic; xtask/src holds the adapter (#3740, #3750)
+[[crate]]
+name = "lanes/differential"
+budget = 400      # #4358's generator, the differential lane's pure part; xtask/src/fuzz holds the adapter (#3740, #4489)
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
@@ -512,6 +521,9 @@ adr = "0008" # a host reaches the engine through php_sapi; php_ext to declare na
 [[edge]]
 from = "fuzz/targets"
 to = ["php_syntax", "php_heap", "php_bundle"]   # #3612, ruled 2026-10-28
+[[edge]]
+from = "xtask"
+to = ["lanes/*"]   # the harness calls its lanes; a lane depends on no workspace crate (#3740, 2026-11-07)
 
 # ---------------------------------------------------------------- rules
 # Each rule: an `id`, a `scope` or a `tool`, one predicate, an optional `adr`,
