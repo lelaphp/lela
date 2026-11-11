@@ -8,6 +8,7 @@
 //! matters when the judge is wrong.
 
 use std::fs;
+use std::path::Path;
 
 use xtask::manifest::Manifest;
 use xtask::reading::Status;
@@ -16,8 +17,10 @@ use xtask::steer;
 
 mod common {
     pub mod repo;
+    pub mod run;
 }
-use common::repo::Repo;
+use common::repo::{Repo, scratch_workspace};
+use common::run::{Run, xtask};
 
 /// A scratch workspace carrying one of the harness's own files, a git
 /// repository with one commit so that a reading can be stamped.
@@ -601,6 +604,193 @@ fn a_conflicted_merge_refuses_a_reworded_reason_and_a_row_neither_side_carries()
             "{name}: a refused proposal writes nothing"
         );
     }
+}
+
+/// A scratch workspace standing in a merge of the registry that git took
+/// cleanly and did not commit, as pre-merge-commit leaves one it refused
+/// (#4441): `base` committed at `root`, `merged` on a branch beside it,
+/// `head` on `HEAD`, and `git merge --no-commit` of the branch with `how`,
+/// the strategy options it was given. The file is staged, unmerged nowhere.
+fn cleanly(root: &Path, base: &str, [head, merged]: [&str; 2], how: &[&str]) -> Repo {
+    let file = xtask::divergence::FILE;
+    let repo = Repo::at(root);
+    let side = |branch: &str, body: &str| {
+        fs::write(root.join(file), body).expect("the registry");
+        repo.git(&["commit", "-q", "-am", branch]);
+    };
+    side("base", base);
+    repo.git(&["checkout", "-q", "-b", "merged"]);
+    side("merged", merged);
+    repo.git(&["checkout", "-q", "-"]);
+    side("head", head);
+    let merge = [
+        &["merge", "-q", "--no-ff", "--no-commit"][..],
+        how,
+        &["merged"],
+    ]
+    .concat();
+    repo.git(&merge);
+    assert!(
+        repo.git(&["ls-files", "--unmerged"]).is_empty(),
+        "git merged the registry cleanly"
+    );
+    repo
+}
+
+/// `permit --diff`, pre-commit's judge of what is staged, as an agent's
+/// commit runs it (`CLAUDE_CODE_SESSION_ID` set): its exit and what it
+/// printed.
+fn agents_diff(root: &Path) -> (i32, String) {
+    let ran = Run::at(root)
+        .args(["permit", "--diff"])
+        .env(xtask::owner::SESSION_VARIABLE, "an-agent")
+        .go();
+    (ran.code(), format!("{ran}"))
+}
+
+/// The clean merge #4441 met, end to end through the binaries the hooks
+/// run: a person's commit rewords a reason on `HEAD` and the branch adds a
+/// steered row, which git merges with no conflict. Pre-commit refuses the
+/// agent's merge (#3644), the one step merging.md gives, steer over a copy
+/// of the merged file, writes a reading that names what each side brings
+/// and is stamped over the staged blob, and pre-commit then admits it.
+#[test]
+fn a_cleanly_merged_harness_file_is_covered_by_steering_its_merged_copy() {
+    let file = xtask::divergence::FILE;
+    let root = Tree::new("steer-clean-commit").expect("the scratch workspace");
+    scratch_workspace(xtask::package_dir().parent().expect("the workspace"), &root);
+    let reworded = fixture("merge/head-reworded.toml");
+    let merged = fixture("merge/merged.toml");
+    let repo = cleanly(
+        &root,
+        &fixture("merge/base.toml"),
+        [&reworded, &merged],
+        &[],
+    );
+    let clean = fixture("merge/clean.toml");
+    assert_eq!(
+        fs::read_to_string(root.join(file)).expect("the registry"),
+        clean,
+        "git's merge is HEAD's reason and the branch's row"
+    );
+    let (code, said) = agents_diff(&root);
+    assert_eq!(code, 1, "the merge is refused before steer: {said}");
+    assert!(said.contains("#3644"), "{said}");
+
+    let copy = Tree::new("steer-clean-copy").expect("the scratchpad");
+    let at = copy.join("divergence.toml");
+    fs::copy(root.join(file), &at).expect("the merged file's copy");
+    xtask(
+        &root,
+        &["steer", file, "--from", at.to_str().expect("UTF-8")],
+    )
+    .ok();
+    let reading = xtask::reading::Store::of_workspace(&root)
+        .read("steer", file)
+        .expect("the store")
+        .expect("steer's reading");
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.numbers["added"], 1.into(), "{}", reading.message);
+    for named in [
+        "HEAD (divergence[trace:fixture-base].reason)",
+        "as git's three-way merge of the three files gives it cleanly",
+        "divergence[trace:fixture-merged]",
+    ] {
+        assert!(
+            reading.message.contains(named),
+            "the reading names {named}: {}",
+            reading.message
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(root.join(file)).expect("the registry"),
+        clean
+    );
+    repo.git(&["add", "--", file]);
+    let (code, said) = agents_diff(&root);
+    assert_eq!(code, 0, "steer's reading covers what is staged: {said}");
+    repo.git(&["commit", "-q", "-m", "Merge merged"]);
+    repo.git(&["rev-parse", "--verify", "HEAD^2"]);
+}
+
+/// The negative controls of a clean merge (xtask/fixtures/steer/README.md),
+/// each refused at what it names with nothing written: a proposal that
+/// puts back the reason HEAD's person reworded, one that drops the
+/// branch's row, one that is the union in another text than git merged,
+/// and the working copy of a merge `-X theirs` took, which dropped HEAD's
+/// row where git's three-way merge of the three files conflicts.
+#[test]
+fn a_clean_merge_refuses_a_side_undone_and_a_text_git_did_not_merge() {
+    let file = xtask::divergence::FILE;
+    let base = fixture("merge/base.toml");
+    let reworded = fixture("merge/head-reworded.toml");
+    let merged = fixture("merge/merged.toml");
+    let clean = fixture("merge/clean.toml");
+    let head_row = fixture("merge/head.toml")
+        .strip_prefix(base.as_str())
+        .expect("HEAD appends to the base")
+        .to_owned();
+    let both = format!("{reworded}{head_row}");
+    // One control: the merge of `sides` with `how`, steered with
+    // `proposal`, or the staged file where it is `None`.
+    let refused =
+        |name: &str, sides: [&str; 2], how: &[&str], proposal: Option<&str>, named: &[&str]| {
+            let root = scratch_at(&format!("clean-{name}"), file, "# no row yet\n");
+            cleanly(&root, &base, sides, how);
+            let staged = fs::read_to_string(root.join(file)).expect("the registry");
+            let at = root.join("proposed.toml");
+            fs::write(&at, proposal.unwrap_or(&staged)).expect("the proposal");
+
+            let reading =
+                steer::run(&root, &harness(), file, &at, false).expect("the instrument runs");
+            assert_eq!(reading.status, Status::Fail, "{name}: {}", reading.message);
+            for path in named {
+                assert!(
+                    reading.message.contains(path)
+                        && reading.message.contains("Nothing was written"),
+                    "{name} is refused at {path}: {}",
+                    reading.message
+                );
+            }
+            assert_eq!(
+                fs::read_to_string(root.join(file)).expect("the registry"),
+                staged,
+                "{name}: a refused proposal writes nothing"
+            );
+        };
+    let sides = [reworded.as_str(), merged.as_str()];
+    refused(
+        "undone",
+        sides,
+        &[],
+        Some(&merged),
+        &["divergence[trace:fixture-base].reason"],
+    );
+    refused(
+        "dropped",
+        sides,
+        &[],
+        Some(&reworded),
+        &["divergence[trace:fixture-merged] dropped"],
+    );
+    let retyped = format!("{clean}# retyped\n");
+    refused(
+        "retyped",
+        sides,
+        &[],
+        Some(&retyped),
+        &["is not the text git's three-way merge"],
+    );
+    refused(
+        "theirs",
+        [&both, &merged],
+        &["-X", "theirs"],
+        None,
+        &[
+            "divergence[trace:fixture-head] dropped",
+            "a strategy option took one side's hunk",
+        ],
+    );
 }
 
 /// An `[[owed]]` row named by its instrument (#3636): `held_at` added to
