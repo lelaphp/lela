@@ -860,7 +860,7 @@ fn engine_state_held(
     }
     let cited = rule.adr.adr_cited();
     Ok(Some(format!(
-        "{}: EngineState implemented by hand outside the homes (seams.toml rule {}: {}{}{cited})",
+        "{}: EngineState implemented by hand outside the homes, or where the sensor cannot read (seams.toml rule {}: {}{}{cited})",
         list(&outside, 8),
         rule.id,
         rule.text,

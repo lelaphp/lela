@@ -1147,8 +1147,13 @@ mod engine_state {
 
     /// An extension's type made engine state by an impl written by hand
     /// in its `src/lib.rs`, around the derive, fails the extension naming
-    /// the line; one in an extension's `src/ffi/`, a home `unsafe.homes`
-    /// names, passes; the failing reading names the rule, the passing one not.
+    /// the line, and so does each way around a reading of the text: a
+    /// rename, a macro's metavariable, a `build.rs` writing to `OUT_DIR`, a file
+    /// outside every crate, a spaced path, an `include!` the walk cannot
+    /// follow and a macro defined elsewhere. One in an extension's
+    /// `src/ffi/`, a home `unsafe.homes` names, passes beside the derive,
+    /// local macros and an `OUT_DIR` file from a `build.rs` that does not
+    /// name the trait; the failing reading names the rule, the passing one not.
     #[test]
     fn engine_state_written_by_hand_outside_the_homes_fails_naming_its_line() {
         let manifest = sealed();
@@ -1172,7 +1177,37 @@ mod engine_state {
         assert_eq!(json.status, Status::Pass, "{}", json.message);
         assert!(pcre.rule.split(", ").any(|r| r == id), "{}", pcre.rule);
         assert!(!json.rule.split(", ").any(|r| r == id), "{}", json.rule);
-        assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+        // Each way around a reading of the text (#4360): a site per crate.
+        for (krate, site) in [
+            ("ext/ctype", "ext/ctype/src/lib.rs:12: "),
+            (
+                "ext/bz2",
+                "ext/bz2/src/lib.rs:14 (its trait is a metavariable): ",
+            ),
+            (
+                "ext/calendar",
+                "ext/calendar/build.rs:1 (build.rs names the trait",
+            ),
+            ("ext/gettext", "elsewhere/also.rs:3, elsewhere/kept.rs:5: "),
+            ("ext/shmop", "ext/shmop/src/lib.rs:11: "),
+            (
+                "ext/sysvmsg",
+                "ext/sysvmsg/src/lib.rs:6 (an include! the walk cannot follow): ",
+            ),
+            (
+                "ext/posix",
+                "ext/posix/src/lib.rs:11 (the trait handed to a macro whose body",
+            ),
+        ] {
+            let reading = of(&readings, krate);
+            assert_eq!(reading.status, Status::Fail, "{krate}: {}", reading.message);
+            assert!(
+                reading.message.starts_with(site),
+                "{krate}: {}",
+                reading.message
+            );
+        }
+        assert_eq!(failures(&readings).len(), 8, "{readings:#?}");
     }
 
     /// Each compile-fail fixture beside the sensor's is compiled by
