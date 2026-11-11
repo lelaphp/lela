@@ -48,7 +48,7 @@ use php_ext::decl::IniDecl;
 use php_ext::raising::Thrown;
 use php_ext::request::{Ini, Request};
 
-use crate::conn::ConnData;
+use crate::conn::{ConnData, IdleConn};
 
 /// `PHP_MYSQLND_VERSION`, `"mysqlnd " PHP_VERSION`.
 const VERSION: &str = "mysqlnd 8.5.12";
@@ -383,26 +383,18 @@ impl Handle {
     /// waits in, as php's mysqlnd keeps none of its own. `None` where the
     /// number names none or the connection is not a persistent one that
     /// connected.
-    pub(crate) fn give_back(self, req: &mut Request) -> Option<Box<ConnData>> {
+    pub(crate) fn give_back(self, req: &mut Request) -> Option<IdleConn> {
         let slot = slot_of(req.state::<State>(), self)?;
         slot.conn.as_ref()?.net.persistent_id.as_ref()?;
-        let mut conn = slot.conn.take()?;
+        let conn = slot.conn.take()?;
         slot.refs -= 1;
-        // A result's pool is the request's heap's, which the request's
-        // end releases: none waits with the connection.
-        if let Some(result) = conn.current_result.take() {
-            result.release(req);
-        }
-        // Nor does a last message, the request's whatever the connection.
-        crate::alloc::Pstr::put(req, &mut conn.last_message, None);
-        conn.net.give_back(req);
-        Some(conn)
+        Some(conn.idle(req))
     }
 
     /// A connection a request gave back held in the table again, one
     /// owner counted, over the socket it kept.
-    pub(crate) fn take_up(req: &mut Request, mut conn: Box<ConnData>) -> Result<Handle, Thrown> {
-        conn.net.take_up(req)?;
+    pub(crate) fn take_up(req: &mut Request, idle: IdleConn) -> Result<Handle, Thrown> {
+        let conn = Box::new(ConnData::take_up(req, idle)?);
         Ok(Handle::hold(req, conn))
     }
 }

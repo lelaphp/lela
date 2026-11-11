@@ -176,6 +176,71 @@ impl ErrorInfo {
     }
 }
 
+/// An [`ErrorInfo`] while the engine's pool keeps its persistent
+/// connection: the error and the list, each element `malloc`'s, which a
+/// persistent connection's list is.
+#[derive(Debug, php_ext::abi::EngineState)]
+pub(crate) struct IdleError {
+    errno: u32,
+    sqlstate: Option<[u8; 5]>,
+    error: Vec<u8>,
+    list: Vec<IdleListed>,
+    persistent: bool,
+}
+
+/// A [`ListedError`] while the pool keeps its connection, with its
+/// element's length.
+#[derive(Debug, php_ext::abi::EngineState)]
+struct IdleListed {
+    errno: u32,
+    sqlstate: [u8; 5],
+    error: Vec<u8>,
+    held: usize,
+}
+
+impl ErrorInfo {
+    /// What the pool keeps of the error info, each element's allocation
+    /// [`Alloc::idle`].
+    pub(crate) fn idle(self, req: &mut Request) -> IdleError {
+        let list = (self.list.into_iter())
+            .map(|listed| IdleListed {
+                errno: listed.errno,
+                sqlstate: listed.sqlstate,
+                error: listed.error,
+                held: listed.held.idle(req),
+            })
+            .collect();
+        IdleError {
+            errno: self.errno,
+            sqlstate: self.sqlstate,
+            error: self.error,
+            list,
+            persistent: self.persistent,
+        }
+    }
+}
+
+impl From<IdleError> for ErrorInfo {
+    /// The error info a request takes up, as the pool kept it.
+    fn from(idle: IdleError) -> ErrorInfo {
+        let list = (idle.list.into_iter())
+            .map(|listed| ListedError {
+                errno: listed.errno,
+                sqlstate: listed.sqlstate,
+                error: listed.error,
+                held: Alloc::Malloc(listed.held),
+            })
+            .collect();
+        ErrorInfo {
+            errno: idle.errno,
+            sqlstate: idle.sqlstate,
+            error: idle.error,
+            list,
+            persistent: idle.persistent,
+        }
+    }
+}
+
 /// The five bytes of an SQLSTATE php copies with `strlcpy` into a
 /// six-byte buffer.
 fn state_of(sqlstate: &[u8]) -> [u8; 5] {
@@ -197,7 +262,7 @@ fn cut(error: &[u8]) -> Vec<u8> {
 }
 
 /// `MYSQLND_UPSERT_STATUS`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, php_ext::abi::EngineState)]
 pub struct Upsert {
     pub warning_count: u32,
     pub server_status: u32,

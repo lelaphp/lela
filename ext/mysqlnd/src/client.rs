@@ -8,7 +8,7 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Owner, Value};
 
-use crate::conn::ConnData;
+use crate::conn::{ConnData, IdleConn};
 use crate::consts::{CloseType as Close, ServerOption as Server, fetch, status};
 use crate::result::Res;
 use crate::{Handle, State};
@@ -147,12 +147,13 @@ pub enum Command<'a> {
 
 /// An idle persistent connection, what `mysqlnd.h`'s persistent
 /// `MYSQLND *` is between requests (#1674): it owns the connection's
-/// `ConnData` with its socket, and a pool entry of `pdo_mysql` or mysqli
+/// data as a persistent connection holds it, with its socket and nothing
+/// of a request's (#4474), and a pool entry of `pdo_mysql` or mysqli
 /// holds it, so dropping the entry closes the connection, its socket
 /// closed with no `COM_QUIT` sent. [`Mysqlnd::give_back`] answers one;
 /// a request takes it up ([`Mysqlnd::take_up`]) or closes it with a
 /// `COM_QUIT` ([`Idle::close`]).
-pub struct Idle(Box<ConnData>);
+pub struct Idle(Box<IdleConn>);
 
 impl Idle {
     /// `mysqlnd_close` with this request: the connection taken up and
@@ -186,7 +187,7 @@ impl Mysqlnd {
     /// connected.
     #[must_use]
     pub fn give_back(self, req: &mut Request) -> Option<Idle> {
-        self.0.give_back(req).map(Idle)
+        self.0.give_back(req).map(|idle| Idle(Box::new(idle)))
     }
 
     /// The connection a request gave back taken up by this one, one owner
@@ -194,7 +195,7 @@ impl Mysqlnd {
     /// closed fails every command as one over a dead link does, as the
     /// `mysqlnd_ping` or `COM_CHANGE_USER` its owner sends first finds.
     pub fn take_up(req: &mut Request, idle: Idle) -> Result<Mysqlnd, Thrown> {
-        Ok(Mysqlnd(Handle::take_up(req, idle.0)?))
+        Ok(Mysqlnd(Handle::take_up(req, *idle.0)?))
     }
 
     /// `get_reference`: one more owner, for a statement or a set of rows

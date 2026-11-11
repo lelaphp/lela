@@ -14,7 +14,7 @@ pub(crate) const UTF8_MB4_DEFAULT_ID: u32 = 45;
 /// `enum mysqlnd_encoding_charlen` and `enum mysqlnd_encoding_valid`, one
 /// variant per encoding: every row of php's table pairs a `mysqlnd_mbcharlen_*`
 /// with the `check_mb_*` of the same encoding, so the pair is one value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_ext::abi::EngineState)]
 pub(crate) enum Mb {
     /// `mysqlnd_mbcharlen_null`, `check_null`: a single-byte set, whose
     /// `lowest_mb_byte` of `0x100` no byte reaches.
@@ -267,7 +267,7 @@ fn widened(b: u8) -> u32 {
 }
 
 /// `MYSQLND_CHARSET`: one row of php's table.
-#[derive(Debug)]
+#[derive(Debug, php_ext::abi::EngineState)]
 pub(crate) struct Charset {
     pub(crate) nr: u32,
     pub(crate) name: &'static str,

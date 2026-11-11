@@ -92,6 +92,17 @@ impl Alloc {
             block.free(req);
         }
     }
+
+    /// What a persistent connection keeps of the allocation while the
+    /// engine's pool holds it: `malloc`'s length, which
+    /// [`Alloc::Malloc`] takes up again. One on the request's heap, which
+    /// a persistent connection never makes, is freed with the request
+    /// that gives the connection back, and its length kept.
+    pub(crate) fn idle(self, req: &mut Request) -> usize {
+        let len = self.len();
+        self.free(req);
+        len
+    }
 }
 
 /// A string the connection keeps as php keeps it, `mnd_pestrdup`'d or
@@ -148,6 +159,27 @@ impl Pstr {
         if let Pstr::Heap { held, .. } = self {
             held.free(req);
         }
+    }
+
+    /// What a persistent connection keeps of the string while the
+    /// engine's pool holds it: `malloc`'s bytes, which [`Pstr::Malloc`]
+    /// takes up again. One on the request's heap, which a persistent
+    /// connection never makes, is copied out and freed with the request
+    /// that gives the connection back.
+    pub(crate) fn idle(self, req: &mut Request) -> Box<[u8]> {
+        match self {
+            Pstr::Malloc(bytes) => bytes,
+            heap @ Pstr::Heap { .. } => {
+                let bytes = heap.bytes().into();
+                heap.free(req);
+                bytes
+            }
+        }
+    }
+
+    /// [`Pstr::idle`] of the field, where it holds a string.
+    pub(crate) fn idle_field(req: &mut Request, field: Option<Pstr>) -> Option<Box<[u8]>> {
+        field.map(|s| s.idle(req))
     }
 
     /// `field` set to `to`, what it held before freed: the

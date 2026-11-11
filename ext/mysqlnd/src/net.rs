@@ -30,7 +30,7 @@ const COMPRESSED_HEADER_SIZE: usize = 3;
 const TLS_CLIENT: i64 = (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | 1;
 
 /// `enum mysqlnd_ssl_peer`: whether TLS checks the server's certificate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, php_ext::abi::EngineState)]
 pub(crate) enum SslPeer {
     #[default]
     Default,
@@ -67,16 +67,60 @@ impl VioOptions {
     }
 }
 
+/// [`VioOptions`] while the engine's pool keeps the connection: the
+/// strings `malloc`'s, as a persistent connection's are.
+#[derive(Debug, php_ext::abi::EngineState)]
+pub(crate) struct IdleVio {
+    timeout_connect: u32,
+    timeout_read: u32,
+    net_read_buffer_size: u32,
+    ssl_key: Option<Box<[u8]>>,
+    ssl_cert: Option<Box<[u8]>>,
+    ssl_ca: Option<Box<[u8]>>,
+    ssl_capath: Option<Box<[u8]>>,
+    ssl_cipher: Option<Box<[u8]>>,
+    ssl_verify_peer: SslPeer,
+}
+
+impl VioOptions {
+    /// What the pool keeps of the options.
+    fn idle(self, req: &mut Request) -> IdleVio {
+        IdleVio {
+            timeout_connect: self.timeout_connect,
+            timeout_read: self.timeout_read,
+            net_read_buffer_size: self.net_read_buffer_size,
+            ssl_key: Pstr::idle_field(req, self.ssl_key),
+            ssl_cert: Pstr::idle_field(req, self.ssl_cert),
+            ssl_ca: Pstr::idle_field(req, self.ssl_ca),
+            ssl_capath: Pstr::idle_field(req, self.ssl_capath),
+            ssl_cipher: Pstr::idle_field(req, self.ssl_cipher),
+            ssl_verify_peer: self.ssl_verify_peer,
+        }
+    }
+}
+
+impl From<IdleVio> for VioOptions {
+    fn from(idle: IdleVio) -> VioOptions {
+        VioOptions {
+            timeout_connect: idle.timeout_connect,
+            timeout_read: idle.timeout_read,
+            net_read_buffer_size: idle.net_read_buffer_size,
+            ssl_key: idle.ssl_key.map(Pstr::Malloc),
+            ssl_cert: idle.ssl_cert.map(Pstr::Malloc),
+            ssl_ca: idle.ssl_ca.map(Pstr::Malloc),
+            ssl_capath: idle.ssl_capath.map(Pstr::Malloc),
+            ssl_cipher: idle.ssl_cipher.map(Pstr::Malloc),
+            ssl_verify_peer: idle.ssl_verify_peer,
+        }
+    }
+}
+
 /// `MYSQLND_VIO` and `MYSQLND_PFC` together: the stream, the frame
 /// codec's sequence numbers and the compressed protocol's read buffer.
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)] // php's flags, `vio->data->ssl` and the frame codec's two
 pub(crate) struct Net {
     stream: Option<Owner<Stream>>,
-    /// A persistent connection's socket while no request holds the
-    /// connection: out of every request and of the engine's persistent
-    /// list, the connection's alone, as php's mysqlnd owns its stream.
-    kept: Option<Persisted>,
     /// Whether the stream is a unix socket, which `caching_sha2_password` counts as
     /// a secure stream (`is_secure_transport`).
     pub(crate) unix: bool,
@@ -104,6 +148,27 @@ pub(crate) struct Net {
     /// persistent one; the stream leaves the persistent list as it opens,
     /// so nothing is ever held under it.
     pub(crate) persistent_id: Option<Vec<u8>>,
+}
+
+/// A persistent connection's [`Net`] while the engine's pool keeps it:
+/// its socket out of every request and of the engine's persistent list,
+/// the connection's alone, as php's mysqlnd owns its stream, and no
+/// stream of a request's.
+// The derive waits on `Persisted` being engine state (#4541).
+#[allow(clippy::struct_excessive_bools)] // `Net`'s flags, one each
+pub(crate) struct IdleNet {
+    kept: Option<Persisted>,
+    unix: bool,
+    ssl: bool,
+    options: IdleVio,
+    packet_no: u8,
+    envelope_no: u8,
+    compressed: bool,
+    use_compression: bool,
+    uncompressed: ReadBuffer,
+    cmd_buffer: Option<usize>,
+    sha256_server_public_key: Option<Box<[u8]>>,
+    persistent_id: Option<Vec<u8>>,
 }
 
 impl Net {
@@ -231,28 +296,54 @@ impl Net {
         Ok(true)
     }
 
-    /// The stream of a persistent connection taken up by a request: the
-    /// socket the connection kept, lent to the request in neither of its
-    /// lists, with the options `post_connect_set_opt` gave it; a
+    /// The frames of a persistent connection taken up by a request, over
+    /// the socket the connection kept, lent to the request in neither of
+    /// its lists, with the options `post_connect_set_opt` gave it; a
     /// connection that kept none takes up holding no stream, over which
     /// every command fails as one over a dead link does.
-    pub(crate) fn take_up(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        self.stream = None;
-        let Some(kept) = self.kept.take() else {
-            return Ok(());
+    pub(crate) fn take_up(req: &mut Request, idle: IdleNet) -> Result<Net, Thrown> {
+        let mut net = Net {
+            stream: None,
+            unix: idle.unix,
+            ssl: idle.ssl,
+            options: idle.options.into(),
+            packet_no: idle.packet_no,
+            envelope_no: idle.envelope_no,
+            compressed: idle.compressed,
+            use_compression: idle.use_compression,
+            uncompressed: idle.uncompressed,
+            cmd_buffer: idle.cmd_buffer.map(Alloc::Malloc),
+            sha256_server_public_key: idle.sha256_server_public_key.map(Pstr::Malloc),
+            persistent_id: idle.persistent_id,
         };
-        let stream = req.stream_lend(kept)?;
-        self.post_connect(req, *stream);
-        self.stream = Some(stream);
-        Ok(())
+        if let Some(kept) = idle.kept {
+            let stream = req.stream_lend(kept)?;
+            net.post_connect(req, *stream);
+            net.stream = Some(stream);
+        }
+        Ok(net)
     }
 
-    /// The stream of a persistent connection let go as the request gives
-    /// the connection back, nothing of the request's left on it: its
-    /// socket kept by the connection ([`OwnedStream::keep`](php_ext::request::OwnedStream::keep)), out of the
-    /// request, so the one list the connection waits in is its owner's.
-    pub(crate) fn give_back(&mut self, req: &mut Request) {
-        self.kept = self.stream.take().and_then(|stream| stream.keep(req));
+    /// The frames of a persistent connection let go as the request gives
+    /// the connection back, nothing of the request's left on them: its
+    /// socket kept by the connection ([`OwnedStream::keep`](php_ext::request::OwnedStream::keep)),
+    /// out of the request, so the one list the connection waits in is its
+    /// owner's.
+    pub(crate) fn idle(self, req: &mut Request) -> IdleNet {
+        IdleNet {
+            kept: self.stream.and_then(|stream| stream.keep(req)),
+            unix: self.unix,
+            ssl: self.ssl,
+            options: self.options.idle(req),
+            packet_no: self.packet_no,
+            envelope_no: self.envelope_no,
+            compressed: self.compressed,
+            use_compression: self.use_compression,
+            uncompressed: self.uncompressed,
+            cmd_buffer: self.cmd_buffer.map(|buffer| buffer.idle(req)),
+            sha256_server_public_key: Pstr::idle_field(req, self.sha256_server_public_key),
+            persistent_id: self.persistent_id,
+        }
     }
 
     /// `post_connect_set_opt` and the error suppression php sets beside it.
@@ -653,7 +744,7 @@ fn ssl_options(req: &mut Request, context: StreamCtx, o: &VioOptions) -> Result<
 /// it takes and moves the cursor, never the bytes after it; the envelope
 /// is given back whole once read through, as `mysqlnd_pfc::receive` frees
 /// php's.
-#[derive(Default)]
+#[derive(Default, php_ext::abi::EngineState)]
 struct ReadBuffer {
     data: Vec<u8>,
     offset: usize,
