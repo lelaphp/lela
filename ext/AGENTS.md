@@ -79,4 +79,4 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 |---|---|---|---|
 | php_bundle | registration |  |  |
 
-<!-- /computed in=4a95c0bae47ea29fbbb47eb94575fcc16697bd38cc278f935c6b188aca67405f out=91983940b62ed840754cb91c6ed571841ceefb8b8c359d504e95bc1c50cdf1a5 -->
+<!-- /computed in=33246746ca4b2de48cc6ef23cf54dbde319100bd7b9729fb0df47a4e553c4de4 out=91983940b62ed840754cb91c6ed571841ceefb8b8c359d504e95bc1c50cdf1a5 -->

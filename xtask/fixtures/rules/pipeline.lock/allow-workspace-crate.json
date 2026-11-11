@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"Cargo.lock","old_string":"[[package]]\nname = \"php_ext\"","new_string":"[[package]]\nname = \"php_ext_new\"\nversion = \"0.0.0\"\ndependencies = [\n \"php_ext\",\n]\n\n[[package]]\nname = \"php_ext\""}}

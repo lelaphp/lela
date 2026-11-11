@@ -5,15 +5,19 @@
 //! transcript` opener line is refused in any file and one the file already
 //! carried is not, nor a `computed use` or one behind a code file's comment
 //! leader; and an agent's commit that stages any of them, however it was
-//! written, is refused at the index while a person's is a note.
+//! written, is refused at the index while a person's is a note. And
+//! `pipeline.lock`, a third-party package added to a `Cargo.lock`, held
+//! by what a change adds to the lock rather than by its path (#4458).
 //!
 //! The opener is spelled here with its first byte escaped, so this file
 //! carries no line the row refuses and `computed run` executes nothing
-//! in it.
+//! in it; a lock's lines are built from parts, so none starts a line here.
 
 use super::*;
 
 const RULE: &str = "pipeline.self";
+
+const LOCK: &str = "pipeline.lock";
 
 /// The opener of an exec region, and the closer after it.
 const OPENER: &str = "\u{3c}!-- computed exec cmd=\"sh run.sh\" inputs=run.sh name=run | do not edit; run computed -->\n\u{3c}!-- /computed -->\n";
@@ -270,4 +274,147 @@ fn an_agent_s_commit_of_a_pipeline_path_is_refused_however_it_was_written_and_a_
         );
     }
     assert!(!ran.stdout.contains("docs/kept.md"), "{ran}");
+}
+
+/// `pipeline.lock` (#4458): a third-party package added to a `Cargo.lock`,
+/// a new `checksum` line or a git `source`, is refused to an `Edit` and a
+/// `Write`, in the workspace's lock and in any other; an edge to a package
+/// the lock holds, a removal, a workspace crate's entry, which carries
+/// neither line, and a lock written whole with its packages reordered are
+/// no finding of the row's, since a line the file carried, kept or moved,
+/// adds nothing (#510).
+#[test]
+fn a_package_added_to_a_lock_is_refused_and_a_lock_that_moves_among_its_own_is_not() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let root = scratch("pipeline-lock");
+    let lock = locked(&[package("memchr", 'a'), package("libc", 'b')]);
+    write(&root, "Cargo.lock", &lock);
+    let at = |file: &str| root.join(file);
+    let refused = [
+        touch(
+            "Edit",
+            &at("Cargo.lock"),
+            "version = 4\n",
+            &format!("version = 4\n\n{}", package("left-pad", 'c')),
+        ),
+        touch(
+            "Edit",
+            &at("Cargo.lock"),
+            "version = 4\n",
+            "version = 4\n\n[[package]]\nname = \"left-pad\"\nversion = \"1.0.0\"\nsource = \"git+https://example.invalid/left-pad#1a2b3c\"\n",
+        ),
+        touch(
+            "Write",
+            &at("Cargo.lock"),
+            "",
+            &format!("{lock}\n{}", package("left-pad", 'c')),
+        ),
+        touch(
+            "Write",
+            &at("fuzz/Cargo.lock"),
+            "",
+            &locked(&[package("memchr", 'a')]),
+        ),
+    ];
+    for call in &refused {
+        let judged = judge(&manifest, &root, call).unwrap();
+        let denial = judged
+            .denial()
+            .unwrap_or_else(|| panic!("allowed: {call:?}"));
+        assert_eq!(denial.rule, LOCK, "{call:?}");
+        assert!(denial.reason().contains("Instead:"), "{judged:?}");
+    }
+    let let_through = [
+        touch(
+            "Edit",
+            &at("Cargo.lock"),
+            " \"memchr\",\n",
+            " \"libc\",\n \"memchr\",\n",
+        ),
+        touch("Edit", &at("Cargo.lock"), &package("libc", 'b'), ""),
+        touch(
+            "Edit",
+            &at("Cargo.lock"),
+            "version = 4\n",
+            "version = 4\n\n[[package]]\nname = \"php_new\"\nversion = \"0.0.0\"\n",
+        ),
+        touch(
+            "Write",
+            &at("Cargo.lock"),
+            "",
+            &locked(&[package("libc", 'b'), package("memchr", 'a')]),
+        ),
+    ];
+    for call in &let_through {
+        let judged = judge(&manifest, &root, call).unwrap();
+        assert!(
+            judged.findings.iter().all(|f| f.rule != LOCK),
+            "{call:?}: {judged:?}"
+        );
+    }
+}
+
+/// A `Cargo.lock` that `cargo` rewrote is held at the commit as an
+/// `Edit` is at the call: an agent's commit staging a lock that gained a
+/// package is refused with the row's id and #3644, a person's is a note,
+/// and one that only moved among its own packages, here dropping one and
+/// reordering the rest, is no finding.
+#[test]
+fn an_agent_s_commit_of_a_lock_that_gained_a_package_is_refused_and_one_that_moved_is_not() {
+    let root = scratch("pipeline-lock-diff");
+    let held = [
+        package("memchr", 'a'),
+        package("libc", 'b'),
+        package("cc", 'd'),
+    ];
+    write(&root, "Cargo.lock", &locked(&held));
+    Repo::at(&root).commit("a lock");
+    write(
+        &root,
+        "Cargo.lock",
+        &locked(&[package("left-pad", 'c'), held[0].clone(), held[1].clone()]),
+    );
+    Repo::at(&root).git(&["add", "--", "Cargo.lock"]);
+    let ran = diff_from(&root, Some("an-agent"));
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(
+        ran.stdout.contains("deny Cargo.lock: ")
+            && ran.stdout.contains(LOCK)
+            && ran.stdout.contains("#3644"),
+        "{ran}"
+    );
+    let ran = diff_from(&root, None);
+    assert_eq!(ran.code(), 0, "a person's commit: {ran}");
+    assert!(ran.stdout.contains("note Cargo.lock: "), "{ran}");
+
+    write(
+        &root,
+        "Cargo.lock",
+        &locked(&[held[1].clone(), held[0].clone()]),
+    );
+    Repo::at(&root).git(&["add", "--", "Cargo.lock"]);
+    assert!(
+        Repo::at(&root)
+            .git(&["diff", "--cached", "--name-only"])
+            .contains("Cargo.lock"),
+        "the moved lock is staged"
+    );
+    let ran = diff_from(&root, Some("an-agent"));
+    assert!(!ran.stdout.contains("Cargo.lock"), "{ran}");
+}
+
+/// A registry package's entry in a lock, its checksum `sum` repeated.
+fn package(name: &str, sum: char) -> String {
+    let checksum = sum.to_string().repeat(64);
+    let source = "registry+https://github.com/rust-lang/crates.io-index";
+    format!(
+        "[[package]]\nname = \"{name}\"\nversion = \"1.0.0\"\nsource = \"{source}\"\nchecksum = \"{checksum}\"\n"
+    )
+}
+
+/// A lock of `packages` and one workspace crate that depends on the first.
+fn locked(packages: &[String]) -> String {
+    let crate_ =
+        "[[package]]\nname = \"php_ext\"\nversion = \"0.0.0\"\ndependencies = [\n \"memchr\",\n]\n";
+    format!("version = 4\n\n{}\n{crate_}", packages.join("\n"))
 }
