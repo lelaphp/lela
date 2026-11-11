@@ -72,7 +72,7 @@ fn from_env(zend: Option<&OsStr>, tracked: Option<&OsStr>) -> bool {
 
 /// `ZEND_ATOL`, `atoll`: blanks skipped, a sign, then the digits up to
 /// the first byte that is not one; a string that opens with none is zero.
-fn atol(text: &[u8]) -> i64 {
+pub(super) fn atol(text: &[u8]) -> i64 {
     let mut rest = text;
     while let [b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c, tail @ ..] = rest {
         rest = tail;

@@ -26,9 +26,28 @@
 //! before a heap hands out its pages, and nothing here reads one before.
 //! A heap reaches the cache once as it starts and once as it ends, and
 //! never on an allocation.
+//!
+//! So a kept chunk carries what its last request wrote into the next
+//! request's pages, as a php-fpm child's does, and under makala into a
+//! request on another thread. That is the default, php's ([`Residue`],
+//! #4348's ruling 4). A process started with [`ZEROED`] set to a number
+//! that is not zero zeroes the pages each request touched before its
+//! chunks are kept, at a cost that follows the request's writes and not
+//! the chunk's size; nothing a request reads moves.
+//!
+//! It covers the chunks a heap keeps, and nothing else. Not kept, and so
+//! not zeroed: huge blocks and chunks given back to the system, which a
+//! mapping gets back zeroed (and the system allocator, where there is no
+//! `mmap`, is asked for zeroed). Outside it: a heap of the tracked
+//! allocator (`USE_ZEND_ALLOC=0` with `USE_TRACKED_ALLOC=1`), whose
+//! blocks are the system allocator's; an allocation ADR-0014's lend
+//! serves from the system allocator past the limit, and `emalloc` outside
+//! a lend; and every buffer that lives in the system allocator, the
+//! host's own and the compiler's among them.
 
+use std::ffi::OsStr;
 use std::ptr::NonNull;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use super::{Chunk, chunk_free};
 
@@ -36,9 +55,57 @@ use super::{Chunk, chunk_free};
 /// with [`crate::Heap::new_in`] starts from and is kept in at its end,
 /// as a php-fpm child keeps its heap (`zend_mm_shutdown(full=0)`).
 /// Dropping it unmaps every chunk it keeps.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ChunkCache {
     kept: Mutex<Vec<Kept>>,
+    /// What a kept chunk's touched pages carry to the next heap, the
+    /// process's choice read as the cache is made ([`Residue::chosen`]).
+    residue: Residue,
+}
+
+impl Default for ChunkCache {
+    fn default() -> ChunkCache {
+        ChunkCache::with(Residue::chosen())
+    }
+}
+
+/// The variable that turns [`Residue::Zeroed`] on for the process: set
+/// to a number that is not zero, as `ZEND_ATOL` reads one, as php's
+/// `USE_ZEND_ALLOC` is read. It is the engine's own and not a php.ini
+/// directive, since php has none, and `ini_get_all()` names nothing of
+/// it (#4348's ruling 4).
+pub(super) const ZEROED: &str = "ZERO_TOUCHED_PAGES";
+
+/// What the pages a request touched carry into the next request that is
+/// handed its kept chunks: the bytes the request left there, as php's
+/// `zend_mm_shutdown(full=0)` leaves them, or zeros, written before the
+/// chunk is kept and so before another thread's heap can take it. Chosen
+/// once for every heap of the process ([`Residue::chosen`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Residue {
+    /// php's: nothing is zeroed.
+    Left,
+    /// Each kept chunk's pages from its first after the header up to the
+    /// last its requests were handed since it was last zeroed, written
+    /// to zero as the chunk is kept ([`super::Mm::keep`]).
+    Zeroed,
+}
+
+impl Residue {
+    /// The process's choice: [`Residue::Zeroed`] where it started with
+    /// [`ZEROED`] set to a number that is not zero, read once.
+    fn chosen() -> Residue {
+        static CHOSEN: OnceLock<Residue> = OnceLock::new();
+        *CHOSEN.get_or_init(|| Residue::from_env(std::env::var_os(ZEROED).as_deref()))
+    }
+
+    /// [`Residue::chosen`]'s reading of the variable.
+    fn from_env(value: Option<&OsStr>) -> Residue {
+        match value.map(|value| super::tracked::atol(value.as_encoded_bytes())) {
+            Some(number) if number != 0 => Residue::Zeroed,
+            _ => Residue::Left,
+        }
+    }
 }
 
 /// What `zend_mm_shutdown(full=0)` leaves of one heap: its main chunk,
@@ -59,6 +126,20 @@ impl ChunkCache {
     #[must_use]
     pub fn new() -> ChunkCache {
         ChunkCache::default()
+    }
+
+    /// An empty cache whose kept chunks carry `residue`, whatever the
+    /// process chose.
+    fn with(residue: Residue) -> ChunkCache {
+        ChunkCache {
+            kept: Mutex::default(),
+            residue,
+        }
+    }
+
+    /// What a chunk kept here carries to the next heap.
+    pub(super) fn residue(&self) -> Residue {
+        self.residue
     }
 
     fn kept(&self) -> std::sync::MutexGuard<'_, Vec<Kept>> {
@@ -98,9 +179,12 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering::Relaxed;
 
-    use super::ChunkCache;
+    use std::ffi::OsStr;
+    use std::ptr::NonNull;
+
+    use super::{ChunkCache, Residue};
     use crate::Heap;
-    use crate::mm::{CHUNK_SIZE, MAPPINGS};
+    use crate::mm::{CHUNK_SIZE, MAPPINGS, MAX_LARGE_SIZE, Mm, PAGE_SIZE, PAGES};
     use crate::serial::alone;
 
     /// What a request reads at its first line: `memory_get_usage()`,
@@ -194,6 +278,177 @@ mod tests {
         drop(heap);
         drop(cache);
         assert_eq!(MAPPINGS.load(Relaxed), before);
+    }
+
+    /// The bytes a request wrote, a pattern no allocation lays down.
+    const WRITTEN: u8 = 0x5A;
+
+    /// The first `bytes` of the block at `at` laid with [`WRITTEN`].
+    fn write(at: NonNull<u8>, bytes: usize) {
+        // SAFETY: `at` is a block of at least `bytes` bytes its heap
+        // handed out and nothing else names.
+        unsafe { at.write_bytes(WRITTEN, bytes) };
+    }
+
+    /// What the page at `at`, a block of at least a page its heap has just
+    /// handed out, holds past the debug build's freed-block mark, which
+    /// a hand-out clears: `Some(byte)` where every byte is that one, and
+    /// `None` where they differ.
+    fn read(at: NonNull<u8>) -> Option<u8> {
+        // SAFETY: the block is a page of its heap's, read through the
+        // pointer this heap's allocation gave, and every byte of it was
+        // written by an earlier request or zeroed as its chunk was kept.
+        let page = unsafe { std::slice::from_raw_parts(at.as_ptr(), PAGE_SIZE) };
+        let past = &page[64..];
+        past.iter().all(|b| *b == past[0]).then_some(past[0])
+    }
+
+    /// What a second request reads in the pages the first touched, kept
+    /// in a cache of `residue`: the first takes two `runs` of two pages from
+    /// the main chunk and writes both, gives the first back and ends with
+    /// the second held, and the second takes one `run` of four pages, which
+    /// lands where both stood. Each of the four pages is read.
+    fn read_after_one_request(residue: Residue) -> Vec<Option<u8>> {
+        let cache = Arc::new(ChunkCache::with(residue));
+        let mut first = Mm::new_in(Arc::clone(&cache));
+        let freed = first.alloc(2 * PAGE_SIZE).expect("a run");
+        let held = first.alloc(2 * PAGE_SIZE).expect("a run");
+        write(freed, 2 * PAGE_SIZE);
+        write(held, 2 * PAGE_SIZE);
+        // SAFETY: `freed` is a block of `first`'s that nothing names.
+        unsafe { first.free(freed) };
+        drop(first);
+        let mut second = Mm::new_in(Arc::clone(&cache));
+        let run = second.alloc(4 * PAGE_SIZE).expect("a run");
+        assert_eq!(run, freed, "the run lands where the first request's stood");
+        let pages = (0..4).map(|page| {
+            // SAFETY: the page is inside the run of four just handed out.
+            read(unsafe { run.add(page * PAGE_SIZE) })
+        });
+        let read = pages.collect();
+        // SAFETY: `run` is a block of `second`'s that nothing names.
+        unsafe { second.free(run) };
+        read
+    }
+
+    /// php's `zend_mm_shutdown(full=0)` zeroes nothing, so by default the
+    /// next request's pages hold what the last one wrote, the pages it
+    /// gave back before its end among them (#4348's ruling 4); with
+    /// [`Residue::Zeroed`] every page it touched reads zero.
+    #[test]
+    fn the_pages_a_request_touched_read_zero_in_the_next_only_where_the_cache_zeroes() {
+        let _alone = alone();
+        assert_eq!(
+            read_after_one_request(Residue::Left),
+            vec![Some(WRITTEN); 4],
+            "php's: what the first request wrote, freed and held alike"
+        );
+        assert_eq!(read_after_one_request(Residue::Zeroed), vec![Some(0); 4]);
+    }
+
+    /// A cached chunk is zeroed as the main one is, and the numbers a
+    /// request reads at its first line are the same either way: a request
+    /// that peaked at three chunks leaves one cached
+    /// (`zend_mm_shutdown(full=0)`'s average), and the next one, past its
+    /// main chunk, is handed a `run` in it.
+    #[test]
+    fn a_kept_cached_chunk_is_zeroed_too_and_no_number_php_reads_moves() {
+        let _alone = alone();
+        let mut seen = Vec::new();
+        for residue in [Residue::Left, Residue::Zeroed] {
+            let cache = Arc::new(ChunkCache::with(residue));
+            let mut first = Mm::new_in(Arc::clone(&cache));
+            for _ in 0..3 {
+                let whole = first.alloc(MAX_LARGE_SIZE).expect("a chunk's run");
+                write(whole, PAGE_SIZE);
+            }
+            drop(first);
+            let mut second = Mm::new_in(Arc::clone(&cache));
+            let numbers = [second.size(), second.real_size(), second.real_peak()];
+            let main = second.alloc(MAX_LARGE_SIZE).expect("the main chunk's run");
+            let cached = second
+                .alloc(MAX_LARGE_SIZE)
+                .expect("the cached chunk's run");
+            assert_eq!(second.real_size(), 2 * CHUNK_SIZE, "nothing new mapped");
+            seen.push((numbers, read(cached)));
+            // SAFETY: both are blocks of `second`'s that nothing names.
+            unsafe { second.free(cached) };
+            // SAFETY: as above.
+            unsafe { second.free(main) };
+        }
+        let numbers = [0, 2 * CHUNK_SIZE, 2 * CHUNK_SIZE];
+        assert_eq!(seen, vec![(numbers, Some(WRITTEN)), (numbers, Some(0))]);
+    }
+
+    /// With the cache zeroing, the first page of each block a request is
+    /// handed reads zero: in the main chunk and the cached one, zeroed as
+    /// they were kept, and in a chunk mapped fresh, which stands where the
+    /// one the first request's end gave back to the system stood. A mapping comes zeroed; where a chunk is the system
+    /// allocator's, under Miri and on a platform with no `mmap`, it is
+    /// asked for zeroed, and Miri reads the page as uninitialised where it
+    /// is not.
+    #[test]
+    fn a_chunk_mapped_fresh_reads_zero_as_a_kept_one_does() {
+        let _alone = alone();
+        let cache = Arc::new(ChunkCache::with(Residue::Zeroed));
+        let mut first = Mm::new_in(Arc::clone(&cache));
+        for _ in 0..3 {
+            let whole = first.alloc(MAX_LARGE_SIZE).expect("a chunk's run");
+            write(whole, PAGE_SIZE);
+        }
+        // Peaking at three chunks keeps one cached and gives the third back.
+        drop(first);
+        let mut second = Mm::new_in(Arc::clone(&cache));
+        let runs: Vec<NonNull<u8>> = (0..3)
+            .map(|_| second.alloc(MAX_LARGE_SIZE).expect("a chunk's run"))
+            .collect();
+        let read: Vec<Option<u8>> = runs.iter().map(|run| read(*run)).collect();
+        for run in runs {
+            // SAFETY: `run` is a block of `second`'s that nothing names.
+            unsafe { second.free(run) };
+        }
+        assert_eq!(read, vec![Some(0); 3]);
+    }
+
+    /// A chunk a request empties and is handed again keeps the mark of
+    /// the pages it touched before, so the pages the request wrote there
+    /// first are zeroed with it however few it takes the second time.
+    #[test]
+    fn a_chunk_emptied_and_laid_down_again_in_a_request_keeps_its_mark() {
+        let _alone = alone();
+        let cache = Arc::new(ChunkCache::with(Residue::Zeroed));
+        let mut heap = Mm::new_in(Arc::clone(&cache));
+        // Past the fast shutdown's start an emptied chunk is cached.
+        heap.keep_emptied();
+        let main = heap.alloc(MAX_LARGE_SIZE).expect("the main chunk's run");
+        let whole = heap.alloc(MAX_LARGE_SIZE).expect("a second chunk's run");
+        let chunk = heap.chunks[1];
+        // SAFETY: `whole` is a block of `heap`'s that nothing names.
+        unsafe { heap.free(whole) };
+        assert_eq!(heap.chunks.len(), 1, "the emptied chunk left the list");
+        let again = heap.alloc(PAGE_SIZE).expect("a page");
+        assert_eq!(heap.chunks[1], chunk, "and was laid down again");
+        // SAFETY: the chunk is on the heap's list, its header the one
+        // `chunk_init` wrote, and nothing writes it during the read.
+        let touched = unsafe { (*chunk.as_ptr()).touched };
+        assert_eq!(touched, PAGES, "every page its first run took");
+        // SAFETY: both are blocks of `heap`'s that nothing names.
+        unsafe { heap.free(again) };
+        // SAFETY: as above.
+        unsafe { heap.free(main) };
+    }
+
+    /// The process's choice is php's unless the variable is a number that
+    /// is not zero, read as php reads `USE_ZEND_ALLOC`.
+    #[test]
+    fn the_process_zeroes_only_where_the_variable_is_a_number_not_zero() {
+        let of = |value: Option<&str>| Residue::from_env(value.map(OsStr::new));
+        assert_eq!(of(None), Residue::Left);
+        assert_eq!(of(Some("0")), Residue::Left);
+        assert_eq!(of(Some("")), Residue::Left);
+        assert_eq!(of(Some("yes")), Residue::Left);
+        assert_eq!(of(Some("1")), Residue::Zeroed);
+        assert_eq!(of(Some(" 2x")), Residue::Zeroed);
     }
 
     /// Each heap that stood at once is kept, as each php-fpm child keeps

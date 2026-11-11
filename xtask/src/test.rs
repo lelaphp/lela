@@ -19,7 +19,11 @@
 //! A run is three steps over every crate at once, as `cargo test` would
 //! take them one crate at a time (#2165), and a crate with a binary takes
 //! them alone, so its binary is built with its own features
-//! ([`batch::runs`], #2606). One `cargo build --tests
+//! ([`batch::runs`], #2606). A crate whose `Cargo.toml` names `profile =
+//! "release-da"` under `[package.metadata.xtask.test]` takes them under
+//! that profile, its doctests too, so the binary its tests start runs the
+//! debug build's sensors at release optimisation, as `sapi/makala`'s do
+//! (#4348's ruling 4, [`TestProfile`], #4361). One `cargo build --tests
 //! --keep-going` builds every crate's test targets, cargo building crates
 //! side by side, and a crate that does not compile stops only the crates
 //! built on it ([`batch::Run`]). Next, one `cargo test --doc` runs the
@@ -65,7 +69,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::batch::{self, Built, Executable, Package, Run, Targets, tail};
+use crate::batch::{self, Built, Executable, Group, Package, Run, Targets, TestProfile, tail};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::SKIPPED_VARIABLE;
@@ -123,11 +127,12 @@ fn measure(
     let _seat = crate::seat::Seats::of_env().take(INSTRUMENT);
     let mut readings = Vec::with_capacity(crates.len());
     let (builds, mut ran) = (batch::Builds::hold(root), Vec::new());
-    for run in batch::runs(root, &crates)? {
-        let built = Run::of(root, &["build", "--keep-going"], &run, Targets::Tests)?;
-        let mut docs = doctests(root, &built, &run)?;
-        let missed = Pin::missed(root, &built, &run)?;
-        for krate in run {
+    for group in batch::runs(root, &crates)? {
+        let args = [&["build", "--keep-going"][..], group.profile.flags()].concat();
+        let built = Run::of(root, &args, &group.crates, Targets::Tests)?;
+        let mut docs = doctests(root, &built, &group)?;
+        let missed = Pin::missed(root, &built, &group)?;
+        for krate in group.crates {
             let missed = missed.get(&krate.name).map_or(&[][..], Vec::as_slice);
             let (reading, left_out) = reading(
                 &snapshot,
@@ -431,13 +436,23 @@ enum Beside {
 impl Beside {
     /// What `package` declares; a declaration this does not read is an
     /// error, never one at a time in silence.
+    /// The table's `profile` is the build's and not this
+    /// ([`TestProfile`]), so a table that names nothing else is one at a
+    /// time.
     fn of(package: &Package) -> Result<Beside> {
         let Some(table) = (package.metadata.as_ref()).and_then(|m| m.get("xtask")?.get("test"))
         else {
             return Ok(Beside::OneAtATime);
         };
+        let mut table = table.clone();
+        if let Some(keys) = table.as_object_mut() {
+            keys.remove(TestProfile::KEY);
+            if keys.is_empty() {
+                return Ok(Beside::OneAtATime);
+            }
+        }
         let at = package.manifest_path.display();
-        serde_json::from_value(table.clone())
+        serde_json::from_value(table)
             .with_context(|| format!("{at}: [package.metadata.xtask.test]"))
     }
 
@@ -610,14 +625,14 @@ fn environment(executable: &Executable, built: &Built, run: &Run) -> Vec<(&'stat
     env
 }
 
-/// `cargo test --doc` over `crates` at `root` with `args` after them,
-/// both streams written to one file, where a test's line, cargo's
-/// `Doc-tests <lib>` and the compiler's words stand in the order they were
-/// written: how it ended, and the file's text.
+/// `cargo test --doc` over `crates` at `root` under `profile`, with `args`
+/// after them, both streams written to one file, where a test's line,
+/// cargo's `Doc-tests <lib>` and the compiler's words stand in the order
+/// they were written: how it ended, and the file's text.
 fn doc_run(
     root: &Path,
     run: &Run,
-    crates: &[&Crate],
+    (profile, crates): (TestProfile, &[&Crate]),
     args: Vec<String>,
 ) -> Result<(ExitStatus, String)> {
     let dir = &run.target_dir;
@@ -627,6 +642,7 @@ fn doc_run(
     let mut command = Command::new("cargo");
     command
         .args(["test", "--doc", "--no-fail-fast", "--color", "never"])
+        .args(profile.flags())
         .current_dir(root)
         .stdout(Stdio::from(
             file.try_clone().context("sharing the doctests' file")?,
@@ -648,8 +664,8 @@ fn doc_run(
 /// the run's lines follow on stdout, so both are written to one file,
 /// where they stand in the order they were written. A crate whose library
 /// carries no doctests, or that did not build, has none.
-fn doctests(root: &Path, run: &Run, crates: &[&Crate]) -> Result<BTreeMap<String, Ran>> {
-    let with: Vec<&Crate> = crates
+fn doctests(root: &Path, run: &Run, group: &Group) -> Result<BTreeMap<String, Ran>> {
+    let with: Vec<&Crate> = (group.crates)
         .iter()
         .copied()
         .filter(|k| {
@@ -668,7 +684,7 @@ fn doctests(root: &Path, run: &Run, crates: &[&Crate]) -> Result<BTreeMap<String
             Some((lib, k.name.clone()))
         })
         .collect();
-    let (ended, text) = doc_run(root, run, &with, Vec::new())?;
+    let (ended, text) = doc_run(root, run, (group.profile, &with), Vec::new())?;
     let mut sections: BTreeMap<String, String> = BTreeMap::new();
     let mut current: Option<String> = None;
     for line in text.lines() {
@@ -749,9 +765,9 @@ impl Pin {
     /// words on the stream (`--nocapture`), and each `compile_fail`
     /// block's codes read from its `error[E....]` lines, the words the
     /// nightly's rustdoc reads them from.
-    fn missed(root: &Path, run: &Run, crates: &[&Crate]) -> Result<BTreeMap<String, Vec<String>>> {
+    fn missed(root: &Path, run: &Run, group: &Group) -> Result<BTreeMap<String, Vec<String>>> {
         let mut pinned: Vec<(&Crate, Vec<Pin>)> = Vec::new();
-        for krate in crates {
+        for krate in group.crates.iter().copied() {
             if !run
                 .crates
                 .get(&krate.name)
@@ -784,7 +800,7 @@ impl Pin {
             .collect();
         args.extend(files);
         let krates: Vec<&Crate> = pinned.iter().map(|(krate, _)| *krate).collect();
-        let said = Pin::said(&doc_run(root, run, &krates, args)?.1);
+        let said = Pin::said(&doc_run(root, run, (group.profile, &krates), args)?.1);
         let mut missed = BTreeMap::new();
         for (krate, pins) in pinned {
             let words: Vec<String> = pins.iter().filter_map(|pin| pin.missed_in(&said)).collect();
@@ -911,7 +927,7 @@ impl Counts {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
@@ -972,6 +988,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A table's `profile` is the build's, so beside it the executables
+    /// stand as the rest of the table says, one at a time where it says
+    /// nothing else (#4361).
+    #[test]
+    fn a_tables_profile_leaves_how_the_executables_stand_to_the_rest() {
+        let declaring = |table: serde_json::Value| {
+            let mut package = Package::default();
+            package.metadata = Some(serde_json::json!({ "xtask": { "test": table } }));
+            package
+        };
+        let alone = declaring(serde_json::json!({ "profile": "release-da" }));
+        assert_eq!(Beside::of(&alone).unwrap(), Beside::OneAtATime);
+        let beside = declaring(
+            serde_json::json!({ "profile": "release-da", "executables": "side-by-side" }),
+        );
+        assert_eq!(
+            Beside::of(&beside).unwrap(),
+            Beside::SideBySide {
+                apart: BTreeMap::new(),
+                own: BTreeMap::new()
+            }
+        );
     }
 
     /// A staged topic of `tests/common` runs every test binary whose module

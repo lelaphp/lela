@@ -38,6 +38,17 @@
 //! took to end, and every answer of the rep carries the body the rep is
 //! held to (§5), so a rep is refused on the first answer that differs.
 //!
+//! **The heap's opt-in** (#4348's ruling 4, #4361). `makala-zeroed-c8/<workload>`
+//! is the throughput load against two makalas, the first started with
+//! [`ZEROED`] set, so each request's heap zeroes the pages it touched
+//! before its chunks are kept, and the second without: what the opt-in
+//! costs, the measurement a person reads before it could ever become a
+//! default. It is the throughput load because the zeroing runs as a
+//! request's heap ends, after its response is written, where one client
+//! waiting on one request would not pay for it; eight clients on eight
+//! request threads do, and each arm's rep reads what its server retired.
+//! Its A/A control is `makala-c8-aa/<workload>`, under the same load.
+//!
 //! **How each is held.** Each series is held to no bound until a person
 //! writes one in the manifest once the nightly series is read (#2336's
 //! ruling, after #1902's); its reading states the paired delta and how far
@@ -47,6 +58,7 @@
 //! machine without the pinned php-fpm measures none of them, each a skip
 //! that says so.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -112,13 +124,53 @@ impl Load {
     }
 }
 
-/// Each workload's bars: the name before the workload's, how it is held
-/// and the load each rep asks under.
-const BARS: [(&str, Held, Load); 4] = [
-    ("makala-fpm", Held::Series, Load::One),
-    ("makala-aa", Held::Control, Load::One),
-    ("makala-fpm-c8", Held::Series, Load::Clients),
-    ("makala-c8-aa", Held::Control, Load::Clients),
+/// What a bar's makala is measured against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Against {
+    /// The pinned php-fpm behind a `FastCGI` client: a series.
+    Fpm,
+    /// Itself: the A/A control.
+    Itself,
+    /// A makala whose heap zeroes nothing, the first started with
+    /// [`ZEROED`]: a series.
+    Unzeroed,
+}
+
+impl Against {
+    /// How a bar against this is held.
+    fn held(self) -> Held {
+        match self {
+            Against::Itself => Held::Control,
+            Against::Fpm | Against::Unzeroed => Held::Series,
+        }
+    }
+
+    /// What a bar's `about` names its makala and its second arm by.
+    fn said(self) -> &'static str {
+        match self {
+            Against::Fpm => "makala against php-fpm behind a FastCGI client",
+            Against::Itself => "makala against itself",
+            Against::Unzeroed => {
+                "makala zeroing the pages each request touched against makala zeroing none"
+            }
+        }
+    }
+}
+
+/// The variable `php_heap` reads once per process to zero the pages each
+/// request touched before its chunks are kept, set to a number that is
+/// not zero: a copy, since the harness links no engine crate, which
+/// [`tests`] holds to `php_heap`'s.
+const ZEROED: &str = "ZERO_TOUCHED_PAGES";
+
+/// Each workload's bars: the name before the workload's, what its makala
+/// is measured against and the load each rep asks under.
+const BARS: [(&str, Against, Load); 5] = [
+    ("makala-fpm", Against::Fpm, Load::One),
+    ("makala-aa", Against::Itself, Load::One),
+    ("makala-fpm-c8", Against::Fpm, Load::Clients),
+    ("makala-c8-aa", Against::Itself, Load::Clients),
+    ("makala-zeroed-c8", Against::Unzeroed, Load::Clients),
 ];
 
 /// The bars over each workload of the workspace at `root`: makala against
@@ -131,22 +183,13 @@ pub(crate) fn declared(root: &Path) -> Result<Vec<Declared>> {
             || entry.id.clone(),
             |stem| stem.to_string_lossy().into_owned(),
         );
-        for (bar, held, load) in BARS {
-            let against = if held == Held::Control {
-                "itself"
-            } else {
-                "php-fpm behind a FastCGI client"
-            };
+        for (bar, against, load) in BARS {
             let (root, entry) = (root.to_path_buf(), entry.clone());
             bars.push(Declared {
                 id: format!("{bar}/{name}"),
-                about: format!(
-                    "makala against {against} over {}{}",
-                    entry.id,
-                    load.clients()
-                ),
-                held,
-                start: Box::new(move || sides(&root, &entry, held, load)),
+                about: format!("{} over {}{}", against.said(), entry.id, load.clients()),
+                held: against.held(),
+                start: Box::new(move || sides(&root, &entry, against, load)),
             });
         }
     }
@@ -154,9 +197,11 @@ pub(crate) fn declared(root: &Path) -> Result<Vec<Declared>> {
 }
 
 /// The arms of a bar over `entry`: makala's and the pinned php-fpm's for a
-/// series, two of one makala for a control, which is measured only where
-/// php-fpm's is too, so the control is never read beside no series.
-fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
+/// series against php-fpm, two of one makala for a control, and a makala
+/// started with [`ZEROED`] and one without for the opt-in's series, each
+/// measured only where php-fpm's is, so a control is never read beside no
+/// series nor a series beside no control.
+fn sides(root: &Path, entry: &Entry, against: Against, load: Load) -> Result<Sides> {
     let manifest = Manifest::load(root)?;
     let pin = manifest.pin()?;
     let Some(fpm) = (pin.sapi.fpm.as_ref()).filter(|fpm| fpm.path.is_file()) else {
@@ -165,10 +210,10 @@ fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
     let oracle = pin.oracle();
     oracle.host_asserted(fpm)?;
     let (threads, children) = load.hosts();
-    let served = Arc::new(Served::start(root, &manifest, entry, threads)?);
-    let makala = |name| -> Box<dyn Side> {
+    let served = Arc::new(Served::start(root, &manifest, entry, threads, &[])?);
+    let makala = |name, served: &Arc<Served>| -> Box<dyn Side> {
         let (pid, program) = (served.server.pid(), served.binary.clone());
-        let served = Arc::clone(&served);
+        let served = Arc::clone(served);
         let ask = Box::new(move || served.body());
         Box::new(ByRequest {
             name,
@@ -178,8 +223,18 @@ fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
             pid,
         })
     };
-    if held == Held::Control {
-        return Ok(Ok(Arms::Pair([makala("makala-a"), makala("makala-b")])));
+    match against {
+        Against::Itself => {
+            let pair = [makala("makala-a", &served), makala("makala-b", &served)];
+            return Ok(Ok(Arms::Pair(pair)));
+        }
+        Against::Unzeroed => {
+            let zeroed = [(ZEROED.to_owned(), OsString::from("1"))];
+            let zeroing = Arc::new(Served::start(root, &manifest, entry, threads, &zeroed)?);
+            let pair = [makala("makala-zeroed", &zeroing), makala("makala", &served)];
+            return Ok(Ok(Arms::Pair(pair)));
+        }
+        Against::Fpm => {}
     }
     let (program, http) = (fpm.path.clone(), &entry.http);
     let pool = Fpm::start(
@@ -199,7 +254,7 @@ fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
         ask,
         pid,
     };
-    Ok(Ok(Arms::Pair([makala("makala"), Box::new(fpm)])))
+    Ok(Ok(Arms::Pair([makala("makala", &served), Box::new(fpm)])))
 }
 
 /// Why a bar of the production server is not measured on this machine.
@@ -218,12 +273,14 @@ struct Served {
 }
 
 impl Served {
-    /// The makala, with `threads` request threads or its default.
+    /// The makala, with `threads` request threads or its default, and
+    /// `env` over the recipe's environment.
     fn start(
         root: &Path,
         manifest: &Manifest,
         entry: &Entry,
         threads: Option<usize>,
+        env: &[(String, OsString)],
     ) -> Result<Served> {
         let recipe = &manifest.pin()?.recipe;
         let binary =
@@ -231,7 +288,7 @@ impl Served {
         let own = Tree::new("bench-makala")?;
         own.write(&entry.script, &entry.program)?;
         let log = own.path().join("errors");
-        let server = Server::start(recipe, &binary, own.path(), &ini(), threads, &log, &[])?;
+        let server = Server::start(recipe, &binary, own.path(), &ini(), threads, &log, env)?;
         Ok(Served {
             server,
             binary,
@@ -384,11 +441,12 @@ mod tests {
             ("makala-aa/ucall", Held::Control),
             ("makala-fpm-c8/ucall", Held::Series),
             ("makala-c8-aa/ucall", Held::Control),
+            ("makala-zeroed-c8/ucall", Held::Series),
             ("makala-fpm/bench_quiet", Held::Series),
         ] {
             assert!(named.contains(&(bar, held)), "{bar}: {named:?}");
         }
-        assert_eq!(bars.len(), 4 * workloads(&root).unwrap().len());
+        assert_eq!(bars.len(), 5 * workloads(&root).unwrap().len());
         let unserved = [
             "fileinfo",
             "compression",
@@ -418,8 +476,27 @@ mod tests {
         );
         assert_eq!(
             BARS.map(|(_, _, load)| load == Load::Clients),
-            [false, false, true, true]
+            [false, false, true, true, true]
         );
+    }
+
+    /// The opt-in's bar measures something only while its first makala is
+    /// started with the variable `php_heap` reads: a rename there that
+    /// left this copy behind would make the bar an A/A control in all but
+    /// its name, so the copy is held to `php_heap`'s constant, and its
+    /// arms named for what each is (#4361).
+    #[cfg(tracked)]
+    #[test]
+    fn the_opt_ins_bar_starts_its_first_makala_with_the_variable_php_heap_reads() {
+        let root = crate::package_dir().join("..");
+        let cache = std::fs::read_to_string(root.join("crates/php_heap/src/mm/cache.rs")).unwrap();
+        let declared = format!("pub(super) const ZEROED: &str = {ZEROED:?};");
+        assert!(cache.contains(&declared), "php_heap declares no {declared}");
+        assert_eq!(Against::Unzeroed.held(), Held::Series);
+        assert_eq!(Against::Itself.held(), Held::Control);
+        let (_, against, load) = BARS[4];
+        assert_eq!((against, load), (Against::Unzeroed, Load::Clients));
+        assert!(Against::Unzeroed.said().starts_with("makala zeroing"));
     }
 
     /// An arm of the latency series is a time and one of the throughput

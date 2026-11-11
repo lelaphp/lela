@@ -438,25 +438,83 @@ impl Run {
 /// `sapi/cli`'s, loads cli's `pcntl` and `posix`, and makala's tests start
 /// it. So a crate whose package has a binary a test run builds, one that
 /// requires no feature, is a run of its own, and every other crate is in
-/// one run, first.
-pub(crate) fn runs<'c>(root: &Path, crates: &[&'c Crate]) -> Result<Vec<Vec<&'c Crate>>> {
+/// one run for each [`TestProfile`] the crates declare, first.
+pub(crate) fn runs<'c>(root: &Path, crates: &[&'c Crate]) -> Result<Vec<Group<'c>>> {
     let metadata = Metadata::read(root)?;
-    let mut shared = Vec::new();
-    let mut runs = Vec::new();
+    let mut shared: BTreeMap<TestProfile, Vec<&Crate>> = BTreeMap::new();
+    let mut alone = Vec::new();
     for krate in crates {
         let (_, package) = metadata.package_of(root, krate)?;
+        let profile = TestProfile::of(package)?;
         let ships =
             |t: &Target| t.kind.iter().any(|k| k == "bin") && t.required_features.is_empty();
         if package.targets.iter().any(ships) {
-            runs.push(vec![*krate]);
+            alone.push(Group {
+                crates: vec![*krate],
+                profile,
+            });
         } else {
-            shared.push(*krate);
+            shared.entry(profile).or_default().push(*krate);
         }
     }
-    if !shared.is_empty() {
-        runs.insert(0, shared);
+    let shared = shared
+        .into_iter()
+        .map(|(profile, crates)| Group { crates, profile });
+    Ok(shared.chain(alone).collect())
+}
+
+/// One cargo run of [`runs`]: its crates, and the profile it builds and
+/// runs their tests under.
+#[derive(Debug)]
+pub(crate) struct Group<'c> {
+    pub(crate) crates: Vec<&'c Crate>,
+    pub(crate) profile: TestProfile,
+}
+
+/// The cargo profile a crate's tests are built and run under, as its
+/// `Cargo.toml` names it under `profile` in `[package.metadata.xtask.test]`:
+/// `cargo test`'s own unless it names `release-da`, the release
+/// optimisation with debug assertions on (the workspace's
+/// `[profile.release-da]`), so the debug build's sensors in the binary a
+/// test starts run at the speed it ships at, as #4348's ruling 4 has
+/// `sapi/makala`'s run (#4361). A name it does not know is an error.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TestProfile {
+    /// `cargo test`'s `test` profile, the dev profile's settings.
+    #[default]
+    Dev,
+    /// `--profile release-da`.
+    ReleaseDa,
+}
+
+impl TestProfile {
+    /// The key of `[package.metadata.xtask.test]` that names it.
+    pub(crate) const KEY: &str = "profile";
+
+    /// What `package` declares.
+    fn of(package: &Package) -> Result<TestProfile> {
+        let declared = (package.metadata.as_ref())
+            .and_then(|m| m.get("xtask")?.get("test")?.get(TestProfile::KEY));
+        let Some(declared) = declared else {
+            return Ok(TestProfile::Dev);
+        };
+        serde_json::from_value(declared.clone()).with_context(|| {
+            format!(
+                "{}: [package.metadata.xtask.test] {}",
+                package.manifest_path.display(),
+                TestProfile::KEY
+            )
+        })
     }
-    Ok(runs)
+
+    /// The flags a cargo build or `cargo test` takes for it.
+    pub(crate) fn flags(self) -> &'static [&'static str] {
+        match self {
+            TestProfile::Dev => &[],
+            TestProfile::ReleaseDa => &["--profile", "release-da"],
+        }
+    }
 }
 
 /// The toolchain's library directories, from `rustc --print sysroot` and
@@ -601,7 +659,34 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::{Built, Executable, Package, dir_of, tail};
+    use super::{Built, Executable, Package, TestProfile, dir_of, tail};
+
+    /// A crate's tests are built under `cargo test`'s profile unless its
+    /// `[package.metadata.xtask.test]` names `release-da`, and a name the
+    /// harness does not know is an error, never the dev profile in silence
+    /// (#4361).
+    #[test]
+    fn a_package_names_the_profile_its_tests_are_built_under() {
+        let declaring = |table: serde_json::Value| Package {
+            metadata: Some(serde_json::json!({ "xtask": { "test": table } })),
+            ..Package::default()
+        };
+        let of = |package: &Package| TestProfile::of(package).map_err(|e| format!("{e:#}"));
+        assert_eq!(of(&Package::default()), Ok(TestProfile::Dev));
+        let beside = declaring(serde_json::json!({ "executables": "side-by-side" }));
+        assert_eq!(of(&beside), Ok(TestProfile::Dev));
+        let named = declaring(serde_json::json!({ "profile": "release-da" }));
+        assert_eq!(of(&named), Ok(TestProfile::ReleaseDa));
+        assert_eq!(TestProfile::ReleaseDa.flags(), ["--profile", "release-da"]);
+        assert!(TestProfile::Dev.flags().is_empty());
+        let unknown = of(&declaring(serde_json::json!({ "profile": "release" })));
+        assert!(
+            unknown
+                .as_ref()
+                .is_err_and(|e| e.contains("[package.metadata.xtask.test] profile")),
+            "{unknown:?}"
+        );
+    }
 
     #[test]
     fn a_package_id_names_its_directory_whatever_follows_the_hash() {

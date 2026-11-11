@@ -19,6 +19,14 @@ description = "the production web server beside php -S, the binary makala"
 [lints]
 workspace = true
 
+# The tests start the `makala` binary, so they are built and run under
+# `release-da`: the debug build's sensors (the freed-block mark, the
+# quarantine, the lend's slot) run in a worker at the optimisation it
+# ships at, across the requests one request thread serves (#4348's
+# ruling 4, #4361).
+[package.metadata.xtask.test]
+profile = "release-da"
+
 [[bin]]
 name = "makala"
 path = "src/main.rs"
