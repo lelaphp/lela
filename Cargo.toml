@@ -1,10 +1,10 @@
 # The workspace (third-engine-design.md §4.2): members are `crates/*`, `ext/*`,
-# `sapi/*` (ADR-0008) and `xtask`. The globs are listed as each crate is
-# created; cargo refuses a glob that matches a directory without a manifest,
-# and `crates/php_ext` holds only `api.lock` today.
+# `sapi/*` (ADR-0008) and `xtask`. Every directory under the three globs is a
+# crate, since cargo refuses one that holds no `Cargo.toml`, so `xtask new-ext`
+# lays an extension down and writes nothing here (#4458).
 [workspace]
 resolver = "3"
-members = ["crates/*", "sapi/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor", "ext/zlib", "ext/pcntl", "ext/posix", "ext/sockets", "ext/phar", "ext/bz2", "ext/uri", "ext/opcache", "ext/bcmath", "ext/simplexml", "ext/calendar", "ext/exif", "ext/shmop", "ext/sysvsem", "ext/sysvmsg", "ext/sysvshm", "ext/ftp", "ext/xml", "ext/xmlreader", "ext/xmlwriter", "ext/mysqlnd", "ext/mysqli", "ext/sqlite3", "ext/fileinfo", "ext/dba", "ext/zip", "ext/gmp", "ext/xsl", "ext/tidy", "ext/soap", "ext/gd", "ext/sodium", "ext/gettext", "ext/readline", "ext/ffi", "ext/intl", "ext/zend_test"]
+members = ["crates/*", "ext/*", "sapi/*", "xtask"]
 
 # On macOS the dev profile's default, `split-debuginfo = "unpacked"`, keeps
 # every codegen unit's object in target/debug/deps for its debuginfo, under a
