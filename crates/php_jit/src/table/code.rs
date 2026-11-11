@@ -1468,6 +1468,13 @@ unsafe extern "C" {
     static vm_kernel_page_size: libc::vm_size_t;
 }
 
+// The epoch's trace table, which every request of the epoch reads
+// (`tier::epoch_state`, #4492): this arena's code, the traces' records
+// and the analyses they were built through, none of it a request's. Here
+// until #4544 says how php_unit's and php_ssa's types it holds become
+// engine state, since the derive cannot read through them.
+impl<P: Pages + 'static> php_engine::api::abi::EngineState for super::TraceTable<P> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

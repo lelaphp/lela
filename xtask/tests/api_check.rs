@@ -1217,13 +1217,24 @@ mod engine_state {
         assert_eq!(failures(&readings).len(), 10, "{readings:#?}");
     }
 
-    /// Each compile-fail fixture beside the sensor's is compiled by
-    /// `php_bundle`'s `refusals` under a `compile_fail,E0277` fence, which
-    /// `xtask test` holds to the code (#2049).
+    /// Each compile-fail fixture beside the sensor's is compiled under a
+    /// `compile_fail,E0277` fence, which `xtask test` holds to the code
+    /// (#2049): by `php_bundle`'s `refusals` where the facade reaches the
+    /// entry, and by `php_engine`'s doctest on `tier::epoch_state`, which
+    /// the facade does not (#4492).
     #[test]
     fn each_compile_fail_fixture_is_included_under_a_pinned_fence() {
-        let refusals =
-            fs::read_to_string(workspace().join("crates/php_bundle/src/refusals.rs")).unwrap();
+        let includers = [
+            ("crates/php_bundle/src/refusals.rs", "//! "),
+            ("crates/php_engine/src/tier/view.rs", "/// "),
+        ]
+        .map(|(file, doc)| {
+            (
+                file,
+                doc,
+                fs::read_to_string(workspace().join(file)).unwrap(),
+            )
+        });
         let mut seen = 0;
         for entry in fs::read_dir(fixture("engine-state")).unwrap() {
             let path = entry.unwrap().path();
@@ -1233,16 +1244,16 @@ mod engine_state {
             seen += 1;
             let name = path.file_name().unwrap().to_str().unwrap();
             let named = format!("/xtask/fixtures/api-check/engine-state/{name}\"");
-            let at = refusals
-                .find(&named)
-                .unwrap_or_else(|| panic!("refusals.rs includes no {name}"));
-            let fence = refusals[..at].rfind("//! ```").unwrap();
+            let (file, doc, text, at) = (includers.iter())
+                .find_map(|(file, doc, text)| Some((file, doc, text, text.find(&named)?)))
+                .unwrap_or_else(|| panic!("no file includes {name}"));
+            let fence = text[..at].rfind(&format!("{doc}```")).unwrap();
             assert!(
-                refusals[fence..].starts_with("//! ```compile_fail,E0277\n"),
-                "{name} is included under {}",
-                &refusals[fence..at]
+                text[fence..].starts_with(&format!("{doc}```compile_fail,E0277\n")),
+                "{file} includes {name} under {}",
+                &text[fence..at]
             );
         }
-        assert_eq!(seen, 2, "handle.rs and entry.rs");
+        assert_eq!(seen, 3, "handle.rs, entry.rs and epoch.rs");
     }
 }

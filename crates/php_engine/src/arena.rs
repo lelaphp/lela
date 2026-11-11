@@ -231,8 +231,9 @@ pub(crate) struct Arena {
     /// (`jit-design.md` §4.5): made by the tier the first time it asks,
     /// read by every request of the epoch with nothing taken, and
     /// dropped with the epoch, so a restart's epoch starts with none
-    /// ([`crate::tier::epoch_state`]).
-    pub(crate) tier: OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+    /// ([`crate::tier::epoch_state`]). Engine state, as every request of
+    /// the epoch reads it.
+    pub(crate) tier: OnceLock<php_heap::AnyState>,
     /// The engine's interned strings, which a held unit's constants and
     /// names and the engine's classes' names are: kept by the epoch so
     /// what holds it reads them after the engine that made them is
@@ -799,7 +800,9 @@ mod tests {
     fn a_restarts_epoch_starts_with_no_tier_value() {
         let epochs = Epochs::of(Arena::past(0, 0, crate::unit_cache::Files::new(16)));
         let first = epochs.enter(|_| false);
-        let made = first.tier.get_or_init(|| Box::new(Arc::new(7_u32)));
+        let made = first
+            .tier
+            .get_or_init(|| php_heap::AnyState::new(Arc::new(7_u32)));
         let held = made.downcast_ref::<Arc<u32>>().map(Arc::downgrade);
         assert!(Arc::ptr_eq(&first, &epochs.enter(|_| false)));
         let second = epochs.enter(|_| true);
