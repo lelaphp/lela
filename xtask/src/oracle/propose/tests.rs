@@ -37,8 +37,9 @@ fn link(at: &Path, to: &str) {
 
 /// One keg of the prefix: its binaries, php a shell program that prints its
 /// configure line and the hosts Mach-O files that load `loads`, and its
-/// receipt naming php's `version` and the runtime kegs `named`.
-fn keg(dir: &Path, version: &str, configured: &str, loads: &[&Path], named: &[&str]) {
+/// receipt naming php's `version` and the runtime kegs `named`, each at
+/// the version it names.
+fn keg(dir: &Path, version: &str, configured: &str, loads: &[&Path], named: &[(&str, &str)]) {
     fs::create_dir_all(dir.join("bin")).unwrap();
     fs::create_dir_all(dir.join("sbin")).unwrap();
     let php = dir.join("bin/php");
@@ -53,7 +54,7 @@ fn keg(dir: &Path, version: &str, configured: &str, loads: &[&Path], named: &[&s
     }
     fs::write(dir.join("bin/phpdbg"), macho(&[])).unwrap();
     let named: Vec<String> = (named.iter())
-        .map(|n| format!("{{\"full_name\":\"{n}\",\"pkg_version\":\"0\"}}"))
+        .map(|(n, v)| format!("{{\"full_name\":\"{n}\",\"pkg_version\":\"{v}\"}}"))
         .collect();
     let receipt = format!(
         "{{\"source\":{{\"versions\":{{\"stable\":\"{version}\"}}}},\"runtime_dependencies\":[{}]}}",
@@ -83,24 +84,36 @@ impl Machine {
         let zstd = lib("zstd", "1.5.7_1", "lib/libzstd.dylib", &[]);
         let zip_before = lib("zip", "1.0", "lib/libzip.dylib", &[]);
         let zip_after = lib("zip", "1.1", "lib/libzip.dylib", &[zstd.to_str().unwrap()]);
-        lib("openssl@3", "3.0.1", "lib/libssl.dylib", &[]);
+        let icu_before = lib("icu4c@78", "78.1", "lib/libicuuc.dylib", &[]);
+        let icu_after = lib("icu4c@79", "79.1", "lib/libicuuc.dylib", &[]);
         for version in ["2026-01-01", "2026-02-01"] {
             lib("ca-certificates", version, "lib/cert.pem", &[]);
         }
-        let receipt = ["zip", "ca-certificates"];
+        // The receipt names zip at a revision the Cellar does not hold, as
+        // the pinned keg's receipt names openldap beside the older one it loads.
+        let receipt = [
+            ("zip", "1.0_1"),
+            ("icu4c@78", "78.1"),
+            ("ca-certificates", "2026-01-01"),
+        ];
         keg(
             &prefix.join(BEFORE),
             "9.1.1",
             CONFIGURED_BEFORE,
-            &[&zip_before],
+            &[&zip_before, &icu_before],
             &receipt,
         );
-        let receipt = ["zip", "zstd", "ca-certificates"];
+        let receipt = [
+            ("zip", "1.1"),
+            ("zstd", "1.5.7_1"),
+            ("icu4c@79", "79.1"),
+            ("ca-certificates", "2026-02-01"),
+        ];
         keg(
             &prefix.join(AFTER),
             "9.1.2",
             CONFIGURED_AFTER,
-            &[&zip_after],
+            &[&zip_after, &icu_after],
             &receipt,
         );
         let opt = [
@@ -108,7 +121,8 @@ impl Machine {
             ("php@9.1", AFTER),
             ("zip", "Cellar/zip/1.1"),
             ("zstd", "Cellar/zstd/1.5.7_1"),
-            ("openssl@3", "Cellar/openssl@3/3.0.1"),
+            ("icu4c@78", "Cellar/icu4c@78/78.1"),
+            ("icu4c@79", "Cellar/icu4c@79/79.1"),
         ];
         for (name, at) in opt {
             link(&prefix.join("opt").join(name), &format!("../{at}"));
@@ -189,8 +203,7 @@ impl Machine {
             let digest = Sha256::of(bytes.as_bytes()).to_string();
             facts.insert(format!("ini:{ini}"), digest["sha256:".len()..].to_owned());
         }
-        let recorded =
-            "ca-certificates = \"2026-01-01\"\n\"openssl@3\" = \"3.0.1\"\nzip = \"1.0\"\n";
+        let recorded = "ca-certificates = \"2026-01-01\"\n\"icu4c@78\" = \"78.1\"\nzip = \"1.0\"\n";
         let digest = toml::from_str::<Closure>(recorded)
             .unwrap()
             .digest()
@@ -212,10 +225,14 @@ impl Machine {
             }
             text
         };
-        [PIN, CONFIGURE, INPUTS, DOCKERFILE]
+        let tracked = [PIN, CONFIGURE, INPUTS, DOCKERFILE].map(|file| (file, file));
+        // The settings stand under `.claude/` in the workspace, and under
+        // a name of their own in the fixture, which holds no `.claude/`.
+        (tracked
             .into_iter()
-            .map(|file| (file, filled(file)))
-            .collect()
+            .chain([(SETTINGS, "claude-settings.json")]))
+        .map(|(file, fixture)| (file, filled(fixture)))
+        .collect()
     }
 
     fn workspace(&self, files: &[(&str, String)]) {
@@ -253,35 +270,43 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (Vec<u8>, Option<SystemTime>)> {
 }
 
 /// The bump from a keg to the next. Pointed at the pinned keg and tree,
-/// the diff is empty (box 1). Pointed at the next keg, poured from another
-/// formula at a revision of its version and loading another closure, the
-/// diff names every line d2eb1f516 and 6a054ac09 changed at the last
-/// bump: `[oracle]`'s version, path and md5, `[closure]`'s rows and date,
-/// `[source]`'s tag, commit, path and count, `TEST_PHP_EXECUTABLE`, the
-/// three `[sapi]` hosts and the configure line's md5 and arguments; beside
-/// them `[oracle].formula`, `dist/inputs.toml` and the Dockerfile's
-/// version (box 2). The variant's build line is left for its rebuild, and
-/// a note names it. `git apply` takes the diff, the files it writes are
-/// the fixture's after the bump to the byte, and the pin they make takes
-/// its formula and closure checks with no defect but the variant's
-/// rebuild. Neither run writes a file anywhere in the machine, nor a
-/// reading (box 3).
+/// the diff is empty (box 1), and the notes still print: the receipt that
+/// names zip at a version the Cellar does not hold among them. Pointed at
+/// the next keg, poured from another formula at a revision of its version
+/// and loading another closure, the diff names every line d2eb1f516 and
+/// 6a054ac09 changed at the last bump: `[oracle]`'s version, path and md5,
+/// `[closure]`'s rows and date, `[source]`'s tag, commit, path and count,
+/// `TEST_PHP_EXECUTABLE`, the three `[sapi]` hosts and the configure
+/// line's md5 and arguments; beside them `[oracle].formula`,
+/// `dist/inputs.toml`, the Dockerfile's version and the settings' tree
+/// (box 2). `icu4c@78`, which the new keg loads at its next major and its
+/// receipt no longer names, leaves the closure with one note, and
+/// `icu4c@79` takes its place. The variant's build line and `ops.toml`
+/// are left for their rebuild, and a note names each. `git apply` takes
+/// the diff, the files it writes are the fixture's after the bump to the
+/// byte, and the pin they make takes its formula and closure checks with
+/// no defect but the variant's rebuild. Neither run writes a file anywhere
+/// in the machine, nor a reading (box 3).
 #[test]
 fn a_bump_proposes_every_line_the_pin_states_of_the_keg_and_writes_nothing() {
     let tree = Tree::new("propose").unwrap();
     let machine = Machine::lay(&tree);
     let before = Machine::files("before", &machine.facts(BEFORE, "php-9.1.1", ""));
     machine.workspace(&before);
+    machine.workspace(&[("ops.toml", "php_tag = \"php-9.1.1\"\n".to_owned())]);
     let ws = &machine.workspace;
     let held = snapshot(&tree);
 
     let pinned = proposed(ws, None, None, "2026-03-04").unwrap();
     assert_eq!(pinned.diff, "", "{:?}", pinned.notes);
-    assert!(
-        pinned.notes[1].contains("the bump writes nothing"),
-        "{:?}",
-        pinned.notes
-    );
+    let notes = pinned.notes.join("\n");
+    for said in [
+        "the bump writes nothing",
+        "zip: the keg's receipt names 1.0_1, and the proposed [closure] records 1.0",
+    ] {
+        assert!(notes.contains(said), "{notes}");
+    }
+    assert!(!notes.contains("ops.toml"), "{notes}");
     assert_eq!(snapshot(&tree), held, "the pinned proposal wrote a file");
 
     machine.certificates("2026-02-01");
@@ -297,12 +322,20 @@ fn a_bump_proposes_every_line_the_pin_states_of_the_keg_and_writes_nothing() {
     let notes = bump.notes.join("\n");
     for said in [
         "[variant.zend-test] pins builds for darwin-arm64, linux-x86_64, each made from the tag the diff replaces",
-        "openssl@3 of the pin's [closure] the binaries do not load",
-        "the proposed pin carries a defect until then: [variant.zend-test.darwin-arm64] was made against the closure",
+        "icu4c@78 78.1 of the pin's [closure] is loaded by none of the binaries and named by no receipt, so the diff removes its row",
+        "ops.toml names php-9.1.1 and is regenerated from the new tree",
+        "the proposed pin carries a defect: [variant.zend-test.darwin-arm64] was made against the closure",
     ] {
         assert!(notes.contains(said), "{notes}");
     }
-    assert!(!notes.contains("the keg check"), "{notes}");
+    assert_eq!(
+        notes.matches("of the pin's [closure]").count(),
+        1,
+        "{notes}"
+    );
+    for unsaid in ["the keg check", "receipt names", "func-infos"] {
+        assert!(!notes.contains(unsaid), "{notes}");
+    }
 
     let patch = tree.join("bump.diff");
     fs::write(&patch, &bump.diff).unwrap();
@@ -323,6 +356,44 @@ fn a_bump_proposes_every_line_the_pin_states_of_the_keg_and_writes_nothing() {
     assert_eq!(pin.oracle.bottle(), "9.1.2_1");
     let binaries: Vec<&Path> = pin.binaries().into_iter().map(|(_, path)| path).collect();
     pin.closure.as_ref().unwrap().held(&binaries).unwrap();
+}
+
+/// A row of the record no binary loads and no receipt names, whose keg is
+/// not installed at all, is proposed as a removal with its note and no
+/// refusal, and the date the closure was frozen on stands, since no
+/// version was read again. Settings that name a tree other than
+/// `[source].path` are left as they stand, with a note.
+#[test]
+fn a_row_nothing_loads_or_names_is_removed_with_a_note_installed_or_not() {
+    let tree = Tree::new("propose-gone").unwrap();
+    let machine = Machine::lay(&tree);
+    let mut files = Machine::files("before", &machine.facts(BEFORE, "php-9.1.1", ""));
+    let row = "\"gone@1\" = \"1.0\"\n";
+    files[0].1 = files[0]
+        .1
+        .replace("zip = \"1.0\"\n", &format!("zip = \"1.0\"\n{row}"));
+    files[4].1 = files[4].1.replace("/php-src-9.1.1", "/elsewhere");
+    machine.workspace(&files);
+
+    let proposal = proposed(&machine.workspace, None, None, "2026-03-04").unwrap();
+    let removed: Vec<&str> = (proposal.diff.lines())
+        .filter(|line| {
+            line.starts_with(['-', '+']) && !line.starts_with("---") && !line.starts_with("+++")
+        })
+        .collect();
+    assert_eq!(
+        removed,
+        [format!("-{}", row.trim_end())],
+        "{}",
+        proposal.diff
+    );
+    let notes = proposal.notes.join("\n");
+    for said in [
+        "gone@1 1.0 of the pin's [closure] is loaded by none of the binaries and named by no receipt, so the diff removes its row: a person who keeps it leaves that hunk out",
+        "which is not [source].path, and the diff leaves it as it stands",
+    ] {
+        assert!(notes.contains(said), "{notes}");
+    }
 }
 
 #[test]

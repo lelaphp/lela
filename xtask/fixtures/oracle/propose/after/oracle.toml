@@ -14,7 +14,7 @@ md5 = "{md5:php}"
 # The kegs the pinned binaries load, and the receipt's other runtime kegs;
 # frozen as the Cellar stood on {date}, each `brew pin`ned.
 ca-certificates = "2026-02-01"
-"openssl@3" = "3.0.1"
+"icu4c@79" = "79.1"
 zip = "1.1"
 zstd = "1.5.7_1"
 

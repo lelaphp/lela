@@ -144,11 +144,11 @@ impl Closure {
     /// The record `binaries` stand to on this machine, walked as
     /// [`Closure::held`] walks them, which a bump writes (#4384): each keg
     /// they load at the version it resolved to, and each keg of `named`,
-    /// the runtime kegs of their keg's receipt and the record's own, that
-    /// none loads, at the version `<prefix>/opt/<keg>` points at; beside it,
-    /// the kegs of `named` none loads. A keg loaded at two versions and a
-    /// named keg not installed each refuse, since no record holds either.
-    pub(crate) fn walked(binaries: &[&Path], named: &[String]) -> Result<(Closure, Vec<String>)> {
+    /// the runtime kegs of their keg's receipt, that none loads, at the
+    /// version `<prefix>/opt/<keg>` points at; nothing else. A keg
+    /// loaded at two versions and a named keg not installed each refuse,
+    /// since no record holds either.
+    pub(crate) fn walked(binaries: &[&Path], named: &[String]) -> Result<Closure> {
         let walked = Walked::from(binaries)?;
         let mut kegs = BTreeMap::new();
         for (keg, version) in &walked.kegs {
@@ -156,18 +156,16 @@ impl Closure {
                 bail!("{keg} is loaded at two versions, {other} and {version}");
             }
         }
-        let unloaded: Vec<String> = (named.iter())
-            .filter(|keg| !walked.names(keg))
-            .cloned()
-            .collect();
-        for keg in &unloaded {
+        for keg in named.iter().filter(|keg| !walked.names(keg)) {
             let version = walked.prefix.as_deref().and_then(|p| installed(p, keg));
             let Some(version) = version else {
-                bail!("{keg} is loaded by none of the binaries and installed at no version");
+                bail!(
+                    "{keg}, a runtime keg of the receipt, is loaded by none of the binaries and installed at no version"
+                );
             };
             kegs.insert(keg.clone(), version);
         }
-        Ok((Closure(kegs), unloaded))
+        Ok(Closure(kegs))
     }
 }
 

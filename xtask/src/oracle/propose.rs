@@ -9,7 +9,10 @@
 //! **What it reads** is the machine and the tracked files: the keg's
 //! receipt, for php's version and its runtime kegs; each binary's md5;
 //! `[closure]`, walked from the binaries as the pin's own check walks it
-//! ([`Closure::walked`]); php's `Configure Command`, as
+//! ([`Closure::walked`]): what they load and the receipt's runtime kegs,
+//! and nothing else, so a row of the record outside that set is proposed
+//! as a removal with a note, and a person who keeps it leaves that hunk
+//! out; php's `Configure Command`, as
 //! `scripts/oracle-build.py configure-line` reads it; and the checkout's
 //! commit at `php-<version>`, its `.phpt` count and the SHA-256 of each ini
 //! file `dist/inputs.toml` names. The pin is read with [`Pin::parse`] and
@@ -21,17 +24,23 @@
 //! `[oracle]`, `[closure]`, `[source]`, `[recipe.env]`'s
 //! `TEST_PHP_EXECUTABLE` and `[sapi]`; `ci/oracle/configure.toml` below its
 //! header; `dist/inputs.toml`'s `[php]` and `[php.ini]`; and
-//! `dist/Dockerfile`'s `ARG PHP_VERSION`. A `[variant.*]` build is made
-//! from the tag and, on macOS, against `[closure]`, so it is rebuilt and
-//! never proposed: a note names each, beside the defects the proposed pin
-//! carries until it is.
+//! `dist/Dockerfile`'s `ARG PHP_VERSION`; and `.claude/settings.json`'s
+//! tree where it names `[source].path`. A `[variant.*]` build is made from
+//! the tag and, on macOS, against `[closure]`, so it is rebuilt and never
+//! proposed, and `ops.toml` and `data/func-infos.toml` are regenerated
+//! from the tree: a note names each command, beside the defects the
+//! proposed pin carries until they run. The notes print whether or not
+//! the diff is empty, a receipt keg recorded at another version than the
+//! receipt names among them.
 //!
 //! **Where the keg is** is `--keg`, any path in it, a formula's `opt` link
 //! among them; without it, the `opt` link of the pinned formula under the
 //! prefix the pinned php stands in. **Where the tree is** is `--source`;
 //! without it, `[source].path` with the pinned version replaced by the
-//! keg's. Pointed at the pinned keg and tree, the diff is empty.
+//! keg's. Pointed at the pinned keg and tree, the diff is empty where the
+//! record holds what the binaries load and the receipt names.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -59,6 +68,25 @@ const PIN: &str = "oracle.toml";
 const CONFIGURE: &str = "ci/oracle/configure.toml";
 const INPUTS: &str = "dist/inputs.toml";
 const DOCKERFILE: &str = "dist/Dockerfile";
+/// The settings that name the php-src tree for every session, by
+/// [`super::TREE_VARIABLE`], which [`Source::tree`] reads first: written
+/// where it names `[source].path`, so no session's tree is refused once
+/// the pin has moved.
+const SETTINGS: &str = ".claude/settings.json";
+
+/// The tracked files a bump moves by regenerating them from the new tree,
+/// each with its command, `{tree}` the checkout: named in a note, not
+/// written in the diff, as a variant's rebuild is.
+const REGENERATED: [(&str, &str); 2] = [
+    (
+        "ops.toml",
+        "python3 scripts/extract_ops.py {tree} > ops.toml",
+    ),
+    (
+        "data/func-infos.toml",
+        "python3 scripts/extract_func_infos.py {tree} > data/func-infos.toml",
+    ),
+];
 
 /// The diff a bump to the keg at `keg` and the php-src checkout at
 /// `source` writes over the tracked files at `root`, each place defaulted
@@ -87,63 +115,99 @@ fn proposed(
     let tree = Checkout::read(&pin, &keg.version, source)?;
     let pinned = pinned(&text, &pin, &keg, &tree, today)?;
     let (configure, inputs, dockerfile) = (read(CONFIGURE)?, read(INPUTS)?, read(DOCKERFILE)?);
-    let files = [
-        (PIN, text.as_str(), pinned.clone()),
-        (CONFIGURE, &configure, configured(&configure, &keg)?),
-        (INPUTS, &inputs, inputs_of(&inputs, &tree)?),
+    let mut files = vec![
+        (PIN, text.clone(), pinned.clone()),
+        (CONFIGURE, configure.clone(), configured(&configure, &keg)?),
+        (INPUTS, inputs.clone(), inputs_of(&inputs, &tree)?),
         (
             DOCKERFILE,
-            &dockerfile,
+            dockerfile.clone(),
             dockerfile_of(&dockerfile, &keg.version)?,
         ),
     ];
-    let diff: String = (files.iter())
-        .map(|(file, was, now)| unified(file, was, now))
-        .collect();
     let mut notes = vec![format!(
-        "read the keg {}, php {} poured from the formula {}, and the php-src checkout {} at php-{} ({})",
+        "read the keg {}, php {} poured from the formula {}, and the php-src checkout {} at {} ({})",
         keg.dir.display(),
         keg.version,
         keg.formula,
         tree.dir.display(),
-        keg.version,
+        tree.tag,
         tree.commit
     )];
+    if let Ok(settings) = fs::read_to_string(root.join(SETTINGS)) {
+        let (now, note) = settings_of(&settings, &pin, &tree)?;
+        files.push((SETTINGS, settings, now));
+        notes.extend(note);
+    }
+    let diff: String = (files.iter())
+        .map(|(file, was, now)| unified(file, was, now))
+        .collect();
     if diff.is_empty() {
         notes.push(
             "the keg and the checkout are the ones the pin names: the bump writes nothing"
                 .to_owned(),
         );
-        return Ok(Proposal { diff, notes });
     }
-    notes.extend(proposed_notes(&pin, &pinned, &keg)?);
+    notes.extend(proposed_notes(root, &pin, &pinned, &keg, &tree)?);
     Ok(Proposal { diff, notes })
 }
 
-/// What a person reads beside a diff that is not empty: each variant left
-/// for its rebuild, every defect the proposed pin carries until then, and
-/// what the pin's keg check says of the keg, a keg not yet `brew pin`ned
-/// among it. A proposed pin whose formula and paths disagree is refused,
-/// since no diff written here may carry one.
-fn proposed_notes(pin: &Pin, pinned: &str, keg: &Keg) -> Result<Vec<String>> {
+/// What a person reads beside the diff, whether or not it is empty: where
+/// the tag moves, each variant left for its rebuild and each file left for
+/// its regeneration; each row of the record the diff removes; each receipt
+/// keg the diff records at another version than the receipt names; every
+/// defect the proposed pin carries; and what the pin's keg check says of
+/// the keg, a keg not yet `brew pin`ned among it. A proposed pin whose
+/// formula and paths disagree is refused, since no diff written here may
+/// carry one.
+fn proposed_notes(
+    root: &Path,
+    pin: &Pin,
+    pinned: &str,
+    keg: &Keg,
+    tree: &Checkout,
+) -> Result<Vec<String>> {
     let mut notes = Vec::new();
-    for (name, variant) in &pin.variant {
-        let platforms: Vec<&str> = (Platform::ALL.into_iter())
-            .filter(|&platform| variant.build(platform).is_some())
-            .map(Platform::key)
-            .collect();
-        if !platforms.is_empty() {
-            notes.push(format!(
-                "[variant.{name}] pins builds for {}, each made from the tag the diff replaces and left as it stands: `scripts/oracle-build.py build <platform> {name}` rebuilds each once the diff is applied (#4373)",
-                platforms.join(", ")
-            ));
+    if tree.tag != pin.source.tag {
+        for (name, variant) in &pin.variant {
+            let platforms: Vec<&str> = (Platform::ALL.into_iter())
+                .filter(|&platform| variant.build(platform).is_some())
+                .map(Platform::key)
+                .collect();
+            if !platforms.is_empty() {
+                notes.push(format!(
+                    "[variant.{name}] pins builds for {}, each made from the tag the diff replaces and left as it stands: `scripts/oracle-build.py build <platform> {name}` rebuilds each once the diff is applied (#4373)",
+                    platforms.join(", ")
+                ));
+            }
+        }
+        for (file, command) in REGENERATED {
+            let stale = fs::read_to_string(root.join(file))
+                .is_ok_and(|text| text.contains(&pin.source.tag));
+            if stale {
+                let command = command.replace("{tree}", &tree.dir.to_string_lossy());
+                notes.push(format!(
+                    "{file} names {} and is regenerated from the new tree, not written in the diff: `{command}` once the diff is applied",
+                    pin.source.tag
+                ));
+            }
         }
     }
-    if !keg.kept.is_empty() {
+    let recorded = pin.closure.iter().flat_map(Closure::kegs);
+    for (name, version) in recorded.filter(|(name, _)| !keg.closure.kegs().contains_key(*name)) {
         notes.push(format!(
-            "{} of the pin's [closure] the binaries do not load and the receipt does not name, carried at the version installed: a row leaves the record by a person's hand",
-            keg.kept.join(", ")
+            "{name} {version} of the pin's [closure] is loaded by none of the binaries and named by no receipt, so the diff removes its row: a person who keeps it leaves that hunk out"
         ));
+    }
+    for (name, named) in &keg.receipt {
+        let Some(version) = keg.closure.kegs().get(name) else {
+            continue;
+        };
+        if version != named {
+            notes.push(format!(
+                "{name}: the keg's receipt names {named}, and the proposed [closure] records {version}, the version this machine holds; the pour ran against the keg as it stood, so which of the two the closure keeps, and whether {name} is unpinned and upgraded first, is a person's call"
+            ));
+        }
     }
     let proposed = Pin::parse(pinned).context("the proposed oracle.toml")?;
     let poured = (proposed.oracle.formula).held(&proposed.oracle.version, &proposed.binaries());
@@ -151,13 +215,59 @@ fn proposed_notes(pin: &Pin, pinned: &str, keg: &Keg) -> Result<Vec<String>> {
         bail!("the proposed oracle.toml is no pin its own check takes: {defect}");
     }
     let defects = proposed.defects().iter();
-    notes.extend(
-        defects.map(|defect| format!("the proposed pin carries a defect until then: {defect}")),
-    );
+    notes.extend(defects.map(|defect| format!("the proposed pin carries a defect: {defect}")));
     if let Err(err) = keg.closure.held(&keg.binaries()) {
         notes.push(format!("the keg check: {err:#}"));
     }
     Ok(notes)
+}
+
+/// `.claude/settings.json` with [`super::TREE_VARIABLE`] moved to the
+/// checkout where it names `[source].path`, in its own spelling, a leading
+/// `~/` kept where the moved value still names the checkout; and a note
+/// where it names another tree, which the bump leaves as it stands.
+fn settings_of(text: &str, pin: &Pin, tree: &Checkout) -> Result<(String, Option<String>)> {
+    let json: serde_json::Value =
+        serde_json::from_str(text).with_context(|| format!("reading {SETTINGS}"))?;
+    let variable = super::TREE_VARIABLE;
+    let Some(value) = json
+        .pointer(&format!("/env/{variable}"))
+        .and_then(|v| v.as_str())
+    else {
+        return Ok((text.to_owned(), None));
+    };
+    let named = super::at_home(Path::new(value));
+    if pin.source.path() != Some(named.as_path()) {
+        let note = format!(
+            "{SETTINGS} sets {variable} to {value}, which is not [source].path, and the diff leaves it as it stands"
+        );
+        return Ok((text.to_owned(), Some(note)));
+    }
+    let moved = value.replace(pin.oracle.version.as_str(), &keg_version(&tree.tag));
+    let moved = if super::at_home(Path::new(&moved)) == tree.dir {
+        moved
+    } else {
+        tree.dir.to_string_lossy().into_owned()
+    };
+    let (was, now) = (
+        serde_json::to_string(value)?,
+        serde_json::to_string(&moved)?,
+    );
+    let mut file = Text::of(text);
+    let lead = serde_json::to_string(variable)?;
+    for line in file
+        .lines
+        .iter_mut()
+        .filter(|line| line.trim_start().starts_with(&lead))
+    {
+        *line = line.replace(&was, &now);
+    }
+    Ok((file.text(), None))
+}
+
+/// The php version of tag `php-<version>`.
+fn keg_version(tag: &str) -> String {
+    tag.trim_start_matches("php-").to_owned()
 }
 
 /// The keg a bump moves the pin to, as this machine has it.
@@ -173,10 +283,9 @@ struct Keg {
     /// names.
     binaries: Vec<(&'static str, PathBuf, String)>,
     closure: Closure,
-    /// The kegs of the pin's `[closure]` that the binaries do not load and
-    /// the receipt does not name, carried at the version installed, since a
-    /// row leaves the record by a person's hand alone.
-    kept: Vec<String>,
+    /// Each runtime keg the receipt names, at the version it names, which
+    /// the pour was made against only where that keg was not held back.
+    receipt: BTreeMap<String, String>,
     /// php's `Configure Command`, less `./configure`.
     configure: Vec<String>,
 }
@@ -201,6 +310,7 @@ struct Versions {
 #[derive(Deserialize)]
 struct Dependency {
     full_name: String,
+    pkg_version: String,
 }
 
 impl Keg {
@@ -268,26 +378,14 @@ impl Keg {
             version,
             binaries,
             closure: Closure::default(),
-            kept: Vec::new(),
+            receipt: BTreeMap::new(),
             configure: Vec::new(),
         };
-        // The record's own kegs are named after the receipt's, so a row
-        // a person keeps that nothing loads stays a row (#3454).
-        let mut named: Vec<String> = (receipt.runtime_dependencies.into_iter())
-            .map(|dependency| dependency.full_name)
+        keg.receipt = (receipt.runtime_dependencies.into_iter())
+            .map(|dependency| (dependency.full_name, dependency.pkg_version))
             .collect();
-        let recorded = pin.closure.iter().flat_map(|closure| closure.kegs().keys());
-        let kept: Vec<String> = recorded
-            .filter(|keg| !named.contains(keg))
-            .cloned()
-            .collect();
-        named.extend(kept.iter().cloned());
-        let (closure, unloaded) = Closure::walked(&keg.binaries(), &named)?;
-        keg.closure = closure;
-        keg.kept = kept
-            .into_iter()
-            .filter(|keg| unloaded.contains(keg))
-            .collect();
+        let named: Vec<String> = keg.receipt.keys().cloned().collect();
+        keg.closure = Closure::walked(&keg.binaries(), &named)?;
         keg.configure = configure_line(keg.php())?;
         Ok(keg)
     }
@@ -467,13 +565,21 @@ fn pinned(text: &str, pin: &Pin, keg: &Keg, tree: &Checkout, today: &str) -> Res
     let (_, php, md5) = &keg.binaries[0];
     file.set("oracle", "path", &path(php))?;
     file.set("oracle", "md5", &quoted(md5))?;
-    if pin
+    if let Some(recorded) = pin
         .closure
         .as_ref()
-        .is_some_and(|recorded| *recorded != keg.closure)
+        .filter(|recorded| **recorded != keg.closure)
     {
         file.rows("closure", &keg.closure)?;
-        file.dated("closure", today)?;
+        // The date says when the versions were read off the Cellar, so a
+        // row the diff only removes leaves it as it stands.
+        let kept = keg.closure.kegs().iter();
+        if kept
+            .into_iter()
+            .any(|(name, version)| recorded.kegs().get(name) != Some(version))
+        {
+            file.dated("closure", today)?;
+        }
     }
     file.set("source", "tag", &quoted(&tree.tag))?;
     file.set("source", "commit", &quoted(&tree.commit))?;
