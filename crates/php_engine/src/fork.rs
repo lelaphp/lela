@@ -51,10 +51,12 @@
 //! the native that asked for the fork, as `pcntl_fork` does.
 //!
 //! Beside what php restores, a child makes its own what it would
-//! otherwise share with its parent ([`Inherited`]): the compiled tier's
-//! code arena on Linux, whose pages one shared mapping of a `memfd`
-//! holds, so the two processes would write each other's code
-//! (`jit-design.md` §4.4). php keeps its one buffer shared by every
+//! otherwise share with its parent, or hold in pieces ([`Inherited`]):
+//! the compiled tier's code arena, on Linux one `memfd` whose pages a
+//! shared mapping holds, so the two processes would write each other's
+//! code, and on macOS x86-64 two views of one anonymous mapping that a
+//! fork copies apart, so the child's writes would not reach its own
+//! executable view (`jit-design.md` §4.4). php keeps its one buffer shared by every
 //! process on one opcache segment, each allocation under
 //! `zend_shared_alloc_lock`; this engine shares an arena among one
 //! process's threads alone.
