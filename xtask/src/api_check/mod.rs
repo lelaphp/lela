@@ -829,8 +829,8 @@ fn crate_reading(
 
 /// `EngineState` written by hand outside the homes, under the rule whose
 /// `check` names the seal ([`engine_state`]): the problem it makes of
-/// `krate`, and the rule's id added to `reading` where the rule covers any
-/// of its sources.
+/// `krate`, and the rule's id added to `reading` where it makes one, so a
+/// reading the seal did not fail names the rules it named before.
 fn engine_state_held(
     manifest: &Manifest,
     crates: &Crates,
@@ -849,14 +849,14 @@ fn engine_state_held(
     if !files.iter().any(|file| rule.covers(Path::new(file))) {
         return Ok(None);
     }
+    let outside = engine_state::outside_the_homes(crates.root(), manifest, rule, listed, &files)?;
+    if outside.is_empty() {
+        return Ok(None);
+    }
     if reading.rule.is_empty() {
         reading.rule.clone_from(&rule.id);
     } else {
         reading.rule = format!("{}, {}", reading.rule, rule.id);
-    }
-    let outside = engine_state::outside_the_homes(crates.root(), manifest, rule, listed, &files)?;
-    if outside.is_empty() {
-        return Ok(None);
     }
     let cited = rule.adr.adr_cited();
     Ok(Some(format!(
