@@ -357,10 +357,10 @@ impl Request {
         };
         match self.code_mut().resolve_path(&script) {
             Ok(_) => {}
-            // `tsrm_realpath` resolves a directory, which the engine's
-            // resolution refuses as no regular file: php goes on to open
-            // it, through the guard, and the opener refuses it.
-            Err(Unresolved::Missing(_)) if self.names_directory(&script) => {}
+            // `tsrm_realpath` resolves a directory, a FIFO or a device,
+            // which the engine's resolution refuses as no regular file:
+            // php goes on to open it, through the guard.
+            Err(Unresolved::Missing(_)) if self.names_irregular(&script) => {}
             // The `errno` `tsrm_realpath` leaves, `ENOENT` where the
             // reason carries none.
             Err(Unresolved::Missing(error) | Unresolved::Url(error)) => {
@@ -396,12 +396,14 @@ impl Request {
     }
 
     /// Whether `path` resolves, against the request's working directory,
-    /// to a directory, which `tsrm_realpath` resolves as it resolves a
+    /// to a file that is not a regular one, a directory, a FIFO or a
+    /// device, which `tsrm_realpath` resolves as it resolves a regular
     /// file.
-    fn names_directory(&mut self, path: &[u8]) -> bool {
+    fn names_irregular(&mut self, path: &[u8]) -> bool {
         self.environment_mut()
             .realpath(path)
-            .is_some_and(|real| real.is_dir())
+            .and_then(|real| std::fs::metadata(real).ok())
+            .is_some_and(|meta| !meta.is_file())
     }
 
     /// The `*opened_path` of the program's stream, where
