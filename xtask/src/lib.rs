@@ -48,6 +48,7 @@ pub mod dispatch_census;
 pub mod divergence;
 pub mod done;
 mod fold;
+mod fuzz;
 pub mod generated;
 mod git;
 mod glossary;
@@ -345,6 +346,7 @@ fn command_line() -> Result<()> {
         Command::CompileIdentity(ask) => compile_identity::command(&root, &manifest, &store, &ask),
         Command::TraceDump(ask) => trace_dump::command(&root, &manifest, &store, &ask),
         Command::Hostile => hostile::command(&root, &manifest, &store),
+        Command::Fuzz(ask) => fuzz::command(&root, &manifest, &store, &ask),
         Command::Fold(ask) => fold::command(&root, &manifest, &store, &ask),
         Command::DispatchCensus(ask) => dispatch_census::command(&root, &manifest, &store, &ask),
         Command::Crosscheck { ext, staged } => {

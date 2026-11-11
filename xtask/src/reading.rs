@@ -98,9 +98,9 @@ pub struct Reading {
     /// The subcommands that write one, in the order `cli::Command` has
     /// them: `api-check | permit | done | track-work | ticket | usage |
     /// review | bench | budget | clippy | test | miri | phpt | port-map |
-    /// compile-identity | crosscheck | trace-dump | hostile | fold | dispatch-census | fpm-compare | soak | unsafe-audit |
-    /// steer | divergence-reason | witness | vocab`; `fuzz | mutants` are
-    /// named by harness-design.md §4.2 and not built yet.
+    /// compile-identity | crosscheck | trace-dump | hostile | fuzz | fold | dispatch-census | fpm-compare | soak | unsafe-audit |
+    /// steer | divergence-reason | witness | vocab`; `mutants` is named by
+    /// harness-design.md §4.2 and not built yet.
     pub instrument: String,
     /// A crate, a corpus subset, a bar's id such as `G1`, a ticket's
     /// number, or `"workspace"`.

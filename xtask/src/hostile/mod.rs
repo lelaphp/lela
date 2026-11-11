@@ -30,7 +30,7 @@
 //! interpreter's verdicts as the run [`kept`] holds the next one to.
 
 mod corpus;
-mod judge;
+pub(crate) mod judge;
 mod kept;
 #[cfg(test)]
 mod tests;
@@ -47,7 +47,7 @@ use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::built_from::BuiltFrom;
 use crate::oracle::hosts::CLI;
-use crate::oracle::{ENGINE, Invocation, Oracle, PastLimit, Program, profile};
+use crate::oracle::{ENGINE, Oracle, profile};
 use crate::reading::{Reading, Status, joined};
 use crate::track::{self, Track};
 use corpus::Corpus;
@@ -299,16 +299,6 @@ impl Sides<'_> {
 
     /// `code` run by `binary` under the recipe and `regimes`.
     fn came(&self, binary: &Path, code: &str, regimes: &[&str]) -> Result<Came> {
-        let ran = self.oracle.run_under(&Invocation {
-            regimes,
-            ..Invocation::new(binary, Program::Snippet(code))
-        });
-        match ran {
-            Ok(observed) => Ok(Came::Observed(observed)),
-            Err(why) => match why.downcast_ref::<PastLimit>() {
-                Some(past) => Ok(Came::PastLimit(past.limit_s)),
-                None => Err(why),
-            },
-        }
+        judge::came(self.oracle, binary, code, regimes)
     }
 }

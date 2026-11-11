@@ -91,7 +91,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=eb27c98ba5796a342be24911eb83adab827ed4207a0f62f6b41b308f7157023a out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=34e608d006d99ed958006b2dfabccb51882e2bd321a94b199282b8568a90961d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -158,6 +158,7 @@ Commands:
   crosscheck         Hold each default extension's `--re` and `--ri` rendering to the oracle's bytes, kept in the store; one reading per extension per flag
   trace-dump         Hold the engine's `TRACE` lines under `jit.mode=force` to the oracle's under `[regime.jit-inline]` on the seven kernels, kept in the store; one reading per kernel
   hostile            Hold the engine to the oracle on `data/hostile.toml`'s programs, whose error handlers disturb an opline mid-step; one reading per crate that owes it
+  fuzz               Hold the engine to the oracle on a corpus's programs and as many again drawn from a seed, generated or mutated; one reading per crate that owes it
   fold               Hold the release `serve_frame` to LLVM's fold of a request field's address into each access; one reading, at `sapi/cli`
   dispatch-census    Each variant's share of the oplines the loop dispatched, over every program `IN_THE_LOOP`'s doc names; one reading per program
   fpm-compare        Hold makala to the pinned php-fpm: each request of the HTTP-served subset served by both, the status, header lines and body compared; one reading, at makala's crate
@@ -176,7 +177,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=bb13ed1932197b20cda2b458af6c122e08a3fc8d4e6cf2d962a8fb51d8a6464c out=6ad00b9849b133d7b7b4569bfbc0c0cc146f70316c4d0d6214ada271c888d6df -->
+<!-- /computed in=2d18915a342e956e6a6978a49dd7518dd5418808184c28a2906e0a6dd53e90e1 out=a3273ba5a2d830e67a0f4c59d3e77d374ad4b8f77d61639592996b9933301eb2 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
