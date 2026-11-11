@@ -1687,6 +1687,7 @@ dependencies = [
  "libc",
  "php_ext",
  "php_ext_libxml",
+ "php_ext_reflection",
  "php_ext_standard",
  "php_ext_uri",
 ]
