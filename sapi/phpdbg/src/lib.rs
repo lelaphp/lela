@@ -206,11 +206,7 @@ pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
         session.after_serve = session::AfterServe::Quit;
     }
     if let Some(exec) = &line.exec {
-        let path = std::path::Path::new(std::ffi::OsStr::from_bytes(exec));
-        session.exec = Some(std::fs::canonicalize(path).map_or_else(
-            |_| exec.clone(),
-            |path| path.as_os_str().as_bytes().to_vec(),
-        ));
+        session.exec = Some(host::expanded_path(exec));
     }
     session.init_files = init::Files {
         named: line.init_file.clone(),

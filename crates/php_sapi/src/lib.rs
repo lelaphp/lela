@@ -93,9 +93,9 @@ pub fn strerror(error: &std::io::Error) -> String {
 pub mod tier {
     pub use php_engine::tier::{
         Argument, Aside, Called, Compiled, Evaluated, Flow, FrameRef, Held, Hooked, Request,
-        SafepointIdx, Site, Stepped, Tier, Under, begin, below, call, catches, compile, entry,
-        evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin, sink, step,
-        unwind,
+        SafepointIdx, Site, Startup, Stepped, Tier, Under, begin, below, call, catches, compile,
+        entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin, sink,
+        step, unwind,
     };
 }
 

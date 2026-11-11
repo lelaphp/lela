@@ -72,8 +72,8 @@ pub use crossing::{
 };
 pub use dims::{dim_key, lookup_element};
 pub use frames::{
-    Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
-    entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
+    Argument, Aside, Called, Compiled, Evaluated, Startup, Under, begin, below, call, catches,
+    compile, entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 pub(crate) use held::UnitsLeft;
 use held::{Entered, Kept, Scope, Units};

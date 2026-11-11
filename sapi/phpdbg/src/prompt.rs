@@ -1057,7 +1057,7 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Reply {
     // `phpdbg_compile` before anything of the run: the compiler refuses
     // the context again, in its log, and bails out of the run.
     if s.exec_compile == ExecCompile::Refused && !here.compiled() {
-        refused_again(s, here);
+        serving_refused(s, here);
         return Reply::Success;
     }
     // In the init files, php's `run` compiles the context and runs it
@@ -1518,8 +1518,33 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Parameter]) -> Reply {
 /// prompt>
 /// ```
 pub fn refused_again(s: &mut Session, here: &mut Here<'_>) {
+    compiled_again(s, here);
+}
+
+/// The `phpdbg_compile` of the `run` command where the `exec` file does
+/// not compile ([`refused_again`]), and where it did not open, the
+/// command's `Failed to compile` error and the status 255
+/// (`Z/sapi/phpdbg/phpdbg_prompt.c:743-747`).
+pub fn serving_refused(s: &mut Session, here: &mut Here<'_>) {
+    if compiled_again(s, here) == Some(tier::Compiled::Unopened) {
+        not_served(s);
+    }
+}
+
+/// The `run` command's answer to a `phpdbg_compile` that returned
+/// `FAILURE`: its error, and `EG(exit_status) = FAILURE`.
+pub fn not_served(s: &mut Session) {
+    let exec = String::from_utf8_lossy(s.exec.as_deref().unwrap_or_default()).into_owned();
+    s.out
+        .error(format!("Failed to compile {exec}, cannot run").as_bytes());
+    s.status = Some(255);
+}
+
+/// [`refused_again`], and what the compile answered; none where no
+/// `exec` file or no request stands.
+fn compiled_again(s: &mut Session, here: &mut Here<'_>) -> Option<tier::Compiled> {
     let (Some(exec), Some(req)) = (s.exec.clone(), here.request()) else {
-        return;
+        return None;
     };
     // A refusal inside the log bails out of it, past the line that
     // clears `PG(in_error_log)`, and of the prompt inside it.
@@ -1531,7 +1556,15 @@ pub fn refused_again(s: &mut Session, here: &mut Here<'_>) {
     let compiled = if code.is_none() && read::open_refused(req) {
         tier::Compiled::Unopened
     } else {
-        crate::session::lend(req, s, |req| tier::compile(req, &exec, code.as_deref()))
+        // Until phpdbg is fully started, its request is starting.
+        let startup = if s.started {
+            tier::Startup::Over
+        } else {
+            tier::Startup::During
+        };
+        crate::session::lend(req, s, |req| {
+            tier::compile(req, &exec, code.as_deref(), startup)
+        })
     };
     match compiled {
         tier::Compiled::Refused if logging => {
@@ -1544,6 +1577,7 @@ pub fn refused_again(s: &mut Session, here: &mut Here<'_>) {
             .out
             .error(format!("Could not open file {}", String::from_utf8_lossy(&exec)).as_bytes()),
     }
+    Some(compiled)
 }
 
 /// `phpdbg_compile`'s notice where the init files compile the `exec` file,

@@ -184,9 +184,28 @@ pub enum Compiled {
 /// debugs, `zend_compile_file` with nothing executing, and dropped: what
 /// the compiler raised rendered as php raises it, and a refusal's fatal
 /// caught as the `zend_try` around phpdbg's compile catches it, the
-/// request standing with what php leaves after it.
-pub fn compile(req: &mut Request, path: &[u8], source: Option<&[u8]>) -> Compiled {
-    req.compile_context(path, source)
+/// request standing with what php leaves after it. During `startup`, a
+/// file the `open_basedir` guard refuses is warned of as php warns while
+/// the request starts.
+pub fn compile(
+    req: &mut Request,
+    path: &[u8],
+    source: Option<&[u8]>,
+    startup: Startup,
+) -> Compiled {
+    req.compile_context(path, source, startup)
+}
+
+/// Where a host stands to its request's startup as it compiles,
+/// `PG(during_request_startup)`, which phpdbg clears once it is fully
+/// started (`Z/sapi/phpdbg/phpdbg.c:1573`): what no function raises is
+/// named for the request's startup until then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Startup {
+    /// The request is still starting.
+    During,
+    /// The host is fully started.
+    Over,
 }
 
 /// What code a tier has the engine serve on its own account stands on.

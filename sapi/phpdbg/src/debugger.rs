@@ -170,13 +170,13 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             } else if quits {
                 // `-rr`'s run compiles it under `PHPDBG_PREVENT_INTERACTIVE`:
                 // what the compiler says alone, and the session ends.
-                prompt::refused_again(&mut session, &mut Here::Idle { req });
+                prompt::serving_refused(&mut session, &mut Here::Idle { req });
                 session.stopped = Some(session::Stop::Quit);
             } else if runs {
                 // `-r`'s run compiles the context once the session is
                 // fully started, so its log stands at a prompt.
                 session.started = true;
-                prompt::refused_again(&mut session, &mut Here::Idle { req });
+                prompt::serving_refused(&mut session, &mut Here::Idle { req });
                 let _ = prompted(&mut session, req, |req| Here::Idle { req });
             } else {
                 refused(&mut session, req);
@@ -279,15 +279,7 @@ fn initialized(req: &mut Request) -> bool {
             idle_prompt(&mut session, req, quits);
         }
     } else if session.stopped.is_none() && unopened(&mut session, req) {
-        session.out.error(
-            format!(
-                "Failed to compile {}, cannot run",
-                String::from_utf8_lossy(session.exec.as_deref().unwrap_or_default())
-            )
-            .as_bytes(),
-        );
-        // `EG(exit_status) = FAILURE`.
-        session.status = Some(255);
+        prompt::not_served(&mut session);
         session.execution = Execution::Not;
         idle_prompt(&mut session, req, quits);
     } else if session.execution != Execution::BailedOut {

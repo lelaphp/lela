@@ -6175,6 +6175,7 @@ impl Engine {
         let handle = match (req.primary(), req.program_file()) {
             (Primary::Wrapped, ProgramFile::Unopened) => HandlePath::Kept,
             (Primary::Wrapped, _) => HandlePath::Host,
+            (Primary::Bare, _) if !Engine::bare_passes(req, &script) => return None,
             (Primary::Bare, _) => HandlePath::Opened,
         };
         Engine::compile_program(req, &script, written.unwrap_or(&script), handle)
@@ -6234,6 +6235,21 @@ impl Engine {
             String::from_utf8_lossy(req.include_path()),
         );
         req.end_in_compile_time(Level::Error, &message, b"Unknown", 0);
+        false
+    }
+
+    /// Whether a bare program, phpdbg's, passes the `open_basedir` guard
+    /// of the plain files opener `php_stream_open_for_zend_ex` opens it
+    /// through in `phpdbg_compile` (`Z/sapi/phpdbg/phpdbg_prompt.c:546`).
+    /// A refused file warns as the opener warns, with no `Failed to open
+    /// stream` after it, since phpdbg asks for no report, and nothing is
+    /// compiled; the status is 255, which phpdbg reads as the compile's
+    /// `FAILURE`.
+    fn bare_passes(req: &mut Request, path: &[u8]) -> bool {
+        if req.environment_mut().check_open_basedir(path, true).is_ok() {
+            return true;
+        }
+        req.end_in_exit(255);
         false
     }
 
