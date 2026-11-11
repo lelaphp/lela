@@ -22,6 +22,8 @@
 //! args = ["-n", "-d", "x=1", "t.php"]  # the host's command line
 //! env = { SCRIPT_FILENAME = "{dir}/t.php" }  # an empty value takes the name out
 //! files = { "t.php" = "<?php echo 1;", "scan/" = "" }  # a name ending in `/` is a directory
+//! links = { "l.php" = "{dir}/t.php" }  # a symbolic link to the target, laid after the files
+//! fifos = ["f.php"]                    # a FIFO, laid after the files
 //! modes = { "t.php" = 0o000 }
 //! stdin = "a\n"                        # a pipe; without it, /dev/null
 //! head = 4096                          # stdout's first bytes, then killed
@@ -103,6 +105,10 @@ pub(crate) struct Line {
     env: BTreeMap<String, String>,
     #[serde(default)]
     files: BTreeMap<String, String>,
+    #[serde(default)]
+    links: BTreeMap<String, String>,
+    #[serde(default)]
+    fifos: Vec<String>,
     #[serde(default)]
     modes: BTreeMap<String, u32>,
     stdin: Option<String>,
@@ -532,6 +538,21 @@ fn lay(line: &Line, dir: &Path, port: u16) -> Result<()> {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         if !name.ends_with('/') {
             crate::write(&path, fill(text, dir, port))?;
+        }
+    }
+    for (name, target) in &line.links {
+        let path = dir.join(name);
+        std::os::unix::fs::symlink(fill(target, dir, port), &path)
+            .with_context(|| format!("linking {}", path.display()))?;
+    }
+    for name in &line.fifos {
+        let path = dir.join(name);
+        let made = Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .with_context(|| format!("running mkfifo for {}", path.display()))?;
+        if !made.success() {
+            bail!("mkfifo {} ended {made}", path.display());
         }
     }
     for (name, mode) in &line.modes {
@@ -1282,5 +1303,24 @@ mod tests {
             let refused = Held::parse(hosts::CGI, "lines.toml".into(), text).unwrap_err();
             assert!(format!("{refused:#}").contains(said), "{text}: {refused:#}");
         }
+    }
+
+    /// A line's links and FIFOs laid after its files, a link's target
+    /// filled as a file's text is, and neither read back as a file.
+    #[test]
+    fn a_line_lays_its_links_and_fifos() {
+        let text = "[[line]]\nname = \"one\"\nargs = []\nfiles = { \"base/t.php\" = \"t\" }\n\
+                    links = { \"base/l.php\" = \"{dir}/base/t.php\" }\nfifos = [\"f.php\"]\n";
+        let held = Held::parse(hosts::CGI, "lines.toml".into(), text).unwrap();
+        let dir = Tree::new("host-line-lay").unwrap();
+        super::lay(&held.lines[0], dir.path(), 0).unwrap();
+        let link = dir.path().join("base/l.php");
+        assert_eq!(fs::read_link(&link).unwrap(), dir.path().join("base/t.php"));
+        let fifo = fs::symlink_metadata(dir.path().join("f.php")).unwrap();
+        assert!(std::os::unix::fs::FileTypeExt::is_fifo(&fifo.file_type()));
+        let files = super::files(dir.path()).unwrap();
+        assert_eq!(files.keys().collect::<Vec<_>>(), ["base/t.php"]);
+        // Laid again over what the first left.
+        super::lay(&held.lines[0], dir.path(), 0).unwrap();
     }
 }
