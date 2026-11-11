@@ -26,6 +26,8 @@
 //!   (`Z/sapi/fpm/fpm/fpm_env.c:172`), so a request's `getenv("A")` is
 //!   the variable's value, and the request's body is held to the pinned
 //!   php-fpm's, `string(3) "val"`, written on 2026-11-11 (#4453).
+//! - a POST whose `REQUEST_BODY_FILE` names `{dir}/no\xff`, which does
+//!   not open: the warning names the path with its bytes (#4444).
 
 #![allow(
     clippy::disallowed_methods,
@@ -212,10 +214,10 @@ fn an_unknown_entry_is_named_with_its_own_bytes() {
     assert_eq!(out.status.code(), Some(78));
 }
 
-/// What request 1, for `script`, writes on `FCGI_STDOUT` through the pool
-/// listening at `socket`, tried for ten seconds; empty where nothing
-/// listens or answers.
-fn served(socket: &Path, script: &Path) -> Vec<u8> {
+/// What request 1, with `params` and an empty `FCGI_STDIN`, writes on
+/// `FCGI_STDOUT` through the pool listening at `socket`, tried for ten
+/// seconds; empty where nothing listens or answers.
+fn served(socket: &Path, params: &[(&[u8], &[u8])]) -> Vec<u8> {
     use php_proto::fcgi::{self, Header, Kind};
     use std::io::{Read, Write};
     let record = |kind: Kind, content: &[u8]| {
@@ -235,12 +237,12 @@ fn served(socket: &Path, script: &Path) -> Vec<u8> {
             Err(_) => return Vec::new(),
         }
     };
-    let mut params = Vec::new();
-    let script = script.as_os_str().as_encoded_bytes();
-    fcgi::put_pair(&mut params, b"SCRIPT_FILENAME", script);
-    fcgi::put_pair(&mut params, b"REQUEST_METHOD", b"GET");
+    let mut pairs = Vec::new();
+    for (name, value) in params {
+        fcgi::put_pair(&mut pairs, name, value);
+    }
     let mut out = record(Kind::BeginRequest, &[0, 1, 0, 0, 0, 0, 0, 0]);
-    out.extend(record(Kind::Params, &params));
+    out.extend(record(Kind::Params, &pairs));
     out.extend(record(Kind::Params, &[]));
     out.extend(record(Kind::Stdin, &[]));
     if stream.write_all(&out).is_err()
@@ -289,7 +291,13 @@ fn an_env_value_naming_a_variable_finds_it_by_its_bytes() {
         .stderr(Stdio::null())
         .spawn()
         .expect("php-fpm starts");
-    let response = served(&dir.join("fpm.sock"), &script);
+    let response = served(
+        &dir.join("fpm.sock"),
+        &[
+            (b"SCRIPT_FILENAME", script.as_os_str().as_encoded_bytes()),
+            (b"REQUEST_METHOD", b"GET"),
+        ],
+    );
     let pid = nix::unistd::Pid::from_raw(i32::try_from(master.id()).expect("a pid"));
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).ok();
     master.wait().ok();
@@ -301,6 +309,61 @@ fn an_env_value_naming_a_variable_finds_it_by_its_bytes() {
     assert_eq!(
         shown(body),
         shown(b"string(3) \"val\"\n"),
+        "{}",
+        shown(&response)
+    );
+}
+
+/// A body file the server names that does not open is warned of with
+/// the path's bytes (`sapi_cgi_read_post`'s `%s`,
+/// `Z/sapi/fpm/fpm/fpm_main.c:448`), a `\xff` one byte where a decoding
+/// would write U+FFFD's three (#4444). The response's body is held to the
+/// bytes the pinned php-fpm 8.5.12 (md5 f7b17a549250f398e137eef2bd917f1c)
+/// wrote on 2026-11-11 for the same request on this machine, a macOS one,
+/// the directory written `{dir}`: the errno's text and number are the
+/// platform's `strerror(ENOENT)` and `ENOENT`, as that binary wrote them
+/// here.
+#[test]
+fn a_body_file_that_does_not_open_is_warned_of_with_its_own_bytes() {
+    let dir = tree("body");
+    let path = conf(
+        &dir,
+        b"[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n",
+    );
+    let script = dir.join("index.php");
+    std::fs::write(&script, "<?php var_dump($_POST);").expect("the script is written");
+    let at = dir.as_os_str().as_encoded_bytes();
+    let file = [at, b"/no\xff"].concat();
+    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+        .args(["-R", "-n", "-F", "-y"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("php-fpm starts");
+    let response = served(
+        &dir.join("fpm.sock"),
+        &[
+            (b"SCRIPT_FILENAME", script.as_os_str().as_encoded_bytes()),
+            (b"REQUEST_METHOD", b"POST"),
+            (b"CONTENT_LENGTH", b"3"),
+            (b"CONTENT_TYPE", b"application/x-www-form-urlencoded"),
+            (b"REQUEST_BODY_FILE", &file),
+        ],
+    );
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(master.id()).expect("a pid"));
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).ok();
+    master.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
+    let response = replace(&response, at, b"{dir}");
+    let body = match response.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(at) => &response[at + 4..],
+        None => &response[..],
+    };
+    assert_eq!(
+        shown(body),
+        shown(b"<br />\n<b>Warning</b>:  REQUEST_BODY_FILE: open('{dir}/no\xff') failed: No such file or directory (2) in <b>Unknown</b> on line <b>0</b><br />\narray(0) {\n}\n"),
         "{}",
         shown(&response)
     );
