@@ -6,12 +6,14 @@
 
 use crate::master::{Fpm, Pool};
 
-/// `fpm_env_init_main`.
+/// `fpm_env_init_main`: a value naming a variable (`$NAME`) is looked up
+/// by the name's bytes, as php's `getenv` is.
 pub(crate) fn init_main(fpm: &mut Fpm) -> bool {
+    use std::os::unix::ffi::OsStrExt;
     for pool in &mut fpm.pools {
         for (key, value) in &mut pool.config.env {
             if value.first() == Some(&b'$') {
-                let name = String::from_utf8_lossy(&value[1..]).into_owned();
+                let name = std::ffi::OsStr::from_bytes(&value[1..]);
                 *value = std::env::var_os(name)
                     .map(std::ffi::OsString::into_encoded_bytes)
                     .unwrap_or_default();
