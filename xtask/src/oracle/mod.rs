@@ -33,6 +33,7 @@ mod formula;
 pub(crate) mod hosts;
 pub(crate) mod linked;
 pub(crate) mod profile;
+mod propose;
 mod variant;
 
 use built_from::BuiltFrom;
@@ -41,6 +42,7 @@ pub(crate) use closure::stand_in;
 pub(crate) use closure::{Closure, Minos, Own};
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub(crate) use formula::Formula;
+pub use propose::{Proposal, propose};
 pub use variant::{Build, Oracles, Platform, Provenance, Variant};
 
 use std::collections::{BTreeMap, BTreeSet};

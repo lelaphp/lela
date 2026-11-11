@@ -470,6 +470,12 @@ pub(crate) enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// The oracle's pin: `propose` prints the whole diff a bump writes,
+    /// after a person has poured the new keg. Writes no reading.
+    Oracle {
+        #[command(subcommand)]
+        command: OracleCommand,
+    },
     /// Hold the divergence registry to the manifest rule whose `check` names
     /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,
@@ -1010,6 +1016,34 @@ pub(crate) enum UsageCommand {
         /// The turn's number in the session, counted by the plugin.
         #[arg(long, value_name = "N")]
         turn: u64,
+    },
+}
+
+/// What the oracle's pin is moved by.
+#[derive(Debug, Subcommand)]
+pub(crate) enum OracleCommand {
+    /// Print the whole diff a bump of the pin writes, read off the keg a
+    /// person poured and the php-src checkout at its tag, for the person to
+    /// apply with `git apply` and commit; notes on stderr.
+    ///
+    /// The diff covers every line that states the oracle's version, digest
+    /// or closure: `oracle.toml`'s `[oracle]`, `[closure]`, `[source]`,
+    /// `[recipe.env]` `TEST_PHP_EXECUTABLE` and `[sapi]`;
+    /// `ci/oracle/configure.toml`; `dist/inputs.toml`'s `[php]`; and
+    /// `dist/Dockerfile`'s `PHP_VERSION`. A `[variant.*]` build is rebuilt
+    /// from the new tag, not proposed, and a note names it. Pointed at the
+    /// pinned keg and checkout, the diff is empty. It writes no file and no
+    /// reading, and reads the pin whatever its defects (#4384).
+    Propose {
+        /// The keg, any path in `<prefix>/Cellar/<formula>/<bottle>`, a
+        /// formula's `opt` link such as `/opt/homebrew/opt/php@8.5` among
+        /// them; the pinned formula's `opt` link by default.
+        #[arg(long, value_name = "DIR")]
+        keg: Option<PathBuf>,
+        /// The php-src checkout at `php-<version>`; by default
+        /// `[source].path` with the pinned version replaced by the keg's.
+        #[arg(long, value_name = "DIR")]
+        source: Option<PathBuf>,
     },
 }
 

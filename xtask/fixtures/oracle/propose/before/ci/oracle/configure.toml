@@ -1,0 +1,9 @@
+# The pinned oracle's configure line, as `php -n -i`'s "Configure Command"
+# row prints it, for `oracle propose`'s test (#4384).
+md5 = "{md5:php}"
+args = [
+    "--prefix=/opt/homebrew/Cellar/php/9.1.1",
+    "--with-pear=/opt/homebrew/Cellar/php/9.1.1/share/php/pear",
+    "--enable-bcmath",
+    "PKG_CONFIG_PATH=/opt/homebrew/opt/zip/lib/pkgconfig",
+]

@@ -1,0 +1,13 @@
+# Reviewed distribution downloads, for `oracle propose`'s test (#4384).
+toolchain_sha256 = "12dc5d64dbd96c1b07be2943241d52d9f6127a79ba47a820455ba7b873fc896a"
+
+[php]
+tag = "php-9.1.1"
+commit = "{commit}"
+# SHA-256 of the files at the full commit above.
+[php.ini]
+"php.ini-development" = "{ini:php.ini-development}"
+"php.ini-production" = "{ini:php.ini-production}"
+
+[rustup]
+version = "1.29.2"
