@@ -534,7 +534,7 @@ pub(crate) fn read_by_tests(root: &Path, dir: &Path, path: &str, moved: &[FilePa
     let tests = read_by(&READ_BY_TESTS, dir).any(|f| Path::new(path).starts_with(f));
     let builds = read_by(&READ_BY_BUILDS, dir).any(|f| match f.part {
         Part::Whole => Path::new(path).starts_with(f.path),
-        Part::Config | Part::Manifest | Part::Table(_) => moved.contains(&f),
+        Part::Config | Part::Manifest | Part::Table(_) => f.path == path && moved.contains(&f),
     });
     crate_dir(root, dir) && (tests || builds)
 }
@@ -1209,6 +1209,14 @@ mod tests {
         assert!(!touched(Now::Index, "HEAD"));
         committing(&tree, &["add", "--", "oracle.toml"]);
         assert!(touched(Now::Index, "HEAD"));
+        // A diff that moves the closure and writes another file: the
+        // other file is no part ext/intl's `build.rs` reads, so `done`
+        // names it as no reason its key moved.
+        fs::write(tree.join("README.md"), "read by no build\n").unwrap();
+        let paths = ["README.md", "oracle.toml"];
+        let moved = parts_moved(&tree, ("HEAD", Now::Disk), &paths).unwrap();
+        assert!(read_by_tests(&tree, intl, "oracle.toml", &moved));
+        assert!(!read_by_tests(&tree, intl, "README.md", &moved));
         fs::create_dir_all(tree.join("xtask")).unwrap();
         fs::write(
             tree.join("xtask/Cargo.toml"),
