@@ -25,7 +25,7 @@ use crate::api::layer::Face as _;
 use crate::state::EngineState;
 
 use super::held::Payload;
-use super::sockets::Socket;
+use super::sockets::{Connection, Socket};
 use super::{PhpStream, Request, Stream, StreamOp};
 use crate::api::raising::Thrown;
 use crate::api::request::{OptionAnswer, OwnedStream, StreamOption};
@@ -49,15 +49,27 @@ enum State {
 }
 
 /// What the persistent list keeps of a stream across its resources and
-/// across requests: the socket, with its `transport`'s and crypto layer's
-/// state, `stream->orig_path`, which php allocates persistent beside it,
-/// and the filters of its chains, which stay on the stream as php's
-/// `php_stream` keeps them, their resources the request's and gone with
-/// it. Nothing of a request's.
+/// across requests: the stream bare of its filters ([`Bare`]), and the
+/// filters of its chains, which stay on the stream as php's `php_stream`
+/// keeps them, their resources the request's and gone with it. Nothing
+/// of a request's.
 pub(crate) struct Entry {
-    socket: Socket,
-    orig_path: Option<Box<[u8]>>,
+    bare: Bare,
     filters: Kept,
+}
+
+/// A persistent stream bare of its filters: the socket's [`Connection`],
+/// with its `transport`'s and crypto layer's state, and
+/// `stream->orig_path`, which php allocates persistent beside it. What
+/// [`keep`] takes out for the extension that opened the stream, as
+/// [`Persisted`], which holds no filter. Engine state by type (#4541):
+/// no field of it can hold a request's value.
+///
+/// [`Persisted`]: crate::api::request::Persisted
+#[derive(php_engine::api::abi::EngineState)]
+pub(crate) struct Bare {
+    socket: Connection,
+    orig_path: Option<Box<[u8]>>,
 }
 
 pub(crate) trait Persistent {
@@ -200,8 +212,9 @@ impl Persistent for Request {
 /// `entry` under a fresh resource of the `persistent stream` type, `r+`
 /// and seeking nowhere, held under no key.
 fn reopen(req: &mut Request, entry: Entry) -> Result<Owner<Stream>, Thrown> {
-    let mut stream = PhpStream::new(Box::new(entry.socket), b"r+");
-    stream.orig_path = entry.orig_path.map(super::OrigPath::Persistent);
+    let Bare { socket, orig_path } = entry.bare;
+    let mut stream = PhpStream::new(Box::new(Socket::from(socket)), b"r+");
+    stream.orig_path = orig_path.map(super::OrigPath::Persistent);
     stream.flags.no_seek = true;
     stream.attach_kept(entry.filters);
     req.stream_alloc_as(stream, true)
@@ -211,8 +224,12 @@ fn reopen(req: &mut Request, entry: Entry) -> Result<Owner<Stream>, Thrown> {
 /// lends: the connection [`keep`] took out, under a fresh resource taken
 /// off both of the request's lists at once ([`unlist`]), as php's
 /// persistent mysqlnd connection carries its `php_stream` from request to
-/// request in no list at all.
-pub(crate) fn lend_alone(req: &mut Request, entry: Entry) -> Result<Owner<Stream>, Thrown> {
+/// request in no list at all; with no filters, as it was kept.
+pub(crate) fn lend_alone(req: &mut Request, bare: Bare) -> Result<Owner<Stream>, Thrown> {
+    let entry = Entry {
+        bare,
+        filters: Kept::default(),
+    };
     let stream = reopen(req, entry)?;
     unlist(req, *stream);
     Ok(stream)
@@ -236,13 +253,12 @@ pub(crate) fn unlist(req: &mut Request, stream: Stream) {
 /// entry the request still holds given back to the engine's pool, its
 /// resource and its `stream->ctx` forgotten, nothing of them released,
 /// since the request's resources, each `stream->ctx` among them, are
-/// destroyed already. Served as the request's stream state is dropped,
-/// after the resources are closed, when every entry is idle and holds
-/// no `stream->ctx`.
+/// destroyed already, and an idle entry holds neither by type
+/// ([`Connection`]). Served as the request's stream state is dropped,
+/// after the resources are closed, when every entry is idle.
 pub(crate) fn give_back(pool: &Pool<Vec<u8>, Entry>, held: Vec<Held>) {
     for held in held {
-        if let State::Idle(mut entry) = held.state {
-            entry.socket.forget_request();
+        if let State::Idle(entry) = held.state {
             // An entry past the pool's bound is closed here, outside the
             // lock.
             drop(pool.give_back(held.key, entry));
@@ -255,9 +271,12 @@ pub(crate) fn give_back(pool: &Pool<Vec<u8>, Entry>, held: Vec<Held>) {
 /// connection keeps its `php_stream`: its owed write flushed first, out
 /// of the request's persistent list, where an unlisted stream is not
 /// already, and out of the resource, which is closed, and the caller's
-/// owner given up. `None`, and the stream freed, for a stream that is not
-/// a socket's.
-pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
+/// owner given up: the one place a socket becomes what outlives every
+/// request, its connection taken out whole and what of the request it
+/// held left to close with the stream ([`Socket::detach`]), and its
+/// filters, none of which travel. `None`, and the stream freed, for a
+/// stream that is not a socket's.
+pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Bare> {
     let res = stream.resource();
     let socket = req.stream_with(*stream, |s| s.ops.as_socket().is_some());
     if socket != Some(true) {
@@ -278,15 +297,10 @@ pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
     };
     let kept = taken.and_then(|slot| {
         let mut taken = slot.stream;
-        let mut socket = taken.ops.as_socket()?.detach();
-        socket.forget_request();
+        let socket = taken.ops.as_socket()?.detach();
         let orig_path = taken.orig_path.take().map(|path| path.into_persistent(req));
         req.streams().pclose_ret = taken.release(req);
-        Some(Entry {
-            socket,
-            orig_path,
-            filters: Kept::default(),
-        })
+        Some(Bare { socket, orig_path })
     });
     stream.give_up(req);
     kept
@@ -341,11 +355,13 @@ pub(crate) fn finish(req: &mut Request, stream: PhpStream) -> i32 {
         // the key next.
         let filters = stream.keep_filters(req);
         let entry = stream.ops.as_socket().map(|socket| Entry {
-            socket: socket.detach(),
-            orig_path: stream
-                .orig_path
-                .take()
-                .map(|path| path.into_persistent(req)),
+            bare: Bare {
+                socket: socket.detach(),
+                orig_path: stream
+                    .orig_path
+                    .take()
+                    .map(|path| path.into_persistent(req)),
+            },
             filters,
         });
         if let Some(entry) = entry
