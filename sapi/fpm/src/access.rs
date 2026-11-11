@@ -3,9 +3,16 @@
 //! and its `{…}` modifier at a time, through a stream held to
 //! `log_limit`; a successful `GET` or `HEAD` without a query string or a
 //! body to a path `access.suppress_path[]` names left out.
+//!
+//! Each field the request supplies, `%e`, `%f`, `%m`, `%o`, `%q`, `%r`
+//! and `%u`, has a `\r` or `\n` in it written as two bytes
+//! ([`php_sapi::log_field`]), so no request writes a line of its own;
+//! every other byte, and every other token, is php's (#4355).
 
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt as _;
+
+use php_sapi::log_field as field;
 
 use crate::master::Fpm;
 use crate::scoreboard::{BoardView, ProcView};
@@ -221,7 +228,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                     }
                     if let Some(r) = request {
                         let value = (r.param)(&m).unwrap_or_else(|| b"-".to_vec());
-                        out(stream, &value);
+                        out(stream, &field(&value));
                     }
                     modifier.clear();
                 }
@@ -232,7 +239,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                         } else {
                             &r.proc.script_filename
                         };
-                        out(stream, script);
+                        out(stream, &field(script));
                     }
                 }
                 b'l' => {
@@ -247,7 +254,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                         } else {
                             &r.proc.request_method
                         };
-                        out(stream, method);
+                        out(stream, &field(method));
                     }
                 }
                 b'M' => {
@@ -299,7 +306,8 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                                 continue;
                             }
                             let value = &header[m.len() + 2..];
-                            written += out(stream, if value.is_empty() { b"-" } else { value });
+                            written +=
+                                out(stream, &field(if value.is_empty() { b"-" } else { value }));
                             break;
                         }
                         if written == 0
@@ -325,7 +333,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                 }
                 b'q' => {
                     if let Some(r) = request {
-                        out(stream, &r.proc.query_string);
+                        out(stream, &field(&r.proc.query_string));
                     }
                 }
                 b'Q' => {
@@ -342,7 +350,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                 }
                 b'r' => {
                     if let Some(r) = request {
-                        out(stream, &r.proc.request_uri);
+                        out(stream, &field(&r.proc.request_uri));
                     }
                 }
                 b'R' => {
@@ -373,7 +381,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                 }
                 b'u' => {
                     if let Some(r) = request {
-                        out(stream, &r.proc.auth_user);
+                        out(stream, &field(&r.proc.auth_user));
                     }
                 }
                 b'{' => {
