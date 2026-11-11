@@ -339,7 +339,9 @@ fn command_line() -> Result<()> {
         Command::Test { staged: true, .. } => {
             record(&store, &test::run_staged(&root, &manifest, &store)?)
         }
-        Command::Test { crates, .. } => record(&store, &test::run(&root, &manifest, &crates)?),
+        Command::Test { crates, target, .. } => {
+            record(&store, &test::run_on(&root, &manifest, &crates, target)?)
+        }
         Command::Miri { crates } => record(&store, &miri::run(&root, &manifest, &crates)?),
         Command::Phpt(ask) => phpt_command(&root, &manifest, &store, ask),
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),

@@ -299,6 +299,16 @@ pub(crate) enum Command {
         /// Only the crates with a staged change (pre-commit's touched crates).
         #[arg(long)]
         staged: bool,
+        /// Build the named crates' tests for this target and run them on
+        /// this machine, natively or translated: one reading per crate over
+        /// `<crate>/<triple>` (#4462).
+        #[arg(
+            long,
+            value_name = "TRIPLE",
+            requires = "crates",
+            conflicts_with = "staged"
+        )]
+        target: Option<String>,
     },
     /// `cargo miri test` on `php_heap`, or on the crates named, as the
     /// lane design §9 runs per commit; one reading per crate, with what

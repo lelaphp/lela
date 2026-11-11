@@ -14,7 +14,10 @@
 //! badly before its `test result:` line, as the engine's hard timeout ends
 //! one, counts each `... FAILED` line it printed, and a failing reading's
 //! message names every run that failed and its failed tests ahead of the
-//! tail of what they printed ([`Runs::judge`], #3698).
+//! tail of what they printed ([`Runs::judge`], #3698). `--target` builds
+//! the named crates' tests for another target and runs them on this
+//! machine, a second reading of each over `<crate>/<triple>` that says how
+//! the code ran ([`Target`], #4462).
 //!
 //! A run is three steps over every crate at once, as `cargo test` would
 //! take them one crate at a time (#2165), and a crate with a binary takes
@@ -69,13 +72,16 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::batch::{self, Built, Executable, Group, Package, Run, Targets, TestProfile, tail};
+use crate::batch::{self, Built, Executable, Package, Run, Targets, TestProfile, tail};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::SKIPPED_VARIABLE;
 use crate::reading::{Number, Reading, Status, Store, millis, plural};
 use crate::tally::{self, Apart};
 use crate::{git, sources};
+
+mod target;
+use target::Target;
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "test";
@@ -105,16 +111,34 @@ pub fn committed(root: &Path, path: &str) -> Result<String> {
 /// Run the tests of every crate that exists, or of `only`; one reading
 /// each.
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
-    measure(root, manifest, only, None)
+    measure(root, manifest, only, None, None)
+}
+
+/// [`run`] where `triple` is none; otherwise the tests of `only` built for
+/// it and run on this machine, natively or translated, one reading each
+/// over `<crate>/<triple>` ([`Target`], #4462).
+pub(crate) fn run_on(
+    root: &Path,
+    manifest: &Manifest,
+    only: &[String],
+    triple: Option<String>,
+) -> Result<Vec<Reading>> {
+    let Some(triple) = triple else {
+        return run(root, manifest, only);
+    };
+    let target = Target::on_this_machine(&triple, &manifest.crates_named(only)?)?;
+    measure(root, manifest, only, None, Some(&target))
 }
 
 /// [`run`] with the paths a commit stages, under which an executable the
-/// crate names in `own` runs only where one of its own sources is staged.
+/// crate names in `own` runs only where one of its own sources is staged,
+/// and the target the tests are built for where it is not the host's.
 fn measure(
     root: &Path,
     manifest: &Manifest,
     only: &[String],
     staged: Option<&[String]>,
+    target: Option<&Target>,
 ) -> Result<Vec<Reading>> {
     let mut crates = manifest.crates_named(only)?;
     crates.retain(|k| sources::exists(root, k));
@@ -128,14 +152,20 @@ fn measure(
     let mut readings = Vec::with_capacity(crates.len());
     let (builds, mut ran) = (batch::Builds::hold(root), Vec::new());
     for group in batch::runs(root, &crates)? {
-        let args = [&["build", "--keep-going"][..], group.profile.flags()].concat();
+        let on = target.map(Target::flags);
+        let flags = [
+            group.profile.flags(),
+            on.as_ref().map_or(&[][..], |f| &f[..]),
+        ]
+        .concat();
+        let args = [&["build", "--keep-going"][..], &flags].concat();
         let built = Run::of(root, &args, &group.crates, Targets::Tests)?;
-        let mut docs = doctests(root, &built, &group)?;
-        let missed = Pin::missed(root, &built, &group)?;
+        let mut docs = doctests(root, &built, (&group.crates, &flags))?;
+        let missed = Pin::missed(root, &built, (&group.crates, &flags))?;
         for krate in group.crates {
             let missed = missed.get(&krate.name).map_or(&[][..], Vec::as_slice);
             let (reading, left_out) = reading(
-                &snapshot,
+                (&snapshot, target),
                 krate,
                 &built,
                 (docs.remove(&krate.name), missed),
@@ -169,7 +199,7 @@ pub fn run_staged(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec
         .into_iter()
         .map(|change| change.path)
         .collect();
-    measure(root, manifest, &measured, Some(&staged))
+    measure(root, manifest, &measured, Some(&staged), None)
 }
 
 /// How one test executable, or one crate's doctests, ended.
@@ -308,17 +338,24 @@ impl Runs {
 /// One crate's reading: pass when every test executable of the crate and
 /// its doctests ended well and no pinned code was `missed`, fail
 /// otherwise, each missed pin a failed test, the numbers summed over all
-/// of them either way ([`Runs::judge`]).
+/// of them either way ([`Runs::judge`]); over `<crate>/<triple>` for a
+/// `target` other than the host's, stamped over the crate as
+/// `<crate>/release` is.
 fn reading(
-    snapshot: &Snapshot,
+    (snapshot, target): (&Snapshot, Option<&Target>),
     krate: &Crate,
     run: &Run,
     (doc, missed): (Option<Ran>, &[String]),
     staged: Option<&[String]>,
 ) -> Result<(Reading, Vec<String>)> {
     let name = &krate.name;
+    let stamped = || match target {
+        None => Reading::for_crate(INSTRUMENT, krate, snapshot),
+        Some(t) => Reading::stamped_over(INSTRUMENT, &t.scope(name), snapshot, &krate.path()),
+    };
+    let label = target.map_or_else(|| name.clone(), |t| t.label(name));
     let Some(built) = run.crates.get(name).filter(|b| b.whole) else {
-        let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
+        let mut reading = stamped()?;
         let said = run
             .crates
             .get(name)
@@ -327,7 +364,7 @@ fn reading(
             .unwrap_or_else(|| run.stderr.clone());
         Counts::default().count(&mut reading)?;
         reading.status = Status::Fail;
-        reading.message = format!("{name}: the tests did not build\n{}", tail(&said, 40));
+        reading.message = format!("{label}: the tests did not build\n{}", tail(&said, 40));
         return Ok((reading, Vec::new()));
     };
     let started = Instant::now();
@@ -363,7 +400,7 @@ fn reading(
     tally::pool(&executables, jobs, batch, &apart, each, on)?;
     // Stamped once the executables have ended, so a span read off the
     // store's stamps holds their run (#2869).
-    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
+    let mut reading = stamped()?;
     reading.count("ms", millis(started.elapsed()))?;
     reading.groups = took;
     if let Some(doc) = doc {
@@ -381,7 +418,7 @@ fn reading(
         };
         runs.add("pinned error codes".to_owned(), pins);
     }
-    runs.judge(name, not_built(snapshot.root(), krate)?, &mut reading)?;
+    runs.judge(&label, not_built(snapshot.root(), krate)?, &mut reading)?;
     Ok((reading, left_out))
 }
 
@@ -625,14 +662,15 @@ fn environment(executable: &Executable, built: &Built, run: &Run) -> Vec<(&'stat
     env
 }
 
-/// `cargo test --doc` over `crates` at `root` under `profile`, with `args`
-/// after them, both streams written to one file, where a test's line,
-/// cargo's `Doc-tests <lib>` and the compiler's words stand in the order
-/// they were written: how it ended, and the file's text.
+/// `cargo test --doc` over `crates` at `root` under `flags`, the profile's
+/// and the target's, with `args` after them, both streams written to one
+/// file, where a test's line, cargo's `Doc-tests <lib>` and the compiler's
+/// words stand in the order they were written: how it ended, and the
+/// file's text.
 fn doc_run(
     root: &Path,
     run: &Run,
-    (profile, crates): (TestProfile, &[&Crate]),
+    (crates, flags): (&[&Crate], &[&str]),
     args: Vec<String>,
 ) -> Result<(ExitStatus, String)> {
     let dir = &run.target_dir;
@@ -642,7 +680,7 @@ fn doc_run(
     let mut command = Command::new("cargo");
     command
         .args(["test", "--doc", "--no-fail-fast", "--color", "never"])
-        .args(profile.flags())
+        .args(flags)
         .current_dir(root)
         .stdout(Stdio::from(
             file.try_clone().context("sharing the doctests' file")?,
@@ -664,8 +702,12 @@ fn doc_run(
 /// the run's lines follow on stdout, so both are written to one file,
 /// where they stand in the order they were written. A crate whose library
 /// carries no doctests, or that did not build, has none.
-fn doctests(root: &Path, run: &Run, group: &Group) -> Result<BTreeMap<String, Ran>> {
-    let with: Vec<&Crate> = (group.crates)
+fn doctests(
+    root: &Path,
+    run: &Run,
+    (crates, flags): (&[&Crate], &[&str]),
+) -> Result<BTreeMap<String, Ran>> {
+    let with: Vec<&Crate> = crates
         .iter()
         .copied()
         .filter(|k| {
@@ -684,7 +726,7 @@ fn doctests(root: &Path, run: &Run, group: &Group) -> Result<BTreeMap<String, Ra
             Some((lib, k.name.clone()))
         })
         .collect();
-    let (ended, text) = doc_run(root, run, (group.profile, &with), Vec::new())?;
+    let (ended, text) = doc_run(root, run, (&with, flags), Vec::new())?;
     let mut sections: BTreeMap<String, String> = BTreeMap::new();
     let mut current: Option<String> = None;
     for line in text.lines() {
@@ -765,9 +807,13 @@ impl Pin {
     /// words on the stream (`--nocapture`), and each `compile_fail`
     /// block's codes read from its `error[E....]` lines, the words the
     /// nightly's rustdoc reads them from.
-    fn missed(root: &Path, run: &Run, group: &Group) -> Result<BTreeMap<String, Vec<String>>> {
+    fn missed(
+        root: &Path,
+        run: &Run,
+        (crates, flags): (&[&Crate], &[&str]),
+    ) -> Result<BTreeMap<String, Vec<String>>> {
         let mut pinned: Vec<(&Crate, Vec<Pin>)> = Vec::new();
-        for krate in group.crates.iter().copied() {
+        for krate in crates.iter().copied() {
             if !run
                 .crates
                 .get(&krate.name)
@@ -800,7 +846,7 @@ impl Pin {
             .collect();
         args.extend(files);
         let krates: Vec<&Crate> = pinned.iter().map(|(krate, _)| *krate).collect();
-        let said = Pin::said(&doc_run(root, run, (group.profile, &krates), args)?.1);
+        let said = Pin::said(&doc_run(root, run, (&krates, flags), args)?.1);
         let mut missed = BTreeMap::new();
         for (krate, pins) in pinned {
             let words: Vec<String> = pins.iter().filter_map(|pin| pin.missed_in(&said)).collect();
