@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use php_heap::ZvalType;
+use php_heap::{AnyState, EngineState, ZvalType};
 use php_link::LinkedClass;
 use php_unit::decl::{Bare, ClassDecl, FunctionDecl, HookKind, Name, Parameter, Type, Visibility};
 use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
@@ -151,11 +151,20 @@ pub fn epoch(req: &Request) -> Epoch {
 /// with it: the trace table, which a restart's epoch starts without
 /// (`jit-design.md` §4.5). A borrow of the request's own hold, which
 /// takes nothing; none where the epoch holds a value of another type.
-pub fn epoch_state<T: std::any::Any + Send + Sync>(
+///
+/// Every request of the epoch reads it, so it is engine state (ADR-0005,
+/// #4492): a value holding a request's, a pointer into that request's
+/// heap, is refused,
+///
+/// ```compile_fail,E0277
+/// # fn main() {}
+/// include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../xtask/fixtures/api-check/engine-state/epoch.rs"));
+/// ```
+pub fn epoch_state<T: EngineState + std::any::Any + Send + Sync>(
     req: &Request,
     make: impl FnOnce() -> T,
 ) -> Option<&T> {
-    let held = req.arena().tier.get_or_init(|| Box::new(make()));
+    let held = req.arena().tier.get_or_init(|| AnyState::new(make()));
     held.downcast_ref()
 }
 

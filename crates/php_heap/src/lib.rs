@@ -34,6 +34,7 @@
     clippy::unimplemented
 )]
 
+mod any_state;
 mod array;
 mod block;
 mod bump;
@@ -75,6 +76,7 @@ mod table_copy;
 mod zend_arena;
 mod zval;
 
+pub use any_state::AnyState;
 pub use array::DeclaredRows;
 pub use array::{Arr, ArrIter, EmbeddedArr, Key, SortEntry, SortKeys, canonical_int};
 pub use block::Block;
