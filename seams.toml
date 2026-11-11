@@ -633,6 +633,7 @@ scope = ["crates/*", "ext/*", "sapi/*"]
 check = "engine-state"   # api-check's sensor: a hand-written `impl EngineState for` outside the unsafe.homes homes; the compile-fail fixtures are php_bundle's refusals.rs doctests (#4348 ruling 2, #4360)
 adr = "0005"
 text = "No handle into a request's heap enters engine-wide shared state: engine_state, process_state, register and constants_with take an EngineState, which #[derive(EngineState)] holds at every field, and an impl written by hand stands only where unsafe may (#4348 ruling 2)."
+remedy = "#[derive(EngineState)] on the type, or the impl in the crate's own src/ffi/ for a C library's object; where the sensor cannot read, write the trait's path, the file's path or the impl where it reads them"
 
 [[rule]]
 id = "vocab.avoid"
