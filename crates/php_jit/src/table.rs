@@ -47,8 +47,11 @@
 //! were free at the fork, which the child, publishing nothing, never
 //! enters, and no chunk of a standing table is freed before the table.
 //! Where the mapping is refused, the kernel may have taken the code
-//! away with it, so the child's table is lost besides: it hands out no
-//! trace, and the child runs in the dispatch loop alone (#4471).
+//! away with it, so the child's table is lost besides: it hands no
+//! trace to an entry ([`TraceTable::entry`]), and a child with no trace
+//! standing on a stack at the fork runs in the dispatch loop alone; one
+//! with a trace standing returns into its code, which no table state
+//! saves (#4471, #4501).
 //! The copy is the asking process's to pay, at each fork, for the chunks
 //! in use alone.
 
@@ -471,7 +474,7 @@ pub(crate) struct TraceTable<P: Pages = Native> {
     stopped: AtomicBool,
     /// Whether its code may be gone from where its entries point: set
     /// once, in a fork's child whose copy of the arena could not be laid
-    /// over it ([`tier::Inherited`]), after which [`TraceTable::get`]
+    /// over it ([`tier::Inherited`]), after which [`TraceTable::entry`]
     /// hands out no trace.
     lost: AtomicBool,
     bounds: Bounds,
@@ -664,19 +667,34 @@ impl<P: Pages> TraceTable<P> {
         self.used.now()
     }
 
-    /// The trace `id` names: a relaxed load and two acquire loads,
-    /// nothing taken. None for
+    /// The trace `id` names: two acquire loads, nothing taken. None for
     /// an id no publish wrote, which is "not compiled" to every reader,
-    /// the window `jit-design.md` §3.2 names included, and for every id
-    /// once the table's code is lost, so a fork's child that could not
-    /// take its arena runs in the dispatch loop alone (§4.4).
+    /// the window `jit-design.md` §3.2 names included.
     pub(crate) fn get(&self, id: TraceId) -> Option<&Trace<P>> {
-        if self.lost.load(Ordering::Relaxed) {
-            return None;
-        }
         let (segment, slot) = id.slot();
         let slots = self.segments.get(segment)?.get()?;
         slots.get(slot)?.get().map(Box::as_ref)
+    }
+
+    /// The trace `id` names for an entry from the dispatch loop: what
+    /// [`TraceTable::get`] answers, behind a relaxed load of whether the
+    /// table is lost, and none for every id once it is, so a fork's child
+    /// that could not take its arena enters no trace published before the
+    /// fork (`jit-design.md` §4.4). A trace already running at the fork
+    /// still finds the traces it answers by and the words of its exits,
+    /// which ask `get`. Whether the third load stands against the two
+    /// §4.5 settles is #4520's.
+    pub(crate) fn entry(&self, id: TraceId) -> Option<&Trace<P>> {
+        if self.lost() {
+            return None;
+        }
+        self.get(id)
+    }
+
+    /// Whether the table's code is lost: a fork's child's whose copy of
+    /// the arena could not be laid over it.
+    pub(crate) fn lost(&self) -> bool {
+        self.lost.load(Ordering::Relaxed)
     }
 
     /// The number the next trace published takes, which a `TRACE start`
@@ -919,10 +937,11 @@ impl<P: Pages + 'static> tier::Inherited for TraceTable<P> {
     /// copied for the child ([`Arena::inheritance`]); in the child the copy
     /// is mapped over the arena, or, where either was refused, the arena
     /// let go, so the child writes no page its parent maps. A refused copy
-    /// leaves the code where it stands, the parent's; a refused mapping
-    /// may not, since Linux unmaps the executable view before it maps its
-    /// replacement and may then refuse it (`jit-design.md` §4.4), so the
-    /// child's table is lost and hands out no trace.
+    /// leaves the code where it stands, on Linux the pages it shares with
+    /// its parent and on macOS x86-64 the copy the fork gave it; a refused
+    /// mapping may not, since Linux unmaps the executable view before it
+    /// maps its replacement and may then refuse it (`jit-design.md`
+    /// §4.4), so the child's table is lost and enters no trace.
     fn hold(&self) -> Box<dyn FnOnce() + '_> {
         let mut writer = self.writer();
         let inheritance = writer.arena.as_ref().map(Arena::inheritance);

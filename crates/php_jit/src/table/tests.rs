@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use php_engine::tier::{Epoch, Inherited};
 use php_unit::{OpArray, OplineIdx, Unit};
 
-use super::code::{CHUNK, HeapPages, Unadoptable, Unmapped};
+use super::code::{CHUNK, HeapPages, Unadoptable, Uncopyable, Unmapped};
 use super::perf::{self, Captured, Loaded};
 use super::{Full, Perf, TraceId, TraceName, TraceTable, Unpublished};
 use crate::lower::Compiled;
@@ -427,10 +427,11 @@ fn a_table_with_no_arena_numbers_and_keeps_no_code() {
 
 /// A fork's child whose copy of the arena could not be laid over it,
 /// where Linux may have unmapped the executable view first, enters no trace
-/// published before the fork: each reads as not compiled, and what it
-/// publishes after is numbered with no code (`jit-design.md` §4.4,
-/// #4471). The process that asked lets its hold go and keeps every
-/// trace, and a child that took its copy keeps every trace too.
+/// published before the fork, while a trace already running at the fork
+/// still finds each it answers by; what it publishes after is numbered
+/// with no code (`jit-design.md` §4.4, #4471). The process that asked
+/// lets its hold go and enters every trace, and a child that took its
+/// copy enters every trace too.
 #[test]
 fn a_child_that_could_not_take_its_arena_enters_nothing_published_before() -> Result<(), String> {
     let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
@@ -439,17 +440,32 @@ fn a_child_that_could_not_take_its_arena_enters_nothing_published_before() -> Re
     let before = loop_of(&lost)?;
     let ours = loop_of(&kept)?;
     drop(lost.hold());
-    assert!(lost.get(before).is_some(), "the asker keeps its trace");
+    assert!(lost.entry(before).is_some(), "the asker enters its trace");
     lost.hold()();
     kept.hold()();
-    assert!(lost.get(before).is_none(), "the child enters it");
-    assert!(
-        kept.get(ours).is_some(),
-        "the child that took its copy lost it"
-    );
+    assert!(lost.entry(before).is_none(), "the child enters it");
+    assert!(lost.get(before).is_some(), "an answer by it is not found");
+    assert!(kept.entry(ours).is_some(), "the copy's child enters none");
     let after = loop_of(&lost)?;
     assert_eq!(after, trace(2));
     assert!(lost.get(after).is_none(), "published with code after");
+    Ok(())
+}
+
+/// A fork's child whose copy was refused before the fork keeps the
+/// pages it has, which its parent writes nowhere a trace stands, so it
+/// enters every trace published before the fork and publishes no more
+/// code (`jit-design.md` §4.4).
+#[test]
+fn a_child_whose_copy_was_refused_enters_what_was_published_before() -> Result<(), String> {
+    let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
+    let table: TraceTable<Uncopyable> = TraceTable::with_perf(&policy, Perf::none());
+    let before = loop_of(&table)?;
+    table.hold()();
+    assert!(!table.lost(), "a refused copy lost the table");
+    assert!(table.entry(before).is_some(), "the child does not enter it");
+    let after = loop_of(&table)?;
+    assert!(table.get(after).is_none(), "published with code after");
     Ok(())
 }
 

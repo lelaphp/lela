@@ -283,7 +283,7 @@ fn return_visit(
         (lent.state.returns_visited).set(lent.state.returns_visited.get().saturating_add(1));
         match returning(req, lent, landing) {
             Returning::Continue => Flow::Continue,
-            Returning::Enter(id) => match lent.table.and_then(|table| table.get(id)) {
+            Returning::Enter(id) => match lent.table.and_then(|table| table.entry(id)) {
                 Some(trace) => run_trace(req, lent, caller, trace),
                 None => run(req, lent, caller, id),
             },
@@ -791,7 +791,7 @@ fn run_at(req: &mut Request, lent: Lent<'_>, frame: FrameRef, id: TraceId, at: A
     let Some(table) = lent.table.or_else(|| table::of_epoch(epoch)) else {
         return Some(Flow::Continue);
     };
-    let Some(trace) = table.get(id) else {
+    let Some(trace) = table.entry(id) else {
         return Some(Flow::Continue);
     };
     if at == At::Body {
@@ -883,7 +883,7 @@ fn followed<'t>(
             // one that counts nothing either goes on with no visit.
             Left::Escaped(frame) if unarmed(req, lending, frame) => return Flow::Resume(frame),
             Left::Escaped(frame) => match visit_landing(req, lending, frame, Came::Escaped) {
-                Visited::Enter(id) => match table.get(id) {
+                Visited::Enter(id) => match table.entry(id) {
                     Some(next) => {
                         #[cfg(test)]
                         state
@@ -905,8 +905,10 @@ fn followed<'t>(
                 }
             },
             // php's interrupt stub: the interrupt handled, and the trace
-            // entered again at its header, its handler.
+            // entered again at its header, its handler; by the interpreter
+            // where the table is lost (`TraceTable::entry`).
             Left::Interrupted(header) => match tier::interrupted(req) {
+                Ok(false) if table.lost() => return Flow::Resume(header),
                 Ok(false) => {
                     entered = enter::enter(req, Some(state), header, (epoch, trace), At::First);
                     continue;
@@ -946,14 +948,14 @@ fn followed<'t>(
                 }
             },
         };
-        let next = match next.and_then(|next| table.get(next)) {
+        let next = match next.and_then(|next| table.entry(next)) {
             Some(next) => next,
             // Left for the interpreter, which runs the opline's handler:
             // where a return lands, the landing's.
             None if let Some(flow) = owed(req, shared, frame) => return flow,
             None if unarmed(req, lending, frame) => return Flow::Resume(frame),
             None => match visit_landing(req, lending, frame, Came::Left(Some(from))) {
-                Visited::Enter(id) => match table.get(id) {
+                Visited::Enter(id) => match table.entry(id) {
                     Some(next) => next,
                     None => return Flow::Resume(frame),
                 },

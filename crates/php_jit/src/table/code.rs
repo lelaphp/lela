@@ -502,16 +502,26 @@ impl HeapPages {
     }
 }
 
-/// The heap adapter whose fork's child cannot take its copy: `adopt` is
-/// refused with `ENOMEM`, as Linux refuses the executable view's
-/// replacement after it has unmapped the view (`jit-design.md` §4.4).
+/// The heap adapter whose fork's child cannot take its copy, refused with
+/// `ENOMEM` (`jit-design.md` §4.4): by `adopt` where `COPIES`, as Linux
+/// refuses the executable view's replacement after it has unmapped the
+/// view, and by `own` before the fork otherwise, so the child keeps the
+/// pages it has.
 #[cfg(test)]
-pub(crate) struct Unadoptable(HeapPages);
+pub(crate) struct Refusing<const COPIES: bool>(HeapPages);
+
+/// The heap adapter whose fork's child's mapping is refused.
+#[cfg(test)]
+pub(crate) type Unadoptable = Refusing<true>;
+
+/// The heap adapter whose copy for a fork's child is refused.
+#[cfg(test)]
+pub(crate) type Uncopyable = Refusing<false>;
 
 #[cfg(test)]
-impl Pages for Unadoptable {
+impl<const COPIES: bool> Pages for Refusing<COPIES> {
     fn map_pair(len: usize) -> io::Result<Self> {
-        HeapPages::map_pair(len).map(Unadoptable)
+        HeapPages::map_pair(len).map(Refusing)
     }
 
     unsafe fn write(&self, at: usize, bytes: &[u8]) {
@@ -528,7 +538,11 @@ impl Pages for Unadoptable {
     type Own = ();
 
     fn own(&self, _: &mut dyn Iterator<Item = Range<usize>>) -> io::Result<()> {
-        Ok(())
+        if COPIES {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(libc::ENOMEM))
+        }
     }
 
     unsafe fn adopt(&self, (): ()) -> io::Result<()> {
