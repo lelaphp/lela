@@ -20,6 +20,7 @@ layer::Face::unguarded_host_path
 layer::Face::wrapper_warning
 layer::IncludeFile
 layer::IncludeReadHook
+layer::PrimaryOpenHook
 layer::Readiness
 layer::SockOpt
 layer::StandardHandlesHook

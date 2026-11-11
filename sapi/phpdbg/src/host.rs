@@ -499,6 +499,41 @@ pub fn idle(s: &mut Session, command: Command) {
     s.stopped = Some(Stop::Idle);
 }
 
+/// `expand_filepath` over a path, as `phpdbg_resolve_path` takes the
+/// line's program (`Z/sapi/phpdbg/phpdbg_utils.c:146`): its real path
+/// where it resolves, and else made absolute against the working
+/// directory with its `.` and `..` taken lexically, no link resolved, so
+/// a program that does not open is named by its whole path.
+pub fn expanded_path(path: &[u8]) -> Vec<u8> {
+    if let Ok(real) = std::fs::canonicalize(Path::new(std::ffi::OsStr::from_bytes(path))) {
+        return real.into_os_string().into_encoded_bytes();
+    }
+    let mut whole = Vec::new();
+    if !path.starts_with(b"/")
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        whole = cwd.into_os_string().into_encoded_bytes();
+    }
+    whole.push(b'/');
+    whole.extend_from_slice(path);
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for part in whole.split(|b| *b == b'/') {
+        match part {
+            b"" | b"." => {}
+            b".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    parts
+        .iter()
+        .flat_map(|part| [&b"/"[..], part])
+        .flatten()
+        .copied()
+        .collect()
+}
+
 /// `VCWD_REALPATH` over a path, the path as given where it resolves to
 /// nothing.
 pub fn real_path(path: &[u8]) -> Vec<u8> {

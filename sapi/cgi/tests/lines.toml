@@ -211,6 +211,59 @@ files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_
 [[line.then]]
 args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "{dir}/t.php"]
 
+# php-cgi opens its program with `php_fopen_primary_script`'s
+# `zend_stream_open` (`Z/main/fopen_wrappers.c:468-473`), through the plain
+# files opener's `open_basedir` check, under `display_errors=0` while
+# `php_request_startup` is not yet done, so a program outside the base
+# directories warns only where `log_errors` sends the warnings, named for
+# `PHP Request Startup`, and leaves `errno` `EPERM`: not `EACCES`, so the
+# page is `No input file specified.` with a 404 (`Z/sapi/cgi/cgi_main.c:2478`),
+# and `main` returns `FAILURE`, under `-l` and `-s` too, by the path on the
+# line or a server's `SCRIPT_FILENAME` (#4351); a directory, a FIFO or a
+# device is resolved as a file is and refused by the same check, and a link
+# by the file it resolves to. A program within them runs.
+[[line]]
+name = "a-program-outside-open-basedir-is-not-opened"
+args = ["-n", "-d", "open_basedir={dir}/base", "{dir}/out.php"]
+files = { "base/in.php" = "<?php echo \"ran\\n\";", "out.php" = "<?php echo \"ran\\n\";", "d.php/" = "" }
+links = { "base/link-out.php" = "{dir}/out.php", "link-in.php" = "{dir}/base/in.php" }
+fifos = ["fifo.php"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "log_errors=1", "{dir}/out.php"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-l", "{dir}/out.php"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-s", "{dir}/out.php"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "log_errors=1"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/out.php" }
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "log_errors=1", "{dir}/d.php"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "log_errors=1", "{dir}/fifo.php"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "log_errors=1", "/dev/null"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "log_errors=1", "{dir}/base/link-out.php"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "{dir}/link-in.php"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "{dir}/base/in.php"]
+
+# php-cgi `-b` opens each request's program as the line's: outside the base
+# directories, the page and no program.
+[[line]]
+name = "fastcgi-a-program-outside-open-basedir-is-not-opened"
+args = ["-n", "-d", "open_basedir={dir}/base", "-b", "127.0.0.1:{port}"]
+files = { "base/in.php" = "<?php echo \"ran\\n\";", "out.php" = "<?php echo \"ran\\n\";" }
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/out.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/base/in.php"], ["REQUEST_METHOD", "GET"]]
+
 # php-cgi `-b`, its FastCGI server (`Z/sapi/cgi/cgi_main.c:1931-2140`): the
 # socket bound where the switch names, each request's variables read from its
 # `FCGI_PARAMS` as `init_request_info` reads them, its body from its

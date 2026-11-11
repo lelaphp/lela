@@ -45,7 +45,7 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 
 use php_proto::cgi::{Environment, RequestInfo};
-use php_sapi::cgi::{C_NUMBER, CachedDisk, path_of};
+use php_sapi::cgi::{C_NUMBER, CachedDisk};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 use php_sapi::ini::{Search, define, enabled};
 use php_sapi::{
@@ -597,6 +597,7 @@ fn describe(
             script_name,
             source,
             ini: activated,
+            unopened: Some(unopened),
             ..RequestDescription::default()
         },
         primary,
@@ -657,16 +658,20 @@ impl Primary {
     }
 }
 
-/// `php_fopen_primary_script` failing over `path`, as `main` answers it
-/// once the request has started (`Z/sapi/cgi/cgi_main.c:2478-2487`),
-/// php-fpm's page ([`php_sapi::cgi::unopened`]), a request with no path
-/// among them; `None` where the file opens.
-fn refusal(path: Option<&[u8]>) -> Option<HostPage> {
-    match path.map(|path| std::fs::File::open(path_of(path))) {
-        Some(Ok(_)) => None,
-        Some(Err(error)) => Some(php_sapi::cgi::unopened(Some(&error))),
-        None => Some(php_sapi::cgi::unopened(None)),
-    }
+/// `php_fopen_primary_script` failing over the program with `error`, as
+/// `main` answers it once the request has started
+/// (`Z/sapi/cgi/cgi_main.c:2478-2487`), php-fpm's page
+/// ([`php_sapi::cgi::unopened`]): the engine opens the program, through
+/// the request's `open_basedir` guard, where the request description's
+/// `unopened` names this.
+fn unopened(_path: &[u8], error: &std::io::Error) -> HostPage {
+    php_sapi::cgi::unopened(Some(error))
+}
+
+/// What a request with no path translated serves, which opens nothing:
+/// `No input file specified.`.
+fn no_path() -> HostServes {
+    HostServes::Page(php_sapi::cgi::unopened(None))
 }
 
 /// The process's environment, `environ`.
@@ -745,18 +750,9 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
         }
     };
     let sink = Box::new(Process);
-    let mut refused = false;
+    let nothing = matches!(primary, Primary::Path(None));
     let (served, _): (Observables, _) = match (&primary, invocation.behavior) {
-        (Primary::Path(path), Behavior::Standard) => engine.serve(description, sink, |_| {
-            refusal(path.as_deref()).map_or(HostServes::Program, |page| {
-                refused = true;
-                HostServes::Page(page)
-            })
-        }),
-        (Primary::Path(path), _) if let Some(page) = refusal(path.as_deref()) => {
-            refused = true;
-            engine.serve(description, sink, |_| HostServes::Page(page))
-        }
+        (Primary::Path(None), _) => engine.serve(description, sink, |_| no_path()),
         (_, Behavior::Highlight) => engine.highlight(description, sink),
         (_, Behavior::Strip) => engine.strip(description, sink),
         _ => engine.serve(description, sink, |_| HostServes::Program),
@@ -765,7 +761,7 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
     // `main` returns `FAILURE` where `php_request_startup` failed, an
     // extension's `rinit` having raised (#1775), and php-cgi ends there
     // (`Z/sapi/cgi/cgi_main.c:2460-2467`), or where the file did not open.
-    if refused || served.start_failed {
+    if nothing || served.unopened || served.start_failed {
         255
     } else {
         served.exit_code
@@ -788,17 +784,16 @@ fn lint(engine: &Engine, invocation: &Invocation, env: &Environment) -> i32 {
                 return 255;
             }
         };
-        if let Primary::Path(path) = &primary
-            && let Some(page) = refusal(path.as_deref())
-        {
-            engine.serve(description, Box::new(Process), |_| HostServes::Page(page));
+        if matches!(primary, Primary::Path(None)) {
+            engine.serve(description, Box::new(Process), |_| no_path());
             return 255;
         }
         let name = description.script_name.clone().unwrap_or_default();
         let (served, _) = engine.lint(description, Box::new(Process));
         // Each file's request is started at `do_repeat`, and one whose
-        // start fails ends the process with `FAILURE`, no verdict written.
-        if served.start_failed {
+        // start fails ends the process with `FAILURE`, no verdict written;
+        // so does one whose file did not open.
+        if served.start_failed || served.unopened {
             return 255;
         }
         let mut line = if served.exit_code == 0 {

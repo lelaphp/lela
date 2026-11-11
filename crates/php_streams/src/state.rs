@@ -79,6 +79,12 @@ pub(crate) struct State {
     /// being served (`Streams::set_opened_path`), which an include
     /// compiles the file under.
     pub(crate) opened_path: Option<Vec<u8>>,
+    /// php's `errno` as the plain files opener left it where it failed,
+    /// the guard's refusal or the open's own, which
+    /// `php_fopen_primary_script`'s host reads to answer the program it
+    /// did not open ([`crate::zend`]'s `open_primary`); `None` where the
+    /// last open that failed was no plain file's.
+    pub(crate) errno: Option<i32>,
     /// How many filter calls the request has lent a filter out for,
     /// each call's number the mark of the filter's place on its chain.
     pub(crate) filter_lends: u64,
@@ -175,6 +181,7 @@ impl Default for State {
             standard_closed: [false; 3],
             wrapper_errors: Vec::new(),
             opened_path: None,
+            errno: None,
             filter_lends: 0,
             closed: Vec::new(),
             read_scratch: Vec::new(),

@@ -520,6 +520,20 @@ name = "the-cli-notes-its-program-before-the-prepend-file"
 args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "t.php"]
 files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''', "t.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''' }
 
+# The CLI opens its program with `VCWD_FOPEN` in `cli_seek_file_begin`
+# (`Z/sapi/cli/php_cli.c:577`), not through the stream layer, so no
+# `open_basedir` check stands on it: a program outside the base directories
+# runs, by a whole path or a relative one, and `-l` reads it; an include
+# from it of a file outside them is refused as any include is (#4351).
+[[line]]
+name = "the-cli-runs-a-program-outside-open-basedir"
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "{dir}/out.php"]
+files = { "base/in.php" = "<?php echo \"in\\n\";", "out.php" = "<?php echo \"ran\\n\"; include __DIR__ . '/other.php';", "other.php" = "<?php echo \"other\\n\";" }
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "out.php"]
+[[line.then]]
+args = ["-n", "-d", "open_basedir={dir}/base", "-l", "{dir}/out.php"]
+
 [[line]]
 name = "the-built-in-server-notes-its-program-as-it-compiles"
 args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
@@ -530,6 +544,66 @@ listen = "127.0.0.1:{port}"
 stop = "SIGINT"
 [[line.serve.request]]
 http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+# The built-in server hands its program to `php_execute_script` unopened
+# (`zend_stream_init_filename`), so the compile opens it with
+# `zend_stream_open`, through the plain files opener's `open_basedir`
+# check: a program outside the base directories warns, named for no
+# function, and `ZMSG_FAILED_REQUIRE_FOPEN`'s `zend_throw_error`, with no
+# frame standing, is a fatal error (`Z/main/main.c:1784-1787`,
+# `Z/Zend/zend.c:1842-1850`); the router is opened the same way (#4351). The
+# warning names the path the check resolved, and the fatal the file as the
+# server was handed it, relative or through a link. A program within them
+# runs.
+[[line]]
+name = "the-built-in-server-refuses-a-program-outside-open-basedir"
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
+files = { "base/in.php" = "<?php echo \"in\\n\";", "out.php" = "<?php echo \"ran\\n\";" }
+links = { "base/link-out.php" = "{dir}/out.php" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /out.php HTTP/1.0\r\nHost: x\r\n\r\n"
+[[line.serve.request]]
+http = "GET /base/link-out.php HTTP/1.0\r\nHost: x\r\n\r\n"
+[[line.serve.request]]
+http = "GET /base/in.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+[[line]]
+name = "the-built-in-server-refuses-a-router-outside-open-basedir"
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "-S", "127.0.0.1:{port}", "-t", "{dir}", "{dir}/router.php"]
+files = { "base/in.php" = "<?php echo \"in\\n\";", "router.php" = "<?php echo \"routed\\n\"; return false;" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /base/in.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+[[line]]
+name = "the-built-in-server-refuses-a-relative-router-outside-open-basedir"
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "-S", "127.0.0.1:{port}", "-t", "{dir}", "router.php"]
+files = { "base/in.php" = "<?php echo \"in\\n\";", "router.php" = "<?php echo \"routed\\n\"; return false;" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /base/in.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+[[line]]
+name = "the-built-in-server-refuses-a-router-through-a-link-outside-open-basedir"
+args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "-S", "127.0.0.1:{port}", "-t", "{dir}", "{dir}/base/rlink.php"]
+files = { "base/in.php" = "<?php echo \"in\\n\";", "router.php" = "<?php echo \"routed\\n\"; return false;" }
+links = { "base/rlink.php" = "{dir}/router.php" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /base/in.php HTTP/1.0\r\nHost: x\r\n\r\n"
 
 # An archive phar's `zend_compile_file` answers as `auto_prepend_file`:
 # `phar_compile_file` puts the stub's stream in the `zend_file_handle`'s

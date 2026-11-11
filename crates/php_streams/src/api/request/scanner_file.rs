@@ -5,6 +5,7 @@
 use crate::api::raising::Thrown;
 use crate::api::request::{OwnedStream, Request, Stream, StreamOption};
 use crate::api::values::{Emalloc, Owner, PhpString};
+use crate::state::Layer;
 use crate::streams::OpenOptions;
 use crate::streams::{StreamLayer, StreamOp};
 
@@ -71,22 +72,42 @@ impl ScannerFile {
 
     /// `php_fopen_primary_script`'s `zend_stream_open` of the host's
     /// program (`Z/main/fopen_wrappers.c:468-473`): [`ScannerFile::open`]
-    /// under `display_errors=0`, its fd inherited by a process the
-    /// request execs while the program runs, since the host's
-    /// `zend_file_handle` holds it open until the program has been
-    /// served or the request ends.
+    /// with the bit that warns, which the engine serves under
+    /// `display_errors=0`, its fd inherited by a process the request execs
+    /// while the program runs, since the host's `zend_file_handle` holds
+    /// it open until the program has been served or the request ends. A
+    /// file that opens and is no regular file is closed again and not
+    /// opened, as the plain files opener answers an open for an include
+    /// (`Z/main/streams/plain_wrapper.c:1225-1236`), `errno` left
+    /// `ENOENT`, as the pinned php-fpm logs it for a directory.
     pub(crate) fn open_held(req: &mut Request, path: &[u8]) -> Result<Option<ScannerFile>, Thrown> {
-        ScannerFile::open_with(
+        /// `ENOENT`, the same number on every system the engine builds on.
+        const ENOENT: i32 = 2;
+        /// `S_IFMT` and `S_IFREG`.
+        const FORMAT: i64 = 0o170_000;
+        const REGULAR: i64 = 0o100_000;
+        let opened = ScannerFile::open_with(
             req,
             path,
             OpenOptions {
                 use_path: true,
                 for_include: true,
                 for_zend_stream: true,
+                report: true,
                 held: true,
                 ..OpenOptions::default()
             },
-        )
+        )?;
+        let Some(fh) = opened else {
+            return Ok(None);
+        };
+        let stat = req.stream_op(*fh.stream, StreamOp::stat).flatten();
+        if stat.is_some_and(|sb| sb[2] & FORMAT == REGULAR) {
+            return Ok(Some(fh));
+        }
+        fh.destroy(req);
+        req.streams().errno = Some(ENOENT);
+        Ok(None)
     }
 
     fn open_with(

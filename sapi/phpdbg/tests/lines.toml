@@ -925,3 +925,24 @@ name = "a-native-the-prompt-serves-reads-the-session"
 args = ["-qIb", "-n", "{dir}/t.php"]
 files = { "t.php" = "<?php\nfunction f() {\n  echo \"in f\\n\";\n}\nf();\necho \"done\\n\";\n" }
 stdin = "register phpdbg_prompt\nphpdbg_prompt y>\nev phpdbg_break_function(\"f\")\nr\nq\n"
+
+# `phpdbg_compile` opens its program with `php_stream_open_for_zend_ex`
+# (`Z/sapi/phpdbg/phpdbg_prompt.c:546`), through the plain files opener's
+# `open_basedir` check and with no report asked for: a program outside the
+# base directories warns, named for the request's startup while phpdbg is
+# not fully started and for no function after, and `Could not open file`;
+# the run that compiles it answers `Failed to compile`, and the status is
+# 255 (#4351). A program within them runs.
+[[line]]
+name = "a-program-outside-open-basedir-is-not-opened"
+args = ["-qIbrr", "-n", "-d", "open_basedir={dir}/base", "{dir}/out.php"]
+files = { "base/in.php" = "<?php echo \"in\\n\";", "out.php" = "<?php echo \"out\\n\";" }
+stdin = "run\nq\n"
+[[line.then]]
+args = ["-qIbr", "-n", "-d", "open_basedir={dir}/base", "{dir}/out.php"]
+[[line.then]]
+args = ["-qIb", "-n", "-d", "open_basedir={dir}/base", "{dir}/out.php"]
+[[line.then]]
+args = ["-qIrr", "-n", "-d", "open_basedir={dir}/base", "out.php"]
+[[line.then]]
+args = ["-qIbrr", "-n", "-d", "open_basedir={dir}/base", "{dir}/base/in.php"]

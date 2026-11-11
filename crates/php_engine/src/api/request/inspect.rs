@@ -16,7 +16,7 @@ use super::Request;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{PhpObject, Value};
 use crate::exec::TableId;
-use crate::tier::{Called, Compiled, Evaluated, Under};
+use crate::tier::{Called, Compiled, Evaluated, Startup, Under};
 
 /// What [`Request::eval_returning`] did with a string.
 pub(super) enum Evaluation {
@@ -139,27 +139,45 @@ impl Request {
     /// `zend_try` around the compile catches it, the status 255 left
     /// and the request standing; what php leaves behind it stands too:
     /// the record ([`Request::emit_recorded`]) and the functions the
-    /// compile had declared ([`Request::declare_refused`]).
-    pub(crate) fn compile_context(&mut self, path: &[u8], source: Option<&[u8]>) -> Compiled {
-        let read;
-        let source = match source {
-            Some(source) => source,
-            None => match std::fs::read(self.environment().cwd().join(OsStr::from_bytes(path))) {
-                Ok(bytes) => {
-                    read = bytes;
-                    &read
-                }
-                Err(_) => return Compiled::Unopened,
-            },
-        };
+    /// compile had declared ([`Request::declare_refused`]). A file is
+    /// opened through the plain files opener's `open_basedir` guard,
+    /// which warns of one outside every base directory as nothing
+    /// executing names it, as the request's startup during `startup`, and
+    /// one it refuses, or that does not open, is [`Compiled::Unopened`].
+    pub(crate) fn compile_context(
+        &mut self,
+        path: &[u8],
+        source: Option<&[u8]>,
+        startup: Startup,
+    ) -> Compiled {
         let ending = self.ending.take();
-        let compiled = self.nothing_executing(|req| req.compile_context_over(path, source));
+        let compiled = self.nothing_executing(|req| match source {
+            Some(source) => req.compile_context_over(path, source),
+            None => match req.context_opened(path, startup) {
+                Some(read) => req.compile_context_over(path, &read),
+                None => Compiled::Unopened,
+            },
+        });
         self.ending = ending;
         if self.diagnostics().bailing_out() {
             self.catch_bailout();
             return Compiled::Refused;
         }
         compiled
+    }
+
+    /// `php_stream_open_for_zend_ex` over the file at `path` and its bytes
+    /// read: none where the `open_basedir` guard refused it, having
+    /// warned, or where it does not open.
+    fn context_opened(&mut self, path: &[u8], startup: Startup) -> Option<Vec<u8>> {
+        let phase = self.phase();
+        if startup == Startup::During {
+            self.enter_phase(super::Phase::Startup);
+        }
+        let checked = self.environment_mut().check_open_basedir(path, true);
+        self.enter_phase(phase);
+        checked.ok()?;
+        std::fs::read(self.environment().cwd().join(OsStr::from_bytes(path))).ok()
     }
 
     /// The compile itself, its unit the request's alone, with its names.

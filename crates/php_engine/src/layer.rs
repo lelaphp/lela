@@ -91,9 +91,10 @@ pub struct StreamHooks {
     /// request's resources, held as the host's `zend_file_handle` until
     /// [`StreamHooks::close_primary`], its fd inherited by a process the
     /// request execs meanwhile; the `*opened_path` its opener set, which
-    /// `EG(included_files)` holds the program under, or `None` where the
-    /// file did not open. The `Err` is what the open threw.
-    pub open_primary: fn(&mut Request, &[u8]) -> Result<Option<PhpString>, Thrown>,
+    /// `EG(included_files)` holds the program under, where it set one, and
+    /// php's `errno` where the file did not open, which the host answers
+    /// with its page. The outer `Err` is what the open threw.
+    pub open_primary: PrimaryOpenHook,
     /// `zend_destroy_file_handle` over what
     /// [`StreamHooks::open_primary`] opened.
     pub close_primary: fn(&mut Request),
@@ -143,6 +144,10 @@ pub struct StreamHooks {
 /// warns.
 pub type StreamOpenHook =
     fn(&mut Request, &[u8], bool) -> Result<Option<(IncludeFile, Vec<u8>)>, Thrown>;
+
+/// [`StreamHooks::open_primary`].
+pub type PrimaryOpenHook =
+    fn(&mut Request, &[u8]) -> Result<Result<Option<PhpString>, std::io::Error>, Thrown>;
 
 /// [`StreamHooks::read_include`].
 pub type IncludeReadHook = fn(&mut Request, &mut IncludeFile) -> Result<Option<Vec<u8>>, Thrown>;

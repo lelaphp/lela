@@ -134,6 +134,7 @@ tier::Sample
 tier::Site
 tier::Start
 tier::Started
+tier::Startup
 tier::StartupIni
 tier::Stepped
 tier::Thrown

@@ -551,6 +551,39 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 
+# A child opens its program with `php_fopen_primary_script`'s
+# `zend_stream_open` (`Z/main/fopen_wrappers.c:468-473`), through the plain
+# files opener's `open_basedir` check under the pool's `open_basedir`, with
+# `display_errors=0` while the request is starting: a program outside the
+# base directories is answered with `No input file specified.` and a 404,
+# `errno` `EPERM` not being `EACCES`, and `Unable to open primary script`
+# with `strerror` on the request's `FCGI_STDERR`, which
+# `catch_workers_output` logs (`Z/sapi/fpm/fpm/fpm_main.c:1879-1888`); its
+# warnings, named for `PHP Request Startup`, go only where `log_errors`
+# sends them (#4351); a directory, a FIFO or a device is resolved as a file
+# is and refused by the same check. A program within them runs.
+[[line]]
+name = "a-program-outside-the-pool-s-open-basedir-is-not-opened"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\ncatch_workers_output = yes\nphp_admin_value[open_basedir] = {dir}/base\n", "base/in.php" = "<?php echo \"in\\n\";", "out.php" = "<?php echo \"out\\n\";", "d.php/" = "" }
+fifos = ["fifo.php"]
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/out.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/base/in.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/out.php"], ["REQUEST_METHOD", "GET"], ["PHP_VALUE", "log_errors=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/d.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/fifo.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "/dev/null"], ["REQUEST_METHOD", "GET"]]
+
 # A `realpath_cache_ttl` of zero leaves the child's time unread, `*t` at
 # `-1` (`Z/Zend/zend_virtual_cwd.c:1140`), so each entry expires at -1 and
 # none expires: the second request lists what the first entered as the

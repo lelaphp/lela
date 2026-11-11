@@ -113,7 +113,7 @@ mod weakrefs;
 
 pub use api::request::ending::{Ending, ProcessEnd};
 pub use api::request::ini_files::IniFile;
-pub use api::request::{BuildDefs, IniFiles, PHP_VERSION};
+pub use api::request::{BuildDefs, HostPath, IniFiles, PHP_VERSION};
 pub use command_line::{CommandLine, EachLine};
 pub use constants::{
     PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR,

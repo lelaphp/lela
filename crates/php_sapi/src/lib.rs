@@ -45,8 +45,8 @@ use php_engine::LeakSensor;
 
 pub use php_engine::{
     Aborted, Body, BuildDefs, Chdir, CommandLine, Dispatched, EachLine, Ending, Engine,
-    EngineBuilder, FileHandles, Forked, HostPage, HostServes, HostThread, HostValue, IniEvent,
-    IniFile, IniFiles, IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink,
+    EngineBuilder, FileHandles, Forked, HostPage, HostPath, HostServes, HostThread, HostValue,
+    IniEvent, IniFile, IniFiles, IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink,
     PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR,
     PHP_VERSION, Pid, Primary, ProcessEnd, ProcessTitle, ProgramFile, ProgramServed,
     RequestDescription, ResponseHead, Routed, Uncaught, WebRequest, fork, host_thread, log_field,
@@ -94,9 +94,9 @@ pub fn strerror(error: &std::io::Error) -> String {
 pub mod tier {
     pub use php_engine::tier::{
         Argument, Aside, Called, Compiled, Evaluated, Flow, FrameRef, Held, Hooked, Request,
-        SafepointIdx, Site, Stepped, Tier, Under, begin, below, call, catches, compile, entry,
-        evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin, sink, step,
-        unwind,
+        SafepointIdx, Site, Startup, Stepped, Tier, Under, begin, below, call, catches, compile,
+        entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin, sink,
+        step, unwind,
     };
 }
 
