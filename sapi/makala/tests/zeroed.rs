@@ -15,8 +15,22 @@ mod common;
 
 use common::{Request, Server, read_response, root};
 
-/// The variable `php_heap` reads once per process.
+/// The variable `php_heap` reads once per process, and a number that is
+/// not zero: a copy, since the constant is not `php_heap`'s to export,
+/// which [`the_variable_is_the_one_php_heap_reads`] holds to `php_heap`'s.
 const ZEROED: (&str, &str) = ("ZERO_TOUCHED_PAGES", "1");
+
+/// The test below starts makala with the variable `php_heap` reads: one
+/// named otherwise would serve every request as it does with the opt-in
+/// off, and pass all the same.
+#[test]
+fn the_variable_is_the_one_php_heap_reads() {
+    let cache = common::manifest_dir().join("../../crates/php_heap/src/mm/cache.rs");
+    let text = std::fs::read_to_string(&cache)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", cache.display()));
+    let declared = format!("pub(super) const ZEROED: &str = {:?};", ZEROED.0);
+    assert!(text.contains(&declared), "php_heap declares no {declared}");
+}
 
 /// Two requests on the one thread, twice over, so each after the first
 /// is handed the chunks the one before it touched: one that writes about
