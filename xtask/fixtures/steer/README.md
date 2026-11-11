@@ -73,6 +73,18 @@ criss-cross, each side's first commit merged into the other before
 copy, `clean.toml`, and a row added to it are both refused, naming the
 several merge bases.
 
+`merge/manifest.toml` is a manifest small enough to merge, for the same
+walk over `seams.toml` itself, whose `HEAD` copy names what steer may
+write and whose merged copy is what every binary loads. The test raises
+`crates/fixture_a`'s ceiling on `HEAD`, a person's commit, and appends a
+`crates/fixture_c` row on the branch; git merges them cleanly. Through
+the `steer` and `permit --diff` binaries, the merged copy with
+`crates/fixture_b`'s ceiling changed, which neither side changed, is
+refused at `crate[crates/fixture_b].budget` with nothing written and the
+merge still refused; the merged copy as git left it is written, naming
+`crate[crates/fixture_a].budget` as `HEAD`'s and `crate[crates/fixture_c]`
+as brought, and pre-commit then admits the agent's merge.
+
 ## An `[[owed]]` row (#3636)
 
 `owed/tracked.toml` is a slice of `seams.toml`'s `[[owed]]` rows, each
