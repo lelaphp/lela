@@ -214,6 +214,7 @@ pub(crate) fn of_command(command: &crate::cli::Command) -> Option<Seat> {
         Command::Crosscheck { .. } => "crosscheck",
         Command::TraceDump(_) => "trace-dump",
         Command::Hostile => "hostile",
+        Command::Fuzz(_) => "fuzz",
         Command::Fold(_) => "fold",
         Command::DispatchCensus(_) => "dispatch-census",
         Command::FpmCompare { .. } | Command::Soak { .. } => "makala",

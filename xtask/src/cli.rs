@@ -379,6 +379,13 @@ pub(crate) enum Command {
     /// side is kept per pin, and the interpreter's verdicts at
     /// `target/harness/hostile-runs/<engine tree>.json` (#4265).
     Hostile,
+    /// Hold the engine to the oracle on a corpus's programs and as many
+    /// again drawn from a seed, generated or mutated; one reading per crate
+    /// that owes it.
+    ///
+    /// A difference or a fault fails the run, its program minimised and
+    /// kept at `target/harness/fuzz/<seed>/`; the nightly lane (harness §7).
+    Fuzz(crate::fuzz::Ask),
     /// Hold the release `serve_frame` to LLVM's fold of a request field's
     /// address into each access; one reading, at `sapi/cli`.
     ///

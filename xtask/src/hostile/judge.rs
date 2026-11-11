@@ -21,6 +21,27 @@ pub(crate) enum Came {
     PastLimit(u64),
 }
 
+/// `code` run by `binary` under the oracle's recipe and `regimes`, as
+/// both sides of a lane that holds a program to php run it.
+pub(crate) fn came(
+    oracle: &oracle::Oracle<'_>,
+    binary: &std::path::Path,
+    code: &str,
+    regimes: &[&str],
+) -> anyhow::Result<Came> {
+    let ran = oracle.run_under(&oracle::Invocation {
+        regimes,
+        ..oracle::Invocation::new(binary, oracle::Program::Snippet(code))
+    });
+    match ran {
+        Ok(observed) => Ok(Came::Observed(observed)),
+        Err(why) => match why.downcast_ref::<oracle::PastLimit>() {
+            Some(past) => Ok(Came::PastLimit(past.limit_s)),
+            None => Err(why),
+        },
+    }
+}
+
 /// The engine's fault on a program: what no php program ends in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Fault {
@@ -101,6 +122,12 @@ impl Judged {
     /// The engine's run `came` held to the oracle's bytes `theirs` under
     /// the program `id`'s divergence key.
     pub(crate) fn of(registry: &Registry, id: &str, theirs: &[u8], came: &Came) -> Judged {
+        Judged::keyed(registry, &key(id), theirs, came)
+    }
+
+    /// The same under the divergence key `key` whole, which the `fuzz`
+    /// lane holds its programs by.
+    pub(crate) fn keyed(registry: &Registry, key: &str, theirs: &[u8], came: &Came) -> Judged {
         let observed = match came {
             Came::PastLimit(limit) => return Judged::Fault(Fault::PastLimit(*limit)),
             Came::Observed(observed) => observed,
@@ -109,7 +136,7 @@ impl Judged {
             return Judged::Fault(fault);
         }
         let ours = seen(observed);
-        match oracle::compare(registry, &key(id), theirs, &ours) {
+        match oracle::compare(registry, key, theirs, &ours) {
             oracle::Verdict::Same => Judged::Met,
             oracle::Verdict::Diverged(row) => Judged::Accepted(row.id.to_string()),
             oracle::Verdict::Moved(moved) => Judged::Moved(moved.to_string()),
