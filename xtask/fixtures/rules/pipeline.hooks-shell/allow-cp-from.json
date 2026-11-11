@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cp scripts/hooks/pre-commit /tmp/pre-commit","description":"Copy a hook out"}}

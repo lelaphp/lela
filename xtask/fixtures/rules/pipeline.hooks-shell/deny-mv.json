@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"mv scripts/hooks/pre-commit /tmp/pre-commit","description":"Move a hook out of the way"}}

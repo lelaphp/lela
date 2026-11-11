@@ -873,6 +873,41 @@ with = ["git push", "git config"]
 text = "A push runs the pre-push hook, which runs `done`, and the hooks run from where core.hooksPath points them; --no-verify on a push, core.hooksPath, and removing or renaming a configuration section are not available to agents (#4348 ruling 3)."
 remedy = "push as it is, and fix what pre-push names; core.hooksPath is the session hook's to set"
 
+[[rule]]
+id = "pipeline.hooks-shell"
+tool = "Bash"
+# The git hooks, written by a shell line (#4363, the second ruling
+# comment): core.hooksPath points this clone's every checkout at main's
+# checkout's scripts/hooks, so a write there governs the next commit, merge
+# and push of every checkout with no commit of its own, and in a fresh clone
+# the hook a worktree carries judges the commit that carries its edit. A
+# redirection into one, `tee` naming one, `sed -i` or `perl -i` over one,
+# `cp`, `ln`, `install` or `rsync` with one as the destination or the
+# `-t` target, `mv`, `rm`, `rmdir`, `unlink`, `chmod`, `chown`, `truncate`,
+# `patch`, or `git apply`, `checkout`, `restore`, `rm` or `mv` naming one,
+# or `dd of=` one; the path bare, relative or absolute, since a worktree reaches
+# main's checkout's hooks by an absolute path, and judged wherever the line
+# runs, since a line run outside every checkout reaches them by that path
+# too. Reading one, or running it, is none of these.
+deny_pattern = '''(?x)
+  [0-9&]?>>?\|?\s*['"]?
+    (?:[^\s'"|;&)<>=]*/)?scripts/hooks(?:/[^\s'"|;&)<>]*)?(?:$|[\s'"|;&)<>])
+| (?:^|[|;&(\n`'"]|\$\()\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:(?:sudo|command|exec|env|xargs(?:\s+-\S+)*)\s+)*(?:\S*/)?
+  (?:
+      tee\s(?:[^|;&\n]*[\s'"])?
+    | (?:sed|perl)\s(?:[^|;&\n]*\s)?(?:-[a-zA-Z]*i|--in-place)[^|;&\n]*[\s'"]
+    | (?:mv|rm|rmdir|unlink|chmod|chown|truncate|patch|git\s+(?:-C\s+\S+\s+)?(?:apply|checkout|restore|rm|mv))\s(?:[^|;&\n]*[\s'"=])?
+    | dd\s(?:[^|;&\n]*\s)?of=['"]?
+    | (?:cp|ln|install)\s(?:[^|;&\n]*\s)?(?:-t\s*|--target-directory[=\s]\s*)['"]?
+  )
+    (?:[^\s'"|;&)<>=]*/)?scripts/hooks(?:/[^\s'"|;&)<>]*)?(?:$|[\s'"|;&)<>])
+| (?:^|[|;&(\n`'"]|\$\()\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:(?:sudo|command|exec|env|xargs(?:\s+-\S+)*)\s+)*(?:\S*/)?
+  (?:cp|ln|install|rsync)\s(?:[^|;&\n]*[\s'"])?
+    (?:[^\s'"|;&)<>=]*/)?scripts/hooks(?:/[^\s'"|;&)<>]*)?['"]?(?:\s+(?:-\S*|[0-9]*>&?\S*))*\s*(?:$|[|;&\n)])
+'''
+text = "The git hooks under scripts/hooks judge every checkout's commits, merges and pushes, and a shell line does not write them (#4363)."
+remedy = "propose the hook's change on a `for-a-person` ticket with its diff, and a person commits it; a scratch repository's hooks go in a folder of another name"
+
 # ---------------------------------------------------------------- owed
 # What a crate owes before done (harness §4.5 condition 1): one row per
 # instrument, the crates a glob or a list less `exempt`, and `when` a

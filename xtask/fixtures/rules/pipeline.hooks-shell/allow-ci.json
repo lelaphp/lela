@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"printf x > scripts/ci/x.sh","description":"Write a CI file, which this row does not name"}}

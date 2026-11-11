@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"chmod -x scripts/hooks/pre-commit","description":"Make a hook unrunnable"}}

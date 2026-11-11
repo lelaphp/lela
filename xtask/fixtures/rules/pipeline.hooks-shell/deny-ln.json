@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"ln -sf /usr/bin/true scripts/hooks/pre-commit","description":"Link a hook to true"}}

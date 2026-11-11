@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"echo 'exit 0' | tee -a scripts/hooks/pre-merge-commit","description":"Append to a hook through tee"}}
