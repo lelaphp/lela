@@ -365,7 +365,7 @@ pub(crate) fn reading(
                     tally.missing.len(),
                     tally.subjects,
                     listed(&tally.missing),
-                    rule.map(|r| r.text.as_str()).unwrap_or_default()
+                    rule.map(Rule::said).unwrap_or_default()
                 )
             };
             let unread = if tally.problems.is_empty() {

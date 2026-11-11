@@ -1131,7 +1131,8 @@ mod tracked {
 mod engine_state {
     use super::*;
 
-    /// The tracked manifest with the rule whose `check` names the seal.
+    /// The tracked manifest with the rule whose `check` names the seal,
+    /// carrying a `remedy` where the tracked row has none yet (#4500).
     fn sealed() -> Manifest {
         let mut manifest = Manifest::load(workspace()).unwrap();
         if manifest.rule_checked_by("engine-state").is_none() {
@@ -1141,6 +1142,11 @@ mod engine_state {
             rule.predicate.deny = None;
             rule.predicate.check = Some("engine-state".to_owned());
             manifest.rules.push(rule);
+        }
+        let checks = |r: &&mut Rule| r.predicate.check.as_deref() == Some("engine-state");
+        if let Some(rule) = manifest.rules.iter_mut().find(checks) {
+            rule.remedy
+                .get_or_insert_with(|| "#[derive(EngineState)] on the type".to_owned());
         }
         manifest
     }
@@ -1155,11 +1161,18 @@ mod engine_state {
     /// own `src/ffi/`, a home `unsafe.homes` names, passes beside the
     /// derive, local macros and an `OUT_DIR` file from a `build.rs` whose
     /// closure holds a module naming the trait in no string; the failing
-    /// reading names the rule, the passing one not.
+    /// reading names the rule, its text and then its remedy, the passing
+    /// one not.
     #[test]
     fn engine_state_written_by_hand_outside_the_homes_fails_naming_its_line() {
         let manifest = sealed();
-        let id = &manifest.rule_checked_by("engine-state").unwrap().id;
+        let rule = manifest.rule_checked_by("engine-state").unwrap();
+        let id = &rule.id;
+        let said = format!(
+            "{} Instead: {}.",
+            rule.text,
+            rule.remedy.as_deref().unwrap()
+        );
         let readings = api_check::hold(&manifest, &fixture("engine-state"), false).unwrap();
         let pcre = of(&readings, "ext/pcre");
         assert_eq!(pcre.status, Status::Fail, "{}", pcre.message);
@@ -1171,7 +1184,8 @@ mod engine_state {
             pcre.message
         );
         assert!(
-            pcre.message.contains(&format!("seams.toml rule {id}")),
+            pcre.message
+                .contains(&format!("seams.toml rule {id}: {said}")),
             "{}",
             pcre.message
         );

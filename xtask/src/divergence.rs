@@ -41,7 +41,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::key::Snapshot;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, Rule};
 use crate::reading::{self, Reading};
 use crate::sha256::Sha256;
 
@@ -1095,7 +1095,7 @@ pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<R
         reading.message = format!(
             "{FILE}: {}. {}",
             failures.join("; "),
-            rule.map(|r| r.text.as_str()).unwrap_or_default()
+            rule.map(Rule::said).unwrap_or_default()
         );
     }
     Ok(reading)
