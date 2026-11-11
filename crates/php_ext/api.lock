@@ -1235,6 +1235,7 @@ test::Engine::activated_ini
 test::Engine::alter_master_ini
 test::Engine::build_defs
 test::Engine::builder
+test::Engine::check_open_basedir
 test::Engine::command_line
 test::Engine::dispatch
 test::Engine::dump_before_optimizer

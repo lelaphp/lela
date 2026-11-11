@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use php_proto::vpath::{self, Translated};
-use php_sapi::ResponseHead;
 use php_sapi::cgi::Disk;
+use php_sapi::{HostPath, ResponseHead};
 
 use crate::options::{Hidden, Options};
 use crate::static_file::StaticFile;
@@ -28,20 +28,29 @@ const SOURCE_EXTENSIONS: [&[u8]; 9] = [
 /// challenges and `security.txt` stand under it.
 const WELL_KNOWN: &[u8] = b".well-known";
 
-/// Where requests go: the document root, and what of it [`Hidden`]
-/// refuses. Its one question asks the disk, so the connection side asks
-/// it on tokio's blocking pool, never on its one thread (M4).
+/// The `open_basedir` guard a static file passes before it opens: the
+/// engine's `Engine::check_open_basedir`, the path it may open, or none
+/// where the guard refuses it.
+pub(crate) type Guard = Box<dyn Fn(&[u8]) -> Option<HostPath> + Send + Sync>;
+
+/// Where requests go: the document root, what of it [`Hidden`] refuses,
+/// and the guard a static file passes. Its one question asks the disk, so
+/// the connection side asks it on tokio's blocking pool, never on its one
+/// thread (M4).
 pub(crate) struct Router {
     root: Arc<[u8]>,
     hidden: Hidden,
+    guard: Guard,
 }
 
 impl Router {
-    /// The router of `options`' document root and [`Hidden`].
-    pub(crate) fn new(options: &Options) -> Router {
+    /// The router of `options`' document root and [`Hidden`], its static
+    /// files passing `guard`.
+    pub(crate) fn new(options: &Options, guard: Guard) -> Router {
         Router {
             root: options.document_root.as_os_str().as_encoded_bytes().into(),
             hidden: options.hidden,
+            guard,
         }
     }
 
@@ -60,7 +69,9 @@ impl Router {
     /// `php_cli_server_begin_send_static`'s order: a method that writes
     /// refused, then a path that translated to nothing, then, under
     /// [`Hidden::Refused`], a path past the file it found or a file of
-    /// PHP's source, then a file that does not open. A path holding a NUL
+    /// PHP's source, then a file outside `open_basedir`, which no oracle
+    /// holds, answered as a file makala may not serve is, then a file
+    /// that does not open. A path holding a NUL
     /// is never split, and `vpath::holds_nul` answers it under
     /// [`Hidden::Refused`] as a path with nothing at it is; under
     /// [`Hidden::Served`] a static file's is refused with 400 after a
@@ -102,7 +113,9 @@ impl Router {
                     || (found.path_info.is_none()
                         && !is_source(vpath::extension(&found.vpath))) =>
             {
-                StaticFile::open(&found).map_or(Route::Refused(Refusal::NotFound), Route::Static)
+                (self.guard)(&found.path_translated)
+                    .and_then(|host| StaticFile::open(&host, &found))
+                    .map_or(Route::Refused(Refusal::NotFound), Route::Static)
             }
             _ => Route::Refused(Refusal::NotFound),
         }

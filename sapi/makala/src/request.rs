@@ -279,6 +279,7 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
         sapi_name: crate::NAME.to_owned(),
         web: Some(web),
         script_name: info.path_translated.clone(),
+        unopened: Some(unopened),
         ..RequestDescription::default()
     };
     // A program whose path holds a NUL is never run, as
@@ -317,8 +318,19 @@ enum Refusal<'a> {
     /// `security.limit_extensions` (`fpm_php_limit_extensions`).
     Extension(&'a [u8]),
     /// The program does not open as a regular file, with the error php's
-    /// `errno` holds after `php_fopen_primary_script` fails.
-    Unopened(&'a [u8], std::io::Error),
+    /// `errno` holds after `php_fopen_primary_script` fails, as the engine
+    /// opens it through the request's `open_basedir` guard ([`unopened`]).
+    Unopened(&'a [u8], &'a std::io::Error),
+}
+
+/// A program that did not open as php-fpm's `php_fopen_primary_script`
+/// opens it, which the engine opens through the request's `open_basedir`
+/// guard (`RequestDescription::unopened`): php-fpm's line in the error
+/// log and its page, as [`Refusal::Unopened`] has them.
+fn unopened(path: &[u8], error: &std::io::Error) -> HostPage {
+    let refused = Refusal::Unopened(path, error);
+    crate::log::error(&refused.logged());
+    refused.page()
 }
 
 impl Refusal<'_> {
@@ -377,11 +389,10 @@ const ZLOG_BUFFER: usize = 2048;
 /// Whether the request is refused once it has started, in php-fpm's
 /// order (`Z/sapi/fpm/fpm/fpm_main.c:1854-1888`): where the path names no
 /// program; for one whose name does not end in `.php`, so no file of
-/// another kind runs as a program, `T.PHP` among them; and for one that
-/// does not open, a directory among them, which php's plain-files opener
-/// refuses for a program as no regular file
-/// (`Z/main/streams/plain_wrapper.c:1225-1230`) with `errno` left
-/// `ENOENT`, as the pinned php-fpm logs it. Else the program is served.
+/// another kind runs as a program, `T.PHP` among them. Else the program
+/// is served where the engine opens it, through the request's
+/// `open_basedir` guard, and one that does not open, a directory among
+/// them, is answered by [`unopened`].
 ///
 /// A path that names no program is php-fpm's 404, and its line in the
 /// error log, under both:
@@ -410,14 +421,7 @@ fn refusal(info: &RequestInfo) -> Option<Refusal<'_>> {
     if !(path.len() > b".php".len() && path.ends_with(b".php")) {
         return Some(Refusal::Extension(path));
     }
-    match std::fs::File::open(php_sapi::cgi::path_of(path)).and_then(|file| file.metadata()) {
-        Ok(opened) if opened.is_file() => None,
-        Ok(_) => Some(Refusal::Unopened(
-            path,
-            std::io::Error::from_raw_os_error(libc::ENOENT),
-        )),
-        Err(error) => Some(Refusal::Unopened(path, error)),
-    }
+    None
 }
 
 /// The CGI environment a web server hands php-fpm for `head`, after
@@ -879,7 +883,8 @@ mod tests {
             }
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let router = Arc::new(crate::route::Router::new(&options));
+        // No static file is asked for here, so the guard refuses every one.
+        let router = Arc::new(crate::route::Router::new(&options, Box::new(|_| None)));
         std::thread::spawn(move || {
             let _pool = pool;
             if let Ok(side) = crate::connection::ConnectionSide::new() {
@@ -937,8 +942,10 @@ mod tests {
     #[test]
     fn a_refusals_line_is_cut_where_php_fpms_buffer_ends() {
         let long = [b"/".as_slice(), &[b'a'; 3000], b".php"].concat();
-        let unopened =
-            Refusal::Unopened(&long, std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+        let unopened = Refusal::Unopened(
+            &long,
+            &std::io::Error::from_raw_os_error(libc::ENAMETOOLONG),
+        );
         let line = unopened.logged();
         assert_eq!(line.len(), ZLOG_BUFFER);
         assert!(line.starts_with(b"Unable to open primary script: /aaa"));
@@ -957,7 +964,7 @@ mod tests {
     fn a_program_that_does_not_open_is_denied_for_eacces_alone() {
         let page = |errno: i32| {
             let page =
-                Refusal::Unopened(b"/x.php", std::io::Error::from_raw_os_error(errno)).page();
+                Refusal::Unopened(b"/x.php", &std::io::Error::from_raw_os_error(errno)).page();
             (page.code, page.body)
         };
         assert_eq!(page(libc::EACCES), (403, b"Access denied.\n".to_vec()));

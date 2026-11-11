@@ -14,7 +14,7 @@ use std::task::{Context, Poll};
 
 use hyper::body::Bytes;
 use php_proto::vpath::{self, Translated};
-use php_sapi::ResponseHead;
+use php_sapi::{HostPath, ResponseHead};
 use tokio::io::{AsyncRead, ReadBuf};
 
 use crate::connection::Unfinished;
@@ -36,10 +36,11 @@ pub(crate) struct StaticFile {
 }
 
 impl StaticFile {
-    /// The file `found` names, opened, and its length; none where it does
-    /// not open, which is answered as nothing there. It waits on the disk.
-    pub(crate) fn open(found: &Translated) -> Option<StaticFile> {
-        let file = std::fs::File::open(php_sapi::cgi::path_of(&found.path_translated)).ok()?;
+    /// The file `found` names, at the `host` path the `open_basedir` guard
+    /// let it open, opened, and its length; none where it does not open,
+    /// which is answered as nothing there. It waits on the disk.
+    pub(crate) fn open(host: &HostPath, found: &Translated) -> Option<StaticFile> {
+        let file = std::fs::File::open(host).ok()?;
         let length = file.metadata().ok()?.len();
         Some(StaticFile {
             file,

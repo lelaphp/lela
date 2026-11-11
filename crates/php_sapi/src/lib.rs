@@ -45,8 +45,8 @@ use php_engine::LeakSensor;
 
 pub use php_engine::{
     Aborted, Body, BuildDefs, Chdir, CommandLine, Dispatched, EachLine, Ending, Engine,
-    EngineBuilder, FileHandles, Forked, HostPage, HostServes, HostThread, HostValue, IniEvent,
-    IniFile, IniFiles, IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink,
+    EngineBuilder, FileHandles, Forked, HostPage, HostPath, HostServes, HostThread, HostValue,
+    IniEvent, IniFile, IniFiles, IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink,
     PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR,
     PHP_VERSION, Pid, Primary, ProcessEnd, ProcessTitle, ProgramFile, ProgramServed,
     RequestDescription, ResponseHead, Routed, Uncaught, WebRequest, fork, host_thread, main_thread,

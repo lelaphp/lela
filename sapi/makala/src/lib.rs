@@ -115,7 +115,13 @@ pub fn main() -> ExitCode {
             return php_sapi::exit_code(1);
         }
     };
-    let router = Arc::new(route::Router::new(&options));
+    // The router's guard holds a clone of the engine, dropped with the
+    // connection side's runtime before the engine's end below.
+    let guard = engine.clone();
+    let router = Arc::new(route::Router::new(
+        &options,
+        Box::new(move |path| guard.check_open_basedir(path).ok()),
+    ));
     let (queue, pool) =
         match request::Pool::start(&options, request::serving(&engine, router.root())) {
             Ok(started) => started,
