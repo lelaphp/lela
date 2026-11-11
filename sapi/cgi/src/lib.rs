@@ -100,7 +100,7 @@ pub enum Behavior {
 pub enum Ask {
     /// `php_cgi_usage` on stdout, with `php_getopt`'s line on stderr for
     /// a switch it does not know, and the exit code.
-    Usage { stderr: String, exit_code: i32 },
+    Usage { stderr: Vec<u8>, exit_code: i32 },
     /// `-v`: `php_print_version`.
     Version,
     /// `-m`: the loaded extensions.
@@ -245,7 +245,7 @@ fn usage_pass(argv: &[Vec<u8>]) -> Option<Ask> {
                 code: b'h' | b'?', ..
             }) => {
                 return Some(Ask::Usage {
-                    stderr: String::new(),
+                    stderr: Vec::new(),
                     exit_code: 0,
                 });
             }
@@ -841,7 +841,7 @@ pub fn main() -> ExitCode {
         // (`Z/sapi/cgi/cgi_main.c:1879`, `:2260-2269`).
         Ask::Usage { stderr, exit_code } => {
             let engine = engine(&options.ini, Origin::Shell, false);
-            std::io::stderr().lock().write_all(stderr.as_bytes()).ok();
+            std::io::stderr().lock().write_all(stderr).ok();
             php_sapi::stdio::write(&usage_text(argv0.as_encoded_bytes()));
             drop(engine);
             *exit_code
@@ -980,14 +980,14 @@ mod tests {
         assert_eq!(
             parse(&["-x"], &[]).ask,
             Ask::Usage {
-                stderr: "Error in argument 1, char 2: option not found x\n".to_owned(),
+                stderr: b"Error in argument 1, char 2: option not found x\n".to_vec(),
                 exit_code: 1
             }
         );
         assert_eq!(
             parse(&["-h"], &[]).ask,
             Ask::Usage {
-                stderr: String::new(),
+                stderr: Vec::new(),
                 exit_code: 0
             }
         );

@@ -27,25 +27,21 @@ pub const fn opt(code: u8, need: u8, name: &'static str) -> Opt<'static> {
 /// `php_opt_error`'s line on stderr (`Z/main/getopt.c:28-50`), the
 /// argument counted from the program's name and the character from
 /// one; the host's usage follows it on stdout. `argv` is the line after
-/// the program's name, as a host's walk reads it from 0.
+/// the program's name, as a host's walk reads it from 0. The switch is
+/// named by its byte as php's `%c` writes it, whether or not it is UTF-8.
 #[must_use]
-pub fn getopt_line(argv: &[Vec<u8>], argument: usize, at: usize, error: OptError) -> String {
-    let letter = argv
-        .get(argument)
-        .and_then(|word| word.get(at))
-        .map_or(String::new(), |&b| {
-            String::from_utf8_lossy(&[b]).into_owned()
-        });
-    let reason = match error {
-        OptError::Colon => String::from(": in flags"),
-        OptError::NotFound => format!("option not found {letter}"),
-        OptError::NoArgument => format!("no argument for option {letter}"),
+pub fn getopt_line(argv: &[Vec<u8>], argument: usize, at: usize, error: OptError) -> Vec<u8> {
+    let letter = argv.get(argument).and_then(|word| word.get(at));
+    let (reason, letter): (&[u8], _) = match error {
+        OptError::Colon => (b": in flags", None),
+        OptError::NotFound => (b"option not found ", letter),
+        OptError::NoArgument => (b"no argument for option ", letter),
     };
-    format!(
-        "Error in argument {}, char {}: {reason}\n",
-        argument + 1,
-        at + 1
-    )
+    let mut line = format!("Error in argument {}, char {}: ", argument + 1, at + 1).into_bytes();
+    line.extend_from_slice(reason);
+    line.extend(letter);
+    line.push(b'\n');
+    line
 }
 
 /// Bytes of the command line as a word the host hands on.
