@@ -323,8 +323,10 @@ pub enum Body {
     /// Nothing, and the `E_WARNING` the host's read raises each time it
     /// is asked, as php-fpm's `sapi_cgi_read_post` raises
     /// `REQUEST_BODY_FILE: open('%s') failed: %s (%d)` where the file the
-    /// server names does not open (`Z/sapi/fpm/fpm/fpm_main.c:448`).
-    Refused(String),
+    /// server names does not open (`Z/sapi/fpm/fpm/fpm_main.c:448`): the
+    /// message's bytes, so a path that is not UTF-8 is written as its own
+    /// bytes, as php's `%s` writes it.
+    Refused(Vec<u8>),
 }
 
 impl From<Vec<u8>> for Body {
@@ -345,7 +347,10 @@ impl std::fmt::Debug for Body {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Body::Stream(_) => f.write_str("Stream"),
-            Body::Refused(warning) => f.debug_tuple("Refused").field(warning).finish(),
+            Body::Refused(warning) => f
+                .debug_tuple("Refused")
+                .field(&format_args!("{}", warning.escape_ascii()))
+                .finish(),
         }
     }
 }

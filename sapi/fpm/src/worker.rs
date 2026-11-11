@@ -1064,12 +1064,19 @@ fn body(env: &Environment, unread: u64, wire: &Arc<Mutex<Wire>>) -> Body {
     };
     match std::fs::File::open(crate::conf::path(file)) {
         Ok(opened) => Body::Stream(Box::new(opened.take(unread))),
-        Err(e) => Body::Refused(format!(
-            "REQUEST_BODY_FILE: open('{}') failed: {} ({})",
-            String::from_utf8_lossy(file),
-            php_sapi::strerror(&e),
-            crate::conf::errno(&e) as i32
-        )),
+        Err(e) => Body::Refused(
+            [
+                &b"REQUEST_BODY_FILE: open('"[..],
+                file,
+                format!(
+                    "') failed: {} ({})",
+                    php_sapi::strerror(&e),
+                    crate::conf::errno(&e) as i32
+                )
+                .as_bytes(),
+            ]
+            .concat(),
+        ),
     }
 }
 
