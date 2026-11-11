@@ -13,7 +13,9 @@
 //! A mutation works on lines, the unit a generated program is written in
 //! and the one [`super`]'s minimiser removes: it drops, repeats or swaps a
 //! line, puts a generated statement before one, or puts a trap value in
-//! place of an integer literal in one.
+//! place of an integer literal in one that names no loop, so no trap
+//! takes a loop's bound or step away. A loop the corpus spreads over
+//! lines a drop can still unbind, which the run's budget bounds.
 
 use std::fmt::Write as _;
 
@@ -118,10 +120,18 @@ pub(crate) fn mutated(code: &str, rng: &mut Rng) -> String {
     out
 }
 
+/// The words that open a loop, whose line a trap leaves alone.
+const LOOPS: [&str; 4] = ["while", "for", "foreach", "do"];
+
 /// `line` with one of its integer literals, a run of digits that no
 /// letter, digit, `$`, `_`, `.` or quote stands against, put out for a
-/// [`TRAPS`] value; the line unchanged where it has none.
-fn trapped(line: &str, rng: &mut Rng) -> String {
+/// [`TRAPS`] value; the line unchanged where it has none, or where it
+/// names a loop, whose bound or step a trap could take away.
+pub(super) fn trapped(line: &str, rng: &mut Rng) -> String {
+    let words = line.split(|c: char| !c.is_ascii_alphanumeric());
+    if words.into_iter().any(|word| LOOPS.contains(&word)) {
+        return line.to_owned();
+    }
     let bytes = line.as_bytes();
     let joins = |b: u8| b.is_ascii_alphanumeric() || b"$_.\"'".contains(&b);
     let mut runs = Vec::new();

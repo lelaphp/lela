@@ -28,6 +28,12 @@
 //! file, and the registry has no kind whose ids name a fuzz program, so
 //! the reading names the finding and stops there.
 //!
+//! **What bounds a run.** Each program, the recipe's limit; a trap never
+//! lands on a line that names a loop; a time-out is kept whole rather
+//! than minimised, since each trial would run to the limit; and the run's
+//! budget, `--minutes`, past which no program starts and no finding is
+//! minimised. The reading says how many programs and findings each cut.
+//!
 //! **What it writes.** One reading per crate of [`OWING`], each stamped
 //! over its crate and all carrying the one run's verdict, as `hostile`'s
 //! do: a fail while a finding stands or where no program was held to
@@ -39,12 +45,12 @@ mod generate;
 mod tests;
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use crate::divergence::Registry;
-use crate::hostile::judge::{self, Came, Judged};
+use crate::hostile::judge::{self, Came, Fault, Judged};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::hosts::CLI;
@@ -92,6 +98,11 @@ pub struct Ask {
     /// How many programs to draw beside the corpus's own.
     #[arg(long, value_name = "N", default_value_t = 32)]
     pub programs: usize,
+    /// The run's budget in minutes: a program not started by then is not
+    /// run, and a finding met then is kept whole. The reading says how
+    /// many of each.
+    #[arg(long, value_name = "N", default_value_t = 30)]
+    pub minutes: u64,
 }
 
 /// `xtask fuzz`: [`run`] under the tracked registry, its readings
@@ -151,10 +162,11 @@ pub fn run(
         php: &pin.oracle.path,
         engine: &engine,
         registry,
+        deadline: started + Duration::from_secs(ask.minutes.saturating_mul(60)),
     };
     let hunt = sides.hunt(&programs, &root.join(FOUND).join(seed.to_string()))?;
     let wall = started.elapsed();
-    let message = hunt.message(root, seed, &corpus, ask.programs);
+    let message = hunt.message(root, seed, &corpus, ask);
     for reading in &mut readings {
         hunt.numbers(reading, seed, &programs)?;
         reading.count("wall_ms", crate::reading::millis(wall))?;
@@ -249,12 +261,25 @@ impl Pass {
     }
 }
 
-/// What both sides of a run run as, and the registry `compare` reads.
+/// What both sides of a run run as, the registry `compare` reads, and
+/// when the run's budget is spent.
 pub(crate) struct Sides<'a> {
     pub oracle: &'a Oracle<'a>,
     pub php: &'a Path,
     pub engine: &'a Path,
     pub registry: &'a Registry,
+    pub deadline: Instant,
+}
+
+/// How one program's run came out.
+enum Ran {
+    /// The run's budget was spent before it started.
+    Cut,
+    /// The oracle did not complete it.
+    Unheld,
+    /// Its verdict under the interpreter, and under the tier where the
+    /// interpreter met php.
+    Held(Judged, Option<Judged>),
 }
 
 /// One program the engine disagrees with php on, minimised: where it is
@@ -272,6 +297,11 @@ pub(crate) struct Hunt {
     pub met: u64,
     pub accepted: u64,
     pub unheld: u64,
+    /// Programs not run, the run's budget spent before they started.
+    pub cut: u64,
+    /// Findings kept whole: a time-out, which minimising would spend the
+    /// recipe's limit on per trial, or one met with the budget spent.
+    pub whole: u64,
     pub findings: Vec<Finding>,
 }
 
@@ -287,11 +317,18 @@ impl Sides<'_> {
         let found = crate::tally::each_beside(programs, |p| self.found(&p.code))?;
         let mut hunt = Hunt::default();
         for (program, found) in programs.iter().zip(found) {
-            let found = found.with_context(|| format!("running {}", program.label))?;
-            let Some((interpreter, tier)) = found else {
-                hunt.unheld += 1;
-                continue;
-            };
+            let (interpreter, tier) =
+                match found.with_context(|| format!("running {}", program.label))? {
+                    Ran::Cut => {
+                        hunt.cut += 1;
+                        continue;
+                    }
+                    Ran::Unheld => {
+                        hunt.unheld += 1;
+                        continue;
+                    }
+                    Ran::Held(interpreter, tier) => (interpreter, tier),
+                };
             let (pass, judged) = match (&interpreter, tier) {
                 (judged, _) if disagrees(judged) => (Pass::Interpreter, interpreter),
                 (_, Some(tier)) if disagrees(&tier) => (Pass::Tier, tier),
@@ -304,22 +341,30 @@ impl Sides<'_> {
                     continue;
                 }
             };
-            let code = self.minimised(&program.code, pass, &judged)?;
             let tail = if pass == Pass::Tier { "-tier" } else { "" };
             let path = dir.join(format!("{}{tail}.php", program.label));
+            let minimised = self.minimised(&program.code, pass, &judged)?;
+            hunt.whole += u64::from(minimised.is_none());
+            let code = minimised.as_deref().unwrap_or(&program.code);
             crate::make_parent(&path)?;
             crate::reading::replace(&path, code.as_bytes())?;
-            let judged = self.judged(&code, pass)?.unwrap_or(judged);
+            let judged = if minimised.is_some() {
+                self.judged(code, pass)?.unwrap_or(judged)
+            } else {
+                judged
+            };
             hunt.findings.push(Finding { path, pass, judged });
         }
         Ok(hunt)
     }
 
-    /// `code` judged under the interpreter, and under the tier where the
-    /// interpreter met php; none where the oracle did not complete it.
-    fn found(&self, code: &str) -> Result<Option<(Judged, Option<Judged>)>> {
+    /// `code` run and judged, unless the run's budget is spent.
+    fn found(&self, code: &str) -> Result<Ran> {
+        if Instant::now() >= self.deadline {
+            return Ok(Ran::Cut);
+        }
         let Some(theirs) = self.theirs(code)? else {
-            return Ok(None);
+            return Ok(Ran::Unheld);
         };
         let interpreter = self.held(code, &theirs, Pass::Interpreter)?;
         let tier = if disagrees(&interpreter) {
@@ -327,7 +372,7 @@ impl Sides<'_> {
         } else {
             Some(self.held(code, &theirs, Pass::Tier)?)
         };
-        Ok(Some((interpreter, tier)))
+        Ok(Ran::Held(interpreter, tier))
     }
 
     /// `code` judged under `pass` alone; none where the oracle did not
@@ -357,8 +402,19 @@ impl Sides<'_> {
 
     /// `code` with as many of its lines dropped as leave the disagreement
     /// `judged` standing under `pass`, of the same kind: runs of lines
-    /// halving down to one, within [`TRIALS`] runs. The opening tag stays.
-    fn minimised(&self, code: &str, pass: Pass, judged: &Judged) -> Result<String> {
+    /// halving down to one, within [`TRIALS`] runs and the run's budget.
+    /// The opening tag stays. None for a time-out, each trial of which
+    /// would run to the recipe's limit, and where the budget is spent.
+    pub(crate) fn minimised(
+        &self,
+        code: &str,
+        pass: Pass,
+        judged: &Judged,
+    ) -> Result<Option<String>> {
+        let spent = || Instant::now() >= self.deadline;
+        if matches!(judged, Judged::Fault(Fault::PastLimit(_))) || spent() {
+            return Ok(None);
+        }
         let render = |lines: &[&str]| {
             lines.iter().fold(String::new(), |mut out, line| {
                 out.push_str(line);
@@ -372,7 +428,7 @@ impl Sides<'_> {
         let mut trials = 0;
         loop {
             let mut at = head;
-            while at < lines.len() && trials < TRIALS {
+            while at < lines.len() && trials < TRIALS && !spent() {
                 let end = (at + chunk).min(lines.len());
                 let fewer: Vec<&str> = lines[..at].iter().chain(&lines[end..]).copied().collect();
                 trials += 1;
@@ -385,8 +441,8 @@ impl Sides<'_> {
                     at = end;
                 }
             }
-            if chunk == 1 || trials >= TRIALS {
-                return Ok(render(&lines));
+            if chunk == 1 || trials >= TRIALS || spent() {
+                return Ok(Some(render(&lines)));
             }
             chunk = chunk.div_ceil(2);
         }
@@ -403,7 +459,8 @@ impl Hunt {
 
     /// What a run says, after the crate's name: the findings first where
     /// there are any, then the counts and how to draw the programs again.
-    fn message(&self, root: &Path, seed: u32, corpus: &Corpus, drawn: usize) -> String {
+    fn message(&self, root: &Path, seed: u32, corpus: &Corpus, ask: &Ask) -> String {
+        let drawn = ask.programs;
         let found = (!self.findings.is_empty()).then(|| {
             let each = self.findings.iter().map(|f| {
                 let path = f.path.strip_prefix(root).unwrap_or(&f.path).display();
@@ -435,7 +492,19 @@ impl Hunt {
         );
         let empty = (self.findings.is_empty() && self.met + self.accepted == 0)
             .then(|| "no program was held to php, so the run compared nothing".to_owned());
-        joined(found.into_iter().chain(empty).chain([counted]), "; ")
+        let cut = (self.cut + self.whole > 0).then(|| {
+            format!(
+                "cut short: {} not run and {} finding{} kept whole, a time-out's or past the run's {} minutes",
+                self.cut,
+                self.whole,
+                crate::reading::plural(usize::try_from(self.whole).unwrap_or(usize::MAX)),
+                ask.minutes
+            )
+        });
+        joined(
+            found.into_iter().chain(empty).chain(cut).chain([counted]),
+            "; ",
+        )
     }
 
     /// The counts a run's readings carry.
@@ -452,6 +521,8 @@ impl Hunt {
             ("met", self.met),
             ("accepted", self.accepted),
             ("unheld", self.unheld),
+            ("cut", self.cut),
+            ("whole", self.whole),
             ("findings", self.findings.len() as u64),
             ("faults", faults.count() as u64),
             ("tier_findings", tier as u64),
