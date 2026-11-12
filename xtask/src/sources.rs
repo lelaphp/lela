@@ -425,11 +425,16 @@ pub(crate) struct Laid {
 
 impl Laid {
     /// The index at `root` laid down, or none where the working tree is
-    /// what it holds already: no tracked file differs from its staged copy
-    /// and no untracked file stands beside them.
+    /// what it holds already: no tracked file differs from its staged copy,
+    /// no untracked file stands beside them, and no entry is marked
+    /// `skip-worktree` or `assume-unchanged`, which `--modified` passes
+    /// over however its working copy differs; `ls-files -v` tags every
+    /// other entry `H`.
     pub(crate) fn of(root: &Path) -> Result<Option<Laid>> {
         let differs = git::listed(root, &["ls-files", "-z", "--modified"])?;
-        if differs.is_empty() && git::untracked(root)?.is_empty() {
+        let marked = (git::listed(root, &["ls-files", "-z", "-v"])?.iter())
+            .any(|entry| !entry.starts_with("H "));
+        if differs.is_empty() && !marked && git::untracked(root)?.is_empty() {
             return Ok(None);
         }
         Laid::lay(root).map(Some)
@@ -766,6 +771,26 @@ mod tests {
         let gone = at.to_path_buf();
         drop(laid);
         assert!(!gone.exists());
+    }
+
+    /// A file marked `skip-worktree` or `assume-unchanged` whose working
+    /// copy differs from its staged one is hidden from `ls-files
+    /// --modified`; the index is laid down all the same, and holds the
+    /// staged copy (#4620).
+    #[test]
+    fn a_marked_file_that_differs_lays_the_index_down() {
+        for mark in ["--skip-worktree", "--assume-unchanged"] {
+            let (tree, _, _) = repository("marked");
+            git(&tree, &["update-index", mark, "--", "xtask/src/lib.rs"]).unwrap();
+            fs::write(tree.join("xtask/src/lib.rs"), "b\n").unwrap();
+            let laid = Laid::of(&tree).unwrap();
+            let laid = laid.unwrap_or_else(|| panic!("{mark}: nothing laid"));
+            assert_eq!(
+                fs::read_to_string(laid.root().join("xtask/src/lib.rs")).unwrap(),
+                "a\n",
+                "{mark}"
+            );
+        }
     }
 
     #[test]
