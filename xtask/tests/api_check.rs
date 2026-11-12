@@ -1241,6 +1241,7 @@ mod engine_state {
         let includers = [
             ("crates/php_bundle/src/refusals.rs", "//! "),
             ("crates/php_engine/src/tier/view.rs", "/// "),
+            ("crates/php_engine/src/layer.rs", "/// "),
         ]
         .map(|(file, doc)| {
             (
@@ -1268,6 +1269,9 @@ mod engine_state {
                 &text[fence..at]
             );
         }
-        assert_eq!(seen, 4, "handle.rs, entry.rs, epoch.rs and class.rs");
+        assert_eq!(
+            seen, 5,
+            "handle.rs, entry.rs, epoch.rs, class.rs and layer.rs"
+        );
     }
 }

@@ -4060,7 +4060,7 @@ impl EngineBuilder {
             crate::unit_cache::Files::new(MAX_ACCELERATED_FILES),
             interned.clone(),
         ));
-        let layer = supplied.stream_hooks.get().map(|hooks| (hooks.state)());
+        let layer = supplied.stream_hooks.get().map(|hooks| hooks.state.build());
         let realpath_cache = crate::virtual_cwd::RealpathCache::of(|name| ini.master(name));
         let mut engine = Engine {
             shared: Arc::new(Shared {

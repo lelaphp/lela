@@ -4,7 +4,7 @@
 //! with `ExtensionBuilder::stream_hooks`, and the CLI's standard handles
 //! `do_cli` registers and reads.
 
-use crate::api::layer::{Face as _, IncludeFile, StreamHooks, scheme_length};
+use crate::api::layer::{Face as _, IncludeFile, StateHook, StreamHooks, scheme_length};
 
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, ScannerFile, Stream, Streams, Unresolved, UrlStat, Whence};
@@ -31,7 +31,7 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     body_discard,
     body_read,
     body_close,
-    state: crate::state::engine_state,
+    state: StateHook::of::<crate::state::LayerState>(),
     engine_end: crate::state::engine_end,
     post_deactivate: crate::streams::persistent::forget,
 };

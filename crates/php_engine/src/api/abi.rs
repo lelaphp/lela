@@ -67,7 +67,9 @@ pub use php_compile::multibyte::{Encoding, Encodings, Unicode};
 /// its derive, which holds each field to it. The four entries that keep
 /// a value engine-wide, [`ExtensionBuilder::engine_state`],
 /// [`ExtensionBuilder::process_state`], [`ExtensionBuilder::register`]
-/// and [`ExtensionBuilder::constants_with`], are bounded by it.
+/// and [`ExtensionBuilder::constants_with`], are bounded by it, and so
+/// is the stream layer's state beside them
+/// ([`StateHook::of`](crate::layer::StateHook::of)).
 pub use php_heap::EngineState;
 pub use php_macros::EngineState;
 

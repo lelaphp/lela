@@ -13,7 +13,7 @@
 //! given back to the pool, its resource and `stream->ctx` forgotten as
 //! `forget_persistent_resource_id_numbers` forgets them; the next request
 //! to ask the key takes it out, checked for liveness first. The pool is
-//! the layer's engine state's ([`EngineState`]), typed by the entry it
+//! the layer's engine state's ([`LayerState`]), typed by the entry it
 //! keeps (#1962).
 //!
 //! [`Pool`]: crate::api::abi::Pool
@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use crate::api::abi::Pool;
 use crate::api::layer::Face as _;
-use crate::state::EngineState;
+use crate::state::LayerState;
 
 use super::held::Payload;
 use super::sockets::{Connection, Socket};
@@ -92,7 +92,8 @@ struct Idle {
 /// across requests: the stream bare of its filters ([`Bare`]), and the
 /// filters of its chains, which stay on the stream as php's `php_stream`
 /// keeps them, their resources the request's and gone with it. Nothing
-/// of a request's.
+/// of a request's, by type.
+#[derive(php_engine::api::abi::EngineState)]
 pub(crate) struct Entry {
     bare: Bare,
     filters: Kept,
@@ -117,7 +118,7 @@ pub(crate) trait Persistent {
     fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Owner<Stream>, Thrown>;
     fn hold_persistent(&mut self, key: Vec<u8>, stream: Stream);
     fn drop_persistent(&mut self, res: Resource);
-    fn persistent_pool(&mut self) -> Option<Arc<EngineState>>;
+    fn persistent_pool(&mut self) -> Option<Arc<LayerState>>;
 }
 
 impl Persistent for Request {
@@ -250,11 +251,11 @@ impl Persistent for Request {
     /// back to it as the request is dropped ([`give_back`]); `None` on an
     /// engine no stream layer was supplied to, where a held entry closes
     /// with the request.
-    fn persistent_pool(&mut self) -> Option<Arc<EngineState>> {
+    fn persistent_pool(&mut self) -> Option<Arc<LayerState>> {
         if let Some(engine) = &self.streams().engine {
             return Some(Arc::clone(engine));
         }
-        let engine = self.layer_state::<EngineState>()?;
+        let engine = self.layer_state::<LayerState>()?;
         self.streams().engine = Some(Arc::clone(&engine));
         Some(engine)
     }
@@ -497,7 +498,7 @@ pub(crate) fn end_entry(req: &mut Request, entry: Entry) {
 /// one it may keep ([`KeptFilter`]).
 ///
 /// [`KeptFilter`]: crate::api::request::KeptFilter
-#[derive(Default)]
+#[derive(Default, php_engine::api::abi::EngineState)]
 pub(crate) struct Kept {
     pub(super) read: Vec<Box<dyn crate::api::request::KeptFilter>>,
     pub(super) write: Vec<Box<dyn crate::api::request::KeptFilter>>,
