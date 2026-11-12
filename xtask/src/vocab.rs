@@ -151,7 +151,7 @@ pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Rea
             readings.push(reading);
             continue;
         };
-        let scan = scan_crate(&dir, glossary)?;
+        let scan = scan_crate(root, &krate.path(), glossary)?;
         for finding in &scan.findings {
             println!("{}/{finding}", krate.path().display());
         }
@@ -294,14 +294,16 @@ fn reading_of(scan: &Scan, snapshot: &Snapshot, rule: &Rule, krate: &Crate) -> R
     Ok(reading)
 }
 
-/// Scan one crate directory: every `.rs` file under it, `target/` and
-/// `fixtures/` aside. The findings' files are relative to `dir`.
-pub(crate) fn scan_crate(dir: &Path, glossary: &Glossary) -> Result<Scan> {
+/// Scan the crate at `path` under the workspace `root`: every `.rs` file
+/// under it, `target/` and `fixtures/` aside. The findings' files are
+/// relative to the crate's directory.
+pub(crate) fn scan_crate(root: &Path, path: &Path, glossary: &Glossary) -> Result<Scan> {
     let avoided = glossary.avoided_phrases();
     let mut scan = Scan::default();
-    for file in rust_files(dir)? {
+    let dir = root.join(path);
+    for file in rust_files(root, path)? {
         let text = crate::read(&file)?;
-        let relative = file.strip_prefix(dir).unwrap_or(&file);
+        let relative = file.strip_prefix(&dir).unwrap_or(&file);
         scan_source(relative, &text, &avoided, &mut scan);
     }
     Ok(scan)
@@ -497,19 +499,26 @@ fn without_code_spans(text: &str) -> String {
     out
 }
 
-/// Every `.rs` file under `dir` that git does not ignore, as a crate's key
-/// lists them ([`crate::git::files`]), in path order; `target/` is
-/// skipped, and so is `fixtures/`, whose files are other crates' sources.
-/// A file git ignores is in no commit and moves no key, so it is not read
-/// (#4620).
-fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut files: Vec<PathBuf> = (crate::git::files(dir, Path::new("."))?.into_iter())
+/// Every `.rs` file of the crate at `path` that git does not ignore, as
+/// a crate's key lists them ([`crate::git::files`]), in path order;
+/// `target/` is skipped, and so is `fixtures/`, whose files are other
+/// crates' sources. A file git ignores is in no commit and moves no key,
+/// so it is not read (#4620). Git lists from the workspace `root` with the
+/// crate as the pathspec, as budget does: run in the crate's directory
+/// under the `GIT_DIR` a linked worktree's hook exports, git takes that
+/// directory for the top of the work tree and reads no `.gitignore` above
+/// it.
+fn rust_files(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
+    let mut files: Vec<PathBuf> = (crate::git::files(root, path)?.into_iter())
         .map(PathBuf::from)
         .filter(|p| {
-            p.extension().is_some_and(|e| e == "rs")
-                && !p.iter().any(|part| part == "target" || part == "fixtures")
+            let inner = p.strip_prefix(path).unwrap_or(p);
+            inner.extension().is_some_and(|e| e == "rs")
+                && !inner
+                    .iter()
+                    .any(|part| part == "target" || part == "fixtures")
         })
-        .map(|p| dir.join(p))
+        .map(|p| root.join(p))
         .collect();
     files.sort();
     Ok(files)

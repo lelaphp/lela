@@ -19,6 +19,9 @@ pub struct Present {
     pub name: String,
     /// The crate's directory, absolute.
     pub dir: PathBuf,
+    /// The workspace root the crate is under, which git lists its sources
+    /// from.
+    pub root: PathBuf,
     /// The cargo package name; `php_ext_random` for `ext/random`.
     pub package: String,
     pub deps: Vec<Dep>,
@@ -69,12 +72,17 @@ impl Present {
     /// Every `.rs` file under the crate's source directories and its
     /// `build.rs`, in path order, as git lists them ([`crate::git::files`]):
     /// a file git ignores is in no commit and moves no key, so it is not
-    /// read (#4620).
+    /// read (#4620). Git lists from the workspace root with the crate's
+    /// directories as the pathspecs, as budget does: run in the crate's
+    /// directory under the `GIT_DIR` a linked worktree's hook exports, git
+    /// takes that directory for the top of the work tree and reads no
+    /// `.gitignore` above it.
     pub fn sources(&self) -> Result<Vec<PathBuf>> {
-        let scopes = ["src", "tests", "benches", "examples", "build.rs"];
-        let mut out: Vec<PathBuf> = (crate::git::files_under(&self.dir, &scopes)?.into_iter())
+        let path = self.dir.strip_prefix(&self.root).unwrap_or(&self.dir);
+        let scopes = ["src", "tests", "benches", "examples", "build.rs"].map(|s| path.join(s));
+        let mut out: Vec<PathBuf> = (crate::git::files_under(&self.root, &scopes)?.into_iter())
             .filter(|p| Path::new(p).extension().is_some_and(|e| e == "rs"))
-            .map(|p| self.dir.join(p))
+            .map(|p| self.root.join(p))
             .collect();
         out.sort();
         Ok(out)
@@ -122,6 +130,7 @@ impl Crates {
                 external,
                 inherits_lints,
                 dir,
+                root: root.to_path_buf(),
                 package,
             });
         }

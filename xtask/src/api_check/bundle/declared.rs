@@ -278,10 +278,11 @@ mod tests {
     /// What the tracked `ext/<name>` declares `Required`, and where it
     /// declares what the instrument does not read.
     fn declared(name: &str) -> (Vec<String>, Vec<String>) {
-        let dir = crate::package_dir().to_path_buf().join("../ext").join(name);
+        let root = crate::package_dir().to_path_buf().join("..");
         let krate = Present {
             name: format!("ext/{name}"),
-            dir,
+            dir: root.join("ext").join(name),
+            root,
             package: format!("php_ext_{name}"),
             deps: Vec::new(),
             external: BTreeSet::default(),

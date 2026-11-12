@@ -101,6 +101,7 @@ fn php_engine_fails_for_a_raise_it_no_longer_defines() {
     let engine = Present {
         name: ENGINE.to_owned(),
         dir: dir.clone(),
+        root: root.to_path_buf(),
         package: ENGINE.to_owned(),
         deps: Vec::new(),
         external: std::collections::BTreeSet::new(),
