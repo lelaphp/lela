@@ -120,6 +120,12 @@ pub(super) struct Cd(libc::iconv_t);
 // never used from two at once.
 unsafe impl Send for Cd {}
 
+// The converter's state is libiconv's, on the system allocator, so no
+// request's heap is reachable from it: what a persistent stream's
+// `convert.iconv.*` filter keeps across requests, one at a time, as
+// `Send` says.
+impl php_ext::abi::EngineState for Cd {}
+
 impl Cd {
     /// `iconv_open(to, from)`: the converter, or `errno`.
     pub(super) fn open(to: &[u8], from: &[u8]) -> Result<Cd, Errno> {

@@ -9,7 +9,7 @@ mod support;
 use php_ext::abi::ExtensionBuilder;
 use php_ext::raising::Thrown;
 use php_ext::request::{
-    Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _,
+    Brigade, FilterFlags, FilterStatus, MadeFilter, Request, Stream, StreamFilter, Streams as _,
 };
 use php_ext::test::{Capture, Engine};
 use php_ext::values::{PhpString, Value};
@@ -496,8 +496,8 @@ fn leaky_factory(
     _name: &[u8],
     _params: Option<&Value>,
     _persistent: bool,
-) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
-    Ok(Some(Box::new(LeakyFilter)))
+) -> Result<Option<MadeFilter>, Thrown> {
+    Ok(Some(MadeFilter::Request(Box::new(LeakyFilter))))
 }
 
 #[allow(clippy::unnecessary_wraps)] // the ABI's `rinit` hook

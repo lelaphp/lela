@@ -62,7 +62,7 @@ mod owner;
 mod smart_str;
 pub mod walk;
 pub use charset::Charset;
-pub use emalloc::{Emalloc, Pemalloc};
+pub use emalloc::{Allocation, Emalloc, Malloc};
 pub use fresh::FreshString;
 pub use identity::Identity;
 pub(crate) use owner::{Left, adopted, adopted_some};

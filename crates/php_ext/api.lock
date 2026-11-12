@@ -799,6 +799,7 @@ request::Interrupt::raise
 request::Interrupt::raised
 request::Interrupt::receive_signals
 request::Invalidation
+request::KeptFilter
 request::Lent
 request::Lent::at
 request::Limits
@@ -814,6 +815,7 @@ request::Limits::start_periodic
 request::Limits::stop_periodic
 request::Limits::suspend_time_limit
 request::MAXPATHLEN
+request::MadeFilter
 request::Memory
 request::Memory::adopt
 request::Memory::disown
@@ -1274,6 +1276,11 @@ test::LeakSensor
 test::Served
 test::Served::assert_clean
 test::Served::stdout_text
+values::Allocation
+values::Allocation::bytes
+values::Allocation::bytes_mut
+values::Allocation::free
+values::Allocation::new
 values::Charset
 values::Charset::named
 values::Charset::next_char
@@ -1323,6 +1330,7 @@ values::Key::lookup
 values::Key::to_prop_name
 values::Layout
 values::Laziness
+values::Malloc
 values::NameHasher
 values::Owner
 values::Owner::append
@@ -1358,11 +1366,6 @@ values::Owner::try_append
 values::Owner::unset
 values::Owner::unset_in_place
 values::Owner::visit
-values::Pemalloc
-values::Pemalloc::bytes
-values::Pemalloc::bytes_mut
-values::Pemalloc::free
-values::Pemalloc::new
 values::PhpArray
 values::PhpArray::append
 values::PhpArray::clean

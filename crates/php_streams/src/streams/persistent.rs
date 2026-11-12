@@ -493,11 +493,14 @@ pub(crate) fn end_entry(req: &mut Request, entry: Entry) {
 
 /// The filters a persistent stream keeps between its resources and
 /// across requests: each chain's `fops`, in order, with no resource and
-/// on no heap of a request's.
+/// on no heap of a request's, each a filter the stream's chain held as
+/// one it may keep ([`KeptFilter`]).
+///
+/// [`KeptFilter`]: crate::api::request::KeptFilter
 #[derive(Default)]
 pub(crate) struct Kept {
-    pub(super) read: Vec<Box<dyn crate::api::request::StreamFilter>>,
-    pub(super) write: Vec<Box<dyn crate::api::request::StreamFilter>>,
+    pub(super) read: Vec<Box<dyn crate::api::request::KeptFilter>>,
+    pub(super) write: Vec<Box<dyn crate::api::request::KeptFilter>>,
 }
 
 impl Kept {

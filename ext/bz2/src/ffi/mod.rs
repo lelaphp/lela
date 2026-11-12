@@ -24,6 +24,7 @@ use std::convert::Infallible;
 use std::ffi::{c_int, c_uint, c_void};
 
 use libbz2_rs_sys as bz;
+use php_ext::abi::EngineState;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, efree, emalloc};
 
@@ -231,6 +232,12 @@ pub(crate) struct Compress(Box<bz::bz_stream>);
 // thread at a time (ADR-0005); the library keeps no thread-local state.
 unsafe impl Send for Compress {}
 
+// The stream's state is on the library's own allocator, the system's, so
+// no request's heap is reachable from it: what a persistent stream's
+// `bzip2.compress` filter keeps across requests, one at a time, as `Send`
+// says.
+impl EngineState for Compress {}
+
 impl Compress {
     /// `BZ2_bzCompressInit(&strm, block_size, 0, work_factor)`.
     pub(crate) fn new(block_size: i32, work_factor: i32) -> Result<Compress, Code> {
@@ -273,6 +280,9 @@ pub(crate) struct Decompress(Box<bz::bz_stream>);
 // SAFETY: as for Compress: one owner, one thread at a time, no
 // thread-local state in the library.
 unsafe impl Send for Decompress {}
+
+// As `Compress`: the state on the library's own allocator.
+impl EngineState for Decompress {}
 
 impl Decompress {
     /// `BZ2_bzDecompressInit(&strm, 0, small)`.

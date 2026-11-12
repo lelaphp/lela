@@ -17,8 +17,8 @@
 //! stand (the homes `unsafe.homes` names), for a leaf the derive cannot
 //! read through: here, the primitives, the standard containers over engine
 //! state, a `Cow` among them, an owned fd and the standard library's
-//! sockets, a function pointer, [`Bytes`], a [`ClassCache`], [`FrozenZval`]
-//! and [`AnyState`](crate::AnyState).
+//! sockets, a function pointer, [`Bytes`], a [`ClassCache`], a debug
+//! build's `Origin`, [`FrozenZval`] and [`AnyState`](crate::AnyState).
 //! An `AnyState` is a value of engine state behind its erased type, which
 //! the engine holds where it keeps a value it does not name, the compiled
 //! tier's for an epoch (#4492): its one constructor takes engine state,
@@ -178,6 +178,12 @@ impl EngineState for Bytes {}
 // class each request finds there is the request's, and stands in its
 // table, never here (`string.rs`).
 impl EngineState for ClassCache {}
+
+// An origin is a number, an extension's `module_number`, which a debug
+// build's heap keeps beside a block and which names no block itself
+// (`sensed.rs`).
+#[cfg(debug_assertions)]
+impl EngineState for crate::Origin {}
 
 /// A value no request owns: a scalar, or a string of the engine's
 /// permanent table, [`Strings`]. It is how engine state holds a value

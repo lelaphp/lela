@@ -12,7 +12,7 @@ use std::os::fd::OwnedFd;
 
 use crate::api::decl::Type;
 
-use crate::api::abi::FromArgument;
+use crate::api::abi::{EngineState, FromArgument};
 use crate::api::layer::{Face as _, TemporaryGuard};
 use crate::api::raising::{Thrown, arg_type_error, fatal};
 use crate::api::values::{ClassId, Owner, PhpArray, PhpString, Resource, ResourceView, Value};
@@ -1193,15 +1193,55 @@ pub trait StreamFilter: Send {
     }
 }
 
+/// A filter a persistent stream's chain may hold: a [`StreamFilter`]
+/// that is engine state by type, since the chain is kept past the
+/// request that made it, idle in the engine's pool as php's
+/// `EG(persistent_list)` keeps the stream, and lent to the next request
+/// that asks for the stream; nothing reachable from it is a request's.
+/// Every filter that is both is one.
+pub trait KeptFilter: StreamFilter + EngineState {}
+
+impl<F: StreamFilter + EngineState> KeptFilter for F {}
+
+/// What a [`FilterFactory`] made, typed by the stream it may stand on: a
+/// filter for a stream of the request's, or one a persistent stream's
+/// chain may keep ([`KeptFilter`]), which a stream of the request's may
+/// hold as well. The stream layer puts a filter on a persistent stream's
+/// chain only as the second, so the user filter, which holds its PHP
+/// object, never stands there.
+pub enum MadeFilter {
+    Request(Box<dyn StreamFilter>),
+    Kept(Box<dyn KeptFilter>),
+}
+
+impl MadeFilter {
+    /// The filter, to call.
+    pub(crate) fn as_filter(&self) -> &dyn StreamFilter {
+        match self {
+            MadeFilter::Request(filter) => &**filter,
+            MadeFilter::Kept(filter) => &**filter,
+        }
+    }
+
+    /// The filter, to call mutably.
+    pub(crate) fn as_filter_mut(&mut self) -> &mut dyn StreamFilter {
+        match self {
+            MadeFilter::Request(filter) => &mut **filter,
+            MadeFilter::Kept(filter) => &mut **filter,
+        }
+    }
+}
+
 /// `php_stream_filter_factory`'s `create_filter`: a filter of the name
 /// the program asked for, which may be one a wildcard matched, with the
 /// parameters it was given, and `persistent`, whether the stream it is
 /// made for is (`php_stream_is_persistent`), so that a factory keeps what
 /// a persistent stream's filter allocates off the request's heap, as
-/// `pemalloc(.., persistent)` does; `None` is the factory's refusal,
-/// after whatever it said.
+/// `pemalloc(.., persistent)` does, and answers a filter the stream may
+/// keep ([`MadeFilter::Kept`]); `None` is the factory's refusal, after
+/// whatever it said.
 pub type FilterFactory =
-    fn(&mut Request, &[u8], Option<&Value>, bool) -> Result<Option<Box<dyn StreamFilter>>, Thrown>;
+    fn(&mut Request, &[u8], Option<&Value>, bool) -> Result<Option<MadeFilter>, Thrown>;
 
 /// No declared type, the stream `PHP_Z_PARAM_STREAM` holds: a resource,
 /// as [`Resource`] holds one, and then an open stream

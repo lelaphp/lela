@@ -10,6 +10,7 @@
 
 use std::sync::atomic::Ordering;
 
+use crate::api::abi::EngineState;
 use crate::api::call::{ClassNative, Function};
 use crate::api::raising::Thrown;
 use crate::api::values::{
@@ -2117,8 +2118,9 @@ impl Symbols<&mut Request> {
 /// Whose code supplied a hook, as [`Code::supplier`] took it where
 /// the hook was registered, for [`Code::serve_supplied`] to serve the
 /// hook as: the extension a debug build tags what the hook allocates
-/// with, and nothing in a release build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// with, and nothing in a release build. Engine state by type, a number
+/// at most, so a hook a persistent stream keeps keeps its supplier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub struct Supplier {
     #[cfg(debug_assertions)]
     origin: php_heap::Origin,

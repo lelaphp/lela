@@ -102,7 +102,7 @@ use php_ext::call::{autoload, call_method, lookup_class, new_object, write_prop}
 use php_ext::coerce::{is_callable, to_long};
 use php_ext::raising::{Carrying, Level, Thrown, arg_value_error, docref, type_error};
 use php_ext::request::{
-    Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _,
+    Brigade, FilterFlags, FilterStatus, MadeFilter, Request, Stream, StreamFilter, Streams as _,
 };
 use php_ext::values::{
     Owner, PhpArray, PhpObject, PhpRef, PhpString, PropertyScope, Resource, ResourceType, Value,
@@ -664,7 +664,7 @@ fn user_filter_factory(
     name: &[u8],
     params: Option<&Value>,
     persistent: bool,
-) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+) -> Result<Option<MadeFilter>, Thrown> {
     if persistent {
         docref(
             req,
@@ -732,10 +732,12 @@ fn user_filter_factory(
             return Ok(None);
         }
     }
-    Ok(Some(Box::new(UserFilter {
+    // The filter holds its PHP object, so it is one for a stream of the
+    // request's alone.
+    Ok(Some(MadeFilter::Request(Box::new(UserFilter {
         object: Some(object),
         held: Held::Chain,
-    })))
+    }))))
 }
 
 /// The new filter object's `filtername` and `params` set, and what
