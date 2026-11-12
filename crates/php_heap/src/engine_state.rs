@@ -16,15 +16,19 @@
 //! field to the bound, or by an impl written by hand where `unsafe` may
 //! stand (the homes `unsafe.homes` names), for a leaf the derive cannot
 //! read through: here, the primitives, the standard containers over engine
-//! state, an owned fd, a function pointer, [`Bytes`],
-//! [`FrozenZval`] and [`Exclusive`], which holds no field to the bound
-//! (#4474); in an extension's `src/ffi/`, a C library's object, beside its
-//! `Send` or `Sync` argument, which is the homes' prose and no check: there
-//! a hand-written impl stands for any type. The seal is the `engine-state`
-//! rule's sensor in `xtask api-check`. It reads the syntax of the sources a
-//! crate under `crates/`, `ext/` and `sapi/` compiles, and of what they
-//! reach by `mod`, `#[path]` and `include!`, a home covering the crate's
-//! own files only. It refuses a hand-written impl outside the homes whose
+//! state, an owned fd and the standard library's sockets, a function
+//! pointer, [`Bytes`], [`FrozenZval`] and [`AnyState`](crate::AnyState).
+//! An `AnyState` is a value of engine state behind its erased type, which
+//! the engine holds where it keeps a value it does not name, the compiled
+//! tier's for an epoch (#4492): its one constructor takes engine state,
+//! so a field of it is held to the bound where the value is made and not
+//! where it is kept. In an extension's `src/ffi/`, an impl by hand stands
+//! for a C library's object, beside its `Send` or `Sync` argument, which
+//! is the homes' prose and no check: there one stands for any type. The
+//! seal is the `engine-state` rule's sensor in `xtask api-check`. It
+//! reads the syntax of the sources a crate under `crates/`, `ext/` and
+//! `sapi/` compiles, and of what they reach by `mod`, `#[path]` and
+//! `include!`, a home covering the crate's own files only. It refuses a hand-written impl outside the homes whose
 //! trait path ends in the trait's name or one a `use .. as` gives it, in
 //! source or in a macro's tokens, and each place it cannot read: a macro's
 //! impl whose trait is a metavariable or a path a repetition builds, in a
@@ -71,7 +75,8 @@ pub trait EngineState: Send + 'static {}
 macro_rules! leaves {
     ($($leaf:ty),* $(,)?) => {$(
         // A primitive or a value of the standard library that owns no
-        // pointer a request could have made.
+        // pointer a request could have made; an fd or a socket is a
+        // number into the process's table.
         impl EngineState for $leaf {}
     )*};
 }
@@ -80,6 +85,13 @@ leaves! {
     (), bool, char, u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64,
     str, String, NonZeroU32, PathBuf, OsString, CString, Duration, Instant, SystemTime,
     AtomicBool, AtomicU32, AtomicU64, AtomicUsize, AtomicI64, std::hash::RandomState,
+    std::net::TcpStream, std::net::TcpListener, std::net::UdpSocket,
+}
+
+#[cfg(unix)]
+leaves! {
+    std::os::fd::OwnedFd, std::os::unix::net::UnixStream, std::os::unix::net::UnixListener,
+    std::os::unix::net::UnixDatagram,
 }
 
 /// Each listed container is engine state where what it holds is.
@@ -124,33 +136,6 @@ impl<T: EngineState, const N: usize> EngineState for [T; N] {}
 
 // A `PhantomData` holds nothing at all.
 impl<T: ?Sized + Send + 'static> EngineState for PhantomData<T> {}
-
-// An open file descriptor is the process's, a number into its table, and
-// carries nothing of a request's heap.
-#[cfg(unix)]
-impl EngineState for std::os::fd::OwnedFd {}
-
-/// Each listed socket of the standard library is engine state: it owns
-/// one open fd and nothing beside it, as an [`OwnedFd`] does.
-///
-/// [`OwnedFd`]: std::os::fd::OwnedFd
-macro_rules! sockets {
-    ($($socket:ty),* $(,)?) => {$(
-        // A socket is an fd, a number into the process's table, which carries
-        // nothing of a request's heap.
-        impl EngineState for $socket {}
-    )*};
-}
-
-sockets! {
-    std::net::TcpStream, std::net::TcpListener, std::net::UdpSocket,
-}
-
-#[cfg(unix)]
-sockets! {
-    std::os::unix::net::UnixStream, std::os::unix::net::UnixListener,
-    std::os::unix::net::UnixDatagram,
-}
 
 /// Each listed function pointer's type is engine state whatever it takes
 /// and answers: a function pointer is code the binary holds and carries no
@@ -229,38 +214,6 @@ impl FrozenZval {
 // is immutable, never refcounted and alive while the engine stands
 // (`Strings`); its constructors make nothing else.
 impl EngineState for FrozenZval {}
-
-/// A value one request holds at a time and none shares: kept by the
-/// engine between two requests, reached only by moving it in and out, so
-/// a `&Exclusive` lets no thread read what it holds. `api::Pool` keeps its
-/// idle entries in one, a persistent connection between the requests that
-/// take it up. Engine state for whatever it holds that may move between
-/// threads, holding nothing to the bound at its fields: an entry's lender
-/// gives it back with nothing of the request on it, which `pdo`'s and
-/// `mysqli`'s entries keep as a value and not as a type (their fields can
-/// hold a request's array, object or allocation while lent). No extension
-/// can name it: the api does not re-export it.
-pub struct Exclusive<T>(T);
-
-impl<T> Exclusive<T> {
-    /// `value`, kept.
-    pub const fn new(value: T) -> Exclusive<T> {
-        Exclusive(value)
-    }
-
-    /// What was kept, taken out.
-    pub fn into_inner(self) -> T {
-        self.0
-    }
-}
-
-// SAFETY: an `Exclusive` is reached only by value, never through `&self`,
-// so a `&Exclusive` on another thread reads nothing of what it holds.
-unsafe impl<T: Send> Sync for Exclusive<T> {}
-
-// Never shared: what it holds moves between requests whole, one request
-// holding it at a time.
-impl<T: Send + 'static> EngineState for Exclusive<T> {}
 
 #[cfg(test)]
 mod tests {

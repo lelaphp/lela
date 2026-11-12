@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use php_heap::{Exclusive, Fatal, Heap, Obj};
+use php_heap::{Fatal, Heap, Obj};
 use php_unit::decl::{
     ClassConstDecl, ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl, Name, PropertyDecl,
     Visibility,
@@ -363,10 +363,10 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
 /// hold two entries, as two php-fpm workers hold two connections. `V`
 /// holds no request memory, only what the connection is: the socket, the
 /// `transport`'s and the crypto layer's state, a database connection.
-/// The `Mutex` and the bound are here and nowhere an extension can see.
-/// An idle entry is kept [`Exclusive`](php_heap::Exclusive), engine
-/// state for any `V` that moves between threads, since one request
-/// holds it at a time and none shares it.
+/// The `Mutex` is here and nowhere an extension can see. A pool is
+/// engine state where `V` is (#4474): an idle entry is held as the `V`
+/// it is, so what a pool keeps between requests holds nothing of a
+/// request's by its type, not by its lender's care at give-back.
 #[derive(EngineState)]
 pub struct Pool<K, V> {
     capacity: usize,
@@ -377,7 +377,7 @@ pub struct Pool<K, V> {
 /// the number of its give-back, and whether the pool was drained.
 #[derive(EngineState)]
 struct Idle<K, V> {
-    entries: HashMap<K, Vec<(u64, Exclusive<V>)>>,
+    entries: HashMap<K, Vec<(u64, V)>>,
     given: u64,
     drained: bool,
 }
@@ -415,7 +415,7 @@ impl<K: Hash + Eq, V> Pool<K, V> {
         if entries.is_empty() {
             idle.entries.remove(key);
         }
-        entry.map(|(_, entry)| entry.into_inner())
+        entry.map(|(_, entry)| entry)
     }
 
     /// The entries idle under every key, which php counts as a process's
@@ -440,10 +440,7 @@ impl<K: Hash + Eq, V> Pool<K, V> {
         }
         idle.given += 1;
         let given = idle.given;
-        idle.entries
-            .entry(key)
-            .or_default()
-            .push((given, Exclusive::new(entry)));
+        idle.entries.entry(key).or_default().push((given, entry));
         None
     }
 
@@ -470,7 +467,7 @@ impl<K: Hash + Eq, V> Pool<K, V> {
             .flat_map(|(key, entries)| {
                 entries
                     .into_iter()
-                    .map(move |(given, entry)| (given, key.clone(), entry.into_inner()))
+                    .map(move |(given, entry)| (given, key.clone(), entry))
             })
             .collect();
         drained.sort_unstable_by_key(|&(given, _, _)| std::cmp::Reverse(given));

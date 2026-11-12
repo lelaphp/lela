@@ -584,9 +584,7 @@ pub trait Connection: Any + Send {
 /// library connection and what it records beside it, with no value or
 /// allocation of a request's and no number into a request's table, so
 /// give-back is the one place a connection is converted (#4474).
-// `EngineState` is the bound this asks once mysqlnd's idle connection,
-// which pdo_mysql's holds, is engine state (#4541).
-pub trait IdleConnection: Send {
+pub trait IdleConnection: EngineState {
     /// The connection taken up by the request PDO lends it to, kept in
     /// that request's tables again; one the request cannot keep answers
     /// dead to `check_liveness`.

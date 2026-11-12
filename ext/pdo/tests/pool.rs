@@ -38,6 +38,7 @@ impl Connector for Counted {
 }
 
 /// One connection of [`Counted`].
+#[derive(EngineState)]
 struct Link {
     log: PathBuf,
 }

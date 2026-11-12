@@ -35,6 +35,7 @@ impl Connector for Stub {
 }
 
 /// One connection of [`Stub`].
+#[derive(EngineState)]
 struct Open;
 
 impl IdleConnection for Open {
