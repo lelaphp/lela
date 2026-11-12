@@ -519,6 +519,38 @@ impl<K: PartialEq, V> Lent<K, V> {
     }
 }
 
+/// The key a [`Pool`] and a request's [`Lent`] keep a connection under
+/// where what names the connection holds a credential: a SHA-256 digest
+/// of the parts, each framed by its length. A key decides which request
+/// is lent an authenticated connection, so two lists of parts that differ
+/// in a byte, or in where one part ends and the next begins, give two
+/// keys, and neither the pool nor the request keeps a part, a password
+/// among them, in the clear: 32 bytes whatever the parts.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, EngineState)]
+pub struct PoolKey([u8; 32]);
+
+impl PoolKey {
+    /// The key of `parts`, in order: each part's length as eight
+    /// little-endian bytes, then its bytes, digested.
+    #[must_use]
+    pub fn of(parts: &[&[u8]]) -> PoolKey {
+        use sha2::Digest as _;
+        let mut digest = sha2::Sha256::new();
+        for part in parts {
+            digest.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+            digest.update(part);
+        }
+        PoolKey(digest.finalize().into())
+    }
+}
+
+impl std::fmt::Debug for PoolKey {
+    /// The digest in hex, which is all the key holds.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+    }
+}
+
 /// A Zend extension's `zend_extension` row (`Z/Zend/zend_extensions.h`),
 /// for an extension php loads both as a `zend_module_entry` and as a Zend extension, as
 /// opcache's `zend_extension_entry` stands beside its

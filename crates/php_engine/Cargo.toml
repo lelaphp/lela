@@ -32,6 +32,9 @@ php_unit = { path = "../php_unit" }
 php_link = { path = "../php_link" }
 php_macros = { path = "../php_macros" }
 php_process = { path = "../php_process" }
+# `api::abi::PoolKey`: the SHA-256 digest a pool keys a credential's
+# connection by (#4354); the lock holds it already, for ext/hash.
+sha2 = { workspace = true }
 
 # The dispatch is generated from ops.toml (design §4.3 seam 7).
 [build-dependencies]
