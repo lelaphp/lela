@@ -3,12 +3,14 @@
 //! git does not ignore, less its tests, benches, examples and fixtures;
 //! and which crates a staged change touches, and which readings already
 //! stand for what is staged, for the instruments pre-commit runs over
-//! them.
+//! them; and the index laid down as a tree of its own, for those that
+//! read the sources to read what the commit takes ([`Laid`]).
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::git;
 use crate::key;
@@ -16,6 +18,7 @@ use crate::layout::HARNESS;
 use crate::lock;
 use crate::manifest::{AvoidFrom, Crate, Manifest};
 use crate::reading::{Reading, Status, Store, listed};
+use crate::scratch::Tree;
 
 /// Directories under a crate whose files are not its code.
 const NOT_CODE: [&str; 4] = ["tests", "benches", "examples", "fixtures"];
@@ -403,11 +406,82 @@ pub(crate) fn for_commit(
     Ok(Standing::for_commit(root, manifest, store, instrument, &touched)?.unmeasured(&touched))
 }
 
+/// The index laid down as a repository of its own (#4620): every file it
+/// holds at stage 0 checked out, its own index the same entries, its
+/// objects borrowed from the workspace's and its `HEAD` the workspace's.
+/// `vocab`, `budget`, `unsafe-audit` and `api-check` under `--staged` read
+/// the sources of a crate no reading stands for, and the closure each
+/// crate is keyed over comes from `cargo metadata` over the manifests at
+/// the root; rooted here, both are what the commit takes, where at the
+/// workspace an unstaged edit was read, and an unstaged dependency in a
+/// `Cargo.toml` moved the key of a crate the commit leaves as it was. The
+/// readings are stamped here, over the index's content, which is what
+/// [`Standing`] asks of them at the next commit. Git is asked here without
+/// the hook's variables ([`git::apart`]), and the tree goes when the value
+/// does.
+pub(crate) struct Laid {
+    tree: Tree,
+}
+
+impl Laid {
+    /// The index at `root` laid down, or none where the working tree is
+    /// what it holds already: no tracked file differs from its staged copy
+    /// and no untracked file stands beside them.
+    pub(crate) fn of(root: &Path) -> Result<Option<Laid>> {
+        let differs = git::listed(root, &["ls-files", "-z", "--modified"])?;
+        if differs.is_empty() && git::untracked(root)?.is_empty() {
+            return Ok(None);
+        }
+        Laid::lay(root).map(Some)
+    }
+
+    fn lay(root: &Path) -> Result<Laid> {
+        let head = git::rev_parse(root, &["--verify", "HEAD"])?;
+        let objects = root.join(git::rev_parse(root, &["--git-path", "objects"])?);
+        // `<mode> <id> <stage>\t<path>`, as `update-index --index-info`
+        // reads them back: a conflicted path has no stage 0 and a
+        // submodule no file, so neither is laid.
+        let mut entries = String::new();
+        for entry in git::listed(root, &["ls-files", "--stage", "-z"])? {
+            let head = entry.split('\t').next().unwrap_or_default();
+            if head.ends_with(" 0") && !head.starts_with("160000 ") {
+                entries.push_str(&entry);
+                entries.push('\0');
+            }
+        }
+        let laid = Laid {
+            tree: Tree::new("staged")?,
+        };
+        let at = laid.root();
+        git::apart(at);
+        git::git(at, &["init", "-q", "--template="])?;
+        let info = at.join(".git/objects/info");
+        fs::create_dir_all(&info).with_context(|| format!("making {}", info.display()))?;
+        fs::write(info.join("alternates"), format!("{}\n", objects.display()))
+            .context("naming the workspace's objects")?;
+        fs::write(at.join(".git/HEAD"), format!("{head}\n")).context("writing HEAD")?;
+        git::fed(at, &["update-index", "-z", "--index-info"], &entries)?;
+        git::git(at, &["checkout-index", "--all", "--force", "--index"])?;
+        Ok(laid)
+    }
+
+    /// The root the index is laid at.
+    pub(crate) fn root(&self) -> &Path {
+        self.tree.path()
+    }
+}
+
+impl Drop for Laid {
+    fn drop(&mut self) {
+        git::rejoined(self.tree.path());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use super::{Standing, is_binding};
+    use super::{Laid, Standing, is_binding};
     use crate::built_root;
     use crate::git::git;
     use crate::manifest::Manifest;
@@ -662,6 +736,36 @@ mod tests {
         .unwrap();
         git(&tree, &["add", "--", "crates/php_engine"]).unwrap();
         assert!(standing().is_empty(), "{:?}", standing());
+    }
+
+    /// The index laid down holds the staged copy of a file and not the
+    /// working one, nor a file git does not track, and keys a crate as
+    /// the index does; a working tree that is the index lays nothing.
+    #[test]
+    fn the_index_laid_down_holds_what_the_commit_takes() {
+        let (tree, _, _) = repository("laid");
+        assert!(Laid::of(&tree).unwrap().is_none(), "nothing differs");
+        edit(&tree, "b\n", true);
+        edit(&tree, "c\n", false);
+        fs::write(tree.join("xtask/src/new.rs"), "d\n").unwrap();
+        let laid = Laid::of(&tree).unwrap().unwrap();
+        let at = laid.root();
+        assert_eq!(
+            fs::read_to_string(at.join("xtask/src/lib.rs")).unwrap(),
+            "b\n"
+        );
+        assert!(!at.join("xtask/src/new.rs").exists());
+        let index = crate::key::Snapshot::index(&tree, &crate::git::Index::read(&tree).unwrap());
+        let laid_key = crate::key::Snapshot::disk(at)
+            .unwrap()
+            .key("xtask".as_ref());
+        assert_eq!(
+            laid_key.unwrap(),
+            index.unwrap().key("xtask".as_ref()).unwrap()
+        );
+        let gone = at.to_path_buf();
+        drop(laid);
+        assert!(!gone.exists());
     }
 
     #[test]

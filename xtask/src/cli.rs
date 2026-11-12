@@ -30,7 +30,8 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "staged")]
         write: bool,
         /// For pre-commit: leave out each crate whose reading passes and
-        /// was taken over what is staged, naming the reading (#1143).
+        /// was taken over what is staged, naming the reading (#1143), and
+        /// read the rest as the index holds them (#4620).
         #[arg(long)]
         staged: bool,
     },
@@ -274,7 +275,8 @@ pub(crate) enum Command {
     /// `build.rs` that bakes its crate's directory in.
     Budget {
         /// For pre-commit: leave out each crate whose reading passes and
-        /// was taken over what is staged, naming the reading (#1143).
+        /// was taken over what is staged, naming the reading (#1143), and
+        /// read the rest as the index holds them (#4620).
         #[arg(long)]
         staged: bool,
     },
@@ -459,7 +461,8 @@ pub(crate) enum Command {
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit {
         /// For pre-commit: leave out each crate whose reading passes and
-        /// was taken over what is staged, naming the reading (#1143).
+        /// was taken over what is staged, naming the reading (#1143), and
+        /// read the rest as the index holds them (#4620).
         #[arg(long)]
         staged: bool,
     },
@@ -539,7 +542,8 @@ pub(crate) struct Vocab {
     #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
     pub crates: Vec<String>,
     /// For pre-commit: leave out each crate whose reading passes and
-    /// was taken over what is staged, naming the reading (#1143).
+    /// was taken over what is staged, naming the reading (#1143), and
+    /// read the rest as the index holds them (#4620).
     #[arg(long)]
     pub staged: bool,
     /// For commit-msg: the message git is about to commit, noted against

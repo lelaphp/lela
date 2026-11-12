@@ -263,7 +263,10 @@ impl Snapshot {
 
     /// What `index` holds, as a commit would take it: the keys the scopes
     /// would have on disk were the working tree the index, with no
-    /// untracked file beside it.
+    /// untracked file beside it. A crate's closure is still the graph of
+    /// the manifests at `root`, so an instrument that keys the commit where
+    /// the working tree differs asks it at the index laid down
+    /// ([`crate::sources::Laid`], #4620).
     pub(crate) fn index(root: &Path, index: &Index) -> Result<Snapshot> {
         let files = index.entries().to_vec();
         let commit = git::head_commit(root)?;

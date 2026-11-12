@@ -19,7 +19,7 @@ mod common {
 }
 use common::manifest::Tracked;
 use common::repo::Repo;
-use common::run::xtask;
+use common::run::{Run, xtask};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -327,6 +327,107 @@ fn two_rules_over_one_crate_are_refused() {
         err.contains("2 rules") && err.contains("vocab.harness, vocab.whole"),
         "{err}"
     );
+}
+
+/// One Cargo workspace of `php_ext` and `php_heap` under the glossary's
+/// rule, neither depending on the other and neither using an avoided word,
+/// committed with the store ignored.
+fn two_crates(name: &str) -> (Tree, Repo) {
+    let dir = Tree::new(&format!("vocab-{name}")).unwrap();
+    for file in ["oracle.toml", "CONTEXT.md"] {
+        std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
+    }
+    Tracked::minimal()
+        .with_crate("php_ext", |_| ())
+        .with_crate("php_heap", |_| ())
+        .with_rule("vocab.avoid", |rule| {
+            rule.extend(AVOID.parse::<toml::Table>().unwrap());
+        })
+        .write(&dir);
+    let repo = Repo::init(&dir);
+    repo.write(".gitignore", "target/\n").write(
+        "Cargo.toml",
+        "[workspace]\nresolver = \"3\"\nmembers = [\"crates/php_ext\", \"crates/php_heap\"]\n",
+    );
+    for name in ["php_ext", "php_heap"] {
+        repo.write(&format!("crates/{name}/Cargo.toml"), package(name, ""))
+            .write(&format!("crates/{name}/src/lib.rs"), "//! A crate.\n");
+    }
+    repo.commit("two crates");
+    (dir, repo)
+}
+
+fn package(name: &str, rest: &str) -> String {
+    format!("[package]\nname = \"{name}\"\nedition = \"2024\"\n{rest}")
+}
+
+/// A change to `php_heap`, staged, and two to `php_ext` the commit does
+/// not take: an avoided word in its rustdoc and, where `depends`, a
+/// dependency on `php_heap` in its `Cargo.toml`.
+fn stage_heap_beside_unstaged_ext(repo: &Repo, depends: bool) {
+    repo.write(
+        "crates/php_heap/src/lib.rs",
+        "//! A crate.\npub fn heap() {}\n",
+    );
+    repo.git(&["add", "--", "crates/php_heap"]);
+    if depends {
+        let dependency = "\n[dependencies]\nphp_heap = { path = \"../php_heap\" }\n";
+        repo.write("crates/php_ext/Cargo.toml", package("php_ext", dependency));
+    }
+    repo.write(
+        "crates/php_ext/src/lib.rs",
+        "//! A crate.\n\n/// A builtin.\npub fn ext() {}\n",
+    );
+}
+
+/// The fixture of #4620: a commit stages `php_heap` alone, while the
+/// working tree also makes `php_ext` depend on it in an unstaged
+/// `Cargo.toml` and uses an avoided word in its rustdoc. `vocab --staged`
+/// takes `php_ext`'s closure from the index's `Cargo.toml`, which names no
+/// dependency, so its pass over the commit before stands, and the word the
+/// commit does not take is not found. It runs under the variables a linked
+/// worktree's hook exports, which name the repository being committed to,
+/// and leaves its index as it was. Before, the closure came from the
+/// working copy's manifest, no reading stood, and the crate was read from
+/// disk: the hook refused the commit over a line that never reached it.
+#[test]
+fn an_unstaged_dependency_and_word_beside_a_staged_crate_are_not_judged() {
+    let (root, repo) = two_crates("unstaged-dependency");
+    xtask(&root, &["vocab"]).ok();
+    stage_heap_beside_unstaged_ext(&repo, true);
+    let git = root.join(".git");
+    let ran = Run::at(&root)
+        .args(["vocab", "--staged"])
+        .env("GIT_DIR", &git)
+        .env("GIT_INDEX_FILE", git.join("index"))
+        .go();
+    let said = ran.ok();
+    assert!(
+        said.contains("vocab: php_ext stands on its pass of "),
+        "{said}"
+    );
+    assert!(!said.contains("builtin"), "{said}");
+    assert_eq!(
+        repo.git(&["diff", "--cached", "--name-only"]),
+        "crates/php_heap/src/lib.rs"
+    );
+    let ran = xtask(&root, &["vocab", "--crate", "php_ext"]);
+    assert_ne!(ran.code(), 0, "the working tree's word is avoided: {ran}");
+}
+
+/// A crate no reading stands for is measured under `--staged` as the
+/// index holds it: the word the commit does not take is not found, and
+/// the reading passes (#4620).
+#[test]
+fn a_crate_measured_under_staged_is_read_as_the_index_holds_it() {
+    let (root, repo) = two_crates("unstaged-word");
+    stage_heap_beside_unstaged_ext(&repo, false);
+    xtask(&root, &["vocab", "--staged"]).ok();
+    let reading = Store::of_workspace(&root)
+        .read("vocab", "php_ext")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
 }
 
 /// The tracked manifest with the row a person adds (#63): a second
