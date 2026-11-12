@@ -875,7 +875,7 @@ impl PlainCall {
 /// request-scoped one whose method is published (#3558), one it inherits
 /// from a published class, or its own (#3561), the request's, numbered
 /// for it alone as php's `zend_lazy_class_load` copies each into the
-/// request ([`Method::Own`]); or to a closure over a user function that
+/// request (`Method::Request`, with no inherited method); or to a closure over a user function that
 /// reads its function's own cache, whatever its receiver; none for any
 /// other. The class and the method of a method's call are named as
 /// `view`'s epoch names them where they are shared, and the view mints
