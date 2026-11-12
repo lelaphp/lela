@@ -19,6 +19,7 @@ use std::ops::ControlFlow;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
+use php_ext::abi::EngineState;
 use php_ext::call::call;
 use php_ext::coerce::{to_callable, to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, docref, leave_pending, raise, value_error};
@@ -147,7 +148,7 @@ pub(crate) fn transports() -> Vec<XportFactory> {
 
 /// A crypto method, `php_stream_xport_crypt_method_t` decoded: whether
 /// the socket is the client, and the protocol bits it allows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 struct CryptoMethod {
     client: bool,
     protocols: i64,
@@ -358,6 +359,7 @@ impl Hooks {
 /// `peer_fingerprint` as `php_openssl_apply_peer_verification_policy`
 /// sorts it: a string, an array of `algo => fingerprint` pairs (`None`
 /// for one that is empty or holds another shape), or anything else.
+#[derive(EngineState)]
 enum Fingerprint {
     Text(Vec<u8>),
     Pairs(Option<Vec<(Vec<u8>, Vec<u8>)>>),
@@ -366,6 +368,7 @@ enum Fingerprint {
 
 /// One entry of `SNI_server_certs`: the host name its key gives, `None`
 /// for an integer key, and what it maps to.
+#[derive(EngineState)]
 struct SniEntry {
     name: Option<Vec<u8>>,
     certs: SniCerts,
@@ -374,6 +377,7 @@ struct SniEntry {
 /// What an `SNI_server_certs` entry maps a host to: `local_cert` and
 /// `local_pk`, each `None` where the array lacks it; a path to both; or
 /// anything else.
+#[derive(EngineState)]
 enum SniCerts {
     Pair {
         local_cert: Option<Vec<u8>>,
@@ -384,6 +388,7 @@ enum SniCerts {
 }
 
 /// `SNI_server_certs` as a server's setup reads it.
+#[derive(EngineState)]
 enum SniOption {
     NotArray,
     Entries(Vec<SniEntry>),
@@ -394,7 +399,7 @@ enum SniOption {
 /// number by `zval_get_long`, a string by `try_convert_to_string`, and
 /// absent where the `context` has no such option. Every later step reads
 /// this and not the `context`.
-#[derive(Default)]
+#[derive(Default, EngineState)]
 #[allow(clippy::struct_excessive_bools)] // php's options, one flag per name
 struct SslOptions {
     verify_peer: Option<bool>,
@@ -563,7 +568,7 @@ fn sni_option(req: &mut Request, value: &Value) -> Result<SniOption, Thrown> {
 /// How far a layer's handshake came: not begun; begun, the connect or
 /// accept state set (`state_set`); or done, the layer active
 /// (`ssl_active`), which shutting the layer takes back to begun.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 enum Phase {
     Fresh,
     Begun,
@@ -574,7 +579,9 @@ enum Phase {
 /// the options it was set up under, the handshake's own timeout, the
 /// method a connect or an accept enables it with (`enable_on_connect`
 /// and `method`), which side it is, how far its handshake came, and the
-/// host a client verifies (`url_name`).
+/// host a client verifies (`url_name`). Engine state, as a crypto layer
+/// is ([`Crypto`]): a persistent stream keeps it across requests.
+#[derive(EngineState)]
 pub(crate) struct Layer {
     tls: Option<Tls>,
     options: SslOptions,

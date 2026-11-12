@@ -1533,12 +1533,14 @@ pub(crate) fn mlsd_line(req: &mut Request, line: &[u8]) -> Result<Option<Owner<P
 #[cfg(test)]
 mod tests {
     use super::{NO_SESSION, data_session};
+    use php_ext::abi::EngineState;
     use php_ext::raising::Thrown;
     use php_ext::request::{Crypto, CryptoSocket, Handshake, Request, Stream};
     use php_ext::values::{Owner, PhpArray};
 
     /// A crypto layer whose session is resumable or not, and which does
     /// nothing else.
+    #[derive(EngineState)]
     struct Session(bool);
 
     impl Crypto for Session {

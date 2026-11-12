@@ -85,9 +85,6 @@ EmbeddedArr::free_data
 EmbeddedArr::new
 EngineState
 EntryGuard
-Exclusive
-Exclusive::into_inner
-Exclusive::new
 Exponent
 Exponent::as_char
 FakeRoom

@@ -268,7 +268,7 @@ struct Held {
 /// nor the rows the last query left are here to wait (#4474).
 /// [`ConnData::idle`] makes one as the request gives the connection back
 /// and [`ConnData::take_up`] makes the connection again.
-// The derive waits on `Persisted` being engine state (#4541).
+#[derive(php_ext::abi::EngineState)]
 pub struct IdleConn {
     held: Option<IdleHeld>,
     mysqlnd: Option<usize>,
