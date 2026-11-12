@@ -383,7 +383,9 @@ fn a_timed_out_request_s_line_breaks_are_escaped() {
 
 /// A program the pool refuses, by its extension or because it did not
 /// open, is named in the error log's line for it with each `\r` and `\n`
-/// of its path written as two bytes (#4559), one line for each refusal.
+/// of its path written as two bytes (#4559), one line for each refusal;
+/// the second refusal is held only where this user cannot open a file
+/// whose permissions are `0o000`.
 #[test]
 #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
 fn a_refused_program_s_line_breaks_are_escaped() {
@@ -402,6 +404,10 @@ fn a_refused_program_s_line_breaks_are_escaped() {
         std::fs::Permissions::from_mode(0o000),
     )
     .expect("the program is closed");
+    // A user the file's permissions do not refuse, root, opens it, and the
+    // pool serves it: the line for a program that did not open is held
+    // only where this user is refused the file.
+    let refused_to_us = std::fs::File::open(OsStr::from_bytes(&unopened)).is_err();
     let pairs = |program: &[u8]| -> Vec<u8> {
         request(
             master.connect(),
@@ -419,11 +425,13 @@ fn a_refused_program_s_line_breaks_are_escaped() {
         String::from_utf8_lossy(&body)
     );
     let body = pairs(&unopened);
-    assert!(
-        body.ends_with(b"Access denied.\n"),
-        "{}",
-        String::from_utf8_lossy(&body)
-    );
+    if refused_to_us {
+        assert!(
+            body.ends_with(b"Access denied.\n"),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+    }
     master.halt();
     let log = std::fs::read(master.dir.join("fpm.log")).unwrap_or_default();
     let fpm = String::from_utf8_lossy(&log);
@@ -443,13 +451,15 @@ fn a_refused_program_s_line_breaks_are_escaped() {
         ]
         .concat(),
     );
-    line(
-        [
-            &b"Unable to open primary script: "[..],
-            &escaped(&unopened),
-            b" (Permission denied)",
-        ]
-        .concat(),
-    );
+    if refused_to_us {
+        line(
+            [
+                &b"Unable to open primary script: "[..],
+                &escaped(&unopened),
+                b" (Permission denied)",
+            ]
+            .concat(),
+        );
+    }
     assert!(!forged(&log), "{fpm}");
 }
