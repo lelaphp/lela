@@ -617,7 +617,7 @@ const _: () = {
 /// function's). Its header is the one [`call_image`] lays out for the
 /// request the code runs in, since the function's number and its record
 /// are the request's.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, php_macros::EngineState)]
 pub struct PlainCall {
     serves: Serves,
     count: u32,
@@ -636,7 +636,7 @@ pub struct PlainCall {
 }
 
 /// What a plain call serves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 enum Serves {
     /// A native, which the call's name names.
     Native,
@@ -651,7 +651,7 @@ enum Serves {
 
 /// The called scope and the method of a method's plain call, as a
 /// request that runs the code finds them ([`call_image`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
 enum Method {
     /// A published class's method, which is one of its published rows:
     /// each by the number every request of the epoch knows it by.
@@ -720,7 +720,7 @@ impl PartialEq for PlainCall {
 /// [`Request::enter_call`] writes it), past the caller and the slot that
 /// takes its return: where the call has no `RECV*` left to serve and
 /// reads its function's own cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub struct Activation {
     keep: u32,
     used: u32,

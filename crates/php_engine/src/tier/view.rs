@@ -172,7 +172,7 @@ pub fn epoch_state<T: EngineState + std::any::Any + Send + Sync>(
 /// map-pointer offset its unit's publication gave it, which no other op
 /// array of the engine shares, where its unit is held; by the request's
 /// own offset where it was compiled for the request alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
 pub struct FuncRef(MapPtrOffset);
 
 impl FuncRef {
@@ -438,7 +438,7 @@ fn landing_looked_up(req: &Request, frame: FrameRef, at: OplineIdx) -> &Word {
 /// the engine's map-pointer offset every request lays that cache at, and
 /// the slot in it, which compiled code reads past the request's map
 /// base (`jit-design.md` §4.2's `map_ptrs`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub struct MapPtrRaw {
     pub offset: u32,
     pub slot: u32,
@@ -772,7 +772,7 @@ pub struct UnitView {
 /// it (ADR-0015, as amended on #3571; #3579). The epoch keeps an analysis
 /// under these alone, so each class is named as every request of the
 /// epoch names it ([`EpochClassId`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
 pub struct Bindings {
     scope: Option<EpochClassId>,
     named: Vec<(Box<[u8]>, EpochClassId)>,
@@ -782,7 +782,7 @@ pub struct Bindings {
 
 /// Where [`UnitView::called`] looks a callee up, owned, a method's class
 /// named as a `C`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
 enum Site<C = ClassId> {
     Function(Box<[u8]>),
     Method(C, Box<[u8]>),
@@ -832,7 +832,7 @@ pub enum CallSite<'a> {
 /// serves, and a method's class and flags, named as a `C`: by the
 /// recording request's number as the view answers it, and as every
 /// request of the epoch names it among [`Bindings`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
 pub struct CalledFunction<C = ClassId> {
     /// `common.function_name`, as declared.
     pub name: Name,
@@ -872,7 +872,7 @@ impl CalledFunction {
 
 /// A method's `common.scope` and the `fn_flags` php's call analysis
 /// reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct CalledMethod<C = ClassId> {
     /// The class that declares it.
