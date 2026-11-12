@@ -825,7 +825,7 @@ impl<T> IntoIterator for PinnedRows<T> {
 /// engine reads them once where the function is declared, so a call
 /// reads them off the function table and walks neither the declaration
 /// nor the unit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, php_macros::EngineState)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct FrameShape {
     pub(crate) parameters: u32,
     pub(crate) typed: bool,

@@ -33,7 +33,7 @@ use crate::exec::{self, Body};
 /// rows, a native one of its classes lays from `CLASS_NATIVE` on, and
 /// from [`Function::TRAMPOLINE`] on a call's trampoline. Either stays
 /// the function's for as long as the request runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Function(pub(crate) u32);
 
 impl Function {
@@ -111,7 +111,7 @@ impl Function {
 /// `func->common.scope` names the class and an observer is asked of it
 /// once per class (`zend_observer_fcall_init`). The row beside each
 /// number is the class and this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClassNative {
     /// `zend_enum_register_funcs`: an enum's own `cases`, `from` or
     /// `tryFrom`, which a program's enum is given at its link.

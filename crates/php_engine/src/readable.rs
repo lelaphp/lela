@@ -48,7 +48,7 @@ const USER: u64 = 2;
 /// the record stands. The name is empty for a file's op array,
 /// php's `NULL` `function_name`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, php_macros::EngineState)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Record {
     kind: u64,
     name: usize,

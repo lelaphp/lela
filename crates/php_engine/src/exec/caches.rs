@@ -185,7 +185,7 @@ impl Slab {
 /// Both numbers count op arrays, the engine's those it published and the
 /// request's those of its own units standing at once, far below the bit.
 /// Two are one where they name the same entry of the same table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CacheAt(u32);
 
 /// Which table a [`CacheAt`] names an entry of, and the entry.
