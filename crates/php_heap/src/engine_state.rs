@@ -16,8 +16,9 @@
 //! field to the bound, or by an impl written by hand where `unsafe` may
 //! stand (the homes `unsafe.homes` names), for a leaf the derive cannot
 //! read through: here, the primitives, the standard containers over engine
-//! state, an owned fd and the standard library's sockets, a function
-//! pointer, [`Bytes`], [`FrozenZval`] and [`AnyState`](crate::AnyState).
+//! state, a `Cow` among them, an owned fd and the standard library's
+//! sockets, a function pointer, [`Bytes`], a [`ClassCache`], [`FrozenZval`]
+//! and [`AnyState`](crate::AnyState).
 //! An `AnyState` is a value of engine state behind its erased type, which
 //! the engine holds where it keeps a value it does not name, the compiled
 //! tier's for an epoch (#4492): its one constructor takes engine state,
@@ -42,6 +43,7 @@
 //! outside what it reads (#4463). [`Zval`] and every pointer into a
 //! request's heap have no impl.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::{CString, OsString};
 use std::marker::PhantomData;
@@ -51,7 +53,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::{Bytes, Fatal, Intern, Strings, Zval};
+use crate::{Bytes, ClassCache, Fatal, Intern, Strings, Zval};
 
 /// A value engine state may hold: kept by the engine across requests
 /// and holding no pointer into a request's heap, at any depth.
@@ -134,6 +136,16 @@ impl<T: ?Sized + EngineState + Sync> EngineState for &'static T {}
 // by the bound.
 impl<T: EngineState, const N: usize> EngineState for [T; N] {}
 
+// A borrow every holder reads at once, of what is engine state by its own
+// bound and `Sync`, or what it owns, engine state by its own bound: each
+// arm is a value the impls above vouch for, and nothing beside it.
+impl<B> EngineState for Cow<'static, B>
+where
+    B: ?Sized + ToOwned + EngineState + Sync,
+    B::Owned: EngineState,
+{
+}
+
 // A `PhantomData` holds nothing at all.
 impl<T: ?Sized + Send + 'static> EngineState for PhantomData<T> {}
 
@@ -161,6 +173,11 @@ code! {
 // The bytes are the binary's, a box's or a share of a published block
 // (`bytes.rs`), never a request's heap.
 impl EngineState for Bytes {}
+
+// A class cache is a number, an offset into a request's map table; the
+// class each request finds there is the request's, and stands in its
+// table, never here (`string.rs`).
+impl EngineState for ClassCache {}
 
 /// A value no request owns: a scalar, or a string of the engine's
 /// permanent table, [`Strings`]. It is how engine state holds a value
@@ -228,6 +245,12 @@ mod tests {
         held::<std::collections::HashMap<Box<[u8]>, std::sync::Arc<FrozenZval>>>();
         held::<&'static [&'static str]>();
         held::<fn(&mut String, &[u8], i64, bool) -> Result<Vec<u8>, ()>>();
+    }
+
+    #[test]
+    fn a_cow_over_engine_state_and_a_class_cache_are_engine_state() {
+        held::<std::borrow::Cow<'static, [Option<crate::ClassCache>]>>();
+        held::<std::borrow::Cow<'static, str>>();
     }
 
     #[test]
