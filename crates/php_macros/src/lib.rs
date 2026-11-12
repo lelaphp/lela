@@ -154,6 +154,7 @@ fn refused<T>(answer: syn::Result<T>) -> String {
 #[cfg(test)]
 mod tests {
     use super::root_for;
+    use crate::engine_state::state_trait_for;
 
     #[test]
     fn the_crate_being_compiled_picks_the_root() {
@@ -168,5 +169,27 @@ mod tests {
         );
         assert_eq!(root_for(Some("php_ext_ctype")).to_string(), ":: php_ext");
         assert_eq!(root_for(None).to_string(), ":: php_ext");
+    }
+
+    #[test]
+    fn a_crate_below_the_engine_names_php_heaps_trait() {
+        for below in ["php_unit", "php_ssa"] {
+            assert_eq!(
+                state_trait_for(Some(below)).to_string(),
+                ":: php_heap :: EngineState"
+            );
+        }
+        assert_eq!(
+            state_trait_for(Some("php_engine")).to_string(),
+            "crate :: api :: abi :: EngineState"
+        );
+        assert_eq!(
+            state_trait_for(Some("php_jit")).to_string(),
+            ":: php_engine :: api :: abi :: EngineState"
+        );
+        assert_eq!(
+            state_trait_for(Some("php_ext_ctype")).to_string(),
+            ":: php_ext :: abi :: EngineState"
+        );
     }
 }

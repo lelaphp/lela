@@ -6,7 +6,8 @@
 //! impl, spanned at the field's type, so a type holding a pointer into a
 //! request's heap fails to compile at that field, which the error shows.
 //! A field written as `fn(..)` is code and is passed unread. The trait is
-//! `php_heap`'s, re-exported at the api's `abi::EngineState`.
+//! `php_heap`'s, re-exported at the api's `abi::EngineState`, and named
+//! at `php_heap` itself in a crate below the engine (#4544).
 
 use proc_macro2::TokenStream as Tokens;
 use quote::{quote, quote_spanned};
@@ -14,14 +15,13 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{Data, DeriveInput, Fields, Ident, Type};
 
-use crate::{error, root};
+use crate::{error, root_for};
 
 /// The impl, and the function holding each field the `where` clause
 /// does not.
 pub(crate) fn expand(item: Tokens) -> syn::Result<Tokens> {
     let input: DeriveInput = syn::parse2(item)?;
-    let root = root();
-    let root = quote!(#root::abi);
+    let state = state_trait();
     let fields: Vec<&Fields> = match &input.data {
         Data::Struct(data) => vec![&data.fields],
         Data::Enum(data) => data.variants.iter().map(|v| &v.fields).collect(),
@@ -44,9 +44,7 @@ pub(crate) fn expand(item: Tokens) -> syn::Result<Tokens> {
             continue;
         }
         if names_any(ty, &params) {
-            clause
-                .predicates
-                .push(syn::parse_quote!(#ty: #root::EngineState));
+            clause.predicates.push(syn::parse_quote!(#ty: #state));
         } else {
             held.push(quote_spanned!(ty.span()=> held::<#ty>();));
         }
@@ -56,16 +54,33 @@ pub(crate) fn expand(item: Tokens) -> syn::Result<Tokens> {
     Ok(quote! {
         // Every field is engine state: held to the bound in this `where`
         // clause where its type names a parameter, and below where not.
-        impl #impl_generics #root::EngineState for #name #ty_generics #where_clause {}
+        impl #impl_generics #state for #name #ty_generics #where_clause {}
 
         const _: () = {
             #[allow(dead_code, clippy::extra_unused_type_parameters)]
             fn fields #impl_generics () #where_clause {
-                fn held<T: ?::core::marker::Sized + #root::EngineState>() {}
+                fn held<T: ?::core::marker::Sized + #state>() {}
                 #(#held)*
             }
         };
     })
+}
+
+/// The path `#[derive(EngineState)]` names the trait by: `php_heap`'s own
+/// in a crate below the engine, `php_unit` and `php_ssa`, which depend on
+/// `php_heap` and on neither the engine nor the facade, and the root's
+/// `abi::EngineState` everywhere else (ADR-0007, #4544).
+fn state_trait() -> Tokens {
+    state_trait_for(std::env::var("CARGO_CRATE_NAME").ok().as_deref())
+}
+
+pub(crate) fn state_trait_for(crate_name: Option<&str>) -> Tokens {
+    if matches!(crate_name, Some("php_unit" | "php_ssa")) {
+        quote!(::php_heap::EngineState)
+    } else {
+        let root = root_for(crate_name);
+        quote!(#root::abi::EngineState)
+    }
 }
 
 /// Whether `ty` names any of `params`.
