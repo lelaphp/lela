@@ -154,6 +154,9 @@ jobs:
       # suite per push for nothing `done` reads, and `cargo xtask clippy`
       # above already holds xtask to every warning.
       - run: cargo xtask test
+      # The export's tool (#4597); the folder is left out of the export, so the step runs only where it is.
+      - name: the export tool's tests
+        run: '[ ! -d scripts/export ] || python3 -I -B -m unittest discover -s scripts/export -p "test_*.py"'
       - run: cargo xtask api-check
       - run: cargo xtask budget
       - run: cargo xtask unsafe-audit

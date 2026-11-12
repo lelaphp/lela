@@ -262,6 +262,10 @@ if ! git diff --cached --quiet -- harness-plugins; then
         echo "pre-commit: claude is not on PATH; skipped rewriting harness-plugins/types, tsc, plugin validate and plugin test" >&2
     fi
 fi
+# The export's tool, held to its negative controls when its folder is staged (#4597).
+if ! git diff --cached --quiet -- scripts/export; then
+    step buffered python3 -I -B -m unittest discover -s scripts/export -p 'test_*.py'
+fi
 # A group of instruments run at once (#1144), each on a pipe of its own,
 # as `buffered` runs one: its text kept whole in a file of its own,
 # printed after all of them have ended and in the order they are listed,
