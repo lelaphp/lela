@@ -61,8 +61,9 @@ const MAX_FUNCS: usize = 30;
 /// as amended on #3571): php rebuilds an op array's analysis at every
 /// trace's build, and a build that binds what an earlier one bound
 /// finds what php's rebuild would. Engine state by its derive, which
-/// holds each analysis it keeps, and each class one names by an
-/// identity of the epoch's, to holding nothing of a request (#4492).
+/// holds each field, each analysis it keeps and each class one names by
+/// an identity of the epoch's, to the bound by the trait's letter
+/// (#4492, #4628).
 #[derive(Debug, Default, EngineState)]
 pub(crate) struct Analyses(Mutex<HashMap<FuncRef, Vec<(Bindings, Kept)>>>);
 
