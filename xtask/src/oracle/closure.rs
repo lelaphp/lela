@@ -233,8 +233,8 @@ impl Walked {
 /// file it resolves to and the keg that file stands in, beside the
 /// Homebrew prefix the binary stands under (#3458). A crate built against
 /// a keg is held to these, so it links the keg the oracle loads itself
-/// and not another the closure carries for a library's sake, as it
-/// carries openssl@3 beside the openssl@4 php loads.
+/// and not another the closure carries only because a library php loads
+/// links it.
 #[derive(Debug)]
 pub(crate) struct Own {
     prefix: PathBuf,
