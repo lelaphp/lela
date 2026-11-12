@@ -1,13 +1,15 @@
-//! The ICU major `build.rs` reads from the pin (`build/pin.rs`, #4406),
-//! held to fixture pins: the bump that re-freezes the closure on
-//! `icu4c@79` asks for 79, a key the reading does not know is no concern
-//! of it, and a pin that names no one ICU keg is refused in the build's
-//! words.
+//! What ICU `build.rs` links (`build/pin.rs`), held to fixture pins and
+//! to versions made up for `pkg-config` to have found: the bump that
+//! re-freezes the closure on `icu4c@79` asks for 79, a key the reading
+//! does not know is no concern of it, a pin that names no one ICU keg is
+//! refused in the build's words (#4406), and on macOS an ICU of another
+//! major than the pin's, or none, is refused naming the keg, where any
+//! other target links what it finds at or above php's floor (#4428).
 
 #[path = "../build/pin.rs"]
 mod pin;
 
-use pin::{Major, Refusal, icu_major};
+use pin::{Asked, Major, Refusal, Unlinked, held_to_pin, icu_major};
 
 /// A pin as `oracle.toml` is laid out, its closure being `closure`, with
 /// a key under `[oracle]` the reading does not know.
@@ -34,7 +36,9 @@ fn the_workspace_pin_names_one_icu() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../oracle.toml");
     let text = std::fs::read_to_string(&path).unwrap();
     let major = icu_major(&text).unwrap();
-    assert!(text.contains(&format!("\"{}\" = \"{major}.", major.keg())));
+    let pin: toml::Table = text.parse().unwrap();
+    let version = pin["closure"][&major.keg()].as_str().unwrap();
+    assert!(version.starts_with(&format!("{major}.")), "{version}");
 }
 
 /// A pin with no `[closure]` names no ICU.
@@ -94,4 +98,90 @@ fn a_pin_that_is_not_toml_is_refused() {
             .starts_with("oracle.toml does not parse: "),
         "{refusal}"
     );
+}
+
+/// What the build asks on each target: the pin's keg on macOS alone.
+fn asked(target_os: &str, pin: &str) -> Asked {
+    if held_to_pin(target_os) {
+        Asked::Keg(icu_major(pin).unwrap())
+    } else {
+        Asked::Floor
+    }
+}
+
+/// Over a fixture pin naming ICU 79 where `pkg-config` finds 78.3, the
+/// build refuses on macOS naming the keg the pin asks for, and on any
+/// other target links 78 and hands that major to the binding.
+#[test]
+fn an_icu_of_another_major_than_the_pin_is_refused_on_macos_alone() {
+    let pin = pin_with("\"icu4c@79\" = \"79.1\"\n");
+    let refusal = asked("macos", &pin).linked(Some("78.3")).unwrap_err();
+    assert_eq!(
+        refusal,
+        Unlinked::OtherMajor {
+            found: "78.3".to_owned(),
+            keg: Major(79)
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "pkg-config icu-uc: found ICU 78.3, where the pin asks for icu4c@79: put its lib/pkgconfig ahead on PKG_CONFIG_PATH (Homebrew: `$(brew --prefix icu4c@79)/lib/pkgconfig`)"
+    );
+    assert_eq!(asked("macos", &pin).linked(Some("79.1")), Ok(Major(79)));
+    for os in ["linux", "freebsd"] {
+        assert_eq!(asked(os, &pin).linked(Some("78.3")), Ok(Major(78)));
+    }
+}
+
+/// With no ICU found the build refuses on every target: on macOS naming
+/// the keg the pin asks for, elsewhere naming php's floor.
+#[test]
+fn a_missing_icu_is_refused_naming_what_the_build_asks_for() {
+    let pin = pin_with("\"icu4c@79\" = \"79.1\"\n");
+    assert_eq!(
+        asked("macos", &pin).linked(None).unwrap_err().to_string(),
+        "pkg-config icu-uc: no ICU found; the pin asks for icu4c@79: put its lib/pkgconfig on PKG_CONFIG_PATH (Homebrew: `$(brew --prefix icu4c@79)/lib/pkgconfig`)"
+    );
+    assert_eq!(
+        asked("linux", &pin).linked(None).unwrap_err().to_string(),
+        "pkg-config icu-uc: no ICU found; php's intl asks for ICU 57.1 or later: put its lib/pkgconfig on PKG_CONFIG_PATH"
+    );
+}
+
+/// Away from macOS the floor is php's, `icu-uc >= 57.1`, held component
+/// by component as `pkg-config --atleast-version` holds it.
+#[test]
+fn away_from_macos_an_icu_below_phps_floor_is_refused() {
+    for found in ["57.1", "57.1.0", "57.2", "60", "74.2", "80.0.1"] {
+        let major = found.split('.').next().unwrap().parse().unwrap();
+        assert_eq!(
+            Asked::Floor.linked(Some(found)),
+            Ok(Major(major)),
+            "{found}"
+        );
+    }
+    for found in ["57", "57.0", "56.1", "4.8.1"] {
+        assert_eq!(
+            Asked::Floor.linked(Some(found)),
+            Err(Unlinked::BelowFloor(found.to_owned()))
+        );
+    }
+    assert_eq!(
+        Asked::Floor.linked(Some("56.1")).unwrap_err().to_string(),
+        "pkg-config icu-uc: found ICU 56.1, below the 57.1 php's intl asks for: put its lib/pkgconfig ahead on PKG_CONFIG_PATH"
+    );
+}
+
+/// A version that is not dotted numbers is refused on every target,
+/// rather than read for a major it may not have.
+#[test]
+fn a_version_that_is_not_dotted_numbers_is_refused() {
+    for asked in [Asked::Keg(Major(78)), Asked::Floor] {
+        for found in ["", "78.rc1", "seventy-eight"] {
+            assert_eq!(
+                asked.linked(Some(found)),
+                Err(Unlinked::NotAVersion(found.to_owned()))
+            );
+        }
+    }
 }

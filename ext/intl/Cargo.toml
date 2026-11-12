@@ -21,10 +21,11 @@ php_ext = { path = "../../crates/php_ext" }
 # time and zone (design §4.10).
 php_ext_date = { path = "../date" }
 
-# ICU is the keg the oracle links, of the major the pin's `[closure]` names
-# (`icu4c@<major>`, which `build.rs` reads from `oracle.toml` with `toml`;
-# #4406), found by `build.rs` through pkg-config and bound in `src/ffi/`
-# alone, and php's intl C++ is built by `cc` in C++ mode as
+# ICU is found by `build.rs` through pkg-config: on macOS the keg the oracle
+# links, of the major the pin's `[closure]` names (`icu4c@<major>`, which
+# `build.rs` reads from `oracle.toml` with `toml`; #4406), and on any other
+# target the platform's, at or above php's floor, 57.1 (#4428). It is bound
+# in `src/ffi/` alone, and php's intl C++ is built by `cc` in C++ mode as
 # `src/ffi/shim/` (`unsafe.homes`; design §7.2, revision 75).
 [build-dependencies]
 cc = { workspace = true }
