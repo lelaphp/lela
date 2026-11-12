@@ -495,4 +495,5 @@ witness::run
 worktree::add
 worktree::own
 worktree::retire
+worktree::seed_build
 worktree::whose

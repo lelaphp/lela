@@ -12,6 +12,7 @@ use xtask::permit::{Call, Finding, Kind, judge, judged_at_the_call};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::witness::{self, Accept, Ask};
+use xtask::worktree::seed_build;
 
 mod common {
     pub mod manifest;
@@ -254,15 +255,11 @@ remedy = "write it in your own worktree"
             );
         })
         .write(&beside);
-    // The checkout's dependency build, seeded the way `worktree add` seeds
-    // it; where the volume cannot clone, the build there starts cold.
-    std::fs::create_dir_all(beside.join("target")).unwrap();
-    Command::new("cp")
-        .args(["-c", "-R"])
-        .arg(workspace().join("target/debug"))
-        .arg(beside.join("target/debug"))
-        .output()
-        .ok();
+    // The checkout's dependency build, seeded by what `worktree add` seeds
+    // it with, so a checkout whose `target/debug` is a link seeds a
+    // directory of the worktree's own (#4589); where the volume cannot
+    // clone, the build there starts cold.
+    seed_build(&beside, workspace(), "debug").ok();
 
     let write = |file: &Path| {
         hook_stdin(
