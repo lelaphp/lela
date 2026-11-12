@@ -67,7 +67,9 @@ pub use php_compile::multibyte::{Encoding, Encodings, Unicode};
 /// its derive, which holds each field to it. The four entries that keep
 /// a value engine-wide, [`ExtensionBuilder::engine_state`],
 /// [`ExtensionBuilder::process_state`], [`ExtensionBuilder::register`]
-/// and [`ExtensionBuilder::constants_with`], are bounded by it.
+/// and [`ExtensionBuilder::constants_with`], are bounded by it, and so
+/// is the stream layer's state beside them
+/// ([`StateHook::of`](crate::layer::StateHook::of)).
 pub use php_heap::EngineState;
 pub use php_macros::EngineState;
 
@@ -1676,7 +1678,7 @@ impl ExtensionBuilder {
 
     /// Served after the request's `shutdown_executor`, php's
     /// `post_deactivate_func` (`zend_post_deactivate_modules`, step 11 of
-    /// `php_request_shutdown`, `Z/main/main.c:2026-2029`): after every
+    /// `php_request_shutdown`, `Z/main/main.c:2070`): after every
     /// `deactivate`, with the request's resources closed, its objects
     /// freed and its ini entries restored, every extension's hook in
     /// reverse bundle order and each in a `zend_try` of its own, with

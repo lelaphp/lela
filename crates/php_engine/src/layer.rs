@@ -8,7 +8,8 @@
 //! Three kinds of item: [`Face`], the request's operations the layer
 //! calls, a sealed trait implemented for [`Request`] alone, since a path
 //! `php_ext` does not re-export cannot hide a method of a type it does;
-//! [`StreamHooks`], what the engine asks of the layer in turn; and
+//! [`StreamHooks`], what the engine asks of the layer in turn, its
+//! engine state among it ([`StateHook`]); and
 //! the system calls `main/network.c` and the plain files kind make over
 //! the fds a stream holds, `php_process`'s bindings in its `unsafe` home
 //! (#1935), which the layer has no edge of its own to (#1874).
@@ -17,6 +18,7 @@ use std::any::Any;
 use std::os::fd::BorrowedFd;
 use std::sync::Arc;
 
+use crate::api::abi::EngineState;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::{Callee, Family, HostPath, Request, Retval, Standard, Unresolved};
@@ -131,8 +133,9 @@ pub struct StreamHooks {
     /// ([`Face::layer_state`]): what streams keep across requests, php's
     /// `EG(persistent_list)` as `zend_startup`'s `zend_init_rsrc_plist`
     /// sets it up (#1962). The engine holds it and cannot name its type;
-    /// the layer reads it back as the type it is.
-    pub state: fn() -> Arc<dyn Any + Send + Sync>,
+    /// the layer reads it back as the type it is. Engine state by its
+    /// type, as the four entries' is ([`StateHook::of`]).
+    pub state: StateHook,
     /// `zend_shutdown`'s `zend_destroy_rsrc_list(&EG(persistent_list))`
     /// (`Z/Zend/zend.c:1166`): served on the engine-end request before
     /// any extension's engine end, so the layer's idle persistent
@@ -141,11 +144,49 @@ pub struct StreamHooks {
     /// `ZEND_MODULE_POST_ZEND_DEACTIVATE_D(streams)`, which
     /// `basic_functions` registers (`Z/ext/standard/basic_functions.c:163`,
     /// `Z/main/streams/streams.c:90-98`): served as each request ends,
-    /// after its resources are closed and before any extension's
-    /// post-deactivation, so what of the request the layer's idle
-    /// persistent streams still hold, `stream->ctx`, is let go while the
-    /// request stands.
+    /// after its resources are closed, so what of the request the
+    /// layer's idle persistent streams still hold, `stream->ctx`, is let
+    /// go while the request stands. The engine serves it before any
+    /// extension's post-deactivation.
     pub post_deactivate: fn(&mut Request),
+}
+
+/// [`StreamHooks::state`]: how the engine builds the layer's engine
+/// state, a `T` it holds as its erased type and the layer reads back
+/// ([`Face::layer_state`]). Made only by [`StateHook::of`], which asks of
+/// `T` what [`ExtensionBuilder::engine_state`] asks of an extension's,
+/// [`EngineState`] and `Sync`: every request reads it at once, so it
+/// holds no value of a request's, by its type.
+///
+/// A type holding a request's value is refused as the layer's state:
+///
+/// ```compile_fail,E0277
+/// # fn main() {}
+/// include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../xtask/fixtures/api-check/engine-state/layer.rs"));
+/// ```
+///
+/// [`ExtensionBuilder::engine_state`]: crate::api::abi::ExtensionBuilder::engine_state
+#[derive(Debug, Clone, Copy)]
+pub struct StateHook(fn() -> Arc<dyn Any + Send + Sync>);
+
+impl StateHook {
+    /// The hook that builds a `T` as its [`Default`], the layer's state
+    /// as the engine starts.
+    #[must_use]
+    pub const fn of<T: EngineState + Sync + Default>() -> StateHook {
+        StateHook(built::<T>)
+    }
+
+    /// The layer's state, built as the engine starts.
+    pub(crate) fn build(self) -> Arc<dyn Any + Send + Sync> {
+        (self.0)()
+    }
+}
+
+/// A `T` as its [`Default`], its type erased: what [`StateHook::of`]
+/// points at.
+fn built<T: EngineState + Sync + Default>() -> Arc<dyn Any + Send + Sync> {
+    Arc::new(T::default())
 }
 
 /// [`StreamHooks::open`], whose `bool` says whether an open that fails

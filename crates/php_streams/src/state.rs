@@ -4,9 +4,8 @@
 //! entries a request holds, reached as `req.state::<State>()`, built on
 //! the request's first touch and dropped with it. Its engine state: php's
 //! `EG(persistent_list)`, built by the engine as it starts
-//! ([`engine_state`]) and closed first as it ends ([`engine_end`]).
+//! ([`LayerState`]) and closed first as it ends ([`engine_end`]).
 
-use std::any::Any;
 use std::sync::Arc;
 
 use crate::api::abi::Pool;
@@ -105,7 +104,7 @@ pub(crate) struct State {
     /// The layer's engine state, once the request took or held an
     /// entry: the pool the entries still held go back to as the request
     /// is dropped.
-    pub(crate) engine: Option<Arc<EngineState>>,
+    pub(crate) engine: Option<Arc<LayerState>>,
     /// The host's `zend_file_handle` of the program, where
     /// `php_fopen_primary_script` opened it ([`crate::zend`]'s
     /// `open_primary`), until the engine destroys it.
@@ -120,9 +119,15 @@ pub(crate) struct State {
 const PERSISTENT_ENTRIES: usize = 1024;
 
 /// The layer's engine state (#1962): what it keeps across the engine's
-/// requests, built as the engine starts and reached through any of them
-/// ([`crate::api::layer::Face::layer_state`]).
-pub(crate) struct EngineState {
+/// requests, built as the engine starts, its pool empty
+/// ([`StreamHooks::state`]), and reached through any of them
+/// ([`crate::api::layer::Face::layer_state`]). Engine state by type, as
+/// an extension's is: every request reads it at once, so no field of it
+/// can hold a request's value.
+///
+/// [`StreamHooks::state`]: crate::api::layer::StreamHooks::state
+#[derive(php_engine::api::abi::EngineState)]
+pub(crate) struct LayerState {
     /// php's `EG(persistent_list)` as far as streams reach it: the
     /// sockets `pfsockopen` and `STREAM_CLIENT_PERSISTENT` open, idle
     /// under php's key, each lent to one request at a time
@@ -130,12 +135,12 @@ pub(crate) struct EngineState {
     pub(crate) persistent: Pool<Vec<u8>, Entry>,
 }
 
-/// [`StreamHooks::state`](crate::api::layer::StreamHooks::state): the
-/// layer's engine state, its pool empty.
-pub(crate) fn engine_state() -> Arc<dyn Any + Send + Sync> {
-    Arc::new(EngineState {
-        persistent: Pool::new(PERSISTENT_ENTRIES),
-    })
+impl Default for LayerState {
+    fn default() -> LayerState {
+        LayerState {
+            persistent: Pool::new(PERSISTENT_ENTRIES),
+        }
+    }
 }
 
 /// [`StreamHooks::engine_end`](crate::api::layer::StreamHooks::engine_end):
@@ -143,7 +148,7 @@ pub(crate) fn engine_state() -> Arc<dyn Any + Send + Sync> {
 /// closed, the one given back last first, before any extension's engine
 /// end.
 pub(crate) fn engine_end(req: &mut Request) {
-    if let Some(engine) = req.layer_state::<EngineState>() {
+    if let Some(engine) = req.layer_state::<LayerState>() {
         for (_, entry) in engine.persistent.drain() {
             crate::streams::persistent::end_entry(req, entry);
         }

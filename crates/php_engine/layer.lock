@@ -24,6 +24,8 @@ layer::PrimaryOpenHook
 layer::Readiness
 layer::SockOpt
 layer::StandardHandlesHook
+layer::StateHook
+layer::StateHook::of
 layer::StreamHooks
 layer::StreamOpenHook
 layer::TemporaryGuard

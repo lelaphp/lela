@@ -4060,7 +4060,7 @@ impl EngineBuilder {
             crate::unit_cache::Files::new(MAX_ACCELERATED_FILES),
             interned.clone(),
         ));
-        let layer = supplied.stream_hooks.get().map(|hooks| (hooks.state)());
+        let layer = supplied.stream_hooks.get().map(|hooks| hooks.state.build());
         let realpath_cache = crate::virtual_cwd::RealpathCache::of(|name| ini.master(name));
         let mut engine = Engine {
             shared: Arc::new(Shared {
@@ -6499,9 +6499,10 @@ impl Engine {
         // `php_free_request_globals`' `clear_last_error()`.
         req.clear_last_error_strings();
         // `zend_post_deactivate_modules`, after the executor is shut
-        // down and the request globals freed (`Z/main/main.c:2026-2029`),
-        // and before the host's deactivation hands over what is left:
-        // `basic_functions`' own for the streams first.
+        // down and the request globals freed (`Z/main/main.c:2070`), and
+        // before the host's deactivation hands over what is left. The
+        // engine serves the streams' own, which `basic_functions`
+        // registers, before any extension's.
         if let Some(hooks) = req.stream_hooks() {
             (hooks.post_deactivate)(req);
         }
