@@ -6500,7 +6500,11 @@ impl Engine {
         req.clear_last_error_strings();
         // `zend_post_deactivate_modules`, after the executor is shut
         // down and the request globals freed (`Z/main/main.c:2026-2029`),
-        // and before the host's deactivation hands over what is left.
+        // and before the host's deactivation hands over what is left:
+        // `basic_functions`' own for the streams first.
+        if let Some(hooks) = req.stream_hooks() {
+            (hooks.post_deactivate)(req);
+        }
         end_phase(&self.shared.extensions, req, |e| e.post_deactivate);
         // A debug build's request leak sensor, after the request's last
         // release, then its last sensing point, which raises what the
