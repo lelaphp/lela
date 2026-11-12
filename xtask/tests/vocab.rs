@@ -430,6 +430,20 @@ fn a_crate_measured_under_staged_is_read_as_the_index_holds_it() {
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
 }
 
+/// A `.rs` file git ignores under a crate is in no commit and moves no
+/// key, so its avoided word is not read, under `--staged` where nothing
+/// differs from the index and in a run over the working tree alike
+/// (#4620); before, vocab walked the directory and refused it.
+#[test]
+fn an_ignored_source_under_a_crate_is_not_read() {
+    let (root, repo) = two_crates("ignored");
+    repo.write(".gitignore", "target/\n*.local.rs\n");
+    repo.commit("ignored");
+    repo.write("crates/php_ext/src/notes.local.rs", "/// A builtin.\n");
+    xtask(&root, &["vocab", "--staged"]).ok();
+    xtask(&root, &["vocab", "--crate", "php_ext"]).ok();
+}
+
 /// The tracked manifest with the row a person adds (#63): a second
 /// `avoid_from` rule over `xtask` that reads the glossary's Harness section
 /// alone, built through the constructors while no tracked rule covers the

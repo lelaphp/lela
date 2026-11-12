@@ -497,19 +497,20 @@ fn without_code_spans(text: &str) -> String {
     out
 }
 
-/// Every `.rs` file under `dir`, in path order; `target/` is skipped, and
-/// so is `fixtures/`, whose files are other crates' sources.
+/// Every `.rs` file under `dir` that git does not ignore, as a crate's key
+/// lists them ([`crate::git::files`]), in path order; `target/` is
+/// skipped, and so is `fixtures/`, whose files are other crates' sources.
+/// A file git ignores is in no commit and moves no key, so it is not read
+/// (#4620).
 fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    crate::tally::files_under(dir, &mut files)?;
-    files.retain(|p| {
-        p.extension().is_some_and(|e| e == "rs")
-            && !p
-                .strip_prefix(dir)
-                .unwrap_or(p)
-                .iter()
-                .any(|part| part == "target" || part == "fixtures")
-    });
+    let mut files: Vec<PathBuf> = (crate::git::files(dir, Path::new("."))?.into_iter())
+        .map(PathBuf::from)
+        .filter(|p| {
+            p.extension().is_some_and(|e| e == "rs")
+                && !p.iter().any(|part| part == "target" || part == "fixtures")
+        })
+        .map(|p| dir.join(p))
+        .collect();
     files.sort();
     Ok(files)
 }
