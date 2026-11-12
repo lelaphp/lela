@@ -1,20 +1,25 @@
-//! ICU is the library the oracle links (design §7.2, revision 75; #1573):
+//! ICU is a platform library (design §7.2, revision 75; #1573):
 //! libicuuc, libicui18n and libicuio, found through `pkg-config`
 //! (`icu-uc`, `icu-i18n`, `icu-io`) and linked as the shared libraries
 //! php links, never vendored. Where it lives is the environment's to say,
 //! through `PKG_CONFIG_PATH`, which the Mac runner's environment and the
 //! developer's shell set (Homebrew's `icu4c@<major>` kegs are keg-only;
-//! #2486); the build writes no path of its own. What it holds is the
-//! version: the major is the one the pin's `[closure]` names in its
-//! `icu4c@<major>` keg, read from `oracle.toml` when the build runs
-//! (`build/pin.rs`, #4406), so a bump that re-freezes the closure on
-//! another ICU moves the build with it. An ICU of another major fails
-//! the build naming the keg the pin asks for, as does no ICU at all
-//! (#2278), and so does a pin that names no one ICU keg.
+//! #2486); the build writes no path of its own.
+//!
+//! What it holds is the version, by target (`build/pin.rs`, #4428). On
+//! macOS, where the pin's `[closure]` names the kegs the oracle loads,
+//! the major is the one its `icu4c@<major>` keg names, read from
+//! `oracle.toml` when the build runs (#4406), so a bump that re-freezes
+//! the closure on another ICU moves the build with it; an ICU of another
+//! major fails the build naming the keg the pin asks for, as does no ICU
+//! at all (#2278), and so does a pin that names no one ICU keg. On any
+//! other target the build links the ICU `pkg-config` finds at or above
+//! php's own floor, 57.1, as php built on that host would, and reads no
+//! pin: no Linux lane holds ext/intl to the oracle.
 //!
 //! ICU renames every C symbol with its major version
-//! (`u_errorName_<major>`); the major is handed to the binding as
-//! `INTL_ICU_SUFFIX`, so a pin bump moves the names with the library.
+//! (`u_errorName_<major>`); the linked ICU's major is handed to the
+//! binding as `INTL_ICU_SUFFIX`, so the names move with the library.
 //!
 //! `src/ffi/shim/*.cpp` is the part of php's intl written in C++ over
 //! ICU's C++ classes, behind `extern "C"`, compiled here by `cc` in C++
@@ -38,46 +43,51 @@ fn pkg_config(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// What the build asks of the ICU `pkg-config` finds: on macOS the major
+/// of the keg the pin's `[closure]` names, read from `oracle.toml` when
+/// `build.rs` runs, not when it compiles, since cargo runs one compiled
+/// `build.rs` for every checkout sharing a target directory (#2628);
+/// anywhere else php's floor, with no pin read.
+fn asked() -> Result<pin::Asked, String> {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if !pin::held_to_pin(&target_os) {
+        return Ok(pin::Asked::Floor);
+    }
+    let Some(dir) = std::env::var_os("CARGO_MANIFEST_DIR") else {
+        return Err("CARGO_MANIFEST_DIR is unset; cargo sets it for every `build.rs`".to_owned());
+    };
+    let path = Path::new(&dir).join("../../oracle.toml");
+    // Cargo watches a file's time, not a table of it: any edit of the
+    // pin reruns this, and reruns the shim's compile and every crate
+    // built on this one, though the `[closure]` is all it reads (#4429).
+    println!("cargo::rerun-if-changed={}", path.display());
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let major = pin::icu_major(&text).map_err(|refusal| refusal.to_string())?;
+    Ok(pin::Asked::Keg(major))
+}
+
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-changed=build/pin.rs");
     println!("cargo::rerun-if-changed=src/ffi/shim");
     println!("cargo::rerun-if-env-changed=PKG_CONFIG_PATH");
-    // Read when `build.rs` runs, not when it compiles: cargo runs one
-    // compiled `build.rs` for every checkout sharing a target directory
-    // (#2628).
-    let Some(dir) = std::env::var_os("CARGO_MANIFEST_DIR") else {
-        println!("cargo::error=CARGO_MANIFEST_DIR is unset; cargo sets it for every `build.rs`");
-        return;
-    };
-    let path = Path::new(&dir).join("../../oracle.toml");
-    println!("cargo::rerun-if-changed={}", path.display());
-    let pinned = match std::fs::read_to_string(&path) {
-        Ok(text) => pin::icu_major(&text).map_err(|refusal| refusal.to_string()),
-        Err(e) => Err(format!("reading {}: {e}", path.display())),
-    };
-    let wanted = match pinned {
-        Ok(major) => major,
+    let asked = match asked() {
+        Ok(asked) => asked,
         Err(why) => {
             println!("cargo::error={why}");
             return;
         }
     };
-    let keg = wanted.keg();
-    let Some(version) = pkg_config(&["--modversion", "icu-uc"]) else {
-        println!(
-            "cargo::error=pkg-config icu-uc: no ICU found; the pin asks for {keg}: put its lib/pkgconfig on PKG_CONFIG_PATH (Homebrew: `$(brew --prefix {keg})/lib/pkgconfig`)"
-        );
-        return;
+    let found = pkg_config(&["--modversion", "icu-uc"]);
+    let major = match asked.linked(found.as_deref()) {
+        Ok(major) => major,
+        Err(unlinked) => {
+            println!("cargo::error={unlinked}");
+            return;
+        }
     };
-    let found = version.split('.').next().and_then(|m| m.parse().ok());
-    if found.map(pin::Major) != Some(wanted) {
-        println!(
-            "cargo::error=pkg-config icu-uc: found ICU {version}, where the pin asks for {keg}: put its lib/pkgconfig ahead on PKG_CONFIG_PATH (Homebrew: `$(brew --prefix {keg})/lib/pkgconfig`)"
-        );
-        return;
-    }
-    println!("cargo::rustc-env=INTL_ICU_SUFFIX=_{wanted}");
+    println!("cargo::rustc-env=INTL_ICU_SUFFIX=_{major}");
     let mut args = vec!["--libs-only-L"];
     args.extend(MODULES);
     for flag in pkg_config(&args).unwrap_or_default().split_whitespace() {

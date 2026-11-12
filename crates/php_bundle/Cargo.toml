@@ -150,7 +150,7 @@ sodium = ["dep:php_ext_sodium", "standard"] # the `php` binary and the phpt lane
 gettext = ["dep:php_ext_gettext"] # the `php` binary and the phpt lane, as php builds it with --with-gettext over the keg's libintl (design §7.2, revision 72; #1540, #1568)
 readline = ["dep:php_ext_readline"] # the `php` binary and the phpt lane, as php builds it with --with-libedit, over the platform's libedit; readline_cli.c's shell is `php -a` (design §7.2, revision 72; #1540, #1567)
 ffi = ["dep:php_ext_ffi"] # the `php` binary and the phpt lane, as php builds it --with-ffi over the platform's libffi (design §7.2, revision 75; #1573, #1576)
-intl = ["dep:php_ext_intl", "date"] # the `php` binary and the phpt lane, as php builds it with --enable-intl over the keg's ICU, icu4c@78 (design §7.2, revision 75; #1573); date, whose DateTime and DateTimeZone classes and default zone IntlCalendar and IntlTimeZone read (#2356)
+intl = ["dep:php_ext_intl", "date"] # the `php` binary and the phpt lane, as php builds it with --enable-intl, over the pinned keg's ICU on macOS (icu4c@<major>, the pin's [closure]) and the platform's at or above php's floor, 57.1, elsewhere (design §7.2, revision 75; #1573, #4428); date, whose DateTime and DateTimeZone classes and default zone IntlCalendar and IntlTimeZone read (#2356)
 zend_test = ["dep:php_ext_zend_test"] # off by default, as php builds it only with --enable-zend-test; the phpt lane runs its subset under the oracle variant that loads it (#1782, #1816); its link to standard is the php_var_export_ex code the observer writes a return value with (#2356)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.

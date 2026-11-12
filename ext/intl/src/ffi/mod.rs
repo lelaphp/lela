@@ -22,7 +22,8 @@ use std::ptr;
 
 /// ICU's C functions under the names `urename.h` gives them, the major
 /// version appended (`u_errorName_<major>`), which `build.rs` hands over
-/// as `INTL_ICU_SUFFIX`, the major the pin's `[closure]` names.
+/// as `INTL_ICU_SUFFIX`, the linked ICU's major: the pin's `[closure]`'s
+/// on macOS, the one `pkg-config` finds elsewhere.
 macro_rules! icu {
     ($( $(#[$meta:meta])* fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?; )*) => {
         unsafe extern "C" { $(

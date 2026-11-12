@@ -14,9 +14,9 @@
 # crashes it; only the apache stage's own layers run as the target.
 #
 # The base is the Ubuntu release CI builds and tests the workspace on,
-# whose package names packages.txt gives: ext/intl links the ICU the
-# oracle links (packages.txt), which the Debian release php's official
-# images are built on does not ship.
+# whose package names packages.txt gives. ext/intl links the ICU that
+# release ships, at or above php's floor, 57.1, as php built on it would:
+# only a build for macOS is held to the oracle's ICU (#4428).
 
 ARG UBUNTU=ubuntu:26.04@sha256:19fcd1bf268f02b60aca3bd30bd8a6d9a11759a430e32921833e65f16d87348a
 # Where php's official images keep php.ini, $PHP_INI_DIR, with conf.d in it.

@@ -1384,11 +1384,18 @@ impl Manifest {
 
     /// The crates a change to `paths` touches, in manifest order: those
     /// [`Manifest::crates_of`] names and those whose tests or `build.rs`
-    /// read one of them as the tree at `root` holds it
-    /// ([`crate::key::read_by_tests`], #3646, #3654).
-    pub(crate) fn touched_by(&self, root: &Path, paths: &[&str]) -> Vec<&Crate> {
+    /// read one of them as the tree at `root` holds it, a `build.rs` that
+    /// reads a part of a file only where that part is among `moved`
+    /// ([`crate::key::read_by_tests`], #3646, #3654, #4429).
+    pub(crate) fn touched_by(
+        &self,
+        root: &Path,
+        paths: &[&str],
+        moved: &[crate::key::FilePart],
+    ) -> Vec<&Crate> {
         let touches = |c: &&Crate, p: &&str| {
-            Path::new(p).starts_with(c.path()) || crate::key::read_by_tests(root, &c.path(), p)
+            Path::new(p).starts_with(c.path())
+                || crate::key::read_by_tests(root, &c.path(), p, moved)
         };
         (self.crates.iter())
             .filter(|c| paths.iter().any(|p| touches(c, p)))
