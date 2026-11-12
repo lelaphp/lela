@@ -16,9 +16,9 @@
 //! field to the bound, or by an impl written by hand where `unsafe` may
 //! stand (the homes `unsafe.homes` names), for a leaf the derive cannot
 //! read through: here, the primitives, the standard containers over engine
-//! state, a `Cow` among them, an owned fd and the standard library's
-//! sockets, a function pointer, [`Bytes`], a [`ClassCache`], a debug
-//! build's `Origin`, [`FrozenZval`] and [`AnyState`](crate::AnyState).
+//! state, a `Cow` among them, an owned fd, a file and the standard
+//! library's sockets, a function pointer, [`Bytes`], a [`ClassCache`], a
+//! [`ZvalType`], a debug build's `Origin`, [`FrozenZval`] and [`AnyState`](crate::AnyState).
 //! An `AnyState` is a value of engine state behind its erased type, which
 //! the engine holds where it keeps a value it does not name, the compiled
 //! tier's for an epoch (#4492): its one constructor takes engine state,
@@ -49,11 +49,11 @@ use std::ffi::{CString, OsString};
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::{Bytes, ClassCache, Fatal, Intern, Strings, Zval};
+use crate::{Bytes, ClassCache, Fatal, Intern, Strings, Zval, ZvalType};
 
 /// A value engine state may hold: kept by the engine across requests
 /// and holding no pointer into a request's heap, at any depth.
@@ -86,8 +86,8 @@ macro_rules! leaves {
 leaves! {
     (), bool, char, u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64,
     str, String, NonZeroU32, PathBuf, OsString, CString, Duration, Instant, SystemTime,
-    AtomicBool, AtomicU32, AtomicU64, AtomicUsize, AtomicI64, std::hash::RandomState,
-    std::net::TcpStream, std::net::TcpListener, std::net::UdpSocket,
+    AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, AtomicI64, std::hash::RandomState,
+    std::fs::File, std::net::TcpStream, std::net::TcpListener, std::net::UdpSocket,
 }
 
 #[cfg(unix)]
@@ -179,6 +179,10 @@ impl EngineState for Bytes {}
 // table, never here (`string.rs`).
 impl EngineState for ClassCache {}
 
+// A zval's type is a byte, php's `IS_*`, which names a kind of value and
+// holds none (`zval.rs`).
+impl EngineState for ZvalType {}
+
 // An origin is a number, an extension's `module_number`, which a debug
 // build's heap keeps beside a block and which names no block itself
 // (`sensed.rs`).
@@ -251,6 +255,11 @@ mod tests {
         held::<std::collections::HashMap<Box<[u8]>, std::sync::Arc<FrozenZval>>>();
         held::<&'static [&'static str]>();
         held::<fn(&mut String, &[u8], i64, bool) -> Result<Vec<u8>, ()>>();
+        held::<(
+            ZvalType,
+            std::sync::Arc<[std::sync::atomic::AtomicU8]>,
+            std::fs::File,
+        )>();
     }
 
     #[test]
