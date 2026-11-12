@@ -53,7 +53,7 @@ pub(crate) type FakeRoom = php_heap::FakeRoom<Header>;
 /// `EX(func)` points at one `zend_op_array`: reading the op array is
 /// one index, never a search. A method's or a hook's place is found
 /// once, where its class binds it ([`Body::method`], [`Body::hook`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) enum Body {
     Main,
     Function(u32),
@@ -898,7 +898,7 @@ impl Header {
 
 /// `ZEND_CALL_INFO`'s flags as this engine's frame has them, one bit
 /// each behind a name.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, php_macros::EngineState)]
 #[repr(transparent)]
 pub(crate) struct CallInfo(u32);
 
@@ -1811,7 +1811,7 @@ pub(crate) fn init_runtime_cache(
 /// ([`OpArray::cache_size`]), and the bytes php's heap gives it, fewer
 /// where opcache's optimizer shared slots
 /// ([`OpArray::cache_room`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) struct CacheSize {
     pub(crate) slots: u32,
     pub(crate) room: u32,

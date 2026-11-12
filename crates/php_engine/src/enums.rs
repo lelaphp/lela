@@ -23,7 +23,7 @@ use crate::api::request::{ByValue, Request};
 use crate::api::values::{ClassId, Owner, Value, adopted};
 
 /// Which of the three a function number of a program's enum serves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) enum EnumMethod {
     Cases,
     From,

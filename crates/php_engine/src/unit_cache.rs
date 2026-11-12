@@ -182,7 +182,7 @@ impl Stat for () {}
 /// int(1)
 /// int(2)
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) struct Stamp {
     modified: Duration,
     size: u64,
@@ -368,7 +368,7 @@ impl Held {
 /// `zend_accel_restart_reason`: why a restart was scheduled, which of
 /// `ZCSG(oom_restarts)`, `ZCSG(hash_restarts)` and
 /// `ZCSG(manual_restarts)` it counts under.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 enum Reason {
     /// `ACCEL_RESTART_OOM`: the memory exhausted.
     Oom,

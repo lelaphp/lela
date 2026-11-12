@@ -32,7 +32,7 @@ use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
 /// attribute's presence (`zend_compile_func_decl`) and
 /// `validate_nodiscard` raises `ZEND_ACC_NODISCARD`; `gen_stub.php`
 /// writes both from a native's stub.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) struct Flags {
     pub(crate) deprecated: bool,
     pub(crate) no_discard: bool,

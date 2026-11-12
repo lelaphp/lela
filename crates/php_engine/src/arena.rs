@@ -96,6 +96,7 @@ type Span<T> = Box<[OnceLock<Chunk<T>>; SPAN]>;
 
 /// One kind of row of the arena, numbered from zero in the order its
 /// numbers were reserved.
+#[derive(php_macros::EngineState)]
 pub(crate) struct Column<T> {
     /// The spans, each laid on first use.
     spans: [OnceLock<Span<T>>; SPANS],

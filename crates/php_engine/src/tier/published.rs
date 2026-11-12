@@ -204,7 +204,7 @@ pub struct LandingIndex {
 
 /// One stretch of op arrays a [`LandingIndex`] names: the op array at offset
 /// `first + n`, for `n` below `held`, at place `place + n`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub struct LandingRows {
     /// The offset the stretch's first op array stands at.
     pub first: u32,
@@ -244,6 +244,7 @@ fn place_among(own: LandingRows, preloaded: Option<LandingRows>, offset: u32) ->
 /// An epoch's landing index ([`LandingIndex`]), over its own [`Funcs`]
 /// and the ones it lays for the preload's op arrays, laid down the
 /// first time a tier arms a landing or asks for it.
+#[derive(php_macros::EngineState)]
 pub(crate) struct Landings {
     own: LandingRows,
     preloaded: Option<LandingRows>,
@@ -322,6 +323,7 @@ impl Landings {
 /// The index's own: each chunk, owned, two words per place, and the
 /// address of each chunk, which is what compiled code reads, as a
 /// request's rows of its traces are kept (`php_jit`'s `enter::Rows`).
+#[derive(php_macros::EngineState)]
 struct Index {
     chunks: Box<[OnceLock<Box<[AtomicUsize]>>]>,
     addresses: Box<[AtomicUsize]>,

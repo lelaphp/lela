@@ -825,7 +825,7 @@ impl<T> IntoIterator for PinnedRows<T> {
 /// engine reads them once where the function is declared, so a call
 /// reads them off the function table and walks neither the declaration
 /// nor the unit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) struct FrameShape {
     pub(crate) parameters: u32,
     pub(crate) typed: bool,
@@ -928,7 +928,7 @@ pub(crate) struct Member {
 /// Where a method stands in its class's declaration: among its methods,
 /// `ce->function_table`, or as one of a property's hooks,
 /// `prop_info->hooks[kind]`, which php's function table never lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) enum MemberAt {
     Method(u32),
     Hook { property: u32, kind: HookKind },
