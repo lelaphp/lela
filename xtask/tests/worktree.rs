@@ -19,6 +19,7 @@ use xtask::permit::{Call, judge};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::{self, Tree};
 use xtask::status;
+use xtask::worktree::seed_build;
 
 mod common {
     pub mod manifest;
@@ -511,15 +512,13 @@ fn warm_clone(root: &Path) -> bool {
     if !clones(root) {
         return false;
     }
-    let target = root.join("target");
-    // A sweep mid-copy fails the copy with the files it took; the build
-    // below compiles them, so the copy's exit is not this test's.
-    Command::new("cp")
-        .args(["-c", "-R"])
-        .arg(workspace().join("target/debug"))
-        .arg(target.join("debug"))
-        .output()
-        .unwrap();
+    // Seeded as the add seeds, so a workspace whose `target/debug` is a
+    // link seeds a directory of the clone's own and the build below writes
+    // there, not into the workspace's (#4589). A copy that fails, a sweep
+    // mid-copy or a link to another volume, leaves the clone cold; the
+    // build below compiles what it lacks, so the copy's result is not this
+    // test's.
+    seed_build(root, workspace(), "debug").ok();
     let roots = [
         ("xtask/src/lib.rs", "//! empty\n"),
         ("xtask/src/main.rs", "//! empty\nfn main() {}\n"),
@@ -561,6 +560,93 @@ fn clones(root: &Path) -> bool {
         .success();
     fs::remove_file(&sample).ok();
     clones
+}
+
+/// A seed from a `target/debug` that is a symbolic link copies what the
+/// link names and not the link (#4589): `cp -R` copies a link named on
+/// its command line as the link, and a seeded tree whose `target/debug`
+/// were the source's link would relink the source's binaries when it
+/// builds. The link here names a directory on the same volume, inside the
+/// test's own tree, so where the volume clones the seed is warm, a
+/// directory of the seeded tree's own holding the source's build; where
+/// `cp -c` refuses, the seed is the error and nothing is left behind.
+/// Either way the seeded tree's build makes a binary of its own and
+/// leaves the source's as it was.
+#[test]
+fn a_seed_from_a_target_that_is_a_link_is_a_directory_of_its_own() {
+    let tree = Tree::new("worktree-seed-link").unwrap();
+    let package = |dir: &Path, says: &str| {
+        write(
+            dir,
+            "Cargo.toml",
+            "[package]\nname = \"seeded\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        );
+        write(
+            dir,
+            "src/main.rs",
+            &format!("fn main() {{\n    print!(\"{says}\");\n}}\n"),
+        );
+    };
+    let build = |dir: &Path| {
+        let built = Command::new("cargo")
+            .args(["build", "--offline"])
+            .current_dir(dir)
+            .env_remove("CARGO")
+            .env_remove("CARGO_MANIFEST_DIR")
+            .env_remove("CARGO_TARGET_DIR")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "the build in {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&built.stderr)
+        );
+    };
+    let says =
+        |binary: &Path| String::from_utf8(Command::new(binary).output().unwrap().stdout).unwrap();
+
+    let source = tree.join("source");
+    let real = tree.join("elsewhere/debug");
+    fs::create_dir_all(&real).unwrap();
+    fs::create_dir_all(source.join("target")).unwrap();
+    std::os::unix::fs::symlink(&real, source.join("target/debug")).unwrap();
+    package(&source, "source");
+    build(&source);
+    let binary = real.join("seeded");
+    let before = fs::read(&binary).unwrap();
+
+    let seeded = tree.join("seeded");
+    package(&seeded, "seeded");
+    let seeding = seed_build(&seeded, &source, "debug");
+    let to = seeded.join("target/debug");
+    if clones(&source) {
+        assert_eq!(seeding, Ok(true));
+        assert!(
+            fs::symlink_metadata(&to).unwrap().file_type().is_dir(),
+            "the seeded target/debug is a directory of its own, not the source's link"
+        );
+        assert_eq!(
+            fs::read(to.join("seeded")).unwrap(),
+            before,
+            "the seed holds the source's build"
+        );
+    } else {
+        assert!(seeding.is_err(), "{seeding:?}");
+        assert!(
+            fs::symlink_metadata(&to).is_err(),
+            "a seed that failed leaves nothing"
+        );
+    }
+
+    build(&seeded);
+    assert_eq!(says(&to.join("seeded")), "seeded");
+    assert_eq!(
+        fs::read(&binary).unwrap(),
+        before,
+        "the seeded tree's build left the source's binary as it was"
+    );
+    assert_eq!(says(&source.join("target/debug/seeded")), "source");
 }
 
 /// The retire half: a worktree's readings live in its own `target/harness/`

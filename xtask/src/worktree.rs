@@ -492,7 +492,18 @@ fn seed(dir: &Path, root: &Path, whose: &str, builds: &[&str]) {
 /// supports one, so the dependencies are blocks the two share: whether
 /// there was a build to copy, or why the copy failed, with what it left
 /// removed so the worktree is as cold as that says.
-pub(crate) fn seed_build(dir: &Path, root: &Path, build: &str) -> Result<bool, String> {
+///
+/// What is copied is what `root`'s `target/<build>` holds, never the
+/// directory's own entry: `cp -R` copies a symbolic link named on its
+/// command line as the link, so a `target/<build>` that is one, to a
+/// build directory on another volume say, would seed a link to the same
+/// directory: the worktree's build would relink `root`'s binaries, and
+/// `seed`'s removal of the seeded `xtask` would remove `root`'s (#4589). The source is `<from>/.`, which the path's resolution follows
+/// through such a link, so the worktree's `target/<build>` is a directory
+/// of its own whatever `root`'s is. Across volumes clonefile refuses, and
+/// the worktree starts cold. The add, the phpt lane's base worktree and
+/// the tests that seed a clone all seed through this.
+pub fn seed_build(dir: &Path, root: &Path, build: &str) -> Result<bool, String> {
     let from = root.join("target").join(build);
     if !from.is_dir() {
         return Ok(false);
@@ -501,7 +512,7 @@ pub(crate) fn seed_build(dir: &Path, root: &Path, build: &str) -> Result<bool, S
     let copied = fs::create_dir_all(dir.join("target")).and_then(|()| {
         Command::new("cp")
             .args(["-c", "-R"])
-            .arg(&from)
+            .arg(from.join("."))
             .arg(&to)
             .stdin(Stdio::null())
             .output()
