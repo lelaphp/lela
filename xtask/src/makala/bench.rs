@@ -161,7 +161,7 @@ impl Against {
 /// request touched before its chunks are kept, set to a number that is
 /// not zero: a copy, since the harness links no engine crate, which
 /// [`tests`] holds to `php_heap`'s.
-const ZEROED: &str = "ZERO_TOUCHED_PAGES";
+const ZEROED: &str = "LELA_ZERO_TOUCHED_PAGES";
 
 /// Each workload's bars: the name before the workload's, what its makala
 /// is measured against and the load each rep asks under.

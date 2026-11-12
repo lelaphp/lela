@@ -73,8 +73,14 @@ impl Default for ChunkCache {
 /// to a number that is not zero, as `ZEND_ATOL` reads one, as php's
 /// `USE_ZEND_ALLOC` is read. It is the engine's own and not a php.ini
 /// directive, since php has none, and `ini_get_all()` names nothing of
-/// it (#4348's ruling 4).
-pub(super) const ZEROED: &str = "ZERO_TOUCHED_PAGES";
+/// it (#4348's ruling 4), so it carries the product's prefix and none of
+/// php's (#4478).
+///
+/// The name promises that the pages a request touched are zeroed before
+/// its chunks are kept, and no more (#4478): it is no security boundary,
+/// it covers nothing the system allocator hands out, and it says nothing
+/// of a request still running.
+pub(super) const ZEROED: &str = "LELA_ZERO_TOUCHED_PAGES";
 
 /// What the pages a request touched carry into the next request that is
 /// handed its kept chunks: the bytes the request left there, as php's
