@@ -676,7 +676,7 @@ enum Place {
 /// of a request's, the mysqlnd connection with its socket, which wait in
 /// PDO's pool with it and in no other list until a request takes them up,
 /// and its `einfo`, whose message a persistent connection `malloc`s.
-// The derive waits on mysqlnd's `Idle` being engine state (#4541).
+#[derive(EngineState)]
 struct IdleDb {
     h: H<()>,
     conn: Idle,

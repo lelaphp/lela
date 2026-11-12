@@ -138,6 +138,7 @@ impl Connector for Filler {
 }
 
 /// One connection of [`Filler`].
+#[derive(EngineState)]
 struct Filled;
 
 impl IdleConnection for Filled {
