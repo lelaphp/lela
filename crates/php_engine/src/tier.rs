@@ -87,9 +87,9 @@ pub use sampled::{
 pub use strings::{assign_concat, concat, rope_end, rope_open, rope_push, string_offset};
 pub use view::{
     Bindings, CachedSlot, CallSite, CalledFunction, CalledMethod, CalleeSlot, Declaration, Epoch,
-    EpochClassId, EpochFunction, FuncRef, Held, MapPtrRaw, PropertySlot, UnitView, epoch,
-    epoch_state, frame_cache, func, jump_targets, landing, landing_stood, running_func, served,
-    touch, touchable,
+    EpochClassId, EpochFunction, FuncRef, Held, MapPtrRaw, PlaceClass, PropertySlot, UnitView,
+    epoch, epoch_state, frame_cache, func, jump_targets, landing, landing_stood, running_func,
+    served, touch, touchable,
 };
 
 pub use crate::api::values::ClassId;

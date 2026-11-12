@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::tier::{
-    self, CalleeSlot, ClassId, EpochClassId, FramelessAt, FuncRef, MapPtrRaw, PlainCall,
-    PropertySlot, Sample, UnitView,
+    self, CalleeSlot, ClassId, EpochClassId, FramelessAt, FuncRef, MapPtrRaw, PlaceClass,
+    PlainCall, PropertySlot, Sample, UnitView,
 };
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
@@ -511,13 +511,13 @@ struct Builder<'a> {
     bounded: HashSet<OpId>,
 }
 
-/// Where a property opline is served in place: the object it reads, the
-/// class the recording saw it of, and the slot the engine placed its
-/// name at on that class ([`UnitView::place`]).
+/// Where a property opline is served in place: the object it reads, and
+/// the slot the engine placed its name at on the class the recording saw
+/// it of ([`UnitView::place`]), with how compiled code finds that class's
+/// place ([`PropertySlot::class_of`]).
 #[derive(Debug, Clone, Copy)]
 struct PropertyAt {
     object: Object,
-    class: ClassId,
     slot: PropertySlot,
 }
 
@@ -971,10 +971,10 @@ impl<'a> Builder<'a> {
             Some(HeldBy::Slot(slot)) => Some(*slot),
             _ => None,
         };
-        // A published class's place, which the view held the class for.
+        // A published class's place, under a guard on the class the view
+        // held for it; a request's class's place is read from its slot.
         if let (Form::Inline, Some(property)) = (form, property)
-            && property.slot.cached().is_none()
-            && let Some(class) = self.view.shared_class(property.class)
+            && let PlaceClass::Shared(class) = property.slot.class_of()
         {
             self.class_guard(idx, frame, at, (property.object, class));
         }
@@ -1090,9 +1090,9 @@ impl<'a> Builder<'a> {
                 }
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
                     Imm::Property {
-                        slot: match property.slot.cached() {
-                            Some(_) => Slotted::Cached,
-                            None => Slotted::Declared(property.slot.slot()),
+                        slot: match property.slot.class_of() {
+                            PlaceClass::Cached(_) => Slotted::Cached,
+                            PlaceClass::Shared(_) => Slotted::Declared(property.slot.slot()),
                         },
                         binary: (op.opcode == Opcode::AssignObjOp)
                             .then(|| lattice::binary_of(op.extended_value))
@@ -3715,11 +3715,7 @@ impl<'a> Builder<'a> {
             _ => unused,
         };
         let typed_served = matches!(op.opcode, Opcode::FetchObjR | Opcode::AssignObj);
-        (served && (typed_served || !slot.typed())).then_some(PropertyAt {
-            object,
-            class,
-            slot,
-        })
+        (served && (typed_served || !slot.typed())).then_some(PropertyAt { object, slot })
     }
 
     /// The call a function's `INIT_FCALL_BY_NAME` or

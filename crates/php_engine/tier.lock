@@ -113,6 +113,7 @@ tier::LandingRows
 tier::MapPtrRaw
 tier::PLACE
 tier::Parked
+tier::PlaceClass
 tier::PlaceLayout
 tier::PlaceLayout::call
 tier::PlaceLayout::call_record

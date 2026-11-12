@@ -520,10 +520,31 @@ pub struct PropertySlot {
     slot: u32,
     typed: bool,
     admits: u16,
-    cached: Option<MapPtrRaw>,
+    class_of: PlaceClass,
+}
+
+/// How compiled code finds a property's place on its object's class: by
+/// a guard on a class every request of the epoch shares, whose place is
+/// the one the view took in every request, or from the runtime-cache slot
+/// of the request it runs in, for a request-scoped class. One of the two
+/// is always the case, so a place served in place is either guarded on
+/// its class or read where the class is the request's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceClass {
+    /// A published class's place, under a guard on the class.
+    Shared(EpochClassId),
+    /// A request-scoped class's place, read from this cache slot.
+    Cached(MapPtrRaw),
 }
 
 impl PropertySlot {
+    /// How compiled code finds the place: under a guard on a shared class,
+    /// or from the request's cache slot ([`PlaceClass`]).
+    #[must_use]
+    pub fn class_of(self) -> PlaceClass {
+        self.class_of
+    }
+
     /// The runtime-cache slot compiled code reads the place from, in the
     /// request it runs in, for a request-scoped class, as php's code reads
     /// `CACHED_PTR(cache_slot)` for a class that is not immutable
@@ -531,7 +552,10 @@ impl PropertySlot {
     /// published class, whose place is this one in every request.
     #[must_use]
     pub fn cached(self) -> Option<MapPtrRaw> {
-        self.cached
+        match self.class_of {
+            PlaceClass::Cached(raw) => Some(raw),
+            PlaceClass::Shared(_) => None,
+        }
     }
 
     /// The declared slot, by its number among the object's slots.
@@ -1263,13 +1287,16 @@ impl UnitView {
     /// nothing; `false` for a request-local one, which the trace reads
     /// through the request's cache slot instead.
     pub fn hold_class(&mut self, req: &Request, c: ClassId) -> bool {
-        let Some(shared) = self.shared(req, c) else {
-            return false;
-        };
+        self.held_class(req, c).is_some()
+    }
+
+    /// [`UnitView::hold_class`], with the identity it minted.
+    fn held_class(&mut self, req: &Request, c: ClassId) -> Option<EpochClassId> {
+        let shared = self.shared(req, c)?;
         if !self.classes.contains(&shared) {
             self.classes.push(shared);
         }
-        true
+        Some(shared)
     }
 
     /// The identity every request of the view's epoch names class `c` by,
@@ -1367,14 +1394,14 @@ impl UnitView {
         }
         // A request-scoped class's place is read from the cache slot of
         // the request compiled code runs in.
-        let cached = if class.is_published() {
-            if !self.hold_class(req, class) {
-                return false;
+        let class_of = if class.is_published() {
+            match self.held_class(req, class) {
+                Some(shared) => PlaceClass::Shared(shared),
+                None => return false,
             }
-            None
         } else {
             match self.cache_slot(f, slot) {
-                Some(raw) => Some(raw),
+                Some(raw) => PlaceClass::Cached(raw),
                 None => return false,
             }
         };
@@ -1404,7 +1431,7 @@ impl UnitView {
             slot,
             typed: ty.typed(),
             admits,
-            cached,
+            class_of,
         };
         if !self.places.contains(&place) {
             self.places.push(place);
