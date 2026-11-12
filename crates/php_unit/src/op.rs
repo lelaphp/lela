@@ -3,13 +3,14 @@
 //! the compiler numbers beside the line table.
 
 use php_heap::{Table, Zval};
+use php_macros::EngineState;
 
 use crate::decl::{ConstExpr, Name};
 use crate::opcode;
 use crate::{Handler, Opcode};
 
 /// An index into an op array's oplines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, EngineState)]
 pub struct OplineIdx(pub u32);
 
 /// An index into an op array's `literals`, what a `CONST` operand holds.
@@ -31,7 +32,7 @@ pub struct CacheSlot(pub u32);
 /// The cache itself is the request's and its type the engine's, which
 /// converts this where it reads it. The compiler leaves the engine's
 /// first offset, which the engine overwrites before the unit is shared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EngineState)]
 pub enum MapPtrOffset {
     Engine(u32),
     Request(u32),
@@ -327,7 +328,7 @@ impl Opline {
 }
 
 /// One `try`/`catch`/`finally` range of an op array (`zend_try_catch_element`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 pub struct TryCatch {
     pub try_op: OplineIdx,
     pub catch_op: OplineIdx,

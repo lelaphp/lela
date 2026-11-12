@@ -1,7 +1,8 @@
 # php_ssa: php's function-level analysis over one op array (ADR-0015), below
 # the compiled tier that alone calls it: Zend/Optimizer's CFG, DFG and SSA,
 # run as zend_jit_trace_build_ssa runs them. Reads the unit format and the
-# constants it carries.
+# constants it carries; takes php_macros for #[derive(EngineState)] alone,
+# which links nothing (#4544).
 [package]
 name = "php_ssa"
 version = "0.0.0"
@@ -17,6 +18,7 @@ workspace = true
 [dependencies]
 php_unit = { path = "../php_unit" }
 php_heap = { path = "../php_heap" }
+php_macros = { path = "../php_macros" }
 
 [build-dependencies]
 toml.workspace = true

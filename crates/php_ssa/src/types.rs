@@ -7,6 +7,7 @@
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
 use php_heap::{Key, Zval, ZvalType};
+use php_macros::EngineState;
 use php_unit::decl::Type;
 use php_unit::may_be;
 
@@ -14,7 +15,7 @@ use crate::LinkedTable;
 
 /// A `MAY_BE_*` mask: the types a value may have, and for an array its
 /// keys and the types of its elements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, EngineState)]
 pub struct Types(pub u32);
 
 impl Types {
@@ -150,7 +151,7 @@ pub(crate) fn bit(code: u32) -> Types {
 
 /// `zend_ssa_range`: the integers a value lies between, `underflow` and
 /// `overflow` where it may pass a bound.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 #[allow(clippy::struct_field_names)]
 pub struct Range {
     pub min: i64,
@@ -180,7 +181,7 @@ impl Range {
 
 /// An object's class as inference knows it: the class, and whether the
 /// value may be of a class below it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub struct ClassOf<C> {
     pub class: C,
     pub instanceof: bool,
@@ -188,7 +189,7 @@ pub struct ClassOf<C> {
 
 /// `zend_ssa_var_info`, as php's tier reads it: its types, its class where
 /// one is known, and its range where it has one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub struct VarInfo<C> {
     pub types: Types,
     pub class: Option<ClassOf<C>>,
@@ -207,7 +208,7 @@ impl<C> Default for VarInfo<C> {
 
 /// `func_info->return_info`: what a function returns, its range printed
 /// whether or not php holds it, as `zend_dump_op_array` prints it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub struct Returns<C> {
     pub types: Types,
     pub class: Option<ClassOf<C>>,

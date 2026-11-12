@@ -14,10 +14,13 @@
 use std::borrow::Cow;
 use std::ops::{Deref, DerefMut};
 
+use php_macros::EngineState;
+
 /// A list of the declaration model: borrowed from a native's static
 /// entry ([`List::borrowed`]) or a vector of its own (`From` a vector,
 /// `collect`). Changing a borrowed one copies it into a vector first, so
 /// the entry stays as the binary laid it.
+#[derive(EngineState)]
 pub struct List<T: Clone + 'static>(Cow<'static, [T]>);
 
 impl<T: Clone> List<T> {
@@ -207,8 +210,10 @@ impl<T: Clone + std::hash::Hash> std::hash::Hash for List<T> {
 /// One value of the declaration model behind a pointer, `?T`'s `T`:
 /// borrowed from a native's static entry ([`Boxed::borrowed`]) or a box
 /// of its own (`From` a box or a value).
+#[derive(EngineState)]
 pub struct Boxed<T: 'static>(Pointed<T>);
 
+#[derive(EngineState)]
 enum Pointed<T: 'static> {
     Borrowed(&'static T),
     Owned(Box<T>),

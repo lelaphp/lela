@@ -1,5 +1,6 @@
 # php_unit: the unit format (design §4.7, ADR-0001), a leaf below both the
-# compiler and the engine. Depends on php_heap for literal values.
+# compiler and the engine. Depends on php_heap for literal values, and on
+# php_macros for #[derive(EngineState)] alone, which links nothing (#4544).
 [package]
 name = "php_unit"
 version = "0.0.0"
@@ -14,6 +15,7 @@ workspace = true
 
 [dependencies]
 php_heap = { path = "../php_heap" }
+php_macros = { path = "../php_macros" }
 
 [dev-dependencies]
 expect-test.workspace = true
