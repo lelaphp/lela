@@ -6,8 +6,8 @@
 use std::ops::ControlFlow;
 
 use php_ext::abi::{
-    EngineState, GcTable, Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Refusals, Static,
-    Std, This, Variadic,
+    EngineState, GcTable, Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, PoolKey, Refusals,
+    Static, Std, This, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, autoload, known_method, lookup_class, new_object};
@@ -276,10 +276,11 @@ fn share(req: &mut Request, object: PhpObject, at: usize) {
 }
 
 /// `EG(persistent_list)` as far as PDO reaches it (design §4.10): the
-/// engine's pool of persistent connections, keyed `PDO:DBH:DSN=…`.
+/// engine's pool of persistent connections, keyed by the DSN and the
+/// credentials digested ([`persistent_key`]).
 #[derive(EngineState)]
 pub(crate) struct Pooled {
-    pub(crate) pool: Pool<Vec<u8>, IdleDbh>,
+    pub(crate) pool: Pool<PoolKey, IdleDbh>,
     /// The classes the natives raise, resolved at the same start.
     pub(crate) throwables: Throwables,
 }
@@ -292,7 +293,7 @@ pub(crate) const POOLED: usize = 1024;
 /// opened, each held under its key until `post_deactivate` gives it back.
 #[derive(Default)]
 pub(crate) struct Persistent {
-    lent: Lent<Vec<u8>, Box<DbhState>>,
+    lent: Lent<PoolKey, Box<DbhState>>,
 }
 
 /// What a persistent connection holds of the request given back, the
@@ -808,7 +809,7 @@ fn open(
     let ce = Throwables::of(req)?;
     let mut dead = None;
     let key = persistent.then(|| persistent_key(source, username, password, named.as_deref()));
-    if let Some(key) = &key {
+    if let Some(key) = key {
         // `efree(dbh)`: the object's own `pdo_dbh_t` gives way to the
         // persistent one, lent or made.
         object.free_beside(req);
@@ -885,34 +886,32 @@ fn apply_options(
     Ok(())
 }
 
-/// The persistent list's key, `PDO:DBH:DSN=<dsn>:<user>:<password>`, and
-/// the attribute's string after one more colon where it is one, as `%s`
-/// reads it, to its first NUL; the DSN and the credentials are cut there
-/// already.
+/// The persistent list's key: the DSN, the username and the password,
+/// an absent one empty, and the attribute's string where it is one, to
+/// its first NUL, digested ([`PoolKey`]); the DSN and the credentials are
+/// cut there already. A key decides which request is lent a connection
+/// already authenticated, so credentials that differ, however their
+/// bytes split, never meet in one, and the pool keeps no password.
 fn persistent_key(
     source: &[u8],
     username: Option<&[u8]>,
     password: Option<&[u8]>,
     named: Option<&[u8]>,
-) -> Vec<u8> {
-    let mut key = [b"PDO:DBH:DSN=".as_slice(), source, b":"].concat();
-    key.extend(username.unwrap_or_default());
-    key.push(b':');
-    key.extend(password.unwrap_or_default());
-    if let Some(named) = named {
-        key.push(b':');
-        key.extend(c_str(named));
+) -> PoolKey {
+    let (username, password) = (username.unwrap_or_default(), password.unwrap_or_default());
+    match named {
+        Some(named) => PoolKey::of(&[source, username, password, c_str(named)]),
+        None => PoolKey::of(&[source, username, password]),
     }
-    key
 }
 
 /// The persistent connection under `key` lent to the request: the one it
 /// holds, or the pool's, each where the connector's `check_liveness`
 /// finds it alive. `Err` has the factory open one, in place of the dead
 /// one the request held where it is `Some`, as `zend_list_close` drops it.
-fn lend(req: &mut Request, key: &[u8]) -> Result<usize, Option<usize>> {
+fn lend(req: &mut Request, key: PoolKey) -> Result<usize, Option<usize>> {
     let lent = &mut req.state::<Persistent>().lent;
-    if let Some(at) = lent.find(&key.to_vec()) {
+    if let Some(at) = lent.find(&key) {
         let conn = lent.get_mut(at).map(|d| std::mem::take(&mut d.conn));
         let (alive, conn) = alive(req, conn.unwrap_or_default());
         if let Some(dbh) = req.state::<Persistent>().lent.get_mut(at) {
@@ -922,7 +921,7 @@ fn lend(req: &mut Request, key: &[u8]) -> Result<usize, Option<usize>> {
     }
     let Some(idle) = req
         .engine::<Pooled>()
-        .and_then(|Pooled { pool, .. }| pool.take(&key.to_vec()))
+        .and_then(|Pooled { pool, .. }| pool.take(&key))
     else {
         return Err(None);
     };
@@ -937,7 +936,7 @@ fn lend(req: &mut Request, key: &[u8]) -> Result<usize, Option<usize>> {
         }
         return Err(None);
     }
-    Ok(req.state::<Persistent>().lent.hold(key.to_vec(), dbh))
+    Ok(req.state::<Persistent>().lent.hold(key, dbh))
 }
 
 /// `pdbh->methods->check_liveness`, php's null slot answering alive.
@@ -951,7 +950,7 @@ fn alive(req: &mut Request, conn: Conn) -> (bool, Conn) {
 /// `zend_register_persistent_resource`: the connection the factory just
 /// opened for `object` held by the request under `key`, in place of the
 /// dead one at `dead`, and the object switched over to it.
-fn hold(req: &mut Request, object: PhpObject, key: Vec<u8>, dead: Option<usize>) {
+fn hold(req: &mut Request, object: PhpObject, key: PoolKey, dead: Option<usize>) {
     let Some(dbh) = detach(req, object) else {
         return;
     };
@@ -2337,5 +2336,32 @@ impl PDO {
         clear_error(req, this);
         constructed(req, this)?;
         attribute_set(req, this, attribute, &value, 2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use php_ext::abi::PoolKey;
+
+    use super::persistent_key;
+
+    /// The key holds a digest of the credentials and none of their bytes,
+    /// and credentials that split the same bytes at another colon, or
+    /// differ in the password alone, meet in no key; the same DSN and
+    /// credentials, an absent one as an empty one, meet in one.
+    #[test]
+    fn credentials_that_differ_however_they_split_meet_in_no_key() {
+        let dsn = b"mysql:host=127.0.0.1".as_slice();
+        let key =
+            |user: &[u8], password: Option<&[u8]>| persistent_key(dsn, Some(user), password, None);
+        assert_eq!(std::mem::size_of::<PoolKey>(), 32);
+        assert_eq!(key(b"a:b", Some(b"c")), key(b"a:b", Some(b"c")));
+        assert_ne!(key(b"a:b", Some(b"c")), key(b"a", Some(b"b:c")));
+        assert_ne!(key(b"root", Some(b"one")), key(b"root", Some(b"two")));
+        assert_eq!(key(b"root", None), key(b"root", Some(b"")));
+        assert_ne!(
+            persistent_key(dsn, Some(b"root"), None, Some(b"")),
+            persistent_key(dsn, Some(b"root"), None, None),
+        );
     }
 }
