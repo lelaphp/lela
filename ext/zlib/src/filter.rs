@@ -3,14 +3,17 @@
 //! in pieces of the 32 KiB `inbuf` php copies through and handing on
 //! what fits the 32 KiB `outbuf` after every call, as php's do.
 
+use php_ext::abi::EngineState;
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
+use php_ext::request::{
+    Brigade, FilterFlags, FilterStatus, MadeFilter, Request, Stream, StreamFilter,
+};
 use php_ext::values::walk;
-use php_ext::values::{Key, Pemalloc, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Malloc, Value, ValueRef};
 
 use crate::encode::MAX_MEM_LEVEL;
-use crate::ffi::{Deflate, Flush, Inflate, Status};
+use crate::ffi::{Deflate, Flush, Heap, Inflate, Status};
 
 /// The name `MINIT` registers the factory under.
 pub(crate) const NAME: &[u8] = b"zlib.*";
@@ -27,26 +30,26 @@ const DATA: usize = 152;
 const MAX_WBITS: i64 = 15;
 
 /// What `php_zlib_filter_create` allocates beside zlib's state, with the
-/// stream's persistence: `data`, the `php_zlib_filter_data`, and its
+/// stream's persistence, `A`: `data`, the `php_zlib_filter_data`, and its
 /// `inbuf`, which each piece of a bucket is copied through, and `outbuf`,
-/// which each call writes into. zlib's own state is on the request's heap
-/// whatever the stream, as php's `php_zlib_alloc` reads a `persistent`
-/// the factory never sets.
-struct Buffers {
-    data: Pemalloc,
-    inbuf: Pemalloc,
-    outbuf: Pemalloc,
+/// which each call writes into. zlib's own state is where the stream's
+/// [`Heap`] puts it.
+#[derive(EngineState)]
+struct Buffers<A> {
+    data: A,
+    inbuf: A,
+    outbuf: A,
 }
 
-impl Buffers {
+impl<A: Heap> Buffers<A> {
     /// `pecalloc(1, sizeof(php_zlib_filter_data), persistent)` and the
     /// two `pemalloc(0x8000, persistent)`s; the `Err` is the memory
     /// limit's fatal.
-    fn new(req: &mut Request, persistent: bool) -> Result<Buffers, Thrown> {
+    fn new(req: &mut Request) -> Result<Buffers<A>, Thrown> {
         Ok(Buffers {
-            data: Pemalloc::new(req, DATA, persistent)?,
-            inbuf: Pemalloc::new(req, BUFFER, persistent)?,
-            outbuf: Pemalloc::new(req, BUFFER, persistent)?,
+            data: A::new(req, DATA)?,
+            inbuf: A::new(req, BUFFER)?,
+            outbuf: A::new(req, BUFFER)?,
         })
     }
 
@@ -97,21 +100,23 @@ impl Buffers {
 ///
 /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 13
 /// ```
-struct Inflating {
-    stream: Option<Inflate>,
-    buffers: Option<Buffers>,
+#[derive(EngineState)]
+struct Inflating<A> {
+    stream: Option<Inflate<A>>,
+    buffers: Option<Buffers<A>>,
 }
 
 /// `zlib.deflate`: the stream, `None` once the filter's `dtor` ended it,
 /// the buffers, `None` once the dtor freed them, and `finished`, whether
 /// no flush is pending since the last bucket.
-struct Deflating {
-    stream: Option<Deflate>,
-    buffers: Option<Buffers>,
+#[derive(EngineState)]
+struct Deflating<A> {
+    stream: Option<Deflate<A>>,
+    buffers: Option<Buffers<A>>,
     finished: bool,
 }
 
-impl StreamFilter for Inflating {
+impl<A: Heap> StreamFilter for Inflating<A> {
     /// `php_zlib_inflate_filter`.
     fn filter(
         &mut self,
@@ -203,7 +208,7 @@ impl StreamFilter for Inflating {
     }
 }
 
-impl StreamFilter for Deflating {
+impl<A: Heap> StreamFilter for Deflating<A> {
     /// `php_zlib_deflate_filter`.
     fn filter(
         &mut self,
@@ -346,8 +351,36 @@ pub(crate) fn factory(
     name: &[u8],
     params: Option<&Value>,
     persistent: bool,
-) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
-    let buffers = Buffers::new(req, persistent)?;
+) -> Result<Option<MadeFilter>, Thrown> {
+    if persistent {
+        create::<Malloc>(
+            req,
+            name,
+            params,
+            |filter| MadeFilter::Kept(Box::new(filter)),
+            |filter| MadeFilter::Kept(Box::new(filter)),
+        )
+    } else {
+        create::<Emalloc>(
+            req,
+            name,
+            params,
+            |filter| MadeFilter::Request(Box::new(filter)),
+            |filter| MadeFilter::Request(Box::new(filter)),
+        )
+    }
+}
+
+/// [`factory`] for a stream whose persistence is `A`, decided there, each
+/// filter answered as `inflating` or `deflating` makes it.
+fn create<A: Heap>(
+    req: &mut Request,
+    name: &[u8],
+    params: Option<&Value>,
+    inflating: fn(Inflating<A>) -> MadeFilter,
+    deflating: fn(Deflating<A>) -> MadeFilter,
+) -> Result<Option<MadeFilter>, Thrown> {
+    let buffers = Buffers::<A>::new(req)?;
     if name.eq_ignore_ascii_case(b"zlib.inflate") {
         let mut window = -MAX_WBITS;
         if let Some(params) = params
@@ -362,14 +395,15 @@ pub(crate) fn factory(
                 docref(req, Level::Warning, &text);
             }
         }
-        let Ok(stream) = Inflate::new(req, window, persistent)? else {
+        let Ok(stream) = Inflate::new(req, window)? else {
             buffers.free(req);
             return Ok(None);
         };
-        return Ok(Some(Box::new(Inflating {
+        let filter = Inflating {
             stream: Some(stream),
             buffers: Some(buffers),
-        })));
+        };
+        return Ok(Some(inflating(filter)));
     }
     if !name.eq_ignore_ascii_case(b"zlib.deflate") {
         buffers.free(req);
@@ -417,13 +451,14 @@ pub(crate) fn factory(
             }
         }
     }
-    let Ok(stream) = Deflate::new(req, (level, window, memory, 0), persistent)? else {
+    let Ok(stream) = Deflate::new(req, (level, window, memory, 0))? else {
         buffers.free(req);
         return Ok(None);
     };
-    Ok(Some(Box::new(Deflating {
+    let filter = Deflating {
         stream: Some(stream),
         buffers: Some(buffers),
         finished: true,
-    })))
+    };
+    Ok(Some(deflating(filter)))
 }

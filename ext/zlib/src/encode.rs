@@ -45,11 +45,8 @@ fn encode(
     encoding: i64,
     level: i64,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let status = match Deflate::new(
-        req,
-        (level, encoding, MAX_MEM_LEVEL, DEFAULT_STRATEGY),
-        false,
-    )? {
+    let made = Deflate::<Emalloc>::new(req, (level, encoding, MAX_MEM_LEVEL, DEFAULT_STRATEGY))?;
+    let status = match made {
         Ok(mut stream) => {
             // `zend_string_falloc` since 8.5.12: where the memory limit
             // refuses the guess, the stream is ended and the call answers
@@ -400,7 +397,7 @@ fn decode(
         input.extend_from_slice(data);
         input.push(0);
         loop {
-            let mut stream = match Inflate::new(req, encoding, false)? {
+            let mut stream = match Inflate::new(req, encoding)? {
                 Ok(stream) => stream,
                 Err(refused) => {
                     status = refused;

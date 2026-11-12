@@ -21,10 +21,10 @@
 use std::collections::VecDeque;
 
 use super::{PhpStream, StreamOp};
-use crate::api::raising::{Thrown, warning};
+use crate::api::raising::{Thrown, fatal, warning};
 use crate::api::request::{
-    Brigade, FilterChain as Chain, FilterFactory, FilterFlags, FilterStatus, Request, Stream,
-    StreamFilter, Supplier,
+    Brigade, FilterChain as Chain, FilterFactory, FilterFlags, FilterStatus, KeptFilter,
+    MadeFilter, Request, Stream, StreamFilter, Supplier,
 };
 use crate::api::values::{Emalloc, Owner, Resource, Value};
 use crate::state::Layer;
@@ -39,11 +39,11 @@ const HEADER: usize = 80;
 const FILTER_READ: i64 = 1;
 const FILTER_WRITE: i64 = 2;
 
-/// One filter on a chain: the extension's filter and, once
-/// `stream_filter_append` named it, its resource, of which the chain
-/// holds one owner.
-pub(crate) struct Attached {
-    ops: FilterOps,
+/// One filter on a chain: the extension's filter, of the type its chain
+/// holds ([`Chains`]), and, once `stream_filter_append` named it, its
+/// resource, of which the chain holds one owner.
+pub(crate) struct Attached<F: ?Sized> {
+    ops: FilterOps<F>,
     /// The filter's `php_stream_filter` on the request's heap, as
     /// `pemalloc` keeps one for a stream that is not persistent, freed
     /// where `php_stream_filter_free` frees it; `None` for a persistent
@@ -59,14 +59,14 @@ pub(crate) struct Attached {
 /// for its call ([`StreamOp::run_filter`]), the place on the chain marked with
 /// the call's number so the filter comes back to it wherever PHP code
 /// the call served moved the chain.
-enum FilterOps {
-    On(Box<dyn StreamFilter>),
+enum FilterOps<F: ?Sized> {
+    On(Box<F>),
     Lent(Lend),
 }
 
-impl FilterOps {
+impl<F: ?Sized> FilterOps<F> {
     /// The filter, where it is on its chain and not out for a call.
-    fn into_on(self) -> Option<Box<dyn StreamFilter>> {
+    fn into_on(self) -> Option<Box<F>> {
         match self {
             FilterOps::On(ops) => Some(ops),
             FilterOps::Lent(_) => None,
@@ -74,13 +74,196 @@ impl FilterOps {
     }
 }
 
+/// A filter its factory made and the layer has not put on a chain yet,
+/// with its header: what [`FilterLayer::filter_create`] answers.
+pub(crate) struct Made {
+    ops: MadeFilter,
+    header: Option<Emalloc>,
+}
+
+/// A filter taken off its chain, and what of it is still to release.
+struct Off {
+    ops: Option<MadeFilter>,
+    header: Option<Emalloc>,
+    res: Option<Owner<Resource>>,
+}
+
 /// A stream's two filter chains, `stream->readfilters` and
 /// `stream->writefilters`, head first: every read of the kind passes
 /// through the first, every write through the second before the kind.
-#[derive(Default)]
-pub(crate) struct Chains {
-    read: Vec<Attached>,
-    write: Vec<Attached>,
+/// Typed by the stream they are on: a persistent stream's hold filters it
+/// may keep past the request alone ([`KeptFilter`]), so what
+/// [`PhpStream::keep_filters`] keeps of them is engine state by type, and
+/// every other stream's hold any filter.
+pub(crate) enum Chains {
+    Request(Pair<dyn StreamFilter>),
+    Kept(Pair<dyn KeptFilter>),
+}
+
+impl Chains {
+    /// No filters yet, of the type a stream of `persistent` holds.
+    fn new(persistent: bool) -> Chains {
+        if persistent {
+            Chains::Kept(Pair::default())
+        } else {
+            Chains::Request(Pair::default())
+        }
+    }
+}
+
+/// `body` over the read and write chains `chains` holds, whichever type
+/// of filter they hold, as `pair`.
+macro_rules! pair {
+    ($chains:expr, $pair:ident => $body:expr) => {
+        match $chains {
+            Chains::Request($pair) => $body,
+            Chains::Kept($pair) => $body,
+        }
+    };
+}
+
+/// The read and the write chain of one type of filter.
+pub(crate) struct Pair<F: ?Sized> {
+    read: Vec<Attached<F>>,
+    write: Vec<Attached<F>>,
+}
+
+impl<F: ?Sized> Default for Pair<F> {
+    fn default() -> Pair<F> {
+        Pair {
+            read: Vec::new(),
+            write: Vec::new(),
+        }
+    }
+}
+
+/// The type of filter one type of chain holds, and the [`MadeFilter`]
+/// each one is.
+pub(crate) trait OnChain {
+    /// `made` as the chain holds it, or handed back where it may not
+    /// stand there.
+    fn hold(made: MadeFilter) -> Result<Box<Self>, MadeFilter>;
+
+    /// What a filter of the chain is, taken off it.
+    fn made(on: Box<Self>) -> MadeFilter;
+}
+
+impl OnChain for dyn StreamFilter {
+    fn hold(made: MadeFilter) -> Result<Box<dyn StreamFilter>, MadeFilter> {
+        Ok(match made {
+            MadeFilter::Request(filter) => filter,
+            MadeFilter::Kept(filter) => filter,
+        })
+    }
+
+    fn made(on: Box<dyn StreamFilter>) -> MadeFilter {
+        MadeFilter::Request(on)
+    }
+}
+
+impl OnChain for dyn KeptFilter {
+    fn hold(made: MadeFilter) -> Result<Box<dyn KeptFilter>, MadeFilter> {
+        match made {
+            MadeFilter::Kept(filter) => Ok(filter),
+            refused @ MadeFilter::Request(_) => Err(refused),
+        }
+    }
+
+    fn made(on: Box<dyn KeptFilter>) -> MadeFilter {
+        MadeFilter::Kept(on)
+    }
+}
+
+impl<F: ?Sized + OnChain> Attached<F> {
+    /// The filter off its chain, its filter as it was made.
+    fn off(self) -> Off {
+        Off {
+            ops: self.ops.into_on().map(F::made),
+            header: self.header,
+            res: self.res,
+        }
+    }
+}
+
+impl<F: ?Sized + OnChain> Pair<F> {
+    fn chain(&mut self, chain: Chain) -> &mut Vec<Attached<F>> {
+        match chain {
+            Chain::Read => &mut self.read,
+            Chain::Write => &mut self.write,
+        }
+    }
+
+    fn count(&self, chain: Chain) -> usize {
+        match chain {
+            Chain::Read => self.read.len(),
+            Chain::Write => self.write.len(),
+        }
+    }
+
+    /// `made` put at the tail of `chain`, `append`, or its head; handed
+    /// back where it may not stand on a chain of this type.
+    fn place(&mut self, chain: Chain, made: Made, append: bool) -> Result<(), Made> {
+        let Made { ops, header } = made;
+        let ops = match F::hold(ops) {
+            Ok(ops) => ops,
+            Err(ops) => return Err(Made { ops, header }),
+        };
+        let attached = Attached {
+            ops: FilterOps::On(ops),
+            header,
+            res: None,
+        };
+        let filters = self.chain(chain);
+        if append {
+            filters.push(attached);
+        } else {
+            filters.insert(0, attached);
+        }
+        Ok(())
+    }
+
+    /// The filter at `at` of `chain` lent out under `lend`, `None` where
+    /// there is none there or it is out already.
+    fn lend(&mut self, chain: Chain, at: usize, lend: Lend) -> Option<MadeFilter> {
+        let attached = self.chain(chain).get_mut(at)?;
+        if matches!(attached.ops, FilterOps::Lent(_)) {
+            return None;
+        }
+        std::mem::replace(&mut attached.ops, FilterOps::Lent(lend))
+            .into_on()
+            .map(F::made)
+    }
+
+    /// `made` back to the place marked `lend` on either chain; handed
+    /// back where there is no such place, or it may not stand there.
+    fn put(&mut self, lend: Lend, made: MadeFilter) -> Option<MadeFilter> {
+        let place = (self.read.iter_mut().chain(self.write.iter_mut()))
+            .find(|f| matches!(f.ops, FilterOps::Lent(n) if n == lend));
+        let Some(place) = place else {
+            return Some(made);
+        };
+        match F::hold(made) {
+            Ok(ops) => {
+                place.ops = FilterOps::On(ops);
+                None
+            }
+            Err(made) => Some(made),
+        }
+    }
+
+    /// Where on `chain` the filter `res` names stands.
+    fn position(&mut self, chain: Chain, res: Resource) -> Option<usize> {
+        self.chain(chain)
+            .iter()
+            .position(|f| f.res.as_deref() == Some(&res))
+    }
+
+    /// Every filter of both chains taken off, the read chain's first.
+    fn off(self) -> Vec<Off> {
+        (self.read.into_iter().chain(self.write))
+            .map(Attached::off)
+            .collect()
+    }
 }
 
 /// The number of one filter call, which marks the lent filter's place on
@@ -118,20 +301,17 @@ pub(super) fn defer(req: &mut Request, thrown: Thrown) {
 }
 
 impl PhpStream {
-    fn chain_mut(&mut self, chain: Chain) -> &mut Vec<Attached> {
-        let chains = self.filters.get_or_insert_with(Box::default);
-        match chain {
-            Chain::Read => &mut chains.read,
-            Chain::Write => &mut chains.write,
-        }
+    /// The stream's chains, made of the type its persistence holds where
+    /// it had none.
+    fn chains_mut(&mut self) -> &mut Chains {
+        let persistent = self.flags.persistent;
+        self.filters
+            .get_or_insert_with(|| Box::new(Chains::new(persistent)))
     }
 
     /// How many filters `chain` has.
     pub(super) fn filter_count(&self, chain: Chain) -> usize {
-        self.filters.as_ref().map_or(0, |chains| match chain {
-            Chain::Read => chains.read.len(),
-            Chain::Write => chains.write.len(),
-        })
+        (self.filters.as_deref()).map_or(0, |chains| pair!(chains, p => p.count(chain)))
     }
 
     /// Whether `chain` has a filter.
@@ -142,54 +322,70 @@ impl PhpStream {
     /// The filter at `at` of `chain` lent out for its call under the
     /// call's number `lend`, `None` where there is none there or it is
     /// out already.
-    fn lend_filter(
-        &mut self,
-        chain: Chain,
-        at: usize,
-        lend: Lend,
-    ) -> Option<Box<dyn StreamFilter>> {
-        let attached = self.chain_mut(chain).get_mut(at)?;
-        if matches!(attached.ops, FilterOps::Lent(_)) {
-            return None;
-        }
-        match std::mem::replace(&mut attached.ops, FilterOps::Lent(lend)) {
-            FilterOps::On(ops) => Some(ops),
-            FilterOps::Lent(_) => None,
-        }
+    fn lend_filter(&mut self, chain: Chain, at: usize, lend: Lend) -> Option<MadeFilter> {
+        pair!(self.filters.as_deref_mut()?, p => p.lend(chain, at, lend))
     }
 
     /// A filter back from its call to the place marked `lend`, on
     /// whichever chain it is now; handed back where PHP code the call
     /// served took the place off.
-    fn put_filter(
-        &mut self,
-        lend: Lend,
-        ops: Box<dyn StreamFilter>,
-    ) -> Option<Box<dyn StreamFilter>> {
-        let place = self
-            .filters
-            .iter_mut()
-            .flat_map(|chains| chains.read.iter_mut().chain(chains.write.iter_mut()))
-            .find(|f| matches!(f.ops, FilterOps::Lent(n) if n == lend));
-        match place {
-            Some(place) => {
-                place.ops = FilterOps::On(ops);
-                None
-            }
+    fn put_filter(&mut self, lend: Lend, ops: MadeFilter) -> Option<MadeFilter> {
+        match self.filters.as_deref_mut() {
+            Some(chains) => pair!(chains, p => p.put(lend, ops)),
             None => Some(ops),
         }
+    }
+
+    /// The filter `res` names taken off `chain`.
+    fn take_named(&mut self, chain: Chain, res: Resource) -> Option<Off> {
+        pair!(self.filters.as_deref_mut()?, p => {
+            let at = p.position(chain, res)?;
+            Some(p.chain(chain).remove(at).off())
+        })
     }
 
     /// The filters of both chains taken off and kept, as a persistent
     /// stream keeps them past its resource: each one's resource closed and
     /// the chain's owner of it given up, its `fops` kept, its `dtor` not
-    /// served ([`super::persistent::Kept`]).
+    /// served ([`super::persistent::Kept`]). A persistent stream's chains
+    /// hold kept filters alone, so each is kept as it stands; a stream of
+    /// the request's keeps none past it, each released as its free
+    /// releases them. Each chain writes and reads through what it kept
+    /// once the stream is asked for again:
+    ///
+    /// ```php
+    /// $s = stream_socket_server('tcp://127.0.0.1:0');
+    /// [$host, $port] = explode(':', stream_socket_get_name($s, false));
+    /// $a = pfsockopen($host, $port);
+    /// $peer = stream_socket_accept($s, 1);
+    /// stream_filter_append($a, 'convert.base64-encode', STREAM_FILTER_WRITE);
+    /// stream_filter_append($a, 'string.rot13', STREAM_FILTER_WRITE);
+    /// stream_filter_append($a, 'dechunk', STREAM_FILTER_READ);
+    /// $a = null;
+    /// $b = pfsockopen($host, $port);
+    /// fwrite($b, "abc"); usleep(50000);
+    /// var_dump(fread($peer, 10));
+    /// fwrite($peer, "3\r\nxyz\r\n0\r\n\r\n"); usleep(50000);
+    /// var_dump(fread($b, 3));
+    /// ```
+    /// ```expect
+    /// string(4) "LJWw"
+    /// string(3) "xyz"
+    /// ```
     pub(super) fn keep_filters(&mut self, req: &mut Request) -> super::persistent::Kept {
         let mut kept = super::persistent::Kept::default();
         let Some(chains) = self.filters.take() else {
             return kept;
         };
-        let Chains { read, write } = *chains;
+        let Pair { read, write } = match *chains {
+            Chains::Kept(pair) => pair,
+            Chains::Request(pair) => {
+                for filter in pair.off() {
+                    release_filter(req, filter);
+                }
+                return kept;
+            }
+        };
         for (chain, into) in [(read, &mut kept.read), (write, &mut kept.write)] {
             for Attached { ops, header, res } in chain {
                 if let Some(res) = res {
@@ -208,15 +404,26 @@ impl PhpStream {
     /// Kept filters attached again, each chain in its order, with no
     /// resource, as the stream php's list kept still has them.
     pub(super) fn attach_kept(&mut self, kept: super::persistent::Kept) {
-        let attach = |ops| Attached {
-            ops: FilterOps::On(ops),
-            header: None,
-            res: None,
-        };
-        self.chain_mut(Chain::Read)
-            .extend(kept.read.into_iter().map(attach));
-        self.chain_mut(Chain::Write)
-            .extend(kept.write.into_iter().map(attach));
+        fn on<F: ?Sized>(ops: Box<F>) -> Attached<F> {
+            Attached {
+                ops: FilterOps::On(ops),
+                header: None,
+                res: None,
+            }
+        }
+        let super::persistent::Kept { read, write } = kept;
+        let chains = (self.filters).get_or_insert_with(|| Box::new(Chains::new(true)));
+        match &mut **chains {
+            Chains::Kept(p) => {
+                p.read.extend(read.into_iter().map(on));
+                p.write.extend(write.into_iter().map(on));
+            }
+            Chains::Request(p) => {
+                let upcast = |ops: Box<dyn KeptFilter>| on(ops as Box<dyn StreamFilter>);
+                p.read.extend(read.into_iter().map(upcast));
+                p.write.extend(write.into_iter().map(upcast));
+            }
+        }
     }
 
     /// The filters of both chains taken off at the stream's free
@@ -226,8 +433,7 @@ impl PhpStream {
         let Some(chains) = self.filters.take() else {
             return;
         };
-        let Chains { read, write } = *chains;
-        for filter in read.into_iter().chain(write) {
+        for filter in pair!(*chains, p => p.off()) {
             release_filter(req, filter);
         }
     }
@@ -379,16 +585,17 @@ impl StreamOp<'_> {
         // A filter that can be re-entered is called through a filter shared
         // for the call, and goes back on its chain at once, where a call
         // made inside this one finds it, as php's finds the same filter.
-        let mut called = match filter.share(self.req) {
+        let mut called = match filter.as_filter().share(self.req) {
             Some(shared) => {
                 self.put_back(lend, filter);
-                shared
+                MadeFilter::Request(shared)
             }
             None => filter,
         };
         let (input, output) = io;
         self.req.streams().held_streams.push(stream.resource());
-        let answered = called.filter(self.req, stream, input, output, consumed, flags);
+        let answered =
+            (called.as_filter_mut()).filter(self.req, stream, input, output, consumed, flags);
         self.req.streams().held_streams.pop();
         self.put_back(lend, called);
         match answered {
@@ -409,10 +616,10 @@ impl StreamOp<'_> {
 
     /// A filter back from its call to its place on the chain marked
     /// `lend`; one whose place is gone, or shared for the call, closed.
-    fn put_back(&mut self, lend: Lend, filter: Box<dyn StreamFilter>) {
+    fn put_back(&mut self, lend: Lend, filter: MadeFilter) {
         let unplaced = self.with(|s| s.put_filter(lend, filter)).flatten();
         if let Some(mut unplaced) = unplaced
-            && let Err(thrown) = unplaced.close(self.req)
+            && let Err(thrown) = unplaced.as_filter_mut().close(self.req)
         {
             defer(self.req, thrown);
         }
@@ -610,20 +817,36 @@ impl StreamOp<'_> {
     /// buffer holds bytes has them wound through it at once, their
     /// filtered bytes replacing the buffer, the buffer given to a filter
     /// that asks to be fed, and php's `Filter failed to process
-    /// pre-buffered data` and `false` where it breaks.
-    fn attach(&mut self, chain: Chain, filter: Attached, append: bool) -> bool {
-        let held = self.with(|s| {
-            if !append {
-                s.chain_mut(chain).insert(0, filter);
-                return None;
-            }
-            s.chain_mut(chain).push(filter);
+    /// pre-buffered data` and [`Attach::Broke`] where it breaks. A filter
+    /// of the request's is refused a persistent stream's chain
+    /// ([`Chains`]): released, and an `InternalError`, since its factory
+    /// was told the stream is persistent.
+    fn attach(&mut self, chain: Chain, filter: Made, append: bool) -> Attach {
+        let placed = self.with(|s| -> Result<_, Made> {
+            pair!(s.chains_mut(), p => p.place(chain, filter, append))?;
             let held = &s.readbuf[s.readpos..s.writepos];
-            (chain == Chain::Read && !held.is_empty())
-                .then(|| (held.to_vec(), s.filter_count(Chain::Read) - 1))
+            Ok((append && chain == Chain::Read && !held.is_empty())
+                .then(|| (held.to_vec(), s.filter_count(Chain::Read) - 1)))
         });
-        let Some(Some((held, at))) = held else {
-            return true;
+        let (held, at) = match placed {
+            Some(Ok(Some(held))) => held,
+            Some(Ok(None)) | None => return Attach::On,
+            Some(Err(refused)) => {
+                release_filter(
+                    self.req,
+                    Off {
+                        ops: Some(refused.ops),
+                        header: refused.header,
+                        res: None,
+                    },
+                );
+                let thrown = fatal(
+                    self.req,
+                    "InternalError: a filter factory answered a filter of the request's for a persistent stream",
+                );
+                defer(self.req, thrown);
+                return Attach::Refused;
+            }
         };
         let held_len = held.len();
         let mut inp: Brigade = VecDeque::from([held]);
@@ -646,7 +869,7 @@ impl StreamOp<'_> {
                     self.req.frames().active_function_name()
                 );
                 warning(self.req, &text);
-                return false;
+                return Attach::Broke;
             }
             FilterStatus::FeedMe => {
                 self.with(PhpStream::drop_buffer);
@@ -655,12 +878,12 @@ impl StreamOp<'_> {
                 self.with(PhpStream::drop_buffer);
                 while let Some(bucket) = outp.pop_front() {
                     if !self.append_read(&bucket) {
-                        return false;
+                        return Attach::Broke;
                     }
                 }
             }
         }
-        true
+        Attach::On
     }
 
     /// `_php_stream_filter_flush` (`Z/main/streams/filter.c:360`): from the
@@ -765,9 +988,23 @@ impl PhpStream {
     }
 }
 
+/// What [`StreamOp::attach`] did with a filter: put it on its chain, put
+/// it there and then broke on the bytes the read buffer held, or refused
+/// it the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Attach {
+    On,
+    Broke,
+    Refused,
+}
+
 /// The filter just attached to `chain`: its tail, `append`, or its head.
-fn placed(s: &mut PhpStream, chain: Chain, append: bool) -> Option<&mut Attached> {
-    let filters = s.chain_mut(chain);
+fn placed<F: ?Sized + OnChain>(
+    p: &mut Pair<F>,
+    chain: Chain,
+    append: bool,
+) -> Option<&mut Attached<F>> {
+    let filters = p.chain(chain);
     let at = if append {
         filters.len().checked_sub(1)?
     } else {
@@ -783,14 +1020,14 @@ fn placed(s: &mut PhpStream, chain: Chain, append: bool) -> Option<&mut Attached
 /// with it, and a filter whose `dtor` serves PHP code serves none while
 /// a throwable is pending ([`crate::api::request::StreamFilter::close`]).
 /// A filter out for its call is closed as it comes back.
-fn release_filter(req: &mut Request, filter: Attached) {
-    let Attached { ops, header, res } = filter;
+fn release_filter(req: &mut Request, filter: Off) {
+    let Off { ops, header, res } = filter;
     if let Some(res) = res {
         res.close(req);
         res.give_up(req);
     }
-    if let Some(mut ops) = ops.into_on()
-        && let Err(thrown) = ops.close(req)
+    if let Some(mut ops) = ops
+        && let Err(thrown) = ops.as_filter_mut().close(req)
     {
         defer(req, thrown);
     }
@@ -805,7 +1042,7 @@ pub(crate) trait FilterLayer {
         name: &[u8],
         params: Option<&Value>,
         persistent: bool,
-    ) -> Option<Attached>;
+    ) -> Option<Made>;
     fn remove_filter(&mut self, res: Resource) -> Result<Option<bool>, Thrown>;
 }
 
@@ -841,7 +1078,7 @@ impl FilterLayer for Request {
         name: &[u8],
         params: Option<&Value>,
         persistent: bool,
-    ) -> Option<Attached> {
+    ) -> Option<Made> {
         let lookup = |req: &Request, wanted: &[u8]| -> Option<(FilterFactory, Supplier)> {
             req.streams_ref()?
                 .filters
@@ -906,11 +1143,7 @@ impl FilterLayer for Request {
                 }
             }
         };
-        Some(Attached {
-            ops: FilterOps::On(ops),
-            header,
-            res: None,
-        })
+        Some(Made { ops, header })
     }
 
     fn remove_filter(&mut self, res: Resource) -> Result<Option<bool>, Thrown> {
@@ -923,11 +1156,7 @@ impl FilterLayer for Request {
         let flushed = self
             .stream_op(stream, |op| {
                 let at = op
-                    .with(|s| {
-                        s.chain_mut(chain)
-                            .iter()
-                            .position(|f| f.res.as_deref() == Some(&res))
-                    })
+                    .with(|s| pair!(s.filters.as_deref_mut()?, p => p.position(chain, res)))
                     .flatten()?;
                 Some(op.flush_from(chain, at, true))
             })
@@ -941,13 +1170,7 @@ impl FilterLayer for Request {
             return Ok(Some(false));
         }
         let taken = self
-            .stream_with(stream, |s| {
-                let filters = s.chain_mut(chain);
-                let at = filters
-                    .iter()
-                    .position(|f| f.res.as_deref() == Some(&res))?;
-                Some(filters.remove(at))
-            })
+            .stream_with(stream, |s| s.take_named(chain, res))
             .flatten();
         if let Some(filter) = taken {
             release_filter(self, filter);
@@ -980,7 +1203,13 @@ impl Stream {
         let Some(filter) = req.filter_create(name, None, persistent) else {
             return Ok(false);
         };
-        req.stream_op(self, |op| op.attach(chain, filter, true));
+        let attached = req.stream_op(self, |op| op.attach(chain, filter, true));
+        if attached == Some(Attach::Refused) {
+            return match req.diagnostics_mut().stream_thrown().take() {
+                Some(thrown) => Err(thrown),
+                None => Ok(false),
+            };
+        }
         match req.diagnostics_mut().stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(true),
@@ -1031,12 +1260,17 @@ impl Stream {
             };
             let attached = req
                 .stream_op(self, |op| op.attach(chain, filter, append))
-                .unwrap_or(false);
-            if !attached {
+                .unwrap_or(Attach::Broke);
+            if attached != Attach::On {
                 // `php_stream_filter_remove(filter, 1)`: the filter that
                 // broke on the buffer taken off its chain and freed.
-                let taken = req
-                    .stream_with(self, |s| s.chain_mut(chain).pop())
+                let taken = (attached == Attach::Broke)
+                    .then(|| {
+                        req.stream_with(self, |s| {
+                            pair!(s.filters.as_deref_mut()?, p => p.chain(chain).pop().map(Attached::off))
+                        })
+                    })
+                    .flatten()
                     .flatten();
                 if let Some(filter) = taken {
                     release_filter(req, filter);
@@ -1056,9 +1290,10 @@ impl Stream {
         // laid down as the resource's payload, where the header it was
         // made with goes.
         let header = req
-            .stream_with(self, |s| {
-                placed(s, chain, append).and_then(|f| f.header.take())
-            })
+            .stream_with(
+                self,
+                |s| pair!(s.filters.as_deref_mut()?, p => placed(p, chain, append)?.header.take()),
+            )
             .flatten();
         let kind = req.types().filter;
         let named = Named {
@@ -1074,8 +1309,12 @@ impl Stream {
         };
         let mut held = Some(Owner::take(req, *res));
         req.stream_with(self, |s| {
-            if let Some(filter) = placed(s, chain, append) {
-                filter.res = held.take();
+            if let Some(chains) = s.filters.as_deref_mut() {
+                pair!(chains, p => {
+                    if let Some(filter) = placed(p, chain, append) {
+                        filter.res = held.take();
+                    }
+                });
             }
         });
         if let Some(unheld) = held {

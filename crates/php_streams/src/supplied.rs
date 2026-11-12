@@ -13,8 +13,8 @@ use std::ops::Deref;
 #[cfg(debug_assertions)]
 use crate::api::raising::Thrown;
 #[cfg(debug_assertions)]
-use crate::api::request::{Brigade, FilterFlags, FilterStatus, Stream, Whence};
-use crate::api::request::{Request, StreamFilter, StreamOps, Supplier};
+use crate::api::request::{Brigade, FilterFlags, FilterStatus, Stream, StreamFilter, Whence};
+use crate::api::request::{MadeFilter, Request, StreamOps, Supplier};
 use crate::state::Layer as _;
 
 /// One row an extension registered, with who registered it.
@@ -53,10 +53,14 @@ pub(crate) fn kind(req: &Request, ops: Box<dyn StreamOps>) -> Box<dyn StreamOps>
 }
 
 /// A filter `by`'s factory made, each call served as `by` in a debug
-/// build.
-pub(crate) fn filter(by: Supplier, filter: Box<dyn StreamFilter>) -> Box<dyn StreamFilter> {
+/// build, and kept as it was made: a filter a persistent stream may keep
+/// stays one, its supplier beside it.
+pub(crate) fn filter(by: Supplier, filter: MadeFilter) -> MadeFilter {
     #[cfg(debug_assertions)]
-    return Box::new(SuppliedFilter { filter, by });
+    return match filter {
+        MadeFilter::Request(filter) => MadeFilter::Request(Box::new(SuppliedFilter { filter, by })),
+        MadeFilter::Kept(filter) => MadeFilter::Kept(Box::new(SuppliedFilter { filter, by })),
+    };
     #[cfg(not(debug_assertions))]
     {
         let _ = by;
@@ -142,16 +146,18 @@ impl StreamOps for SuppliedOps {
     }
 }
 
-/// A filter an extension's factory made, served as it.
+/// A filter an extension's factory made, served as it: engine state where
+/// the filter is, so one a persistent stream keeps is kept wrapped.
 #[cfg(debug_assertions)]
-struct SuppliedFilter {
-    filter: Box<dyn StreamFilter>,
+#[derive(php_engine::api::abi::EngineState)]
+struct SuppliedFilter<F: ?Sized> {
+    filter: Box<F>,
     by: Supplier,
 }
 
 #[cfg(debug_assertions)]
 #[deny(clippy::missing_trait_methods)]
-impl StreamFilter for SuppliedFilter {
+impl<F: ?Sized + StreamFilter> StreamFilter for SuppliedFilter<F> {
     fn filter(
         &mut self,
         req: &mut Request,
@@ -174,7 +180,10 @@ impl StreamFilter for SuppliedFilter {
     }
 
     fn share(&self, req: &mut Request) -> Option<Box<dyn StreamFilter>> {
-        let shared = self.filter.share(req)?;
-        Some(filter(self.by, shared))
+        let filter = self.filter.share(req)?;
+        Some(Box::new(SuppliedFilter {
+            filter,
+            by: self.by,
+        }))
     }
 }

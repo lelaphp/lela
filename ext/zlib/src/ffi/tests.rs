@@ -70,7 +70,7 @@ extern "C" fn release(opaque: *mut c_void, address: *mut c_void) {
 /// A fresh stream whose allocator records into `allocations`.
 #[allow(clippy::unnecessary_box_returns)]
 fn stream(allocations: &mut Allocations) -> Box<z::z_stream> {
-    let mut stream = super::fresh(false);
+    let mut stream = super::fresh::<php_ext::values::Emalloc>();
     stream.zalloc = allocate;
     stream.zfree = release;
     stream.opaque = std::ptr::from_mut(allocations).cast();

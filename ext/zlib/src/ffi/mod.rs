@@ -13,7 +13,9 @@
 //! each call hands zlib the caller's slices for that call alone, which is
 //! all zlib reads of `next_in` and `next_out`. zlib allocates through
 //! [`alloc`] and [`free`], on the request's heap as `php_zlib_alloc`'s
-//! `safe_emalloc` allocates (design §5.13); a `gzFile` allocates through
+//! `safe_emalloc` allocates (design §5.13), or for a persistent stream's
+//! filter through [`palloc`] and [`pfree`], on the system's, as the
+//! [`Heap`] a stream is made over says; a `gzFile` allocates through
 //! zlib's own.
 #![allow(unsafe_code)]
 #![deny(
@@ -25,9 +27,13 @@ use std::ffi::{CStr, c_char, c_int, c_uint};
 use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::ptr::NonNull;
 
+use std::marker::PhantomData;
+
 use libz_sys as z;
+use php_ext::abi::EngineState;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, efree, emalloc};
+use php_ext::values::{Emalloc, Malloc, Pemalloc};
 
 // SAFETY: zlib's own `zError`, which libz-sys does not declare, from the
 // library it links: an `int` in, a pointer into a static table out.
@@ -227,17 +233,47 @@ extern "C" fn pfree(_opaque: z::voidpf, address: z::voidpf) {
     unsafe { std::alloc::dealloc(at, layout) };
 }
 
+/// Where zlib allocates a stream's state, as the allocations of the
+/// filter that holds it are made ([`Pemalloc`]): the request's heap,
+/// lent for each call, beside an [`Emalloc`], and the system's
+/// ([`palloc`]) beside a [`Malloc`], a persistent stream's.
+pub(crate) trait Heap: Pemalloc {
+    /// `zalloc` and `zfree`.
+    fn allocator() -> (z::alloc_func, z::free_func);
+
+    /// `call`, the request's heap lent for its length where zlib
+    /// allocates on it (ADR-0014); the `Err` is the memory limit's fatal
+    /// an allocation met.
+    fn serve(req: &mut Request, call: impl FnOnce() -> c_int) -> Result<c_int, Thrown>;
+}
+
+impl Heap for Emalloc {
+    fn allocator() -> (z::alloc_func, z::free_func) {
+        (alloc, free)
+    }
+
+    fn serve(req: &mut Request, call: impl FnOnce() -> c_int) -> Result<c_int, Thrown> {
+        req.memory_mut().lend_heap(call)
+    }
+}
+
+impl Heap for Malloc {
+    fn allocator() -> (z::alloc_func, z::free_func) {
+        (palloc, pfree)
+    }
+
+    fn serve(_req: &mut Request, call: impl FnOnce() -> c_int) -> Result<c_int, Thrown> {
+        Ok(call())
+    }
+}
+
 /// A `z_stream` before its init, with the allocator set and nothing
 /// else, as `memset` then `Z.zalloc = php_zlib_alloc` leaves one; boxed,
 /// since zlib's state keeps the stream's address. A persistent stream's
 /// filter allocates on the system's ([`palloc`]).
 #[allow(clippy::unnecessary_box_returns)]
-fn fresh(persistent: bool) -> Box<z::z_stream> {
-    let (zalloc, zfree): (z::alloc_func, z::free_func) = if persistent {
-        (palloc, pfree)
-    } else {
-        (alloc, free)
-    };
+fn fresh<A: Heap>() -> Box<z::z_stream> {
+    let (zalloc, zfree) = A::allocator();
     Box::new(z::z_stream {
         next_in: std::ptr::null_mut(),
         avail_in: 0,
@@ -291,8 +327,9 @@ fn avail(len: usize) -> c_uint {
 }
 
 /// One `z_stream` and what zlib allocated for it on the request's heap
-/// (design §5.13). Every call into zlib is made through [`Stream::call`],
-/// which lends the request's heap for that call alone. A stream
+/// (design §5.13), or the system's where `A` is a persistent stream's.
+/// Every call into zlib is made through [`Stream::call`], which lends the
+/// request's heap for that call alone. A stream
 /// is ended through [`Deflate::end`] or [`Inflate::end`], which gives its
 /// state back; one dropped without is left to the request's end, whose
 /// heap takes what zlib held, and zlib is not called again, since its
@@ -316,14 +353,22 @@ fn avail(len: usize) -> c_uint {
 /// -290464
 /// 128
 /// ```
-struct Stream {
+struct Stream<A> {
     z: Box<z::z_stream>,
-    /// Whether zlib allocates on the system's ([`palloc`]), so no call
-    /// lends it the request's heap.
-    persistent: bool,
+    /// Where zlib allocates, so whether a call lends it the request's
+    /// heap.
+    heap: PhantomData<A>,
 }
 
-impl Stream {
+impl<A: Heap> Stream<A> {
+    /// A stream before its init over `A`'s allocator.
+    fn fresh() -> Stream<A> {
+        Stream {
+            z: fresh::<A>(),
+            heap: PhantomData,
+        }
+    }
+
     /// `call` over the stream with `req`'s heap lent for its length
     /// (ADR-0014), so what zlib allocates and frees is the request's;
     /// the `Err` is the memory limit's fatal an allocation met, which
@@ -334,10 +379,7 @@ impl Stream {
         call: impl FnOnce(*mut z::z_stream) -> c_int,
     ) -> Result<c_int, Thrown> {
         let stream = &raw mut *self.z;
-        if self.persistent {
-            return Ok(call(stream));
-        }
-        req.memory_mut().lend_heap(|| call(stream))
+        A::serve(req, || call(stream))
     }
 
     /// One step over `input` into `output` for their length alone.
@@ -369,15 +411,22 @@ impl Stream {
     }
 }
 
-/// A `z_stream` after `deflateInit2`, its state on the request's heap.
-pub(crate) struct Deflate(Stream);
+/// A `z_stream` after `deflateInit2`, its state on the request's heap,
+/// or the system's where `A` is a persistent stream's.
+pub(crate) struct Deflate<A = Emalloc>(Stream<A>);
 
 // SAFETY: the stream and the state zlib hangs off it are reached only
 // through this value, which one request owns and serves on one thread at
 // a time (ADR-0005); zlib keeps no thread-local state.
-unsafe impl Send for Deflate {}
+unsafe impl<A: Send> Send for Deflate<A> {}
 
-impl Deflate {
+// A persistent stream's filter's: zlib's state is on the system
+// allocator ([`palloc`]), so no request's heap is reachable from it, and
+// it is kept with the stream across requests, one at a time, as `Send`
+// says.
+impl EngineState for Deflate<Malloc> {}
+
+impl<A: Heap> Deflate<A> {
     /// `deflateInit2(&Z, level, Z_DEFLATED, window, memory, strategy)`:
     /// the stream, or zlib's refusal; the outer `Err` is the memory
     /// limit's fatal. zlib is handed the header's `ZLIB_VERSION`
@@ -387,18 +436,14 @@ impl Deflate {
     pub(crate) fn new(
         req: &mut Request,
         (level, window, memory, strategy): (i64, i64, i64, i64),
-        persistent: bool,
-    ) -> Result<Result<Deflate, Status>, Thrown> {
+    ) -> Result<Result<Deflate<A>, Status>, Thrown> {
         let int = |n: i64| c_int::try_from(n).map_err(|_| Status::StreamError);
         let (Ok(level), Ok(window), Ok(memory), Ok(strategy)) =
             (int(level), int(window), int(memory), int(strategy))
         else {
             return Ok(Err(Status::StreamError));
         };
-        let mut stream = Stream {
-            z: fresh(persistent),
-            persistent,
-        };
+        let mut stream = Stream::fresh();
         let code = stream.call(req, |z| {
             // SAFETY: the stream is fresh with its allocator set, the
             // version is the header's static C string and the size the
@@ -467,13 +512,17 @@ impl Deflate {
     }
 }
 
-/// A `z_stream` after `inflateInit2`, its state on the request's heap.
-pub(crate) struct Inflate(Stream);
+/// A `z_stream` after `inflateInit2`, its state on the request's heap,
+/// or the system's where `A` is a persistent stream's.
+pub(crate) struct Inflate<A = Emalloc>(Stream<A>);
 
 // SAFETY: as Deflate's: one owner, one thread at a time (ADR-0005).
-unsafe impl Send for Inflate {}
+unsafe impl<A: Send> Send for Inflate<A> {}
 
-impl Inflate {
+// As `Deflate<Malloc>`: zlib's state on the system allocator.
+impl EngineState for Inflate<Malloc> {}
+
+impl<A: Heap> Inflate<A> {
     /// `inflateInit2(&Z, window)`: the stream, or zlib's refusal; the
     /// outer `Err` is the memory limit's fatal. zlib is handed the
     /// header's `ZLIB_VERSION` ([`header_version`]) as the macro hands it
@@ -482,15 +531,11 @@ impl Inflate {
     pub(crate) fn new(
         req: &mut Request,
         window: i64,
-        persistent: bool,
-    ) -> Result<Result<Inflate, Status>, Thrown> {
+    ) -> Result<Result<Inflate<A>, Status>, Thrown> {
         let Ok(window) = c_int::try_from(window) else {
             return Ok(Err(Status::StreamError));
         };
-        let mut stream = Stream {
-            z: fresh(persistent),
-            persistent,
-        };
+        let mut stream = Stream::fresh();
         // SAFETY: the stream is fresh with its allocator set, the version
         // is the header's static C string and the size the struct's.
         let code = stream.call(req, |z| unsafe {

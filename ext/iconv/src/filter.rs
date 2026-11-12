@@ -10,8 +10,11 @@
 
 use crate::MAX_NAME;
 use crate::ffi::{Cd, Errno};
+use php_ext::abi::EngineState;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
+use php_ext::request::{
+    Brigade, FilterFlags, FilterStatus, MadeFilter, Request, Stream, StreamFilter,
+};
 use php_ext::values::Value;
 
 /// The name php registers the factory under.
@@ -23,7 +26,9 @@ const STUB: usize = 128;
 
 /// `php_iconv_stream_filter`: the converter, the two names its warnings
 /// print, and `stub`, the bytes of a character the last bucket ended
-/// inside of.
+/// inside of. It holds nothing of a request's, so any stream may keep
+/// it.
+#[derive(EngineState)]
 struct Filter {
     cd: Cd,
     from: String,
@@ -289,7 +294,7 @@ pub(crate) fn factory(
     name: &[u8],
     _params: Option<&Value>,
     _persistent: bool,
-) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+) -> Result<Option<MadeFilter>, Thrown> {
     Ok(charsets(name).and_then(|(from, to)| {
         let cd = Cd::open(to, from).ok()?;
         let named = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
@@ -299,7 +304,7 @@ pub(crate) fn factory(
             to: named(to),
             stub: Vec::new(),
         };
-        Some(Box::new(filter) as Box<dyn StreamFilter>)
+        Some(MadeFilter::Kept(Box::new(filter)))
     }))
 }
 

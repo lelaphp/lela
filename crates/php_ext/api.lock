@@ -799,6 +799,7 @@ request::Interrupt::raise
 request::Interrupt::raised
 request::Interrupt::receive_signals
 request::Invalidation
+request::KeptFilter
 request::Lent
 request::Lent::at
 request::Limits
@@ -814,6 +815,7 @@ request::Limits::start_periodic
 request::Limits::stop_periodic
 request::Limits::suspend_time_limit
 request::MAXPATHLEN
+request::MadeFilter
 request::Memory
 request::Memory::adopt
 request::Memory::disown
@@ -1323,6 +1325,7 @@ values::Key::lookup
 values::Key::to_prop_name
 values::Layout
 values::Laziness
+values::Malloc
 values::NameHasher
 values::Owner
 values::Owner::append

@@ -9,15 +9,19 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::EngineState;
 use php_ext::raising::Thrown;
 use php_ext::request::{
-    Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _, Whence,
+    Brigade, FilterFlags, FilterStatus, MadeFilter, Request, Stream, StreamFilter, Streams as _,
+    Whence,
 };
-use php_ext::values::{Pemalloc, Value};
+use php_ext::values::{Emalloc, Malloc, Pemalloc, Value};
 
 mod convert;
 
-/// One of the three string filters: the byte map it applies.
+/// One of the three string filters: the byte map it applies, which any
+/// stream may keep.
+#[derive(EngineState)]
 struct Strfilter {
     map: fn(u8) -> u8,
 }
@@ -66,8 +70,8 @@ fn rot13_factory(
     _name: &[u8],
     _params: Option<&Value>,
     _persistent: bool,
-) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
-    Ok(Some(Box::new(Strfilter { map: rot13 })))
+) -> Result<Option<MadeFilter>, Thrown> {
+    Ok(Some(MadeFilter::Kept(Box::new(Strfilter { map: rot13 }))))
 }
 
 #[allow(clippy::unnecessary_wraps)] // `FilterFactory`'s signature
@@ -76,10 +80,10 @@ fn toupper_factory(
     _name: &[u8],
     _params: Option<&Value>,
     _persistent: bool,
-) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
-    Ok(Some(Box::new(Strfilter {
+) -> Result<Option<MadeFilter>, Thrown> {
+    Ok(Some(MadeFilter::Kept(Box::new(Strfilter {
         map: |b| b.to_ascii_uppercase(),
-    })))
+    }))))
 }
 
 #[allow(clippy::unnecessary_wraps)] // `FilterFactory`'s signature
@@ -88,10 +92,10 @@ fn tolower_factory(
     _name: &[u8],
     _params: Option<&Value>,
     _persistent: bool,
-) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
-    Ok(Some(Box::new(Strfilter {
+) -> Result<Option<MadeFilter>, Thrown> {
+    Ok(Some(MadeFilter::Kept(Box::new(Strfilter {
         map: |b| b.to_ascii_lowercase(),
-    })))
+    }))))
 }
 
 /// `sizeof(php_consumed_filter_data)` and `sizeof(php_chunked_filter_data)`
@@ -101,14 +105,28 @@ const CHUNKED_DATA: usize = 16;
 
 /// `php_consumed_filter_data`: the stream's position at the filter's
 /// first call, and the bytes it has passed on since; `data` is what php
-/// `pecalloc`s for them, `None` once the `dtor` gave it back.
-struct Consumed {
+/// `pecalloc`s for them, with the stream's persistence, `None` once the
+/// `dtor` gave it back.
+#[derive(EngineState)]
+struct Consumed<A> {
     offset: Option<i64>,
     passed: usize,
-    data: Option<Pemalloc>,
+    data: Option<A>,
 }
 
-impl StreamFilter for Consumed {
+impl<A: Pemalloc> Consumed<A> {
+    /// `consumed_filter_create`'s `pecalloc`; the `Err` is the memory
+    /// limit's fatal.
+    fn new(req: &mut Request) -> Result<Consumed<A>, Thrown> {
+        Ok(Consumed {
+            offset: None,
+            passed: 0,
+            data: Some(A::new(req, CONSUMED_DATA)?),
+        })
+    }
+}
+
+impl<A: Pemalloc> StreamFilter for Consumed<A> {
     /// `consumed_filter_dtor`: the data given back.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
         if let Some(data) = self.data.take() {
@@ -173,19 +191,19 @@ fn consumed_factory(
     name: &[u8],
     _params: Option<&Value>,
     persistent: bool,
-) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+) -> Result<Option<MadeFilter>, Thrown> {
     if !name.eq_ignore_ascii_case(b"consumed") {
         return Ok(None);
     }
-    Ok(Some(Box::new(Consumed {
-        offset: None,
-        passed: 0,
-        data: Some(Pemalloc::new(req, CONSUMED_DATA, persistent)?),
-    })))
+    Ok(Some(if persistent {
+        MadeFilter::Kept(Box::new(Consumed::<Malloc>::new(req)?))
+    } else {
+        MadeFilter::Request(Box::new(Consumed::<Emalloc>::new(req)?))
+    }))
 }
 
 /// `php_chunked_filter_state`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 enum ChunkState {
     SizeStart,
     Size,
@@ -200,15 +218,26 @@ enum ChunkState {
 }
 
 /// `php_chunked_filter_data`: where the decoder stands, and what is left
-/// of the chunk it is in; `data` is what php `pecalloc`s for them, `None`
-/// once the `dtor` gave it back.
-struct Dechunk {
+/// of the chunk it is in; `data` is what php `pecalloc`s for them, with
+/// the stream's persistence, `None` once the `dtor` gave it back.
+#[derive(EngineState)]
+struct Dechunk<A> {
     chunk_size: usize,
     state: ChunkState,
-    data: Option<Pemalloc>,
+    data: Option<A>,
 }
 
-impl Dechunk {
+impl<A: Pemalloc> Dechunk<A> {
+    /// `chunked_filter_create`'s `pecalloc`; the `Err` is the memory
+    /// limit's fatal.
+    fn new(req: &mut Request) -> Result<Dechunk<A>, Thrown> {
+        Ok(Dechunk {
+            chunk_size: 0,
+            state: ChunkState::SizeStart,
+            data: Some(A::new(req, CHUNKED_DATA)?),
+        })
+    }
+
     /// `php_dechunk` (`Z/ext/standard/filters.c:1699`): the chunks' bodies
     /// moved to the front of `buf`, their sizes, extensions, line ends
     /// and the trailer dropped; bytes that are no chunk pass as they
@@ -362,7 +391,7 @@ impl Dechunk {
     }
 }
 
-impl StreamFilter for Dechunk {
+impl<A: Pemalloc> StreamFilter for Dechunk<A> {
     /// `php_chunked_dtor`: the data given back.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
         if let Some(data) = self.data.take() {
@@ -416,15 +445,15 @@ fn dechunk_factory(
     name: &[u8],
     _params: Option<&Value>,
     persistent: bool,
-) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+) -> Result<Option<MadeFilter>, Thrown> {
     if !name.eq_ignore_ascii_case(b"dechunk") {
         return Ok(None);
     }
-    Ok(Some(Box::new(Dechunk {
-        chunk_size: 0,
-        state: ChunkState::SizeStart,
-        data: Some(Pemalloc::new(req, CHUNKED_DATA, persistent)?),
-    })))
+    Ok(Some(if persistent {
+        MadeFilter::Kept(Box::new(Dechunk::<Malloc>::new(req)?))
+    } else {
+        MadeFilter::Request(Box::new(Dechunk::<Emalloc>::new(req)?))
+    }))
 }
 
 /// `PHP_MINIT(standard_filters)` (`Z/ext/standard/filters.c:1907`)'s

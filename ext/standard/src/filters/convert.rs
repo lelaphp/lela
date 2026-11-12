@@ -12,10 +12,13 @@
 //! into. None of the four answers `PHP_CONV_ERR_MORE`, so the stub php
 //! keeps for a converter that does is never filled, and is not here.
 
+use php_ext::abi::EngineState;
 use php_ext::coerce::{to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
-use php_ext::values::{Pemalloc, PhpArray, Value};
+use php_ext::request::{
+    Brigade, FilterFlags, FilterStatus, MadeFilter, Request, Stream, StreamFilter,
+};
+use php_ext::values::{Emalloc, Malloc, Pemalloc, PhpArray, Value};
 
 /// `php_conv_err_t` less `PHP_CONV_ERR_SUCCESS`, the `Ok`, and the three
 /// no converter here answers.
@@ -50,6 +53,7 @@ fn b64_dec(c: u8) -> u32 {
 
 /// `php_conv_base64_encode`: the line break and its length, the up to
 /// two bytes left from the last call, and the room left on the line.
+#[derive(EngineState)]
 struct Base64Encode {
     lbchars: Option<Vec<u8>>,
     erem: [u8; 3],
@@ -163,7 +167,7 @@ impl Base64Encode {
 
 /// `php_conv_base64_decode`: the bits read and not yet a byte, the
 /// `=` seen, and whether the padding ended the data.
-#[derive(Default)]
+#[derive(Default, EngineState)]
 struct Base64Decode {
     urem: u32,
     urem_nbits: u32,
@@ -260,7 +264,7 @@ impl Base64Decode {
 }
 
 /// `PHP_CONV_QPRINT_OPT_BINARY` and `PHP_CONV_QPRINT_OPT_FORCE_ENCODE_FIRST`.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, EngineState)]
 struct QprintOpts {
     binary: bool,
     force_encode_first: bool,
@@ -269,6 +273,7 @@ struct QprintOpts {
 /// `php_conv_qprint_encode`: the line break, the options, the room left
 /// on the line, and how much of a line break the input has matched
 /// (`lb_cnt`) and given back (`lb_ptr`).
+#[derive(EngineState)]
 struct QprintEncode {
     lbchars: Option<Vec<u8>>,
     opts: QprintOpts,
@@ -399,6 +404,7 @@ impl QprintEncode {
 
 /// `php_conv_qprint_decode`: the line break, `None` to tell `\r\n`,
 /// `\r` and `\n` apart as they come, and the scanner's state.
+#[derive(EngineState)]
 struct QprintDecode {
     lbchars: Option<Vec<u8>>,
     scan_stat: u32,
@@ -560,6 +566,7 @@ impl QprintDecode {
 }
 
 /// `php_conv`, one of the four.
+#[derive(EngineState)]
 enum Conv {
     Base64Encode(Base64Encode),
     Base64Decode(Base64Decode),
@@ -725,13 +732,40 @@ impl Conv {
 /// with the stream's persistence: the `php_convert_filter`, the
 /// `pestrdup`'d name, the converter and its `pestrndup`'d line break, given back in
 /// its `dtor`.
-pub(super) struct ConvertFilter {
+#[derive(EngineState)]
+pub(super) struct ConvertFilter<A> {
     cd: Conv,
     filtername: String,
-    held: Vec<Pemalloc>,
+    held: Vec<A>,
 }
 
-impl ConvertFilter {
+impl<A: Pemalloc> ConvertFilter<A> {
+    /// The filter over `cd`, with what php allocates for it: the
+    /// `php_convert_filter`, the name of `name_len` bytes and its
+    /// terminator, the converter and its line break. The `Err` is the
+    /// memory limit's fatal.
+    fn new(
+        req: &mut Request,
+        cd: Conv,
+        filtername: String,
+        name_len: usize,
+    ) -> Result<ConvertFilter<A>, Thrown> {
+        let (size, lbchars) = cd.allocated();
+        let mut held = vec![
+            A::new(req, FILTER)?,
+            A::new(req, name_len + 1)?,
+            A::new(req, size)?,
+        ];
+        if let Some(lbchars) = lbchars {
+            held.push(A::new(req, lbchars.len() + 1)?);
+        }
+        Ok(ConvertFilter {
+            cd,
+            filtername,
+            held,
+        })
+    }
+
     /// `strfilter_convert_append_bucket` (`Z/ext/standard/filters.c:1314`):
     /// one bucket's bytes converted, or the flush for `None`, what came
     /// out one bucket on `output`; a converter's error is php's warning
@@ -771,7 +805,7 @@ impl ConvertFilter {
     }
 }
 
-impl StreamFilter for ConvertFilter {
+impl<A: Pemalloc> StreamFilter for ConvertFilter<A> {
     /// `strfilter_convert_dtor`: the converter's line break, the
     /// converter, the name and the filter given back.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
@@ -887,7 +921,7 @@ pub(super) fn create(
     name: &[u8],
     params: Option<&Value>,
     persistent: bool,
-) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+) -> Result<Option<MadeFilter>, Thrown> {
     let filtername = String::from_utf8_lossy(name).into_owned();
     let options = params.map(php_ext::values::Value::as_array);
     if options == Some(None) {
@@ -902,18 +936,11 @@ pub(super) fn create(
     let Some(cd) = conv_open(req, &name[dot + 1..], options)? else {
         return Ok(None);
     };
-    let (size, lbchars) = cd.allocated();
-    let mut held = vec![
-        Pemalloc::new(req, FILTER, persistent)?,
-        Pemalloc::new(req, name.len() + 1, persistent)?,
-        Pemalloc::new(req, size, persistent)?,
-    ];
-    if let Some(lbchars) = lbchars {
-        held.push(Pemalloc::new(req, lbchars.len() + 1, persistent)?);
-    }
-    Ok(Some(Box::new(ConvertFilter {
-        cd,
-        filtername,
-        held,
-    })))
+    Ok(Some(if persistent {
+        let filter = ConvertFilter::<Malloc>::new(req, cd, filtername, name.len())?;
+        MadeFilter::Kept(Box::new(filter))
+    } else {
+        let filter = ConvertFilter::<Emalloc>::new(req, cd, filtername, name.len())?;
+        MadeFilter::Request(Box::new(filter))
+    }))
 }

@@ -4,6 +4,7 @@
 
 use php_heap::Block;
 
+use crate::api::abi::EngineState;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 
@@ -125,11 +126,21 @@ impl Emalloc {
     }
 }
 
-/// One `pemalloc(len, persistent)`: an [`Emalloc`] on the request's heap
-/// where the allocation is not persistent, else `len` bytes of the system
-/// allocator, as php's `malloc` holds them, which no request counts. What
-/// php `pemalloc`s for a stream's filter takes the stream's persistence,
-/// so a filter on a `pfsockopen` stream is counted nowhere.
+/// `pemalloc(len, 1)`: `len` bytes of the system allocator, as php's
+/// `__zend_malloc` holds a persistent allocation, which no request
+/// counts or frees. Engine state by type, since no request's heap is
+/// reachable from it, so what holds it outlives the request that made
+/// it: a filter on a persistent stream's chain.
+#[derive(Debug, EngineState)]
+pub struct Malloc(Box<[u8]>);
+
+/// One `pemalloc(len, persistent)` whose persistence is its type: an
+/// [`Emalloc`] on the request's heap, or a [`Malloc`] of the system
+/// allocator where the allocation is persistent. A native that php hands
+/// `persistent` is generic over the one it holds and decides it once,
+/// where it is handed it. What php `pemalloc`s for a stream's filter
+/// takes the stream's persistence, so a filter on a `pfsockopen` stream
+/// is counted nowhere.
 ///
 /// ```php
 /// $s = stream_socket_server('tcp://127.0.0.1:0');
@@ -144,47 +155,53 @@ impl Emalloc {
 /// 3531152
 /// 32
 /// ```
-#[derive(Debug)]
-pub struct Pemalloc(Held);
-
-#[derive(Debug)]
-enum Held {
-    Request(Emalloc),
-    System(Box<[u8]>),
-}
-
-impl Pemalloc {
+pub trait Pemalloc: Sized + Send + 'static {
     /// `pecalloc(1, len, persistent)`: `len` zero bytes; the `Err` is the
     /// memory limit's fatal.
-    pub fn new(req: &mut Request, len: usize, persistent: bool) -> Result<Pemalloc, Thrown> {
-        if persistent {
-            return Ok(Pemalloc(Held::System(vec![0; len].into_boxed_slice())));
-        }
-        Ok(Pemalloc(Held::Request(Emalloc::new(req, len)?)))
-    }
+    fn new(req: &mut Request, len: usize) -> Result<Self, Thrown>;
 
     /// The bytes, as written.
-    #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        match &self.0 {
-            Held::Request(block) => block.bytes(),
-            Held::System(block) => block,
-        }
-    }
+    fn bytes(&self) -> &[u8];
 
     /// The bytes, to write.
-    pub fn bytes_mut(&mut self) -> &mut [u8] {
-        match &mut self.0 {
-            Held::Request(block) => block.bytes_mut(),
-            Held::System(block) => block,
-        }
-    }
+    fn bytes_mut(&mut self) -> &mut [u8];
 
     /// `pefree(ptr, persistent)`: the allocation back to where it came
     /// from.
-    pub fn free(self, req: &mut Request) {
-        if let Held::Request(block) = self.0 {
-            block.free(req);
-        }
+    fn free(self, req: &mut Request);
+}
+
+impl Pemalloc for Emalloc {
+    fn new(req: &mut Request, len: usize) -> Result<Emalloc, Thrown> {
+        Emalloc::new(req, len)
     }
+
+    fn bytes(&self) -> &[u8] {
+        Emalloc::bytes(self)
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        Emalloc::bytes_mut(self)
+    }
+
+    fn free(self, req: &mut Request) {
+        Emalloc::free(self, req);
+    }
+}
+
+impl Pemalloc for Malloc {
+    fn new(_req: &mut Request, len: usize) -> Result<Malloc, Thrown> {
+        Ok(Malloc(vec![0; len].into_boxed_slice()))
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+
+    /// What the system allocator holds goes back as it is dropped.
+    fn free(self, _req: &mut Request) {}
 }
