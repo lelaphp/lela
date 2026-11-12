@@ -875,7 +875,11 @@ fn is_entity(text: &str) -> bool {
 /// `php_cli_server_log_response`: `<peer> [<status>]: <method> <uri>`,
 /// ` - <message>` where one is given and ` - <error> in <file> on line
 /// <n>` where the request ended in a fatal, which makes a 200 a 500 for
-/// the colour; the whole in its colour where the log is coloured.
+/// the colour; the whole in its colour where the log is coloured. The
+/// file is the program the request's path named, or one it included, so
+/// each `\r` and `\n` of it is written as two bytes
+/// ([`php_sapi::log_field`], #4355); the error's message is written as
+/// it was raised.
 fn log_response(
     site: &Site,
     client: &Client,
@@ -902,7 +906,7 @@ fn log_response(
         write!(
             line,
             " - {error} in {} on line {at}",
-            String::from_utf8_lossy(file)
+            String::from_utf8_lossy(&php_sapi::log_field(file))
         )
         .ok();
     }

@@ -4,15 +4,19 @@
 //! gone, as a rotation leaves it; and a `\r` or `\n` in a field the
 //! request supplies is written as two bytes, in the access log's `%e`,
 //! `%f`, `%m`, `%o`, `%q`, `%r` and `%u`, in the line naming a slow
-//! request and in the slow log's `script_filename` and frames, which hold
-//! the program's path, so the request writes no line of its own.
+//! request, in the slow log's `script_filename` and frames, which hold
+//! the program's path, and in the lines naming a program the pool refused
+//! by its extension or that did not open, so the request writes no line
+//! of its own.
 
 #![allow(
     clippy::disallowed_methods,
     reason = "a test starts its own threads (seams.toml rule fork.threads)"
 )]
 
+use std::ffi::OsStr;
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -374,5 +378,88 @@ fn a_timed_out_request_s_line_breaks_are_escaped() {
         fpm.contains(&format!("{REQUEST} execution timed out")),
         "{fpm}"
     );
+    assert!(!forged(&log), "{fpm}");
+}
+
+/// A program the pool refuses, by its extension or because it did not
+/// open, is named in the error log's line for it with each `\r` and `\n`
+/// of its path written as two bytes (#4559), one line for each refusal;
+/// the second refusal is held only where this user cannot open a file
+/// whose permissions are `0o000`.
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+fn a_refused_program_s_line_breaks_are_escaped() {
+    let mut master = Master::start("refused", "022", "catch_workers_output = yes\n");
+    let path = |name: &str| master.dir.join(name).into_os_string().into_encoded_bytes();
+    let denied = path("x\r\nFORGED-X.txt");
+    let unopened = path("closed\r\nFORGED-O.php");
+    // Each file stands, as the pool finds a program before it refuses
+    // one; the second is no one's to read.
+    for file in [&denied, &unopened] {
+        std::fs::write(OsStr::from_bytes(file), "<?php echo 'ran';\n")
+            .expect("the program is written");
+    }
+    std::fs::set_permissions(
+        OsStr::from_bytes(&unopened),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .expect("the program is closed");
+    // A user the file's permissions do not refuse, root, opens it, and the
+    // pool serves it: the line for a program that did not open is held
+    // only where this user is refused the file.
+    let refused_to_us = std::fs::File::open(OsStr::from_bytes(&unopened)).is_err();
+    let pairs = |program: &[u8]| -> Vec<u8> {
+        request(
+            master.connect(),
+            &[
+                (b"SCRIPT_FILENAME", program),
+                (b"REQUEST_METHOD", b"GET"),
+                (b"REQUEST_URI", b"/x"),
+            ],
+        )
+    };
+    let body = pairs(&denied);
+    assert!(
+        body.ends_with(b"Access denied.\n"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let body = pairs(&unopened);
+    if refused_to_us {
+        assert!(
+            body.ends_with(b"Access denied.\n"),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    master.halt();
+    let log = std::fs::read(master.dir.join("fpm.log")).unwrap_or_default();
+    let fpm = String::from_utf8_lossy(&log);
+    let line = |text: Vec<u8>| {
+        let text = String::from_utf8_lossy(&text).into_owned();
+        assert_eq!(
+            fpm.lines().filter(|line| line.contains(&text)).count(),
+            1,
+            "{text}\n{fpm}"
+        );
+    };
+    line(
+        [
+            &b"Access to the script '"[..],
+            &escaped(&denied),
+            b"' has been denied (see security.limit_extensions)",
+        ]
+        .concat(),
+    );
+    if refused_to_us {
+        line(
+            [
+                &b"Unable to open primary script: "[..],
+                &escaped(&unopened),
+                b" (Permission denied)",
+            ]
+            .concat(),
+        );
+    }
     assert!(!forged(&log), "{fpm}");
 }

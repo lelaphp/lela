@@ -1,19 +1,27 @@
-//! A field a request supplied, as a line of a log holds it (#4355): the
-//! one escape every log the engine and its hosts keep runs such a field
-//! through, the file of a diagnostic's log form here, php-fpm's access
-//! log and slow log and makala's refusals through `php_sapi`.
+//! A value a request supplied, as a line of a log holds it (#4355): each
+//! `\r` is written as the two bytes `\r` and each `\n` as `\n`, and every
+//! other byte as its own.
 //!
-//! A line of a log is one entry, so a field that could end the line
-//! could write a second entry the request made up. Each `\r` is written
-//! as the two bytes `\r` and each `\n` as `\n`, and every other byte as
-//! php writes it: a line that holds neither is php's own bytes, and a
-//! parser of php's log formats reads every other line as before. The
-//! price is that a field holding the two bytes `\` `n` reads as one that
-//! held a line feed; what stays certain is that each line is one entry.
+//! A line of a log is one entry, so a value that could end the line could
+//! write a second entry the request made up. A value that holds neither
+//! byte is written unchanged. The price is that a value holding the two
+//! bytes `\` `n` reads as one that held a line feed.
 //!
-//! What php itself writes into an entry, a message over several lines or
-//! the stack trace after an uncaught throwable, is not a field and is
-//! written as php writes it.
+//! The values that go through the function: the file of a diagnostic's
+//! log form, here; and through `php_sapi`, the fields of php-fpm's access
+//! log, the request in its lines naming a slow request, the program and
+//! the frames' files in its slow log, the path in its two lines refusing
+//! a program (by its extension, or one that did not open) and in makala's
+//! copies of them, and the file in the built-in server's line for a
+//! request that ended in a fatal (#4559).
+//!
+//! The text that does not: a diagnostic's message and its stack trace,
+//! the message of an uncaught throwable among them, which are written as
+//! they stand, a request's value they quote included (#4592); the program
+//! in php-fpm's lines naming a slow request, each byte of it outside
+//! printable ASCII written as `.`; and what a host writes from a value
+//! that cannot hold either byte, a method from a fixed table or a request
+//! line's raw target.
 
 use std::borrow::Cow;
 

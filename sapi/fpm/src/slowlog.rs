@@ -3,14 +3,14 @@
 //! request to the pool's slow log once, and to
 //! `request_terminate_timeout`, which ends the child with `SIGTERM`.
 //!
-//! Two things differ from php on purpose (#4355). The request's fields,
-//! the method, path and query of the line naming a slow or timed-out
-//! request, and the slow log's `script_filename` and each frame's name
-//! and file, which hold the program's path, have each
-//! `\r` and `\n` written as two bytes ([`php_sapi::log_field`]), so a
-//! request cannot write a line of its own into either log. And a slow log
-//! the trace finds gone is made owner-only, `0600`, as the configuration
-//! makes it at the start.
+//! The request's fields, the method, path and query of the line naming a
+//! slow or timed-out request, and the slow log's `script_filename` and
+//! each frame's name and file, which hold the program's path, have each
+//! `\r` and `\n` written as two bytes ([`php_sapi::log_field`], #4355), so
+//! no request writes a line of its own into either log. A slow log the
+//! trace finds gone is made again owner-only, `0600`, as the
+//! configuration makes it at the start, so only its owner reads what a
+//! request left in it.
 
 use std::os::unix::fs::OpenOptionsExt as _;
 
