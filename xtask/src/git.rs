@@ -335,9 +335,27 @@ pub(crate) fn fed(root: &Path, args: &[&str], stdin: &str) -> Result<String> {
     utf8(run(Command::new("git"), root, args, Some(stdin))?)
 }
 
+/// The repositories this process laid down apart from the workspace
+/// ([`crate::sources::Laid`]), each asked as itself: the `GIT_` variables
+/// a hook exports name the repository being committed to, and under them
+/// `-C` would read and write that one's index in a laid tree's place.
+static APART: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+
+/// `root`, and every path under it, asked without the hook's `GIT_`
+/// variables until [`rejoined`].
+pub(crate) fn apart(root: &Path) {
+    crate::locked(&APART).insert(root.to_path_buf());
+}
+
+/// `root` asked as any other again, its tree gone.
+pub(crate) fn rejoined(root: &Path) {
+    crate::locked(&APART).remove(root);
+}
+
 /// `git`, as `command` stands, run in `root` with `stdin` fed to it: what
 /// it wrote on stdout, or the error that carries what it wrote on stderr
-/// when it exited non-zero.
+/// when it exited non-zero. A root laid [`apart`] is asked without the
+/// `GIT_` variables this process inherited.
 pub(crate) fn run(
     mut command: Command,
     root: &Path,
@@ -346,6 +364,16 @@ pub(crate) fn run(
 ) -> Result<Vec<u8>> {
     #[cfg(test)]
     recorder::record(root, args);
+    if crate::locked(&APART)
+        .iter()
+        .any(|laid| root.starts_with(laid))
+    {
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(key);
+            }
+        }
+    }
     let mut child = command
         .arg("-C")
         .arg(root)

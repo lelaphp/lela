@@ -19,6 +19,9 @@ pub struct Present {
     pub name: String,
     /// The crate's directory, absolute.
     pub dir: PathBuf,
+    /// The workspace root the crate is under, which git lists its sources
+    /// from.
+    pub root: PathBuf,
     /// The cargo package name; `php_ext_random` for `ext/random`.
     pub package: String,
     pub deps: Vec<Dep>,
@@ -66,18 +69,21 @@ impl Present {
         lib.is_file().then_some(lib)
     }
 
-    /// Every `.rs` file under the crate's source directories, in path
-    /// order.
+    /// Every `.rs` file under the crate's source directories and its
+    /// `build.rs`, in path order, as git lists them ([`crate::git::files`]):
+    /// a file git ignores is in no commit and moves no key, so it is not
+    /// read (#4620). Git lists from the workspace root with the crate's
+    /// directories as the pathspecs, as budget does: run in the crate's
+    /// directory under the `GIT_DIR` a linked worktree's hook exports, git
+    /// takes that directory for the top of the work tree and reads no
+    /// `.gitignore` above it.
     pub fn sources(&self) -> Result<Vec<PathBuf>> {
-        let mut out = Vec::new();
-        for sub in ["src", "tests", "benches", "examples"] {
-            crate::tally::files_under(&self.dir.join(sub), &mut out)?;
-        }
-        let build = self.dir.join("build.rs");
-        if build.is_file() {
-            out.push(build);
-        }
-        out.retain(|p| p.extension().is_some_and(|e| e == "rs"));
+        let path = self.dir.strip_prefix(&self.root).unwrap_or(&self.dir);
+        let scopes = ["src", "tests", "benches", "examples", "build.rs"].map(|s| path.join(s));
+        let mut out: Vec<PathBuf> = (crate::git::files_under(&self.root, &scopes)?.into_iter())
+            .filter(|p| Path::new(p).extension().is_some_and(|e| e == "rs"))
+            .map(|p| self.root.join(p))
+            .collect();
         out.sort();
         Ok(out)
     }
@@ -124,6 +130,7 @@ impl Crates {
                 external,
                 inherits_lints,
                 dir,
+                root: root.to_path_buf(),
                 package,
             });
         }
@@ -214,4 +221,35 @@ fn dep_crate(key: &str, value: &Value, dir: &Path, root: &Path, layout: &Layout)
         return layout.name_of_path(rel);
     }
     layout.name_of_package(&package_of(key, value).replace('-', "_"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::Crates;
+    use crate::git::git;
+    use crate::manifest::Manifest;
+    use crate::scratch::Tree;
+
+    /// A crate's sources are the `.rs` files git lists under it: one git
+    /// ignores is in no commit and moves no key, so it is not read (#4620).
+    #[test]
+    fn a_source_git_ignores_is_not_among_a_crates() {
+        let root = Tree::new("api-check-ignored").unwrap();
+        let src = root.join("crates/php_heap/src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(root.join(".gitignore"), "*.local.rs\n").unwrap();
+        fs::write(
+            root.join("crates/php_heap/Cargo.toml"),
+            "[package]\nname = \"php_heap\"\n",
+        )
+        .unwrap();
+        fs::write(src.join("lib.rs"), "").unwrap();
+        fs::write(src.join("notes.local.rs"), "pub fn notes() {}\n").unwrap();
+        git(&root, &["init", "-q"]).unwrap();
+        let crates = Crates::scan(&Manifest::named("php_heap"), &root).unwrap();
+        let sources = crates.named("php_heap").unwrap().sources().unwrap();
+        assert_eq!(sources, [src.join("lib.rs")]);
+    }
 }

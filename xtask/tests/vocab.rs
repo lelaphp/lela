@@ -19,7 +19,7 @@ mod common {
 }
 use common::manifest::Tracked;
 use common::repo::Repo;
-use common::run::xtask;
+use common::run::{Run, xtask};
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -327,6 +327,178 @@ fn two_rules_over_one_crate_are_refused() {
         err.contains("2 rules") && err.contains("vocab.harness, vocab.whole"),
         "{err}"
     );
+}
+
+/// One Cargo workspace of `php_ext` and `php_heap` under the glossary's
+/// rule, neither depending on the other and neither using an avoided word,
+/// committed with the store ignored.
+fn two_crates(name: &str) -> (Tree, Repo) {
+    let dir = Tree::new(&format!("vocab-{name}")).unwrap();
+    for file in ["oracle.toml", "CONTEXT.md"] {
+        std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
+    }
+    Tracked::minimal()
+        .with_crate("php_ext", |_| ())
+        .with_crate("php_heap", |_| ())
+        .with_rule("vocab.avoid", |rule| {
+            rule.extend(AVOID.parse::<toml::Table>().unwrap());
+        })
+        .write(&dir);
+    let repo = Repo::init(&dir);
+    repo.write(".gitignore", "target/\n").write(
+        "Cargo.toml",
+        "[workspace]\nresolver = \"3\"\nmembers = [\"crates/php_ext\", \"crates/php_heap\"]\n",
+    );
+    for name in ["php_ext", "php_heap"] {
+        repo.write(&format!("crates/{name}/Cargo.toml"), package(name, ""))
+            .write(&format!("crates/{name}/src/lib.rs"), "//! A crate.\n");
+    }
+    repo.commit("two crates");
+    (dir, repo)
+}
+
+fn package(name: &str, rest: &str) -> String {
+    format!("[package]\nname = \"{name}\"\nedition = \"2024\"\n{rest}")
+}
+
+/// A linked worktree of `repo` on a branch of its own, `git worktree add`
+/// laid, and its git dir: the `GIT_DIR` its pre-commit hook exports, with
+/// `GIT_INDEX_FILE` the index there.
+fn linked(repo: &Repo, name: &str) -> (Tree, PathBuf) {
+    let dir = Tree::new(&format!("vocab-{name}-linked")).unwrap();
+    let path = dir.to_str().unwrap();
+    repo.git(&["worktree", "add", "-q", "-b", name, path]);
+    let git = Repo::at(&dir).git(&["rev-parse", "--absolute-git-dir"]);
+    (dir, PathBuf::from(git))
+}
+
+/// `args` run in the linked worktree `dir` under the variables its hook
+/// exports, `git` the worktree's git dir.
+fn hooked(dir: &Path, git: &Path, args: &[&str]) -> String {
+    Run::at(dir)
+        .args(args)
+        .env("GIT_DIR", git)
+        .env("GIT_INDEX_FILE", git.join("index"))
+        .go()
+        .ok()
+}
+
+/// A change to `php_heap`, staged, and two to `php_ext` the commit does
+/// not take: an avoided word in its rustdoc and, where `depends`, a
+/// dependency on `php_heap` in its `Cargo.toml`.
+fn stage_heap_beside_unstaged_ext(repo: &Repo, depends: bool) {
+    repo.write(
+        "crates/php_heap/src/lib.rs",
+        "//! A crate.\npub fn heap() {}\n",
+    );
+    repo.git(&["add", "--", "crates/php_heap"]);
+    if depends {
+        let dependency = "\n[dependencies]\nphp_heap = { path = \"../php_heap\" }\n";
+        repo.write("crates/php_ext/Cargo.toml", package("php_ext", dependency));
+    }
+    repo.write(
+        "crates/php_ext/src/lib.rs",
+        "//! A crate.\n\n/// A builtin.\npub fn ext() {}\n",
+    );
+}
+
+/// The fixture of #4620: a commit stages `php_heap` alone, while the
+/// working tree also makes `php_ext` depend on it in an unstaged
+/// `Cargo.toml` and uses an avoided word in its rustdoc. `vocab --staged`
+/// takes `php_ext`'s closure from the index's `Cargo.toml`, which names no
+/// dependency, so its pass over the commit before stands, and the word the
+/// commit does not take is not found. It runs in a linked worktree under
+/// the variables its hook exports, which name the worktree's git dir and
+/// index, and leaves that index as it was. Before, the closure came from
+/// the working copy's manifest, no reading stood, and the crate was read
+/// from disk: the hook refused the commit over a line that never reached
+/// it.
+#[test]
+fn an_unstaged_dependency_and_word_beside_a_staged_crate_are_not_judged() {
+    let (_root, repo) = two_crates("unstaged-dependency");
+    let (dir, git) = linked(&repo, "unstaged-dependency");
+    xtask(&dir, &["vocab"]).ok();
+    let worktree = Repo::at(&dir);
+    stage_heap_beside_unstaged_ext(&worktree, true);
+    let said = hooked(&dir, &git, &["vocab", "--staged"]);
+    assert!(
+        said.contains("vocab: php_ext stands on its pass of "),
+        "{said}"
+    );
+    assert!(!said.contains("builtin"), "{said}");
+    assert_eq!(
+        worktree.git(&["diff", "--cached", "--name-only"]),
+        "crates/php_heap/src/lib.rs"
+    );
+    let ran = xtask(&dir, &["vocab", "--crate", "php_ext"]);
+    assert_ne!(ran.code(), 0, "the working tree's word is avoided: {ran}");
+}
+
+/// A crate no reading stands for is measured under `--staged` as the
+/// index holds it: the word the commit does not take is not found, and
+/// the reading passes (#4620).
+#[test]
+fn a_crate_measured_under_staged_is_read_as_the_index_holds_it() {
+    let (root, repo) = two_crates("unstaged-word");
+    stage_heap_beside_unstaged_ext(&repo, false);
+    xtask(&root, &["vocab", "--staged"]).ok();
+    let reading = Store::of_workspace(&root)
+        .read("vocab", "php_ext")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+}
+
+/// A `.rs` file git ignores under a crate is in no commit and moves no
+/// key, so its avoided word is not read, under `--staged` where nothing
+/// differs from the index and in a run over the working tree alike
+/// (#4620); before, vocab walked the directory and refused it.
+#[test]
+fn an_ignored_source_under_a_crate_is_not_read() {
+    let (root, repo) = two_crates("ignored");
+    repo.write(".gitignore", "target/\n*.local.rs\n");
+    repo.commit("ignored");
+    repo.write("crates/php_ext/src/notes.local.rs", "/// A builtin.\n");
+    xtask(&root, &["vocab", "--staged"]).ok();
+    xtask(&root, &["vocab", "--crate", "php_ext"]).ok();
+}
+
+/// The same ignored file in a linked worktree, measured under the
+/// `GIT_DIR` and `GIT_INDEX_FILE` its hook exports, where the tree is the
+/// index and nothing is laid down: neither vocab nor api-check reads it
+/// (#4620). The file uses an avoided word, and a path across a module
+/// edge the manifest denies; the crates take the workspace's lints, so
+/// api-check has nothing else to say. Before, both listed a crate's files with git
+/// run in the crate's directory, which under that `GIT_DIR` git takes for
+/// the top of the work tree, reading no `.gitignore` above it: the file
+/// was read, and each refused it.
+#[test]
+fn an_ignored_source_in_a_linked_worktree_is_not_read_under_its_hook() {
+    let (root, repo) = two_crates("linked-ignored");
+    let edge = "from = \"php_ext::{a}\"\nto = \"php_ext::{b}\"\ndeny = true\n";
+    Tracked::of(&root)
+        .with_row("edge", edge.parse::<toml::Table>().unwrap())
+        .write(&root);
+    repo.write(".gitignore", "target/\n*.local.rs\n").write(
+        "Cargo.toml",
+        "[workspace]\nresolver = \"3\"\nmembers = [\"crates/php_ext\", \"crates/php_heap\"]\n\n[workspace.lints]\n",
+    );
+    for name in ["php_ext", "php_heap"] {
+        let lints = package(name, "\n[lints]\nworkspace = true\n");
+        repo.write(&format!("crates/{name}/Cargo.toml"), lints);
+    }
+    repo.commit("ignored");
+    let (dir, git) = linked(&repo, "linked-ignored");
+    Repo::at(&dir).write(
+        "crates/php_ext/src/a/notes.local.rs",
+        "/// A builtin.\nuse crate::b::B;\n",
+    );
+    let said = hooked(&dir, &git, &["api-check", "--staged"]);
+    assert!(!said.contains("may not use"), "{said}");
+    assert!(!said.contains("laid down"), "{said}");
+    let said = hooked(&dir, &git, &["vocab", "--staged"]);
+    assert!(!said.contains("builtin"), "{said}");
+    assert!(!said.contains("laid down"), "{said}");
 }
 
 /// The tracked manifest with the row a person adds (#63): a second

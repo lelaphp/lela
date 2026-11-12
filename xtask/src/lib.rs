@@ -328,8 +328,8 @@ fn command_line() -> Result<()> {
         }
         asked @ Command::Done { .. } => done::command(&root, &manifest, &store, asked),
         Command::Bench(ask) => bench_command(&root, &store, &ask),
-        Command::Budget { staged } => {
-            record(&store, &budget::measure(&root, &manifest, &store, staged)?)
+        ask @ (Command::Budget { .. } | Command::UnsafeAudit { .. } | Command::ApiCheck { .. }) => {
+            reading_the_tree(&root, &manifest, &store, &ask)
         }
         // The crates named, or with `--staged` the ones with a staged change.
         Command::Clippy { staged: true, .. } => {
@@ -357,14 +357,7 @@ fn command_line() -> Result<()> {
         ask @ (Command::FpmCompare { .. } | Command::Soak { .. }) => {
             record(&store, &[makala::run(&root, &manifest, ask)?])
         }
-        Command::UnsafeAudit { staged } => record(
-            &store,
-            &unsafe_audit::measure(&root, &manifest, &store, staged)?,
-        ),
         Command::Generate => generate_command(&root, &manifest),
-        Command::ApiCheck { write, staged } => {
-            api_check::run(&manifest, &root, &store, write, staged)
-        }
         Command::DivergenceReason => divergence_command(&root, &manifest, &store),
         Command::NewExt { name } => said(new_ext::run(&root, &manifest, &name)),
         Command::NewSapi { name, binary } => {
@@ -437,19 +430,76 @@ fn vocab_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Voca
         println!("{reading}");
         return store.record_measurement(std::slice::from_ref(&reading));
     }
-    let crates = if staged {
-        let all: Vec<String> = manifest.crates.iter().map(|c| c.name.clone()).collect();
-        let standing = Standing::of_every_crate(true, root, manifest, store, vocab::INSTRUMENT)?;
-        let left = standing.unmeasured(&all);
-        if left.is_empty() {
-            return Ok(());
+    over_index(root, manifest, staged, |root, manifest| {
+        let crates = if staged {
+            let all: Vec<String> = manifest.crates.iter().map(|c| c.name.clone()).collect();
+            let standing =
+                Standing::of_every_crate(true, root, manifest, store, vocab::INSTRUMENT)?;
+            let left = standing.unmeasured(&all);
+            if left.is_empty() {
+                return Ok(());
+            }
+            left
+        } else {
+            crates
+        };
+        vocab::run(root, manifest, store, &crates)?
+            .exit_saying(|| "vocab: an avoided word is in use; the findings are above".to_owned())
+    })
+}
+
+/// `budget`, `unsafe-audit` and `api-check`, three of the four pre-commit
+/// runs over the tree before anything is built, `vocab` the fourth: each
+/// over the index under `--staged` ([`over_index`]).
+fn reading_the_tree(root: &Path, manifest: &Manifest, store: &Store, ask: &Command) -> Result<()> {
+    match *ask {
+        Command::Budget { staged } => {
+            let measure =
+                |root: &Path, manifest: &Manifest| budget::measure(root, manifest, store, staged);
+            record(store, &over_index(root, manifest, staged, measure)?)
         }
-        left
+        Command::UnsafeAudit { staged } => {
+            let measure = |root: &Path, manifest: &Manifest| {
+                unsafe_audit::measure(root, manifest, store, staged)
+            };
+            record(store, &over_index(root, manifest, staged, measure)?)
+        }
+        Command::ApiCheck { write, staged } => {
+            over_index(root, manifest, staged, |root, manifest| {
+                api_check::run(manifest, root, store, write, staged)
+            })
+        }
+        _ => bail!("only budget, unsafe-audit and api-check read the tree here"),
+    }
+}
+
+/// `measure` over the workspace, or with `staged` over what the index
+/// holds (#4620): where the working tree holds what the commit does not
+/// take, over the index laid down apart ([`sources::Laid`]) and the
+/// manifest it carries, so the sources an instrument reads and the closure
+/// it keys a crate's reading over are the commit's. The readings are
+/// recorded in the workspace's store all the same.
+fn over_index<T>(
+    root: &Path,
+    manifest: &Manifest,
+    staged: bool,
+    measure: impl FnOnce(&Path, &Manifest) -> Result<T>,
+) -> Result<T> {
+    let laid = if staged {
+        sources::Laid::of(root)?
     } else {
-        crates
+        None
     };
-    vocab::run(root, manifest, store, &crates)?
-        .exit_saying(|| "vocab: an avoided word is in use; the findings are above".to_owned())
+    match &laid {
+        Some(laid) => {
+            println!(
+                "the working tree holds what the commit does not take, so the index is laid down at {} and measured there",
+                laid.root().display()
+            );
+            measure(laid.root(), &Manifest::load(laid.root())?)
+        }
+        None => measure(root, manifest),
+    }
 }
 
 /// [`record`] without the exit: every reading printed and written, and
