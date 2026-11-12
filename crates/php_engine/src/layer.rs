@@ -138,6 +138,14 @@ pub struct StreamHooks {
     /// any extension's engine end, so the layer's idle persistent
     /// sockets close first.
     pub engine_end: fn(&mut Request),
+    /// `ZEND_MODULE_POST_ZEND_DEACTIVATE_D(streams)`, which
+    /// `basic_functions` registers (`Z/ext/standard/basic_functions.c:163`,
+    /// `Z/main/streams/streams.c:90-98`): served as each request ends,
+    /// after its resources are closed and before any extension's
+    /// post-deactivation, so what of the request the layer's idle
+    /// persistent streams still hold, `stream->ctx`, is let go while the
+    /// request stands.
+    pub post_deactivate: fn(&mut Request),
 }
 
 /// [`StreamHooks::open`], whose `bool` says whether an open that fails
