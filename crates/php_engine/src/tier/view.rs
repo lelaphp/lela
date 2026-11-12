@@ -637,13 +637,14 @@ impl CalleeSlot {
 /// The identity of a class every request of one epoch shares, one of the
 /// engine's own or a row of the epoch's published arena, by which the
 /// epoch's tier state names a class (design §5.14, *Identities*,
-/// revision NEXT): minted only by a [`UnitView`] of that epoch, where the
-/// check [`UnitView::hold_class`] makes finds the request of that epoch,
-/// the class published and its row in the arena, so a request's own
-/// class has none, and standing only in that epoch's arena or beside a
-/// hold on it. An [`EngineClassId`](crate::api::values::EngineClassId) is
-/// one, by `From`, since the engine's own classes stand in every epoch;
-/// and where a [`ClassId`] is asked for, this is one, by `From`.
+/// revision NEXT). One is made two ways and no other: by a [`UnitView`]
+/// of that epoch, where the check [`UnitView::hold_class`] makes finds
+/// the request of that epoch, the class published and its row in the
+/// arena; and from an [`EngineClassId`](crate::api::values::EngineClassId),
+/// by `From` and with no view, since the engine's own classes stand in
+/// every epoch. So a request's own class has none, and one stands only
+/// in its epoch's arena, beside a hold on it, or among the engine's own.
+/// Where a [`ClassId`] is asked for, this is one, by `From`.
 ///
 /// What compiled code compares a class against is one of these
 /// ([`super::class_number`]); a request's number is not:
@@ -657,10 +658,14 @@ impl CalleeSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
 pub struct EpochClassId(u32);
 
-/// The identity of a published function or method of one epoch, by which
-/// the epoch's tier state names one, minted as an [`EpochClassId`] is,
-/// where the request is of the view's epoch and the epoch's arena holds
-/// the function's row: the number every request of the epoch calls it by.
+/// The identity of a function or method every request of one epoch
+/// numbers alike, by which the epoch's tier state names one: the number
+/// every request of the epoch calls it by. Made only by a [`UnitView`] of
+/// that epoch, by a check of its own beside the class's
+/// (`UnitView::shared_function`): where the request is of the
+/// view's epoch and the function is a native or a native method, which
+/// every request numbers alike, or a user function or method whose row
+/// the epoch's arena holds. So a request's own function has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
 pub struct EpochFunction(u32);
 
@@ -1300,8 +1305,8 @@ impl UnitView {
     }
 
     /// The identity every request of the view's epoch names class `c` by,
-    /// the check [`UnitView::hold_class`] makes and the one place an
-    /// [`EpochClassId`] is made: where `req` started in the view's epoch,
+    /// the check [`UnitView::hold_class`] makes and the one place a view
+    /// makes an [`EpochClassId`]: where `req` started in the view's epoch,
     /// `c` is published (`ClassId::is_published`) and the epoch holds its
     /// row. None for a request-local class and a request of another
     /// epoch.
@@ -1311,7 +1316,8 @@ impl UnitView {
     }
 
     /// The identity every request of the view's epoch calls `function`
-    /// by, made as [`UnitView::shared`] makes a class's: where `req`
+    /// by, the one place an [`EpochFunction`] is made, by a check of its
+    /// own beside [`UnitView::shared`]'s: where `req`
     /// started in the view's epoch and the function is one every request
     /// of it numbers alike, a native or a native method, or a user
     /// function or method whose row the epoch holds. None for a request's
