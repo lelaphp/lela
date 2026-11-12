@@ -4,6 +4,7 @@
 //! predecessors, the dominator tree of Cooper, Harvey and Kennedy, and the
 //! loops Sreedhar's DJ graphs identify.
 
+use php_macros::EngineState;
 use php_unit::{OpArray, Opcode, OperandKind, Opline, TryCatch};
 
 use crate::{BlockId, Features, Marks};
@@ -26,7 +27,7 @@ const FETCH_LOCAL: u32 = 4;
 const FETCH_GLOBAL_LOCK: u32 = 8;
 
 /// One basic block, `zend_basic_block`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, EngineState)]
 pub struct Block {
     pub marks: Marks,
     /// The block's first opline.
@@ -56,7 +57,7 @@ impl Block {
 }
 
 /// `zend_cfg`: the blocks of one op array.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, EngineState)]
 pub struct Cfg {
     pub blocks: Vec<Block>,
     /// The block each opline stands in, `cfg->map`.

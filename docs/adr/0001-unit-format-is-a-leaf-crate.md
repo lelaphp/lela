@@ -19,3 +19,4 @@ Revision 2 described declarations twice: `api::ClassDecl` in `php_engine` for na
 - A future reader will ask why the engine does not own its own opcodes. This file is the answer.
 - `unit.lock` joins the interface locks; the crate's public surface is types and `dump()`.
 - Reflection, the dumpers, the stub cross-check and the linker read one model.
+- *Amended 2026-11-11 (#4544):* `php_unit` also depends on `php_macros`, for `#[derive(EngineState)]` alone. A macro emits paths and links nothing (ADR-0007), so the unit format still links `php_heap` and nothing else of the workspace.

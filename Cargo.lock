@@ -1855,6 +1855,7 @@ name = "php_ssa"
 version = "0.0.0"
 dependencies = [
  "php_heap",
+ "php_macros",
  "php_unit",
  "toml",
 ]
@@ -1881,6 +1882,7 @@ version = "0.0.0"
 dependencies = [
  "expect-test",
  "php_heap",
+ "php_macros",
  "toml",
 ]
 

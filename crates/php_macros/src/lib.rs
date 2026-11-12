@@ -29,9 +29,12 @@
 //! signature, a type or a name. A default is php's constant expression,
 //! read as php's lexer reads it and kept unevaluated.
 //!
-//! The expansion names `::php_ext::abi` and `::php_ext::__private`, or
-//! `crate::api` while `php_engine` is compiled, so Core's natives take the
-//! same attributes (ADR-0007).
+//! The expansion names `::php_ext::abi` and `::php_ext::__private` in an
+//! extension, `::php_engine::api` in `php_jit` and `php_streams`, which
+//! reach the engine directly, and `crate::api` while `php_engine` is
+//! compiled, so Core's natives take the same attributes (ADR-0007).
+//! `#[derive(EngineState)]` names `::php_heap::EngineState` in `php_unit`
+//! and `php_ssa`, which stand below the engine and the facade (#4544).
 //!
 //! What fails the build is held by `compile_fail` blocks in
 //! `php_bundle`'s `refusals`, and the parity extension that holds
@@ -102,6 +105,9 @@ pub fn mirrors(attribute: TokenStream, item: TokenStream) -> TokenStream {
 /// itself is compiled, whose natives are Core's, `php_engine::api` in
 /// the tier and the stream layer, which reach the engine directly and
 /// derive engine state there, and the facade everywhere else (ADR-0007).
+/// The derive's trait starts apart from this root in `php_unit` and
+/// `php_ssa`, at `::php_heap::EngineState`, since neither crate reaches
+/// the engine or the facade (`engine_state::state_trait_for`, #4544).
 fn root() -> Tokens {
     root_for(std::env::var("CARGO_CRATE_NAME").ok().as_deref())
 }
@@ -154,6 +160,7 @@ fn refused<T>(answer: syn::Result<T>) -> String {
 #[cfg(test)]
 mod tests {
     use super::root_for;
+    use crate::engine_state::state_trait_for;
 
     #[test]
     fn the_crate_being_compiled_picks_the_root() {
@@ -168,5 +175,27 @@ mod tests {
         );
         assert_eq!(root_for(Some("php_ext_ctype")).to_string(), ":: php_ext");
         assert_eq!(root_for(None).to_string(), ":: php_ext");
+    }
+
+    #[test]
+    fn a_crate_below_the_engine_names_php_heaps_trait() {
+        for below in ["php_unit", "php_ssa"] {
+            assert_eq!(
+                state_trait_for(Some(below)).to_string(),
+                ":: php_heap :: EngineState"
+            );
+        }
+        assert_eq!(
+            state_trait_for(Some("php_engine")).to_string(),
+            "crate :: api :: abi :: EngineState"
+        );
+        assert_eq!(
+            state_trait_for(Some("php_jit")).to_string(),
+            ":: php_engine :: api :: abi :: EngineState"
+        );
+        assert_eq!(
+            state_trait_for(Some("php_ext_ctype")).to_string(),
+            ":: php_ext :: abi :: EngineState"
+        );
     }
 }

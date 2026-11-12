@@ -41,6 +41,7 @@ mod trace;
 mod types;
 mod update;
 
+use php_macros::EngineState;
 use php_unit::decl::{FunctionDecl, HookKind, Type, Visibility};
 use php_unit::{OpArray, OperandKind, Opline};
 
@@ -53,21 +54,21 @@ pub use trace::{Position, TraceFrame};
 pub use types::{ClassOf, Range, Returns, Types, VarInfo};
 
 /// A basic block's number, its index in [`Cfg::blocks`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, EngineState)]
 pub struct BlockId(pub u32);
 
 /// A variable of the frame, `EX_VAR_TO_NUM`: a CV below the op array's
 /// `num_cvs`, a temporary past them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, EngineState)]
 pub struct Var(pub u32);
 
 /// An SSA variable's number, its index in [`Ssa::vars`]; the first
 /// `num_cvs` are each CV's value on entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, EngineState)]
 pub struct SsaVar(pub u32);
 
 /// A phi's index in [`Ssa::phis`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, EngineState)]
 pub struct PhiId(pub u32);
 
 macro_rules! index {
@@ -88,7 +89,7 @@ macro_rules! index {
 index!(BlockId, Var, SsaVar, PhiId);
 
 /// What `zend_build_cfg` marks a block with, `ZEND_BB_*`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Marks {
     /// The entry.
@@ -116,7 +117,7 @@ pub struct Marks {
 
 /// What the CFG learns of the whole function, `ZEND_FUNC_*` in
 /// `cfg->flags`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Features {
     /// Its variables are reachable by name: `extract`, `compact`,
@@ -412,7 +413,7 @@ pub enum Level {
 /// What `zend_jit_trace_build_ssa` leaves: the CFG always, the SSA with
 /// what inference learned where php builds one, and what the function
 /// returns.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, EngineState)]
 pub struct Analysis<C> {
     pub cfg: Cfg,
     /// None for a file's own code, a generator, a function with a `try`,
@@ -469,4 +470,25 @@ pub fn analyse<T: LinkedTable>(
         ssa: Some(ssa),
         returns,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use php_heap::EngineState;
+
+    use crate::Analysis;
+
+    fn held<T: EngineState>() {}
+
+    /// An analysis is engine state for every class type `C` that is, each
+    /// field held by the derive where it is declared (#4544): the tier
+    /// keeps one per op array in the epoch's state.
+    fn analysis_of<C: EngineState>() {
+        held::<Analysis<C>>();
+    }
+
+    #[test]
+    fn an_analysis_over_engine_state_is_engine_state() {
+        analysis_of::<u32>();
+    }
 }

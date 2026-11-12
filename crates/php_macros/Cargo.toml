@@ -1,7 +1,10 @@
 # php_macros: the three native attributes (design §4.1, §7.1; ADR-0007).
 # Each derives a native's declaration from its Rust types and identifiers
-# and emits its entry as php's ZPP, naming `::php_ext` paths, or
-# `crate::api` inside php_engine. Depends on no workspace crate: a macro
+# and emits its entry as php's ZPP, naming `::php_ext` paths in an
+# extension, `::php_engine::api` in php_jit and php_streams, and
+# `crate::api` inside php_engine; the EngineState derive names
+# `::php_heap::EngineState` in php_unit and php_ssa (#4544). Depends on
+# no workspace crate: a macro
 # emits paths and never links what they name. Beside them `mirrors`, a
 # marker on a surface item that expands to the item (#2353).
 [package]

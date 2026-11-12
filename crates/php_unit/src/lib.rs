@@ -43,3 +43,27 @@ pub use unit::{
     AutoGlobal, Diagnostic, HookBody, Level, MethodBody, PublishedUnit, SpareUnit, TopLevel, Unit,
     UnitCell, WeakUnit,
 };
+
+#[cfg(test)]
+mod tests {
+    use php_heap::EngineState;
+
+    use crate::decl::{HookKind, Name, Type, Visibility};
+    use crate::{MapPtrOffset, OplineIdx, TryCatch};
+
+    fn held<T: EngineState>() {}
+
+    /// What the compiled tier's trace table holds of the unit format is
+    /// engine state by the derive, each field held where it is declared
+    /// (#4544).
+    #[test]
+    fn what_the_trace_table_holds_is_engine_state() {
+        held::<OplineIdx>();
+        held::<MapPtrOffset>();
+        held::<TryCatch>();
+        held::<HookKind>();
+        held::<Name>();
+        held::<Type>();
+        held::<Visibility>();
+    }
+}

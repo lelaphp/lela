@@ -5,6 +5,7 @@
 //! strongly connected components of the def-use graph, by Pearce.
 
 use php_heap::ZvalType;
+use php_macros::EngineState;
 use php_unit::{OpArray, Opcode, OperandKind, Opline};
 
 use crate::bits::Bits;
@@ -19,7 +20,7 @@ const MOST_SETS: usize = 4 * 1024 * 1024;
 
 /// What a pi's range constraint knows of whether the bound holds,
 /// `zend_ssa_negative_lat`; e-SSA construction sets the first two.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 pub enum Negative {
     #[default]
     None,
@@ -30,7 +31,7 @@ pub enum Negative {
 /// `zend_ssa_range_constraint`: the variable lies in `range`, each
 /// bound a constant or, where a variable names it, that variable's value
 /// plus the constant; a bound passed has none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub struct RangeConstraint {
     pub range: Range,
     pub min_var: Option<Var>,
@@ -42,7 +43,7 @@ pub struct RangeConstraint {
 }
 
 /// A pi's constraint, `zend_ssa_pi_constraint`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub enum Constraint<C> {
     Range(RangeConstraint),
     /// `zend_ssa_type_constraint`: the value is of `mask`, an instance of
@@ -54,7 +55,7 @@ pub enum Constraint<C> {
 }
 
 /// A phi or an e-SSA pi, which `zend_ssa_phi` tells apart by `pi`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub enum PhiKind<C> {
     Phi,
     /// The variable on the edge from `from`, constrained by the jump.
@@ -65,7 +66,7 @@ pub enum PhiKind<C> {
 }
 
 /// `zend_ssa_phi`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, EngineState)]
 pub struct Phi<C> {
     pub kind: PhiKind<C>,
     /// The variable of the frame it merges.
@@ -83,7 +84,7 @@ pub struct Phi<C> {
 
 /// `zend_ssa_op`: the SSA variables one opline reads and writes, and the
 /// next opline reading each one it reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 #[allow(clippy::struct_field_names)]
 pub struct SsaOp {
     pub op1_use: Option<SsaVar>,
@@ -98,7 +99,7 @@ pub struct SsaOp {
 }
 
 /// How a CV's value may change behind the code's back, `zend_ssa_alias_kind`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 pub enum Alias {
     #[default]
     None,
@@ -109,7 +110,7 @@ pub enum Alias {
 }
 
 /// `zend_ssa_var`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub struct SsaVarInfo {
     pub var: Var,
     /// Its strongly connected component, numbered in topological order;
@@ -129,7 +130,7 @@ pub struct SsaVarInfo {
 }
 
 /// `zend_ssa` as the compiled tier builds it, with what inference learned.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, EngineState)]
 pub struct Ssa<C> {
     pub phis: Vec<Phi<C>>,
     /// Each block's phis in php's order: its pis, the latest placed first,

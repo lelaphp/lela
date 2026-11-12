@@ -7,6 +7,8 @@
 //! is `api.lock`'s as well as `unit.lock`'s; the trait adaptations, which
 //! no native writes, are not re-exported.
 
+use php_macros::EngineState;
+
 /// A name as declared: resolved, as `zend_resolve_class_name` leaves a
 /// written one, so fully qualified with no leading `\`, and in the case
 /// it was declared in. The compiler resolves a name the source wrote
@@ -15,7 +17,7 @@
 /// ([`php_heap::Bytes::borrowed`]), as php's `zend_function_entry` names
 /// a function by its `const char *`. What a table by name files the
 /// declaration under ([`Bare`]).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord, EngineState)]
 pub struct Name(pub php_heap::Bytes);
 
 impl Name {
@@ -37,7 +39,7 @@ impl Name {
 /// none, as php's plain string under opcache carries none, and are looked
 /// up. A cache says nothing of what a type is, so two names of the same
 /// bytes are one type whatever each carries.
-#[derive(Clone)]
+#[derive(Clone, EngineState)]
 pub struct TypeName {
     pub(crate) name: Name,
     class_cache: Option<php_heap::ClassCache>,
@@ -261,7 +263,7 @@ pub fn hook_attribute_refusal(attribute: &[u8]) -> Option<&'static str> {
 }
 
 /// php's three member visibilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, EngineState)]
 pub enum Visibility {
     #[default]
     Public,
@@ -394,7 +396,7 @@ pub enum EnumBacking {
 /// native's is laid in its binary whole, its members and its `?T`'s
 /// inner type borrowed ([`List::borrowed`], [`Boxed::borrowed`]), as
 /// php's `zend_internal_arg_info` points a `zend_type` at static data.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, EngineState)]
 pub enum Type {
     Mixed,
     Void,
@@ -1397,7 +1399,7 @@ pub struct PropertyDecl {
 
 /// php's two hooks, `zend_property_hook_kind`, in the order
 /// `prop_info->hooks` indexes them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EngineState)]
 pub enum HookKind {
     Get,
     Set,
