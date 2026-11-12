@@ -27,6 +27,8 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use php_engine::api::abi::EngineState;
+
 use super::{TraceId, TraceName, code};
 use crate::policy::JitDebug;
 
@@ -51,10 +53,18 @@ const ELF_MACHINE: u32 = if cfg!(target_arch = "aarch64") {
     62
 };
 
+/// What a table's `PERF` lines or `PERF_DUMP` records are written to: a
+/// file the engine opened, or a test's buffer, either engine state, as
+/// the table that holds it is (`tier::epoch_state`, #4492).
+pub(crate) trait PerfWriter: Write + EngineState {}
+
+impl<W: Write + EngineState> PerfWriter for W {}
+
 /// Where a table's `PERF` lines and `PERF_DUMP` records go: nowhere for
 /// a bit that is clear.
+#[derive(EngineState)]
 pub(crate) struct Perf {
-    map: Option<Box<dyn Write + Send>>,
+    map: Option<Box<dyn PerfWriter>>,
     dump: Option<Dump>,
     used: Arc<Used>,
 }
@@ -67,7 +77,7 @@ pub(crate) struct Perf {
 /// `zend_jit_status` and its `JIT memory usage` line read is the buffer in
 /// use. php's line counts its stubs and alignment with them; this counts
 /// the traces' bytes alone.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, EngineState)]
 pub(crate) struct Used {
     bytes: AtomicUsize,
     oplines: AtomicUsize,
@@ -94,8 +104,9 @@ impl Used {
 }
 
 /// The jitdump the records go to, and the engine's next `code_id`.
+#[derive(EngineState)]
 struct Dump {
-    to: Box<dyn Write + Send>,
+    to: Box<dyn PerfWriter>,
     code_id: Arc<AtomicU64>,
 }
 
@@ -227,7 +238,7 @@ impl Perf {
     /// one that does not open writing nothing, and its own [`Used`],
     /// which `outputs` keeps as the last.
     pub(crate) fn of(outputs: &Outputs) -> Perf {
-        let append = |started: bool, path: String| -> Option<Box<dyn Write + Send>> {
+        let append = |started: bool, path: String| -> Option<Box<dyn PerfWriter>> {
             let file = OpenOptions::new()
                 .append(true)
                 .open(path)
@@ -252,10 +263,7 @@ impl Perf {
     /// Lines to `map` and records to `dump`, each where given, counting
     /// `code_id`s from one.
     #[cfg(test)]
-    pub(crate) fn to(
-        map: Option<Box<dyn Write + Send>>,
-        dump: Option<Box<dyn Write + Send>>,
-    ) -> Perf {
+    pub(crate) fn to(map: Option<Box<dyn PerfWriter>>, dump: Option<Box<dyn PerfWriter>>) -> Perf {
         Perf {
             map,
             dump: dump.map(|to| Dump {
@@ -364,7 +372,7 @@ pub(crate) fn load_record(at: &Loaded, symbol: &[u8], start: usize, bytes: &[u8]
 
 /// A sink a test reads back: what was written, shared with the test.
 #[cfg(test)]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, EngineState)]
 pub(crate) struct Captured(pub(crate) std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
 #[cfg(test)]

@@ -58,7 +58,7 @@ mod text;
 /// Where a recording starts: php's `ZEND_JIT_TRACE_START_LOOP`, `_ENTER`,
 /// `_RETURN` and `_SIDE` (`Z/ext/opcache/jit/zend_jit_internal.h:317-320`),
 /// a side trace naming the trace and exit it grows from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Start {
     Loop,
     Enter,
@@ -415,7 +415,7 @@ pub(crate) enum Landed {
 /// One slot of the frame a side trace starts in whose type its parent's
 /// exit knew, php's `STACK_TYPE`: the slot, a variable or a temporary
 /// numbered past the variables, and its type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) struct Entered {
     pub(crate) var: u32,
     pub(crate) tag: ZvalType,

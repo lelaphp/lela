@@ -56,6 +56,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
+use php_engine::api::abi::EngineState;
 use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
 use php_unit::OplineIdx;
 
@@ -106,7 +107,7 @@ pub(crate) const SEGMENT: usize = 1024;
 /// for roots and side traces, whichever word holds it, below `2^24`, the
 /// width a word keeps it in. Zero is no trace, as php's trace numbers
 /// count from one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, EngineState)]
 pub(crate) struct TraceId(u32);
 
 impl TraceId {
@@ -165,13 +166,14 @@ impl TraceName {
 /// What a trace is (`jit-design.md` §4.5): today one recorded path; what
 /// month three builds over hot traces is a second kind, entered from the
 /// same word by the same id through the same entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Kind {
     Trace,
 }
 
 /// One published trace (`jit-design.md` §4.5): its code, final, and what
 /// the crossing and the dispatch read of it, none of it written again.
+#[derive(EngineState)]
 pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) code: Code<P>,
     entry_offset: usize,
@@ -306,7 +308,7 @@ impl<P: Pages> std::fmt::Debug for Trace<P> {
 /// interpreter goes on, what the trampoline does first, the trace it
 /// links to, and its own word, zero at publication, which grows a side
 /// trace by the machine that grew the root.
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 pub(crate) struct Exit {
     pub(crate) opline: Option<OplineIdx>,
     pub(crate) landing: Landing,
@@ -361,7 +363,7 @@ impl From<Full> for Unpublished {
 }
 
 /// The table's bounds, read once from the `Policy`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, EngineState)]
 struct Bounds {
     /// No id is this or past it: `opcache.jit_max_root_traces`, at most
     /// the ids a word holds.
@@ -372,7 +374,7 @@ struct Bounds {
 
 /// What a publish counts, php's `ZEND_JIT_EXIT_COUNTERS` and each root's
 /// `child_count`, beside the root of every id numbered.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, EngineState)]
 struct Counts {
     exits: u32,
     /// By id, from one: the trace's root, and for a root how many side
@@ -380,7 +382,7 @@ struct Counts {
     rows: Vec<Row>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 struct Row {
     root: TraceId,
     sides: u32,
@@ -447,6 +449,7 @@ type Segment<P> = Box<[OnceLock<Box<Trace<P>>>]>;
 
 /// What the compile mutex guards: the arena, none where it could not
 /// be mapped, the counts and where the `PERF` lines go.
+#[derive(EngineState)]
 struct Writer<P: Pages> {
     arena: Option<Arena<P>>,
     counts: Counts,
@@ -456,6 +459,7 @@ struct Writer<P: Pages> {
 /// The epoch's traces (`jit-design.md` §4.5): a read side of segments of
 /// slots, each written once and read with nothing taken, and a write side
 /// behind the one mutex a publish takes.
+#[derive(EngineState)]
 pub(crate) struct TraceTable<P: Pages = Native> {
     segments: Box<[OnceLock<Segment<P>>]>,
     /// The entrance of each trace by its number, php's `zend_jit_traces`

@@ -79,6 +79,7 @@ mod tests;
 
 use std::num::{NonZeroU32, NonZeroUsize};
 
+use php_engine::api::abi::EngineState;
 use php_engine::tier::{
     EpochClassId, EpochFunction, FramelessAt, FuncRef, MapPtrRaw, PlainCall, UnitView,
 };
@@ -93,7 +94,7 @@ use crate::record::{Began, Callee, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
 /// One exit of a trace, by its place among the trace's exits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EngineState)]
 pub(crate) struct ExitId(pub(crate) u16);
 
 /// One unwind of a trace, by its place among the trace's unwinds.
@@ -818,7 +819,7 @@ pub(crate) struct Known {
 }
 
 /// Whether a side trace may grow from an exit, php's `flags`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EngineState)]
 pub(crate) enum Grows {
     /// A hot exit records a side trace, php's `flags` 0.
     Side,
@@ -955,7 +956,7 @@ impl Read {
 /// two things apart, as php's exit frees an opline's operands and
 /// restores a call under way each on its own (`ZEND_JIT_EXIT_FREE_OP1`,
 /// `ZEND_JIT_EXIT_FREE_OP2`, `ZEND_JIT_EXIT_RESTORE_CALL`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EngineState)]
 pub(crate) struct Landing {
     /// The temporaries the opline before the exit's read, which compiled
     /// code has not freed yet.
@@ -979,7 +980,7 @@ impl Landing {
 }
 
 /// Which of the temporaries an opline read a landing frees.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EngineState)]
 pub(crate) struct Frees {
     pub(crate) op1: bool,
     pub(crate) op2: bool,

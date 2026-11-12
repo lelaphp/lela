@@ -77,6 +77,7 @@ use cranelift_codegen::ir::SourceLoc;
 use cranelift_codegen::isa::{self, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, Final, MachSrcLoc};
+use php_engine::api::abi::EngineState;
 use php_engine::tier::{FuncRef, LandingIndex, MapPtrRaw, PlainCall};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
@@ -175,7 +176,7 @@ pub(crate) struct Compiled {
 /// ```expect exit=0 regime=jit-exit-fuzz process
 /// 13940
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, EngineState)]
 pub(crate) struct Fuzzed(Arc<[AtomicU8]>);
 
 impl Fuzzed {
@@ -248,7 +249,7 @@ const _: () = assert!(
 /// nothing published: php patches the exit's jump
 /// (`zend_jit_link_side_trace`, `Z/ext/opcache/jit/zend_jit_ir.c:17413`),
 /// and here no published byte is written again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Door {
     /// The exit with this number: one that grows a side, or the end a link
     /// leaves through.
@@ -291,7 +292,7 @@ const _: () = assert!(
 /// as a constant, written once, by the publish that numbers the trace,
 /// before anything can enter it, so `enter` reads the answer against the
 /// trace that gave it, which a jump may have entered.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, EngineState)]
 pub(crate) struct Numbered(Arc<AtomicU32>);
 
 impl Numbered {
@@ -318,7 +319,7 @@ impl Numbered {
 /// down in each trace it publishes, which never moves while the table
 /// stands, and names it in [`Escapes::entrances`].
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 pub(crate) struct Entrance {
     pub(crate) body: usize,
     pub(crate) trace: u32,
@@ -372,7 +373,7 @@ pub(crate) struct Linked {
 /// its function since a trace inlines calls, the opline, and the offset
 /// in the trace's bytes. What a profiler and a disassembly read; it costs
 /// nothing in the code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) struct Mark {
     pub(crate) func: FuncRef,
     pub(crate) opline: OplineIdx,
