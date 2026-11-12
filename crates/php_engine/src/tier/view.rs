@@ -712,9 +712,11 @@ pub struct UnitView {
     funcs: Vec<FuncRef>,
     /// The shared classes the view holds ([`UnitView::hold_class`]).
     classes: Vec<EpochClassId>,
-    /// The shared classes of the pairs the recording took, minted for
-    /// them and not held for the analysis ([`UnitView::shared_class`]).
-    paired: Vec<EpochClassId>,
+    /// The shared classes the view minted an identity for and did not
+    /// hold for the analysis ([`UnitView::shared_class`]): the class of
+    /// each pair the recording took, and the declaring class of each
+    /// method a held op array's calls reach.
+    minted: Vec<EpochClassId>,
     /// The plain calls the recording took ([`UnitView::hold_call`]), each
     /// beside the called scope the recording's request numbered, by which
     /// a trace's build finds the call of a receiver it sampled.
@@ -932,7 +934,7 @@ impl UnitView {
             epoch: epoch(req),
             funcs: Vec::new(),
             classes: Vec::new(),
-            paired: Vec::new(),
+            minted: Vec::new(),
             calls: Vec::new(),
             places: Vec::new(),
             callees: Vec::new(),
@@ -1133,8 +1135,26 @@ impl UnitView {
                 }
             };
             if let Some(found) = found {
+                // The method's declaring class, which the analysis kept
+                // under these bindings names, may be one the view holds
+                // nothing of, an interface's or a trait's.
+                if let Some(method) = found.method {
+                    self.mint(req, method.scope);
+                }
                 self.called.push((f, site, found));
             }
+        }
+    }
+
+    /// Mint the identity every request of the view's epoch names class
+    /// `c` by, where it is shared ([`UnitView::shared`]), holding nothing
+    /// of it; nothing for a request's own.
+    fn mint(&mut self, req: &Request, c: ClassId) {
+        if let Some(shared) = self.shared(req, c)
+            && !self.classes.contains(&shared)
+            && !self.minted.contains(&shared)
+        {
+            self.minted.push(shared);
         }
     }
 
@@ -1333,12 +1353,13 @@ impl UnitView {
 
     /// The identity the view minted for class `c`, the recording
     /// request's number for it, where it holds the class
-    /// ([`UnitView::hold_class`]) or took a pair on it
-    /// ([`UnitView::hold_callee`]); none for any other, a request's own
-    /// class among them.
+    /// ([`UnitView::hold_class`]), took a pair on it
+    /// ([`UnitView::hold_callee`]) or bound a call to a method it declares
+    /// ([`UnitView::called`]); none for any other, a request's own class
+    /// among them.
     #[must_use]
     pub fn shared_class(&self, c: ClassId) -> Option<EpochClassId> {
-        (self.classes.iter().chain(&self.paired))
+        (self.classes.iter().chain(&self.minted))
             .find(|held| **held == c)
             .copied()
     }
@@ -1494,11 +1515,7 @@ impl UnitView {
             cached,
         };
         // A shared class's pair names it in the code compiled from it.
-        if let Some(shared) = self.shared(req, class)
-            && !self.paired.contains(&shared)
-        {
-            self.paired.push(shared);
-        }
+        self.mint(req, class);
         self.callees.retain(|held| (held.func, held.at) != (f, at));
         self.callees.push(pair);
         true
