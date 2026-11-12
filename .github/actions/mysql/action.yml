@@ -9,9 +9,8 @@
 # On Linux, the compose file itself, recreated with a fresh data volume; the
 # runner's user is in the `docker` group (scripts/ci/runner.sh). On the Mac,
 # which has no Docker, Homebrew's mysql@8.4 on a data directory of the job's
-# own, after the pinned php, whose icu4c@78 and openssl@3 it shares, so
-# nothing php links is replaced; a server an earlier job left is shut down
-# first.
+# own, after the pinned php, so that no keg php links is replaced; a server
+# an earlier job left is shut down first.
 name: mysql
 description: Start the MySQL server of ci/mysql/compose.yaml for this job
 runs:

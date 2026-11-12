@@ -29,4 +29,4 @@ libxml2-dev           # ext/libxml, ext/xsl: pkg-config libxml-2.0, >= 2.9
 libxslt1-dev          # ext/xsl: pkg-config libxslt >= 1.1, libexslt >= 0.8
 libedit-dev           # ext/readline: pkg-config libedit
 libffi-dev            # ext/ffi: pkg-config libffi, >= 3.3
-libicu-dev            # ext/intl: pkg-config icu-uc, icu-i18n, icu-io; ICU 78, the oracle's
+libicu-dev            # ext/intl: pkg-config icu-uc, icu-i18n, icu-io; the distribution's ICU, at or above the floor ext/intl's build states

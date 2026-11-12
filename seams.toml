@@ -313,7 +313,7 @@ budget = 20000    # php's soap C ported over ext/libxml's surface, no library of
 feature = "soap"
 [[crate]]
 name = "ext/intl"
-budget = 28000    # php's intl C over the ICU4C the pinned keg links (icu4c@78), through pkg-config, never vendored, its C++ paths through an extern "C" C++ shim of the crate's own in src/ffi/; 14,794 lines of C and 7,445 of C++ (#1166, #727's rule, #1573)
+budget = 28000    # php's intl C over the platform's ICU4C, through pkg-config, never vendored, its C++ paths through an extern "C" C++ shim of the crate's own in src/ffi/; 14,794 lines of C and 7,445 of C++ (#1166, #727's rule, #1573)
 feature = "intl"
 [[crate]]
 name = "ext/gd"
