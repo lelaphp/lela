@@ -460,7 +460,7 @@ from = "php_syntax"
 to = ["php_heap"]
 [[edge]]
 from = "php_unit"
-to = ["php_heap"]
+to = ["php_heap", "php_macros"]   # php_macros for #[derive(EngineState)] alone, which links nothing: a type that stands in engine state derives where it is declared (#4544)
 [[edge]]
 from = "php_link"
 to = ["php_unit", "php_heap"]
@@ -495,7 +495,7 @@ allowlist = "tier.lock"
 adr = "0006"
 [[edge]]
 from = "php_ssa"
-to = ["php_unit", "php_heap"]
+to = ["php_unit", "php_heap", "php_macros"]   # php_macros as php_unit takes it (#4544)
 adr = "0015"
 [[edge]]
 from = "php_sapi"
