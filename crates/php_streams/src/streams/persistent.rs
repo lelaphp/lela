@@ -307,6 +307,12 @@ pub(crate) fn unlist(req: &mut Request, stream: Stream) {
 /// destroyed already, and an idle entry holds neither by type
 /// ([`Connection`]). Served as the request's stream state is dropped,
 /// after the resources are closed, when every entry is idle.
+///
+/// An entry given back holds no read buffer by type ([`Bare`]): what the
+/// stream's buffer held past the program's last read ended with the
+/// request when its resource closed, so the next request lent the entry
+/// reads from the socket on. What the crypto layer and a kept read filter
+/// hold of their own travels with the entry.
 pub(crate) fn give_back(pool: &Pool<Vec<u8>, Entry>, held: Vec<Held>) {
     for held in held {
         // `stream->ctx` was let go at the request's post-deactivation

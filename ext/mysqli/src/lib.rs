@@ -18,7 +18,9 @@
 //! **What a request holds.** `MyG(...)` is the request's [`State`]: the
 //! `report_mode`, the last connect error, the link
 //! counts, and the `p:` links it took out of the engine's pool or opened,
-//! held under php's `hash_key` until `post_deactivate` gives them back. php
+//! held under their `hash_key`, a digest of where the link connects and
+//! with which credentials ([`link::HashKey`]), until `post_deactivate`
+//! gives them back. php
 //! keeps them in `EG(persistent_list)`, one list per php-fpm process; here
 //! the list is a pool of the engine's (design §4.10, revision 55), lent to
 //! one request at a time, and the inactive links php counts per process
@@ -54,6 +56,7 @@ mod throwables;
 
 use php_ext::abi::{
     Dependency, DependencyKind, EngineState, Extension, ExtensionBuilder, Lent, LongHandler, Pool,
+    PoolKey,
 };
 use php_ext::attr::php_const;
 use php_ext::decl::IniDecl;
@@ -114,9 +117,10 @@ pub(crate) struct State {
     /// `num_inactive_persistent`.
     pub(crate) num_free_persistent: i64,
     /// `EG(persistent_list)`'s `mysqli_plist_entry`s the request holds, by
-    /// `hash_key`: each persistent connection it took out of the pool or
-    /// opened, open on a link or free for the next connect.
-    pub(crate) plinks: Lent<Vec<u8>, link::Plinks>,
+    /// `hash_key`, digested ([`link::HashKey`]): each persistent
+    /// connection it took out of the pool or opened, open on a link or
+    /// free for the next connect.
+    pub(crate) plinks: Lent<PoolKey, link::Plinks>,
 }
 
 /// `EG(persistent_list)`'s `mysqli_plist_entry`s: the engine's pool of
@@ -125,7 +129,7 @@ pub(crate) struct State {
 /// in no other list between the requests that take it up.
 #[derive(EngineState)]
 pub(crate) struct Pooled {
-    pub(crate) pool: Pool<Vec<u8>, Idle>,
+    pub(crate) pool: Pool<PoolKey, Idle>,
     /// The classes the natives raise, resolved at the same start.
     pub(crate) throwables: throwables::Throwables,
 }

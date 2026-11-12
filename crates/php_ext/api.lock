@@ -296,6 +296,8 @@ abi::Pool::give_back
 abi::Pool::idle_len
 abi::Pool::new
 abi::Pool::take
+abi::PoolKey
+abi::PoolKey::of
 abi::PostStartup
 abi::PreloadThread
 abi::PreloadThread::joined

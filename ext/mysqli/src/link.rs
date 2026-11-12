@@ -5,7 +5,7 @@
 
 #![allow(non_camel_case_types)]
 
-use php_ext::abi::{Instance, OrFalse, This, True, Union, Untyped};
+use php_ext::abi::{Instance, OrFalse, PoolKey, This, True, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, with_string};
@@ -57,10 +57,9 @@ pub(crate) enum Link {
 pub(crate) struct Conn {
     /// `mysql`, which a close leaves unset until the next connect.
     pub(crate) mysql: Option<Mysqlnd>,
-    /// `hash_key` of a persistent link, `mysql->persistent` where set:
-    /// the request's string `strpprintf` makes, released by
-    /// `php_clear_mysql`.
-    hash_key: Option<Owner<PhpString>>,
+    /// `hash_key` of a persistent link, `mysql->persistent` where set,
+    /// released by `php_clear_mysql`.
+    hash_key: Option<HashKey>,
     /// `multi_query`: whether multi statements are on.
     multi_query: bool,
     /// `async_result_fetch_type`: how `reap_async_query` reads the rows.
@@ -103,8 +102,8 @@ impl Conn {
     /// 32
     /// ```
     fn clear(&mut self, req: &mut Request) {
-        if let Some(key) = self.hash_key.take() {
-            key.give_up(req);
+        if let Some(HashKey { string, .. }) = self.hash_key.take() {
+            string.free(req);
         }
     }
 
@@ -234,22 +233,44 @@ impl Target {
         }
     }
 
-    /// `hash_key`: `mysqli_%s_%s%ld%s%s%s` of host, socket, `port`, user,
-    /// database and password.
-    fn key(&self) -> Vec<u8> {
-        let part = |v: &Option<Vec<u8>>| v.clone().unwrap_or_default();
-        [
-            b"mysqli_".to_vec(),
-            part(&self.host),
-            b"_".to_vec(),
-            part(&self.socket),
-            self.port.to_string().into_bytes(),
-            part(&self.user),
-            part(&self.database),
-            part(&self.password),
-        ]
-        .concat()
+    /// `hash_key` of host, socket, `port`, user, database and password,
+    /// an absent one empty, as the link holds it ([`HashKey`]); the `Err`
+    /// is the memory limit's fatal.
+    fn hash_key(&self, req: &mut Request) -> Result<HashKey, Thrown> {
+        let (key, len) = self.key();
+        // `_ZSTR_STRUCT_SIZE(len)`: the header, the bytes and the
+        // terminator.
+        let string = Emalloc::new(req, 24 + len + 1)?;
+        Ok(HashKey { key, string })
     }
+
+    /// The key of host, socket, `port`, user, database and password, and
+    /// the length of `hash_key`'s string, eight bytes and the parts'.
+    fn key(&self) -> (PoolKey, usize) {
+        let port = self.port.to_string();
+        let parts = [
+            self.host.as_deref().unwrap_or_default(),
+            self.socket.as_deref().unwrap_or_default(),
+            port.as_bytes(),
+            self.user.as_deref().unwrap_or_default(),
+            self.database.as_deref().unwrap_or_default(),
+            self.password.as_deref().unwrap_or_default(),
+        ];
+        let len = 8 + parts.iter().map(|part| part.len()).sum::<usize>();
+        (PoolKey::of(&parts), len)
+    }
+}
+
+/// A persistent link's `hash_key` as the link holds it from its connect
+/// to its close: the key its connection is kept under, in the request's
+/// [`Plinks`] and the engine's pool, digested ([`PoolKey`]), so that
+/// credentials that differ never share a connection's key and nothing
+/// the request or the pool keeps holds the password; and the request's
+/// allocation for the key's string, at its size, which `memory_get_usage`
+/// counts and nothing reads.
+pub(crate) struct HashKey {
+    key: PoolKey,
+    string: Emalloc,
 }
 
 /// The persistent connections the request holds under one `hash_key`:
@@ -263,9 +284,8 @@ pub(crate) struct Plinks {
 
 /// The request's [`Plinks`] under `key`, held from here to
 /// `post_deactivate`.
-fn plinks<'r>(req: &'r mut Request, key: &[u8]) -> Option<&'r mut Plinks> {
+fn plinks(req: &mut Request, key: PoolKey) -> Option<&mut Plinks> {
     let plinks = &mut req.state::<State>().plinks;
-    let key = key.to_vec();
     let at = match plinks.find(&key) {
         Some(at) => at,
         None => plinks.hold(key, Plinks::default()),
@@ -276,14 +296,19 @@ fn plinks<'r>(req: &'r mut Request, key: &[u8]) -> Option<&'r mut Plinks> {
 /// A free connection of the key's, the request's or one the engine's pool
 /// lends, taken up with `change_user` under the new credentials; `false`
 /// where there is none or the change failed, which closes it.
-fn reuse(req: &mut Request, mysql: &mut Conn, target: &Target, key: &[u8]) -> Result<bool, Thrown> {
+fn reuse(
+    req: &mut Request,
+    mysql: &mut Conn,
+    target: &Target,
+    key: PoolKey,
+) -> Result<bool, Thrown> {
     let pooled = if let Some(free) = plinks(req, key).and_then(|held| held.free.pop()) {
         req.state::<State>().num_free_persistent -= 1;
         free
     } else {
         let kept = req
             .engine::<crate::Pooled>()
-            .and_then(|crate::Pooled { pool, .. }| pool.take(&key.to_vec()));
+            .and_then(|crate::Pooled { pool, .. }| pool.take(&key));
         let Some(kept) = kept else {
             return Ok(false);
         };
@@ -331,19 +356,19 @@ pub(crate) fn post_deactivate(req: &mut Request) {
             handle.close(req, CloseType::Explicit).ok();
         }
         for handle in plinks.free {
-            give_to_pool(req, &key, handle);
+            give_to_pool(req, key, handle);
         }
     }
 }
 
 /// `handle` kept, with its socket, in the engine's pool of mysqli's free
 /// links under `key`, or closed with this request past its bound.
-fn give_to_pool(req: &mut Request, key: &[u8], handle: Mysqlnd) {
+fn give_to_pool(req: &mut Request, key: PoolKey, handle: Mysqlnd) {
     let Some(kept) = handle.give_back(req) else {
         return;
     };
     let past = match req.engine::<crate::Pooled>() {
-        Some(crate::Pooled { pool, .. }) => pool.give_back(key.to_vec(), kept),
+        Some(crate::Pooled { pool, .. }) => pool.give_back(key, kept),
         None => Some(kept),
     };
     if let Some(past) = past {
@@ -493,11 +518,11 @@ pub(crate) fn common_connect(
     if target.persistent {
         if ini_bool(req, b"mysqli.allow_persistent") {
             persistent = true;
-            let key = target.key();
-            let held = PhpString::new(req, &key)?;
+            let held = target.hash_key(req)?;
+            let key = held.key;
             mysql.clear(req);
             mysql.hash_key = Some(held);
-            reused = reuse(req, &mut mysql, &target, &key)?;
+            reused = reuse(req, &mut mysql, &target, key)?;
         } else {
             let text = "Persistent connections are disabled. Downgrading to normal";
             docref(req, Level::Warning, text);
@@ -539,8 +564,8 @@ pub(crate) fn common_connect(
             return Ok(None);
         }
         connected(req, handle)?;
-        if let Some(key) = mysql.hash_key.as_ref().map(|k| k.as_bytes().to_vec())
-            && let Some(held) = plinks(req, &key)
+        if let Some(key) = mysql.hash_key.as_ref().map(|k| k.key)
+            && let Some(held) = plinks(req, key)
         {
             held.open.push(handle);
         }
@@ -624,7 +649,7 @@ fn close_conn(
         mysql.clear(req);
         return Ok(());
     };
-    let key = mysql.hash_key.as_ref().map(|k| k.as_bytes().to_vec());
+    let key = mysql.hash_key.as_ref().map(|k| k.key);
     // `php_clear_mysql`, which php calls last: nothing reads the string
     // after its bytes are copied.
     mysql.clear(req);
@@ -635,7 +660,7 @@ fn close_conn(
         Some(key) => {
             req.state::<State>().num_active_persistent -= 1;
             let ended = end_psession(req, handle)?;
-            if let Some(held) = plinks(req, &key) {
+            if let Some(held) = plinks(req, key) {
                 held.open.retain(|open| *open != handle);
                 if ended {
                     held.free.push(handle);
@@ -1926,4 +1951,39 @@ pub(crate) fn set_report_mode(req: &mut Request, flags: i64) {
 /// `MyG(report_mode)`, for `mysqli_driver`.
 pub(crate) fn read_report_mode(req: &mut Request) -> i64 {
     report_mode(req)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Target;
+
+    fn target(user: &[u8], database: &[u8], password: &[u8]) -> Target {
+        Target {
+            host: Some(b"127.0.0.1".to_vec()),
+            user: Some(user.to_vec()),
+            password: Some(password.to_vec()),
+            database: Some(database.to_vec()),
+            port: 3306,
+            socket: None,
+            persistent: true,
+        }
+    }
+
+    /// The key is a digest: credentials whose bytes join up the same, a
+    /// user, database and password split at other places, meet in no
+    /// key, nor do two passwords one byte apart; the same credentials
+    /// meet in one, and the string the link holds is sized as before,
+    /// whatever the key.
+    #[test]
+    fn credentials_that_run_together_the_same_meet_in_no_key() {
+        let (key, len) = target(b"root", b"test", b"").key();
+        assert_eq!(key, target(b"root", b"test", b"").key().0);
+        assert_eq!(len, 8 + 9 + 4 + 4 + 4);
+        assert_ne!(key, target(b"root", b"tes", b"t").key().0);
+        assert_ne!(key, target(b"roottest", b"", b"").key().0);
+        assert_ne!(
+            target(b"root", b"test", b"one").key().0,
+            target(b"root", b"test", b"onE").key().0,
+        );
+    }
 }
