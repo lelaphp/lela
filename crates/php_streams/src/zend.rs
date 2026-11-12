@@ -33,6 +33,7 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     body_close,
     state: crate::state::engine_state,
     engine_end: crate::state::engine_end,
+    post_deactivate: crate::streams::persistent::forget,
 };
 
 /// `zend_stream_open` for an include ([`ScannerFile`]), warning where it

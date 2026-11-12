@@ -154,7 +154,7 @@ pub(crate) struct Net {
 /// its socket out of every request and of the engine's persistent list,
 /// the connection's alone, as php's mysqlnd owns its stream, and no
 /// stream of a request's.
-// The derive waits on `Persisted` being engine state (#4541).
+#[derive(php_ext::abi::EngineState)]
 #[allow(clippy::struct_excessive_bools)] // `Net`'s flags, one each
 pub(crate) struct IdleNet {
     kept: Option<Persisted>,

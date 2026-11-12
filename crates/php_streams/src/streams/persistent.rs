@@ -25,10 +25,10 @@ use crate::api::layer::Face as _;
 use crate::state::EngineState;
 
 use super::held::Payload;
-use super::sockets::Socket;
+use super::sockets::{Connection, Socket};
 use super::{PhpStream, Request, Stream, StreamOp};
 use crate::api::raising::Thrown;
-use crate::api::request::{OptionAnswer, OwnedStream, StreamOption};
+use crate::api::request::{OptionAnswer, OwnedStream, StreamCtx, StreamOption};
 use crate::api::values::{Owner, Resource};
 use crate::state::Layer;
 use crate::streams::StreamLayer;
@@ -45,19 +45,71 @@ pub(crate) struct Held {
 /// type whose payload it is, or the connection alone.
 enum State {
     InResource(Resource),
-    Idle(Entry),
+    Idle(Idle),
+}
+
+/// An entry the request holds idle, its resource gone, and beside it what
+/// of the request php's `php_stream` still holds then: `stream->ctx`, one
+/// owner the stream's, which php keeps for the rest of the request and
+/// forgets at its end (`forget_persistent_resource_id_numbers`,
+/// `Z/main/streams/streams.c:68-87`). The next ask by the key in the same
+/// request gives the stream it back ([`Persistent::persistent_stream`]);
+/// the request's end lets it go ([`forget`]). The entry is engine state
+/// and the `context` is the request's, so the two stand apart.
+///
+/// A stream asked for again by its key in the same request, with no
+/// `context`, has the first open's, and its crypto layer reads it:
+///
+/// ```php
+/// set_error_handler(function ($no, $msg) { echo $msg, "\n"; });
+/// $s = stream_socket_server('tcp://127.0.0.1:0'); $addr = stream_socket_get_name($s, false);
+/// $flags = STREAM_CLIENT_CONNECT | STREAM_CLIENT_PERSISTENT;
+/// $a = stream_socket_client("tcp://$addr", $no, $str, 1, $flags, stream_context_create(['ssl' => ['local_cert' => '/nonexistent/cert.pem']]));
+/// $peer = stream_socket_accept($s, 1);
+/// $a = null;
+/// $b = stream_socket_client("tcp://$addr", $no, $str, 1, $flags);
+/// var_dump(stream_context_get_options($b));
+/// fwrite($peer, "not a handshake\n"); fclose($peer);
+/// var_dump(stream_socket_enable_crypto($b, true, STREAM_CRYPTO_METHOD_TLS_CLIENT));
+/// ```
+/// ```expect
+/// array(1) {
+///   ["ssl"]=>
+///   array(1) {
+///     ["local_cert"]=>
+///     string(21) "/nonexistent/cert.pem"
+///   }
+/// }
+/// stream_socket_enable_crypto(): Unable to set local cert chain file `/nonexistent/cert.pem'; Check that your cafile/capath settings include details of your certificate and its issuer
+/// bool(false)
+/// ```
+struct Idle {
+    entry: Entry,
+    context: Option<Owner<StreamCtx>>,
 }
 
 /// What the persistent list keeps of a stream across its resources and
-/// across requests: the socket, with its `transport`'s and crypto layer's
-/// state, `stream->orig_path`, which php allocates persistent beside it,
-/// and the filters of its chains, which stay on the stream as php's
-/// `php_stream` keeps them, their resources the request's and gone with
-/// it. Nothing of a request's.
+/// across requests: the stream bare of its filters ([`Bare`]), and the
+/// filters of its chains, which stay on the stream as php's `php_stream`
+/// keeps them, their resources the request's and gone with it. Nothing
+/// of a request's.
 pub(crate) struct Entry {
-    socket: Socket,
-    orig_path: Option<Box<[u8]>>,
+    bare: Bare,
     filters: Kept,
+}
+
+/// A persistent stream bare of its filters: the socket's [`Connection`],
+/// with its `transport`'s and crypto layer's state, and
+/// `stream->orig_path`, which php allocates persistent beside it. What
+/// [`keep`] takes out for the extension that opened the stream, as
+/// [`Persisted`], which holds no filter. Engine state by type (#4541):
+/// no field of it can hold a request's value.
+///
+/// [`Persisted`]: crate::api::request::Persisted
+#[derive(php_engine::api::abi::EngineState)]
+pub(crate) struct Bare {
+    socket: Connection,
+    orig_path: Option<Box<[u8]>>,
 }
 
 pub(crate) trait Persistent {
@@ -111,7 +163,18 @@ impl Persistent for Request {
                     self.streams().persistent.insert(at, Held { key, state });
                     Owner::take(self, Stream::of(res))
                 }
-                State::Idle(entry) => self.lend(key, entry)?,
+                State::Idle(Idle { entry, context }) => {
+                    let stream = self.lend(key, entry);
+                    // The `context` the stream kept goes back to it, its
+                    // socket's crypto layer reading it as before.
+                    if let (Ok(stream), Some(context)) = (&stream, &context) {
+                        self.set_stream_context(**stream, Some(**context));
+                    }
+                    if let Some(context) = context {
+                        context.give_up(self);
+                    }
+                    stream?
+                }
             }
         } else if let Some(entry) = self
             .persistent_pool()
@@ -200,8 +263,9 @@ impl Persistent for Request {
 /// `entry` under a fresh resource of the `persistent stream` type, `r+`
 /// and seeking nowhere, held under no key.
 fn reopen(req: &mut Request, entry: Entry) -> Result<Owner<Stream>, Thrown> {
-    let mut stream = PhpStream::new(Box::new(entry.socket), b"r+");
-    stream.orig_path = entry.orig_path.map(super::OrigPath::Persistent);
+    let Bare { socket, orig_path } = entry.bare;
+    let mut stream = PhpStream::new(Box::new(Socket::from(socket)), b"r+");
+    stream.orig_path = orig_path.map(super::OrigPath::Persistent);
     stream.flags.no_seek = true;
     stream.attach_kept(entry.filters);
     req.stream_alloc_as(stream, true)
@@ -211,8 +275,12 @@ fn reopen(req: &mut Request, entry: Entry) -> Result<Owner<Stream>, Thrown> {
 /// lends: the connection [`keep`] took out, under a fresh resource taken
 /// off both of the request's lists at once ([`unlist`]), as php's
 /// persistent mysqlnd connection carries its `php_stream` from request to
-/// request in no list at all.
-pub(crate) fn lend_alone(req: &mut Request, entry: Entry) -> Result<Owner<Stream>, Thrown> {
+/// request in no list at all; with no filters, as it was kept.
+pub(crate) fn lend_alone(req: &mut Request, bare: Bare) -> Result<Owner<Stream>, Thrown> {
+    let entry = Entry {
+        bare,
+        filters: Kept::default(),
+    };
     let stream = reopen(req, entry)?;
     unlist(req, *stream);
     Ok(stream)
@@ -236,13 +304,15 @@ pub(crate) fn unlist(req: &mut Request, stream: Stream) {
 /// entry the request still holds given back to the engine's pool, its
 /// resource and its `stream->ctx` forgotten, nothing of them released,
 /// since the request's resources, each `stream->ctx` among them, are
-/// destroyed already. Served as the request's stream state is dropped,
-/// after the resources are closed, when every entry is idle and holds
-/// no `stream->ctx`.
+/// destroyed already, and an idle entry holds neither by type
+/// ([`Connection`]). Served as the request's stream state is dropped,
+/// after the resources are closed, when every entry is idle.
 pub(crate) fn give_back(pool: &Pool<Vec<u8>, Entry>, held: Vec<Held>) {
     for held in held {
-        if let State::Idle(mut entry) = held.state {
-            entry.socket.forget_request();
+        // `stream->ctx` was let go at the request's post-deactivation
+        // ([`forget`]), which every request that ends goes through; none
+        // is left here to give up.
+        if let State::Idle(Idle { entry, context: _ }) = held.state {
             // An entry past the pool's bound is closed here, outside the
             // lock.
             drop(pool.give_back(held.key, entry));
@@ -255,9 +325,12 @@ pub(crate) fn give_back(pool: &Pool<Vec<u8>, Entry>, held: Vec<Held>) {
 /// connection keeps its `php_stream`: its owed write flushed first, out
 /// of the request's persistent list, where an unlisted stream is not
 /// already, and out of the resource, which is closed, and the caller's
-/// owner given up. `None`, and the stream freed, for a stream that is not
-/// a socket's.
-pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
+/// owner given up: the one place a socket becomes what outlives every
+/// request, its connection taken out whole and what of the request it
+/// held left to close with the stream ([`Socket::detach`]), and its
+/// filters, none of which travel. `None`, and the stream freed, for a
+/// stream that is not a socket's.
+pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Bare> {
     let res = stream.resource();
     let socket = req.stream_with(*stream, |s| s.ops.as_socket().is_some());
     if socket != Some(true) {
@@ -278,15 +351,10 @@ pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
     };
     let kept = taken.and_then(|slot| {
         let mut taken = slot.stream;
-        let mut socket = taken.ops.as_socket()?.detach();
-        socket.forget_request();
+        let socket = taken.ops.as_socket()?.detach();
         let orig_path = taken.orig_path.take().map(|path| path.into_persistent(req));
         req.streams().pclose_ret = taken.release(req);
-        Some(Entry {
-            socket,
-            orig_path,
-            filters: Kept::default(),
-        })
+        Some(Bare { socket, orig_path })
     });
     stream.give_up(req);
     kept
@@ -340,18 +408,29 @@ pub(crate) fn finish(req: &mut Request, stream: PhpStream) -> i32 {
         // ([`engine_end`]) or travel with it to the request that asks
         // the key next.
         let filters = stream.keep_filters(req);
+        // `stream->ctx` stays the stream's for the rest of the request,
+        // beside the entry and not in it.
+        let context = stream.wrapped.as_mut().and_then(|w| w.context.take());
         let entry = stream.ops.as_socket().map(|socket| Entry {
-            socket: socket.detach(),
-            orig_path: stream
-                .orig_path
-                .take()
-                .map(|path| path.into_persistent(req)),
+            bare: Bare {
+                socket: socket.detach(),
+                orig_path: stream
+                    .orig_path
+                    .take()
+                    .map(|path| path.into_persistent(req)),
+            },
             filters,
         });
-        if let Some(entry) = entry
-            && let Some(at) = held_at(req, &stream)
-        {
-            req.streams().persistent[at].state = State::Idle(entry);
+        match (entry, held_at(req, &stream)) {
+            (Some(entry), Some(at)) => {
+                req.streams().persistent[at].state = State::Idle(Idle { entry, context });
+            }
+            (entry, _) => {
+                drop(entry);
+                if let Some(context) = context {
+                    context.give_up(req);
+                }
+            }
         }
     } else {
         super::held::owned(req, &mut stream, StreamOp::flush_owed);
@@ -360,6 +439,33 @@ pub(crate) fn finish(req: &mut Request, stream: PhpStream) -> i32 {
         }
     }
     stream.release(req)
+}
+
+/// `ZEND_MODULE_POST_ZEND_DEACTIVATE_D(streams)`, which `basic_functions`
+/// registers (`Z/main/streams/streams.c:90-98`), and its
+/// `forget_persistent_resource_id_numbers`: each entry the request holds
+/// idle lets go of `stream->ctx`, after the request's resources, that
+/// `context` among them, are closed. The entries stay held, to go back to
+/// the engine's pool as the request's stream state is dropped
+/// ([`give_back`]).
+pub(crate) fn forget(req: &mut Request) {
+    // A request that never touched a stream holds none, and its stream
+    // state is not built for the asking.
+    if req
+        .streams_ref()
+        .is_none_or(|state| state.persistent.is_empty())
+    {
+        return;
+    }
+    let contexts: Vec<Owner<StreamCtx>> = (req.streams().persistent.iter_mut())
+        .filter_map(|held| match &mut held.state {
+            State::Idle(idle) => idle.context.take(),
+            State::InResource(_) => None,
+        })
+        .collect();
+    for context in contexts {
+        context.give_up(req);
+    }
 }
 
 /// `zend_destroy_rsrc_list(&EG(persistent_list))`'s free of an entry
