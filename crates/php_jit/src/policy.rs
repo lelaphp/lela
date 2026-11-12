@@ -353,7 +353,7 @@ enum Runs {
 /// `opcache.jit=off` php starts it and runs no trace, so no `TRACE` line
 /// is written; the bits it reads then are for its stubs (`ASM_STUBS`,
 /// `PERF`, `GDB`, `zend_jit_ir.c:2981-2986`), and this tier has none.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EngineState)]
 pub(crate) enum Note {
     /// `function`, or a number whose trigger is not `HOT_TRACE`, runs as
     /// tracing: there is one tier and no optimizer.
@@ -1361,7 +1361,7 @@ pub(crate) enum Outcome {
 /// ---- TRACE 2 compiled
 ///
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Spent {
     /// A root's word, at this many failed attempts, which its state
     /// keeps, php's bad root cache (`zend_jit_trace_is_bad_root`,

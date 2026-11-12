@@ -878,7 +878,7 @@ impl Kernel {
 /// kernel's wrapper, which compiled code calls as a 64-bit constant, so
 /// its bytes are final. `enter`'s `kernels!` list makes the one the
 /// engine's `Backend` is built with (#2957).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) struct Symbols([usize; Kernel::ALL.len()]);
 
 impl Symbols {
@@ -941,8 +941,9 @@ impl Stood {
 /// that jumps to another passes over it, as php's link jumps past the
 /// prologue to the code after it. It is compiled once, with the
 /// `Backend`, and copied ahead of each body.
+#[derive(EngineState)]
 pub(crate) struct Backend {
-    isa: OwnedTargetIsa,
+    isa: Isa,
     symbols: Symbols,
     /// Whether every guard fails once, `jit.mode=exit-fuzz`.
     fuzz: bool,
@@ -955,6 +956,19 @@ impl std::fmt::Debug for Backend {
         f.debug_struct("Backend")
             .field("isa", &self.isa.triple().to_string())
             .finish_non_exhaustive()
+    }
+}
+
+/// Cranelift's ISA for the host, made once at engine start: what the
+/// derive on [`Backend`] cannot read through, a `dyn TargetIsa`, which
+/// `php_jit::table::code` vouches for.
+pub(crate) struct Isa(OwnedTargetIsa);
+
+impl std::ops::Deref for Isa {
+    type Target = dyn isa::TargetIsa;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
     }
 }
 
@@ -997,7 +1011,7 @@ impl Backend {
         let prologue = machine(&*isa, clif::prologue(isa.frontend_config()))
             .map_err(|_| Unsupported("the host's ISA refused the trace prologue"))?;
         Ok(Backend {
-            isa,
+            isa: Isa(isa),
             symbols,
             fuzz: policy.mode() == Mode::ExitFuzz,
             prologue: (prologue.bytes.into_boxed_slice(), prologue.align),

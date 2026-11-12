@@ -280,12 +280,23 @@ unsafe impl<P: Pages> Sync for Code<P> {}
 // request's; the derive cannot read through the address.
 impl<P: Pages> EngineState for Code<P> where Arc<Chunk<P>>: EngineState {}
 
-// The tier's engine state (ADR-0005, ADR-0006): the code this arena holds,
-// the code generator and the policy read at engine start, and the worker
-// that compiles a job past the request that submitted it, which is why a
-// job carries nothing of that request (`jit-design.md` §4.8). Here, with
-// the arena's `Send` and `Sync`, since the derive cannot read through the
-// code generator's types.
+// Cranelift's ISA for the host (`jit-design.md` §4.3): its triple, the
+// flags the policy asked for and the code generator's own tables, made
+// once at engine start from the host's description and read by every
+// compile after, none a request's; the derive on `Backend` cannot read
+// through its `dyn TargetIsa`.
+impl EngineState for crate::lower::Isa {}
+
+// The tier's engine state (ADR-0005, ADR-0006). Its `Shared`, the policy,
+// the code generator and the `PERF` outputs, derives; what this impl
+// still vouches for is its `Compiler`, the queue of jobs the worker
+// compiles past the request that submitted them (`jit-design.md` §4.8).
+// A job's `Recorded` names the recording request's classes by number, in
+// its view and in a sample's class, and no impl vouches for it until
+// #4607's question is answered (#4596). The rest of the queue waits on
+// that: the worker, whose body is the queue; a job's claim, whose holder
+// keeps the word's `Epoch`, engine state only once the arena is (#4476);
+// and the queue's `Condvar`.
 impl php_engine::api::abi::EngineState for crate::JitEngine {}
 
 /// The chunk being filled, and where its next body may start.

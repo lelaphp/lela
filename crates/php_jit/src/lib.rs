@@ -31,6 +31,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use php_engine::api::abi::EngineState;
 use php_engine::api::raising::{self, Level};
 use php_engine::api::request::TierStatus;
 use php_engine::tier::{
@@ -247,7 +248,7 @@ pub(crate) struct JitEngine {
 /// The tier's lines go where php's `opcache.jit_debug` lines go, to
 /// `stderr` (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250`), which for a
 /// request is the host's error stream: the CLI's `stderr`, as php's.
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 pub(crate) struct Shared {
     policy: policy::Policy,
     /// Which loops the engine binds ([`Jit::bound`]).

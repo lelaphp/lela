@@ -2,6 +2,7 @@
 //! php's `MAY_BE_*` bits (`Z/Zend/zend_type_info.h`) as its inference
 //! types a variable, and the part of them the trace decides by.
 
+use php_engine::api::abi::EngineState;
 use php_heap::{Zval, ZvalType};
 use php_ssa::Types as Php;
 use php_unit::Opcode;
@@ -18,7 +19,7 @@ use super::Layout;
 /// php's empty array, being of either), which mean something only beside
 /// `ARRAY`. Two sets are equal, and one is within another, by their
 /// views: what php knows of an array's elements or a count rides along.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, EngineState)]
 pub(crate) struct Types(Php);
 
 impl PartialEq for Types {

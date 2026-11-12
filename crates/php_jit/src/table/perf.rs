@@ -139,7 +139,7 @@ const DUMPS: bool = cfg!(target_os = "linux");
 /// `code_id`, which every epoch's table counts on as php counts on its
 /// one static. Dropped at the engine's end, it closes the jitdump with
 /// php's `JIT_CODE_CLOSE` record (`ir_perf_jitdump_close`).
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 pub(crate) struct Outputs {
     map: bool,
     dump: bool,

@@ -141,7 +141,7 @@ impl TraceId {
 /// `zend_jit_trace_name` (`Z/ext/opcache/jit/zend_jit_trace.c:237-252`)
 /// over the op array the trace starts in, `Class::method`, the function,
 /// or for a file's own code the file, and the line of its first opline.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EngineState)]
 pub(crate) struct TraceName {
     pub(crate) at: Box<[u8]>,
     pub(crate) line: u32,
