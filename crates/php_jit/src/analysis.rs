@@ -9,6 +9,11 @@
 //! `ZEND_JIT_DEBUG_SSA` at each trace's build, as php writes them each
 //! time it builds them anew.
 //!
+//! An analysis the epoch keeps names a class by the identity every
+//! request of the epoch shares, [`EpochClassId`], and one built for one
+//! build alone by the recording request's number, [`ClassId`]
+//! (design §5.14, *Identities*): `php_ssa::analyse` is built for each.
+//!
 //! What a call returns is typed by what php knows of the callee: a
 //! native's from php's table, a user function's from what its analysis
 //! earlier in the same build found it returns (`func_info->return_info`),
@@ -17,13 +22,16 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use php_engine::tier::{Bindings, CallSite, CalledFunction, ClassId, FuncRef, UnitView};
+use php_engine::tier::{
+    Bindings, CallSite, CalledFunction, ClassId, EpochClassId, FuncRef, UnitView,
+};
 use php_ssa::{
-    Analysis, BlockId, Body, Callee, Cfg, ClassConstant, Function, Level, LinkedTable, Method,
-    ObjectShape, PhiKind, Position, Property, Range, Returns, Ssa, SsaVar, TraceFrame, VarInfo,
-    is_no_val_use,
+    Analysis, BlockId, Body, Callee, Cfg, ClassConstant, ClassOf, Function, Level, LinkedTable,
+    Method, ObjectShape, PhiKind, Position, Property, Range, Returns, Ssa, SsaVar, TraceFrame,
+    VarInfo, is_no_val_use,
 };
 use php_unit::OpArray;
 use php_unit::decl::{ClassKind, HookKind, PropertyDecl, Visibility};
@@ -32,8 +40,16 @@ use crate::Lines;
 use crate::policy::JitDebug;
 use crate::record::{Event, TraceRecord};
 
-/// The analysis of one op array, none where php's fails.
-type Kept = Option<Arc<Analysis<ClassId>>>;
+/// The analysis of one op array the epoch keeps, none where php's fails.
+type Kept = Option<Arc<Analysis<EpochClassId>>>;
+
+/// What the epoch keeps of an analysis holds nothing of a request, each
+/// class named by an identity of the epoch's: held here, where it is
+/// kept, so a field that is not fails the build.
+const _: () = {
+    const fn engine_state<T: php_heap::EngineState>() {}
+    engine_state::<Analysis<EpochClassId>>();
+};
 
 /// `ZEND_JIT_LEVEL_OPT_FUNC`: the `O` digit of `opcache.jit` from which
 /// php analyses the op arrays a trace passes through (`zend_jit.h`).
@@ -76,11 +92,34 @@ impl Analyses {
     }
 }
 
+/// How one analysis names a class: by the identity every request of the
+/// view's epoch shares, in an analysis the epoch keeps
+/// ([`EpochClassId`]), or by the recording request's number, in one made
+/// for one build alone ([`ClassId`]). The view answers by the request's
+/// number, which an analysis takes in its own.
+trait Handle: Copy + PartialEq + Into<ClassId> {
+    /// `class` as an analysis of this kind names it; none where it
+    /// cannot, a request's own class in one the epoch keeps.
+    fn of(view: &UnitView, class: ClassId) -> Option<Self>;
+}
+
+impl Handle for ClassId {
+    fn of(_: &UnitView, class: ClassId) -> Option<ClassId> {
+        Some(class)
+    }
+}
+
+impl Handle for EpochClassId {
+    fn of(view: &UnitView, class: ClassId) -> Option<EpochClassId> {
+        view.shared_class(class)
+    }
+}
+
 /// The classes php's analysis of one op array names, as the view bound
 /// them when it accepted the op array ([`UnitView::class_named`]), and
 /// what the analysis reads of each from its linked record and
-/// declaration.
-struct Bound<'a> {
+/// declaration, each named as a `C`.
+struct Bound<'a, C> {
     view: &'a UnitView,
     /// The op array analysed.
     f: FuncRef,
@@ -93,12 +132,62 @@ struct Bound<'a> {
     /// which differs from build to build with the order the op arrays
     /// are analysed in, so the analysis is built anew at each build.
     reads_returns: Cell<bool>,
+    /// Whether the analysis met a class it has no `C` for, a request's
+    /// own in an analysis the epoch would keep, so it is made again
+    /// under the request's numbers and kept for no other build.
+    unnamed: Cell<bool>,
+    named: PhantomData<C>,
 }
 
-impl Bound<'_> {
+impl<'a, C: Handle> Bound<'a, C> {
+    fn new(
+        view: &'a UnitView,
+        f: FuncRef,
+        built: &'a [(FuncRef, Option<Returns<ClassId>>)],
+    ) -> Bound<'a, C> {
+        Bound {
+            view,
+            f,
+            built,
+            reads_returns: Cell::new(false),
+            unnamed: Cell::new(false),
+            named: PhantomData,
+        }
+    }
+
+    /// `class`, as the view answers it, named as a `C`.
+    fn named(&self, class: ClassId) -> Option<C> {
+        let named = C::of(self.view, class);
+        if named.is_none() {
+            self.unnamed.set(true);
+        }
+        named
+    }
+
+    /// What a function returns, as an earlier analysis of this build
+    /// found it, its class named as a `C`.
+    fn returns(&self, returns: Returns<ClassId>) -> Option<Returns<C>> {
+        let class = match returns.class {
+            Some(of) => Some(ClassOf {
+                class: self.named(of.class)?,
+                instanceof: of.instanceof,
+            }),
+            None => None,
+        };
+        Some(Returns {
+            types: returns.types,
+            class,
+            range: returns.range,
+            has_range: returns.has_range,
+        })
+    }
+
     /// `c` and the classes above it, nearest first.
-    fn lineage(&self, c: ClassId) -> impl Iterator<Item = ClassId> + '_ {
-        std::iter::successors(Some(c), |&c| self.view.parent(c)).take(MAX_DEPTH)
+    fn lineage(&self, c: C) -> impl Iterator<Item = C> + '_ {
+        std::iter::successors(Some(c), |&c| {
+            self.view.parent(c.into()).and_then(|up| self.named(up))
+        })
+        .take(MAX_DEPTH)
     }
 
     /// `zend_get_property_info`'s access check for code of `scope`: a
@@ -108,9 +197,9 @@ impl Bound<'_> {
     fn reaches(
         &self,
         visibility: Visibility,
-        declared_in: ClassId,
+        declared_in: C,
         name: &[u8],
-        scope: Option<ClassId>,
+        scope: Option<C>,
     ) -> bool {
         match (visibility, scope) {
             (Visibility::Public, _) => true,
@@ -126,7 +215,7 @@ impl Bound<'_> {
     /// `property_info->prototype->ce`: the class above `declared_in`
     /// furthest up whose properties still hold `name`, where an
     /// inherited protected property was first declared.
-    fn prototype(&self, declared_in: ClassId, name: &[u8]) -> ClassId {
+    fn prototype(&self, declared_in: C, name: &[u8]) -> C {
         self.lineage(declared_in)
             .take_while(|&c| self.own_property(c, name).is_some())
             .last()
@@ -134,21 +223,20 @@ impl Bound<'_> {
     }
 
     /// The property `name` class `c` declares itself.
-    fn own_property(&self, c: ClassId, name: &[u8]) -> Option<&PropertyDecl> {
-        (self.view.class_decl(c)?.properties.iter()).find(|p| *p.name.0 == *name)
+    fn own_property(&self, c: C, name: &[u8]) -> Option<&PropertyDecl> {
+        (self.view.class_decl(c.into())?.properties.iter()).find(|p| *p.name.0 == *name)
     }
-}
 
-impl<'a> Bound<'a> {
     /// `called` as php's call analysis reads it.
-    fn callee(&self, called: &'a CalledFunction) -> Callee<'a, ClassId> {
+    fn callee(&self, called: &'a CalledFunction) -> Callee<'a, C> {
         let body = match called.body {
             None => Body::Native,
             Some(g) if g == self.f => Body::Analysed,
             Some(g) => {
                 self.reads_returns.set(true);
                 let built = self.built.iter().find(|(h, _)| *h == g);
-                Body::User(built.and_then(|&(_, returns)| returns))
+                let returns = built.and_then(|&(_, returns)| returns);
+                Body::User(returns.and_then(|returns| self.returns(returns)))
             }
         };
         Callee {
@@ -156,12 +244,14 @@ impl<'a> Bound<'a> {
             return_type: called.return_type.as_ref(),
             returns_by_ref: called.returns_by_ref,
             generator: called.generator,
-            method: called.method.map(|m| Method {
-                scope: m.scope,
-                visibility: m.visibility,
-                is_final: m.is_final,
-                is_abstract: m.is_abstract,
-                tentative_return: m.tentative_return,
+            method: called.method.and_then(|m| {
+                Some(Method {
+                    scope: self.named(m.scope)?,
+                    visibility: m.visibility,
+                    is_final: m.is_final,
+                    is_abstract: m.is_abstract,
+                    tentative_return: m.tentative_return,
+                })
             }),
             body,
         }
@@ -171,60 +261,64 @@ impl<'a> Bound<'a> {
 /// The classes above a class the analysis walks, past which it stops.
 const MAX_DEPTH: usize = 64;
 
-impl LinkedTable for Bound<'_> {
-    type Class = ClassId;
+impl<C: Handle> LinkedTable for Bound<'_, C> {
+    type Class = C;
 
-    fn class(&self, lcname: &[u8]) -> Option<ClassId> {
-        self.view.class_named(self.f, lcname)
+    fn class(&self, lcname: &[u8]) -> Option<C> {
+        let class = self.view.class_named(self.f, lcname)?;
+        self.named(class)
     }
 
-    fn engine_class(&self, lcname: &[u8]) -> Option<ClassId> {
-        self.view.engine_class(lcname)
+    fn engine_class(&self, lcname: &[u8]) -> Option<C> {
+        let class = self.view.engine_class(lcname)?;
+        self.named(class)
     }
 
-    fn scope(&self) -> Option<ClassId> {
-        self.view.scope(self.f)
+    fn scope(&self) -> Option<C> {
+        let class = self.view.scope(self.f)?;
+        self.named(class)
     }
 
-    fn name(&self, class: ClassId) -> &[u8] {
+    fn name(&self, class: C) -> &[u8] {
         self.view
-            .class_decl(class)
+            .class_decl(class.into())
             .map_or(&[][..], |decl| &decl.name.0)
     }
 
-    fn parent(&self, class: ClassId) -> Option<ClassId> {
-        self.view.parent(class)
+    fn parent(&self, class: C) -> Option<C> {
+        let parent = self.view.parent(class.into())?;
+        self.named(parent)
     }
 
-    fn instance_of(&self, class: ClassId, of: ClassId) -> bool {
+    fn instance_of(&self, class: C, of: C) -> bool {
         self.lineage(class).any(|c| c == of)
             || self
                 .view
-                .class(class)
-                .is_some_and(|linked| linked.interfaces.contains(&of))
+                .class(class.into())
+                .is_some_and(|linked| linked.interfaces.contains(&of.into()))
     }
 
-    fn is_final(&self, class: ClassId) -> bool {
+    fn is_final(&self, class: C) -> bool {
         self.view
-            .class_decl(class)
+            .class_decl(class.into())
             .is_some_and(|decl| decl.flags.is_final)
     }
 
-    fn is_trait(&self, class: ClassId) -> bool {
+    fn is_trait(&self, class: C) -> bool {
         self.view
-            .class_decl(class)
+            .class_decl(class.into())
             .is_some_and(|decl| decl.kind == ClassKind::Trait)
     }
 
     /// A class lays its objects down with php's standard handlers and no
     /// `create_object` where no class of its lineage is the engine's own
     /// but `stdClass`, as no program's class sets either.
-    fn object(&self, class: ClassId) -> ObjectShape {
-        let Some(linked) = self.view.class(class) else {
+    fn object(&self, class: C) -> ObjectShape {
+        let Some(linked) = self.view.class(class.into()) else {
             return ObjectShape::default();
         };
         let standard = self.lineage(class).all(|c| {
-            self.view.class_decl(c).is_some_and(|decl| {
+            self.view.class_decl(c.into()).is_some_and(|decl| {
                 !decl.file.0.is_empty() || decl.name.0.eq_ignore_ascii_case(b"stdClass")
             })
         });
@@ -236,22 +330,18 @@ impl LinkedTable for Bound<'_> {
         }
     }
 
-    fn property(
-        &self,
-        class: ClassId,
-        name: &[u8],
-        scope: Option<ClassId>,
-    ) -> Option<Property<'_, ClassId>> {
+    fn property(&self, class: C, name: &[u8], scope: Option<C>) -> Option<Property<'_, C>> {
         let declared =
             |holder: ClassId, at: u32| self.view.class_decl(holder)?.properties.get(at as usize);
-        let row = (self.view.class(class)?.properties).find(name, |row| {
-            declared(row.holder_in(class), row.at).map_or(&[][..], |p| &p.name.0)
+        let row = (self.view.class(class.into())?.properties).find(name, |row| {
+            declared(row.holder_in(class.into()), row.at).map_or(&[][..], |p| &p.name.0)
         })?;
+        let holder = self.named(row.holder_in(class.into()))?;
         let (holder, decl) = match scope {
             // `zend_get_parent_private_property`: code of a class above
             // `class` that declares `name` private reads its own.
             Some(scope)
-                if scope != row.holder_in(class)
+                if scope != holder
                     && scope != class
                     && self.lineage(class).any(|c| c == scope)
                     && self
@@ -260,10 +350,7 @@ impl LinkedTable for Bound<'_> {
             {
                 (scope, self.own_property(scope, name)?)
             }
-            _ => (
-                row.holder_in(class),
-                declared(row.holder_in(class), row.at)?,
-            ),
+            _ => (holder, declared(holder.into(), row.at)?),
         };
         self.reaches(decl.visibility, holder, name, scope)
             .then_some(Property {
@@ -273,40 +360,39 @@ impl LinkedTable for Bound<'_> {
             })
     }
 
-    fn function(&self, lcname: &[u8]) -> Option<Callee<'_, ClassId>> {
+    fn function(&self, lcname: &[u8]) -> Option<Callee<'_, C>> {
         let called = self.view.called(self.f, CallSite::Function(lcname))?;
         Some(self.callee(called))
     }
 
-    fn method(&self, class: ClassId, lcname: &[u8]) -> Option<Callee<'_, ClassId>> {
-        let called = self.view.called(self.f, CallSite::Method(class, lcname))?;
+    fn method(&self, class: C, lcname: &[u8]) -> Option<Callee<'_, C>> {
+        let called = (self.view).called(self.f, CallSite::Method(class.into(), lcname))?;
         Some(self.callee(called))
     }
 
-    fn frameless(&self, index: u32) -> Option<Callee<'_, ClassId>> {
+    fn frameless(&self, index: u32) -> Option<Callee<'_, C>> {
         let called = self.view.called(self.f, CallSite::Frameless(index))?;
         Some(self.callee(called))
     }
 
-    fn parent_hook(&self, name: &[u8], kind: HookKind) -> Option<Callee<'_, ClassId>> {
+    fn parent_hook(&self, name: &[u8], kind: HookKind) -> Option<Callee<'_, C>> {
         let called = self.view.called(self.f, CallSite::ParentHook(name, kind))?;
         Some(self.callee(called))
     }
 
-    fn constant(&self, class: ClassId, name: &[u8]) -> Option<ClassConstant<'_, ClassId>> {
+    fn constant(&self, class: C, name: &[u8]) -> Option<ClassConstant<'_, C>> {
         let declared =
             |holder: ClassId, at: u32| self.view.class_decl(holder)?.constants.get(at as usize);
-        let row = (self.view.class(class)?.constants).find(name, |row| {
-            declared(row.holder_in(class), row.at).map_or(&[][..], |c| &c.name.0)
+        let row = (self.view.class(class.into())?.constants).find(name, |row| {
+            declared(row.holder_in(class.into()), row.at).map_or(&[][..], |c| &c.name.0)
         })?;
-        let holder = row.holder_in(class);
-        let decl = declared(holder, row.at)?;
+        let decl = declared(row.holder_in(class.into()), row.at)?;
         Some(ClassConstant {
             ty: decl.ty.as_ref(),
             is_public: decl.visibility == Visibility::Public,
             is_deprecated: (decl.attributes.iter())
                 .any(|a| a.name.0.eq_ignore_ascii_case(b"Deprecated")),
-            declared_in: holder,
+            declared_in: self.named(row.holder_in(class.into()))?,
         })
     }
 }
@@ -350,6 +436,61 @@ fn passed(record: &TraceRecord) -> Vec<FuncRef> {
     order
 }
 
+/// One analysis a trace's build reads: one the epoch keeps, its classes
+/// named as every request of the epoch names them, or one made for this
+/// build alone, named by the recording request's numbers.
+#[derive(Debug)]
+enum Read {
+    Kept(Arc<Analysis<EpochClassId>>),
+    Own(Arc<Analysis<ClassId>>),
+}
+
+impl Read {
+    /// `func_info->return_info`, its class by the recording request's
+    /// number.
+    fn returns(&self) -> Returns<ClassId> {
+        match self {
+            Read::Kept(analysis) => widened_returns(analysis.returns),
+            Read::Own(analysis) => analysis.returns,
+        }
+    }
+
+    /// Whether php built an SSA of the op array.
+    fn has_ssa(&self) -> bool {
+        match self {
+            Read::Kept(analysis) => analysis.ssa.is_some(),
+            Read::Own(analysis) => analysis.ssa.is_some(),
+        }
+    }
+}
+
+/// `info`, its class by the recording request's number.
+fn widened<C: Into<ClassId>>(info: VarInfo<C>) -> VarInfo<ClassId> {
+    VarInfo {
+        types: info.types,
+        class: info.class.map(widened_class),
+        range: info.range,
+    }
+}
+
+/// `returns`, its class by the recording request's number.
+fn widened_returns<C: Into<ClassId>>(returns: Returns<C>) -> Returns<ClassId> {
+    Returns {
+        types: returns.types,
+        class: returns.class.map(widened_class),
+        range: returns.range,
+        has_range: returns.has_range,
+    }
+}
+
+/// `of`, its class by the recording request's number.
+fn widened_class<C: Into<ClassId>>(of: ClassOf<C>) -> ClassOf<ClassId> {
+    ClassOf {
+        class: of.class.into(),
+        instanceof: of.instanceof,
+    }
+}
+
 /// The analyses of the op arrays one trace's build passes through, as
 /// `zend_jit_trace_build_tssa` reads each one's `func_info.ssa`: none for
 /// an op array php does not analyse, or analyses with no SSA; and what
@@ -357,7 +498,7 @@ fn passed(record: &TraceRecord) -> Vec<FuncRef> {
 /// built at and what each op array analysed returns.
 #[derive(Debug)]
 pub(crate) struct Analysed {
-    analyses: Vec<(FuncRef, Arc<Analysis<ClassId>>)>,
+    analyses: Vec<(FuncRef, Read)>,
     built: Vec<(FuncRef, Option<Returns<ClassId>>)>,
     level: Level,
 }
@@ -382,28 +523,32 @@ pub(crate) enum Defined {
     Out,
 }
 
-impl Analysed {
-    /// The analysis of `f` this build made or read, and its SSA, where it
-    /// has one.
-    fn of(&self, f: FuncRef) -> Option<(&Cfg, &Ssa<ClassId>)> {
-        let (_, analysis) = self.analyses.iter().find(|(g, _)| *g == f)?;
-        Some((&analysis.cfg, analysis.ssa.as_ref()?))
-    }
+/// `$read` over the CFG and the SSA of the analysis of `$f` that
+/// `$analysed` made or read, whichever identity names its classes; none
+/// where it has none, or no SSA.
+macro_rules! over {
+    ($analysed:expr, $f:expr, |$cfg:pat_param, $ssa:ident| $read:expr) => {
+        match &$analysed.analyses.iter().find(|(g, _)| *g == $f)?.1 {
+            Read::Kept(analysis) => {
+                let ($cfg, $ssa) = (&analysis.cfg, analysis.ssa.as_ref()?);
+                $read
+            }
+            Read::Own(analysis) => {
+                let ($cfg, $ssa) = (&analysis.cfg, analysis.ssa.as_ref()?);
+                $read
+            }
+        }
+    };
+}
 
+impl Analysed {
     /// What php's analysis of `f` knows of the variable opline `at`
     /// defines as `which`, the op array's `var_info` that
     /// `zend_jit_trace_restrict_ssa_var_info` and
     /// `zend_jit_trace_copy_ssa_var_range` read
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:1009-1100`).
-    pub(crate) fn defined(&self, f: FuncRef, at: u32, which: Defined) -> Option<&VarInfo<ClassId>> {
-        let (_, ssa) = self.of(f)?;
-        let op = ssa.ops.get(at as usize)?;
-        let var = match which {
-            Defined::Op1 => op.op1_def,
-            Defined::Op2 => op.op2_def,
-            Defined::Out => op.out_def,
-        }?;
-        ssa.info.get(var.index())
+    pub(crate) fn defined(&self, f: FuncRef, at: u32, which: Defined) -> Option<VarInfo<ClassId>> {
+        over!(self, f, |_, ssa| defined_in(ssa, at, which))
     }
 
     /// Whether php's analysis of `f` holds what opline `at` defines as
@@ -412,16 +557,8 @@ impl Analysed {
     /// variable, which `zend_jit_trace_copy_ssa_var_range` copies before
     /// it propagates the range (`Z/ext/opcache/jit/zend_jit_trace.c:996-1050`).
     pub(crate) fn aliased(&self, f: FuncRef, at: u32, which: Defined) -> bool {
-        let Some((_, ssa)) = self.of(f) else {
-            return false;
-        };
-        let var = ssa.ops.get(at as usize).and_then(|op| match which {
-            Defined::Op1 => op.op1_def,
-            Defined::Op2 => op.op2_def,
-            Defined::Out => op.out_def,
-        });
-        var.and_then(|var| ssa.vars.get(var.index()))
-            .is_some_and(|var| var.alias != php_ssa::Alias::None)
+        let aliased = || over!(self, f, |_, ssa| aliased_in(ssa, at, which));
+        aliased().unwrap_or(false)
     }
 
     /// What php's analysis of `f` knows of variable `var` where opline
@@ -432,30 +569,8 @@ impl Analysed {
     /// pi only where no phi is, and so up each immediate dominator; none
     /// where no definition dominates it, as php then copies what its first
     /// use reads, which is what the variable entered the function with.
-    pub(crate) fn reaching(&self, f: FuncRef, at: u32, var: u32) -> Option<&VarInfo<ClassId>> {
-        let (cfg, ssa) = self.of(f)?;
-        let of_var = |v: Option<SsaVar>| v.filter(|v| ssa.var(*v).is_some_and(|i| i.var.0 == var));
-        let mut block = *cfg.map.get(at as usize)?;
-        let mut op_num = at;
-        loop {
-            let b = cfg.blocks.get(block.index())?;
-            while op_num > b.start {
-                op_num -= 1;
-                let op = ssa.ops.get(op_num as usize)?;
-                if let Some(v) = of_var(op.out_def)
-                    .or_else(|| of_var(op.op2_def))
-                    .or_else(|| of_var(op.op1_def))
-                {
-                    return ssa.info.get(v.index());
-                }
-            }
-            if let Some(v) = block_phi(ssa, block, var) {
-                return ssa.info.get(v.index());
-            }
-            block = b.idom?;
-            let up = cfg.blocks.get(block.index())?;
-            op_num = up.start + up.len;
-        }
+    pub(crate) fn reaching(&self, f: FuncRef, at: u32, var: u32) -> Option<VarInfo<ClassId>> {
+        over!(self, f, |cfg, ssa| reaching_in(cfg, ssa, at, var))
     }
 
     /// `zend_ssa_is_last_use` (`Z/ext/opcache/jit/zend_jit.c:125-172`):
@@ -472,53 +587,7 @@ impl Analysed {
         at: u32,
         which: Defined,
     ) -> Option<bool> {
-        let (cfg, ssa) = self.of(f)?;
-        let op = ssa.ops.get(at as usize)?;
-        let var = match which {
-            Defined::Op1 => op.op1_use,
-            Defined::Op2 => op.op2_use,
-            Defined::Out => op.out_use,
-        }?;
-        let info = ssa.var(var)?;
-        let mut phi = info.phi_use_chain;
-        while let Some(id) = phi {
-            if !ssa.var(ssa.phi(id)?.ssa_var)?.no_val {
-                return Some(false);
-            }
-            phi = ssa.next_use_phi(var, id);
-        }
-        let no_val = |at: u32| {
-            let (op, ssa_op) = (code.oplines.get(at as usize)?, ssa.ops.get(at as usize)?);
-            Some(is_no_val_use(op, ssa_op, var))
-        };
-        let b = *cfg.map.get(at as usize)?;
-        let block = cfg.blocks.get(b.index())?;
-        if block.loop_header.is_some_and(|h| h.0 > 0) || block.marks.loop_header {
-            let defined_in = match info.definition {
-                Some(def) => *cfg.map.get(def as usize)?,
-                None => ssa.phi(info.definition_phi?)?.block,
-            };
-            let header = if block.marks.loop_header {
-                b
-            } else {
-                block.loop_header?
-            };
-            if cfg.dominates(defined_in, header) {
-                return Some(false);
-            }
-            let mut prev = info.use_chain;
-            while let Some(p) = prev.filter(|p| *p != at) {
-                let pb = *cfg.map.get(p as usize)?;
-                if b != pb && cfg.dominates(b, pb) && !no_val(p)? {
-                    return Some(false);
-                }
-                prev = ssa.next_use(var, p);
-            }
-        }
-        match ssa.next_use(var, at) {
-            None => Some(true),
-            Some(next) => no_val(next),
-        }
+        over!(self, f, |cfg, ssa| last_use_in((cfg, ssa), code, at, which))
     }
 
     /// What php's analysis of `f` knows of variable `var` at the phi of the
@@ -534,21 +603,145 @@ impl Analysed {
         start: u32,
         last: Option<u32>,
         var: u32,
-    ) -> Option<&VarInfo<ClassId>> {
-        let (cfg, ssa) = self.of(f)?;
-        let block = *cfg.map.get(start as usize)?;
-        if !cfg.blocks.get(block.index())?.marks.loop_header {
-            return None;
-        }
-        let false_loop = last
-            .and_then(|last| cfg.map.get(last as usize))
-            .and_then(|b| cfg.blocks.get(b.index()))
-            .is_some_and(|b| b.loop_header != Some(block));
-        if false_loop {
-            return None;
-        }
-        ssa.info.get(block_phi(ssa, block, var)?.index())
+    ) -> Option<VarInfo<ClassId>> {
+        over!(self, f, |cfg, ssa| header_in((cfg, ssa), start, last, var))
     }
+}
+
+/// [`Analysed::defined`] over one analysis's SSA.
+fn defined_in<C: Copy + Into<ClassId>>(
+    ssa: &Ssa<C>,
+    at: u32,
+    which: Defined,
+) -> Option<VarInfo<ClassId>> {
+    let op = ssa.ops.get(at as usize)?;
+    let var = match which {
+        Defined::Op1 => op.op1_def,
+        Defined::Op2 => op.op2_def,
+        Defined::Out => op.out_def,
+    }?;
+    ssa.info.get(var.index()).copied().map(widened)
+}
+
+/// [`Analysed::aliased`] over one analysis's SSA; none where the opline
+/// defines nothing as `which`.
+fn aliased_in<C>(ssa: &Ssa<C>, at: u32, which: Defined) -> Option<bool> {
+    let op = ssa.ops.get(at as usize)?;
+    let var = match which {
+        Defined::Op1 => op.op1_def,
+        Defined::Op2 => op.op2_def,
+        Defined::Out => op.out_def,
+    }?;
+    Some(ssa.vars.get(var.index())?.alias != php_ssa::Alias::None)
+}
+
+/// [`Analysed::reaching`] over one analysis's CFG and SSA.
+fn reaching_in<C: Copy + Into<ClassId>>(
+    cfg: &Cfg,
+    ssa: &Ssa<C>,
+    at: u32,
+    var: u32,
+) -> Option<VarInfo<ClassId>> {
+    let info = |v: SsaVar| ssa.info.get(v.index()).copied().map(widened);
+    let of_var = |v: Option<SsaVar>| v.filter(|v| ssa.var(*v).is_some_and(|i| i.var.0 == var));
+    let mut block = *cfg.map.get(at as usize)?;
+    let mut op_num = at;
+    loop {
+        let b = cfg.blocks.get(block.index())?;
+        while op_num > b.start {
+            op_num -= 1;
+            let op = ssa.ops.get(op_num as usize)?;
+            if let Some(v) = of_var(op.out_def)
+                .or_else(|| of_var(op.op2_def))
+                .or_else(|| of_var(op.op1_def))
+            {
+                return info(v);
+            }
+        }
+        if let Some(v) = block_phi(ssa, block, var) {
+            return info(v);
+        }
+        block = b.idom?;
+        let up = cfg.blocks.get(block.index())?;
+        op_num = up.start + up.len;
+    }
+}
+
+/// [`Analysed::is_last_use`] over one analysis's CFG and SSA.
+fn last_use_in<C>(
+    (cfg, ssa): (&Cfg, &Ssa<C>),
+    code: &OpArray,
+    at: u32,
+    which: Defined,
+) -> Option<bool> {
+    let op = ssa.ops.get(at as usize)?;
+    let var = match which {
+        Defined::Op1 => op.op1_use,
+        Defined::Op2 => op.op2_use,
+        Defined::Out => op.out_use,
+    }?;
+    let info = ssa.var(var)?;
+    let mut phi = info.phi_use_chain;
+    while let Some(id) = phi {
+        if !ssa.var(ssa.phi(id)?.ssa_var)?.no_val {
+            return Some(false);
+        }
+        phi = ssa.next_use_phi(var, id);
+    }
+    let no_val = |at: u32| {
+        let (op, ssa_op) = (code.oplines.get(at as usize)?, ssa.ops.get(at as usize)?);
+        Some(is_no_val_use(op, ssa_op, var))
+    };
+    let b = *cfg.map.get(at as usize)?;
+    let block = cfg.blocks.get(b.index())?;
+    if block.loop_header.is_some_and(|h| h.0 > 0) || block.marks.loop_header {
+        let defined_in = match info.definition {
+            Some(def) => *cfg.map.get(def as usize)?,
+            None => ssa.phi(info.definition_phi?)?.block,
+        };
+        let header = if block.marks.loop_header {
+            b
+        } else {
+            block.loop_header?
+        };
+        if cfg.dominates(defined_in, header) {
+            return Some(false);
+        }
+        let mut prev = info.use_chain;
+        while let Some(p) = prev.filter(|p| *p != at) {
+            let pb = *cfg.map.get(p as usize)?;
+            if b != pb && cfg.dominates(b, pb) && !no_val(p)? {
+                return Some(false);
+            }
+            prev = ssa.next_use(var, p);
+        }
+    }
+    match ssa.next_use(var, at) {
+        None => Some(true),
+        Some(next) => no_val(next),
+    }
+}
+
+/// [`Analysed::header`] over one analysis's CFG and SSA.
+fn header_in<C: Copy + Into<ClassId>>(
+    (cfg, ssa): (&Cfg, &Ssa<C>),
+    start: u32,
+    last: Option<u32>,
+    var: u32,
+) -> Option<VarInfo<ClassId>> {
+    let block = *cfg.map.get(start as usize)?;
+    if !cfg.blocks.get(block.index())?.marks.loop_header {
+        return None;
+    }
+    let false_loop = last
+        .and_then(|last| cfg.map.get(last as usize))
+        .and_then(|b| cfg.blocks.get(b.index()))
+        .is_some_and(|b| b.loop_header != Some(block));
+    if false_loop {
+        return None;
+    }
+    let phi = block_phi(ssa, block, var)?;
+    ssa.info.get(phi.index()).copied().map(widened)
 }
 
 impl Analysed {
@@ -565,15 +758,7 @@ impl Analysed {
             }
         }
         let tables = (funcs.into_iter())
-            .filter_map(|f| {
-                let table = Bound {
-                    view,
-                    f,
-                    built: &self.built,
-                    reads_returns: Cell::new(false),
-                };
-                Some((f, function(view, f)?, table))
-            })
+            .filter_map(|f| Some((f, function(view, f)?, Bound::new(view, f, &self.built))))
             .collect();
         Tables {
             tables,
@@ -587,7 +772,7 @@ impl Analysed {
 /// ([`Analysed::tables`]), from which its frames are made
 /// ([`Tables::frames`]).
 pub(crate) struct Tables<'a> {
-    tables: Vec<(FuncRef, Function<'a>, Bound<'a>)>,
+    tables: Vec<(FuncRef, Function<'a>, Bound<'a, ClassId>)>,
     level: Level,
 }
 
@@ -605,10 +790,10 @@ impl Tables<'_> {
 /// php's inference over a trace's SSA, `zend_update_type_info` and
 /// `zend_inference_propagate_range` as `zend_jit_trace_build_tssa` calls
 /// them, each op read in the op array it is of.
-pub(crate) struct Inference<'a>(Vec<(FuncRef, TraceFrame<'a, Bound<'a>>)>);
+pub(crate) struct Inference<'a>(Vec<(FuncRef, TraceFrame<'a, Bound<'a, ClassId>>)>);
 
 impl<'a> Inference<'a> {
-    fn frame(&self, f: FuncRef) -> Option<&TraceFrame<'a, Bound<'a>>> {
+    fn frame(&self, f: FuncRef) -> Option<&TraceFrame<'a, Bound<'a, ClassId>>> {
         self.0.iter().find(|(g, _)| *g == f).map(|(_, frame)| frame)
     }
 
@@ -657,7 +842,7 @@ impl<'a> Inference<'a> {
 
 /// The phi of `var` at `block`, a pi only where the block has no phi of
 /// it, as `zend_jit_trace_copy_ssa_var_info` walks `ssa->blocks[b].phis`.
-fn block_phi(ssa: &Ssa<ClassId>, block: BlockId, var: u32) -> Option<SsaVar> {
+fn block_phi<C>(ssa: &Ssa<C>, block: BlockId, var: u32) -> Option<SsaVar> {
     let phis = ssa.block_phis.get(block.index())?;
     let mut pi = None;
     for phi in phis.iter().filter_map(|id| ssa.phi(*id)) {
@@ -670,6 +855,38 @@ fn block_phi(ssa: &Ssa<ClassId>, block: BlockId, var: u32) -> Option<SsaVar> {
         }
     }
     pi
+}
+
+/// The analysis of `f` a trace's build reads: the one the epoch keeps
+/// under what the view bound for it, made and kept where none is; or one
+/// made for this build alone where it binds a class only the request
+/// holds, or met one with no identity the epoch shares, and made for the
+/// epoch but kept for no other build where it read another function's
+/// return. None where php's analysis fails.
+fn analysis_of(
+    view: &UnitView,
+    analyses: &Analyses,
+    (f, function): (FuncRef, &Function<'_>),
+    built: &[(FuncRef, Option<Returns<ClassId>>)],
+    level: Level,
+) -> Option<Read> {
+    if let Some(bindings) = view.bindings(f) {
+        if let Some(kept) = analyses.kept(f, &bindings) {
+            return kept.map(Read::Kept);
+        }
+        let table = Bound::<EpochClassId>::new(view, f, built);
+        let made = php_ssa::analyse(function, &table, level).map(Arc::new);
+        if !table.unnamed.get() {
+            let made = if table.reads_returns.get() {
+                made
+            } else {
+                analyses.keep(f, bindings, made)
+            };
+            return made.map(Read::Kept);
+        }
+    }
+    let table = Bound::<ClassId>::new(view, f, built);
+    php_ssa::analyse(function, &table, level).map(|made| Read::Own(Arc::new(made)))
 }
 
 /// The analyses of the op arrays `record` passes through, at an
@@ -702,34 +919,25 @@ pub(crate) fn build(
         let Some(function) = function(view, f) else {
             continue;
         };
-        let table = Bound {
-            view,
-            f,
-            built: &built,
-            reads_returns: Cell::new(false),
-        };
-        // Kept for the epoch only where what it read stays: no class
-        // only the request holds, and no other function's return.
-        let bindings = (!view.binds_request_class(f)).then(|| view.bindings(f));
-        let kept = (bindings.as_ref())
-            .and_then(|b| analyses.kept(f, b))
-            .unwrap_or_else(|| {
-                let made = php_ssa::analyse(&function, &table, level).map(Arc::new);
-                match bindings {
-                    Some(bindings) if !table.reads_returns.get() => {
-                        analyses.keep(f, bindings, made)
-                    }
-                    _ => made,
-                }
-            });
-        if dump && let Some(analysis) = &kept {
+        let read = analysis_of(view, analyses, (f, &function), &built, level);
+        if dump && let Some(read) = &read {
             let mut written = Vec::new();
-            analysis.dump(&mut written, &function, &table, view.frameless_names());
+            let frameless = view.frameless_names();
+            match read {
+                Read::Kept(kept) => {
+                    let table = Bound::<EpochClassId>::new(view, f, &built);
+                    kept.dump(&mut written, &function, &table, frameless);
+                }
+                Read::Own(own) => {
+                    let table = Bound::<ClassId>::new(view, f, &built);
+                    own.dump(&mut written, &function, &table, frameless);
+                }
+            }
             lines.push(&written);
         }
-        built.push((f, kept.as_ref().map(|a| a.returns)));
-        if let Some(analysis) = kept.filter(|a| a.ssa.is_some()) {
-            found.push((f, analysis));
+        built.push((f, read.as_ref().map(Read::returns)));
+        if let Some(read) = read.filter(Read::has_ssa) {
+            found.push((f, read));
         }
     }
     (passed.len() <= MAX_FUNCS).then_some(Analysed {

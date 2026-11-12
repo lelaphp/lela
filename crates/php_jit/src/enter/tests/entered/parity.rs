@@ -295,7 +295,8 @@ fn by_kernel(req: &mut Request, f: FrameRef) -> Option<Reads> {
     tier::stand(req, f, OplineIdx(init));
     tier::step(req, f).ok()?;
     let pushed_at = tier::building_call(req)?;
-    req.state::<Parity>().plain = tier::plain_call(req, pushed_at);
+    let view = tier::UnitView::new(req);
+    req.state::<Parity>().plain = tier::plain_call(&view, req, pushed_at);
     let pushed = read(req, pushed_at);
     while tier::frame(req, f)?.opline().0 < call {
         tier::step(req, f).ok()?;

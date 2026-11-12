@@ -1848,7 +1848,7 @@ type CallKey = (
     Box<[u8]>,
     Box<[u8]>,
     u32,
-    Option<tier::ClassId>,
+    Option<tier::EpochClassId>,
 );
 
 #[derive(Debug, Default)]
@@ -2103,8 +2103,7 @@ fn header_of(
         Box::<[u8]>::from(call.own_class().unwrap_or_default()),
         Box::<[u8]>::from(call.name()),
         call.count(),
-        // The scope the image writes: a request-scoped class's is none.
-        call.scope().filter(|class| tier::class_published(*class)),
+        call.shared_scope(),
     );
     if let Some(image) = calls.get(&key) {
         return Some(image.address());

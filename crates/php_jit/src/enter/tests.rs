@@ -314,7 +314,7 @@ mod touched {
         let (Some(class), Some(f)) = (tier::this_class(req, frame), tier::func(req, frame)) else {
             return;
         };
-        req.state::<Seen>().class = tier::class_number(class);
+        req.state::<Seen>().class = tier::recorded_number(class);
         let Some(at) = tier::frame(req, frame)
             .and_then(|view| view.op_array())
             .and_then(|code| {

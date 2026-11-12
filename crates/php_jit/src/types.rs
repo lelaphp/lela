@@ -79,7 +79,9 @@ mod tests;
 
 use std::num::{NonZeroU32, NonZeroUsize};
 
-use php_engine::tier::{ClassId, FramelessAt, FuncRef, MapPtrRaw, PlainCall, UnitView};
+use php_engine::tier::{
+    EpochClassId, EpochFunction, FramelessAt, FuncRef, MapPtrRaw, PlainCall, UnitView,
+};
 use php_heap::ZvalType;
 use php_ssa::Range;
 use php_unit::{ConstIdx, Opcode, OplineIdx};
@@ -509,7 +511,7 @@ pub(crate) enum PairCallee {
     /// A published method's number, the same in every request of the
     /// epoch ([`php_engine::tier::CalleeSlot::function`]), compared as a
     /// constant.
-    Number(u32),
+    Number(EpochFunction),
     /// A request-scoped class's own method, numbered by each request for
     /// itself: the pair's record compared with the record of the header
     /// the request laid out for the call, which names the method the
@@ -531,7 +533,7 @@ pub(crate) enum PairClass {
     /// This published class, the one an `INIT_STATIC_METHOD_CALL` names,
     /// which the call's header names as its called scope in every
     /// request, as php takes an immutable linked class as a constant.
-    Published(ClassId),
+    Published(EpochClassId),
     /// The request-scoped class an `INIT_STATIC_METHOD_CALL` names,
     /// whatever its request resolved the name to: the called scope
     /// written from the pair, as php reads it from the slot.
@@ -552,8 +554,8 @@ pub(crate) enum PairClass {
     /// published class, and with nothing where `self` or `parent` or a
     /// request-scoped name names it.
     This {
-        named: Option<ClassId>,
-        receiver: ClassId,
+        named: Option<EpochClassId>,
+        receiver: EpochClassId,
     },
 }
 
@@ -750,7 +752,7 @@ pub(crate) enum Check {
     /// compares `obj->ce` (`Z/ext/opcache/jit/zend_jit_ir.c:14191-14204`):
     /// a published class, whose id names the one linked class in every
     /// request of the trace's epoch.
-    Class { object: Object, class: ClassId },
+    Class { object: Object, class: EpochClassId },
     /// The call the stepped `INIT_*` before it pushed through its handler
     /// serves this op array, php's `zend_jit_func_guard` on `call->func`
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:9283-9300`), so the trace's

@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::tier::{
-    self, CalleeSlot, ClassId, FramelessAt, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample,
-    UnitView,
+    self, CalleeSlot, ClassId, EpochClassId, FramelessAt, FuncRef, MapPtrRaw, PlainCall,
+    PropertySlot, Sample, UnitView,
 };
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
@@ -398,7 +398,7 @@ struct PushAt {
 /// runtime-cache slot holds, which compiled code reads in the request it
 /// runs in, the pair and the class it is held to, or a function.
 enum HeldBy {
-    Class(Object, ClassId),
+    Class(Object, EpochClassId),
     Pair(CalleeSlot, PairClass),
     /// A function's call by its name: the callee the slot holds, which
     /// the request's image of the call names.
@@ -406,7 +406,7 @@ enum HeldBy {
     /// A closure's call, held by the `push_call` kernel to the function
     /// the object holds, under php's guard on its class, `Closure`, where
     /// nothing has held that.
-    Closure(Object, ClassId),
+    Closure(Object, EpochClassId),
 }
 
 /// What a send wrote into a call's argument: the types of what it sent,
@@ -971,10 +971,12 @@ impl<'a> Builder<'a> {
             Some(HeldBy::Slot(slot)) => Some(*slot),
             _ => None,
         };
+        // A published class's place, which the view held the class for.
         if let (Form::Inline, Some(property)) = (form, property)
             && property.slot.cached().is_none()
+            && let Some(class) = self.view.shared_class(property.class)
         {
-            self.class_guard(idx, frame, at, (property.object, property.class));
+            self.class_guard(idx, frame, at, (property.object, class));
         }
         let pair_callee = pushed.as_ref().and_then(|pushed| pushed.plain.callee());
         let in_place = match pushed {
@@ -1925,7 +1927,7 @@ impl<'a> Builder<'a> {
                     // A function named in full, or the frame's own.
                     Callee::User(callee) if op.opcode == Opcode::InitFcall || *callee == func => {
                         (self.view.calls_of(*callee, op.extended_value))
-                            .find(|plain| plain.scope().is_none())?
+                            .find(|plain| !plain.is_method())?
                     }
                     // A native named in full, which php's trace pushes as
                     // it pushes a user function's call
@@ -3776,7 +3778,7 @@ impl<'a> Builder<'a> {
             return None;
         }
         let plain = (self.view.calls_of(*callee, op.extended_value))
-            .find(|plain| plain.scope().is_none())?
+            .find(|plain| !plain.is_method())?
             .clone();
         Some(PushAt {
             plain,
@@ -3786,9 +3788,13 @@ impl<'a> Builder<'a> {
 
     /// The class of a sample that holds a `Closure` as it is, php's
     /// `orig_op2_type == IS_OBJECT && op2_ce == zend_ce_closure`.
-    fn of_closure(&self, sample: Option<Sample>) -> Option<ClassId> {
+    fn of_closure(&self, sample: Option<Sample>) -> Option<EpochClassId> {
         let class = sample.filter(|sample| !sample.reference)?.class?;
-        (self.view.engine_class(b"closure") == Some(class)).then_some(class)
+        let closure = self
+            .view
+            .engine_class(b"closure")
+            .filter(|closure| *closure == class)?;
+        self.view.shared_class(closure)
     }
 
     /// The call an `INIT_DYNAMIC_CALL` of a `Closure` makes, as php's
@@ -3924,16 +3930,17 @@ impl<'a> Builder<'a> {
         idx: OpId,
         (frame, func, at): (Frame, FuncRef, OplineIdx),
         op: &Opline,
-        (object, class): (Object, ClassId),
+        (object, class): (Object, EpochClassId),
     ) {
         let known = (self.analysed.reaching(func, at.0, op.op2))
             .and_then(|info| info.class)
             .is_some_and(|of| of.class == class && !of.instanceof);
-        if known || self.classed.get(&object) == Some(&class) {
-            self.classed.insert(object, class);
+        let numbered = ClassId::from(class);
+        if known || self.classed.get(&object) == Some(&numbered) {
+            self.classed.insert(object, numbered);
             return;
         }
-        self.classed.insert(object, class);
+        self.classed.insert(object, numbered);
         self.guards.push(Placed {
             at: GuardAt::Before(idx),
             check: Check::Class { object, class },
@@ -3986,14 +3993,14 @@ impl<'a> Builder<'a> {
             _ => return None,
         };
         let plain = match callee {
-            Callee::User(callee) => (self.view.calls_of(*callee, op.extended_value))
-                .find(|plain| plain.scope() == Some(class))?
+            Callee::User(callee) => (self.view)
+                .method_call(*callee, op.extended_value, class)?
                 .clone(),
             Callee::Request => self.request_call(func, op, class)?,
             Callee::Native(_) => return None,
         };
-        let held = if tier::class_published(class) {
-            HeldBy::Class(object, class)
+        let held = if let Some(shared) = plain.shared_scope() {
+            HeldBy::Class(object, shared)
         } else {
             let pair = (self.view.callee_at(func, at))
                 .filter(|pair| pair.class() == class && pair.instance())?;
@@ -4048,24 +4055,24 @@ impl<'a> Builder<'a> {
             }
             _ => return None,
         };
-        let named = (constant && tier::class_published(pair.class())).then_some(pair.class());
+        let named = constant
+            .then(|| self.view.shared_class(pair.class()))
+            .flatten();
         let mut plains = self.view.calls_of(*callee, op.extended_value);
         let (plain, class) = if pair.instance() {
             // The receiver's class is the call's called scope, the one
             // plain call to the callee whose scope is published.
-            let plain = plains
-                .find(|plain| plain.scope().is_some_and(tier::class_published))?
-                .clone();
-            let receiver = plain.scope()?;
-            (plain, PairClass::This { named, receiver })
+            let (plain, receiver) =
+                plains.find_map(|plain| Some((plain, plain.shared_scope()?)))?;
+            (plain.clone(), PairClass::This { named, receiver })
         } else if scoped {
             (
-                plains.find(|plain| plain.scope().is_some())?.clone(),
+                plains.find(|plain| plain.is_method())?.clone(),
                 PairClass::Forwarded,
             )
         } else {
-            let plain = plains
-                .find(|plain| plain.scope() == Some(pair.class()))?
+            let plain = (self.view)
+                .method_call(*callee, op.extended_value, pair.class())?
                 .clone();
             (plain, named.map_or(PairClass::Named, PairClass::Published))
         };
@@ -4116,7 +4123,7 @@ impl<'a> Builder<'a> {
             return None;
         };
         (self.view.calls_of(*callee, op.extended_value))
-            .find(|plain| plain.scope().is_some())
+            .find(|plain| plain.is_method())
             .cloned()
     }
 
@@ -4127,12 +4134,13 @@ impl<'a> Builder<'a> {
         idx: OpId,
         frame: Frame,
         here: OplineIdx,
-        (object, class): (Object, ClassId),
+        (object, class): (Object, EpochClassId),
     ) {
-        if self.classed.get(&object) == Some(&class) {
+        let numbered = ClassId::from(class);
+        if self.classed.get(&object) == Some(&numbered) {
             return;
         }
-        self.classed.insert(object, class);
+        self.classed.insert(object, numbered);
         self.guards.push(Placed {
             at: GuardAt::Before(idx),
             check: Check::Class { object, class },

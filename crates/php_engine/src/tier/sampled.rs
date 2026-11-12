@@ -11,6 +11,7 @@
 use php_heap::{FrameRef, Slot, Zval, ZvalType};
 use php_unit::OperandKind;
 
+use super::{EpochClassId, EpochFunction};
 use super::{FuncRef, Request};
 use crate::api::values::ClassId;
 
@@ -86,11 +87,30 @@ pub fn on_heap(req: &Request, frame: FrameRef) -> bool {
         .is_some_and(|at| at.generator().is_some())
 }
 
-/// The number a class is known by within its request (design §5.14,
-/// *Identities*), which a recorded trace writes in its text form
-/// (`jit-design.md` §4.1, `TraceRecord::dump`).
+/// The number every request of the epoch knows a shared class by
+/// (design §5.14, *Identities*, revision NEXT), which compiled code
+/// compares an object's class against: only a class the view minted an
+/// [`EpochClassId`] for has one, so no code compiled for the epoch names
+/// a request's own class by its number.
 #[must_use]
-pub fn class_number(class: ClassId) -> u32 {
+pub fn class_number(class: EpochClassId) -> u32 {
+    ClassId::from(class).0
+}
+
+/// The number every request of the epoch calls a function it shares by,
+/// as compiled code compares a pair's callee against it: only a function
+/// the view minted an [`EpochFunction`] for has one.
+#[must_use]
+pub fn function_number(function: EpochFunction) -> u32 {
+    crate::api::call::Function::from(function).0
+}
+
+/// The number a class is known by within the recording's request, a
+/// request's own class's among them, which a recorded trace writes in
+/// its text form (`jit-design.md` §4.1, `TraceRecord::dump`) and
+/// [`numbered_class`] reads back.
+#[must_use]
+pub fn recorded_number(class: ClassId) -> u32 {
     class.0
 }
 
@@ -103,7 +123,7 @@ pub fn class_published(class: ClassId) -> bool {
     class.is_published()
 }
 
-/// The class [`class_number`] gave `number`, read back, as a recorded
+/// The class [`recorded_number`] gave `number`, read back, as a recorded
 /// trace's text form names it; whether any request has such a class is
 /// the reader's to ask.
 #[must_use]

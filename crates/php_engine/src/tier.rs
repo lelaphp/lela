@@ -81,14 +81,15 @@ pub use layout::{
     Activation, FRAME, FrameLayout, PLACE, PlaceLayout, PlainCall, call_image, plain_call,
 };
 pub use sampled::{
-    Building, Sample, building, building_call, class_number, class_published, native_returns,
-    numbered_class, on_heap, sample, this_class, under_way,
+    Building, Sample, building, building_call, class_number, class_published, function_number,
+    native_returns, numbered_class, on_heap, recorded_number, sample, this_class, under_way,
 };
 pub use strings::{assign_concat, concat, rope_end, rope_open, rope_push, string_offset};
 pub use view::{
     Bindings, CachedSlot, CallSite, CalledFunction, CalledMethod, CalleeSlot, Declaration, Epoch,
-    FuncRef, Held, MapPtrRaw, PropertySlot, UnitView, epoch, epoch_state, frame_cache, func,
-    jump_targets, landing, landing_stood, running_func, served, touch, touchable,
+    EpochClassId, EpochFunction, FuncRef, Held, MapPtrRaw, PropertySlot, UnitView, epoch,
+    epoch_state, frame_cache, func, jump_targets, landing, landing_stood, running_func, served,
+    touch, touchable,
 };
 
 pub use crate::api::values::ClassId;

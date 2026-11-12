@@ -58,6 +58,8 @@ tier::Epoch
 tier::Epoch::fixture
 tier::Epoch::tier_state
 tier::Epoch::word
+tier::EpochClassId
+tier::EpochFunction
 tier::Evaluated
 tier::Extension
 tier::ExtensionBuilder
@@ -187,6 +189,7 @@ tier::frame
 tier::frame_cache
 tier::free_operands
 tier::func
+tier::function_number
 tier::inherit
 tier::interrupted
 tier::jump_targets
@@ -201,6 +204,7 @@ tier::on_heap
 tier::owed_frame
 tier::plain_call
 tier::primed
+tier::recorded_number
 tier::restore
 tier::room
 tier::running_func

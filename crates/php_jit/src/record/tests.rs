@@ -1007,7 +1007,7 @@ fn dump_then_parse_is_the_identity() {
             "seed {seed}:\n{text}"
         );
     }
-    assert_eq!(tier::class_number(tier::numbered_class(3)), 3);
+    assert_eq!(tier::recorded_number(tier::numbered_class(3)), 3);
     assert!(TraceRecord::parse("start loop\nroot e1\n").is_err());
     assert!(
         TraceRecord::parse("start loop\nroot e1\nop e1 0 long.square - - -\nstop loop\n").is_err()
