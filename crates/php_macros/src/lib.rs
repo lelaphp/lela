@@ -29,9 +29,12 @@
 //! signature, a type or a name. A default is php's constant expression,
 //! read as php's lexer reads it and kept unevaluated.
 //!
-//! The expansion names `::php_ext::abi` and `::php_ext::__private`, or
-//! `crate::api` while `php_engine` is compiled, so Core's natives take the
-//! same attributes (ADR-0007).
+//! The expansion names `::php_ext::abi` and `::php_ext::__private` in an
+//! extension, `::php_engine::api` in `php_jit` and `php_streams`, which
+//! reach the engine directly, and `crate::api` while `php_engine` is
+//! compiled, so Core's natives take the same attributes (ADR-0007).
+//! `#[derive(EngineState)]` names `::php_heap::EngineState` in `php_unit`
+//! and `php_ssa`, which stand below the engine and the facade (#4544).
 //!
 //! What fails the build is held by `compile_fail` blocks in
 //! `php_bundle`'s `refusals`, and the parity extension that holds
@@ -102,6 +105,9 @@ pub fn mirrors(attribute: TokenStream, item: TokenStream) -> TokenStream {
 /// itself is compiled, whose natives are Core's, `php_engine::api` in
 /// the tier and the stream layer, which reach the engine directly and
 /// derive engine state there, and the facade everywhere else (ADR-0007).
+/// The derive's trait starts apart from this root in `php_unit` and
+/// `php_ssa`, at `::php_heap::EngineState`, since neither crate reaches
+/// the engine or the facade (`engine_state::state_trait_for`, #4544).
 fn root() -> Tokens {
     root_for(std::env::var("CARGO_CRATE_NAME").ok().as_deref())
 }
