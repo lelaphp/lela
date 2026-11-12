@@ -442,7 +442,9 @@ fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
         Imm::Named => return write!(text, " named"),
         Imm::Pair { function, class } => {
             match function {
-                PairCallee::Number(function) => write!(text, " pair fn {function}")?,
+                PairCallee::Number(function) => {
+                    write!(text, " pair fn {}", tier::function_number(function))?;
+                }
                 PairCallee::Record => write!(text, " pair fn own")?,
             }
             return match class {

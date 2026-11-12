@@ -438,7 +438,7 @@ impl Builder<'_> {
         for (def, use_, which, i) in defs(tssa) {
             let Some(def) = def else { continue };
             let place = at.0 + i;
-            let static_info = self.analysed.defined(func, place, which).copied();
+            let static_info = self.analysed.defined(func, place, which);
             let propagates = match &static_info {
                 Some(info) => {
                     !info.types.has(php_ssa::Types::REF)

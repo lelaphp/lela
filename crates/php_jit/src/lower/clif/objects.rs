@@ -13,7 +13,7 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{InstBuilder, Value};
-use php_engine::tier::{self, ClassId, FRAME, PLACE, PlaceLayout};
+use php_engine::tier::{self, EpochClassId, FRAME, PLACE, PlaceLayout};
 use php_heap::{Obj, ZvalType};
 use php_unit::Opcode;
 
@@ -69,7 +69,7 @@ impl Emit<'_> {
     pub(super) fn class_guard(
         &mut self,
         object: Object,
-        class: ClassId,
+        class: EpochClassId,
         exit: ExitId,
     ) -> Result<(), Abort> {
         let obj = self.object(object)?;

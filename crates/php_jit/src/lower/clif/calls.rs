@@ -712,10 +712,11 @@ impl Emit<'_> {
         match function {
             PairCallee::Number(function) => {
                 let callee = (self.b.ins()).load(I32, trusted(), place, at(P.pair_function()));
-                let other = self
-                    .b
-                    .ins()
-                    .icmp_imm_u(IntCC::NotEqual, callee, i64::from(function));
+                let other = self.b.ins().icmp_imm_u(
+                    IntCC::NotEqual,
+                    callee,
+                    i64::from(tier::function_number(function)),
+                );
                 self.refuse_if(other, refuse)?;
             }
             PairCallee::Record => {

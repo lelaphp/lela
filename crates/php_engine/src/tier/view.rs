@@ -520,10 +520,31 @@ pub struct PropertySlot {
     slot: u32,
     typed: bool,
     admits: u16,
-    cached: Option<MapPtrRaw>,
+    class_of: PlaceClass,
+}
+
+/// How compiled code finds a property's place on its object's class: by
+/// a guard on a class every request of the epoch shares, whose place is
+/// the one the view took in every request, or from the runtime-cache slot
+/// of the request it runs in, for a request-scoped class. One of the two
+/// is always the case, so a place served in place is either guarded on
+/// its class or read where the class is the request's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceClass {
+    /// A published class's place, under a guard on the class.
+    Shared(EpochClassId),
+    /// A request-scoped class's place, read from this cache slot.
+    Cached(MapPtrRaw),
 }
 
 impl PropertySlot {
+    /// How compiled code finds the place: under a guard on a shared class,
+    /// or from the request's cache slot ([`PlaceClass`]).
+    #[must_use]
+    pub fn class_of(self) -> PlaceClass {
+        self.class_of
+    }
+
     /// The runtime-cache slot compiled code reads the place from, in the
     /// request it runs in, for a request-scoped class, as php's code reads
     /// `CACHED_PTR(cache_slot)` for a class that is not immutable
@@ -531,7 +552,10 @@ impl PropertySlot {
     /// published class, whose place is this one in every request.
     #[must_use]
     pub fn cached(self) -> Option<MapPtrRaw> {
-        self.cached
+        match self.class_of {
+            PlaceClass::Cached(raw) => Some(raw),
+            PlaceClass::Shared(_) => None,
+        }
     }
 
     /// The declared slot, by its number among the object's slots.
@@ -572,7 +596,7 @@ pub struct CalleeSlot {
     func: FuncRef,
     at: OplineIdx,
     class: ClassId,
-    function: crate::api::call::Function,
+    function: Option<EpochFunction>,
     instance: bool,
     cached: MapPtrRaw,
 }
@@ -593,8 +617,8 @@ impl CalleeSlot {
     /// request for itself, which compiled code holds the slot to by the
     /// callee's record ([`PlaceLayout::pair_record`](super::PlaceLayout::pair_record)).
     #[must_use]
-    pub fn function(self) -> Option<u32> {
-        self.function.published_number()
+    pub fn function(self) -> Option<EpochFunction> {
+        self.function
     }
 
     /// Whether the callee takes `$this`, php's `ZEND_ACC_STATIC` clear.
@@ -610,6 +634,71 @@ impl CalleeSlot {
     }
 }
 
+/// The identity of a class every request of one epoch shares, one of the
+/// engine's own or a row of the epoch's published arena, by which the
+/// epoch's tier state names a class (design §5.14, *Identities*,
+/// revision 183). One is made two ways and no other: by a [`UnitView`]
+/// of that epoch, where the check [`UnitView::hold_class`] makes finds
+/// the request of that epoch, the class published and its row in the
+/// arena; and from an [`EngineClassId`](crate::api::values::EngineClassId),
+/// by `From` and with no view, since the engine's own classes stand in
+/// every epoch. So a request's own class has none, and one stands only
+/// in its epoch's arena, beside a hold on it, or among the engine's own.
+/// Where a [`ClassId`] is asked for, this is one, by `From`.
+///
+/// What compiled code compares a class against is one of these
+/// ([`super::class_number`]); a request's number is not:
+///
+/// ```compile_fail,E0308
+/// fn baked(class: php_engine::tier::ClassId) -> u32 {
+///     php_engine::tier::class_number(class)
+/// }
+/// # fn main() {}
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
+pub struct EpochClassId(u32);
+
+/// The identity of a function or method every request of one epoch
+/// numbers alike, by which the epoch's tier state names one: the number
+/// every request of the epoch calls it by. Made only by a [`UnitView`] of
+/// that epoch, by a check of its own beside the class's
+/// (`UnitView::shared_function`): where the request is of the
+/// view's epoch and the function is a native or a native method, which
+/// every request numbers alike, or a user function or method whose row
+/// the epoch's arena holds. So a request's own function has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
+pub struct EpochFunction(u32);
+
+impl From<crate::api::values::EngineClassId> for EpochClassId {
+    fn from(class: crate::api::values::EngineClassId) -> EpochClassId {
+        EpochClassId(ClassId::from(class).0)
+    }
+}
+
+impl From<EpochClassId> for ClassId {
+    fn from(class: EpochClassId) -> ClassId {
+        ClassId(class.0)
+    }
+}
+
+impl PartialEq<ClassId> for EpochClassId {
+    fn eq(&self, other: &ClassId) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl PartialEq<EpochClassId> for ClassId {
+    fn eq(&self, other: &EpochClassId) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl From<EpochFunction> for crate::api::call::Function {
+    fn from(function: EpochFunction) -> crate::api::call::Function {
+        crate::api::call::Function(function.0)
+    }
+}
+
 /// What a trace may read of the op arrays, literals and published
 /// classes it touched (`jit-design.md` §4.1, §5.3): built by the recorder
 /// from the request, it holds the request's epoch once and the ids it
@@ -621,9 +710,17 @@ impl CalleeSlot {
 pub struct UnitView {
     epoch: Epoch,
     funcs: Vec<FuncRef>,
-    classes: Vec<ClassId>,
-    /// The plain calls the recording took ([`UnitView::hold_call`]).
-    calls: Vec<super::PlainCall>,
+    /// The shared classes the view holds ([`UnitView::hold_class`]).
+    classes: Vec<EpochClassId>,
+    /// The shared classes the view minted an identity for and did not
+    /// hold for the analysis ([`UnitView::shared_class`]): the class of
+    /// each pair the recording took, and the declaring class of each
+    /// method a held op array's calls reach.
+    minted: Vec<EpochClassId>,
+    /// The plain calls the recording took ([`UnitView::hold_call`]), each
+    /// beside the called scope the recording's request numbered, by which
+    /// a trace's build finds the call of a receiver it sampled.
+    calls: Vec<(Option<ClassId>, super::PlainCall)>,
     /// The property places the recording took ([`UnitView::hold_place`]).
     places: Vec<PropertySlot>,
     /// The pairs of a method's call the recording took
@@ -672,20 +769,23 @@ pub struct UnitView {
 /// they stand then (`zend_jit_trace_build_ssa`); two builds that bind
 /// the same find the same in them, so an analysis kept under one
 /// binding set is the one php would build at the next build that binds
-/// it (ADR-0015, as amended on #3571; #3579).
+/// it (ADR-0015, as amended on #3571; #3579). The epoch keeps an analysis
+/// under these alone, so each class is named as every request of the
+/// epoch names it ([`EpochClassId`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bindings {
-    scope: Option<ClassId>,
-    named: Vec<(Box<[u8]>, ClassId)>,
-    engine_named: Vec<(Box<[u8]>, ClassId)>,
-    called: Vec<(Site, CalledFunction)>,
+    scope: Option<EpochClassId>,
+    named: Vec<(Box<[u8]>, EpochClassId)>,
+    engine_named: Vec<(Box<[u8]>, EpochClassId)>,
+    called: Vec<(Site<EpochClassId>, CalledFunction<EpochClassId>)>,
 }
 
-/// Where [`UnitView::called`] looks a callee up, owned.
+/// Where [`UnitView::called`] looks a callee up, owned, a method's class
+/// named as a `C`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Site {
+enum Site<C = ClassId> {
     Function(Box<[u8]>),
-    Method(ClassId, Box<[u8]>),
+    Method(C, Box<[u8]>),
     Frameless(u32),
     ParentHook(Box<[u8]>, HookKind),
 }
@@ -699,6 +799,17 @@ impl Site {
             Site::Frameless(index) => CallSite::Frameless(*index),
             Site::ParentHook(name, kind) => CallSite::ParentHook(name, *kind),
         }
+    }
+
+    /// The site with its class named as every request of `view`'s epoch
+    /// names it; none for a class of the request's own.
+    fn shared(&self, view: &UnitView) -> Option<Site<EpochClassId>> {
+        Some(match self {
+            Site::Function(name) => Site::Function(name.clone()),
+            Site::Method(class, name) => Site::Method(view.shared_class(*class)?, name.clone()),
+            Site::Frameless(index) => Site::Frameless(*index),
+            Site::ParentHook(name, kind) => Site::ParentHook(name.clone(), *kind),
+        })
     }
 }
 
@@ -718,9 +829,11 @@ pub enum CallSite<'a> {
 /// A function a call of a held op array reaches, as php's call analysis
 /// reads it (`zend_optimizer_get_called_func`, `zend_get_func_info`):
 /// its name, its declared return, the op array a user function's call
-/// serves, and a method's class and flags.
+/// serves, and a method's class and flags, named as a `C`: by the
+/// recording request's number as the view answers it, and as every
+/// request of the epoch names it among [`Bindings`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CalledFunction {
+pub struct CalledFunction<C = ClassId> {
     /// `common.function_name`, as declared.
     pub name: Name,
     pub return_type: Option<Type>,
@@ -729,16 +842,41 @@ pub struct CalledFunction {
     /// The op array a user function's call serves; none for a native.
     pub body: Option<FuncRef>,
     /// A method's class and flags; none for a function.
-    pub method: Option<CalledMethod>,
+    pub method: Option<CalledMethod<C>>,
+}
+
+impl CalledFunction {
+    /// The function with its method's class named as every request of
+    /// `view`'s epoch names it; none for a class of the request's own.
+    fn shared(&self, view: &UnitView) -> Option<CalledFunction<EpochClassId>> {
+        let method = match self.method {
+            Some(m) => Some(CalledMethod {
+                scope: view.shared_class(m.scope)?,
+                visibility: m.visibility,
+                is_final: m.is_final,
+                is_abstract: m.is_abstract,
+                tentative_return: m.tentative_return,
+            }),
+            None => None,
+        };
+        Some(CalledFunction {
+            name: self.name.clone(),
+            return_type: self.return_type.clone(),
+            returns_by_ref: self.returns_by_ref,
+            generator: self.generator,
+            body: self.body,
+            method,
+        })
+    }
 }
 
 /// A method's `common.scope` and the `fn_flags` php's call analysis
 /// reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
-pub struct CalledMethod {
+pub struct CalledMethod<C = ClassId> {
     /// The class that declares it.
-    pub scope: ClassId,
+    pub scope: C,
     pub visibility: Visibility,
     pub is_final: bool,
     pub is_abstract: bool,
@@ -796,6 +934,7 @@ impl UnitView {
             epoch: epoch(req),
             funcs: Vec::new(),
             classes: Vec::new(),
+            minted: Vec::new(),
             calls: Vec::new(),
             places: Vec::new(),
             callees: Vec::new(),
@@ -996,8 +1135,26 @@ impl UnitView {
                 }
             };
             if let Some(found) = found {
+                // The method's declaring class, which the analysis kept
+                // under these bindings names, may be one the view holds
+                // nothing of, an interface's or a trait's.
+                if let Some(method) = found.method {
+                    self.mint(req, method.scope);
+                }
                 self.called.push((f, site, found));
             }
+        }
+    }
+
+    /// Mint the identity every request of the view's epoch names class
+    /// `c` by, where it is shared ([`UnitView::shared`]), holding nothing
+    /// of it; nothing for a request's own.
+    fn mint(&mut self, req: &Request, c: ClassId) {
+        if let Some(shared) = self.shared(req, c)
+            && !self.classes.contains(&shared)
+            && !self.minted.contains(&shared)
+        {
+            self.minted.push(shared);
         }
     }
 
@@ -1100,23 +1257,36 @@ impl UnitView {
     /// What the view bound for php's analysis of the op array `f` names,
     /// the key the epoch keeps its analysis under: an analysis built
     /// under one [`Bindings`] is read only where a later build's view
-    /// binds the same.
+    /// binds the same. None where the analysis binds a class only the
+    /// request holds ([`UnitView::binds_request_class`]), or names one
+    /// the view minted no [`EpochClassId`] for, which the epoch keeps no
+    /// analysis under.
     #[must_use]
-    pub fn bindings(&self, f: FuncRef) -> Bindings {
-        let mut engine_named = self.engine_named.clone();
-        engine_named.sort_unstable();
-        Bindings {
-            scope: self.scope(f),
+    pub fn bindings(&self, f: FuncRef) -> Option<Bindings> {
+        if self.binds_request_class(f) {
+            return None;
+        }
+        let shared = |name: &[u8], class: ClassId| Some((name.into(), self.shared_class(class)?));
+        let mut engine_named = (self.engine_named.iter())
+            .map(|(name, class)| shared(name, *class))
+            .collect::<Option<Vec<_>>>()?;
+        // Each name is bound once, so the names alone order them.
+        engine_named.sort_unstable_by(|(a, _), (b, _): &(Box<[u8]>, _)| a.cmp(b));
+        Some(Bindings {
+            scope: match self.scope(f) {
+                Some(class) => Some(self.shared_class(class)?),
+                None => None,
+            },
             named: (self.named.iter())
                 .filter(|(func, ..)| *func == f)
-                .map(|(_, name, class)| (name.clone(), *class))
-                .collect(),
+                .map(|(_, name, class)| shared(name, *class))
+                .collect::<Option<_>>()?,
             engine_named,
             called: (self.called.iter())
                 .filter(|(func, ..)| *func == f)
-                .map(|(_, site, called)| (site.clone(), called.clone()))
-                .collect(),
-        }
+                .map(|(_, site, called)| Some((site.shared(self)?, called.shared(self)?)))
+                .collect::<Option<_>>()?,
+        })
     }
 
     /// The function the call `site` of the op array `f` names reaches, as
@@ -1142,13 +1312,56 @@ impl UnitView {
     /// nothing; `false` for a request-local one, which the trace reads
     /// through the request's cache slot instead.
     pub fn hold_class(&mut self, req: &Request, c: ClassId) -> bool {
-        if !self.epoch.of(req) || !c.is_published() || self.epoch.0.linked_class(c).is_none() {
-            return false;
+        self.held_class(req, c).is_some()
+    }
+
+    /// [`UnitView::hold_class`], with the identity it minted.
+    fn held_class(&mut self, req: &Request, c: ClassId) -> Option<EpochClassId> {
+        let shared = self.shared(req, c)?;
+        if !self.classes.contains(&shared) {
+            self.classes.push(shared);
         }
-        if !self.classes.contains(&c) {
-            self.classes.push(c);
-        }
-        true
+        Some(shared)
+    }
+
+    /// The identity every request of the view's epoch names class `c` by,
+    /// the check [`UnitView::hold_class`] makes and the one place a view
+    /// makes an [`EpochClassId`]: where `req` started in the view's epoch,
+    /// `c` is published (`ClassId::is_published`) and the epoch holds its
+    /// row. None for a request-local class and a request of another
+    /// epoch.
+    pub(super) fn shared(&self, req: &Request, c: ClassId) -> Option<EpochClassId> {
+        let shared = self.epoch.of(req) && c.is_published();
+        (shared && self.epoch.0.linked_class(c).is_some()).then_some(EpochClassId(c.0))
+    }
+
+    /// The identity every request of the view's epoch calls `function`
+    /// by, the one place an [`EpochFunction`] is made, by a check of its
+    /// own beside [`UnitView::shared`]'s: where `req`
+    /// started in the view's epoch and the function is one every request
+    /// of it numbers alike, a native or a native method, or a user
+    /// function or method whose row the epoch holds. None for a request's
+    /// own.
+    pub(super) fn shared_function(
+        &self,
+        req: &Request,
+        function: crate::api::call::Function,
+    ) -> Option<EpochFunction> {
+        let shared = self.epoch.of(req) && self.epoch.0.shares_function(function);
+        shared.then_some(EpochFunction(function.0))
+    }
+
+    /// The identity the view minted for class `c`, the recording
+    /// request's number for it, where it holds the class
+    /// ([`UnitView::hold_class`]), took a pair on it
+    /// ([`UnitView::hold_callee`]) or bound a call to a method it declares
+    /// ([`UnitView::called`]); none for any other, a request's own class
+    /// among them.
+    #[must_use]
+    pub fn shared_class(&self, c: ClassId) -> Option<EpochClassId> {
+        (self.classes.iter().chain(&self.minted))
+            .find(|held| **held == c)
+            .copied()
     }
 
     /// Take the place the property opline at `at` of the op array `frame`
@@ -1208,14 +1421,14 @@ impl UnitView {
         }
         // A request-scoped class's place is read from the cache slot of
         // the request compiled code runs in.
-        let cached = if class.is_published() {
-            if !self.hold_class(req, class) {
-                return false;
+        let class_of = if class.is_published() {
+            match self.held_class(req, class) {
+                Some(shared) => PlaceClass::Shared(shared),
+                None => return false,
             }
-            None
         } else {
             match self.cache_slot(f, slot) {
-                Some(raw) => Some(raw),
+                Some(raw) => PlaceClass::Cached(raw),
                 None => return false,
             }
         };
@@ -1245,7 +1458,7 @@ impl UnitView {
             slot,
             typed: ty.typed(),
             admits,
-            cached,
+            class_of,
         };
         if !self.places.contains(&place) {
             self.places.push(place);
@@ -1297,10 +1510,12 @@ impl UnitView {
             func: f,
             at,
             class,
-            function,
+            function: self.shared_function(req, function),
             instance,
             cached,
         };
+        // A shared class's pair names it in the code compiled from it.
+        self.mint(req, class);
         self.callees.retain(|held| (held.func, held.at) != (f, at));
         self.callees.push(pair);
         true
@@ -1381,7 +1596,7 @@ impl UnitView {
     /// and its own (#3561, #3570), so a trace that recorded it writes it
     /// in place; `false`, taking nothing, for any other.
     pub fn hold_call(&mut self, req: &Request, call: FrameRef) -> bool {
-        let Some(plain) = super::plain_call(req, call) else {
+        let Some((scope, plain)) = super::layout::scoped_call(self, req, call) else {
             return false;
         };
         let held = match plain.callee() {
@@ -1391,8 +1606,9 @@ impl UnitView {
         if !held {
             return false;
         }
-        if !self.calls.contains(&plain) {
-            self.calls.push(plain);
+        let call = (scope, plain);
+        if !self.calls.contains(&call) {
+            self.calls.push(call);
         }
         true
     }
@@ -1430,11 +1646,29 @@ impl UnitView {
 
     /// The plain calls to the op array `f` names with `count` arguments
     /// [`UnitView::hold_call`] took: a function's, and a method's of each
-    /// called scope ([`super::PlainCall::scope`]).
+    /// called scope ([`super::PlainCall::is_method`]).
     pub fn calls_of(&self, f: FuncRef, count: u32) -> impl Iterator<Item = &super::PlainCall> {
-        (self.calls.iter()).filter(move |call| {
-            call.callee() == Some(f) && call.count() == count && !call.is_closure()
-        })
+        (self.calls.iter())
+            .map(|(_, call)| call)
+            .filter(move |call| {
+                call.callee() == Some(f) && call.count() == count && !call.is_closure()
+            })
+    }
+
+    /// The plain call to the op array `f` names with `count` arguments
+    /// [`UnitView::hold_call`] took of a method over a receiver of
+    /// `class`, its called scope as the recording's request numbered it;
+    /// none unless it took one.
+    #[must_use]
+    pub fn method_call(&self, f: FuncRef, count: u32, class: ClassId) -> Option<&super::PlainCall> {
+        (self.calls.iter())
+            .find(|(scope, call)| {
+                *scope == Some(class)
+                    && call.callee() == Some(f)
+                    && call.count() == count
+                    && !call.is_closure()
+            })
+            .map(|(_, call)| call)
     }
 
     /// The plain call of a closure over the op array `f` names, with
@@ -1442,6 +1676,7 @@ impl UnitView {
     #[must_use]
     pub fn closure_call(&self, f: FuncRef, count: u32) -> Option<&super::PlainCall> {
         (self.calls.iter())
+            .map(|(_, call)| call)
             .find(|call| call.callee() == Some(f) && call.count() == count && call.is_closure())
     }
 
@@ -1450,6 +1685,7 @@ impl UnitView {
     #[must_use]
     pub fn native_call(&self, name: &[u8], count: u32) -> Option<&super::PlainCall> {
         (self.calls.iter())
+            .map(|(_, call)| call)
             .find(|call| call.is_native() && call.name() == name && call.count() == count)
     }
 
@@ -1464,12 +1700,14 @@ impl UnitView {
         name: &[u8],
         count: u32,
     ) -> Option<&super::PlainCall> {
-        (self.calls.iter()).find(|call| {
-            call.is_request()
-                && call.scope() == Some(scope)
-                && call.name() == name
-                && call.count() == count
-        })
+        (self.calls.iter())
+            .find(|(held, call)| {
+                call.is_request()
+                    && *held == Some(scope)
+                    && call.name() == name
+                    && call.count() == count
+            })
+            .map(|(_, call)| call)
     }
 
     /// The op array `f` names; none unless [`UnitView::hold`] accepted it.
@@ -1590,7 +1828,7 @@ impl UnitView {
         if let Some((.., decl)) = self.own.iter().find(|(class, ..)| *class == c) {
             return Some(decl);
         }
-        if !self.classes.contains(&c) {
+        if !self.classes.iter().any(|held| *held == c) {
             return None;
         }
         match self.engine_decls.iter().find(|(class, _)| *class == c) {
@@ -1606,7 +1844,7 @@ impl UnitView {
         if let Some((_, linked, _)) = self.own.iter().find(|(class, ..)| *class == c) {
             return Some(linked);
         }
-        if !self.classes.contains(&c) {
+        if !self.classes.iter().any(|held| *held == c) {
             return None;
         }
         self.epoch.0.linked_class(c)

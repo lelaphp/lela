@@ -430,6 +430,20 @@ impl Arena {
         base.functions.get(number.checked_sub(base.first_function)?)
     }
 
+    /// Whether every request of the epoch calls `function` by its number:
+    /// one of the engine's natives or native methods, numbered below every
+    /// arena's, or a published user function this arena or the preload's
+    /// below it holds; never a request's own.
+    pub(crate) fn shares_function(&self, function: Function) -> bool {
+        let Some(number) = function.published_number() else {
+            return false;
+        };
+        let natives = self
+            .base()
+            .map_or(self.first_function, |base| base.first_function);
+        number < natives || self.function(function).is_some()
+    }
+
     /// The published class native `function` names, and its class.
     pub(crate) fn class_native(&self, function: Function) -> Option<(ClassId, ClassNative)> {
         let at = function.published_class_native_at()?;

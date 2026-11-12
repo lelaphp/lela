@@ -20,7 +20,7 @@ use php_heap::{FrameRef, HEADER_AT, HeaderImage, ROOM_BYTES, StackLayout, VmStac
 use php_unit::MapPtrOffset;
 use php_unit::decl::Bare;
 
-use super::{ClassId, FuncRef};
+use super::{ClassId, EpochClassId, EpochFunction, FuncRef, UnitView};
 use crate::api::call::Function;
 use crate::api::request::Request;
 use crate::exec::{CallInfo, Header};
@@ -627,10 +627,9 @@ pub struct PlainCall {
     activation: Option<Activation>,
     checks: bool,
     /// A method's call: the class of its receiver, its called scope, and
-    /// the method its methods answered. The class is published, or the
-    /// request's own, whose number the recording's request gave it and
-    /// compiled code reads where it runs.
-    method: Option<(ClassId, Method)>,
+    /// the method its methods answered, as each request finds them; none
+    /// for a function's.
+    method: Option<Method>,
     /// A `Closure`'s call: its handler pushes it, and compiled code makes
     /// it and leaves it in place ([`UnitView::closure_call`]).
     closure: bool,
@@ -650,18 +649,57 @@ enum Serves {
     Request,
 }
 
-/// The method a method's plain call serves, as a request that runs the
-/// code finds it ([`call_image`]).
+/// The called scope and the method of a method's plain call, as a
+/// request that runs the code finds them ([`call_image`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Method {
-    /// A published method, the same number in every request of the epoch.
-    Published(Function),
-    /// A request-scoped class's own method, `zend_lazy_class_load`'s
-    /// copy's, an enum's, an evaluated class's: numbered by each request
-    /// for itself, so found in the request that runs the code under the
-    /// name of the class that answered it, lowered, and the call's own
-    /// name, and held there to the op array the call serves.
-    Own(Box<[u8]>),
+    /// A published class's method, which is one of its published rows:
+    /// each by the number every request of the epoch knows it by.
+    Shared(EpochClassId, EpochFunction),
+    /// A request-scoped class's: `zend_lazy_class_load`'s copy's, an
+    /// enum's, an evaluated class's, numbered by each request for itself
+    /// (design §5.14, *Identities*), so named by its name, lowered, and
+    /// never by a number; compiled code writes the called scope it reads
+    /// in the request it runs in ([`FrameLayout::called_scope`]). The
+    /// method is the published one it inherits (#3558), the same number
+    /// in every request of the epoch, or none where it is the class's own
+    /// (#3561), found in the request that runs the code under the class's
+    /// name and the call's own and held there to the op array the call
+    /// serves.
+    Request {
+        class: Box<[u8]>,
+        inherited: Option<EpochFunction>,
+    },
+}
+
+impl Method {
+    /// The method `function` a call over a receiver of `class`, its
+    /// called scope, serves, as `view`'s epoch names them; none for a
+    /// published class's method that is no published row of it.
+    fn of(
+        view: &UnitView,
+        req: &Request,
+        (class, function): (ClassId, Function),
+    ) -> Option<Method> {
+        let published = view.shared_function(req, function);
+        let Some(shared) = view.shared(req, class) else {
+            let name = req.symbols().class_name(class).to_ascii_lowercase();
+            return Some(Method::Request {
+                class: name.into_boxed_slice(),
+                inherited: published,
+            });
+        };
+        Some(Method::Shared(shared, published?))
+    }
+
+    /// The called scope, by its identity where it is shared and by its
+    /// name, lowered, where it is a request's.
+    fn scope(&self) -> Result<EpochClassId, &[u8]> {
+        match self {
+            Method::Shared(class, _) => Ok(*class),
+            Method::Request { class, .. } => Err(class),
+        }
+    }
 }
 
 /// Two calls of one callee, one argument count and one called scope are
@@ -671,7 +709,7 @@ enum Method {
 impl PartialEq for PlainCall {
     fn eq(&self, other: &PlainCall) -> bool {
         (self.serves, self.count, self.closure) == (other.serves, other.count, other.closure)
-            && self.scope() == other.scope()
+            && self.method.as_ref().map(Method::scope) == other.method.as_ref().map(Method::scope)
             && self.own_class() == other.own_class()
             && (self.callee().is_some() || self.name == other.name)
     }
@@ -788,17 +826,27 @@ impl PlainCall {
         self.checks
     }
 
-    /// A method's call: the class of the receiver it was pushed over,
-    /// which its called scope is and whose table answered the method;
-    /// none for a function's. A class that is not
-    /// [`ClassId::is_published`] is the recording's request's own, the
-    /// one its number names there alone: compiled code that pushes the
-    /// call writes the called scope it reads in the request it runs in
-    /// ([`FrameLayout::called_scope`]), and the header [`call_image`]
-    /// lays out names none.
+    /// Whether the call is a method's, pushed over a receiver of its
+    /// called scope or none.
     #[must_use]
-    pub fn scope(&self) -> Option<ClassId> {
-        self.method.as_ref().map(|(class, _)| *class)
+    pub fn is_method(&self) -> bool {
+        self.method.is_some()
+    }
+
+    /// A published class's method's call: the class of the receiver it
+    /// was pushed over, which its called scope is and whose table answered
+    /// the method, by the identity every request of the epoch knows it
+    /// by, which the header [`call_image`] lays out names. None for a
+    /// function's call and a request-scoped class's, whose number is its
+    /// request's alone and which the call keeps none of: compiled code
+    /// that pushes it writes the called scope it reads in the request it
+    /// runs in ([`FrameLayout::called_scope`]).
+    #[must_use]
+    pub fn shared_scope(&self) -> Option<EpochClassId> {
+        match &self.method {
+            Some(Method::Shared(class, _)) => Some(*class),
+            _ => None,
+        }
     }
 
     /// The name, lowered, of the request-scoped class whose own method the
@@ -808,7 +856,10 @@ impl PlainCall {
     #[must_use]
     pub fn own_class(&self) -> Option<&[u8]> {
         match &self.method {
-            Some((_, Method::Own(class))) => Some(class),
+            Some(Method::Request {
+                class,
+                inherited: None,
+            }) => Some(class),
             _ => None,
         }
     }
@@ -824,11 +875,13 @@ impl PlainCall {
 /// request-scoped one whose method is published (#3558), one it inherits
 /// from a published class, or its own (#3561), the request's, numbered
 /// for it alone as php's `zend_lazy_class_load` copies each into the
-/// request ([`Method::Own`]); or to a closure over a user function that
+/// request (`Method::Request`, with no inherited method); or to a closure over a user function that
 /// reads its function's own cache, whatever its receiver; none for any
-/// other.
+/// other. The class and the method of a method's call are named as
+/// `view`'s epoch names them where they are shared, and the view mints
+/// their identities; a request-scoped class is named by its name.
 #[must_use]
-pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
+pub fn plain_call(view: &UnitView, req: &Request, call: FrameRef) -> Option<PlainCall> {
     let (top, laid) = req.vm().stack.top()?;
     let header = laid.header();
     let function = header.function()?;
@@ -844,13 +897,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         _ if closure => None,
         (None, None) => None,
         (Some(class), this) if this.is_none_or(|this| this.class() == class) => {
-            let method = if function.published_number().is_some() {
-                Method::Published(function)
-            } else {
-                let name = req.symbols().class_name(class).to_ascii_lowercase();
-                Method::Own(name.into_boxed_slice())
-            };
-            Some((class, method))
+            Some(Method::of(view, req, (class, function))?)
         }
         _ => return None,
     };
@@ -949,6 +996,22 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     })
 }
 
+/// [`plain_call`], beside the called scope a method's call was pushed
+/// with as `req` numbers it, by which the recording's view finds the
+/// call of a receiver ([`UnitView::method_call`]).
+pub(super) fn scoped_call(
+    view: &UnitView,
+    req: &Request,
+    call: FrameRef,
+) -> Option<(Option<ClassId>, PlainCall)> {
+    let plain = plain_call(view, req, call)?;
+    let scope = (plain.is_method())
+        .then(|| req.vm().stack.top())
+        .flatten()
+        .and_then(|(_, laid)| laid.header().called_scope());
+    Some((scope, plain))
+}
+
 /// The header `push_call` lays down for `call` in `req`, as compiled code
 /// that pushes it in place copies it: the function the request's table
 /// holds under the call's name, where it serves the call's op array, its
@@ -959,8 +1022,17 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
 #[must_use]
 pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
     let function = match &call.method {
-        Some((_, Method::Published(method))) => *method,
-        Some((_, Method::Own(class))) => {
+        Some(
+            Method::Shared(_, method)
+            | Method::Request {
+                inherited: Some(method),
+                ..
+            },
+        ) => Function::from(*method),
+        Some(Method::Request {
+            class,
+            inherited: None,
+        }) => {
             let class = req.class_named(Bare::resolved(class))?;
             req.symbols().method_named(class, &call.name)?
         }
@@ -987,7 +1059,7 @@ pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
     if let Some(base) = base {
         header.set_cache_base(base);
     }
-    header.set_called_scope(call.scope().filter(|class| class.is_published()));
+    header.set_called_scope(call.shared_scope().map(ClassId::from));
     let (room, header) = req.laid_call(header)?;
     // The room compiled code lays is the recording's: a request's own op
     // array another request found under the same names may take another.

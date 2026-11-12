@@ -240,7 +240,7 @@ fn sample(sampled: Option<Sample>) -> String {
         }
     }
     if let Some(class) = sampled.class {
-        write!(text, "#{}", tier::class_number(class)).unwrap_or_default();
+        write!(text, "#{}", tier::recorded_number(class)).unwrap_or_default();
     }
     text
 }
