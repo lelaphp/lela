@@ -326,7 +326,7 @@ impl Denied {
                     "{}: a return at a #[test] fn's own level (seams.toml rule {}: {})",
                     sites.join(", "),
                     rule.id,
-                    rule.text
+                    rule.said()
                 ));
             }
         }

@@ -863,7 +863,7 @@ fn engine_state_held(
         "{}: EngineState implemented by hand outside the homes, or where the sensor cannot read (seams.toml rule {}: {}{}{cited})",
         list(&outside, 8),
         rule.id,
-        rule.text,
+        rule.said(),
         if cited.is_empty() { "" } else { " " },
     )))
 }

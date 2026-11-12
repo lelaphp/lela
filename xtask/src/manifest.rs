@@ -110,6 +110,15 @@ fn remedied(rule: &Rule) -> Result<()> {
     Ok(())
 }
 
+/// `text`, then ` Instead: {remedy}.` where there is a remedy: one shape
+/// for a denial at a call and a sensor's reading (#3618 ruling 3, #4500).
+pub(crate) fn instead(text: &str, remedy: Option<&str>) -> String {
+    match remedy {
+        Some(remedy) => format!("{text} Instead: {remedy}."),
+        None => text.to_owned(),
+    }
+}
+
 /// One thing a person's file carries that parses but does not validate,
 /// a cross-file check's refusal ([`Manifest::defects`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -914,6 +923,12 @@ impl Rule {
             },
             ..Rule::default()
         }
+    }
+
+    /// The text, then what to do instead where the rule carries a
+    /// `remedy`: the sentence a sensor names a `check` rule by (#4500).
+    pub(crate) fn said(&self) -> String {
+        instead(&self.text, self.remedy.as_deref())
     }
 
     /// Whether the rule's `scope` covers `path`: the manifest's `scope` key

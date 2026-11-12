@@ -121,10 +121,7 @@ impl Finding {
     /// The text, then what to do instead and where a denial judged the
     /// call (#3618 ruling 3).
     pub(crate) fn said(&self) -> String {
-        let mut said = self.text.clone();
-        if let Some(remedy) = &self.remedy {
-            said = format!("{said} Instead: {remedy}.");
-        }
+        let said = crate::manifest::instead(&self.text, self.remedy.as_deref());
         match &self.placement {
             Some(placement) => format!("{said} {placement}"),
             None => said,
