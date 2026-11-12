@@ -1234,8 +1234,8 @@ mod engine_state {
     /// Each compile-fail fixture beside the sensor's is compiled under a
     /// `compile_fail,E0277` fence, which `xtask test` holds to the code
     /// (#2049): by `php_bundle`'s `refusals` where the facade reaches the
-    /// entry, and by `php_engine`'s doctest on `tier::epoch_state`, which
-    /// the facade does not (#4492).
+    /// entry, and by `php_engine`'s doctests on `tier::epoch_state` (#4492)
+    /// and `layer::StateHook` (#4475), which the facade does not.
     #[test]
     fn each_compile_fail_fixture_is_included_under_a_pinned_fence() {
         let includers = [
