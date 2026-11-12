@@ -153,7 +153,9 @@ pub(crate) struct Net {
 /// A persistent connection's [`Net`] while the engine's pool keeps it:
 /// its socket out of every request and of the engine's persistent list,
 /// the connection's alone, as php's mysqlnd owns its stream, and no
-/// stream of a request's.
+/// stream of a request's. No read buffer by type: an envelope a request
+/// read and did not read through ends with that request, so the next
+/// request lent the connection reads only what the server sends it.
 #[derive(php_ext::abi::EngineState)]
 #[allow(clippy::struct_excessive_bools)] // `Net`'s flags, one each
 pub(crate) struct IdleNet {
@@ -165,7 +167,6 @@ pub(crate) struct IdleNet {
     envelope_no: u8,
     compressed: bool,
     use_compression: bool,
-    uncompressed: ReadBuffer,
     cmd_buffer: Option<usize>,
     sha256_server_public_key: Option<Box<[u8]>>,
     persistent_id: Option<Vec<u8>>,
@@ -311,7 +312,7 @@ impl Net {
             envelope_no: idle.envelope_no,
             compressed: idle.compressed,
             use_compression: idle.use_compression,
-            uncompressed: idle.uncompressed,
+            uncompressed: ReadBuffer::default(),
             cmd_buffer: idle.cmd_buffer.map(Alloc::Malloc),
             sha256_server_public_key: idle.sha256_server_public_key.map(Pstr::Malloc),
             persistent_id: idle.persistent_id,
@@ -328,7 +329,7 @@ impl Net {
     /// the connection back, nothing of the request's left on them: its
     /// socket kept by the connection ([`OwnedStream::keep`](php_ext::request::OwnedStream::keep)),
     /// out of the request, so the one list the connection waits in is its
-    /// owner's.
+    /// owner's, and the envelope it had not read through emptied.
     pub(crate) fn idle(self, req: &mut Request) -> IdleNet {
         IdleNet {
             kept: self.stream.and_then(|stream| stream.keep(req)),
@@ -339,7 +340,6 @@ impl Net {
             envelope_no: self.envelope_no,
             compressed: self.compressed,
             use_compression: self.use_compression,
-            uncompressed: self.uncompressed,
             cmd_buffer: self.cmd_buffer.map(|buffer| buffer.idle(req)),
             sha256_server_public_key: Pstr::idle_field(req, self.sha256_server_public_key),
             persistent_id: self.persistent_id,
