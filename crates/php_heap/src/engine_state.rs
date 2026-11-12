@@ -5,12 +5,13 @@
 //! thread alone; one kept engine-wide would be read by another request's
 //! thread while its owner frees or writes it. `Send + Sync` cannot say
 //! so, since [`Zval`] is both for the frozen values a published unit
-//! shares, so [`EngineState`] says it, and the engine's four entries that
-//! keep a value engine-wide are bounded by it and by `Sync` beside it.
+//! shares, so [`EngineState`] says it, and each slot the engine keeps a
+//! value engine-wide in, an extension's entries and the stream layer's
+//! state beside them, is bounded by it and by `Sync` beside it.
 //! The trait asks `Send` and not `Sync` (#4474): a value behind a `Mutex`,
 //! an idle entry `api::Pool` keeps, is moved and never shared, and is
 //! engine state all the same; where a value is shared, through an `Arc`,
-//! a `&'static` or one of the four entries, `Sync` is asked there.
+//! a `&'static` or one of those slots, `Sync` is asked there.
 //!
 //! A type is engine state by `#[derive(EngineState)]`, which holds every
 //! field to the bound, or by an impl written by hand where `unsafe` may
