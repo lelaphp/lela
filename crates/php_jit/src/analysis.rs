@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use php_engine::api::abi::EngineState;
 use php_engine::tier::{
     Bindings, CallSite, CalledFunction, ClassId, EpochClassId, FuncRef, UnitView,
 };
@@ -43,14 +44,6 @@ use crate::record::{Event, TraceRecord};
 /// The analysis of one op array the epoch keeps, none where php's fails.
 type Kept = Option<Arc<Analysis<EpochClassId>>>;
 
-/// What the epoch keeps of an analysis holds nothing of a request, each
-/// class named by an identity of the epoch's: held here, where it is
-/// kept, so a field that is not fails the build.
-const _: () = {
-    const fn engine_state<T: php_heap::EngineState>() {}
-    engine_state::<Analysis<EpochClassId>>();
-};
-
 /// `ZEND_JIT_LEVEL_OPT_FUNC`: the `O` digit of `opcache.jit` from which
 /// php analyses the op arrays a trace passes through (`zend_jit.h`).
 const OPT_FUNC: u8 = 3;
@@ -67,8 +60,11 @@ const MAX_FUNCS: usize = 30;
 /// view bound for it, each written once (`jit-design.md` §4.6; ADR-0015
 /// as amended on #3571): php rebuilds an op array's analysis at every
 /// trace's build, and a build that binds what an earlier one bound
-/// finds what php's rebuild would.
-#[derive(Debug, Default)]
+/// finds what php's rebuild would. Engine state by its derive, which
+/// holds each field, each analysis it keeps and each class one names by
+/// an identity of the epoch's, to the bound by the trait's letter
+/// (#4492, #4628).
+#[derive(Debug, Default, EngineState)]
 pub(crate) struct Analyses(Mutex<HashMap<FuncRef, Vec<(Bindings, Kept)>>>);
 
 impl Analyses {

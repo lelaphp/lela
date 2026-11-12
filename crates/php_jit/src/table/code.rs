@@ -42,6 +42,8 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
+use php_engine::api::abi::EngineState;
+
 /// The size of one chunk, the unit the arena hands out and takes back.
 pub(crate) const CHUNK: usize = 64 * 1024;
 
@@ -162,6 +164,7 @@ pub(crate) struct Full;
 
 /// The mapping and which of its chunks are free, shared by the arena and
 /// every chunk handed out, so the pages outlive the last `Code`.
+#[derive(EngineState)]
 struct Region<P> {
     pages: P,
     /// How many bytes the mapping holds: every chunk's but the last's
@@ -174,7 +177,7 @@ struct Region<P> {
 
 /// Which chunk of its arena a chunk is: made only by the arena, from the
 /// position of a chunk it has, so it always names one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) struct ChunkIdx(usize);
 
 impl ChunkIdx {
@@ -215,6 +218,7 @@ fn page_size() -> usize {
 
 /// One chunk handed out: while any `Code` in it lives, or the arena is
 /// filling it, nobody else is given it.
+#[derive(EngineState)]
 pub(crate) struct Chunk<P: Pages> {
     region: Arc<Region<P>>,
     index: ChunkIdx,
@@ -270,6 +274,12 @@ unsafe impl<P: Pages> Send for Code<P> {}
 // SAFETY: the same, and `&Code` hands out only the address and two counts.
 unsafe impl<P: Pages> Sync for Code<P> {}
 
+// A body is engine state where its chunk is (`tier::epoch_state`,
+// #4492): its entry is an address in the arena's executable view, of
+// compiled code the arena holds, and its length a count, neither a
+// request's; the derive cannot read through the address.
+impl<P: Pages> EngineState for Code<P> where Arc<Chunk<P>>: EngineState {}
+
 // The tier's engine state (ADR-0005, ADR-0006): the code this arena holds,
 // the code generator and the policy read at engine start, and the worker
 // that compiles a job past the request that submitted it, which is why a
@@ -279,6 +289,7 @@ unsafe impl<P: Pages> Sync for Code<P> {}
 impl php_engine::api::abi::EngineState for crate::JitEngine {}
 
 /// The chunk being filled, and where its next body may start.
+#[derive(EngineState)]
 struct Filling<P: Pages> {
     chunk: Arc<Chunk<P>>,
     cursor: usize,
@@ -287,6 +298,7 @@ struct Filling<P: Pages> {
 /// The arena (`jit-design.md` §4.4): published into by the one thread
 /// holding it mutably, under the table's one mutex in the tier, and executed
 /// from any.
+#[derive(EngineState)]
 pub(crate) struct Arena<P: Pages> {
     region: Arc<Region<P>>,
     filling: Option<Filling<P>>,
@@ -505,6 +517,11 @@ pub(crate) struct HeapPages {
 // byte unsynchronised.
 unsafe impl Sync for HeapPages {}
 
+// Engine state (#4492): bytes a test's arena copies bodies into, owned
+// here and never a request's; the derive cannot read through the cells.
+#[cfg(test)]
+impl EngineState for HeapPages {}
+
 #[cfg(test)]
 impl Pages for HeapPages {
     fn map_pair(len: usize) -> io::Result<Self> {
@@ -598,6 +615,7 @@ impl Refuses for AtSecond {
 /// The heap adapter whose fork's child cannot take its copy, refused
 /// where `R` says.
 #[cfg(test)]
+#[derive(EngineState)]
 pub(crate) struct Refusing<R>(HeapPages, std::marker::PhantomData<R>);
 
 /// The heap adapter whose fork's child's first mapping is refused, so its
@@ -686,6 +704,7 @@ pub(crate) use linux::Memfd;
 /// The adapter of a target with none (`build.rs` sets no `php_jit_arena`):
 /// it maps nothing, so an arena over it is never made.
 #[cfg(any(test, not(php_jit_arena)))]
+#[derive(EngineState)]
 pub(crate) struct Unmapped;
 
 #[cfg(any(test, not(php_jit_arena)))]
@@ -733,6 +752,13 @@ unsafe impl Send for Mapping {}
 // SAFETY: the same.
 #[cfg(unix)]
 unsafe impl Sync for Mapping {}
+
+// Engine state (#4492): pages of this process's own that the adapter
+// mapped, holding compiled code, a copy of it or a table's null slots,
+// and never a request's heap; the derive cannot read through the
+// address.
+#[cfg(unix)]
+impl EngineState for Mapping {}
 
 #[cfg(unix)]
 impl Mapping {
@@ -791,6 +817,13 @@ pub(crate) struct NullTable<T> {
     map: Option<Mapping>,
     of: PhantomData<AtomicPtr<T>>,
 }
+
+// Engine state where what its slots point at is, and `Sync`, since every
+// reader of the table loads them at once (#4492): a page of its own
+// holding one pointer a slot, null or written once by the table's owner,
+// to a `T` that owner keeps; the derive cannot read through the mapping.
+#[cfg(unix)]
+impl<T: EngineState + Sync> EngineState for NullTable<T> {}
 
 #[cfg(unix)]
 impl<T> NullTable<T> {
@@ -913,6 +946,8 @@ mod mac {
     use std::ops::Range;
     use std::ptr::NonNull;
 
+    use php_engine::api::abi::EngineState;
+
     use super::{Mapping, Pages, Unadopted};
 
     unsafe extern "C" {
@@ -922,6 +957,7 @@ mod mac {
     }
 
     /// One `MAP_JIT` anonymous mapping.
+    #[derive(EngineState)]
     pub(crate) struct MapJit {
         map: Mapping,
         protection: Protection,
@@ -930,7 +966,7 @@ mod mac {
     /// What the system does about a `MAP_JIT` mapping's protection, read
     /// once from `pthread_jit_write_protect_supported_np`, as php's
     /// `zend_jit_startup` reads it into `zend_write_protect`.
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, PartialEq, Eq, EngineState)]
     enum Protection {
         /// Apple silicon: executable on every thread but one that opened
         /// it for writing with `pthread_jit_write_protect_np(0)`.
@@ -1044,6 +1080,8 @@ mod remap {
     use std::ops::Range;
     use std::ptr::NonNull;
 
+    use php_engine::api::abi::EngineState;
+
     use super::{Mapping, Pages, Unadopted, page_size};
 
     /// `<mach/vm_inherit.h>`'s copy on fork, which `mmap` gives a private
@@ -1093,6 +1131,7 @@ mod remap {
     }
 
     /// One anonymous mapping's two views.
+    #[derive(EngineState)]
     pub(crate) struct Remapped {
         written: Mapping,
         executed: Mapping,
@@ -1369,12 +1408,14 @@ mod linux {
     use std::os::fd::OwnedFd;
     use std::ptr::NonNull;
 
+    use php_engine::api::abi::EngineState;
     use rustix::fs::{MemfdFlags, SealFlags};
     use rustix::mm::{MapFlags, ProtFlags};
 
     use super::{Mapping, Pages, Unadopted};
 
     /// One sealed `memfd`'s two views.
+    #[derive(EngineState)]
     pub(crate) struct Memfd {
         written: Mapping,
         executed: Mapping,
@@ -1637,13 +1678,6 @@ unsafe extern "C" {
     /// `vm_page_size` beside it and not this one.
     static vm_kernel_page_size: libc::vm_size_t;
 }
-
-// The epoch's trace table, which every request of the epoch reads
-// (`tier::epoch_state`, #4492): this arena's code, the traces' records
-// and the analyses they were built through, none of it a request's. Here
-// until #4544 says how php_unit's and php_ssa's types it holds become
-// engine state, since the derive cannot read through them.
-impl<P: Pages + 'static> php_engine::api::abi::EngineState for super::TraceTable<P> {}
 
 #[cfg(test)]
 mod tests {

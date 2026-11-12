@@ -526,6 +526,7 @@ fn a_new_epochs_table_starts_empty() {
 }
 
 /// A `Write` that panics while armed.
+#[derive(php_engine::api::abi::EngineState)]
 struct Tripwire(Arc<AtomicBool>);
 
 impl Write for Tripwire {

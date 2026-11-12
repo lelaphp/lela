@@ -559,7 +559,7 @@ pub fn set_owed_frame(req: &Request, frame: Option<FrameRef>) {
 /// publication, all ones when sealed, laid in that order, as compiled
 /// code reads a landing's ([`LandingIndex`]).
 #[repr(C)]
-#[derive(Debug, Default)]
+#[derive(Debug, Default, php_macros::EngineState)]
 pub struct Word {
     halves: [AtomicU32; 2],
 }
