@@ -153,6 +153,7 @@ pub enum Command<'a> {
 /// closed with no `COM_QUIT` sent. [`Mysqlnd::give_back`] answers one;
 /// a request takes it up ([`Mysqlnd::take_up`]) or closes it with a
 /// `COM_QUIT` ([`Idle::close`]).
+#[derive(php_ext::abi::EngineState)]
 pub struct Idle(Box<IdleConn>);
 
 impl Idle {

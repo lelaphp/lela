@@ -103,6 +103,7 @@ pub(crate) enum Xported {
 
 /// The socket `std` holds, one variant per shape php's `socket(2)` was
 /// asked for, and the one a stream was handed.
+#[derive(php_engine::api::abi::EngineState)]
 pub(crate) enum Sock {
     Tcp(TcpStream),
     TcpServer(TcpListener),
@@ -168,13 +169,12 @@ impl Sock {
     }
 }
 
-/// `php_netstream_data_t` under one of `xp_socket.c`'s ops: the socket,
-/// `None` once closed; the ops' label; `is_blocked`; the read timeout,
-/// `None` for php's `tv_sec == -1`; `timeout_event`; and whether the
-/// stream is a server's ([`Role`]), which only this kind reads. A
-/// registered `transport`'s socket carries its crypto layer, dropped before
-/// the socket closes, and `PHP_STREAM_CONTEXT(stream)`, whose owner is the
-/// stream's, to lend the layer.
+/// `php_netstream_data_t` under one of `xp_socket.c`'s ops, as a request
+/// holds it: the [`Connection`], which outlives the request where the
+/// stream is persistent, and beside it what of the request the socket
+/// keeps, dropped as the connection leaves it ([`Socket::detach`]): the
+/// allocations php makes for the struct, and `PHP_STREAM_CONTEXT(stream)`
+/// and the stream itself, which the crypto layer is lent.
 pub(crate) struct Socket {
     /// The `php_netstream_data_t` php `pemalloc`s, [`NETSTREAM_DATA_SIZE`]
     /// bytes, or what a registered `transport`'s factory allocates in its
@@ -182,9 +182,25 @@ pub(crate) struct Socket {
     /// [`Ops::lay_down`] to the close; none for a persistent stream's,
     /// which php allocates persistent.
     data: Vec<Emalloc>,
-    crypto: CryptoLayer,
     context: Option<StreamCtx>,
     own: Option<Stream>,
+    conn: Connection,
+}
+
+/// What of a socket outlives the request that opened it: the socket,
+/// `None` once closed; the ops' label; `is_blocked`; the read timeout,
+/// `None` for php's `tv_sec == -1`; `timeout_event`; whether the stream
+/// is a server's ([`Role`]), which only this kind reads; and a registered
+/// `transport`'s crypto layer, dropped before the socket closes. Engine
+/// state by type (#4541): a persistent stream's connection stands in the
+/// engine's persistent list, or in the extension that kept it, between
+/// requests ([`persistent::Entry`]), and no field of it can hold a
+/// request's value.
+///
+/// [`persistent::Entry`]: super::persistent::Entry
+#[derive(php_engine::api::abi::EngineState)]
+pub(crate) struct Connection {
+    crypto: CryptoLayer,
     /// The socket, shared with a crypto layer's call that runs over it
     /// while PHP code it serves reaches the stream.
     sock: Option<Arc<Sock>>,
@@ -200,6 +216,7 @@ pub(crate) struct Socket {
 /// A socket's crypto layer: none, the layer, or the layer out for a
 /// call that runs with the request ([`StreamOp::with_crypto`]), which PHP code
 /// the call serves finds in use.
+#[derive(php_engine::api::abi::EngineState)]
 enum CryptoLayer {
     Absent,
     On(Box<dyn Crypto>),
@@ -250,19 +267,16 @@ impl From<Option<Box<dyn Crypto>>> for CryptoLayer {
 /// the server was made with, which `php_tcp_sockop_accept` gives each
 /// client it accepts; read when the server is made, where php reads it
 /// off the server's `PHP_STREAM_CONTEXT` at each accept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_engine::api::abi::EngineState)]
 enum Role {
     Peer,
     Server { accept_nodelay: bool },
 }
 
-impl Socket {
-    fn new(sock: Option<Sock>, label: &'static str, timeout: Option<Duration>) -> Socket {
-        Socket {
-            data: Vec::new(),
+impl Connection {
+    fn new(sock: Option<Sock>, label: &'static str, timeout: Option<Duration>) -> Connection {
+        Connection {
             crypto: CryptoLayer::Absent,
-            context: None,
-            own: None,
             sock: sock.map(Arc::new),
             label,
             is_blocked: true,
@@ -272,11 +286,32 @@ impl Socket {
             suppress_errors: false,
         }
     }
+}
+
+impl From<Connection> for Socket {
+    /// The connection under a socket a request holds, which keeps nothing
+    /// of the request yet: the stream it serves adopts it
+    /// ([`Ops::adopt`]), and a `context` set on that stream reaches it
+    /// ([`Socket::set_ctx`]).
+    fn from(conn: Connection) -> Socket {
+        Socket {
+            data: Vec::new(),
+            context: None,
+            own: None,
+            conn,
+        }
+    }
+}
+
+impl Socket {
+    fn new(sock: Option<Sock>, label: &'static str, timeout: Option<Duration>) -> Socket {
+        Socket::from(Connection::new(sock, label, timeout))
+    }
 
     /// Whether the crypto layer reads and writes in the socket's place,
     /// `ssl_active`.
     fn crypto_active(&self) -> bool {
-        self.crypto.on().is_some_and(Crypto::active)
+        self.conn.crypto.on().is_some_and(Crypto::active)
     }
 
     /// The crypto layer and the socket it runs over, lent for one call,
@@ -289,13 +324,17 @@ impl Socket {
         f: impl FnOnce(&mut dyn Crypto, &mut CryptoSocket<'_>) -> R,
     ) -> Option<R> {
         let Socket {
-            crypto,
             context,
             own,
-            sock,
-            is_blocked,
-            timeout,
-            timeout_event,
+            conn:
+                Connection {
+                    crypto,
+                    sock,
+                    is_blocked,
+                    timeout,
+                    timeout_event,
+                    ..
+                },
             ..
         } = self;
         let layer = crypto.on_mut()?;
@@ -318,12 +357,13 @@ impl Socket {
 
     /// The crypto layer, where the socket has one.
     pub(crate) fn crypto_layer(&mut self) -> Option<&mut dyn Crypto> {
-        self.crypto.on_mut()
+        self.conn.crypto.on_mut()
     }
 
     /// `SSL_pending` of an active layer, `0` for every other socket.
     pub(crate) fn crypto_pending(&self) -> usize {
-        self.crypto
+        self.conn
+            .crypto
             .on()
             .filter(|layer| layer.active())
             .map_or(0, Crypto::pending)
@@ -335,19 +375,14 @@ impl Socket {
     }
 
     /// The connection taken out of the stream it served, which is left
-    /// holding no socket: what a persistent stream's resource keeps in
-    /// the persistent list when its last owner lets go.
-    pub(crate) fn detach(&mut self) -> Socket {
-        let empty = Socket::new(None, self.label, self.timeout);
-        std::mem::replace(self, empty)
-    }
-
-    /// `forget_persistent_resource_id_numbers`: what of the request the
-    /// socket kept, its stream and its `stream->ctx`, forgotten before it
-    /// outlives the request.
-    pub(crate) fn forget_request(&mut self) {
-        self.own = None;
-        self.context = None;
+    /// holding no socket, and with it what of the request the socket
+    /// kept, its allocations, its stream and its `stream->ctx`, to go
+    /// with the stream (`forget_persistent_resource_id_numbers`): what a
+    /// persistent stream's resource keeps in the persistent list when its
+    /// last owner lets go, and what [`OwnedStream::keep`] keeps.
+    pub(crate) fn detach(&mut self) -> Connection {
+        let empty = Connection::new(None, self.conn.label, self.conn.timeout);
+        std::mem::replace(&mut self.conn, empty)
     }
 
     /// `recv(2)` with `MSG_DONTWAIT` on a socket that blocks: the socket
@@ -374,9 +409,13 @@ impl StreamOp<'_> {
     ) -> Option<R> {
         let (mut layer, sock, fields) = self.with(|s| {
             let socket = s.ops.as_socket()?;
-            let sock = Arc::clone(socket.sock.as_ref()?);
-            let layer = socket.crypto.lend()?;
-            let fields = (socket.is_blocked, socket.timeout, socket.timeout_event);
+            let sock = Arc::clone(socket.conn.sock.as_ref()?);
+            let layer = socket.conn.crypto.lend()?;
+            let fields = (
+                socket.conn.is_blocked,
+                socket.conn.timeout,
+                socket.conn.timeout_event,
+            );
             Some((layer, sock, (fields, socket.context, socket.own)))
         })??;
         let ((blocked, timeout, timed_out), ctx, stream) = fields;
@@ -398,9 +437,9 @@ impl StreamOp<'_> {
         let set_timed_out = (lent.timed_out != timed_out).then_some(lent.timed_out);
         self.with(|s| {
             if let Some(socket) = s.ops.as_socket() {
-                socket.crypto = CryptoLayer::On(layer);
+                socket.conn.crypto = CryptoLayer::On(layer);
                 if let Some(timed_out) = set_timed_out {
-                    socket.timeout_event = timed_out;
+                    socket.conn.timeout_event = timed_out;
                 }
             }
         });
@@ -414,7 +453,7 @@ impl StreamOp<'_> {
         self.with(|s| {
             s.ops
                 .as_socket()
-                .is_some_and(|socket| socket.crypto.is_lent())
+                .is_some_and(|socket| socket.conn.crypto.is_lent())
         }) == Some(true)
     }
 
@@ -476,7 +515,7 @@ impl StreamOp<'_> {
 pub(crate) fn show_blocking(req: &mut Request, stream: Stream, blocked: bool) {
     req.stream_with(stream, |s| {
         if let Some(socket) = s.ops.as_socket() {
-            socket.is_blocked = blocked;
+            socket.conn.is_blocked = blocked;
         }
     });
 }
@@ -523,7 +562,7 @@ fn socket_error(error: &std::io::Error) -> (i32, String) {
 
 impl Ops for Socket {
     fn label(&self) -> &'static str {
-        self.label
+        self.conn.label
     }
 
     fn counts_progress(&self) -> bool {
@@ -540,13 +579,13 @@ impl Ops for Socket {
                 .with_layer(false, |layer, lent| layer.write(req, lent, buf))
                 .flatten();
         }
-        let Some(sock) = self.sock.as_deref() else {
+        let Some(sock) = self.conn.sock.as_deref() else {
             return Some(0);
         };
         match sock.write(buf) {
             Ok(n) => Some(n),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Some(0),
-            Err(_) if self.suppress_errors => None,
+            Err(_) if self.conn.suppress_errors => None,
             Err(error) => {
                 let (code, text) = socket_error(&error);
                 let text = format!(
@@ -591,13 +630,13 @@ impl Ops for Socket {
                 None => None,
             };
         }
-        let sock = self.sock.as_deref()?;
+        let sock = self.conn.sock.as_deref()?;
         let mut dont_wait = false;
-        if self.is_blocked {
-            dont_wait = has_buffered_data || self.timeout == Some(Duration::ZERO);
+        if self.conn.is_blocked {
+            dont_wait = has_buffered_data || self.conn.timeout == Some(Duration::ZERO);
             if !dont_wait {
-                self.timeout_event = false;
-                let timeout = self.timeout;
+                self.conn.timeout_event = false;
+                let timeout = self.conn.timeout;
                 loop {
                     let polled = req.limits_mut().blocking(|| {
                         crate::api::layer::poll_fd(sock.fd(), Readiness::Readable, timeout)
@@ -606,7 +645,7 @@ impl Ops for Socket {
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                         Ok(true) | Err(_) => break,
                         Ok(false) => {
-                            self.timeout_event = true;
+                            self.conn.timeout_event = true;
                             return None;
                         }
                     }
@@ -636,8 +675,8 @@ impl Ops for Socket {
     /// crypto layer's own close, `SSL_shutdown` and free, which its drop
     /// is.
     fn close(&mut self, req: &mut Request) -> i32 {
-        self.crypto = CryptoLayer::Absent;
-        self.sock = None;
+        self.conn.crypto = CryptoLayer::Absent;
+        self.conn.sock = None;
         for data in std::mem::take(&mut self.data) {
             data.free(req);
         }
@@ -659,6 +698,7 @@ impl Ops for Socket {
     /// ```
     fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
         let sizes = self
+            .conn
             .crypto
             .on()
             .map_or_else(|| vec![NETSTREAM_DATA_SIZE], Crypto::allocations);
@@ -678,15 +718,15 @@ impl Ops for Socket {
 
     /// `php_sockop_stat`: `fstat(2)` of the socket.
     fn stat(&mut self, _req: &mut Request) -> Option<StatBuf> {
-        let fd = self.sock.as_ref()?.fd().try_clone_to_owned().ok()?;
+        let fd = self.conn.sock.as_ref()?.fd().try_clone_to_owned().ok()?;
         let meta = std::fs::File::from(fd).metadata().ok()?;
         Some(stat_buf(&meta))
     }
 
     fn meta_data(&self) -> MetaData {
         MetaData::Socket {
-            timed_out: self.timeout_event,
-            blocked: self.is_blocked,
+            timed_out: self.conn.timeout_event,
+            blocked: self.conn.is_blocked,
         }
     }
 
@@ -704,7 +744,8 @@ impl Ops for Socket {
         if cast != Cast::Select && self.crypto_active() {
             return CastTarget::Refused;
         }
-        self.sock
+        self.conn
+            .sock
             .as_ref()
             .map_or(CastTarget::Refused, |sock| CastTarget::Fd(sock.fd()))
     }
@@ -719,26 +760,26 @@ impl Ops for Socket {
     fn set_option(&mut self, req: &mut Request, option: StreamOption) -> OptionAnswer {
         match option {
             StreamOption::Blocking(blocking) => {
-                let Some(sock) = self.sock.as_ref() else {
+                let Some(sock) = self.conn.sock.as_ref() else {
                     return OptionAnswer::Err;
                 };
                 if sock.set_blocking(blocking).is_err() {
                     return OptionAnswer::Err;
                 }
-                self.is_blocked = blocking;
+                self.conn.is_blocked = blocking;
                 OptionAnswer::Ok
             }
             StreamOption::ReadTimeout(timeout) => {
-                self.timeout = Some(timeout);
-                self.timeout_event = false;
+                self.conn.timeout = Some(timeout);
+                self.conn.timeout_event = false;
                 OptionAnswer::Ok
             }
             StreamOption::SuppressErrors(suppress) => {
-                self.suppress_errors = suppress;
+                self.conn.suppress_errors = suppress;
                 OptionAnswer::Ok
             }
             StreamOption::Liveness if self.crypto_active() => {
-                let readable = self.sock.as_ref().is_some_and(|sock| {
+                let readable = self.conn.sock.as_ref().is_some_and(|sock| {
                     matches!(
                         crate::api::layer::poll_fd(
                             sock.fd(),
@@ -778,7 +819,7 @@ impl Ops for Socket {
                 .blocking(|| self.accept(timeout, want_peer));
             return Some(Xported::Accepted(accepted));
         }
-        let sock = self.sock.as_deref()?;
+        let sock = self.conn.sock.as_deref()?;
         Some(match op {
             XportOp::Accept { .. } => return None,
             XportOp::Name { peer } => Xported::Name(name(sock, peer)),
@@ -865,10 +906,10 @@ impl Socket {
     /// bool(false)
     /// ```
     fn alive(&self) -> bool {
-        let Some(sock) = self.sock.as_ref() else {
+        let Some(sock) = self.conn.sock.as_ref() else {
             return false;
         };
-        if matches!(self.role, Role::Server { .. })
+        if matches!(self.conn.role, Role::Server { .. })
             && !matches!(
                 crate::api::layer::poll_fd(sock.fd(), Readiness::Readable, Some(Duration::ZERO)),
                 Ok(true)
@@ -877,7 +918,7 @@ impl Socket {
             return true;
         }
         let mut byte = [0u8; 1];
-        let peeked = if self.is_blocked {
+        let peeked = if self.conn.is_blocked {
             // `MSG_DONTWAIT` on a socket that blocks: made non-blocking
             // for the one call, as [`Socket::read_now`] makes it.
             sock.set_blocking(false).ok();
@@ -906,7 +947,7 @@ impl Socket {
         timeout: Option<Duration>,
         want_peer: bool,
     ) -> Result<(Socket, Option<Vec<u8>>), String> {
-        let sock = self.sock.as_deref().ok_or_else(String::new)?;
+        let sock = self.conn.sock.as_deref().ok_or_else(String::new)?;
         match crate::api::layer::poll_fd(sock.fd(), Readiness::Readable, timeout) {
             Ok(true) => {}
             Ok(false) => {
@@ -917,7 +958,7 @@ impl Socket {
         let (client, peer) = match sock {
             Sock::TcpServer(listener) => {
                 let (client, addr) = listener.accept().map_err(|e| socket_error(&e).1)?;
-                if self.role
+                if self.conn.role
                     == (Role::Server {
                         accept_nodelay: true,
                     })
@@ -934,7 +975,7 @@ impl Socket {
             // `php://stdin` over a listening socket: `accept(2)` of
             // whatever family it is, as `php_network_accept_incoming` takes
             // any, through a copy of the fd shaped as that family's listener.
-            Sock::Generic(handed) if self.label != GENERIC => {
+            Sock::Generic(handed) if self.conn.label != GENERIC => {
                 let copy = handed.as_fd().try_clone_to_owned();
                 let copy = copy.map_err(|e| socket_error(&e).1)?;
                 let inet = TcpListener::from(copy);
@@ -952,9 +993,9 @@ impl Socket {
                 return Err(socket_error(&error).1);
             }
         };
-        let mut accepted = Socket::new(Some(client), self.label, self.timeout);
-        accepted.is_blocked = self.is_blocked;
-        accepted.crypto = self.crypto.on().map(Crypto::accepted).into();
+        let mut accepted = Socket::new(Some(client), self.conn.label, self.conn.timeout);
+        accepted.conn.is_blocked = self.conn.is_blocked;
+        accepted.conn.crypto = self.conn.crypto.on().map(Crypto::accepted).into();
         Ok((accepted, want_peer.then_some(peer)))
     }
 }
@@ -1500,7 +1541,7 @@ impl Transports for Request {
         let stream = self.socket_stream(fd)?;
         self.stream_with(*stream, |s| {
             if let Some(socket) = s.ops.as_socket() {
-                socket.label = "tcp_socket";
+                socket.conn.label = "tcp_socket";
             }
         });
         Ok(stream)
@@ -1542,8 +1583,8 @@ impl Transports for Request {
             _ => (Sock::Generic(UnixStream::from(fd)), GENERIC),
         };
         let mut kind = Socket::new(Some(sock), label, default_timeout(self));
-        kind.is_blocked = blocking;
-        kind.crypto = crypto.into();
+        kind.conn.is_blocked = blocking;
+        kind.conn.crypto = crypto.into();
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
         stream.flags.no_seek = true;
         let stream = self.stream_alloc(stream)?;
@@ -1634,8 +1675,8 @@ impl Transports for Request {
             None => (label, None),
         };
         let mut kind = Socket::new(sock, label, default_timeout(self));
-        kind.role = role;
-        kind.crypto = crypto.into();
+        kind.conn.role = role;
+        kind.conn.crypto = crypto.into();
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
         stream.flags.no_seek = true;
         // `pestrdup(name, persistent_id ? 1 : 0)`.

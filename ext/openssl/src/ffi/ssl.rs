@@ -351,6 +351,17 @@ pub(crate) struct Tls {
 // by one call at a time; OpenSSL 3 lets an SSL move between threads.
 unsafe impl Send for Tls {}
 
+// The `SSL *` is libssl's own state for one connection, in the library's
+// memory: the `SSL_CTX` it was made in, of which this value holds one
+// reference, and the hooks its callbacks read, which hold the options'
+// flags, the `passphrase` and ALPN bytes copied out of the `context` and
+// the SNI certificates' own `SSL_CTX`s. Every read and write copies its
+// bytes in and out, so nothing of a request's heap reaches it, and a
+// persistent stream's socket keeps it across requests with its crypto
+// layer. Not `Sync`, and not asked to be: the socket that owns it is
+// moved between requests, never shared.
+impl php_ext::abi::EngineState for Tls {}
+
 impl Drop for Tls {
     fn drop(&mut self) {
         // SAFETY: the SSL is owned here and freed once, before the hooks

@@ -146,7 +146,14 @@ impl CryptoSocket<'_> {
 /// free, before the socket closes. What a call throws, php's
 /// `EG(exception)` left standing while the call goes on to fail, the
 /// engine keeps for the native to throw once it returns.
-pub trait Crypto: Any + Send {
+///
+/// A layer is engine state ([`EngineState`]): a persistent stream's
+/// socket keeps its layer as it outlives the request, in the persistent
+/// list or in the extension that kept it ([`OwnedStream::keep`]), so the
+/// layer holds nothing of a request's, which the bound says by type.
+///
+/// [`OwnedStream::keep`]: crate::api::request::OwnedStream::keep
+pub trait Crypto: Any + EngineState {
     /// `STREAM_XPORT_CRYPTO_OP_SETUP` with php's crypto `method` bits and
     /// the `session_stream` to take a session from: `true` for php's `0`.
     fn setup(

@@ -36,6 +36,7 @@ impl Connector for Leaky {
 }
 
 /// One connection of [`Leaky`].
+#[derive(EngineState)]
 struct Quiet;
 
 impl IdleConnection for Quiet {

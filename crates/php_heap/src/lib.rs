@@ -89,7 +89,7 @@ pub use compare::{
 };
 #[cfg(debug_assertions)]
 pub use counting::CountingSystem;
-pub use engine_state::{EngineState, Exclusive, FrozenZval};
+pub use engine_state::{EngineState, FrozenZval};
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, FatalReason, GcTable, HeapHooks};
 pub use lend::{ecalloc, efree, emalloc, erealloc};

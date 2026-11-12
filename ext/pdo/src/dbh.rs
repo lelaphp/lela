@@ -223,7 +223,7 @@ impl DbhState {
 /// ([`IdleConnection`]), and no field of a request's, neither the
 /// statement a failed `query()` left, the statement class's arguments,
 /// the constructor's copies, nor the objects sharing it.
-// The derive waits on `IdleConnection` asking `EngineState` (#4541).
+#[derive(EngineState)]
 #[allow(clippy::struct_excessive_bools)] // `DbhState`'s flags, one each
 pub(crate) struct IdleDbh {
     driver: Option<&'static dyn Connector>,

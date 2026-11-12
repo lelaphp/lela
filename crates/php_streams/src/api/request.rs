@@ -242,8 +242,11 @@ pub enum Xport {
 /// [`Stream::keep`] answers: the socket with its `transport`'s and crypto
 /// layer's state, kept by the extension that opened it and by nothing
 /// else, until a request lends it again with [`Streams::stream_lend`].
-/// Dropped, it closes the socket.
-pub struct Persisted(crate::streams::persistent::Entry);
+/// Dropped, it closes the socket. Engine state by type (#4541): it holds
+/// the socket's connection and no filter, and nothing of a request's, so
+/// an extension's pool keeps it between requests.
+#[derive(php_engine::api::abi::EngineState)]
+pub struct Persisted(crate::streams::persistent::Bare);
 
 /// The `socket` options of a socket, as `xp_socket.c` and `transports.c`
 /// read them off `PHP_STREAM_CONTEXT(stream)`: each is

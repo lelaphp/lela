@@ -351,29 +351,38 @@ impl Drop for Conn {
 /// ([`Conn::idle`]): the `sqlite3 *` with its lend, and `H->einfo` as a
 /// persistent connection records it. Taken up into a [`Conn`] again
 /// ([`IdleConn::take_up`]); dropped, closed with `sqlite3_close_v2`.
+#[derive(php_ext::abi::EngineState)]
 pub(crate) struct IdleConn {
+    library: Idle,
+    einfo: crate::sqlite::IdleEinfo,
+}
+
+/// The library's connection and the lend it keeps as its client data,
+/// emptied of what a request put there: made by [`Conn::idle`] alone.
+struct Idle {
     raw: Raw<sys::sqlite3>,
     lend: Raw<Lend>,
-    einfo: crate::sqlite::IdleEinfo,
 }
 
 impl Drop for IdleConn {
     fn drop(&mut self) {
         // SAFETY: the connection's one owner, closed once.
-        unsafe { sqlite3_close_v2(self.raw.get()) };
+        unsafe { sqlite3_close_v2(self.library.raw.get()) };
     }
 }
 
 // The `sqlite3 *` is the library's, and so is the lend it keeps as the
 // connection's client data, a value of this crate's in the library's
-// keeping: `Conn::idle`, the one place an `IdleConn` is made, empties the
-// lend's `req`, its `pending` throwable and its authorizer's view of a
-// request's callable, and the handlers of the functions and collations
-// the request registered were taken out of their data
-// (`Kind::take_handlers`) as `persistent_shutdown` gave them up, which
-// `give_back` runs first; what is left is the library's state, the static
-// `callbacks` and data that serves no handler. `Send` by `Raw`'s argument.
-impl php_ext::abi::EngineState for IdleConn {}
+// keeping; both are vouched for here, the `IdleConn` beside them held
+// to the bound by its derive. `Conn::idle`, the one place an `Idle` is
+// made, empties the lend's `req`, its `pending` throwable and its
+// authorizer's view of a request's callable, and the handlers of the
+// functions and collations the request registered were taken out of
+// their data (`Kind::take_handlers`) as `persistent_shutdown` gave them
+// up, which `give_back` runs first; what is left is the library's state,
+// the static `callbacks` and data that serves no handler. `Send` by
+// `Raw`'s argument.
+impl php_ext::abi::EngineState for Idle {}
 
 impl IdleConn {
     /// The connection a request takes up, for the request to keep.
@@ -381,8 +390,8 @@ impl IdleConn {
         let mut idle = ManuallyDrop::new(self);
         let einfo = std::mem::take(&mut idle.einfo).into();
         Conn {
-            raw: idle.raw,
-            lend: idle.lend,
+            raw: idle.library.raw,
+            lend: idle.library.lend,
             einfo,
         }
     }
@@ -479,8 +488,10 @@ impl Conn {
         lend.req = ptr::null_mut();
         let einfo = std::mem::take(&mut conn.einfo).idle(req);
         IdleConn {
-            raw: conn.raw,
-            lend: conn.lend,
+            library: Idle {
+                raw: conn.raw,
+                lend: conn.lend,
+            },
             einfo,
         }
     }
