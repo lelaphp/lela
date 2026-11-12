@@ -15,7 +15,7 @@ use php_ext::request::{
     Brigade, FilterFlags, FilterStatus, MadeFilter, Request, Stream, StreamFilter, Streams as _,
     Whence,
 };
-use php_ext::values::{Allocation, Emalloc, Malloc, Value};
+use php_ext::values::{Emalloc, Malloc, Pemalloc, Value};
 
 mod convert;
 
@@ -114,7 +114,7 @@ struct Consumed<A> {
     data: Option<A>,
 }
 
-impl<A: Allocation> Consumed<A> {
+impl<A: Pemalloc> Consumed<A> {
     /// `consumed_filter_create`'s `pecalloc`; the `Err` is the memory
     /// limit's fatal.
     fn new(req: &mut Request) -> Result<Consumed<A>, Thrown> {
@@ -126,7 +126,7 @@ impl<A: Allocation> Consumed<A> {
     }
 }
 
-impl<A: Allocation> StreamFilter for Consumed<A> {
+impl<A: Pemalloc> StreamFilter for Consumed<A> {
     /// `consumed_filter_dtor`: the data given back.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
         if let Some(data) = self.data.take() {
@@ -227,7 +227,7 @@ struct Dechunk<A> {
     data: Option<A>,
 }
 
-impl<A: Allocation> Dechunk<A> {
+impl<A: Pemalloc> Dechunk<A> {
     /// `chunked_filter_create`'s `pecalloc`; the `Err` is the memory
     /// limit's fatal.
     fn new(req: &mut Request) -> Result<Dechunk<A>, Thrown> {
@@ -391,7 +391,7 @@ impl<A: Allocation> Dechunk<A> {
     }
 }
 
-impl<A: Allocation> StreamFilter for Dechunk<A> {
+impl<A: Pemalloc> StreamFilter for Dechunk<A> {
     /// `php_chunked_dtor`: the data given back.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
         if let Some(data) = self.data.take() {

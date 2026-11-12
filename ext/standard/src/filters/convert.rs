@@ -18,7 +18,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     Brigade, FilterFlags, FilterStatus, MadeFilter, Request, Stream, StreamFilter,
 };
-use php_ext::values::{Allocation, Emalloc, Malloc, PhpArray, Value};
+use php_ext::values::{Emalloc, Malloc, Pemalloc, PhpArray, Value};
 
 /// `php_conv_err_t` less `PHP_CONV_ERR_SUCCESS`, the `Ok`, and the three
 /// no converter here answers.
@@ -739,7 +739,7 @@ pub(super) struct ConvertFilter<A> {
     held: Vec<A>,
 }
 
-impl<A: Allocation> ConvertFilter<A> {
+impl<A: Pemalloc> ConvertFilter<A> {
     /// The filter over `cd`, with what php allocates for it: the
     /// `php_convert_filter`, the name of `name_len` bytes and its
     /// terminator, the converter and its line break. The `Err` is the
@@ -805,7 +805,7 @@ impl<A: Allocation> ConvertFilter<A> {
     }
 }
 
-impl<A: Allocation> StreamFilter for ConvertFilter<A> {
+impl<A: Pemalloc> StreamFilter for ConvertFilter<A> {
     /// `strfilter_convert_dtor`: the converter's line break, the
     /// converter, the name and the filter given back.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {

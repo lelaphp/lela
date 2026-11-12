@@ -11,7 +11,7 @@ use php_ext::request::{
     Brigade, FilterFlags, FilterStatus, MadeFilter, Request, Stream, StreamFilter,
 };
 use php_ext::values::walk;
-use php_ext::values::{Allocation, Emalloc, Key, Malloc, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Malloc, Pemalloc, Value, ValueRef};
 
 use crate::ffi::{Action, Code, Compress, Decompress, LentCompress, LentDecompress, Step};
 
@@ -41,7 +41,7 @@ struct Buffers<A> {
     outbuf: A,
 }
 
-impl<A: Allocation> Buffers<A> {
+impl<A: Pemalloc> Buffers<A> {
     /// `pecalloc(1, sizeof(php_bz2_filter_data), persistent)` and the two
     /// `pemalloc(2048, persistent)`s; the `Err` is the memory limit's
     /// fatal.
@@ -79,7 +79,7 @@ impl<A: Allocation> Buffers<A> {
 /// reads the filter's persistence: on the request's heap, lent for each
 /// call, beside an [`Emalloc`], and on the library's own allocator beside
 /// a [`Malloc`], a persistent stream's.
-trait Heap: Allocation {
+trait Heap: Pemalloc {
     /// A compressing `bz_stream`.
     type Compressor: Send;
     /// A decompressing `bz_stream`.

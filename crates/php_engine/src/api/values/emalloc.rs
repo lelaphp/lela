@@ -155,7 +155,7 @@ pub struct Malloc(Box<[u8]>);
 /// 3531152
 /// 32
 /// ```
-pub trait Allocation: Sized + Send + 'static {
+pub trait Pemalloc: Sized + Send + 'static {
     /// `pecalloc(1, len, persistent)`: `len` zero bytes; the `Err` is the
     /// memory limit's fatal.
     fn new(req: &mut Request, len: usize) -> Result<Self, Thrown>;
@@ -171,7 +171,7 @@ pub trait Allocation: Sized + Send + 'static {
     fn free(self, req: &mut Request);
 }
 
-impl Allocation for Emalloc {
+impl Pemalloc for Emalloc {
     fn new(req: &mut Request, len: usize) -> Result<Emalloc, Thrown> {
         Emalloc::new(req, len)
     }
@@ -189,7 +189,7 @@ impl Allocation for Emalloc {
     }
 }
 
-impl Allocation for Malloc {
+impl Pemalloc for Malloc {
     fn new(_req: &mut Request, len: usize) -> Result<Malloc, Thrown> {
         Ok(Malloc(vec![0; len].into_boxed_slice()))
     }

@@ -488,8 +488,16 @@ impl StreamFilter for LeakyFilter {
         }
         Ok(FilterStatus::PassOn)
     }
+
+    /// Says it was released, so a test sees the chain give it up.
+    fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        req.response_mut().write(b"leaky released\n");
+        Ok(())
+    }
 }
 
+/// A filter of the request's, [`MadeFilter::Request`], whatever stream
+/// it is made for: a persistent stream's chain refuses it.
 #[allow(clippy::unnecessary_wraps)] // `FilterFactory`'s signature
 fn leaky_factory(
     _req: &mut Request,
@@ -534,5 +542,40 @@ fn a_leak_from_a_supplied_filter_names_its_extension() {
     assert!(
         stdout.contains(", allocated by leak_filter in "),
         "{stdout}"
+    );
+}
+
+/// A factory that answers a filter of the request's for a persistent
+/// stream has it refused: the filter is released without running, the
+/// stream's chain is left without it, so the write the shutdown function
+/// makes runs no filter and leaks nothing, and the request ends in the
+/// stream layer's fatal `InternalError`.
+#[test]
+fn a_request_s_filter_is_refused_a_persistent_stream() {
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+            ExtensionBuilder::default()
+                .rinit(register_leaky)
+                .build("leak_filter"),
+        ])
+        .build();
+    let served = engine.serve_capture(
+        r#"<?php
+$s = stream_socket_server('tcp://127.0.0.1:0');
+[$host, $port] = explode(':', stream_socket_get_name($s, false));
+$p = pfsockopen($host, (int) $port); $peer = stream_socket_accept($s, 1);
+register_shutdown_function(function () use ($p, $peer) { fwrite($p, 'x'); usleep(20000); var_dump(fread($peer, 10)); });
+echo "opened\n";
+stream_filter_append($p, 'leaky', STREAM_FILTER_WRITE);
+echo "unreached\n";
+"#,
+        Capture::default(),
+    );
+    assert_eq!(
+        served.stdout_text(),
+        "opened\nleaky released\n<br />\n<b>Fatal error</b>:  InternalError: a filter factory answered a filter of the request's for a persistent stream in <b>Standard input code</b> on line <b>7</b><br />\nstring(1) \"x\"\n"
     );
 }

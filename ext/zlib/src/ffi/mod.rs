@@ -33,7 +33,7 @@ use libz_sys as z;
 use php_ext::abi::EngineState;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, efree, emalloc};
-use php_ext::values::{Allocation, Emalloc, Malloc};
+use php_ext::values::{Emalloc, Malloc, Pemalloc};
 
 // SAFETY: zlib's own `zError`, which libz-sys does not declare, from the
 // library it links: an `int` in, a pointer into a static table out.
@@ -234,10 +234,10 @@ extern "C" fn pfree(_opaque: z::voidpf, address: z::voidpf) {
 }
 
 /// Where zlib allocates a stream's state, as the allocations of the
-/// filter that holds it are made ([`Allocation`]): the request's heap,
+/// filter that holds it are made ([`Pemalloc`]): the request's heap,
 /// lent for each call, beside an [`Emalloc`], and the system's
 /// ([`palloc`]) beside a [`Malloc`], a persistent stream's.
-pub(crate) trait Heap: Allocation {
+pub(crate) trait Heap: Pemalloc {
     /// `zalloc` and `zfree`.
     fn allocator() -> (z::alloc_func, z::free_func);
 
