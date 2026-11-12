@@ -93,6 +93,9 @@ fn the_class_argument_is_read_past_nested_calls_and_strings() {
 #[test]
 fn php_engine_fails_for_a_raise_it_no_longer_defines() {
     let root = crate::scratch::Tree::new("raises-engine").unwrap();
+    // A crate's sources are the files git lists, so the tree is a
+    // repository, as every scratch workspace is.
+    crate::git::git(&root, &["init", "-q"]).unwrap();
     let dir = root.join("crates/php_engine");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     let engine = Present {
