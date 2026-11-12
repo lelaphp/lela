@@ -8,7 +8,7 @@ use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::attr::php_class;
 use php_ext::raising::{self, Thrown};
 use php_ext::request::Request;
-use php_ext::values::ClassId;
+use php_ext::values::EngineClassId;
 
 use crate::object::PharException;
 
@@ -32,11 +32,11 @@ pub(crate) struct InvalidArgumentException;
 #[derive(Clone, Copy, EngineState)]
 #[allow(clippy::struct_field_names)] // each field is its class's name, which ends in Exception
 pub(crate) struct Throwables {
-    pub(crate) phar_exception: ClassId,
-    pub(crate) bad_method_call_exception: ClassId,
-    pub(crate) unexpected_value_exception: ClassId,
-    pub(crate) runtime_exception: ClassId,
-    pub(crate) invalid_argument_exception: ClassId,
+    pub(crate) phar_exception: EngineClassId,
+    pub(crate) bad_method_call_exception: EngineClassId,
+    pub(crate) unexpected_value_exception: EngineClassId,
+    pub(crate) runtime_exception: EngineClassId,
+    pub(crate) invalid_argument_exception: EngineClassId,
 }
 
 impl Throwables {

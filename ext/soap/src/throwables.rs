@@ -8,7 +8,7 @@ use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::attr::php_class;
 use php_ext::raising::{self, Thrown};
 use php_ext::request::Request;
-use php_ext::values::ClassId;
+use php_ext::values::EngineClassId;
 
 use crate::classes::SoapFault;
 
@@ -32,11 +32,11 @@ pub(crate) struct RandomException;
 /// The classes the natives raise, by their identity in this engine.
 #[derive(Clone, Copy, EngineState)]
 pub(crate) struct Throwables {
-    pub(crate) error: ClassId,
-    pub(crate) type_error: ClassId,
-    pub(crate) value_error: ClassId,
-    pub(crate) soap_fault: ClassId,
-    pub(crate) random_exception: ClassId,
+    pub(crate) error: EngineClassId,
+    pub(crate) type_error: EngineClassId,
+    pub(crate) value_error: EngineClassId,
+    pub(crate) soap_fault: EngineClassId,
+    pub(crate) random_exception: EngineClassId,
 }
 
 impl Throwables {

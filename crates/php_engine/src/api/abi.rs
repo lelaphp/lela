@@ -23,8 +23,8 @@ use crate::api::raising::{Level, Thrown};
 use crate::api::request::Family;
 use crate::api::request::{HookedTable, Request};
 use crate::api::values::{
-    ClassId, ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
-    walk,
+    ClassId, ClosureInfo, EngineClassId, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place,
+    TypeTag, Value, walk,
 };
 use crate::supplied::{Keyed, Registered, Supplies};
 
@@ -121,8 +121,9 @@ impl Start<'_> {
     /// throws (#3403). A class the engine does not link refuses the
     /// start, naming it, as the template's `InternalError` names what
     /// it cannot reach.
-    pub fn class<C: crate::api::abi::Class>(&self) -> Result<ClassId, Refusal> {
-        self.classes.find(C::NAME).ok_or_else(|| {
+    pub fn class<C: crate::api::abi::Class>(&self) -> Result<EngineClassId, Refusal> {
+        let found = self.classes.find(C::NAME).map(EngineClassId::engine_own);
+        found.ok_or_else(|| {
             let name = String::from_utf8_lossy(C::NAME);
             Refusal::new().raise(
                 Level::CoreError,

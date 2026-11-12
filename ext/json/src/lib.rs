@@ -37,7 +37,7 @@ use php_ext::abi::{EngineState, Extension, ExtensionBuilder, OrFalse, Start};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error, fatal, new_throwable, pending, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Owner, PhpString, SmartStr, Value};
+use php_ext::values::{EngineClassId, Owner, PhpString, SmartStr, Value};
 
 use constants::{
     JSON_ERROR_CTRL_CHAR, JSON_ERROR_DEPTH, JSON_ERROR_INF_OR_NAN,
@@ -211,7 +211,7 @@ fn error_message(code: i64) -> &'static str {
 /// (ADR-0005: engine state, immutable), so a raise names the class by
 /// its identity, never by a name looked up as it throws (#3403).
 #[derive(Clone, Copy, EngineState)]
-struct Raised(ClassId);
+struct Raised(EngineClassId);
 
 /// `zend_throw_exception(php_json_exception_ce, msg, error_code)`: the
 /// message `json_last_error_msg` would have answered, under the code

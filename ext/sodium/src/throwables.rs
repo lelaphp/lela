@@ -6,14 +6,14 @@
 use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::raising::{self, Thrown};
 use php_ext::request::Request;
-use php_ext::values::ClassId;
+use php_ext::values::EngineClassId;
 
 use crate::SodiumException;
 
 /// The classes the natives raise, by their identity in this engine.
 #[derive(Clone, Copy, EngineState)]
 pub(crate) struct Throwables {
-    pub(crate) sodium_exception: ClassId,
+    pub(crate) sodium_exception: EngineClassId,
 }
 
 impl Throwables {

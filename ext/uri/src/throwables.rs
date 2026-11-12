@@ -7,7 +7,7 @@
 use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::raising::{self, Thrown};
 use php_ext::request::Request;
-use php_ext::values::ClassId;
+use php_ext::values::EngineClassId;
 
 use crate::whatwg::InvalidUrlException;
 use crate::{Error, Exception, InvalidUriException, UriError};
@@ -15,11 +15,11 @@ use crate::{Error, Exception, InvalidUriException, UriError};
 /// The classes the natives raise, by their identity in this engine.
 #[derive(Clone, Copy, EngineState)]
 pub(crate) struct Throwables {
-    pub(crate) error: ClassId,
-    pub(crate) exception: ClassId,
-    pub(crate) uri_error: ClassId,
-    pub(crate) invalid_uri_exception: ClassId,
-    pub(crate) invalid_url_exception: ClassId,
+    pub(crate) error: EngineClassId,
+    pub(crate) exception: EngineClassId,
+    pub(crate) uri_error: EngineClassId,
+    pub(crate) invalid_uri_exception: EngineClassId,
+    pub(crate) invalid_url_exception: EngineClassId,
 }
 
 impl Throwables {

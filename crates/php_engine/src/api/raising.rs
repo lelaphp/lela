@@ -5,7 +5,10 @@
 //! must ...` itself. [`Thrown`] is the error every native returns. In
 //! this skeleton nothing is rendered or dispatched to a user handler: a
 //! diagnostic is kept on the request as its last error, and a `Thrown`
-//! carries the throwable it would have made pending.
+//! carries the throwable it would have made pending. A raise that names
+//! its class takes a [`ClassId`] or the
+//! [`EngineClassId`](crate::api::values::EngineClassId) an extension
+//! keeps from its engine start.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -1003,7 +1006,12 @@ pub fn leave_pending(req: &mut Request, thrown: Thrown) {
 /// throwable or an exit, or a fatal leaving on for the next `zend_try`
 /// out, as the `zend_catch` bails out again. A client's fault thrown
 /// over the engine's fatal is the witness, in `ext/soap`.
-pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: ClassId) -> Result<Thrown, Thrown> {
+pub fn catch_fatal(
+    req: &mut Request,
+    thrown: Thrown,
+    class: impl Into<ClassId>,
+) -> Result<Thrown, Thrown> {
+    let class = class.into();
     if !req.diagnostics().bailing_out() || req.unwind_exit() {
         return Err(thrown);
     }
@@ -1038,7 +1046,11 @@ pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: ClassId) -> Result<
 /// object(stdClass)#1 (0) {
 /// }
 /// ```
-pub fn throw(req: &mut Request, class: ClassId, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+pub fn throw(
+    req: &mut Request,
+    class: impl Into<ClassId>,
+    message: &(impl AsRef<[u8]> + ?Sized),
+) -> Thrown {
     match new_throwable(req, class, message) {
         Ok(throwable) => {
             let thrown = throw_value(req, &throwable);
@@ -1076,10 +1088,10 @@ pub fn throw(req: &mut Request, class: ClassId, message: &(impl AsRef<[u8]> + ?S
 /// ```
 pub fn throw_error(
     req: &mut Request,
-    class: ClassId,
+    class: impl Into<ClassId>,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
-    throw_printed(req, Printing::Twice, None, class, message.as_ref())
+    throw_printed(req, Printing::Twice, None, class.into(), message.as_ref())
 }
 
 /// How php prints the sentence of a throwable it makes from a format,
@@ -1203,9 +1215,10 @@ fn made_and_thrown(
 /// ```
 pub fn throw_exception_ex(
     req: &mut Request,
-    class: ClassId,
+    class: impl Into<ClassId>,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
+    let class = class.into();
     made_and_thrown(req, None, |req| {
         formatted_throwable(req, class, message.as_ref())
     })
@@ -1274,12 +1287,12 @@ pub(crate) fn error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) ->
 /// without the extension.
 pub fn throw_at(
     req: &mut Request,
-    class: ClassId,
+    class: impl Into<ClassId>,
     message: &str,
     file: &[u8],
     line: u32,
 ) -> Thrown {
-    match throwable_at(req, class, message, file, line) {
+    match throwable_at(req, class.into(), message, file, line) {
         Ok(object) => throw_object(req, object),
         Err(fatal) => fatal,
     }
@@ -1482,7 +1495,13 @@ pub(crate) fn non_object_error(
 /// ```expect
 /// RuntimeException: Failed to call sub iterator method / inner
 /// ```
-pub fn throw_chained(req: &mut Request, previous: Thrown, class: ClassId, message: &str) -> Thrown {
+pub fn throw_chained(
+    req: &mut Request,
+    previous: Thrown,
+    class: impl Into<ClassId>,
+    message: &str,
+) -> Thrown {
+    let class = class.into();
     chained(req, previous, |req| new_throwable_made(req, class, message))
 }
 
@@ -1530,14 +1549,14 @@ fn chained(
 pub fn throw_error_chained(
     req: &mut Request,
     previous: Thrown,
-    class: ClassId,
+    class: impl Into<ClassId>,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
     throw_printed(
         req,
         Printing::Twice,
         Some(previous),
-        class,
+        class.into(),
         message.as_ref(),
     )
 }
@@ -1728,10 +1747,10 @@ pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn new_throwable(
     req: &mut Request,
-    class: ClassId,
+    class: impl Into<ClassId>,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Result<Owner<Value>, Thrown> {
-    adopted(new_throwable_made(req, class, message))
+    adopted(new_throwable_made(req, class.into(), message))
 }
 
 /// What [`new_throwable`] makes, its one owner not yet named.
@@ -1963,10 +1982,11 @@ pub fn arg_value_error(
 /// ```
 pub fn argument_error(
     req: &mut Request,
-    class: ClassId,
+    class: impl Into<ClassId>,
     position: u32,
     tail: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
+    let class = class.into();
     let tail = tail.as_ref();
     let message = req.argument_message(position, b"");
     let message = bytes!(message.strip_suffix(b"must ").unwrap_or(&message), tail);
@@ -2201,10 +2221,10 @@ pub(crate) fn none_pending(req: &Request) -> Result<(), Thrown> {
 /// ```
 pub fn throwing_warnings<R>(
     req: &mut Request,
-    class: ClassId,
+    class: impl Into<ClassId>,
     f: impl FnOnce(&mut Request) -> Result<R, Thrown>,
 ) -> Result<R, Thrown> {
-    let previous = req.replace_error_handling(Some(class));
+    let previous = req.replace_error_handling(Some(class.into()));
     let answered = f(req);
     req.replace_error_handling(previous);
     match (answered, req.take_error_handling_thrown()) {

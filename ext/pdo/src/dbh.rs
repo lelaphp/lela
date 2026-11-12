@@ -159,7 +159,10 @@ impl DbhState {
     /// statement class's arguments given up, as `persistent_shutdown`
     /// gives them up, the constructor's copies freed, which a persistent
     /// connection `pestrdup`s and so never holds, and the connection
-    /// given back by its connector ([`Connection::give_back`]).
+    /// given back by its connector ([`Connection::give_back`]). It keeps
+    /// no statement class: a persistent PDO refuses
+    /// `ATTR_STATEMENT_CLASS`, and a class identity the pool kept would
+    /// outlive the request whose class it can name.
     fn idle(self, req: &mut Request) -> IdleDbh {
         if let Some(stmt) = self.query_stmt {
             stmt.give_up(req);
@@ -183,7 +186,6 @@ impl DbhState {
             nulls: self.nulls,
             stringify: self.stringify,
             default_fetch: self.default_fetch,
-            stmt_class: self.stmt_class,
             in_txn: self.in_txn,
             persistent: self.persistent,
             describes_at_execute: self.describes_at_execute,
@@ -205,7 +207,7 @@ impl DbhState {
             nulls: idle.nulls,
             stringify: idle.stringify,
             default_fetch: idle.default_fetch,
-            stmt_class: idle.stmt_class,
+            stmt_class: None,
             stmt_args: None,
             in_txn: idle.in_txn,
             persistent: idle.persistent,
@@ -221,8 +223,8 @@ impl DbhState {
 /// A persistent `pdo_dbh_t` while the engine's pool keeps it between
 /// requests (#4474): its attributes and its connection idle
 /// ([`IdleConnection`]), and no field of a request's, neither the
-/// statement a failed `query()` left, the statement class's arguments,
-/// the constructor's copies, nor the objects sharing it.
+/// statement a failed `query()` left, the statement class or its
+/// arguments, the constructor's copies, nor the objects sharing it.
 // The derive waits on `IdleConnection` asking `EngineState` (#4541).
 #[allow(clippy::struct_excessive_bools)] // `DbhState`'s flags, one each
 pub(crate) struct IdleDbh {
@@ -234,7 +236,6 @@ pub(crate) struct IdleDbh {
     nulls: Nulls,
     stringify: bool,
     default_fetch: u16,
-    stmt_class: Option<ClassId>,
     in_txn: bool,
     persistent: bool,
     describes_at_execute: bool,

@@ -13,7 +13,9 @@ use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw_exception_ex};
 use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _};
-use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{
+    ClassId, EngineClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef,
+};
 use php_ext_spl::directory::{self as spl, Other};
 
 use crate::archive::{
@@ -96,7 +98,7 @@ fn named(req: &mut Request, id: ArchiveId) -> (String, bool) {
 fn writes_off(
     req: &mut Request,
     id: ArchiveId,
-    class: ClassId,
+    class: EngineClassId,
     message: &str,
 ) -> Result<(), Thrown> {
     let (_, is_data) = named(req, id);

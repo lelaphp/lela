@@ -7,7 +7,7 @@
 use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::raising::{self, Thrown};
 use php_ext::request::Request;
-use php_ext::values::ClassId;
+use php_ext::values::EngineClassId;
 
 use crate::classes::{
     DateError, DateException, DateInvalidOperationException, DateInvalidTimeZoneException,
@@ -18,16 +18,16 @@ use crate::classes::{
 /// The classes the natives raise, by their identity in this engine.
 #[derive(Clone, Copy, EngineState)]
 pub(crate) struct Throwables {
-    pub(crate) error: ClassId,
-    pub(crate) date_error: ClassId,
-    pub(crate) date_object_error: ClassId,
-    pub(crate) date_range_error: ClassId,
-    pub(crate) date_exception: ClassId,
-    pub(crate) date_invalid_time_zone_exception: ClassId,
-    pub(crate) date_invalid_operation_exception: ClassId,
-    pub(crate) date_malformed_string_exception: ClassId,
-    pub(crate) date_malformed_interval_string_exception: ClassId,
-    pub(crate) date_malformed_period_string_exception: ClassId,
+    pub(crate) error: EngineClassId,
+    pub(crate) date_error: EngineClassId,
+    pub(crate) date_object_error: EngineClassId,
+    pub(crate) date_range_error: EngineClassId,
+    pub(crate) date_exception: EngineClassId,
+    pub(crate) date_invalid_time_zone_exception: EngineClassId,
+    pub(crate) date_invalid_operation_exception: EngineClassId,
+    pub(crate) date_malformed_string_exception: EngineClassId,
+    pub(crate) date_malformed_interval_string_exception: EngineClassId,
+    pub(crate) date_malformed_period_string_exception: EngineClassId,
 }
 
 impl Throwables {

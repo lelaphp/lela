@@ -1724,8 +1724,11 @@ pub fn load_file(req: &mut Request, path: &[u8], autoloading: bool) -> Result<bo
 /// one owner, the caller's; an interface, a trait, an enum or an
 /// abstract class is php's `Error` for what cannot be instantiated.
 #[cfg_attr(debug_assertions, track_caller)]
-pub fn new_object(req: &mut Request, class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
-    adopted(new_object_made(req, class))
+pub fn new_object(
+    req: &mut Request,
+    class: impl Into<ClassId>,
+) -> Result<Owner<PhpObject>, Thrown> {
+    adopted(new_object_made(req, class.into()))
 }
 
 /// `ce->create_object(ce)`, what [`new_object`] serves past

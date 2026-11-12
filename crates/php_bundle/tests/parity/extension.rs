@@ -618,7 +618,7 @@ fn proto_never(req: &mut Request) -> Result<Never, Thrown> {
 /// Core's `Exception` as the extension's engine start resolved it, the
 /// class `proto_never` throws.
 #[derive(EngineState)]
-struct Raised(php_ext::values::ClassId);
+struct Raised(php_ext::values::EngineClassId);
 
 /// `proto_false(): false`.
 #[php_function]
