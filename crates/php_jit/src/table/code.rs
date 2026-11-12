@@ -280,23 +280,23 @@ unsafe impl<P: Pages> Sync for Code<P> {}
 // request's; the derive cannot read through the address.
 impl<P: Pages> EngineState for Code<P> where Arc<Chunk<P>>: EngineState {}
 
-// Cranelift's ISA for the host (`jit-design.md` §4.3): its triple, the
-// flags the policy asked for and the code generator's own tables, made
-// once at engine start from the host's description and read by every
-// compile after, none a request's; the derive on `Backend` cannot read
-// through its `dyn TargetIsa`.
+// Cranelift's ISA for the host (`jit-design.md` §4.3): the host's triple
+// and the ISA flags `cranelift-native` found on it, and the shared flags
+// `lower::flags` sets, the same for every engine; made once at engine
+// start and read by every compile after, none a request's. The derive on
+// `Backend` cannot read through its `dyn TargetIsa`.
 impl EngineState for crate::lower::Isa {}
 
 // The tier's engine state (ADR-0005, ADR-0006). Its `Shared`, the policy,
-// the code generator and the `PERF` outputs, derives; what this impl
-// still vouches for is its `Compiler`, the queue of jobs the worker
-// compiles past the request that submitted them (`jit-design.md` §4.8).
-// A job's `Recorded` names the recording request's classes by number, in
-// its view and in a sample's class, and no impl vouches for it until
-// #4607's question is answered (#4596). The rest of the queue waits on
-// that: the worker, whose body is the queue; a job's claim, whose holder
-// keeps the word's `Epoch`, engine state only once the arena is (#4476);
-// and the queue's `Condvar`.
+// the code generator and the `PERF` outputs, derives; this impl vouches
+// for its `Compiler`, the queue of jobs the worker compiles past the
+// request that submitted them (`jit-design.md` §4.8). A job's `Recorded`
+// names the recording request's classes by number, in its view and in a
+// sample's class, and has no impl of its own (#4596): this impl vouches
+// for the recordings the queue holds until #4607's question is answered.
+// A job's claim keeps the word's `Epoch`, which waits on the arena
+// (#4632, #4633, #4634); the worker, whose body is the queue, and the
+// queue's `Condvar` are #4636's.
 impl php_engine::api::abi::EngineState for crate::JitEngine {}
 
 /// The chunk being filled, and where its next body may start.
