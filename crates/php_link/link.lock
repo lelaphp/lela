@@ -23,6 +23,7 @@ Indexed::rows
 Linked
 LinkedClass
 LinkedClass::lay
+LinkedClass::try_map
 Linking
 NameHash
 NameHasher

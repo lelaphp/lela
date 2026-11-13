@@ -4055,7 +4055,7 @@ impl EngineBuilder {
             interned.clone(),
         );
         let arena = crate::arena::Epochs::of(crate::arena::Arena::of_engine(
-            Arc::clone(&records),
+            &records,
             functions.len().saturating_add(methods.len()),
             crate::unit_cache::Files::new(MAX_ACCELERATED_FILES),
             interned.clone(),

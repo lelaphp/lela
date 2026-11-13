@@ -216,11 +216,14 @@ impl Request {
     }
 
     /// The class native a function number names, the request's own or
-    /// the published arena's ([`Function::CLASS_NATIVE`]), and its class.
+    /// the published arena's ([`Function::CLASS_NATIVE`]), and its class,
+    /// the arena's widened to the number the request names it by.
     pub(super) fn class_native_of(&self, function: Function) -> Option<(ClassId, ClassNative)> {
         match function.local_class_native_at() {
             Some(at) => self.class_natives.get(at).copied(),
-            None => self.arena.class_native(function),
+            None => {
+                (self.arena.class_native(function)).map(|(class, native)| (class.into(), native))
+            }
         }
     }
 
@@ -235,7 +238,7 @@ impl Request {
     /// ([`Request::method_decl`]).
     pub(super) fn served_native(&self, function: Function) -> Function {
         match self.class_native_of(function) {
-            Some((_, ClassNative::Trait { native, .. })) => native,
+            Some((_, ClassNative::Trait { native, .. })) => native.into(),
             _ => function,
         }
     }

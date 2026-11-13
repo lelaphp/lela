@@ -72,9 +72,11 @@ impl CompileRefused {
 
 /// The classes a held unit's compiler bound early, each published into
 /// the engine's arena as the unit was held (design §5.14, §6.3), by its
-/// declaration's index: none for a class the unit leaves to an opline
-/// and for one the arena could not take ([`crate::api::request::Request::publish_unit`]).
-pub(crate) type EarlyBound = Arc<[Option<crate::api::values::ClassId>]>;
+/// declaration's index and by the identity the arena minted for its row
+/// ([`crate::arena::EpochClassId`]): none for a class the unit leaves to
+/// an opline and for one the arena could not take
+/// ([`crate::api::request::Request::publish_unit`]).
+pub(crate) type EarlyBound = Arc<[Option<crate::arena::EpochClassId>]>;
 
 /// What the unit cache files a held file under, one space of names as
 /// php's `ZCSG(hash)` is (design §6.3, revision 45): the file's full
