@@ -1,7 +1,8 @@
 //! `Frozen::new` and the walk it reads through (#4649): a unit or a class
 //! declaration is admitted only where every value it holds is the engine
-//! table's, every index its constants hold names an entry of its own
-//! tables, and every op array is numbered by the engine.
+//! table's, each of its constants that is an index, an `IS_CONSTANT_AST`
+//! or an `IS_PTR`, names an entry of its own tables, and every op array is
+//! numbered by the engine.
 
 use php_heap::{Heap, Intern, Key, Strings, Zval};
 use php_unit::decl::{

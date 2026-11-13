@@ -574,9 +574,10 @@ mod sealed {
 /// so no type outside this crate is one.
 pub trait Values: sealed::Walked {}
 
-/// Every value the unit holds passes [`FrozenZval::of`], every index its
-/// op arrays' constants hold names an entry of its own tables, and every
-/// op array is numbered by the engine.
+/// Every value the unit holds passes [`FrozenZval::of`], each of its op
+/// arrays' constants that is an index, an `IS_CONSTANT_AST` or an
+/// `IS_PTR`, names an entry of its own tables, and every op array is
+/// numbered by the engine.
 impl sealed::Walked for PublishedUnit {
     fn frozen(&self) -> bool {
         let mut values = true;
@@ -615,8 +616,9 @@ pub struct Frozen<T>(T);
 impl<T: Values> Frozen<T> {
     /// `value`, where every value the walk reaches is a scalar or a
     /// published string or constant array of the engine's table
-    /// ([`FrozenZval::of`]), and, for a unit, each index its constants hold
-    /// is below its table's bound, none is `UNDEF`, and every op array's
+    /// ([`FrozenZval::of`]), and, for a unit, each of its constants that is
+    /// an index, an `IS_CONSTANT_AST` or an `IS_PTR`, is below its table's
+    /// bound, none is `UNDEF`, and every op array's
     /// offset is [`MapPtrOffset::Engine`] ([`unit_values`]); for a
     /// declaration, every closure's cell in it is empty ([`Stray::Cell`]).
     ///
@@ -646,9 +648,13 @@ impl<T> Deref for Frozen<T> {
 /// which names every field and variant of the unit format, and admitted
 /// each only where [`FrozenZval::of`] does: a scalar, or a string or
 /// constant array the engine's table published, which no request owns or
-/// counts and which lives as long as the engine. Each index a unit's
-/// constants hold is decided against its own unit's table, and each op
-/// array is numbered by the engine's map-pointer space, not a request's.
+/// counts and which lives as long as the engine. Each of a unit's
+/// constants that is an index names an entry of its own tables, an
+/// `IS_CONSTANT_AST` of its op array's `const_exprs` and an `IS_PTR` of
+/// the unit's `constants`; no other index the unit holds, an opline's or
+/// a table's, is checked, since none reaches a request's heap (#4684).
+/// Each op array is numbered by the engine's map-pointer space, not a
+/// request's.
 /// It is read and never written, so what the check read stands while it
 /// is held.
 ///
