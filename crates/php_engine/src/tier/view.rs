@@ -1528,8 +1528,12 @@ impl UnitView {
         if let Some(at) = met {
             return RecordClass::Own(OwnClass::of(at));
         }
-        // A class with no declaration is met as a new one each time,
-        // which names no two classes as one.
+        // No class a request linked lacks a declaration: a native's is
+        // the engine's, and a declared row's is its unit's class at the
+        // index `Request::bind_declared` was given, which every caller
+        // read the declaration at. Were one to, it would be met as a new
+        // class each time, which names no two classes as one, where
+        // sharing an index would name two as one.
         let at = self.own.len();
         let name = name.cloned().unwrap_or_default();
         self.own.push(OwnEntry { name, bound: None });
