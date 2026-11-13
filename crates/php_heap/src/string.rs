@@ -38,7 +38,7 @@ use std::cell::Cell;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
-use crate::array::{Arr, Key, free_persistent_array, persistent_array};
+use crate::array::{Arr, Key, free_persistent_array, persistent_array, publish_persistent_array};
 use crate::bump::Bump;
 use crate::gc::{self, Counted, Refcounted};
 use crate::hooks::Fatal;
@@ -75,10 +75,17 @@ const _: () = assert!(Str::LEN_AT == 16 && Str::VAL_AT == 24);
 /// never refcounted and never freed by a release.
 pub(crate) const INTERNED: u32 = gc::IMMUTABLE;
 
-/// What a string outside every request's heap carries beside it:
-/// `IS_STR_PERSISTENT`, allocated by `pemalloc`, and `IS_STR_PERMANENT`,
-/// which relives the request boundary.
-const PERMANENT: u32 = INTERNED | gc::PERSISTENT | gc::PERMANENT;
+/// What a string a [`Pending`] set lays carries beside it:
+/// `IS_STR_PERSISTENT`, allocated by `pemalloc`, and not yet
+/// `IS_STR_PERMANENT`, which [`Strings::publish`] sets as the set enters
+/// the table (#4656).
+const PENDING: u32 = INTERNED | gc::PERSISTENT;
+
+/// What a string of a table carries: [`PENDING`]'s bits and
+/// `IS_STR_PERMANENT`, which relives the request boundary and here says
+/// the string is published, laid with it by the frozen table and a
+/// [`Strings`]' bump and set on a set's as the set is published.
+const PERMANENT: u32 = PENDING | gc::PERMANENT;
 
 /// `IS_STR_CLASS_NAME_MAP_PTR` (`Z/Zend/zend_types.h:860`), php's
 /// `GC_PROTECTED` on a string: an interned string that names a class,
@@ -732,6 +739,27 @@ impl Str {
         self.header().gc.flags() & gc::PERSISTENT != 0
     }
 
+    /// `IS_STR_PERMANENT` beside `IS_STR_INTERNED` and
+    /// `IS_STR_PERSISTENT`, the three bits [`PERMANENT`] a published
+    /// string of a table carries: the frozen table's and a [`Strings`]'
+    /// bump's, laid with them ([`laid`]), and a [`Pending`] set's, laid
+    /// without the last ([`persistent`]) until [`Strings::publish`]
+    /// sets it ([`Str::publish`]). A request's heap lays its strings
+    /// with none of them ([`crate::Heap::string`]), and only `publish`
+    /// sets one on a string after it is laid, so no string of a request,
+    /// and none of a set not yet published, carries them.
+    pub(crate) fn is_permanent(self) -> bool {
+        self.header().gc.flags() & PERMANENT == PERMANENT
+    }
+
+    /// `IS_STR_PERMANENT` set on a string a [`Pending`] set laid, as
+    /// [`Strings::publish`] takes the set into the table: written while
+    /// the compile that made the set alone names the string, before the
+    /// table or another thread can.
+    fn publish(self) {
+        self.header().gc.add_flags(gc::PERMANENT);
+    }
+
     /// `ZSTR_IS_VALID_UTF8`: the bytes were checked once and are valid
     /// UTF-8. A string that was written into forgets this with its hash.
     #[must_use]
@@ -1196,11 +1224,20 @@ impl Strings {
     /// as it enters, and stands in the table in place of a string of its
     /// bytes that holds none, so the next name of those bytes finds the
     /// cache; the string it replaced stays for whatever names it.
+    ///
+    /// Each string and constant array of the set, a shadow among them,
+    /// takes `IS_STR_PERMANENT`'s bit as it enters, the bit that says a
+    /// value is the table's ([`crate::FrozenZval::of`], #4656): laid
+    /// without it, a set's value is refused until it is published.
     pub fn publish(&mut self, mut pending: Pending) {
         for PendingString { s, class_cache, .. } in pending.take_strings() {
             let hash = hash_func(s.bytes());
             // `s` is the compile's alone until it enters the table below,
-            // so its header is written before anyone reads it.
+            // so its header is written before anyone reads it: the set
+            // is moved in, its compile holds `&mut self`, and the unit
+            // that names `s` is handed to other threads only after this.
+            // A string it replaces is the table's already and not written.
+            s.publish();
             if let Some(cache) = class_cache {
                 s.alloc_ce_cache(cache);
             }
@@ -1213,7 +1250,10 @@ impl Strings {
                 Some(_) => self.shadows.push(s),
             }
         }
-        (self.arrays).extend(pending.arrays.drain(..).map(|(a, _)| a));
+        for (a, _) in pending.arrays.drain(..) {
+            publish_persistent_array(a);
+            self.arrays.push(a);
+        }
     }
 
     /// `zend_alloc_ce_cache(name)` (`Z/Zend/zend.c:2151`) over a name a
@@ -1320,9 +1360,12 @@ impl Intern for Strings {
 
     /// `zend_persist_zval` over a constant array under opcache: one
     /// array on the system allocator, immutable, shared by every request
-    /// that serves the unit, freed with the engine.
+    /// that serves the unit, freed with the engine, and the table's from
+    /// its lay, so it carries `IS_STR_PERMANENT`'s bit from there
+    /// ([`publish_persistent_array`]).
     fn constant_array(&mut self, entries: &[(Key, Zval)], _: usize) -> Result<Arr, Fatal> {
         let a = persistent_array(entries)?;
+        publish_persistent_array(a);
         self.arrays.push(a);
         Ok(a)
     }
@@ -1358,7 +1401,9 @@ impl Drop for Strings {
 /// `zend_accel_store_interned_string` persists the unit that holds it,
 /// so a fold's intermediate, freed as the fold goes on, and what a
 /// refused compile made never reach it. Each string is the system
-/// allocator's, laid down as the table would lay it, and given back
+/// allocator's, laid down as the table would lay it but for
+/// `IS_STR_PERMANENT`, which it and each constant array take only as the
+/// set is published (#4656), and given back
 /// once its last claim is and nothing kept it, or with the set where
 /// it is dropped unpublished.
 #[derive(Default)]
@@ -1480,7 +1525,8 @@ impl Pending {
     }
 
     /// A constant array of the unit (design §5.3), laid as
-    /// [`Strings`] lays one and the table's once the unit is published,
+    /// [`Strings`] lays one but without `IS_STR_PERMANENT`'s bit, and the
+    /// table's, the bit set, once the unit is published,
     /// with one claim on it: one ask on each string and array this set
     /// made that it holds is the array's from here, as php's array takes
     /// over the zvals `zend_try_ct_eval_array` folded.
@@ -1900,8 +1946,10 @@ pub(crate) fn hash_func(bytes: &[u8]) -> u64 {
 }
 
 /// A string outside every request's heap, on the system allocator, which
-/// is php's `pemalloc(size, 1)`: interned, persistent and permanent, so
-/// no request's end takes it and only its table frees it.
+/// is php's `pemalloc(size, 1)`, laid for a [`Pending`] set: interned and
+/// persistent, so no request's end takes it and only its set or its
+/// table frees it, and permanent only once the set is published
+/// ([`Str::publish`]).
 fn persistent(bytes: &[u8]) -> Result<Str, Fatal> {
     let size = Str::allocation_size(bytes.len());
     let Ok(layout) = Layout::from_size_align(size, align_of::<StrHeader>()) else {
@@ -1914,7 +1962,7 @@ fn persistent(bytes: &[u8]) -> Result<Str, Fatal> {
     };
     // SAFETY: the allocation is exactly what `init` asks for and holds
     // nothing else.
-    Ok(unsafe { Str::init(at, bytes, PERMANENT) })
+    Ok(unsafe { Str::init(at, bytes, PENDING) })
 }
 
 /// What a table lays a string of `bytes` at in its bump, as opcache's

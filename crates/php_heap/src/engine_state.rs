@@ -19,7 +19,8 @@
 //! read through: here, the primitives, the standard containers over engine
 //! state, a `Cow` among them, an owned fd, a file and the standard
 //! library's sockets, a function pointer, [`Bytes`], a [`ClassCache`], a
-//! [`ZvalType`], a debug build's `Origin`, [`FrozenZval`] and [`AnyState`](crate::AnyState).
+//! [`ZvalType`], a debug build's `Origin`, [`Strings`], [`FrozenZval`]
+//! and [`AnyState`](crate::AnyState).
 //! An `AnyState` is a value of engine state behind its erased type, which
 //! the engine holds where it keeps a value it does not name, the compiled
 //! tier's for an epoch (#4492): its one constructor takes engine state,
@@ -54,7 +55,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, A
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::{Bytes, ClassCache, Fatal, Intern, Strings, Zval, ZvalType};
+use crate::{Arr, Bytes, ClassCache, Fatal, Intern, Key, Strings, Zval, ZvalType};
 
 /// A value engine state may hold: kept by the engine across requests
 /// and holding no pointer into a request's heap, at any depth.
@@ -190,12 +191,42 @@ impl EngineState for ZvalType {}
 #[cfg(debug_assertions)]
 impl EngineState for crate::Origin {}
 
-/// A value no request owns: a scalar, or a string of the engine's
-/// permanent table, [`Strings`]. It is how engine state holds a value
-/// where a [`Zval`] could be a request's: `Engine::constant_values` is
-/// one per constant, made where the engine publishes the constant at
-/// `MINIT`, and a request reads it as the [`Zval`] it is. Made from
-/// nothing else, so no request's value can be one.
+/// The engine's permanent table (`string.rs`, #4633's ruling): the
+/// blocks it holds are its own, laid off every request's heap, and
+/// immutable once it is published. A string of it is "immutable, hashed
+/// before it is published, never refcounted and never freed while the
+/// engine stands", laid in its bump or by a set a cache-bound compile
+/// filled on the system allocator ([`crate::Pending`]); a constant array
+/// of it is one `persistent_array` laid on the system allocator, marked
+/// `IS_ARRAY_IMMUTABLE`, and freed with the table. Each carries
+/// `IS_STR_PERMANENT`'s bit from the moment the table holds it, a set's
+/// as [`Strings::publish`] takes the set in (#4656). The pointers it holds
+/// are to those blocks and its bump's chunks, beside the class caches'
+/// numbers. What a constant array's keys and elements name is what its
+/// caller handed [`Intern::constant_array`], which the engine's
+/// publishers keep to the table's values and which no type or check in
+/// this crate holds (#4655). Its `Send` and `Sync` impls make the
+/// same argument for moving and sharing it: the only other names for
+/// its strings and arrays are the zvals of the units the engine
+/// published, which read and never write them, and growing it takes
+/// `&mut self`.
+impl EngineState for Strings {}
+
+/// A value no request owns: a scalar, a string of the engine's
+/// permanent table, [`Strings`], or one of that table's constant arrays,
+/// immutable, whose every key and element is one of these in turn. It
+/// is how engine state holds a value where a [`Zval`] could be a
+/// request's: `Engine::constant_values` is one per constant, made where
+/// the engine publishes the constant at `MINIT`, and a request reads it
+/// as the [`Zval`] it is. Made from a scalar, from the table
+/// ([`FrozenZval::interned`]), or from a value [`FrozenZval::of`] has
+/// read through, so no request's value can be one.
+///
+/// One thing neither constructor can check (#4656): the table whose
+/// block a frozen value names outlives the value. The bits a value
+/// carries say a table laid it and published it, never which table or
+/// for how long, so a frozen value is held no longer than its table, and
+/// the engine's tables keep that by living as long as the engine.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrozenZval(Zval);
 
@@ -225,28 +256,133 @@ impl FrozenZval {
     }
 
     /// The string of `bytes` the permanent table holds, interned there on
-    /// the first ask, and the fatal the table raised where it had no room.
+    /// the first ask, and the fatal the table raised where it had no room:
+    /// laid in the table's bump, or the frozen table's or one the table
+    /// holds, each published. Held no longer than `strings` stands
+    /// ([`FrozenZval`]).
     pub fn interned(strings: &mut Strings, bytes: &[u8]) -> Result<FrozenZval, Fatal> {
         strings.intern(bytes).map(|s| FrozenZval(Zval::string(s)))
     }
 
-    /// The value, for a request to read: a scalar, or an interned string
-    /// no request counts.
+    /// `z`, where no request owns it or anything it reaches, and `None`
+    /// where a request may: what a walk over a value the engine
+    /// publishes asks of each value it reaches (#4633's ruling, #4649).
+    /// Each type is decided by name, so a type [`ZvalType`] gains does
+    /// not compile until it is decided here:
+    ///
+    /// - `null`, a boolean, an integer and a float hold no pointer, and
+    ///   are admitted;
+    /// - a string is the table's where it carries the bits a published
+    ///   string of a table carries, `IS_STR_PERMANENT` among them: the
+    ///   frozen table's and the table's own are laid with them, a
+    ///   cache-bound compile's set ([`crate::Pending`]) lays its strings
+    ///   without the last and [`Strings::publish`] sets it as the set
+    ///   enters the table, and a request's heap lays none of them on a
+    ///   string. A string a request's compile made in the request's
+    ///   memory, and one of a set not yet published, is refused;
+    /// - an array is the table's where it is `IS_ARRAY_IMMUTABLE` and
+    ///   carries `IS_STR_PERMANENT`'s bit, which only a constant array
+    ///   the table holds and the process's empty array do (`array.rs`),
+    ///   a set's taking the bit as the set is published, and is admitted
+    ///   where each key and element is in turn. What a constant array
+    ///   holds is what its home was handed ([`Intern::constant_array`]),
+    ///   which no type holds to these values, so each is read, an array
+    ///   named twice once;
+    /// - `UNDEF`, a constant expression's index (`IS_CONSTANT_AST`) and an
+    ///   `IS_PTR`'s are refused, at the top and as an element (#4656):
+    ///   an index means something only beside the table it names, which
+    ///   a frozen value read by any request outside its unit is not, so
+    ///   deciding one against its own table is the walk's over the unit
+    ///   (#4649), and an `UNDEF` is a value no publisher is shown to
+    ///   write;
+    /// - an object, a resource, a reference and an `IS_INDIRECT` are a
+    ///   request's or point at what may be, and are refused.
+    ///
+    /// What it admits names its table's blocks, and is held no longer
+    /// than that table stands ([`FrozenZval`]).
+    #[must_use]
+    pub fn of(z: Zval) -> Option<FrozenZval> {
+        let mut walk = Walk::default();
+        if !walk.admits(z) {
+            return None;
+        }
+        while let Some(a) = walk.unread.pop() {
+            for (key, element) in &a {
+                let key = match key {
+                    Key::Long(_) => true,
+                    Key::Str(s) => s.is_permanent(),
+                };
+                if !key || !walk.admits(element) {
+                    return None;
+                }
+            }
+        }
+        Some(FrozenZval(z))
+    }
+
+    /// The value, for a request to read: a scalar, an interned string or
+    /// a constant array, which no request counts.
     #[must_use]
     pub const fn zval(self) -> Zval {
         self.0
     }
 }
 
-// A frozen value is a scalar or a string of the permanent table, which
-// is immutable, never refcounted and alive while the engine stands
-// (`Strings`); its constructors make nothing else.
+/// The constant arrays [`FrozenZval::of`] has met and not yet read
+/// through, and every one it has met, so an array a value names twice,
+/// at any depth, is read once.
+#[derive(Default)]
+struct Walk {
+    unread: Vec<Arr>,
+    met: HashSet<std::ptr::NonNull<u8>>,
+}
+
+impl Walk {
+    /// Whether `z` is admitted as it stands, an array that is put on
+    /// the walk for its keys and elements to be read.
+    fn admits(&mut self, z: Zval) -> bool {
+        match z.kind() {
+            ZvalType::Null
+            | ZvalType::False
+            | ZvalType::True
+            | ZvalType::Long
+            | ZvalType::Double => true,
+            ZvalType::String => z.as_str().is_some_and(crate::Str::is_permanent),
+            ZvalType::Array => z.as_arr().is_some_and(|a| self.met(a)),
+            ZvalType::Undef
+            | ZvalType::ConstExpr
+            | ZvalType::Ptr
+            | ZvalType::Object
+            | ZvalType::Resource
+            | ZvalType::Reference
+            | ZvalType::Indirect => false,
+        }
+    }
+
+    /// Whether `a` is a table's constant array, published, put on the
+    /// walk the first time it is met.
+    fn met(&mut self, a: Arr) -> bool {
+        if !a.is_permanent() {
+            return false;
+        }
+        if self.met.insert(a.address()) {
+            self.unread.push(a);
+        }
+        true
+    }
+}
+
+// A frozen value is a scalar, a published string of the permanent
+// table, which is immutable, never refcounted and alive while the engine
+// stands (`Strings`), or a published constant array of that table, whose
+// keys and elements `FrozenZval::of` read to be the same; its
+// constructors make nothing else.
 impl EngineState for FrozenZval {}
 
 #[cfg(test)]
 mod tests {
     use super::{EngineState, FrozenZval};
-    use crate::{Strings, ZvalType};
+    use crate::{Arr, Heap, Intern, Key, Strings, Zval, ZvalType};
 
     fn held<T: ?Sized + EngineState>() {}
 
@@ -277,5 +413,214 @@ mod tests {
         assert_eq!(z.kind(), ZvalType::String);
         assert!(!z.is_refcounted(), "an interned string is never counted");
         assert_eq!(FrozenZval::long(7).zval().kind(), ZvalType::Long);
+    }
+
+    #[test]
+    fn the_permanent_table_is_engine_state_moved_and_shared() {
+        held::<Strings>();
+        held::<std::sync::Arc<Strings>>();
+        held::<std::sync::Arc<std::sync::Mutex<Strings>>>();
+    }
+
+    /// What [`FrozenZval::of`] answers for `z`: the value it admitted.
+    fn of(z: Zval) -> Option<Zval> {
+        FrozenZval::of(z).map(FrozenZval::zval)
+    }
+
+    #[test]
+    fn of_admits_a_scalar_and_the_tables_strings_and_constant_arrays() {
+        let _alone = crate::serial::alone();
+        for z in [
+            Zval::null(),
+            Zval::bool(false),
+            Zval::bool(true),
+            Zval::long(-3),
+            Zval::double(0.5),
+        ] {
+            assert_eq!(of(z), Some(z), "{:?} holds no pointer", z.kind());
+        }
+        let mut strings = Strings::new();
+        let laid = strings.intern(b"laid in the table").map(Zval::string);
+        let laid = laid.expect("the table has room");
+        let frozen = strings.intern(b"x").map(Zval::string).expect("frozen");
+        let mut pending = crate::Pending::default();
+        let compiled = pending.intern(b"a cache-bound compile's", false);
+        let compiled = Zval::string(compiled.expect("the allocator has room"));
+        strings.publish(pending);
+        for z in [laid, frozen, compiled] {
+            assert_eq!(of(z), Some(z), "a string of the table");
+        }
+        let key = strings.intern(b"key").expect("the table has room");
+        let inner = (strings.constant_array(&[(Key::Long(0), laid)], 1)).expect("a constant array");
+        let entries = [
+            (Key::Str(key), Zval::array(inner)),
+            (Key::Long(1), compiled),
+            (Key::Long(2), Zval::array(Arr::empty())),
+        ];
+        let outer = strings.constant_array(&entries, 3).expect("an array");
+        let outer = Zval::array(outer);
+        assert_eq!(of(outer), Some(outer), "a constant array of the table");
+        assert_eq!(
+            of(Zval::array(Arr::empty())),
+            Some(Zval::array(Arr::empty()))
+        );
+    }
+
+    #[test]
+    fn of_refuses_a_requests_string_a_refcounted_array_and_an_object() {
+        let _alone = crate::serial::alone();
+        let mut heap = Heap::new();
+        let string = heap.string(b"made in the request's memory");
+        let string = string.expect("the heap has room");
+        string.mark_valid_utf8();
+        assert_eq!(of(Zval::string(string)), None, "a request's string");
+        let empty = heap.array().expect("the heap has room");
+        assert_eq!(of(Zval::array(empty)), None, "a refcounted array");
+        let full = heap.array().expect("the heap has room");
+        assert!(matches!(heap.array_append(full, Zval::long(1)), Ok(true)));
+        assert_eq!(of(Zval::array(full)), None, "a refcounted array");
+        let object = heap.object(1, 0, 0).expect("the heap has room");
+        assert_eq!(of(Zval::object(object)), None, "an object");
+        let reference = heap.reference(Zval::long(1)).expect("room");
+        assert_eq!(of(Zval::reference(reference)), None, "a reference");
+        let resource = heap.resource(crate::ResourceType(1)).expect("room");
+        assert_eq!(of(Zval::resource(resource)), None, "a resource");
+        let mut slot = Zval::long(4);
+        let at = crate::ZvalRef::new(std::ptr::NonNull::from(&mut slot));
+        assert_eq!(of(Zval::indirect(at)), None, "an `IS_INDIRECT`");
+    }
+
+    /// An index means something only beside the table it names, and an
+    /// `UNDEF` is no value a publisher writes (#4656): each is refused
+    /// as the value and as an element of a constant array.
+    #[test]
+    fn of_refuses_undef_and_a_constant_expressions_and_an_is_ptrs_index() {
+        let _alone = crate::serial::alone();
+        for z in [Zval::UNDEF, Zval::const_expr(2), Zval::ptr(3)] {
+            assert_eq!(of(z), None, "{:?} is refused", z.kind());
+        }
+        let mut strings = Strings::new();
+        for z in [Zval::const_expr(0), Zval::ptr(1)] {
+            let entries = [(Key::Long(0), Zval::long(1)), (Key::Long(1), z)];
+            let a = strings.constant_array(&entries, 2).expect("an array");
+            assert_eq!(of(Zval::array(a)), None, "{:?} as an element", z.kind());
+        }
+    }
+
+    /// The bit means published (#4656): a set lays its strings and its
+    /// constant arrays without it, so `of` refuses each, and the table's
+    /// own constant array holding one, until the set enters the table,
+    /// and admits each after.
+    #[test]
+    fn of_refuses_a_sets_string_and_constant_array_until_it_is_published() {
+        let _alone = crate::serial::alone();
+        let mut strings = Strings::new();
+        let mut pending = crate::Pending::default();
+        let s = pending.intern(b"a compile's string", false);
+        let s = Zval::string(s.expect("the allocator has room"));
+        let table = strings.intern(b"the table's").map(Zval::string);
+        let table = table.expect("the table has room");
+        let inner = pending.constant_array(&[(Key::Long(0), table)]);
+        let inner = Zval::array(inner.expect("an array"));
+        let key = pending.intern(b"a compile's key", false);
+        let key = key.expect("the allocator has room");
+        let outer = pending.constant_array(&[(Key::Str(key), inner), (Key::Long(1), s)]);
+        let outer = Zval::array(outer.expect("an array"));
+        let holding = strings.constant_array(&[(Key::Long(0), s)], 1);
+        let holding = Zval::array(holding.expect("an array"));
+        assert_eq!(of(table), Some(table), "the table's own string");
+        for (z, what) in [
+            (s, "a set's string"),
+            (inner, "a set's constant array of the table's string"),
+            (outer, "a set's constant array"),
+            (holding, "the table's constant array of a set's string"),
+        ] {
+            assert_eq!(of(z), None, "{what}, unpublished");
+        }
+        strings.publish(pending);
+        for (z, what) in [
+            (s, "a set's string"),
+            (inner, "a set's constant array of the table's string"),
+            (outer, "a set's constant array"),
+            (holding, "the table's constant array of a set's string"),
+        ] {
+            assert_eq!(of(z), Some(z), "{what}, published");
+        }
+    }
+
+    /// A set's string whose bytes the table holds already is kept as a
+    /// shadow, and one that takes a class cache stands in the table in
+    /// place of its bytes' string: each takes the bit as the set is
+    /// published, and the string it replaced keeps the one it had.
+    #[test]
+    fn of_admits_a_sets_shadow_and_a_class_names_string_once_published() {
+        let _alone = crate::serial::alone();
+        let mut strings = Strings::new();
+        let held = strings.intern(b"held already").expect("the table has room");
+        let named = strings.intern(b"Named").expect("the table has room");
+        let mut pending = crate::Pending::default();
+        let shadow = pending.intern(b"held already", false);
+        let shadow = shadow.expect("the allocator has room");
+        assert!(!shadow.is_same(held), "the set makes its own");
+        let cache = strings.class_cache(&mut pending, b"Named");
+        assert!(cache.expect("the allocator has room").is_some());
+        let class = pending.intern(b"Named", false).expect("room");
+        assert!(!class.is_same(named), "the set makes its own");
+        for s in [shadow, class] {
+            assert_eq!(of(Zval::string(s)), None, "unpublished");
+        }
+        strings.publish(pending);
+        assert!(
+            strings
+                .find(b"held already")
+                .is_some_and(|s| s.is_same(held))
+        );
+        assert!(strings.find(b"Named").is_some_and(|s| s.is_same(class)));
+        for s in [shadow, class, held, named] {
+            assert_eq!(of(Zval::string(s)), Some(Zval::string(s)), "published");
+        }
+    }
+
+    /// A constant array holds what its home was handed, which no type
+    /// holds to the table's values: so `of` reads every key and element,
+    /// at every depth, and refuses an array one of which is a request's.
+    #[test]
+    fn of_reads_a_constant_array_through_to_each_key_and_element() {
+        let _alone = crate::serial::alone();
+        let mut heap = Heap::new();
+        let mut strings = Strings::new();
+        let string = heap.string(b"the request's").expect("room");
+        let counted = heap.array().expect("the heap has room");
+        let handed = |strings: &mut Strings, entries: &[(Key, Zval)]| {
+            let a = strings.constant_array(entries, entries.len());
+            Zval::array(a.expect("a constant array"))
+        };
+        let element = handed(&mut strings, &[(Key::Long(0), Zval::string(string))]);
+        assert_eq!(of(element), None, "a request's string as an element");
+        let keyed = handed(&mut strings, &[(Key::Str(string), Zval::long(1))]);
+        assert_eq!(of(keyed), None, "a request's string as a key");
+        let nested = handed(&mut strings, &[(Key::Long(0), Zval::array(counted))]);
+        assert_eq!(of(nested), None, "a refcounted array as an element");
+        let deeper = handed(&mut strings, &[(Key::Long(0), element)]);
+        let deepest = handed(
+            &mut strings,
+            &[(Key::Long(5), Zval::long(5)), (Key::Long(6), deeper)],
+        );
+        assert_eq!(of(deepest), None, "a request's string two arrays down");
+    }
+
+    /// An array a constant array names twice is read once: sixty-four
+    /// arrays, each naming the one below it twice, are read in sixty-four
+    /// steps and not in two to the sixty-fourth.
+    #[test]
+    fn of_reads_an_array_named_twice_once() {
+        let _alone = crate::serial::alone();
+        let mut strings = Strings::new();
+        let mut z = Zval::string(strings.intern(b"at the bottom").expect("room"));
+        for _ in 0..64 {
+            let entries = [(Key::Long(0), z), (Key::Long(1), z)];
+            z = Zval::array(strings.constant_array(&entries, 2).expect("an array"));
+        }
+        assert_eq!(of(z), Some(z));
     }
 }
