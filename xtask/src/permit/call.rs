@@ -34,7 +34,8 @@ pub struct Call {
     /// the path is not it: the diff judge's, the tracked content at the
     /// base it measures since, or in a merge each parent's ([`Call::diff_of`],
     /// #2783). Empty at the hook, whose JSON never carries it, since a call
-    /// there displaces what is at the path.
+    /// there displaces what is at the path. Its presence is also what
+    /// places a file outside the workspace as a diff's ([`Call::touched`]).
     #[serde(skip)]
     pub(super) displaced: Vec<String>,
     /// The session's transcript, where Claude Code writes the person's
@@ -88,12 +89,15 @@ pub(super) enum Touched {
     /// A file outside the workspace, which no row's scope names and no
     /// row's `adding` reaches (#4679).
     Outside,
-    /// A path of a diff whose file on disk resolves outside the workspace,
-    /// through a link: git names the path in the checkout and no commit
-    /// carries a file outside the repository, so a row without a scope
-    /// reaches it as it reaches a call without a file, its `adding` asked
-    /// of what the diff displaces (#4679). Placing it by git's path for
-    /// every row is #4434's.
+    /// A diff's call that carries what it displaces ([`Call::diff_of`]),
+    /// whose file on disk resolves outside the workspace through a link:
+    /// git names the path in the checkout and no commit carries a file
+    /// outside the repository, so a row without a scope reaches it as it
+    /// reaches a call without a file, its `adding` asked of what the diff
+    /// displaces (#4679). A binary file of a diff carries nothing it
+    /// displaces and so reads [`Touched::Outside`], with no finding lost by
+    /// it, since no `adding` fires on a call that writes no text. Placing
+    /// a diff's call by git's path for every row is #4434's.
     Diffed,
 }
 
@@ -243,11 +247,11 @@ impl Call {
     /// [`Call::touched`] tells apart. No row's scope names a file outside
     /// the workspace and no row's `adding` reaches one written by a call
     /// (#4679); a row with neither still judges the call, with no path to
-    /// read, and a diff's path that a link leads outside is a row's without
-    /// a scope, `adding` among them ([`Touched::Diffed`]). Read off
-    /// [`Call::file`], so `seams.toml`, `./seams.toml` and
-    /// `docs/../seams.toml` are one path and every scope sees it as such
-    /// (#4430).
+    /// read, and a diff's call that carries what it displaces, whose file
+    /// a link leads outside, is a row's without a scope, `adding` among
+    /// them ([`Touched::Diffed`]). Read off [`Call::file`], so
+    /// `seams.toml`, `./seams.toml` and `docs/../seams.toml` are one path
+    /// and every scope sees it as such (#4430).
     pub fn path(&self, root: &Path) -> Option<PathBuf> {
         self.touched(root).path().map(Path::to_path_buf)
     }

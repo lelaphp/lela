@@ -238,9 +238,10 @@ fn applies(rule: &Rule, call: &Call, touched: &Touched) -> bool {
 /// workspace is reached by a row with neither scope nor `adding` alone,
 /// so no `adding` judges a call's write outside the workspace, of which
 /// [`Call::rewrite`] would read the standing text, with no path, as empty
-/// and count every hit as added (#4679). A diff's path a link leads
-/// outside is reached as a call without a file is: the diff carries what
-/// it displaces, and git names the path in the checkout.
+/// and count every hit as added (#4679). A diff's call that carries what
+/// it displaces, whose file a link leads outside, is reached as a call
+/// without a file is: its `adding` is asked of what the diff displaces,
+/// and git names the path in the checkout.
 fn reaches(rule: &Rule, touched: &Touched) -> bool {
     let adding = rule.predicate.adding.is_some();
     match touched {
