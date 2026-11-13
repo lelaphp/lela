@@ -634,24 +634,7 @@ impl CalleeSlot {
     }
 }
 
-pub use crate::arena::EpochClassId;
-
-/// The identity of a function or method every request of one epoch
-/// numbers alike, by which the epoch's tier state names one: the number
-/// every request of the epoch calls it by. Made only by a [`UnitView`] of
-/// that epoch, by a check of its own beside the class's
-/// (`UnitView::shared_function`): where the request is of the
-/// view's epoch and the function is a native or a native method, which
-/// every request numbers alike, or a user function or method whose row
-/// the epoch's arena holds. So a request's own function has none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
-pub struct EpochFunction(u32);
-
-impl From<EpochFunction> for crate::api::call::Function {
-    fn from(function: EpochFunction) -> crate::api::call::Function {
-        crate::api::call::Function(function.0)
-    }
-}
+pub use crate::arena::{EpochClassId, EpochFunction};
 
 /// What a trace may read of the op arrays, literals and published
 /// classes it touched (`jit-design.md` §4.1, §5.3): built by the recorder
@@ -1307,19 +1290,21 @@ impl UnitView {
     }
 
     /// The identity every request of the view's epoch calls `function`
-    /// by, the one place an [`EpochFunction`] is made, by a check of its
-    /// own beside [`UnitView::shared`]'s: where `req`
-    /// started in the view's epoch and the function is one every request
-    /// of it numbers alike, a native or a native method, or a user
-    /// function or method whose row the epoch holds. None for a request's
-    /// own.
+    /// by, beside [`UnitView::shared`]'s for a class: where `req` started
+    /// in the view's epoch, the epoch's arena's one check of a function
+    /// ([`Arena::shared_function`]), which mints the identity where the
+    /// function is a native or a native method, or a user function or
+    /// method whose row the epoch holds. None for a request's own; the
+    /// view mints none of its own.
     pub(super) fn shared_function(
         &self,
         req: &Request,
         function: crate::api::call::Function,
     ) -> Option<EpochFunction> {
-        let shared = self.epoch.of(req) && self.epoch.0.shares_function(function);
-        shared.then_some(EpochFunction(function.0))
+        if !self.epoch.of(req) {
+            return None;
+        }
+        self.epoch.0.shared_function(function)
     }
 
     /// The identity the view took from the arena for class `c`, the

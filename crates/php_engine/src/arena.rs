@@ -243,6 +243,23 @@ impl PartialEq<EpochClassId> for ClassId {
     }
 }
 
+/// The identity of a function or method every request of one epoch
+/// numbers alike, by which the epoch's tier state names one: the number
+/// every request of the epoch calls it by. Minted only by the arena's
+/// one check of a function ([`Arena::shared_function`]), which a
+/// [`UnitView`](crate::tier::UnitView) of that epoch calls, beside the
+/// class's ([`EpochClassId`]): a native or a native method, which every
+/// request numbers alike, or a user function or method whose row the
+/// epoch's arena holds. So a request's own function has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
+pub struct EpochFunction(u32);
+
+impl From<EpochFunction> for Function {
+    fn from(function: EpochFunction) -> Function {
+        Function(function.0)
+    }
+}
+
 /// The arena of one epoch: the classes, the user functions and methods,
 /// and the natives a class lays under its own scope published past the
 /// engine's own and the preload's, each numbered past what is numbered
@@ -508,18 +525,17 @@ impl Arena {
         base.functions.get(number.checked_sub(base.first_function)?)
     }
 
-    /// Whether every request of the epoch calls `function` by its number:
-    /// one of the engine's natives or native methods, numbered below every
-    /// arena's, or a published user function this arena or the preload's
-    /// below it holds; never a request's own.
-    pub(crate) fn shares_function(&self, function: Function) -> bool {
-        let Some(number) = function.published_number() else {
-            return false;
-        };
+    /// The arena's one check of a function every request of the epoch
+    /// calls by its number, and the identity it mints for one: one of the
+    /// engine's natives or native methods, numbered below every arena's,
+    /// or a published user function this arena or the preload's below it
+    /// holds; none for a request's own.
+    pub(crate) fn shared_function(&self, function: Function) -> Option<EpochFunction> {
+        let number = function.published_number()?;
         let natives = self
             .base()
             .map_or(self.first_function, |base| base.first_function);
-        number < natives || self.function(function).is_some()
+        (number < natives || self.function(function).is_some()).then_some(EpochFunction(number))
     }
 
     /// The published class native `function` names, and its class.
@@ -759,7 +775,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{Arena, CHUNK, Column, Epochs, Laid, SPAN, SPANS};
-    use crate::api::call::ClassNative;
+    use crate::api::call::{ClassNative, Function};
     use crate::api::values::ClassId;
     use crate::enums::EnumMethod;
 
@@ -808,7 +824,8 @@ mod tests {
     }
 
     /// The arena's one check mints an identity for a class every request
-    /// of the epoch shares and for nothing else: one of the engine's own,
+    /// of the epoch shares and for nothing else, and its check of a
+    /// function a function's like for a native and for no request's own: one of the engine's own,
     /// whose record the arena keeps keyed by the identity, and none for a
     /// request's own class, which names a row of the request's whatever
     /// its number, for a class past the engine's that no row holds, and
@@ -824,7 +841,7 @@ mod tests {
         };
         let records = [LinkedClass::default(), record];
         let files = crate::unit_cache::Files::new(16);
-        let arena = Arena::of_engine(&records, 0, files, super::Interned::default());
+        let arena = Arena::of_engine(&records, 3, files, super::Interned::default());
         let engine = arena.shared_class(ClassId(1));
         assert_eq!(
             engine.map(ClassId::from),
@@ -844,6 +861,13 @@ mod tests {
         let reserved = arena.reserve_class().map(ClassId::from);
         assert_eq!(reserved, Some(ClassId(2)));
         assert!(reserved.is_some_and(|class| arena.shared_class(class).is_none()));
+        // A function's like, by its own check: a native, never a
+        // request's own function or a number no row holds.
+        let native = arena.shared_function(Function(2)).map(Function::from);
+        assert_eq!(native, Some(Function(2)), "the engine's native");
+        let own = Function::local(0);
+        assert!(own.is_some_and(|own| arena.shared_function(own).is_none()));
+        assert_eq!(arena.shared_function(Function(3)), None, "no row holds it");
     }
 
     /// A restart after a preloaded op array's trace compiled (#3564):
