@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::tier::{
-    self, CalleeSlot, ClassId, EngineFuncRef, EpochClassId, FramelessAt, MapPtrRaw, PlaceClass,
-    PlainCall, PropertySlot, Sample, UnitView,
+    CalleeSlot, EngineFuncRef, EpochClassId, FramelessAt, MapPtrRaw, PlaceClass, PlainCall,
+    PropertySlot, RecordClass, UnitView,
 };
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
@@ -32,7 +32,7 @@ use super::{
     Unguarded, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::analysis::{Analysed, Inference};
-use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
+use crate::record::{self, Began, Callee, Event, Landed, Sample, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
 mod infer;
@@ -487,7 +487,7 @@ struct Builder<'a> {
     /// and `MAY_BE_CLASS_GUARD` mark a class guarded once
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:14317-14335`): an object's class
     /// never changes, and a value read again is a value of its own.
-    classed: HashMap<Object, ClassId>,
+    classed: HashMap<Object, RecordClass>,
     /// The values of variables no symbol table reaches that the trace read
     /// through a reference a guard of it held, and what an opline that read
     /// one so wrote back to its variable: php's `guarded_reference` on the
@@ -3786,11 +3786,9 @@ impl<'a> Builder<'a> {
     /// `orig_op2_type == IS_OBJECT && op2_ce == zend_ce_closure`.
     fn of_closure(&self, sample: Option<Sample>) -> Option<EpochClassId> {
         let class = sample.filter(|sample| !sample.reference)?.class?;
-        let closure = self
-            .view
+        self.view
             .engine_class(b"closure")
-            .filter(|closure| *closure == class)?;
-        self.view.shared_class(closure)
+            .filter(|closure| RecordClass::Shared(*closure) == class)
     }
 
     /// The call an `INIT_DYNAMIC_CALL` of a `Closure` makes, as php's
@@ -3930,8 +3928,8 @@ impl<'a> Builder<'a> {
     ) {
         let known = (self.analysed.reaching(func, at.0, op.op2))
             .and_then(|info| info.class)
-            .is_some_and(|of| of.class == class && !of.instanceof);
-        let numbered = ClassId::from(class);
+            .is_some_and(|of| of.class == RecordClass::Shared(class) && !of.instanceof);
+        let numbered = RecordClass::Shared(class);
         if known || self.classed.get(&object) == Some(&numbered) {
             self.classed.insert(object, numbered);
             return;
@@ -4051,9 +4049,7 @@ impl<'a> Builder<'a> {
             }
             _ => return None,
         };
-        let named = constant
-            .then(|| self.view.shared_class(pair.class()))
-            .flatten();
+        let named = constant.then(|| pair.class().shared()).flatten();
         let mut plains = self.view.calls_of(*callee, op.extended_value);
         let (plain, class) = if pair.instance() {
             // The receiver's class is the call's called scope, the one
@@ -4083,8 +4079,13 @@ impl<'a> Builder<'a> {
     /// class's, which the record names by no number (#3570): found by the
     /// method's name, the constant the `INIT_*` at `op` of the op array
     /// `func` names, lowered, and its argument count.
-    fn request_call(&self, func: EngineFuncRef, op: &Opline, scope: ClassId) -> Option<PlainCall> {
-        if tier::class_published(scope) {
+    fn request_call(
+        &self,
+        func: EngineFuncRef,
+        op: &Opline,
+        scope: RecordClass,
+    ) -> Option<PlainCall> {
+        if let RecordClass::Shared(_) = scope {
             return None;
         }
         let code = self.view.op_array(func)?;
@@ -4132,7 +4133,7 @@ impl<'a> Builder<'a> {
         here: OplineIdx,
         (object, class): (Object, EpochClassId),
     ) {
-        let numbered = ClassId::from(class);
+        let numbered = RecordClass::Shared(class);
         if self.classed.get(&object) == Some(&numbered) {
             return;
         }

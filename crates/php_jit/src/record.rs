@@ -32,8 +32,8 @@
 use std::ops::{Deref, DerefMut};
 
 use php_engine::tier::{
-    self, Building, EngineFuncRef, Epoch, Fatal, FrameRef, Request, SafepointIdx, Sample, Stepped,
-    UnitView,
+    self, Building, ClassId, EngineFuncRef, Epoch, Fatal, FrameRef, RecordClass, Request,
+    SafepointIdx, Stepped, UnitView,
 };
 use php_heap::{ZvalType, constant_truth};
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
@@ -274,6 +274,12 @@ impl Stop {
         Stop::CODED.get(usize::from(code).checked_sub(1)?).copied()
     }
 }
+
+/// One operand's value as a record holds it, its class named as the
+/// recording names it ([`RecordClass`]), never by the request's number,
+/// so a record holds nothing of its request (design §5.14,
+/// *Identities*).
+pub(crate) type Sample = tier::Sample<RecordClass>;
 
 /// One thing the recorder wrote down, php's `zend_jit_trace_rec`
 /// (`Z/ext/opcache/jit/zend_jit_internal.h:365-373`) as this engine's
@@ -1212,10 +1218,12 @@ impl<'p> Recorder<'p> {
     }
 
     /// The opline at `at` of `func`, about to be served in `frame`,
-    /// written down as one `Op` with its operands sampled, and the native
-    /// a frameless call names taken into `view`
-    /// ([`UnitView::hold_frameless`]); its `op1`'s sample and how many
-    /// class records php's trace adds beside it ([`classes`]).
+    /// written down as one `Op` with its operands sampled, each class as
+    /// `view` names it ([`UnitView::record_class`]), and the native a
+    /// frameless call names taken into `view`
+    /// ([`UnitView::hold_frameless`]); its `op1`'s sample as the request
+    /// names its class and how many class records php's trace adds beside
+    /// it ([`classes`]).
     fn write_down(
         &mut self,
         req: &Request,
@@ -1223,16 +1231,20 @@ impl<'p> Recorder<'p> {
         frame: FrameRef,
         (func, at): (EngineFuncRef, OplineIdx),
         (op, after): (&Opline, Option<&Opline>),
-    ) -> (Option<Sample>, u32) {
+    ) -> (Option<tier::Sample>, u32) {
         let (op1, op2, data) = sampled(req, frame, op, after);
-        self.events.push(Event::Op {
+        let mut named = |sample: Option<tier::Sample>| {
+            sample.map(|sample| sample.named(|class| view.record_class(req, class)))
+        };
+        let event = Event::Op {
             func,
             opline: at,
-            op1,
-            op2,
-            data,
+            op1: named(op1),
+            op2: named(op2),
+            data: named(data),
             branch: None,
-        });
+        };
+        self.events.push(event);
         if op.opcode.is_frameless_icall() {
             view.hold_frameless(req, op.extended_value);
         }
@@ -2009,7 +2021,11 @@ pub(crate) fn sampled(
     frame: FrameRef,
     op: &Opline,
     after: Option<&Opline>,
-) -> (Option<Sample>, Option<Sample>, Option<Sample>) {
+) -> (
+    Option<tier::Sample>,
+    Option<tier::Sample>,
+    Option<tier::Sample>,
+) {
     let op1_read = !matches!(
         op.opcode,
         Opcode::RopeAdd
@@ -2060,7 +2076,7 @@ pub(crate) fn sampled(
     let data = after
         .filter(|_| assigns)
         .and_then(|data| tier::sample(req, frame, data.op1_type, data.op1))
-        .map(|sample| Sample {
+        .map(|sample| tier::Sample {
             class: None,
             ..sample
         });
@@ -2075,7 +2091,7 @@ fn placed(
     view: &mut UnitView,
     (frame, next): (FrameRef, FrameRef),
     (op, at): (&Opline, OplineIdx),
-    op1: Option<Sample>,
+    op1: Option<tier::Sample>,
 ) {
     if next == frame
         && let Some(class) = op1.and_then(|sample| sample.class)
@@ -2099,8 +2115,8 @@ fn on_this(op: &Opline) -> bool {
 }
 
 /// `$this` of `frame` sampled as an object of its class.
-fn this(req: &Request, frame: FrameRef) -> Option<Sample> {
-    tier::this_class(req, frame).map(|class| Sample {
+fn this(req: &Request, frame: FrameRef) -> Option<tier::Sample> {
+    tier::this_class(req, frame).map(|class: ClassId| tier::Sample {
         kind: ZvalType::Object,
         indirect: false,
         reference: false,
@@ -2114,7 +2130,11 @@ fn this(req: &Request, frame: FrameRef) -> Option<Sample> {
 /// this recorder writes down for a property opline and a method's call,
 /// php records only in a closure, so it is counted for no operand php
 /// samples no slot of.
-pub(crate) fn classes(op: &Opline, op1: Option<Sample>, op2: Option<Sample>) -> u32 {
+pub(crate) fn classes<C>(
+    op: &Opline,
+    op1: Option<tier::Sample<C>>,
+    op2: Option<tier::Sample<C>>,
+) -> u32 {
     let slotted = |kind: OperandKind| !matches!(kind, OperandKind::Unused | OperandKind::Const);
     u32::from(slotted(op.op1_type) && op1.is_some_and(|s| s.class.is_some()))
         + u32::from(op2.is_some_and(|s| s.class.is_some()))

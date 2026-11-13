@@ -1,12 +1,12 @@
 start loop
 root e1
 op e1 10 long long - taken
-op e1 5 object#2147483649 - - -
+op e1 5 object#own0 - - -
 init e3
 op e1 6 long - - -
 op e1 7 - - - -
 enter e3
-op e3 1 object#2147483649 - - -
+op e3 1 object#own0 - - -
 op e3 2 long long - -
 op e3 3 long - - -
 back

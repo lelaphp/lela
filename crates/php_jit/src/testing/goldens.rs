@@ -675,17 +675,18 @@ pub(crate) fn recorded(fixture: Fixture) -> Result<Recorded, String> {
     recording(fixture.plan, &program(fixture)?).map(|(recorded, _)| recorded)
 }
 
-/// The fixture's golden record, `<name>.trace`, parsed.
-pub(crate) fn record(fixture: Fixture) -> Result<TraceRecord, String> {
+/// The fixture's golden record, `<name>.trace`, parsed through the view
+/// of `recorded`, whose epoch names the shared classes it numbers.
+pub(crate) fn record(fixture: Fixture, recorded: &Recorded) -> Result<TraceRecord, String> {
     let path = types().join(format!("{}.trace", fixture.name));
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    TraceRecord::parse(&text).map_err(|e| format!("{}.trace: {e:?}", fixture.name))
+    TraceRecord::parse(&text, &recorded.view).map_err(|e| format!("{}.trace: {e:?}", fixture.name))
 }
 
 /// The trace the fixture's golden record builds, read through the view
 /// of `recorded`.
 pub(crate) fn built(fixture: Fixture, recorded: &Recorded) -> Result<TraceIr, String> {
-    let record = record(fixture)?;
+    let record = record(fixture, recorded)?;
     let analysed = crate::analysis::analysed(&record, &recorded.view);
     build(&record, &recorded.view, &analysed)
         .map_err(|abort| format!("{}: {abort:?}", fixture.name))
@@ -695,7 +696,7 @@ pub(crate) fn built(fixture: Fixture, recorded: &Recorded) -> Result<TraceIr, St
 /// record's text.
 pub(crate) fn traced(plan: &[(&str, &str)], program: &str) -> Result<TraceIr, String> {
     let (recorded, _) = recording(plan, program)?;
-    let record = TraceRecord::parse(&recorded.record.dump())
+    let record = TraceRecord::parse(&recorded.record.dump(), &recorded.view)
         .map_err(|e| format!("the record's text: {e:?}"))?;
     build(
         &record,

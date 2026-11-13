@@ -420,7 +420,7 @@ op {root} 93 - - - taken\nop {root} 66 long long - taken\nop {root} 72 array.pac
 op {root} 73 long long - -\nop {root} 74 long - - -\nop {root} 75 - - - -
 link-at {root} 82\nstop link 6\n"
         .replace("{root}", &root);
-    let record = TraceRecord::parse(&text).map_err(|e| format!("{e:?}"))?;
+    let record = TraceRecord::parse(&text, &recorded.view).map_err(|e| format!("{e:?}"))?;
     let ir = build(
         &record,
         &recorded.view,

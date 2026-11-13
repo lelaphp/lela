@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use php_heap::{AnyState, EngineState, ZvalType};
 use php_link::LinkedClass;
-use php_unit::decl::{Bare, ClassDecl, FunctionDecl, HookKind, Name, Parameter, Type, Visibility};
+use php_unit::decl::{Bare, FunctionDecl, HookKind, Name, Parameter, Type, Visibility};
 use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
+use super::facts::{ClassFacts, Linked, OwnClass, RecordClass};
 use super::published::SEALED;
 use super::{FrameRef, Request, SafepointIdx, Word};
 use crate::api::values::ClassId;
@@ -563,12 +564,13 @@ fn touched_code(epoch: &Epoch, raw: MapPtrRaw) -> Option<&OpArray> {
 /// place is the one the recording's request found, by which the trace
 /// decides how it serves the opline, and compiled code reads the place
 /// of the request it runs in from that request's cache slot
-/// ([`PropertySlot::cached`]).
+/// ([`PropertySlot::cached`]). The class is named as the recording names
+/// it ([`RecordClass`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropertySlot {
     func: EngineFuncRef,
     at: OplineIdx,
-    class: ClassId,
+    class: RecordClass,
     slot: u32,
     typed: bool,
     admits: u16,
@@ -647,7 +649,7 @@ impl PropertySlot {
 pub struct CalleeSlot {
     func: EngineFuncRef,
     at: OplineIdx,
-    class: ClassId,
+    class: RecordClass,
     function: Option<EpochFunction>,
     instance: bool,
     cached: MapPtrRaw,
@@ -655,10 +657,10 @@ pub struct CalleeSlot {
 
 impl CalleeSlot {
     /// The class the pair was resolved on: the receiver's, or the one an
-    /// `INIT_STATIC_METHOD_CALL` names, the recording's request's number
-    /// for a class that is not [`ClassId::is_published`].
+    /// `INIT_STATIC_METHOD_CALL` names, as the recording names it
+    /// ([`RecordClass`]).
     #[must_use]
-    pub fn class(self) -> ClassId {
+    pub fn class(self) -> RecordClass {
         self.class
     }
 
@@ -695,21 +697,68 @@ pub use crate::arena::{EpochClassId, EpochFunction};
 /// that built it for as long as it stands. What it reads, it reads
 /// through the epoch, which keeps every held unit and published class
 /// until it is dropped.
+///
+/// It names a class as a recording does ([`RecordClass`]), never by a
+/// request's number, and holds no declaration: what a trace's build reads
+/// of one it reads through [`UnitView::class_facts`], copied by one
+/// projection that keeps no value (#4653). So no reader of a view on the
+/// worker reaches a value of the request's, and none is handed a
+/// declaration. What the view answers for a class is its facts, which
+/// are not a declaration: this does not compile, for that reason alone,
+///
+/// ```compile_fail,E0308
+/// fn declaration<'v>(
+///     view: &'v php_engine::tier::UnitView,
+///     class: php_engine::tier::RecordClass,
+/// ) -> Option<&'v php_unit::decl::ClassDecl> {
+///     view.class_facts(class)
+/// }
+/// ```
+///
+/// while the same function compiles with its body changed to an answer
+/// that hands nothing over,
+///
+/// ```
+/// fn declaration<'v>(
+///     view: &'v php_engine::tier::UnitView,
+///     class: php_engine::tier::RecordClass,
+/// ) -> Option<&'v php_unit::decl::ClassDecl> {
+///     let _ = (view, class);
+///     None
+/// }
+/// ```
+///
+/// and the facts hold the fields below and no other, each of the type it
+/// names: a field added later, which could hold a declaration or a
+/// value, stops this compiling until it is named here.
+///
+/// ```
+/// use php_engine::tier::{ClassFacts, ConstantFacts, PropertyFacts};
+/// use php_unit::decl::{ClassFlags, ClassKind, Name, Type, Visibility};
+///
+/// fn every_field(facts: &ClassFacts) {
+///     let ClassFacts { name, kind, flags, file, properties, constants } = facts;
+///     let _: (&Name, &ClassKind, &ClassFlags, &Name) = (name, kind, flags, file);
+///     for property in properties.iter() {
+///         let PropertyFacts { name, visibility, is_instance, ty } = property;
+///         let _: (&Name, &Visibility, &bool, &Option<Type>) = (name, visibility, is_instance, ty);
+///     }
+///     for constant in constants.iter() {
+///         let ConstantFacts { name, ty, visibility, attributes } = constant;
+///         let _: (&Name, &Option<Type>, &Visibility, &Box<[Name]>) = (name, ty, visibility, attributes);
+///     }
+/// }
+/// ```
 #[derive(Debug)]
 pub struct UnitView {
     epoch: Epoch,
     funcs: Vec<EngineFuncRef>,
     /// The shared classes the view holds ([`UnitView::hold_class`]).
     classes: Vec<EpochClassId>,
-    /// The shared classes the view minted an identity for and did not
-    /// hold for the analysis ([`UnitView::shared_class`]): the class of
-    /// each pair the recording took, and the declaring class of each
-    /// method a held op array's calls reach.
-    minted: Vec<EpochClassId>,
     /// The plain calls the recording took ([`UnitView::hold_call`]), each
-    /// beside the called scope the recording's request numbered, by which
-    /// a trace's build finds the call of a receiver it sampled.
-    calls: Vec<(Option<ClassId>, super::PlainCall)>,
+    /// beside its called scope as the recording names it, by which a
+    /// trace's build finds the call of a receiver it sampled.
+    calls: Vec<(Option<RecordClass>, super::PlainCall)>,
     /// The property places the recording took ([`UnitView::hold_place`]).
     places: Vec<PropertySlot>,
     /// The pairs of a method's call the recording took
@@ -726,32 +775,42 @@ pub struct UnitView {
     frameless_names: Vec<Name>,
     /// The classes php's analysis of each held op array binds by name
     /// ([`UnitView::class_named`]), bound as the view accepts it.
-    named: Vec<(EngineFuncRef, Box<[u8]>, ClassId)>,
+    named: Vec<(EngineFuncRef, Box<[u8]>, RecordClass)>,
     /// The engine's own classes the declared types of what the view
     /// holds name ([`UnitView::engine_class`]).
-    engine_named: Vec<(Box<[u8]>, ClassId)>,
+    engine_named: Vec<(Box<[u8]>, EpochClassId)>,
     /// The class each held op array is declared in ([`UnitView::scope`]).
-    scopes: Vec<(EngineFuncRef, ClassId)>,
+    scopes: Vec<(EngineFuncRef, RecordClass)>,
     /// Each class bound for the analysis with its parent
     /// ([`UnitView::parent`]).
-    related: Vec<(ClassId, Option<ClassId>)>,
-    /// The declarations of the engine's own classes bound for the
-    /// analysis, which the epoch does not keep ([`UnitView::class_decl`]).
-    engine_decls: Vec<(ClassId, ClassDecl)>,
-    /// The linked records of the engine's own classes the view holds,
-    /// keyed as a request names a class, where the epoch keeps them keyed
-    /// by [`EpochClassId`] ([`UnitView::held_class`]).
-    engine_records: Vec<(EpochClassId, LinkedClass<ClassId>)>,
-    /// The request-scoped classes bound for the analysis, each's linked
-    /// record and declaration as the request linked it, which the epoch
-    /// does not hold ([`UnitView::hold_own`]).
-    own: Vec<(ClassId, LinkedClass<ClassId>, ClassDecl)>,
+    related: Vec<(RecordClass, Option<RecordClass>)>,
+    /// What the analysis reads of the declarations of the shared classes
+    /// the view holds ([`UnitView::class_facts`]): each of the engine's
+    /// own it binds, whose declaration the epoch does not keep, and each
+    /// row of the epoch's, projected as an own class's is.
+    shared_facts: Vec<(EpochClassId, ClassFacts)>,
+    /// The request's own classes the view met, by [`OwnClass`]: each
+    /// one's name, and, where the analysis binds it, its linked record and
+    /// what the analysis reads of its declaration, as the request linked
+    /// it, which the epoch does not hold ([`UnitView::record_class`]).
+    own: Vec<OwnEntry>,
     /// The op arrays whose analysis binds one of `own`
     /// ([`UnitView::binds_request_class`]).
     request_bound: Vec<EngineFuncRef>,
     /// The functions the calls of each held op array reach, bound as the
     /// view accepts it ([`UnitView::called`]).
     called: Vec<(EngineFuncRef, Site, CalledFunction)>,
+}
+
+/// One of the request's own classes a view met, at its [`OwnClass`]: its
+/// name, by which the view finds it again at record time, since one
+/// request declares a name for one class alone; and, where
+/// the analysis binds it, its linked record, its classes named as the
+/// view names them, and what the analysis reads of its declaration.
+#[derive(Debug)]
+struct OwnEntry {
+    name: Name,
+    bound: Option<(LinkedClass<RecordClass>, ClassFacts)>,
 }
 
 /// What a view bound for php's analysis of one op array
@@ -807,7 +866,7 @@ pub enum CalleeBody {
 /// Where [`UnitView::called`] looks a callee up, owned, a method's class
 /// named as a `C`.
 #[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
-enum Site<C = ClassId> {
+enum Site<C = RecordClass> {
     Function(Box<[u8]>),
     Method(C, Box<[u8]>),
     Frameless(u32),
@@ -825,12 +884,12 @@ impl Site {
         }
     }
 
-    /// The site with its class named as every request of `view`'s epoch
-    /// names it; none for a class of the request's own.
-    fn shared(&self, view: &UnitView) -> Option<Site<EpochClassId>> {
+    /// The site with its class named as every request of the epoch names
+    /// it; none for a class of the request's own.
+    fn shared(&self) -> Option<Site<EpochClassId>> {
         Some(match self {
             Site::Function(name) => Site::Function(name.clone()),
-            Site::Method(class, name) => Site::Method(view.shared_class(*class)?, name.clone()),
+            Site::Method(class, name) => Site::Method(class.shared()?, name.clone()),
             Site::Frameless(index) => Site::Frameless(*index),
             Site::ParentHook(name, kind) => Site::ParentHook(name.clone(), *kind),
         })
@@ -845,7 +904,7 @@ impl Site {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallSite<'a> {
     Function(&'a [u8]),
-    Method(ClassId, &'a [u8]),
+    Method(RecordClass, &'a [u8]),
     Frameless(u32),
     ParentHook(&'a [u8], HookKind),
 }
@@ -853,23 +912,38 @@ pub enum CallSite<'a> {
 /// A function a call of a held op array reaches, as php's call analysis
 /// reads it (`zend_optimizer_get_called_func`, `zend_get_func_info`):
 /// its name, its declared return, its body, and a method's class and
-/// flags. As the view answers it, a method's class is the recording
-/// request's number and the body the op array a user function's call
-/// serves; among [`Bindings`], the class is named as every request of the
-/// epoch names it, a `C`, and the body by its kind, a `B`
-/// ([`CalleeBody`]).
+/// flags. As the view answers it, a method's class is named as the
+/// recording names it ([`RecordClass`]) and the body is what a user
+/// function's call serves ([`CalledBody`]); among [`Bindings`], the class
+/// is named as every request of the epoch names it, a `C`, and the body
+/// by its kind, a `B` ([`CalleeBody`]).
 #[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
-pub struct CalledFunction<C = ClassId, B = Option<FuncRef>> {
+pub struct CalledFunction<C = RecordClass, B = CalledBody> {
     /// `common.function_name`, as declared.
     pub name: Name,
     pub return_type: Option<Type>,
     pub returns_by_ref: bool,
     pub generator: bool,
-    /// The op array a user function's call serves, none for a native; its
-    /// kind among [`Bindings`].
+    /// What a user function's call serves, a native's none; its kind
+    /// among [`Bindings`].
     pub body: B,
     /// A method's class and flags; none for a function.
     pub method: Option<CalledMethod<C>>,
+}
+
+/// The body of a function a call reaches, as a view holds it: none, a
+/// native's; an op array the engine numbered, by its [`EngineFuncRef`];
+/// or an op array of the request's own, a method an `eval`'d parent
+/// declares, which no number names past its request, as a plain call's
+/// is named by none (`Serves::Request`; design §5.14, *Identities*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
+pub enum CalledBody {
+    /// A native's: there is no op array.
+    Native,
+    /// An op array the engine numbered.
+    Engine(EngineFuncRef),
+    /// An op array of the request's own.
+    Request,
 }
 
 impl CalledFunction {
@@ -879,24 +953,20 @@ impl CalledFunction {
     #[must_use]
     pub fn body_from(&self, f: EngineFuncRef) -> CalleeBody {
         match self.body {
-            None => CalleeBody::Native,
-            Some(g) if g == FuncRef::from(f) => CalleeBody::Itself,
-            Some(_) => CalleeBody::Another,
+            CalledBody::Native => CalleeBody::Native,
+            CalledBody::Engine(g) if g == f => CalleeBody::Itself,
+            CalledBody::Engine(_) | CalledBody::Request => CalleeBody::Another,
         }
     }
 
     /// The function as [`Bindings`] names it for a call of the op array
-    /// `f` names: its method's class as every request of `view`'s epoch
-    /// names it, none for a class of the request's own, and its body by
-    /// its kind.
-    fn shared(
-        &self,
-        view: &UnitView,
-        f: EngineFuncRef,
-    ) -> Option<CalledFunction<EpochClassId, CalleeBody>> {
+    /// `f` names: its method's class as every request of the epoch names
+    /// it, none for a class of the request's own, and its body by its
+    /// kind.
+    fn shared(&self, f: EngineFuncRef) -> Option<CalledFunction<EpochClassId, CalleeBody>> {
         let method = match self.method {
             Some(m) => Some(CalledMethod {
-                scope: view.shared_class(m.scope)?,
+                scope: m.scope.shared()?,
                 visibility: m.visibility,
                 is_final: m.is_final,
                 is_abstract: m.is_abstract,
@@ -919,7 +989,7 @@ impl CalledFunction {
 /// reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 #[allow(clippy::struct_excessive_bools)]
-pub struct CalledMethod<C = ClassId> {
+pub struct CalledMethod<C = RecordClass> {
     /// The class that declares it.
     pub scope: C,
     pub visibility: Visibility,
@@ -946,10 +1016,12 @@ fn called(
 ) -> Option<CalledFunction> {
     let decl = req.symbols().function_decl(func)?;
     let body = match req.user_function(func) {
-        Some(user) => Some(FuncRef(
-            crate::exec::body_of(&user.unit, user.body)?.runtime_cache,
-        )),
-        None => None,
+        Some(user) => {
+            let code = crate::exec::body_of(&user.unit, user.body)?;
+            EngineFuncRef::of(FuncRef(code.runtime_cache))
+                .map_or(CalledBody::Request, CalledBody::Engine)
+        }
+        None => CalledBody::Native,
     };
     Some(CalledFunction {
         name: decl.name.clone(),
@@ -979,7 +1051,6 @@ impl UnitView {
             epoch: epoch(req),
             funcs: Vec::new(),
             classes: Vec::new(),
-            minted: Vec::new(),
             calls: Vec::new(),
             places: Vec::new(),
             callees: Vec::new(),
@@ -990,8 +1061,7 @@ impl UnitView {
             engine_named: Vec::new(),
             scopes: Vec::new(),
             related: Vec::new(),
-            engine_decls: Vec::new(),
-            engine_records: Vec::new(),
+            shared_facts: Vec::new(),
             own: Vec::new(),
             request_bound: Vec::new(),
             called: Vec::new(),
@@ -1045,29 +1115,35 @@ impl UnitView {
             (!name.is_empty() && !name.starts_with(b"\\"))
                 .then(|| req.class_named(Bare::resolved(name)))?
         };
-        if let Some(scope) = scope.and_then(|name| lookup(&name.0))
-            && self.relate(req, scope)
+        // Each class bound beside the request's number for it, which the
+        // calls' lookup asks the request by while the view is built.
+        let mut bound: Vec<(ClassId, RecordClass)> = Vec::new();
+        let scope = scope.and_then(|name| lookup(&name.0));
+        if let Some(scope) = scope
+            && let Some(class) = self.relate(req, scope)
         {
-            self.scopes.push((f, scope));
-            self.mark_own(f, scope);
+            self.scopes.push((f, class));
+            self.mark_own(f, class);
+            bound.push((scope, class));
         }
         for name in body
             .literals
             .iter()
             .filter_map(|literal| literal.str_bytes())
         {
-            let Some(class) = lookup(name) else {
+            let Some(found) = lookup(name) else {
                 continue;
             };
-            let own = req.native_class_at(class).is_some()
+            let own = req.native_class_at(found).is_some()
                 || req
                     .symbols()
-                    .class_decl(class)
+                    .class_decl(found)
                     .is_some_and(|d| d.file.0 == body.filename.0);
-            if own && self.relate(req, class) {
+            if own && let Some(class) = self.relate(req, found) {
                 self.named
                     .push((f, name.to_ascii_lowercase().into_boxed_slice(), class));
                 self.mark_own(f, class);
+                bound.push((found, class));
             }
         }
         let mut types = Vec::new();
@@ -1079,7 +1155,8 @@ impl UnitView {
         for name in [&b"closure"[..], b"traversable"] {
             self.bind_engine_type(req, name);
         }
-        self.bind_calls(req, f, body);
+        let scope = scope.filter(|_| self.scope(f).is_some());
+        self.bind_calls(req, (f, body), &bound, scope);
     }
 
     /// Bind the functions the calls of `body`, the op array `f` names,
@@ -1087,21 +1164,23 @@ impl UnitView {
     /// analysis ([`UnitView::called`]): an `INIT_FCALL`'s function, a
     /// native or one declared in the same file
     /// (`zend_optimizer_ignore_function`); the method a constant name
-    /// names of the op array's class or of a class it names; and a
-    /// frameless call's native.
-    fn bind_calls(&mut self, req: &Request, f: EngineFuncRef, body: &OpArray) {
+    /// names of the op array's class or of a class it names, `bound`,
+    /// each beside the request's number for it; and a frameless call's
+    /// native. `scope` is the request's number for the op array's class,
+    /// where the view holds it.
+    fn bind_calls(
+        &mut self,
+        req: &Request,
+        (f, body): (EngineFuncRef, &OpArray),
+        bound: &[(ClassId, RecordClass)],
+        scope: Option<ClassId>,
+    ) {
         let literal = |n: u32| body.literals.get(n as usize).and_then(|z| z.str_bytes());
-        let mut classes: Vec<ClassId> = self.scope(f).into_iter().collect();
-        classes.extend(
-            (self.named.iter())
-                .filter(|(func, ..)| *func == f)
-                .map(|(.., c)| *c),
-        );
         let mut sites = Vec::new();
         for op in &body.oplines {
             match op.opcode {
                 Opcode::InitFcall => {
-                    sites.extend(literal(op.op2).map(|n| Site::Function(n.into())));
+                    sites.extend(literal(op.op2).map(|n| (None, Site::Function(n.into()))));
                 }
                 Opcode::InitMethodCall | Opcode::InitStaticMethodCall
                     if op.op2_type == OperandKind::Const
@@ -1113,7 +1192,11 @@ impl UnitView {
                     let Some(name) = literal(op.op2 + 1) else {
                         continue;
                     };
-                    sites.extend(classes.iter().map(|&c| Site::Method(c, name.into())));
+                    sites.extend(
+                        bound
+                            .iter()
+                            .map(|&c| (Some(c.0), Site::Method(c.1, name.into()))),
+                    );
                 }
                 Opcode::InitParentPropertyHookCall => {
                     let kind = if op.op2 == 0 {
@@ -1121,15 +1204,15 @@ impl UnitView {
                     } else {
                         HookKind::Set
                     };
-                    sites.extend(literal(op.op1).map(|n| Site::ParentHook(n.into(), kind)));
+                    sites.extend(literal(op.op1).map(|n| (None, Site::ParentHook(n.into(), kind))));
                 }
                 _ if op.opcode.is_frameless_icall() => {
-                    sites.push(Site::Frameless(op.extended_value));
+                    sites.push((None, Site::Frameless(op.extended_value)));
                 }
                 _ => {}
             }
         }
-        for site in sites {
+        for (class, site) in sites {
             if self
                 .called
                 .iter()
@@ -1137,20 +1220,23 @@ impl UnitView {
             {
                 continue;
             }
-            let found = match &site {
-                Site::Function(name) => req.function_named(Bare::resolved(name)).and_then(|func| {
-                    let user = req.user_function(func);
-                    let elsewhere = user.is_some_and(|user| {
-                        crate::exec::body_of(&user.unit, user.body)
-                            .is_none_or(|code| code.filename != body.filename)
-                    });
-                    (!elsewhere).then(|| called(req, func, None)).flatten()
-                }),
-                Site::Method(class, name) => {
-                    req.symbols().method_named(*class, name).and_then(|func| {
+            let found = match (&site, class) {
+                (Site::Function(name), _) => {
+                    req.function_named(Bare::resolved(name)).and_then(|func| {
+                        let user = req.user_function(func);
+                        let elsewhere = user.is_some_and(|user| {
+                            crate::exec::body_of(&user.unit, user.body)
+                                .is_none_or(|code| code.filename != body.filename)
+                        });
+                        (!elsewhere).then(|| called(req, func, None)).flatten()
+                    })
+                }
+                (Site::Method(..), None) => None,
+                (Site::Method(_, name), Some(class)) => {
+                    req.symbols().method_named(class, name).and_then(|func| {
                         let decl = req.method_decl(func)?;
                         let method = CalledMethod {
-                            scope: req.method_class(func)?,
+                            scope: self.record_class(req, req.method_class(func)?),
                             visibility: decl.visibility,
                             is_final: decl.is_final,
                             is_abstract: decl.is_abstract,
@@ -1159,14 +1245,14 @@ impl UnitView {
                         called(req, func, Some(method))
                     })
                 }
-                Site::Frameless(index) => req
+                (Site::Frameless(index), _) => req
                     .frameless_entry(*index)
                     .and_then(|(func, _)| called(req, func, None)),
                 // `zend_get_property_info` on the parent of the op array's
                 // class, a property it may read that is not private, and
                 // its hook of that kind.
-                Site::ParentHook(name, kind) => {
-                    let parent = self.scope(f).and_then(|c| req.symbols().class_parent(c));
+                (Site::ParentHook(name, kind), _) => {
+                    let parent = scope.and_then(|c| req.symbols().class_parent(c));
                     parent.and_then(|parent| {
                         let (_, property) = req.property_info_of(parent, name)?;
                         if property.visibility == Visibility::Private {
@@ -1182,27 +1268,8 @@ impl UnitView {
                 }
             };
             if let Some(found) = found {
-                // The method's declaring class, which the analysis kept
-                // under these bindings names, may be one the view holds
-                // nothing of, an interface's or a trait's.
-                if let Some(method) = found.method {
-                    self.mint(req, method.scope);
-                }
                 self.called.push((f, site, found));
             }
-        }
-    }
-
-    /// Take the identity every request of the view's epoch names class
-    /// `c` by, which the arena mints where it is shared
-    /// ([`UnitView::shared`]), holding nothing of it; nothing for a
-    /// request's own.
-    fn mint(&mut self, req: &Request, c: ClassId) {
-        if let Some(shared) = self.shared(req, c)
-            && !self.classes.contains(&shared)
-            && !self.minted.contains(&shared)
-        {
-            self.minted.push(shared);
         }
     }
 
@@ -1231,64 +1298,91 @@ impl UnitView {
         }
         if let Some(class) = req.class_named(Bare::resolved(name))
             && req.native_class_at(class).is_some()
-            && self.relate(req, class)
+            && let Some(RecordClass::Shared(class)) = self.relate(req, class)
         {
             self.engine_named.push((lcname.into_boxed_slice(), class));
         }
     }
 
-    /// Hold class `c` for the analysis with its parents, the engine's
-    /// declaration of it where it is one of the engine's own, and the
-    /// engine's classes its properties' and constants' types name;
-    /// `false` where the request has not linked it
-    /// ([`UnitView::hold_class`], [`UnitView::hold_own`]).
-    fn relate(&mut self, req: &Request, c: ClassId) -> bool {
-        if self.related.iter().any(|(class, _)| *class == c) {
-            return true;
+    /// Hold class `c` for the analysis with its parents, what the
+    /// analysis reads of the engine's declaration of it where it is one of
+    /// the engine's own, and the engine's classes its properties' and
+    /// constants' types name, with the class as the recording names it;
+    /// none where the request has not linked it ([`UnitView::hold_class`],
+    /// [`UnitView::bind_own`]).
+    fn relate(&mut self, req: &Request, c: ClassId) -> Option<RecordClass> {
+        let class = self.record_class(req, c);
+        if self.related.iter().any(|(held, _)| *held == class) {
+            return Some(class);
         }
-        if !self.hold_class(req, c) && !self.hold_own(req, c) {
-            return false;
+        let held = match class {
+            RecordClass::Shared(_) => self.hold_class(req, c),
+            RecordClass::Own(own) => self.bind_own(req, c, own),
+        };
+        if !held {
+            return None;
         }
         let at = self.related.len();
-        self.related.push((c, None));
+        self.related.push((class, None));
         let Some(decl) = req.symbols().class_decl(c) else {
-            return true;
+            return Some(class);
         };
-        if req.native_class_at(c).is_some() {
-            self.engine_decls.push((c, decl.clone()));
+        if let RecordClass::Shared(shared) = class
+            && req.native_class_at(c).is_some()
+            && !self.shared_facts.iter().any(|(held, _)| *held == shared)
+        {
+            self.shared_facts.push((shared, ClassFacts::of(decl)));
         }
         let types: Vec<&Type> = (decl.properties.iter().filter_map(|p| p.ty.as_ref()))
             .chain(decl.constants.iter().filter_map(|c| c.ty.as_ref()))
             .collect();
         self.bind_engine_types(req, &types);
         if let Some(parent) = req.symbols().class_parent(c)
-            && self.relate(req, parent)
+            && let Some(parent) = self.relate(req, parent)
             && let Some((_, held)) = self.related.get_mut(at)
         {
             *held = Some(parent);
         }
-        true
+        Some(class)
     }
 
-    /// Hold the request-scoped class `c` for the analysis as the request
-    /// linked it, its linked record and declaration copied, since no
-    /// other request reads it; `false` for a shared one and one the
-    /// request has not linked.
-    fn hold_own(&mut self, req: &Request, c: ClassId) -> bool {
-        if !self.epoch.of(req) || c.is_published() {
+    /// Bind the request's own class `c`, which the view names `own`, for
+    /// the analysis as the request linked it: its linked record, its
+    /// classes named as the view names them, and what the analysis reads
+    /// of its declaration ([`ClassFacts::of`]), copied, since no other
+    /// request reads them; `false` for a request of another epoch and a
+    /// class the request has not linked.
+    fn bind_own(&mut self, req: &Request, c: ClassId, own: OwnClass) -> bool {
+        if !self.epoch.of(req) {
             return false;
+        }
+        if self
+            .own
+            .get(own.position())
+            .is_some_and(|entry| entry.bound.is_some())
+        {
+            return true;
         }
         let (Some(linked), Some(decl)) = (req.linked_class(c), req.symbols().class_decl(c)) else {
             return false;
         };
-        self.own.push((c, linked.clone(), decl.clone()));
-        true
+        let Some(linked) = linked.try_map(|class| Some(self.record_class(req, class))) else {
+            return false;
+        };
+        let facts = ClassFacts::of(decl);
+        match self.own.get_mut(own.position()) {
+            Some(entry) => {
+                entry.bound = Some((linked, facts));
+                true
+            }
+            None => false,
+        }
     }
 
-    /// Mark the analysis of `f` as the request's where `c`, a class it
-    /// binds, is held for the request alone.
-    fn mark_own(&mut self, f: EngineFuncRef, c: ClassId) {
-        if self.own.iter().any(|(class, ..)| *class == c) && !self.request_bound.contains(&f) {
+    /// Mark the analysis of `f` as the request's where `class`, a class
+    /// it binds, is the request's own.
+    fn mark_own(&mut self, f: EngineFuncRef, class: RecordClass) {
+        if matches!(class, RecordClass::Own(_)) && !self.request_bound.contains(&f) {
             self.request_bound.push(f);
         }
     }
@@ -1315,15 +1409,15 @@ impl UnitView {
         if self.binds_request_class(f) {
             return None;
         }
-        let shared = |name: &[u8], class: ClassId| Some((name.into(), self.shared_class(class)?));
-        let mut engine_named = (self.engine_named.iter())
-            .map(|(name, class)| shared(name, *class))
-            .collect::<Option<Vec<_>>>()?;
+        let shared = |name: &[u8], class: RecordClass| Some((name.into(), class.shared()?));
+        let mut engine_named: Vec<(Box<[u8]>, EpochClassId)> = (self.engine_named.iter())
+            .map(|(name, class)| (name.clone(), *class))
+            .collect();
         // Each name is bound once, so the names alone order them.
         engine_named.sort_unstable_by(|(a, _), (b, _): &(Box<[u8]>, _)| a.cmp(b));
         Some(Bindings {
             scope: match self.scope(f) {
-                Some(class) => Some(self.shared_class(class)?),
+                Some(class) => Some(class.shared()?),
                 None => None,
             },
             named: (self.named.iter())
@@ -1333,7 +1427,7 @@ impl UnitView {
             engine_named,
             called: (self.called.iter())
                 .filter(|(func, ..)| *func == f)
-                .map(|(_, site, called)| Some((site.shared(self)?, called.shared(self, f)?)))
+                .map(|(_, site, called)| Some((site.shared()?, called.shared(f)?)))
                 .collect::<Option<_>>()?,
         })
     }
@@ -1365,17 +1459,17 @@ impl UnitView {
     }
 
     /// [`UnitView::hold_class`], with the identity the arena minted for
-    /// `c`. A class of the engine's own has its linked record, which the
-    /// epoch keeps keyed by [`EpochClassId`], widened once to the keys a
-    /// request names a class by, for [`UnitView::class`].
+    /// `c`. A row of the epoch's has what the analysis reads of its
+    /// declaration projected once, as an own class's is
+    /// ([`ClassFacts::of`]), for [`UnitView::class_facts`].
     fn held_class(&mut self, req: &Request, c: ClassId) -> Option<EpochClassId> {
         let shared = self.shared(req, c)?;
         if !self.classes.contains(&shared) {
             self.classes.push(shared);
-            let widened = (self.epoch.0.native(shared))
-                .and_then(|record| record.try_map(|class| Some(ClassId::from(class))));
-            if let Some(record) = widened {
-                self.engine_records.push((shared, record));
+            if let Some(decl) = self.epoch.0.class(c).and_then(|row| row.decl())
+                && !self.shared_facts.iter().any(|(held, _)| *held == shared)
+            {
+                self.shared_facts.push((shared, ClassFacts::of(decl)));
             }
         }
         Some(shared)
@@ -1413,17 +1507,50 @@ impl UnitView {
         self.epoch.0.shared_function(function)
     }
 
-    /// The identity the view took from the arena for class `c`, the
-    /// recording request's number for it, where it holds the class
-    /// ([`UnitView::hold_class`]), took a pair on it
-    /// ([`UnitView::hold_callee`]) or bound a call to a method it declares
-    /// ([`UnitView::called`]); none for any other, a request's own class
-    /// among them.
+    /// Class `c`, the recording request's number for it, as a recording
+    /// names it (design §5.14, *Identities*; #4653): by the identity
+    /// every request of the view's epoch names it by where the arena's one
+    /// test finds it shared ([`UnitView::shared`]), and otherwise by the
+    /// index the view gives a class of the request's own, the one it gave
+    /// the class before where it met it already, found by its name, which
+    /// the request declares for one class alone. Total, so a
+    /// recording names every object's class it samples, and holding
+    /// nothing of the request: an own class's entry holds its name until
+    /// the analysis binds it ([`UnitView::bind_own`]).
+    pub fn record_class(&mut self, req: &Request, c: ClassId) -> RecordClass {
+        if let Some(shared) = self.shared(req, c) {
+            return RecordClass::Shared(shared);
+        }
+        let name = req.symbols().class_decl(c).map(|decl| &decl.name);
+        let met = name.and_then(|name| {
+            (self.own.iter()).position(|own| own.name.0.eq_ignore_ascii_case(&name.0))
+        });
+        if let Some(at) = met {
+            return RecordClass::Own(OwnClass::of(at));
+        }
+        // No class a request linked lacks a declaration: a native's is
+        // the engine's, and a declared row's is its unit's class at the
+        // index `Request::bind_declared` was given, which every caller
+        // read the declaration at. Were one to, it would be met as a new
+        // class each time, which names no two classes as one, where
+        // sharing an index would name two as one.
+        let at = self.own.len();
+        let name = name.cloned().unwrap_or_default();
+        self.own.push(OwnEntry { name, bound: None });
+        RecordClass::Own(OwnClass::of(at))
+    }
+
+    /// The identity every request of the view's epoch names the class
+    /// numbered `number` by, as a recorded trace's text form writes a
+    /// shared class (`jit-design.md` §4.1, `TraceRecord::parse`): the
+    /// epoch's arena's one test ([`Arena::shared_class`]), which mints it
+    /// where the number names one of the engine's own or a row the epoch
+    /// holds; none for any other number, a request's own class's among
+    /// them, so a text read back through the view names no class its
+    /// epoch does not share.
     #[must_use]
-    pub fn shared_class(&self, c: ClassId) -> Option<EpochClassId> {
-        (self.classes.iter().chain(&self.minted))
-            .find(|held| **held == c)
-            .copied()
+    pub fn shared_numbered(&self, number: u32) -> Option<EpochClassId> {
+        self.epoch.0.shared_class(ClassId(number))
     }
 
     /// Take the place the property opline at `at` of the op array `frame`
@@ -1516,7 +1643,7 @@ impl UnitView {
         let place = PropertySlot {
             func: f,
             at,
-            class,
+            class: self.record_class(req, class),
             slot,
             typed: ty.typed(),
             admits,
@@ -1571,13 +1698,11 @@ impl UnitView {
         let pair = CalleeSlot {
             func: f,
             at,
-            class,
+            class: self.record_class(req, class),
             function: self.shared_function(req, function),
             instance,
             cached,
         };
-        // A shared class's pair names it in the code compiled from it.
-        self.mint(req, class);
         self.callees.retain(|held| (held.func, held.at) != (f, at));
         self.callees.push(pair);
         true
@@ -1637,7 +1762,12 @@ impl UnitView {
     /// names on an object of `class`; none unless
     /// [`UnitView::hold_place`] took it.
     #[must_use]
-    pub fn place(&self, f: EngineFuncRef, at: OplineIdx, class: ClassId) -> Option<PropertySlot> {
+    pub fn place(
+        &self,
+        f: EngineFuncRef,
+        at: OplineIdx,
+        class: RecordClass,
+    ) -> Option<PropertySlot> {
         (self.places.iter())
             .find(|place| place.func == f && place.at == at && place.class == class)
             .copied()
@@ -1668,7 +1798,7 @@ impl UnitView {
         if !held {
             return false;
         }
-        let call = (scope, plain);
+        let call = (scope.map(|scope| self.record_class(req, scope)), plain);
         if !self.calls.contains(&call) {
             self.calls.push(call);
         }
@@ -1723,14 +1853,14 @@ impl UnitView {
 
     /// The plain call to the op array `f` names with `count` arguments
     /// [`UnitView::hold_call`] took of a method over a receiver of
-    /// `class`, its called scope as the recording's request numbered it;
-    /// none unless it took one.
+    /// `class`, its called scope as the recording names it; none unless
+    /// it took one.
     #[must_use]
     pub fn method_call(
         &self,
         f: EngineFuncRef,
         count: u32,
-        class: ClassId,
+        class: RecordClass,
     ) -> Option<&super::PlainCall> {
         (self.calls.iter())
             .find(|(scope, call)| {
@@ -1767,7 +1897,7 @@ impl UnitView {
     #[must_use]
     pub fn request_call(
         &self,
-        scope: ClassId,
+        scope: RecordClass,
         name: &[u8],
         count: u32,
     ) -> Option<&super::PlainCall> {
@@ -1858,7 +1988,7 @@ impl UnitView {
     /// accepted the op array (`zend_optimizer_get_class_entry`, its
     /// `script` null); none for any other.
     #[must_use]
-    pub fn class_named(&self, f: EngineFuncRef, lcname: &[u8]) -> Option<ClassId> {
+    pub fn class_named(&self, f: EngineFuncRef, lcname: &[u8]) -> Option<RecordClass> {
         (self.named.iter())
             .find(|(func, name, _)| *func == f && **name == *lcname)
             .map(|(_, _, class)| *class)
@@ -1868,7 +1998,7 @@ impl UnitView {
     /// type of what the view holds names it, or it is `Closure` or
     /// `Traversable`, which php's analysis names itself.
     #[must_use]
-    pub fn engine_class(&self, lcname: &[u8]) -> Option<ClassId> {
+    pub fn engine_class(&self, lcname: &[u8]) -> Option<EpochClassId> {
         (self.engine_named.iter())
             .find(|(name, _)| **name == *lcname)
             .map(|(_, class)| *class)
@@ -1877,7 +2007,7 @@ impl UnitView {
     /// The class the op array `f` names is declared in, php's
     /// `op_array->scope`, where the view holds it.
     #[must_use]
-    pub fn scope(&self, f: EngineFuncRef) -> Option<ClassId> {
+    pub fn scope(&self, f: EngineFuncRef) -> Option<RecordClass> {
         (self.scopes.iter())
             .find(|(func, _)| *func == f)
             .map(|(_, class)| *class)
@@ -1885,43 +2015,50 @@ impl UnitView {
 
     /// `ce->parent` of a class bound for the analysis.
     #[must_use]
-    pub fn parent(&self, c: ClassId) -> Option<ClassId> {
+    pub fn parent(&self, c: RecordClass) -> Option<RecordClass> {
         (self.related.iter())
             .find(|(class, _)| *class == c)
             .and_then(|(_, parent)| *parent)
     }
 
-    /// The declaration of class `c`; none unless [`UnitView::hold_class`]
-    /// accepted it, and for one of the engine's own the analysis did not
-    /// bind.
+    /// What the analysis reads of the declaration of class `c`
+    /// ([`ClassFacts`]): a request's own where the analysis binds it, and
+    /// a shared one where [`UnitView::hold_class`] accepted it, none for
+    /// one of the engine's own the analysis did not bind.
     #[must_use]
-    pub fn class_decl(&self, c: ClassId) -> Option<&ClassDecl> {
-        if let Some((.., decl)) = self.own.iter().find(|(class, ..)| *class == c) {
-            return Some(decl);
-        }
-        if !self.classes.iter().any(|held| *held == c) {
-            return None;
-        }
-        match self.engine_decls.iter().find(|(class, _)| *class == c) {
-            Some((_, decl)) => Some(decl),
-            None => self.epoch.0.class(c)?.decl(),
+    pub fn class_facts(&self, c: RecordClass) -> Option<&ClassFacts> {
+        match c {
+            RecordClass::Own(own) => {
+                let (_, facts) = self.own.get(own.position())?.bound.as_ref()?;
+                Some(facts)
+            }
+            RecordClass::Shared(shared) => (self.shared_facts.iter())
+                .find(|(held, _)| *held == shared)
+                .map(|(_, facts)| facts),
         }
     }
 
-    /// The linked record of class `c`; none unless
-    /// [`UnitView::hold_class`] accepted it.
+    /// The linked record of class `c`, its classes named as the view
+    /// names them ([`Linked`]): a request's own where the analysis binds
+    /// it, and a shared one where [`UnitView::hold_class`] accepted it.
     #[must_use]
-    pub fn class(&self, c: ClassId) -> Option<&LinkedClass<ClassId>> {
-        if let Some((_, linked, _)) = self.own.iter().find(|(class, ..)| *class == c) {
-            return Some(linked);
+    pub fn class(&self, c: RecordClass) -> Option<Linked<'_>> {
+        match c {
+            RecordClass::Own(own) => {
+                let (linked, _) = self.own.get(own.position())?.bound.as_ref()?;
+                Some(Linked::own(c, linked))
+            }
+            RecordClass::Shared(shared) => {
+                if !self.classes.contains(&shared) {
+                    return None;
+                }
+                if let Some(record) = self.epoch.0.native(shared) {
+                    return Some(Linked::native(shared, record));
+                }
+                let record = self.epoch.0.class(ClassId::from(shared))?.record()?;
+                Some(Linked::published(shared, record, &self.epoch.0))
+            }
         }
-        if let Some((_, linked)) = self.engine_records.iter().find(|(class, _)| *class == c) {
-            return Some(linked);
-        }
-        if !self.classes.iter().any(|held| *held == c) {
-            return None;
-        }
-        self.epoch.0.class(c)?.record()
     }
 
     /// Where slot `slot` of the `run_time_cache` of the op array `f` names
@@ -1939,9 +2076,7 @@ impl UnitView {
 
 #[cfg(test)]
 mod tests {
-    use php_unit::MapPtrOffset;
-
-    use super::{CallSite, EngineFuncRef, FuncRef, UnitView};
+    use super::{CallSite, CalledBody, EngineFuncRef, UnitView};
     use crate::test::Files;
 
     /// Whether `entry` binds the call `site` of the op array `f` names.
@@ -1958,7 +2093,7 @@ mod tests {
         view: &mut UnitView,
         f: EngineFuncRef,
         site: CallSite<'_>,
-        body: Option<FuncRef>,
+        body: CalledBody,
     ) -> Option<super::Bindings> {
         (view.called.iter_mut())
             .filter(|entry| binds(entry, f, site))
@@ -1969,8 +2104,8 @@ mod tests {
     /// The key a view binds for `f`'s analysis names the body of the
     /// function its call of `g` reaches by its kind (#4628): bound to
     /// another user op array than `g`'s, the file's own code or a
-    /// request's number, the key is the one it binds for `g`; bound to a
-    /// native, to `f` itself, or to nothing, the key is another.
+    /// request's own op array, the key is the one it binds for `g`; bound
+    /// to a native, to `f` itself, or to nothing, the key is another.
     #[test]
     fn the_key_names_a_callees_body_by_its_kind() {
         let files = Files::new(
@@ -1986,23 +2121,26 @@ mod tests {
         let (mut view, f) = views.pop().expect("f's view");
         let (_, main) = views.pop().expect("the view of the file's own code");
         let f = EngineFuncRef::of(f).expect("f's op array, the engine's");
+        let main = EngineFuncRef::of(main).expect("the file's own code, the engine's");
         let site = CallSite::Function(b"g");
-        let g = view.called(f, site).and_then(|called| called.body);
+        let g = view.called(f, site).map(|called| called.body);
         assert!(
-            g.is_some_and(|g| g != FuncRef::from(f) && g != main),
+            matches!(g, Some(CalledBody::Engine(g)) if g != f && g != main),
             "f's call reaches g's op array: {g:?}"
         );
         let key = view.bindings(f);
         assert!(key.is_some(), "f's analysis is kept under a key");
-        let request = FuncRef::at(MapPtrOffset::Request(7));
-        for other in [main, request] {
+        for other in [CalledBody::Engine(main), CalledBody::Request] {
             assert_eq!(
-                reaching(&mut view, f, site, Some(other)),
+                reaching(&mut view, f, site, other),
                 key,
                 "another user op array than g's: {other:?}"
             );
         }
-        for (body, kind) in [(None, "a native"), (Some(f.into()), "f itself")] {
+        for (body, kind) in [
+            (CalledBody::Native, "a native"),
+            (CalledBody::Engine(f), "f itself"),
+        ] {
             assert_ne!(reaching(&mut view, f, site, body), key, "{kind}");
         }
         view.called.retain(|entry| !binds(entry, f, site));
