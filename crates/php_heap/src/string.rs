@@ -35,6 +35,7 @@
 
 use std::alloc::Layout;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
@@ -1252,7 +1253,7 @@ impl Strings {
                 Some(_) => self.shadows.push(s),
             }
         }
-        for (a, _) in pending.arrays.drain(..) {
+        for (_, (a, _)) in pending.arrays.drain() {
             publish_persistent_array(a);
             self.arrays.push(a);
         }
@@ -1454,8 +1455,9 @@ pub struct Pending {
     /// The strings made, one open-addressed table as the engine's is
     /// ([`Permanent`]), each hashed as it is made.
     slots: Slots<PendingString>,
-    /// Each constant array beside the claims on it that stand.
-    arrays: Vec<(Arr, u32)>,
+    /// Each constant array beside the claims on it that stand, found by
+    /// its address, as an array of arrays asks after each it holds.
+    arrays: HashMap<NonNull<u8>, (Arr, u32)>,
     /// How many strings the set has made, the next one's place.
     made: u64,
 }
@@ -1527,15 +1529,14 @@ impl Pending {
     }
 
     /// Whether `z` is a string or a constant array this set made and
-    /// still holds. A fold and the unit cache's decode lay an inner
-    /// array just before the one that holds it, so the arrays are read
-    /// from the last laid.
+    /// still holds, a string found by its hash and an array by its
+    /// address.
     fn made_here(&self, z: Zval) -> bool {
         if let Some(s) = z.as_str() {
             return self.slot_of(s).is_some();
         }
         z.as_arr()
-            .is_some_and(|a| self.arrays.iter().rev().any(|(held, _)| held.is_same(a)))
+            .is_some_and(|a| self.arrays.contains_key(&a.address()))
     }
 
     /// One claim on `z` given back ([`Intern::give_back`]): a string
@@ -1545,17 +1546,16 @@ impl Pending {
     /// make.
     pub fn give_back(&mut self, z: Zval) {
         let Some(s) = z.as_str() else {
-            let Some(at) =
-                (z.as_arr()).and_then(|a| self.arrays.iter().position(|(held, _)| held.is_same(a)))
-            else {
+            let Some(at) = z.as_arr().map(Arr::address) else {
                 return;
             };
-            let asks = self.arrays.get_mut(at).map(|(_, asks)| {
+            let asks = self.arrays.get_mut(&at).map(|(_, asks)| {
                 *asks = asks.saturating_sub(1);
                 *asks
             });
-            if asks == Some(0) {
-                let (a, _) = self.arrays.swap_remove(at);
+            if asks == Some(0)
+                && let Some((a, _)) = self.arrays.remove(&at)
+            {
                 for (key, value) in &a {
                     if let Key::Str(key) = key {
                         self.give_back(Zval::string(key));
@@ -1596,7 +1596,7 @@ impl Pending {
         held_by_a_table(entries, |z| self.made_here(z))?;
         let a = persistent_array(entries)?;
         if !a.is_same(Arr::empty()) {
-            self.arrays.push((a, 1));
+            self.arrays.insert(a.address(), (a, 1));
         }
         Ok(a)
     }
@@ -1606,7 +1606,7 @@ impl Pending {
     /// giving that array back leaves it standing.
     pub fn hold(&mut self, z: Zval) {
         if let Some(a) = z.as_arr() {
-            if let Some((_, asks)) = self.arrays.iter_mut().find(|(held, _)| held.is_same(a)) {
+            if let Some((_, asks)) = self.arrays.get_mut(&a.address()) {
                 *asks = asks.saturating_add(1);
             }
             return;
@@ -1640,7 +1640,7 @@ impl Drop for Pending {
     /// A set never published: what the compile made, its unit refused,
     /// given back.
     fn drop(&mut self) {
-        for (a, _) in self.arrays.drain(..) {
+        for (_, (a, _)) in self.arrays.drain() {
             free_persistent_array(a);
         }
         for held in self.take_strings() {
