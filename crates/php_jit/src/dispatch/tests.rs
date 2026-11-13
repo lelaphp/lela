@@ -379,12 +379,13 @@ fn a_full_table_refuses_one_root_and_stops_the_counters() {
 
 /// What [`RequestRooted`] saw once the recording it began at `h` was
 /// refused: the published op array whose entry word it claimed, that
-/// word's state, and whether the request still recorded.
+/// word's state, and whether the epoch's trace table stopped its
+/// counters.
 #[derive(Debug, Default)]
 struct Refused {
     published: Option<EngineFuncRef>,
     word: Option<State>,
-    recording: Option<bool>,
+    stopped: Option<bool>,
 }
 
 /// The recording path `Lane` runs, [`super::hot`], from a frame that
@@ -393,8 +394,10 @@ struct Refused {
 /// array reads the sealed word at every site, and every word a visit
 /// claims is a row of the request's epoch, whose frames serve that row's
 /// op array. So this tier keeps `f`'s number at `f`'s entry, and at `h`'s
-/// claims `f`'s entry word for an enter and hands the claim to
-/// [`super::hot`] in `h`'s frame, as a visit hands one.
+/// claims `f`'s entry word for an enter, where a visit would, past a
+/// table that has not stopped its counters, and hands the claim to
+/// [`super::hot`] in `h`'s frame, as a visit hands one. The request
+/// starts as `Lane`'s does, with the engine's banner.
 struct RequestRooted;
 
 impl Tier for RequestRooted {
@@ -421,6 +424,11 @@ impl Tier for RequestRooted {
                 let epoch = tier::epoch(req);
                 let flow = crate::enter::lent(req, |req, lent| {
                     let shared = lent.shared();
+                    // As a visit claims: no word past a stopped table.
+                    let table = crate::table::of(req, &shared.policy, &shared.perf)?;
+                    if table.stopped() {
+                        return None;
+                    }
                     let holder = Holder::Root {
                         epoch: epoch.clone(),
                         func: f,
@@ -430,10 +438,10 @@ impl Tier for RequestRooted {
                     Some(super::hot(req, frame, claim, shared))
                 });
                 let word = policy::read(epoch.word(f, SafepointIdx::ENTRY));
-                let recording = record::recording(req);
+                let stopped = crate::table::of_epoch(&epoch).map(crate::table::Table::stopped);
                 let refused = req.state::<Refused>();
                 refused.word = Some(word);
-                refused.recording = Some(recording);
+                refused.stopped = stopped;
                 flow.flatten().unwrap_or(Flow::Continue)
             }
             _ => Flow::Continue,
@@ -447,6 +455,7 @@ impl Tier for RequestRooted {
             testing::switched(ExtensionBuilder::default())
                 .ini(ini)
                 .engine_state(crate::JitEngine::new)
+                .rinit(crate::JitEngine::request_started)
                 .request_state::<Refused>()
                 .build("jit"),
         )
@@ -456,14 +465,16 @@ impl Tier for RequestRooted {
 /// A recording refused before its first opline at a frame that serves an
 /// op array compiled for its request alone, `eval`'s `h` ([`RequestRooted`]),
 /// as [`a_full_table_refuses_one_root_and_stops_the_counters`] pins a
-/// refusal at a full table: each attempt is written and settled as a root
-/// that failed, `start` and `abort (root in a request-scoped op array)`,
-/// with no record, since a record roots in an op array the engine numbered
-/// (#4650, #4668). The refusal may recover, so the word is cold again
-/// after the first and blacklisted at `opcache.jit_blacklist_root_trace`,
-/// here the second, and the third call claims nothing and writes no line.
-/// The request records no more. The lines are the engine's alone: php
-/// records an `eval`'d op array as any other.
+/// refusal at a full table: after the banner, each attempt is written and
+/// settled as a root that failed, `start` and `abort (root in a
+/// request-scoped op array)`, with no record, since a record roots in an
+/// op array the engine numbered (#4650, #4668). The refusal may recover,
+/// so the word is cold again after the first and blacklisted at
+/// `opcache.jit_blacklist_root_trace`, here the second, and the third
+/// call claims nothing and writes no line. Unlike a full table's, this
+/// refusal leaves the counters running: the table has not stopped. The
+/// lines are this engine's, held to the engine alone, since no served
+/// program reaches this path to give an oracle's line beside them.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_frame_serving_a_request_op_array_refuses_its_root() {
@@ -480,6 +491,7 @@ fn a_frame_serving_a_request_op_array_refuses_its_root() {
     assert_eq!(
         lines(&served),
         [
+            "JIT: jit.mode=force",
             "---- TRACE 1 start (enter) h() body.php(2) : eval()'d code:1",
             "---- TRACE 1 abort (root in a request-scoped op array)",
             "",
@@ -492,7 +504,7 @@ fn a_frame_serving_a_request_op_array_refuses_its_root() {
     let refused = refused.unwrap_or_default();
     assert!(refused.published.is_some(), "{refused:?}");
     assert_eq!(refused.word, Some(State::Blacklisted), "{refused:?}");
-    assert_eq!(refused.recording, Some(false), "{refused:?}");
+    assert_eq!(refused.stopped, Some(false), "{refused:?}");
 }
 
 /// What the panicking tier saw after the panic: whether the request
