@@ -2024,12 +2024,13 @@ impl Shared {
     /// files, the preload's scripts and the rows of the classes it
     /// declares, is a unit each of whose values is the engine's. `Err` is
     /// the unit published all the same, for the asker alone, which binds
-    /// what it declares as its own; it took its map-pointer offsets.
+    /// what it declares as its own; it took its map-pointer offsets. No
+    /// compile's unit is refused, since a unit's walk passes its
+    /// closures' cells over (#4684).
     ///
-    /// A class whose constants hold a closure and a first-class callable
-    /// runs as php runs it, with the cache and without, whether the
-    /// engine shares the unit or the check refuses it and each request
-    /// binds the class as its own:
+    /// A class whose constants hold a closure and a first-class callable,
+    /// and a class that extends it, are served as php serves them, with
+    /// the cache and without:
     ///
     /// ```php
     /// $dir = sys_get_temp_dir() . '/frozen-closure-' . getmypid();

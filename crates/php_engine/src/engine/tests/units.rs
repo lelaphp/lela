@@ -78,9 +78,9 @@ fn a_file_the_cache_holds_nowhere_moves_the_engine_s_map_pointer_count_by_nothin
 /// later ask compiles the file again, one compile for each. The check
 /// runs after the unit took its map-pointer offsets of the engine's, so
 /// each of those compiles moves the count by as much as the first did.
-/// No real compile is refused yet; the refusal is driven here by the
-/// `share` the cache is handed, as the walk's first refusal of one will
-/// drive it (#4649).
+/// No compile's unit is refused, since a unit's walk passes its
+/// closures' cells over (#4684); the refusal is driven here by the
+/// `share` the cache is handed.
 #[test]
 fn a_unit_the_check_refuses_is_held_nowhere_and_every_ask_compiles_it_again() {
     use crate::unit_cache::{Asked, Compiled, Filed, Levels};

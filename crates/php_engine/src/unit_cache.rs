@@ -726,16 +726,21 @@ impl Optimizer {
 }
 
 /// The unit [`UnitCache::file`] answers with: one held, published for
-/// every request with its map-pointer offsets, or one held nowhere, the
-/// asking request's own (`Request::take_unit`), as php keeps a file it
-/// does not persist in process memory with heap caches
-/// (`zend_file_cache_unserialize_op_array`'s `script->corrupted` arm), so
-/// `CG(map_ptr_last)` moves only for what is held (GH-8646).
+/// every request with its map-pointer offsets; one held nowhere and
+/// never published, the asking request's own (`Request::take_unit`), as
+/// php keeps a file it does not persist in process memory with heap
+/// caches (`zend_file_cache_unserialize_op_array`'s `script->corrupted`
+/// arm), so `CG(map_ptr_last)` does not move for it (GH-8646); or one
+/// published and then refused by [`Frozen::new`], which moved it.
 pub(crate) enum Compiled {
     /// Held for every request, frozen.
     Held(Frozen<PublishedUnit>),
     /// Published, and refused by [`Frozen::new`], so held nowhere
-    /// ([`refused`]).
+    /// ([`refused`]). It is not answered as [`Compiled::Alone`] is: the
+    /// check admits only a unit the engine's map-pointer space numbers
+    /// ([`php_unit::frozen::Stray::Request`]), so it is asked once
+    /// `share` has numbered the unit, and a published unit does not go
+    /// back to a [`Unit`] its asker numbers as its own.
     Published(PublishedUnit),
     Alone(Box<Unit>),
 }
@@ -871,12 +876,16 @@ fn answered_by(held: &Held, filed: Filed) -> Answered {
     (Some(Ok(unit)), filed, Some(Arc::clone(&held.early)))
 }
 
-/// A unit published that [`Frozen::new`] refused, held nowhere: answered
-/// as php without the cache answers a compile, [`Filed::Compiled`] with
-/// no early-bound class published, so the asker binds every class it
-/// declares as its own, as a class whose publication the arena refused
-/// is bound ([`crate::api::request::Request::publish`]). The next
-/// request that asks for the file compiles it again.
+/// A unit `share` published that [`Frozen::new`] refused, held nowhere:
+/// answered as php without the cache answers a compile,
+/// [`Filed::Compiled`] with no early-bound class published, so the asker
+/// binds every class it declares as its own. It keeps the engine's
+/// map-pointer offsets `share` gave it, and the next request that asks
+/// for the file compiles it again and takes as many again, where php
+/// without the cache takes none. No compile makes such a unit: a unit's
+/// walk refuses no value a compile and `share` leave in it, and passes
+/// its closures' cells over (#4684), so this is the check's answer kept
+/// for a walk that comes to refuse one.
 fn refused(unit: PublishedUnit) -> Answered {
     (Some(Ok(Compiled::Published(unit))), Filed::Compiled, None)
 }
@@ -1170,9 +1179,9 @@ impl UnitCache {
     /// [`Levels::Disk`] asks and keeps in the file cache alone and counts
     /// nothing. Nothing where the file cannot be
     /// read. What is `compile`d or `decode`d takes no map-pointer offset
-    /// until it is held, `share`d as it is, and one `share` publishes
-    /// but no [`Frozen`] admits is answered held nowhere ([`refused`]);
-    /// one held nowhere is answered
+    /// until it is to be held, `share`d as it is; one `share` publishes
+    /// but no [`Frozen`] admits has taken them and is answered held
+    /// nowhere ([`refused`]); one held nowhere is answered
     /// [`Compiled::Alone`], its caller's own (GH-8646), and so is one
     /// that answers the request that asked alone ([`Answers::Asker`]).
     /// `compile` and `publish` are handed `caller`, the request the file
