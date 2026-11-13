@@ -222,7 +222,8 @@ impl Allocate for System {
 /// A constant array (design §5.3), php's `IS_ARRAY_IMMUTABLE`, out of the
 /// system allocator: the entries written in order as php's compiler
 /// writes a jump table, then the immutable bit, after which no owner is
-/// counted and no write reaches it. Its keys are persistent interned
+/// counted and no write reaches it but the one that makes it the table's
+/// ([`publish_persistent_array`]). Its keys are persistent interned
 /// strings and its values scalars, so freeing it releases nothing;
 /// [`free_persistent_array`] gives its two allocations back. No entries
 /// is the process's [`Arr::empty`], as `zend_try_ct_eval_array` answers
@@ -245,6 +246,21 @@ pub(crate) fn persistent_array(entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
     }
     a.header().gc.add_flags(gc::IMMUTABLE);
     Ok(a)
+}
+
+/// `IS_STR_PERMANENT`'s bit set on a [`persistent_array`] as a table
+/// takes it, laid by the table ([`crate::Strings`]'s
+/// `constant_array`) or by a set the table publishes
+/// ([`crate::Strings::publish`]): beside `IS_ARRAY_IMMUTABLE`, what says
+/// the array is the table's ([`Arr::is_permanent`], #4656). Written while
+/// whoever laid the array alone names it. The process's empty array
+/// carries the bit from its lay ([`Arr::empty`]) and, read by every
+/// thread, is never written here.
+pub(crate) fn publish_persistent_array(a: Arr) {
+    if a.is_same(Arr::empty()) {
+        return;
+    }
+    a.header().gc.add_flags(gc::PERMANENT);
 }
 
 /// `_zend_hash_init(ht, size, NULL, ZSTR_HASH_LOOKUP, 0)` over a header
@@ -765,7 +781,9 @@ impl Arr {
                 // SAFETY: the allocation is a header's size and alignment
                 // and nothing else holds it.
                 let a = unsafe { Arr::init(at.cast(), MIN_SIZE) };
-                a.header().gc.add_flags(gc::IMMUTABLE);
+                // The process's, as a table's constant array is the
+                // table's ([`Arr::is_permanent`]).
+                a.header().gc.add_flags(gc::IMMUTABLE | gc::PERMANENT);
                 FrozenEmpty(a)
             })
             .0
@@ -894,6 +912,18 @@ impl Arr {
     #[must_use]
     pub const fn is_immutable(&self) -> bool {
         self.header().gc.flags() & gc::IMMUTABLE != 0
+    }
+
+    /// `IS_ARRAY_IMMUTABLE` beside `IS_STR_PERMANENT`'s bit: a table's
+    /// constant array once the table holds it, and the process's empty
+    /// array. A [`persistent_array`] is laid without the second, which
+    /// only [`publish_persistent_array`] and [`Arr::empty`] set, and a
+    /// request's heap lays its arrays with neither
+    /// ([`crate::Heap::array`]), so no array of a request, and none of a
+    /// set not yet published, carries both.
+    pub(crate) fn is_permanent(self) -> bool {
+        const BOTH: u32 = gc::IMMUTABLE | gc::PERMANENT;
+        self.header().gc.flags() & BOTH == BOTH
     }
 
     /// `zend_array_refcount`: one for an immutable array whatever its

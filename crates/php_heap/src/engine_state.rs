@@ -198,7 +198,9 @@ impl EngineState for crate::Origin {}
 /// engine stands", laid in its bump or by a set a cache-bound compile
 /// filled on the system allocator ([`crate::Pending`]); a constant array
 /// of it is one `persistent_array` laid on the system allocator, marked
-/// `IS_ARRAY_IMMUTABLE`, and freed with the table. The pointers it holds
+/// `IS_ARRAY_IMMUTABLE`, and freed with the table. Each carries
+/// `IS_STR_PERMANENT`'s bit from the moment the table holds it, a set's
+/// as [`Strings::publish`] takes the set in (#4656). The pointers it holds
 /// are to those blocks and its bump's chunks, beside the class caches'
 /// numbers. What a constant array's keys and elements name is what its
 /// caller handed [`Intern::constant_array`], which the engine's
@@ -248,7 +250,9 @@ impl FrozenZval {
     }
 
     /// The string of `bytes` the permanent table holds, interned there on
-    /// the first ask, and the fatal the table raised where it had no room.
+    /// the first ask, and the fatal the table raised where it had no room:
+    /// laid in the table's bump, or the frozen table's or one the table
+    /// holds, each published.
     pub fn interned(strings: &mut Strings, bytes: &[u8]) -> Result<FrozenZval, Fatal> {
         strings.intern(bytes).map(|s| FrozenZval(Zval::string(s)))
     }
@@ -261,19 +265,22 @@ impl FrozenZval {
     ///
     /// - `null`, a boolean, an integer and a float hold no pointer, and
     ///   are admitted;
-    /// - a string is the table's where it carries the bits a table lays
-    ///   its own strings with, `IS_STR_PERMANENT` among them, as the
-    ///   frozen table's, the table's own and a cache-bound compile's set
-    ///   for it ([`crate::Pending`]) do, and a request's heap lays none
-    ///   of them on a string: a string a request's compile made in the
-    ///   request's memory is refused;
-    /// - an array is the table's where it is `IS_ARRAY_IMMUTABLE`, which
-    ///   only a constant array the table or a set for it lays and the
-    ///   process's empty array are (`array.rs`), and is admitted where
-    ///   each key and element is in turn. What a constant array holds is
-    ///   what its home was handed ([`Intern::constant_array`]), which no
-    ///   type holds to these values, so each is read, an array named
-    ///   twice once;
+    /// - a string is the table's where it carries the bits a published
+    ///   string of a table carries, `IS_STR_PERMANENT` among them: the
+    ///   frozen table's and the table's own are laid with them, a
+    ///   cache-bound compile's set ([`crate::Pending`]) lays its strings
+    ///   without the last and [`Strings::publish`] sets it as the set
+    ///   enters the table, and a request's heap lays none of them on a
+    ///   string. A string a request's compile made in the request's
+    ///   memory, and one of a set not yet published, is refused;
+    /// - an array is the table's where it is `IS_ARRAY_IMMUTABLE` and
+    ///   carries `IS_STR_PERMANENT`'s bit, which only a constant array
+    ///   the table holds and the process's empty array do (`array.rs`),
+    ///   a set's taking the bit as the set is published, and is admitted
+    ///   where each key and element is in turn. What a constant array
+    ///   holds is what its home was handed ([`Intern::constant_array`]),
+    ///   which no type holds to these values, so each is read, an array
+    ///   named twice once;
     /// - `UNDEF`, a constant expression's index (`IS_CONSTANT_AST`) and an
     ///   `IS_PTR`'s are refused, at the top and as an element (#4656):
     ///   an index means something only beside the table it names, which
@@ -342,10 +349,10 @@ impl Walk {
         }
     }
 
-    /// Whether `a` is a table's constant array, put on the walk the
-    /// first time it is met.
+    /// Whether `a` is a table's constant array, published, put on the
+    /// walk the first time it is met.
     fn met(&mut self, a: Arr) -> bool {
-        if !a.is_immutable() {
+        if !a.is_permanent() {
             return false;
         }
         if self.met.insert(a.address()) {
@@ -355,11 +362,11 @@ impl Walk {
     }
 }
 
-// A frozen value is a scalar, a string of the permanent table, which is
-// immutable, never refcounted and alive while the engine stands
-// (`Strings`), or a constant array of that table, whose keys and
-// elements `FrozenZval::of` read to be the same; its constructors make
-// nothing else.
+// A frozen value is a scalar, a published string of the permanent
+// table, which is immutable, never refcounted and alive while the engine
+// stands (`Strings`), or a published constant array of that table, whose
+// keys and elements `FrozenZval::of` read to be the same; its
+// constructors make nothing else.
 impl EngineState for FrozenZval {}
 
 #[cfg(test)]
@@ -487,6 +494,80 @@ mod tests {
             let entries = [(Key::Long(0), Zval::long(1)), (Key::Long(1), z)];
             let a = strings.constant_array(&entries, 2).expect("an array");
             assert_eq!(of(Zval::array(a)), None, "{:?} as an element", z.kind());
+        }
+    }
+
+    /// The bit means published (#4656): a set lays its strings and its
+    /// constant arrays without it, so `of` refuses each, and the table's
+    /// own constant array holding one, until the set enters the table,
+    /// and admits each after.
+    #[test]
+    fn of_refuses_a_sets_string_and_constant_array_until_it_is_published() {
+        let _alone = crate::serial::alone();
+        let mut strings = Strings::new();
+        let mut pending = crate::Pending::default();
+        let s = pending.intern(b"a compile's string", false);
+        let s = Zval::string(s.expect("the allocator has room"));
+        let table = strings.intern(b"the table's").map(Zval::string);
+        let table = table.expect("the table has room");
+        let inner = pending.constant_array(&[(Key::Long(0), table)]);
+        let inner = Zval::array(inner.expect("an array"));
+        let key = pending.intern(b"a compile's key", false);
+        let key = key.expect("the allocator has room");
+        let outer = pending.constant_array(&[(Key::Str(key), inner), (Key::Long(1), s)]);
+        let outer = Zval::array(outer.expect("an array"));
+        let holding = strings.constant_array(&[(Key::Long(0), s)], 1);
+        let holding = Zval::array(holding.expect("an array"));
+        assert_eq!(of(table), Some(table), "the table's own string");
+        for (z, what) in [
+            (s, "a set's string"),
+            (inner, "a set's constant array of the table's string"),
+            (outer, "a set's constant array"),
+            (holding, "the table's constant array of a set's string"),
+        ] {
+            assert_eq!(of(z), None, "{what}, unpublished");
+        }
+        strings.publish(pending);
+        for (z, what) in [
+            (s, "a set's string"),
+            (inner, "a set's constant array of the table's string"),
+            (outer, "a set's constant array"),
+            (holding, "the table's constant array of a set's string"),
+        ] {
+            assert_eq!(of(z), Some(z), "{what}, published");
+        }
+    }
+
+    /// A set's string whose bytes the table holds already is kept as a
+    /// shadow, and one that takes a class cache stands in the table in
+    /// place of its bytes' string: each takes the bit as the set is
+    /// published, and the string it replaced keeps the one it had.
+    #[test]
+    fn of_admits_a_sets_shadow_and_a_class_names_string_once_published() {
+        let _alone = crate::serial::alone();
+        let mut strings = Strings::new();
+        let held = strings.intern(b"held already").expect("the table has room");
+        let named = strings.intern(b"Named").expect("the table has room");
+        let mut pending = crate::Pending::default();
+        let shadow = pending.intern(b"held already", false);
+        let shadow = shadow.expect("the allocator has room");
+        assert!(!shadow.is_same(held), "the set makes its own");
+        let cache = strings.class_cache(&mut pending, b"Named");
+        assert!(cache.expect("the allocator has room").is_some());
+        let class = pending.intern(b"Named", false).expect("room");
+        assert!(!class.is_same(named), "the set makes its own");
+        for s in [shadow, class] {
+            assert_eq!(of(Zval::string(s)), None, "unpublished");
+        }
+        strings.publish(pending);
+        assert!(
+            strings
+                .find(b"held already")
+                .is_some_and(|s| s.is_same(held))
+        );
+        assert!(strings.find(b"Named").is_some_and(|s| s.is_same(class)));
+        for s in [shadow, class, held, named] {
+            assert_eq!(of(Zval::string(s)), Some(Zval::string(s)), "published");
         }
     }
 
