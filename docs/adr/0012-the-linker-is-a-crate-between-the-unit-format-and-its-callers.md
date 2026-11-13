@@ -26,3 +26,4 @@ ADR-0001 made `php_unit` the format leaf: the declaration model, op arrays and t
 - Each crate has a ceiling that measures one thing: `php_unit` the format (ceiling ruled on #2228), `php_link` the linker and its record (5500).
 - A `use` of the linker reads `php_link::` and crosses the `link` seam, which `api-check` holds to `link.lock`.
 - ADR-0001 still stands, and this ADR supplements it: its consequence that "reflection, the dumpers, the stub cross-check and the linker read one model" still holds, and that model is `php_unit`'s.
+- *Amended 2026-11-13 (#4632):* `php_link` also depends on `php_macros`, for `#[derive(EngineState)]` alone, as #4544 ruled for `php_unit` and `php_ssa`. A macro emits paths and links nothing (ADR-0007), so the linker still links `php_unit` and `php_heap` and nothing else of the workspace.

@@ -463,7 +463,7 @@ from = "php_unit"
 to = ["php_heap", "php_macros"]   # php_macros for #[derive(EngineState)] alone, which links nothing: a type that stands in engine state derives where it is declared (#4544)
 [[edge]]
 from = "php_link"
-to = ["php_unit", "php_heap"]
+to = ["php_unit", "php_heap", "php_macros"]   # php_macros for #[derive(EngineState)] alone, which links nothing: a type that stands in engine state derives where it is declared (#4544, #4632)
 [[edge]]
 from = "php_compile"
 to = ["php_syntax", "php_unit", "php_link", "php_heap"]
