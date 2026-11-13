@@ -17,7 +17,7 @@
 //! field to the bound, or by an impl written by hand where `unsafe` may
 //! stand (the homes `unsafe.homes` names), for a leaf the derive cannot
 //! read through: here, the primitives, the standard containers over engine
-//! state, a `Cow` among them, an owned fd, a file and the standard
+//! state, a `Cow` and a `Range` among them, an owned fd, a file and the standard
 //! library's sockets, a function pointer, [`Bytes`], a [`ClassCache`], a
 //! [`ZvalType`], a debug build's `Origin`, [`Strings`], [`FrozenZval`]
 //! and [`AnyState`](crate::AnyState).
@@ -121,6 +121,7 @@ containers! {
     <T: ?Sized> Mutex<T>,
     <T: ?Sized> RwLock<T>,
     <T> OnceLock<T>,
+    <T> std::ops::Range<T>,
     <A, B> (A, B),
     <A, B, C> (A, B, C),
     <A, B, C, D> (A, B, C, D),
