@@ -10,6 +10,23 @@
 //! types, and an extension's `src/ffi/`. Anywhere else the rule's scope
 //! covers, one fails the crate's reading, naming its line.
 //!
+//! The rule's `allow`, where it carries one, names the modules outside the
+//! homes where a hand-written impl stands (#4633: `php_unit`'s `Frozen<T>`,
+//! which only a constructor that walks every value vouches for). Each
+//! entry is a module, `crate::path`, read by the [`Home`] that reads one
+//! of `unsafe.homes`, so the module is its file and the directory beside
+//! it; a crate or a directory is refused when the manifest is read
+//! ([`admitted`]). An entry admits an impl whose trait the sensor reads as
+//! this one, by name or by a rename, in that module of that crate, and
+//! nothing else: there a line the sensor cannot read, an impl whose trait
+//! is a metavariable and the trait handed to a macro whose body no source
+//! holds fail the crate as anywhere, and the module is no home of
+//! `unsafe`, which reads `unsafe.homes` alone. An entry naming a module no
+//! crate has, or a crate the manifest does not list, covers no file and
+//! admits nothing, and is not refused, so the row may stand before the
+//! module it names is written. With no `allow` the sensor reads as it did
+//! before the key.
+//!
 //! The sensor reads syntax, with `syn`, and follows what the compiler
 //! follows: every source under the crate's `src/`, `tests/`, `benches/`
 //! and `examples/` and its `build.rs` (a target path the crate's
@@ -54,7 +71,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
@@ -73,10 +90,27 @@ const TRAIT: &str = "EngineState";
 /// The derive's expansion, whose `quote!` names the trait.
 const DERIVE: &str = "crates/php_macros/src/engine_state.rs";
 
+/// The modules `rule`'s `allow` names, where a hand-written impl stands
+/// outside the homes; none where it carries no `allow`. An entry that is
+/// not a module, `crate::path`, is refused naming the rule and the entry,
+/// since a crate or a directory would admit an impl anywhere in it (#4633).
+pub(crate) fn admitted(rule: &Rule) -> Result<Vec<Home>> {
+    (rule.predicate.allow.iter().flatten())
+        .map(|entry| match Home::parse(entry) {
+            Ok(module @ Home::Module { .. }) => Ok(module),
+            _ => bail!(
+                "rule \"{}\" admits {entry:?}; an entry of the `allow` beside check = \"{CHECK}\" is one module, crate::path, as unsafe.homes names php_jit::enter, never a crate or a directory (#4633)",
+                rule.id
+            ),
+        })
+        .collect()
+}
+
 /// Each hand-written impl of the trait in `files`, the sources of
 /// `krate` relative to the root, that `rule` covers and no home of
-/// `unsafe.homes` does, and each place the sensor cannot read, as
-/// `path:line` with what stops it after.
+/// `unsafe.homes` does, less one in a module the rule's `allow` names
+/// ([`admitted`]), and each place the sensor cannot read, as `path:line`
+/// with what stops it after.
 pub(crate) fn outside_the_homes(
     root: &Path,
     manifest: &Manifest,
@@ -88,6 +122,7 @@ pub(crate) fn outside_the_homes(
         .flat_map(|rule| rule.predicate.allow.iter().flatten())
         .map(|home| Home::parse(home))
         .collect::<Result<_>>()?;
+    let admitting = admitted(rule)?;
     let root = normal(root);
     let mut queue: Vec<(PathBuf, bool)> = (files.iter())
         .filter(|file| rule.covers(Path::new(file)) && !rule.exempts(Path::new(file)))
@@ -114,13 +149,19 @@ pub(crate) fn outside_the_homes(
         // A home covers the crate's own files: one it reaches in another
         // crate's `src/ffi/`, or outside every crate, is held.
         let own = Path::new(&shown).starts_with(krate.path());
-        let held = !own || !homes.iter().any(|h| h.covers(krate, &shown));
+        let standing = if own && homes.iter().any(|h| h.covers(krate, &shown)) {
+            Standing::Home
+        } else if own && admitting.iter().any(|m| m.covers(krate, &shown)) {
+            Standing::Admitted
+        } else {
+            Standing::Held
+        };
         sources.insert(
             path,
             Source {
                 derive: shown == DERIVE,
                 shown,
-                held,
+                standing,
                 build,
                 text,
                 read,
@@ -134,14 +175,27 @@ pub(crate) fn outside_the_homes(
 struct Source {
     /// Its path relative to the root, or whole where it is outside it.
     shown: String,
-    /// Whether what it writes counts: no home of `unsafe.homes` covers it.
-    held: bool,
+    /// What its sites count as.
+    standing: Standing,
     /// Whether it is the derive's own expansion.
     derive: bool,
     /// Whether the crate's `build.rs` reaches it.
     build: bool,
     text: String,
     read: Read,
+}
+
+/// What a source's sites count as, by what covers it among the crate's
+/// own files.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// A home of `unsafe.homes`: nothing it writes counts.
+    Home,
+    /// A module the rule's `allow` names: an impl the sensor reads as the
+    /// trait's passes, and every other site counts.
+    Admitted,
+    /// Neither, or a file of another crate or of none: every site counts.
+    Held,
 }
 
 /// The sites in `sources` that fail the crate, each once, by file and line.
@@ -160,7 +214,7 @@ fn found(sources: &BTreeMap<PathBuf, Source>) -> Vec<String> {
     let defined: BTreeSet<&String> = sources.values().flat_map(|s| &s.read.defined).collect();
     let out_dir = sources.values().any(|s| s.read.out_dir);
     let mut sites: BTreeMap<(&str, usize), String> = BTreeMap::new();
-    for s in sources.values().filter(|s| s.held) {
+    for s in sources.values().filter(|s| s.standing != Standing::Home) {
         let mut site = |line: usize, why: Option<&str>| {
             (sites.entry((s.shown.as_str(), line))).or_insert_with(|| match why {
                 Some(why) => format!("{}:{line} ({why})", s.shown),
@@ -173,7 +227,9 @@ fn found(sources: &BTreeMap<PathBuf, Source>) -> Vec<String> {
         for imp in &s.read.impls {
             match &imp.trait_ {
                 _ if imp.in_macro && s.derive => {}
-                Trait::Named(name) if names.contains(name) => site(imp.line, None),
+                Trait::Named(name) if names.contains(name) && s.standing != Standing::Admitted => {
+                    site(imp.line, None);
+                }
                 Trait::Meta if mentioned => site(imp.line, Some("its trait is a metavariable")),
                 _ => {}
             }

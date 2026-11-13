@@ -1231,6 +1231,52 @@ mod engine_state {
         assert_eq!(failures(&readings).len(), 10, "{readings:#?}");
     }
 
+    /// The sites the seal names in `php_syntax` over the `engine-state-allow`
+    /// fixture, under the rule with its `allow` set to `allow`, laid on the
+    /// copy by the test and never read from the tracked file; empty where
+    /// the reading names none.
+    fn sealed_under(allow: Option<&[&str]>) -> String {
+        let mut manifest = sealed();
+        let checks = |r: &&mut Rule| r.predicate.check.as_deref() == Some("engine-state");
+        let rule = manifest.rules.iter_mut().find(checks).unwrap();
+        rule.predicate.allow = allow.map(|a| a.iter().map(|s| (*s).to_owned()).collect());
+        let readings = api_check::hold(&manifest, &fixture("engine-state-allow"), false).unwrap();
+        let syntax = of(&readings, "php_syntax");
+        let sealed = ": EngineState implemented by hand outside the homes";
+        (syntax.message.split("; "))
+            .find_map(|problem| {
+                problem
+                    .split_once(sealed)
+                    .map(|(sites, _)| sites.to_owned())
+            })
+            .unwrap_or_default()
+    }
+
+    /// `state.engine`'s `allow` (#4633, #4647): under an entry naming
+    /// `php_syntax::frozen`, the hand impl in that module passes and the one
+    /// in `thawed`, a module no entry names, fails, beside the line in
+    /// `frozen` handing the trait to a macro no source holds, which the
+    /// entry does not admit. With no `allow`, and under an entry naming a
+    /// module no crate has yet or a crate the manifest does not list, the
+    /// sensor names what it names with no key, both impls among them.
+    #[test]
+    fn a_hand_impl_passes_in_a_module_the_allow_names_and_fails_in_any_other() {
+        let (frozen, handed, thawed) = (
+            "crates/php_syntax/src/frozen.rs:10",
+            "crates/php_syntax/src/frozen.rs:12 (the trait handed to a macro whose body no source here holds)",
+            "crates/php_syntax/src/thawed.rs:9",
+        );
+        let without = sealed_under(None);
+        assert_eq!(without, format!("{frozen}, {handed}, {thawed}"));
+        assert_eq!(
+            sealed_under(Some(&["php_syntax::frozen"])),
+            format!("{handed}, {thawed}")
+        );
+        for nothing in [&["php_syntax::not_yet"], &["php_absent::frozen"]] {
+            assert_eq!(sealed_under(Some(nothing)), without, "{nothing:?}");
+        }
+    }
+
     /// Each compile-fail fixture beside the sensor's is compiled under a
     /// `compile_fail,E0277` fence, which `xtask test` holds to the code
     /// (#2049): by `php_bundle`'s `refusals` where the facade reaches the
