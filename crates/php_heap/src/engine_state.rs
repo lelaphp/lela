@@ -259,9 +259,8 @@ impl FrozenZval {
     /// Each type is decided by name, so a type [`ZvalType`] gains does
     /// not compile until it is decided here:
     ///
-    /// - `UNDEF`, `null`, a boolean, an integer and a float hold no
-    ///   pointer, and neither does a constant expression's or an
-    ///   `IS_PTR`'s index into its unit's own tables;
+    /// - `null`, a boolean, an integer and a float hold no pointer, and
+    ///   are admitted;
     /// - a string is the table's where it carries the bits a table lays
     ///   its own strings with, `IS_STR_PERMANENT` among them, as the
     ///   frozen table's, the table's own and a cache-bound compile's set
@@ -275,6 +274,13 @@ impl FrozenZval {
     ///   what its home was handed ([`Intern::constant_array`]), which no
     ///   type holds to these values, so each is read, an array named
     ///   twice once;
+    /// - `UNDEF`, a constant expression's index (`IS_CONSTANT_AST`) and an
+    ///   `IS_PTR`'s are refused, at the top and as an element (#4656):
+    ///   an index means something only beside the table it names, which
+    ///   a frozen value read by any request outside its unit is not, so
+    ///   deciding one against its own table is the walk's over the unit
+    ///   (#4649), and an `UNDEF` is a value no publisher is shown to
+    ///   write;
     /// - an object, a resource, a reference and an `IS_INDIRECT` are a
     ///   request's or point at what may be, and are refused.
     #[must_use]
@@ -319,19 +325,20 @@ impl Walk {
     /// the walk for its keys and elements to be read.
     fn admits(&mut self, z: Zval) -> bool {
         match z.kind() {
-            ZvalType::Undef
-            | ZvalType::Null
+            ZvalType::Null
             | ZvalType::False
             | ZvalType::True
             | ZvalType::Long
-            | ZvalType::Double
-            | ZvalType::ConstExpr
-            | ZvalType::Ptr => true,
+            | ZvalType::Double => true,
             ZvalType::String => z.as_str().is_some_and(crate::Str::is_permanent),
             ZvalType::Array => z.as_arr().is_some_and(|a| self.met(a)),
-            ZvalType::Object | ZvalType::Resource | ZvalType::Reference | ZvalType::Indirect => {
-                false
-            }
+            ZvalType::Undef
+            | ZvalType::ConstExpr
+            | ZvalType::Ptr
+            | ZvalType::Object
+            | ZvalType::Resource
+            | ZvalType::Reference
+            | ZvalType::Indirect => false,
         }
     }
 
@@ -407,14 +414,11 @@ mod tests {
     fn of_admits_a_scalar_and_the_tables_strings_and_constant_arrays() {
         let _alone = crate::serial::alone();
         for z in [
-            Zval::UNDEF,
             Zval::null(),
             Zval::bool(false),
             Zval::bool(true),
             Zval::long(-3),
             Zval::double(0.5),
-            Zval::const_expr(2),
-            Zval::ptr(3),
         ] {
             assert_eq!(of(z), Some(z), "{:?} holds no pointer", z.kind());
         }
@@ -467,6 +471,23 @@ mod tests {
         let mut slot = Zval::long(4);
         let at = crate::ZvalRef::new(std::ptr::NonNull::from(&mut slot));
         assert_eq!(of(Zval::indirect(at)), None, "an `IS_INDIRECT`");
+    }
+
+    /// An index means something only beside the table it names, and an
+    /// `UNDEF` is no value a publisher writes (#4656): each is refused
+    /// as the value and as an element of a constant array.
+    #[test]
+    fn of_refuses_undef_and_a_constant_expressions_and_an_is_ptrs_index() {
+        let _alone = crate::serial::alone();
+        for z in [Zval::UNDEF, Zval::const_expr(2), Zval::ptr(3)] {
+            assert_eq!(of(z), None, "{:?} is refused", z.kind());
+        }
+        let mut strings = Strings::new();
+        for z in [Zval::const_expr(0), Zval::ptr(1)] {
+            let entries = [(Key::Long(0), Zval::long(1)), (Key::Long(1), z)];
+            let a = strings.constant_array(&entries, 2).expect("an array");
+            assert_eq!(of(Zval::array(a)), None, "{:?} as an element", z.kind());
+        }
     }
 
     /// A constant array holds what its home was handed, which no type
