@@ -14,8 +14,9 @@
 //! stop loop
 //! ```
 //!
-//! An op array is its map-pointer offset, `e` for the engine's and `r`
-//! for a request's; an operand not sampled is `-`, a sampled one its
+//! An op array is the engine's map-pointer offset after an `e`, and a
+//! call whose callee is a request's own op array is `request`, since a
+//! record names no request's op array; an operand not sampled is `-`, a sampled one its
 //! type with what was followed to it and its class, `object#3`; a
 //! conditional jump is `taken` or `fell`; a side trace's start is
 //! `side <parent>/<exit>`, the slots its parent's exit knew the types of
@@ -26,7 +27,7 @@
 
 use std::fmt::Write as _;
 
-use php_engine::tier::{self, FuncRef, Sample};
+use php_engine::tier::{self, EngineFuncRef, FuncRef, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, OplineIdx};
 
@@ -191,13 +192,12 @@ fn refused(line: usize, found: &str) -> ParseError {
     }
 }
 
-fn parse_func(text: &str) -> Option<FuncRef> {
-    let offset = if let Some(n) = text.strip_prefix('e') {
-        MapPtrOffset::Engine(n.parse().ok()?)
-    } else {
-        MapPtrOffset::Request(text.strip_prefix('r')?.parse().ok()?)
-    };
-    Some(FuncRef::at(offset))
+/// The op array `text` names, `e` and the engine's offset, made as any
+/// other is made, from the [`FuncRef`] of that offset; none for any other
+/// text, since a record names no request's op array.
+fn parse_func(text: &str) -> Option<EngineFuncRef> {
+    let offset = text.strip_prefix('e')?.parse().ok()?;
+    EngineFuncRef::of(FuncRef::at(MapPtrOffset::Engine(offset)))
 }
 
 /// A kind's name in the text form.

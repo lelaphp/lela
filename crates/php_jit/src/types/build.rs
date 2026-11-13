@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::tier::{
-    self, CalleeSlot, ClassId, EpochClassId, FramelessAt, FuncRef, MapPtrRaw, PlaceClass,
+    self, CalleeSlot, ClassId, EngineFuncRef, EpochClassId, FramelessAt, MapPtrRaw, PlaceClass,
     PlainCall, PropertySlot, Sample, UnitView,
 };
 use php_heap::ZvalType;
@@ -581,7 +581,7 @@ impl<'a> Builder<'a> {
     /// A new frame of `func`.
     fn frame(
         &mut self,
-        func: FuncRef,
+        func: EngineFuncRef,
         place: Place,
         called_at: Option<OplineIdx>,
         begins: Option<OplineIdx>,
@@ -890,7 +890,7 @@ impl<'a> Builder<'a> {
     )]
     fn line(
         &mut self,
-        func: FuncRef,
+        func: EngineFuncRef,
         at: OplineIdx,
         samples: [Option<Sample>; 3],
         branch: Option<bool>,
@@ -1359,7 +1359,7 @@ impl<'a> Builder<'a> {
 
     /// `Check::Stands` within the op at `idx`, leaving where the step or
     /// the return left the interpreter, in `frame`.
-    fn stands_at(&mut self, idx: OpId, frame: Frame, func: FuncRef, opline: OplineIdx) {
+    fn stands_at(&mut self, idx: OpId, frame: Frame, func: EngineFuncRef, opline: OplineIdx) {
         self.guards.push(Placed {
             at: GuardAt::Within(idx),
             check: Check::Stands { func, opline },
@@ -1384,7 +1384,7 @@ impl<'a> Builder<'a> {
     /// ```expect regime=jit-exit-fuzz process
     /// 20300 39800 5150 4953 9900
     /// ```
-    fn following(&self, ahead: &[Event]) -> Option<(FuncRef, OplineIdx)> {
+    fn following(&self, ahead: &[Event]) -> Option<(EngineFuncRef, OplineIdx)> {
         let mut until_back = ahead
             .iter()
             .take_while(|event| !matches!(event, Event::Back));
@@ -1411,7 +1411,7 @@ impl<'a> Builder<'a> {
     /// return trace opens with, as php steps over `INIT_CALL` records to
     /// the opline it holds the instruction pointer to
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:11210-11214`).
-    fn header_line(&self) -> Option<(FuncRef, OplineIdx)> {
+    fn header_line(&self) -> Option<(EngineFuncRef, OplineIdx)> {
         let header = (self.ops.get(self.header.index()..)?.iter())
             .find(|op| !matches!(op, Op::InitCall { .. }));
         let Some(Op::Line(line)) = header else {
@@ -2159,7 +2159,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The frame a call pushed runs, its parameters what was sent.
-    fn enter(&mut self, func: FuncRef) -> Result<(), Abort> {
+    fn enter(&mut self, func: EngineFuncRef) -> Result<(), Abort> {
         let caller = self.running()?;
         let idx = self.begin();
         let call = self.calls.pop();
@@ -3669,7 +3669,7 @@ impl<'a> Builder<'a> {
     fn property_at(
         &self,
         frame: Frame,
-        (func, at): (FuncRef, OplineIdx),
+        (func, at): (EngineFuncRef, OplineIdx),
         (op, data): (&Opline, Option<&Opline>),
         (op1, sample1): (Operand, Option<Sample>),
         seen: Seen,
@@ -3762,7 +3762,7 @@ impl<'a> Builder<'a> {
     /// Call to undefined function N\later()
     /// 777
     /// ```
-    fn named_at(&self, func: FuncRef, op: &Opline, next: Option<&Event>) -> Option<PushAt> {
+    fn named_at(&self, func: EngineFuncRef, op: &Opline, next: Option<&Event>) -> Option<PushAt> {
         let Some(Event::InitCall {
             callee: Callee::User(callee),
             began: Began::Here,
@@ -3924,7 +3924,7 @@ impl<'a> Builder<'a> {
     fn closure_guard(
         &mut self,
         idx: OpId,
-        (frame, func, at): (Frame, FuncRef, OplineIdx),
+        (frame, func, at): (Frame, EngineFuncRef, OplineIdx),
         op: &Opline,
         (object, class): (Object, EpochClassId),
     ) {
@@ -3960,7 +3960,7 @@ impl<'a> Builder<'a> {
     /// ([`UnitView::callee_at`]).
     fn method_at(
         &self,
-        (frame, func, at): (Frame, FuncRef, OplineIdx),
+        (frame, func, at): (Frame, EngineFuncRef, OplineIdx),
         op: &Opline,
         (op1, sample1): (Operand, Option<Sample>),
         seen: Seen,
@@ -4020,7 +4020,7 @@ impl<'a> Builder<'a> {
     /// published class the recording saw it of ([`PairClass::This`]).
     fn static_at(
         &self,
-        (func, at): (FuncRef, OplineIdx),
+        (func, at): (EngineFuncRef, OplineIdx),
         op: &Opline,
         next: Option<&Event>,
     ) -> Option<PushAt> {
@@ -4083,7 +4083,7 @@ impl<'a> Builder<'a> {
     /// class's, which the record names by no number (#3570): found by the
     /// method's name, the constant the `INIT_*` at `op` of the op array
     /// `func` names, lowered, and its argument count.
-    fn request_call(&self, func: FuncRef, op: &Opline, scope: ClassId) -> Option<PlainCall> {
+    fn request_call(&self, func: EngineFuncRef, op: &Opline, scope: ClassId) -> Option<PlainCall> {
         if tier::class_published(scope) {
             return None;
         }
@@ -4866,14 +4866,14 @@ impl<'a> Builder<'a> {
 
     /// The opline `line` is, as php's pointer names it: by its op array,
     /// whatever frame of the trace serves it.
-    fn place_of(&self, line: &Line) -> (FuncRef, OplineIdx) {
+    fn place_of(&self, line: &Line) -> (EngineFuncRef, OplineIdx) {
         (self.frames[usize::from(line.frame.0)].func, line.opline)
     }
 
     /// The opline php's handler leaves the pointer at after `line`: the
     /// next, past an `OP_DATA` that goes with it (`zend_jit_handler`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:4139-4153`).
-    fn after_handler(&self, line: &Line) -> (FuncRef, OplineIdx) {
+    fn after_handler(&self, line: &Line) -> (EngineFuncRef, OplineIdx) {
         let (func, at) = self.place_of(line);
         let code = self.meta(line.frame).code;
         let data = code
@@ -5932,7 +5932,7 @@ struct Reused {
 /// caller's, as php's register references do (`Builder::held_at`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Level {
-    func: FuncRef,
+    func: EngineFuncRef,
     held: Vec<(u32, ValueId)>,
 }
 

@@ -177,6 +177,7 @@ fn a_kept_landing_reads_the_epochs_word_and_one_armed_since() {
         },
         ..Unit::default()
     });
+    let func = EngineFuncRef::of(func).expect("the fixture's op array, the engine's");
     let state = |word: &Word| word.halves()[1].load(Ordering::Relaxed);
     let landings = Landings::default();
     let kept = landings.keep(&epoch, func, OplineIdx(2), Some(SafepointIdx(1)));
@@ -311,7 +312,8 @@ mod touched {
             }
             return;
         }
-        let (Some(class), Some(f)) = (tier::this_class(req, frame), tier::func(req, frame)) else {
+        let f = tier::func(req, frame).and_then(tier::EngineFuncRef::of);
+        let (Some(class), Some(f)) = (tier::this_class(req, frame), f) else {
             return;
         };
         req.state::<Seen>().class = tier::recorded_number(class);
@@ -534,7 +536,9 @@ pub(crate) mod entered {
         frame: FrameRef,
         function: &[u8],
     ) -> Option<Compiled> {
-        let func = tier::func(req, frame).and_then(super::super::engine_offset)?;
+        let func = tier::func(req, frame)
+            .and_then(tier::EngineFuncRef::of)
+            .map(super::super::engine_offset)?;
         (function == b"f").then(|| {
             let mut words = calling(wrapper, 0, &[func], true);
             words.extend([
@@ -580,8 +584,8 @@ pub(crate) mod entered {
         let running = tier::trace_num(req).raw();
         req.state::<Numbered>().0.push(running);
         let frame = standing(req, on.room, on.at)?;
-        let func = tier::func(req, frame)
-            .and_then(super::super::engine_offset)
+        let func = (tier::func(req, frame).and_then(tier::EngineFuncRef::of))
+            .map(super::super::engine_offset)
             .ok_or_else(|| Fatal::error("a numbered step of a request's op array"))?;
         super::super::step(req, on, func)
     }
@@ -657,7 +661,9 @@ pub(crate) mod entered {
         fn body(req: &mut Request, frame: FrameRef, function: &[u8]) -> Option<Compiled> {
             match function {
                 b"f" => {
-                    let func = tier::func(req, frame).and_then(super::super::engine_offset)?;
+                    let func = tier::func(req, frame)
+                        .and_then(tier::EngineFuncRef::of)
+                        .map(super::super::engine_offset)?;
                     let kernel = (counted::counted_handle as *const ()).addr();
                     let words = answering(calling(kernel, 0, &[func], false), 0);
                     Some(compiled(&words, vec![landing(1, Landing::PLAIN)]))
@@ -848,7 +854,9 @@ pub(crate) mod entered {
     impl Plan for Calling {
         fn body(req: &mut Request, frame: FrameRef, function: &[u8]) -> Option<Compiled> {
             if function == b"g" {
-                let g = tier::func(req, frame).and_then(super::super::engine_offset);
+                let g = tier::func(req, frame)
+                    .and_then(tier::EngineFuncRef::of)
+                    .map(super::super::engine_offset);
                 req.state::<Seen>().g = g;
                 return None;
             }
@@ -862,7 +870,9 @@ pub(crate) mod entered {
                 (_, Some(g)) => g.wrapping_add(1000),
                 (_, None) => u32::MAX,
             };
-            let func = tier::func(req, frame).and_then(super::super::engine_offset)?;
+            let func = tier::func(req, frame)
+                .and_then(tier::EngineFuncRef::of)
+                .map(super::super::engine_offset)?;
             let mut words = calling(
                 (wrapped::push_call as *const ()).addr(),
                 0,

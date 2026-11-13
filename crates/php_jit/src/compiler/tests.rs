@@ -11,7 +11,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use php_engine::tier::FuncRef;
+use php_engine::tier::{EngineFuncRef, FuncRef};
 use php_heap::ZvalType;
 use php_unit::MapPtrOffset;
 use php_unit::decl::ConstExpr;
@@ -282,7 +282,8 @@ fn each_stages_failure_settles_the_word_as_php_does() -> Result<(), String> {
 #[test]
 fn a_record_that_builds_nothing_settles_before_the_backend() -> Result<(), String> {
     let (mut misfit, holder) = job(&[])?;
-    misfit.recorded.record.root = FuncRef::at(MapPtrOffset::Engine(u32::MAX));
+    misfit.recorded.record.root = EngineFuncRef::of(FuncRef::at(MapPtrOffset::Engine(u32::MAX)))
+        .ok_or("an engine offset names the engine's op array")?;
     let (outcome, state, lines) = piped(&engine(&[]), Backend::Panics, misfit, &holder);
     assert_eq!(outcome, Outcome::Abort(Stop::CompilerError));
     assert_eq!(state, State::Cold);

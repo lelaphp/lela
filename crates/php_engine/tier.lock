@@ -55,6 +55,8 @@ tier::CalleeSlot
 tier::ClassId
 tier::Compiled
 tier::Declaration
+tier::EngineFuncRef
+tier::EngineFuncRef::of
 tier::Epoch
 tier::Epoch::fixture
 tier::Epoch::tier_state

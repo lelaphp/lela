@@ -897,10 +897,7 @@ fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
         .ok_or("no exit links")?;
     assert_eq!(end.opline, None);
     let g = (ir.frames.get(usize::from(end.frame.0)))
-        .and_then(|frame| match frame.func.offset() {
-            php_unit::MapPtrOffset::Engine(func) => Some(func),
-            php_unit::MapPtrOffset::Request(_) => None,
-        })
+        .map(|frame| frame.func.offset())
         .ok_or("g's op array")?;
     let linked = |interrupt| super::Linked {
         trace: link.get(),

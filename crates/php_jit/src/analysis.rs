@@ -27,7 +27,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use php_engine::api::abi::EngineState;
 use php_engine::tier::{
-    Bindings, CallSite, CalledFunction, CalleeBody, ClassId, EpochClassId, FuncRef, UnitView,
+    Bindings, CallSite, CalledFunction, CalleeBody, ClassId, EngineFuncRef, EpochClassId, FuncRef,
+    UnitView,
 };
 use php_ssa::{
     Analysis, BlockId, Body, Callee, Cfg, ClassConstant, ClassOf, Function, Level, LinkedTable,
@@ -65,11 +66,11 @@ const MAX_FUNCS: usize = 30;
 /// an identity of the epoch's, to the bound by the trait's letter
 /// (#4492, #4628).
 #[derive(Debug, Default, EngineState)]
-pub(crate) struct Analyses(Mutex<HashMap<FuncRef, Vec<(Bindings, Kept)>>>);
+pub(crate) struct Analyses(Mutex<HashMap<EngineFuncRef, Vec<(Bindings, Kept)>>>);
 
 impl Analyses {
     /// The analysis of `f` kept under `bindings`, none where none was.
-    fn kept(&self, f: FuncRef, bindings: &Bindings) -> Option<Kept> {
+    fn kept(&self, f: EngineFuncRef, bindings: &Bindings) -> Option<Kept> {
         let map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let under = map.get(&f)?.iter().find(|(held, _)| held == bindings);
         under.map(|(_, kept)| kept.clone())
@@ -77,7 +78,7 @@ impl Analyses {
 
     /// Keep `made` for `f` under `bindings`, or the analysis kept first
     /// where two builds race.
-    fn keep(&self, f: FuncRef, bindings: Bindings, made: Kept) -> Kept {
+    fn keep(&self, f: EngineFuncRef, bindings: Bindings, made: Kept) -> Kept {
         let mut map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let entries = map.entry(f).or_default();
         if let Some((_, kept)) = entries.iter().find(|(held, _)| *held == bindings) {
@@ -118,12 +119,12 @@ impl Handle for EpochClassId {
 struct Bound<'a, C> {
     view: &'a UnitView,
     /// The op array analysed.
-    f: FuncRef,
+    f: EngineFuncRef,
     /// What the analyses this build made before `f`'s found each op
     /// array returns, `func_info->return_info`, which php clears from
     /// every op array a build analysed once its trace is compiled
     /// (`zend_jit_compile_trace`), so a caller reads only this build's.
-    built: &'a [(FuncRef, Option<Returns<ClassId>>)],
+    built: &'a [(EngineFuncRef, Option<Returns<ClassId>>)],
     /// Whether the analysis read what another user function returns,
     /// which differs from build to build with the order the op arrays
     /// are analysed in, so the analysis is built anew at each build.
@@ -138,8 +139,8 @@ struct Bound<'a, C> {
 impl<'a, C: Handle> Bound<'a, C> {
     fn new(
         view: &'a UnitView,
-        f: FuncRef,
-        built: &'a [(FuncRef, Option<Returns<ClassId>>)],
+        f: EngineFuncRef,
+        built: &'a [(EngineFuncRef, Option<Returns<ClassId>>)],
     ) -> Bound<'a, C> {
         Bound {
             view,
@@ -233,7 +234,8 @@ impl<'a, C: Handle> Bound<'a, C> {
             CalleeBody::Itself => Body::Analysed,
             CalleeBody::Another => {
                 self.reads_returns.set(true);
-                let built = self.built.iter().find(|(h, _)| Some(*h) == called.body);
+                let built =
+                    (self.built.iter()).find(|&&(h, _)| Some(FuncRef::from(h)) == called.body);
                 let returns = built.and_then(|&(_, returns)| returns);
                 Body::User(returns.and_then(|returns| self.returns(returns)))
             }
@@ -397,7 +399,7 @@ impl<C: Handle> LinkedTable for Bound<'_, C> {
 }
 
 /// The op array `f` names and what php reads beside it, from `view`.
-fn function(view: &UnitView, f: FuncRef) -> Option<Function<'_>> {
+fn function(view: &UnitView, f: EngineFuncRef) -> Option<Function<'_>> {
     let body = view.op_array(f)?;
     let declared = view.declaration(f)?;
     Some(Function {
@@ -411,9 +413,9 @@ fn function(view: &UnitView, f: FuncRef) -> Option<Function<'_>> {
 /// `record`, in its order: the one the trace starts in, each one a call
 /// enters, and the one a return past the trace's first frame leaves,
 /// each once.
-fn passed(record: &TraceRecord) -> Vec<FuncRef> {
+fn passed(record: &TraceRecord) -> Vec<EngineFuncRef> {
     let mut order = vec![record.root];
-    let mut build = |f: FuncRef| {
+    let mut build = |f: EngineFuncRef| {
         if !order.contains(&f) {
             order.push(f);
         }
@@ -497,8 +499,8 @@ fn widened_class<C: Into<ClassId>>(of: ClassOf<C>) -> ClassOf<ClassId> {
 /// built at and what each op array analysed returns.
 #[derive(Debug)]
 pub(crate) struct Analysed {
-    analyses: Vec<(FuncRef, Read)>,
-    built: Vec<(FuncRef, Option<Returns<ClassId>>)>,
+    analyses: Vec<(EngineFuncRef, Read)>,
+    built: Vec<(EngineFuncRef, Option<Returns<ClassId>>)>,
     level: Level,
 }
 
@@ -546,7 +548,12 @@ impl Analysed {
     /// `zend_jit_trace_restrict_ssa_var_info` and
     /// `zend_jit_trace_copy_ssa_var_range` read
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:1009-1100`).
-    pub(crate) fn defined(&self, f: FuncRef, at: u32, which: Defined) -> Option<VarInfo<ClassId>> {
+    pub(crate) fn defined(
+        &self,
+        f: EngineFuncRef,
+        at: u32,
+        which: Defined,
+    ) -> Option<VarInfo<ClassId>> {
         over!(self, f, |_, ssa| defined_in(ssa, at, which))
     }
 
@@ -555,7 +562,7 @@ impl Analysed {
     /// `compact`, a reference taken by name), the `alias` of its SSA
     /// variable, which `zend_jit_trace_copy_ssa_var_range` copies before
     /// it propagates the range (`Z/ext/opcache/jit/zend_jit_trace.c:996-1050`).
-    pub(crate) fn aliased(&self, f: FuncRef, at: u32, which: Defined) -> bool {
+    pub(crate) fn aliased(&self, f: EngineFuncRef, at: u32, which: Defined) -> bool {
         let aliased = || over!(self, f, |_, ssa| aliased_in(ssa, at, which));
         aliased().unwrap_or(false)
     }
@@ -568,7 +575,7 @@ impl Analysed {
     /// pi only where no phi is, and so up each immediate dominator; none
     /// where no definition dominates it, as php then copies what its first
     /// use reads, which is what the variable entered the function with.
-    pub(crate) fn reaching(&self, f: FuncRef, at: u32, var: u32) -> Option<VarInfo<ClassId>> {
+    pub(crate) fn reaching(&self, f: EngineFuncRef, at: u32, var: u32) -> Option<VarInfo<ClassId>> {
         over!(self, f, |cfg, ssa| reaching_in(cfg, ssa, at, var))
     }
 
@@ -581,7 +588,7 @@ impl Analysed {
     /// no SSA.
     pub(crate) fn is_last_use(
         &self,
-        f: FuncRef,
+        f: EngineFuncRef,
         code: &OpArray,
         at: u32,
         which: Defined,
@@ -598,7 +605,7 @@ impl Analysed {
     /// (`zend_jit_trace_is_false_loop`).
     pub(crate) fn header(
         &self,
-        f: FuncRef,
+        f: EngineFuncRef,
         start: u32,
         last: Option<u32>,
         var: u32,
@@ -771,7 +778,7 @@ impl Analysed {
 /// ([`Analysed::tables`]), from which its frames are made
 /// ([`Tables::frames`]).
 pub(crate) struct Tables<'a> {
-    tables: Vec<(FuncRef, Function<'a>, Bound<'a, ClassId>)>,
+    tables: Vec<(EngineFuncRef, Function<'a>, Bound<'a, ClassId>)>,
     level: Level,
 }
 
@@ -789,10 +796,10 @@ impl Tables<'_> {
 /// php's inference over a trace's SSA, `zend_update_type_info` and
 /// `zend_inference_propagate_range` as `zend_jit_trace_build_tssa` calls
 /// them, each op read in the op array it is of.
-pub(crate) struct Inference<'a>(Vec<(FuncRef, TraceFrame<'a, Bound<'a, ClassId>>)>);
+pub(crate) struct Inference<'a>(Vec<(EngineFuncRef, TraceFrame<'a, Bound<'a, ClassId>>)>);
 
 impl<'a> Inference<'a> {
-    fn frame(&self, f: FuncRef) -> Option<&TraceFrame<'a, Bound<'a, ClassId>>> {
+    fn frame(&self, f: EngineFuncRef) -> Option<&TraceFrame<'a, Bound<'a, ClassId>>> {
         self.0.iter().find(|(g, _)| *g == f).map(|(_, frame)| frame)
     }
 
@@ -801,7 +808,7 @@ impl<'a> Inference<'a> {
     /// would narrow what it wrote.
     pub(crate) fn update(
         &self,
-        f: FuncRef,
+        f: EngineFuncRef,
         tssa: &mut Ssa<ClassId>,
         positions: &[Position],
         at: usize,
@@ -815,7 +822,7 @@ impl<'a> Inference<'a> {
     /// passes through.
     pub(crate) fn may_throw(
         &self,
-        f: FuncRef,
+        f: EngineFuncRef,
         tssa: &mut Ssa<ClassId>,
         positions: &[Position],
         at: usize,
@@ -829,7 +836,7 @@ impl<'a> Inference<'a> {
     /// `tssa`, running in `f`, defines.
     pub(crate) fn propagate_range(
         &self,
-        f: FuncRef,
+        f: EngineFuncRef,
         tssa: &mut Ssa<ClassId>,
         positions: &[Position],
         at: usize,
@@ -865,8 +872,8 @@ fn block_phi<C>(ssa: &Ssa<C>, block: BlockId, var: u32) -> Option<SsaVar> {
 fn analysis_of(
     view: &UnitView,
     analyses: &Analyses,
-    (f, function): (FuncRef, &Function<'_>),
-    built: &[(FuncRef, Option<Returns<ClassId>>)],
+    (f, function): (EngineFuncRef, &Function<'_>),
+    built: &[(EngineFuncRef, Option<Returns<ClassId>>)],
     level: Level,
 ) -> Option<Read> {
     if let Some(bindings) = view.bindings(f) {
@@ -912,7 +919,7 @@ pub(crate) fn build(
     } else {
         Level::Func
     };
-    let mut built: Vec<(FuncRef, Option<Returns<ClassId>>)> = Vec::new();
+    let mut built: Vec<(EngineFuncRef, Option<Returns<ClassId>>)> = Vec::new();
     let mut found = Vec::new();
     for &f in passed.iter().take(MAX_FUNCS) {
         let Some(function) = function(view, f) else {

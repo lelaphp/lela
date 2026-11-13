@@ -32,7 +32,7 @@
 use std::ops::{Deref, DerefMut};
 
 use php_engine::tier::{
-    self, Building, Epoch, Fatal, FrameRef, FuncRef, Request, SafepointIdx, Sample, Stepped,
+    self, Building, EngineFuncRef, Epoch, Fatal, FrameRef, Request, SafepointIdx, Sample, Stepped,
     UnitView,
 };
 use php_heap::{ZvalType, constant_truth};
@@ -99,13 +99,11 @@ impl Start {
     }
 }
 
-/// An op array as a record's text form and a trace's dump name it: its
-/// map-pointer offset, `e` for the engine's and `r` for a request's.
-pub(crate) fn func_name(f: FuncRef) -> String {
-    match f.offset() {
-        php_unit::MapPtrOffset::Engine(n) => format!("e{n}"),
-        php_unit::MapPtrOffset::Request(n) => format!("r{n}"),
-    }
+/// An op array as a record's text form and a trace's dump name it: the
+/// engine's map-pointer offset, after an `e`. A record names no
+/// request's op array ([`Callee::Request`]).
+pub(crate) fn func_name(f: EngineFuncRef) -> String {
+    format!("e{}", f.offset())
 }
 
 /// Why a recording or a compile stopped: php's `ZEND_JIT_TRACE_STOP`
@@ -291,7 +289,7 @@ pub(crate) enum Event {
     /// `END`'s opline; this record has no `END`, so a trace that ends on
     /// a jump says which way it went here.
     Op {
-        func: FuncRef,
+        func: EngineFuncRef,
         opline: OplineIdx,
         op1: Option<Sample>,
         op2: Option<Sample>,
@@ -302,7 +300,7 @@ pub(crate) enum Event {
     /// php's record's `func`, and whether the recording saw it begin.
     InitCall { callee: Callee, began: Began },
     /// A PHP-to-PHP call followed, `ZEND_JIT_TRACE_ENTER`.
-    Enter { func: FuncRef },
+    Enter { func: EngineFuncRef },
     /// Its return, `ZEND_JIT_TRACE_BACK`.
     Back,
 }
@@ -312,7 +310,7 @@ pub(crate) enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Callee {
     /// A user function, by the op array it serves.
-    User(FuncRef),
+    User(EngineFuncRef),
     /// A native, with the types its declaration says it returns, which
     /// php's `zend_jit_trace_build_tssa` types what its `DO_ICALL` writes by
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`); anything where it
@@ -328,11 +326,12 @@ pub(crate) enum Callee {
 }
 
 impl Callee {
-    /// The callee of the call `call` is building, as `req` serves it.
+    /// The callee of the call `call` is building, as `req` serves it:
+    /// the one place a record's callee is named, where a request's op
+    /// array is refused its number.
     fn of(req: &Request, call: tier::Building) -> Callee {
         match call.target {
-            Some(f) if matches!(f.offset(), php_unit::MapPtrOffset::Request(_)) => Callee::Request,
-            Some(f) => Callee::User(f),
+            Some(f) => EngineFuncRef::of(f).map_or(Callee::Request, Callee::User),
             None => Callee::Native(
                 tier::native_returns(req, call.call).map_or(Types::ANY, |ty| types::declared(&ty)),
             ),
@@ -340,7 +339,7 @@ impl Callee {
     }
 
     /// The op array a user function's call serves; none for a native's.
-    pub(crate) fn user(self) -> Option<FuncRef> {
+    pub(crate) fn user(self) -> Option<EngineFuncRef> {
         match self {
             Callee::User(f) => Some(f),
             Callee::Native(_) | Callee::Request => None,
@@ -380,7 +379,7 @@ impl Began {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TraceRecord {
     pub(crate) start: Start,
-    pub(crate) root: FuncRef,
+    pub(crate) root: EngineFuncRef,
     /// For a side trace, what its parent's exit knew of the slots of the
     /// frame it starts in, php's stack map that `zend_jit_trace_build_tssa`
     /// reads a side's entry types from; empty for a root.
@@ -396,7 +395,7 @@ pub(crate) struct TraceRecord {
     /// it is held to land on (`zend_jit_leave_func`'s IP guard,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`). None for any
     /// other stop.
-    pub(crate) link_at: Option<(FuncRef, OplineIdx)>,
+    pub(crate) link_at: Option<(EngineFuncRef, OplineIdx)>,
 }
 
 /// Where a side trace's parent exit left the interpreter, php's exit
@@ -439,14 +438,14 @@ pub(crate) struct Ended {
     pub(crate) at: FrameRef,
     /// For a stop at an inner loop, that loop's header, where php
     /// records again at once (`ZEND_JIT_TRACE_STOP_REPEAT`).
-    pub(crate) inner: Option<(FuncRef, SafepointIdx)>,
+    pub(crate) inner: Option<(EngineFuncRef, SafepointIdx)>,
     /// Whether anything was stepped: a recording that stopped at its
     /// first opline left the program where the safepoint found it.
     pub(crate) stepped: bool,
     /// Where the trace was rooted once it stopped, where that is not the
     /// claimed word's safepoint: a loop php unrolled and made the trace
     /// of (`zend_jit_trace_subtrace`), rooted at its header.
-    pub(crate) rerooted: Option<(FuncRef, SafepointIdx)>,
+    pub(crate) rerooted: Option<(EngineFuncRef, SafepointIdx)>,
     /// The compiled trace whose root the recording stopped at, a loop's
     /// header or a call's entry, which php's interpreter, going on there,
     /// enters at once, the trace being that opline's handler.
@@ -557,15 +556,27 @@ pub(crate) enum Bailed {
     Unwinding(FrameRef),
 }
 
-/// Record from `frame`, which stands where `start` roots, on the word
-/// `claimed` holds: a loop header for `Loop`, the first opline past the
-/// prologue for `Enter`, the caller's landing past the call a return
-/// landed from for `Return` (`jit-design.md` §2.2, #3036), an exit's
-/// landing for a side. `Ok` with the record and where the program
-/// stands; `Err` where the request bailed out under it, the recording
-/// thrown away.
+/// The op array a recording from `frame` roots in, held by a view of
+/// `req`'s epoch the recording reads through: none where the frame
+/// serves no op array the engine numbered, a request's own, which a
+/// recording is refused at with [`Stop::RequestUnit`] before its first
+/// opline and so names in no record.
+pub(crate) fn held_root(req: &Request, frame: FrameRef) -> Option<(UnitView, EngineFuncRef)> {
+    let mut view = UnitView::new(req);
+    let root = view.hold(req, tier::func(req, frame)?)?;
+    Some((view, root))
+}
+
+/// Record from `frame`, which stands where `start` roots, in `root`, the
+/// op array the view holds ([`held_root`]), on the word `claimed` holds: a loop header for
+/// `Loop`, the first opline past the prologue for `Enter`, the caller's
+/// landing past the call a return landed from for `Return`
+/// (`jit-design.md` §2.2, #3036), an exit's landing for a side. `Ok`
+/// with the record and where the program stands; `Err` where the request
+/// bailed out under it, the recording thrown away.
 pub(crate) fn run(
     req: &mut Request,
+    (mut view, root): (UnitView, EngineFuncRef),
     frame: FrameRef,
     start: Start,
     claimed: &Holder,
@@ -579,14 +590,6 @@ pub(crate) fn run(
         ret_depth,
     } = opening;
     let mut req = Recording::set(req);
-    let mut view = UnitView::new(&req);
-    let held = tier::func(&req, frame).filter(|root| view.hold(&req, *root));
-    let Some(root) = held else {
-        return Ok((
-            refused(&req, frame, start, Stop::RequestUnit),
-            ended(frame, false),
-        ));
-    };
     let mut recorder = Recorder::new(
         policy,
         start,
@@ -694,14 +697,15 @@ pub(crate) struct Opening {
 pub(crate) fn ret_depth(
     req: &Request,
     frame: FrameRef,
-    (root, at): (FuncRef, OplineIdx),
+    (root, at): (EngineFuncRef, OplineIdx),
     folds: Folds,
 ) -> u32 {
-    if tier::func(req, frame) == Some(root) {
+    if tier::func(req, frame) == Some(root.into()) {
         return 0;
     }
     let mut view = UnitView::new(req);
-    let copied = !view.hold(req, root) || view.is_main(root) != Some(false) || closure(&view, root);
+    let copied =
+        view.hold(req, root).is_none() || view.is_main(root) != Some(false) || closure(&view, root);
     if copied || (view.op_array(root)).is_none_or(|code| header_at(code, at, folds).is_none()) {
         return 0;
     }
@@ -710,7 +714,7 @@ pub(crate) fn ret_depth(
         let Some(next) = tier::below(req, below) else {
             return 0;
         };
-        if tier::func(req, next) == Some(root) {
+        if tier::func(req, next) == Some(root.into()) {
             return depth;
         }
         below = next;
@@ -721,7 +725,7 @@ pub(crate) fn ret_depth(
 /// Whether the op array `func` names is a closure's body, php's
 /// `ZEND_ACC_CLOSURE`, which its compiler names `{closure:...}`; false for
 /// one `view` does not hold.
-pub(crate) fn closure(view: &UnitView, func: FuncRef) -> bool {
+pub(crate) fn closure(view: &UnitView, func: EngineFuncRef) -> bool {
     (view.declaration(func))
         .and_then(|declared| declared.function)
         .is_some_and(|function| function.name.0.starts_with(b"{closure:"))
@@ -743,8 +747,8 @@ pub(crate) fn landings(
     record: &TraceRecord,
     view: &UnitView,
     folds: Folds,
-) -> Vec<(FuncRef, OplineIdx)> {
-    let past = |(func, at): (FuncRef, OplineIdx)| (func, OplineIdx(at.0.saturating_add(1)));
+) -> Vec<(EngineFuncRef, OplineIdx)> {
+    let past = |(func, at): (EngineFuncRef, OplineIdx)| (func, OplineIdx(at.0.saturating_add(1)));
     let mut last = None;
     let mut calls = Vec::new();
     let mut armed = Vec::new();
@@ -860,7 +864,7 @@ pub(crate) fn behind(
 ) -> Option<OplineIdx> {
     let mut view = UnitView::new(req);
     let code = tier::func(req, frame)
-        .filter(|func| view.hold(req, *func))
+        .and_then(|func| view.hold(req, func))
         .and_then(|func| view.op_array(func))?;
     let body = position(req, frame);
     let root = loop_root(code, header, folds).filter(|root| *root != body)?;
@@ -997,7 +1001,7 @@ pub(crate) fn arrived(
 /// The op array `frame` runs, as `view` holds it; none where it runs no
 /// op array a trace reads.
 fn served_code<'v>(req: &Request, view: &'v mut UnitView, frame: FrameRef) -> Option<&'v OpArray> {
-    let func = tier::func(req, frame).filter(|func| view.hold(req, *func))?;
+    let func = tier::func(req, frame).and_then(|func| view.hold(req, func))?;
     view.op_array(func)
 }
 
@@ -1088,27 +1092,6 @@ fn stepped_on(
     }
 }
 
-/// A recording refused before its first opline: no event, and `stop`.
-pub(crate) fn refused(req: &Request, frame: FrameRef, start: Start, stop: Stop) -> Recorded {
-    let record = TraceRecord {
-        start,
-        root: tier::func(req, frame).unwrap_or(REQUEST_SCOPED),
-        entered: Vec::new(),
-        landed: Landed::Named,
-        events: Vec::new(),
-        stop,
-        link_at: None,
-    };
-    Recorded {
-        record,
-        view: UnitView::new(req),
-    }
-}
-
-/// The name of an op array no epoch holds, for a recording refused at a
-/// frame that names none of its own.
-const REQUEST_SCOPED: FuncRef = FuncRef::at(php_unit::MapPtrOffset::Request(0));
-
 /// What the loop keeps between steps, php's locals of
 /// `zend_jit_trace_execute`.
 struct Recorder<'p> {
@@ -1120,7 +1103,7 @@ struct Recorder<'p> {
     claimed: Claimed,
     /// php's `orig_opline`: the op array and opline the trace is rooted
     /// at, which closes a loop and names recursion.
-    root: Option<(FuncRef, OplineIdx)>,
+    root: Option<(EngineFuncRef, OplineIdx)>,
     events: Vec<Event>,
     /// php's `idx`: the records the trace holds, its head included.
     length: u32,
@@ -1130,20 +1113,20 @@ struct Recorder<'p> {
     ret_depth: u32,
     /// php's `unrolled_calls`: the op array entered at each depth, the
     /// returns past the root first.
-    unrolled: Vec<FuncRef>,
+    unrolled: Vec<EngineFuncRef>,
     backtrack_recursion: Option<usize>,
     backtrack_ret_recursion: Option<(usize, u32)>,
     backtrack_link_to_enter: Option<(usize, TraceId)>,
     /// php's `last_loop`, `last_loop_opline` and `last_loop_level`.
-    last_loop: Option<(usize, FuncRef, OplineIdx, SafepointIdx, u32)>,
+    last_loop: Option<(usize, EngineFuncRef, OplineIdx, SafepointIdx, u32)>,
     loop_unrolls: u8,
     /// The calls under way whose `DO_*CALL` stops at the interpreter,
     /// php's `ZEND_CALL_MEGAMORPHIC`.
     megamorphic: Vec<FrameRef>,
-    rerooted: Option<(FuncRef, SafepointIdx)>,
+    rerooted: Option<(EngineFuncRef, SafepointIdx)>,
     stood: Option<TraceId>,
     /// Where the recording linked, [`TraceRecord::link_at`].
-    link_at: Option<(FuncRef, OplineIdx)>,
+    link_at: Option<(EngineFuncRef, OplineIdx)>,
     /// Whether it stopped at a frame's activation, [`Ended::activated`].
     activated: bool,
 }
@@ -1153,8 +1136,8 @@ struct Recorder<'p> {
 /// exit's, by its trace and exit.
 #[derive(Debug, Clone, Copy)]
 enum Claimed {
-    Root(FuncRef, SafepointIdx),
-    Landing(FuncRef, OplineIdx),
+    Root(EngineFuncRef, SafepointIdx),
+    Landing(EngineFuncRef, OplineIdx),
     Exit(TraceId, ExitId),
 }
 
@@ -1238,7 +1221,7 @@ impl<'p> Recorder<'p> {
         req: &Request,
         view: &mut UnitView,
         frame: FrameRef,
-        (func, at): (FuncRef, OplineIdx),
+        (func, at): (EngineFuncRef, OplineIdx),
         (op, after): (&Opline, Option<&Opline>),
     ) -> (Option<Sample>, u32) {
         let (op1, op2, data) = sampled(req, frame, op, after);
@@ -1262,7 +1245,7 @@ impl<'p> Recorder<'p> {
         req: &mut Recording<'_>,
         view: &mut UnitView,
         mut frame: FrameRef,
-        root: FuncRef,
+        root: EngineFuncRef,
         behind: Option<OplineIdx>,
     ) -> Result<(Stop, Ended), Bailed> {
         let mut func = root;
@@ -1378,7 +1361,7 @@ impl<'p> Recorder<'p> {
         req: &Request,
         view: &mut UnitView,
         frame: FrameRef,
-        root: FuncRef,
+        root: EngineFuncRef,
         behind: Option<OplineIdx>,
     ) -> Result<bool, Bailed> {
         self.root = Some((root, behind.unwrap_or_else(|| position(req, frame))));
@@ -1529,7 +1512,7 @@ impl<'p> Recorder<'p> {
         req: &Request,
         view: &mut UnitView,
         callee: FrameRef,
-        func: &mut FuncRef,
+        func: &mut EngineFuncRef,
     ) -> Went {
         let went = self.pushed(req, view, callee, func);
         self.activated = matches!(went, Went::Stopped(_));
@@ -1650,9 +1633,9 @@ impl<'p> Recorder<'p> {
         req: &Request,
         view: &mut UnitView,
         callee: FrameRef,
-        func: &mut FuncRef,
+        func: &mut EngineFuncRef,
     ) -> Went {
-        let Some(entered) = tier::func(req, callee).filter(|f| view.hold(req, *f)) else {
+        let Some(entered) = tier::func(req, callee).and_then(|f| view.hold(req, f)) else {
             return Went::Stopped(Stop::Interpreter);
         };
         if self.level > MAX_CALL_DEPTH {
@@ -1730,7 +1713,7 @@ impl<'p> Recorder<'p> {
         req: &Request,
         view: &mut UnitView,
         caller: FrameRef,
-        func: &mut FuncRef,
+        func: &mut EngineFuncRef,
     ) -> Went {
         if self.level == 0 {
             let limit = self.policy.blacklist_root().saturating_sub(1);
@@ -1753,7 +1736,7 @@ impl<'p> Recorder<'p> {
                     return Went::Stopped(Stop::RecursionExit);
                 }
                 Start::Side { .. } if self.ret_level < self.ret_depth => {
-                    let Some(landed) = tier::func(req, caller).filter(|f| view.hold(req, *f))
+                    let Some(landed) = tier::func(req, caller).and_then(|f| view.hold(req, f))
                     else {
                         return Went::Stopped(Stop::Return);
                     };
@@ -1782,7 +1765,7 @@ impl<'p> Recorder<'p> {
             // op array keeps no `jit_extension`, its caller not the frame
             // it left, stops with `Return`
             // (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`).
-            let Some(landed) = tier::func(req, caller) else {
+            let Some(landed) = tier::func(req, caller).and_then(EngineFuncRef::of) else {
                 return Went::Stopped(Stop::Return);
             };
             *func = landed;
@@ -1801,12 +1784,12 @@ impl<'p> Recorder<'p> {
         req: &Request,
         view: &mut UnitView,
         caller: FrameRef,
-        func: &mut FuncRef,
+        func: &mut EngineFuncRef,
     ) -> Option<Stop> {
         if self.ret_level > MAX_RET_DEPTH {
             return Some(Stop::TooDeepRet);
         }
-        let Some(landed) = tier::func(req, caller).filter(|f| view.hold(req, *f)) else {
+        let Some(landed) = tier::func(req, caller).and_then(|f| view.hold(req, f)) else {
             return Some(Stop::Return);
         };
         self.events.push(Event::Back);
@@ -1834,7 +1817,13 @@ impl<'p> Recorder<'p> {
     /// At the opline a step left the recording at: the word of the loop
     /// header there, where there is one, read as php reads a handler's
     /// `trace_flags` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1296-1375`).
-    fn landed(&mut self, req: &Request, view: &UnitView, frame: FrameRef, func: FuncRef) -> Went {
+    fn landed(
+        &mut self,
+        req: &Request,
+        view: &UnitView,
+        frame: FrameRef,
+        func: EngineFuncRef,
+    ) -> Went {
         let at = position(req, frame);
         let Some(header) =
             (view.op_array(func)).and_then(|code| header_at(code, at, self.policy.folds()))
@@ -1866,7 +1855,7 @@ impl<'p> Recorder<'p> {
     /// (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1294-1325`): a return
     /// trace compiled there is linked to, and one blacklisted stops the
     /// recording.
-    fn return_landing(&mut self, func: FuncRef, at: OplineIdx) -> Went {
+    fn return_landing(&mut self, func: EngineFuncRef, at: OplineIdx) -> Went {
         let landing = self.epoch.landing(func, at);
         if !policy::armed(landing) {
             return Went::On;
@@ -1886,7 +1875,7 @@ impl<'p> Recorder<'p> {
     /// loop; another is an inner loop php records on its own, unless
     /// attempts at it failed, when it is unrolled up to php's limit and
     /// a second visit at one depth makes the unrolled loop the trace.
-    fn loop_header(&mut self, func: FuncRef, at: OplineIdx, header: SafepointIdx) -> Went {
+    fn loop_header(&mut self, func: EngineFuncRef, at: OplineIdx, header: SafepointIdx) -> Went {
         let side = self.start.grew().is_some();
         let depth = self.level + self.ret_level;
         if !side && self.root == Some((func, at)) && depth == 0 {
@@ -1962,7 +1951,7 @@ impl<'p> Recorder<'p> {
     }
 
     /// php's `zend_jit_trace_recursive_call_count`.
-    fn recursive_calls(&self, func: FuncRef) -> u32 {
+    fn recursive_calls(&self, func: EngineFuncRef) -> u32 {
         let (from, to) = (
             self.ret_level as usize,
             (self.ret_level + self.level) as usize,
@@ -1971,12 +1960,12 @@ impl<'p> Recorder<'p> {
     }
 
     /// php's `zend_jit_trace_recursive_ret_count`.
-    fn recursive_returns(&self, func: FuncRef) -> u32 {
+    fn recursive_returns(&self, func: EngineFuncRef) -> u32 {
         count_of(self.unrolled.get(..self.ret_level as usize), func)
     }
 
     /// `unrolled_calls[at] = func`.
-    fn unroll_at(&mut self, at: u32, func: FuncRef) {
+    fn unroll_at(&mut self, at: u32, func: EngineFuncRef) {
         let at = at as usize;
         if self.unrolled.len() <= at {
             self.unrolled.resize(at + 1, func);
@@ -1998,7 +1987,7 @@ impl<'p> Recorder<'p> {
         while let Some(at_frame) = frame
             && level < MAX_RET_DEPTH
         {
-            if tier::func(req, at_frame) == Some(root)
+            if tier::func(req, at_frame) == Some(root.into())
                 && position(req, at_frame).0.wrapping_add(1) == at.0
             {
                 return true;
@@ -2139,7 +2128,7 @@ fn recursion_exits(req: &Request, caller: FrameRef) -> bool {
 }
 
 /// How many of `seen` are `func`.
-fn count_of(seen: Option<&[FuncRef]>, func: FuncRef) -> u32 {
+fn count_of(seen: Option<&[EngineFuncRef]>, func: EngineFuncRef) -> u32 {
     seen.map_or(0, |seen| {
         u32::try_from(seen.iter().filter(|f| **f == func).count()).unwrap_or(u32::MAX)
     })

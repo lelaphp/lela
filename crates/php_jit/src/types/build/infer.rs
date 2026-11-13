@@ -10,7 +10,7 @@
 //! `zend_update_type_info` reads of the SSA; the inference is `php_ssa`'s,
 //! the one function that learns it for an op array's own SSA.
 
-use php_engine::tier::{ClassId, FuncRef, Sample};
+use php_engine::tier::{ClassId, EngineFuncRef, Sample};
 use php_heap::ZvalType;
 use php_ssa::{Alias, Position, Range, Ssa, SsaOp, SsaVar, SsaVarInfo, Var, VarInfo};
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
@@ -412,7 +412,7 @@ impl Builder<'_> {
     /// ```
     fn copy_ranges(
         &self,
-        func: FuncRef,
+        func: EngineFuncRef,
         at: OplineIdx,
         tssa: &mut Ssa<ClassId>,
         positions: &[Position],
@@ -470,7 +470,7 @@ impl Builder<'_> {
         &self,
         tssa: &mut Tssa,
         positions: &mut Vec<Position>,
-        func: FuncRef,
+        func: EngineFuncRef,
         next: Option<&Event>,
         array: u32,
     ) {

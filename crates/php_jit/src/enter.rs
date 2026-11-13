@@ -45,8 +45,8 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicBool;
 
 use php_engine::tier::{
-    self, CachedSlot, Epoch, Fatal, FrameRef, FramelessAt, FuncRef, Held, Request, SafepointIdx,
-    Stepped, TraceNum, Word,
+    self, CachedSlot, EngineFuncRef, Epoch, Fatal, FrameRef, FramelessAt, FuncRef, Held, Request,
+    SafepointIdx, Stepped, TraceNum, Word,
 };
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
@@ -396,7 +396,7 @@ impl<'l> Lent<'l> {
     /// The words the request kept for opline `at` of the op array `func`
     /// names ([`Landings::landed`]), of the epoch the state holds.
     #[inline]
-    pub(crate) fn landed(self, func: FuncRef, at: OplineIdx) -> Option<Landed<'l>> {
+    pub(crate) fn landed(self, func: EngineFuncRef, at: OplineIdx) -> Option<Landed<'l>> {
         // SAFETY: the state's `Landings` is kept through `Lent::keep`
         // alone, which hands it `self.epoch`, and `self.epoch` is the
         // epoch the state holds, laid once (`lent`, which alone makes a
@@ -410,7 +410,7 @@ impl<'l> Lent<'l> {
     /// the epoch the state holds.
     pub(crate) fn keep(
         self,
-        func: FuncRef,
+        func: EngineFuncRef,
         at: OplineIdx,
         header: Option<SafepointIdx>,
     ) -> Landed<'l> {
@@ -447,7 +447,7 @@ pub(crate) struct Landings {
 /// none, and `func` none in a place that keeps nothing.
 #[derive(Debug, Default, Clone, Copy)]
 struct Kept {
-    func: Option<FuncRef>,
+    func: Option<EngineFuncRef>,
     at: OplineIdx,
     landing: usize,
     header: usize,
@@ -476,7 +476,7 @@ impl Landings {
     unsafe fn landed<'e>(
         &self,
         epoch: &'e Epoch,
-        func: FuncRef,
+        func: EngineFuncRef,
         at: OplineIdx,
     ) -> Option<Landed<'e>> {
         let (slot, kept) = (self.kept.iter())
@@ -501,7 +501,7 @@ impl Landings {
     fn keep<'e>(
         &self,
         epoch: &'e Epoch,
-        func: FuncRef,
+        func: EngineFuncRef,
         at: OplineIdx,
         header: Option<SafepointIdx>,
     ) -> Landed<'e> {
@@ -861,7 +861,9 @@ fn leave(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result
 fn push_call(req: &mut Request, on: On<'_, '_>, func: u32, callee: u32) -> Result<Stood, Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, epoch) = held(on, func)?;
-    if tier::primed(req, frame, held, on.at).and_then(engine_offset) != Some(callee) {
+    if (tier::primed(req, frame, held, on.at).and_then(EngineFuncRef::of)).map(engine_offset)
+        != Some(callee)
+    {
         let refused = where_stood(req, frame, Some(func), on.holding)?;
         return Ok(Stood {
             call: ptr::null_mut(),
@@ -1286,11 +1288,12 @@ fn stood_in(
     // A cache the hold served the op array of last is that op array's own.
     let func =
         func.unwrap_or_else(
-            || match tier::frame_cache(req, frame).and_then(engine_offset) {
-                Some(cache) if holding.is_some_and(|holding| holding.served(cache)) => cache,
-                _ => tier::running_func(req, frame)
-                    .and_then(engine_offset)
-                    .unwrap_or(u32::MAX),
+            || match tier::frame_cache(req, frame).and_then(EngineFuncRef::of) {
+                Some(cache) if holding.is_some_and(|holding| holding.served(cache.offset())) => {
+                    cache.offset()
+                }
+                _ => (tier::running_func(req, frame).and_then(EngineFuncRef::of))
+                    .map_or(u32::MAX, engine_offset),
             },
         );
     Stood {
@@ -1450,8 +1453,11 @@ pub(crate) fn enter<'t>(
         // A frame whose cache is the own cache of the op array the trace
         // opens in runs that op array, named with no row of the epoch read.
         let own = (trace.opens)
-            .and_then(|(func, _)| engine_offset(func))
-            .filter(|func| tier::frame_cache(req, frame).and_then(engine_offset) == Some(*func));
+            .map(|(func, _)| engine_offset(func))
+            .filter(|func| {
+                (tier::frame_cache(req, frame).and_then(EngineFuncRef::of)).map(engine_offset)
+                    == Some(*func)
+            });
         Some(stood_in(req, (frame, room), own, None))
     } else {
         None
@@ -1792,7 +1798,7 @@ fn callees_laid(req: &Request, trace: &Trace) -> bool {
     trace
         .callee_caches
         .iter()
-        .all(|callee| tier::laid(req, *callee))
+        .all(|callee| tier::laid(req, (*callee).into()))
 }
 
 /// What a request keeps of the headers its traces push calls in place
@@ -1844,7 +1850,7 @@ enum Toward {
 /// called scope, which its header names: one image per call
 /// [`tier::PlainCall`]'s equality tells apart.
 type CallKey = (
-    Option<FuncRef>,
+    Option<EngineFuncRef>,
     Box<[u8]>,
     Box<[u8]>,
     u32,
@@ -2084,7 +2090,7 @@ fn landing_key(trace: &Trace) -> Option<usize> {
     }
     let (func, opline) = trace.opens?;
     let stands = lower::Stands {
-        func: engine_offset(func)?,
+        func: engine_offset(func),
         opline: opline.0,
     };
     Some(stands.key())

@@ -23,7 +23,7 @@
 
 use std::hint::black_box;
 
-use php_engine::tier::{self, Flow, FrameRef, FuncRef, Request, Sample, Stepped, UnitView};
+use php_engine::tier::{self, EngineFuncRef, Flow, FrameRef, Request, Sample, Stepped, UnitView};
 
 use crate::record;
 
@@ -71,8 +71,8 @@ pub(crate) fn driven(req: &mut Request, mut frame: FrameRef) -> Flow {
 
 /// The function `frame` runs, where the view holds it, as the recorder
 /// holds a callee's op array as it steps into it.
-fn held(req: &Request, view: &mut UnitView, frame: FrameRef) -> Option<FuncRef> {
-    tier::func(req, frame).filter(|f| view.hold(req, *f))
+fn held(req: &Request, view: &mut UnitView, frame: FrameRef) -> Option<EngineFuncRef> {
+    tier::func(req, frame).and_then(|f| view.hold(req, f))
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ use php_engine::tier::{self, Epoch, Parked};
 use crate::lower::{Compiled, Escapes, Linked};
 use crate::policy::{self, Claim, Compile, Mode, Outcome, Policy, State, TraceEvent};
 use crate::record::{self, Recorded, Start, Stop};
-use crate::table::{self, Table, TraceName, Unpublished};
+use crate::table::{self, Table, TraceId, TraceName, Unpublished};
 use crate::types::{self, Abort, End, TraceIr};
 use crate::{Lines, Shared};
 
@@ -326,6 +326,32 @@ fn pipeline_with(
     {
         arm_landings(&recorded, claim.epoch(), &shared.policy);
     }
+    concluded(claim, outcome, number, lines)
+}
+
+/// [`pipeline`] for a recording refused with `stop` before its first
+/// opline, which never compiles: an attempt failed, settled and written
+/// as the pipeline settles and writes one. It has no record to build,
+/// since the frame it was to start in may serve no op array the engine
+/// numbered, which a record roots in.
+pub(crate) fn refused(claim: Claim, stop: Stop, lines: &mut Lines) -> Outcome {
+    let number = table::of_epoch(claim.epoch()).map(Table::next);
+    let outcome = match number {
+        Some(_) => failed(stop),
+        None => failed(Stop::TooManyTraces),
+    };
+    concluded(claim, outcome, number.flatten(), lines)
+}
+
+/// The claim settled with `outcome`, and the attempt written as trace
+/// `number`: `TRACE n compiled`, or `TRACE n abort` and, where it
+/// blacklisted the word, `TRACE n blacklisted`.
+fn concluded(
+    claim: Claim,
+    outcome: Outcome,
+    number: Option<TraceId>,
+    lines: &mut Lines,
+) -> Outcome {
     let start = claim.start();
     let settled = policy::settle(claim, &outcome);
     match (outcome, number) {

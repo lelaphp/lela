@@ -29,7 +29,7 @@ use cranelift_codegen::ir::{
     Block, BlockArg, InstBuilder, MemFlagsData, StackSlot, StackSlotData, StackSlotKind, Value,
 };
 use cranelift_frontend::Variable;
-use php_engine::tier::{self, FRAME, FrameLayout, FuncRef, PLACE, PlaceLayout, PlainCall};
+use php_engine::tier::{self, EngineFuncRef, FRAME, FrameLayout, PLACE, PlaceLayout, PlainCall};
 use php_heap::{Obj, Ref, Zval, ZvalType};
 use php_unit::{Opcode, OperandKind};
 
@@ -268,7 +268,7 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// 435 870 seven 59
     /// ```
-    pub(super) fn callee_guard(&mut self, func: FuncRef, exit: ExitId) -> Result<(), Abort> {
+    pub(super) fn callee_guard(&mut self, func: EngineFuncRef, exit: ExitId) -> Result<(), Abort> {
         let held = (self.held.iter())
             .find(|held| held.callee() == Some(func))
             .ok_or_else(|| mismatch("a callee guard on a call the trace does not hold"))?;

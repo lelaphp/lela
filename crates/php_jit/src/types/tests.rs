@@ -3842,14 +3842,13 @@ fn a_send_by_reference_whose_value_is_destroyed_runs_nothing() -> Result<(), Str
 
 /// A trace that calls an `eval`'d function, a function's and a method's,
 /// stops at the call (#3570), and nothing it builds names the request's
-/// op array: no frame, no guard and no call, whose number another
-/// request gives another op array (design §3.4).
+/// op array, whose number another request gives another op array (design
+/// §3.4): its frames and guards name op arrays by `EngineFuncRef`, which a
+/// request's has none of (#4650), and the call it begins names its callee
+/// as the request's, by no number and with no published callee.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_names_no_request_scoped_op_array() -> Result<(), String> {
-    use php_unit::MapPtrOffset;
-
-    let request = |f: php_engine::tier::FuncRef| matches!(f.offset(), MapPtrOffset::Request(_));
     for program in [
         "eval('function h($a) { return $a + 1; }');
         function f($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += h($i); } return $t; }
@@ -3861,20 +3860,18 @@ fn a_trace_names_no_request_scoped_op_array() -> Result<(), String> {
         let ir = built(&IN_F, program)?;
         let rendered = dump::render(&ir);
         assert_eq!(ir.entry.stop, Stop::Interpreter, "{rendered}");
-        assert!(!ir.frames.iter().any(|frame| request(frame.func)), "{rendered}");
-        let guarded = (ir.guards.iter()).any(|guard| match guard.check {
-            Check::Callee { func } | Check::Stands { func, .. } => request(func),
-            _ => false,
+        let calls: Vec<_> = (ir.ops.iter())
+            .filter_map(|op| match op {
+                Op::InitCall { callee, plain, .. } => Some((*callee, plain)),
+                _ => None,
+            })
+            .collect();
+        assert!(!calls.is_empty(), "{rendered}");
+        let request = calls.iter().all(|(callee, plain)| {
+            matches!(callee, crate::record::Callee::Request)
+                && plain.as_ref().and_then(php_engine::tier::PlainCall::callee).is_none()
         });
-        assert!(!guarded, "{rendered}");
-        let called = (ir.ops.iter()).any(|op| match op {
-            Op::InitCall { callee, plain, .. } => {
-                callee.user().is_some_and(request)
-                    || plain.as_ref().and_then(php_engine::tier::PlainCall::callee).is_some_and(request)
-            }
-            _ => false,
-        });
-        assert!(!called, "{rendered}");
+        assert!(request, "{rendered}");
     }
     Ok(())
 }

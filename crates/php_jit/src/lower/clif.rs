@@ -42,13 +42,13 @@ use cranelift_codegen::ir::{
 };
 use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use php_engine::tier::{FRAME, FuncRef, PlainCall};
+use php_engine::tier::{EngineFuncRef, FRAME, PlainCall};
 use php_heap::{Arr, ROOM_BYTES, Ref, Str, Zval, ZvalType};
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 use super::{
     ABANDONED, DECLINED, Door, ENTRY_BODY, ENTRY_PLACE, ENTRY_UNREADY, INTERRUPT_AT, INTERRUPTED,
-    Kernel, RETURNED, STACK_AT, Stood, Symbols, TRACE_AT, UNWOUND, located,
+    Kernel, RETURNED, STACK_AT, Stood, Symbols, TRACE_AT, UNWOUND, engine_offset, located,
 };
 
 mod calls;
@@ -2249,7 +2249,7 @@ impl<'a> Emit<'a> {
             .get(usize::from(frame.0))
             .map(|info| info.func)
             .ok_or_else(|| mismatch("a frame past the trace's"))?;
-        Ok(self.b.ins().iconst(I32, i64::from(engine_offset(func)?)))
+        Ok(self.b.ins().iconst(I32, i64::from(engine_offset(func))))
     }
 
     /// Where a kernel that answers a word or a zval writes it.
@@ -3172,13 +3172,18 @@ impl<'a> Emit<'a> {
     /// php's IP guard: leave through `exit` unless the last kernel left
     /// the interpreter at `opline` of `func`. The exit names no opline, so
     /// exit-fuzz fails it too.
-    fn stands(&mut self, func: FuncRef, opline: OplineIdx, exit: ExitId) -> Result<(), Abort> {
+    fn stands(
+        &mut self,
+        func: EngineFuncRef,
+        opline: OplineIdx,
+        exit: ExitId,
+    ) -> Result<(), Abort> {
         let landed = self.stood_word(I32, STOOD_FUNC);
         let at = self.stood_word(I32, STOOD_OPLINE);
         let other_func =
             self.b
                 .ins()
-                .icmp_imm_u(IntCC::NotEqual, landed, i64::from(engine_offset(func)?));
+                .icmp_imm_u(IntCC::NotEqual, landed, i64::from(engine_offset(func)));
         let other_opline = self
             .b
             .ins()
@@ -3192,13 +3197,13 @@ impl<'a> Emit<'a> {
     /// `opline` of `func`, where the trace escapes ([`ESCAPED`](super::ESCAPED)) with
     /// nothing to store, as php's `jit_stub_trace_escape` takes no exit.
     /// Never failed by exit-fuzz, as it names no exit.
-    fn escapes(&mut self, func: FuncRef, opline: OplineIdx) -> Result<(), Abort> {
+    fn escapes(&mut self, func: EngineFuncRef, opline: OplineIdx) -> Result<(), Abort> {
         let landed = self.stood_word(I32, STOOD_FUNC);
         let at = self.stood_word(I32, STOOD_OPLINE);
         let other_func =
             self.b
                 .ins()
-                .icmp_imm_u(IntCC::NotEqual, landed, i64::from(engine_offset(func)?));
+                .icmp_imm_u(IntCC::NotEqual, landed, i64::from(engine_offset(func)));
         let other_opline = self
             .b
             .ins()
@@ -5207,7 +5212,7 @@ impl<'a> Emit<'a> {
         let exit = line
             .exit
             .ok_or_else(|| mismatch("an inline call that cannot leave"))?;
-        let callee = self.b.ins().iconst(I32, i64::from(engine_offset(*callee)?));
+        let callee = self.b.ins().iconst(I32, i64::from(engine_offset(*callee)));
         let [room, opline] = self.served(line)?;
         let func = self.func_of(line.frame)?;
         let stood = self.stood_out();
@@ -5866,10 +5871,4 @@ fn slot_offset(var: u32) -> Result<i32, Abort> {
         .and_then(|at| at.checked_add(i64::from(imm(ROOM_BYTES))))
         .and_then(|at| i32::try_from(at).ok())
         .ok_or_else(|| mismatch("a slot past an immediate"))
-}
-
-/// The engine offset that numbers an op array a trace holds; a
-/// request-scoped one is never held (`jit-design.md` §4.1).
-fn engine_offset(func: FuncRef) -> Result<u32, Abort> {
-    super::engine_offset(func).ok_or_else(|| mismatch("a request-scoped op array in a trace"))
 }

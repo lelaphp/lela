@@ -23,7 +23,7 @@ use std::io::{self, Write};
 use std::sync::atomic::Ordering;
 
 use php_engine::api::request::{Ini, TierStatus};
-use php_engine::tier::{Bound, Epoch, FuncRef, Laid, SafepointIdx, StartupIni, Word};
+use php_engine::tier::{Bound, EngineFuncRef, Epoch, Laid, SafepointIdx, StartupIni, Word};
 use php_unit::{Opcode, OplineIdx};
 
 use crate::types::ExitId;
@@ -1420,12 +1420,12 @@ pub(crate) fn bump(word: &Word) -> u32 {
 pub(crate) enum Holder {
     Root {
         epoch: Epoch,
-        func: FuncRef,
+        func: EngineFuncRef,
         at: SafepointIdx,
     },
     Landing {
         epoch: Epoch,
-        func: FuncRef,
+        func: EngineFuncRef,
         at: OplineIdx,
     },
     Exit {
