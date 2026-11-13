@@ -6,11 +6,11 @@
 use php_heap::{Heap, Intern, Key, Strings, Zval};
 use php_unit::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
-    ConstExpr, EnumBacking, MethodDecl, Name, NativeParameter, Parameters, Type, UnitValue,
-    Visibility,
+    ConstExpr, EnumBacking, HookKind, MethodDecl, Name, NativeParameter, Parameter,
+    ParameterDefault, Parameters, PropertyDecl, PropertyHooks, Type, UnitValue, Visibility,
 };
 use php_unit::frozen::{Frozen, Holder, Slot, Stray, unit_values};
-use php_unit::{BoundVar, MapPtrOffset, MethodBody, OpArray, PublishedUnit, Unit};
+use php_unit::{BoundVar, HookBody, MapPtrOffset, MethodBody, OpArray, PublishedUnit, Unit};
 
 /// What the engine's table lays for a unit it publishes: a string, and a
 /// constant array holding it under a string key of the table's.
@@ -326,4 +326,192 @@ fn the_walk_leaves_a_natives_unbuilt_slots_unbuilt() {
     let parameters = &frozen.methods[0].function.parameters;
     assert!(parameters.unbuilt().is_some(), "the walk built no slot");
     assert_eq!(parameters.len(), 1, "a reader builds them after");
+}
+
+/// A string a request's compile made in the request's memory, counted.
+fn requests(heap: &mut Heap) -> Zval {
+    Zval::string(heap.string(b"made in the request's memory").expect("room"))
+}
+
+/// A method named `m` whose declaration carries `attributes`.
+fn method(attributes: Vec<Attribute>) -> MethodDecl {
+    let mut function = php_unit::decl::native_function(b"m");
+    function.attributes = attributes.into();
+    MethodDecl {
+        function,
+        visibility: Visibility::Public,
+        is_instance: true,
+        is_abstract: false,
+        is_final: false,
+        tentative_return: false,
+    }
+}
+
+/// A property named `p` with nothing in it, for a test to lay one value in.
+fn property() -> PropertyDecl {
+    PropertyDecl {
+        name: Name::from("p"),
+        visibility: Visibility::Public,
+        set_visibility: None,
+        is_instance: true,
+        is_readonly: false,
+        is_final: false,
+        is_promoted: false,
+        is_virtual: false,
+        ty: None,
+        default: None,
+        attributes: Vec::new().into(),
+        doc_comment: None,
+        hooks: None,
+    }
+}
+
+/// A parameter named `a` with nothing in it.
+fn parameter() -> Parameter {
+    Parameter {
+        name: Name::from("a"),
+        ty: None,
+        by_ref: false,
+        prefer_ref: false,
+        promoted: false,
+        variadic: false,
+        default: ParameterDefault::None,
+        attributes: Vec::new().into(),
+    }
+}
+
+/// Whether the table's class, with `change` made to it, is frozen.
+fn declaration(table: &Table, change: impl FnOnce(&mut ClassDecl)) -> bool {
+    let mut declared = class(held(table.array));
+    change(&mut declared);
+    Frozen::new(declared).is_ok()
+}
+
+#[test]
+fn frozen_refuses_a_requests_value_as_a_propertys_default() {
+    let (table, mut heap) = (table(), Heap::new());
+    let s = requests(&mut heap);
+    let mut p = property();
+    p.default = Some(held(table.array));
+    assert!(declaration(&table, |c| c.properties = vec![p.clone()].into()));
+    p.default = Some(held(s));
+    assert!(!declaration(&table, |c| c.properties = vec![p].into()));
+}
+
+#[test]
+fn frozen_refuses_a_requests_value_as_a_propertys_attribute() {
+    let (table, mut heap) = (table(), Heap::new());
+    let s = requests(&mut heap);
+    let mut p = property();
+    p.attributes = vec![attribute(held(s))].into();
+    assert!(!declaration(&table, |c| c.properties = vec![p].into()));
+}
+
+#[test]
+fn frozen_refuses_a_requests_value_as_a_property_hooks_attribute() {
+    let (table, mut heap) = (table(), Heap::new());
+    let s = requests(&mut heap);
+    for (get, set) in [
+        (Some(method(vec![attribute(held(s))])), None),
+        (None, Some(method(vec![attribute(held(s))]))),
+    ] {
+        let mut p = property();
+        p.hooks = Some(Box::new(PropertyHooks {
+            get,
+            set,
+            is_abstract: false,
+        }));
+        assert!(!declaration(&table, |c| c.properties = vec![p].into()));
+    }
+}
+
+#[test]
+fn frozen_refuses_a_requests_value_in_a_property_hooks_op_array() {
+    let (table, mut heap) = (table(), Heap::new());
+    let s = requests(&mut heap);
+    let hook = |literals| HookBody {
+        class: 0,
+        property: 0,
+        kind: HookKind::Get,
+        body: code(literals),
+    };
+    let mut unit = published(&table);
+    unit.hooks = vec![hook(vec![table.string])];
+    assert!(frozen(unit), "the table's string in a hook's op array");
+    let mut unit = published(&table);
+    unit.hooks = vec![hook(vec![s])];
+    assert!(!frozen(unit), "a request's string in a hook's op array");
+}
+
+#[test]
+fn frozen_refuses_a_requests_value_as_a_classs_attribute() {
+    let (table, mut heap) = (table(), Heap::new());
+    let s = requests(&mut heap);
+    assert!(declaration(&table, |c| c.attributes =
+        vec![attribute(held(table.array))].into()));
+    assert!(!declaration(&table, |c| c.attributes = vec![attribute(held(s))].into()));
+}
+
+#[test]
+fn frozen_refuses_a_requests_value_as_a_methods_attribute() {
+    let (table, mut heap) = (table(), Heap::new());
+    let s = requests(&mut heap);
+    assert!(!declaration(&table, |c| c.methods =
+        vec![method(vec![attribute(held(s))])]));
+}
+
+/// A unit of the table's whose function `f` has `slot` for its one
+/// parameter.
+fn with_parameter(table: &Table, slot: Parameter) -> Unit {
+    let mut unit = published(table);
+    unit.functions[0].0.parameters = Parameters::from(vec![slot]);
+    unit
+}
+
+#[test]
+fn frozen_refuses_a_requests_value_as_a_parameters_default() {
+    let (table, mut heap) = (table(), Heap::new());
+    let s = requests(&mut heap);
+    let mut slot = parameter();
+    slot.default = ParameterDefault::Expr(held(table.array));
+    assert!(frozen(with_parameter(&table, slot.clone())));
+    slot.default = ParameterDefault::Expr(held(s));
+    assert!(!frozen(with_parameter(&table, slot)));
+}
+
+#[test]
+fn frozen_refuses_a_requests_value_as_a_parameters_attribute() {
+    let (table, mut heap) = (table(), Heap::new());
+    let s = requests(&mut heap);
+    let mut slot = parameter();
+    slot.attributes = vec![attribute(held(s))].into();
+    assert!(!frozen(with_parameter(&table, slot)));
+}
+
+#[test]
+fn frozen_refuses_a_requests_value_as_a_consts_value() {
+    let (table, mut heap) = (table(), Heap::new());
+    let s = requests(&mut heap);
+    let mut unit = published(&table);
+    unit.constants[0].value = held(s);
+    assert!(!frozen(unit), "a request's string as a `const`'s value");
+    let mut unit = published(&table);
+    unit.constants[0].attributes = vec![attribute(held(s))].into();
+    assert!(!frozen(unit), "a request's string as a `const`'s attribute");
+}
+
+#[test]
+fn frozen_refuses_a_requests_value_as_a_bound_variables_value() {
+    let (table, mut heap) = (table(), Heap::new());
+    let s = requests(&mut heap);
+    let mut unit = published(&table);
+    unit.dynamic[0].1.bound_vars = vec![BoundVar {
+        name: Name::from("s"),
+        value: s,
+        lexical: false,
+    }];
+    assert!(
+        !frozen(unit),
+        "a request's string a bound variable starts with"
+    );
 }
