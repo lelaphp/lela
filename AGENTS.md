@@ -9,10 +9,11 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | crates/ | 16 | 1 |
 | ext/ | 59 | 31 |
 | fuzz/ | 1 | 1 |
+| lanes/ | 3 | 0 |
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=2f9f4d04998b618fef4cbf7aab37c54267b77c39222329e6160740d566d809cc out=754ca578e0f983ef28c007d8cb97847977da87d9d80985ced7da0c0b946f2782 -->
+<!-- /computed in=e598c8ee82d42081b5c547de2c1610685f757e803ce2aaba8be1f1aeede3c2e8 out=24a0970de38bf3e82a307507a5be68798c82ac2bde27126dd973619312f06362 -->
 
 ## What makes the third engine special?
 
@@ -91,7 +92,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=5543796411ee67cd881461611d2df30069953684156d7bf1364ff2c4621d8c99 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=8022a853226e8a0f20283e2e4df1fddb182b86e440e8bcf587522f7784789fbc out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -129,7 +130,7 @@ third-engine-design.md
 | layer | layer.lock | 43 |  |
 | harness | xtask.lock | 499 |  |
 
-<!-- /computed in=30e7224b5192eba3b7167df5851a6cea8bc56985b7a640871918e10b9cef2395 out=27fe98ccc8ce36999e381d0d0ab97952e89a2263cac95932c26c5b45d01ffe77 -->
+<!-- /computed in=2fd90564472e36df75e5b5f2409abc3dac3aaaeccfe19688695acd0f559a3065 out=27fe98ccc8ce36999e381d0d0ab97952e89a2263cac95932c26c5b45d01ffe77 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
