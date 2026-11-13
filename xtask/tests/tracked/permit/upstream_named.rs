@@ -9,7 +9,9 @@
 //! and until then from `proposal.toml` beside its fixtures, the whole file
 //! `cargo xtask steer seams.toml --from` lands; so the tests hold the row
 //! in both states, and the walk over the tracked rules takes its fixtures
-//! once it is tracked. No name is spelled in this file, which the row does
+//! once it is tracked. Every other row is read from `seams.toml` alone,
+//! never from the proposal's copy, which stands still while the tracked
+//! file moves. No name is spelled in this file, which the row does
 //! not exempt: every form is read from the list.
 
 use super::*;
@@ -21,16 +23,14 @@ fn dir() -> PathBuf {
     fixtures().join("rules").join(RULE)
 }
 
-/// The text of the manifest that carries the row: `seams.toml` where a
-/// person has landed it, and the proposal beside its fixtures until then.
-fn carrying() -> String {
-    let tracked = std::fs::read_to_string(workspace().join("seams.toml")).unwrap();
-    let landed = Manifest::parse(&tracked).unwrap().rule(RULE).is_some();
-    if landed {
-        tracked
-    } else {
-        std::fs::read_to_string(dir().join("proposal.toml")).unwrap()
-    }
+/// The text of `seams.toml` as it stands.
+fn tracked() -> String {
+    std::fs::read_to_string(workspace().join("seams.toml")).unwrap()
+}
+
+/// The proposal beside the row's fixtures, the whole file steer lands.
+fn proposal() -> String {
+    std::fs::read_to_string(dir().join("proposal.toml")).unwrap()
 }
 
 /// The tracked manifest with the row: as it carries it, or with the
@@ -39,7 +39,7 @@ fn carrying() -> String {
 fn with_the_row() -> Manifest {
     let mut manifest = Manifest::load(workspace()).unwrap();
     if manifest.rule(RULE).is_none() {
-        let proposed = Manifest::parse(&carrying()).unwrap();
+        let proposed = Manifest::parse(&proposal()).unwrap();
         let row = proposed.rule(RULE).cloned();
         manifest
             .rules
@@ -74,11 +74,20 @@ fn forms() -> Vec<Listed> {
 }
 
 /// The `[[rule]]` block of `id` in `text`, as the export's test reads it.
-fn block<'a>(text: &'a str, id: &str) -> &'a str {
+fn block_in(text: &str, id: &str) -> Option<String> {
     let id = format!("id = \"{id}\"");
-    text.split("[[rule]]")
-        .find(|block| block.contains(&id))
-        .unwrap_or_else(|| panic!("no row {id}"))
+    let mut blocks = text.split("[[rule]]");
+    blocks.find(|block| block.contains(&id)).map(str::to_owned)
+}
+
+/// The `[[rule]]` block of `id` as `seams.toml` carries it, and only
+/// `upstream.named`'s from the proposal while the tracked file does not.
+fn block(id: &str) -> String {
+    let tracked = block_in(&tracked(), id);
+    let proposed = || (id == RULE).then(|| block_in(&proposal(), id)).flatten();
+    tracked
+        .or_else(proposed)
+        .unwrap_or_else(|| panic!("seams.toml carries no row {id}"))
 }
 
 /// A `Write` of `content` at `file`, or an `Edit` appending it.
@@ -112,7 +121,6 @@ fn denied(manifest: &Manifest, root: &Path, call: &Call) -> bool {
 fn the_row_refuses_each_form_the_bar_refuses_and_passes_the_rest() {
     let manifest = with_the_row();
     let file = Path::new("docs/a-made-up-note.md");
-    let text = carrying();
     let forms = forms();
     for list in ["names-one", "names-none", "row", "stays-refused"] {
         assert!(forms.iter().any(|f| f.list == list), "forms.tsv: no {list}");
@@ -121,7 +129,7 @@ fn the_row_refuses_each_form_the_bar_refuses_and_passes_the_rest() {
         let (content, refused) = match list.as_str() {
             "names-one" | "stays-refused" => (format!("see {form} for it\n"), true),
             "names-none" => (format!("see {form} for it\n"), false),
-            "row" => (block(&text, form).to_owned(), false),
+            "row" => (block(form), false),
             _ => panic!("forms.tsv: {name}: no list {list}"),
         };
         for tool in ["Edit", "Write"] {
