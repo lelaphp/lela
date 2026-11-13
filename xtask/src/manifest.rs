@@ -759,11 +759,13 @@ pub struct Predicates {
     pub with: OneOrMany,
     pub on: Option<String>,
     pub deny: Option<bool>,
-    /// A pattern beside `deny = true`: a write to any file, in the scope
-    /// or out of it, that adds a hit of it is refused as a write into the
-    /// scope is, read as a `deny_pattern` over a write reads what the
-    /// write adds (#510): a `computed exec` opener line, which `computed
-    /// run` executes wherever it stands (#4363, #4348 ruling 3).
+    /// A pattern beside `deny = true`: a write to any file of the
+    /// workspace, in the scope or out of it, that adds a hit of it is
+    /// refused as a write into the scope is, read as a `deny_pattern` over
+    /// a write reads what the write adds (#510): a `computed exec` opener
+    /// line, which `computed run` executes wherever it stands (#4363,
+    /// #4348 ruling 3). A file outside the workspace it does not reach
+    /// (#4679).
     pub adding: Option<String>,
     /// `writes = true`: a call that writes, an `Edit`, a `Write`, or a
     /// shell command that can change the checkout it runs in or a

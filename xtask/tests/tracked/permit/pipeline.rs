@@ -357,8 +357,8 @@ fn a_package_added_to_a_lock_is_refused_and_a_lock_that_moves_among_its_own_is_n
 /// A `Cargo.lock` outside the workspace is no lock of its own (#4679): an
 /// `Edit` and a `Write` there that add a registry package are no finding
 /// of `pipeline.lock`'s, since no row's `adding` reaches a file outside
-/// the workspace, which `Call::path` says no row describes; the same
-/// text written to the workspace's own lock is refused, the control.
+/// the workspace, as `Call::path` says; the same text written to the
+/// workspace's own lock is refused, the control.
 #[test]
 fn a_package_added_to_a_lock_outside_the_workspace_is_no_finding_of_the_row() {
     let manifest = Manifest::load(workspace()).unwrap();
