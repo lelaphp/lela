@@ -2030,7 +2030,11 @@ impl Shared {
     ///
     /// A class whose constants hold a closure and a first-class callable,
     /// and a class that extends it, are served as php serves them, with
-    /// the cache and without:
+    /// the cache and without; so is a class that uses a trait and holds a
+    /// first-class callable in a constant and a closure in a property's
+    /// default, whose composed declaration the check refuses where its
+    /// link would be published (`Request::publish`), so that with the
+    /// cache it is bound per request (#4684):
     ///
     /// ```php
     /// $dir = sys_get_temp_dir() . '/frozen-closure-' . getmypid();
@@ -2042,8 +2046,16 @@ impl Shared {
     ///     const ADD = static function (int $a, int $b): int { return $a + $b; };
     /// }
     /// class Child extends Holder {}
+    /// trait Greets {
+    ///     public function hi(): string { return 'hi'; }
+    /// }
+    /// class Greeter {
+    ///     use Greets;
+    ///     const LEN = strlen(...);
+    ///     public $twice = static function (int $n): int { return 2 * $n; };
+    /// }
     /// PHP);
-    /// file_put_contents("$dir/main.php", "<?php\nrequire __DIR__ . '/c.inc';\nvar_dump((Holder::LEN)('abc'), (Child::ADD)(2, 3), Child::LEN instanceof Closure);\n");
+    /// file_put_contents("$dir/main.php", "<?php\nrequire __DIR__ . '/c.inc';\nvar_dump((Holder::LEN)('abc'), (Child::ADD)(2, 3), Child::LEN instanceof Closure);\n\$g = new Greeter;\nvar_dump((Greeter::LEN)('abcd'), (\$g->twice)(4), \$g->hi());\n");
     /// foreach ([[], ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.file_update_protection=0']] as $ini) {
     ///     $p = proc_open([PHP_BINARY, '-n', ...$ini, "$dir/main.php"], [1 => ['pipe', 'w']], $pipes);
     ///     echo stream_get_contents($pipes[1]);
@@ -2057,9 +2069,15 @@ impl Shared {
     /// int(3)
     /// int(5)
     /// bool(true)
+    /// int(4)
+    /// int(8)
+    /// string(2) "hi"
     /// int(3)
     /// int(5)
     /// bool(true)
+    /// int(4)
+    /// int(8)
+    /// string(2) "hi"
     /// ```
     pub(crate) fn publish_compiled(
         &self,
