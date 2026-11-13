@@ -2,7 +2,8 @@
 //! recording the recording tier took and a claim on the word it grew
 //! from, each stage's failure settled as php settles it, a panicking
 //! `Backend` among them, the stage's fixture standing for it; a held
-//! unit's strings read off the request after its engine dropped; and the
+//! unit's strings read off the request after its engine dropped; a job
+//! served on the worker after its request's values are gone; and the
 //! worker, submitted to from four threads and drained, every word
 //! settled once and no trace published twice, and its queue dropped with
 //! the engine.
@@ -11,7 +12,9 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use php_engine::tier::FuncRef;
+use php_heap::ZvalType;
 use php_unit::MapPtrOffset;
+use php_unit::decl::ConstExpr;
 
 use super::{Job, pipeline, pipeline_with};
 use crate::lower::Compiled;
@@ -347,6 +350,53 @@ fn a_held_units_strings_read_off_the_request_after_its_engine_dropped() -> Resul
     let (named, outcome) = off.map_err(|_| "the thread panicked")?;
     assert!(named, "the literal reads as the engine interned it");
     assert_eq!(outcome, Outcome::Published(trace(1)));
+    assert_eq!(policy::read(holder.word()), State::Compiled(trace(1)));
+    Ok(())
+}
+
+/// A job is served on the worker after the request that recorded it has
+/// ended, and its values with it: a method of a class whose parent an
+/// `eval` declared, recorded at its entry. Once the request is served the
+/// view still holds the parent's declaration as the request linked it,
+/// with a constant's string and a default's array the `eval` laid among
+/// the request's values, each named here by its zval's type and never
+/// read; the job is then queued for the worker, which serves it and
+/// settles its word.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_job_is_served_on_the_worker_after_its_requests_values_are_gone() -> Result<(), String> {
+    let quiet = [("opcache.jit_debug", "0")];
+    let program = concat!(
+        "eval('class P { const K = \"abcdefghij\" . 5; public $d = [1, 2]; }');",
+        " class C extends P { function f($a) { return $a * 3 + 1; } }",
+        " echo (new C)->f(2);",
+    );
+    let mut taken = recorded(&records::at("f", "enter"), &quiet, program);
+    let (recorded, holder) = taken.remove(0);
+    let view = &recorded.view;
+    let class = (view.scope(recorded.record.root)).ok_or("the view holds f's class")?;
+    let parent = view.parent(class).ok_or("and the class's parent")?;
+    let decl = view
+        .class_decl(parent)
+        .ok_or("and the parent's declaration")?;
+    let values = decl.constants.iter().map(|constant| &constant.value);
+    let defaults = decl.properties.iter().filter_map(|p| p.default.as_ref());
+    let counted: Vec<ZvalType> = (values.chain(defaults))
+        .filter_map(|expr| match expr {
+            ConstExpr::UnitValue(held) if held.value().is_refcounted() => Some(held.value().kind()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        counted,
+        [ZvalType::String, ZvalType::Array],
+        "the request's own values, named by their zvals"
+    );
+    let job = claimed(recorded, &holder)?;
+    let engine = engine(&quiet);
+    let queued = (engine.compiler.submitter()).submit(&engine.shared, job, &mut Lines::default());
+    assert!(queued.is_none(), "queued for the worker");
+    engine.compiler.drain();
     assert_eq!(policy::read(holder.word()), State::Compiled(trace(1)));
     Ok(())
 }
