@@ -20,12 +20,12 @@
 //! compiles inline holds the type of what it fetched
 //! ([`Builder::hold_in_fetch`]).
 
-use php_engine::tier::Sample;
 use php_heap::ZvalType;
 use php_unit::{Opcode, OperandKind, Opline};
 
 use super::{At, Builder, Left, Placed, Point, draft};
 use crate::analysis::Defined;
+use crate::record::Sample;
 use crate::types::lattice::{self, Types};
 use crate::types::opcodes::{ISEMPTY, MAX_ARG_FLAG_NUM};
 use crate::types::{

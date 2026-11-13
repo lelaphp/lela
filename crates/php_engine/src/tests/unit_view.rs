@@ -53,7 +53,9 @@ fn hold_class_named(req: &mut Request, name: PhpString) -> bool {
         return false;
     };
     let mut view = UnitView::new(req);
-    view.hold_class(req, class) && view.class(class).is_some()
+    let held = view.hold_class(req, class);
+    let named = view.record_class(req, class);
+    held && view.class(named).is_some()
 }
 
 /// `hold_callee_here(): bool`: whether a view takes the pair the calling

@@ -11,8 +11,11 @@
 //!
 //! An analysis the epoch keeps names a class by the identity every
 //! request of the epoch shares, [`EpochClassId`], and one built for one
-//! build alone by the recording request's number, [`ClassId`]
-//! (design §5.14, *Identities*): `php_ssa::analyse` is built for each.
+//! build alone as the recording names it, [`RecordClass`], a request's
+//! own class by the index its view gave it (design §5.14, *Identities*):
+//! `php_ssa::analyse` is built for each. What either reads of a class's
+//! declaration it reads through the view's [`ClassFacts`](php_engine::tier::ClassFacts),
+//! never the declaration itself.
 //!
 //! What a call returns is typed by what php knows of the callee: a
 //! native's from php's table, a user function's from what its analysis
@@ -27,8 +30,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use php_engine::api::abi::EngineState;
 use php_engine::tier::{
-    Bindings, CallSite, CalledFunction, CalleeBody, ClassId, EngineFuncRef, EpochClassId, FuncRef,
-    UnitView,
+    Bindings, CallSite, CalledBody, CalledFunction, CalleeBody, EngineFuncRef, EpochClassId,
+    PropertyFacts, RecordClass, UnitView,
 };
 use php_ssa::{
     Analysis, BlockId, Body, Callee, Cfg, ClassConstant, ClassOf, Function, Level, LinkedTable,
@@ -36,7 +39,7 @@ use php_ssa::{
     VarInfo, is_no_val_use,
 };
 use php_unit::OpArray;
-use php_unit::decl::{ClassKind, HookKind, PropertyDecl, Visibility};
+use php_unit::decl::{ClassKind, HookKind, Visibility};
 
 use crate::Lines;
 use crate::policy::JitDebug;
@@ -91,24 +94,24 @@ impl Analyses {
 
 /// How one analysis names a class: by the identity every request of the
 /// view's epoch shares, in an analysis the epoch keeps
-/// ([`EpochClassId`]), or by the recording request's number, in one made
-/// for one build alone ([`ClassId`]). The view answers by the request's
-/// number, which an analysis takes in its own.
-trait Handle: Copy + PartialEq + Into<ClassId> {
+/// ([`EpochClassId`]), or as the recording names it, in one made for one
+/// build alone ([`RecordClass`]). The view answers as the recording names
+/// a class, which an analysis takes in its own.
+trait Handle: Copy + PartialEq + Into<RecordClass> {
     /// `class` as an analysis of this kind names it; none where it
     /// cannot, a request's own class in one the epoch keeps.
-    fn of(view: &UnitView, class: ClassId) -> Option<Self>;
+    fn of(class: RecordClass) -> Option<Self>;
 }
 
-impl Handle for ClassId {
-    fn of(_: &UnitView, class: ClassId) -> Option<ClassId> {
+impl Handle for RecordClass {
+    fn of(class: RecordClass) -> Option<RecordClass> {
         Some(class)
     }
 }
 
 impl Handle for EpochClassId {
-    fn of(view: &UnitView, class: ClassId) -> Option<EpochClassId> {
-        view.shared_class(class)
+    fn of(class: RecordClass) -> Option<EpochClassId> {
+        class.shared()
     }
 }
 
@@ -124,14 +127,14 @@ struct Bound<'a, C> {
     /// array returns, `func_info->return_info`, which php clears from
     /// every op array a build analysed once its trace is compiled
     /// (`zend_jit_compile_trace`), so a caller reads only this build's.
-    built: &'a [(EngineFuncRef, Option<Returns<ClassId>>)],
+    built: &'a [(EngineFuncRef, Option<Returns<RecordClass>>)],
     /// Whether the analysis read what another user function returns,
     /// which differs from build to build with the order the op arrays
     /// are analysed in, so the analysis is built anew at each build.
     reads_returns: Cell<bool>,
     /// Whether the analysis met a class it has no `C` for, a request's
     /// own in an analysis the epoch would keep, so it is made again
-    /// under the request's numbers and kept for no other build.
+    /// as the recording names its classes and kept for no other build.
     unnamed: Cell<bool>,
     named: PhantomData<C>,
 }
@@ -140,7 +143,7 @@ impl<'a, C: Handle> Bound<'a, C> {
     fn new(
         view: &'a UnitView,
         f: EngineFuncRef,
-        built: &'a [(EngineFuncRef, Option<Returns<ClassId>>)],
+        built: &'a [(EngineFuncRef, Option<Returns<RecordClass>>)],
     ) -> Bound<'a, C> {
         Bound {
             view,
@@ -153,8 +156,8 @@ impl<'a, C: Handle> Bound<'a, C> {
     }
 
     /// `class`, as the view answers it, named as a `C`.
-    fn named(&self, class: ClassId) -> Option<C> {
-        let named = C::of(self.view, class);
+    fn named(&self, class: RecordClass) -> Option<C> {
+        let named = C::of(class);
         if named.is_none() {
             self.unnamed.set(true);
         }
@@ -163,7 +166,7 @@ impl<'a, C: Handle> Bound<'a, C> {
 
     /// What a function returns, as an earlier analysis of this build
     /// found it, its class named as a `C`.
-    fn returns(&self, returns: Returns<ClassId>) -> Option<Returns<C>> {
+    fn returns(&self, returns: Returns<RecordClass>) -> Option<Returns<C>> {
         let class = match returns.class {
             Some(of) => Some(ClassOf {
                 class: self.named(of.class)?,
@@ -220,8 +223,8 @@ impl<'a, C: Handle> Bound<'a, C> {
     }
 
     /// The property `name` class `c` declares itself.
-    fn own_property(&self, c: C, name: &[u8]) -> Option<&PropertyDecl> {
-        (self.view.class_decl(c.into())?.properties.iter()).find(|p| *p.name.0 == *name)
+    fn own_property(&self, c: C, name: &[u8]) -> Option<&PropertyFacts> {
+        (self.view.class_facts(c.into())?.properties.iter()).find(|p| *p.name.0 == *name)
     }
 
     /// `called` as php's call analysis reads it: its body by the kind the
@@ -235,7 +238,7 @@ impl<'a, C: Handle> Bound<'a, C> {
             CalleeBody::Another => {
                 self.reads_returns.set(true);
                 let built =
-                    (self.built.iter()).find(|&&(h, _)| Some(FuncRef::from(h)) == called.body);
+                    (self.built.iter()).find(|&&(h, _)| CalledBody::Engine(h) == called.body);
                 let returns = built.and_then(|&(_, returns)| returns);
                 Body::User(returns.and_then(|returns| self.returns(returns)))
             }
@@ -272,7 +275,7 @@ impl<C: Handle> LinkedTable for Bound<'_, C> {
 
     fn engine_class(&self, lcname: &[u8]) -> Option<C> {
         let class = self.view.engine_class(lcname)?;
-        self.named(class)
+        self.named(class.into())
     }
 
     fn scope(&self) -> Option<C> {
@@ -282,8 +285,8 @@ impl<C: Handle> LinkedTable for Bound<'_, C> {
 
     fn name(&self, class: C) -> &[u8] {
         self.view
-            .class_decl(class.into())
-            .map_or(&[][..], |decl| &decl.name.0)
+            .class_facts(class.into())
+            .map_or(&[][..], |facts| &facts.name.0)
     }
 
     fn parent(&self, class: C) -> Option<C> {
@@ -296,19 +299,19 @@ impl<C: Handle> LinkedTable for Bound<'_, C> {
             || self
                 .view
                 .class(class.into())
-                .is_some_and(|linked| linked.interfaces.contains(&of.into()))
+                .is_some_and(|linked| linked.implements(of.into()))
     }
 
     fn is_final(&self, class: C) -> bool {
         self.view
-            .class_decl(class.into())
-            .is_some_and(|decl| decl.flags.is_final)
+            .class_facts(class.into())
+            .is_some_and(|facts| facts.flags.is_final)
     }
 
     fn is_trait(&self, class: C) -> bool {
         self.view
-            .class_decl(class.into())
-            .is_some_and(|decl| decl.kind == ClassKind::Trait)
+            .class_facts(class.into())
+            .is_some_and(|facts| facts.kind == ClassKind::Trait)
     }
 
     /// A class lays its objects down with php's standard handlers and no
@@ -319,25 +322,26 @@ impl<C: Handle> LinkedTable for Bound<'_, C> {
             return ObjectShape::default();
         };
         let standard = self.lineage(class).all(|c| {
-            self.view.class_decl(c.into()).is_some_and(|decl| {
-                !decl.file.0.is_empty() || decl.name.0.eq_ignore_ascii_case(b"stdClass")
+            self.view.class_facts(c.into()).is_some_and(|facts| {
+                !facts.file.0.is_empty() || facts.name.0.eq_ignore_ascii_case(b"stdClass")
             })
         });
+        let accessors = linked.accessors();
         ObjectShape {
-            constructor: linked.constructor.is_some(),
-            get: linked.accessors.get.is_some(),
-            set: linked.accessors.set.is_some(),
+            constructor: linked.constructs(),
+            get: accessors.get.is_some(),
+            set: accessors.set.is_some(),
             standard,
         }
     }
 
     fn property(&self, class: C, name: &[u8], scope: Option<C>) -> Option<Property<'_, C>> {
-        let declared =
-            |holder: ClassId, at: u32| self.view.class_decl(holder)?.properties.get(at as usize);
-        let row = (self.view.class(class.into())?.properties).find(name, |row| {
-            declared(row.holder_in(class.into()), row.at).map_or(&[][..], |p| &p.name.0)
-        })?;
-        let holder = self.named(row.holder_in(class.into()))?;
+        let declared = |holder: RecordClass, at: u32| {
+            self.view.class_facts(holder)?.properties.get(at as usize)
+        };
+        let (holder, at) = (self.view.class(class.into())?)
+            .property(name, |holder, at| Some(&*declared(holder, at)?.name.0))?;
+        let holder = self.named(holder)?;
         let (holder, decl) = match scope {
             // `zend_get_parent_private_property`: code of a class above
             // `class` that declares `name` private reads its own.
@@ -351,7 +355,7 @@ impl<C: Handle> LinkedTable for Bound<'_, C> {
             {
                 (scope, self.own_property(scope, name)?)
             }
-            _ => (holder, declared(holder.into(), row.at)?),
+            _ => (holder, declared(holder.into(), at)?),
         };
         self.reaches(decl.visibility, holder, name, scope)
             .then_some(Property {
@@ -382,18 +386,18 @@ impl<C: Handle> LinkedTable for Bound<'_, C> {
     }
 
     fn constant(&self, class: C, name: &[u8]) -> Option<ClassConstant<'_, C>> {
-        let declared =
-            |holder: ClassId, at: u32| self.view.class_decl(holder)?.constants.get(at as usize);
-        let row = (self.view.class(class.into())?.constants).find(name, |row| {
-            declared(row.holder_in(class.into()), row.at).map_or(&[][..], |c| &c.name.0)
-        })?;
-        let decl = declared(row.holder_in(class.into()), row.at)?;
+        let declared = |holder: RecordClass, at: u32| {
+            self.view.class_facts(holder)?.constants.get(at as usize)
+        };
+        let (holder, at) = (self.view.class(class.into())?)
+            .constant(name, |holder, at| Some(&*declared(holder, at)?.name.0))?;
+        let facts = declared(holder, at)?;
         Some(ClassConstant {
-            ty: decl.ty.as_ref(),
-            is_public: decl.visibility == Visibility::Public,
-            is_deprecated: (decl.attributes.iter())
-                .any(|a| a.name.0.eq_ignore_ascii_case(b"Deprecated")),
-            declared_in: self.named(row.holder_in(class.into()))?,
+            ty: facts.ty.as_ref(),
+            is_public: facts.visibility == Visibility::Public,
+            is_deprecated: (facts.attributes.iter())
+                .any(|name| name.0.eq_ignore_ascii_case(b"Deprecated")),
+            declared_in: self.named(holder)?,
         })
     }
 }
@@ -439,17 +443,16 @@ fn passed(record: &TraceRecord) -> Vec<EngineFuncRef> {
 
 /// One analysis a trace's build reads: one the epoch keeps, its classes
 /// named as every request of the epoch names them, or one made for this
-/// build alone, named by the recording request's numbers.
+/// build alone, named as the recording names its classes.
 #[derive(Debug)]
 enum Read {
     Kept(Arc<Analysis<EpochClassId>>),
-    Own(Arc<Analysis<ClassId>>),
+    Own(Arc<Analysis<RecordClass>>),
 }
 
 impl Read {
-    /// `func_info->return_info`, its class by the recording request's
-    /// number.
-    fn returns(&self) -> Returns<ClassId> {
+    /// `func_info->return_info`, its class as the recording names it.
+    fn returns(&self) -> Returns<RecordClass> {
         match self {
             Read::Kept(analysis) => widened_returns(analysis.returns),
             Read::Own(analysis) => analysis.returns,
@@ -465,8 +468,8 @@ impl Read {
     }
 }
 
-/// `info`, its class by the recording request's number.
-fn widened<C: Into<ClassId>>(info: VarInfo<C>) -> VarInfo<ClassId> {
+/// `info`, its class as the recording names it.
+fn widened<C: Into<RecordClass>>(info: VarInfo<C>) -> VarInfo<RecordClass> {
     VarInfo {
         types: info.types,
         class: info.class.map(widened_class),
@@ -474,8 +477,8 @@ fn widened<C: Into<ClassId>>(info: VarInfo<C>) -> VarInfo<ClassId> {
     }
 }
 
-/// `returns`, its class by the recording request's number.
-fn widened_returns<C: Into<ClassId>>(returns: Returns<C>) -> Returns<ClassId> {
+/// `returns`, its class as the recording names it.
+fn widened_returns<C: Into<RecordClass>>(returns: Returns<C>) -> Returns<RecordClass> {
     Returns {
         types: returns.types,
         class: returns.class.map(widened_class),
@@ -484,8 +487,8 @@ fn widened_returns<C: Into<ClassId>>(returns: Returns<C>) -> Returns<ClassId> {
     }
 }
 
-/// `of`, its class by the recording request's number.
-fn widened_class<C: Into<ClassId>>(of: ClassOf<C>) -> ClassOf<ClassId> {
+/// `of`, its class as the recording names it.
+fn widened_class<C: Into<RecordClass>>(of: ClassOf<C>) -> ClassOf<RecordClass> {
     ClassOf {
         class: of.class.into(),
         instanceof: of.instanceof,
@@ -500,7 +503,7 @@ fn widened_class<C: Into<ClassId>>(of: ClassOf<C>) -> ClassOf<ClassId> {
 #[derive(Debug)]
 pub(crate) struct Analysed {
     analyses: Vec<(EngineFuncRef, Read)>,
-    built: Vec<(EngineFuncRef, Option<Returns<ClassId>>)>,
+    built: Vec<(EngineFuncRef, Option<Returns<RecordClass>>)>,
     level: Level,
 }
 
@@ -553,7 +556,7 @@ impl Analysed {
         f: EngineFuncRef,
         at: u32,
         which: Defined,
-    ) -> Option<VarInfo<ClassId>> {
+    ) -> Option<VarInfo<RecordClass>> {
         over!(self, f, |_, ssa| defined_in(ssa, at, which))
     }
 
@@ -575,7 +578,12 @@ impl Analysed {
     /// pi only where no phi is, and so up each immediate dominator; none
     /// where no definition dominates it, as php then copies what its first
     /// use reads, which is what the variable entered the function with.
-    pub(crate) fn reaching(&self, f: EngineFuncRef, at: u32, var: u32) -> Option<VarInfo<ClassId>> {
+    pub(crate) fn reaching(
+        &self,
+        f: EngineFuncRef,
+        at: u32,
+        var: u32,
+    ) -> Option<VarInfo<RecordClass>> {
         over!(self, f, |cfg, ssa| reaching_in(cfg, ssa, at, var))
     }
 
@@ -609,17 +617,17 @@ impl Analysed {
         start: u32,
         last: Option<u32>,
         var: u32,
-    ) -> Option<VarInfo<ClassId>> {
+    ) -> Option<VarInfo<RecordClass>> {
         over!(self, f, |cfg, ssa| header_in((cfg, ssa), start, last, var))
     }
 }
 
 /// [`Analysed::defined`] over one analysis's SSA.
-fn defined_in<C: Copy + Into<ClassId>>(
+fn defined_in<C: Copy + Into<RecordClass>>(
     ssa: &Ssa<C>,
     at: u32,
     which: Defined,
-) -> Option<VarInfo<ClassId>> {
+) -> Option<VarInfo<RecordClass>> {
     let op = ssa.ops.get(at as usize)?;
     let var = match which {
         Defined::Op1 => op.op1_def,
@@ -642,12 +650,12 @@ fn aliased_in<C>(ssa: &Ssa<C>, at: u32, which: Defined) -> Option<bool> {
 }
 
 /// [`Analysed::reaching`] over one analysis's CFG and SSA.
-fn reaching_in<C: Copy + Into<ClassId>>(
+fn reaching_in<C: Copy + Into<RecordClass>>(
     cfg: &Cfg,
     ssa: &Ssa<C>,
     at: u32,
     var: u32,
-) -> Option<VarInfo<ClassId>> {
+) -> Option<VarInfo<RecordClass>> {
     let info = |v: SsaVar| ssa.info.get(v.index()).copied().map(widened);
     let of_var = |v: Option<SsaVar>| v.filter(|v| ssa.var(*v).is_some_and(|i| i.var.0 == var));
     let mut block = *cfg.map.get(at as usize)?;
@@ -729,12 +737,12 @@ fn last_use_in<C>(
 }
 
 /// [`Analysed::header`] over one analysis's CFG and SSA.
-fn header_in<C: Copy + Into<ClassId>>(
+fn header_in<C: Copy + Into<RecordClass>>(
     (cfg, ssa): (&Cfg, &Ssa<C>),
     start: u32,
     last: Option<u32>,
     var: u32,
-) -> Option<VarInfo<ClassId>> {
+) -> Option<VarInfo<RecordClass>> {
     let block = *cfg.map.get(start as usize)?;
     if !cfg.blocks.get(block.index())?.marks.loop_header {
         return None;
@@ -778,7 +786,7 @@ impl Analysed {
 /// ([`Analysed::tables`]), from which its frames are made
 /// ([`Tables::frames`]).
 pub(crate) struct Tables<'a> {
-    tables: Vec<(EngineFuncRef, Function<'a>, Bound<'a, ClassId>)>,
+    tables: Vec<(EngineFuncRef, Function<'a>, Bound<'a, RecordClass>)>,
     level: Level,
 }
 
@@ -796,10 +804,10 @@ impl Tables<'_> {
 /// php's inference over a trace's SSA, `zend_update_type_info` and
 /// `zend_inference_propagate_range` as `zend_jit_trace_build_tssa` calls
 /// them, each op read in the op array it is of.
-pub(crate) struct Inference<'a>(Vec<(EngineFuncRef, TraceFrame<'a, Bound<'a, ClassId>>)>);
+pub(crate) struct Inference<'a>(Vec<(EngineFuncRef, TraceFrame<'a, Bound<'a, RecordClass>>)>);
 
 impl<'a> Inference<'a> {
-    fn frame(&self, f: EngineFuncRef) -> Option<&TraceFrame<'a, Bound<'a, ClassId>>> {
+    fn frame(&self, f: EngineFuncRef) -> Option<&TraceFrame<'a, Bound<'a, RecordClass>>> {
         self.0.iter().find(|(g, _)| *g == f).map(|(_, frame)| frame)
     }
 
@@ -809,7 +817,7 @@ impl<'a> Inference<'a> {
     pub(crate) fn update(
         &self,
         f: EngineFuncRef,
-        tssa: &mut Ssa<ClassId>,
+        tssa: &mut Ssa<RecordClass>,
         positions: &[Position],
         at: usize,
     ) -> bool {
@@ -823,7 +831,7 @@ impl<'a> Inference<'a> {
     pub(crate) fn may_throw(
         &self,
         f: EngineFuncRef,
-        tssa: &mut Ssa<ClassId>,
+        tssa: &mut Ssa<RecordClass>,
         positions: &[Position],
         at: usize,
         operands: (php_ssa::Types, php_ssa::Types),
@@ -837,7 +845,7 @@ impl<'a> Inference<'a> {
     pub(crate) fn propagate_range(
         &self,
         f: EngineFuncRef,
-        tssa: &mut Ssa<ClassId>,
+        tssa: &mut Ssa<RecordClass>,
         positions: &[Position],
         at: usize,
         var: SsaVar,
@@ -873,7 +881,7 @@ fn analysis_of(
     view: &UnitView,
     analyses: &Analyses,
     (f, function): (EngineFuncRef, &Function<'_>),
-    built: &[(EngineFuncRef, Option<Returns<ClassId>>)],
+    built: &[(EngineFuncRef, Option<Returns<RecordClass>>)],
     level: Level,
 ) -> Option<Read> {
     if let Some(bindings) = view.bindings(f) {
@@ -891,7 +899,7 @@ fn analysis_of(
             return made.map(Read::Kept);
         }
     }
-    let table = Bound::<ClassId>::new(view, f, built);
+    let table = Bound::<RecordClass>::new(view, f, built);
     php_ssa::analyse(function, &table, level).map(|made| Read::Own(Arc::new(made)))
 }
 
@@ -919,7 +927,7 @@ pub(crate) fn build(
     } else {
         Level::Func
     };
-    let mut built: Vec<(EngineFuncRef, Option<Returns<ClassId>>)> = Vec::new();
+    let mut built: Vec<(EngineFuncRef, Option<Returns<RecordClass>>)> = Vec::new();
     let mut found = Vec::new();
     for &f in passed.iter().take(MAX_FUNCS) {
         let Some(function) = function(view, f) else {
@@ -935,7 +943,7 @@ pub(crate) fn build(
                     kept.dump(&mut written, &function, &table, frameless);
                 }
                 Read::Own(own) => {
-                    let table = Bound::<ClassId>::new(view, f, &built);
+                    let table = Bound::<RecordClass>::new(view, f, &built);
                     own.dump(&mut written, &function, &table, frameless);
                 }
             }

@@ -328,9 +328,9 @@ mod touched {
             return;
         };
         let mut view = UnitView::new(req);
-        if view.hold_place(req, frame, at, class)
-            && let Some(raw) = view.place(f, at, class).and_then(PropertySlot::cached)
-        {
+        let held = view.hold_place(req, frame, at, class);
+        let named = view.record_class(req, class);
+        if held && let Some(raw) = view.place(f, at, named).and_then(PropertySlot::cached) {
             PLACED.get_or_init(|| raw);
         }
     }

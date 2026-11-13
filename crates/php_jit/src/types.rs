@@ -944,7 +944,7 @@ impl Read {
     /// How the recorder reached the zval it sampled: through an
     /// `IS_INDIRECT`, then through the `IS_REFERENCE` it points at where
     /// it is one, through an `IS_REFERENCE`, or in place.
-    pub(crate) fn sampled(sample: php_engine::tier::Sample) -> Read {
+    pub(crate) fn sampled<C: Copy>(sample: php_engine::tier::Sample<C>) -> Read {
         match (sample.indirect, sample.reference) {
             (false, false) => Read::InPlace,
             (false, true) => Read::Through,

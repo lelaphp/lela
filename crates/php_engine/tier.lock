@@ -49,6 +49,7 @@ tier::Building
 tier::CachedSlot
 tier::CallSite
 tier::Called
+tier::CalledBody
 tier::CalledFunction
 tier::CalleeBody
 tier::CalleeSlot
@@ -114,6 +115,7 @@ tier::Laid
 tier::LandingIndex
 tier::LandingRows
 tier::MapPtrRaw
+tier::OwnClass
 tier::PLACE
 tier::Parked
 tier::PlaceClass
@@ -132,7 +134,9 @@ tier::PlainCall::activation
 tier::PlainCall::callee
 tier::PlainCall::count
 tier::PlainCall::slots
+tier::PropertyFacts
 tier::PropertySlot
+tier::RecordClass
 tier::Refusal
 tier::Request
 tier::SafepointIdx
@@ -179,7 +183,6 @@ tier::call
 tier::call_image
 tier::catches
 tier::class_number
-tier::class_published
 tier::compile
 tier::current
 tier::dim_key
@@ -202,7 +205,6 @@ tier::landing
 tier::landing_stood
 tier::lending
 tier::native_returns
-tier::numbered_class
 tier::observes
 tier::on_heap
 tier::owed_frame

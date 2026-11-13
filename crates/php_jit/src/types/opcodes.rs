@@ -3,13 +3,13 @@
 //! switch names (`Z/ext/opcache/jit/zend_jit_trace.c:1835-2245`), and the
 //! parameters an op array's `RECV` oplines declare.
 
-use php_engine::tier::Sample;
 use php_heap::ZvalType;
 use php_unit::decl::{Parameter, Type};
 use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
 use super::{Constant, Frame, Imm, Layout, Line, Operand, Slot};
+use crate::record::Sample;
 
 /// php's `MAX_ARG_FLAG_NUM`: past it, how a send passes is read late.
 pub(super) const MAX_ARG_FLAG_NUM: u32 = 12;
