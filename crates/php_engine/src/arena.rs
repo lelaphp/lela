@@ -200,8 +200,11 @@ impl<T> Column<T> {
 /// own row is filled; and by its one check of a class every request of
 /// the epoch shares ([`Arena::shared_class`]), which a
 /// [`UnitView`](crate::tier::UnitView) of that epoch calls. Beside them,
-/// an [`EngineClassId`](crate::api::values::EngineClassId) widens to one
-/// by `From`, since the engine's own classes stand in every epoch. So a
+/// and the one other way its constructor is reached, an
+/// [`EngineClassId`](crate::api::values::EngineClassId) widens to one by
+/// `From`, since the engine's own classes stand in every epoch; the
+/// engine's records the arena keeps are keyed by that widening
+/// ([`Arena::of_engine`]). So a
 /// request's own class has none, a publisher that forgets a filter is
 /// handed none to write into a row, and one stands only in its epoch's
 /// arena, beside a hold on it, or among the engine's own. Where a
@@ -355,9 +358,10 @@ impl Arena {
     /// past them and past `functions` natives and native methods,
     /// holding `files` and keeping `interned`. Each record is keyed by
     /// [`EpochClassId`] here, once: every class an engine's record names
-    /// is one of the engine's own, numbered below `records.len()`. A
-    /// record that named another would be keyed to none and is held
-    /// empty, as the engine holds a record its link refused.
+    /// is one of the engine's own, numbered below `records.len()`, whose
+    /// [`EngineClassId`](crate::api::values::EngineClassId) widens to it
+    /// by `From`. A record that named another would be keyed to none and
+    /// is held empty, as the engine holds a record its link refused.
     pub(crate) fn of_engine(
         records: &[LinkedClass<ClassId>],
         functions: usize,
@@ -365,11 +369,14 @@ impl Arena {
         interned: Interned,
     ) -> Arena {
         let first_class = u32::try_from(records.len()).unwrap_or(ClassId::LOCAL);
+        // Below `first_class` a class is one of the engine's own, which
+        // widens to the epoch's identity as every engine class does.
         let own = |class: ClassId| {
-            let number = class
+            class
                 .published_number()
                 .filter(|number| *number < first_class)?;
-            Some(EpochClassId(number))
+            let engine = crate::api::values::EngineClassId::engine_own(class);
+            Some(EpochClassId::from(engine))
         };
         let mut natives: Vec<LinkedClass<EpochClassId>> = (records.iter())
             .map(|record| record.try_map(own).unwrap_or_default())
