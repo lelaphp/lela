@@ -708,7 +708,7 @@ pub enum Runs {
     Foreground,
 }
 
-/// The predicates of harness-design.md §4.1, which cites [`Self::NAMES`]
+/// The predicates of harness-design.md §4.1, which cites [`Self::TABLE`]
 /// and [`Self::orphaned_qualifier`] and counts neither (#2250), each
 /// optional in the grammar so the file parses;
 /// `Manifest::parse` then holds every rule to exactly one. `unless` and
