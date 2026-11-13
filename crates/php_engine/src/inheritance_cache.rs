@@ -165,13 +165,16 @@ mod tests {
     use php_unit::Unit;
 
     use super::{Entry, InheritanceCache};
-    use crate::api::values::{ClassId, EngineClassId};
-    use crate::arena::EpochClassId;
+    use crate::api::values::ClassId;
+    use crate::arena::{Arena, EpochClassId};
 
-    /// The identity of class `number`, widened from one of the engine's,
-    /// as a test that numbers its own classes names one.
+    /// The identity of class `number`, as a publisher has one: the row an
+    /// arena numbered past `number` classes reserves first.
     fn class(number: u32) -> EpochClassId {
-        EpochClassId::from(EngineClassId::engine_own(ClassId(number)))
+        let classes = usize::try_from(number).unwrap_or(usize::MAX);
+        let arena = Arena::past(classes, 0, crate::unit_cache::Files::new(16));
+        let reserved = arena.reserve_class();
+        reserved.expect("an empty arena reserves its first row")
     }
 
     /// The number an identity names.
@@ -210,7 +213,7 @@ mod tests {
     #[test]
     fn a_restart_empties_the_map() {
         let files = crate::unit_cache::Files::new(16);
-        let epochs = crate::arena::Epochs::of(crate::arena::Arena::past(0, 0, files));
+        let epochs = crate::arena::Epochs::of(Arena::past(0, 0, files));
         let unit = Unit::default().published(None);
         let arena = epochs.enter(|_| false);
         arena.inheritance.add(&unit, 0, entry(1, 10));
