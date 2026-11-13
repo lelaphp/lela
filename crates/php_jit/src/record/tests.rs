@@ -921,7 +921,7 @@ impl Draw<'_> {
             .flatten()
             .and_then(|view| view.shared_numbered(number));
         shared.map_or_else(
-            || RecordClass::Own(OwnClass::at(self.next(64))),
+            || RecordClass::Own(OwnClass::at(self.next(u32::MAX))),
             RecordClass::Shared,
         )
     }
