@@ -257,12 +257,12 @@ pub(crate) struct Held {
     pub(crate) early: EarlyBound,
     /// The full path, php's `script.filename`.
     pub(crate) path: Vec<u8>,
-    /// The full path as the engine's interned string, hashed before the
-    /// file was held ([`UnitCache::name`]), which `EG(included_files)`
-    /// is handed for a hit as `persistent_compile_file` hands it
-    /// `script.filename`: no string made and no hash taken. A null where
-    /// the engine's table had no room for it.
-    name: php_heap::Zval,
+    /// The full path as the engine's interned string, a value no request
+    /// owns, hashed before the file was held ([`UnitCache::name`]), which
+    /// `EG(included_files)` is handed for a hit as `persistent_compile_file`
+    /// hands it `script.filename`: no string made and no hash taken. A
+    /// null where the engine's table had no room for it.
+    name: php_heap::FrozenZval,
     /// The file as it was compiled; none for one held under
     /// [`Validation::Never`], php's zero timestamp, which a window never
     /// validates and nothing else finds fresh.
@@ -313,7 +313,7 @@ impl Held {
     /// Its full path is `path`, interned as `name` ([`UnitCache::name`]).
     pub(crate) fn preloaded(
         unit: PublishedUnit,
-        (name, path): (php_heap::Zval, Vec<u8>),
+        (name, path): (php_heap::FrozenZval, Vec<u8>),
         size: u64,
         order: u64,
     ) -> Held {
@@ -335,7 +335,7 @@ impl Held {
     /// The engine's interned string for its full path, `script.filename`,
     /// its hash cached; none where the engine's table had no room for it.
     pub(crate) fn name(&self) -> Option<php_heap::Str> {
-        self.name.as_str()
+        self.name.zval().as_str()
     }
 
     /// What a hit under `validation` at the request time `now` is due.
@@ -1024,13 +1024,13 @@ impl UnitCache {
 
     /// The first name `zend_accel_script_persist` interns of a unit it
     /// persists: its `filename`, the full path `path`, hashed as the
-    /// engine's table takes it, which the [`Held`] file keeps; a null
-    /// where the table has no room for it. A unit served without being
+    /// engine's table takes it, which the [`Held`] file keeps as a value
+    /// of that table and nothing a request owns; a null where the table
+    /// has no room for it. A unit served without being
     /// held is persisted by nothing, and names none.
-    pub(crate) fn name(&self, path: &[u8]) -> php_heap::Zval {
+    pub(crate) fn name(&self, path: &[u8]) -> php_heap::FrozenZval {
         let mut strings = self.interned.strings();
-        php_heap::Intern::intern(&mut *strings, path)
-            .map_or(php_heap::Zval::null(), php_heap::Zval::string)
+        php_heap::FrozenZval::interned(&mut strings, path).unwrap_or(php_heap::FrozenZval::null())
     }
 
     /// The names `zend_accel_script_persist` interns beside the strings
