@@ -1,7 +1,11 @@
 //! A unit or a declaration the engine published for every request, as a
 //! type only a check makes (#4633): [`Frozen`], and the one walk over the
-//! values a unit holds ([`unit_values`]), which the check and every other
-//! reader of a unit's values read through.
+//! values a unit holds ([`unit_values`]). The check reads through it, and
+//! so do `php_compile`'s `declared_values` and `holds_counted_value`, the
+//! compiler's reuse of an attribute's arguments, and the engine's walks
+//! over a constant expression's values and a constant's attributes. One
+//! reader does not yet: `php_engine`'s `main_constants` reads an op array's
+//! constants and bound variables itself (#4682).
 //!
 //! A [`PublishedUnit`] cannot tell the engine's unit from a request's:
 //! the engine's (`publish_compiled`), a request's own (`compile_for`) and
@@ -12,12 +16,15 @@
 //!
 //! The walk destructures every struct it walks with no `..` and matches
 //! every enum with no `_`, so a field or a variant the unit format gains
-//! does not compile until the walk names it; a field that holds no value
-//! is named `_`, and each such field's type is one that holds no value,
-//! most of them engine state by the derive. The one that names something
-//! beside the walked value is a closure's cell ([`crate::UnitCell`]),
-//! which names the unit the closure was declared in: the unit walked,
-//! where the walk is over a unit.
+//! does not compile until the walk names it. A field that holds no value
+//! is named `_`: plain data (flags, counts, lines, oplines, indices and
+//! tables of them, a doc comment, a diagnostic's text, an attribute's
+//! validator), and names and types, of which `Name`, `Type` and
+//! `Visibility` are engine state by the derive. The one that names
+//! something beside the walked value is a closure's cell
+//! ([`crate::UnitCell`]), which names the unit the closure was declared
+//! in; what that is, for a unit and for a declaration, is the argument of
+//! [`Frozen`]'s `EngineState` impl.
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use std::ops::Deref;
@@ -592,7 +599,25 @@ impl<T> Deref for Frozen<T> {
 /// constants hold is decided against its own unit's table, and each op
 /// array is numbered by the engine's map-pointer space, not a request's.
 /// It is read and never written, so what the check read stands while it
-/// is held, and every other field the walk passes over holds no value.
-/// So no pointer into a request's heap is reachable through one, and it
-/// may be moved and shared as engine state.
+/// is held.
+///
+/// No field the walk passes over names anything beside the value walked
+/// but one, a closure's cell ([`crate::UnitCell`]) in a constant
+/// expression, which names a unit. In a unit, every closure's cell is a
+/// share of the one cell its maker laid, the compiler's
+/// ([`crate::UnitCell::share`]) or the cache reader's, which
+/// [`Unit::published`] binds to the published copy the first time the
+/// unit is published; a copy published again keeps that first binding.
+/// The engine publishes only a unit fresh from a compile or from the
+/// cache's reader (`publish_compiled`), once, so the cell names the unit
+/// walked: that holds by how the engine makes a unit, and the walk does
+/// not check it. So no pointer into a request's heap is reachable through
+/// a frozen unit, and it may be moved and shared as engine state.
+///
+/// A frozen declaration is not yet held to that: the walk does not refuse
+/// a cell in it that is not empty, which names the unit the declaration
+/// was compiled in, a request's own among them; that refusal is #4649's
+/// remaining change, waiting on #4681, and until it lands nothing outside
+/// this crate's tests makes a `Frozen<ClassDecl>`, whose first holder is
+/// #4652.
 impl<T: Values + Send + Sync + 'static> EngineState for Frozen<T> {}
