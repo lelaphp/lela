@@ -86,3 +86,11 @@ This section lists every C library the engine and its hosts link that is not in 
 ## 6. Rust crates
 
 The crates this project builds with are the ones `Cargo.lock` lists, each under the licence its own manifest states; `cargo metadata --format-version 1` prints each package's `license`. The list changes with `Cargo.lock`, so it is not typed here.
+
+## 7. Harness data
+
+The notice in this section is taken at the nginx release that `oracle.toml`'s `[fastcgi]` key `nginx` pins, not at php-src's tag: a bump of that key moves `LICENSES/nginx.txt` with it.
+
+| component | where in this project | origin | licence | notice text |
+|---|---|---|---|---|
+| nginx's `fastcgi_params`, Igor Sysoev and Nginx, Inc. | `oracle.toml`, `[fastcgi]`: `params`, the text of the file, and `script_filename`, the line `conf/fastcgi.conf` adds | nginx `conf/fastcgi_params` and `conf/fastcgi.conf` at the tag `release-1.30.5`, the release `[fastcgi]`'s `nginx` key pins | BSD-2-Clause | `LICENSES/nginx.txt` (nginx's `LICENSE` at `release-1.30.5`) |
