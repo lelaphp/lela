@@ -19,7 +19,7 @@ use crate::api::request::Request;
 use crate::api::values::PhpString;
 use crate::engine::Engine;
 use crate::test::{Capture, Files};
-use crate::tier::{self, FuncRef, SafepointIdx, UnitView};
+use crate::tier::{self, EngineFuncRef, FuncRef, SafepointIdx, UnitView};
 
 /// The views the natives built, with the op array each was asked to
 /// hold, the extension's request state, kept past the request for the
@@ -40,7 +40,7 @@ fn hold_caller(req: &mut Request) -> bool {
         return false;
     };
     let mut view = UnitView::new(req);
-    let held = view.hold(req, f);
+    let held = view.hold(req, f).is_some();
     req.state::<Views>().0.push((view, f));
     held
 }
@@ -175,7 +175,8 @@ fn a_view_holds_a_held_units_function_refuses_an_evals_and_outlives_its_request(
     assert_eq!(views.len(), 2, "two views were built");
     let mut views = views.into_iter();
     let (held_view, held) = views.next().expect("the view of inc.php");
-    let (own_view, own) = views.next().expect("the view of the eval");
+    let (_, own) = views.next().expect("the view of the eval");
+    let held = EngineFuncRef::of(held).expect("inc.php's function, the engine's");
     let code = held_view.op_array(held);
     assert!(
         code.is_some_and(|code| code.safepoints.len() >= 3),
@@ -187,10 +188,8 @@ fn a_view_holds_a_held_units_function_refuses_an_evals_and_outlives_its_request(
         None,
         "past its cache"
     );
-    assert!(own_view.op_array(own).is_none());
-    assert!(held_view.op_array(own).is_none(), "never asked to hold it");
+    assert_eq!(EngineFuncRef::of(own), None, "the eval's is the request's");
     assert_eq!(held_view.is_main(held), Some(false), "a function's own");
-    assert_eq!(own_view.is_main(own), None, "refused, so unread");
 }
 
 /// A held file's own code is its main op array, whose variables a symbol
@@ -206,7 +205,9 @@ fn a_view_tells_a_files_own_code_from_its_functions() {
     );
     let dir = files.path();
     let views = kept(dir);
-    let mains: Vec<Option<bool>> = views.iter().map(|(view, f)| view.is_main(*f)).collect();
+    let mains: Vec<Option<bool>> = (views.iter())
+        .map(|(view, f)| view.is_main(EngineFuncRef::of(*f)?))
+        .collect();
     assert_eq!(mains, [Some(true), Some(false)]);
 }
 
@@ -228,7 +229,7 @@ fn a_view_lists_a_functions_parameters() {
     let listed: Vec<Option<Vec<(String, bool)>>> = views
         .iter()
         .map(|(view, f)| {
-            view.parameters(*f).map(|parameters| {
+            view.parameters(EngineFuncRef::of(*f)?).map(|parameters| {
                 parameters
                     .iter()
                     .map(|p| (String::from_utf8_lossy(&p.name.0).into_owned(), p.by_ref))
@@ -251,7 +252,7 @@ fn a_view_lists_a_functions_parameters() {
     );
     let (typed_view, typed) = &views[1];
     let masks: Vec<u32> = typed_view
-        .parameters(*typed)
+        .parameters(EngineFuncRef::of(*typed).expect("typed's op array, the engine's"))
         .expect("the typed function's parameters")
         .iter()
         .map(|p| p.ty.as_ref().map_or(0, php_unit::decl::Type::mask))
@@ -325,7 +326,7 @@ fn a_held_functions_constant_string_reads_through_a_view_past_its_engine() {
     let strings = |views: &[(UnitView, FuncRef)]| -> Vec<Vec<u8>> {
         views
             .iter()
-            .filter_map(|(view, f)| view.op_array(*f))
+            .filter_map(|(view, f)| view.op_array(EngineFuncRef::of(*f)?))
             .flat_map(|code| code.literals.iter())
             .filter_map(|literal| literal.as_str())
             .map(|s| s.bytes().to_vec())

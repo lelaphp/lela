@@ -27,7 +27,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use php_unit::decl::{FunctionDecl, Name, Parameter};
-use php_unit::{MapPtrOffset, OpArray, OplineIdx, PublishedUnit};
+use php_unit::{OpArray, OplineIdx, PublishedUnit};
 
 use super::{Laid, SafepointIdx, Word};
 use crate::arena::Column;
@@ -439,10 +439,8 @@ impl Funcs {
 /// The engine offset `code` took as its unit was published; none for an
 /// op array compiled for one request.
 fn engine_offset(code: &OpArray) -> Option<u32> {
-    match code.runtime_cache {
-        MapPtrOffset::Engine(offset) => Some(offset),
-        MapPtrOffset::Request(_) => None,
-    }
+    super::EngineFuncRef::of(super::FuncRef::at(code.runtime_cache))
+        .map(super::EngineFuncRef::offset)
 }
 
 /// Every op array of `unit` with its place: the main one, its

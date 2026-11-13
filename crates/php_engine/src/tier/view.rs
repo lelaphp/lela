@@ -46,7 +46,7 @@ impl Epoch {
     /// array this epoch holds no row for, a request's, and for a number
     /// past its last safepoint.
     #[must_use]
-    pub fn word(&self, f: FuncRef, at: SafepointIdx) -> &Word {
+    pub fn word(&self, f: impl Into<FuncRef>, at: SafepointIdx) -> &Word {
         self.func(f).map_or(&SEALED, |func| func.word(at))
     }
 
@@ -57,7 +57,7 @@ impl Epoch {
     /// ([`Epoch::lay_landing`]), and for an op array this epoch holds no
     /// row for.
     #[must_use]
-    pub fn landing(&self, f: FuncRef, at: OplineIdx) -> &Word {
+    pub fn landing(&self, f: impl Into<FuncRef>, at: OplineIdx) -> &Word {
         self.func(f).map_or(&SEALED, |func| func.landing(at))
     }
 
@@ -67,7 +67,7 @@ impl Epoch {
     /// where they are not, when the landing reads sealed until a tier lays
     /// them, and for an op array this epoch holds no row for.
     #[must_use]
-    pub fn laid_landing(&self, f: FuncRef, at: OplineIdx) -> Option<&Word> {
+    pub fn laid_landing(&self, f: impl Into<FuncRef>, at: OplineIdx) -> Option<&Word> {
         self.func(f)?.laid_landing(at)
     }
 
@@ -76,11 +76,8 @@ impl Epoch {
     /// first time; none for an op array this epoch holds no row for, and
     /// past its last opline.
     #[must_use]
-    pub fn lay_landing(&self, f: FuncRef, at: OplineIdx) -> Option<&Word> {
-        match f.0 {
-            MapPtrOffset::Engine(offset) => self.0.lay_landing(offset, at),
-            MapPtrOffset::Request(_) => None,
-        }
+    pub fn lay_landing(&self, f: impl Into<FuncRef>, at: OplineIdx) -> Option<&Word> {
+        self.0.lay_landing(EngineFuncRef::of(f.into())?.0, at)
     }
 
     /// Where compiled code finds the landing words of the op arrays this
@@ -98,16 +95,19 @@ impl Epoch {
     /// trace holds and no frame's function. None for an op array this
     /// epoch holds no row for, a request's.
     #[must_use]
-    pub fn held(&self, f: FuncRef) -> Option<Held<'_>> {
+    pub fn held(&self, f: impl Into<FuncRef>) -> Option<Held<'_>> {
         self.func(f)?.op_array().map(Held)
     }
 
-    /// The row of a held op array.
-    fn func(&self, f: FuncRef) -> Option<&super::published::Func> {
-        match f.0 {
-            MapPtrOffset::Engine(offset) => self.0.func(offset),
-            MapPtrOffset::Request(_) => None,
-        }
+    /// The row of a held op array, none for a request's.
+    fn func(&self, f: impl Into<FuncRef>) -> Option<&super::published::Func> {
+        self.row(EngineFuncRef::of(f.into())?)
+    }
+
+    /// The row of the op array the engine numbered `f`, where this epoch
+    /// holds one.
+    fn row(&self, f: EngineFuncRef) -> Option<&super::published::Func> {
+        self.0.func(f.0)
     }
 
     /// The tier's value for this epoch where the tier made one
@@ -172,8 +172,60 @@ pub fn epoch_state<T: EngineState + std::any::Any + Send + Sync>(
 /// map-pointer offset its unit's publication gave it, which no other op
 /// array of the engine shares, where its unit is held; by the request's
 /// own offset where it was compiled for the request alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
+///
+/// So it may be a request's, and is no engine state (design §5.14,
+/// *Identities*; #4631): engine state names an op array by the
+/// [`EngineFuncRef`] made from one, and a `FuncRef` asked to stand there
+/// is refused,
+///
+/// ```compile_fail,E0277
+/// fn engine_state<T: php_engine::api::abi::EngineState>() {}
+/// engine_state::<php_engine::tier::EngineFuncRef>();
+/// engine_state::<php_engine::tier::FuncRef>();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FuncRef(MapPtrOffset);
+
+/// An op array the engine numbered, by the map-pointer offset its unit's
+/// publication gave it (design §5.14, *Identities*; #4631): the name an
+/// op array has in engine state, the epoch's tier state among it.
+///
+/// It may stand there, and derives `EngineState`, because the engine
+/// never reuses one of its map-pointer offsets: `map_ptr_last` only adds,
+/// so the number names one op array for as long as the engine stands,
+/// whichever epoch holds its row. A request's offset, which numbers
+/// another op array in every other request, has none: the one way to
+/// make one is [`EngineFuncRef::of`], which refuses it, and where a
+/// [`FuncRef`] is asked for, this is one, by `From`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
+pub struct EngineFuncRef(u32);
+
+impl EngineFuncRef {
+    /// The op array `f` names, where the engine numbered it; none for one
+    /// compiled for its request alone. The one place an `EngineFuncRef`
+    /// is made.
+    #[must_use]
+    pub const fn of(f: FuncRef) -> Option<EngineFuncRef> {
+        match f.0 {
+            MapPtrOffset::Engine(offset) => Some(EngineFuncRef(offset)),
+            MapPtrOffset::Request(_) => None,
+        }
+    }
+
+    /// The engine's map-pointer offset that numbers the op array: what
+    /// compiled code, the kernels and a recorded trace's text form name
+    /// it by, and where the epoch keeps its row.
+    #[must_use]
+    pub const fn offset(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<EngineFuncRef> for FuncRef {
+    fn from(f: EngineFuncRef) -> FuncRef {
+        FuncRef(MapPtrOffset::Engine(f.0))
+    }
+}
 
 impl FuncRef {
     /// The map-pointer offset that names the op array, as a recorded
@@ -253,10 +305,7 @@ impl<'a> Held<'a> {
 /// The row of the epoch `req` started in at `offset`, none for a
 /// request's offset.
 fn row(req: &Request, offset: MapPtrOffset) -> Option<&super::published::Func> {
-    match offset {
-        MapPtrOffset::Engine(offset) => req.arena().func(offset),
-        MapPtrOffset::Request(_) => None,
-    }
+    req.arena().func(EngineFuncRef::of(FuncRef(offset))?.0)
 }
 
 /// The op array an activated user frame runs, [`func`]'s answer, read
@@ -327,10 +376,11 @@ fn own_row<'r>(
 /// the fake scope (`EG(fake_scope)`, [`Request::in_fake_scope`]), and a
 /// resumed generator or fiber may stand under one, as php's does, so the
 /// guard asks nothing of it either.
-fn scoped_code(req: &Request, frame: FrameRef) -> Option<(FuncRef, &OpArray)> {
+fn scoped_code(req: &Request, frame: FrameRef) -> Option<(EngineFuncRef, &OpArray)> {
     let header = req.vm().at(frame)?;
     let func = own_row(req, header).filter(|func| func.fixes_scope())?;
-    Some((FuncRef(header.runtime_cache().offset()), func.op_array()?))
+    let f = EngineFuncRef::of(FuncRef(header.runtime_cache().offset()))?;
+    Some((f, func.op_array()?))
 }
 
 /// The op array `frame` serves; none for a frame that serves none.
@@ -494,7 +544,7 @@ pub fn touchable(epoch: &Epoch, raw: MapPtrRaw) -> bool {
 /// The op array of a function's whose cache slot `raw` names, which the
 /// touch reads.
 fn touched_code(epoch: &Epoch, raw: MapPtrRaw) -> Option<&OpArray> {
-    (epoch.func(FuncRef(MapPtrOffset::Engine(raw.offset))))
+    (epoch.0.func(raw.offset))
         .filter(|func| !func.is_main())
         .and_then(|func| func.op_array())
 }
@@ -514,7 +564,7 @@ fn touched_code(epoch: &Epoch, raw: MapPtrRaw) -> Option<&OpArray> {
 /// ([`PropertySlot::cached`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropertySlot {
-    func: FuncRef,
+    func: EngineFuncRef,
     at: OplineIdx,
     class: ClassId,
     slot: u32,
@@ -593,7 +643,7 @@ impl PropertySlot {
 /// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CalleeSlot {
-    func: FuncRef,
+    func: EngineFuncRef,
     at: OplineIdx,
     class: ClassId,
     function: Option<EpochFunction>,
@@ -709,7 +759,7 @@ impl From<EpochFunction> for crate::api::call::Function {
 #[derive(Debug)]
 pub struct UnitView {
     epoch: Epoch,
-    funcs: Vec<FuncRef>,
+    funcs: Vec<EngineFuncRef>,
     /// The shared classes the view holds ([`UnitView::hold_class`]).
     classes: Vec<EpochClassId>,
     /// The shared classes the view minted an identity for and did not
@@ -737,12 +787,12 @@ pub struct UnitView {
     frameless_names: Vec<Name>,
     /// The classes php's analysis of each held op array binds by name
     /// ([`UnitView::class_named`]), bound as the view accepts it.
-    named: Vec<(FuncRef, Box<[u8]>, ClassId)>,
+    named: Vec<(EngineFuncRef, Box<[u8]>, ClassId)>,
     /// The engine's own classes the declared types of what the view
     /// holds name ([`UnitView::engine_class`]).
     engine_named: Vec<(Box<[u8]>, ClassId)>,
     /// The class each held op array is declared in ([`UnitView::scope`]).
-    scopes: Vec<(FuncRef, ClassId)>,
+    scopes: Vec<(EngineFuncRef, ClassId)>,
     /// Each class bound for the analysis with its parent
     /// ([`UnitView::parent`]).
     related: Vec<(ClassId, Option<ClassId>)>,
@@ -755,10 +805,10 @@ pub struct UnitView {
     own: Vec<(ClassId, LinkedClass<ClassId>, ClassDecl)>,
     /// The op arrays whose analysis binds one of `own`
     /// ([`UnitView::binds_request_class`]).
-    request_bound: Vec<FuncRef>,
+    request_bound: Vec<EngineFuncRef>,
     /// The functions the calls of each held op array reach, bound as the
     /// view accepts it ([`UnitView::called`]).
-    called: Vec<(FuncRef, Site, CalledFunction)>,
+    called: Vec<(EngineFuncRef, Site, CalledFunction)>,
 }
 
 /// What a view bound for php's analysis of one op array
@@ -884,10 +934,10 @@ impl CalledFunction {
     /// reaches it: the one place the kind is decided, for the key and for
     /// the analysis that reads it.
     #[must_use]
-    pub fn body_from(&self, f: FuncRef) -> CalleeBody {
+    pub fn body_from(&self, f: EngineFuncRef) -> CalleeBody {
         match self.body {
             None => CalleeBody::Native,
-            Some(g) if g == f => CalleeBody::Itself,
+            Some(g) if g == FuncRef::from(f) => CalleeBody::Itself,
             Some(_) => CalleeBody::Another,
         }
     }
@@ -899,7 +949,7 @@ impl CalledFunction {
     fn shared(
         &self,
         view: &UnitView,
-        f: FuncRef,
+        f: EngineFuncRef,
     ) -> Option<CalledFunction<EpochClassId, CalleeBody>> {
         let method = match self.method {
             Some(m) => Some(CalledMethod {
@@ -1005,23 +1055,24 @@ impl UnitView {
     }
 
     /// Accept the op array `f` names where the view's epoch holds its
-    /// unit, holding nothing; `false` for a request-scoped one, which a
-    /// trace may not read past the request, and for a request of another
-    /// epoch.
-    pub fn hold(&mut self, req: &Request, f: FuncRef) -> bool {
-        if !self.epoch.of(req) || self.epoch.func(f).is_none() {
-            return false;
+    /// unit, holding nothing, with the [`EngineFuncRef`] that names it in
+    /// what the view holds; none for a request-scoped one, which a trace
+    /// may not read past the request, and for a request of another epoch.
+    pub fn hold(&mut self, req: &Request, f: impl Into<FuncRef>) -> Option<EngineFuncRef> {
+        let f = EngineFuncRef::of(f.into())?;
+        if !self.epoch.of(req) || self.epoch.row(f).is_none() {
+            return None;
         }
         if !self.funcs.contains(&f) {
             self.funcs.push(f);
-            let frameless = (self.epoch.func(f).and_then(|func| func.op_array()))
+            let frameless = (self.epoch.row(f).and_then(|func| func.op_array()))
                 .is_some_and(|body| body.oplines.iter().any(|op| op.opcode.is_frameless_icall()));
             if frameless && self.frameless_names.is_empty() {
                 self.frameless_names = req.shared.frameless_names();
             }
             self.bind_names(req, f);
         }
-        true
+        Some(f)
     }
 
     /// Bind what php's analysis of the op array `f` names may look up
@@ -1037,9 +1088,9 @@ impl UnitView {
     /// php's `op_array->scope` and `EG(class_table)` name the request's, and
     /// marks the op array's analysis as the request's
     /// ([`UnitView::binds_request_class`]).
-    fn bind_names(&mut self, req: &Request, f: FuncRef) {
+    fn bind_names(&mut self, req: &Request, f: EngineFuncRef) {
         let epoch = self.epoch.clone();
-        let Some(func) = epoch.func(f) else {
+        let Some(func) = epoch.row(f) else {
             return;
         };
         let Some(body) = func.op_array() else {
@@ -1094,7 +1145,7 @@ impl UnitView {
     /// (`zend_optimizer_ignore_function`); the method a constant name
     /// names of the op array's class or of a class it names; and a
     /// frameless call's native.
-    fn bind_calls(&mut self, req: &Request, f: FuncRef, body: &OpArray) {
+    fn bind_calls(&mut self, req: &Request, f: EngineFuncRef, body: &OpArray) {
         let literal = |n: u32| body.literals.get(n as usize).and_then(|z| z.str_bytes());
         let mut classes: Vec<ClassId> = self.scope(f).into_iter().collect();
         classes.extend(
@@ -1291,7 +1342,7 @@ impl UnitView {
 
     /// Mark the analysis of `f` as the request's where `c`, a class it
     /// binds, is held for the request alone.
-    fn mark_own(&mut self, f: FuncRef, c: ClassId) {
+    fn mark_own(&mut self, f: EngineFuncRef, c: ClassId) {
         if self.own.iter().any(|(class, ..)| *class == c) && !self.request_bound.contains(&f) {
             self.request_bound.push(f);
         }
@@ -1302,7 +1353,7 @@ impl UnitView {
     /// learns is this request's, so it is built anew at each trace's
     /// build, as php builds every one, and kept for no other.
     #[must_use]
-    pub fn binds_request_class(&self, f: FuncRef) -> bool {
+    pub fn binds_request_class(&self, f: EngineFuncRef) -> bool {
         self.request_bound.contains(&f)
     }
 
@@ -1315,7 +1366,7 @@ impl UnitView {
     /// ([`UnitView::binds_request_class`]), or names one the view minted
     /// no [`EpochClassId`] for, which the epoch keeps no analysis under.
     #[must_use]
-    pub fn bindings(&self, f: FuncRef) -> Option<Bindings> {
+    pub fn bindings(&self, f: EngineFuncRef) -> Option<Bindings> {
         if self.binds_request_class(f) {
             return None;
         }
@@ -1346,7 +1397,7 @@ impl UnitView {
     /// the view bound it when it accepted the op array; none where php's
     /// call analysis finds none.
     #[must_use]
-    pub fn called(&self, f: FuncRef, site: CallSite<'_>) -> Option<&CalledFunction> {
+    pub fn called(&self, f: EngineFuncRef, site: CallSite<'_>) -> Option<&CalledFunction> {
         (self.called.iter())
             .find(|(func, held, _)| *func == f && held.as_call_site() == site)
             .map(|(.., called)| called)
@@ -1469,7 +1520,7 @@ impl UnitView {
             },
             _ => return false,
         };
-        if op.op2_type != OperandKind::Const || !self.hold(req, f) {
+        if op.op2_type != OperandKind::Const || self.hold(req, f).is_none() {
             return false;
         }
         // A request-scoped class's place is read from the cache slot of
@@ -1544,7 +1595,7 @@ impl UnitView {
             _ => false,
         };
         let slot = CacheSlot(op.out);
-        if !named || !self.hold(req, f) {
+        if !named || self.hold(req, f).is_none() {
             return false;
         }
         let Some(cached) = self.cache_slot(f, slot) else {
@@ -1577,7 +1628,7 @@ impl UnitView {
     /// The pair the call at `at` of the op array `f` resolved; none
     /// unless [`UnitView::hold_callee`] took it.
     #[must_use]
-    pub fn callee_at(&self, f: FuncRef, at: OplineIdx) -> Option<CalleeSlot> {
+    pub fn callee_at(&self, f: EngineFuncRef, at: OplineIdx) -> Option<CalleeSlot> {
         (self.callees.iter())
             .find(|pair| pair.func == f && pair.at == at)
             .copied()
@@ -1592,7 +1643,7 @@ impl UnitView {
     /// frame alike ([`super::published::Func::fixes_scope`]); none for any
     /// other opline and for a slot past its cache.
     #[must_use]
-    pub fn fetched_slot(&self, f: FuncRef, op: &Opline) -> Option<MapPtrRaw> {
+    pub fn fetched_slot(&self, f: EngineFuncRef, op: &Opline) -> Option<MapPtrRaw> {
         match op.opcode {
             Opcode::FetchConstant => self.cache_slot(f, CacheSlot(op.extended_value)),
             Opcode::FetchStaticPropR
@@ -1600,7 +1651,7 @@ impl UnitView {
                     && crate::exec::class_fixed(op.op2_type, op.op2)
                     && self
                         .epoch
-                        .func(f)
+                        .row(f)
                         .is_some_and(super::published::Func::fixes_scope) =>
             {
                 self.cache_slot(f, crate::handlers::fetched::static_slot(op))
@@ -1615,7 +1666,7 @@ impl UnitView {
     /// `Z/ext/opcache/jit/zend_jit_ir.c:8860-8880`); none for any other
     /// opline and for a slot past its cache.
     #[must_use]
-    pub fn named_slot(&self, f: FuncRef, op: &Opline) -> Option<MapPtrRaw> {
+    pub fn named_slot(&self, f: EngineFuncRef, op: &Opline) -> Option<MapPtrRaw> {
         matches!(
             op.opcode,
             Opcode::InitFcallByName | Opcode::InitNsFcallByName
@@ -1628,7 +1679,7 @@ impl UnitView {
     /// names on an object of `class`; none unless
     /// [`UnitView::hold_place`] took it.
     #[must_use]
-    pub fn place(&self, f: FuncRef, at: OplineIdx, class: ClassId) -> Option<PropertySlot> {
+    pub fn place(&self, f: EngineFuncRef, at: OplineIdx, class: ClassId) -> Option<PropertySlot> {
         (self.places.iter())
             .find(|place| place.func == f && place.at == at && place.class == class)
             .copied()
@@ -1653,7 +1704,7 @@ impl UnitView {
             return false;
         };
         let held = match plain.callee() {
-            Some(callee) => self.hold(req, callee),
+            Some(callee) => self.hold(req, callee).is_some(),
             None => plain.is_native() || plain.own_class().is_some(),
         };
         if !held {
@@ -1700,7 +1751,11 @@ impl UnitView {
     /// The plain calls to the op array `f` names with `count` arguments
     /// [`UnitView::hold_call`] took: a function's, and a method's of each
     /// called scope ([`super::PlainCall::is_method`]).
-    pub fn calls_of(&self, f: FuncRef, count: u32) -> impl Iterator<Item = &super::PlainCall> {
+    pub fn calls_of(
+        &self,
+        f: EngineFuncRef,
+        count: u32,
+    ) -> impl Iterator<Item = &super::PlainCall> {
         (self.calls.iter())
             .map(|(_, call)| call)
             .filter(move |call| {
@@ -1713,7 +1768,12 @@ impl UnitView {
     /// `class`, its called scope as the recording's request numbered it;
     /// none unless it took one.
     #[must_use]
-    pub fn method_call(&self, f: FuncRef, count: u32, class: ClassId) -> Option<&super::PlainCall> {
+    pub fn method_call(
+        &self,
+        f: EngineFuncRef,
+        count: u32,
+        class: ClassId,
+    ) -> Option<&super::PlainCall> {
         (self.calls.iter())
             .find(|(scope, call)| {
                 *scope == Some(class)
@@ -1727,7 +1787,7 @@ impl UnitView {
     /// The plain call of a closure over the op array `f` names, with
     /// `count` arguments, [`UnitView::hold_call`] took.
     #[must_use]
-    pub fn closure_call(&self, f: FuncRef, count: u32) -> Option<&super::PlainCall> {
+    pub fn closure_call(&self, f: EngineFuncRef, count: u32) -> Option<&super::PlainCall> {
         (self.calls.iter())
             .map(|(_, call)| call)
             .find(|call| call.callee() == Some(f) && call.count() == count && call.is_closure())
@@ -1765,11 +1825,11 @@ impl UnitView {
 
     /// The op array `f` names; none unless [`UnitView::hold`] accepted it.
     #[must_use]
-    pub fn op_array(&self, f: FuncRef) -> Option<&OpArray> {
+    pub fn op_array(&self, f: EngineFuncRef) -> Option<&OpArray> {
         if !self.funcs.contains(&f) {
             return None;
         }
-        self.epoch.func(f)?.op_array()
+        self.epoch.row(f)?.op_array()
     }
 
     /// Whether the op array `f` names is its file's own code, whose
@@ -1777,11 +1837,11 @@ impl UnitView {
     /// (`zend_jit_var_may_alias`, `Z/ext/opcache/jit/zend_jit_trace.c:363`);
     /// none unless [`UnitView::hold`] accepted it.
     #[must_use]
-    pub fn is_main(&self, f: FuncRef) -> Option<bool> {
+    pub fn is_main(&self, f: EngineFuncRef) -> Option<bool> {
         if !self.funcs.contains(&f) {
             return None;
         }
-        Some(self.epoch.func(f)?.is_main())
+        Some(self.epoch.row(f)?.is_main())
     }
 
     /// Whether the op array `f` names is a property hook's body, php's
@@ -1789,11 +1849,11 @@ impl UnitView {
     /// (`ZEND_JIT_TRACE_STOP_PROP_HOOK_CALL`); none unless
     /// [`UnitView::hold`] accepted it.
     #[must_use]
-    pub fn is_hook(&self, f: FuncRef) -> Option<bool> {
+    pub fn is_hook(&self, f: EngineFuncRef) -> Option<bool> {
         if !self.funcs.contains(&f) {
             return None;
         }
-        Some(self.epoch.func(f)?.is_hook())
+        Some(self.epoch.row(f)?.is_hook())
     }
 
     /// Whether a frame that runs the op array `f` names may have a
@@ -1802,11 +1862,11 @@ impl UnitView {
     /// from a method runs with its includer's; never a function's. None
     /// unless [`UnitView::hold`] accepted it.
     #[must_use]
-    pub fn receives(&self, f: FuncRef) -> Option<bool> {
+    pub fn receives(&self, f: EngineFuncRef) -> Option<bool> {
         if !self.funcs.contains(&f) {
             return None;
         }
-        Some(self.epoch.func(f)?.receives())
+        Some(self.epoch.row(f)?.receives())
     }
 
     /// The parameters the declaration of the op array `f` names lists,
@@ -1814,11 +1874,11 @@ impl UnitView {
     /// reference; none unless [`UnitView::hold`] accepted it, and an
     /// empty list for a file's own code.
     #[must_use]
-    pub fn parameters(&self, f: FuncRef) -> Option<&[Parameter]> {
+    pub fn parameters(&self, f: EngineFuncRef) -> Option<&[Parameter]> {
         if !self.funcs.contains(&f) {
             return None;
         }
-        self.epoch.func(f)?.parameters()
+        self.epoch.row(f)?.parameters()
     }
 
     /// The declaration the op array `f` names is the body of and the class
@@ -1826,11 +1886,11 @@ impl UnitView {
     /// php's analysis of the op array reads; none unless [`UnitView::hold`]
     /// accepted it.
     #[must_use]
-    pub fn declaration(&self, f: FuncRef) -> Option<Declaration<'_>> {
+    pub fn declaration(&self, f: EngineFuncRef) -> Option<Declaration<'_>> {
         if !self.funcs.contains(&f) {
             return None;
         }
-        let (function, scope) = self.epoch.func(f)?.declaration()?;
+        let (function, scope) = self.epoch.row(f)?.declaration()?;
         Some(Declaration { function, scope })
     }
 
@@ -1840,7 +1900,7 @@ impl UnitView {
     /// accepted the op array (`zend_optimizer_get_class_entry`, its
     /// `script` null); none for any other.
     #[must_use]
-    pub fn class_named(&self, f: FuncRef, lcname: &[u8]) -> Option<ClassId> {
+    pub fn class_named(&self, f: EngineFuncRef, lcname: &[u8]) -> Option<ClassId> {
         (self.named.iter())
             .find(|(func, name, _)| *func == f && **name == *lcname)
             .map(|(_, _, class)| *class)
@@ -1859,7 +1919,7 @@ impl UnitView {
     /// The class the op array `f` names is declared in, php's
     /// `op_array->scope`, where the view holds it.
     #[must_use]
-    pub fn scope(&self, f: FuncRef) -> Option<ClassId> {
+    pub fn scope(&self, f: EngineFuncRef) -> Option<ClassId> {
         (self.scopes.iter())
             .find(|(func, _)| *func == f)
             .map(|(_, class)| *class)
@@ -1907,13 +1967,10 @@ impl UnitView {
     /// stands; none unless [`UnitView::hold`] accepted it, and for a slot
     /// past its cache.
     #[must_use]
-    pub fn cache_slot(&self, f: FuncRef, slot: CacheSlot) -> Option<MapPtrRaw> {
+    pub fn cache_slot(&self, f: EngineFuncRef, slot: CacheSlot) -> Option<MapPtrRaw> {
         let code = self.op_array(f)?;
-        let MapPtrOffset::Engine(offset) = code.runtime_cache else {
-            return None;
-        };
         (slot.0 < code.cache_size).then_some(MapPtrRaw {
-            offset,
+            offset: f.offset(),
             slot: slot.0,
         })
     }
@@ -1923,13 +1980,13 @@ impl UnitView {
 mod tests {
     use php_unit::MapPtrOffset;
 
-    use super::{CallSite, FuncRef, UnitView};
+    use super::{CallSite, EngineFuncRef, FuncRef, UnitView};
     use crate::test::Files;
 
     /// Whether `entry` binds the call `site` of the op array `f` names.
     fn binds(
-        entry: &(FuncRef, super::Site, super::CalledFunction),
-        f: FuncRef,
+        entry: &(EngineFuncRef, super::Site, super::CalledFunction),
+        f: EngineFuncRef,
         site: CallSite<'_>,
     ) -> bool {
         entry.0 == f && entry.1.as_call_site() == site
@@ -1938,7 +1995,7 @@ mod tests {
     /// The key `view` binds for `f` once its call `site` reaches `body`.
     fn reaching(
         view: &mut UnitView,
-        f: FuncRef,
+        f: EngineFuncRef,
         site: CallSite<'_>,
         body: Option<FuncRef>,
     ) -> Option<super::Bindings> {
@@ -1967,10 +2024,11 @@ mod tests {
         let mut views = crate::tests::unit_view::kept(files.path());
         let (mut view, f) = views.pop().expect("f's view");
         let (_, main) = views.pop().expect("the view of the file's own code");
+        let f = EngineFuncRef::of(f).expect("f's op array, the engine's");
         let site = CallSite::Function(b"g");
         let g = view.called(f, site).and_then(|called| called.body);
         assert!(
-            g.is_some_and(|g| g != f && g != main),
+            g.is_some_and(|g| g != FuncRef::from(f) && g != main),
             "f's call reaches g's op array: {g:?}"
         );
         let key = view.bindings(f);
@@ -1983,7 +2041,7 @@ mod tests {
                 "another user op array than g's: {other:?}"
             );
         }
-        for (body, kind) in [(None, "a native"), (Some(f), "f itself")] {
+        for (body, kind) in [(None, "a native"), (Some(f.into()), "f itself")] {
             assert_ne!(reaching(&mut view, f, site, body), key, "{kind}");
         }
         view.called.retain(|entry| !binds(entry, f, site));

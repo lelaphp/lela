@@ -49,7 +49,7 @@ mod tests {
     use php_heap::EngineState;
 
     use crate::decl::{HookKind, Name, Type, Visibility};
-    use crate::{MapPtrOffset, OplineIdx, TryCatch};
+    use crate::{OplineIdx, TryCatch};
 
     fn held<T: EngineState>() {}
 
@@ -59,7 +59,6 @@ mod tests {
     #[test]
     fn what_the_trace_table_holds_is_engine_state() {
         held::<OplineIdx>();
-        held::<MapPtrOffset>();
         held::<TryCatch>();
         held::<HookKind>();
         held::<Name>();

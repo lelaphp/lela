@@ -12,7 +12,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use php_engine::tier::{
-    self, Extension, ExtensionBuilder, Flow, FrameRef, FuncRef, Request, Site, Tier,
+    self, EngineFuncRef, Extension, ExtensionBuilder, Flow, FrameRef, Request, Site, Tier,
 };
 use php_unit::OplineIdx;
 
@@ -65,7 +65,7 @@ fn exit_at(opline: u32, grows: Grows) -> ExitSpec {
 
 /// A trace of no ops over `f`'s frame, started as `start`, with `guards`
 /// and `exits`, ending through its last exit.
-fn trace(f: FuncRef, start: Start, guards: Vec<Guard>, exits: Vec<ExitSpec>) -> TraceIr {
+fn trace(f: EngineFuncRef, start: Start, guards: Vec<Guard>, exits: Vec<ExitSpec>) -> TraceIr {
     let end = ExitId(u16::try_from(exits.len().saturating_sub(1)).unwrap_or(0));
     TraceIr {
         entry: Entry {
@@ -140,7 +140,7 @@ fn raced(req: &mut Request, frame: FrameRef) -> Result<Turns, String> {
         .shared
         .clone();
     let backend = shared.backend.as_ref().ok_or("no backend")?;
-    let f = tier::func(req, frame).ok_or("no op array for f")?;
+    let f = (tier::func(req, frame).and_then(EngineFuncRef::of)).ok_or("no op array for f")?;
     let epoch = table::holding(req, &shared.policy, &shared.perf);
     let table = table::of_epoch(&epoch).ok_or("no table")?;
     // The root: its entry's stack check never holds, so it leaves through

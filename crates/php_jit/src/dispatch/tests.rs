@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use php_engine::api::abi::PostStartup;
 use php_engine::api::request::TierStatus;
 use php_engine::tier::{
-    self, Epoch, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, FuncRef, Request,
+    self, EngineFuncRef, Epoch, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, Request,
     SafepointIdx, Site, Tier, TraceNum, Word,
 };
 use php_unit::{OpArray, OplineIdx, Unit};
@@ -27,14 +27,16 @@ use crate::testing::{self, Lane, function_of};
 use crate::types::ExitId;
 
 /// An epoch holding one unit whose main op array has two safepoints.
-fn fixture() -> (Epoch, FuncRef) {
-    Epoch::fixture(Unit {
+fn fixture() -> (Epoch, EngineFuncRef) {
+    let (epoch, main) = Epoch::fixture(Unit {
         main: OpArray {
             safepoints: vec![OplineIdx(0), OplineIdx(1)].into(),
             ..OpArray::default()
         },
         ..Unit::default()
-    })
+    });
+    let main = EngineFuncRef::of(main).expect("the fixture's op array, the engine's");
+    (epoch, main)
 }
 
 fn trace(n: u32) -> TraceId {
@@ -57,7 +59,7 @@ fn heat(word: &Word) -> u32 {
     clippy::unnecessary_wraps,
     reason = "visit takes the holder a home may not have"
 )]
-fn root(epoch: &Epoch, func: FuncRef, at: u32) -> Option<Holder> {
+fn root(epoch: &Epoch, func: EngineFuncRef, at: u32) -> Option<Holder> {
     Some(Holder::Root {
         epoch: epoch.clone(),
         func,
@@ -1324,7 +1326,7 @@ fn escape_doors(req: &mut Request, elsewhere: bool) -> Vec<(usize, bool)> {
             .map(|[key, body, _]| {
                 let enters = traces().any(|trace| {
                     let opens = trace.opens.and_then(|(func, opline)| {
-                        let func = crate::lower::engine_offset(func)?;
+                        let func = crate::lower::engine_offset(func);
                         let stands = crate::lower::Stands {
                             func,
                             opline: opline.0,

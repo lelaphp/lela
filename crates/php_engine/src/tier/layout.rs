@@ -20,7 +20,7 @@ use php_heap::{FrameRef, HEADER_AT, HeaderImage, ROOM_BYTES, StackLayout, VmStac
 use php_unit::MapPtrOffset;
 use php_unit::decl::Bare;
 
-use super::{ClassId, EpochClassId, EpochFunction, FuncRef, UnitView};
+use super::{ClassId, EngineFuncRef, EpochClassId, EpochFunction, FuncRef, UnitView};
 use crate::api::call::Function;
 use crate::api::request::Request;
 use crate::exec::{CallInfo, Header};
@@ -641,12 +641,24 @@ enum Serves {
     /// A native, which the call's name names.
     Native,
     /// A user function's op array, published.
-    Published(FuncRef),
+    Published(EngineFuncRef),
     /// An op array of the request's own, an evaluated class's own
     /// method's: no number names it past the request, so each request
     /// finds it under the call's names, and the call is held to the
     /// room the recording's took ([`call_image`]; #3570).
     Request,
+}
+
+impl Serves {
+    /// What a call of `code`, a user function's op array, serves: the
+    /// op array by the [`EngineFuncRef`] the engine numbered it by, or
+    /// the request's own, which no number names past its request.
+    fn of(code: &php_unit::OpArray) -> Serves {
+        match EngineFuncRef::of(FuncRef::at(code.runtime_cache)) {
+            Some(f) => Serves::Published(f),
+            None => Serves::Request,
+        }
+    }
 }
 
 /// The called scope and the method of a method's plain call, as a
@@ -762,7 +774,7 @@ impl PlainCall {
     /// The published op array the call serves; none for a native's call
     /// and a request's own op array's.
     #[must_use]
-    pub fn callee(&self) -> Option<FuncRef> {
+    pub fn callee(&self) -> Option<EngineFuncRef> {
         match self.serves {
             Serves::Published(f) => Some(f),
             Serves::Native | Serves::Request => None,
@@ -980,12 +992,8 @@ pub fn plain_call(view: &UnitView, req: &Request, call: FrameRef) -> Option<Plai
         }
         _ => None,
     };
-    let served = FuncRef::at(code.runtime_cache);
     Some(PlainCall {
-        serves: match served.offset() {
-            MapPtrOffset::Engine(_) => Serves::Published(served),
-            MapPtrOffset::Request(_) => Serves::Request,
-        },
+        serves: Serves::of(code),
         count,
         name,
         slots,
@@ -1040,10 +1048,7 @@ pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
     };
     let (served, base) = if let Some(user) = req.user_function(function) {
         let code = crate::exec::body_of(&user.unit, user.body)?;
-        let served = match code.runtime_cache {
-            MapPtrOffset::Engine(_) => Serves::Published(FuncRef::at(code.runtime_cache)),
-            MapPtrOffset::Request(_) => Serves::Request,
-        };
+        let served = Serves::of(code);
         // Where the callee's cache stands in this request, which the
         // activation in place leaves as the image wrote it: an image is
         // laid out once its cache is laid down, which a function's stays.

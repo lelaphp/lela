@@ -4,7 +4,7 @@
 //! list it takes, each held to the record it wrote and to `dump` then
 //! `parse`; and the text form as a property over generated records.
 
-use php_engine::tier::{self, FuncRef, SafepointIdx, Sample};
+use php_engine::tier::{self, EngineFuncRef, FuncRef, SafepointIdx, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, Opcode, OperandKind, OplineIdx};
 
@@ -872,13 +872,10 @@ impl Draw {
         u32::try_from((self.0 >> 33) % u64::from(below.max(1))).unwrap_or(0)
     }
 
-    fn func(&mut self) -> FuncRef {
+    fn func(&mut self) -> EngineFuncRef {
         let n = self.next(1000);
-        FuncRef::at(if self.next(4) == 0 {
-            MapPtrOffset::Request(n)
-        } else {
-            MapPtrOffset::Engine(n)
-        })
+        EngineFuncRef::of(FuncRef::at(MapPtrOffset::Engine(n)))
+            .expect("an engine offset's op array")
     }
 
     fn sample(&mut self) -> Option<Sample> {

@@ -333,6 +333,8 @@ This states what a ruled ticket built and reverses no ruling. The amendment it c
 
 **153. Revision 153 (2026-11-13).** §3.2's `epoch_state` says what the analyses' key binds of a call, as Mitchell ruled on #4628 (2026-11-12) and #4629 built, answering what revision 152 left to #4628: `tier::Bindings` names the body of the function a call reaches by its kind, `tier::CalleeBody`, a native's, the op array's own or another user function's, and no op array by its map-pointer number, `MapPtrOffset::Request` above all, by type. `UnitView::bindings` decides the kind from the op array it binds for through `CalledFunction::body_from`, which php_jit's `Bound::callee` reads it through too, so the kind is decided in one place. The request-side `CalledFunction` keeps its `FuncRef` body: `Bound::callee` reads it on the third kind alone, to find what the other function's analysis earlier in the same build found it returns, and that read marks the analysis as one the epoch keeps under no key, so a kept analysis read no other body's identity and two builds whose bindings differ only in which other user function a call reaches read one kept analysis. The key still tells a bound call from an unbound one and a native from a user function, which the ruling on #3589 keeps `called` for; `CalleeBody`'s rustdoc states the proof, and that a change which reads a kept callee's body for anything else, or keeps an analysis that read returns, names the body in the key again. Rejected, by the ruling: `Option<EpochFunction>`, which names a function number where `Bound::callee` compares op arrays, and which a function declared from a published unit has none of, so most kept analyses would stop being kept; and a refusal in `CalledFunction::shared`, sound but keeping the number in the key by type. It states what a person ruled and reverses, widens or adds to no ruling: the narrowing of #3589's key is the ruling's own, on the proof above, and ADR-0015's line is #4630's. Check: `grep -n 'no op array by its map-pointer number' jit-design.md` matches §3.2 and this row; `tier::view::tests::the_key_names_a_callees_body_by_its_kind` passes; `cargo xtask api-check` passes with `tier::CalleeBody` in `tier.lock`.
 
+**NEXT. Revision NEXT (2026-11-13).** §3.2, §4.1, §4.3, §4.7 and §5.3 state what #4650 built under Mitchell's ruling on #4631 (2026-11-13), which design §5.14's *Identities* paragraph states in its revision of the same day: a trace, a recording and every holder of the tier's names an op array the engine numbered by `tier::EngineFuncRef`, where the listings named it by `FuncRef`, and `FuncRef`, which may be a request's, is no engine state. `EngineFuncRef::of` is the one place one is made, from a `FuncRef`'s engine arm, and it answers its offset for compiled code and the record's text form. The holders: the analyses' key, a trace's `opens`, `callee_caches` and `marks`, `PlainCall`'s published callee, a view's held op arrays and its places and pairs, a claim's `Holder::Root` and `Holder::Landing`, and a record's root, its events and a user callee; `Callee::of` refuses a request's op array its number once, as a call's `request`, and the view's `hold` answers the `EngineFuncRef` it holds. A recording refused before its first opline, at a frame that serves a request's op array or at a full table, is settled as an attempt failed with its stop and no record, where it was a record rooted at a request's number no reader read, so `lower`'s offset of a held op array is total and its abort for a request's op array in a trace is gone. The epoch's methods keep a `FuncRef` face, taking anything that becomes one. A record's text form writes what it wrote of every record the recorder takes, the `r` form having been written for those refused records alone, and reads an `e` form back through `EngineFuncRef::of`. It states what a person ruled and reverses, widens or adds to no ruling, so there is no ADR; a person reads this row at the merge. Check: `git grep -n 'MapPtrOffset::Request' -- crates/php_engine/src/tier crates/php_jit/src` finds `EngineFuncRef::of` and the view's test of a request's callee body alone; the `compile_fail` doctest on `tier::FuncRef` passes; `cargo xtask api-check` passes with `tier::EngineFuncRef` in `tier.lock`.
+
 **If this is wrong, it is wrong in eight places.** First, that the write view of a dual-mapped arena costs nothing on the execute path: it does not touch it, but on aarch64 the cache maintenance after a write through the other alias is the part no source in the note settles (§4.4); on macOS aarch64, whose two views are one address, #2741's `mov; ret`, concurrent publish and reused-chunk tests pass (revision 19), and on Linux aarch64 the same tests through the two aliases pass in a container on the same cores (revision 102), the Linux runner's own cores being the check. Second, that every loop header and every return can be numbered by the compiler and found by its handler: a backward `JMP`, `JMPZ` or `JMPNZ` and a `RETURN*` leave `result` unused in php's op arrays (§3.1; verified at 8.5.9 in every handler body and every emission, `data/ops-extraction.md`), `ops.toml` says which field per opcode, and the compiler asserts that every backward jump it emits other than `FAST_RET` has a column and a header, so a disagreement is a compile-time failure on the first op array that has one. Third, that a `UnitView` can be owned rather than borrowed, so that `types::build` runs on a thread with no request (§4.1, §4.8); if engine-immutable classes turn out not to be shareable by `Arc`, the compile thread is kept and `build` alone moves back to the recording thread. Fourth, that the entry-frame slot on the VM stack is per fiber (§2.2). Fifth, that a 24-bit one-level id, a segmented read side borrowed with two loads per trace entry, and one worker do not measurably move G1, G4 or G6. Sixth, that one interrupt test per compiled loop iteration is enough and costs what php's does: a trace has at most one back-edge, the root's, and a recursive trace is bounded by `opcache.jit_max_recursive_calls`, so every trace without a loop runs a bounded number of oplines before the interpreter's own check; G2 carries the cost and the §7 witnesses the sufficiency. Seventh, that raising `Site::Entry` at activation is where php's counter fires: it is, for a function with no typed parameters, where php installs the counter after the `RECV*` run it skips (`zend_jit_trace.c:8983-9001`, `zend_execute.c:4426-4437`); for a typed function php's counter is on opline zero, before the `RECV` that may throw, so php counts such a call and this engine does not. That is no longer an open item but a `trace` row of the registry (§4.1), kept so that a throwing `RECV` is never inside a recording. Eighth, that all ones decodes as `blacklisted` in every future layout of the word: it is a one-line invariant of `policy` with a test, and the sealed word is the only bit pattern `php_engine` knows.
 
 ---
@@ -572,14 +574,18 @@ impl SafepointIdx { pub const ENTRY: Self; }
 /// engine's for a held unit and the request's for a request-scoped one (revision 24).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)] pub struct FuncRef(/* MapPtrOffset */);
 pub fn func(req: &Request, frame: FrameRef) -> Option<FuncRef>;
+/// An op array the engine numbered, the name engine state, the epoch's tier state among it, holds one by:
+/// made by `of` alone, none for a request's; a `FuncRef` by `From`. `FuncRef` is no engine state (revision NEXT).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, EngineState)] pub struct EngineFuncRef(/* u32 */);
+impl EngineFuncRef { pub const fn of(f: FuncRef) -> Option<EngineFuncRef>; pub const fn offset(self) -> u32; }
 /// A hold on the request's epoch (design §5.14), `Send` and `Sync`: what a holder and a view keep.
 #[derive(Clone)] pub struct Epoch(/* Arc<Arena> */);
 pub fn epoch(req: &Request) -> Epoch;
-impl Epoch { pub fn word(&self, f: FuncRef, at: SafepointIdx) -> &Word; pub fn held(&self, f: FuncRef) -> Option<Held<'_>>; }
+impl Epoch { pub fn word(&self, f: impl Into<FuncRef>, at: SafepointIdx) -> &Word; pub fn held(&self, f: impl Into<FuncRef>) -> Option<Held<'_>>; }
 /// A return root's word, the landing past a call (§2.2): one per opline of a held op array, laid down
 /// sealed the first time a tier arms one of its landings, sealed until armed (revision 61).
 pub fn landing(req: &Request, frame: FrameRef, at: OplineIdx) -> &Word;
-impl Epoch { pub fn landing(&self, f: FuncRef, at: OplineIdx) -> &Word; pub fn lay_landing(&self, f: FuncRef, at: OplineIdx) -> Option<&Word>; }
+impl Epoch { pub fn landing(&self, f: impl Into<FuncRef>, at: OplineIdx) -> &Word; pub fn lay_landing(&self, f: impl Into<FuncRef>, at: OplineIdx) -> Option<&Word>; }
 /// The tier's one value for an epoch, its trace table (§4.5): made by the epoch's first request that asks,
 /// a borrow of the request's hold; read back from a hold that outlives its request (revision 27). It is
 /// engine state, which the trace table is by `#[derive(EngineState)]` (revision 152); the key it keeps an
@@ -670,12 +676,12 @@ The lock, stated where the rule lives. Design §4.4's "`E` may not contain a loc
 
 ```rust
 pub(crate) enum Start { Loop, Enter, Return, Side { parent: TraceId, exit: ExitId } }
-pub(crate) struct TraceRecord { start: Start, root: FuncRef, events: Vec<Event>, stop: Stop }
+pub(crate) struct TraceRecord { start: Start, root: EngineFuncRef, events: Vec<Event>, stop: Stop }   // a recording refused before its first opline is no record (revision NEXT)
 pub(crate) struct Recorded { record: TraceRecord, view: UnitView }
 pub(crate) enum Event {
-    Op { func: FuncRef, opline: OplineIdx, op1: Sample, op2: Sample, data: Sample, branch: Option<bool> },   // whether a conditional jump, or the one a fused compare-and-branch serves, was taken (revision 26)
-    InitCall { callee: Callee, began: Began },   // Callee: User(FuncRef), Native(Types), what a native declares it returns (revision 75); Began: Here, Before, php's FAKE_INIT_CALL (revision 72)
-    Enter { func: FuncRef },                 // a PHP-to-PHP call followed
+    Op { func: EngineFuncRef, opline: OplineIdx, op1: Sample, op2: Sample, data: Sample, branch: Option<bool> },   // whether a conditional jump, or the one a fused compare-and-branch serves, was taken (revision 26)
+    InitCall { callee: Callee, began: Began },   // Callee: User(EngineFuncRef), Native(Types), Request, what a native declares it returns (revision 75); Began: Here, Before, php's FAKE_INIT_CALL (revision 72)
+    Enter { func: EngineFuncRef },           // a PHP-to-PHP call followed
     Back,                                    // its return
 }
 #[derive(Clone, Copy)] pub(crate) struct Sample { tag: Tag, packed: bool, reference: bool, indirect: bool, class: Option<ClassId> }
@@ -742,7 +748,7 @@ pub(crate) struct Compiled {
                                                  // calls, so an opline is named with its function
     name: TraceName,                             // php's `zend_jit_trace_name` but the number, the job's (revision 27)
 }
-pub(crate) struct Mark { func: FuncRef, opline: OplineIdx, offset: u32 }
+pub(crate) struct Mark { func: EngineFuncRef, opline: OplineIdx, offset: u32 }
 pub(crate) struct Backend { /* private: the host ISA, its flags, the kernel symbol table */ }
 impl Backend {
     /// Detects the host ISA through cranelift-native and applies the flags `Policy` asks for.
@@ -952,7 +958,7 @@ pub(crate) enum Outcome { Published(TraceId), Abort(Stop), Blacklist(Stop) }   /
 pub(crate) enum Spent { After(u8), At(u32) }   // a root's attempts, php's bad root cache; an exit's heat, php's exit counter, at hot_side_exit + blacklist_side_trace (revision 56)
 
 /// Where a claimed word lives. Owned, so a claim can leave the thread that made it.
-pub(crate) enum Holder { Root { epoch: Epoch, func: FuncRef, at: SafepointIdx }, Exit { epoch: Epoch, trace: TraceId, exit: ExitId } }   // Epoch: a hold on the epoch (design §5.14)
+pub(crate) enum Holder { Root { epoch: Epoch, func: EngineFuncRef, at: SafepointIdx }, Exit { epoch: Epoch, trace: TraceId, exit: ExitId } }   // Epoch: a hold on the epoch (design §5.14)
 impl Holder { pub(crate) fn word(&self) -> &Word; }
 
 impl Policy {
@@ -1136,15 +1142,15 @@ php's `zend_jit_trace_handler` calls the opline's handler (§A.9); here the hand
 pub struct UnitView { /* private */ }
 impl UnitView {
     pub fn new(req: &Request) -> UnitView;                                    // holds req's epoch
-    pub fn hold(&mut self, req: &Request, f: FuncRef) -> bool;                // false, and holds nothing, for a request-scoped op array
+    pub fn hold(&mut self, req: &Request, f: impl Into<FuncRef>) -> Option<EngineFuncRef>; // none, holding nothing, for a request-scoped op array (revision NEXT)
     pub fn hold_class(&mut self, req: &Request, c: ClassId) -> bool;          // false, and holds nothing, unless the ClassId is published
-    pub fn op_array(&self, f: FuncRef) -> Option<&OpArray>;                   // none unless hold accepted it
-    pub fn is_main(&self, f: FuncRef) -> Option<bool>;                        // f is its file's own code, php's !function_name (revision 26)
-    pub fn parameters(&self, f: FuncRef) -> Option<&[Parameter]>;             // its declaration's parameters, php's arg_info (revision 26)
+    pub fn op_array(&self, f: EngineFuncRef) -> Option<&OpArray>;                   // none unless hold accepted it
+    pub fn is_main(&self, f: EngineFuncRef) -> Option<bool>;                        // f is its file's own code, php's !function_name (revision 26)
+    pub fn parameters(&self, f: EngineFuncRef) -> Option<&[Parameter]>;             // its declaration's parameters, php's arg_info (revision 26)
     pub fn class(&self, c: ClassId) -> Option<&LinkedClass<ClassId>>;         // none unless hold_class accepted it
-    pub fn cache_slot(&self, f: FuncRef, slot: CacheSlot) -> Option<MapPtrRaw>; // the engine's offset of f's cache and the slot in it
+    pub fn cache_slot(&self, f: EngineFuncRef, slot: CacheSlot) -> Option<MapPtrRaw>; // the engine's offset of f's cache and the slot in it
     pub fn hold_place(&mut self, req: &Request, frame: FrameRef, at: OplineIdx, c: ClassId) -> bool; // the declared slot the cache names (revision 93)
-    pub fn place(&self, f: FuncRef, at: OplineIdx, c: ClassId) -> Option<PropertySlot>;       // none unless hold_place took it
+    pub fn place(&self, f: EngineFuncRef, at: OplineIdx, c: ClassId) -> Option<PropertySlot>;       // none unless hold_place took it
 }
 ```
 

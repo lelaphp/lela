@@ -32,7 +32,21 @@ pub struct CacheSlot(pub u32);
 /// The cache itself is the request's and its type the engine's, which
 /// converts this where it reads it. The compiler leaves the engine's
 /// first offset, which the engine overwrites before the unit is shared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EngineState)]
+///
+/// So one may be a request's, and is no engine state (design §5.14,
+/// *Identities*; #4631): engine state names an op array the engine
+/// numbered by the tier's `EngineFuncRef`, and a type of this crate that
+/// holds an offset is refused at the field,
+///
+/// ```compile_fail,E0277
+/// #[derive(php_macros::EngineState)]
+/// struct Kept {
+///     at: php_unit::OplineIdx,
+///     cache: php_unit::MapPtrOffset,
+/// }
+/// # fn main() {}
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MapPtrOffset {
     Engine(u32),
     Request(u32),

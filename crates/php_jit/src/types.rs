@@ -81,7 +81,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 
 use php_engine::api::abi::EngineState;
 use php_engine::tier::{
-    EpochClassId, EpochFunction, FramelessAt, FuncRef, MapPtrRaw, PlainCall, UnitView,
+    EngineFuncRef, EpochClassId, EpochFunction, FramelessAt, MapPtrRaw, PlainCall, UnitView,
 };
 use php_heap::ZvalType;
 use php_ssa::Range;
@@ -146,7 +146,7 @@ pub(crate) struct BodyEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub(crate) start: Start,
-    pub(crate) root: FuncRef,
+    pub(crate) root: EngineFuncRef,
     pub(crate) stop: Stop,
 }
 
@@ -164,7 +164,7 @@ impl Frame {
 /// how it stands to the trace's other frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FrameInfo {
-    pub(crate) func: FuncRef,
+    pub(crate) func: EngineFuncRef,
     pub(crate) place: Place,
     /// How many of its slots are variables; the temporaries follow.
     pub(crate) cvs: u32,
@@ -315,7 +315,7 @@ pub(crate) enum Op {
     Back {
         frame: Frame,
         out: Option<ValueId>,
-        escapes: Option<(FuncRef, OplineIdx)>,
+        escapes: Option<(EngineFuncRef, OplineIdx)>,
     },
 }
 
@@ -742,7 +742,10 @@ pub(crate) enum Check {
     /// opline the record does not say went, a table's jump. Its exit names
     /// no opline, so the interpreter goes on where it stands and the exit
     /// is right whatever the guard held.
-    Stands { func: FuncRef, opline: OplineIdx },
+    Stands {
+        func: EngineFuncRef,
+        opline: OplineIdx,
+    },
     /// The VM stack's top page has room for this many bytes of frames,
     /// php's `zend_jit_stack_check`: at a loop's entry for what its calls
     /// push, and before an `INIT_*` that pushes past what that held. Its
@@ -759,7 +762,7 @@ pub(crate) enum Check {
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:9283-9300`), so the trace's
     /// plain call of it is the call made. Its exit goes on where the
     /// interpreter stands, the call pushed.
-    Callee { func: FuncRef },
+    Callee { func: EngineFuncRef },
     /// A table's jump went elsewhere than this opline: php's exit per
     /// target of `zend_jit_switch`, taken where the stepped jump went
     /// there and landing where it went, so exit-fuzz fails it never.
