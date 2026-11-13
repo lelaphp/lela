@@ -732,6 +732,17 @@ impl Str {
         self.header().gc.flags() & gc::PERSISTENT != 0
     }
 
+    /// `IS_STR_PERMANENT` beside `IS_STR_INTERNED` and
+    /// `IS_STR_PERSISTENT`, the three bits [`PERMANENT`] a table lays
+    /// its own strings with: the frozen table's, a [`Strings`]' bump's
+    /// and those a [`Pending`] set lays for its table ([`laid`],
+    /// [`persistent`]). A request's heap lays its strings with none of
+    /// them ([`crate::Heap::string`]), and nothing sets one on a string
+    /// after it is laid, so no string of a request carries them.
+    pub(crate) fn is_permanent(self) -> bool {
+        self.header().gc.flags() & PERMANENT == PERMANENT
+    }
+
     /// `ZSTR_IS_VALID_UTF8`: the bytes were checked once and are valid
     /// UTF-8. A string that was written into forgets this with its hash.
     #[must_use]
