@@ -1,0 +1,7 @@
+[package]
+name = "php_proto"
+version = "0.0.0"
+edition = "2024"
+
+[lints]
+workspace = true
