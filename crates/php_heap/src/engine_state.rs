@@ -406,9 +406,12 @@ mod tests {
         for z in [
             Zval::UNDEF,
             Zval::null(),
+            Zval::bool(false),
             Zval::bool(true),
             Zval::long(-3),
             Zval::double(0.5),
+            Zval::const_expr(2),
+            Zval::ptr(3),
         ] {
             assert_eq!(of(z), Some(z), "{:?} holds no pointer", z.kind());
         }
@@ -456,6 +459,11 @@ mod tests {
         assert_eq!(of(Zval::object(object)), None, "an object");
         let reference = heap.reference(Zval::long(1)).expect("room");
         assert_eq!(of(Zval::reference(reference)), None, "a reference");
+        let resource = heap.resource(crate::ResourceType(1)).expect("room");
+        assert_eq!(of(Zval::resource(resource)), None, "a resource");
+        let mut slot = Zval::long(4);
+        let at = crate::ZvalRef::new(std::ptr::NonNull::from(&mut slot));
+        assert_eq!(of(Zval::indirect(at)), None, "an `IS_INDIRECT`");
     }
 
     /// A constant array holds what its home was handed, which no type
