@@ -162,6 +162,15 @@ decl::shown_bytes
 dump_type_info
 enum_methods
 frameless_table
+frozen::Frozen
+frozen::Frozen::new
+frozen::Holder
+frozen::Slot
+frozen::Stray
+frozen::Values
+frozen::attribute_values
+frozen::expr_values
+frozen::unit_values
 may_be::ANY
 may_be::ARRAY
 may_be::ARRAY_SHIFT

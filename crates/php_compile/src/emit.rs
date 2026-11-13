@@ -7338,7 +7338,7 @@ impl<'a> Emit<'a> {
         let own_name = self.own_name(&attribute.name, again.is_some());
         if let Some(earlier) = again {
             for argument in &earlier.arguments {
-                crate::values::unit_values(&argument.value, &mut |z| {
+                php_unit::frozen::expr_values(&argument.value, &mut |z| {
                     self.strings.hold(z);
                 });
             }

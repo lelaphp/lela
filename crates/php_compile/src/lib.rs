@@ -71,8 +71,8 @@ use php_heap::{Fatal, FatalReason, Intern, Sizing};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::{Arena, Parsed};
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, HookKind, Visibility};
+use php_unit::frozen::Holder;
 use php_unit::{Diagnostic, Level, Unit};
-use values::Holder;
 
 /// What the compiler is told beside the source (design §4.1).
 #[allow(clippy::struct_excessive_bools)] // php's compile-time ini entries and compiler options, each one fact

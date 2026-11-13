@@ -29,11 +29,11 @@
 use std::collections::HashMap;
 
 use php_compile::syntax::ScannerHeap;
-use php_compile::values::Holder;
 use php_compile::{Named, SourceKind};
 use php_heap::{Sizing, Str, Zval};
 use php_link::NameHasher;
 use php_unit::decl::TraitAdaptation;
+use php_unit::frozen::Holder;
 use php_unit::{OperandKind, PublishedUnit, Unit, WeakUnit};
 
 use super::declared_bytes::{self, Alone, Blocks, ClassBlocks, Declared, Gone, MainOpArray};
@@ -388,7 +388,7 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Holder, Zval)> {
     // not fold among them, whose `RECV_INIT` holds the tree.
     for (owner, body) in bodies(unit) {
         for expr in &body.const_exprs {
-            php_compile::values::unit_values(expr, &mut |z| literals.push((z, owner)));
+            php_unit::frozen::expr_values(expr, &mut |z| literals.push((z, owner)));
         }
     }
     let literals = ByIdentity::of(literals);

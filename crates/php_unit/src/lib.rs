@@ -19,6 +19,7 @@ pub mod decl;
 mod dump;
 mod enum_methods;
 mod frameless;
+pub mod frozen;
 mod op;
 mod persist;
 mod types;
