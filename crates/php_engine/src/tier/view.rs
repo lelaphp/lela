@@ -703,14 +703,50 @@ pub use crate::arena::{EpochClassId, EpochFunction};
 /// of one it reads through [`UnitView::class_facts`], copied by one
 /// projection that keeps no value (#4653). So no reader of a view on the
 /// worker reaches a value of the request's, and none is handed a
-/// declaration,
+/// declaration. What the view answers for a class is its facts, which
+/// are not a declaration: this does not compile, for that reason alone,
 ///
-/// ```compile_fail,E0599
-/// fn declaration(
-///     view: &php_engine::tier::UnitView,
+/// ```compile_fail,E0308
+/// fn declaration<'v>(
+///     view: &'v php_engine::tier::UnitView,
 ///     class: php_engine::tier::RecordClass,
-/// ) -> Option<&php_unit::decl::ClassDecl> {
-///     view.class_decl(class)
+/// ) -> Option<&'v php_unit::decl::ClassDecl> {
+///     view.class_facts(class)
+/// }
+/// ```
+///
+/// while the same function compiles with its body changed to an answer
+/// that hands nothing over,
+///
+/// ```
+/// fn declaration<'v>(
+///     view: &'v php_engine::tier::UnitView,
+///     class: php_engine::tier::RecordClass,
+/// ) -> Option<&'v php_unit::decl::ClassDecl> {
+///     let _ = (view, class);
+///     None
+/// }
+/// ```
+///
+/// and the facts hold the fields below and no other, each of the type it
+/// names: a field added later, which could hold a declaration or a
+/// value, stops this compiling until it is named here.
+///
+/// ```
+/// use php_engine::tier::{ClassFacts, ConstantFacts, PropertyFacts};
+/// use php_unit::decl::{ClassFlags, ClassKind, Name, Type, Visibility};
+///
+/// fn every_field(facts: &ClassFacts) {
+///     let ClassFacts { name, kind, flags, file, properties, constants } = facts;
+///     let _: (&Name, &ClassKind, &ClassFlags, &Name) = (name, kind, flags, file);
+///     for property in properties.iter() {
+///         let PropertyFacts { name, visibility, is_instance, ty } = property;
+///         let _: (&Name, &Visibility, &bool, &Option<Type>) = (name, visibility, is_instance, ty);
+///     }
+///     for constant in constants.iter() {
+///         let ConstantFacts { name, ty, visibility, attributes } = constant;
+///         let _: (&Name, &Option<Type>, &Visibility, &Box<[Name]>) = (name, ty, visibility, attributes);
+///     }
 /// }
 /// ```
 #[derive(Debug)]
