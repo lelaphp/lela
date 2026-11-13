@@ -33,7 +33,7 @@ php-src carries code from other projects, and this project ports or bundles some
 strnatcmp, uuencode, xxHash, MurmurHash, Mersenne Twister and libavifinfo).
 Each keeps its own licence, listed with its copyright notice in
 THIRD-PARTY.md and in LICENSES/. Where a component is LGPL-2.1, its source is
-in this distribution and the build instructions are in BUILDING.md.
+in this distribution and the build instructions are in the README's build section.
 
 The names PHP and Zend belong to their respective owners and are used here
 only to say what this project runs and what it is compatible with.
