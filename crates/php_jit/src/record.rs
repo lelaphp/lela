@@ -113,7 +113,7 @@ pub(crate) fn func_name(f: FuncRef) -> String {
 /// this engine's own, `MovedFrame` and `RequestUnit` (`jit-design.md`
 /// §4.1). The first nine end a trace that compiles; the rest are
 /// failures, and from `TooManyTraces` on php blacklists at once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Stop {
     Loop,
     RecursiveCall,
@@ -309,7 +309,7 @@ pub(crate) enum Event {
 
 /// The callee of a call a recording wrote down, php's `func` of a
 /// `ZEND_JIT_TRACE_INIT_CALL` record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Callee {
     /// A user function, by the op array it serves.
     User(FuncRef),
@@ -355,7 +355,7 @@ impl Callee {
 /// (`zend_jit_trace_record_fake_init_call`,
 /// `Z/ext/opcache/jit/zend_jit_vm_helpers.c:631-682`), so the trace knows
 /// the call its sends write and its `DO_*CALL` makes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) enum Began {
     /// At an `INIT_*` the recording served.
     Here,
@@ -405,7 +405,7 @@ pub(crate) struct TraceRecord {
 /// the opline it was recorded from at its first op, php's IP guard
 /// (`zend_jit_trace_opline_guard`, `Z/ext/opcache/jit/zend_jit_trace.c:4178-4180`),
 /// since the exit leaves the frame wherever it stood.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EngineState)]
 pub(crate) enum Landed {
     #[default]
     Named,

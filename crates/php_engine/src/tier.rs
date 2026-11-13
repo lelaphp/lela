@@ -95,7 +95,7 @@ pub use view::{
 pub use crate::api::values::ClassId;
 
 /// The number of a safepoint within its op array; zero is the entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
 pub struct SafepointIdx(pub u32);
 
 impl SafepointIdx {
@@ -251,7 +251,7 @@ pub trait Tier: 'static {
 
 /// Which loops an engine binds, as its tier answers at its start
 /// ([`Tier::bound`]; ADR-0006, amended on #3301).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub enum Bound {
     /// [`Nop`]'s alone: the tier never runs in the engine, and its
     /// safepoints cost the loop nothing.
@@ -272,7 +272,7 @@ pub enum Bound {
 /// persisted while its compiled tier was off keeps php's own handlers;
 /// or counting, each word at the two halves the tier gives, whose bits
 /// are the tier's alone ([`Word`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub enum Laid {
     Sealed,
     Counting([u32; 2]),
