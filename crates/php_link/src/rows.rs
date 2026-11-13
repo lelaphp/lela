@@ -1368,8 +1368,10 @@ mod tests {
             let name = format!("p{at}");
             (record.properties).add(Row { holder, at }, name.as_bytes(), |_| b"");
         }
-        record.prototypes = Column::from(vec![None, Some(3)]);
-        record.interfaces = Column::from(vec![5, 7]);
+        // Holders are odd numbers below 12, so the prototype's scope and
+        // the interfaces are classes no other column names.
+        record.prototypes = Column::from(vec![None, Some(20)]);
+        record.interfaces = Column::from(vec![30, 31]);
         record.constructor = Some(1);
         let named = |row: &Row<u64>| match row.at {
             3 => &b"p3"[..],
@@ -1395,12 +1397,23 @@ mod tests {
             );
             let own = keyed.properties.find_at(b"p3", named);
             assert_eq!(own.map(|(at, _)| at), Some(3));
-            assert_eq!(*keyed.prototypes, [None, Some(103)]);
-            assert_eq!(*keyed.interfaces, [105, 107]);
+            assert_eq!(*keyed.prototypes, [None, Some(120)]);
+            assert_eq!(*keyed.interfaces, [130, 131]);
             assert_eq!(keyed.constructor, Some(1));
         }
-        let refused = record.try_map(|class| (class != 7).then_some(class));
-        assert!(refused.is_none(), "one interface refused");
+        // One class the key refuses leaves no record, whichever column
+        // names it: an interface, a row's holder or a prototype's scope.
+        let refusals = [
+            (31, "an interface"),
+            (11, "a row's holder"),
+            (20, "a prototype"),
+        ];
+        for (refused, column) in refusals {
+            let keyed = record.try_map(|class| (class != refused).then_some(class));
+            assert!(keyed.is_none(), "{column} refused");
+        }
+        let kept = record.try_map(|class| (class != 4).then_some(class));
+        assert!(kept.is_some(), "a class no column names refuses nothing");
     }
 
     #[test]
