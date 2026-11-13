@@ -9,6 +9,7 @@
 use php_heap::{FrameRef, Heap, Intern};
 use php_link::{FoldedHash, LinkedClass};
 use php_unit::decl::{Bare, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind, TypeName};
+use php_unit::frozen::Frozen;
 use php_unit::{Opcode, PublishedUnit, TopLevel, Unit};
 
 use crate::api::call::{ClassNative, EngineMethod, Function};
@@ -63,7 +64,17 @@ struct MemberRow {
     method: Option<u32>,
     user: UserFunction,
     cache: CacheOf,
+    /// The unit `user`'s body is in, where the arena holds it frozen,
+    /// which a published class's member is published over.
+    frozen: Option<Frozen<PublishedUnit>>,
 }
+
+/// What a published class's members came to: the function each method
+/// is, and the numbers its members took.
+type PublishedMembers = (
+    Box<[Option<crate::arena::EpochFunction>]>,
+    std::ops::Range<u32>,
+);
 
 /// Whose runtime cache a member's function reads: its op array's own
 /// map pointer, or one of its own where the function is a copy of
@@ -836,7 +847,7 @@ impl Request {
         let none = super::Placed::default();
         let above = parent
             .and_then(|parent| self.placement(parent))
-            .unwrap_or(&none);
+            .unwrap_or(super::PlacedOf::Request(&none));
         super::placed_of(class, decl, record, above, |info| self.property_decl(info))
     }
 
@@ -845,7 +856,7 @@ impl Request {
     /// hook of its own properties a user function's row, and which of its
     /// methods are natives it lays under its own scope, an enum's own
     /// `cases`, `from` and `tryFrom` and a native trait's methods.
-    pub(super) fn members_of(&self, row: &Declared, class: ClassId) -> Option<Members> {
+    pub(super) fn members_of(&self, row: super::ClassRow<'_>, class: ClassId) -> Option<Members> {
         let observed = crate::observer::observing(self);
         let decl = row.decl()?;
         let enum_backing = (decl.kind == ClassKind::Enum).then_some(decl.backing);
@@ -873,9 +884,10 @@ impl Request {
             if served.is_some() {
                 continue;
             }
-            let Some((unit, body, cache)) = self.method_body(row, method) else {
+            let Some((from, body, cache)) = self.method_body(row, method) else {
                 continue;
             };
+            let unit = PublishedUnit::clone(from.unit());
             let member = Some(Member {
                 class,
                 at: MemberAt::Method(method),
@@ -884,6 +896,7 @@ impl Request {
                 method: Some(method),
                 user: UserFunction::of(unit, body, member, &decl.function, observed),
                 cache,
+                frozen: from.frozen().cloned(),
             });
         }
         // Each hook of the class's own properties, `prop_info->hooks`,
@@ -893,9 +906,10 @@ impl Request {
                 let Some(hook) = declared.hooks.as_ref().and_then(|hooks| hooks.of(kind)) else {
                     continue;
                 };
-                let Some((unit, body, cache)) = self.hook_body(row, property, kind) else {
+                let Some((from, body, cache)) = self.hook_body(row, property, kind) else {
                     continue;
                 };
+                let unit = PublishedUnit::clone(from.unit());
                 let member = Some(Member {
                     class,
                     at: MemberAt::Hook { property, kind },
@@ -904,6 +918,7 @@ impl Request {
                     method: None,
                     user: UserFunction::of(unit, body, member, &hook.function, observed),
                     cache,
+                    frozen: from.frozen().cloned(),
                 });
             }
         }
@@ -940,21 +955,31 @@ impl Request {
 
     /// A published class's members published into the engine's arena
     /// (design §5.14): the function each method is and the numbers its
-    /// members took. None where the arena has no room for them.
+    /// members took, each over the frozen unit its body is in, which
+    /// `units` finds for a body of a request's row. None where the arena
+    /// has no room for them, and where a body's unit is none frozen.
     pub(super) fn place_published(
         &self,
         class: crate::arena::EpochClassId,
         members: Members,
-    ) -> Option<Numbered> {
+        units: &dyn Fn(&PublishedUnit) -> Option<Frozen<PublishedUnit>>,
+    ) -> Option<PublishedMembers> {
         let count = u32::try_from(members.rows.len()).ok()?;
-        let numbers = self.arena.reserve_functions(count)?;
-        let mut functions = members.functions(numbers.clone());
+        let reserved = self.arena.reserve_functions(count)?;
+        let numbers = reserved.numbers();
+        let mut functions: Vec<Option<crate::arena::EpochFunction>> =
+            (members.functions(numbers.clone()).into_iter())
+                .map(|function| function.and_then(|function| reserved.function(function.0)))
+                .collect();
         for (
             number,
             MemberRow {
-                mut user, cache, ..
+                mut user,
+                cache,
+                frozen,
+                ..
             },
-        ) in numbers.clone().zip(members.rows)
+        ) in reserved.functions().zip(members.rows)
         {
             // A copy published with its class takes a map pointer of the
             // engine's, `ZEND_MAP_PTR_NEW`, as a published op array does,
@@ -962,9 +987,12 @@ impl Request {
             if cache == CacheOf::Copy {
                 user.shape.cache = crate::engine::new_map_ptr(&self.shared.map_ptr_last);
             }
-            self.arena
-                .publish_function(Function(number), user)
-                .then_some(())?;
+            // A member's row is the arena's only over the frozen unit its
+            // body is in; one whose body is in a request's own unit is
+            // never published.
+            let frozen = frozen.or_else(|| units(&user.unit))?;
+            let user = user.published(frozen, Some(class))?;
+            self.arena.publish_function(number, user).then_some(())?;
         }
         for (slot, served) in functions.iter_mut().zip(members.served) {
             if let Some(served) = served {
@@ -981,7 +1009,7 @@ impl Request {
     /// The row of a class the request declared, or the engine published
     /// into its arena, the preload's among them; none for an engine's
     /// class ([`ClassLookup::declared_row`]).
-    pub(super) fn declared_row(&self, class: ClassId) -> Option<&Declared> {
+    pub(super) fn declared_row(&self, class: ClassId) -> Option<super::ClassRow<'_>> {
         self.class_lookup().declared_row(class)
     }
 
@@ -1004,16 +1032,16 @@ impl Request {
     /// (`zend_do_traits_property_binding`).
     fn hook_body<'r>(
         &'r self,
-        declared: &'r Declared,
+        declared: super::ClassRow<'r>,
         property: u32,
         kind: HookKind,
-    ) -> Option<(PublishedUnit, exec::Body, CacheOf)> {
+    ) -> Option<(super::ClassRow<'r>, exec::Body, CacheOf)> {
         let decl = declared.decl()?;
         let name = &decl.properties.get(usize::try_from(property).ok()?)?.name;
         let own = declared
-            .unit
+            .unit()
             .classes
-            .get(usize::try_from(declared.at).ok()?)?;
+            .get(usize::try_from(declared.at()).ok()?)?;
         let (from, at, cache) = match own.properties.iter().position(|p| p.name == *name) {
             Some(at) => (declared, at, CacheOf::OpArray),
             None => decl.traits.iter().find_map(|trait_name| {
@@ -1027,8 +1055,8 @@ impl Request {
                 Some((from, at, CacheOf::Copy))
             })?,
         };
-        let body = exec::Body::hook(&from.unit, from.at, u32::try_from(at).ok()?, kind)?;
-        Some((PublishedUnit::clone(&from.unit), body, cache))
+        let body = exec::Body::hook(from.unit(), from.at(), u32::try_from(at).ok()?, kind)?;
+        Some((from, body, cache))
     }
 
     /// Where the op array of the method at `method` of a class the
@@ -1068,8 +1096,12 @@ impl Request {
     /// class, where a native trait gave the class that method: one of the
     /// engine's native methods, since only the engine's classes are
     /// native; none for a method a program's code serves.
-    fn native_trait_method(&self, declared: &Declared, method: u32) -> Option<EngineMethod> {
-        let composed = declared.composed.as_ref()?;
+    fn native_trait_method(
+        &self,
+        declared: super::ClassRow<'_>,
+        method: u32,
+    ) -> Option<EngineMethod> {
+        let composed = declared.composed()?;
         let body = composed.bodies.get(usize::try_from(method).ok()?)?;
         if composed.decl.name.0.eq_ignore_ascii_case(&body.class.0) {
             return None;
@@ -1086,12 +1118,12 @@ impl Request {
 
     fn method_body<'r>(
         &'r self,
-        declared: &'r Declared,
+        declared: super::ClassRow<'r>,
         method: u32,
-    ) -> Option<(PublishedUnit, exec::Body, CacheOf)> {
-        let Some(composed) = &declared.composed else {
-            let body = exec::Body::method(&declared.unit, declared.at, method)?;
-            return Some((PublishedUnit::clone(&declared.unit), body, CacheOf::OpArray));
+    ) -> Option<(super::ClassRow<'r>, exec::Body, CacheOf)> {
+        let Some(composed) = declared.composed() else {
+            let body = exec::Body::method(declared.unit(), declared.at(), method)?;
+            return Some((declared, body, CacheOf::OpArray));
         };
         let body = composed.bodies.get(usize::try_from(method).ok()?)?;
         let own = composed.decl.name.0.eq_ignore_ascii_case(&body.class.0);
@@ -1101,8 +1133,8 @@ impl Request {
             let holder = self.class_named((&body.class).into())?;
             (self.declared_row(holder)?, CacheOf::Copy)
         };
-        let body = exec::Body::method(&from.unit, from.at, body.method)?;
-        Some((PublishedUnit::clone(&from.unit), body, cache))
+        let body = exec::Body::method(from.unit(), from.at(), body.method)?;
+        Some((from, body, cache))
     }
 
     /// `do_bind_class` at a `ZEND_DECLARE_CLASS`: the declaration the
@@ -1573,22 +1605,32 @@ impl Request {
 
     /// A class as the link reads the table: its declaration, and the
     /// bodies of its methods where it was composed with traits.
-    pub(super) fn held_class(&self, name: Bare<'_>) -> Option<php_link::Held<'_, ClassId>> {
-        self.held_as(self.class_named(name)?)
+    pub(super) fn held_class<'a>(
+        &'a self,
+        name: Bare<'_>,
+        records: &'a super::LinkRecords,
+    ) -> Option<php_link::Held<'a, ClassId>> {
+        self.held_as(self.class_named(name)?, records)
     }
 
-    /// [`Request::held_class`] of the class `class` names.
-    fn held_as(&self, class: ClassId) -> Option<php_link::Held<'_, ClassId>> {
+    /// [`Request::held_class`] of the class `class` names, its record
+    /// keyed for the link by `records`.
+    fn held_as<'a>(
+        &'a self,
+        class: ClassId,
+        records: &'a super::LinkRecords,
+    ) -> Option<php_link::Held<'a, ClassId>> {
         let decl = self.symbols().class_decl(class)?;
         let bodies = self
             .declared_row(class)
-            .and_then(|declared| declared.composed.as_ref())
-            .map(|composed| composed.bodies.as_slice());
+            .and_then(super::ClassRow::composed)
+            .map(|composed| composed.bodies);
+        let record = (self.linked_class(class)).and_then(|record| records.keyed(class, record));
         Some(php_link::Held {
             decl,
             bodies,
             linked: true,
-            record: self.linked_class(class).map(|record| (class, record)),
+            record: record.map(|record| (class, record)),
         })
     }
 
@@ -1606,15 +1648,13 @@ impl Request {
     /// ([`Request::record_at_bind`]).
     pub(super) fn record_over(
         &self,
-        row: &Declared,
+        row: super::ClassRow<'_>,
         named: &dyn Fn(&[u8]) -> Option<ClassId>,
     ) -> Option<LinkedClass<ClassId>> {
         let decl = row.decl()?;
-        let abstracts = row
-            .composed
-            .as_ref()
-            .map_or(0, |composed| composed.abstracts);
-        let lookup = |name: &[u8]| self.held_as(named(name)?);
+        let abstracts = row.composed().map_or(0, |composed| composed.abstracts);
+        let records = super::LinkRecords::new();
+        let lookup = |name: &[u8]| self.held_as(named(name)?, &records);
         let holder = |holder: ClassId| self.symbols().class_decl(holder);
         php_link::linked_class(
             decl,
@@ -2571,7 +2611,7 @@ impl<'r> ClassLookup<'r> {
         units: super::unit_strings::UnitsHeld<'_>,
         class: ClassId,
     ) -> bool {
-        (self.declared_row(class)).is_some_and(|row| units.holds(PublishedUnit::as_ptr(&row.unit)))
+        (self.declared_row(class)).is_some_and(|row| units.holds(PublishedUnit::as_ptr(row.unit())))
     }
 
     /// Where an engine's class stands among the engine's; none for any
@@ -2584,10 +2624,10 @@ impl<'r> ClassLookup<'r> {
 
     /// The row of a class the request declared, or the engine published
     /// into its arena; none for an engine's class.
-    pub(super) fn declared_row(self, class: ClassId) -> Option<&'r Declared> {
+    pub(super) fn declared_row(self, class: ClassId) -> Option<super::ClassRow<'r>> {
         match class.local_at() {
-            Some(at) => self.own_classes.get(at),
-            None => self.arena.class(class),
+            Some(at) => self.own_classes.get(at).map(super::ClassRow::Own),
+            None => self.arena.class(class).map(super::ClassRow::Arena),
         }
     }
 
@@ -2601,10 +2641,14 @@ impl<'r> ClassLookup<'r> {
 
     /// The linked record of a class: a native class's as startup linked
     /// it, a declared class's as it bound.
-    pub(super) fn linked_class(self, class: ClassId) -> Option<&'r LinkedClass<ClassId>> {
+    pub(super) fn linked_class(self, class: ClassId) -> Option<super::ClassRecord<'r>> {
         match self.native_class_at(class) {
-            Some(native) => self.shared.records.get(native),
-            None => self.declared_row(class)?.bound.record.as_ref(),
+            Some(native) => self
+                .shared
+                .records
+                .get(native)
+                .map(super::ClassRecord::Request),
+            None => self.declared_row(class)?.record(),
         }
     }
 
@@ -2627,11 +2671,11 @@ impl<'r> ClassLookup<'r> {
         class: ClassId,
         name: &[u8],
     ) -> Option<(ClassId, &'r php_unit::decl::ClassConstDecl)> {
-        let row = self.linked_class(class)?.constants.find(name, |row| {
-            self.row_constant(class, *row)
+        let row = self.linked_class(class)?.constants().find(name, |row| {
+            self.row_constant(class, row)
                 .map_or(&[][..], |(_, constant)| &constant.name.0)
         })?;
-        self.row_constant(class, *row)
+        self.row_constant(class, row)
     }
 }
 

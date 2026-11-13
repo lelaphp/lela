@@ -321,7 +321,7 @@ impl Request {
         };
         let room = self
             .user_function(closure.function)
-            .map(|user| user.shape.cache_size.room);
+            .map(|user| user.shape().cache_size.room);
         let own_cache = match room.filter(|_| {
             object.native::<ClosureObject>(self).is_some_and(|payload| {
                 closure.scope != Some(scope) || payload.cache != ClosureCache::Function
@@ -393,7 +393,7 @@ impl Request {
     /// The op array a user function serves, none for a native.
     fn closure_code(&self, function: Function) -> Option<&php_unit::OpArray> {
         let user = self.user_function(function)?;
-        exec::body_of(&user.unit, user.body)
+        exec::body_of(user.unit(), user.body())
     }
 
     /// The live object the store holds under the id `spl_object_id`
@@ -1064,7 +1064,7 @@ impl Request {
     #[inline(always)] // in the `SEND_*_EX` arms, as `arg_send_mode`
     fn takes_nothing_by_ref(&self, function: Function) -> bool {
         self.user_function(function)
-            .is_some_and(|user| !user.shape.by_ref)
+            .is_some_and(|user| !user.shape().by_ref)
     }
 
     /// [`Request::arg_send_mode`] read off the declaration.
@@ -1442,7 +1442,7 @@ impl Request {
     /// the request's own rows, or the published arena's, which are
     /// numbered past the natives and the native methods (design §5.14).
     #[inline]
-    pub(crate) fn user_function(&self, function: Function) -> Option<&UserFunction> {
+    pub(crate) fn user_function(&self, function: Function) -> Option<super::FunctionRow<'_>> {
         user_in(&self.user_functions, &self.arena, function)
     }
 
@@ -1452,7 +1452,7 @@ impl Request {
     pub(crate) fn function_flags(&self, function: Function) -> crate::attributes::Flags {
         // A user function is no class native, so it serves as itself.
         if let Some(user) = self.user_function(function) {
-            return user.flags;
+            return user.flags();
         }
         let function = self.served_native(function);
         if let Some(method) = self.native_method(function) {
@@ -2145,9 +2145,9 @@ pub(super) fn user_in<'a>(
     rows: &'a super::PinnedRows<UserFunction>,
     arena: &'a crate::arena::Arena,
     function: Function,
-) -> Option<&'a UserFunction> {
+) -> Option<super::FunctionRow<'a>> {
     match function.local_at() {
-        Some(at) => rows.get(at),
-        None => arena.function(function),
+        Some(at) => rows.get(at).map(super::FunctionRow::Own),
+        None => arena.function(function).map(super::FunctionRow::Arena),
     }
 }

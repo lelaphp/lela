@@ -203,7 +203,7 @@ fn building_at(req: &Request, call: FrameRef) -> Option<Building> {
     let target = header
         .function()
         .and_then(|function| req.user_function(function))
-        .and_then(|user| crate::exec::body_of(&user.unit, user.body))
+        .and_then(|user| crate::exec::body_of(user.unit(), user.body()))
         .map(|code| FuncRef::at(code.runtime_cache));
     Some(Building { call, target })
 }

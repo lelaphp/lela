@@ -724,7 +724,7 @@ impl Request {
     /// properties and the chain's declarations.
     pub(super) fn declares_properties(&self, class: ClassId) -> bool {
         match self.linked_class(class) {
-            Some(record) => !record.properties.rows().is_empty(),
+            Some(record) => !record.properties().rows().is_empty(),
             None => {
                 !self.placed_properties(class).is_empty()
                     || self.symbols().lineage(class).any(|here| {
@@ -953,7 +953,7 @@ impl Request {
             name,
         );
         Some(Found {
-            info: *self.placed_properties(class).get(slot)?,
+            info: self.placed_properties(class).get(slot)?,
             property,
             place: RowPlace {
                 slot: u32::try_from(slot).ok(),
@@ -1639,7 +1639,7 @@ impl Request {
         if table.rows.rows().is_empty() {
             return InfoFound::Absent;
         }
-        let declared = |row: &Row<ClassId>| match row.holder {
+        let declared = |row: Row<ClassId>| match row.holder {
             None => table.decl.properties.get(usize::try_from(row.at).ok()?),
             Some(holder) => self.property_decl(PropertyInfo {
                 declaring: holder,
@@ -2430,7 +2430,7 @@ impl Request {
     /// Q::__unset e
     /// ```
     fn magic_accessor(&self, class: ClassId, accessor: Accessor) -> Option<Function> {
-        self.resolved_method(class, |record| record.accessors.of(accessor))
+        self.resolved_method(class, |record| record.accessors().of(accessor))
     }
 
     /// `zobj->ce->__set != NULL`, the test a handler makes before it
@@ -2439,7 +2439,7 @@ impl Request {
     /// ([`Request::declared_slot_for_write`]).
     pub(crate) fn serves_accessor(&self, class: ClassId, accessor: Accessor) -> bool {
         self.linked_class(class)
-            .is_some_and(|record| record.accessors.of(accessor).is_some())
+            .is_some_and(|record| record.accessors().of(accessor).is_some())
     }
 
     /// `ce->ce_flags & ZEND_ACC_USE_GUARDS`: whether `class` or a class

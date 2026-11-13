@@ -48,8 +48,8 @@ const USER: u64 = 2;
 /// the record stands. The name is empty for a file's op array,
 /// php's `NULL` `function_name`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Record {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, php_macros::EngineState)]
+struct Fields {
     kind: u64,
     name: usize,
     name_len: usize,
@@ -59,21 +59,55 @@ pub(crate) struct Record {
     oplines_len: usize,
 }
 
+/// A record ([`Fields`]) of a function of a request's own row, or of a
+/// native: its addresses may be into a unit only the request holds, so
+/// it is no engine state.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Record(Fields);
+
+/// The record of a function of the arena's row, laid out as a
+/// [`Record`] is, so a reader in another process reads either alike:
+/// made only beside the [`Frozen`](php_unit::frozen::Frozen) unit its
+/// addresses are into, which the same row holds ([`FrozenRecord::beside`]),
+/// so the bytes it names are the engine's for as long as it stands.
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq, php_macros::EngineState)]
+pub(crate) struct FrozenRecord(Fields);
+
+impl FrozenRecord {
+    /// `record`, made over `unit`, beside which a row of the arena holds
+    /// it: what it names is the bytes of the unit or of the declaration
+    /// the same row's class holds, which the row keeps as long as it.
+    pub(crate) fn beside(
+        record: Record,
+        _unit: &php_unit::frozen::Frozen<php_unit::PublishedUnit>,
+    ) -> FrozenRecord {
+        FrozenRecord(record.0)
+    }
+
+    /// Where this record stands, which a frame's header names; the
+    /// record must stand there while a frame names it.
+    pub(crate) fn at(&self) -> CalleeAt {
+        CalleeAt(std::ptr::from_ref(self).expose_provenance())
+    }
+}
+
 impl Record {
     /// A native's: its name and no code.
     pub(crate) fn native(name: &[u8]) -> Record {
-        Record {
+        Record(Fields {
             kind: NATIVE,
             name: name.as_ptr().expose_provenance(),
             name_len: name.len(),
-            ..Record::default()
-        }
+            ..Fields::default()
+        })
     }
 
     /// An op array's under `name`, empty for a file's: its file and its
     /// oplines.
     pub(crate) fn user(name: &[u8], code: &OpArray) -> Record {
-        Record {
+        Record(Fields {
             kind: USER,
             name: name.as_ptr().expose_provenance(),
             name_len: name.len(),
@@ -81,7 +115,7 @@ impl Record {
             file_len: code.filename.0.len(),
             oplines: code.oplines.as_ptr().expose_provenance(),
             oplines_len: code.oplines.len(),
-        }
+        })
     }
 
     /// Where this record stands, which a frame's header names; the
@@ -111,7 +145,7 @@ impl Named {
 
     /// Where the record stands.
     pub(crate) fn at(&self) -> CalleeAt {
-        debug_assert_eq!(self.record.name, self.name.as_ptr().addr());
+        debug_assert_eq!(self.record.0.name, self.name.as_ptr().addr());
         self.record.at()
     }
 }
@@ -243,28 +277,28 @@ pub struct Callee {
 
 impl Callee {
     /// The bytes a record takes.
-    pub const BYTES: usize = std::mem::size_of::<Record>();
+    pub const BYTES: usize = std::mem::size_of::<Fields>();
 
     /// The record `bytes` are; none where fewer than
     /// [`Callee::BYTES`] were read.
     #[must_use]
     pub fn read(bytes: &[u8]) -> Option<Callee> {
         let field = |at: usize| word(bytes, at);
-        let kind = field(std::mem::offset_of!(Record, kind))?;
+        let kind = field(std::mem::offset_of!(Fields, kind))?;
         let name = Span {
-            at: field(std::mem::offset_of!(Record, name))?,
-            len: field(std::mem::offset_of!(Record, name_len))?,
+            at: field(std::mem::offset_of!(Fields, name))?,
+            len: field(std::mem::offset_of!(Fields, name_len))?,
         };
         let code = (kind == USER)
             .then(|| {
                 Some(Code {
                     file: Span {
-                        at: field(std::mem::offset_of!(Record, file))?,
-                        len: field(std::mem::offset_of!(Record, file_len))?,
+                        at: field(std::mem::offset_of!(Fields, file))?,
+                        len: field(std::mem::offset_of!(Fields, file_len))?,
                     },
                     oplines: Span {
-                        at: field(std::mem::offset_of!(Record, oplines))?,
-                        len: field(std::mem::offset_of!(Record, oplines_len))?,
+                        at: field(std::mem::offset_of!(Fields, oplines))?,
+                        len: field(std::mem::offset_of!(Fields, oplines_len))?,
                     },
                 })
             })

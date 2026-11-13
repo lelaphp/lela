@@ -33,6 +33,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use php_link::Raised;
 use php_unit::PublishedUnit;
+use php_unit::frozen::Frozen;
 
 use crate::arena::EpochClassId;
 
@@ -43,7 +44,7 @@ const SHARDS: usize = 64;
 /// each class by the identity the epoch's arena minted for it
 /// ([`EpochClassId`]), since the entry is the arena's alone and every
 /// class it names is one every request of the epoch shares.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) struct Entry {
     /// The parent the link fetched, `entry->parent`.
     pub(crate) parent: Option<EpochClassId>,
@@ -71,9 +72,10 @@ impl Entry {
 
 /// The entries of one unlinked declaration, newest last, beside the unit
 /// that declares it, which the chain keeps alive so its address names it.
+#[derive(php_macros::EngineState)]
 struct Chain {
     /// Held and never read: what keeps the key's address the unit's.
-    _unit: PublishedUnit,
+    _unit: Frozen<PublishedUnit>,
     entries: Arc<[Arc<Entry>]>,
 }
 
@@ -82,6 +84,7 @@ struct Chain {
 type Shard = HashMap<(usize, u32), Chain>;
 
 /// The map ([its docs](self)).
+#[derive(php_macros::EngineState)]
 pub(crate) struct InheritanceCache {
     shards: Box<[RwLock<Shard>]>,
     hasher: RandomState,
@@ -124,14 +127,14 @@ impl InheritanceCache {
     /// `entry` added for the declaration at `at` of `unit`, or the entry
     /// another request added for the same link meanwhile, which is the
     /// one to declare.
-    pub(crate) fn add(&self, unit: &PublishedUnit, at: u32, entry: Entry) -> Arc<Entry> {
+    pub(crate) fn add(&self, unit: &Frozen<PublishedUnit>, at: u32, entry: Entry) -> Arc<Entry> {
         let key = key(unit, at);
         let mut shard = self
             .shard(key)
             .write()
             .unwrap_or_else(PoisonError::into_inner);
         let chain = shard.entry(key).or_insert_with(|| Chain {
-            _unit: PublishedUnit::clone(unit),
+            _unit: Frozen::clone(unit),
             entries: Arc::new([]),
         });
         if let Some(found) = chain.entries.iter().find(|found| found.same_link(&entry)) {
@@ -195,7 +198,8 @@ mod tests {
     #[test]
     fn a_link_is_found_by_its_declaration_and_added_once() {
         let cache = InheritanceCache::default();
-        let unit = Unit::default().published(None);
+        let unit = php_unit::frozen::Frozen::new(Unit::default().published(None))
+            .expect("a unit of the engine's values");
         assert!(cache.find(&unit, 0).is_none());
         let first = cache.add(&unit, 0, entry(1, 10));
         let again = cache.add(&unit, 0, entry(1, 11));
@@ -214,7 +218,8 @@ mod tests {
     fn a_restart_empties_the_map() {
         let files = crate::unit_cache::Files::new(16);
         let epochs = crate::arena::Epochs::of(Arena::past(0, 0, files));
-        let unit = Unit::default().published(None);
+        let unit = php_unit::frozen::Frozen::new(Unit::default().published(None))
+            .expect("a unit of the engine's values");
         let arena = epochs.enter(|_| false);
         arena.inheritance.add(&unit, 0, entry(1, 10));
         let restarted = epochs.enter(|_| true);
@@ -230,7 +235,8 @@ mod tests {
     #[test]
     fn readers_and_a_writer_share_the_map() {
         let cache = InheritanceCache::default();
-        let unit = Unit::default().published(None);
+        let unit = php_unit::frozen::Frozen::new(Unit::default().published(None))
+            .expect("a unit of the engine's values");
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 scope.spawn(|| {

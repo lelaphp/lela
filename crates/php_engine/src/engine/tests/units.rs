@@ -71,6 +71,91 @@ fn a_file_the_cache_holds_nowhere_moves_the_engine_s_map_pointer_count_by_nothin
     assert_eq!(count(&holding), after_first, "and took them once");
 }
 
+/// A unit [`Frozen::new`] refuses is held nowhere
+/// (`unit_cache::refused`): the asker is answered as php without the
+/// cache answers a compile, [`Filed::Compiled`] with no early-bound class
+/// published, so it binds every class it declares as its own, and each
+/// later ask compiles the file again, one compile for each. The check
+/// runs after the unit took its map-pointer offsets of the engine's, so
+/// each of those compiles moves the count by as much as the first did.
+/// No real compile is refused yet; the refusal is driven here by the
+/// `share` the cache is handed, as the walk's first refusal of one will
+/// drive it (#4649).
+#[test]
+fn a_unit_the_check_refuses_is_held_nowhere_and_every_ask_compiles_it_again() {
+    use crate::unit_cache::{Asked, Compiled, Filed, Levels};
+    let files = Files::new(
+        "refused",
+        &[(
+            "declares.inc",
+            "<?php class Refused { function m() {} } function refused() {}",
+        )],
+    );
+    let path = files.path().join("declares.inc");
+    let path = path.to_string_lossy().into_owned().into_bytes();
+    let engine = Engine::cli_builder().build();
+    let shared = &engine.shared;
+    let arena = shared.arena.current();
+    let compiles = std::cell::Cell::new(0);
+    let count = || shared.map_ptr_last.load(Ordering::Relaxed);
+    let mut moved = Vec::new();
+    for _ in 0..3 {
+        let before = count();
+        let held = std::cell::Cell::new(false);
+        let asked = Asked {
+            path: &path,
+            source: None,
+            written: None,
+            opened: true,
+            validation: Validation::Never,
+            protection: 0,
+            now: crate::unit_cache::now(),
+            levels: Levels::Memory,
+            optimizer: shared.optimizer(),
+            laid: crate::tier::words_laid(shared, None),
+            held: &held,
+        };
+        let (answered, how, early) = shared.units.file(
+            &mut (),
+            &arena.files,
+            asked,
+            |(), source, _| {
+                compiles.set(compiles.get() + 1);
+                let request = ForRequest::none(shared.unbound());
+                let mut laid = php_compile::syntax::Arena::default();
+                let (cwd, stack) = (Path::new(""), StackLimit::UNCHECKED);
+                let heap = CompileHeap::Engine;
+                shared.compile_file(
+                    source,
+                    &path,
+                    SourceKind::File,
+                    cwd,
+                    stack,
+                    request,
+                    heap,
+                    &mut laid,
+                )
+            },
+            |_| None,
+            |unit| Err(shared.published_alone(unit)),
+            |(), _| Arc::new([]),
+        );
+        assert_eq!(how, Filed::Compiled);
+        assert!(early.is_none(), "no early-bound class published");
+        assert!(matches!(answered, Some(Ok(Compiled::Published(_)))));
+        moved.push(count() - before);
+    }
+    assert_eq!(compiles.get(), 3, "one compile for each ask");
+    assert!(
+        moved.iter().all(|moved| *moved > 0),
+        "each took offsets: {moved:?}"
+    );
+    assert!(
+        moved.windows(2).all(|pair| pair[0] == pair[1]),
+        "as many each time: {moved:?}"
+    );
+}
+
 /// An extension that names a file to preload as the engine
 /// finishes starting up, reading it from an ini entry of its own,
 /// and holds every file in the cache, never validated, as opcache

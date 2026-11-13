@@ -203,7 +203,7 @@ impl Request {
         if let Some(place) = self.native_place(function) {
             return self.observing.natives.get_mut(place);
         }
-        let cache = self.user_function(function)?.shape.cache;
+        let cache = self.user_function(function)?.shape().cache;
         exec::observer_slot_of(&mut self.map, cache)
     }
 }

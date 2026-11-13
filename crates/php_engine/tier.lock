@@ -59,6 +59,7 @@ tier::EngineFuncRef
 tier::EngineFuncRef::of
 tier::Epoch
 tier::Epoch::fixture
+tier::Epoch::holding
 tier::Epoch::tier_state
 tier::Epoch::word
 tier::EpochClassId

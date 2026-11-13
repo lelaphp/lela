@@ -940,9 +940,9 @@ pub fn plain_call(view: &UnitView, req: &Request, call: FrameRef) -> Option<Plai
     if !header.info.plain_entry() {
         return None;
     }
-    let code = crate::exec::body_of(&user.unit, user.body)?;
+    let code = crate::exec::body_of(user.unit(), user.body())?;
     let name = name()?;
-    let shape = user.shape;
+    let shape = user.shape();
     let slots = u32::try_from(laid.len()).ok()?;
     let count = header.num_args;
     let opline = crate::exec::skipped_recv(count, shape.parameters, shape.typed, shape.entry);
@@ -1047,12 +1047,12 @@ pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
         None => req.function_named(Bare::resolved(&call.name))?,
     };
     let (served, base) = if let Some(user) = req.user_function(function) {
-        let code = crate::exec::body_of(&user.unit, user.body)?;
+        let code = crate::exec::body_of(user.unit(), user.body())?;
         let served = Serves::of(code);
         // Where the callee's cache stands in this request, which the
         // activation in place leaves as the image wrote it: an image is
         // laid out once its cache is laid down, which a function's stays.
-        (served, Some(req.cache_base(user.shape.cache)?))
+        (served, Some(req.cache_base(user.shape().cache)?))
     } else {
         req.native_entry(function)?;
         (Serves::Native, None)

@@ -15,13 +15,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use php_link::{Folded, FoldedHash, Linked, NameMap, Obligation};
+use php_link::{Composed, Folded, FoldedHash, Linked, NameMap, Obligation};
 use php_unit::decl::{Bare, ClassDecl, Name, shown};
+use php_unit::frozen::Frozen;
 use php_unit::{AutoGlobal, Level, PublishedUnit};
 
 use super::Code;
 use super::Frames;
-use super::{PreloadStatistics, Request, UserFunction, user_function_decl};
+use super::{InArena, PreloadStatistics, Request, UserFunction, user_function_decl};
 use crate::api::call::Function;
 use crate::api::values::ClassId;
 use crate::arena::EpochClassId;
@@ -281,7 +282,14 @@ fn address(unit: &PublishedUnit) -> usize {
 /// many aliases the extensions' `RINIT`s had added before its program
 /// began, which are theirs and every request's, not the preload's.
 pub(crate) struct Preloading {
-    scripts: Vec<(Vec<u8>, PublishedUnit, u64)>,
+    /// Each a unit [`Frozen::new`] admitted: a file whose unit it
+    /// refuses is served to the preload as its own and saved nowhere.
+    scripts: Vec<(Vec<u8>, Frozen<PublishedUnit>, u64)>,
+    /// Each `eval`'s unit [`Frozen::new`] admitted, whose classes and
+    /// functions the preload publishes as php's
+    /// `preload_move_user_classes` keeps an `eval()'d code`'s of a
+    /// preloaded file, and which the preload saves as no file of its own.
+    evals: Vec<Frozen<PublishedUnit>>,
     aliases_before: usize,
     /// `ZEND_COMPILE_PRELOAD_IN_CHILD` ([`Code::preloading_in_child`]).
     in_child: bool,
@@ -296,6 +304,16 @@ struct Candidate {
     linked: bool,
     /// The last refusal its link met, with the site php names.
     refused: Option<(String, Vec<u8>, u32)>,
+}
+
+impl Preloading {
+    /// The unit the preload froze that `unit` is, a preloaded file's or
+    /// an `eval`'s; none for one the request holds as its own.
+    fn frozen(&self, unit: &PublishedUnit) -> Option<&Frozen<PublishedUnit>> {
+        (self.scripts.iter().map(|(_, frozen, _)| frozen))
+            .chain(&self.evals)
+            .find(|frozen| PublishedUnit::ptr_eq(frozen, unit))
+    }
 }
 
 /// A row of the preload's table of classes, `preload_sort_classes`'s bucket:
@@ -316,6 +334,7 @@ impl Request {
     pub(crate) fn begin_preload(&mut self, in_child: bool) {
         self.preloading = Some(Preloading {
             scripts: Vec::new(),
+            evals: Vec::new(),
             aliases_before: self.aliases.len(),
             in_child,
         });
@@ -348,15 +367,44 @@ impl Request {
         // in `preload_optimize`).
         let optimizer = shared.optimizer();
         let unit = unit.map(|unit| shared.publish_compiled(optimizer.optimized(unit)));
-        if let (Ok(unit), Some(preloading)) = (&unit, &mut self.preloading) {
+        if let (Ok(Ok(unit)), Some(preloading)) = (&unit, &mut self.preloading) {
             let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
-            preloading
-                .scripts
-                .push((full, PublishedUnit::clone(unit), size));
+            preloading.scripts.push((full, Frozen::clone(unit), size));
         }
+        let unit = unit.map(|unit| unit.map_or_else(|own| own, |unit| PublishedUnit::clone(&unit)));
         Some(unit.map_err(|error| {
             crate::unit_cache::CompileRefused::published(error, |unit| self.take_unit(unit))
         }))
+    }
+
+    /// An `eval`'s string compiled while the preload runs, as
+    /// [`Request::preload_file`] compiles a file: with the engine's
+    /// strings and numbers, optimized and published, so the classes and
+    /// functions it declares can be published with the preload's. A
+    /// unit [`Frozen::new`] refuses is served as the request's own, and
+    /// what it declares is left out of the preload ([`Request::publish_tables`]).
+    pub(crate) fn preload_eval(
+        &mut self,
+        source: &[u8],
+        name: &[u8],
+        position: php_compile::syntax::Position,
+    ) -> Result<PublishedUnit, crate::unit_cache::CompileRefused> {
+        let shared = Arc::clone(&self.shared);
+        let kind = php_compile::SourceKind::Eval(position);
+        let optimizer = crate::unit_cache::Optimizer::Off;
+        let unit = (self.compile_kind_for_cache(source, name, kind, optimizer)).unit;
+        if let Ok(unit) = &unit {
+            self.count_keys_made(crate::unit_cache::keys_of(unit));
+        }
+        let optimizer = shared.optimizer();
+        let unit = unit.map(|unit| shared.publish_compiled(optimizer.optimized(unit)));
+        if let (Ok(Ok(unit)), Some(preloading)) = (&unit, &mut self.preloading) {
+            preloading.evals.push(Frozen::clone(unit));
+        }
+        let unit = unit.map(|unit| unit.map_or_else(|own| own, |unit| PublishedUnit::clone(&unit)));
+        unit.map_err(|error| {
+            crate::unit_cache::CompileRefused::published(error, |unit| self.take_unit(unit))
+        })
     }
 
     /// Whether the class at `at` of `unit` is one the preload holds,
@@ -565,7 +613,7 @@ impl Request {
             let held = declared.entry(address(&user.unit)).or_default();
             held.functions.push(user.body);
         }
-        let tables = match self.publish_tables(&rows) {
+        let tables = match self.publish_tables(&rows, &preloading) {
             Ok(tables) => tables,
             Err(message) => {
                 crate::api::raising::fatal(self, &message);
@@ -627,11 +675,18 @@ impl Request {
     /// from its parent's published one; the request's own rows are
     /// taken out. `Err` is the internal error of a class whose record
     /// could not be built.
-    fn publish_tables(&mut self, rows: &[Row]) -> Result<Published, String> {
+    fn publish_tables(
+        &mut self,
+        rows: &[Row],
+        preloading: &Preloading,
+    ) -> Result<Published, String> {
         let mut renumbered: HashMap<ClassId, EpochClassId> = HashMap::new();
+        let mut left = std::collections::HashSet::new();
         for local in self.publication_order(rows) {
-            let published = self.publish_class(local, &renumbered)?;
-            renumbered.insert(local, published);
+            match self.publish_class(local, &renumbered, &left, preloading)? {
+                Some(published) => _ = renumbered.insert(local, published),
+                None => _ = left.insert(local),
+            }
         }
         let shared = |class: ClassId| {
             renumbered
@@ -643,7 +698,7 @@ impl Request {
         let mut aliases = Vec::new();
         for row in rows {
             match row {
-                Row::Class(local) => {
+                Row::Class(local) if !left.contains(local) => {
                     let Some(decl) = self.symbols().class_decl(*local) else {
                         continue;
                     };
@@ -652,36 +707,40 @@ impl Request {
                     let class = shared(*local);
                     classes.push((key, Named { place, class }));
                 }
-                Row::Alias(alias, class) => {
+                Row::Alias(alias, class) if !left.contains(class) => {
                     let place = self.buckets.take();
                     let key = alias.clone().into_boxed_slice();
                     aliases.push((key, (place, alias.clone(), shared(*class))));
                 }
-                Row::Unlinked(_) => {}
+                Row::Class(_) | Row::Alias(..) | Row::Unlinked(_) => {}
             }
         }
         self.closure_rows.clear();
-        let functions: Vec<(Box<[u8]>, UserFunction)> = std::mem::take(&mut self.user_functions)
-            .into_iter()
-            .filter(|user| user.member.is_none())
-            .filter_map(|user| {
-                let name = Box::<[u8]>::from(&*user_function_decl(&user)?.name.0);
-                (!name.starts_with(b"{")).then_some((name, user))
-            })
-            .rev()
-            .collect();
+        // A function of a unit the preload holds as its own, one
+        // `Frozen::new` refused, is left out of it.
+        let functions: Vec<(Box<[u8]>, UserFunction<InArena>)> =
+            std::mem::take(&mut self.user_functions)
+                .into_iter()
+                .filter(|user| user.member.is_none())
+                .filter_map(|user| {
+                    let decl = user_function_decl(super::FunctionRow::Own(&user))?;
+                    let name = Box::<[u8]>::from(&*decl.name.0);
+                    let frozen = Frozen::clone(preloading.frozen(&user.unit)?);
+                    (!name.starts_with(b"{")).then_some((name, user.published(frozen, None)?))
+                })
+                .rev()
+                .collect();
         let count = u32::try_from(functions.len()).map_err(|_| ARENA_FULL.to_string())?;
-        let numbers = self
+        let reserved = self
             .arena
             .reserve_functions(count)
             .ok_or_else(|| ARENA_FULL.to_string())?;
         let mut published = Vec::with_capacity(functions.len());
-        for (number, (name, user)) in numbers.zip(functions) {
-            let function = Function(number);
+        for (function, (name, user)) in reserved.functions().zip(functions) {
             if !self.arena.publish_function(function, user) {
                 return Err(ARENA_FULL.to_string());
             }
-            published.push((name, function));
+            published.push((name, Function::from(function)));
         }
         self.functions.clear_own();
         self.declared.clear_own();
@@ -711,7 +770,7 @@ impl Request {
             .map(|preloaded| preloaded.scripts.iter())
             .into_iter()
             .flatten()
-            .map(|held| PublishedUnit::clone(&held.unit))
+            .map(|held| Frozen::clone(&held.unit))
             .collect();
         let laid = crate::tier::words_laid(&self.shared, Some(self));
         if laid.counts() {
@@ -766,7 +825,9 @@ impl Request {
         &mut self,
         local: ClassId,
         renumbered: &HashMap<ClassId, EpochClassId>,
-    ) -> Result<EpochClassId, String> {
+        left: &std::collections::HashSet<ClassId>,
+        preloading: &Preloading,
+    ) -> Result<Option<EpochClassId>, String> {
         let name = String::from_utf8_lossy(self.symbols().class_name(local)).into_owned();
         let shared = |class: ClassId| match renumbered.get(&class) {
             Some(published) => Some(*published),
@@ -777,6 +838,22 @@ impl Request {
                 "InternalError: the preload's class {name} has no row"
             ));
         };
+        // Declared by a unit the preload holds as its own, or naming a
+        // class so declared, the class is left out of the preload, as a
+        // class of no preloaded file is.
+        let Some(frozen) = preloading.frozen(row.unit()).cloned() else {
+            return Ok(None);
+        };
+        let names_left = row.decl().is_some_and(|decl| {
+            (decl.parent.iter())
+                .chain(&decl.interfaces)
+                .chain(&decl.traits)
+                .filter_map(|name| self.class_named(name.into()))
+                .any(|class| left.contains(&class))
+        });
+        if names_left {
+            return Ok(None);
+        }
         let named =
             |name: &[u8]| shared(self.class_named(Bare::resolved(name))?).map(ClassId::from);
         let Some(record) = self.record_over(row, &named) else {
@@ -788,15 +865,15 @@ impl Request {
             .decl()
             .and_then(|decl| self.class_named(decl.parent.as_ref()?.into()))
             .and_then(shared);
-        let composed = row.composed.as_deref().cloned();
-        self.publish(
-            &PublishedUnit::clone(&row.unit),
-            row.at,
-            composed,
-            record,
-            parent,
-        )
-        .ok_or_else(|| ARENA_FULL.to_string())
+        let composed = row.composed().map(|composed| Composed {
+            decl: composed.decl.clone(),
+            bodies: composed.bodies.to_vec(),
+            abstracts: composed.abstracts,
+        });
+        let units = |unit: &PublishedUnit| preloading.frozen(unit).cloned();
+        self.publish((&frozen, row.at()), composed, &record, parent, &units)
+            .map(Some)
+            .ok_or_else(|| ARENA_FULL.to_string())
     }
 
     /// `preload_sort_classes`, php's own swap sort and not a stable one:
@@ -850,7 +927,7 @@ impl Request {
             .user_functions
             .iter()
             .filter(|user| user.member.is_none())
-            .filter_map(user_function_decl)
+            .filter_map(|user| user_function_decl(super::FunctionRow::Own(user)))
             .filter(|decl| !decl.name.0.starts_with(b"{"))
             .map(|decl| decl.name.0.to_vec())
             .rev()
@@ -1171,7 +1248,8 @@ mod tests {
         if let Some(at) = at {
             rows[..=at].rotate_right(1);
         }
-        let published = req.publish_tables(&rows);
+        let preloading = req.preloading.take().expect("the preload's request");
+        let published = req.publish_tables(&rows, &preloading);
         let names: Vec<(ClassId, String)> = published
             .iter()
             .flat_map(|published| published.classes.rows.iter())
@@ -1186,11 +1264,12 @@ mod tests {
         // naming the published classes.
         let placed = |class: ClassId| -> Vec<(ClassId, String)> {
             req.arena.class(class).map_or_else(Vec::new, |row| {
-                let shown = |info: &PropertyInfo| {
-                    let name = req.property_decl(*info).map_or(&[][..], |p| &p.name.0);
+                let shown = |info: PropertyInfo| {
+                    let name = req.property_decl(info).map_or(&[][..], |p| &p.name.0);
                     (info.declaring, String::from_utf8_lossy(name).into_owned())
                 };
-                row.bound.placed.slots().iter().map(shown).collect()
+                let row = crate::api::request::ClassRow::Arena(row);
+                row.placed().slots().iter().map(shown).collect()
             })
         };
         let parent = names.last().map(|(class, _)| *class);

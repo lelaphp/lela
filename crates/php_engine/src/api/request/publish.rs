@@ -12,8 +12,9 @@
 
 use php_link::{Composed, LinkedClass};
 use php_unit::PublishedUnit;
+use php_unit::frozen::Frozen;
 
-use super::{Bound, Declared, Request};
+use super::{Bound, ClassRow, Declared, InArena, Request};
 use crate::api::values::ClassId;
 use crate::arena::EpochClassId;
 
@@ -26,30 +27,62 @@ impl Request {
     /// properties, built before the number is handed on. The parent and
     /// the class are named by the identities the arena minted
     /// ([`EpochClassId`]), so no request's own class is published as one,
-    /// and widen to [`ClassId`] where they enter the row every request
-    /// reads. None where the arena has no room for it, which leaves the
-    /// class to be bound by the request that asked.
+    /// and so is every class its record and its placed properties name,
+    /// each by the arena's one check or as the class itself, so the row
+    /// stands in the arena's scope ([`InArena`]): over the frozen unit,
+    /// with the composed declaration frozen by [`Frozen::new`]. None
+    /// where the arena has no room for it, and where it refuses the
+    /// composed declaration or a class the row names, which leaves the
+    /// class to be bound by the request that asked, as its own. A member
+    /// whose body is in another unit, a trait's method, is published over
+    /// the frozen unit `units` finds that unit to be, and the class is not
+    /// published where it finds none.
     pub(crate) fn publish(
         &self,
-        unit: &PublishedUnit,
-        at: u32,
+        (unit, at): (&Frozen<PublishedUnit>, u32),
         composed: Option<Composed>,
-        record: LinkedClass<ClassId>,
+        record: &LinkedClass<ClassId>,
         parent: Option<EpochClassId>,
+        units: &dyn Fn(&PublishedUnit) -> Option<Frozen<PublishedUnit>>,
     ) -> Option<EpochClassId> {
-        let row = Declared {
-            unit: PublishedUnit::clone(unit),
+        let composed = match composed {
+            Some(Composed {
+                decl,
+                bodies,
+                abstracts,
+            }) => Some(Box::new(Composed {
+                decl: Frozen::new(decl).ok()?,
+                bodies,
+                abstracts,
+            })),
+            None => None,
+        };
+        let row: Declared<InArena> = Declared {
+            unit: Frozen::clone(unit),
             at,
-            composed: composed.map(Box::new),
+            composed,
             bound: Bound::default(),
         };
         let class = self.arena.reserve_class()?;
-        let members = self.members_of(&row, class.into())?;
-        let (functions, members) = self.place_published(class, members)?;
-        let parent = parent.map(ClassId::from);
+        let members = self.members_of(ClassRow::Arena(&row), class.into())?;
+        let (functions, members) = self.place_published(class, members, units)?;
         // `zend_build_properties_info_table` at the link: built by the
         // publisher, so no request writes the published row.
-        let placed = self.placed_over(class.into(), row.decl()?, Some(&record), parent);
+        let placed = self.placed_over(
+            class.into(),
+            row.decl()?,
+            Some(record),
+            parent.map(ClassId::from),
+        );
+        let keyed = |named: ClassId| {
+            if named == class {
+                Some(class)
+            } else {
+                self.arena.shared_class(named)
+            }
+        };
+        let record = record.try_map(keyed)?;
+        let placed = placed.published(keyed)?;
         let row = Declared {
             bound: Bound {
                 record: Some(record),
@@ -76,7 +109,10 @@ impl Request {
     /// published before it, and never over the request's. By declaration
     /// index, none for a class the unit does not bind early and for one
     /// the arena could not take, which the request binds as its own.
-    pub(crate) fn publish_unit(&self, unit: &PublishedUnit) -> crate::unit_cache::EarlyBound {
+    pub(crate) fn publish_unit(
+        &self,
+        unit: &Frozen<PublishedUnit>,
+    ) -> crate::unit_cache::EarlyBound {
         let mut published: Vec<Option<EpochClassId>> = vec![None; unit.classes.len()];
         let mut own: Vec<(Vec<u8>, EpochClassId)> = Vec::new();
         for (at, decl) in (0u32..).zip(&unit.classes) {
@@ -101,17 +137,17 @@ impl Request {
                 },
                 None => None,
             };
-            let row = Declared {
-                unit: PublishedUnit::clone(unit),
+            let row: Declared<InArena> = Declared {
+                unit: Frozen::clone(unit),
                 at,
                 composed: None,
                 bound: Bound::default(),
             };
-            let Some(record) = self.record_over(&row, &|name| named(name).map(ClassId::from))
-            else {
+            let row = ClassRow::Arena(&row);
+            let Some(record) = self.record_over(row, &|name| named(name).map(ClassId::from)) else {
                 continue;
             };
-            let Some(class) = self.publish(unit, at, None, record, parent) else {
+            let Some(class) = self.publish((unit, at), None, &record, parent, &|_| None) else {
                 continue;
             };
             if let Some(slot) = usize::try_from(at)

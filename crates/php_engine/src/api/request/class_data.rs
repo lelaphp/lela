@@ -1086,12 +1086,7 @@ impl Request {
             .map_or(0, |data| data.defaults.len());
         // The rows not yet evaluated, which is none once the class's
         // defaults stood.
-        let rows: Vec<PropertyInfo> = self
-            .placed_properties(class)
-            .iter()
-            .skip(done)
-            .copied()
-            .collect();
+        let rows: Vec<PropertyInfo> = self.placed_properties(class).iter().skip(done).collect();
         for info in rows {
             // The default expression alone is handed on past what writes
             // the request, so it is what is cloned.

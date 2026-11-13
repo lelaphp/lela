@@ -2928,9 +2928,6 @@ fn begun(
     made
 }
 
-/// One table of a linked record.
-type RecordRows<C> = php_link::Rows<Row<ClassId>, C>;
-
 /// One of a class's three tables, which names a row of it.
 #[derive(Clone, Copy)]
 enum Table {
@@ -2953,10 +2950,12 @@ impl Request {
     /// holds to its end; the request binds no other class of its own. The
     /// `Err` is the memory limit's fatal.
     pub(super) fn link_blocks(&mut self, class: ClassId) -> Result<(), Thrown> {
-        let Some((unit, at)) = self
-            .declared_row(class)
-            .map(|row| (php_unit::PublishedUnit::as_ptr(&row.unit), row.at as usize))
-        else {
+        let Some((unit, at)) = self.declared_row(class).map(|row| {
+            (
+                php_unit::PublishedUnit::as_ptr(row.unit()),
+                row.at() as usize,
+            )
+        }) else {
             return Ok(());
         };
         let cached = !self.unit_strings.holds(unit);
@@ -2964,7 +2963,7 @@ impl Request {
             Some(blocks) => blocks,
             // The class as its unit wrote it, before its traits composed it.
             None if cached => match (self.declared_row(class))
-                .and_then(|row| row.unit.classes.get(row.at as usize))
+                .and_then(|row| row.unit().classes.get(row.at() as usize))
                 .map(Compiled::of)
             {
                 Some(compiled) => lazy_copy(self, compiled)?,
@@ -3019,11 +3018,11 @@ impl Request {
             return;
         }
         let Some((unit, at, constant)) = self.declared_row(class).and_then(|row| {
-            let written = row.unit.classes.get(row.at as usize)?;
+            let written = row.unit().classes.get(row.at() as usize)?;
             let constant = (written.constants.iter()).position(|c| *c.name.0 == *name)?;
             Some((
-                php_unit::PublishedUnit::as_ptr(&row.unit),
-                row.at as usize,
+                php_unit::PublishedUnit::as_ptr(row.unit()),
+                row.at() as usize,
                 constant,
             ))
         }) else {
@@ -3091,9 +3090,12 @@ impl Request {
             return;
         }
         let Some((unit, at)) = self.declared_row(info.declaring).and_then(|row| {
-            let written = row.unit.classes.get(row.at as usize)?;
+            let written = row.unit().classes.get(row.at() as usize)?;
             (written.properties.get(info.at as usize)).filter(|p| p.is_instance)?;
-            Some((php_unit::PublishedUnit::as_ptr(&row.unit), row.at as usize))
+            Some((
+                php_unit::PublishedUnit::as_ptr(row.unit()),
+                row.at() as usize,
+            ))
         }) else {
             return;
         };
@@ -3110,8 +3112,8 @@ impl Request {
             .filter_map(|info| {
                 let row = self.declared_row(info.declaring)?;
                 Some((
-                    php_unit::PublishedUnit::as_ptr(&row.unit),
-                    row.at as usize,
+                    php_unit::PublishedUnit::as_ptr(row.unit()),
+                    row.at() as usize,
                     info.at as usize,
                 ))
             })
@@ -3146,10 +3148,11 @@ impl Request {
         let Some(row) = self.declared_row(class) else {
             return Ok(());
         };
-        let Some((decl, written)) = row.decl().zip(row.unit.classes.get(row.at as usize)) else {
+        let Some((decl, written)) = row.decl().zip(row.unit().classes.get(row.at() as usize))
+        else {
             return Ok(());
         };
-        let unit = php_unit::PublishedUnit::as_ptr(&row.unit);
+        let unit = php_unit::PublishedUnit::as_ptr(row.unit());
         let mangled: Vec<Vec<u8>> = (decl.properties.get(written.properties.len()..))
             .unwrap_or_default()
             .iter()
@@ -3169,12 +3172,11 @@ impl Request {
     /// linked record and its parent's.
     pub(super) fn linking(&self, class: ClassId) -> Option<Linking> {
         let row = self.declared_row(class)?;
-        let written = row.unit.classes.get(row.at as usize)?;
+        let written = row.unit().classes.get(row.at() as usize)?;
         let decl = row.decl()?;
         let record = row.record()?;
         let abstracts = row
-            .composed
-            .as_ref()
+            .composed()
             .map_or(0, |composed| composed.abstracts as usize);
         let composed = decl.methods.len().saturating_sub(abstracts);
         let first = Members {
@@ -3204,17 +3206,19 @@ impl Request {
             .as_ref()
             .map_or_else(Members::default, |parent| parent.rows);
         let last = Members {
-            methods: (record.methods.rows().len()).saturating_sub(composed + taken.methods),
-            constants: (record.constants.rows().len())
+            methods: (record.methods().rows().len()).saturating_sub(composed + taken.methods),
+            constants: (record.constants().rows().len())
                 .saturating_sub(decl.constants.len() + taken.constants),
-            properties: (record.properties.rows().len())
+            properties: (record.properties().rows().len())
                 .saturating_sub(decl.properties.len() + taken.properties),
         };
         let interfaces = self.interface_sizes(decl, written);
         let above = (decl.parent.as_ref()).and_then(|name| self.class_named(name.into()));
         let backed_above = |name: &[u8]| {
-            let above = above.map_or(&[][..], |above| self.placed_properties(above));
-            (above.iter().filter_map(|info| self.property_decl(*info))).any(|property| {
+            let above = above.map_or(super::PlacedSlots::NONE, |above| {
+                self.placed_properties(above)
+            });
+            (above.iter().filter_map(|info| self.property_decl(info))).any(|property| {
                 *property.name.0 == *name
                     && property.visibility != Visibility::Private
                     && property.hooks.is_none()
@@ -3248,27 +3252,27 @@ impl Request {
         let pair = (class, parent);
         Some(Inherited {
             tables: Members {
-                methods: theirs.methods.rows().len(),
-                constants: theirs.constants.rows().len(),
-                properties: theirs.properties.rows().len(),
+                methods: theirs.methods().rows().len(),
+                constants: theirs.constants().rows().len(),
+                properties: theirs.properties().rows().len(),
             },
             rows: Members {
                 methods: self.taken(
                     pair,
                     Table::Methods,
-                    (&ours.methods, &theirs.methods),
+                    (ours.methods(), theirs.methods()),
                     methods,
                 ),
                 constants: self.taken(
                     pair,
                     Table::Constants,
-                    (&ours.constants, &theirs.constants),
+                    (ours.constants(), theirs.constants()),
                     constants,
                 ),
                 properties: self.taken(
                     pair,
                     Table::Properties,
-                    (&ours.properties, &theirs.properties),
+                    (ours.properties(), theirs.properties()),
                     properties,
                 ),
             },
@@ -3285,16 +3289,16 @@ impl Request {
         &self,
         (class, parent): (ClassId, ClassId),
         table: Table,
-        (ours, theirs): (&RecordRows<C>, &RecordRows<C>),
+        (ours, theirs): (super::RowsOf<'_, C>, super::RowsOf<'_, C>),
         own: usize,
     ) -> usize {
-        (theirs.rows().iter())
+        (theirs.iter())
             .filter(|row| {
-                let Some(name) = self.row_name(parent, **row, table) else {
+                let Some(name) = self.row_name(parent, *row, table) else {
                     return false;
                 };
                 ours.find_at(name, |row| {
-                    self.row_name(class, *row, table).unwrap_or_default()
+                    self.row_name(class, row, table).unwrap_or_default()
                 })
                 .is_some_and(|(at, _)| at >= own)
             })
@@ -3347,16 +3351,15 @@ impl Request {
     /// copied, where it has any. `Stringable`, which the link adds where
     /// a trait gave the class `__toString`, is one more after them all.
     fn interface_sizes(&self, decl: &ClassDecl, written: &ClassDecl) -> Vec<usize> {
-        let interfaces_of = |class: ClassId| {
-            self.linked_class(class)
-                .map_or(&[][..], |record| &record.interfaces)
+        let interfaces_of = |class: ClassId| -> Vec<ClassId> {
+            (self.linked_class(class)).map_or_else(Vec::new, |record| record.interfaces().collect())
         };
         let theirs = (decl.parent.as_ref())
             .and_then(|name| self.class_named(name.into()))
-            .map_or(&[][..], interfaces_of);
+            .map_or_else(Vec::new, interfaces_of);
         let own = written.interfaces.len().min(decl.interfaces.len());
         let mut sizes = Vec::new();
-        let mut placed: Vec<ClassId> = theirs.to_vec();
+        let mut placed: Vec<ClassId> = theirs.clone();
         if own > 0 {
             sizes.push(own + theirs.len());
             let mut new = Vec::new();
@@ -3374,7 +3377,7 @@ impl Request {
                     continue;
                 }
                 sizes.push(placed.len() + extended.len());
-                for &above in extended {
+                for above in extended {
                     if !placed.contains(&above) {
                         placed.push(above);
                     }

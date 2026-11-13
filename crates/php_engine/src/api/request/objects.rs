@@ -230,16 +230,17 @@ impl Request {
     /// link (`zend_build_properties_info_table`), and read as plain data
     /// after: what a linked class declares, and the chain above it,
     /// never changes.
-    pub(crate) fn placed_properties(&self, class: ClassId) -> &[PropertyInfo] {
-        self.placement(class).map_or(&[], Placed::slots)
+    pub(crate) fn placed_properties(&self, class: ClassId) -> super::PlacedSlots<'_> {
+        self.placement(class)
+            .map_or(super::PlacedSlots::NONE, super::PlacedOf::slots)
     }
 
     /// Where `class`'s declared properties are on its objects
     /// ([`Placed`]), as the class's link built it.
-    pub(crate) fn placement(&self, class: ClassId) -> Option<&Placed> {
+    pub(crate) fn placement(&self, class: ClassId) -> Option<super::PlacedOf<'_>> {
         match self.native_class_at(class) {
-            Some(native) => self.shared.placed.get(native),
-            None => self.declared_row(class).map(|row| &row.bound.placed),
+            Some(native) => self.shared.placed.get(native).map(super::PlacedOf::Request),
+            None => self.declared_row(class).map(super::ClassRow::placed),
         }
     }
 
@@ -254,20 +255,20 @@ impl Request {
     pub(super) fn properties_info(&self, class: ClassId) -> Option<PropertiesInfo<'_>> {
         let (record, placed, decl) = if let Some(native) = self.native_class_at(class) {
             (
-                self.shared.records.get(native)?,
-                self.shared.placed.get(native)?,
+                super::ClassRecord::Request(self.shared.records.get(native)?),
+                super::PlacedOf::Request(self.shared.placed.get(native)?),
                 self.shared.classes.get(native)?,
             )
         } else {
             let row = self.declared_row(class)?;
-            (row.bound.record.as_ref()?, &row.bound.placed, row.decl()?)
+            (row.record()?, row.placed(), row.decl()?)
         };
         Some(PropertiesInfo {
             class,
-            rows: &record.properties,
-            places: &placed.rows,
+            rows: record.properties(),
+            places: placed.rows(),
             decl,
-            hooks: record.hooks,
+            hooks: record.hooks(),
         })
     }
 
@@ -292,7 +293,7 @@ impl Request {
         class: ClassId,
         slot: u32,
     ) -> Option<(ClassId, &PropertyDecl)> {
-        let info = *self
+        let info = self
             .placed_properties(class)
             .get(usize::try_from(slot).ok()?)?;
         Some((info.declaring, self.property_decl(info)?))
@@ -308,7 +309,7 @@ impl Request {
         self.placed_properties(class)
             .iter()
             .enumerate()
-            .filter_map(|(slot, info)| Some((slot, info.declaring, self.property_decl(*info)?)))
+            .filter_map(|(slot, info)| Some((slot, info.declaring, self.property_decl(info)?)))
     }
 
     /// The slot on an object of `class` of the property `declaring`
@@ -373,7 +374,7 @@ pub(crate) fn placed_of<'d>(
     class: ClassId,
     decl: &ClassDecl,
     record: Option<&LinkedClass<ClassId>>,
-    above: &Placed,
+    above: super::PlacedOf<'_>,
     decl_of: impl Fn(PropertyInfo) -> Option<&'d PropertyDecl>,
 ) -> Placed {
     let parent = above.slots();
@@ -398,8 +399,8 @@ pub(crate) fn placed_of<'d>(
     };
     let mut took = vec![false; decl.properties.len()];
     let mut placed = Vec::with_capacity(parent.len().saturating_add(decl.properties.len()));
-    let mut holes = above.holes;
-    for &inherited in parent {
+    let mut holes = above.holes();
+    for inherited in parent.iter() {
         let above =
             decl_of(inherited).filter(|property| property.visibility != Visibility::Private);
         let redeclared = above
@@ -451,7 +452,7 @@ pub(crate) fn placed_of<'d>(
 #[derive(Clone, Copy)]
 pub(super) struct PropertiesInfo<'r> {
     pub(super) class: ClassId,
-    pub(super) rows: &'r php_link::Rows<Row<ClassId>, php_link::Exact>,
+    pub(super) rows: super::RowsOf<'r, php_link::Exact>,
     pub(super) places: &'r [RowPlace],
     pub(super) decl: &'r ClassDecl,
     /// Where the class's property hooks are, `ce->num_hooked_props`.

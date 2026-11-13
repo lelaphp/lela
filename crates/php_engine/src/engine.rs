@@ -28,6 +28,7 @@ use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, IniDecl, MethodDecl, Name,
     ParameterDefault, Type,
 };
+use php_unit::frozen::Frozen;
 use php_unit::{FramelessEntry, PublishedUnit, Unit, frameless_table};
 
 use crate::api::__private::{NativeConst, NativeFunction};
@@ -1455,6 +1456,7 @@ fn native_placed(
     let place = |at: usize, parent: &Placed| {
         let class = ClassId(u32::try_from(at).unwrap_or(u32::MAX));
         let decl = classes.get(at)?;
+        let parent = crate::api::request::PlacedOf::Request(parent);
         Some(placed_of(class, decl, records.get(at), parent, decl_of))
     };
     // A root's parent places nothing; a parent's own placing is read
@@ -1960,7 +1962,7 @@ impl Shared {
         (self
             .compile_shared(source, origin, stack, CompileHeap::Engine, &mut arena)
             .unit)
-            .map(|unit| self.publish_compiled(unit))
+            .map(|unit| self.published_alone(unit))
     }
 
     /// [`Shared::publish`]'s compile alone: the constant strings in the
@@ -2017,11 +2019,61 @@ impl Shared {
     /// map-pointer offset ([`assign_map_ptrs`]), which only a unit held
     /// for more than one request takes, as only what opcache persists
     /// moves `CG(map_ptr_last)`, and its tables laid in one block at
-    /// their length ([`Unit::persist`]).
-    pub(crate) fn publish_compiled(&self, mut unit: Unit) -> PublishedUnit {
+    /// their length ([`Unit::persist`]); then held to [`Frozen::new`],
+    /// so what the engine keeps for every request, the unit cache's
+    /// files, the preload's scripts and the rows of the classes it
+    /// declares, is a unit each of whose values is the engine's. `Err` is
+    /// the unit published all the same, for the asker alone, which binds
+    /// what it declares as its own; it took its map-pointer offsets.
+    ///
+    /// A class whose constants hold a closure and a first-class callable
+    /// runs as php runs it, with the cache and without, whether the
+    /// engine shares the unit or the check refuses it and each request
+    /// binds the class as its own:
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/frozen-closure-' . getmypid();
+    /// @mkdir($dir);
+    /// file_put_contents("$dir/c.inc", <<<'PHP'
+    /// <?php
+    /// class Holder {
+    ///     const LEN = strlen(...);
+    ///     const ADD = static function (int $a, int $b): int { return $a + $b; };
+    /// }
+    /// class Child extends Holder {}
+    /// PHP);
+    /// file_put_contents("$dir/main.php", "<?php\nrequire __DIR__ . '/c.inc';\nvar_dump((Holder::LEN)('abc'), (Child::ADD)(2, 3), Child::LEN instanceof Closure);\n");
+    /// foreach ([[], ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.file_update_protection=0']] as $ini) {
+    ///     $p = proc_open([PHP_BINARY, '-n', ...$ini, "$dir/main.php"], [1 => ['pipe', 'w']], $pipes);
+    ///     echo stream_get_contents($pipes[1]);
+    ///     proc_close($p);
+    /// }
+    /// unlink("$dir/c.inc");
+    /// unlink("$dir/main.php");
+    /// rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// int(3)
+    /// int(5)
+    /// bool(true)
+    /// int(3)
+    /// int(5)
+    /// bool(true)
+    /// ```
+    pub(crate) fn publish_compiled(
+        &self,
+        mut unit: Unit,
+    ) -> Result<Frozen<PublishedUnit>, PublishedUnit> {
         assign_map_ptrs(&mut unit, &self.map_ptr_last);
         unit.persist();
-        unit.published(None)
+        Frozen::new(unit.published(None))
+    }
+
+    /// [`Shared::publish_compiled`] for a caller that holds the unit for
+    /// no other request, frozen or not.
+    pub(crate) fn published_alone(&self, unit: Unit) -> PublishedUnit {
+        self.publish_compiled(unit)
+            .map_or_else(|refused| refused, |frozen| PublishedUnit::clone(&frozen))
     }
 
     /// One source compiled for one request alone, under the request's
@@ -2239,7 +2291,16 @@ impl Shared {
                 // No request asked, so no request's arena is at hand.
                 let mut arena = php_compile::syntax::Arena::default();
                 let heap = CompileHeap::Engine;
-                self.compile_file(source, path, cwd, stack, request, heap, &mut arena)
+                self.compile_file(
+                    source,
+                    path,
+                    SourceKind::File,
+                    cwd,
+                    stack,
+                    request,
+                    heap,
+                    &mut arena,
+                )
             },
             |_| None,
             |unit| self.publish_compiled(unit),
@@ -2249,7 +2310,7 @@ impl Shared {
         );
         // With no request to own it, a unit held nowhere is published
         // all the same.
-        crate::unit_cache::served(compiled, |unit| self.publish_compiled(unit))
+        crate::unit_cache::served(compiled, |unit| self.published_alone(unit))
     }
 
     /// A unit the file cache kept, read back from its bytes as a compiled
@@ -2278,11 +2339,15 @@ impl Shared {
     /// ([`Request::count_keys_made`]); a unit compiled for no request
     /// starts from none. The compile is charged to `heap` while it runs
     /// ([`CompileHeap`]), in `arena` ([`Shared::compile_shared`]).
+    /// An `eval`'s string compiled so is a [`SourceKind::Eval`] under
+    /// its `eval()'d code` name, which only the preload publishes
+    /// ([`crate::api::request::Request::preload_eval`]).
     #[allow(clippy::too_many_arguments)] // the source, where it is, what asked, and where the compile is charged and laid, each one fact
     pub(crate) fn compile_file(
         &self,
         source: &[u8],
         path: &[u8],
+        kind: SourceKind,
         cwd: &Path,
         stack: StackLimit,
         request: ForRequest<'_>,
@@ -2294,7 +2359,7 @@ impl Shared {
             Origin {
                 filename: path,
                 cwd,
-                kind: SourceKind::File,
+                kind,
                 request,
             },
             stack,

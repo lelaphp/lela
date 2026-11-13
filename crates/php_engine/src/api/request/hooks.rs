@@ -349,7 +349,9 @@ impl Request {
         let Some(Member {
             class,
             at: MemberAt::Hook { property, .. },
-        }) = self.user_function(function).and_then(|user| user.member)
+        }) = self
+            .user_function(function)
+            .and_then(super::FunctionRow::member)
         else {
             return false;
         };
@@ -1260,7 +1262,7 @@ impl Request {
     /// read off its chain's declarations by the same rule.
     pub(super) fn class_hooks(&self, class: ClassId) -> ClassHooks {
         if let Some(record) = self.linked_class(class) {
-            return record.hooks;
+            return record.hooks();
         }
         let mut hooks = ClassHooks::Absent;
         for here in self.symbols().lineage(class) {

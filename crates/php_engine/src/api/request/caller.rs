@@ -751,7 +751,7 @@ impl Request {
     /// bit.
     pub(crate) fn function_strict_types(&self, function: Function) -> bool {
         self.user_function(function).is_some_and(|user| {
-            crate::exec::body_of(&user.unit, user.body).is_some_and(|code| code.strict_types)
+            crate::exec::body_of(user.unit(), user.body()).is_some_and(|code| code.strict_types)
         })
     }
 }

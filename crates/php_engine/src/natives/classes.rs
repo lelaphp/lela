@@ -251,7 +251,7 @@ fn is_a(
 /// among its declarations it stands.
 fn properties_info(req: &Request, class: ClassId) -> Vec<PropertyInfo> {
     req.linked_class(class).map_or_else(Vec::new, |record| {
-        (record.properties.rows().iter())
+        (record.properties().rows().iter())
             .map(|row| PropertyInfo {
                 declaring: row.holder_in(class),
                 at: row.at,

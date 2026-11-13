@@ -51,11 +51,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use crate::api::call::{ClassNative, Function};
-use crate::api::request::{Declared, UserFunction};
+use crate::api::request::{Declared, InArena, UserFunction};
 use crate::api::values::ClassId;
 use crate::tier::Laid;
 use php_link::LinkedClass;
 use php_unit::PublishedUnit;
+use php_unit::frozen::Frozen;
 
 /// The rows of one chunk, `1 << CHUNK_BITS` of them: a number's low
 /// bits are its slot in the chunk.
@@ -248,13 +249,19 @@ impl PartialEq<EpochClassId> for ClassId {
 }
 
 /// The identity of a function or method every request of one epoch
-/// numbers alike, by which the epoch's tier state names one: the number
-/// every request of the epoch calls it by. Minted only by the arena's
-/// one check of a function ([`Arena::shared_function`]), which a
-/// [`UnitView`](crate::tier::UnitView) of that epoch calls, beside the
-/// class's ([`EpochClassId`]): a native or a native method, which every
-/// request numbers alike, or a user function or method whose row the
-/// epoch's arena holds. So a request's own function has none.
+/// numbers alike, by which the epoch's arena and its tier state name
+/// one: the number every request of the epoch calls it by. Minted, as
+/// the class's is ([`EpochClassId`]), two ways and no other: where the
+/// arena numbers a row, a user function's or method's
+/// ([`Arena::reserve_functions`]) or a native a published class lays
+/// under its own scope ([`Arena::reserve_class_native`]), so a class's
+/// row names its methods before their rows are filled; and by the
+/// arena's one check of a function ([`Arena::shared_function`]), which
+/// a [`UnitView`](crate::tier::UnitView) of that epoch calls: a native
+/// or a native method, which every request numbers alike, or a user
+/// function or method whose row the epoch's arena holds. The check
+/// admits no class native, which the tier names by its class and place
+/// instead. So a request's own function has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
 pub struct EpochFunction(u32);
 
@@ -264,17 +271,46 @@ impl From<EpochFunction> for Function {
     }
 }
 
+impl PartialEq<EpochFunction> for Function {
+    fn eq(&self, other: &EpochFunction) -> bool {
+        self.0 == other.0
+    }
+}
+
+/// The numbers of user functions the arena reserved together, in order,
+/// each minted an [`EpochFunction`] here, where the arena numbered it.
+#[derive(Debug, Clone)]
+pub(crate) struct Reserved(std::ops::Range<u32>);
+
+impl Reserved {
+    /// The numbers, as a request calls them.
+    pub(crate) fn numbers(&self) -> std::ops::Range<u32> {
+        self.0.clone()
+    }
+
+    /// Each function, in order.
+    pub(crate) fn functions(&self) -> impl Iterator<Item = EpochFunction> + use<> {
+        self.0.clone().map(EpochFunction)
+    }
+
+    /// The function a number of these names; none past them.
+    pub(crate) fn function(&self, number: u32) -> Option<EpochFunction> {
+        self.0.contains(&number).then_some(EpochFunction(number))
+    }
+}
+
 /// The arena of one epoch: the classes, the user functions and methods,
 /// and the natives a class lays under its own scope published past the
 /// engine's own and the preload's, each numbered past what is numbered
 /// below them, with the caches that name them.
+#[derive(php_macros::EngineState)]
 pub(crate) struct Arena {
     /// The preload, which every epoch after it is laid over
     /// ([`Epochs::lay_base`]); none in the preload's own arena and where
     /// nothing was preloaded.
     below: Option<Base>,
-    classes: Column<Declared>,
-    functions: Column<UserFunction>,
+    classes: Column<Declared<InArena>>,
+    functions: Column<UserFunction<InArena>>,
     class_natives: Column<(EpochClassId, ClassNative)>,
     /// The classes below, the engine's and the preload's, which the
     /// arena's are numbered past.
@@ -315,12 +351,20 @@ pub(crate) struct Arena {
     interned: Interned,
 }
 
+/// The arena is engine state by the derive, held at every field, and
+/// shared by every request of its epoch at once (ADR-0005, #4652).
+const _: fn() = || {
+    fn held<T: crate::api::abi::EngineState + Sync>() {}
+    held::<Arena>();
+    held::<Epochs>();
+};
+
 /// The engine's two tables of interned strings (design §5.2): the
 /// permanent names its startup interned, frozen after, and the table a
 /// unit's constant strings enter as it is published, grown by one
 /// publisher at a time. Shared by the engine and every epoch it hands out, so neither
 /// outlives the strings the other's units name.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, php_macros::EngineState)]
 pub(crate) struct Interned {
     pub(crate) names: Arc<php_heap::Strings>,
     pub(crate) strings: Arc<Mutex<php_heap::Strings>>,
@@ -468,7 +512,7 @@ impl Arena {
 
     /// The published class `class` names; none for the engine's own and
     /// for a request's.
-    pub(crate) fn class(&self, class: ClassId) -> Option<&Declared> {
+    pub(crate) fn class(&self, class: ClassId) -> Option<&Declared<InArena>> {
         let number = class.published_number()?;
         if let Some(at) = number.checked_sub(self.first_class) {
             return self.classes.get(at);
@@ -524,7 +568,7 @@ impl Arena {
 
     /// The published user function or method `function` names; none for
     /// a native and for a request's.
-    pub(crate) fn function(&self, function: Function) -> Option<&UserFunction> {
+    pub(crate) fn function(&self, function: Function) -> Option<&UserFunction<InArena>> {
         let number = function.published_number()?;
         if let Some(at) = number.checked_sub(self.first_function) {
             return self.functions.get(at);
@@ -571,22 +615,26 @@ impl Arena {
             .then_some(EpochClassId(number))
     }
 
-    /// The numbers of `count` user functions to publish, in order.
-    pub(crate) fn reserve_functions(&self, count: u32) -> Option<std::ops::Range<u32>> {
+    /// The identities of `count` user functions to publish, in order,
+    /// minted where the arena numbers their rows, which
+    /// [`Arena::publish_function`] fills.
+    pub(crate) fn reserve_functions(&self, count: u32) -> Option<Reserved> {
         let at = self.functions.reserve(count)?;
         let first = self.first_function.checked_add(at)?;
-        Some(first..first.checked_add(count)?)
+        Some(Reserved(first..first.checked_add(count)?))
     }
 
-    /// The number of a class native to publish.
-    pub(crate) fn reserve_class_native(&self) -> Option<Function> {
+    /// The identity of a class native to publish, minted where the arena
+    /// numbers its row, which [`Arena::publish_class_native`] fills.
+    pub(crate) fn reserve_class_native(&self) -> Option<EpochFunction> {
         let at = self.class_natives.reserve(1)?;
-        Function::published_class_native(self.first_class_native.checked_add(at)?)
+        let function = Function::published_class_native(self.first_class_native.checked_add(at)?)?;
+        Some(EpochFunction(function.0))
     }
 
     /// The row of a reserved class, written once; `false` where the
     /// number was not reserved or its row was written.
-    pub(crate) fn publish_class(&self, class: EpochClassId, row: Declared) -> bool {
+    pub(crate) fn publish_class(&self, class: EpochClassId, row: Declared<InArena>) -> bool {
         let Some(at) = class.0.checked_sub(self.first_class) else {
             return false;
         };
@@ -594,8 +642,12 @@ impl Arena {
     }
 
     /// The row of a reserved user function, written once.
-    pub(crate) fn publish_function(&self, function: Function, row: UserFunction) -> bool {
-        let Some(at) = function
+    pub(crate) fn publish_function(
+        &self,
+        function: EpochFunction,
+        row: UserFunction<InArena>,
+    ) -> bool {
+        let Some(at) = Function::from(function)
             .published_number()
             .and_then(|number| number.checked_sub(self.first_function))
         else {
@@ -607,10 +659,10 @@ impl Arena {
     /// The row of a reserved class native, written once.
     pub(crate) fn publish_class_native(
         &self,
-        function: Function,
+        function: EpochFunction,
         row: (EpochClassId, ClassNative),
     ) -> bool {
-        let Some(at) = function
+        let Some(at) = Function::from(function)
             .published_class_native_at()
             .and_then(|at| at.checked_sub(self.first_class_native))
         else {
@@ -639,6 +691,7 @@ impl Arena {
 /// moment no process is inside (`accel_is_inactive`) and kills the ones
 /// that hold it past `opcache.force_restart_timeout`; a thread cannot be
 /// killed, and an epoch per request makes the wait needless.
+#[derive(php_macros::EngineState)]
 pub(crate) struct Epochs {
     current: Mutex<Arc<Arena>>,
 }
@@ -732,7 +785,12 @@ impl Epochs {
     /// any other request, and publishes nothing into it after; a row it
     /// did would be numbered among the next epoch's own and reached by no
     /// request of it.
-    pub(crate) fn lay_base(&self, arena: &Arc<Arena>, units: Arc<[PublishedUnit]>, laid: Laid) {
+    pub(crate) fn lay_base(
+        &self,
+        arena: &Arc<Arena>,
+        units: Arc<[Frozen<PublishedUnit>]>,
+        laid: Laid,
+    ) {
         let mut current = self.lock();
         if arena.below.is_some() || current.below.is_some() {
             return;
@@ -750,15 +808,16 @@ impl Epochs {
 /// each epoch lays its own words for them, as php's restart resets every
 /// preloaded op array's (`zend_jit_restart`) and an epoch still served
 /// keeps its own.
+#[derive(php_macros::EngineState)]
 struct Base {
     arena: Arc<Arena>,
-    units: Arc<[PublishedUnit]>,
+    units: Arc<[Frozen<PublishedUnit>]>,
     laid: Laid,
     funcs: crate::tier::published::Funcs,
 }
 
 impl Base {
-    fn of(arena: Arc<Arena>, units: Arc<[PublishedUnit]>, laid: Laid) -> Base {
+    fn of(arena: Arc<Arena>, units: Arc<[Frozen<PublishedUnit>]>, laid: Laid) -> Base {
         let funcs = crate::tier::published::Funcs::preloaded(&units, laid);
         Base {
             arena,
@@ -817,12 +876,15 @@ mod tests {
         assert_eq!(second.counts(), [0, 0, 0]);
         for epoch in [&first, &second] {
             assert!(row.is_some());
-            assert_eq!(method.and_then(|method| epoch.class_native(method)), row);
+            assert_eq!(
+                method.and_then(|method| epoch.class_native(method.into())),
+                row
+            );
         }
         assert!(mine.is_some());
-        assert_eq!(own.and_then(|own| first.class_native(own)), mine);
+        assert_eq!(own.and_then(|own| first.class_native(own.into())), mine);
         assert_eq!(
-            own.and_then(|own| second.class_native(own)),
+            own.and_then(|own| second.class_native(own.into())),
             None,
             "not the new epoch's"
         );

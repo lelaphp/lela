@@ -252,7 +252,7 @@ impl Request {
     pub(crate) fn unit_of(&self, header: &exec::Header) -> Option<(&PublishedUnit, exec::Body)> {
         if let Some(function) = header.function() {
             let user = self.user_function(function)?;
-            Some((&user.unit, user.body))
+            Some((user.unit(), user.body()))
         } else {
             let unit = self.annexes.get(header.annex()?)?.unit.as_ref()?;
             Some((unit, exec::Body::Main))
@@ -1112,7 +1112,7 @@ impl Request {
         let cvs = self
             .frame_function(frame)
             .and_then(|function| self.user_function(function))
-            .map_or(0, |user| user.shape.cvs as usize);
+            .map_or(0, |user| user.shape().cvs as usize);
         let mut from = 0;
         let mut served = false;
         while let Some((at, value)) = self.take_next_owner(frame, from, cvs) {
@@ -1436,9 +1436,9 @@ impl Request {
     ) -> (usize, crate::readable::CalleeAt, exec::CallInfo) {
         if let Some(user) = self.user_function(function) {
             return (
-                usize::try_from(user.shape.room(count)).unwrap_or(usize::MAX),
+                usize::try_from(user.shape().room(count)).unwrap_or(usize::MAX),
                 user.callee_at(),
-                user.shape.sent,
+                user.shape().sent,
             );
         }
         let (room, callee) = self.call_room_past_user(function, count);
@@ -1454,7 +1454,7 @@ impl Request {
         count: u32,
     ) -> (usize, crate::readable::CalleeAt) {
         let callee = self.shared.native_callee(function).unwrap_or_default();
-        let shape = |function: Function| Some(self.user_function(function)?.shape);
+        let shape = |function: Function| Some(self.user_function(function)?.shape());
         let room = if let Some(magic) = self
             .trampoline_of(function)
             .and_then(|(trampoline, _)| trampoline.magic())
@@ -1700,7 +1700,7 @@ impl Request {
     /// The [`FrameShape`](crate::api::request::FrameShape) of the user
     /// function `call` names; none for a call to anything else.
     pub(crate) fn call_shape(&self, call: FrameRef) -> Option<crate::api::request::FrameShape> {
-        Some(self.user_function(self.vm.at(call)?.function()?)?.shape)
+        Some(self.user_function(self.vm.at(call)?.function()?)?.shape())
     }
 
     /// The innermost user frame of the running stack ([`Vm::innermost_at`]).
@@ -1888,7 +1888,7 @@ impl Request {
         }
         let function = header.function()?;
         let passed = header.num_args;
-        let shape = user_in(user_functions, arena, function)?.shape;
+        let shape = user_in(user_functions, arena, function)?.shape();
         // The `INIT` found the entry plain ([`exec::CallInfo::plain_entry`]):
         // the function's own cache, and no attribute to raise.
         let cache = shape.cache;
@@ -1930,8 +1930,8 @@ impl Request {
         let passed = header.num_args;
         let len = top.len();
         let user = self.user_function(function)?;
-        let shape = user.shape;
-        if flagged && (user.flags.deprecated || user.flags.no_discard && returns_to.is_none()) {
+        let shape = user.shape();
+        if flagged && (user.flags().deprecated || user.flags().no_discard && returns_to.is_none()) {
             return None;
         }
         let cache = self
@@ -2180,9 +2180,9 @@ impl Request {
             .map_or(0, crate::exec::HeapFrame::len);
         let (cvs, own, parameters) = match function.and_then(|f| self.user_function(f)) {
             Some(user) => (
-                user.shape.cvs as usize,
-                user.shape.slots as usize,
-                user.shape.parameters,
+                user.shape().cvs as usize,
+                user.shape().slots as usize,
+                user.shape().parameters,
             ),
             None => self.frame_at(frame).and_then(exec::FrameAt::code).map_or(
                 (slots, slots, 0),
@@ -2900,7 +2900,7 @@ impl Request {
         &mut self,
         function: Function,
     ) -> Result<Option<exec::CacheBase>, Fatal> {
-        let Some(shape) = self.user_function(function).map(|user| user.shape) else {
+        let Some(shape) = self.user_function(function).map(super::FunctionRow::shape) else {
             return Ok(None);
         };
         exec::lay_runtime_cache(&mut self.map, &mut self.heap, shape.cache, shape.cache_size)
@@ -2975,10 +2975,10 @@ pub(crate) enum CodeFrom {
 fn laid_entry_holds(
     header: &exec::Header,
     len: usize,
-    user: Option<&crate::api::request::UserFunction>,
+    user: Option<crate::api::request::FunctionRow<'_>>,
     map: &exec::RuntimeCaches,
 ) -> bool {
-    let Some(shape) = user.map(|user| user.shape) else {
+    let Some(shape) = user.map(super::FunctionRow::shape) else {
         return false;
     };
     let opline = exec::skipped_recv(header.num_args, shape.parameters, shape.typed, shape.entry);

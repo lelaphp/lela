@@ -749,10 +749,10 @@ impl<'r> Symbols<&'r Request> {
             return Vec::new();
         };
         record
-            .constants
+            .constants()
             .rows()
             .iter()
-            .filter_map(|row| self.0.class_lookup().row_constant(class, *row))
+            .filter_map(|row| self.0.class_lookup().row_constant(class, row))
             .collect()
     }
 }
