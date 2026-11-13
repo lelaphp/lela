@@ -20,11 +20,12 @@
 //! is named `_`: plain data (flags, counts, lines, oplines, indices and
 //! tables of them, a doc comment, a diagnostic's text, an attribute's
 //! validator), and names and types, of which `Name`, `Type` and
-//! `Visibility` are engine state by the derive. The one that names
+//! `Visibility` are engine state by the derive. The one field that names
 //! something beside the walked value is a closure's cell
 //! ([`crate::UnitCell`]), which names the unit the closure was declared
-//! in; what that is, for a unit and for a declaration, is the argument of
-//! [`Frozen`]'s `EngineState` impl.
+//! in: the walk over a unit passes it over, and the walk over a
+//! declaration refuses it unless it is empty, as the argument of
+//! [`Frozen`]'s `EngineState` impl says.
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use std::ops::Deref;
@@ -36,7 +37,7 @@ use crate::decl::{
     MethodDecl, Parameter, ParameterDefault, PropertyDecl, PropertyHooks,
 };
 use crate::op::{BoundVar, MapPtrOffset, OpArray};
-use crate::unit::{HookBody, MethodBody, PublishedUnit, Unit};
+use crate::unit::{HookBody, MethodBody, PublishedUnit, Unit, UnitCell};
 
 /// What holds a value [`unit_values`] meets, as the engine gives each
 /// value of a compile its owner: the main op array, held while it runs;
@@ -75,7 +76,8 @@ pub enum Slot {
 
 /// What [`unit_values`] refuses of a unit apart from its values (#4656):
 /// an index past the table it names, a constant no publisher is shown to
-/// write, and an op array a request numbered.
+/// write, and an op array a request numbered; and what [`Frozen::new`]
+/// refuses of a declaration apart from its values, a closure's cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stray {
     /// An `IS_CONSTANT_AST` constant past its op array's `const_exprs`.
@@ -87,6 +89,10 @@ pub enum Stray {
     /// An op array whose runtime cache is a request's number
     /// ([`MapPtrOffset::Request`]).
     Request(u32),
+    /// A closure's cell in a declaration that is not the empty one, which
+    /// names the unit the declaration was compiled in (#4684). Never
+    /// [`unit_values`]': in a unit, the cell names the unit walked.
+    Cell,
 }
 
 /// Each value `unit` holds, handed to `found` beside its [`Holder`] and
@@ -124,6 +130,7 @@ pub fn unit_values(unit: &Unit, found: &mut dyn FnMut(Holder, Slot, Zval)) -> Re
     let mut walk = Walk {
         found,
         constants: constants.len(),
+        cells: false,
         stray: None,
     };
     walk.op_array(Holder::Main, main);
@@ -169,6 +176,16 @@ pub fn unit_values(unit: &Unit, found: &mut dyn FnMut(Holder, Slot, Zval)) -> Re
 
 /// Each value the arguments of `attributes` hold ([`ConstExpr::UnitValue`]).
 pub fn attribute_values(attributes: &[Attribute], found: &mut dyn FnMut(Zval)) {
+    attribute_parts(attributes, found, &mut |_| {});
+}
+
+/// Each value the arguments of `attributes` hold, handed to `found`, and
+/// each closure's cell in them, handed to `cell`.
+fn attribute_parts(
+    attributes: &[Attribute],
+    found: &mut dyn FnMut(Zval),
+    cell: &mut dyn FnMut(&UnitCell),
+) {
     for Attribute {
         name: _,
         arguments,
@@ -178,17 +195,36 @@ pub fn attribute_values(attributes: &[Attribute], found: &mut dyn FnMut(Zval)) {
     } in attributes
     {
         for AttributeArgument { name: _, value } in arguments.as_slice() {
-            expr_values(value, found);
+            expr_parts(value, found, cell);
         }
     }
 }
 
 /// Each value `expr` holds ([`ConstExpr::UnitValue`]) anywhere in its
 /// tree.
-#[allow(clippy::too_many_lines)] // one arm per variant, its fields a line each
 pub fn expr_values(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
+    expr_parts(expr, found, &mut |_| {});
+}
+
+/// Each value `expr` holds anywhere in its tree, handed to `found`, and
+/// each closure's cell, a `static function` node's or a `name(...)`
+/// node's, handed to `cell`.
+#[allow(clippy::too_many_lines)] // one arm per variant, its fields a line each
+fn expr_parts(expr: &ConstExpr, found: &mut dyn FnMut(Zval), cell: &mut dyn FnMut(&UnitCell)) {
     match expr {
         ConstExpr::UnitValue(held) => found(held.value()),
+        ConstExpr::Closure {
+            at: _,
+            name: _,
+            unit,
+        }
+        | ConstExpr::FunctionCallable {
+            name: _,
+            name_kind: _,
+            line: _,
+            at: _,
+            unit,
+        } => cell(unit),
         ConstExpr::Unary {
             op: _,
             operand,
@@ -205,15 +241,15 @@ pub fn expr_values(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
             class_kind: _,
             name: operand,
             line: _,
-        } => expr_values(operand, found),
+        } => expr_parts(operand, found, cell),
         ConstExpr::Binary {
             op: _,
             lhs,
             rhs,
             line: _,
         } => {
-            expr_values(lhs, found);
-            expr_values(rhs, found);
+            expr_parts(lhs, found, cell);
+            expr_parts(rhs, found, cell);
         }
         ConstExpr::Dim {
             container: a,
@@ -226,8 +262,8 @@ pub fn expr_values(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
             nullsafe: _,
             line: _,
         } => {
-            expr_values(a, found);
-            expr_values(b, found);
+            expr_parts(a, found, cell);
+            expr_parts(b, found, cell);
         }
         ConstExpr::Conditional {
             cond,
@@ -238,13 +274,13 @@ pub fn expr_values(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
                 .into_iter()
                 .flatten()
             {
-                expr_values(expr, found);
+                expr_parts(expr, found, cell);
             }
         }
         ConstExpr::Array { elements, line: _ } => {
             for (key, value) in elements {
                 for expr in key.iter().chain([value]) {
-                    expr_values(expr, found);
+                    expr_parts(expr, found, cell);
                 }
             }
         }
@@ -254,7 +290,7 @@ pub fn expr_values(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
             line: _,
         } => arguments
             .iter()
-            .for_each(|(_, value)| expr_values(value, found)),
+            .for_each(|(_, value)| expr_parts(value, found, cell)),
         ConstExpr::Null
         | ConstExpr::Bool(_)
         | ConstExpr::Long { value: _, radix: _ }
@@ -273,18 +309,6 @@ pub fn expr_values(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
             line: _,
         }
         | ConstExpr::ClassName { class: _, line: _ }
-        | ConstExpr::Closure {
-            at: _,
-            name: _,
-            unit: _,
-        }
-        | ConstExpr::FunctionCallable {
-            name: _,
-            name_kind: _,
-            line: _,
-            at: _,
-            unit: _,
-        }
         | ConstExpr::MethodCallable {
             class: _,
             method: _,
@@ -295,16 +319,27 @@ pub fn expr_values(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
 }
 
 /// The walk over one unit or one declaration: where it hands each value,
-/// the bound of the unit's `constants`, and the first [`Stray`] it met.
+/// the bound of the unit's `constants`, whether a closure's cell that is
+/// not empty is refused, and the first [`Stray`] it met.
 struct Walk<'f> {
     found: &'f mut dyn FnMut(Holder, Slot, Zval),
     constants: usize,
+    cells: bool,
     stray: Option<Stray>,
 }
 
 impl Walk<'_> {
     fn stray(&mut self, stray: Stray) {
         self.stray = self.stray.or(Some(stray));
+    }
+
+    /// A cell that is not the empty one, refused where the walk refuses
+    /// cells. Not bound is not empty: a shared cell is bound when its unit
+    /// is published.
+    fn cell(&mut self, met: bool) {
+        if met && self.cells {
+            self.stray(Stray::Cell);
+        }
     }
 
     /// The index `at` a constant holds, refused as `past` names it where it is not
@@ -508,13 +543,21 @@ impl Walk<'_> {
     }
 
     fn expr(&mut self, holder: Holder, slot: Slot, expr: &ConstExpr) {
-        let found = &mut *self.found;
-        expr_values(expr, &mut |z| found(holder, slot, z));
+        let (found, mut met) = (&mut *self.found, false);
+        let empty = UnitCell::default();
+        expr_parts(expr, &mut |z| found(holder, slot, z), &mut |cell| {
+            met |= *cell != empty;
+        });
+        self.cell(met);
     }
 
     fn attributes(&mut self, holder: Holder, slot: Slot, attributes: &[Attribute]) {
-        let found = &mut *self.found;
-        attribute_values(attributes, &mut |z| found(holder, slot, z));
+        let (found, mut met) = (&mut *self.found, false);
+        let empty = UnitCell::default();
+        attribute_parts(attributes, &mut |z| found(holder, slot, z), &mut |cell| {
+            met |= *cell != empty;
+        });
+        self.cell(met);
     }
 }
 
@@ -531,9 +574,10 @@ mod sealed {
 /// so no type outside this crate is one.
 pub trait Values: sealed::Walked {}
 
-/// Every value the unit holds passes [`FrozenZval::of`], every index its
-/// op arrays' constants hold names an entry of its own tables, and every
-/// op array is numbered by the engine.
+/// Every value the unit holds passes [`FrozenZval::of`], each of its op
+/// arrays' constants that is an index, an `IS_CONSTANT_AST` or an
+/// `IS_PTR`, names an entry of its own tables, and every op array is
+/// numbered by the engine.
 impl sealed::Walked for PublishedUnit {
     fn frozen(&self) -> bool {
         let mut values = true;
@@ -542,18 +586,21 @@ impl sealed::Walked for PublishedUnit {
     }
 }
 
-/// Every value the declaration holds passes [`FrozenZval::of`]; a
-/// declaration holds no index, which only an op array's constant is.
+/// Every value the declaration holds passes [`FrozenZval::of`], and every
+/// closure's cell in it is empty ([`Stray::Cell`]); a declaration holds no
+/// index, which only an op array's constant is.
 impl sealed::Walked for ClassDecl {
     fn frozen(&self) -> bool {
         let mut values = true;
-        Walk {
+        let mut walk = Walk {
             found: &mut |_, _, z| values &= FrozenZval::of(z).is_some(),
             constants: 0,
+            cells: true,
             stray: None,
-        }
-        .class(self);
-        values
+        };
+        walk.class(self);
+        let walked = walk.stray.is_none();
+        values && walked
     }
 }
 
@@ -569,9 +616,11 @@ pub struct Frozen<T>(T);
 impl<T: Values> Frozen<T> {
     /// `value`, where every value the walk reaches is a scalar or a
     /// published string or constant array of the engine's table
-    /// ([`FrozenZval::of`]), and, for a unit, each index its constants hold
-    /// is below its table's bound, none is `UNDEF`, and every op array's
-    /// offset is [`MapPtrOffset::Engine`] ([`unit_values`]).
+    /// ([`FrozenZval::of`]), and, for a unit, each of its constants that is
+    /// an index, an `IS_CONSTANT_AST` or an `IS_PTR`, is below its table's
+    /// bound, none is `UNDEF`, and every op array's
+    /// offset is [`MapPtrOffset::Engine`] ([`unit_values`]); for a
+    /// declaration, every closure's cell in it is empty ([`Stray::Cell`]).
     ///
     /// # Errors
     ///
@@ -599,15 +648,19 @@ impl<T> Deref for Frozen<T> {
 /// which names every field and variant of the unit format, and admitted
 /// each only where [`FrozenZval::of`] does: a scalar, or a string or
 /// constant array the engine's table published, which no request owns or
-/// counts and which lives as long as the engine. Each index a unit's
-/// constants hold is decided against its own unit's table, and each op
-/// array is numbered by the engine's map-pointer space, not a request's.
+/// counts and which lives as long as the engine. Each of a unit's
+/// constants that is an index names an entry of its own tables, an
+/// `IS_CONSTANT_AST` of its op array's `const_exprs` and an `IS_PTR` of
+/// the unit's `constants`; no other index the unit holds, an opline's or
+/// a table's, is checked, since none reaches a request's heap (#4684).
+/// Each op array is numbered by the engine's map-pointer space, not a
+/// request's.
 /// It is read and never written, so what the check read stands while it
 /// is held.
 ///
-/// No field the walk passes over names anything beside the value walked
-/// but one, a closure's cell ([`crate::UnitCell`]) in a constant
-/// expression, which names a unit. In a unit, every closure's cell is a
+/// No field the walk reads names anything beside the value walked but
+/// one, a closure's cell ([`crate::UnitCell`]) in a constant expression,
+/// which names a unit. In a unit, every closure's cell is a
 /// share of the one cell its maker laid, the compiler's
 /// ([`crate::UnitCell::share`]) or the cache reader's, which
 /// [`Unit::published`] binds to the published copy the first time the
@@ -618,10 +671,12 @@ impl<T> Deref for Frozen<T> {
 /// not check it. So no pointer into a request's heap is reachable through
 /// a frozen unit, and it may be moved and shared as engine state.
 ///
-/// A frozen declaration is not yet held to that: the walk does not refuse
-/// a cell in it that is not empty, which names the unit the declaration
-/// was compiled in, a request's own among them; that refusal is #4649's
-/// remaining change, waiting on #4681, and until it lands nothing outside
-/// this crate's tests makes a `Frozen<ClassDecl>`, whose first holder is
-/// #4652.
+/// A declaration is walked apart from any unit, so a cell in it that is
+/// not empty names the unit the declaration was compiled in, which may be
+/// a request's own. No frozen declaration holds one: the walk over a
+/// declaration refuses every cell that is not the empty one, bound or not
+/// ([`Stray::Cell`]), wherever a constant expression sits in it, a class
+/// constant, a property's default, an attribute's argument or a
+/// parameter's default. So no unit is reachable through a frozen
+/// declaration, by the type and the check alone, whoever makes one.
 impl<T: Values + Send + Sync + 'static> EngineState for Frozen<T> {}
