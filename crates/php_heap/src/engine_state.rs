@@ -191,16 +191,19 @@ impl EngineState for ZvalType {}
 #[cfg(debug_assertions)]
 impl EngineState for crate::Origin {}
 
-/// The engine's permanent table (`string.rs`, #4633's ruling): what it
-/// holds is its own, laid off every request's heap, and immutable once
-/// it is published. A string of it is "immutable, hashed before it is
-/// published, never refcounted and never freed while the engine
-/// stands", laid in its bump or by a set a cache-bound compile filled
-/// on the system allocator ([`crate::Pending`]); a constant array of it
-/// is one `persistent_array` laid on the system allocator, marked
+/// The engine's permanent table (`string.rs`, #4633's ruling): the
+/// blocks it holds are its own, laid off every request's heap, and
+/// immutable once it is published. A string of it is "immutable, hashed
+/// before it is published, never refcounted and never freed while the
+/// engine stands", laid in its bump or by a set a cache-bound compile
+/// filled on the system allocator ([`crate::Pending`]); a constant array
+/// of it is one `persistent_array` laid on the system allocator, marked
 /// `IS_ARRAY_IMMUTABLE`, and freed with the table. The pointers it holds
-/// are to those blocks, its bump's chunks and the class caches' numbers,
-/// and to nothing of a request's. Its `Send` and `Sync` impls make the
+/// are to those blocks and its bump's chunks, beside the class caches'
+/// numbers. What a constant array's keys and elements name is what its
+/// caller handed [`Intern::constant_array`], which the engine's
+/// publishers keep to the table's values and which no type or check in
+/// this crate holds (#4655). Its `Send` and `Sync` impls make the
 /// same argument for moving and sharing it: the only other names for
 /// its strings and arrays are the zvals of the units the engine
 /// published, which read and never write them, and growing it takes
