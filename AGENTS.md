@@ -13,7 +13,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=e598c8ee82d42081b5c547de2c1610685f757e803ce2aaba8be1f1aeede3c2e8 out=24a0970de38bf3e82a307507a5be68798c82ac2bde27126dd973619312f06362 -->
+<!-- /computed in=3ff8b93dddbbb63e41c151a52ea2f4acb44deea105210932c63b9d4a485ff18c out=24a0970de38bf3e82a307507a5be68798c82ac2bde27126dd973619312f06362 -->
 
 ## What makes the third engine special?
 
@@ -113,7 +113,7 @@ third-engine-design.md
 - ADR-0016 (accepted, 2026-10-25): The binaries are named after the product from one constant, with `php` an opt-in symlink
 - ADR-0017 (accepted, 2026-10-31): The compiled tier is refused as the default on G3: tracing stays opt-in, and Cranelift stands
 
-<!-- /computed in=2e867ea4d6f4cd9fd420b38c25a68a600d147090f3d89d7793a292d42e78a46d out=505c842c422e5cf0dbefccae4eb1489aed874733945edcc8cac26bedb9aee9d3 -->
+<!-- /computed in=a22492f25b72657482764f9232ebabfe675f2167e6a2f4115ab65504af9bc726 out=505c842c422e5cf0dbefccae4eb1489aed874733945edcc8cac26bedb9aee9d3 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling |
@@ -130,7 +130,7 @@ third-engine-design.md
 | layer | layer.lock | 43 |  |
 | harness | xtask.lock | 499 |  |
 
-<!-- /computed in=5a8109a1d21d0d7a0468c9136836fbe3c246b84b91f1999feb9f49aa3dcc67c5 out=3a7d7232f6c0db0c990f235ba25a0ada7058f3889b762f76ada4b4bd3e727b60 -->
+<!-- /computed in=97076c9a3e5ae688f198bbf58bd04b9c0839511d5ea723b86ab868c5e6f8bc5b out=3a7d7232f6c0db0c990f235ba25a0ada7058f3889b762f76ada4b4bd3e727b60 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
