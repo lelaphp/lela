@@ -395,8 +395,12 @@ impl Walk<'_> {
             frameless: _,
         } = decl;
         // The slots through their `Deref`, since their fields are the
-        // declaration module's: a native's entries are built on the
-        // first read, a program's always are.
+        // declaration module's, where they are built: a program's always
+        // are. A native's that no reader has built are its entries,
+        // which are left unbuilt and not read: each is the binary's own,
+        // its attributes `'static` and its default made by a `fn` where a
+        // reader builds the slots, so none holds a value a unit or a
+        // request laid.
         for Parameter {
             name: _,
             ty: _,
@@ -406,7 +410,7 @@ impl Walk<'_> {
             variadic: _,
             default,
             attributes,
-        } in &**parameters
+        } in parameters.unbuilt().map_or_else(|| &**parameters, |_| &[])
         {
             match default {
                 ParameterDefault::None | ParameterDefault::Unshown => {}

@@ -6,7 +6,8 @@
 use php_heap::{Heap, Intern, Key, Strings, Zval};
 use php_unit::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
-    ConstExpr, EnumBacking, Name, UnitValue, Visibility,
+    ConstExpr, EnumBacking, MethodDecl, Name, NativeParameter, Parameters, Type, UnitValue,
+    Visibility,
 };
 use php_unit::frozen::{Frozen, Holder, Slot, Stray, unit_values};
 use php_unit::{BoundVar, MapPtrOffset, MethodBody, OpArray, PublishedUnit, Unit};
@@ -291,4 +292,38 @@ fn the_walk_hands_each_declared_value_beside_its_holder() {
     // The function's attribute, then the class's constant; the `const`'s
     // value and attribute are views of its `DECLARE_CONST`.
     assert_eq!(declared, [Holder::Unit, Holder::Unit]);
+}
+
+/// A native's one parameter, as its entry spells it.
+const ENTRIES: &[NativeParameter] = &[NativeParameter {
+    name: b"flags",
+    ty: || Some(Type::Int),
+    by_ref: false,
+    prefer_ref: false,
+    variadic: false,
+    passed: true,
+    default: Some(|| ConstExpr::long(0)),
+    attributes: &[],
+}];
+
+/// The walk reads a native's slots only where a reader has built them, so
+/// a declaration whose method is a native's leaves the slots unbuilt.
+#[test]
+fn the_walk_leaves_a_natives_unbuilt_slots_unbuilt() {
+    let table = table();
+    let mut function = php_unit::decl::native_function(b"m");
+    function.parameters = Parameters::native(ENTRIES);
+    let mut declared = class(held(table.array));
+    declared.methods = vec![MethodDecl {
+        function,
+        visibility: Visibility::Public,
+        is_instance: true,
+        is_abstract: false,
+        is_final: false,
+        tentative_return: false,
+    }];
+    let frozen = Frozen::new(declared).expect("every value is the table's");
+    let parameters = &frozen.methods[0].function.parameters;
+    assert!(parameters.unbuilt().is_some(), "the walk built no slot");
+    assert_eq!(parameters.len(), 1, "a reader builds them after");
 }
