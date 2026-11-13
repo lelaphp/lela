@@ -592,6 +592,32 @@ mod tests {
         assert_eq!(of(holding), Some(holding), "the table's array of it");
     }
 
+    /// No maker lays this array: the table's refuses a string it does not
+    /// hold, and a set's array of its own string takes the bit only as
+    /// the set is published with the string. Laid past both, the array
+    /// stands as the table's, and `of` refuses it for what it holds.
+    #[test]
+    fn of_refuses_a_published_array_holding_an_unpublished_sets_string() {
+        let _alone = crate::serial::alone();
+        let mut strings = Strings::new();
+        let mut pending = crate::Pending::default();
+        let s = pending.intern(b"a compile's string", false);
+        let s = s.expect("the allocator has room");
+        assert_eq!(of(Zval::string(s)), None, "a set's string, unpublished");
+        let mut unrefused = Unrefused::default();
+        let laid = [
+            ([(Key::Long(0), Zval::string(s))], "as an element"),
+            ([(Key::Str(s), Zval::long(1))], "as a key"),
+        ];
+        for (entries, what) in laid {
+            let held = strings.constant_array(&entries, 1);
+            assert!(held.is_err(), "the table refuses its string {what}");
+            let a = unrefused.lay(&entries);
+            assert!(a.as_arr().is_some_and(Arr::is_permanent), "the table's");
+            assert_eq!(of(a), None, "a set's string {what}, unpublished");
+        }
+    }
+
     /// A set's string whose bytes the table holds already is kept as a
     /// shadow, and one that takes a class cache stands in the table in
     /// place of its bytes' string: each takes the bit as the set is
