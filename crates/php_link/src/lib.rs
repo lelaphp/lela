@@ -76,7 +76,7 @@ const MAY_BE_NEVER: u32 = 1 << 17;
 /// Where php raises what a link refused or deprecated: the file and the
 /// first line of the declaration it is about, the child method's for a
 /// method and the class's for the rest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
 pub struct Site {
     pub file: Name,
     pub line: u32,
@@ -933,7 +933,7 @@ pub struct Refused {
 /// An override of a tentative return type that does not match it,
 /// `emit_incompatible_method_error` under `INHERITANCE_WARNING`: php's
 /// deprecation, which the child's `#[\ReturnTypeWillChange]` silences.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
 pub struct TentativeReturn {
     pub child: String,
     pub parent: String,
@@ -953,7 +953,7 @@ impl fmt::Display for TentativeReturn {
 /// What a link raised that is no refusal, in the order raised: php
 /// records each while the class links (`zend_begin_record_errors`) and
 /// emits them before a fatal or once the class stands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
 pub enum Raised {
     /// A tentative return overridden out of step, `E_DEPRECATED`.
     TentativeReturn(TentativeReturn),
@@ -1010,7 +1010,7 @@ impl fmt::Display for Raised {
 /// (`zend_add_trait_method` copies the `zend_op_array` and not its
 /// opcodes), so two methods of one body are one method to
 /// `zend_add_trait_method`'s check of a trait used twice.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
 pub struct Body {
     pub class: Name,
     pub method: u32,
@@ -1064,10 +1064,13 @@ impl<H> Held<'_, H> {
 /// each of its methods; and how many of its methods, its last, are the
 /// traits' abstract methods it took, which php binds after the parent's
 /// (`zend_do_traits_method_binding`'s second pass), so its function
-/// table holds them after the parent's.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Composed {
-    pub decl: ClassDecl,
+/// table holds them after the parent's. The declaration is `D`: a
+/// [`ClassDecl`] as the link makes it, or, where the engine published the
+/// class for every request, the declaration as a check made it engine
+/// state (`php_unit::frozen::Frozen`), which its arena holds (#4652).
+#[derive(Debug, Clone, PartialEq, php_macros::EngineState)]
+pub struct Composed<D = ClassDecl> {
+    pub decl: D,
     pub bodies: Vec<Body>,
     pub abstracts: u32,
 }

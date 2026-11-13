@@ -1769,6 +1769,7 @@ version = "0.0.0"
 dependencies = [
  "hashbrown 0.17.1",
  "php_heap",
+ "php_macros",
  "php_unit",
 ]
 

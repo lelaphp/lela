@@ -105,9 +105,10 @@ pub fn mirrors(attribute: TokenStream, item: TokenStream) -> TokenStream {
 /// itself is compiled, whose natives are Core's, `php_engine::api` in
 /// the tier and the stream layer, which reach the engine directly and
 /// derive engine state there, and the facade everywhere else (ADR-0007).
-/// The derive's trait starts apart from this root in `php_unit` and
-/// `php_ssa`, at `::php_heap::EngineState`, since neither crate reaches
-/// the engine or the facade (`engine_state::state_trait_for`, #4544).
+/// The derive's trait starts apart from this root in `php_unit`,
+/// `php_ssa` and `php_link`, at `::php_heap::EngineState`, since none of
+/// them reaches the engine or the facade (`engine_state::state_trait_for`,
+/// #4544, #4632).
 fn root() -> Tokens {
     root_for(std::env::var("CARGO_CRATE_NAME").ok().as_deref())
 }
@@ -179,7 +180,7 @@ mod tests {
 
     #[test]
     fn a_crate_below_the_engine_names_php_heaps_trait() {
-        for below in ["php_unit", "php_ssa"] {
+        for below in ["php_unit", "php_ssa", "php_link"] {
             assert_eq!(
                 state_trait_for(Some(below)).to_string(),
                 ":: php_heap :: EngineState"

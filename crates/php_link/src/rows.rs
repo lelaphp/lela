@@ -12,8 +12,9 @@ use hashbrown::HashTable;
 /// A linked class's tables, generic over the key `H` its reader
 /// names a class by: the engine's class number, or whatever the caller
 /// of the link holds its classes under. Plain data, with no cell and no
-/// per-request value, so it is `Sync` where `H` is.
-#[derive(Debug, Clone, PartialEq)]
+/// per-request value, so it is `Sync` where `H` is, and engine state by
+/// the derive where `H` is (#4652).
+#[derive(Debug, Clone, PartialEq, php_macros::EngineState)]
 pub struct LinkedClass<H> {
     /// `ce->function_table` in php's order: the class's own methods, a
     /// trait's among them, then each of the parent's table it does not
@@ -64,7 +65,7 @@ pub struct LinkedClass<H> {
 /// methods a property access is served by, `zend_add_magic_method`'s
 /// `ce->__get`, `ce->__set`, `ce->__isset` and `ce->__unset`, which
 /// `zend_do_inheritance` copies down; none for a class without one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, php_macros::EngineState)]
 pub struct Accessors {
     pub get: Option<u32>,
     pub set: Option<u32>,
@@ -98,7 +99,7 @@ impl Accessors {
 /// Where a linked class's property hooks are, as `do_inherit_property`
 /// counts `ce->num_hooked_props` and as a property access finds a
 /// `prop_info->hooks` under its scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, php_macros::EngineState)]
 pub enum ClassHooks {
     /// No property of the class's chain has hooks.
     #[default]
@@ -133,7 +134,7 @@ impl<H> Default for LinkedClass<H> {
 /// One member of a linked class's rows: the class that declared it,
 /// `common.scope`, none for the class's own; and its index among that
 /// class's declared members.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub struct Row<H> {
     pub holder: Option<H>,
     pub at: u32,
@@ -218,11 +219,11 @@ pub trait Case {
 
 /// Names compared whatever their ASCII case, `zend_string_tolower`'s
 /// keys: a method's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub struct Folded;
 
 /// Names compared byte for byte: a constant's or a property's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub struct Exact;
 
 impl Case for Folded {
@@ -236,11 +237,11 @@ impl Case for Exact {
 /// One column of a linked record: its own values, or a range of one
 /// table laid for many records ([`Column::lay`]), as opcache persists a
 /// class's tables into one buffer. It reads as the slice either way.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, php_macros::EngineState)]
 pub struct Column<T>(Store<T>);
 
 /// Where a [`Column`]'s values are.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, php_macros::EngineState)]
 enum Store<T> {
     Own(Vec<T>),
     Laid {
@@ -419,7 +420,7 @@ const SCANNED: usize = 8;
 /// `zend_hash` lays its hash part before its buckets in one allocation
 /// (`HT_SET_DATA_ADDR`), so the index grows, and another table's rows
 /// are copied in, without reading a name.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, php_macros::EngineState)]
 pub struct Rows<R, C> {
     entries: Column<R>,
     /// The index's `slots` slots, each the position of a row plus one
