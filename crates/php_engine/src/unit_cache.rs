@@ -85,13 +85,34 @@ pub(crate) type EarlyBound = Arc<[Option<crate::api::values::ClassId>]>;
 /// A name is borrowed while it is looked up and owned once it is filed,
 /// as `accel_make_persistent_key` hands an absolute path back as it was
 /// written and copies nothing until `zend_accel_add_key` interns it: the
-/// cache's names are `UnitKey<'static>`, and a lookup by a borrowed one
-/// hashes its bytes as the owned one's are hashed (`Borrow<[u8]>`).
+/// cache's names are [`FiledKey`]s, made only from a `UnitKey`
+/// ([`UnitKey::filed`]), and a lookup by a borrowed one hashes its bytes
+/// as the filed one's are hashed (`Borrow<[u8]>`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct UnitKey<'a>(Cow<'a, [u8]>);
 
 impl std::borrow::Borrow<[u8]> for UnitKey<'_> {
     fn borrow(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// A [`UnitKey`] as the cache files it, its bytes owned: the key of
+/// [`Files`]' names, which holds no borrow. It hashes and compares as its
+/// bytes, as a `UnitKey` does, so a lookup by a borrowed name's bytes
+/// finds it (`Borrow<[u8]>`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FiledKey(Box<[u8]>);
+
+impl std::borrow::Borrow<[u8]> for FiledKey {
+    fn borrow(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl FiledKey {
+    /// The name's bytes.
+    pub(crate) fn bytes(&self) -> &[u8] {
         &self.0
     }
 }
@@ -110,8 +131,8 @@ impl<'a> UnitKey<'a> {
 
     /// The name as the cache files it, its bytes copied where they were
     /// borrowed.
-    pub(crate) fn into_owned(self) -> UnitKey<'static> {
-        UnitKey(Cow::Owned(self.0.into_owned()))
+    pub(crate) fn filed(self) -> FiledKey {
+        FiledKey(self.0.into_owned().into_boxed_slice())
     }
 }
 
@@ -438,7 +459,7 @@ fn table_keys(unit: &Unit) -> Vec<Vec<u8>> {
 /// file's early-bound classes are rows of its epoch's arena, so a request
 /// finds only the files its own epoch held.
 pub(crate) struct Files {
-    held: Cache<UnitKey<'static>, Held>,
+    held: Cache<FiledKey, Held>,
     /// How many names the files may be held under.
     capacity: usize,
     /// `ZCSG(hits)`: files served from the cache.
@@ -998,7 +1019,7 @@ impl UnitCache {
         // `accel_new_interned_key`: the name as written is one of the
         // buffer's strings from here.
         php_heap::Intern::intern(&mut *self.interned.strings(), key.bytes()).ok();
-        files.held.alias(key.into_owned(), held);
+        files.held.alias(key.filed(), held);
     }
 
     /// The first name `zend_accel_script_persist` interns of a unit it
@@ -1408,29 +1429,26 @@ impl UnitCache {
         // had it interned by that request already.
         let name = self.name(path);
         let mut built = false;
-        let held = files.held.insert_over(
-            UnitKey::full(path).into_owned(),
-            Held::discarded,
-            |replaced| {
-                built = true;
-                // `zend_accel_hash_update` puts the file in a discarded copy's
-                // entry, where that stands in its bucket's chain.
-                let next = || self.taken.fetch_add(1, Ordering::Relaxed);
-                Held {
-                    unit,
-                    early,
-                    path: path.to_vec(),
-                    name,
-                    stamp,
-                    size,
-                    order: replaced.map_or_else(next, |was| was.order),
-                    hits: AtomicU64::new(0),
-                    last_used: AtomicI64::new(now),
-                    revalidate: AtomicI64::new(revalidate),
-                    discarded: AtomicBool::new(false),
-                }
-            },
-        );
+        let key = UnitKey::full(path).filed();
+        let held = files.held.insert_over(key, Held::discarded, |replaced| {
+            built = true;
+            // `zend_accel_hash_update` puts the file in a discarded copy's
+            // entry, where that stands in its bucket's chain.
+            let next = || self.taken.fetch_add(1, Ordering::Relaxed);
+            Held {
+                unit,
+                early,
+                path: path.to_vec(),
+                name,
+                stamp,
+                size,
+                order: replaced.map_or_else(next, |was| was.order),
+                hits: AtomicU64::new(0),
+                last_used: AtomicI64::new(now),
+                revalidate: AtomicI64::new(revalidate),
+                discarded: AtomicBool::new(false),
+            }
+        });
         if !built {
             return Holding::Found(held);
         }
@@ -1654,5 +1672,44 @@ impl UnitCache {
                 .map(|preloaded| preloaded.statistics.clone()),
             tier,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Borrow;
+    use std::hash::BuildHasher;
+
+    use super::{Cache, FiledKey, UnitKey};
+
+    /// A name as written, borrowed for a lookup, and the same name filed
+    /// are one name: each hashes and compares as its bytes, so the cache
+    /// finds a filed name by the bytes of the name it was filed from, a
+    /// full path and a relative one with what resolves it alike.
+    #[test]
+    fn a_filed_name_hashes_and_compares_as_the_name_it_was_filed_from() {
+        let names = [
+            UnitKey::full(b"/srv/app/index.php"),
+            UnitKey::relative(
+                b"lib.php",
+                b"/srv/app",
+                b".:/usr/share/php",
+                Some(b"/srv/app/index.php"),
+            ),
+        ];
+        let hashing = std::hash::RandomState::new();
+        let cache = Cache::<FiledKey, usize>::new(names.len());
+        for (at, name) in names.iter().enumerate() {
+            let filed = name.clone().filed();
+            assert_eq!(filed.bytes(), name.bytes());
+            assert_eq!(Borrow::<[u8]>::borrow(&filed), Borrow::<[u8]>::borrow(name));
+            assert_eq!(hashing.hash_one(&filed), hashing.hash_one(name.bytes()));
+            assert_eq!(hashing.hash_one(name), hashing.hash_one(name.bytes()));
+            cache.get_or_build(filed, |_| at);
+        }
+        for (at, name) in names.iter().enumerate() {
+            assert_eq!(cache.get(name.bytes()).as_deref(), Some(&at));
+        }
+        assert_eq!(cache.get(&b"/srv/app/lib.php"[..]), None);
     }
 }
