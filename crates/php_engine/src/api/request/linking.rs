@@ -30,6 +30,7 @@ use php_unit::decl::{Bare, ClassDecl, ClassKind, ConstExpr, Name};
 use super::Request;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Key, Value, ValueRef, walk};
+use crate::arena::EpochClassId;
 
 /// The classes whose link is under way, `CG(delayed_autoloads)`, and
 /// the units the cache served the request from what it holds, whose
@@ -589,8 +590,8 @@ fn literal_of(req: &Request, value: &Value) -> Option<ConstExpr> {
 /// inheritance cache's link is found by beside the declaration: the
 /// parent, then the traits and the interfaces in the order written.
 pub(super) struct Fetched {
-    parent: Option<ClassId>,
-    uses: Box<[ClassId]>,
+    parent: Option<EpochClassId>,
+    uses: Box<[EpochClassId]>,
 }
 
 impl Request {
@@ -600,7 +601,8 @@ impl Request {
         (self.links.held.entry(at)).or_insert_with(|| PublishedUnit::clone(unit));
     }
 
-    /// What `decl`'s link fetched, each a class every request shares;
+    /// What `decl`'s link fetched, each a class every request shares by
+    /// the identity the arena's one check mints ([`crate::arena::Arena::shared_class`]);
     /// none where one is the request's own, or not linked, which no
     /// cached link can be keyed by (`UPDATE_IS_CACHEABLE`), or where the
     /// declaration is no held unit's, which php's is not immutable, or is
@@ -609,10 +611,7 @@ impl Request {
         if decl.kind == ClassKind::Enum || !self.links.holds(unit) {
             return None;
         }
-        let shared = |name: &Name| {
-            self.class_named(name.into())
-                .filter(|class| class.is_published())
-        };
+        let shared = |name: &Name| self.arena.shared_class(self.class_named(name.into())?);
         let parent = match &decl.parent {
             Some(name) => Some(shared(name)?),
             None => None,
@@ -620,7 +619,7 @@ impl Request {
         let uses = (decl.traits.iter())
             .chain(&decl.interfaces)
             .map(shared)
-            .collect::<Option<Box<[ClassId]>>>()?;
+            .collect::<Option<Box<[EpochClassId]>>>()?;
         Some(Fetched { parent, uses })
     }
 
@@ -820,12 +819,12 @@ impl Request {
         {
             return None;
         }
-        let mut dependencies: Vec<(Box<[u8]>, ClassId)> = Vec::new();
+        let mut dependencies: Vec<(Box<[u8]>, EpochClassId)> = Vec::new();
         for (name, found) in read.names.iter().filter(|_| !early) {
-            let class = (*found).filter(|class| class.is_published())?;
+            let class = self.arena.shared_class((*found)?)?;
             // `track_class_dependency` leaves out the engine's own classes,
             // which are the same in every request.
-            if self.native_class_at(class).is_some()
+            if self.native_class_at(class.into()).is_some()
                 || dependencies.iter().any(|(seen, _)| seen == name)
             {
                 continue;
@@ -891,7 +890,7 @@ impl Request {
         if let Some(standing) = self.unlinked_named((&decl.name).into()) {
             self.links.unlinked.remove(standing);
         }
-        self.declare_published(unit, at, entry.class, decl);
+        self.declare_published(unit, at, entry.class.into(), decl);
         self.emit_recorded(recording);
     }
 }

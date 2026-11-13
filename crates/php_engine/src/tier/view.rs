@@ -135,7 +135,7 @@ impl Epoch {
         let unit = unit.published(None);
         let files = crate::unit_cache::Files::new(1);
         files.funcs.publish(&unit, crate::tier::Laid::COLD);
-        let arena = Arena::of_engine(Arc::from([]), 0, files, crate::arena::Interned::default());
+        let arena = Arena::of_engine(&[], 0, files, crate::arena::Interned::default());
         (Epoch(Arc::new(arena)), FuncRef(unit.main.runtime_cache))
     }
 }
@@ -634,29 +634,7 @@ impl CalleeSlot {
     }
 }
 
-/// The identity of a class every request of one epoch shares, one of the
-/// engine's own or a row of the epoch's published arena, by which the
-/// epoch's tier state names a class (design §5.14, *Identities*,
-/// revision 183). One is made two ways and no other: by a [`UnitView`]
-/// of that epoch, where the check [`UnitView::hold_class`] makes finds
-/// the request of that epoch, the class published and its row in the
-/// arena; and from an [`EngineClassId`](crate::api::values::EngineClassId),
-/// by `From` and with no view, since the engine's own classes stand in
-/// every epoch. So a request's own class has none, and one stands only
-/// in its epoch's arena, beside a hold on it, or among the engine's own.
-/// Where a [`ClassId`] is asked for, this is one, by `From`.
-///
-/// What compiled code compares a class against is one of these
-/// ([`super::class_number`]); a request's number is not:
-///
-/// ```compile_fail,E0308
-/// fn baked(class: php_engine::tier::ClassId) -> u32 {
-///     php_engine::tier::class_number(class)
-/// }
-/// # fn main() {}
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
-pub struct EpochClassId(u32);
+pub use crate::arena::EpochClassId;
 
 /// The identity of a function or method every request of one epoch
 /// numbers alike, by which the epoch's tier state names one: the number
@@ -668,30 +646,6 @@ pub struct EpochClassId(u32);
 /// the epoch's arena holds. So a request's own function has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
 pub struct EpochFunction(u32);
-
-impl From<crate::api::values::EngineClassId> for EpochClassId {
-    fn from(class: crate::api::values::EngineClassId) -> EpochClassId {
-        EpochClassId(ClassId::from(class).0)
-    }
-}
-
-impl From<EpochClassId> for ClassId {
-    fn from(class: EpochClassId) -> ClassId {
-        ClassId(class.0)
-    }
-}
-
-impl PartialEq<ClassId> for EpochClassId {
-    fn eq(&self, other: &ClassId) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl PartialEq<EpochClassId> for ClassId {
-    fn eq(&self, other: &EpochClassId) -> bool {
-        self.0 == other.0
-    }
-}
 
 impl From<EpochFunction> for crate::api::call::Function {
     fn from(function: EpochFunction) -> crate::api::call::Function {
@@ -749,6 +703,10 @@ pub struct UnitView {
     /// The declarations of the engine's own classes bound for the
     /// analysis, which the epoch does not keep ([`UnitView::class_decl`]).
     engine_decls: Vec<(ClassId, ClassDecl)>,
+    /// The linked records of the engine's own classes the view holds,
+    /// keyed as a request names a class, where the epoch keeps them keyed
+    /// by [`EpochClassId`] ([`UnitView::held_class`]).
+    engine_records: Vec<(EpochClassId, LinkedClass<ClassId>)>,
     /// The request-scoped classes bound for the analysis, each's linked
     /// record and declaration as the request linked it, which the epoch
     /// does not hold ([`UnitView::hold_own`]).
@@ -946,6 +904,7 @@ impl UnitView {
             scopes: Vec::new(),
             related: Vec::new(),
             engine_decls: Vec::new(),
+            engine_records: Vec::new(),
             own: Vec::new(),
             request_bound: Vec::new(),
             called: Vec::new(),
@@ -1146,9 +1105,10 @@ impl UnitView {
         }
     }
 
-    /// Mint the identity every request of the view's epoch names class
-    /// `c` by, where it is shared ([`UnitView::shared`]), holding nothing
-    /// of it; nothing for a request's own.
+    /// Take the identity every request of the view's epoch names class
+    /// `c` by, which the arena mints where it is shared
+    /// ([`UnitView::shared`]), holding nothing of it; nothing for a
+    /// request's own.
     fn mint(&mut self, req: &Request, c: ClassId) {
         if let Some(shared) = self.shared(req, c)
             && !self.classes.contains(&shared)
@@ -1315,24 +1275,35 @@ impl UnitView {
         self.held_class(req, c).is_some()
     }
 
-    /// [`UnitView::hold_class`], with the identity it minted.
+    /// [`UnitView::hold_class`], with the identity the arena minted for
+    /// `c`. A class of the engine's own has its linked record, which the
+    /// epoch keeps keyed by [`EpochClassId`], widened once to the keys a
+    /// request names a class by, for [`UnitView::class`].
     fn held_class(&mut self, req: &Request, c: ClassId) -> Option<EpochClassId> {
         let shared = self.shared(req, c)?;
         if !self.classes.contains(&shared) {
             self.classes.push(shared);
+            let widened = (self.epoch.0.native(shared))
+                .and_then(|record| record.try_map(|class| Some(ClassId::from(class))));
+            if let Some(record) = widened {
+                self.engine_records.push((shared, record));
+            }
         }
         Some(shared)
     }
 
     /// The identity every request of the view's epoch names class `c` by,
-    /// the check [`UnitView::hold_class`] makes and the one place a view
-    /// makes an [`EpochClassId`]: where `req` started in the view's epoch,
-    /// `c` is published (`ClassId::is_published`) and the epoch holds its
-    /// row. None for a request-local class and a request of another
-    /// epoch.
+    /// the check [`UnitView::hold_class`] makes: where `req` started in
+    /// the view's epoch, the epoch's arena's one check
+    /// ([`Arena::shared_class`]), which mints the identity where `c` is
+    /// one of the engine's own or a row the epoch holds. None for a
+    /// request-local class and a request of another epoch; the view mints
+    /// none of its own.
     pub(super) fn shared(&self, req: &Request, c: ClassId) -> Option<EpochClassId> {
-        let shared = self.epoch.of(req) && c.is_published();
-        (shared && self.epoch.0.linked_class(c).is_some()).then_some(EpochClassId(c.0))
+        if !self.epoch.of(req) {
+            return None;
+        }
+        self.epoch.0.shared_class(c)
     }
 
     /// The identity every request of the view's epoch calls `function`
@@ -1351,8 +1322,8 @@ impl UnitView {
         shared.then_some(EpochFunction(function.0))
     }
 
-    /// The identity the view minted for class `c`, the recording
-    /// request's number for it, where it holds the class
+    /// The identity the view took from the arena for class `c`, the
+    /// recording request's number for it, where it holds the class
     /// ([`UnitView::hold_class`]), took a pair on it
     /// ([`UnitView::hold_callee`]) or bound a call to a method it declares
     /// ([`UnitView::called`]); none for any other, a request's own class
@@ -1844,10 +1815,13 @@ impl UnitView {
         if let Some((_, linked, _)) = self.own.iter().find(|(class, ..)| *class == c) {
             return Some(linked);
         }
+        if let Some((_, linked)) = self.engine_records.iter().find(|(class, _)| *class == c) {
+            return Some(linked);
+        }
         if !self.classes.iter().any(|held| *held == c) {
             return None;
         }
-        self.epoch.0.linked_class(c)
+        self.epoch.0.class(c)?.record()
     }
 
     /// Where slot `slot` of the `run_time_cache` of the op array `f` names

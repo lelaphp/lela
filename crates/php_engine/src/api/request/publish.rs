@@ -10,13 +10,12 @@
 //! request's tables under the class's number, as php reaches it through
 //! `ZEND_MAP_PTR`; nothing of it is written into the row.
 
-use std::sync::Arc;
-
 use php_link::{Composed, LinkedClass};
 use php_unit::PublishedUnit;
 
 use super::{Bound, Declared, Request};
 use crate::api::values::ClassId;
+use crate::arena::EpochClassId;
 
 impl Request {
     /// The class `unit` declares at `at`, composed as `composed` where it
@@ -24,17 +23,20 @@ impl Request {
     /// either names published or the engine's: a number of the arena's
     /// taken, its methods and hooks published as functions under it, its
     /// row filled, and what it builds once and keeps, its placed
-    /// properties, built before the number is handed on. None where the
-    /// arena has no room for it, which leaves the class to be bound by
-    /// the request that asked.
+    /// properties, built before the number is handed on. The parent and
+    /// the class are named by the identities the arena minted
+    /// ([`EpochClassId`]), so no request's own class is published as one,
+    /// and widen to [`ClassId`] where they enter the row every request
+    /// reads. None where the arena has no room for it, which leaves the
+    /// class to be bound by the request that asked.
     pub(crate) fn publish(
         &self,
         unit: &PublishedUnit,
         at: u32,
         composed: Option<Composed>,
         record: LinkedClass<ClassId>,
-        parent: Option<ClassId>,
-    ) -> Option<ClassId> {
+        parent: Option<EpochClassId>,
+    ) -> Option<EpochClassId> {
         let row = Declared {
             unit: PublishedUnit::clone(unit),
             at,
@@ -42,11 +44,12 @@ impl Request {
             bound: Bound::default(),
         };
         let class = self.arena.reserve_class()?;
-        let members = self.members_of(&row, class)?;
+        let members = self.members_of(&row, class.into())?;
         let (functions, members) = self.place_published(class, members)?;
+        let parent = parent.map(ClassId::from);
         // `zend_build_properties_info_table` at the link: built by the
         // publisher, so no request writes the published row.
-        let placed = self.placed_over(class, row.decl()?, Some(&record), parent);
+        let placed = self.placed_over(class.into(), row.decl()?, Some(&record), parent);
         let row = Declared {
             bound: Bound {
                 record: Some(record),
@@ -73,20 +76,23 @@ impl Request {
     /// published before it, and never over the request's. By declaration
     /// index, none for a class the unit does not bind early and for one
     /// the arena could not take, which the request binds as its own.
-    pub(crate) fn publish_unit(&self, unit: &PublishedUnit) -> Arc<[Option<ClassId>]> {
-        let mut published: Vec<Option<ClassId>> = vec![None; unit.classes.len()];
-        let mut own: Vec<(Vec<u8>, ClassId)> = Vec::new();
+    pub(crate) fn publish_unit(&self, unit: &PublishedUnit) -> crate::unit_cache::EarlyBound {
+        let mut published: Vec<Option<EpochClassId>> = vec![None; unit.classes.len()];
+        let mut own: Vec<(Vec<u8>, EpochClassId)> = Vec::new();
         for (at, decl) in (0u32..).zip(&unit.classes) {
             let keyed = unit.runtime_keys.iter().any(|(_, class)| *class == at);
             if keyed || decl.flags.is_anonymous {
                 continue;
             }
             let named = |name: &[u8]| {
-                self.shared.class_at(name).or_else(|| {
-                    own.iter()
-                        .find(|(held, _)| held.eq_ignore_ascii_case(name))
-                        .map(|(_, class)| *class)
-                })
+                let engine = self.shared.class_at(name);
+                engine
+                    .and_then(|class| self.arena.shared_class(class))
+                    .or_else(|| {
+                        own.iter()
+                            .find(|(held, _)| held.eq_ignore_ascii_case(name))
+                            .map(|(_, class)| *class)
+                    })
             };
             let parent = match &decl.parent {
                 Some(name) => match named(&name.0) {
@@ -101,7 +107,8 @@ impl Request {
                 composed: None,
                 bound: Bound::default(),
             };
-            let Some(record) = self.record_over(&row, &named) else {
+            let Some(record) = self.record_over(&row, &|name| named(name).map(ClassId::from))
+            else {
                 continue;
             };
             let Some(class) = self.publish(unit, at, None, record, parent) else {
@@ -165,6 +172,12 @@ mod tests {
                 d.is_some_and(|d| !d.is_published()),
                 "D is the request's own"
             );
+            // The arena's one check mints the published classes'
+            // identities, and none for the request's own class.
+            let minted = |class: Option<ClassId>| class.and_then(|c| req.arena.shared_class(c));
+            assert_eq!(minted(p).map(ClassId::from), p);
+            assert_eq!(minted(c).map(ClassId::from), c);
+            assert_eq!(minted(d), None, "D's number mints nothing");
             let inherited = c.and_then(|c| req.symbols().method_named(c, b"p"));
             assert!(inherited.is_some_and(|m| req.user_function(m).is_some()));
             assert_eq!(req.own_classes.len(), 1, "D's row alone");
