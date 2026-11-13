@@ -3,7 +3,13 @@
 name = "php_ext_standard"
 version = "0.0.0"
 edition.workspace = true
-license.workspace = true
+# The workspace's, but for the ports of the third-party files php-src
+# carries, each under its own licence (THIRD-PARTY.md): strnatcmp.rs
+# (Zlib), scanf.rs (TCL), crypt/freesec.rs and dir/php_glob.rs
+# (BSD-3-Clause), uuencode.rs (BSD-4-Clause-UC), image/avif.rs
+# (BSD-2-Clause) and crypt/md5_crypt.rs (Beerware); crypt/blowfish.rs,
+# crypt/sha_crypt.rs and md5.rs follow public-domain code.
+license = "MIT AND BSD-2-Clause AND BSD-3-Clause AND BSD-4-Clause-UC AND Beerware AND TCL AND Zlib"
 rust-version.workspace = true
 publish = false
 description = "The standard extension, php-src/ext/standard"

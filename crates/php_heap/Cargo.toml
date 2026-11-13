@@ -8,7 +8,10 @@
 name = "php_heap"
 version = "0.0.0"
 edition.workspace = true
-license.workspace = true
+# The workspace's, but for numeric/dtoa.rs, a port of David M. Gay's dtoa
+# under its own notice, and sort.rs, a port of libc++'s std::sort under
+# NCSA OR MIT (THIRD-PARTY.md).
+license = "MIT AND dtoa AND (MIT OR NCSA)"
 rust-version.workspace = true
 publish = false
 description = "The memory model: zval, refcounted header, VM stack, map table, the heap port"
