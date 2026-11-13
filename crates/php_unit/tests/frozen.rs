@@ -6,11 +6,13 @@
 use php_heap::{Heap, Intern, Key, Strings, Zval};
 use php_unit::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
-    ConstExpr, EnumBacking, HookKind, MethodDecl, Name, NativeParameter, Parameter,
+    ConstExpr, EnumBacking, HookKind, MethodDecl, Name, NameKind, NativeParameter, Parameter,
     ParameterDefault, Parameters, PropertyDecl, PropertyHooks, Type, UnitValue, Visibility,
 };
 use php_unit::frozen::{Frozen, Holder, Slot, Stray, unit_values};
-use php_unit::{BoundVar, HookBody, MapPtrOffset, MethodBody, OpArray, PublishedUnit, Unit};
+use php_unit::{
+    BoundVar, HookBody, MapPtrOffset, MethodBody, OpArray, PublishedUnit, Unit, UnitCell,
+};
 
 /// What the engine's table lays for a unit it publishes: a string, and a
 /// constant array holding it under a string key of the table's.
@@ -514,4 +516,112 @@ fn frozen_refuses_a_requests_value_as_a_bound_variables_value() {
         !frozen(unit),
         "a request's string a bound variable starts with"
     );
+}
+
+/// A `static function () {}` node and a `strlen(...)` node, each holding
+/// a share of `cell`, as a compile lays them (`UnitCell::share`).
+fn closures(cell: &mut UnitCell) -> [ConstExpr; 2] {
+    [
+        ConstExpr::Closure {
+            at: 0,
+            name: Name::from("{closure:k.php:1}"),
+            unit: cell.share(),
+        },
+        ConstExpr::FunctionCallable {
+            name: Name::from("strlen"),
+            name_kind: NameKind::NotFullyQualified,
+            line: 1,
+            at: 0,
+            unit: cell.share(),
+        },
+    ]
+}
+
+/// Whether the table's class is frozen with `change` made to it for each
+/// closure node holding a share of a unit's cell, each answer in turn.
+fn with_cell(table: &Table, change: impl Fn(&mut ClassDecl, ConstExpr)) -> [bool; 2] {
+    closures(&mut UnitCell::default()).map(|closure| declaration(table, |c| change(c, closure)))
+}
+
+#[test]
+fn frozen_refuses_a_declaration_with_a_cell_in_a_class_constant() {
+    let table = table();
+    let refused = with_cell(&table, |c, closure| c.constants[0].value = closure);
+    assert_eq!(refused, [false, false]);
+}
+
+#[test]
+fn frozen_refuses_a_declaration_with_a_cell_in_a_propertys_default() {
+    let table = table();
+    let refused = with_cell(&table, |c, closure| {
+        let mut p = property();
+        p.default = Some(closure);
+        c.properties = vec![p].into();
+    });
+    assert_eq!(refused, [false, false]);
+}
+
+#[test]
+fn frozen_refuses_a_declaration_with_a_cell_in_an_attributes_argument() {
+    let table = table();
+    let refused = with_cell(&table, |c, closure| {
+        c.attributes = vec![attribute(closure)].into();
+    });
+    assert_eq!(refused, [false, false]);
+}
+
+#[test]
+fn frozen_refuses_a_declaration_with_a_cell_in_a_methods_parameter_default() {
+    let table = table();
+    let refused = with_cell(&table, |c, closure| {
+        let mut slot = parameter();
+        slot.default = ParameterDefault::Expr(closure);
+        let mut m = method(Vec::new());
+        m.function.parameters = Parameters::from(vec![slot]);
+        c.methods = vec![m];
+    });
+    assert_eq!(refused, [false, false]);
+}
+
+/// A cell is refused by what it is, not by whether it is bound: one
+/// bound by a publish is refused as one not yet bound is.
+#[test]
+fn frozen_refuses_a_declaration_with_a_cell_its_unit_bound() {
+    let table = table();
+    let mut unit = published(&table);
+    let [closure, _] = closures(&mut unit.cell);
+    unit.classes[0].constants[0].value = closure;
+    let unit = Frozen::new(unit.published(None)).expect("a unit's own cell names it");
+    let ConstExpr::Closure { unit: cell, .. } = &unit.classes[0].constants[0].value else {
+        unreachable!("the closure laid above");
+    };
+    assert!(cell.unit().is_some(), "bound to the published unit");
+    assert!(Frozen::new(unit.classes[0].clone()).is_err());
+}
+
+#[test]
+fn frozen_admits_a_declaration_whose_expressions_hold_no_cell() {
+    let table = table();
+    assert!(declaration(&table, |_| {}), "no closure node");
+    let closure = ConstExpr::Closure {
+        at: 0,
+        name: Name::from("{closure:k.php:1}"),
+        unit: UnitCell::default(),
+    };
+    assert!(
+        declaration(&table, |c| c.constants[0].value = closure),
+        "a closure node whose cell is the empty one"
+    );
+}
+
+#[test]
+fn frozen_admits_a_unit_whose_class_holds_a_closure() {
+    let table = table();
+    for at in 0..2 {
+        let mut unit = published(&table);
+        let closure = closures(&mut unit.cell)[at].clone();
+        unit.classes[0].constants[0].value = closure;
+        assert_eq!(unit_values(&unit, &mut |_, _, _| {}), Ok(()));
+        assert!(frozen(unit), "the cell names the unit walked");
+    }
 }
