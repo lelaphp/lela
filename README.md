@@ -15,3 +15,5 @@ Data files the harness reads, each stated once:
 - `crates/php_ext/api.lock`: the extension-facing interface; v0 is drafted from the Mahout census by `scripts/census.sh`.
 
 The research behind the design, the earlier revisions (`*.rN.md`) and the predecessor data are in `research/`, kept unedited as records and cited by path from there.
+
+Parts of this project are derived from php-src, Copyright (c) The PHP Group and Contributors and Zend Technologies Ltd., and used under the Modified BSD License. See NOTICE.
