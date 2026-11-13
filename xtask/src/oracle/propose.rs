@@ -24,7 +24,9 @@
 //! `[oracle]`, `[closure]`, `[source]`, `[recipe.env]`'s
 //! `TEST_PHP_EXECUTABLE` and `[sapi]`; `ci/oracle/configure.toml` below its
 //! header; `dist/inputs.toml`'s `[php]` and `[php.ini]`; and
-//! `dist/Dockerfile`'s `ARG PHP_VERSION`; and `.claude/settings.json`'s
+//! `dist/Dockerfile`'s `ARG PHP_VERSION`; `NOTICE`'s php-src tag and its
+//! commit, as `[source]` states them, in the one sentence that names them
+//! (#4663), no line of it wrapped again; and `.claude/settings.json`'s
 //! tree where it names `[source].path`. A `[variant.*]` build is made from
 //! the tag and, on macOS, against `[closure]`, so it is rebuilt and never
 //! proposed, and `ops.toml` and `data/func-infos.toml` are regenerated
@@ -68,6 +70,9 @@ const PIN: &str = "oracle.toml";
 const CONFIGURE: &str = "ci/oracle/configure.toml";
 const INPUTS: &str = "dist/inputs.toml";
 const DOCKERFILE: &str = "dist/Dockerfile";
+/// The notice that names the php-src tag the derived parts follow, which
+/// every tree of the workspace carries, the export's among them.
+const NOTICE: &str = "NOTICE";
 /// The settings that name the php-src tree for every session, by
 /// [`super::TREE_VARIABLE`], which [`Source::tree`] reads first: written
 /// where it names `[source].path`, so no session's tree is refused once
@@ -115,6 +120,7 @@ fn proposed(
     let tree = Checkout::read(&pin, &keg.version, source)?;
     let pinned = pinned(&text, &pin, &keg, &tree, today)?;
     let (configure, inputs, dockerfile) = (read(CONFIGURE)?, read(INPUTS)?, read(DOCKERFILE)?);
+    let notice = read(NOTICE)?;
     let mut files = vec![
         (PIN, text.clone(), pinned.clone()),
         (CONFIGURE, configure.clone(), configured(&configure, &keg)?),
@@ -124,6 +130,7 @@ fn proposed(
             dockerfile.clone(),
             dockerfile_of(&dockerfile, &keg.version)?,
         ),
+        (NOTICE, notice.clone(), notice_of(&notice, &tree)?),
     ];
     let mut notes = vec![format!(
         "read the keg {}, php {} poured from the formula {}, and the php-src checkout {} at {} ({})",
@@ -647,6 +654,15 @@ fn dockerfile_of(text: &str, version: &str) -> Result<String> {
     let indent = &line[..line.len() - line.trim_start().len()];
     file.lines[at] = format!("{indent}{lead}{version}");
     Ok(file.text())
+}
+
+/// `NOTICE` with its one sentence naming php-src's tag naming the
+/// checkout's tag, and its commit as [`pinned`] writes `[source].commit`,
+/// so the two cannot differ.
+fn notice_of(text: &str, tree: &Checkout) -> Result<String> {
+    let named =
+        super::notice::Sentence::of(text).map_err(|why| anyhow::anyhow!("{NOTICE} {why}"))?;
+    Ok(named.naming(&tree.tag, &tree.commit))
 }
 
 /// A TOML string as `scripts/oracle-build.py` writes one: `"` and `\`

@@ -32,6 +32,7 @@ mod fastcgi;
 mod formula;
 pub(crate) mod hosts;
 pub(crate) mod linked;
+mod notice;
 pub(crate) mod profile;
 mod propose;
 mod variant;

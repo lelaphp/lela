@@ -225,7 +225,7 @@ impl Machine {
             }
             text
         };
-        let tracked = [PIN, CONFIGURE, INPUTS, DOCKERFILE].map(|file| (file, file));
+        let tracked = [PIN, CONFIGURE, INPUTS, DOCKERFILE, NOTICE].map(|file| (file, file));
         // The settings stand under `.claude/` in the workspace, and under
         // a name of their own in the fixture, which holds no `.claude/`.
         (tracked
@@ -278,7 +278,8 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (Vec<u8>, Option<SystemTime>)> {
 /// `[closure]`'s rows and date, `[source]`'s tag, commit, path and count,
 /// `TEST_PHP_EXECUTABLE`, the three `[sapi]` hosts and the configure
 /// line's md5 and arguments; beside them `[oracle].formula`,
-/// `dist/inputs.toml`, the Dockerfile's version and the settings' tree
+/// `dist/inputs.toml`, the Dockerfile's version, `NOTICE`'s tag and commit,
+/// nothing else on their line moved (#4674), and the settings' tree
 /// (box 2). `icu4c@78`, which the new keg loads at its next major and its
 /// receipt no longer names, leaves the closure with one note, and
 /// `icu4c@79` takes its place. The variant's build line and `ops.toml`
@@ -291,7 +292,8 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (Vec<u8>, Option<SystemTime>)> {
 fn a_bump_proposes_every_line_the_pin_states_of_the_keg_and_writes_nothing() {
     let tree = Tree::new("propose").unwrap();
     let machine = Machine::lay(&tree);
-    let before = Machine::files("before", &machine.facts(BEFORE, "php-9.1.1", ""));
+    let facts = machine.facts(BEFORE, "php-9.1.1", "");
+    let before = Machine::files("before", &facts);
     machine.workspace(&before);
     machine.workspace(&[("ops.toml", "php_tag = \"php-9.1.1\"\n".to_owned())]);
     let ws = &machine.workspace;
@@ -341,7 +343,12 @@ fn a_bump_proposes_every_line_the_pin_states_of_the_keg_and_writes_nothing() {
     fs::write(&patch, &bump.diff).unwrap();
     git(ws, &["init", "-q"]);
     git(ws, &["apply", patch.to_str().unwrap()]);
-    let after = Machine::files("after", &machine.facts(AFTER, "php-9.1.2", "2026-03-04"));
+    let moved = machine.facts(AFTER, "php-9.1.2", "2026-03-04");
+    let (was, now) = (&facts["short"], &moved["short"]);
+    let tail = ": data extracted from it (ops.toml), tables transcribed\n";
+    let renamed = format!("-php-9.1.1 ({was}){tail}+php-9.1.2 ({now}){tail}");
+    assert!(bump.diff.contains(&renamed), "{}", bump.diff);
+    let after = Machine::files("after", &moved);
     for (file, text) in &after {
         let written = fs::read_to_string(ws.join(file)).unwrap();
         assert_eq!(&written, text, "{file}\n{}", bump.diff);
@@ -372,7 +379,11 @@ fn a_row_nothing_loads_or_names_is_removed_with_a_note_installed_or_not() {
     files[0].1 = files[0]
         .1
         .replace("zip = \"1.0\"\n", &format!("zip = \"1.0\"\n{row}"));
-    files[4].1 = files[4].1.replace("/php-src-9.1.1", "/elsewhere");
+    let settings = files
+        .iter_mut()
+        .find(|(file, _)| *file == SETTINGS)
+        .unwrap();
+    settings.1 = settings.1.replace("/php-src-9.1.1", "/elsewhere");
     machine.workspace(&files);
 
     let proposal = proposed(&machine.workspace, None, None, "2026-03-04").unwrap();
