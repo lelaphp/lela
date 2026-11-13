@@ -7,7 +7,7 @@ endorsed by The PHP Group, the PHP Foundation or Perforce Software.
 
 DERIVED FROM PHP-SRC
 Parts of this project are derived from php-src (https://github.com/php/php-src) at tag
-php-8.5.9 (dd6e76cc): data extracted from it (ops.toml), tables transcribed
+php-8.5.12 (136e049a): data extracted from it (ops.toml), tables transcribed
 from it, and modules translated or written from its C source. Each such file
 names the php-src file it follows. These parts are used under the Modified
 BSD License (BSD-3-Clause), published by the PHP Group as the PHP License,
