@@ -20,14 +20,30 @@ use crate::api::values::ClassId;
 /// the class a `ZEND_JIT_TRACE_OP1_TYPE` record carries: its type once an
 /// `IS_INDIRECT` and then an `IS_REFERENCE` were followed, each marked
 /// where it was (`IS_TRACE_INDIRECT`, `IS_TRACE_REFERENCE`), an array's
-/// packed layout (`IS_TRACE_PACKED`), and an object's class.
+/// packed layout (`IS_TRACE_PACKED`), and an object's class, named as a
+/// `C`: by the request's number as [`sample`] reads it, and as a
+/// recording names it in its record ([`RecordClass`](super::RecordClass),
+/// made by [`UnitView::record_class`](super::UnitView::record_class)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sample {
+pub struct Sample<C = ClassId> {
     pub kind: ZvalType,
     pub indirect: bool,
     pub reference: bool,
     pub packed: bool,
-    pub class: Option<ClassId>,
+    pub class: Option<C>,
+}
+
+impl<C> Sample<C> {
+    /// The sample with its class named as `name` names it.
+    pub fn named<D>(self, name: impl FnOnce(C) -> D) -> Sample<D> {
+        Sample {
+            kind: self.kind,
+            indirect: self.indirect,
+            reference: self.reference,
+            packed: self.packed,
+            class: self.class.map(name),
+        }
+    }
 }
 
 /// The value the operand of kind `kind` and field `field` names in
@@ -105,30 +121,13 @@ pub fn function_number(function: EpochFunction) -> u32 {
     crate::api::call::Function::from(function).0
 }
 
-/// The number a class is known by within the recording's request, a
-/// request's own class's among them, which a recorded trace writes in
-/// its text form (`jit-design.md` §4.1, `TraceRecord::dump`) and
-/// [`numbered_class`] reads back.
+/// The number a class is known by within one request, a request's own
+/// class's among them, as that request's runtime cache holds it: what a
+/// test reads beside a slot it touched. No record holds one
+/// ([`RecordClass`](super::RecordClass)).
 #[must_use]
 pub fn recorded_number(class: ClassId) -> u32 {
     class.0
-}
-
-/// Whether `class` is one every request of an epoch shares under its
-/// number, the engine's own or one the epoch published
-/// (`ClassId::is_published`); a request-scoped class's number is its
-/// request's alone, so compiled code reads it where it runs.
-#[must_use]
-pub fn class_published(class: ClassId) -> bool {
-    class.is_published()
-}
-
-/// The class [`recorded_number`] gave `number`, read back, as a recorded
-/// trace's text form names it; whether any request has such a class is
-/// the reader's to ask.
-#[must_use]
-pub fn numbered_class(number: u32) -> ClassId {
-    ClassId(number)
 }
 
 /// The call an `INIT_*` opline began and no `DO_*CALL` has made a frame

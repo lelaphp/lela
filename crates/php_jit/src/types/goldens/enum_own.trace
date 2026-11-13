@@ -1,7 +1,7 @@
 start loop
 root e3
 op e3 10 long long - taken
-op e3 5 object#2147483650 - - -
+op e3 5 object#own0 - - -
 init e6
 op e3 6 long - - -
 op e3 7 - - - -

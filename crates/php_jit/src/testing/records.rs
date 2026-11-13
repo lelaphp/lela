@@ -347,7 +347,10 @@ pub(crate) fn recording(ini: &[(&str, &str)], program: &str) -> Result<(Recorded
         )
     })?;
     let record = &recorded.record;
-    assert_eq!(TraceRecord::parse(&record.dump()).as_ref(), Ok(record));
+    assert_eq!(
+        TraceRecord::parse(&record.dump(), &recorded.view).as_ref(),
+        Ok(record)
+    );
     if let Some(fatal) = served.fatal {
         return Err(format!("the program ended in a fatal: {fatal}"));
     }

@@ -1,11 +1,11 @@
 start loop
 root e1
 op e1 15 long long - taken
-op e1 5 object#2147483649 - - -
+op e1 5 object#own0 - - -
 op e1 6 long long - -
-op e1 7 object#2147483649 - long -
-op e1 9 object#2147483649 - - -
-op e1 11 object#2147483649 - - -
-op e1 12 object#2147483649 - long -
+op e1 7 object#own0 - long -
+op e1 9 object#own0 - - -
+op e1 11 object#own0 - - -
+op e1 12 object#own0 - long -
 op e1 14 long - - -
 stop loop

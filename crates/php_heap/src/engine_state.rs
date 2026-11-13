@@ -203,10 +203,12 @@ impl EngineState for crate::Origin {}
 /// `IS_STR_PERMANENT`'s bit from the moment the table holds it, a set's
 /// as [`Strings::publish`] takes the set in (#4656). The pointers it holds
 /// are to those blocks and its bump's chunks, beside the class caches'
-/// numbers. What a constant array's keys and elements name is what its
-/// caller handed [`Intern::constant_array`], which the engine's
-/// publishers keep to the table's values and which no type or check in
-/// this crate holds (#4655). Its `Send` and `Sync` impls make the
+/// numbers. A constant array's keys and elements are held to the table's
+/// values as it is laid (#4655): the table's [`Intern::constant_array`]
+/// refuses a key or an element [`FrozenZval::of`] refuses, and a set's
+/// ([`crate::Pending::constant_array`]) one that is neither that nor a
+/// string or array of the set, which [`Strings::publish`] makes the
+/// table's with the array. Its `Send` and `Sync` impls make the
 /// same argument for moving and sharing it: the only other names for
 /// its strings and arrays are the zvals of the units the engine
 /// published, which read and never write them, and growing it takes
@@ -285,10 +287,10 @@ impl FrozenZval {
     ///   carries `IS_STR_PERMANENT`'s bit, which only a constant array
     ///   the table holds and the process's empty array do (`array.rs`),
     ///   a set's taking the bit as the set is published, and is admitted
-    ///   where each key and element is in turn. What a constant array
-    ///   holds is what its home was handed ([`Intern::constant_array`]),
-    ///   which no type holds to these values, so each is read, an array
-    ///   named twice once;
+    ///   where each key and element is in turn. A table's homes refuse
+    ///   to lay an array holding anything else ([`Intern::constant_array`],
+    ///   #4655), and each is read here all the same, an array named
+    ///   twice once, so that what this admits rests on no maker;
     /// - `UNDEF`, a constant expression's index (`IS_CONSTANT_AST`) and an
     ///   `IS_PTR`'s are refused, at the top and as an element (#4656):
     ///   an index means something only beside the table it names, which
@@ -309,16 +311,45 @@ impl FrozenZval {
         }
         while let Some(a) = walk.unread.pop() {
             for (key, element) in &a {
-                let key = match key {
-                    Key::Long(_) => true,
-                    Key::Str(s) => s.is_permanent(),
-                };
-                if !key || !walk.admits(element) {
+                if !FrozenZval::admits_key(key) || !walk.admits(element) {
                     return None;
                 }
             }
         }
         Some(FrozenZval(z))
+    }
+
+    /// Whether [`FrozenZval::of`] admits `z` as it stands, before it
+    /// reads an array's keys and elements: a scalar, or a string or a
+    /// constant array that carries the bits a table's published one
+    /// does. Each type is decided here by name.
+    pub(crate) fn admits_standing(z: Zval) -> bool {
+        match z.kind() {
+            ZvalType::Null
+            | ZvalType::False
+            | ZvalType::True
+            | ZvalType::Long
+            | ZvalType::Double => true,
+            ZvalType::String => z.as_str().is_some_and(crate::Str::is_permanent),
+            ZvalType::Array => z.as_arr().is_some_and(Arr::is_permanent),
+            ZvalType::Undef
+            | ZvalType::ConstExpr
+            | ZvalType::Ptr
+            | ZvalType::Object
+            | ZvalType::Resource
+            | ZvalType::Reference
+            | ZvalType::Indirect => false,
+        }
+    }
+
+    /// Whether [`FrozenZval::of`] admits `key` as a constant array's key:
+    /// an integer, or a string as [`FrozenZval::admits_standing`] admits
+    /// one.
+    pub(crate) fn admits_key(key: Key) -> bool {
+        match key {
+            Key::Long(_) => true,
+            Key::Str(s) => FrozenZval::admits_standing(Zval::string(s)),
+        }
     }
 
     /// The value, for a request to read: a scalar, an interned string or
@@ -339,34 +370,17 @@ struct Walk {
 }
 
 impl Walk {
-    /// Whether `z` is admitted as it stands, an array that is put on
-    /// the walk for its keys and elements to be read.
+    /// Whether `z` is admitted as it stands
+    /// ([`FrozenZval::admits_standing`]), an array that is put on the
+    /// walk the first time it is met, for its keys and elements to be
+    /// read.
     fn admits(&mut self, z: Zval) -> bool {
-        match z.kind() {
-            ZvalType::Null
-            | ZvalType::False
-            | ZvalType::True
-            | ZvalType::Long
-            | ZvalType::Double => true,
-            ZvalType::String => z.as_str().is_some_and(crate::Str::is_permanent),
-            ZvalType::Array => z.as_arr().is_some_and(|a| self.met(a)),
-            ZvalType::Undef
-            | ZvalType::ConstExpr
-            | ZvalType::Ptr
-            | ZvalType::Object
-            | ZvalType::Resource
-            | ZvalType::Reference
-            | ZvalType::Indirect => false,
-        }
-    }
-
-    /// Whether `a` is a table's constant array, published, put on the
-    /// walk the first time it is met.
-    fn met(&mut self, a: Arr) -> bool {
-        if !a.is_permanent() {
+        if !FrozenZval::admits_standing(z) {
             return false;
         }
-        if self.met.insert(a.address()) {
+        if let Some(a) = z.as_arr()
+            && self.met.insert(a.address())
+        {
             self.unread.push(a);
         }
         true
@@ -426,6 +440,31 @@ mod tests {
     /// What [`FrozenZval::of`] answers for `z`: the value it admitted.
     fn of(z: Zval) -> Option<Zval> {
         FrozenZval::of(z).map(FrozenZval::zval)
+    }
+
+    /// Constant arrays laid as the table lays one and published, past the
+    /// refusal its homes make of a value no table holds (#4655): what a
+    /// home without that refusal would have laid, for `of` to be shown
+    /// reading it. Each is freed as this is dropped, as the table frees
+    /// its own.
+    #[derive(Default)]
+    struct Unrefused(Vec<Arr>);
+
+    impl Unrefused {
+        fn lay(&mut self, entries: &[(Key, Zval)]) -> Zval {
+            let a = crate::array::persistent_array(entries).expect("the allocator has room");
+            crate::array::publish_persistent_array(a);
+            self.0.push(a);
+            Zval::array(a)
+        }
+    }
+
+    impl Drop for Unrefused {
+        fn drop(&mut self) {
+            for a in self.0.drain(..) {
+                crate::array::free_persistent_array(a);
+            }
+        }
     }
 
     #[test]
@@ -493,7 +532,8 @@ mod tests {
 
     /// An index means something only beside the table it names, and an
     /// `UNDEF` is no value a publisher writes (#4656): each is refused
-    /// as the value and as an element of a constant array.
+    /// as the value and as an element of a constant array, which the
+    /// table refuses to lay (#4655) and `of` refuses where one stands.
     #[test]
     fn of_refuses_undef_and_a_constant_expressions_and_an_is_ptrs_index() {
         let _alone = crate::serial::alone();
@@ -501,17 +541,23 @@ mod tests {
             assert_eq!(of(z), None, "{:?} is refused", z.kind());
         }
         let mut strings = Strings::new();
-        for z in [Zval::const_expr(0), Zval::ptr(1)] {
+        let mut unrefused = Unrefused::default();
+        for z in [Zval::UNDEF, Zval::const_expr(0), Zval::ptr(1)] {
             let entries = [(Key::Long(0), Zval::long(1)), (Key::Long(1), z)];
-            let a = strings.constant_array(&entries, 2).expect("an array");
-            assert_eq!(of(Zval::array(a)), None, "{:?} as an element", z.kind());
+            let laid = strings.constant_array(&entries, 2);
+            assert!(laid.is_err(), "the table refuses {:?}", z.kind());
+            if z.kind() != ZvalType::Undef {
+                let a = unrefused.lay(&entries);
+                assert_eq!(of(a), None, "{:?} as an element", z.kind());
+            }
         }
     }
 
     /// The bit means published (#4656): a set lays its strings and its
-    /// constant arrays without it, so `of` refuses each, and the table's
-    /// own constant array holding one, until the set enters the table,
-    /// and admits each after.
+    /// constant arrays without it, so `of` refuses each until the set
+    /// enters the table, and admits each after. The table's own constant
+    /// array of a set's string is refused at its lay until then (#4655),
+    /// and laid and admitted after.
     #[test]
     fn of_refuses_a_sets_string_and_constant_array_until_it_is_published() {
         let _alone = crate::serial::alone();
@@ -528,25 +574,23 @@ mod tests {
         let outer = pending.constant_array(&[(Key::Str(key), inner), (Key::Long(1), s)]);
         let outer = Zval::array(outer.expect("an array"));
         let holding = strings.constant_array(&[(Key::Long(0), s)], 1);
-        let holding = Zval::array(holding.expect("an array"));
+        assert!(holding.is_err(), "the table's array of a set's string");
         assert_eq!(of(table), Some(table), "the table's own string");
-        for (z, what) in [
+        let laid = [
             (s, "a set's string"),
             (inner, "a set's constant array of the table's string"),
             (outer, "a set's constant array"),
-            (holding, "the table's constant array of a set's string"),
-        ] {
+        ];
+        for (z, what) in laid {
             assert_eq!(of(z), None, "{what}, unpublished");
         }
         strings.publish(pending);
-        for (z, what) in [
-            (s, "a set's string"),
-            (inner, "a set's constant array of the table's string"),
-            (outer, "a set's constant array"),
-            (holding, "the table's constant array of a set's string"),
-        ] {
+        for (z, what) in laid {
             assert_eq!(of(z), Some(z), "{what}, published");
         }
+        let holding = strings.constant_array(&[(Key::Long(0), s)], 1);
+        let holding = Zval::array(holding.expect("the set's string is the table's"));
+        assert_eq!(of(holding), Some(holding), "the table's array of it");
     }
 
     /// A set's string whose bytes the table holds already is kept as a
@@ -582,31 +626,26 @@ mod tests {
         }
     }
 
-    /// A constant array holds what its home was handed, which no type
-    /// holds to the table's values: so `of` reads every key and element,
-    /// at every depth, and refuses an array one of which is a request's.
+    /// The table's homes refuse to lay a constant array holding a
+    /// request's value (#4655), and `of` does not rest on that: laid as
+    /// the table lays one, past the refusal ([`Unrefused`]), an array one
+    /// of whose keys or elements is a request's, at any depth, is
+    /// refused, so `of` reads every key and element.
     #[test]
     fn of_reads_a_constant_array_through_to_each_key_and_element() {
         let _alone = crate::serial::alone();
         let mut heap = Heap::new();
-        let mut strings = Strings::new();
+        let mut unrefused = Unrefused::default();
         let string = heap.string(b"the request's").expect("room");
         let counted = heap.array().expect("the heap has room");
-        let handed = |strings: &mut Strings, entries: &[(Key, Zval)]| {
-            let a = strings.constant_array(entries, entries.len());
-            Zval::array(a.expect("a constant array"))
-        };
-        let element = handed(&mut strings, &[(Key::Long(0), Zval::string(string))]);
+        let element = unrefused.lay(&[(Key::Long(0), Zval::string(string))]);
         assert_eq!(of(element), None, "a request's string as an element");
-        let keyed = handed(&mut strings, &[(Key::Str(string), Zval::long(1))]);
+        let keyed = unrefused.lay(&[(Key::Str(string), Zval::long(1))]);
         assert_eq!(of(keyed), None, "a request's string as a key");
-        let nested = handed(&mut strings, &[(Key::Long(0), Zval::array(counted))]);
+        let nested = unrefused.lay(&[(Key::Long(0), Zval::array(counted))]);
         assert_eq!(of(nested), None, "a refcounted array as an element");
-        let deeper = handed(&mut strings, &[(Key::Long(0), element)]);
-        let deepest = handed(
-            &mut strings,
-            &[(Key::Long(5), Zval::long(5)), (Key::Long(6), deeper)],
-        );
+        let deeper = unrefused.lay(&[(Key::Long(0), element)]);
+        let deepest = unrefused.lay(&[(Key::Long(5), Zval::long(5)), (Key::Long(6), deeper)]);
         assert_eq!(of(deepest), None, "a request's string two arrays down");
     }
 

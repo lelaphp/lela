@@ -224,7 +224,8 @@ impl Allocate for System {
 /// writes a jump table, then the immutable bit, after which no owner is
 /// counted and no write reaches it but the one that makes it the table's
 /// ([`publish_persistent_array`]). Its keys are persistent interned
-/// strings and its values scalars, so freeing it releases nothing;
+/// strings and its values scalars, the table's strings and its constant
+/// arrays, none of them counted, so freeing it releases nothing;
 /// [`free_persistent_array`] gives its two allocations back. No entries
 /// is the process's [`Arr::empty`], as `zend_try_ct_eval_array` answers
 /// `ZVAL_EMPTY_ARRAY` for `[]`.

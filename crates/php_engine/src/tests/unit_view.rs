@@ -16,10 +16,10 @@ use php_unit::{CacheSlot, Opcode, OplineIdx};
 
 use crate::api::abi::{Admission, Extension, ExtensionBuilder, Lookup, Validation};
 use crate::api::request::Request;
-use crate::api::values::PhpString;
+use crate::api::values::{PhpObject, PhpString};
 use crate::engine::Engine;
 use crate::test::{Capture, Files};
-use crate::tier::{self, EngineFuncRef, FuncRef, SafepointIdx, UnitView};
+use crate::tier::{self, EngineFuncRef, FuncRef, RecordClass, SafepointIdx, UnitView};
 
 /// The views the natives built, with the op array each was asked to
 /// hold, the extension's request state, kept past the request for the
@@ -53,7 +53,9 @@ fn hold_class_named(req: &mut Request, name: PhpString) -> bool {
         return false;
     };
     let mut view = UnitView::new(req);
-    view.hold_class(req, class) && view.class(class).is_some()
+    let held = view.hold_class(req, class);
+    let named = view.record_class(req, class);
+    held && view.class(named).is_some()
 }
 
 /// `hold_callee_here(): bool`: whether a view takes the pair the calling
@@ -368,4 +370,51 @@ fn a_view_takes_a_methods_pair_only_where_the_scope_is_fixed() {
         out, "bool(true)\nbool(false)\nbool(false)\nbool(false)\n",
         "the class's method, the file's own code, the trait's method, the closure"
     );
+}
+
+/// The one view a program's calls to `own_index` name classes through,
+/// as one recording's view names every class it meets.
+#[derive(Default)]
+struct Recording(Option<UnitView>);
+
+/// `own_index(object $o): int`: the index the request's one view gives
+/// `$o`'s class ([`UnitView::record_class`]), -1 for a class the epoch
+/// shares.
+#[php_function]
+fn own_index(req: &mut Request, o: PhpObject) -> i64 {
+    let held = req.state::<Recording>().0.take();
+    let mut view = held.unwrap_or_else(|| UnitView::new(req));
+    let named = view.record_class(req, o.class());
+    req.state::<Recording>().0 = Some(view);
+    match named {
+        RecordClass::Own(own) => i64::from(own.index()),
+        RecordClass::Shared(_) => -1,
+    }
+}
+
+/// One view names the request's own classes by the order it first met
+/// them, keyed by the declared name, and a class met again by the index
+/// it had: `A`, `B`, then `A` again. Two anonymous classes from two
+/// `eval`s of one source are two classes, each declared under a name of
+/// its own (`zend_generate_anon_class_name` numbers each), so they get two
+/// indices; and a class the epoch shares is named by no index.
+#[test]
+fn a_view_names_own_classes_in_the_order_it_met_them_and_one_class_once() {
+    let recording = ExtensionBuilder::default()
+        .functions(&[own_index::DECLARED])
+        .request_state::<Recording>()
+        .build("recording");
+    let engine = Engine::cli_builder().extensions(&[recording]).build();
+    let files = Files::new("unit-view-own-index", &[]);
+    let out = serve(
+        &engine,
+        files.path(),
+        "<?php eval('class A {} class B {}');\n\
+         $mk = function () { return eval('return new class {};'); };\n\
+         $x = $mk(); $y = $mk();\n\
+         var_dump(get_class($x) === get_class($y));\n\
+         echo own_index(new A), ',', own_index(new B), ',', own_index(new A), ',',\n\
+             own_index($x), ',', own_index($y), ',', own_index($x), ',', own_index(new stdClass), \"\\n\";",
+    );
+    assert_eq!(out, "bool(false)\n0,1,0,2,3,2,-1\n");
 }

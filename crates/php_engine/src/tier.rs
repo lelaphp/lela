@@ -56,6 +56,7 @@ pub use php_heap::{Fatal, FrameRef};
 
 mod crossing;
 mod dims;
+mod facts;
 mod frames;
 mod held;
 mod layout;
@@ -71,6 +72,7 @@ pub use crossing::{
     nan_to_bool, primed, release, return_entry, room, stack, stack_room, stand,
 };
 pub use dims::{dim_key, lookup_element};
+pub use facts::{ClassFacts, ConstantFacts, Linked, OwnClass, PropertyFacts, RecordClass};
 pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Startup, Under, begin, below, call, catches,
     compile, entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
@@ -81,15 +83,15 @@ pub use layout::{
     Activation, FRAME, FrameLayout, PLACE, PlaceLayout, PlainCall, call_image, plain_call,
 };
 pub use sampled::{
-    Building, Sample, building, building_call, class_number, class_published, function_number,
-    native_returns, numbered_class, on_heap, recorded_number, sample, this_class, under_way,
+    Building, Sample, building, building_call, class_number, function_number, native_returns,
+    on_heap, recorded_number, sample, this_class, under_way,
 };
 pub use strings::{assign_concat, concat, rope_end, rope_open, rope_push, string_offset};
 pub use view::{
-    Bindings, CachedSlot, CallSite, CalledFunction, CalledMethod, CalleeBody, CalleeSlot,
-    Declaration, EngineFuncRef, Epoch, EpochClassId, EpochFunction, FuncRef, Held, MapPtrRaw,
-    PlaceClass, PropertySlot, UnitView, epoch, epoch_state, frame_cache, func, jump_targets,
-    landing, landing_stood, running_func, served, touch, touchable,
+    Bindings, CachedSlot, CallSite, CalledBody, CalledFunction, CalledMethod, CalleeBody,
+    CalleeSlot, Declaration, EngineFuncRef, Epoch, EpochClassId, EpochFunction, FuncRef, Held,
+    MapPtrRaw, PlaceClass, PropertySlot, UnitView, epoch, epoch_state, frame_cache, func,
+    jump_targets, landing, landing_stood, running_func, served, touch, touchable,
 };
 
 pub use crate::api::values::ClassId;
