@@ -150,6 +150,11 @@ impl Epoch {
     /// # drop(epoch);
     /// ```
     ///
+    /// It exists for those two tests: no other public entry point to the
+    /// arena takes a unit, the engine's own publishers among them, which
+    /// are the crate's. Nothing in the engine calls it; the tier's
+    /// fixture lays its epoch through it.
+    ///
     /// [`Frozen::new`]: php_unit::frozen::Frozen::new
     #[must_use]
     pub fn holding(unit: &php_unit::frozen::Frozen<php_unit::PublishedUnit>) -> Epoch {
