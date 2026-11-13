@@ -221,6 +221,12 @@ impl EngineState for Strings {}
 /// as the [`Zval`] it is. Made from a scalar, from the table
 /// ([`FrozenZval::interned`]), or from a value [`FrozenZval::of`] has
 /// read through, so no request's value can be one.
+///
+/// One thing neither constructor can check (#4656): the table whose
+/// block a frozen value names outlives the value. The bits a value
+/// carries say a table laid it and published it, never which table or
+/// for how long, so a frozen value is held no longer than its table, and
+/// the engine's tables keep that by living as long as the engine.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrozenZval(Zval);
 
@@ -252,7 +258,8 @@ impl FrozenZval {
     /// The string of `bytes` the permanent table holds, interned there on
     /// the first ask, and the fatal the table raised where it had no room:
     /// laid in the table's bump, or the frozen table's or one the table
-    /// holds, each published.
+    /// holds, each published. Held no longer than `strings` stands
+    /// ([`FrozenZval`]).
     pub fn interned(strings: &mut Strings, bytes: &[u8]) -> Result<FrozenZval, Fatal> {
         strings.intern(bytes).map(|s| FrozenZval(Zval::string(s)))
     }
@@ -290,6 +297,9 @@ impl FrozenZval {
     ///   write;
     /// - an object, a resource, a reference and an `IS_INDIRECT` are a
     ///   request's or point at what may be, and are refused.
+    ///
+    /// What it admits names its table's blocks, and is held no longer
+    /// than that table stands ([`FrozenZval`]).
     #[must_use]
     pub fn of(z: Zval) -> Option<FrozenZval> {
         let mut walk = Walk::default();
