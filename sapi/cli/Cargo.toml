@@ -8,7 +8,10 @@
 name = "php_sapi_cli"
 version = "0.0.0"
 edition.workspace = true
-license.workspace = true
+# The workspace's, but for src/ffi/title.rs, a port of PostgreSQL's
+# ps_status by way of php-src's ps_title.c, under the PostgreSQL licence
+# (THIRD-PARTY.md).
+license = "MIT AND PostgreSQL"
 rust-version.workspace = true
 publish = false
 description = "php's CLI host, the binary php"

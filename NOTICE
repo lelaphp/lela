@@ -1,0 +1,45 @@
+This project
+Copyright (c) 2026 Mitchell van Wijngaarden and contributors.
+This project's own code is licensed under MIT; see LICENSE.
+
+This project is an independent implementation of PHP. It is not affiliated with or
+endorsed by The PHP Group, the PHP Foundation or Perforce Software.
+
+DERIVED FROM PHP-SRC
+Parts of this project are derived from php-src (https://github.com/php/php-src) at tag
+php-8.5.12 (136e049a): data extracted from it (ops.toml), tables transcribed
+from it, and modules translated or written from its C source. Each such file
+names the php-src file it follows. These parts are used under the Modified
+BSD License (BSD-3-Clause), published by the PHP Group as the PHP License,
+version 4, and by Zend Technologies Ltd. as the Zend Engine License, version
+3.0. Code released under the PHP License 3.01 and the Zend Engine License 2.00
+may be used under any subsequent version of those licenses (clause 5 and
+clause 4 respectively). The text is in LICENSES/php-src.txt:
+
+  Copyright (c) The PHP Group and Contributors.
+  Copyright (c) Zend Technologies Ltd., a subsidiary company of Perforce
+  Software, Inc.
+
+To the extent those licenses are held to apply as written, and without
+conceding that they do:
+  This product includes PHP software, freely available from
+  <http://www.php.net/software/>.
+  This product includes the Zend Engine, freely available at
+  http://www.zend.com
+
+OTHER COMPONENTS
+php-src carries code from other projects, and this project ports or bundles some of it.
+THIRD-PARTY.md is the one list of them. Each keeps its own licence, listed
+with its copyright notice in THIRD-PARTY.md and in LICENSES/. Where a
+component is LGPL-2.1, its source is in this distribution and the build
+instructions are in the README's build section.
+
+Two of the licences listed there, Apache-1.0 and BSD-4-Clause-UC, require
+these acknowledgements:
+  This product includes software developed by the Apache Group
+  for use in the Apache HTTP server project (http://www.apache.org/).
+  This product includes software developed by the University of
+  California, Berkeley and its contributors.
+
+The names PHP and Zend belong to their respective owners and are used here
+only to say what this project runs and what it is compatible with.
