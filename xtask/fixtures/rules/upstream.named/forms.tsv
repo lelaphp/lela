@@ -1,0 +1,31 @@
+# #4598's ruling, form by form, each with the made-up name `x`: the one list
+# the export's upstream bar (cutlib.NAMES_ONE, held by
+# scripts/export/test_export.py) and the upstream.named rule (held by
+# xtask/tests/tracked/permit/upstream_named.rs) are both held to, so neither
+# can move without the other (#4618).
+#
+# Three columns, tab-separated: the list, the fixture's name, and the form.
+# `names-one` and `stays-refused` are refused by both; `names-none` passes
+# both. A form stands in the line `see <form> for it`. A `row` names a
+# `[[rule]]` of the manifest by its id, and its whole block passes both: it is
+# read from seams.toml, or from proposal.toml beside this file while the row
+# is only proposed.
+names-one	a_glob_then_a_name_under_any_depth	upstream/**/x.md
+names-one	a_glob_then_a_name	upstream/*.md
+names-one	a_brace_glob_then_a_name	upstream/{a,b}.md
+names-one	a_class_glob_then_a_name	upstream/[x].md
+names-one	an_escaped_slash	upstream\/x
+names-one	a_percent_encoded_slash	upstream%2Fx
+names-one	an_entity_encoded_slash	upstream&#47;x
+names-one	a_capital_first_letter	Upstream/x
+names-one	every_letter_capital	UPSTREAM/x
+names-none	the_folder_s_own_name	upstream/
+names-none	a_glob_over_it_with_no_name_after	upstream/**
+row	the_manifest_s_own_row	upstream.private
+row	the_row_that_refuses_a_name	upstream.named
+stays-refused	a_git_ref	upstream/main
+stays-refused	a_git_ref_under_a_remote	origin/upstream/main
+stays-refused	a_dash	upstream/-
+stays-refused	a_hash	upstream/#
+stays-refused	a_variable	upstream/$X
+stays-refused	a_parent_step	upstream/../x

@@ -10,3 +10,4 @@ mod replay;
 mod rule_fixtures;
 mod sources;
 mod upstream;
+mod upstream_named;
