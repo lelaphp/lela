@@ -1231,6 +1231,94 @@ mod engine_state {
         assert_eq!(failures(&readings).len(), 10, "{readings:#?}");
     }
 
+    /// The sites the seal names in `krate` over the `engine-state-allow`
+    /// fixture, under the rule with its `allow` set to `allow`, laid on the
+    /// copy by the test and never read from the tracked file; empty where
+    /// the reading names none.
+    fn sealed_under(krate: &str, allow: Option<&[&str]>) -> String {
+        let mut manifest = sealed();
+        let checks = |r: &&mut Rule| r.predicate.check.as_deref() == Some("engine-state");
+        let rule = manifest.rules.iter_mut().find(checks).unwrap();
+        rule.predicate.allow = allow.map(|a| a.iter().map(|s| (*s).to_owned()).collect());
+        let readings = api_check::hold(&manifest, &fixture("engine-state-allow"), false).unwrap();
+        let reading = of(&readings, krate);
+        let sealed = ": EngineState implemented by hand outside the homes";
+        (reading.message.split("; "))
+            .find_map(|problem| {
+                problem
+                    .split_once(sealed)
+                    .map(|(sites, _)| sites.to_owned())
+            })
+            .unwrap_or_default()
+    }
+
+    /// `state.engine`'s `allow` (#4633, #4647): under an entry naming
+    /// `php_syntax::frozen`, the hand impl in that module passes and the one
+    /// in `thawed`, a module no entry names, fails, beside the line in
+    /// `frozen` handing the trait to a macro no source holds, which the
+    /// entry does not admit. With no `allow`, and under an entry naming a
+    /// module no crate has yet or a crate the manifest does not list, the
+    /// sensor names what it names with no key, both impls among them.
+    #[test]
+    fn a_hand_impl_passes_in_a_module_the_allow_names_and_fails_in_any_other() {
+        let (frozen, handed, thawed) = (
+            "crates/php_syntax/src/frozen.rs:10",
+            "crates/php_syntax/src/frozen.rs:12 (the trait handed to a macro whose body no source here holds)",
+            "crates/php_syntax/src/thawed.rs:9",
+        );
+        let without = sealed_under("php_syntax", None);
+        assert_eq!(without, format!("{frozen}, {handed}, {thawed}"));
+        assert_eq!(
+            sealed_under("php_syntax", Some(&["php_syntax::frozen"])),
+            format!("{handed}, {thawed}")
+        );
+        for nothing in [&["php_syntax::not_yet"], &["php_absent::frozen"]] {
+            assert_eq!(
+                sealed_under("php_syntax", Some(nothing)),
+                without,
+                "{nothing:?}"
+            );
+        }
+    }
+
+    /// What an entry does not admit (#4647), each module of `php_proto`
+    /// named by one: a child module's file and a file under the module's
+    /// directory that a `#[path]` makes another module, held as anywhere;
+    /// an impl a macro writes, an impl in an inline `mod`, both impls of a
+    /// file holding two, and the impl of a file an `include!` or a
+    /// `#[path]` reaches beside its own `mod`, each held saying why. The
+    /// one hand impl of `one/mod.rs` passes, and fails with no `allow`.
+    #[test]
+    fn an_entry_admits_one_impl_written_in_its_modules_own_file() {
+        let modules = ["one", "macroed", "nested", "twice", "included", "pathed_to"];
+        let allow = modules.map(|m| format!("php_proto::{m}"));
+        let allow: Vec<&str> = allow.iter().map(String::as_str).collect();
+        let named = "the file of a module the rule's allow names";
+        let src = "crates/php_proto/src";
+        let expected = [
+            format!("{src}/included.rs:6 (in {named}, which a #[path] or include! reaches too)"),
+            format!(
+                "{src}/macroed.rs:6 (written by a macro in {named}, so it stands where the macro expands)"
+            ),
+            format!("{src}/nested.rs:9 (in an inline mod below the module the rule's allow names)"),
+            format!("{src}/one/child.rs:8"),
+            format!("{src}/one/pathed.rs:8"),
+            format!("{src}/pathed_to.rs:6 (in {named}, which a #[path] or include! reaches too)"),
+            format!(
+                "{src}/twice.rs:8 (one of more than one hand impl in {named}, which admits one)"
+            ),
+            format!(
+                "{src}/twice.rs:12 (one of more than one hand impl in {named}, which admits one)"
+            ),
+        ];
+        assert_eq!(sealed_under("php_proto", Some(&allow)), expected.join(", "));
+        let without = sealed_under("php_proto", None);
+        assert!(
+            without.contains(&format!("{src}/one/mod.rs:9, ")),
+            "{without}"
+        );
+    }
+
     /// Each compile-fail fixture beside the sensor's is compiled under a
     /// `compile_fail,E0277` fence, which `xtask test` holds to the code
     /// (#2049): by `php_bundle`'s `refusals` where the facade reaches the
