@@ -439,6 +439,32 @@ fn an_agent_s_commit_of_a_lock_that_gained_a_package_is_refused_and_one_that_mov
     assert!(!ran.stdout.contains("Cargo.lock"), "{ran}");
 }
 
+/// A staged path is the checkout's, whatever the work tree holds there
+/// (#4679): a staged `Cargo.lock` that gained a package, its work tree's
+/// file replaced by a link to a file outside the workspace, is refused at
+/// the commit as the staged lock is without the link, since no commit
+/// carries a file outside the repository.
+#[test]
+fn a_staged_lock_that_gained_a_package_is_refused_with_its_file_a_link_outside_the_workspace() {
+    let root = scratch("pipeline-lock-linked");
+    let elsewhere = Tree::new("permit-pipeline-lock-linked-outside").unwrap();
+    let held = [package("memchr", 'a'), package("libc", 'b')];
+    write(&root, "Cargo.lock", &locked(&held));
+    Repo::at(&root).commit("a lock");
+    let gained = locked(&[package("left-pad", 'c'), held[0].clone(), held[1].clone()]);
+    write(&root, "Cargo.lock", &gained);
+    Repo::at(&root).git(&["add", "--", "Cargo.lock"]);
+    write(&elsewhere, "Cargo.lock", &gained);
+    std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let ran = diff_from(&root, Some("an-agent"));
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(
+        ran.stdout.contains("deny Cargo.lock: ") && ran.stdout.contains(LOCK),
+        "{ran}"
+    );
+}
+
 /// A registry package's entry in a lock, its checksum `sum` repeated.
 fn package(name: &str, sum: char) -> String {
     let checksum = sum.to_string().repeat(64);

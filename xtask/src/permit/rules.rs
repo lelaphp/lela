@@ -236,13 +236,15 @@ fn applies(rule: &Rule, call: &Call, touched: &Touched) -> bool {
 /// a row with one the files it covers (#23), and a row's `adding` every
 /// file of the workspace past its scope (#4363). A file outside the
 /// workspace is reached by a row with neither scope nor `adding` alone,
-/// so no `adding` judges a write outside the workspace, where
-/// [`Call::rewrite`] would read the file's standing text as empty and
-/// count every hit as added (#4679).
+/// so no `adding` judges a call's write outside the workspace, of which
+/// [`Call::rewrite`] would read the standing text, with no path, as empty
+/// and count every hit as added (#4679). A diff's path a link leads
+/// outside is reached as a call without a file is: the diff carries what
+/// it displaces, and git names the path in the checkout.
 fn reaches(rule: &Rule, touched: &Touched) -> bool {
     let adding = rule.predicate.adding.is_some();
     match touched {
-        Touched::NoFile => rule.scope.is_empty(),
+        Touched::NoFile | Touched::Diffed => rule.scope.is_empty(),
         Touched::Workspace(path) => rule.scope.is_empty() || adding || rule.covers(path),
         Touched::Outside => rule.scope.is_empty() && !adding,
     }

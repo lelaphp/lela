@@ -1552,6 +1552,41 @@ fn permit_over_the_diff_judges_a_binary_file_by_its_path_alone() {
     );
 }
 
+/// A changed `Cargo.lock` whose file is a link to a file outside the
+/// workspace is judged by `done` as the diff's path it is, as `permit
+/// --diff` judges a staged one (#4679): the lock it leads to gained a
+/// registry package against the base, and `pipeline.lock` holds it, a
+/// `deny = true` row's denial, which `done` gives as condition 6's note.
+/// The lock's lines are built from parts, so none starts a line here.
+#[test]
+fn permit_over_the_diff_holds_a_lock_that_gained_a_package_through_a_link_outside() {
+    let package = |name: &str, sum: char| {
+        let source = "registry+https://github.com/rust-lang/crates.io-index";
+        let checksum = sum.to_string().repeat(64);
+        format!(
+            "[[package]]\nname = \"{name}\"\nversion = \"1.0.0\"\nsource = \"{source}\"\nchecksum = \"{checksum}\"\n"
+        )
+    };
+    let root = scratch("lock-linked");
+    let elsewhere = Tree::new("done-lock-linked-outside").unwrap();
+    let held = format!("version = 4\n\n{}", package("memchr", 'a'));
+    Repo::at(&root)
+        .write("Cargo.lock", held.as_bytes())
+        .commit("a lock");
+    let gained = format!("{held}\n{}", package("left-pad", 'c'));
+    write(&elsewhere, "Cargo.lock", &gained);
+    std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let verdict = judge(&root);
+    assert_eq!(
+        verdict.notes,
+        [
+            "Cargo.lock is in the diff: changed by a person, or not; the hook cannot tell (pipeline.lock)"
+        ],
+        "{verdict:#?}"
+    );
+}
+
 /// The `unless` qualifier over the diff (#105): a crate whose only `exit=`
 /// is the one `xtask witness --accept` wrote is done, and the same tree
 /// with no witness reading behind it is denied with the rule id. The
