@@ -22,6 +22,7 @@ use php_unit::{AutoGlobal, Level, PublishedUnit};
 
 use super::Code;
 use super::Frames;
+use super::publish::Unpublished;
 use super::{InArena, PreloadStatistics, Request, UserFunction, user_function_decl};
 use crate::api::call::Function;
 use crate::api::values::ClassId;
@@ -600,20 +601,21 @@ impl Request {
                 }
             }
         }
+        // Only of a unit the preload saves: one it served as its own is
+        // dropped with the request, and its address is another's after.
         let mut declared: HashMap<usize, UnitDeclarations> = HashMap::new();
-        for row in &self.own_classes {
+        let saved = |unit: &PublishedUnit| preloading.frozen(unit).is_some();
+        for row in self.own_classes.iter().filter(|row| saved(&row.unit)) {
             let held = declared.entry(address(&row.unit)).or_default();
             held.classes.push(row.at);
         }
-        for user in self
-            .user_functions
-            .iter()
-            .filter(|user| user.member.is_none())
+        for user in
+            (self.user_functions.iter()).filter(|user| user.member.is_none() && saved(&user.unit))
         {
             let held = declared.entry(address(&user.unit)).or_default();
             held.functions.push(user.body);
         }
-        let tables = match self.publish_tables(&rows, &preloading) {
+        let tables = match self.publish_tables(&rows, &preloading, &mut declared) {
             Ok(tables) => tables,
             Err(message) => {
                 crate::api::raising::fatal(self, &message);
@@ -673,12 +675,15 @@ impl Request {
     /// extends, implements and uses ([`Request::publication_order`]),
     /// whatever order `rows` leave them in, so every record is built
     /// from its parent's published one; the request's own rows are
-    /// taken out. `Err` is the internal error of a class whose record
-    /// could not be built.
+    /// taken out. A class or a function left out is taken out of what
+    /// `declared` says the preload holds of its unit. `Err` is the
+    /// internal error of a class whose record could not be built, and of
+    /// an arena with no room.
     fn publish_tables(
         &mut self,
         rows: &[Row],
         preloading: &Preloading,
+        declared: &mut HashMap<usize, UnitDeclarations>,
     ) -> Result<Published, String> {
         let mut renumbered: HashMap<ClassId, EpochClassId> = HashMap::new();
         let mut left = std::collections::HashSet::new();
@@ -686,6 +691,12 @@ impl Request {
             match self.publish_class(local, &renumbered, &left, preloading)? {
                 Some(published) => _ = renumbered.insert(local, published),
                 None => _ = left.insert(local),
+            }
+        }
+        for row in left.iter().filter_map(|local| self.declared_row(*local)) {
+            let held = declared.get_mut(&address(row.unit()));
+            if let Some(held) = held {
+                held.classes.retain(|at| *at != row.at());
             }
         }
         let shared = |class: ClassId| {
@@ -717,20 +728,34 @@ impl Request {
         }
         self.closure_rows.clear();
         // A function of a unit the preload holds as its own, one
-        // `Frozen::new` refused, is left out of it.
-        let functions: Vec<(Box<[u8]>, UserFunction<InArena>)> =
-            std::mem::take(&mut self.user_functions)
-                .into_iter()
-                .filter(|user| user.member.is_none())
-                .filter_map(|user| {
-                    let decl = user_function_decl(super::FunctionRow::Own(&user))?;
-                    let name = Box::<[u8]>::from(&*decl.name.0);
-                    let frozen = Frozen::clone(preloading.frozen(&user.unit)?);
-                    let user = user.published(frozen, crate::readable::NamedIn::Unit)?;
-                    (!name.starts_with(b"{")).then_some((name, user))
-                })
-                .rev()
-                .collect();
+        // `Frozen::new` refused, is left out of it, and so is one whose
+        // row the arena refuses, which a load of its unit then declares.
+        let mut functions: Vec<(Box<[u8]>, UserFunction<InArena>)> = Vec::new();
+        for user in std::mem::take(&mut self.user_functions) {
+            let Some(decl) = (user.member.is_none())
+                .then(|| user_function_decl(super::FunctionRow::Own(&user)))
+                .flatten()
+            else {
+                continue;
+            };
+            let name = Box::<[u8]>::from(&*decl.name.0);
+            let Some(frozen) = preloading.frozen(&user.unit).cloned() else {
+                continue;
+            };
+            if name.starts_with(b"{") {
+                continue;
+            }
+            let (unit, body) = (address(&user.unit), user.body);
+            match user.published(frozen, crate::readable::NamedIn::Unit) {
+                Some(user) => functions.push((name, user)),
+                None => {
+                    if let Some(held) = declared.get_mut(&unit) {
+                        held.functions.retain(|held| *held != body);
+                    }
+                }
+            }
+        }
+        functions.reverse();
         let count = u32::try_from(functions.len()).map_err(|_| ARENA_FULL.to_string())?;
         let reserved = self
             .arena
@@ -872,9 +897,15 @@ impl Request {
             abstracts: composed.abstracts,
         });
         let units = |unit: &PublishedUnit| preloading.frozen(unit).cloned();
-        self.publish((&frozen, row.at()), composed, &record, parent, &units)
-            .map(Some)
-            .map_err(|_| ARENA_FULL.to_string())
+        match self.publish((&frozen, row.at()), composed, &record, parent, &units) {
+            Ok(class) => Ok(Some(class)),
+            // The arena refusing the class leaves it out of the preload,
+            // and out of what the preload holds of its unit, so a request
+            // that loads the unit binds it as its own; a request that
+            // does not finds no class of the name (#4699).
+            Err(Unpublished::Refused) => Ok(None),
+            Err(Unpublished::Full) => Err(ARENA_FULL.to_string()),
+        }
     }
 
     /// `preload_sort_classes`, php's own swap sort and not a stable one:
@@ -1250,7 +1281,8 @@ mod tests {
             rows[..=at].rotate_right(1);
         }
         let preloading = req.preloading.take().expect("the preload's request");
-        let published = req.publish_tables(&rows, &preloading);
+        let published =
+            req.publish_tables(&rows, &preloading, &mut std::collections::HashMap::new());
         let names: Vec<(ClassId, String)> = published
             .iter()
             .flat_map(|published| published.classes.rows.iter())
