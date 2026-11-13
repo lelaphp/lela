@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use php_engine::api::abi::EngineState;
 use php_engine::tier::{
-    Bindings, CallSite, CalledFunction, ClassId, EpochClassId, FuncRef, UnitView,
+    Bindings, CallSite, CalledFunction, CalleeBody, ClassId, EpochClassId, FuncRef, UnitView,
 };
 use php_ssa::{
     Analysis, BlockId, Body, Callee, Cfg, ClassConstant, ClassOf, Function, Level, LinkedTable,
@@ -223,14 +223,17 @@ impl<'a, C: Handle> Bound<'a, C> {
         (self.view.class_decl(c.into())?.properties.iter()).find(|p| *p.name.0 == *name)
     }
 
-    /// `called` as php's call analysis reads it.
+    /// `called` as php's call analysis reads it: its body by the kind the
+    /// key names it by ([`CalleeBody`]), and another user function's by
+    /// its op array only to read what it returns, which marks the
+    /// analysis as kept under no key.
     fn callee(&self, called: &'a CalledFunction) -> Callee<'a, C> {
-        let body = match called.body {
-            None => Body::Native,
-            Some(g) if g == self.f => Body::Analysed,
-            Some(g) => {
+        let body = match called.body_from(self.f) {
+            CalleeBody::Native => Body::Native,
+            CalleeBody::Itself => Body::Analysed,
+            CalleeBody::Another => {
                 self.reads_returns.set(true);
-                let built = self.built.iter().find(|(h, _)| *h == g);
+                let built = self.built.iter().find(|(h, _)| Some(*h) == called.body);
                 let returns = built.and_then(|&(_, returns)| returns);
                 Body::User(returns.and_then(|returns| self.returns(returns)))
             }

@@ -764,20 +764,51 @@ pub struct UnitView {
 /// What a view bound for php's analysis of one op array
 /// ([`UnitView::bindings`]): the class the op array is declared in, the
 /// classes its literals name, the engine's own classes declared types
-/// name, and the functions its calls reach, each by its identity. php
-/// rebuilds the analysis at every trace's build against the tables as
-/// they stand then (`zend_jit_trace_build_ssa`); two builds that bind
-/// the same find the same in them, so an analysis kept under one
-/// binding set is the one php would build at the next build that binds
-/// it (ADR-0015, as amended on #3571; #3579). The epoch keeps an analysis
-/// under these alone, so each class is named as every request of the
-/// epoch names it ([`EpochClassId`]).
+/// name, and the functions its calls reach, each by its identity and
+/// each callee's body by its kind ([`CalleeBody`]). php rebuilds the
+/// analysis at every trace's build against the tables as they stand then
+/// (`zend_jit_trace_build_ssa`); two builds that bind the same find the
+/// same in them, so an analysis kept under one binding set is the one
+/// php would build at the next build that binds it (ADR-0015, as amended
+/// on #3571; #3579). The epoch keeps an analysis under these alone, so
+/// each class is named as every request of the epoch names it
+/// ([`EpochClassId`]), and no op array is named at all.
 #[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
 pub struct Bindings {
     scope: Option<EpochClassId>,
     named: Vec<(Box<[u8]>, EpochClassId)>,
     engine_named: Vec<(Box<[u8]>, EpochClassId)>,
-    called: Vec<(Site<EpochClassId>, CalledFunction<EpochClassId>)>,
+    called: Vec<(Site<EpochClassId>, CalledFunction<EpochClassId, CalleeBody>)>,
+}
+
+/// What the body of a function a call reaches is to the op array the
+/// call is in, as [`Bindings`] names it (#4628): none, a native's; the
+/// op array itself, a recursive call's; or another user function's. The
+/// key names the kind and no body, so no [`FuncRef`] and no map-pointer
+/// number, a request's above all, stands in it by type.
+///
+/// The kind is enough, and this is why. The key's one reader of a
+/// callee's body is the tier's call analysis (`Bound::callee`), which
+/// reads it as one of these three. On the third it reads what the other
+/// function's analysis, earlier in the same build, found it returns, and
+/// marks the analysis as one that read returns, which the epoch keeps
+/// under no key. So an analysis the epoch keeps read no other body's
+/// identity, and two builds whose bindings differ only in which other
+/// user function a call reaches read the same analysis. The key still
+/// tells a call bound from one left unbound, and a native from a user
+/// function, as the ruling on #3589 keeps `called` for.
+///
+/// A change that reads a kept callee's body for anything else, or keeps
+/// an analysis that read what another function returns, must name the
+/// body in the key again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
+pub enum CalleeBody {
+    /// A native's: there is no op array.
+    Native,
+    /// The op array the call is in.
+    Itself,
+    /// Another user function's op array.
+    Another,
 }
 
 /// Where [`UnitView::called`] looks a callee up, owned, a method's class
@@ -828,27 +859,48 @@ pub enum CallSite<'a> {
 
 /// A function a call of a held op array reaches, as php's call analysis
 /// reads it (`zend_optimizer_get_called_func`, `zend_get_func_info`):
-/// its name, its declared return, the op array a user function's call
-/// serves, and a method's class and flags, named as a `C`: by the
-/// recording request's number as the view answers it, and as every
-/// request of the epoch names it among [`Bindings`].
+/// its name, its declared return, its body, and a method's class and
+/// flags. As the view answers it, a method's class is the recording
+/// request's number and the body the op array a user function's call
+/// serves; among [`Bindings`], the class is named as every request of the
+/// epoch names it, a `C`, and the body by its kind, a `B`
+/// ([`CalleeBody`]).
 #[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
-pub struct CalledFunction<C = ClassId> {
+pub struct CalledFunction<C = ClassId, B = Option<FuncRef>> {
     /// `common.function_name`, as declared.
     pub name: Name,
     pub return_type: Option<Type>,
     pub returns_by_ref: bool,
     pub generator: bool,
-    /// The op array a user function's call serves; none for a native.
-    pub body: Option<FuncRef>,
+    /// The op array a user function's call serves, none for a native; its
+    /// kind among [`Bindings`].
+    pub body: B,
     /// A method's class and flags; none for a function.
     pub method: Option<CalledMethod<C>>,
 }
 
 impl CalledFunction {
-    /// The function with its method's class named as every request of
-    /// `view`'s epoch names it; none for a class of the request's own.
-    fn shared(&self, view: &UnitView) -> Option<CalledFunction<EpochClassId>> {
+    /// What this function's body is to the op array `f` names, whose call
+    /// reaches it: the one place the kind is decided, for the key and for
+    /// the analysis that reads it.
+    #[must_use]
+    pub fn body_from(&self, f: FuncRef) -> CalleeBody {
+        match self.body {
+            None => CalleeBody::Native,
+            Some(g) if g == f => CalleeBody::Itself,
+            Some(_) => CalleeBody::Another,
+        }
+    }
+
+    /// The function as [`Bindings`] names it for a call of the op array
+    /// `f` names: its method's class as every request of `view`'s epoch
+    /// names it, none for a class of the request's own, and its body by
+    /// its kind.
+    fn shared(
+        &self,
+        view: &UnitView,
+        f: FuncRef,
+    ) -> Option<CalledFunction<EpochClassId, CalleeBody>> {
         let method = match self.method {
             Some(m) => Some(CalledMethod {
                 scope: view.shared_class(m.scope)?,
@@ -864,7 +916,7 @@ impl CalledFunction {
             return_type: self.return_type.clone(),
             returns_by_ref: self.returns_by_ref,
             generator: self.generator,
-            body: self.body,
+            body: self.body_from(f),
             method,
         })
     }
@@ -1257,10 +1309,11 @@ impl UnitView {
     /// What the view bound for php's analysis of the op array `f` names,
     /// the key the epoch keeps its analysis under: an analysis built
     /// under one [`Bindings`] is read only where a later build's view
-    /// binds the same. None where the analysis binds a class only the
-    /// request holds ([`UnitView::binds_request_class`]), or names one
-    /// the view minted no [`EpochClassId`] for, which the epoch keeps no
-    /// analysis under.
+    /// binds the same, each callee's body named by what it is to `f`'s
+    /// op array ([`CalledFunction::body_from`]). None where the analysis
+    /// binds a class only the request holds
+    /// ([`UnitView::binds_request_class`]), or names one the view minted
+    /// no [`EpochClassId`] for, which the epoch keeps no analysis under.
     #[must_use]
     pub fn bindings(&self, f: FuncRef) -> Option<Bindings> {
         if self.binds_request_class(f) {
@@ -1284,7 +1337,7 @@ impl UnitView {
             engine_named,
             called: (self.called.iter())
                 .filter(|(func, ..)| *func == f)
-                .map(|(_, site, called)| Some((site.shared(self)?, called.shared(self)?)))
+                .map(|(_, site, called)| Some((site.shared(self)?, called.shared(self, f)?)))
                 .collect::<Option<_>>()?,
         })
     }
@@ -1863,5 +1916,77 @@ impl UnitView {
             offset,
             slot: slot.0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use php_unit::MapPtrOffset;
+
+    use super::{CallSite, FuncRef, UnitView};
+    use crate::test::Files;
+
+    /// Whether `entry` binds the call `site` of the op array `f` names.
+    fn binds(
+        entry: &(FuncRef, super::Site, super::CalledFunction),
+        f: FuncRef,
+        site: CallSite<'_>,
+    ) -> bool {
+        entry.0 == f && entry.1.as_call_site() == site
+    }
+
+    /// The key `view` binds for `f` once its call `site` reaches `body`.
+    fn reaching(
+        view: &mut UnitView,
+        f: FuncRef,
+        site: CallSite<'_>,
+        body: Option<FuncRef>,
+    ) -> Option<super::Bindings> {
+        (view.called.iter_mut())
+            .filter(|entry| binds(entry, f, site))
+            .for_each(|(.., called)| called.body = body);
+        view.bindings(f)
+    }
+
+    /// The key a view binds for `f`'s analysis names the body of the
+    /// function its call of `g` reaches by its kind (#4628): bound to
+    /// another user op array than `g`'s, the file's own code or a
+    /// request's number, the key is the one it binds for `g`; bound to a
+    /// native, to `f` itself, or to nothing, the key is another.
+    #[test]
+    fn the_key_names_a_callees_body_by_its_kind() {
+        let files = Files::new(
+            "unit-view-key",
+            &[(
+                "inc.php",
+                "<?php function g() { return 1; }\n\
+                 function f() { g(); return hold_caller(); }\n\
+                 hold_caller(); f();",
+            )],
+        );
+        let mut views = crate::tests::unit_view::kept(files.path());
+        let (mut view, f) = views.pop().expect("f's view");
+        let (_, main) = views.pop().expect("the view of the file's own code");
+        let site = CallSite::Function(b"g");
+        let g = view.called(f, site).and_then(|called| called.body);
+        assert!(
+            g.is_some_and(|g| g != f && g != main),
+            "f's call reaches g's op array: {g:?}"
+        );
+        let key = view.bindings(f);
+        assert!(key.is_some(), "f's analysis is kept under a key");
+        let request = FuncRef::at(MapPtrOffset::Request(7));
+        for other in [main, request] {
+            assert_eq!(
+                reaching(&mut view, f, site, Some(other)),
+                key,
+                "another user op array than g's: {other:?}"
+            );
+        }
+        for (body, kind) in [(None, "a native"), (Some(f), "f itself")] {
+            assert_ne!(reaching(&mut view, f, site, body), key, "{kind}");
+        }
+        view.called.retain(|entry| !binds(entry, f, site));
+        assert_ne!(view.bindings(f), key, "the call left unbound");
     }
 }

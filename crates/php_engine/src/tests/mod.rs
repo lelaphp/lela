@@ -62,7 +62,7 @@ pub(crate) mod test_ext;
 mod tier_setting;
 mod time_limit;
 mod trace_num;
-mod unit_view;
+pub(crate) mod unit_view;
 #[cfg(debug_assertions)]
 mod variadic;
 #[cfg(debug_assertions)]

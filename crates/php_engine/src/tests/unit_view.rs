@@ -132,7 +132,7 @@ fn serve(engine: &Engine, dir: &std::path::Path, program: &str) -> String {
 
 /// The views a program that includes `inc.php` in `dir` built, kept past
 /// its request ([`tier::serve_kept`]).
-fn kept(dir: &std::path::Path) -> Vec<(UnitView, FuncRef)> {
+pub(crate) fn kept(dir: &std::path::Path) -> Vec<(UnitView, FuncRef)> {
     let engine = Engine::cli_builder().extensions(&[viewing()]).build();
     let main = dir.join("main.php");
     let (_, views) = tier::serve_kept::<Views>(
