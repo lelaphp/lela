@@ -228,8 +228,10 @@ impl From<EngineFuncRef> for FuncRef {
 }
 
 impl FuncRef {
-    /// The map-pointer offset that names the op array, as a recorded
-    /// trace's text form writes it (`jit-design.md` §4.1).
+    /// The map-pointer offset that names the op array, the engine's or
+    /// the request's: where the request's map table holds its runtime
+    /// cache, which [`laid`](super::laid) reads. A recorded trace's text form writes
+    /// an [`EngineFuncRef`]'s offset (`jit-design.md` §4.1).
     #[must_use]
     pub fn offset(self) -> MapPtrOffset {
         self.0

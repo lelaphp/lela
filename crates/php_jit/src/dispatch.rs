@@ -1985,11 +1985,6 @@ fn side_opened(
     }
 }
 
-/// `job` settled: a recording that stopped where a trace compiles
-/// submitted through the request's [`compiler::Submitter`], which
-/// settles it here or on the engine's worker; any other settled here at once as the attempt it failed, as
-/// php writes its abort before it records again. Its lines written;
-/// what it settled as, where it was settled here.
 /// A recording refused with `stop` before its first opline, settled on
 /// the request as the pipeline settles an attempt that failed
 /// ([`compiler::refused`]), with no record.
@@ -1999,6 +1994,11 @@ fn refused_settled(req: &mut Request, shared: &Shared, claim: Claim, stop: Stop)
     lines.write(req);
 }
 
+/// `job` settled: a recording that stopped where a trace compiles
+/// submitted through the request's [`compiler::Submitter`], which
+/// settles it here or on the engine's worker; any other settled here at once as the attempt it failed, as
+/// php writes its abort before it records again. Its lines written;
+/// what it settled as, where it was settled here.
 fn settled(req: &mut Request, shared: &Shared, job: Job, goes_on: GoesOn) -> Option<Outcome> {
     let mut lines = Lines::of(req, shared);
     let outcome = if job.recorded.record.stop.compiles() {
