@@ -694,12 +694,12 @@ pub(crate) struct UserFunction<S: Scope = InRequest> {
     /// which never moves ([`PinnedRows`], the arena's column), so a
     /// frame's header names it by its place. Its addresses are into the
     /// bytes of `unit`, the unit beside it in the same row, or of the
-    /// declaration its class's row holds: in the arena's scope the
-    /// [`Frozen`](php_unit::frozen::Frozen) unit, which the row holds
-    /// from its publication until the epoch drops it. The record is
-    /// never parted from the row: the row is filled once and never moved
-    /// out of its column, and a unit's bytes stand behind its share, so
-    /// what the record names lives as long as the record does.
+    /// declaration its class's row holds; in the arena's scope the record
+    /// holds the [`Frozen`](php_unit::frozen::Frozen) unit and
+    /// declaration it names itself ([`crate::readable::FrozenRecord`]).
+    /// The row is filled once and never moved out of its column, and a
+    /// unit's bytes stand behind its share, so what the record names
+    /// lives as long as the record does.
     pub(crate) record: S::Record,
 }
 
@@ -1065,6 +1065,12 @@ pub(crate) struct Placed<S: Scope = InRequest> {
 }
 
 impl Placed {
+    /// Whether `shared` answers for every declaring class the placement
+    /// names, which [`Placed::published`] then keys whole.
+    pub(crate) fn names_only(&self, shared: impl Fn(ClassId) -> bool) -> bool {
+        self.slots.iter().all(|info| shared(info.declaring))
+    }
+
     /// The placement moved into the arena's scope, each declaring class
     /// named by the identity `class` gives it; none where it gives none.
     pub(crate) fn published(

@@ -10,6 +10,8 @@
 //! request's tables under the class's number, as php reaches it through
 //! `ZEND_MAP_PTR`; nothing of it is written into the row.
 
+use std::sync::Arc;
+
 use php_link::{Composed, LinkedClass};
 use php_unit::PublishedUnit;
 use php_unit::frozen::Frozen;
@@ -17,6 +19,24 @@ use php_unit::frozen::Frozen;
 use super::{Bound, ClassRow, Declared, InArena, Request};
 use crate::api::values::ClassId;
 use crate::arena::EpochClassId;
+
+/// What a class being published names itself by in its placed
+/// properties before the arena numbers it: a number no class takes,
+/// which a frame's header leaves to its called scope's `None`.
+const UNNUMBERED: ClassId = ClassId(u32::MAX);
+
+/// Why a class was not published ([`Request::publish`]): either way
+/// the class is left to be bound as a request's own, and only a preload,
+/// which has no request to leave it to, tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unpublished {
+    /// The arena refused to hold it: [`Frozen::new`] refused the
+    /// declaration the class composed with its traits, or the class
+    /// names a class or a body no request but the publisher's can reach.
+    Refused,
+    /// The arena had no room for it.
+    Full,
+}
 
 impl Request {
     /// The class `unit` declares at `at`, composed as `composed` where it
@@ -30,13 +50,21 @@ impl Request {
     /// and so is every class its record and its placed properties name,
     /// each by the arena's one check or as the class itself, so the row
     /// stands in the arena's scope ([`InArena`]): over the frozen unit,
-    /// with the composed declaration frozen by [`Frozen::new`]. None
-    /// where the arena has no room for it, and where it refuses the
-    /// composed declaration or a class the row names, which leaves the
-    /// class to be bound by the request that asked, as its own. A member
+    /// with the composed declaration frozen by [`Frozen::new`]. A member
     /// whose body is in another unit, a trait's method, is published over
-    /// the frozen unit `units` finds that unit to be, and the class is not
-    /// published where it finds none.
+    /// the frozen unit `units` finds that unit to be.
+    ///
+    /// Everything that can refuse is asked before the arena numbers
+    /// anything: the composed declaration, the record's classes, each
+    /// member's frozen unit and record, and the placed properties'
+    /// classes. So a class refused leaves the arena as it was, and only
+    /// its room can stop a publication part way, which leaves numbered
+    /// rows no class names, each holding what its record names.
+    ///
+    /// # Errors
+    ///
+    /// [`Unpublished::Refused`] where the arena refuses the class, and
+    /// [`Unpublished::Full`] where it has no room for it.
     pub(crate) fn publish(
         &self,
         (unit, at): (&Frozen<PublishedUnit>, u32),
@@ -44,14 +72,15 @@ impl Request {
         record: &LinkedClass<ClassId>,
         parent: Option<EpochClassId>,
         units: &dyn Fn(&PublishedUnit) -> Option<Frozen<PublishedUnit>>,
-    ) -> Option<EpochClassId> {
+    ) -> Result<EpochClassId, Unpublished> {
+        use Unpublished::{Full, Refused};
         let composed = match composed {
             Some(Composed {
                 decl,
                 bodies,
                 abstracts,
             }) => Some(Box::new(Composed {
-                decl: Frozen::new(decl).ok()?,
+                decl: Arc::new(Frozen::new(decl).map_err(|_| Refused)?),
                 bodies,
                 abstracts,
             })),
@@ -63,29 +92,39 @@ impl Request {
             composed,
             bound: Bound::default(),
         };
-        let class = self.arena.reserve_class()?;
-        let members = self.members_of(ClassRow::Arena(&row), class.into())?;
-        let (functions, members) = self.place_published(class, members, units)?;
+        // The record was linked before the class had a number, so it
+        // names the class itself nowhere.
+        let linked = record.try_map(|named| self.arena.shared_class(named));
+        let linked = linked.ok_or(Refused)?;
+        let members = self.members_of(ClassRow::Arena(&row)).ok_or(Refused)?;
+        let composed = row.composed.as_ref().map(|composed| &composed.decl);
+        let members = Request::published_members(members, composed, units).ok_or(Refused)?;
         // `zend_build_properties_info_table` at the link: built by the
-        // publisher, so no request writes the published row.
-        let placed = self.placed_over(
-            class.into(),
-            row.decl()?,
-            Some(record),
-            parent.map(ClassId::from),
-        );
+        // publisher, so no request writes the published row. The class
+        // has no number yet: its own properties are placed under one no
+        // class takes, and named by the number once it is taken.
+        let decl = row.decl().ok_or(Refused)?;
+        let placed = self.placed_over(UNNUMBERED, decl, Some(record), parent.map(ClassId::from));
+        let shared =
+            |named: ClassId| named == UNNUMBERED || self.arena.shared_class(named).is_some();
+        if !placed.names_only(shared) {
+            return Err(Refused);
+        }
+        let class = self.arena.reserve_class().ok_or(Full)?;
         let keyed = |named: ClassId| {
-            if named == class {
+            if named == UNNUMBERED {
                 Some(class)
             } else {
                 self.arena.shared_class(named)
             }
         };
-        let record = record.try_map(keyed)?;
-        let placed = placed.published(keyed)?;
+        // Asked above, and the arena's check answers a class the same
+        // once it answered it.
+        let placed = placed.published(keyed).ok_or(Refused)?;
+        let (functions, members) = self.place_published(class, members).ok_or(Full)?;
         let row = Declared {
             bound: Bound {
-                record: Some(record),
+                record: Some(linked),
                 functions,
                 members,
                 parent,
@@ -93,8 +132,10 @@ impl Request {
             },
             ..row
         };
-        self.arena.publish_class(class, row).then_some(())?;
-        Some(class)
+        if !self.arena.publish_class(class, row) {
+            return Err(Full);
+        }
+        Ok(class)
     }
 
     /// `zend_accel_store_class_table` over a unit the cache holds
@@ -147,7 +188,7 @@ impl Request {
             let Some(record) = self.record_over(row, &|name| named(name).map(ClassId::from)) else {
                 continue;
             };
-            let Some(class) = self.publish((unit, at), None, &record, parent, &|_| None) else {
+            let Ok(class) = self.publish((unit, at), None, &record, parent, &|_| None) else {
                 continue;
             };
             if let Some(slot) = usize::try_from(at)

@@ -845,7 +845,9 @@ impl Request {
             (self.links.held.get(&PublishedUnit::as_ptr(unit).addr())).cloned()
         };
         let composed = linking.composed.clone();
-        let class = self.publish((&unit, at), composed, record, fetched.parent, &units)?;
+        // Refused or with no room, the class is the request's own, bound
+        // as it was linked ([`Unpublished`](super::publish::Unpublished)).
+        let class = (self.publish((&unit, at), composed, record, fetched.parent, &units)).ok()?;
         let entry = crate::inheritance_cache::Entry {
             parent: fetched.parent,
             uses: fetched.uses,

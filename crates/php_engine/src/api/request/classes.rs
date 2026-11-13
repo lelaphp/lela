@@ -56,17 +56,37 @@ impl Request {
 pub(super) struct Members {
     served: Vec<Option<ClassNative>>,
     rows: Vec<MemberRow>,
+    /// For each row, the unit its body is in where the arena holds it
+    /// frozen, which a published class's member is published over.
+    frozen: Vec<Option<Frozen<PublishedUnit>>>,
 }
 
-/// One member's row before it is numbered: its index among the methods,
-/// none for a hook, the function it is, and where its runtime cache is.
-struct MemberRow {
-    method: Option<u32>,
-    user: UserFunction,
+/// One member's row before it is numbered: its place among the class's
+/// methods or hooks, the function it is, which names no class until its
+/// class is numbered, and where its runtime cache is.
+struct MemberRow<U = UserFunction> {
+    at: MemberAt,
+    user: U,
     cache: CacheOf,
-    /// The unit `user`'s body is in, where the arena holds it frozen,
-    /// which a published class's member is published over.
-    frozen: Option<Frozen<PublishedUnit>>,
+}
+
+impl<U> MemberRow<U> {
+    /// Its index among the methods, none for a hook.
+    fn method(&self) -> Option<u32> {
+        match self.at {
+            MemberAt::Method(method) => Some(method),
+            MemberAt::Hook { .. } => None,
+        }
+    }
+}
+
+/// A class's members moved into the arena's scope before the arena
+/// numbers anything ([`Request::published_members`]): every row over
+/// the frozen unit its body is in, so nothing is left to refuse but the
+/// arena's room.
+pub(super) struct PublishedRows {
+    served: Vec<Option<ClassNative>>,
+    rows: Vec<MemberRow<UserFunction<super::InArena>>>,
 }
 
 /// What a published class's members came to: the function each method
@@ -142,16 +162,31 @@ impl Members {
     /// The function each method is, the members numbered from `numbers`
     /// in order and a class native left for its caller.
     fn functions(&self, numbers: std::ops::Range<u32>) -> Vec<Option<Function>> {
-        let mut functions = vec![None; self.served.len()];
-        for (number, row) in numbers.zip(&self.rows) {
-            if let Some(slot) =
-                (row.method).and_then(|method| functions.get_mut(usize::try_from(method).ok()?))
-            {
-                *slot = Some(Function(number));
-            }
-        }
-        functions
+        numbered(
+            &self.served,
+            self.rows.iter().map(MemberRow::method),
+            numbers,
+        )
     }
+}
+
+/// The function each of `served`'s methods is, the rows whose methods
+/// `methods` lists numbered from `numbers` in order and a class native
+/// left for its caller.
+fn numbered(
+    served: &[Option<ClassNative>],
+    methods: impl Iterator<Item = Option<u32>>,
+    numbers: std::ops::Range<u32>,
+) -> Vec<Option<Function>> {
+    let mut functions = vec![None; served.len()];
+    for (number, method) in numbers.zip(methods) {
+        if let Some(slot) =
+            method.and_then(|method| functions.get_mut(usize::try_from(method).ok()?))
+        {
+            *slot = Some(Function(number));
+        }
+    }
+    functions
 }
 
 /// The classes a load bound early, whose field no file but this one
@@ -807,7 +842,7 @@ impl Request {
             .and_then(|decl| self.class_named(decl.parent.as_ref()?.into()));
         let Some(members) = self
             .declared_row(class)
-            .and_then(|row| self.members_of(row, class))
+            .and_then(|row| self.members_of(row))
         else {
             return Ok(());
         };
@@ -851,12 +886,12 @@ impl Request {
         super::placed_of(class, decl, record, above, |info| self.property_decl(info))
     }
 
-    /// The members the class `row` declares binding settles under the
-    /// number `class`, before they are numbered: each method and each
-    /// hook of its own properties a user function's row, and which of its
+    /// The members the class `row` declares, before they are numbered:
+    /// each method and each hook of its own properties a user function's
+    /// row, naming no class until its class is numbered, and which of its
     /// methods are natives it lays under its own scope, an enum's own
     /// `cases`, `from` and `tryFrom` and a native trait's methods.
-    pub(super) fn members_of(&self, row: super::ClassRow<'_>, class: ClassId) -> Option<Members> {
+    pub(super) fn members_of(&self, row: super::ClassRow<'_>) -> Option<Members> {
         let observed = crate::observer::observing(self);
         let decl = row.decl()?;
         let enum_backing = (decl.kind == ClassKind::Enum).then_some(decl.backing);
@@ -880,6 +915,7 @@ impl Request {
         // The rows the class's members take, in the order php's tables
         // list them, each method's beside its place among the methods.
         let mut rows: Vec<MemberRow> = Vec::new();
+        let mut frozen = Vec::new();
         for ((method, served), decl) in (0u32..).zip(&served).zip(&decl.methods) {
             if served.is_some() {
                 continue;
@@ -888,16 +924,12 @@ impl Request {
                 continue;
             };
             let unit = PublishedUnit::clone(from.unit());
-            let member = Some(Member {
-                class,
-                at: MemberAt::Method(method),
-            });
             rows.push(MemberRow {
-                method: Some(method),
-                user: UserFunction::of(unit, body, member, &decl.function, observed),
+                at: MemberAt::Method(method),
+                user: UserFunction::of(unit, body, None, &decl.function, observed),
                 cache,
-                frozen: from.frozen().cloned(),
             });
+            frozen.push(from.frozen().cloned());
         }
         // Each hook of the class's own properties, `prop_info->hooks`,
         // a function of its own that php's function table never lists.
@@ -910,19 +942,19 @@ impl Request {
                     continue;
                 };
                 let unit = PublishedUnit::clone(from.unit());
-                let member = Some(Member {
-                    class,
-                    at: MemberAt::Hook { property, kind },
-                });
                 rows.push(MemberRow {
-                    method: None,
-                    user: UserFunction::of(unit, body, member, &hook.function, observed),
+                    at: MemberAt::Hook { property, kind },
+                    user: UserFunction::of(unit, body, None, &hook.function, observed),
                     cache,
-                    frozen: from.frozen().cloned(),
                 });
+                frozen.push(from.frozen().cloned());
             }
         }
-        Some(Members { served, rows })
+        Some(Members {
+            served,
+            rows,
+            frozen,
+        })
     }
 
     /// A class of the request's own's members numbered among the
@@ -934,9 +966,12 @@ impl Request {
         let numbers = first..first.checked_add(count)?;
         let mut functions = members.functions(numbers.clone());
         for MemberRow {
-            mut user, cache, ..
+            at,
+            mut user,
+            cache,
         } in members.rows
         {
+            user.member = Some(Member { class, at });
             // A copy's runtime cache is the request's, as the class is,
             // held for the rest of the request.
             if cache == CacheOf::Copy {
@@ -953,45 +988,73 @@ impl Request {
         Some((functions.into_boxed_slice(), numbers))
     }
 
+    /// A class's members moved into the arena's scope, each over the
+    /// frozen unit its body is in, which `units` finds for a body of a
+    /// request's row, its record over that unit and, for a class
+    /// composed with its traits, over `composed`, the frozen declaration
+    /// the class's row holds ([`UserFunction::published`]). Nothing is
+    /// numbered: none where a body's unit is none frozen or a row does
+    /// not move, and the arena is as it was.
+    pub(super) fn published_members(
+        members: Members,
+        composed: Option<&std::sync::Arc<Frozen<ClassDecl>>>,
+        units: &dyn Fn(&PublishedUnit) -> Option<Frozen<PublishedUnit>>,
+    ) -> Option<PublishedRows> {
+        let rows = (members.rows.into_iter().zip(members.frozen))
+            .map(|(MemberRow { at, user, cache }, frozen)| {
+                // A member's row is the arena's only over the frozen unit
+                // its body is in; one whose body is in a request's own
+                // unit is never published.
+                let frozen = frozen.or_else(|| units(&user.unit))?;
+                let named = match composed {
+                    Some(decl) => crate::readable::NamedIn::Composed(decl, at),
+                    None => crate::readable::NamedIn::Unit,
+                };
+                let user = user.published(frozen, named)?;
+                Some(MemberRow { at, user, cache })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(PublishedRows {
+            served: members.served,
+            rows,
+        })
+    }
+
     /// A published class's members published into the engine's arena
-    /// (design §5.14): the function each method is and the numbers its
-    /// members took, each over the frozen unit its body is in, which
-    /// `units` finds for a body of a request's row. None where the arena
-    /// has no room for them, and where a body's unit is none frozen.
+    /// under `class` (design §5.14): the function each method is and the
+    /// numbers its members took. None where the arena has no room for
+    /// them, which is all that can refuse here.
     pub(super) fn place_published(
         &self,
         class: crate::arena::EpochClassId,
-        members: Members,
-        units: &dyn Fn(&PublishedUnit) -> Option<Frozen<PublishedUnit>>,
+        members: PublishedRows,
     ) -> Option<PublishedMembers> {
         let count = u32::try_from(members.rows.len()).ok()?;
         let reserved = self.arena.reserve_functions(count)?;
         let numbers = reserved.numbers();
+        let methods = members.rows.iter().map(MemberRow::method);
         let mut functions: Vec<Option<crate::arena::EpochFunction>> =
-            (members.functions(numbers.clone()).into_iter())
+            (numbered(&members.served, methods, numbers.clone()).into_iter())
                 .map(|function| function.and_then(|function| reserved.function(function.0)))
                 .collect();
         for (
             number,
             MemberRow {
+                at,
                 mut user,
                 cache,
-                frozen,
-                ..
             },
         ) in reserved.functions().zip(members.rows)
         {
+            user.member = Some(Member { class, at });
             // A copy published with its class takes a map pointer of the
             // engine's, `ZEND_MAP_PTR_NEW`, as a published op array does,
             // so every request lays its own cache down at that offset.
             if cache == CacheOf::Copy {
-                user.shape.cache = crate::engine::new_map_ptr(&self.shared.map_ptr_last);
+                let offset = crate::engine::new_map_ptr(&self.shared.map_ptr_last).offset();
+                user.shape.cache =
+                    crate::tier::EngineFuncRef::of(crate::tier::FuncRef::at(offset))?;
             }
-            // A member's row is the arena's only over the frozen unit its
-            // body is in; one whose body is in a request's own unit is
-            // never published.
-            let frozen = frozen.or_else(|| units(&user.unit))?;
-            let user = user.published(frozen, Some(class))?;
             self.arena.publish_function(number, user).then_some(())?;
         }
         for (slot, served) in functions.iter_mut().zip(members.served) {

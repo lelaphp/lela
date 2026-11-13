@@ -29,6 +29,7 @@ use std::cell::{Cell, OnceCell};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::ops::Range;
+use std::sync::Arc;
 
 use php_link::{Case, Exact, Folded, LinkedClass, Row, Rows};
 use php_unit::decl::ClassDecl;
@@ -40,7 +41,7 @@ use crate::api::call::Function;
 use crate::api::values::ClassId;
 use crate::arena::{EpochClassId, EpochFunction};
 use crate::exec::{self, CacheAt};
-use crate::readable::{CalleeAt, FrozenRecord, Record};
+use crate::readable::{CalleeAt, FrozenRecord, NamedIn, Record};
 use crate::tier::{EngineFuncRef, FuncRef};
 
 /// Where a row stands, and so what it may name: one parameter for
@@ -111,7 +112,7 @@ impl Scope for InRequest {
 
 impl Scope for InArena {
     type Unit = Frozen<PublishedUnit>;
-    type Decl = Frozen<ClassDecl>;
+    type Decl = Arc<Frozen<ClassDecl>>;
     type Class = EpochClassId;
     type Function = EpochFunction;
     type Cache = EngineFuncRef;
@@ -121,7 +122,7 @@ impl Scope for InArena {
         unit
     }
 
-    fn decl(decl: &Frozen<ClassDecl>) -> &ClassDecl {
+    fn decl(decl: &Arc<Frozen<ClassDecl>>) -> &ClassDecl {
         decl
     }
 
@@ -177,28 +178,24 @@ impl<S: Scope> PropertyInfo<S> {
 }
 
 impl UserFunction {
-    /// The row moved into the arena's scope: its unit `unit`, which is
-    /// the one it was built over, frozen; its member's class `class`,
-    /// the identity the arena minted for the class it is a method of;
-    /// and its cache the engine's. None where `unit` is another unit,
-    /// where a member's class is not `class`, and for a cache of a
-    /// request's own, so no row of the arena names what a request made.
+    /// The row moved into the arena's scope over `unit`, the frozen unit
+    /// it was built over: its cache the engine's, and its record made
+    /// over `unit` and, where `named` says so, the declaration its class
+    /// composed with its traits ([`FrozenRecord::over`]), which the
+    /// record holds. A member's class is the publisher's to name once
+    /// the arena numbered the class, so the row comes here naming none.
+    /// None where `unit` is another unit, where the row names a member,
+    /// for a cache of a request's own, and where the record made over
+    /// the frozen bytes names other bytes than the row's own did, so no
+    /// row of the arena names what a request made.
     pub(crate) fn published(
         self,
         unit: Frozen<PublishedUnit>,
-        class: Option<EpochClassId>,
+        named: NamedIn<'_>,
     ) -> Option<UserFunction<InArena>> {
-        if !PublishedUnit::ptr_eq(&self.unit, &unit) {
+        if !PublishedUnit::ptr_eq(&self.unit, &unit) || self.member.is_some() {
             return None;
         }
-        let member = match (self.member, class) {
-            (None, _) => None,
-            (Some(member), Some(class)) if member.class == class => Some(Member {
-                class,
-                at: member.at,
-            }),
-            (Some(_), _) => return None,
-        };
         let cache = EngineFuncRef::of(FuncRef::at(self.shape.cache.offset()))?;
         let shape = FrameShape {
             parameters: self.shape.parameters,
@@ -212,11 +209,14 @@ impl UserFunction {
             by_ref: self.shape.by_ref,
             sent: self.shape.sent,
         };
-        let record = FrozenRecord::beside(self.record, &unit);
+        let record = FrozenRecord::over(&unit, self.body, named)?;
+        if !record.names_as(&self.record) {
+            return None;
+        }
         Some(UserFunction {
             unit,
             body: self.body,
-            member,
+            member: None,
             flags: self.flags,
             shape,
             record,

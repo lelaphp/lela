@@ -726,7 +726,8 @@ impl Request {
                     let decl = user_function_decl(super::FunctionRow::Own(&user))?;
                     let name = Box::<[u8]>::from(&*decl.name.0);
                     let frozen = Frozen::clone(preloading.frozen(&user.unit)?);
-                    (!name.starts_with(b"{")).then_some((name, user.published(frozen, None)?))
+                    let user = user.published(frozen, crate::readable::NamedIn::Unit)?;
+                    (!name.starts_with(b"{")).then_some((name, user))
                 })
                 .rev()
                 .collect();
@@ -873,7 +874,7 @@ impl Request {
         let units = |unit: &PublishedUnit| preloading.frozen(unit).cloned();
         self.publish((&frozen, row.at()), composed, &record, parent, &units)
             .map(Some)
-            .ok_or_else(|| ARENA_FULL.to_string())
+            .map_err(|_| ARENA_FULL.to_string())
     }
 
     /// `preload_sort_classes`, php's own swap sort and not a stable one:
