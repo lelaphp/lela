@@ -19,7 +19,8 @@
 //! read through: here, the primitives, the standard containers over engine
 //! state, a `Cow` among them, an owned fd, a file and the standard
 //! library's sockets, a function pointer, [`Bytes`], a [`ClassCache`], a
-//! [`ZvalType`], a debug build's `Origin`, [`FrozenZval`] and [`AnyState`](crate::AnyState).
+//! [`ZvalType`], a debug build's `Origin`, [`Strings`], [`FrozenZval`]
+//! and [`AnyState`](crate::AnyState).
 //! An `AnyState` is a value of engine state behind its erased type, which
 //! the engine holds where it keeps a value it does not name, the compiled
 //! tier's for an epoch (#4492): its one constructor takes engine state,
@@ -190,6 +191,22 @@ impl EngineState for ZvalType {}
 #[cfg(debug_assertions)]
 impl EngineState for crate::Origin {}
 
+/// The engine's permanent table (`string.rs`, #4633's ruling): what it
+/// holds is its own, laid off every request's heap, and immutable once
+/// it is published. A string of it is "immutable, hashed before it is
+/// published, never refcounted and never freed while the engine
+/// stands", laid in its bump or by a set a cache-bound compile filled
+/// on the system allocator ([`crate::Pending`]); a constant array of it
+/// is one `persistent_array` laid on the system allocator, marked
+/// `IS_ARRAY_IMMUTABLE`, and freed with the table. The pointers it holds
+/// are to those blocks, its bump's chunks and the class caches' numbers,
+/// and to nothing of a request's. Its `Send` and `Sync` impls make the
+/// same argument for moving and sharing it: the only other names for
+/// its strings and arrays are the zvals of the units the engine
+/// published, which read and never write them, and growing it takes
+/// `&mut self`.
+impl EngineState for Strings {}
+
 /// A value no request owns: a scalar, or a string of the engine's
 /// permanent table, [`Strings`]. It is how engine state holds a value
 /// where a [`Zval`] could be a request's: `Engine::constant_values` is
@@ -277,5 +294,12 @@ mod tests {
         assert_eq!(z.kind(), ZvalType::String);
         assert!(!z.is_refcounted(), "an interned string is never counted");
         assert_eq!(FrozenZval::long(7).zval().kind(), ZvalType::Long);
+    }
+
+    #[test]
+    fn the_permanent_table_is_engine_state_moved_and_shared() {
+        held::<Strings>();
+        held::<std::sync::Arc<Strings>>();
+        held::<std::sync::Arc<std::sync::Mutex<Strings>>>();
     }
 }
