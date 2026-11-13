@@ -1,0 +1,6 @@
+The fixture's NOTICE, for `oracle propose`'s test (#4674).
+
+DERIVED FROM PHP-SRC
+Parts of this project are derived from php-src (https://github.com/php/php-src) at tag
+php-9.1.1 ({short}): data extracted from it (ops.toml), tables transcribed
+from it, and modules translated or written from its C source.
