@@ -878,6 +878,15 @@ text = "Nothing is written under upstream/ in this repository: a defect in php-s
 remedy = "write it in the private upstream project, as AGENTS.md says of a defect in php-src"                 # #4414
 
 [[rule]]
+id = "upstream.named"
+tool = ["Edit", "Write"]
+deny = true
+adding = '''(?i:upstream)(?:/|\\/|%2[Ff]|&#47;)(?:(?:[^\s\"'`<>();|\\*\[\]{},]|\\/)*[*\[\]{},](?:[^\s\"'`<>();|\\]|\\/)*?[^\s\"'`<>();|\\*\[\]{},.:/?](?:(?:[^\s\"'`<>();|\\]|\\/)*[^\s\"'`<>();|\\*\[\]{},.:])?|(?:[^\s\"'`<>();|\\*\[\]{},]|\\/)*[^\s\"'`<>();|\\*\[\]{},.:])'''   # scripts/export/cutlib.py's UPSTREAM byte for byte, the export's bar, which reads the same in regex_lite's dialect; xtask/tests/tracked/permit/upstream_named.rs and scripts/export/test_export.py hold the two to xtask/fixtures/rules/upstream.named/forms.tsv (#4598, #4617)
+exempt = ["xtask/fixtures/rules/upstream.private/**", "xtask/tests/tracked/permit/upstream.rs", "xtask/fixtures/rules/upstream.named/**", "scripts/export/**"]   # the two rules' fixtures and upstream.private's test carry the names they judge, and the export's tool reads and maps them (#4594, #4595)
+text = "No line added to a file here names a file or folder under upstream/: the export carries no such name, and each is a line it would have to map before the move. `upstream.private` judges a write under the folder; this row judges text naming one (#4594, #4595, #4676)."
+remedy = "describe the thing without its path: the private upstream project, a defect in php-src, or the folder upstream/ by its own name"
+
+[[rule]]
 id = "git.no-verify-push"
 tool = "Bash"
 where = "checkout"   # as git.no-verify: a scratch repository outside every checkout has no hooks for the flag to skip (#3186, ruled 2026-10-21)
