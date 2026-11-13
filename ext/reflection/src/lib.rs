@@ -6032,7 +6032,7 @@ fn class_header(
             EnumBacking::Pure => {}
         }
     }
-    let interfaces = req.symbols().interfaces(class).to_vec();
+    let interfaces = req.symbols().interfaces(class);
     for (i, interface) in interfaces.iter().enumerate() {
         let name = class_name_of(req, *interface);
         let name = String::from_utf8_lossy(&name);

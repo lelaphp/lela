@@ -1570,7 +1570,7 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getInterfaces(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
-        let linked = req.symbols().interfaces(class).to_vec();
+        let linked = req.symbols().interfaces(class);
         if linked.is_empty() {
             return Ok(Owner::take(req, PhpArray::empty()));
         }
@@ -1621,7 +1621,7 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getInterfaceNames(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
-        let linked = req.symbols().interfaces(class).to_vec();
+        let linked = req.symbols().interfaces(class);
         if linked.is_empty() {
             return Ok(Owner::take(req, PhpArray::empty()));
         }
