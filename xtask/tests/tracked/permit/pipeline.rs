@@ -278,11 +278,11 @@ fn an_agent_s_commit_of_a_pipeline_path_is_refused_however_it_was_written_and_a_
 
 /// `pipeline.lock` (#4458): a third-party package added to a `Cargo.lock`,
 /// a new `checksum` line or a git `source`, is refused to an `Edit` and a
-/// `Write`, in the workspace's lock and in any other; an edge to a package
-/// the lock holds, a removal, a workspace crate's entry, which carries
-/// neither line, and a lock written whole with its packages reordered are
-/// no finding of the row's, since a line the file carried, kept or moved,
-/// adds nothing (#510).
+/// `Write`, in the workspace's lock and in any other of the workspace; an
+/// edge to a package the lock holds, a removal, a workspace crate's entry,
+/// which carries neither line, and a lock written whole with its packages
+/// reordered are no finding of the row's, since a line the file carried,
+/// kept or moved, adds nothing (#510).
 #[test]
 fn a_package_added_to_a_lock_is_refused_and_a_lock_that_moves_among_its_own_is_not() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -351,6 +351,42 @@ fn a_package_added_to_a_lock_is_refused_and_a_lock_that_moves_among_its_own_is_n
             judged.findings.iter().all(|f| f.rule != LOCK),
             "{call:?}: {judged:?}"
         );
+    }
+}
+
+/// A `Cargo.lock` outside the workspace is no lock of its own (#4679): an
+/// `Edit` and a `Write` there that add a registry package are no finding
+/// of `pipeline.lock`'s, since no row's `adding` reaches a file outside
+/// the workspace, which `Call::path` says no row describes; the same
+/// text written to the workspace's own lock is refused, the control.
+#[test]
+fn a_package_added_to_a_lock_outside_the_workspace_is_no_finding_of_the_row() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let root = scratch("pipeline-lock-inside");
+    let elsewhere = Tree::new("permit-pipeline-lock-outside").unwrap();
+    let lock = locked(&[package("memchr", 'a')]);
+    write(&root, "Cargo.lock", &lock);
+    write(&elsewhere, "Cargo.lock", &lock);
+    let added = format!("version = 4\n\n{}", package("left-pad", 'c'));
+    let edit = |dir: &Path| touch("Edit", &dir.join("Cargo.lock"), "version = 4\n", &added);
+    let whole = |dir: &Path| {
+        let text = format!("{lock}\n{}", package("left-pad", 'c'));
+        touch("Write", &dir.join("Cargo.lock"), "", &text)
+    };
+    for call in [edit(&elsewhere), whole(&elsewhere)] {
+        let judged = judge(&manifest, &root, &call).unwrap();
+        assert!(
+            judged.findings.iter().all(|f| f.rule != LOCK),
+            "{call:?}: {judged:?}"
+        );
+        assert!(!denied_by_the_row(&judged), "{call:?}: {judged:?}");
+    }
+    for call in [edit(&root), whole(&root)] {
+        let judged = judge(&manifest, &root, &call).unwrap();
+        let denial = judged
+            .denial()
+            .unwrap_or_else(|| panic!("allowed: {call:?}"));
+        assert_eq!(denial.rule, LOCK, "{call:?}");
     }
 }
 

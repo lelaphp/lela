@@ -76,6 +76,31 @@ pub struct Arguments {
     pub run_in_background: bool,
 }
 
+/// What one call touches, as the manifest's rows read it ([`Call::touched`]):
+/// a call without a file and a call with one outside the workspace both
+/// have no [`Call::path`], and a row's reach tells them apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Touched {
+    /// A call that carries no file, such as a shell line.
+    NoFile,
+    /// A file of the workspace, relative to its root.
+    Workspace(PathBuf),
+    /// A file outside the workspace, which no row's scope names and no
+    /// row's `adding` reaches (#4679).
+    Outside,
+}
+
+impl Touched {
+    /// The file relative to the workspace root, for a file of the
+    /// workspace alone.
+    pub(super) fn path(&self) -> Option<&Path> {
+        match self {
+            Touched::Workspace(path) => Some(path),
+            Touched::NoFile | Touched::Outside => None,
+        }
+    }
+}
+
 impl Call {
     /// The text of the call `json` carries, or else the one on stdin.
     pub(super) fn text(json: Option<&str>) -> Result<String> {
@@ -208,12 +233,27 @@ impl Call {
 
     /// The file the call touches, relative to the workspace root; `None`
     /// for a call without one or for a file outside the workspace, which
-    /// no rule of the manifest describes. Read off [`Call::file`], so
-    /// `seams.toml`, `./seams.toml` and `docs/../seams.toml` are one path
-    /// and every scope sees it as such (#4430).
+    /// [`Call::touched`] tells apart. No row's scope names a file outside
+    /// the workspace and no row's `adding` reaches one (#4679); a row with
+    /// neither still judges the call, with no path to read. Read off
+    /// [`Call::file`], so `seams.toml`, `./seams.toml` and
+    /// `docs/../seams.toml` are one path and every scope sees it as such
+    /// (#4430).
     pub fn path(&self, root: &Path) -> Option<PathBuf> {
-        let file = self.file(root)?;
-        Some(file.strip_prefix(canonical(root)).ok()?.to_path_buf())
+        self.touched(root).path().map(Path::to_path_buf)
+    }
+
+    /// What the call touches as the manifest's rows read it: no file, a
+    /// file of the workspace under `root`, or a file outside it, each by
+    /// [`Call::file`].
+    pub(super) fn touched(&self, root: &Path) -> Touched {
+        let Some(file) = self.file(root) else {
+            return Touched::NoFile;
+        };
+        match file.strip_prefix(canonical(root)) {
+            Ok(path) => Touched::Workspace(path.to_path_buf()),
+            Err(_) => Touched::Outside,
+        }
     }
 
     /// The call, and the `text` it was read from, returned, with a
@@ -450,7 +490,7 @@ fn canonical(path: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::Call;
+    use super::{Call, Touched};
     use crate::manifest;
     use crate::permit::argv::Line;
     use crate::permit::shell::Walk;
@@ -590,7 +630,8 @@ mod tests {
     /// #4430: a relative path that climbs out of the workspace names the
     /// place it climbs to, judged as that absolute path is: in a worktree
     /// of the repository, by that worktree's manifest and as its file;
-    /// anywhere else, as no file of the manifest.
+    /// anywhere else, as no file of the manifest, and as a file outside
+    /// the workspace, which a call without one is not (#4679).
     #[test]
     fn a_relative_path_climbing_out_of_the_workspace_is_the_absolute_path_it_names() {
         let tree = Tree::new("call-climbing").unwrap();
@@ -611,10 +652,14 @@ mod tests {
         let away = edit("../elsewhere/seams.toml", None);
         assert_eq!(away.workspace(&root), root);
         assert_eq!(away.path(&root), None);
+        assert_eq!(away.touched(&root), Touched::Outside);
+        assert_eq!(bash(&root, Some("ls")).touched(&root), Touched::NoFile);
         let sub = worktree.join("sub");
         let from_sub = edit("../../../repo/docs/../seams.toml", Some(&sub));
         assert_eq!(from_sub.workspace(&root), root);
         assert_eq!(from_sub.path(&root), Some(PathBuf::from(manifest::FILE)));
+        let inside = Touched::Workspace(PathBuf::from(manifest::FILE));
+        assert_eq!(from_sub.touched(&root), inside);
     }
 
     /// Round 1, Q17 (a): a call with no line, and a line whose `cwd`
