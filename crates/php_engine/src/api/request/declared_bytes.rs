@@ -3351,29 +3351,30 @@ impl Request {
     /// copied, where it has any. `Stringable`, which the link adds where
     /// a trait gave the class `__toString`, is one more after them all.
     fn interface_sizes(&self, decl: &ClassDecl, written: &ClassDecl) -> Vec<usize> {
-        let interfaces_of = |class: ClassId| -> Vec<ClassId> {
-            (self.linked_class(class)).map_or_else(Vec::new, |record| record.interfaces().collect())
-        };
-        let theirs = (decl.parent.as_ref())
+        let interfaces_of =
+            |class: ClassId| (self.linked_class(class)).map(super::ClassRecord::interfaces);
+        let mut placed: Vec<ClassId> = (decl.parent.as_ref())
             .and_then(|name| self.class_named(name.into()))
-            .map_or_else(Vec::new, interfaces_of);
+            .and_then(interfaces_of)
+            .map_or_else(Vec::new, Iterator::collect);
+        let theirs = placed.len();
         let own = written.interfaces.len().min(decl.interfaces.len());
         let mut sizes = Vec::new();
-        let mut placed: Vec<ClassId> = theirs.clone();
         if own > 0 {
-            sizes.push(own + theirs.len());
-            let mut new = Vec::new();
+            sizes.push(own + theirs);
             for name in decl.interfaces.get(..own).unwrap_or_default() {
                 if let Some(interface) = self.class_named(name.into())
                     && !placed.contains(&interface)
                 {
                     placed.push(interface);
-                    new.push(interface);
                 }
             }
-            for interface in new {
-                let extended = interfaces_of(interface);
-                if extended.is_empty() {
+            // The new ones stand at `theirs..` until the first extends.
+            for at in theirs..placed.len() {
+                let Some(extended) = placed.get(at).and_then(|class| interfaces_of(*class)) else {
+                    continue;
+                };
+                if extended.len() == 0 {
                     continue;
                 }
                 sizes.push(placed.len() + extended.len());
@@ -3383,8 +3384,8 @@ impl Request {
                     }
                 }
             }
-        } else if !theirs.is_empty() {
-            sizes.push(theirs.len());
+        } else if theirs > 0 {
+            sizes.push(theirs);
         }
         let mut count = placed.len();
         for _ in own..decl.interfaces.len() {
