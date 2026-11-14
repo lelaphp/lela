@@ -30,9 +30,11 @@ conceding that they do:
 OTHER COMPONENTS
 php-src carries code from other projects, and this project ports or bundles some of it.
 THIRD-PARTY.md is the one list of them. Each keeps its own licence, listed
-with its copyright notice in THIRD-PARTY.md and in LICENSES/. Where a
-component is LGPL-2.1, its source is in this distribution and the build
-instructions are in the README's build section.
+with its copyright notice in THIRD-PARTY.md and in LICENSES/. libmbfl
+(ext/mbstring) and libbcmath (ext/bcmath) are used in this product. Each is
+covered by the GNU Lesser General Public License, version 2.1
+(LICENSES/libmbfl.txt, LICENSES/libbcmath.txt); its source is in this
+distribution and the build instructions are in the README's build section.
 
 Two of the licences listed there, Apache-1.0 and BSD-4-Clause-UC, require
 these acknowledgements:
@@ -40,6 +42,24 @@ these acknowledgements:
   for use in the Apache HTTP server project (http://www.apache.org/).
   This product includes software developed by the University of
   California, Berkeley and its contributors.
+
+Apache-2.0 asks a derivative work to show lexbor's notice:
+
+     Lexbor.
+
+     Copyright 2018-2020 Alexander Borisov
+
+     Licensed under the Apache License, Version 2.0 (the "License");
+     you may not use this file except in compliance with the License.
+     You may obtain a copy of the License at
+
+         http://www.apache.org/licenses/LICENSE-2.0
+
+     Unless required by applicable law or agreed to in writing, software
+     distributed under the License is distributed on an "AS IS" BASIS,
+     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     See the License for the specific language governing permissions and
+     limitations under the License.
 
 The names PHP and Zend belong to their respective owners and are used here
 only to say what this project runs and what it is compatible with.
