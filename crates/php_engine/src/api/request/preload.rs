@@ -410,10 +410,12 @@ impl Request {
     /// compile makes for it ([`Request::hold_preload_strings`]), held to
     /// the preload's end, and not a persisted file's bytes, which php
     /// lays only for a file. php preloading one class with one method
-    /// (#4696):
+    /// (#4696), from a file whose path is one length in any temporary
+    /// directory, since the name of the `eval`'s code carries it:
     ///
     /// ```php
-    /// $f = sys_get_temp_dir() . '/w4652-' . sprintf('%010d', getmypid()) . '.php';
+    /// $d = realpath('/tmp');
+    /// $f = $d . '/w4652-' . str_pad((string) getmypid(), 34 - strlen($d), '0', STR_PAD_LEFT) . '.php';
     /// file_put_contents($f, <<<'PHP'
     /// <?php
     /// $m = memory_get_usage();
@@ -424,7 +426,7 @@ impl Request {
     /// unlink($f);
     /// ```
     /// ```expect process
-    /// 864
+    /// 848
     /// hi
     /// ```
     ///
