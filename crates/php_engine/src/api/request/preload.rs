@@ -800,10 +800,10 @@ impl Request {
     /// extends, implements and uses ([`Request::publication_order`]),
     /// whatever order `rows` leave them in, so every record is built
     /// from its parent's published one; the request's own rows are
-    /// taken out. A class or a function left out is taken out of what
-    /// `declared` says the preload holds of its unit. `Err` is the
-    /// internal error of a class whose record could not be built, and of
-    /// an arena with no room.
+    /// taken out. A function left out is taken out of what `declared`
+    /// says the preload holds of its unit. `Err` is the internal error
+    /// of a class the preload could not publish, and of an arena with no
+    /// room.
     fn publish_tables(
         &mut self,
         rows: &[Row],
@@ -811,18 +811,9 @@ impl Request {
         declared: &mut HashMap<usize, UnitDeclarations>,
     ) -> Result<Published, String> {
         let mut renumbered: HashMap<ClassId, EpochClassId> = HashMap::new();
-        let mut left = std::collections::HashSet::new();
         for local in self.publication_order(rows) {
-            match self.publish_class(local, &renumbered, &left, preloading)? {
-                Some(published) => _ = renumbered.insert(local, published),
-                None => _ = left.insert(local),
-            }
-        }
-        for row in left.iter().filter_map(|local| self.declared_row(*local)) {
-            let held = declared.get_mut(&address(row.unit()));
-            if let Some(held) = held {
-                held.classes.retain(|at| *at != row.at());
-            }
+            let published = self.publish_class(local, &renumbered, preloading)?;
+            renumbered.insert(local, published);
         }
         let shared = |class: ClassId| {
             renumbered
@@ -834,7 +825,7 @@ impl Request {
         let mut aliases = Vec::new();
         for row in rows {
             match row {
-                Row::Class(local) if !left.contains(local) => {
+                Row::Class(local) => {
                     let Some(decl) = self.symbols().class_decl(*local) else {
                         continue;
                     };
@@ -843,12 +834,12 @@ impl Request {
                     let class = shared(*local);
                     classes.push((key, Named { place, class }));
                 }
-                Row::Alias(alias, class) if !left.contains(class) => {
+                Row::Alias(alias, class) => {
                     let place = self.buckets.take();
                     let key = alias.clone().into_boxed_slice();
                     aliases.push((key, (place, alias.clone(), shared(*class))));
                 }
-                Row::Class(_) | Row::Alias(..) | Row::Unlinked(_) => {}
+                Row::Unlinked(_) => {}
             }
         }
         self.closure_rows.clear();
@@ -975,14 +966,17 @@ impl Request {
     /// The request's own class `local` published ([`Request::publish`]):
     /// its record built over the published classes `renumbered` names,
     /// whose every class it extends, implements or uses is one already,
-    /// or one the arena's one check finds every request shares.
+    /// or one the arena's one check finds every request shares. `Err` is
+    /// the internal error that ends the preload where the class is not
+    /// published, as php's preload refuses no such class: every unit a
+    /// cell of its composed declaration names is one the preload froze,
+    /// so a refusal is the engine's own mistake, made loud (#4699).
     fn publish_class(
         &mut self,
         local: ClassId,
         renumbered: &HashMap<ClassId, EpochClassId>,
-        left: &std::collections::HashSet<ClassId>,
         preloading: &Preloading,
-    ) -> Result<Option<EpochClassId>, String> {
+    ) -> Result<EpochClassId, String> {
         let name = String::from_utf8_lossy(self.symbols().class_name(local)).into_owned();
         let shared = |class: ClassId| match renumbered.get(&class) {
             Some(published) => Some(*published),
@@ -993,22 +987,14 @@ impl Request {
                 "InternalError: the preload's class {name} has no row"
             ));
         };
-        // Declared by a unit the preload holds as its own, or naming a
-        // class so declared, the class is left out of the preload, as a
-        // class of no preloaded file is.
+        // Declared by a unit the preload holds as its own, a file's that
+        // `Shared::publish_compiled` refused, which no compile's unit is,
+        // the class ends the preload as an `eval`'s refused unit does.
         let Some(frozen) = preloading.frozen(row.unit()).cloned() else {
-            return Ok(None);
+            return Err(format!(
+                "InternalError: the preload's class {name} is of a unit the preload holds as its own"
+            ));
         };
-        let names_left = row.decl().is_some_and(|decl| {
-            (decl.parent.iter())
-                .chain(&decl.interfaces)
-                .chain(&decl.traits)
-                .filter_map(|name| self.class_named(name.into()))
-                .any(|class| left.contains(&class))
-        });
-        if names_left {
-            return Ok(None);
-        }
         let named =
             |name: &[u8]| shared(self.class_named(Bare::resolved(name))?).map(ClassId::from);
         let Some(record) = self.record_over(row, &named) else {
@@ -1027,12 +1013,10 @@ impl Request {
         });
         let units = |unit: &PublishedUnit| preloading.frozen(unit).cloned();
         match self.publish((&frozen, row.at()), composed, &record, parent, &units) {
-            Ok(class) => Ok(Some(class)),
-            // The arena refusing the class leaves it out of the preload,
-            // and out of what the preload holds of its unit, so a request
-            // that loads the unit binds it as its own; a request that
-            // does not finds no class of the name (#4699).
-            Err(Unpublished::Refused) => Ok(None),
+            Ok(class) => Ok(class),
+            Err(Unpublished::Refused) => Err(format!(
+                "InternalError: the engine's published arena refused the preload's class {name}"
+            )),
             Err(Unpublished::Full) => Err(ARENA_FULL.to_string()),
         }
     }
@@ -1383,6 +1367,33 @@ mod tests {
                 assert_eq!(name_of(&reader, class), name, "{class:?} moved");
             }
         });
+    }
+
+    /// A class the preload cannot publish ends the preload with the
+    /// internal error, and nothing is left out of its tables: here a
+    /// trait and the class that uses it, of an `eval`'s unit the preload
+    /// is made to hold as its own, as one `Shared::publish_compiled`
+    /// refused would be (#4699).
+    #[test]
+    fn a_class_the_preload_cannot_publish_ends_it_with_the_internal_error() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        req.begin_preload(false);
+        let code = "trait T { function t() {} } class C { use T; }";
+        assert!(
+            req.code_mut()
+                .eval_stringl(code.as_bytes(), b"preload")
+                .is_ok()
+        );
+        let rows = req.class_rows(Vec::new(), 0);
+        let mut preloading = req.preloading.take().expect("the preload's request");
+        preloading.evals.clear();
+        let published =
+            req.publish_tables(&rows, &preloading, &mut std::collections::HashMap::new());
+        assert_eq!(
+            published.err().as_deref(),
+            Some("InternalError: the preload's class T is of a unit the preload holds as its own")
+        );
     }
 
     /// The preload's table with a class before its parent, which it
