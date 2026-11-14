@@ -34,6 +34,7 @@ mod frame_writes;
 mod frames;
 #[cfg(debug_assertions)]
 mod freed_use;
+#[cfg(debug_assertions)]
 mod given_up;
 mod hand_off;
 #[cfg(debug_assertions)]
