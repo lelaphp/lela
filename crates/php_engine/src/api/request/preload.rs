@@ -976,6 +976,88 @@ impl Request {
     /// published, as php's preload refuses no such class: every unit a
     /// cell of its composed declaration names is one the preload froze,
     /// so a refusal is the engine's own mistake, made loud (#4699).
+    ///
+    /// A class that uses a trait and holds a first-class callable in a
+    /// constant, preloaded, is published with the preload: a request that
+    /// does not load the file reads the constant, calls it and reflects
+    /// on the class as php's does:
+    ///
+    /// ```php
+    /// $d = realpath('/tmp');
+    /// $f = $d . '/w4652-' . str_pad((string) getmypid(), 34 - strlen($d), '0', STR_PAD_LEFT) . '.php';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// trait T {}
+    /// class C { use T; const F = strlen(...); }
+    /// PHP);
+    /// echo shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.preload=' . escapeshellarg($f) . ' -r ' . escapeshellarg('var_dump((C::F)("abcd")); $r = new ReflectionClass("C"); var_dump($r->getTraitNames(), $r->getConstant("F") instanceof Closure);'));
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// int(4)
+    /// array(1) {
+    ///   [0]=>
+    ///   string(1) "T"
+    /// }
+    /// bool(true)
+    /// ```
+    ///
+    /// The same class declared by an `eval` the preload serves, whose
+    /// unit the preload froze (#4696):
+    ///
+    /// ```php
+    /// $d = realpath('/tmp');
+    /// $f = $d . '/w4652-' . str_pad((string) getmypid(), 34 - strlen($d), '0', STR_PAD_LEFT) . '.php';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// eval('trait T {} class C { use T; const F = strlen(...); }');
+    /// PHP);
+    /// echo shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.preload=' . escapeshellarg($f) . ' -r ' . escapeshellarg('var_dump((C::F)("abcd")); $r = new ReflectionClass("C"); var_dump($r->getTraitNames(), $r->getConstant("F") instanceof Closure);'));
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// int(4)
+    /// array(1) {
+    ///   [0]=>
+    ///   string(1) "T"
+    /// }
+    /// bool(true)
+    /// ```
+    ///
+    /// And a class whose cells come from a trait's trait in another
+    /// preloaded file: `Inner`, in the file the preloaded one requires,
+    /// declares a first-class callable and a closure, and `Outer`, which
+    /// uses it, and `C`, which uses `Outer`, are the preloaded file's:
+    ///
+    /// ```php
+    /// $d = realpath('/tmp');
+    /// $f = $d . '/w4652-' . str_pad((string) getmypid(), 34 - strlen($d), '0', STR_PAD_LEFT) . '.php';
+    /// $g = $d . '/x4652-' . str_pad((string) getmypid(), 34 - strlen($d), '0', STR_PAD_LEFT) . '.php';
+    /// file_put_contents($g, <<<'PHP'
+    /// <?php
+    /// trait Inner {
+    ///     const F = strlen(...);
+    ///     const G = static function (int $n): int { return 2 * $n; };
+    /// }
+    /// PHP);
+    /// file_put_contents($f, '<?php require ' . var_export($g, true) . '; trait Outer { use Inner; } class C { use Outer; }');
+    /// echo shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.preload=' . escapeshellarg($f) . ' -r ' . escapeshellarg('var_dump((C::F)("abcd"), (C::G)(4)); $r = new ReflectionClass("C"); var_dump($r->getTraitNames(), (new ReflectionClass("Outer"))->getTraitNames(), $r->getConstant("G") instanceof Closure);'));
+    /// unlink($f);
+    /// unlink($g);
+    /// ```
+    /// ```expect process
+    /// int(4)
+    /// int(8)
+    /// array(1) {
+    ///   [0]=>
+    ///   string(5) "Outer"
+    /// }
+    /// array(1) {
+    ///   [0]=>
+    ///   string(5) "Inner"
+    /// }
+    /// bool(true)
+    /// ```
     fn publish_class(
         &mut self,
         local: ClassId,
