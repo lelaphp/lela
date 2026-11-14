@@ -2035,7 +2035,11 @@ impl Shared {
     /// default, whose composed declaration the check admits against the
     /// units it was composed from where its link is published
     /// (`Request::publish`), so that with the cache it is published at its
-    /// first link and shared by every request after it (#4699):
+    /// first link and shared by every request after it (#4699), which
+    /// what the fence below prints, one request a process, cannot tell
+    /// from a class bound per request: the test
+    /// `a_trait_using_class_holding_a_closure_is_published_at_its_first_link`
+    /// in `engine/tests/units.rs` holds it:
     ///
     /// ```php
     /// $dir = sys_get_temp_dir() . '/frozen-closure-' . getmypid();
