@@ -17,7 +17,8 @@
 //! field to the bound, or by an impl written by hand where `unsafe` may
 //! stand (the homes `unsafe.homes` names), for a leaf the derive cannot
 //! read through: here, the primitives, the standard containers over engine
-//! state, a `Cow` and a `Range` among them, an owned fd, a file and the standard
+//! state, a `Cow` and a `Range` among them, a `Condvar`, a `JoinHandle`
+//! over engine state, an owned fd, a file and the standard
 //! library's sockets, a function pointer, [`Bytes`], a [`ClassCache`], a
 //! [`ZvalType`], a debug build's `Origin`, [`Strings`], [`FrozenZval`]
 //! and [`AnyState`](crate::AnyState).
@@ -52,7 +53,8 @@ use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, AtomicUsize};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::{Arr, Bytes, ClassCache, Fatal, Intern, Key, Strings, Zval, ZvalType};
@@ -68,6 +70,14 @@ use crate::{Arr, Bytes, ClassCache, Fatal, Intern, Key, Strings, Zval, ZvalType}
 /// derive cannot read through. It asks `Send` and not `Sync`: where every
 /// request reads the value at once, the entry that shares it asks `Sync`
 /// beside it.
+///
+/// A thread kept to be joined is engine state where what its body
+/// answers is, so one whose body answers a [`Zval`] is refused:
+///
+/// ```compile_fail,E0277
+/// fn held<T: php_heap::EngineState>() {}
+/// held::<std::thread::JoinHandle<php_heap::Zval>>();
+/// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot stand in engine state: it may hold a handle into a request's heap",
     label = "not `EngineState`",
@@ -126,6 +136,20 @@ containers! {
     <A, B, C> (A, B, C),
     <A, B, C, D> (A, B, C, D),
 }
+
+// A condition variable holds no value: it is the queue of threads that
+// wait on it, and what they wait for stands in the `Mutex` beside it,
+// engine state by that mutex's own bound.
+impl EngineState for Condvar {}
+
+// A thread's join handle holds the thread it joins, its id, its name and
+// the system's number for it, and the packet the thread writes its end
+// into once its body returns, read by the one join: what the body
+// answered, a `T`, engine state by its bound, or the payload of the panic
+// it ended in. A payload is a panic's message, a `&'static str` or a
+// `String`, or one resumed from another panic; no code of the workspace
+// panics with a value a request made, so none of it is a request's.
+impl<T: EngineState> EngineState for JoinHandle<T> {}
 
 // A share of what it points at, which is engine state by its own bound
 // and `Sync`, since every holder of the share reads it at once.
@@ -412,6 +436,14 @@ mod tests {
             std::sync::Arc<[std::sync::atomic::AtomicU8]>,
             std::fs::File,
         )>();
+    }
+
+    #[test]
+    fn a_condvar_and_a_thread_joined_over_engine_state_are_engine_state() {
+        held::<std::sync::Condvar>();
+        held::<std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>();
+        held::<std::thread::JoinHandle<()>>();
+        held::<std::sync::Mutex<Option<std::thread::JoinHandle<Vec<FrozenZval>>>>>();
     }
 
     #[test]
