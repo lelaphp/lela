@@ -1,24 +1,19 @@
-//! `upstream.named`, the row #4618 proposes: an `Edit` or a `Write` that
+//! `upstream.named`, the row settled on #4676: an `Edit` or a `Write` that
 //! adds a name of a file or folder under the private folder is refused, as
 //! the export's upstream bar reads a name (#4594, #4595, #4598). The row's
 //! `adding` and the bar's `cutlib.NAMES_ONE` are one idea in two regex
 //! dialects, so both are held to one list of forms, `forms.tsv` beside the
 //! row's fixtures, which `scripts/export/test_export.py` reads too.
 //!
-//! The row is read from `seams.toml` once a person has settled it there,
-//! and until then from `proposal.toml` beside its fixtures, the whole file
-//! `cargo xtask steer seams.toml --from` lands; so the tests hold the row
-//! in both states, and the walk over the tracked rules takes its fixtures
-//! once it is tracked. Every other row is read from `seams.toml` alone,
-//! never from the proposal's copy, which stands still while the tracked
-//! file moves. No name is spelled in this file, which the row does
-//! not exempt: every form is read from the list.
+//! The row is read from `seams.toml`, as every other row is, and the walk
+//! over the tracked rules takes its fixtures. No name is spelled in this
+//! file, which the row does not exempt: every form is read from the list.
 
 use super::*;
 
 const RULE: &str = "upstream.named";
 
-/// The row's fixtures, its list of forms and its proposal.
+/// The row's fixtures and its list of forms.
 fn dir() -> PathBuf {
     fixtures().join("rules").join(RULE)
 }
@@ -28,23 +23,14 @@ fn tracked() -> String {
     std::fs::read_to_string(workspace().join("seams.toml")).unwrap()
 }
 
-/// The proposal beside the row's fixtures, the whole file steer lands.
-fn proposal() -> String {
-    std::fs::read_to_string(dir().join("proposal.toml")).unwrap()
-}
-
-/// The tracked manifest with the row: as it carries it, or with the
-/// proposal's row after every other, so a write under the folder is still
-/// `upstream.private`'s denial first, as the proposal places it.
+/// The tracked manifest, which carries the row after `upstream.private`,
+/// so a write under the folder is that row's denial first.
 fn with_the_row() -> Manifest {
-    let mut manifest = Manifest::load(workspace()).unwrap();
-    if manifest.rule(RULE).is_none() {
-        let proposed = Manifest::parse(&proposal()).unwrap();
-        let row = proposed.rule(RULE).cloned();
-        manifest
-            .rules
-            .push(row.expect("the proposal carries the row"));
-    }
+    let manifest = Manifest::load(workspace()).unwrap();
+    assert!(
+        manifest.rule(RULE).is_some(),
+        "seams.toml carries no {RULE}"
+    );
     manifest
 }
 
@@ -73,21 +59,15 @@ fn forms() -> Vec<Listed> {
     .collect()
 }
 
-/// The `[[rule]]` block of `id` in `text`, as the export's test reads it.
-fn block_in(text: &str, id: &str) -> Option<String> {
-    let id = format!("id = \"{id}\"");
-    let mut blocks = text.split("[[rule]]");
-    blocks.find(|block| block.contains(&id)).map(str::to_owned)
-}
-
-/// The `[[rule]]` block of `id` as `seams.toml` carries it, and only
-/// `upstream.named`'s from the proposal while the tracked file does not.
+/// The `[[rule]]` block of `id` as `seams.toml` carries it, as the
+/// export's test reads it.
 fn block(id: &str) -> String {
-    let tracked = block_in(&tracked(), id);
-    let proposed = || (id == RULE).then(|| block_in(&proposal(), id)).flatten();
-    tracked
-        .or_else(proposed)
-        .unwrap_or_else(|| panic!("seams.toml carries no row {id}"))
+    let named = format!("id = \"{id}\"");
+    let text = tracked();
+    let mut blocks = text.split("[[rule]]");
+    let found = blocks.find(|block| block.contains(&named));
+    let found = found.unwrap_or_else(|| panic!("seams.toml carries no row {id}"));
+    found.to_owned()
 }
 
 /// A `Write` of `content` at `file`, or an `Edit` appending it.
@@ -144,8 +124,8 @@ fn the_row_refuses_each_form_the_bar_refuses_and_passes_the_rest() {
 }
 
 /// The row's own words: the denial carries its id, its text and its
-/// remedy, and the row's `adding` is the pattern the proposal or the
-/// tracked file writes, a regex `permit`'s dialect reads.
+/// remedy, and the row's `adding` is the pattern the tracked file writes,
+/// a regex `permit`'s dialect reads.
 #[test]
 fn the_denial_says_what_is_refused_and_to_describe_the_thing_without_the_path() {
     let manifest = with_the_row();
@@ -223,12 +203,16 @@ fn the_exempt_paths_pass_and_their_neighbours_are_refused() {
 
 /// What a write adds is judged, not what the file carries (#510): an edit
 /// beside a name the file already holds is let through, and one that adds
-/// a second of it is refused. A file outside the workspace, where the
-/// private project keeps its own, is none the row judges, and a write under
-/// the folder itself is `upstream.private`'s denial first.
+/// a second of it is refused. The row has no scope (#4676), and a file
+/// outside the workspace, where the private project keeps its own, is
+/// still none it judges, since no row's `adding` reaches a write outside
+/// the workspace (#4679); a write under the folder itself is
+/// `upstream.private`'s denial first.
 #[test]
 fn a_name_the_file_carries_and_a_file_outside_the_workspace_are_let_through() {
     let manifest = with_the_row();
+    let row = manifest.rule(RULE).unwrap();
+    assert!(row.scope.is_empty(), "{row:?}");
     let named = &forms()[0].form;
     let tree = Tree::new("permit-upstream-named").unwrap();
     let carried = format!("see {named} for it\nline two\n");

@@ -1,0 +1,7 @@
+The fixture's NOTICE (#4663): the tag the draft named before the pin was
+8.5.12, which the hold fails naming both.
+
+DERIVED FROM PHP-SRC
+Parts of this project are derived from php-src (https://github.com/php/php-src) at tag
+php-8.5.9 (dd6e76cc): data extracted from it (ops.toml), tables transcribed
+from it, and modules translated or written from its C source.
