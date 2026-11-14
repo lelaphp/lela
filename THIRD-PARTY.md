@@ -2,7 +2,7 @@
 
 How to read this: component | where in this project | origin | licence | notice text (verbatim).
 
-Where the last column names a file in `LICENSES/`, that file is the notice text, copied byte for byte from the source named beside it: the component's own licence file, an item of php-src's `README.REDIST.BINS`, or the comment that carries the notice in php-src's source, all at php-src's tag php-8.5.12. Where it names "the first comment" of a php-src file, the notice is a public-domain dedication that stays in that file, and `LICENSES/` holds no copy. php-src's own row names `LICENSES/php-src.txt`, which is not yet written. Paths under "origin" are php-src's. `NOTICE` says how the code derived from php-src itself is used.
+Where the last column names a file in `LICENSES/`, that file is the notice text, copied byte for byte from the source named beside it: the component's own licence file, an item of php-src's `README.REDIST.BINS`, or the comment that carries the notice in php-src's source, all at php-src's tag php-8.5.12 except in §7, whose notice is nginx's at the release `oracle.toml`'s `[fastcgi]` pins. Where it names "the first comment" of a php-src file, the notice is a public-domain dedication that stays in that file, and `LICENSES/` holds no copy. php-src's own row names `LICENSES/php-src.txt`, which is not taken at that tag: it is the PHP License, version 4, copied byte for byte from php.net's `https://www.php.net/license/4_0.txt`. Paths under "origin" are php-src's, except in §7, where they are nginx's. `NOTICE` says how the code derived from php-src itself is used.
 
 ## 1. php-src (derived)
 
@@ -36,7 +36,7 @@ Where the last column names a file in `LICENSES/`, that file is the notice text,
 | Mersenne Twister, Matsumoto, Nishimura and Wagner | `ext/random/src/engine_mt19937.rs` | `ext/random/engine_mt19937.c` | BSD-3-Clause | `LICENSES/mt19937.txt` (item 6) |
 | uuencode, University of California, Berkeley | `ext/standard/src/uuencode.rs` | `ext/standard/uuencode.c` | BSD-4-Clause-UC | `LICENSES/uuencode.txt` (item 9) |
 | xxHash, Yann Collet | `ext/hash/src/xxhash.rs` (XXH32 and XXH64) | `ext/hash/xxhash/xxhash.h` | BSD-2-Clause | `LICENSES/xxhash.txt` (item 19) |
-| libavifinfo, Alliance for Open Media | `ext/standard/src/image/avif.rs` | `ext/standard/libavifinfo` | BSD-2-Clause, and the Alliance for Open Media Patent License 1.0 | `LICENSES/libavifinfo.txt` and `LICENSES/libavifinfo-PATENTS.txt` (`ext/standard/libavifinfo/LICENSE` and `PATENTS`) |
+| libavifinfo, Alliance for Open Media | `ext/standard/src/image/avif.rs` | `ext/standard/libavifinfo` | BSD-2-Clause | `LICENSES/libavifinfo.txt`, and the Alliance for Open Media Patent License 1.0 in `LICENSES/libavifinfo-PATENTS.txt` (`ext/standard/libavifinfo/LICENSE` and `PATENTS`) |
 | MurmurHash3 (PMurHash), Austin Appleby and Shane Day | `ext/hash/src/murmur.rs` | `ext/hash/murmur/PMurHash.c`, `PMurHash128.c` | public domain | the first comment of each file |
 | tar, Tim Kientzle (libarchive) | `ext/phar/src/tar.rs` (`phar_tar_octal`) | `ext/phar/tar.c` | BSD-2-Clause | `LICENSES/phar-tar.txt` (item 14) |
 | libbcmath, GNU bc's number package | `ext/bcmath/src/num.rs` | `ext/bcmath/libbcmath` | LGPL-2.1-or-later | `LICENSES/libbcmath.txt` (`ext/bcmath/libbcmath/LICENSE`) |

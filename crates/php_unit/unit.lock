@@ -163,6 +163,7 @@ dump_type_info
 enum_methods
 frameless_table
 frozen::Frozen
+frozen::Frozen::composed
 frozen::Frozen::new
 frozen::Holder
 frozen::Slot

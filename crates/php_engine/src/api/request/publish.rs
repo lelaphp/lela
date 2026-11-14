@@ -80,7 +80,7 @@ impl Request {
                 bodies,
                 abstracts,
             }) => Some(Box::new(Composed {
-                decl: Arc::new(Frozen::new(decl).map_err(|_| Refused)?),
+                decl: Arc::new(Frozen::composed(decl, Vec::new()).map_err(|_| Refused)?),
                 bodies,
                 abstracts,
             })),

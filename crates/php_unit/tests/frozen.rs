@@ -1,8 +1,10 @@
-//! `Frozen::new` and the walk it reads through (#4649): a unit or a class
-//! declaration is admitted only where every value it holds is the engine
-//! table's, each of its constants that is an index, an `IS_CONSTANT_AST`
-//! or an `IS_PTR`, names an entry of its own tables, and every op array is
-//! numbered by the engine.
+//! `Frozen::new`, `Frozen::composed` and the walk they read through
+//! (#4649): a unit or a class declaration is admitted only where every
+//! value it holds is the engine table's, each of its constants that is an
+//! index, an `IS_CONSTANT_AST` or an `IS_PTR`, names an entry of its own
+//! tables, and every op array is numbered by the engine; and a
+//! declaration's closure cell only where it names a frozen unit the
+//! declaration was composed from (#4690).
 
 use php_heap::{Heap, Intern, Key, Strings, Zval};
 use php_unit::decl::{
@@ -149,7 +151,7 @@ fn frozen_admits_a_unit_the_engine_published() {
     let unit = Frozen::new(published(&table).published(None));
     let unit = unit.expect("every value is the table's");
     assert_eq!(unit.functions.len(), 1, "read through the frozen unit");
-    let class = Frozen::new(class(held(table.array)));
+    let class = Frozen::composed(class(held(table.array)), Vec::new());
     assert!(class.is_ok(), "a declaration of the table's values");
     assert!(
         table.strings.find(b"key").is_some(),
@@ -208,7 +210,7 @@ fn frozen_refuses_a_declaration_with_a_requests_constant() {
     let array = Zval::array(heap.array().expect("the heap has room"));
     for z in [string, array] {
         assert!(
-            Frozen::new(class(held(z))).is_err(),
+            Frozen::composed(class(held(z)), Vec::new()).is_err(),
             "{:?} as a constant",
             z.kind()
         );
@@ -325,7 +327,7 @@ fn the_walk_leaves_a_natives_unbuilt_slots_unbuilt() {
         is_final: false,
         tentative_return: false,
     }];
-    let frozen = Frozen::new(declared).expect("every value is the table's");
+    let frozen = Frozen::composed(declared, Vec::new()).expect("every value is the table's");
     let parameters = &frozen.methods[0].function.parameters;
     assert!(parameters.unbuilt().is_some(), "the walk built no slot");
     assert_eq!(parameters.len(), 1, "a reader builds them after");
@@ -387,7 +389,7 @@ fn parameter() -> Parameter {
 fn declaration(table: &Table, change: impl FnOnce(&mut ClassDecl)) -> bool {
     let mut declared = class(held(table.array));
     change(&mut declared);
-    Frozen::new(declared).is_ok()
+    Frozen::composed(declared, Vec::new()).is_ok()
 }
 
 #[test]
@@ -584,20 +586,197 @@ fn frozen_refuses_a_declaration_with_a_cell_in_a_methods_parameter_default() {
     assert_eq!(refused, [false, false]);
 }
 
-/// A cell is refused by what it is, not by whether it is bound: one
-/// bound by a publish is refused as one not yet bound is.
-#[test]
-fn frozen_refuses_a_declaration_with_a_cell_its_unit_bound() {
-    let table = table();
-    let mut unit = published(&table);
-    let [closure, _] = closures(&mut unit.cell);
-    unit.classes[0].constants[0].value = closure;
-    let unit = Frozen::new(unit.published(None)).expect("a unit's own cell names it");
-    let ConstExpr::Closure { unit: cell, .. } = &unit.classes[0].constants[0].value else {
-        unreachable!("the closure laid above");
+/// The cell a closure node holds.
+fn cell_of(node: &ConstExpr) -> &UnitCell {
+    let (ConstExpr::Closure { unit, .. } | ConstExpr::FunctionCallable { unit, .. }) = node else {
+        unreachable!("a closure node");
     };
-    assert!(cell.unit().is_some(), "bound to the published unit");
-    assert!(Frozen::new(unit.classes[0].clone()).is_err());
+    unit
+}
+
+/// A unit of the table's whose class's constant is a `strlen(...)` node
+/// sharing the unit's cell, published and frozen, as a file declaring a
+/// class or a trait with `const C = strlen(...);` leaves it; and a copy of
+/// the node, as a composed declaration takes a used trait's constant.
+fn closing(table: &Table) -> (Frozen<PublishedUnit>, ConstExpr) {
+    let mut unit = published(table);
+    let [_, callable] = closures(&mut unit.cell);
+    unit.classes[0].constants[0].value = callable;
+    let unit = Frozen::new(unit.published(None)).expect("a unit's own cell names it");
+    let node = unit.classes[0].constants[0].value.clone();
+    assert!(cell_of(&node).unit().is_some(), "bound by the publish");
+    (unit, node)
+}
+
+/// A frozen unit of the table's whose class holds no closure.
+fn plain(table: &Table) -> Frozen<PublishedUnit> {
+    Frozen::new(published(table).published(None)).expect("every value is the table's")
+}
+
+/// The units with the one at `struck` left out.
+fn striking(units: &[Frozen<PublishedUnit>], struck: usize) -> Vec<Frozen<PublishedUnit>> {
+    let mut units = units.to_vec();
+    units.remove(struck);
+    units
+}
+
+#[test]
+fn frozen_admits_a_declaration_whose_cell_names_its_own_unit() {
+    let table = table();
+    let (own, _) = closing(&table);
+    let declared = own.classes[0].clone();
+    let frozen = Frozen::composed(declared.clone(), vec![own.clone()]);
+    frozen.expect("the cell names the class's own unit");
+    assert!(
+        Frozen::composed(declared, Vec::new()).is_err(),
+        "the same cell with no unit"
+    );
+}
+
+#[test]
+fn frozen_admits_a_declaration_whose_cell_names_a_traits_unit() {
+    let table = table();
+    let (own, (used, node)) = (plain(&table), closing(&table));
+    let mut declared = own.classes[0].clone();
+    declared.constants[0].value = node;
+    let units = [own, used];
+    let frozen = Frozen::composed(declared.clone(), units.to_vec());
+    frozen.expect("the cell names the used trait's unit");
+    assert!(
+        Frozen::composed(declared, striking(&units, 1)).is_err(),
+        "the trait's unit struck"
+    );
+}
+
+/// The class's own unit, a trait's and that trait's trait's, each holding
+/// a cell the composed declaration took, at each place a constant
+/// expression sits: the declaration is admitted with all three, and
+/// refused with any one struck.
+#[test]
+fn frozen_admits_a_declaration_whose_cells_name_a_traits_traits_unit() {
+    let table = table();
+    let [(own, mine), (used, its), (inner, deepest)] = [(); 3].map(|()| closing(&table));
+    let mut declared = own.classes[0].clone();
+    let mut p = property();
+    p.default = Some(its);
+    let mut slot = parameter();
+    slot.default = ParameterDefault::Expr(mine);
+    let mut m = method(vec![attribute(deepest.clone())]);
+    m.function.parameters = Parameters::from(vec![slot]);
+    declared.constants[0].value = deepest;
+    declared.properties = vec![p].into();
+    declared.methods = vec![m];
+    let units = [own, used, inner];
+    let frozen = Frozen::composed(declared.clone(), units.to_vec());
+    frozen.expect("every cell names a unit of the trait-use closure");
+    for struck in 0..units.len() {
+        let refused = Frozen::composed(declared.clone(), striking(&units, struck));
+        assert!(refused.is_err(), "unit {struck} struck");
+    }
+}
+
+/// A cell bound to a unit outside the units given is refused, a frozen
+/// one or one no check froze, which a request's own unit is, since a
+/// request's unit cannot be given (`Frozen::composed`'s `compile_fail`).
+#[test]
+fn frozen_refuses_a_declaration_whose_cell_names_a_foreign_unit() {
+    let (table, mut heap) = (table(), Heap::new());
+    let (own, used, (_foreign, node)) = (plain(&table), plain(&table), closing(&table));
+    let mut declared = own.classes[0].clone();
+    declared.constants[0].value = node;
+    let units = vec![own.clone(), used.clone()];
+    assert!(
+        Frozen::composed(declared, units.clone()).is_err(),
+        "a frozen unit not given"
+    );
+    let mut requests_unit = published(&table);
+    requests_unit.main = code(vec![requests(&mut heap)]);
+    let [closure, _] = closures(&mut requests_unit.cell);
+    let requests_unit = requests_unit.published(None);
+    assert!(
+        Frozen::new(requests_unit.clone()).is_err(),
+        "no check freezes it"
+    );
+    let mut declared = own.classes[0].clone();
+    declared.constants[0].value = closure;
+    assert!(cell_of(&declared.constants[0].value).unit().is_some());
+    assert!(
+        Frozen::composed(declared, units).is_err(),
+        "a request's unit"
+    );
+}
+
+/// A cell shared and not yet bound names nothing the check can read: it
+/// is refused whatever units are given, as it would be bound to its unit
+/// when that is published.
+#[test]
+fn frozen_refuses_a_declaration_whose_cell_is_shared_and_unbound() {
+    let table = table();
+    let (own, (used, _)) = (plain(&table), closing(&table));
+    let mut pending = published(&table);
+    let [closure, _] = closures(&mut pending.cell);
+    let mut declared = own.classes[0].clone();
+    declared.constants[0].value = closure;
+    assert!(
+        cell_of(&declared.constants[0].value).unit().is_none(),
+        "unbound"
+    );
+    let refused = Frozen::composed(declared, vec![own, used]);
+    assert!(refused.is_err(), "an unbound cell");
+}
+
+/// A cell whose unit is gone names no unit a frozen one holds: the
+/// cell's `Weak` keeps the gone unit's room, so no unit published after
+/// stands where it stood.
+#[test]
+fn frozen_refuses_a_declaration_whose_cells_unit_is_gone() {
+    let table = table();
+    let (gone, node) = closing(&table);
+    let at = PublishedUnit::as_ptr(&gone);
+    drop(gone);
+    assert!(
+        cell_of(&node).unit().is_none(),
+        "no share of the unit stands"
+    );
+    let units: Vec<_> = (0..8).map(|_| plain(&table)).collect();
+    assert!(units.iter().all(|unit| PublishedUnit::as_ptr(unit) != at));
+    let mut declared = units[0].classes[0].clone();
+    declared.constants[0].value = node;
+    assert!(Frozen::composed(declared, units).is_err());
+}
+
+/// The units a frozen declaration was composed from live as long as it
+/// does: with every other share of a unit dropped, its cell still reads
+/// the unit through the frozen declaration.
+#[test]
+fn a_frozen_declaration_holds_its_units_as_long_as_it_lives() {
+    let table = table();
+    let (own, (used, node)) = (plain(&table), closing(&table));
+    let (at, weak) = (
+        PublishedUnit::as_ptr(&used),
+        PublishedUnit::downgrade(&used),
+    );
+    let mut declared = own.classes[0].clone();
+    declared.constants[0].value = node;
+    let frozen = Frozen::composed(declared, vec![own, used]).expect("the cell names `used`");
+    assert_eq!(
+        weak.strong_count(),
+        1,
+        "the frozen declaration's share alone"
+    );
+    let read = cell_of(&frozen.constants[0].value).unit();
+    let read = read.expect("the frozen declaration holds the unit");
+    assert_eq!(PublishedUnit::as_ptr(&read), at, "the unit the check read");
+    drop((read, frozen));
+    assert_eq!(weak.strong_count(), 0, "gone with the frozen declaration");
+}
+
+#[test]
+fn a_frozen_unit_holds_nothing_beside_it() {
+    assert_eq!(
+        size_of::<Frozen<PublishedUnit>>(),
+        size_of::<PublishedUnit>()
+    );
 }
 
 #[test]

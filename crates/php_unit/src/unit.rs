@@ -37,6 +37,23 @@ impl UnitCell {
     pub fn share(&mut self) -> UnitCell {
         UnitCell(Some(Arc::clone(self.0.get_or_insert_default())))
     }
+
+    /// What the cell names, as [`crate::frozen`]'s check reads it.
+    pub(crate) fn binding(&self) -> Binding<'_> {
+        match &self.0 {
+            None => Binding::Empty,
+            Some(cell) => cell.get().map_or(Binding::Unbound, Binding::Bound),
+        }
+    }
+}
+
+/// What a [`UnitCell`] names: nothing yet, as a unit no closure shares
+/// leaves it; nothing yet while it is shared and its unit unpublished; or
+/// the unit [`Unit::published`] bound it to, held weakly.
+pub(crate) enum Binding<'c> {
+    Empty,
+    Unbound,
+    Bound(&'c Weak<Unit>),
 }
 
 /// Two nodes name one cell, which is one unit's.
