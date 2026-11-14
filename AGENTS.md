@@ -1,6 +1,6 @@
 # dax-php
 
-dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's execution model once, with one executor, held to the real `php` binary as its second opinion. Its crates are in `crates/`, one per extension in `ext/`, one per host in `sapi/`, and `xtask`, the harness that measures all of it, counted below from the manifest. Think of it as opcache's memory model applied to threads instead of processes: immutable compiled units shared by every request in one process, with no fork and no recompiling.
+dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's execution model once, with one executor, held to the real `php` binary as its second opinion. Its crates are in `crates/`, one per extension in `ext/`, one per host in `sapi/`, one per harness lane in `lanes/`, and `xtask`, the harness that measures all of it, counted below from the manifest. Think of it as opcache's memory model applied to threads instead of processes: immutable compiled units shared by every request in one process, with no fork and no recompiling.
 
 <!-- computed exec cmd="cargo xtask status --section crates --tracked" inputs=seams.toml,xtask/src/status.rs,xtask/src/status/graph.rs name=crates | do not edit; run computed -->
 
@@ -9,10 +9,11 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | crates/ | 16 | 1 |
 | ext/ | 59 | 31 |
 | fuzz/ | 1 | 1 |
+| lanes/ | 3 | 0 |
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=2f9f4d04998b618fef4cbf7aab37c54267b77c39222329e6160740d566d809cc out=754ca578e0f983ef28c007d8cb97847977da87d9d80985ced7da0c0b946f2782 -->
+<!-- /computed in=ab389a6d9e71c78292c82a42ff01cf25ea14cec7e6b622394a125be4ef27f49e out=24a0970de38bf3e82a307507a5be68798c82ac2bde27126dd973619312f06362 -->
 
 ## What makes the third engine special?
 
@@ -73,7 +74,7 @@ A session stops where `permit` denies an edit, and at an act harness §11 gives 
 - `third-engine-design.md` is the design of record, `jit-design.md` the compiled tier, `harness-design.md` the harness: living documents with a ledger on top, cited by section. What a revision says belongs to a person; typing it does not. Where a ticket carries the sentence a person has settled, landing it with its ledger row is yours, and the commit names the ticket that settled it. A revision that states what a ruled ticket built, and reverses, widens or adds to no ruling, is yours to word and land, with its ledger row naming the ruling and the ticket; the person reads that row at the merge, and a sentence they revert becomes a ticket of theirs. A deletion-test argument, an ADR, and a sentence answering a question the design is silent on stay a person's, and any other revision nobody has settled stays a question you file. `research/` holds the earlier revisions and the research behind them, read for history only. `docs/adr/` is the list of reversals; read the ADR before touching what it names.
 - Design documents carry no numbers of their own; budgets and interfaces live in `seams.toml`, the oracle in `oracle.toml`. A fact that changes is a region, rendered by `computed run` and held by `computed check`. No tickets, plans or agent scratch files in the repository; keep working material in your scratchpad.
 - `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and the stacks, and `php_process` the process and its file descriptors (`fork`, the signal pool, `LC_CTYPE`, the process identity, the fd calls), each an `unsafe` home the `unsafe.homes` rule names; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto` is the codecs and `php_sapi` the facade every host depends on.
-- `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `sapi/<name>` is one crate per host, each its binary (`sapi/cli` builds `php`, `sapi/cgi` `php-cgi`; ADR-0008). `xtask` is the harness and `xtask/fixtures/` its negative controls. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
+- `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `sapi/<name>` is one crate per host, each its binary (`sapi/cli` builds `php`, `sapi/cgi` `php-cgi`; ADR-0008). `xtask` is the harness and `xtask/fixtures/` its negative controls. `lanes/<name>` is one crate per harness lane, the lane's logic under a ceiling of its own: it depends on no workspace crate, and an adapter in `xtask/src` calls it. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
 - Finding code: a Rust name you know, or who calls it, is `cq`'s: `cq find <name>`, then `cq body <handle>` to read it and `cq refs <handle>` for its callers, and `cq area <path>` for what is around a path. Text, strings, docs, TOML and php-src's C are grep's, since cq matches names and not bodies. A brief to a subagent carries this line.
 
 ## Taste
@@ -91,7 +92,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=80d0c06da1ed9dbde58bba7e9133f7d77b97ef8365ac06056be0e9e3327c89fc out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=0b55a0ad648efc577c31da657136f186aa150f029a386c15910593676ee73181 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -112,24 +113,24 @@ third-engine-design.md
 - ADR-0016 (accepted, 2026-10-25): The binaries are named after the product from one constant, with `php` an opt-in symlink
 - ADR-0017 (accepted, 2026-10-31): The compiled tier is refused as the default on G3: tracing stays opt-in, and Cranelift stands
 
-<!-- /computed in=2e867ea4d6f4cd9fd420b38c25a68a600d147090f3d89d7793a292d42e78a46d out=505c842c422e5cf0dbefccae4eb1489aed874733945edcc8cac26bedb9aee9d3 -->
+<!-- /computed in=f72c6bede13b5b1a3eaf30c4799055aee0a6b88e5fdd1216b39b7f22940e6092 out=505c842c422e5cf0dbefccae4eb1489aed874733945edcc8cac26bedb9aee9d3 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 608 |  |
+| heap | heap.lock | 609 |  |
 | process | process.lock | 41 |  |
-| unit | unit.lock | 192 |  |
-| link | link.lock | 69 |  |
+| unit | unit.lock | 201 |  |
+| link | link.lock | 70 |  |
 | ops | ops.lock | 209 |  |
 | api | api.lock | 1558 | 1700 |
 | sapi | sapi.lock | 62 |  |
-| tier | tier.lock | 254 |  |
+| tier | tier.lock | 258 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 43 |  |
 | harness | xtask.lock | 499 |  |
 
-<!-- /computed in=d02b16ab0ceb872061bb5bb5878b617111a3c62271fa200b2f27729c2aa70e37 out=eb68b7c13c9bb39ed520621df618ab7d35a296dcb72eb408daceb6ae52d1e4f5 -->
+<!-- /computed in=1b320d0ec2ad7523e1a09a866bf6cd43fac55898c6a45d2cee25122073234233 out=6b4c89b9bbd32d95ab17eb6f07a0c4cec0ae3600b74cb56f5a8af5efd35be60e -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

@@ -217,7 +217,8 @@ fn a_published_trace_is_got_by_its_id_with_its_exits() -> Result<(), String> {
 fn what_the_published_traces_take_is_counted_as_each_is_published() {
     let table = table(&[]);
     assert_eq!(table.usage(), super::Usage::default());
-    let func = php_engine::tier::FuncRef::at(php_unit::MapPtrOffset::Request(0));
+    let func = php_engine::tier::FuncRef::at(php_unit::MapPtrOffset::Engine(0));
+    let func = php_engine::tier::EngineFuncRef::of(func).expect("an engine offset's op array");
     let marks = |n: u32| -> Box<[crate::lower::Mark]> {
         (0..n)
             .map(|i| crate::lower::Mark {

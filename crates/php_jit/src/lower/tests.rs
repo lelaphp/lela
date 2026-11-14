@@ -799,6 +799,7 @@ fn a_side_trace_returning_an_array_its_parent_knew_compiles() -> Result<(), Stri
     let record = crate::record::TraceRecord::parse(
         "start side 4/3\nroot e2\nentered 2:array 3:long 4:double\n\
          op e2 23 array.packed - - -\nop e2 24 array.packed - - -\nstop return\n",
+        &recorded.view,
     )
     .map_err(|e| format!("{e:?}"))?;
     let ir = crate::types::build(
@@ -897,10 +898,7 @@ fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
         .ok_or("no exit links")?;
     assert_eq!(end.opline, None);
     let g = (ir.frames.get(usize::from(end.frame.0)))
-        .and_then(|frame| match frame.func.offset() {
-            php_unit::MapPtrOffset::Engine(func) => Some(func),
-            php_unit::MapPtrOffset::Request(_) => None,
-        })
+        .map(|frame| frame.func.offset())
         .ok_or("g's op array")?;
     let linked = |interrupt| super::Linked {
         trace: link.get(),

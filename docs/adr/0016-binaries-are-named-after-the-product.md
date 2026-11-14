@@ -13,7 +13,7 @@ ADR-0008 gave each host its own binary and kept php-src's names for them: `php`,
 - The binaries are `<name>` (`sapi/cli`), `<name>-cgi`, `<name>-fpm`, `<name>-dbg`, and `<name>-linked` (the CLI's `linked` build). `<name>` is one constant, the product name.
 - `makala` keeps its own name. It is not a php-src SAPI (ADR-0008, #2332), so its name does not follow the product's.
 - The constant lives in `php_sapi`, the facade every host depends on, and `sapi.lock` lists it. Every site that can read a Rust constant reads this one.
-- Some sites cannot read a constant. A `[[bin]] name` and an `env!("CARGO_BIN_EXE_…")` are literals. xtask links no workspace crate, so `xtask/src/oracle/hosts.rs` keeps a copy. A checked rule holds those literals and that copy equal to the constant, so a rename that misses one fails instead of shipping.
+- Some sites cannot read a constant. A `[[bin]] name` and an `env!("CARGO_BIN_EXE_…")` are literals. xtask links no workspace crate but its lanes, which link none, so `xtask/src/oracle/hosts.rs` keeps a copy. A checked rule holds those literals and that copy equal to the constant, so a rename that misses one fails instead of shipping.
 - `php` is an opt-in symlink to `<name>`, never installed by default. How a release offers it is #3464's to decide.
 - A binary's name is not what it prints. The SAPI names (`php_sapi_name()`), `PHP_VERSION`, `zend_version()` and the shape of the first `-v` line follow php, and the identity lines are #3464's. Where php builds a text from `argv[0]`, the engine does too. The CLI's usage line names the program as it was invoked, as `php_cli_usage` does (php-src `sapi/cli/php_cli.c:470-474`), so a call through the symlink reads `php`.
 - Nothing is renamed until #3404 names the product.

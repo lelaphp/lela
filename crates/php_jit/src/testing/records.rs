@@ -4,10 +4,10 @@
 //! the test to read back.
 
 use php_engine::tier::{
-    self, Extension, ExtensionBuilder, Flow, FrameRef, FuncRef, Refusal, Request, SafepointIdx,
-    Site, Start as EngineStart, Stepped, Tier, UnitView,
+    self, EngineFuncRef, Extension, ExtensionBuilder, Flow, FrameRef, Refusal, Request,
+    SafepointIdx, Site, Start as EngineStart, Stepped, Tier, UnitView,
 };
-use php_unit::{MapPtrOffset, OplineIdx};
+use php_unit::OplineIdx;
 
 use crate::policy::{self, Holder, Outcome, Policy};
 use crate::record::{
@@ -47,7 +47,7 @@ pub(crate) const PLAN: [&str; 7] = [
 /// request recorded when each site was asked.
 #[derive(Debug, Default)]
 pub(crate) struct Kept {
-    pub(crate) funcs: Vec<(Vec<u8>, FuncRef)>,
+    pub(crate) funcs: Vec<(Vec<u8>, EngineFuncRef)>,
     pub(crate) taken: Vec<Recorded>,
     pub(crate) roots: Vec<Holder>,
     pub(crate) asked: Vec<bool>,
@@ -77,7 +77,7 @@ impl Tier for Records {
             return Flow::Continue;
         }
         let name = function_of(req, frame);
-        let held = tier::func(req, frame).filter(|f| matches!(f.offset(), MapPtrOffset::Engine(_)));
+        let held = tier::func(req, frame).and_then(EngineFuncRef::of);
         if let (Some(name), Some(func)) = (&name, held) {
             let kept = req.state::<Kept>();
             if !kept.funcs.iter().any(|(n, _)| n == name) {
@@ -109,7 +109,22 @@ impl Tier for Records {
             return Flow::Continue;
         };
         crate::table::of(req, &policy, &crate::table::Outputs::none());
-        match run(req, at, start, &root, &policy, record::Opening::default()) {
+        let Some(rooted) = record::held_root(req, at) else {
+            return if at == frame {
+                Flow::Continue
+            } else {
+                Flow::Resume(at)
+            };
+        };
+        match run(
+            req,
+            rooted,
+            at,
+            start,
+            &root,
+            &policy,
+            record::Opening::default(),
+        ) {
             Ok((recorded, ended)) => {
                 let kept = req.state::<Kept>();
                 kept.taken.push(recorded);
@@ -188,8 +203,7 @@ pub(crate) fn settle_words(req: &mut Request) {
     let mut view = UnitView::new(req);
     let headers: Vec<SafepointIdx> = view
         .hold(req, func)
-        .then(|| view.op_array(func))
-        .flatten()
+        .and_then(|func| view.op_array(func))
         .map(|code| {
             let mut headers: Vec<SafepointIdx> = (0..code.oplines.len())
                 .filter_map(|at| header_at(code, OplineIdx(u32::try_from(at).ok()?), DEFAULT_FOLDS))
@@ -213,17 +227,14 @@ pub(crate) fn settle_words(req: &mut Request) {
 }
 
 /// Whether the recording tier recorded from `func`'s entry already.
-fn recorded_from(req: &mut Request, func: FuncRef) -> bool {
+fn recorded_from(req: &mut Request, func: EngineFuncRef) -> bool {
     (req.state::<Kept>().roots.iter()).any(|root| {
         matches!(root, Holder::Root { func: f, .. } | Holder::Landing { func: f, .. } if *f == func)
     })
 }
 
-/// The name of an op array no epoch holds.
-const REQUEST: FuncRef = FuncRef::at(MapPtrOffset::Request(0));
-
 /// The op array of the function `name` the tier met.
-pub(crate) fn met(req: &mut Request, name: &[u8]) -> Option<FuncRef> {
+pub(crate) fn met(req: &mut Request, name: &[u8]) -> Option<EngineFuncRef> {
     req.state::<Kept>()
         .funcs
         .iter()
@@ -243,7 +254,7 @@ pub(crate) fn walk_to(
     mut skip: u32,
 ) -> Result<(FrameRef, Holder), Flow> {
     let mut view = UnitView::new(req);
-    let Some(mut func) = tier::func(req, frame).filter(|f| view.hold(req, *f)) else {
+    let Some(mut func) = tier::func(req, frame).and_then(|f| view.hold(req, f)) else {
         return Err(Flow::Continue);
     };
     let epoch = tier::epoch(req);
@@ -273,7 +284,7 @@ pub(crate) fn walk_to(
         match tier::step(req, frame) {
             Ok(Stepped::Same(next)) if next == frame => {}
             Ok(Stepped::Pushed(callee)) if start == Start::Return => {
-                let Some(entered) = tier::func(req, callee).filter(|f| view.hold(req, *f)) else {
+                let Some(entered) = tier::func(req, callee).and_then(|f| view.hold(req, f)) else {
                     return Err(Flow::Resume(callee));
                 };
                 (frame, func) = (callee, entered);
@@ -298,9 +309,12 @@ fn landed(req: &mut Request, frame: FrameRef) -> Result<(FrameRef, Holder), Flow
         Ok(_) => return Err(Flow::Continue),
         Err(fatal) => return Err(Flow::Bail(fatal)),
     };
+    let Some(func) = tier::func(req, caller).and_then(EngineFuncRef::of) else {
+        return Err(Flow::Resume(caller));
+    };
     let holder = Holder::Landing {
         epoch: tier::epoch(req),
-        func: tier::func(req, caller).unwrap_or(REQUEST),
+        func,
         at: tier::frame(req, caller).map_or(OplineIdx(0), |view| view.opline()),
     };
     Ok((caller, holder))
@@ -333,7 +347,10 @@ pub(crate) fn recording(ini: &[(&str, &str)], program: &str) -> Result<(Recorded
         )
     })?;
     let record = &recorded.record;
-    assert_eq!(TraceRecord::parse(&record.dump()).as_ref(), Ok(record));
+    assert_eq!(
+        TraceRecord::parse(&record.dump(), &recorded.view).as_ref(),
+        Ok(record)
+    );
     if let Some(fatal) = served.fatal {
         return Err(format!("the program ended in a fatal: {fatal}"));
     }

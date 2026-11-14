@@ -24,6 +24,7 @@ use super::Frames;
 use super::{PreloadStatistics, Request, UserFunction, user_function_decl};
 use crate::api::call::Function;
 use crate::api::values::ClassId;
+use crate::arena::EpochClassId;
 use crate::engine::Cached;
 use crate::exec::Body;
 use crate::unit_cache::{Held, full_path};
@@ -627,12 +628,16 @@ impl Request {
     /// taken out. `Err` is the internal error of a class whose record
     /// could not be built.
     fn publish_tables(&mut self, rows: &[Row]) -> Result<Published, String> {
-        let mut renumbered: HashMap<ClassId, ClassId> = HashMap::new();
+        let mut renumbered: HashMap<ClassId, EpochClassId> = HashMap::new();
         for local in self.publication_order(rows) {
             let published = self.publish_class(local, &renumbered)?;
             renumbered.insert(local, published);
         }
-        let shared = |class: ClassId| renumbered.get(&class).copied().unwrap_or(class);
+        let shared = |class: ClassId| {
+            renumbered
+                .get(&class)
+                .map_or(class, |&published| published.into())
+        };
         self.buckets = Buckets::default();
         let mut classes = Vec::new();
         let mut aliases = Vec::new();
@@ -755,25 +760,26 @@ impl Request {
 
     /// The request's own class `local` published ([`Request::publish`]):
     /// its record built over the published classes `renumbered` names,
-    /// whose every class it extends, implements or uses is one already.
+    /// whose every class it extends, implements or uses is one already,
+    /// or one the arena's one check finds every request shares.
     fn publish_class(
         &mut self,
         local: ClassId,
-        renumbered: &HashMap<ClassId, ClassId>,
-    ) -> Result<ClassId, String> {
+        renumbered: &HashMap<ClassId, EpochClassId>,
+    ) -> Result<EpochClassId, String> {
         let name = String::from_utf8_lossy(self.symbols().class_name(local)).into_owned();
         let shared = |class: ClassId| match renumbered.get(&class) {
             Some(published) => Some(*published),
-            None => class.is_published().then_some(class),
+            None => self.arena.shared_class(class),
         };
         let Some(row) = self.declared_row(local) else {
             return Err(format!(
                 "InternalError: the preload's class {name} has no row"
             ));
         };
-        let Some(record) =
-            self.record_over(row, &|name| shared(self.class_named(Bare::resolved(name))?))
-        else {
+        let named =
+            |name: &[u8]| shared(self.class_named(Bare::resolved(name))?).map(ClassId::from);
+        let Some(record) = self.record_over(row, &named) else {
             return Err(format!(
                 "InternalError: the preload's class {name} has no record: a class it names was not published before it"
             ));

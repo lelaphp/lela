@@ -22,11 +22,11 @@ use std::fmt::Write as _;
 /// The deterministic generator every program of a run is drawn from:
 /// xorshift64*, seeded through splitmix64 so that neighbouring seeds draw
 /// unrelated programs.
-pub(crate) struct Rng(u64);
+pub struct Rng(u64);
 
 impl Rng {
     /// The generator for `seed`.
-    pub(crate) fn new(seed: u64) -> Rng {
+    pub fn new(seed: u64) -> Rng {
         let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -43,7 +43,7 @@ impl Rng {
     }
 
     /// Uniform in `0..n`, `n` above 0.
-    pub(crate) fn below(&mut self, n: usize) -> usize {
+    pub fn below(&mut self, n: usize) -> usize {
         usize::try_from(self.next() % n.max(1) as u64).unwrap_or_default()
     }
 
@@ -80,7 +80,7 @@ const TRAPS: [&str; 10] = [
 const SPLICED: usize = 100;
 
 /// One program the grammar generator builds from `rng`.
-pub(crate) fn program(rng: &mut Rng) -> String {
+pub fn program(rng: &mut Rng) -> String {
     let mut g = Gen::new(rng, 0);
     for _ in 0..g.rng.below(3) {
         g.function();
@@ -94,7 +94,7 @@ pub(crate) fn program(rng: &mut Rng) -> String {
 
 /// `code` after one to three line mutations drawn from `rng`; the opening
 /// tag line is kept where it is.
-pub(crate) fn mutated(code: &str, rng: &mut Rng) -> String {
+pub fn mutated(code: &str, rng: &mut Rng) -> String {
     let mut lines: Vec<String> = code.lines().map(str::to_owned).collect();
     let head = usize::from(lines.first().is_some_and(|l| l.starts_with("<?php")));
     for _ in 0..=rng.below(3) {

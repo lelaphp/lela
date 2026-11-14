@@ -34,24 +34,27 @@ use std::sync::{Arc, PoisonError, RwLock};
 use php_link::Raised;
 use php_unit::PublishedUnit;
 
-use crate::api::values::ClassId;
+use crate::arena::EpochClassId;
 
 /// How many shards the map is cut into.
 const SHARDS: usize = 64;
 
-/// One published link: what it was linked against and what it made.
+/// One published link: what it was linked against and what it made,
+/// each class by the identity the epoch's arena minted for it
+/// ([`EpochClassId`]), since the entry is the arena's alone and every
+/// class it names is one every request of the epoch shares.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Entry {
     /// The parent the link fetched, `entry->parent`.
-    pub(crate) parent: Option<ClassId>,
+    pub(crate) parent: Option<EpochClassId>,
     /// The traits, then the interfaces, the link fetched, in the order
     /// written, `entry->traits_and_interfaces`.
-    pub(crate) uses: Box<[ClassId]>,
+    pub(crate) uses: Box<[EpochClassId]>,
     /// Every other class a check read, by its name as written, beside
     /// the class the name found, `entry->dependencies`.
-    pub(crate) dependencies: Box<[(Box<[u8]>, ClassId)]>,
+    pub(crate) dependencies: Box<[(Box<[u8]>, EpochClassId)]>,
     /// The published class, `entry->ce`.
-    pub(crate) class: ClassId,
+    pub(crate) class: EpochClassId,
     /// What the link raised, `entry->warnings`.
     pub(crate) raised: Box<[Raised]>,
 }
@@ -163,13 +166,28 @@ mod tests {
 
     use super::{Entry, InheritanceCache};
     use crate::api::values::ClassId;
+    use crate::arena::{Arena, EpochClassId};
+
+    /// The identity of class `number`, as a publisher has one: the row an
+    /// arena numbered past `number` classes reserves first.
+    fn class(number: u32) -> EpochClassId {
+        let classes = usize::try_from(number).unwrap_or(usize::MAX);
+        let arena = Arena::past(classes, 0, crate::unit_cache::Files::new(16));
+        let reserved = arena.reserve_class();
+        reserved.expect("an empty arena reserves its first row")
+    }
+
+    /// The number an identity names.
+    fn number(class: EpochClassId) -> u32 {
+        ClassId::from(class).0
+    }
 
     fn entry(parent: u32, class: u32) -> Entry {
         Entry {
-            parent: Some(ClassId(parent)),
+            parent: Some(self::class(parent)),
             uses: Box::new([]),
             dependencies: Box::new([]),
-            class: ClassId(class),
+            class: self::class(class),
             raised: Box::new([]),
         }
     }
@@ -184,7 +202,7 @@ mod tests {
         assert_eq!(again.class, first.class, "the same link is the first entry");
         cache.add(&unit, 0, entry(2, 12));
         let chain = cache.find(&unit, 0).unwrap_or_else(|| Arc::new([]));
-        let classes: Vec<u32> = chain.iter().map(|entry| entry.class.0).collect();
+        let classes: Vec<u32> = chain.iter().map(|entry| number(entry.class)).collect();
         assert_eq!(classes, [10, 12]);
         assert!(cache.find(&unit, 1).is_none());
         assert_eq!(cache.declarations(), 1);
@@ -195,7 +213,7 @@ mod tests {
     #[test]
     fn a_restart_empties_the_map() {
         let files = crate::unit_cache::Files::new(16);
-        let epochs = crate::arena::Epochs::of(crate::arena::Arena::past(0, 0, files));
+        let epochs = crate::arena::Epochs::of(Arena::past(0, 0, files));
         let unit = Unit::default().published(None);
         let arena = epochs.enter(|_| false);
         arena.inheritance.add(&unit, 0, entry(1, 10));
@@ -219,7 +237,7 @@ mod tests {
                     for _ in 0..2000 {
                         let length = cache.find(&unit, 0).map_or(0, |chain| chain.len());
                         let classes = cache.find(&unit, 0).map_or_else(Vec::new, |chain| {
-                            chain.iter().map(|entry| entry.class.0).collect()
+                            chain.iter().map(|entry| number(entry.class)).collect()
                         });
                         assert!(classes.len() >= length);
                         assert!(classes.windows(2).all(|pair| pair[0] < pair[1]));

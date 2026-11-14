@@ -57,7 +57,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use php_engine::api::abi::EngineState;
-use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
+use php_engine::tier::{self, EngineFuncRef, Epoch, MapPtrRaw, PlainCall, Request, Word};
 use php_unit::OplineIdx;
 
 use crate::lower::{
@@ -210,7 +210,7 @@ pub(crate) struct Trace<P: Pages = Native> {
     /// frame as it answers `lower::INTERRUPTED`: its header's opline.
     pub(crate) stub: Option<OplineIdx>,
     /// The op array and opline its first recorded opline stands at.
-    pub(crate) opens: Option<(FuncRef, OplineIdx)>,
+    pub(crate) opens: Option<(EngineFuncRef, OplineIdx)>,
     /// Whether its code reads where the frame stands as it enters, which
     /// `enter` hands it as a kernel reports it (`lower::Compiled::entry_stood`).
     pub(crate) entry_stood: bool,
@@ -237,7 +237,7 @@ pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) calls: Box<[PlainCall]>,
     /// The callees of the calls its code makes in place whose caches
     /// `enter` asks are laid down (`lower::Compiled::callee_caches`).
-    pub(crate) callee_caches: Box<[FuncRef]>,
+    pub(crate) callee_caches: Box<[EngineFuncRef]>,
     /// Every trace an exit links to, each once, ascending.
     #[cfg_attr(
         not(test),
@@ -279,11 +279,9 @@ impl<P: Pages> Trace<P> {
     /// own root and the root loops other than by recursive returns
     /// (`zend_jit_trace.c:7209-7212`, `:7285-7303`).
     pub(crate) fn linked(&self, from_root: Option<TraceId>) -> Linked {
-        let opens = self.opens.and_then(|(func, opline)| {
-            Some(Stands {
-                func: engine_offset(func)?,
-                opline: opline.0,
-            })
+        let opens = self.opens.map(|(func, opline)| Stands {
+            func: engine_offset(func),
+            opline: opline.0,
         });
         Linked {
             trace: self.id.get(),

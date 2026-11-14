@@ -129,6 +129,7 @@ FrozenZval::double
 FrozenZval::interned
 FrozenZval::long
 FrozenZval::null
+FrozenZval::of
 FrozenZval::zval
 GcStatus
 GcTable

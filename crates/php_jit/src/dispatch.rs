@@ -36,7 +36,7 @@ use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
 use php_engine::tier::{
-    self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, SafepointIdx, Site, Word,
+    self, EngineFuncRef, Epoch, Fatal, FrameRef, FuncRef, Held, Request, SafepointIdx, Site, Word,
 };
 use php_unit::OplineIdx;
 
@@ -354,7 +354,7 @@ fn safepoint_lent(
             match rooted {
                 Rooted::Safepoint(at, _) => Some(Holder::Root {
                     epoch: lent.epoch.clone(),
-                    func: held.func(),
+                    func: EngineFuncRef::of(held.func())?,
                     at,
                 }),
                 Rooted::Goes(caller, goes) => goes.holder(req, caller),
@@ -435,7 +435,7 @@ impl Goes {
         match self {
             Goes::Landing(at) => Some(Holder::Landing {
                 epoch: tier::epoch(req),
-                func: tier::running_func(req, frame)?,
+                func: EngineFuncRef::of(tier::running_func(req, frame)?)?,
                 at,
             }),
             Goes::Header => None,
@@ -544,7 +544,8 @@ fn goes_on<'r>(
     (frame, at): (FrameRef, OplineIdx),
     folds: record::Folds,
 ) -> (Goes, &'r Word) {
-    let kept = tier::frame_cache(req, frame).and_then(|func| lent.landed(func, at));
+    let kept = (tier::frame_cache(req, frame).and_then(EngineFuncRef::of))
+        .and_then(|func| lent.landed(func, at));
     let Some(landed) = kept else {
         return goes_on_found(req, lent, (frame, at), folds);
     };
@@ -563,11 +564,11 @@ fn goes_on_found<'r>(
     (frame, at): (FrameRef, OplineIdx),
     folds: record::Folds,
 ) -> (Goes, &'r Word) {
-    match tier::landing(req, frame, at) {
-        (landing, None) => (Goes::Landing(at), landing),
-        (_, Some(held)) => lent
-            .landed(held.func(), at)
-            .unwrap_or_else(|| lent.keep(held.func(), at, record::loop_at(held.code(), at, folds)))
+    let (landing, held) = tier::landing(req, frame, at);
+    match held.and_then(|held| Some((held, EngineFuncRef::of(held.func())?))) {
+        None => (Goes::Landing(at), landing),
+        Some((held, func)) => (lent.landed(func, at))
+            .unwrap_or_else(|| lent.keep(func, at, record::loop_at(held.code(), at, folds)))
             .goes(at),
     }
 }
@@ -1002,7 +1003,7 @@ fn unarmed(req: &Request, lending: Lent<'_>, frame: FrameRef) -> bool {
     let Some((Some(func), at)) = tier::standing_at(req, frame) else {
         return false;
     };
-    let Some(landed) = lending.landed(func, at) else {
+    let Some(landed) = EngineFuncRef::of(func).and_then(|func| lending.landed(func, at)) else {
         return false;
     };
     let (goes, word) = landed.goes(at);
@@ -1402,23 +1403,17 @@ fn recordings(
             return Ok((resumed(frame, *stepped), None, false));
         };
         if let Some(refusal) = refused(table, start) {
-            let recorded = record::refused(req, frame, start, refusal);
-            settled(
-                req,
-                shared,
-                Job {
-                    recorded,
-                    claim,
-                    name,
-                },
-                GoesOn::Past,
-            );
+            refused_settled(req, shared, claim, refusal);
             return Ok((resumed(frame, *stepped), None, false));
         }
         let opening = side_opened(req, frame, (table, shared.policy.folds()), start, behind);
+        let Some(root) = record::held_root(req, frame) else {
+            refused_settled(req, shared, claim, Stop::RequestUnit);
+            return Ok((resumed(frame, *stepped), None, false));
+        };
         let claimed = claim.holder();
         let (recorded, ended) =
-            match record::run(req, frame, start, claimed, &shared.policy, opening) {
+            match record::run(req, root, frame, start, claimed, &shared.policy, opening) {
                 Ok(done) => done,
                 // php's bailout leaves the recorder with nothing written after
                 // the start line and nothing counted against the root.
@@ -1496,7 +1491,7 @@ fn recordings(
 /// the body's rest, where the condition may leave the loop ([`owed`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Owed {
-    func: FuncRef,
+    func: EngineFuncRef,
     header: SafepointIdx,
 }
 
@@ -1505,7 +1500,7 @@ pub(crate) struct Owed {
 fn owe(
     req: &Request,
     outcome: Option<Outcome>,
-    (frame, header): (FrameRef, Option<(FuncRef, SafepointIdx)>),
+    (frame, header): (FrameRef, Option<(EngineFuncRef, SafepointIdx)>),
     at: FrameRef,
 ) {
     if let (Some(Outcome::Abort(_)), Some((func, header))) = (outcome, header)
@@ -1613,7 +1608,7 @@ fn owed(req: &mut Request, shared: &Shared, frame: FrameRef) -> Option<Flow> {
     let owed = state.owed.get().filter(|_| owes(req, frame))?;
     state.owed.set(None);
     tier::set_owed_frame(req, None);
-    if state.recording.get() || tier::func(req, frame) != Some(owed.func) {
+    if state.recording.get() || tier::func(req, frame) != Some(owed.func.into()) {
         return None;
     }
     let at = match record::arrived(req, frame, owed.header, shared.policy.folds()) {
@@ -1641,7 +1636,7 @@ fn owed(req: &mut Request, shared: &Shared, frame: FrameRef) -> Option<Flow> {
 
 /// The loop header a loop's claim holds the word of, by its op array and
 /// safepoint; none for any other claim.
-fn header_of(claim: &Claim) -> Option<(FuncRef, SafepointIdx)> {
+fn header_of(claim: &Claim) -> Option<(EngineFuncRef, SafepointIdx)> {
     match (claim.start(), claim.holder()) {
         (Start::Loop, Holder::Root { func, at, .. }) => Some((*func, *at)),
         _ => None,
@@ -1656,7 +1651,7 @@ enum Stood {
     Trace(FrameRef, TraceId),
     /// The header of the loop, in this op array, whose recording closed
     /// there and published nothing: the handler counts the loop.
-    Header(FrameRef, FuncRef, SafepointIdx),
+    Header(FrameRef, EngineFuncRef, SafepointIdx),
 }
 
 /// What came of the count at a loop's header ([`counted`]).
@@ -1780,7 +1775,7 @@ fn counted(
     req: &mut Request,
     shared: &Shared,
     frame: FrameRef,
-    func: FuncRef,
+    func: EngineFuncRef,
     header: SafepointIdx,
 ) -> Counted {
     let epoch = tier::epoch(req);
@@ -1923,7 +1918,11 @@ fn opens(req: &Request, frame: FrameRef, id: TraceId, shared: &Shared) -> bool {
     let table = table::of(req, &shared.policy, &shared.perf);
     at.zip(table.and_then(|table| table.get(id)))
         .is_some_and(|((_, at), trace)| {
-            tier::func(req, frame).is_some_and(|func| trace.opens == Some((func, at)))
+            tier::func(req, frame).is_some_and(|func| {
+                trace
+                    .opens
+                    .is_some_and(|(opens, opened)| FuncRef::from(opens) == func && opened == at)
+            })
         })
 }
 
@@ -1984,6 +1983,15 @@ fn side_opened(
             .and_then(|root| root.opens)
             .map_or(0, |root| record::ret_depth(req, frame, root, folds)),
     }
+}
+
+/// A recording refused with `stop` before its first opline, settled on
+/// the request as the pipeline settles an attempt that failed
+/// ([`compiler::refused`]), with no record.
+fn refused_settled(req: &mut Request, shared: &Shared, claim: Claim, stop: Stop) {
+    let mut lines = Lines::of(req, shared);
+    compiler::refused(claim, stop, &mut lines);
+    lines.write(req);
 }
 
 /// `job` settled: a recording that stopped where a trace compiles

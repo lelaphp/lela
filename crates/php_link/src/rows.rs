@@ -145,6 +145,68 @@ impl<H: Copy> Row<H> {
     pub fn holder_in(self, class: H) -> H {
         self.holder.unwrap_or(class)
     }
+
+    /// The row with its holder keyed by `key`; none where `key` keys
+    /// none of it.
+    fn try_map<K>(self, key: &mut impl FnMut(H) -> Option<K>) -> Option<Row<K>> {
+        let holder = match self.holder {
+            Some(holder) => Some(key(holder)?),
+            None => None,
+        };
+        Some(Row {
+            holder,
+            at: self.at,
+        })
+    }
+}
+
+impl<H: Copy> LinkedClass<H> {
+    /// The record with every class it names keyed by `key`: each row's
+    /// holder, each prototype's scope and each interface, its rows'
+    /// positions and its indexes as they stand, so a lookup by name
+    /// finds the same rows. None where `key` keys one of them to none,
+    /// so a record is keyed whole or not at all. Its rows, prototypes
+    /// and interfaces are the new record's own, which
+    /// [`LinkedClass::lay`] lays again; its indexes share what this
+    /// record's are laid in.
+    pub fn try_map<K>(&self, mut key: impl FnMut(H) -> Option<K>) -> Option<LinkedClass<K>> {
+        let prototypes = (self.prototypes.iter())
+            .map(|scope| match *scope {
+                Some(scope) => Some(Some(key(scope)?)),
+                None => Some(None),
+            })
+            .collect::<Option<Column<Option<K>>>>()?;
+        let interfaces = (self.interfaces.iter())
+            .map(|class| key(*class))
+            .collect::<Option<Column<K>>>()?;
+        Some(LinkedClass {
+            methods: self.methods.try_map(&mut key)?,
+            prototypes,
+            constants: self.constants.try_map(&mut key)?,
+            properties: self.properties.try_map(&mut key)?,
+            interfaces,
+            constructor: self.constructor,
+            destructor: self.destructor,
+            accessors: self.accessors,
+            hooks: self.hooks,
+        })
+    }
+}
+
+impl<H: Copy, C> Rows<Row<H>, C> {
+    /// The rows with each holder keyed by `key`, the index and the
+    /// hashes as they stand, since no name moves.
+    fn try_map<K>(&self, key: &mut impl FnMut(H) -> Option<K>) -> Option<Rows<Row<K>, C>> {
+        let entries = (self.entries.iter())
+            .map(|row| row.try_map(key))
+            .collect::<Option<Column<Row<K>>>>()?;
+        Some(Rows {
+            entries,
+            words: self.words.clone(),
+            slots: self.slots,
+            case: PhantomData,
+        })
+    }
 }
 
 /// How a table's names compare and hash: a method's whatever their
@@ -1292,6 +1354,66 @@ mod tests {
         let mut child: Rows<Row<u32>, super::Exact> = Rows::default();
         child.inherit(&records[2].properties, |&row| row, named, named);
         assert_eq!(child.find_at(b"p11", named).map(|(at, _)| at), Some(11));
+    }
+
+    /// A record keyed again names each class by its new key and finds
+    /// every row by name where it stood, laid or not; one class the key
+    /// refuses refuses the record.
+    #[test]
+    fn a_record_keyed_again_finds_each_row_where_it_stood() {
+        use super::{Column, LinkedClass, Row};
+        let mut record: LinkedClass<u32> = LinkedClass::default();
+        for at in 0..12 {
+            let holder = (at % 2 == 1).then_some(at);
+            let name = format!("p{at}");
+            (record.properties).add(Row { holder, at }, name.as_bytes(), |_| b"");
+        }
+        // Holders are odd numbers below 12, so the prototype's scope and
+        // the interfaces are classes no other column names.
+        record.prototypes = Column::from(vec![None, Some(20)]);
+        record.interfaces = Column::from(vec![30, 31]);
+        record.constructor = Some(1);
+        let named = |row: &Row<u64>| match row.at {
+            3 => &b"p3"[..],
+            11 => b"p11",
+            _ => b"",
+        };
+        let mut laid = [record.clone()];
+        LinkedClass::lay(&mut laid);
+        for record in [&record, &laid[0]] {
+            let keyed = record.try_map(|class| Some(u64::from(class) + 100));
+            assert!(keyed.is_some(), "every class is keyed");
+            let Some(keyed) = keyed else { continue };
+            let found = keyed.properties.find_at(b"p11", named);
+            assert_eq!(
+                found,
+                Some((
+                    11,
+                    &Row {
+                        holder: Some(111),
+                        at: 11
+                    }
+                ))
+            );
+            let own = keyed.properties.find_at(b"p3", named);
+            assert_eq!(own.map(|(at, _)| at), Some(3));
+            assert_eq!(*keyed.prototypes, [None, Some(120)]);
+            assert_eq!(*keyed.interfaces, [130, 131]);
+            assert_eq!(keyed.constructor, Some(1));
+        }
+        // One class the key refuses leaves no record, whichever column
+        // names it: an interface, a row's holder or a prototype's scope.
+        let refusals = [
+            (31, "an interface"),
+            (11, "a row's holder"),
+            (20, "a prototype"),
+        ];
+        for (refused, column) in refusals {
+            let keyed = record.try_map(|class| (class != refused).then_some(class));
+            assert!(keyed.is_none(), "{column} refused");
+        }
+        let kept = record.try_map(|class| (class != 4).then_some(class));
+        assert!(kept.is_some(), "a class no column names refuses nothing");
     }
 
     #[test]

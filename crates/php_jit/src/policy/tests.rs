@@ -6,7 +6,7 @@
 use std::sync::atomic::Ordering;
 
 use php_engine::api::request::TierStatus;
-use php_engine::tier::{Epoch, FuncRef, Laid, SafepointIdx, StartupIni, Word};
+use php_engine::tier::{EngineFuncRef, Epoch, Laid, SafepointIdx, StartupIni, Word};
 use php_unit::{OpArray, Opcode, OplineIdx, Unit};
 
 use super::{
@@ -40,17 +40,19 @@ fn read_on(host: &str, entries: &[(&str, &str)]) -> (Policy, Vec<Note>) {
 
 /// An epoch holding one unit whose main op array has two safepoints,
 /// and the op array's name: its words are zero, `Word::default()`'s.
-fn fixture() -> (Epoch, FuncRef) {
-    Epoch::fixture(Unit {
+fn fixture() -> (Epoch, EngineFuncRef) {
+    let (epoch, main) = Epoch::fixture(Unit {
         main: OpArray {
             safepoints: vec![OplineIdx(0), OplineIdx(1)].into(),
             ..OpArray::default()
         },
         ..Unit::default()
-    })
+    });
+    let main = EngineFuncRef::of(main).expect("the fixture's op array, the engine's");
+    (epoch, main)
 }
 
-fn root(epoch: &Epoch, func: FuncRef, at: u32) -> Holder {
+fn root(epoch: &Epoch, func: EngineFuncRef, at: u32) -> Holder {
     Holder::Root {
         epoch: epoch.clone(),
         func,

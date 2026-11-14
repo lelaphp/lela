@@ -14,9 +14,15 @@
 //! stop loop
 //! ```
 //!
-//! An op array is its map-pointer offset, `e` for the engine's and `r`
-//! for a request's; an operand not sampled is `-`, a sampled one its
-//! type with what was followed to it and its class, `object#3`; a
+//! An op array is the engine's map-pointer offset after an `e`, and a
+//! call whose callee is a request's own op array is `request`, since a
+//! record names no request's op array; an operand not sampled is `-`, a sampled one its
+//! type with what was followed to it and its class, `object#3` for a
+//! class the epoch shares, by the number of its `EpochClassId`, which the
+//! view a record is read through names again, and `object#own0` for a
+//! request's own, by the index the record's view gave it, since a record
+//! names no request's class by the request's number;
+//! a
 //! conditional jump is `taken` or `fell`; a side trace's start is
 //! `side <parent>/<exit>`, the slots its parent's exit knew the types of
 //! an `entered` line of `var:kind` after the root, a `landed stood` line
@@ -26,11 +32,15 @@
 
 use std::fmt::Write as _;
 
-use php_engine::tier::{self, FuncRef, Sample};
+use php_engine::tier::{
+    self, EngineFuncRef, EpochClassId, FuncRef, OwnClass, RecordClass, UnitView,
+};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, OplineIdx};
 
-use super::{Began, Callee, Entered, Event, Landed, Start, Stop, TraceRecord, func_name as func};
+use super::{
+    Began, Callee, Entered, Event, Landed, Sample, Start, Stop, TraceRecord, func_name as func,
+};
 use crate::table::TraceId;
 use crate::types::ExitId;
 use crate::types::Types;
@@ -124,8 +134,20 @@ impl TraceRecord {
         text
     }
 
-    /// The record `text` is the form of.
-    pub(crate) fn parse(text: &str) -> Result<TraceRecord, ParseError> {
+    /// The record `text` is the form of, read through `view`, the view
+    /// the record is built through, whose epoch names each shared class
+    /// the text numbers ([`UnitView::shared_numbered`]).
+    pub(crate) fn parse(text: &str, view: &UnitView) -> Result<TraceRecord, ParseError> {
+        TraceRecord::parse_numbered(text, &|number| view.shared_numbered(number))
+    }
+
+    /// The record `text` is the form of, each shared class it numbers
+    /// read by `shared`, which only an epoch answers with a class: a test
+    /// that serves no request reads a text that numbers none.
+    pub(super) fn parse_numbered(
+        text: &str,
+        shared: Shared<'_>,
+    ) -> Result<TraceRecord, ParseError> {
         let mut lines = text.lines().enumerate().map(|(at, line)| (at + 1, line));
         let (at, line) = lines.next().unwrap_or((1, ""));
         let start = line
@@ -178,7 +200,7 @@ impl TraceRecord {
                 landed = Landed::Stood;
                 continue;
             }
-            events.push(parse_event(line).ok_or_else(|| refused(at, line))?);
+            events.push(parse_event(line, shared).ok_or_else(|| refused(at, line))?);
         }
         Err(refused(0, "no stop"))
     }
@@ -191,13 +213,12 @@ fn refused(line: usize, found: &str) -> ParseError {
     }
 }
 
-fn parse_func(text: &str) -> Option<FuncRef> {
-    let offset = if let Some(n) = text.strip_prefix('e') {
-        MapPtrOffset::Engine(n.parse().ok()?)
-    } else {
-        MapPtrOffset::Request(text.strip_prefix('r')?.parse().ok()?)
-    };
-    Some(FuncRef::at(offset))
+/// The op array `text` names, `e` and the engine's offset, made as any
+/// other is made, from the [`FuncRef`] of that offset; none for any other
+/// text, since a record names no request's op array.
+fn parse_func(text: &str) -> Option<EngineFuncRef> {
+    let offset = text.strip_prefix('e')?.parse().ok()?;
+    EngineFuncRef::of(FuncRef::at(MapPtrOffset::Engine(offset)))
 }
 
 /// A kind's name in the text form.
@@ -239,23 +260,40 @@ fn sample(sampled: Option<Sample>) -> String {
             text.push_str(mark);
         }
     }
-    if let Some(class) = sampled.class {
-        write!(text, "#{}", tier::recorded_number(class)).unwrap_or_default();
+    match sampled.class {
+        Some(RecordClass::Shared(class)) => {
+            write!(text, "#{}", tier::class_number(class)).unwrap_or_default();
+        }
+        Some(RecordClass::Own(class)) => {
+            write!(text, "#own{}", class.index()).unwrap_or_default();
+        }
+        None => {}
     }
     text
 }
 
+/// How a reader finds the shared class a text numbers: an epoch's answer
+/// for each number, none where it shares no class under it.
+type Shared<'a> = &'a dyn Fn(u32) -> Option<EpochClassId>;
+
+/// A sampled class's text after its `#`: an own class's index after
+/// `own`, and otherwise a shared class's number, which `shared` names;
+/// none for a number it shares no class under.
+fn parse_class(text: &str, shared: Shared<'_>) -> Option<RecordClass> {
+    match text.strip_prefix("own") {
+        Some(index) => Some(RecordClass::Own(OwnClass::at(index.parse().ok()?))),
+        None => shared(text.parse().ok()?).map(RecordClass::Shared),
+    }
+}
+
 /// A sample's text: none for `-`, and `Err` for a text that is no
 /// sample.
-fn parse_sample(text: &str) -> Result<Option<Sample>, Unknown> {
+fn parse_sample(text: &str, shared: Shared<'_>) -> Result<Option<Sample>, Unknown> {
     if text == "-" {
         return Ok(None);
     }
     let (marks, class) = match text.split_once('#') {
-        Some((marks, class)) => {
-            let number = class.parse().map_err(|_| Unknown)?;
-            (marks, Some(tier::numbered_class(number)))
-        }
+        Some((marks, class)) => (marks, Some(parse_class(class, shared).ok_or(Unknown)?)),
         None => (text, None),
     };
     let mut parts = marks.split('.');
@@ -306,15 +344,15 @@ fn parse_stop(text: &str) -> Option<Stop> {
         .find(|stop| stop.describe() == text)
 }
 
-fn parse_event(line: &str) -> Option<Event> {
+fn parse_event(line: &str, shared: Shared<'_>) -> Option<Event> {
     let mut words = line.split(' ');
     let event = match words.next()? {
         "op" => Event::Op {
             func: parse_func(words.next()?)?,
             opline: OplineIdx(words.next()?.parse().ok()?),
-            op1: parse_sample(words.next()?).ok()?,
-            op2: parse_sample(words.next()?).ok()?,
-            data: parse_sample(words.next()?).ok()?,
+            op1: parse_sample(words.next()?, shared).ok()?,
+            op2: parse_sample(words.next()?, shared).ok()?,
+            data: parse_sample(words.next()?, shared).ok()?,
             branch: match words.next()? {
                 "-" => None,
                 "taken" => Some(true),

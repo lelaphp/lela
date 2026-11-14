@@ -95,13 +95,13 @@ impl Emit<'_> {
         if let Some(opline) = spec.opline {
             let frame = self.ir.frames.get(usize::from(spec.frame.0))?;
             return Some(Stands {
-                func: engine_offset(frame.func).ok()?,
+                func: engine_offset(frame.func),
                 opline: opline.0,
             });
         }
         let opens = linked?.opens?;
         let running = self.ir.frames.get(usize::from(self.running.0))?;
-        (engine_offset(running.func).ok()? == opens.func).then_some(opens)
+        (engine_offset(running.func) == opens.func).then_some(opens)
     }
 
     /// Whether the entry of a trace entered from `exit` can be passed from

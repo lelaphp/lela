@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use php_engine::api::abi::PostStartup;
 use php_engine::api::request::TierStatus;
 use php_engine::tier::{
-    self, Epoch, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, FuncRef, Request,
+    self, EngineFuncRef, Epoch, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, Request,
     SafepointIdx, Site, Tier, TraceNum, Word,
 };
 use php_unit::{OpArray, OplineIdx, Unit};
@@ -27,14 +27,16 @@ use crate::testing::{self, Lane, function_of};
 use crate::types::ExitId;
 
 /// An epoch holding one unit whose main op array has two safepoints.
-fn fixture() -> (Epoch, FuncRef) {
-    Epoch::fixture(Unit {
+fn fixture() -> (Epoch, EngineFuncRef) {
+    let (epoch, main) = Epoch::fixture(Unit {
         main: OpArray {
             safepoints: vec![OplineIdx(0), OplineIdx(1)].into(),
             ..OpArray::default()
         },
         ..Unit::default()
-    })
+    });
+    let main = EngineFuncRef::of(main).expect("the fixture's op array, the engine's");
+    (epoch, main)
 }
 
 fn trace(n: u32) -> TraceId {
@@ -57,7 +59,7 @@ fn heat(word: &Word) -> u32 {
     clippy::unnecessary_wraps,
     reason = "visit takes the holder a home may not have"
 )]
-fn root(epoch: &Epoch, func: FuncRef, at: u32) -> Option<Holder> {
+fn root(epoch: &Epoch, func: EngineFuncRef, at: u32) -> Option<Holder> {
     Some(Holder::Root {
         epoch: epoch.clone(),
         func,
@@ -373,6 +375,136 @@ fn a_full_table_refuses_one_root_and_stops_the_counters() {
             "",
         ]
     );
+}
+
+/// What [`RequestRooted`] saw once the recording it began at `h` was
+/// refused: the published op array whose entry word it claimed, that
+/// word's state, and whether the epoch's trace table stopped its
+/// counters.
+#[derive(Debug, Default)]
+struct Refused {
+    published: Option<EngineFuncRef>,
+    word: Option<State>,
+    stopped: Option<bool>,
+}
+
+/// The recording path `Lane` runs, [`super::hot`], from a frame that
+/// serves an op array compiled for its request alone, `eval`'s `h`, which
+/// no served program reaches under `Lane`. No visit claims there: such an op
+/// array reads the sealed word at every site, and every word a visit
+/// claims is a row of the request's epoch, whose frames serve that row's
+/// op array. So this tier keeps `f`'s number at `f`'s entry, and at `h`'s
+/// claims `f`'s entry word for an enter, where a visit would, past a
+/// table that has not stopped its counters, and hands the claim to
+/// [`super::hot`] in `h`'s frame, as a visit hands one. The request
+/// starts as `Lane`'s does, with the engine's banner.
+struct RequestRooted;
+
+impl Tier for RequestRooted {
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
+        if site != Site::Entry {
+            return Flow::Continue;
+        }
+        match function_of(req, frame).as_deref() {
+            Some(b"f") => {
+                let f = tier::func(req, frame).and_then(EngineFuncRef::of);
+                req.state::<Refused>().published = f;
+                Flow::Continue
+            }
+            Some(b"h") => {
+                let Some(f) = req.state::<Refused>().published else {
+                    return Flow::Continue;
+                };
+                let epoch = tier::epoch(req);
+                let flow = crate::enter::lent(req, |req, lent| {
+                    let shared = lent.shared();
+                    // As a visit claims: no word past a stopped table.
+                    let table = crate::table::of(req, &shared.policy, &shared.perf)?;
+                    if table.stopped() {
+                        return None;
+                    }
+                    let holder = Holder::Root {
+                        epoch: epoch.clone(),
+                        func: f,
+                        at: SafepointIdx::ENTRY,
+                    };
+                    let claim = policy::claim(holder, &shared.policy, Start::Enter)?;
+                    Some(super::hot(req, frame, claim, shared))
+                });
+                let word = policy::read(epoch.word(f, SafepointIdx::ENTRY));
+                let stopped = crate::table::of_epoch(&epoch).map(crate::table::Table::stopped);
+                let refused = req.state::<Refused>();
+                refused.word = Some(word);
+                refused.stopped = stopped;
+                flow.flatten().unwrap_or(Flow::Continue)
+            }
+            _ => Flow::Continue,
+        }
+    }
+
+    fn extension() -> Option<Extension> {
+        let mut ini = crate::policy::ini();
+        ini.extend(testing::declared(&testing::OPCACHE));
+        Some(
+            testing::switched(ExtensionBuilder::default())
+                .ini(ini)
+                .engine_state(crate::JitEngine::new)
+                .rinit(crate::JitEngine::request_started)
+                .request_state::<Refused>()
+                .build("jit"),
+        )
+    }
+}
+
+/// A recording refused before its first opline at a frame that serves an
+/// op array compiled for its request alone, `eval`'s `h` ([`RequestRooted`]),
+/// as [`a_full_table_refuses_one_root_and_stops_the_counters`] pins a
+/// refusal at a full table: after the banner, each attempt is written and
+/// settled as a root that failed, `start` and `abort (root in a
+/// request-scoped op array)`, with no record, since a record roots in an
+/// op array the engine numbered (#4650, #4668). The refusal may recover,
+/// so the word is cold again after the first and blacklisted at
+/// `opcache.jit_blacklist_root_trace`, here the second, and the third
+/// call claims nothing and writes no line. Unlike a full table's, this
+/// refusal leaves the counters running: the table has not stopped. The
+/// lines are this engine's, held to the engine alone, since no served
+/// program reaches this path to give an oracle's line beside them.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_frame_serving_a_request_op_array_refuses_its_root() {
+    let mut ini = DUMPED.to_vec();
+    ini.push(("opcache.jit_blacklist_root_trace", "2"));
+    let engine = testing::engine::<RequestRooted>(&ini);
+    let (served, refused) = testing::Scratch::new().serve_kept::<Refused>(
+        &engine,
+        "eval('function h($a) { return $a + 1; }');
+        function f($n) { return h($n); }
+        echo f(1), f(2), f(3), \"\\n\";",
+    );
+    assert_eq!(testing::stdout(&served), "234\n");
+    assert_eq!(
+        lines(&served),
+        [
+            "JIT: jit.mode=force",
+            "---- TRACE 1 start (enter) h() body.php(2) : eval()'d code:1",
+            "---- TRACE 1 abort (root in a request-scoped op array)",
+            "",
+            "---- TRACE 1 start (enter) h() body.php(2) : eval()'d code:1",
+            "---- TRACE 1 abort (root in a request-scoped op array)",
+            "---- TRACE 1 blacklisted",
+            "",
+        ]
+    );
+    let refused = refused.unwrap_or_default();
+    assert!(refused.published.is_some(), "{refused:?}");
+    assert_eq!(refused.word, Some(State::Blacklisted), "{refused:?}");
+    assert_eq!(refused.stopped, Some(false), "{refused:?}");
 }
 
 /// What the panicking tier saw after the panic: whether the request
@@ -1324,7 +1456,7 @@ fn escape_doors(req: &mut Request, elsewhere: bool) -> Vec<(usize, bool)> {
             .map(|[key, body, _]| {
                 let enters = traces().any(|trace| {
                     let opens = trace.opens.and_then(|(func, opline)| {
-                        let func = crate::lower::engine_offset(func)?;
+                        let func = crate::lower::engine_offset(func);
                         let stands = crate::lower::Stands {
                             func,
                             opline: opline.0,

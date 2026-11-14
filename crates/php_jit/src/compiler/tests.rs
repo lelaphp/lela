@@ -11,10 +11,8 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use php_engine::tier::FuncRef;
-use php_heap::ZvalType;
+use php_engine::tier::{EngineFuncRef, FuncRef};
 use php_unit::MapPtrOffset;
-use php_unit::decl::ConstExpr;
 
 use super::{Job, pipeline, pipeline_with};
 use crate::lower::Compiled;
@@ -282,7 +280,8 @@ fn each_stages_failure_settles_the_word_as_php_does() -> Result<(), String> {
 #[test]
 fn a_record_that_builds_nothing_settles_before_the_backend() -> Result<(), String> {
     let (mut misfit, holder) = job(&[])?;
-    misfit.recorded.record.root = FuncRef::at(MapPtrOffset::Engine(u32::MAX));
+    misfit.recorded.record.root = EngineFuncRef::of(FuncRef::at(MapPtrOffset::Engine(u32::MAX)))
+        .ok_or("an engine offset names the engine's op array")?;
     let (outcome, state, lines) = piped(&engine(&[]), Backend::Panics, misfit, &holder);
     assert_eq!(outcome, Outcome::Abort(Stop::CompilerError));
     assert_eq!(state, State::Cold);
@@ -357,11 +356,11 @@ fn a_held_units_strings_read_off_the_request_after_its_engine_dropped() -> Resul
 /// A job is served on the worker after the request that recorded it has
 /// ended, and its values with it: a method of a class whose parent an
 /// `eval` declared, recorded at its entry. Once the request is served the
-/// view still holds the parent's declaration as the request linked it,
-/// with a constant's string and a default's array the `eval` laid among
-/// the request's values, each named here by its zval's type and never
-/// read; the job is then queued for the worker, which serves it and
-/// settles its word.
+/// view still holds what the analysis reads of the parent's declaration,
+/// the names of its constant and its property, and none of the
+/// constant's string or the default's array the `eval` laid among the
+/// request's values, which the view's facts have no field for; the job is
+/// then queued for the worker, which serves it and settles its word.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_job_is_served_on_the_worker_after_its_requests_values_are_gone() -> Result<(), String> {
@@ -376,21 +375,18 @@ fn a_job_is_served_on_the_worker_after_its_requests_values_are_gone() -> Result<
     let view = &recorded.view;
     let class = (view.scope(recorded.record.root)).ok_or("the view holds f's class")?;
     let parent = view.parent(class).ok_or("and the class's parent")?;
-    let decl = view
-        .class_decl(parent)
-        .ok_or("and the parent's declaration")?;
-    let values = decl.constants.iter().map(|constant| &constant.value);
-    let defaults = decl.properties.iter().filter_map(|p| p.default.as_ref());
-    let counted: Vec<ZvalType> = (values.chain(defaults))
-        .filter_map(|expr| match expr {
-            ConstExpr::UnitValue(held) if held.value().is_refcounted() => Some(held.value().kind()),
-            _ => None,
-        })
-        .collect();
+    let facts = view
+        .class_facts(parent)
+        .ok_or("and what the analysis reads of the parent's declaration")?;
+    let names = |names: Vec<&[u8]>| names.into_iter().map(<[u8]>::to_vec).collect::<Vec<_>>();
     assert_eq!(
-        counted,
-        [ZvalType::String, ZvalType::Array],
-        "the request's own values, named by their zvals"
+        (
+            facts.name.0.to_vec(),
+            names(facts.constants.iter().map(|c| &*c.name.0).collect()),
+            names(facts.properties.iter().map(|p| &*p.name.0).collect()),
+        ),
+        (b"P".to_vec(), vec![b"K".to_vec()], vec![b"d".to_vec()]),
+        "the parent's names, as the request linked it"
     );
     let job = claimed(recorded, &holder)?;
     let engine = engine(&quiet);

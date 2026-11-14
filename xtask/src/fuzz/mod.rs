@@ -7,7 +7,8 @@
 //! **What a run holds.** The corpus's programs as they stand, a directory
 //! of `.php` files ([`CORPUS`] unless one is named), then as many again
 //! as asked, each drawn from the run's seed and its place: the inherited
-//! grammar generator's or a mutation of a corpus program ([`generate`]).
+//! grammar generator's or a mutation of a corpus program, which the lane's
+//! pure part, `lanes/differential`, draws ([`php_lanes_differential`]).
 //! The seed is in the reading, so `--seed` draws the same programs again.
 //!
 //! **How a program is judged.** Both sides' first stream, second stream
@@ -40,7 +41,6 @@
 //! php, a skip where the pinned php is not
 //! on this machine.
 
-mod generate;
 #[cfg(test)]
 mod tests;
 
@@ -56,7 +56,7 @@ use crate::manifest::Manifest;
 use crate::oracle::hosts::CLI;
 use crate::oracle::{ENGINE, Ended, Oracle, profile};
 use crate::reading::{Reading, Status, joined};
-use generate::Rng;
+use php_lanes_differential::Rng;
 
 /// The instrument's name, the reading's `instrument` field.
 pub const INSTRUMENT: &str = "fuzz";
@@ -225,9 +225,12 @@ impl Corpus {
             let mut rng = Rng::new(u64::from(seed) << 32 | i as u64);
             let (label, code) = if rng.below(2) == 0 {
                 let (stem, code) = &self.programs[rng.below(self.programs.len())];
-                (format!("m{i}-{stem}"), generate::mutated(code, &mut rng))
+                (
+                    format!("m{i}-{stem}"),
+                    php_lanes_differential::mutated(code, &mut rng),
+                )
             } else {
-                (format!("g{i}"), generate::program(&mut rng))
+                (format!("g{i}"), php_lanes_differential::program(&mut rng))
             };
             drawn.push(Drawn { label, code });
         }
@@ -401,9 +404,9 @@ impl Sides<'_> {
     }
 
     /// `code` with as many of its lines dropped as leave the disagreement
-    /// `judged` standing under `pass`, of the same kind: runs of lines
-    /// halving down to one, within [`TRIALS`] runs and the run's budget.
-    /// The opening tag stays. None for a time-out, each trial of which
+    /// `judged` standing under `pass`, of the same kind, by the lane's
+    /// loop ([`php_lanes_differential::minimised`]) within [`TRIALS`] runs
+    /// and the run's budget. None for a time-out, each trial of which
     /// would run to the recipe's limit, and where the budget is spent.
     pub(crate) fn minimised(
         &self,
@@ -415,37 +418,9 @@ impl Sides<'_> {
         if matches!(judged, Judged::Fault(Fault::PastLimit(_))) || spent() {
             return Ok(None);
         }
-        let render = |lines: &[&str]| {
-            lines.iter().fold(String::new(), |mut out, line| {
-                out.push_str(line);
-                out.push('\n');
-                out
-            })
-        };
-        let mut lines: Vec<&str> = code.lines().collect();
-        let head = usize::from(lines.first().is_some_and(|l| l.starts_with("<?php")));
-        let mut chunk = lines.len().saturating_sub(head).div_ceil(2).max(1);
-        let mut trials = 0;
-        loop {
-            let mut at = head;
-            while at < lines.len() && trials < TRIALS && !spent() {
-                let end = (at + chunk).min(lines.len());
-                let fewer: Vec<&str> = lines[..at].iter().chain(&lines[end..]).copied().collect();
-                trials += 1;
-                let now = self.judged(&render(&fewer), pass)?;
-                let same =
-                    |now: &Judged| std::mem::discriminant(now) == std::mem::discriminant(judged);
-                if now.as_ref().is_some_and(same) {
-                    lines = fewer;
-                } else {
-                    at = end;
-                }
-            }
-            if chunk == 1 || trials >= TRIALS || spent() {
-                return Ok(Some(render(&lines)));
-            }
-            chunk = chunk.div_ceil(2);
-        }
+        let same = |now: &Judged| std::mem::discriminant(now) == std::mem::discriminant(judged);
+        let stands = |fewer: &str| Ok(self.judged(fewer, pass)?.as_ref().is_some_and(same));
+        php_lanes_differential::minimised(code, TRIALS, stands, spent).map(Some)
     }
 }
 

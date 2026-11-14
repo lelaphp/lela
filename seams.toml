@@ -60,7 +60,7 @@ budget = 800                               # fork, the signal pool, LC_CTYPE, th
 lock = "process.lock"
 [[crate]]
 name = "php_unit"
-budget = 4000                              # 2.5k raised to 3k for the unit format's parity growth (#3357, 2026-10-24); 4k for the memory gate's unit persistence, declarations and the fitted view (#4018, 2026-11-03)
+budget = 4800                              # 2.5k raised to 3k for the unit format's parity growth (#3357, 2026-10-24); 4k for the memory gate's unit persistence, declarations and the fitted view (#4018, 2026-11-03); 4.8k, 1.2 times its use, for #4649's Frozen<T>, its check and the walk over a unit's values (#4681, 2026-11-13)
 lock = "unit.lock"
 [[crate]]
 name = "php_link"
@@ -372,6 +372,15 @@ porting = false   # it ports nothing of php-src's
 name = "fuzz/targets"
 budget = 350      # the eight libFuzzer targets, package php_fuzz_targets; 302 measured in preparation (#3612, ruled 2026-10-28)
 feature = "fuzz"  # libfuzzer-sys is behind it, so a default workspace build never compiles libFuzzer (#3612, 2026-10-31)
+[[crate]]
+name = "lanes/fuzz"
+budget = 300      # #3607's fuzz instrument, its logic; xtask/src holds the adapter (#3740, #3750)
+[[crate]]
+name = "lanes/framework"
+budget = 400      # #2140's framework lane, its logic; xtask/src holds the adapter (#3740, #3750)
+[[crate]]
+name = "lanes/differential"
+budget = 400      # #4358's generator, the differential lane's pure part; xtask/src/fuzz holds the adapter (#3740, #4489)
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
@@ -512,6 +521,9 @@ adr = "0008" # a host reaches the engine through php_sapi; php_ext to declare na
 [[edge]]
 from = "fuzz/targets"
 to = ["php_syntax", "php_heap", "php_bundle"]   # #3612, ruled 2026-10-28
+[[edge]]
+from = "xtask"
+to = ["lanes/*"]   # the harness calls its lanes; a lane depends on no workspace crate (#3740, 2026-11-07)
 
 # ---------------------------------------------------------------- rules
 # Each rule: an `id`, a `scope` or a `tool`, one predicate, an optional `adr`,
@@ -631,8 +643,9 @@ text = "A kernel or a native without a witness fails CI (design §8)."
 id = "state.engine"
 scope = ["crates/*", "ext/*", "sapi/*"]
 check = "engine-state"   # the sensor: xtask/src/api_check/engine_state.rs (#4500)
+allow = ["php_unit::frozen"]   # Frozen<T>'s one impl, which only its checked constructor vouches for (#4633)
 adr = "0005"
-text = "No handle into a request's heap enters engine-wide shared state: engine_state, process_state, register and constants_with take an EngineState, which #[derive(EngineState)] holds at every field, and an impl written by hand stands only where unsafe may (#4348 ruling 2)."
+text = "No handle into a request's heap enters engine-wide shared state: engine_state, process_state, register and constants_with take an EngineState, which #[derive(EngineState)] holds at every field, and an impl written by hand stands only where unsafe may (#4348 ruling 2), or in the one module `allow` names, whose impl only a checked constructor beside it vouches for (#4633)."
 remedy = "#[derive(EngineState)] on the type, or the impl in the crate's own src/ffi/ for a C library's object; where the sensor cannot read, write the trait's path, the file's path or the impl where it reads them"
 
 [[rule]]
@@ -863,6 +876,15 @@ scope = "upstream/**"   # the folder left the tree at f9c488392 (#4380, ruled 20
 deny = true
 text = "Nothing is written under upstream/ in this repository: a defect in php-src, or in a library it links, goes in the private upstream project, and nothing here states it until Mitchell has reported it (#4380)."
 remedy = "write it in the private upstream project, as AGENTS.md says of a defect in php-src"                 # #4414
+
+[[rule]]
+id = "upstream.named"
+tool = ["Edit", "Write"]
+deny = true
+adding = '''(?i:upstream)(?:/|\\/|%2[Ff]|&#47;)(?:(?:[^\s\"'`<>();|\\*\[\]{},]|\\/)*[*\[\]{},](?:[^\s\"'`<>();|\\]|\\/)*?[^\s\"'`<>();|\\*\[\]{},.:/?](?:(?:[^\s\"'`<>();|\\]|\\/)*[^\s\"'`<>();|\\*\[\]{},.:])?|(?:[^\s\"'`<>();|\\*\[\]{},]|\\/)*[^\s\"'`<>();|\\*\[\]{},.:])'''   # scripts/export/cutlib.py's UPSTREAM byte for byte, the export's bar, which reads the same in regex_lite's dialect; xtask/tests/tracked/permit/upstream_named.rs and scripts/export/test_export.py hold the two to xtask/fixtures/rules/upstream.named/forms.tsv (#4598, #4617)
+exempt = ["xtask/fixtures/rules/upstream.private/**", "xtask/tests/tracked/permit/upstream.rs", "xtask/fixtures/rules/upstream.named/**", "scripts/export/**"]   # the two rules' fixtures and upstream.private's test carry the names they judge, and the export's tool reads and maps them (#4594, #4595)
+text = "No line added to a file here names a file or folder under upstream/: the export carries no such name, and each is a line it would have to map before the move. `upstream.private` judges a write under the folder; this row judges text naming one (#4594, #4595, #4676)."
+remedy = "describe the thing without its path: the private upstream project, a defect in php-src, or the folder upstream/ by its own name"
 
 [[rule]]
 id = "git.no-verify-push"

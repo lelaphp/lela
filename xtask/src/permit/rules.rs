@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use super::approval::{Admission, LIFTED};
 use super::argv::{Argv, Line};
-use super::call::Call;
+use super::call::{Call, Touched};
 use super::label;
 use super::operation;
 use super::owned::{self, Owned, Scope};
@@ -198,21 +198,18 @@ pub fn judged_at_the_call(rule: &Rule) -> bool {
 /// Judge one call: the region-body rule, then the manifest's rules in
 /// order, each reading the one walk of the call's line ([`Walk`]).
 pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement> {
-    let path = call.path(root);
+    let touched = call.touched(root);
+    let path = touched.path();
     let line = call.command().map(Line::read);
     let walk = Walk::of(&call.start(root), line.as_ref());
     let mut findings = Vec::new();
     let mut judged = Vec::new();
-    if let Some(path) = &path {
+    if let Some(path) = path {
         findings.extend(region_body(root, path, call));
     }
-    for rule in manifest
-        .rules
-        .iter()
-        .filter(|r| applies(r, call, path.as_deref()))
-    {
+    for rule in manifest.rules.iter().filter(|r| applies(r, call, &touched)) {
         judged.push(rule.id.clone());
-        let finding = evaluate(manifest, root, rule, call, path.as_deref(), &walk)?;
+        let finding = evaluate(manifest, root, rule, call, path, &walk)?;
         findings.extend(finding);
     }
     let defects = manifest.defects().iter().map(ToString::to_string).collect();
@@ -224,15 +221,34 @@ pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement>
 }
 
 /// Whether `rule` judges the call at all: its tool, a file its exempt does
-/// not cover and its scope does (#23), or any file where the row's `adding`
-/// reaches past its scope (#4363), and a predicate that describes a call.
-fn applies(rule: &Rule, call: &Call, path: Option<&Path>) -> bool {
-    let reached = |path: &Path| rule.covers(path) || rule.predicate.adding.is_some();
+/// not cover, what the call touches within the row's reach ([`reaches`]),
+/// and a predicate that describes a call.
+fn applies(rule: &Rule, call: &Call, touched: &Touched) -> bool {
     (rule.tool.is_empty() || rule.tool.iter().any(|t| t == call.judged_as()))
         && !(rule.runs == Runs::Foreground && call.in_background())
-        && !path.is_some_and(|path| rule.exempts(path))
-        && (rule.scope.is_empty() || path.is_some_and(reached))
+        && !touched.path().is_some_and(|path| rule.exempts(path))
+        && reaches(rule, touched)
         && rule.predicate.describes_a_call()
+}
+
+/// Whether what the call touches is within the row's reach: a row without
+/// a scope reaches a call without a file and every file of the workspace,
+/// a row with one the files it covers (#23), and a row's `adding` every
+/// file of the workspace past its scope (#4363). A file outside the
+/// workspace is reached by a row with neither scope nor `adding` alone,
+/// so no `adding` judges a call's write outside the workspace, of which
+/// [`Call::rewrite`] would read the standing text, with no path, as empty
+/// and count every hit as added (#4679). A diff's call that carries what
+/// it displaces, whose file a link leads outside, is reached as a call
+/// without a file is: its `adding` is asked of what the diff displaces,
+/// and git names the path in the checkout.
+fn reaches(rule: &Rule, touched: &Touched) -> bool {
+    let adding = rule.predicate.adding.is_some();
+    match touched {
+        Touched::NoFile | Touched::Diffed => rule.scope.is_empty(),
+        Touched::Workspace(path) => rule.scope.is_empty() || adding || rule.covers(path),
+        Touched::Outside => rule.scope.is_empty() && !adding,
+    }
 }
 
 /// One rule that [`applies`] over the call, with the file it touches and

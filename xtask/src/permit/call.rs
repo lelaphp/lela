@@ -34,7 +34,8 @@ pub struct Call {
     /// the path is not it: the diff judge's, the tracked content at the
     /// base it measures since, or in a merge each parent's ([`Call::diff_of`],
     /// #2783). Empty at the hook, whose JSON never carries it, since a call
-    /// there displaces what is at the path.
+    /// there displaces what is at the path. Its presence is also what
+    /// places a file outside the workspace as a diff's ([`Call::touched`]).
     #[serde(skip)]
     pub(super) displaced: Vec<String>,
     /// The session's transcript, where Claude Code writes the person's
@@ -74,6 +75,41 @@ pub struct Arguments {
     /// end of, which a `runs = "foreground"` rule does not judge (#3624).
     #[serde(default)]
     pub run_in_background: bool,
+}
+
+/// What one call touches, as the manifest's rows read it ([`Call::touched`]):
+/// a call without a file and a call with one outside the workspace both
+/// have no [`Call::path`], and a row's reach tells them apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Touched {
+    /// A call that carries no file, such as a shell line.
+    NoFile,
+    /// A file of the workspace, relative to its root.
+    Workspace(PathBuf),
+    /// A file outside the workspace, which no row's scope names and no
+    /// row's `adding` reaches (#4679).
+    Outside,
+    /// A diff's call that carries what it displaces ([`Call::diff_of`]),
+    /// whose file on disk resolves outside the workspace through a link:
+    /// git names the path in the checkout and no commit carries a file
+    /// outside the repository, so a row without a scope reaches it as it
+    /// reaches a call without a file, its `adding` asked of what the diff
+    /// displaces (#4679). A binary file of a diff carries nothing it
+    /// displaces and so reads [`Touched::Outside`], with no finding lost by
+    /// it, since no `adding` fires on a call that writes no text. Placing
+    /// a diff's call by git's path for every row is #4434's.
+    Diffed,
+}
+
+impl Touched {
+    /// The file relative to the workspace root, for a file of the
+    /// workspace alone.
+    pub(super) fn path(&self) -> Option<&Path> {
+        match self {
+            Touched::Workspace(path) => Some(path),
+            Touched::NoFile | Touched::Outside | Touched::Diffed => None,
+        }
+    }
 }
 
 impl Call {
@@ -208,12 +244,31 @@ impl Call {
 
     /// The file the call touches, relative to the workspace root; `None`
     /// for a call without one or for a file outside the workspace, which
-    /// no rule of the manifest describes. Read off [`Call::file`], so
+    /// [`Call::touched`] tells apart. No row's scope names a file outside
+    /// the workspace and no row's `adding` reaches one written by a call
+    /// (#4679); a row with neither still judges the call, with no path to
+    /// read, and a diff's call that carries what it displaces, whose file
+    /// a link leads outside, is a row's without a scope, `adding` among
+    /// them ([`Touched::Diffed`]). Read off [`Call::file`], so
     /// `seams.toml`, `./seams.toml` and `docs/../seams.toml` are one path
     /// and every scope sees it as such (#4430).
     pub fn path(&self, root: &Path) -> Option<PathBuf> {
-        let file = self.file(root)?;
-        Some(file.strip_prefix(canonical(root)).ok()?.to_path_buf())
+        self.touched(root).path().map(Path::to_path_buf)
+    }
+
+    /// What the call touches as the manifest's rows read it: no file, a
+    /// file of the workspace under `root`, or a file outside it, each by
+    /// [`Call::file`]; a file outside it is a diff's path where the call
+    /// carries what it displaces ([`Call::diff_of`]).
+    pub(super) fn touched(&self, root: &Path) -> Touched {
+        let Some(file) = self.file(root) else {
+            return Touched::NoFile;
+        };
+        match file.strip_prefix(canonical(root)) {
+            Ok(path) => Touched::Workspace(path.to_path_buf()),
+            Err(_) if self.displaced.is_empty() => Touched::Outside,
+            Err(_) => Touched::Diffed,
+        }
     }
 
     /// The call, and the `text` it was read from, returned, with a
@@ -450,7 +505,7 @@ fn canonical(path: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::Call;
+    use super::{Call, Touched};
     use crate::manifest;
     use crate::permit::argv::Line;
     use crate::permit::shell::Walk;
@@ -590,7 +645,9 @@ mod tests {
     /// #4430: a relative path that climbs out of the workspace names the
     /// place it climbs to, judged as that absolute path is: in a worktree
     /// of the repository, by that worktree's manifest and as its file;
-    /// anywhere else, as no file of the manifest.
+    /// anywhere else, as no file of the manifest, and as a file outside
+    /// the workspace, which a call without one is not and a diff's path is
+    /// apart (#4679).
     #[test]
     fn a_relative_path_climbing_out_of_the_workspace_is_the_absolute_path_it_names() {
         let tree = Tree::new("call-climbing").unwrap();
@@ -611,10 +668,16 @@ mod tests {
         let away = edit("../elsewhere/seams.toml", None);
         assert_eq!(away.workspace(&root), root);
         assert_eq!(away.path(&root), None);
+        assert_eq!(away.touched(&root), Touched::Outside);
+        let staged = Call::diff_of("../elsewhere/seams.toml", "x", &[String::new()]);
+        assert_eq!(staged.touched(&root), Touched::Diffed);
+        assert_eq!(bash(&root, Some("ls")).touched(&root), Touched::NoFile);
         let sub = worktree.join("sub");
         let from_sub = edit("../../../repo/docs/../seams.toml", Some(&sub));
         assert_eq!(from_sub.workspace(&root), root);
         assert_eq!(from_sub.path(&root), Some(PathBuf::from(manifest::FILE)));
+        let inside = Touched::Workspace(PathBuf::from(manifest::FILE));
+        assert_eq!(from_sub.touched(&root), inside);
     }
 
     /// Round 1, Q17 (a): a call with no line, and a line whose `cwd`

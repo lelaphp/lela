@@ -110,6 +110,29 @@ fn remedied(rule: &Rule) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a qualifier beside no predicate it qualifies, `predicate` being
+/// the one `rule` carries, and `allow` beside a check other than the
+/// engine-state sensor's, which reads it as a list of modules
+/// ([`Predicates`]), its entries decoded where the sensor decodes them
+/// (#4633).
+fn qualified(rule: &Rule, predicate: &str) -> Result<()> {
+    if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
+        bail!(
+            "rule \"{}\" has `{qualifier}` beside `{predicate}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv, `unless_argv` qualifies deny_argv, `deny_macros` qualifies deny_types, `allow_in_tests` qualifies deny_lints and `adding` qualifies deny = true",
+            rule.id
+        );
+    }
+    let sealed = crate::api_check::engine_state::CHECK;
+    match &rule.predicate.check {
+        Some(check) if rule.predicate.allow.is_some() && check != sealed => bail!(
+            "rule \"{}\" has `allow` beside check = \"{check}\"; beside a check, `allow` qualifies check = \"{sealed}\" alone, the one sensor that reads it (#4633)",
+            rule.id
+        ),
+        Some(_) => crate::api_check::engine_state::admitted(rule).map(drop),
+        None => Ok(()),
+    }
+}
+
 /// `text`, then ` Instead: {remedy}.` where there is a remedy: one shape
 /// for a denial at a call and a sensor's reading (#3618 ruling 3, #4500).
 pub(crate) fn instead(text: &str, remedy: Option<&str>) -> String {
@@ -685,7 +708,7 @@ pub enum Runs {
     Foreground,
 }
 
-/// The predicates of harness-design.md §4.1, which cites [`Self::NAMES`]
+/// The predicates of harness-design.md §4.1, which cites [`Self::TABLE`]
 /// and [`Self::orphaned_qualifier`] and counts neither (#2250), each
 /// optional in the grammar so the file parses;
 /// `Manifest::parse` then holds every rule to exactly one. `unless` and
@@ -694,7 +717,12 @@ pub enum Runs {
 /// its subcommand (`"git add"`); `unless_argv` qualifies `deny_argv`;
 /// `deny_macros` qualifies `deny_types`; `allow_in_tests` qualifies
 /// `deny_lints`; `adding` qualifies `deny = true`; each is refused beside
-/// any other predicate.
+/// any other predicate. `allow` is a predicate alone, the homes
+/// `unsafe.homes` names, and beside `check = "engine-state"` it qualifies
+/// the check and is none of its own: the modules where a hand-written impl
+/// of `EngineState` stands outside those homes (#4633), each one module,
+/// `crate::path`; beside any other check it is refused, since no other
+/// sensor reads it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -731,11 +759,15 @@ pub struct Predicates {
     pub with: OneOrMany,
     pub on: Option<String>,
     pub deny: Option<bool>,
-    /// A pattern beside `deny = true`: a write to any file, in the scope
-    /// or out of it, that adds a hit of it is refused as a write into the
-    /// scope is, read as a `deny_pattern` over a write reads what the
-    /// write adds (#510): a `computed exec` opener line, which `computed
-    /// run` executes wherever it stands (#4363, #4348 ruling 3).
+    /// A pattern beside `deny = true`: a write to any file of the
+    /// workspace, in the scope or out of it, that adds a hit of it is
+    /// refused as a write into the scope is, read as a `deny_pattern` over
+    /// a write reads what the write adds (#510): a `computed exec` opener
+    /// line, which `computed run` executes wherever it stands (#4363,
+    /// #4348 ruling 3). A call's write of a file outside the workspace it
+    /// does not reach; a diff's call that carries what it displaces, whose
+    /// file a link leads outside, is reached by a row without a scope
+    /// alone, its `adding` asked of what the diff displaces (#4679).
     pub adding: Option<String>,
     /// `writes = true`: a call that writes, an `Edit`, a `Write`, or a
     /// shell command that can change the checkout it runs in or a
@@ -852,7 +884,8 @@ impl Predicates {
     const TABLE: [(&'static str, Carries, bool); 13] = [
         ("deny_types", |p| p.deny_types.is_some(), true),
         ("deny_methods", |p| p.deny_methods.is_some(), false),
-        ("allow", |p| p.allow.is_some(), true),
+        // Beside `check`, `allow` qualifies it ([`Predicates`]).
+        ("allow", |p| p.allow.is_some() && p.check.is_none(), true),
         ("deny_pattern", |p| p.deny_pattern.is_some(), true),
         ("deny_argv", |p| p.deny_argv.is_some(), true),
         ("require_argv", |p| p.require_argv.is_some(), true),
@@ -1257,13 +1290,7 @@ impl Manifest {
                     );
                 }
             }
-            if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
-                bail!(
-                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv, `unless_argv` qualifies deny_argv, `deny_macros` qualifies deny_types, `allow_in_tests` qualifies deny_lints and `adding` qualifies deny = true",
-                    rule.id,
-                    named[0]
-                );
-            }
+            qualified(rule, named[0])?;
             let p = &rule.predicate;
             if let Some(lint) = p.allow_in_tests.iter().flatten().find(|lint| {
                 in_tests_key(lint).is_none() || !p.deny_lints.iter().flatten().any(|d| d == *lint)

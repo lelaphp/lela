@@ -10,6 +10,33 @@
 //! types, and an extension's `src/ffi/`. Anywhere else the rule's scope
 //! covers, one fails the crate's reading, naming its line.
 //!
+//! The rule's `allow`, where it carries one, names the modules outside the
+//! homes where a hand-written impl stands (#4633: `php_unit`'s `Frozen<T>`,
+//! which only a constructor that walks every value vouches for, and the
+//! one hand impl the ruling lets stand outside the homes). Each entry is
+//! a module, `crate::path`, decoded by the [`Home`] that reads one of
+//! `unsafe.homes`; a crate or a directory is refused when the manifest is
+//! read ([`admitted`]). Where `unsafe.homes` covers a module's directory
+//! below it too, an entry here covers the module's own file alone,
+//! `src/<module>.rs` or `src/<module>/mod.rs` ([`own_file`]): a child
+//! module's file, and a file under the directory that a `#[path]` makes
+//! another module, are held. In that file the entry admits one impl whose
+//! trait the sensor reads as this one, by name or by a rename, written as
+//! an item of the module itself, and nothing else. Held there, each with
+//! why: every hand impl of a file that holds more than one; an impl a
+//! `macro_rules!` body writes, which stands wherever the macro expands; an
+//! impl in an inline `mod`, a child module; and every hand impl of the
+//! file where a `#[path]` or an `include!` anywhere in the crate reaches
+//! it too, since its items then stand in another module as well. A line
+//! the sensor cannot read, an impl whose trait is a metavariable and the
+//! trait handed to a macro whose body no source holds fail there as
+//! anywhere, and the module is no home of `unsafe`, which reads
+//! `unsafe.homes` alone. An entry naming a module no
+//! crate has, or a crate the manifest does not list, covers no file and
+//! admits nothing, and is not refused, so the row may stand before the
+//! module it names is written. With no `allow` the sensor reads as it did
+//! before the key.
+//!
 //! The sensor reads syntax, with `syn`, and follows what the compiler
 //! follows: every source under the crate's `src/`, `tests/`, `benches/`
 //! and `examples/` and its `build.rs` (a target path the crate's
@@ -54,7 +81,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
@@ -73,10 +100,27 @@ const TRAIT: &str = "EngineState";
 /// The derive's expansion, whose `quote!` names the trait.
 const DERIVE: &str = "crates/php_macros/src/engine_state.rs";
 
+/// The modules `rule`'s `allow` names, where a hand-written impl stands
+/// outside the homes; none where it carries no `allow`. An entry that is
+/// not a module, `crate::path`, is refused naming the rule and the entry,
+/// since a crate or a directory would admit an impl anywhere in it (#4633).
+pub(crate) fn admitted(rule: &Rule) -> Result<Vec<Home>> {
+    (rule.predicate.allow.iter().flatten())
+        .map(|entry| match Home::parse(entry) {
+            Ok(module @ Home::Module { .. }) => Ok(module),
+            _ => bail!(
+                "rule \"{}\" admits {entry:?}; an entry of the `allow` beside check = \"{CHECK}\" is one module, crate::path, as unsafe.homes names php_jit::enter, never a crate or a directory (#4633)",
+                rule.id
+            ),
+        })
+        .collect()
+}
+
 /// Each hand-written impl of the trait in `files`, the sources of
 /// `krate` relative to the root, that `rule` covers and no home of
-/// `unsafe.homes` does, and each place the sensor cannot read, as
-/// `path:line` with what stops it after.
+/// `unsafe.homes` does, less one in a module the rule's `allow` names
+/// ([`admitted`]), and each place the sensor cannot read, as `path:line`
+/// with what stops it after.
 pub(crate) fn outside_the_homes(
     root: &Path,
     manifest: &Manifest,
@@ -88,6 +132,7 @@ pub(crate) fn outside_the_homes(
         .flat_map(|rule| rule.predicate.allow.iter().flatten())
         .map(|home| Home::parse(home))
         .collect::<Result<_>>()?;
+    let admitting = admitted(rule)?;
     let root = normal(root);
     let mut queue: Vec<(PathBuf, bool)> = (files.iter())
         .filter(|file| rule.covers(Path::new(file)) && !rule.exempts(Path::new(file)))
@@ -114,13 +159,19 @@ pub(crate) fn outside_the_homes(
         // A home covers the crate's own files: one it reaches in another
         // crate's `src/ffi/`, or outside every crate, is held.
         let own = Path::new(&shown).starts_with(krate.path());
-        let held = !own || !homes.iter().any(|h| h.covers(krate, &shown));
+        let standing = if own && homes.iter().any(|h| h.covers(krate, &shown)) {
+            Standing::Home
+        } else if own && admitting.iter().any(|m| own_file(m, krate, &shown)) {
+            Standing::Admitted
+        } else {
+            Standing::Held
+        };
         sources.insert(
             path,
             Source {
                 derive: shown == DERIVE,
                 shown,
-                held,
+                standing,
                 build,
                 text,
                 read,
@@ -134,14 +185,68 @@ pub(crate) fn outside_the_homes(
 struct Source {
     /// Its path relative to the root, or whole where it is outside it.
     shown: String,
-    /// Whether what it writes counts: no home of `unsafe.homes` covers it.
-    held: bool,
+    /// What its sites count as.
+    standing: Standing,
     /// Whether it is the derive's own expansion.
     derive: bool,
     /// Whether the crate's `build.rs` reaches it.
     build: bool,
     text: String,
     read: Read,
+}
+
+/// What a source's sites count as, by what covers it among the crate's
+/// own files.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// A home of `unsafe.homes`: nothing it writes counts.
+    Home,
+    /// The own file of a module the rule's `allow` names: its one hand
+    /// impl may pass ([`held_where_admitted`]), and every other site counts.
+    Admitted,
+    /// Neither, or a file of another crate or of none: every site counts.
+    Held,
+}
+
+/// Whether `path`, relative to the root, is the own file of the module
+/// `home` names in `krate`: `src/<module>.rs` or `src/<module>/mod.rs`,
+/// and no file of the directory below it, which [`Home::covers`] passes
+/// for `unsafe.homes` (#4647).
+fn own_file(home: &Home, krate: &Crate, path: &str) -> bool {
+    let Home::Module {
+        krate: name,
+        module,
+    } = home
+    else {
+        return false;
+    };
+    let base = krate.path().join("src").join(module.join("/"));
+    let path = Path::new(path);
+    *name == krate.name && (path == base.with_extension("rs") || path == base.join("mod.rs"))
+}
+
+/// Why the hand impl `imp` in the own file of a module the rule's `allow`
+/// names is held, where its file holds `hand` hand impls and is `aside`,
+/// reached by a `#[path]` or an `include!` as well; `None` where the entry
+/// admits it, the file's one hand impl, an item of the module itself.
+fn held_where_admitted(imp: &Impl, hand: usize, aside: bool) -> Option<&'static str> {
+    if aside {
+        Some(
+            "in the file of a module the rule's allow names, which a #[path] or include! reaches too",
+        )
+    } else if hand > 1 {
+        Some(
+            "one of more than one hand impl in the file of a module the rule's allow names, which admits one",
+        )
+    } else if imp.in_macro {
+        Some(
+            "written by a macro in the file of a module the rule's allow names, so it stands where the macro expands",
+        )
+    } else if imp.nested {
+        Some("in an inline mod below the module the rule's allow names")
+    } else {
+        None
+    }
 }
 
 /// The sites in `sources` that fail the crate, each once, by file and line.
@@ -159,8 +264,9 @@ fn found(sources: &BTreeMap<PathBuf, Source>) -> Vec<String> {
         .any(|s| word(&rust::without_comments_or_literals(&s.text), TRAIT));
     let defined: BTreeSet<&String> = sources.values().flat_map(|s| &s.read.defined).collect();
     let out_dir = sources.values().any(|s| s.read.out_dir);
+    let aside: BTreeSet<&PathBuf> = sources.values().flat_map(|s| &s.read.aside).collect();
     let mut sites: BTreeMap<(&str, usize), String> = BTreeMap::new();
-    for s in sources.values().filter(|s| s.held) {
+    for (path, s) in (sources.iter()).filter(|(_, s)| s.standing != Standing::Home) {
         let mut site = |line: usize, why: Option<&str>| {
             (sites.entry((s.shown.as_str(), line))).or_insert_with(|| match why {
                 Some(why) => format!("{}:{line} ({why})", s.shown),
@@ -170,10 +276,19 @@ fn found(sources: &BTreeMap<PathBuf, Source>) -> Vec<String> {
         for (line, why) in &s.read.refused {
             site(*line, Some(why));
         }
+        let by_hand = |imp: &&Impl| matches!(&imp.trait_, Trait::Named(n) if names.contains(n));
+        let hand = s.read.impls.iter().filter(by_hand).count();
         for imp in &s.read.impls {
             match &imp.trait_ {
                 _ if imp.in_macro && s.derive => {}
-                Trait::Named(name) if names.contains(name) => site(imp.line, None),
+                Trait::Named(name) if names.contains(name) => match s.standing {
+                    Standing::Admitted => {
+                        if let Some(why) = held_where_admitted(imp, hand, aside.contains(path)) {
+                            site(imp.line, Some(why));
+                        }
+                    }
+                    Standing::Home | Standing::Held => site(imp.line, None),
+                },
                 Trait::Meta if mentioned => site(imp.line, Some("its trait is a metavariable")),
                 _ => {}
             }
@@ -215,6 +330,8 @@ struct Read {
     refused: Vec<(usize, &'static str)>,
     /// The files it reaches.
     follow: Vec<PathBuf>,
+    /// The files among them it reaches by a `#[path]` or an `include!`.
+    aside: Vec<PathBuf>,
     /// Whether it includes a file from `OUT_DIR`.
     out_dir: bool,
     /// Each string literal outside a doc comment, with its line.
@@ -226,6 +343,8 @@ struct Impl {
     line: usize,
     trait_: Trait,
     in_macro: bool,
+    /// Whether it stands in an inline `mod` of its file.
+    nested: bool,
 }
 
 enum Trait {
@@ -287,6 +406,15 @@ impl Reader {
         }
     }
 
+    /// [`Self::reach`] by a `#[path]` or an `include!`, which makes the
+    /// file a module other than the one its place names.
+    fn reach_aside(&mut self, path: &Path, span: Span) {
+        if path.is_file() {
+            self.read.aside.push(normal(path));
+        }
+        self.reach(path, span);
+    }
+
     /// The directory an inline module's `mod` resolves in.
     fn module_dir(&self, mod_rs: bool) -> PathBuf {
         let mut dir = self.dir.clone();
@@ -299,7 +427,7 @@ impl Reader {
 
     fn include(&mut self, tokens: TokenStream, span: Span) {
         if let Ok(lit) = syn::parse2::<syn::LitStr>(tokens.clone()) {
-            return self.reach(&self.dir.join(lit.value()), span);
+            return self.reach_aside(&self.dir.join(lit.value()), span);
         }
         let out_dir = syn::parse2::<syn::ExprMacro>(tokens).is_ok_and(|m| {
             let parts = (m.mac.path.is_ident("concat"))
@@ -332,6 +460,7 @@ impl Reader {
                             line,
                             trait_,
                             in_macro: true,
+                            nested: !self.inline.is_empty(),
                         });
                     }
                 }
@@ -366,6 +495,7 @@ impl<'ast> Visit<'ast> for Reader {
                 line,
                 trait_,
                 in_macro: false,
+                nested: !self.inline.is_empty(),
             });
         }
         visit::visit_item_impl(self, node);
@@ -422,7 +552,7 @@ impl<'ast> Visit<'ast> for Reader {
                     } else {
                         self.module_dir(true)
                     };
-                    self.reach(&base.join(lit.value()), span);
+                    self.reach_aside(&base.join(lit.value()), span);
                 }
                 _ => self.refuse(span, "a #[path] the walk cannot follow"),
             },
@@ -539,7 +669,9 @@ fn normal(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{Trait, trait_after};
+    use super::{Trait, own_file, trait_after};
+    use crate::manifest::Crate;
+    use crate::unsafe_audit::Home;
     use proc_macro2::{TokenStream, TokenTree};
 
     fn of(text: &str) -> Option<String> {
@@ -573,6 +705,48 @@ mod tests {
         assert_eq!(of("impl $($p)::+ for $x {}").as_deref(), Some("$"));
         assert_eq!(of("impl #(#p)::* for #x {}").as_deref(), Some("$"));
         assert_eq!(of("impl $($t)* { fn f() {} }"), None);
+    }
+
+    /// An entry of the rule's `allow` covers its module's own file, as the
+    /// `Home` that reads it decodes the path, and nothing of the directory
+    /// below it, which the same `Home` covers for `unsafe.homes` (#4647).
+    #[test]
+    fn an_entry_covers_its_modules_own_file_and_nothing_below_it() {
+        let frozen = Home::parse("php_unit::frozen").unwrap();
+        let unit = Crate::named("php_unit");
+        assert!(own_file(&frozen, &unit, "crates/php_unit/src/frozen.rs"));
+        assert!(own_file(
+            &frozen,
+            &unit,
+            "crates/php_unit/src/frozen/mod.rs"
+        ));
+        for below in [
+            "src/frozen/inner.rs",
+            "src/frozen/pathed.rs",
+            "src/frozen/mod/x.rs",
+        ] {
+            let below = format!("crates/php_unit/{below}");
+            assert!(!own_file(&frozen, &unit, &below), "{below}");
+            assert!(frozen.covers(&unit, &below), "{below}");
+        }
+        assert!(!own_file(
+            &frozen,
+            &unit,
+            "crates/php_unit/src/frozen_too.rs"
+        ));
+        assert!(!own_file(&frozen, &unit, "crates/php_unit/src/lib.rs"));
+        let syntax = Crate::named("php_syntax");
+        assert!(!own_file(
+            &frozen,
+            &syntax,
+            "crates/php_syntax/src/frozen.rs"
+        ));
+        let heap = Home::parse("php_heap").unwrap();
+        assert!(!own_file(
+            &heap,
+            &Crate::named("php_heap"),
+            "crates/php_heap/src/lib.rs"
+        ));
     }
 
     #[test]

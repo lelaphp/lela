@@ -595,6 +595,57 @@ fn allow_in_tests_takes_only_denied_lints_clippy_has_an_in_tests_key_for() {
     assert!(Manifest::parse(&held).is_ok());
 }
 
+/// `allow` is a predicate alone, the homes of `unsafe`, and beside
+/// `check = "engine-state"` it qualifies the check (#4633, #4647): the rule
+/// carries one predicate, `check`, which `permit` does not judge at the
+/// call, and each entry is one module. A crate, a directory or a module of
+/// a crate under a directory is refused naming the rule and the entry, and
+/// so is `allow` beside any other check; an entry naming a module no crate
+/// has yet is the grammar's, since what it admits is the sensor's to read.
+#[test]
+fn allow_qualifies_the_engine_state_check_with_modules_and_no_other_check() {
+    let row = |predicate: &str| {
+        format!(
+            "{MINIMAL}[[rule]]\nid = \"x.sealed\"\nscope = [\"crates/*\", \"ext/*\"]\n{predicate}\ntext = \"t\"\n"
+        )
+    };
+    let sealed = |allow: &str| row(&format!("check = \"engine-state\"\nallow = [{allow}]"));
+    for allow in [
+        "\"php_unit::frozen\"",
+        "\"php_unit::frozen\", \"php_absent::not_yet::x\"",
+    ] {
+        let manifest = Manifest::parse(&sealed(allow)).unwrap();
+        let rule = manifest.rule("x.sealed").unwrap();
+        assert_eq!(rule.predicate.named(), ["check"], "{allow}");
+        assert!(!rule.predicate.describes_a_call(), "{allow}");
+    }
+    for entry in [
+        "php_unit",
+        "crates/php_unit/src/",
+        "ext/json::frozen",
+        "php_unit::",
+    ] {
+        let err = format!(
+            "{:#}",
+            Manifest::parse(&sealed(&format!("{entry:?}"))).unwrap_err()
+        );
+        assert!(
+            err.contains(&format!("rule \"x.sealed\" admits {entry:?}")),
+            "{entry}: {err}"
+        );
+    }
+    let other = row("check = \"witness-coverage\"\nallow = [\"php_unit::frozen\"]");
+    let err = format!("{:#}", Manifest::parse(&other).unwrap_err());
+    assert!(
+        err.contains("rule \"x.sealed\" has `allow` beside check = \"witness-coverage\""),
+        "{err}"
+    );
+    let homes = Manifest::parse(&row("allow = [\"php_heap\", \"ext/*/src/ffi/\"]")).unwrap();
+    let rule = homes.rule("x.sealed").unwrap();
+    assert_eq!(rule.predicate.named(), ["allow"]);
+    assert!(rule.predicate.describes_a_call());
+}
+
 /// A `[[crate]]` row serialises and parses back as itself, a row with no
 /// `lock` among them (#3091): the key is left out where it is empty, as
 /// the file writes such a row, since `OneOrMany::None` is no TOML value.

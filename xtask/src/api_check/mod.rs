@@ -53,7 +53,7 @@
 
 mod binding;
 mod bundle;
-mod engine_state;
+pub(crate) mod engine_state;
 mod inventory;
 pub(crate) mod lock;
 mod mirrors;

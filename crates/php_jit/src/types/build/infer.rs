@@ -10,14 +10,14 @@
 //! `zend_update_type_info` reads of the SSA; the inference is `php_ssa`'s,
 //! the one function that learns it for an op array's own SSA.
 
-use php_engine::tier::{ClassId, FuncRef, Sample};
+use php_engine::tier::{EngineFuncRef, RecordClass};
 use php_heap::ZvalType;
 use php_ssa::{Alias, Position, Range, Ssa, SsaOp, SsaVar, SsaVarInfo, Var, VarInfo};
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::Builder;
 use crate::analysis::Defined;
-use crate::record::Event;
+use crate::record::{Event, Sample};
 use crate::types::lattice::Types;
 use crate::types::opcodes::{slot_of, writes};
 use crate::types::{Frame, Operand};
@@ -57,7 +57,7 @@ pub(super) struct Reads<'r> {
 /// holds, and the ops.
 struct Tssa {
     vars: Vec<SsaVarInfo>,
-    info: Vec<VarInfo<ClassId>>,
+    info: Vec<VarInfo<RecordClass>>,
     ops: Vec<SsaOp>,
 }
 
@@ -67,7 +67,7 @@ impl Tssa {
         var: u32,
         alias: Alias,
         definition: Option<u32>,
-        info: VarInfo<ClassId>,
+        info: VarInfo<RecordClass>,
     ) -> SsaVar {
         let id = SsaVar(u32::try_from(self.vars.len()).unwrap_or(u32::MAX));
         self.vars.push(SsaVarInfo {
@@ -284,7 +284,7 @@ impl Builder<'_> {
         at: OplineIdx,
         reads: &Reads<'_>,
         next: Option<&Event>,
-    ) -> (Ssa<ClassId>, Vec<Position>) {
+    ) -> (Ssa<RecordClass>, Vec<Position>) {
         let func = self.frames[usize::from(frame.0)].func;
         let Reads { op, data, .. } = *reads;
         let written = writes(op, data);
@@ -412,13 +412,13 @@ impl Builder<'_> {
     /// ```
     fn copy_ranges(
         &self,
-        func: FuncRef,
+        func: EngineFuncRef,
         at: OplineIdx,
-        tssa: &mut Ssa<ClassId>,
+        tssa: &mut Ssa<RecordClass>,
         positions: &[Position],
         has_data: bool,
     ) {
-        let defs = |tssa: &Ssa<ClassId>| {
+        let defs = |tssa: &Ssa<RecordClass>| {
             let main = tssa.ops[0];
             let data = tssa.ops.get(1).filter(|_| has_data).map(|d| d.op1_def);
             [
@@ -470,7 +470,7 @@ impl Builder<'_> {
         &self,
         tssa: &mut Tssa,
         positions: &mut Vec<Position>,
-        func: FuncRef,
+        func: EngineFuncRef,
         next: Option<&Event>,
         array: u32,
     ) {

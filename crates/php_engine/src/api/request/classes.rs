@@ -11,7 +11,7 @@ use php_link::{FoldedHash, LinkedClass};
 use php_unit::decl::{Bare, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind, TypeName};
 use php_unit::{Opcode, PublishedUnit, TopLevel, Unit};
 
-use crate::api::call::{ClassNative, Function};
+use crate::api::call::{ClassNative, EngineMethod, Function};
 use crate::api::raising::{Level, Thrown, none_pending};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpString, Value, adopted};
 use crate::engine::Shared;
@@ -411,7 +411,7 @@ impl Request {
         let published = load.early.as_ref().and_then(|early| *early.get(at)?);
         let at = u32::try_from(at).ok()?;
         match published {
-            Some(class) => self.declare_published(unit, at, class, decl),
+            Some(class) => self.declare_published(unit, at, class.into(), decl),
             None => self.bind_declared(unit, at, None, None).ok()?,
         }
         Some(true)
@@ -941,7 +941,11 @@ impl Request {
     /// A published class's members published into the engine's arena
     /// (design §5.14): the function each method is and the numbers its
     /// members took. None where the arena has no room for them.
-    pub(super) fn place_published(&self, class: ClassId, members: Members) -> Option<Numbered> {
+    pub(super) fn place_published(
+        &self,
+        class: crate::arena::EpochClassId,
+        members: Members,
+    ) -> Option<Numbered> {
         let count = u32::try_from(members.rows.len()).ok()?;
         let numbers = self.arena.reserve_functions(count)?;
         let mut functions = members.functions(numbers.clone());
@@ -1061,9 +1065,10 @@ impl Request {
     /// }
     /// ```
     /// The native that serves method number `method` of a composed
-    /// class, where a native trait gave the class that method; none
-    /// for a method a program's code serves.
-    fn native_trait_method(&self, declared: &Declared, method: u32) -> Option<Function> {
+    /// class, where a native trait gave the class that method: one of the
+    /// engine's native methods, since only the engine's classes are
+    /// native; none for a method a program's code serves.
+    fn native_trait_method(&self, declared: &Declared, method: u32) -> Option<EngineMethod> {
         let composed = declared.composed.as_ref()?;
         let body = composed.bodies.get(usize::try_from(method).ok()?)?;
         if composed.decl.name.0.eq_ignore_ascii_case(&body.class.0) {
@@ -1071,7 +1076,12 @@ impl Request {
         }
         let holder = self.class_named((&body.class).into())?;
         self.native_class_at(holder)?;
-        self.method_function(holder, body.method)
+        let function = self.method_function(holder, body.method)?;
+        EngineMethod::of(
+            function,
+            self.shared.functions.len(),
+            self.shared.methods.len(),
+        )
     }
 
     fn method_body<'r>(

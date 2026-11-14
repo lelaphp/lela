@@ -192,6 +192,78 @@ impl<T> Column<T> {
     }
 }
 
+/// The identity of a class every request of one epoch shares, one of the
+/// engine's own or a row of the epoch's published arena, by which the
+/// epoch's arena and its tier state name a class (design §5.14,
+/// *Identities*, revisions 183 and 184). The arena mints one two ways and
+/// no other: where it numbers a row ([`Arena::reserve_class`]), so the
+/// rows beside a class, its methods and its natives, name it before its
+/// own row is filled; and by its one check of a class every request of
+/// the epoch shares ([`Arena::shared_class`]), which a
+/// [`UnitView`](crate::tier::UnitView) of that epoch calls. Beside them,
+/// and the one other way its constructor is reached, an
+/// [`EngineClassId`](crate::api::values::EngineClassId) widens to one by
+/// `From`, since the engine's own classes stand in every epoch; the
+/// engine's records the arena keeps are keyed by that widening
+/// ([`Arena::of_engine`]). So a
+/// request's own class has none, a publisher that forgets a filter is
+/// handed none to write into a row, and one stands only in its epoch's
+/// arena, beside a hold on it, or among the engine's own. Where a
+/// [`ClassId`] is asked for, this is one, by `From`.
+///
+/// What compiled code compares a class against is one of these
+/// ([`crate::tier::class_number`]); a request's number is not:
+///
+/// ```compile_fail,E0308
+/// fn baked(class: php_engine::tier::ClassId) -> u32 {
+///     php_engine::tier::class_number(class)
+/// }
+/// # fn main() {}
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
+pub struct EpochClassId(u32);
+
+impl From<crate::api::values::EngineClassId> for EpochClassId {
+    fn from(class: crate::api::values::EngineClassId) -> EpochClassId {
+        EpochClassId(ClassId::from(class).0)
+    }
+}
+
+impl From<EpochClassId> for ClassId {
+    fn from(class: EpochClassId) -> ClassId {
+        ClassId(class.0)
+    }
+}
+
+impl PartialEq<ClassId> for EpochClassId {
+    fn eq(&self, other: &ClassId) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl PartialEq<EpochClassId> for ClassId {
+    fn eq(&self, other: &EpochClassId) -> bool {
+        self.0 == other.0
+    }
+}
+
+/// The identity of a function or method every request of one epoch
+/// numbers alike, by which the epoch's tier state names one: the number
+/// every request of the epoch calls it by. Minted only by the arena's
+/// one check of a function ([`Arena::shared_function`]), which a
+/// [`UnitView`](crate::tier::UnitView) of that epoch calls, beside the
+/// class's ([`EpochClassId`]): a native or a native method, which every
+/// request numbers alike, or a user function or method whose row the
+/// epoch's arena holds. So a request's own function has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
+pub struct EpochFunction(u32);
+
+impl From<EpochFunction> for Function {
+    fn from(function: EpochFunction) -> Function {
+        Function(function.0)
+    }
+}
+
 /// The arena of one epoch: the classes, the user functions and methods,
 /// and the natives a class lays under its own scope published past the
 /// engine's own and the preload's, each numbered past what is numbered
@@ -203,7 +275,7 @@ pub(crate) struct Arena {
     below: Option<Base>,
     classes: Column<Declared>,
     functions: Column<UserFunction>,
-    class_natives: Column<(ClassId, ClassNative)>,
+    class_natives: Column<(EpochClassId, ClassNative)>,
     /// The classes below, the engine's and the preload's, which the
     /// arena's are numbered past.
     first_class: u32,
@@ -225,9 +297,10 @@ pub(crate) struct Arena {
     /// ([`crate::tier::published::Landings`]).
     landings: crate::tier::published::Landings,
     /// The engine's own classes' linked records, which every epoch
-    /// shares, so what holds an epoch reads a class of the engine's as it
-    /// reads one the epoch published ([`Arena::linked_class`]).
-    natives: Arc<[LinkedClass<ClassId>]>,
+    /// shares, keyed by [`EpochClassId`] once at the engine's start
+    /// ([`Arena::of_engine`]), so what holds an epoch reads a class of the
+    /// engine's ([`Arena::native`]) beside one the epoch published.
+    natives: Arc<[LinkedClass<EpochClassId>]>,
     /// The compiled tier's value for the epoch, its trace table
     /// (`jit-design.md` §4.5): made by the tier the first time it asks,
     /// read by every request of the epoch with nothing taken, and
@@ -282,16 +355,35 @@ impl Arena {
         )
     }
 
-    /// An empty arena over an engine whose classes linked to `natives`,
+    /// An empty arena over an engine whose classes linked to `records`,
     /// past them and past `functions` natives and native methods,
-    /// holding `files` and keeping `interned`.
+    /// holding `files` and keeping `interned`. Each record is keyed by
+    /// [`EpochClassId`] here, once: every class an engine's record names
+    /// is one of the engine's own, numbered below `records.len()`, whose
+    /// [`EngineClassId`](crate::api::values::EngineClassId) widens to it
+    /// by `From`. A record that named another would be keyed to none and
+    /// is held empty, as the engine holds a record its link refused.
     pub(crate) fn of_engine(
-        natives: Arc<[LinkedClass<ClassId>]>,
+        records: &[LinkedClass<ClassId>],
         functions: usize,
         files: crate::unit_cache::Files,
         interned: Interned,
     ) -> Arena {
-        let first_class = u32::try_from(natives.len()).unwrap_or(ClassId::LOCAL);
+        let first_class = u32::try_from(records.len()).unwrap_or(ClassId::LOCAL);
+        // Below `first_class` a class is one of the engine's own, which
+        // widens to the epoch's identity as every engine class does.
+        let own = |class: ClassId| {
+            class
+                .published_number()
+                .filter(|number| *number < first_class)?;
+            let engine = crate::api::values::EngineClassId::engine_own(class);
+            Some(EpochClassId::from(engine))
+        };
+        let mut natives: Vec<LinkedClass<EpochClassId>> = (records.iter())
+            .map(|record| record.try_map(own).unwrap_or_default())
+            .collect();
+        LinkedClass::lay(&mut natives);
+        let natives = Arc::from(natives);
         let first_function = u32::try_from(functions).unwrap_or(Function::CLASS_NATIVE);
         Arena::numbered(
             None,
@@ -308,7 +400,7 @@ impl Arena {
         below: Option<Base>,
         first: [u32; 3],
         files: crate::unit_cache::Files,
-        natives: Arc<[LinkedClass<ClassId>]>,
+        natives: Arc<[LinkedClass<EpochClassId>]>,
         interned: Interned,
     ) -> Arena {
         let [first_class, first_function, first_class_native] = first;
@@ -385,14 +477,24 @@ impl Arena {
         base.classes.get(number.checked_sub(base.first_class)?)
     }
 
-    /// The linked record of a class every request shares: one of the
-    /// engine's, or one the epoch published; none for a request's.
-    pub(crate) fn linked_class(&self, class: ClassId) -> Option<&LinkedClass<ClassId>> {
-        let number = usize::try_from(class.published_number()?).ok()?;
-        match self.natives.get(number) {
-            Some(native) => Some(native),
-            None => self.class(class)?.record(),
-        }
+    /// The arena's one check of a class every request of the epoch
+    /// shares, and the identity it mints for one: where `class` is one of
+    /// the engine's own, or a row this arena or the preload's below it
+    /// holds, filled with its record. None for a request's own class,
+    /// whatever row of the request's its number names, and for a number
+    /// reserved and not filled, which no request was handed.
+    pub(crate) fn shared_class(&self, class: ClassId) -> Option<EpochClassId> {
+        let number = class.published_number()?;
+        let native = usize::try_from(number).is_ok_and(|at| at < self.natives.len());
+        let published = || self.class(class).is_some_and(|row| row.record().is_some());
+        (native || published()).then_some(EpochClassId(number))
+    }
+
+    /// The linked record of the engine's own class `class`, keyed by
+    /// [`EpochClassId`]; none for a row the epoch published, whose record
+    /// its row holds ([`Arena::class`]).
+    pub(crate) fn native(&self, class: EpochClassId) -> Option<&LinkedClass<EpochClassId>> {
+        self.natives.get(usize::try_from(class.0).ok()?)
     }
 
     /// The held op array at engine map-pointer offset `offset`, this
@@ -431,22 +533,21 @@ impl Arena {
         base.functions.get(number.checked_sub(base.first_function)?)
     }
 
-    /// Whether every request of the epoch calls `function` by its number:
-    /// one of the engine's natives or native methods, numbered below every
-    /// arena's, or a published user function this arena or the preload's
-    /// below it holds; never a request's own.
-    pub(crate) fn shares_function(&self, function: Function) -> bool {
-        let Some(number) = function.published_number() else {
-            return false;
-        };
+    /// The arena's one check of a function every request of the epoch
+    /// calls by its number, and the identity it mints for one: one of the
+    /// engine's natives or native methods, numbered below every arena's,
+    /// or a published user function this arena or the preload's below it
+    /// holds; none for a request's own.
+    pub(crate) fn shared_function(&self, function: Function) -> Option<EpochFunction> {
+        let number = function.published_number()?;
         let natives = self
             .base()
             .map_or(self.first_function, |base| base.first_function);
-        number < natives || self.function(function).is_some()
+        (number < natives || self.function(function).is_some()).then_some(EpochFunction(number))
     }
 
     /// The published class native `function` names, and its class.
-    pub(crate) fn class_native(&self, function: Function) -> Option<(ClassId, ClassNative)> {
+    pub(crate) fn class_native(&self, function: Function) -> Option<(EpochClassId, ClassNative)> {
         let at = function.published_class_native_at()?;
         if let Some(own) = at.checked_sub(self.first_class_native) {
             return self.class_natives.get(own).copied();
@@ -458,10 +559,16 @@ impl Arena {
         row.copied()
     }
 
-    /// The number of a class to publish, its row to [`Arena::publish_class`].
-    pub(crate) fn reserve_class(&self) -> Option<ClassId> {
+    /// The identity of a class to publish, minted where the arena numbers
+    /// its row: the reservation the rows beside it, its methods and its
+    /// natives, name it by before [`Arena::publish_class`] fills its own,
+    /// which [`Arena::shared_class`] finds only once filled.
+    pub(crate) fn reserve_class(&self) -> Option<EpochClassId> {
         let at = self.classes.reserve(1)?;
-        Some(ClassId(self.first_class.checked_add(at)?))
+        let number = self.first_class.checked_add(at)?;
+        ClassId(number)
+            .is_published()
+            .then_some(EpochClassId(number))
     }
 
     /// The numbers of `count` user functions to publish, in order.
@@ -479,11 +586,8 @@ impl Arena {
 
     /// The row of a reserved class, written once; `false` where the
     /// number was not reserved or its row was written.
-    pub(crate) fn publish_class(&self, class: ClassId, row: Declared) -> bool {
-        let Some(at) = class
-            .published_number()
-            .and_then(|number| number.checked_sub(self.first_class))
-        else {
+    pub(crate) fn publish_class(&self, class: EpochClassId, row: Declared) -> bool {
+        let Some(at) = class.0.checked_sub(self.first_class) else {
             return false;
         };
         self.classes.fill(at, row).is_ok()
@@ -504,7 +608,7 @@ impl Arena {
     pub(crate) fn publish_class_native(
         &self,
         function: Function,
-        row: (ClassId, ClassNative),
+        row: (EpochClassId, ClassNative),
     ) -> bool {
         let Some(at) = function
             .published_class_native_at()
@@ -679,7 +783,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{Arena, CHUNK, Column, Epochs, Laid, SPAN, SPANS};
-    use crate::api::call::ClassNative;
+    use crate::api::call::{ClassNative, Function};
     use crate::api::values::ClassId;
     use crate::enums::EnumMethod;
 
@@ -690,38 +794,88 @@ mod tests {
     fn the_preloads_rows_keep_their_numbers_across_restarts() {
         let epochs = Epochs::of(Arena::past(10, 20, crate::unit_cache::Files::new(16)));
         let preload = epochs.enter(|_| false);
-        assert_eq!(preload.reserve_class(), Some(ClassId(10)));
+        let class = preload.reserve_class();
+        assert_eq!(class.map(ClassId::from), Some(ClassId(10)));
         let method = preload.reserve_class_native();
-        let row = (ClassId(10), ClassNative::Enum(EnumMethod::Cases));
-        assert!(method.is_some_and(|method| preload.publish_class_native(method, row)));
+        let row = class.map(|class| (class, ClassNative::Enum(EnumMethod::Cases)));
+        let published = method.zip(row);
+        assert!(published.is_some_and(|(method, row)| preload.publish_class_native(method, row)));
         epochs.lay_base(&preload, Arc::from([]), Laid::COLD);
         let first = epochs.enter(|_| false);
+        let class = first.reserve_class();
         assert_eq!(
-            first.reserve_class(),
+            class.map(ClassId::from),
             Some(ClassId(11)),
             "numbered past the preload's"
         );
         let own = first.reserve_class_native();
-        let mine = (ClassId(11), ClassNative::Enum(EnumMethod::From));
-        assert!(own.is_some_and(|own| first.publish_class_native(own, mine)));
+        let mine = class.map(|class| (class, ClassNative::Enum(EnumMethod::From)));
+        assert!((own.zip(mine)).is_some_and(|(own, mine)| first.publish_class_native(own, mine)));
         assert_ne!(own, method);
         let second = epochs.enter(|_| true);
         assert!(!Arc::ptr_eq(&first, &second), "a new epoch");
         assert_eq!(second.counts(), [0, 0, 0]);
         for epoch in [&first, &second] {
-            assert_eq!(
-                method.and_then(|method| epoch.class_native(method)),
-                Some(row)
-            );
+            assert!(row.is_some());
+            assert_eq!(method.and_then(|method| epoch.class_native(method)), row);
         }
-        assert_eq!(own.and_then(|own| first.class_native(own)), Some(mine));
+        assert!(mine.is_some());
+        assert_eq!(own.and_then(|own| first.class_native(own)), mine);
         assert_eq!(
             own.and_then(|own| second.class_native(own)),
             None,
             "not the new epoch's"
         );
-        assert_eq!(second.reserve_class(), Some(ClassId(11)));
+        let again = second.reserve_class().map(ClassId::from);
+        assert_eq!(again, Some(ClassId(11)));
         assert!(Arc::ptr_eq(&second, &epochs.enter(|_| false)));
+    }
+
+    /// The arena's one check mints an identity for a class every request
+    /// of the epoch shares and for nothing else, and its check of a
+    /// function a function's like for a native and for no request's own: one of the engine's own,
+    /// whose record the arena keeps keyed by the identity, and none for a
+    /// request's own class, which names a row of the request's whatever
+    /// its number, for a class past the engine's that no row holds, and
+    /// for a number reserved and not filled, which a publisher hands no
+    /// request.
+    #[test]
+    fn the_one_check_mints_no_identity_for_a_requests_own_class() {
+        use php_link::LinkedClass;
+
+        let record: LinkedClass<ClassId> = LinkedClass {
+            interfaces: vec![ClassId(1)].into(),
+            ..LinkedClass::default()
+        };
+        let records = [LinkedClass::default(), record];
+        let files = crate::unit_cache::Files::new(16);
+        let arena = Arena::of_engine(&records, 3, files, super::Interned::default());
+        let engine = arena.shared_class(ClassId(1));
+        assert_eq!(
+            engine.map(ClassId::from),
+            Some(ClassId(1)),
+            "the engine's own"
+        );
+        let native = engine.and_then(|class| arena.native(class));
+        assert!(native.is_some_and(|native| native.interfaces.iter().eq(&engine)));
+        for own in [0, 1, 2] {
+            let own = ClassId::local(own);
+            assert!(
+                own.is_some_and(|own| arena.shared_class(own).is_none()),
+                "{own:?}"
+            );
+        }
+        assert_eq!(arena.shared_class(ClassId(2)), None, "no row holds it");
+        let reserved = arena.reserve_class().map(ClassId::from);
+        assert_eq!(reserved, Some(ClassId(2)));
+        assert!(reserved.is_some_and(|class| arena.shared_class(class).is_none()));
+        // A function's like, by its own check: a native, never a
+        // request's own function or a number no row holds.
+        let native = arena.shared_function(Function(2)).map(Function::from);
+        assert_eq!(native, Some(Function(2)), "the engine's native");
+        let own = Function::local(0);
+        assert!(own.is_some_and(|own| arena.shared_function(own).is_none()));
+        assert_eq!(arena.shared_function(Function(3)), None, "no row holds it");
     }
 
     /// A restart after a preloaded op array's trace compiled (#3564):

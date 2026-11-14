@@ -123,7 +123,31 @@ pub(crate) enum ClassNative {
     /// row, the method at `at` among the composed class's methods, which
     /// carries the alias's name (`new_fn->common.function_name = name`)
     /// and the alias's visibility (`zend_traits_copy_functions`).
-    Trait { native: Function, at: u32 },
+    Trait { native: EngineMethod, at: u32 },
+}
+
+/// One of the engine's own native methods, by the number every request
+/// calls it by: numbered past the engine's native functions and below
+/// every published and every request's function. Only the engine's
+/// classes are native, so a native trait's method a class copies
+/// ([`ClassNative::Trait`]) is always one, and names none of a request's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EngineMethod(u32);
+
+impl EngineMethod {
+    /// `function`, where it is a native method of an engine of
+    /// `functions` native functions and `methods` native methods.
+    pub(crate) fn of(function: Function, functions: usize, methods: usize) -> Option<EngineMethod> {
+        let at = usize::try_from(function.0).ok()?;
+        let end = functions.checked_add(methods)?;
+        (functions <= at && at < end).then_some(EngineMethod(function.0))
+    }
+}
+
+impl From<EngineMethod> for Function {
+    fn from(method: EngineMethod) -> Function {
+        Function(method.0)
+    }
 }
 
 /// What a [`Callable`] resolved to, `zend_fcall_info_cache`'s three

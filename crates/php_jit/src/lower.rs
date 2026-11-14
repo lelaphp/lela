@@ -78,8 +78,8 @@ use cranelift_codegen::isa::{self, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, Final, MachSrcLoc};
 use php_engine::api::abi::EngineState;
-use php_engine::tier::{FuncRef, LandingIndex, MapPtrRaw, PlainCall};
-use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
+use php_engine::tier::{EngineFuncRef, LandingIndex, MapPtrRaw, PlainCall};
+use php_unit::{OperandKind, OplineIdx};
 
 use crate::policy::{Mode, Policy};
 use crate::record::{Began, Stop};
@@ -119,7 +119,7 @@ pub(crate) struct Compiled {
     pub(crate) stub: Option<OplineIdx>,
     /// The op array and opline the trace's first recorded opline stands
     /// at, where a frame entering it stands.
-    pub(crate) opens: Option<(FuncRef, OplineIdx)>,
+    pub(crate) opens: Option<(EngineFuncRef, OplineIdx)>,
     /// Whether its code reads where the frame stands as it enters, which
     /// `enter` hands it as a kernel reports it: for php's
     /// IP guard of a side trace whose parent's exit named no opline
@@ -156,7 +156,7 @@ pub(crate) struct Compiled {
     /// push (`Z/ext/opcache/jit/zend_jit_ir.c:8840-8850`): every callee
     /// but one of a recursive call, which runs in a frame of its own op
     /// array and so finds its cache laid.
-    pub(crate) callee_caches: Box<[FuncRef]>,
+    pub(crate) callee_caches: Box<[EngineFuncRef]>,
 }
 
 /// The bytes compiled code reads and writes under `jit.mode=exit-fuzz`
@@ -195,12 +195,9 @@ impl Fuzzed {
 }
 
 /// The engine's number of the op array `f` names, which compiled code,
-/// the kernels and a `Stood` name it by; none for a request's own.
-pub(crate) fn engine_offset(f: FuncRef) -> Option<u32> {
-    match f.offset() {
-        MapPtrOffset::Engine(n) => Some(n),
-        MapPtrOffset::Request(_) => None,
-    }
+/// the kernels and a `Stood` name it by.
+pub(crate) fn engine_offset(f: EngineFuncRef) -> u32 {
+    f.offset()
 }
 
 /// Where a frame stands, as a [`Stood`] holds it: its op array by the
@@ -375,7 +372,7 @@ pub(crate) struct Linked {
 /// nothing in the code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) struct Mark {
-    pub(crate) func: FuncRef,
+    pub(crate) func: EngineFuncRef,
     pub(crate) opline: OplineIdx,
     pub(crate) offset: u32,
 }
@@ -558,9 +555,9 @@ fn stood_at_entry(ir: &TraceIr) -> bool {
 /// code's copies of their headers are read from, and the op arrays they
 /// enter but the frame's own, whose caches `enter` asks are laid
 /// ([`Compiled::callee_caches`]).
-fn in_place(ir: &TraceIr) -> (Box<[PlainCall]>, Box<[FuncRef]>) {
+fn in_place(ir: &TraceIr) -> (Box<[PlainCall]>, Box<[EngineFuncRef]>) {
     let mut calls: Vec<PlainCall> = Vec::new();
-    let mut caches: Vec<FuncRef> = Vec::new();
+    let mut caches: Vec<EngineFuncRef> = Vec::new();
     for op in &ir.ops {
         let Op::InitCall {
             frame,
@@ -588,7 +585,7 @@ fn in_place(ir: &TraceIr) -> (Box<[PlainCall]>, Box<[FuncRef]>) {
 }
 
 /// Where the trace's first recorded opline stands.
-fn opens_at(ir: &TraceIr) -> Option<(FuncRef, OplineIdx)> {
+fn opens_at(ir: &TraceIr) -> Option<(EngineFuncRef, OplineIdx)> {
     ir.ops.iter().find_map(|op| match op {
         Op::Line(line) => {
             let frame = ir.frames.get(usize::from(line.frame.0))?;
@@ -897,7 +894,7 @@ impl Symbols {
 /// ([`Kernel::Step`], [`Kernel::PushCall`]): the room of the frame that
 /// runs, php's `EX`; the room of the call under way in it, `EX(call)`,
 /// null where none is; the op array it serves, by the engine offset that
-/// numbers it (`FuncRef`); the opline it goes on at; and the bytes the
+/// numbers it (`EngineFuncRef`); the opline it goes on at; and the bytes the
 /// stack's top page has left for frames, php's `EG(vm_stack_end) -
 /// EG(vm_stack_top)`. A local of compiled code the kernel writes, by
 /// which compiled code follows the frame chain: the call it enters, the

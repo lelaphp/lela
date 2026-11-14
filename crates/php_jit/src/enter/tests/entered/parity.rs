@@ -13,8 +13,8 @@
 //! innermost room.
 
 use php_engine::tier::{
-    self, Extension, ExtensionBuilder, FRAME, Flow, FrameRef, FuncRef, PlainCall, Request, Site,
-    Tier,
+    self, EngineFuncRef, Extension, ExtensionBuilder, FRAME, Flow, FrameRef, FuncRef, PlainCall,
+    Request, Site, Tier,
 };
 use php_heap::Zval;
 use php_unit::{MapPtrOffset, Opcode, OperandKind, OplineIdx};
@@ -134,7 +134,7 @@ struct Parity {
 fn named(req: &Request, frame: FrameRef, opcode: Opcode) -> Option<(u32, Option<u32>)> {
     let f = func(req, frame)?;
     let mut view = tier::UnitView::new(req);
-    view.hold(req, f).then_some(())?;
+    let f = view.hold(req, f)?;
     let code = view.op_array(f)?;
     let (at, op) = (code.oplines.iter().enumerate()).find(|(_, op)| op.opcode == opcode)?;
     let out = (op.out_type != OperandKind::Unused).then_some(op.out);
@@ -142,8 +142,8 @@ fn named(req: &Request, frame: FrameRef, opcode: Opcode) -> Option<(u32, Option<
 }
 
 /// The engine offset of the op array `frame` serves.
-fn func(req: &Request, frame: FrameRef) -> Option<FuncRef> {
-    tier::func(req, frame).filter(|f| matches!(f.offset(), MapPtrOffset::Engine(_)))
+fn func(req: &Request, frame: FrameRef) -> Option<EngineFuncRef> {
+    tier::func(req, frame).and_then(EngineFuncRef::of)
 }
 
 /// An inline line of `frame` at `opline`.
@@ -170,9 +170,13 @@ fn line(frame: Frame, opline: u32, opcode: Opcode, op1: Operand, imm: Imm) -> Li
 /// The trace of `ops` over `frames`, ending through its one exit, which
 /// lands `frame` at `opline`.
 fn trace(frames: Vec<FrameInfo>, ops: Vec<Op>, (frame, opline): (Frame, u32)) -> TraceIr {
-    let root = frames
-        .first()
-        .map_or(FuncRef::at(MapPtrOffset::Engine(0)), |f| f.func);
+    let root = frames.first().map_or_else(
+        || {
+            let first = FuncRef::at(MapPtrOffset::Engine(0));
+            EngineFuncRef::of(first).expect("an engine offset's op array")
+        },
+        |f| f.func,
+    );
     TraceIr {
         entry: Entry {
             start: Start::Enter,
@@ -315,7 +319,7 @@ fn by_kernel(req: &mut Request, f: FrameRef) -> Option<Reads> {
 }
 
 /// The frames of `f` and of `g` as a trace of `f`'s call holds them.
-fn frames(f: FuncRef, g: FuncRef) -> Vec<FrameInfo> {
+fn frames(f: EngineFuncRef, g: EngineFuncRef) -> Vec<FrameInfo> {
     vec![
         FrameInfo {
             func: f,
@@ -484,7 +488,7 @@ fn make_over_handled_push(req: &mut Request, f: FrameRef) -> Option<Read> {
 fn returning(req: &Request, g: FrameRef, ret: u32) -> Option<(Operand, Returned)> {
     let f = func(req, g)?;
     let mut view = tier::UnitView::new(req);
-    view.hold(req, f).then_some(())?;
+    let f = view.hold(req, f)?;
     let code = view.op_array(f)?;
     let op = code.oplines.get(ret as usize)?;
     let literal = code.literals.get(op.op1 as usize)?;

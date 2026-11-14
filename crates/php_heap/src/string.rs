@@ -35,10 +35,11 @@
 
 use std::alloc::Layout;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
-use crate::array::{Arr, Key, free_persistent_array, persistent_array};
+use crate::array::{Arr, Key, free_persistent_array, persistent_array, publish_persistent_array};
 use crate::bump::Bump;
 use crate::gc::{self, Counted, Refcounted};
 use crate::hooks::Fatal;
@@ -75,10 +76,17 @@ const _: () = assert!(Str::LEN_AT == 16 && Str::VAL_AT == 24);
 /// never refcounted and never freed by a release.
 pub(crate) const INTERNED: u32 = gc::IMMUTABLE;
 
-/// What a string outside every request's heap carries beside it:
-/// `IS_STR_PERSISTENT`, allocated by `pemalloc`, and `IS_STR_PERMANENT`,
-/// which relives the request boundary.
-const PERMANENT: u32 = INTERNED | gc::PERSISTENT | gc::PERMANENT;
+/// What a string a [`Pending`] set lays carries beside it:
+/// `IS_STR_PERSISTENT`, allocated by `pemalloc`, and not yet
+/// `IS_STR_PERMANENT`, which [`Strings::publish`] sets as the set enters
+/// the table (#4656).
+const PENDING: u32 = INTERNED | gc::PERSISTENT;
+
+/// What a string of a table carries: [`PENDING`]'s bits and
+/// `IS_STR_PERMANENT`, which relives the request boundary and here says
+/// the string is published, laid with it by the frozen table and a
+/// [`Strings`]' bump and set on a set's as the set is published.
+const PERMANENT: u32 = PENDING | gc::PERMANENT;
 
 /// `IS_STR_CLASS_NAME_MAP_PTR` (`Z/Zend/zend_types.h:860`), php's
 /// `GC_PROTECTED` on a string: an interned string that names a class,
@@ -732,6 +740,27 @@ impl Str {
         self.header().gc.flags() & gc::PERSISTENT != 0
     }
 
+    /// `IS_STR_PERMANENT` beside `IS_STR_INTERNED` and
+    /// `IS_STR_PERSISTENT`, the three bits [`PERMANENT`] a published
+    /// string of a table carries: the frozen table's and a [`Strings`]'
+    /// bump's, laid with them ([`laid`]), and a [`Pending`] set's, laid
+    /// without the last ([`persistent`]) until [`Strings::publish`]
+    /// sets it ([`Str::publish`]). A request's heap lays its strings
+    /// with none of them ([`crate::Heap::string`]), and only `publish`
+    /// sets one on a string after it is laid, so no string of a request,
+    /// and none of a set not yet published, carries them.
+    pub(crate) fn is_permanent(self) -> bool {
+        self.header().gc.flags() & PERMANENT == PERMANENT
+    }
+
+    /// `IS_STR_PERMANENT` set on a string a [`Pending`] set laid, as
+    /// [`Strings::publish`] takes the set into the table: written while
+    /// the compile that made the set alone names the string, before the
+    /// table or another thread can.
+    fn publish(self) {
+        self.header().gc.add_flags(gc::PERMANENT);
+    }
+
     /// `ZSTR_IS_VALID_UTF8`: the bytes were checked once and are valid
     /// UTF-8. A string that was written into forgets this with its hash.
     #[must_use]
@@ -1035,8 +1064,10 @@ pub trait Intern {
     /// A constant array of a unit in this home (design §5.3): the
     /// entries in this order, the keys strings this home made or
     /// integers. An engine's is php's `IS_ARRAY_IMMUTABLE`, no owner
-    /// counted and living as long as the home does; a request's compile
-    /// makes one its unit owns, laid at the `size` php's compile inits it
+    /// counted and living as long as the home does, and refuses a key or
+    /// an element that is neither a table's nor this home's own, as
+    /// [`Strings`]'s and [`Pending`]'s do; a request's compile makes one
+    /// its unit owns, laid at the `size` php's compile inits it
     /// with (`array_init_size`, `zend_hash_init`), which counts what was
     /// written and not what stands, and which a home that persists the
     /// array has no use for. What a `switch` or a `match` jump table is
@@ -1196,11 +1227,20 @@ impl Strings {
     /// as it enters, and stands in the table in place of a string of its
     /// bytes that holds none, so the next name of those bytes finds the
     /// cache; the string it replaced stays for whatever names it.
+    ///
+    /// Each string and constant array of the set, a shadow among them,
+    /// takes `IS_STR_PERMANENT`'s bit as it enters, the bit that says a
+    /// value is the table's ([`crate::FrozenZval::of`], #4656): laid
+    /// without it, a set's value is refused until it is published.
     pub fn publish(&mut self, mut pending: Pending) {
         for PendingString { s, class_cache, .. } in pending.take_strings() {
             let hash = hash_func(s.bytes());
             // `s` is the compile's alone until it enters the table below,
-            // so its header is written before anyone reads it.
+            // so its header is written before anyone reads it: the set
+            // is moved in, its compile holds `&mut self`, and the unit
+            // that names `s` is handed to other threads only after this.
+            // A string it replaces is the table's already and not written.
+            s.publish();
             if let Some(cache) = class_cache {
                 s.alloc_ce_cache(cache);
             }
@@ -1213,7 +1253,10 @@ impl Strings {
                 Some(_) => self.shadows.push(s),
             }
         }
-        (self.arrays).extend(pending.arrays.drain(..).map(|(a, _)| a));
+        for (_, (a, _)) in pending.arrays.drain() {
+            publish_persistent_array(a);
+            self.arrays.push(a);
+        }
     }
 
     /// `zend_alloc_ce_cache(name)` (`Z/Zend/zend.c:2151`) over a name a
@@ -1320,9 +1363,17 @@ impl Intern for Strings {
 
     /// `zend_persist_zval` over a constant array under opcache: one
     /// array on the system allocator, immutable, shared by every request
-    /// that serves the unit, freed with the engine.
+    /// that serves the unit, freed with the engine, and the table's from
+    /// its lay, so it carries `IS_STR_PERMANENT`'s bit from there
+    /// ([`publish_persistent_array`]). Refused, and nothing laid, where a
+    /// key or an element is one [`crate::FrozenZval::of`] refuses
+    /// ([`held_by_a_table`]): a request's string or array, and a set's
+    /// not yet published, which the table would otherwise name past the
+    /// request or the set.
     fn constant_array(&mut self, entries: &[(Key, Zval)], _: usize) -> Result<Arr, Fatal> {
+        held_by_a_table(entries, |_| false)?;
         let a = persistent_array(entries)?;
+        publish_persistent_array(a);
         self.arrays.push(a);
         Ok(a)
     }
@@ -1351,6 +1402,42 @@ impl Drop for Strings {
     }
 }
 
+/// What a constant array a table keeps answers where it is handed a value
+/// no table holds ([`held_by_a_table`]). The engine's homes hand none: a
+/// unit bound for the table is compiled with none of the request's
+/// constants and holds no value it counts (`Intern::hold`), so its
+/// values are what the table and its set made.
+const HANDED_A_REQUESTS: &str =
+    "InternalError: a constant array of the engine's table was handed a value no table holds";
+
+/// `entries`, each key and element of which a constant array a table
+/// keeps may hold, and the fatal [`HANDED_A_REQUESTS`] where one is not:
+/// an integer key, a value [`crate::FrozenZval::of`] admits as it stands
+/// ([`crate::FrozenZval::admits_standing`]), or one `own` answers for, a
+/// string or an array of the set that lays the array and is published
+/// with it.
+///
+/// A constant array admitted as it stands is recognised and not read
+/// again: its bit is set only on [`Arr::empty`] and by
+/// [`publish_persistent_array`], over an array [`Strings`] laid or one a
+/// set laid that [`Strings::publish`] takes in, and each of those was
+/// held to this as it was laid. So an array of arrays costs one step an
+/// entry, however deep, and the verdict on each entry is the one `of`
+/// would give once the set is published.
+fn held_by_a_table(entries: &[(Key, Zval)], own: impl Fn(Zval) -> bool) -> Result<(), Fatal> {
+    let held = |z: Zval| crate::FrozenZval::admits_standing(z) || own(z);
+    for (key, value) in entries {
+        let key = match *key {
+            Key::Long(_) => true,
+            Key::Str(s) => held(Zval::string(s)),
+        };
+        if !key || !held(*value) {
+            return Err(Fatal::error(HANDED_A_REQUESTS));
+        }
+    }
+    Ok(())
+}
+
 /// The strings and constant arrays one compile bound for an engine's
 /// table has made and not given back, apart from the table until the
 /// unit they are for is held ([`Strings::publish`]): opcache's miss
@@ -1358,7 +1445,9 @@ impl Drop for Strings {
 /// `zend_accel_store_interned_string` persists the unit that holds it,
 /// so a fold's intermediate, freed as the fold goes on, and what a
 /// refused compile made never reach it. Each string is the system
-/// allocator's, laid down as the table would lay it, and given back
+/// allocator's, laid down as the table would lay it but for
+/// `IS_STR_PERMANENT`, which it and each constant array take only as the
+/// set is published (#4656), and given back
 /// once its last claim is and nothing kept it, or with the set where
 /// it is dropped unpublished.
 #[derive(Default)]
@@ -1366,8 +1455,9 @@ pub struct Pending {
     /// The strings made, one open-addressed table as the engine's is
     /// ([`Permanent`]), each hashed as it is made.
     slots: Slots<PendingString>,
-    /// Each constant array beside the claims on it that stand.
-    arrays: Vec<(Arr, u32)>,
+    /// Each constant array beside the claims on it that stand, found by
+    /// its address, as an array of arrays asks after each it holds.
+    arrays: HashMap<NonNull<u8>, (Arr, u32)>,
     /// How many strings the set has made, the next one's place.
     made: u64,
 }
@@ -1438,6 +1528,17 @@ impl Pending {
         self.slots.position(hash, |held| held.s.is_same(s))
     }
 
+    /// Whether `z` is a string or a constant array this set made and
+    /// still holds, a string found by its hash and an array by its
+    /// address.
+    fn made_here(&self, z: Zval) -> bool {
+        if let Some(s) = z.as_str() {
+            return self.slot_of(s).is_some();
+        }
+        z.as_arr()
+            .is_some_and(|a| self.arrays.contains_key(&a.address()))
+    }
+
     /// One claim on `z` given back ([`Intern::give_back`]): a string
     /// freed where no other ask stands on it, and an array with each
     /// string and array it holds given back in turn, the one ask on each
@@ -1445,17 +1546,16 @@ impl Pending {
     /// make.
     pub fn give_back(&mut self, z: Zval) {
         let Some(s) = z.as_str() else {
-            let Some(at) =
-                (z.as_arr()).and_then(|a| self.arrays.iter().position(|(held, _)| held.is_same(a)))
-            else {
+            let Some(at) = z.as_arr().map(Arr::address) else {
                 return;
             };
-            let asks = self.arrays.get_mut(at).map(|(_, asks)| {
+            let asks = self.arrays.get_mut(&at).map(|(_, asks)| {
                 *asks = asks.saturating_sub(1);
                 *asks
             });
-            if asks == Some(0) {
-                let (a, _) = self.arrays.swap_remove(at);
+            if asks == Some(0)
+                && let Some((a, _)) = self.arrays.remove(&at)
+            {
                 for (key, value) in &a {
                     if let Key::Str(key) = key {
                         self.give_back(Zval::string(key));
@@ -1480,14 +1580,23 @@ impl Pending {
     }
 
     /// A constant array of the unit (design §5.3), laid as
-    /// [`Strings`] lays one and the table's once the unit is published,
+    /// [`Strings`] lays one but without `IS_STR_PERMANENT`'s bit, and the
+    /// table's, the bit set, once the unit is published,
     /// with one claim on it: one ask on each string and array this set
     /// made that it holds is the array's from here, as php's array takes
     /// over the zvals `zend_try_ct_eval_array` folded.
+    ///
+    /// Refused, and nothing laid, where a key or an element is neither
+    /// one [`crate::FrozenZval::of`] admits nor a string or constant
+    /// array this set made ([`held_by_a_table`]): a request's, or
+    /// another set's. A value of this set is refused by `of` until the
+    /// set is published, and it is published with the array, so it is
+    /// admitted here as the set's own.
     pub fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+        held_by_a_table(entries, |z| self.made_here(z))?;
         let a = persistent_array(entries)?;
         if !a.is_same(Arr::empty()) {
-            self.arrays.push((a, 1));
+            self.arrays.insert(a.address(), (a, 1));
         }
         Ok(a)
     }
@@ -1497,7 +1606,7 @@ impl Pending {
     /// giving that array back leaves it standing.
     pub fn hold(&mut self, z: Zval) {
         if let Some(a) = z.as_arr() {
-            if let Some((_, asks)) = self.arrays.iter_mut().find(|(held, _)| held.is_same(a)) {
+            if let Some((_, asks)) = self.arrays.get_mut(&a.address()) {
                 *asks = asks.saturating_add(1);
             }
             return;
@@ -1531,7 +1640,7 @@ impl Drop for Pending {
     /// A set never published: what the compile made, its unit refused,
     /// given back.
     fn drop(&mut self) {
-        for (a, _) in self.arrays.drain(..) {
+        for (_, (a, _)) in self.arrays.drain() {
             free_persistent_array(a);
         }
         for held in self.take_strings() {
@@ -1900,8 +2009,10 @@ pub(crate) fn hash_func(bytes: &[u8]) -> u64 {
 }
 
 /// A string outside every request's heap, on the system allocator, which
-/// is php's `pemalloc(size, 1)`: interned, persistent and permanent, so
-/// no request's end takes it and only its table frees it.
+/// is php's `pemalloc(size, 1)`, laid for a [`Pending`] set: interned and
+/// persistent, so no request's end takes it and only its set or its
+/// table frees it, and permanent only once the set is published
+/// ([`Str::publish`]).
 fn persistent(bytes: &[u8]) -> Result<Str, Fatal> {
     let size = Str::allocation_size(bytes.len());
     let Ok(layout) = Layout::from_size_align(size, align_of::<StrHeader>()) else {
@@ -1914,7 +2025,7 @@ fn persistent(bytes: &[u8]) -> Result<Str, Fatal> {
     };
     // SAFETY: the allocation is exactly what `init` asks for and holds
     // nothing else.
-    Ok(unsafe { Str::init(at, bytes, PERMANENT) })
+    Ok(unsafe { Str::init(at, bytes, PENDING) })
 }
 
 /// What a table lays a string of `bytes` at in its bump, as opcache's
@@ -2058,6 +2169,50 @@ mod tests {
         pending.give_back(Zval::string(kept));
         pending.give_back(Zval::string(value));
         assert_eq!(pending.count(), 0);
+    }
+
+    /// Each maker of a constant array a table keeps refuses a request's
+    /// string as a key and as an element, and lays nothing for it
+    /// (#4655): the table refuses a set's string until the set is
+    /// published, and a set refuses another set's string and array while
+    /// it lays its own and the table's.
+    #[test]
+    fn a_table_s_constant_array_refuses_a_request_s_string() {
+        let _alone = crate::serial::alone();
+        let mut heap = crate::Heap::new();
+        let request = heap.string(b"the request's").expect("the heap has room");
+        let request = [
+            vec![(Key::Long(0), Zval::string(request))],
+            vec![(Key::Str(request), Zval::long(1))],
+        ];
+        let mut table = Strings::new();
+        let mut pending = Pending::default();
+        let mut other = Pending::default();
+        for entries in &request {
+            let refused = table.constant_array(entries, entries.len());
+            assert!(refused.is_err_and(|fatal| fatal == Fatal::error(HANDED_A_REQUESTS)));
+            assert!(table.arrays.is_empty(), "the table laid nothing");
+            assert!(pending.constant_array(entries).is_err(), "a set refuses it");
+            assert!(pending.arrays.is_empty(), "the set laid nothing");
+        }
+        let held = Zval::string(table.intern(b"the table's").expect("room"));
+        let own_key = pending.intern(b"the set's", false).expect("room");
+        let own = Zval::string(own_key);
+        let theirs = Zval::string(other.intern(b"another set's", false).expect("room"));
+        let their_array = other.constant_array(&[(Key::Long(0), theirs)]);
+        let their_array = Zval::array(their_array.expect("its own string"));
+        for z in [theirs, their_array] {
+            let refused = pending.constant_array(&[(Key::Long(0), z)]);
+            assert!(refused.is_err(), "another set's {:?}", z.kind());
+        }
+        let inner = pending.constant_array(&[(Key::Str(own_key), held)]);
+        let inner = Zval::array(inner.expect("the set's key and the table's string"));
+        let outer = pending.constant_array(&[(Key::Long(0), inner), (Key::Long(1), own)]);
+        assert!(outer.is_ok(), "the set's array and string");
+        assert!(table.constant_array(&[(Key::Long(0), own)], 1).is_err());
+        table.publish(pending);
+        assert!(table.constant_array(&[(Key::Long(0), own)], 1).is_ok());
+        assert!(table.constant_array(&[(Key::Long(0), inner)], 1).is_ok());
     }
 
     /// `zend_string_alloc` then `zend_string_truncate`: the bytes written

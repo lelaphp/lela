@@ -4,11 +4,11 @@
 //! list it takes, each held to the record it wrote and to `dump` then
 //! `parse`; and the text form as a property over generated records.
 
-use php_engine::tier::{self, FuncRef, SafepointIdx, Sample};
+use php_engine::tier::{EngineFuncRef, FuncRef, OwnClass, RecordClass, SafepointIdx, UnitView};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, Opcode, OperandKind, OplineIdx};
 
-use super::{Began, Callee, Event, Start, Stop, TraceRecord};
+use super::{Began, Callee, Event, Sample, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 use crate::testing;
 use crate::testing::records::{DEFAULT_FOLDS as FOLDS, at, kept, recorded, trace};
@@ -860,10 +860,10 @@ fn every_stop_is_named_in_phps_words_and_coded_once() {
 }
 
 /// A generator of records, a linear congruential one so a failure names
-/// its seed.
-struct Draw(u64);
+/// its seed, drawing shared classes from the view it holds, if any.
+struct Draw<'v>(u64, Option<&'v UnitView>);
 
-impl Draw {
+impl Draw<'_> {
     fn next(&mut self, below: u32) -> u32 {
         self.0 = self
             .0
@@ -872,13 +872,10 @@ impl Draw {
         u32::try_from((self.0 >> 33) % u64::from(below.max(1))).unwrap_or(0)
     }
 
-    fn func(&mut self) -> FuncRef {
+    fn func(&mut self) -> EngineFuncRef {
         let n = self.next(1000);
-        FuncRef::at(if self.next(4) == 0 {
-            MapPtrOffset::Request(n)
-        } else {
-            MapPtrOffset::Engine(n)
-        })
+        EngineFuncRef::of(FuncRef::at(MapPtrOffset::Engine(n)))
+            .expect("an engine offset's op array")
     }
 
     fn sample(&mut self) -> Option<Sample> {
@@ -910,8 +907,23 @@ impl Draw {
             indirect: self.next(2) == 0,
             reference: self.next(2) == 0,
             packed: self.next(2) == 0,
-            class: (self.next(2) == 0).then(|| tier::numbered_class(self.next(u32::MAX))),
+            class: (self.next(2) == 0).then(|| self.class()),
         })
+    }
+
+    /// A class as a record names it: one the view's epoch shares, by its
+    /// number, or a request's own, by its view's index; an own class where
+    /// no view is held or its epoch shares nothing under the number drawn.
+    fn class(&mut self) -> RecordClass {
+        let number = self.next(64);
+        let shared = (self.next(2) == 0)
+            .then_some(self.1)
+            .flatten()
+            .and_then(|view| view.shared_numbered(number));
+        shared.map_or_else(
+            || RecordClass::Own(OwnClass::at(self.next(u32::MAX))),
+            RecordClass::Shared,
+        )
     }
 
     fn event(&mut self) -> Event {
@@ -992,25 +1004,101 @@ impl Draw {
 }
 
 /// `dump` then `parse` is the identity, over records drawn from every
-/// event, sample, start and stop, two thousand natively and twenty under
-/// Miri, which interprets each; and `parse` refuses a text with no stop
-/// or with a word it does not know.
+/// event, sample, start and stop with own classes alone, two thousand
+/// natively and twenty under Miri, which interprets each; and `parse`
+/// refuses a text with no stop, with a word it does not know, or with a
+/// class number no epoch was asked about.
 #[test]
 fn dump_then_parse_is_the_identity() {
+    let none = |_| None;
     let seeds = if cfg!(miri) { 20 } else { 2000 };
     for seed in 0..seeds {
-        let record = Draw(seed).record();
+        let record = Draw(seed, None).record();
         let text = record.dump();
         assert_eq!(
-            TraceRecord::parse(&text),
+            TraceRecord::parse_numbered(&text, &none),
             Ok(record),
             "seed {seed}:\n{text}"
         );
     }
-    assert_eq!(tier::recorded_number(tier::numbered_class(3)), 3);
-    assert!(TraceRecord::parse("start loop\nroot e1\n").is_err());
-    assert!(
-        TraceRecord::parse("start loop\nroot e1\nop e1 0 long.square - - -\nstop loop\n").is_err()
+    let parse = |text| TraceRecord::parse_numbered(text, &none);
+    let own = parse("start loop\nroot e1\nop e1 0 object#own2 - - -\nstop loop\n");
+    assert_eq!(
+        own.map(|record| record.events),
+        Ok(vec![Event::Op {
+            func: EngineFuncRef::of(FuncRef::at(MapPtrOffset::Engine(1)))
+                .expect("an engine offset"),
+            opline: OplineIdx(0),
+            op1: Some(object(RecordClass::Own(OwnClass::at(2)))),
+            op2: None,
+            data: None,
+            branch: None,
+        }]),
+        "an own class by its view's index"
     );
-    assert!(TraceRecord::parse("start sideways\nroot e1\nstop loop\n").is_err());
+    assert!(parse("start loop\nroot e1\nop e1 0 object#41 - - -\nstop loop\n").is_err());
+    assert!(parse("start loop\nroot e1\nop e1 0 object#own - - -\nstop loop\n").is_err());
+    assert!(parse("start loop\nroot e1\n").is_err());
+    assert!(parse("start loop\nroot e1\nop e1 0 long.square - - -\nstop loop\n").is_err());
+    assert!(parse("start sideways\nroot e1\nstop loop\n").is_err());
+}
+
+/// The same identity with shared classes, read back through a served
+/// request's view, whose epoch numbers them; a number its epoch shares no
+/// class under is refused.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_shared_class_is_read_back_through_its_view() -> Result<(), String> {
+    let (recorded, _) = testing::records::recording(
+        &at("f", "enter"),
+        "function f() { return 1; }
+        echo f(), \"\\n\";",
+    )?;
+    let view = &recorded.view;
+    let mut shared = 0;
+    for seed in 0..500 {
+        let record = Draw(seed, Some(view)).record();
+        let text = record.dump();
+        shared += text.matches('#').count() - text.matches("#own").count();
+        assert_eq!(
+            TraceRecord::parse(&text, view),
+            Ok(record),
+            "seed {seed}:\n{text}"
+        );
+    }
+    assert!(shared > 0, "no record drew a shared class");
+    let first = view
+        .shared_numbered(0)
+        .ok_or("the epoch shares no class 0")?;
+    let read = TraceRecord::parse(
+        "start loop\nroot e1\nop e1 0 object#0 - - -\nstop loop\n",
+        view,
+    );
+    assert_eq!(
+        read.map(|record| record.events.first().cloned()),
+        Ok(Some(Event::Op {
+            func: EngineFuncRef::of(FuncRef::at(MapPtrOffset::Engine(1)))
+                .expect("an engine offset"),
+            opline: OplineIdx(0),
+            op1: Some(object(RecordClass::Shared(first))),
+            op2: None,
+            data: None,
+            branch: None,
+        })),
+        "a shared class by its number"
+    );
+    let unshared = "start loop\nroot e1\nop e1 0 object#4000000000 - - -\nstop loop\n";
+    assert!(TraceRecord::parse(unshared, view).is_err());
+    Ok(())
+}
+
+/// An object sample of `class`.
+fn object(class: RecordClass) -> Sample {
+    Sample {
+        kind: ZvalType::Object,
+        indirect: false,
+        reference: false,
+        packed: false,
+        class: Some(class),
+    }
 }

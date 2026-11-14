@@ -278,11 +278,11 @@ fn an_agent_s_commit_of_a_pipeline_path_is_refused_however_it_was_written_and_a_
 
 /// `pipeline.lock` (#4458): a third-party package added to a `Cargo.lock`,
 /// a new `checksum` line or a git `source`, is refused to an `Edit` and a
-/// `Write`, in the workspace's lock and in any other; an edge to a package
-/// the lock holds, a removal, a workspace crate's entry, which carries
-/// neither line, and a lock written whole with its packages reordered are
-/// no finding of the row's, since a line the file carried, kept or moved,
-/// adds nothing (#510).
+/// `Write`, in the workspace's lock and in any other of the workspace; an
+/// edge to a package the lock holds, a removal, a workspace crate's entry,
+/// which carries neither line, and a lock written whole with its packages
+/// reordered are no finding of the row's, since a line the file carried,
+/// kept or moved, adds nothing (#510).
 #[test]
 fn a_package_added_to_a_lock_is_refused_and_a_lock_that_moves_among_its_own_is_not() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -354,6 +354,44 @@ fn a_package_added_to_a_lock_is_refused_and_a_lock_that_moves_among_its_own_is_n
     }
 }
 
+/// A `Cargo.lock` outside the workspace is no lock of its own (#4679): an
+/// `Edit` and a `Write` there that add a registry package are no finding
+/// of `pipeline.lock`'s, nor any denial, since no row's `adding` reaches a
+/// file outside the workspace, as `Call::path` says; the same text
+/// written to the workspace's own lock is refused by that row and no
+/// other, the control.
+#[test]
+fn a_package_added_to_a_lock_outside_the_workspace_is_no_finding_of_the_row() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let root = scratch("pipeline-lock-inside");
+    let elsewhere = Tree::new("permit-pipeline-lock-outside").unwrap();
+    let lock = locked(&[package("memchr", 'a')]);
+    write(&root, "Cargo.lock", &lock);
+    write(&elsewhere, "Cargo.lock", &lock);
+    let added = format!("version = 4\n\n{}", package("left-pad", 'c'));
+    let edit = |dir: &Path| touch("Edit", &dir.join("Cargo.lock"), "version = 4\n", &added);
+    let whole = |dir: &Path| {
+        let text = format!("{lock}\n{}", package("left-pad", 'c'));
+        touch("Write", &dir.join("Cargo.lock"), "", &text)
+    };
+    for call in [edit(&elsewhere), whole(&elsewhere)] {
+        let judged = judge(&manifest, &root, &call).unwrap();
+        assert!(
+            judged.findings.iter().all(|f| f.rule != LOCK),
+            "{call:?}: {judged:?}"
+        );
+        assert!(judged.denial().is_none(), "{call:?}: {judged:?}");
+    }
+    for call in [edit(&root), whole(&root)] {
+        let judged = judge(&manifest, &root, &call).unwrap();
+        let denials: Vec<&str> = (judged.findings.iter())
+            .filter(|f| f.kind == Kind::Deny)
+            .map(|f| f.rule.as_str())
+            .collect();
+        assert_eq!(denials, [LOCK], "{call:?}: {judged:?}");
+    }
+}
+
 /// A `Cargo.lock` that `cargo` rewrote is held at the commit as an
 /// `Edit` is at the call: an agent's commit staging a lock that gained a
 /// package is refused with the row's id and #3644, a person's is a note,
@@ -401,6 +439,32 @@ fn an_agent_s_commit_of_a_lock_that_gained_a_package_is_refused_and_one_that_mov
     );
     let ran = diff_from(&root, Some("an-agent"));
     assert!(!ran.stdout.contains("Cargo.lock"), "{ran}");
+}
+
+/// A staged path is the checkout's, whatever the work tree holds there
+/// (#4679): a staged `Cargo.lock` that gained a package, its work tree's
+/// file replaced by a link to a file outside the workspace, is refused at
+/// the commit as the staged lock is without the link, since no commit
+/// carries a file outside the repository.
+#[test]
+fn a_staged_lock_that_gained_a_package_is_refused_with_its_file_a_link_outside_the_workspace() {
+    let root = scratch("pipeline-lock-linked");
+    let elsewhere = Tree::new("permit-pipeline-lock-linked-outside").unwrap();
+    let held = [package("memchr", 'a'), package("libc", 'b')];
+    write(&root, "Cargo.lock", &locked(&held));
+    Repo::at(&root).commit("a lock");
+    let gained = locked(&[package("left-pad", 'c'), held[0].clone(), held[1].clone()]);
+    write(&root, "Cargo.lock", &gained);
+    Repo::at(&root).git(&["add", "--", "Cargo.lock"]);
+    write(&elsewhere, "Cargo.lock", &gained);
+    std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let ran = diff_from(&root, Some("an-agent"));
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(
+        ran.stdout.contains("deny Cargo.lock: ") && ran.stdout.contains(LOCK),
+        "{ran}"
+    );
 }
 
 /// A registry package's entry in a lock, its checksum `sum` repeated.
