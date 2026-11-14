@@ -238,10 +238,12 @@ pub(crate) struct Preloaded {
     /// saved scripts, held in the cache, never validated and outliving
     /// every restart.
     pub(crate) scripts: Vec<Arc<Held>>,
-    /// Each `eval`'s unit the preload admitted, in the order compiled,
-    /// saved as no file of its own and laid with the preloaded files below
-    /// every epoch, as php's `$PRELOAD$` holds an `eval()'d code`'s op
-    /// arrays beside the files'.
+    /// Each `eval`'s unit of which the preload keeps a class or a
+    /// function, in the order compiled, saved as no file of its own and
+    /// laid with the preloaded files below every epoch, as php's
+    /// `$PRELOAD$` holds an `eval()'d code`'s op arrays beside the files'; an
+    /// `eval` whose declarations it keeps none of is dropped as the
+    /// preload ends.
     pub(crate) evals: Vec<Frozen<PublishedUnit>>,
     /// Which declarations of which unit the preload holds, by the unit's
     /// address, which the preload keeps alive for the engine's life.
@@ -256,6 +258,14 @@ pub(crate) struct Preloaded {
 struct UnitDeclarations {
     classes: Vec<u32>,
     functions: Vec<Body>,
+}
+
+impl UnitDeclarations {
+    /// Whether the preload keeps any declaration of the unit: the one
+    /// place it is asked, which keeps an `eval`'s unit past the preload.
+    fn keeps(&self) -> bool {
+        !(self.classes.is_empty() && self.functions.is_empty())
+    }
 }
 
 impl Preloaded {
@@ -385,8 +395,12 @@ impl Request {
 
     /// An `eval`'s string compiled while the preload runs, as
     /// [`Request::preload_file`] compiles a file: with the engine's
-    /// strings and numbers, optimized and published, so the classes and
-    /// functions it declares can be published with the preload's. A
+    /// strings and map-pointer offsets, optimized and published, so the
+    /// classes and functions it declares can be published with the
+    /// preload's. Its strings are the engine's from its compile on, an
+    /// `eval` whose declarations the preload keeps or not, a growth the
+    /// preload bounds; its unit outlives the preload only where the
+    /// preload keeps one of its declarations ([`Preloaded::evals`]). A
     /// unit [`Frozen::new`] refuses is served as the request's own, and
     /// what it declares is left out of the preload ([`Request::publish_tables`]).
     pub(crate) fn preload_eval(
@@ -627,7 +641,14 @@ impl Request {
                 return None;
             }
         };
-        let evals = preloading.evals.clone();
+        // Only of a unit whose declarations the preload keeps one of: an
+        // `eval`'s that keeps none is dropped as the preload ends, and its
+        // address is another's after.
+        declared.retain(|_, held| held.keeps());
+        let evals = (preloading.evals.iter())
+            .filter(|unit| declared.contains_key(&address(unit)))
+            .cloned()
+            .collect();
         let scripts = preloading
             .scripts
             .into_iter()
@@ -794,10 +815,10 @@ impl Request {
     /// `zend_shared_alloc_save_state` after preloading: the arena the
     /// preload published into laid below every epoch from now on, so a
     /// restart keeps its rows at their numbers, with the units it saved,
-    /// its files' and its `eval`s' ([`Preloaded::evals`]), whose words
-    /// every epoch lays its own of, counting where the tier counts a unit
-    /// the cache holds now, as php's `zend_jit_script` lays the words of
-    /// `$PRELOAD$`'s op arrays
+    /// its files' and the `eval`s' it keeps a declaration of
+    /// ([`Preloaded::evals`]), whose words every epoch lays its own of,
+    /// counting where the tier counts a unit the cache holds now, as
+    /// php's `zend_jit_script` lays the words of `$PRELOAD$`'s op arrays
     /// ([`crate::arena::Epochs::lay_base`]).
     pub(crate) fn save_preload_state(&self) {
         let units = (self.shared.units.preloaded())

@@ -398,6 +398,41 @@ fn a_preload_evals_function_and_method_have_their_words_laid_as_a_preloaded_file
     assert_eq!(evals, [true, true], "the eval's function and its method");
 }
 
+/// Only a preload's `eval` with a declaration the preload keeps outlives
+/// the preload (#4696): of an `eval` that declares nothing and one that
+/// declares a function, the preload holds the second's unit alone, and
+/// the function stands in every request.
+#[test]
+fn only_a_preload_eval_with_a_kept_declaration_outlives_the_preload() {
+    let files = Files::new(
+        "preload-eval-kept",
+        &[(
+            "preload.inc",
+            "<?php\neval('$x = 1;');\neval('function eval_k() { return \"k\"; }');\n",
+        )],
+    );
+    let script = files.path().join("preload.inc");
+    let engine = Engine::cli_builder()
+        .extensions(&[preloading(&script)])
+        .ini("t.preload", script.as_os_str().as_encoded_bytes())
+        .build();
+    let served = engine.serve_capture("<?php echo eval_k();", crate::test::Capture::default());
+    assert_eq!(served.stdout_text(), "k");
+    let preloaded = engine
+        .shared
+        .units
+        .preloaded()
+        .expect("the preload published");
+    let kept: Vec<usize> = (preloaded.evals.iter())
+        .map(|unit| unit.functions.len())
+        .collect();
+    assert_eq!(
+        kept,
+        [1],
+        "the eval that declared a function, and not the other"
+    );
+}
+
 /// An extension that keeps every file in the cache, never validated,
 /// and names a file cache from an ini entry of its own.
 fn file_caching(dir: &Path) -> Extension {
