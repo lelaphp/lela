@@ -33,8 +33,9 @@
 //! extension, `::php_engine::api` in `php_jit` and `php_streams`, which
 //! reach the engine directly, and `crate::api` while `php_engine` is
 //! compiled, so Core's natives take the same attributes (ADR-0007).
-//! `#[derive(EngineState)]` names `::php_heap::EngineState` in `php_unit`
-//! and `php_ssa`, which stand below the engine and the facade (#4544).
+//! `#[derive(EngineState)]` names `::php_heap::EngineState` in `php_unit`,
+//! `php_ssa` and `php_link`, which stand below the engine and the facade
+//! (#4544, #4632).
 //!
 //! What fails the build is held by `compile_fail` blocks in
 //! `php_bundle`'s `refusals`, and the parity extension that holds
