@@ -400,9 +400,39 @@ impl Request {
     /// preload's. Its strings are the engine's from its compile on, an
     /// `eval` whose declarations the preload keeps or not, a growth the
     /// preload bounds; its unit outlives the preload only where the
-    /// preload keeps one of its declarations ([`Preloaded::evals`]). A
-    /// unit [`Frozen::new`] refuses is served as the request's own, and
-    /// what it declares is left out of the preload ([`Request::publish_tables`]).
+    /// preload keeps one of its declarations ([`Preloaded::evals`]).
+    ///
+    /// It charges the request what php's compile of the string leaves,
+    /// as [`crate::engine::Shared::compile_for`] charges an `eval`
+    /// outside the preload: the tree and the scanner's strings while it
+    /// compiles, the main op array's blocks until its execution ends, and
+    /// what it declares with the names and the constant strings php's
+    /// compile makes for it ([`Request::hold_preload_strings`]), held to
+    /// the preload's end, and not a persisted file's bytes, which php
+    /// lays only for a file. php preloading one class with one method
+    /// (#4696):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w4652-' . sprintf('%010d', getmypid()) . '.php';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// $m = memory_get_usage();
+    /// eval('class Greeter { function greet() { return "hi"; } }');
+    /// echo memory_get_usage() - $m, "\n";
+    /// PHP);
+    /// echo shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.preload=' . escapeshellarg($f) . ' -r ' . escapeshellarg('echo (new Greeter)->greet(), "\n";'));
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 864
+    /// hi
+    /// ```
+    ///
+    /// A unit [`Frozen::new`] refuses would be served as the request's
+    /// own, charged the same, keeping the engine's offsets it took, and
+    /// what it declares left out of the preload
+    /// ([`Request::publish_tables`]); no compile makes one, since a
+    /// unit's walk passes its closures' cells over.
     pub(crate) fn preload_eval(
         &mut self,
         source: &[u8],
@@ -411,8 +441,11 @@ impl Request {
     ) -> Result<PublishedUnit, crate::unit_cache::CompileRefused> {
         let shared = Arc::clone(&self.shared);
         let kind = php_compile::SourceKind::Eval(position);
-        let optimizer = crate::unit_cache::Optimizer::Off;
-        let unit = (self.compile_kind_for_cache(source, name, kind, optimizer)).unit;
+        let unit = (self.compile_kind_for_cache(source, name, kind)).unit;
+        // Charged as the request's own compile of the string is, before
+        // the optimizer, which php's preload runs over what it keeps once
+        // its file has run (`preload_optimize`).
+        let alone = self.charge_compile(unit.as_ref().ok());
         if let Ok(unit) = &unit {
             self.count_keys_made(crate::unit_cache::keys_of(unit));
         }
@@ -422,9 +455,24 @@ impl Request {
             preloading.evals.push(Frozen::clone(unit));
         }
         let unit = unit.map(|unit| unit.map_or_else(|own| own, |unit| PublishedUnit::clone(&unit)));
-        unit.map_err(|error| {
-            crate::unit_cache::CompileRefused::published(error, |unit| self.take_unit(unit))
-        })
+        match unit {
+            Ok(unit) => {
+                // Held as an `eval`'s outside the preload is, whose names
+                // its noting makes ([`Request::hold_unit_names`]), until
+                // the preload's request ends.
+                self.hold_compiled(&unit);
+                // The memory limit refusing them ends the request.
+                self.hold_preload_strings(&unit).ok();
+                if let Some(alone) = alone {
+                    self.hold_alone(&unit, alone);
+                }
+                Ok(unit)
+            }
+            Err(error) => Err(crate::unit_cache::CompileRefused::published(
+                error,
+                |unit| self.take_unit(unit),
+            )),
+        }
     }
 
     /// Whether the class at `at` of `unit` is one the preload holds,

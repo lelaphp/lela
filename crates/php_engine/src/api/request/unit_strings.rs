@@ -979,6 +979,49 @@ impl Request {
         }
     }
 
+    /// The constant strings of `unit`, a preload's `eval`'s, whose bytes
+    /// the engine interned as it compiled the string, laid as the
+    /// request's own compile of it makes them ([`Compiling::add`]): a
+    /// string of the request's for each bytes of its values that is no
+    /// name its noting makes and that opcache's table does not hold,
+    /// held with its main op array's constants or the unit's as
+    /// [`Request::hold_compiled`] holds what a compile made, since php's
+    /// preload interns them in the request until it ends. The `Err` is
+    /// the memory limit.
+    pub(crate) fn hold_preload_strings(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
+        let Some(at) = self.unit_strings.position(PublishedUnit::as_ptr(unit)) else {
+            return Ok(());
+        };
+        let names: std::collections::HashSet<_> =
+            php_compile::named(unit).map(|(_, name)| name).collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut strings = Vec::new();
+        // A unit the check admitted holds no stray value.
+        php_unit::frozen::unit_values(unit, &mut |holder, _, z| {
+            if let Some(s) = z.as_str()
+                && seen.insert(s.bytes().to_vec())
+            {
+                strings.push((holder == Holder::Main, s));
+            }
+        })
+        .ok();
+        for (main, s) in strings {
+            let bytes = s.bytes();
+            if bytes.len() <= 1 || names.contains(bytes) || self.opcache_holds(bytes) {
+                continue;
+            }
+            let made = Zval::string(self.string(bytes)?.heap());
+            if let Some(held) = self.unit_strings.units.get_mut(at) {
+                if main {
+                    held.main.push(made);
+                } else {
+                    held.constants.push(made);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The owner a request-only unit holds of `value` for a declaration
     /// written as a value, given up as the request's row takes the
     /// declaration's slot over: php's `constants_table` and
@@ -1266,7 +1309,7 @@ impl Request {
                 // a cached file's constants hold, and the one made goes
                 // (`accel_new_interned_string_for_php`).
                 Named::Class(_) | Named::ClassKey(_) | Named::MethodKey { .. } => {
-                    self.shared.existing_interned(&name).is_none()
+                    !self.opcache_holds(&name)
                 }
                 // A dynamic definition's key is its `DECLARE_FUNCTION`'s
                 // constant, the compile's, or the interned string where
@@ -1307,7 +1350,7 @@ impl Request {
         let main = std::iter::once((Holder::Main, &unit.main));
         for (holder, body) in main.chain(bodies(unit)) {
             for (cv, name) in first_bound(body) {
-                if name.len() > 1 && self.shared.existing_interned(name).is_some() {
+                if name.len() > 1 && self.opcache_holds(name) {
                     match holder {
                         Holder::Main => self.hold_main_var(at, cv, name)?,
                         holder => self.hold_name(at, holder, name)?,
@@ -1351,12 +1394,27 @@ impl Request {
     /// made as a string of the request's and held with the unit's names,
     /// unless opcache holds the bytes (`zend_new_interned_string`).
     pub(super) fn hold_class_name(&mut self, unit: *const Unit, name: &[u8]) -> Result<(), Thrown> {
-        if self.shared.existing_interned(name).is_some() {
+        if self.opcache_holds(name) {
             return Ok(());
         }
         match self.unit_strings.position(unit) {
             Some(at) => self.hold_name(at, Holder::Unit, name),
             None => Ok(()),
+        }
+    }
+
+    /// Whether opcache's shared table holds `bytes`, which
+    /// `accel_new_interned_string_for_php` answers a name with before a
+    /// request's compile makes one of its own: the engine's table, or,
+    /// while the preload runs, the strings startup put there alone, since
+    /// opcache persists nothing into it before the preload ends
+    /// (`ZCG(enabled)` off across `accel_preload`,
+    /// `Z/ext/opcache/ZendAccelerator.c:4619-4685`), though the engine
+    /// interns what the preload compiles as it compiles it.
+    fn opcache_holds(&self, bytes: &[u8]) -> bool {
+        match self.preloading {
+            Some(_) => self.shared.permanent(bytes).is_some(),
+            None => self.shared.existing_interned(bytes).is_some(),
         }
     }
 

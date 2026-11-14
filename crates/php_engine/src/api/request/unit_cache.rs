@@ -890,18 +890,26 @@ impl Request {
         path: &[u8],
         optimizer: Optimizer,
     ) -> Fresh {
-        self.compile_kind_for_cache(source, path, SourceKind::File, optimizer)
+        let fresh = self.compile_kind_for_cache(source, path, SourceKind::File);
+        // What the compile laid on the heap before its persist; one that
+        // meets the hard limit has ended the request.
+        if let Ok(unit) = &fresh.unit {
+            super::declared_bytes::persisted(self, unit, fresh.tree, optimizer).ok();
+        }
+        fresh
     }
 
-    /// [`Request::compile_for_cache`] over a source of `kind`: a file's,
+    /// [`Request::compile_for_cache`] over a source of `kind`, a file's
     /// or an `eval`'s string the preload publishes
-    /// ([`Request::preload_eval`]).
+    /// ([`Request::preload_eval`]), with its stacks held to the request's
+    /// end and nothing else charged: the caller charges what the compile
+    /// laid, a persisted file's bytes for a file, an `eval`'s outside the
+    /// preload for a string.
     pub(crate) fn compile_kind_for_cache(
         &mut self,
         source: &[u8],
         path: &[u8],
         kind: SourceKind,
-        optimizer: Optimizer,
     ) -> Fresh {
         let shared = Arc::clone(&self.shared);
         let stack = self.stack_limit();
@@ -932,12 +940,9 @@ impl Request {
             )
         });
         self.compile_arena = arena;
-        // What the compile laid on the heap before its persist, its
-        // stacks held to the request's end; one that meets the hard
-        // limit has ended the request.
+        // The compiler's stacks, held to the request's end.
         if let Ok(unit) = &fresh.unit {
             self.note_pushed(super::Pushed::of(unit));
-            super::declared_bytes::persisted(self, unit, fresh.tree, optimizer).ok();
         }
         fresh
     }
