@@ -24,6 +24,7 @@ use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
+use php_engine::api::abi::EngineState;
 use php_engine::tier::{self, Epoch, Parked};
 
 use crate::lower::{Compiled, Escapes, Linked};
@@ -43,7 +44,7 @@ mod tests;
 /// A recording, the claim on the word it grew from, and the name its
 /// trace is published under, the place its `TRACE start` line named:
 /// what the pipeline takes, on the request or off it.
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 pub(crate) struct Job {
     pub(crate) recorded: Recorded,
     pub(crate) claim: Claim,
@@ -66,7 +67,7 @@ struct Threaded {
 
 /// The jobs waiting for the worker, and what its body needs to serve
 /// them.
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 struct Queue {
     shared: Arc<Shared>,
     held: Mutex<Held>,
@@ -76,7 +77,7 @@ struct Queue {
 }
 
 /// What the queue's mutex guards.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, EngineState)]
 struct Held {
     jobs: VecDeque<Job>,
     /// How many jobs a thread is serving.

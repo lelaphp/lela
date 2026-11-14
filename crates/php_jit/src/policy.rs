@@ -1416,7 +1416,7 @@ pub(crate) fn bump(word: &Word) -> u32 {
 /// past the call (§2.2, #3036), an exit's by its trace and exit, each
 /// under the epoch it holds, which keeps the word, the op array's row or
 /// the trace table's.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EngineState)]
 pub(crate) enum Holder {
     Root {
         epoch: Epoch,
@@ -1587,7 +1587,7 @@ pub(crate) fn arm(word: &Word, policy: &Policy) {
 /// `COMPILER_ERROR`, so no word stays recording. `Send`: it holds its
 /// word's holder, not a borrow of the word.
 #[must_use]
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 pub(crate) struct Claim {
     holder: Holder,
     start: Start,

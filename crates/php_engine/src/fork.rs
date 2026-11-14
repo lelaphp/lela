@@ -89,7 +89,7 @@ pub(crate) const EBUSY: i32 = 16;
 /// One thing running inside the engine: a request in flight, or a thread
 /// the engine started, from before it starts to after it is joined.
 /// While one stands beside the caller's own, nothing forks.
-#[derive(Debug)]
+#[derive(Debug, php_macros::EngineState)]
 pub(crate) struct Inside(());
 
 impl Inside {
@@ -119,11 +119,20 @@ impl Drop for Inside {
 /// A thread the engine started, which a fork waits for: [`Inside`] from
 /// before the thread exists to after it is joined; `T` is what its body
 /// answers.
-#[derive(Debug)]
+#[derive(Debug, php_macros::EngineState)]
 pub(crate) struct Thread<T = ()> {
     handle: JoinHandle<T>,
     _inside: Inside,
 }
+
+/// A thread the engine started is engine state by the derive where what
+/// its body answers is, through `php_heap`'s `JoinHandle<T>`, so the slot a
+/// [`Worker`] keeps its thread in is too (#4636).
+const _: fn() = || {
+    fn held<T: crate::api::abi::EngineState>() {}
+    held::<Thread>();
+    held::<Mutex<Option<Thread>>>();
+};
 
 /// `body` over `input` on a thread apart named `name`, with a stack of
 /// `stack_size` bytes, counted inside the engine while it stands, and
@@ -322,8 +331,10 @@ where
 
 /// What runs on a [`Worker`]'s thread (ADR-0010, Threads): the compiled
 /// tier's compile queue (`jit-design.md` §4.8). The engine owns the
-/// thread; the tier owns the body and the word that ends it.
-pub trait Parked: Send + Sync + 'static {
+/// thread; the tier owns the body and the word that ends it. A body is
+/// engine state, as the [`Worker`] that keeps it is, so it holds nothing
+/// of a request, whose thread it outlives (ADR-0005, #4636).
+pub trait Parked: crate::api::abi::EngineState + Send + Sync + 'static {
     /// The thread's body: it serves until [`Parked::end`] asks it to
     /// return, which it does between two of its jobs, keeping the ones
     /// not yet served for the next body.
@@ -342,11 +353,20 @@ pub trait Parked: Send + Sync + 'static {
 /// process that asked, as the engine's timer thread is (#2541), and
 /// joined when the worker drops.
 /// A child forked meanwhile has no thread for it until it wakes one.
+#[derive(php_macros::EngineState)]
 pub struct Worker {
     name: String,
     parked: Arc<dyn Parked>,
     thread: Mutex<Option<Thread>>,
 }
+
+/// A worker is engine state by the derive, held at every field, its body
+/// by [`Parked`]'s bound, and shared by the engine and every request that
+/// submits to it (ADR-0005, #4636).
+const _: fn() = || {
+    fn held<T: crate::api::abi::EngineState + Sync>() {}
+    held::<Worker>();
+};
 
 impl std::fmt::Debug for Worker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -831,7 +851,7 @@ mod tests {
 
     /// A body that waits until it is asked to end, counting how often it
     /// ran and returned.
-    #[derive(Default)]
+    #[derive(Default, php_macros::EngineState)]
     struct Waits {
         ending: std::sync::Mutex<bool>,
         asked: std::sync::Condvar,
