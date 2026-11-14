@@ -400,16 +400,20 @@ fn a_preload_evals_function_and_method_have_their_words_laid_as_a_preloaded_file
 }
 
 /// Only a preload's `eval` with a declaration the preload keeps outlives
-/// the preload (#4696): of an `eval` that declares nothing and one that
-/// declares a function, the preload holds the second's unit alone, and
-/// the function stands in every request.
+/// the preload (#4696): of an `eval` that declares nothing, one that
+/// declares a function, one that declares and calls a closure alone and
+/// one that declares a function holding a closure, the preload holds the
+/// second's and the fourth's units, since no table names a closure, and
+/// both functions stand in every request.
 #[test]
 fn only_a_preload_eval_with_a_kept_declaration_outlives_the_preload() {
     let files = Files::new(
         "preload-eval-kept",
         &[(
             "preload.inc",
-            "<?php\neval('$x = 1;');\neval('function eval_k() { return \"k\"; }');\n",
+            "<?php\neval('$x = 1;');\neval('function eval_k() { return \"k\"; }');\n\
+             eval('$f = function () { return 1; }; $f();');\n\
+             eval('function eval_c() { $g = function () { return \"c\"; }; return $g(); }');\n",
         )],
     );
     let script = files.path().join("preload.inc");
@@ -417,20 +421,29 @@ fn only_a_preload_eval_with_a_kept_declaration_outlives_the_preload() {
         .extensions(&[preloading(&script)])
         .ini("t.preload", script.as_os_str().as_encoded_bytes())
         .build();
-    let served = engine.serve_capture("<?php echo eval_k();", crate::test::Capture::default());
-    assert_eq!(served.stdout_text(), "k");
+    let served = engine.serve_capture(
+        "<?php echo eval_k(), eval_c();",
+        crate::test::Capture::default(),
+    );
+    assert_eq!(served.stdout_text(), "kc");
     let preloaded = engine
         .shared
         .units
         .preloaded()
         .expect("the preload published");
-    let kept: Vec<usize> = (preloaded.evals.iter())
-        .map(|unit| unit.functions.len())
-        .collect();
+    // Each kept unit by the functions it declares, its closures passed
+    // over.
+    let named = |unit: &php_unit::frozen::Frozen<PublishedUnit>| {
+        let names = unit.functions.iter().map(|(decl, _)| &decl.name.0);
+        let names = names.filter(|name| !name.starts_with(b"{"));
+        let names: Vec<_> = names.map(|name| String::from_utf8_lossy(name)).collect();
+        names.join(",")
+    };
+    let kept: Vec<String> = preloaded.evals.iter().map(named).collect();
     assert_eq!(
         kept,
-        [1],
-        "the eval that declared a function, and not the other"
+        ["eval_k", "eval_c"],
+        "the evals that declared a function, and not the others"
     );
 }
 

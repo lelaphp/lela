@@ -852,25 +852,25 @@ impl Request {
         self.closure_rows.clear();
         // A function of a unit the preload holds as its own, one
         // `Frozen::new` refused, is left out of it, and so is one whose
-        // row the arena refuses, which a load of its unit then declares.
+        // row the arena refuses, which a load of its unit then declares,
+        // and a closure, which no table names: each taken out of what
+        // `declared` holds of its unit here, the one place a function is
+        // kept or left.
         let mut functions: Vec<(Box<[u8]>, UserFunction<InArena>)> = Vec::new();
         for user in std::mem::take(&mut self.user_functions) {
-            let Some(decl) = (user.member.is_none())
+            let (unit, body) = (address(&user.unit), user.body);
+            let name = (user.member.is_none())
                 .then(|| user_function_decl(super::FunctionRow::Own(&user)))
                 .flatten()
-            else {
-                continue;
-            };
-            let name = Box::<[u8]>::from(&*decl.name.0);
-            let Some(frozen) = preloading.frozen(&user.unit).cloned() else {
-                continue;
-            };
-            if name.starts_with(b"{") {
-                continue;
-            }
-            let (unit, body) = (address(&user.unit), user.body);
-            match user.published(frozen, crate::readable::NamedIn::Unit) {
-                Some(user) => functions.push((name, user)),
+                .map(|decl| Box::<[u8]>::from(&*decl.name.0))
+                .filter(|name| !name.starts_with(b"{"));
+            let frozen = preloading.frozen(&user.unit).cloned();
+            let kept = name.zip(frozen).and_then(|(name, frozen)| {
+                let user = user.published(frozen, crate::readable::NamedIn::Unit)?;
+                Some((name, user))
+            });
+            match kept {
+                Some(function) => functions.push(function),
                 None => {
                     if let Some(held) = declared.get_mut(&unit) {
                         held.functions.retain(|held| *held != body);
