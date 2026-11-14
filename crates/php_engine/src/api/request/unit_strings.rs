@@ -1405,17 +1405,15 @@ impl Request {
 
     /// Whether opcache's shared table holds `bytes`, which
     /// `accel_new_interned_string_for_php` answers a name with before a
-    /// request's compile makes one of its own: the engine's table, or,
-    /// while the preload runs, the strings startup put there alone, since
-    /// opcache persists nothing into it before the preload ends
-    /// (`ZCG(enabled)` off across `accel_preload`,
-    /// `Z/ext/opcache/ZendAccelerator.c:4619-4685`), though the engine
-    /// interns what the preload compiles as it compiles it.
+    /// request's compile makes one of its own: the engine's table, and,
+    /// while the preload runs, nothing, since php asks its table only
+    /// once the request has counted itself in (`ZCG(counted)`), which no
+    /// path does with `ZCG(accelerator_enabled)` off across
+    /// `accel_preload` (`Z/ext/opcache/ZendAccelerator.c:577-588`,
+    /// `:4619-4620`), though the engine interns what the preload compiles
+    /// as it compiles it.
     fn opcache_holds(&self, bytes: &[u8]) -> bool {
-        match self.preloading {
-            Some(_) => self.shared.permanent(bytes).is_some(),
-            None => self.shared.existing_interned(bytes).is_some(),
-        }
+        self.preloading.is_none() && self.shared.existing_interned(bytes).is_some()
     }
 
     /// `name` made as a string of the request's, held by the unit at

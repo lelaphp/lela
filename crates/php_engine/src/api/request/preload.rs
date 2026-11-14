@@ -430,6 +430,27 @@ impl Request {
     /// hi
     /// ```
     ///
+    /// And one whose class's key is a string startup interned, `date`,
+    /// which php's preload makes a string of its own of, as no table of
+    /// opcache's answers a name while the preload runs:
+    ///
+    /// ```php
+    /// $d = realpath('/tmp');
+    /// $f = $d . '/w4652-' . str_pad((string) getmypid(), 34 - strlen($d), '0', STR_PAD_LEFT) . '.php';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// $m = memory_get_usage();
+    /// eval('class Date { function f() { return "d"; } }');
+    /// echo memory_get_usage() - $m, "\n";
+    /// PHP);
+    /// echo shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.preload=' . escapeshellarg($f) . ' -r ' . escapeshellarg('echo (new Date)->f(), "\n";'));
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 784
+    /// d
+    /// ```
+    ///
     /// A unit [`Frozen::new`] refuses would be served as the request's
     /// own, charged the same, keeping the engine's offsets it took, and
     /// what it declares left out of the preload
