@@ -272,7 +272,7 @@ pub enum Visibility {
 }
 
 /// What a class declaration declares.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, EngineState)]
 pub enum ClassKind {
     #[default]
     Class,
@@ -283,7 +283,7 @@ pub enum ClassKind {
 
 /// The modifiers of a class (`ZEND_ACC_*` on the class entry).
 #[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a class, each one fact
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, EngineState)]
 pub struct ClassFlags {
     pub is_abstract: bool,
     pub is_final: bool,
@@ -365,7 +365,7 @@ pub struct ClassFlags {
 /// What a class does with a write to a name it did not declare, php's
 /// two `ZEND_ACC_*` bits read as the one question they answer
 /// (`Z/Zend/zend_object_handlers.c:1288`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, EngineState)]
 pub enum DynamicProperties {
     /// Neither bit, which every class carries unless it says
     /// otherwise: creating one is php's 8.2 deprecation.

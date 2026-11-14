@@ -102,7 +102,7 @@ impl OwnClass {
 /// declaration and keeps no `ConstExpr`, so no value of the request's
 /// stands in it: a constant's value, a property's default, a method's
 /// parameters and an attribute's arguments are left behind.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, php_macros::EngineState)]
 pub struct ClassFacts {
     pub name: Name,
     pub kind: ClassKind,
@@ -114,7 +114,7 @@ pub struct ClassFacts {
 }
 
 /// What a trace's build reads of one property's declaration.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, php_macros::EngineState)]
 pub struct PropertyFacts {
     pub name: Name,
     pub visibility: Visibility,
@@ -124,7 +124,7 @@ pub struct PropertyFacts {
 }
 
 /// What a trace's build reads of one constant's declaration.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, php_macros::EngineState)]
 pub struct ConstantFacts {
     pub name: Name,
     pub ty: Option<Type>,
