@@ -16,8 +16,8 @@ version 4, and by Zend Technologies Ltd. as the Zend Engine License, version
 may be used under any subsequent version of those licenses (clause 5 and
 clause 4 respectively). The text is in LICENSES/php-src.txt:
 
-  Copyright (c) The PHP Group and Contributors.
-  Copyright (c) Zend Technologies Ltd., a subsidiary company of Perforce
+  Copyright © The PHP Group and Contributors.
+  Copyright © Zend Technologies Ltd., a subsidiary company of Perforce
   Software, Inc.
 
 To the extent those licenses are held to apply as written, and without
@@ -43,7 +43,7 @@ these acknowledgements:
   This product includes software developed by the University of
   California, Berkeley and its contributors.
 
-Apache-2.0 asks a derivative work to show lexbor's notice:
+Apache-2.0 requires a derivative work to show lexbor's notice:
 
      Lexbor.
 
