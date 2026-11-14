@@ -406,8 +406,9 @@ impl Request {
     /// as [`crate::engine::Shared::compile_for`] charges an `eval`
     /// outside the preload: the tree and the scanner's strings while it
     /// compiles, the main op array's blocks until its execution ends, and
-    /// what it declares with the names and the constant strings php's
-    /// compile makes for it ([`Request::hold_preload_strings`]), held to
+    /// what it declares with the names, the constant strings and the
+    /// variables' names php's compile makes for it
+    /// ([`Request::hold_preload_strings`]), held to
     /// the preload's end, and not a persisted file's bytes, which php
     /// lays only for a file. php preloading one class with one method
     /// (#4696), from a file whose path is one length in any temporary
@@ -451,6 +452,26 @@ impl Request {
     /// d
     /// ```
     ///
+    /// And a function whose variables are named, a `static`'s among them,
+    /// by strings php's preload makes, one for each:
+    ///
+    /// ```php
+    /// $d = realpath('/tmp');
+    /// $f = $d . '/w4652-' . str_pad((string) getmypid(), 34 - strlen($d), '0', STR_PAD_LEFT) . '.php';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// $m = memory_get_usage();
+    /// eval('function g() { static $count = 0; $abc = 1; return ++$count + $abc; }');
+    /// echo memory_get_usage() - $m, "\n";
+    /// PHP);
+    /// echo shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.preload=' . escapeshellarg($f) . ' -r ' . escapeshellarg('echo g(), "\n";'));
+    /// unlink($f);
+    /// ```
+    /// ```expect process
+    /// 984
+    /// 2
+    /// ```
+    ///
     /// A unit [`Frozen::new`] refuses would be served as the request's
     /// own, charged the same, keeping the engine's offsets it took, and
     /// what it declares left out of the preload
@@ -472,6 +493,7 @@ impl Request {
         if let Ok(unit) = &unit {
             self.count_keys_made(crate::unit_cache::keys_of(unit));
         }
+        let variables = unit.as_ref().ok().map(super::unit_strings::variables_of);
         let optimizer = shared.optimizer();
         let unit = unit.map(|unit| shared.publish_compiled(optimizer.optimized(unit)));
         if let (Ok(Ok(unit)), Some(preloading)) = (&unit, &mut self.preloading) {
@@ -485,7 +507,9 @@ impl Request {
                 // the preload's request ends.
                 self.hold_compiled(&unit);
                 // The memory limit refusing them ends the request.
-                self.hold_preload_strings(&unit).ok();
+                if let Some(variables) = variables {
+                    self.hold_preload_strings(&unit, variables).ok();
+                }
                 if let Some(alone) = alone {
                     self.hold_alone(&unit, alone);
                 }

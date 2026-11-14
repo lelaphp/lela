@@ -481,6 +481,23 @@ fn point(by_bytes: &mut HashMap<Box<[u8]>, Option<PhpString>, NameHasher>, s: Ph
     }
 }
 
+/// The names of the variables of each op array of a unit, by what holds
+/// the op array, as its compile left them ([`variables_of`]).
+pub(crate) struct Variables(Vec<(Holder, Box<[u8]>)>);
+
+/// The variables' names of each op array of `unit`, a preload's
+/// `eval`'s, before the optimizer drops a variable no opline names:
+/// the scanner's strings `lookup_cv` keeps in `op_array->vars`, which no
+/// table answers while the preload runs and which php's preload
+/// optimizes only once its file is served (`preload_optimize`).
+pub(crate) fn variables_of(unit: &Unit) -> Variables {
+    let main = std::iter::once((Holder::Main, &unit.main));
+    let names = main.chain(bodies(unit)).flat_map(|(holder, body)| {
+        (body.vars.iter()).map(move |name| (holder, Box::<[u8]>::from(&*name.0)))
+    });
+    Variables(names.collect())
+}
+
 /// Each op array `unit` declares beside what holds it: a function's, a
 /// method's and a hook's the unit, a dynamic definition's its own.
 fn bodies(unit: &Unit) -> impl Iterator<Item = (Holder, &php_unit::OpArray)> {
@@ -986,9 +1003,15 @@ impl Request {
     /// name its noting makes and that opcache's table does not hold,
     /// held with its main op array's constants or the unit's as
     /// [`Request::hold_compiled`] holds what a compile made, since php's
-    /// preload interns them in the request until it ends. The `Err` is
-    /// the memory limit.
-    pub(crate) fn hold_preload_strings(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
+    /// preload interns them in the request until it ends; and a string
+    /// of the request's for each name of more than one byte of
+    /// `variables` ([`variables_of`]), held with its op array's constants
+    /// or names. The `Err` is the memory limit.
+    pub(crate) fn hold_preload_strings(
+        &mut self,
+        unit: &PublishedUnit,
+        variables: Variables,
+    ) -> Result<(), Thrown> {
         let Some(at) = self.unit_strings.position(PublishedUnit::as_ptr(unit)) else {
             return Ok(());
         };
@@ -1017,6 +1040,27 @@ impl Request {
                 } else {
                     held.constants.push(made);
                 }
+            }
+        }
+        for (holder, name) in variables.0 {
+            if name.len() <= 1 {
+                continue;
+            }
+            // The main op array's names its CVs by, numbered as the
+            // optimizer left them; one it dropped is held to the main op
+            // array's end all the same.
+            let cv = (holder == Holder::Main)
+                .then(|| unit.main.vars.iter().position(|var| *var.0 == *name))
+                .flatten();
+            match (holder, cv) {
+                (Holder::Main, Some(cv)) => self.hold_main_var(at, cv, &name)?,
+                (Holder::Main, None) => {
+                    let made = Zval::string(self.string(&name)?.heap());
+                    if let Some(held) = self.unit_strings.units.get_mut(at) {
+                        held.main.push(made);
+                    }
+                }
+                (holder, _) => self.hold_name(at, holder, &name)?,
             }
         }
         Ok(())
