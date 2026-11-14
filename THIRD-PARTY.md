@@ -2,7 +2,7 @@
 
 How to read this: component | where in this project | origin | licence | notice text (verbatim).
 
-Where the last column names a file in `LICENSES/`, that file is the notice text, copied byte for byte from the source named beside it: the component's own licence file, an item of php-src's `README.REDIST.BINS`, or the comment that carries the notice in php-src's source, all at php-src's tag php-8.5.12. Where it names "the first comment" of a php-src file, the notice is a public-domain dedication that stays in that file, and `LICENSES/` holds no copy. php-src's own row names `LICENSES/php-src.txt`, which is not yet written. Paths under "origin" are php-src's. `NOTICE` says how the code derived from php-src itself is used.
+Where the last column names a file in `LICENSES/`, that file is the notice text, copied byte for byte from the source named beside it: the component's own licence file, an item of php-src's `README.REDIST.BINS`, or the comment that carries the notice in php-src's source, all at php-src's tag php-8.5.12. Where it names "the first comment" of a php-src file, the notice is a public-domain dedication that stays in that file, and `LICENSES/` holds no copy. php-src's own row names `LICENSES/php-src.txt`, which is not taken at that tag: it is the PHP License, version 4, copied byte for byte from php.net's `https://www.php.net/license/4_0.txt`. Paths under "origin" are php-src's. `NOTICE` says how the code derived from php-src itself is used.
 
 ## 1. php-src (derived)
 
