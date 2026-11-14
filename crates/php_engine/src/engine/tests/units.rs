@@ -159,12 +159,13 @@ fn a_unit_the_check_refuses_is_held_nowhere_and_every_ask_compiles_it_again() {
 /// The refusal a compile reaches: a class that uses a trait and holds a
 /// closure in its composed declaration, which the check refuses where
 /// its link would be published (`Request::publish`, #4684), so the class
-/// is bound per request. Its cost is that link alone: the file is
+/// is bound per request. What this holds of its cost: the file is
 /// compiled once and held, every later request is served the held unit
 /// with no compile, and the arena reserves nothing for the class, where
-/// the same class holding no closure is published at its first link.
+/// the same class holding no closure is published at its first link;
+/// the link each request makes again is read by no count here.
 #[test]
-fn a_class_the_check_refuses_at_its_link_is_linked_per_request_and_compiled_once() {
+fn a_class_the_check_refuses_at_its_link_is_compiled_once_and_reserves_nothing() {
     use crate::api::abi::{Admission, ExtensionBuilder, Lookup};
     fn compiled(req: &mut Request, path: &[u8]) {
         let name = path.rsplit(|b| *b == b'/').next().unwrap_or(path);
