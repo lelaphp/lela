@@ -25,8 +25,8 @@
 //! other (harness-design.md ledger 51): an array-of-tables row recurses
 //! key by key exactly as a table does, so `porting = true` on `[[crate]]`
 //! `ext/standard` lands the way `[regime.dump]` lands. What that widens
-//! is stated rather than hidden: 20 of the 22 `[[rule]]` rows carry no
-//! `exempt`, so an agent may propose one on the rule that denies it, and
+//! is stated rather than hidden: most `[[rule]]` rows carry no `exempt`,
+//! so an agent may propose one on the rule that denies it, and
 //! a `feature` added to an extension's row takes that extension out of
 //! the per-commit lane. Both are additions here, and both are named — in
 //! the reading, in what this instrument prints and in the commit's diff —
