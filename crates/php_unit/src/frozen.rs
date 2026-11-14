@@ -11,8 +11,9 @@
 //! the engine's (`publish_compiled`), a request's own (`compile_for`) and
 //! an engine-home unit a request takes as its own (`take_unit`) are one
 //! type. So what the engine holds for every request is a [`Frozen`],
-//! which [`Frozen::new`] makes only where every value the walk reaches is
-//! the engine's and every op array is numbered by the engine.
+//! which [`Frozen::new`] makes of a unit, and [`Frozen::composed`] of a
+//! declaration, only where every value the walk reaches is the engine's
+//! and every op array is numbered by the engine.
 //!
 //! The walk destructures every struct it walks with no `..` and matches
 //! every enum with no `_`, so a field or a variant the unit format gains
@@ -24,11 +25,13 @@
 //! something beside the walked value is a closure's cell
 //! ([`crate::UnitCell`]), which names the unit the closure was declared
 //! in: the walk over a unit passes it over, and the walk over a
-//! declaration refuses it unless it is empty, as the argument of
+//! declaration refuses it unless it is empty or bound to one of the
+//! frozen units the declaration was composed from, as the argument of
 //! [`Frozen`]'s `EngineState` impl says.
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use std::ops::Deref;
+use std::sync::Weak;
 
 use php_heap::{EngineState, FrozenZval, Zval, ZvalType};
 
@@ -37,7 +40,7 @@ use crate::decl::{
     MethodDecl, Parameter, ParameterDefault, PropertyDecl, PropertyHooks,
 };
 use crate::op::{BoundVar, MapPtrOffset, OpArray};
-use crate::unit::{HookBody, MethodBody, PublishedUnit, Unit, UnitCell};
+use crate::unit::{Binding, HookBody, MethodBody, PublishedUnit, Unit, UnitCell};
 
 /// What holds a value [`unit_values`] meets, as the engine gives each
 /// value of a compile its owner: the main op array, held while it runs;
@@ -76,8 +79,9 @@ pub enum Slot {
 
 /// What [`unit_values`] refuses of a unit apart from its values (#4656):
 /// an index past the table it names, a constant no publisher is shown to
-/// write, and an op array a request numbered; and what [`Frozen::new`]
-/// refuses of a declaration apart from its values, a closure's cell.
+/// write, and an op array a request numbered; and what
+/// [`Frozen::composed`] refuses of a declaration apart from its values, a
+/// closure's cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stray {
     /// An `IS_CONSTANT_AST` constant past its op array's `const_exprs`.
@@ -89,8 +93,9 @@ pub enum Stray {
     /// An op array whose runtime cache is a request's number
     /// ([`MapPtrOffset::Request`]).
     Request(u32),
-    /// A closure's cell in a declaration that is not the empty one, which
-    /// names the unit the declaration was compiled in (#4684). Never
+    /// A closure's cell in a declaration that is not the empty one and
+    /// names none of the units the declaration was composed from: shared
+    /// and not yet bound, or bound to any other unit (#4684, #4690). Never
     /// [`unit_values`]': in a unit, the cell names the unit walked.
     Cell,
 }
@@ -130,7 +135,7 @@ pub fn unit_values(unit: &Unit, found: &mut dyn FnMut(Holder, Slot, Zval)) -> Re
     let mut walk = Walk {
         found,
         constants: constants.len(),
-        cells: false,
+        cells: Cells::Passed,
         stray: None,
     };
     walk.op_array(Holder::Main, main);
@@ -318,28 +323,49 @@ fn expr_parts(expr: &ConstExpr, found: &mut dyn FnMut(Zval), cell: &mut dyn FnMu
     }
 }
 
+/// What the walk does with a closure's cell: a unit's passes it over, and
+/// a declaration's admits it only where it names one of the units the
+/// declaration was composed from.
+#[derive(Clone, Copy)]
+enum Cells<'u> {
+    Passed,
+    Named(&'u [Frozen<PublishedUnit>]),
+}
+
+impl Cells<'_> {
+    /// Whether `cell` is admitted: empty, which names no unit; or bound
+    /// where one of the units stands, as
+    /// [`Weak::as_ptr`] answers for the binding and
+    /// [`PublishedUnit::as_ptr`] for the unit. Not bound is not empty: a
+    /// shared cell is bound when its unit is published, to a unit no
+    /// check has read. No unit is walked again: each is frozen already.
+    fn admit(self, cell: &UnitCell) -> bool {
+        match self {
+            Cells::Passed => true,
+            Cells::Named(units) => match cell.binding() {
+                Binding::Empty => true,
+                Binding::Unbound => false,
+                Binding::Bound(unit) => units
+                    .iter()
+                    .any(|frozen| Weak::as_ptr(unit) == PublishedUnit::as_ptr(frozen)),
+            },
+        }
+    }
+}
+
 /// The walk over one unit or one declaration: where it hands each value,
-/// the bound of the unit's `constants`, whether a closure's cell that is
-/// not empty is refused, and the first [`Stray`] it met.
+/// the bound of the unit's `constants`, what it does with a closure's
+/// cell, and the first [`Stray`] it met.
 struct Walk<'f> {
     found: &'f mut dyn FnMut(Holder, Slot, Zval),
     constants: usize,
-    cells: bool,
+    cells: Cells<'f>,
     stray: Option<Stray>,
 }
 
 impl Walk<'_> {
     fn stray(&mut self, stray: Stray) {
         self.stray = self.stray.or(Some(stray));
-    }
-
-    /// A cell that is not the empty one, refused where the walk refuses
-    /// cells. Not bound is not empty: a shared cell is bound when its unit
-    /// is published.
-    fn cell(&mut self, met: bool) {
-        if met && self.cells {
-            self.stray(Stray::Cell);
-        }
     }
 
     /// The index `at` a constant holds, refused as `past` names it where it is not
@@ -543,29 +569,37 @@ impl Walk<'_> {
     }
 
     fn expr(&mut self, holder: Holder, slot: Slot, expr: &ConstExpr) {
-        let (found, mut met) = (&mut *self.found, false);
-        let empty = UnitCell::default();
+        let (found, cells, mut admitted) = (&mut *self.found, self.cells, true);
         expr_parts(expr, &mut |z| found(holder, slot, z), &mut |cell| {
-            met |= *cell != empty;
+            admitted &= cells.admit(cell);
         });
-        self.cell(met);
+        if !admitted {
+            self.stray(Stray::Cell);
+        }
     }
 
     fn attributes(&mut self, holder: Holder, slot: Slot, attributes: &[Attribute]) {
-        let (found, mut met) = (&mut *self.found, false);
-        let empty = UnitCell::default();
+        let (found, cells, mut admitted) = (&mut *self.found, self.cells, true);
         attribute_parts(attributes, &mut |z| found(holder, slot, z), &mut |cell| {
-            met |= *cell != empty;
+            admitted &= cells.admit(cell);
         });
-        self.cell(met);
+        if !admitted {
+            self.stray(Stray::Cell);
+        }
     }
 }
 
 mod sealed {
     /// What [`super::Values`] asks and no type outside the crate answers:
-    /// whether every value the walk reaches is the engine's.
+    /// whether every value the walk reaches is the engine's, read beside
+    /// what the check holds with the value, its `Units`.
     pub trait Walked {
-        fn frozen(&self) -> bool;
+        /// What a [`super::Frozen`] holds beside the value for the check's
+        /// sake: nothing for a unit, and for a declaration the frozen
+        /// units its cells may name.
+        type Units: Clone + std::fmt::Debug + Send + Sync + 'static;
+
+        fn frozen(&self, units: &Self::Units) -> bool;
     }
 }
 
@@ -579,7 +613,9 @@ pub trait Values: sealed::Walked {}
 /// `IS_PTR`, names an entry of its own tables, and every op array is
 /// numbered by the engine.
 impl sealed::Walked for PublishedUnit {
-    fn frozen(&self) -> bool {
+    type Units = ();
+
+    fn frozen(&self, (): &()) -> bool {
         let mut values = true;
         let walked = unit_values(self, &mut |_, _, z| values &= FrozenZval::of(z).is_some());
         values && walked.is_ok()
@@ -587,15 +623,18 @@ impl sealed::Walked for PublishedUnit {
 }
 
 /// Every value the declaration holds passes [`FrozenZval::of`], and every
-/// closure's cell in it is empty ([`Stray::Cell`]); a declaration holds no
-/// index, which only an op array's constant is.
+/// closure's cell in it is empty or bound to one of `units`
+/// ([`Stray::Cell`]); a declaration holds no index, which only an op
+/// array's constant is.
 impl sealed::Walked for ClassDecl {
-    fn frozen(&self) -> bool {
+    type Units = Box<[Frozen<PublishedUnit>]>;
+
+    fn frozen(&self, units: &Self::Units) -> bool {
         let mut values = true;
         let mut walk = Walk {
             found: &mut |_, _, z| values &= FrozenZval::of(z).is_some(),
             constants: 0,
-            cells: true,
+            cells: Cells::Named(units),
             stray: None,
         };
         walk.class(self);
@@ -608,42 +647,96 @@ impl Values for PublishedUnit {}
 impl Values for ClassDecl {}
 
 /// A unit or a class declaration the engine published for every request,
-/// read and never written: made only by [`Frozen::new`], which walks every
-/// value it holds. A request's own unit is never one.
+/// read and never written: made only by [`Frozen::new`] for a unit and
+/// [`Frozen::composed`] for a declaration, each of which walks every value
+/// it holds. A request's own unit is never one. A frozen declaration holds
+/// beside it the frozen units it was composed from, which nothing hands
+/// out; a frozen unit holds nothing beside it, and is the size of a
+/// [`PublishedUnit`].
 #[derive(Debug, Clone)]
-pub struct Frozen<T>(T);
+pub struct Frozen<T: Values> {
+    value: T,
+    /// Held, never read: what the check read the value beside stands as
+    /// long as the value does.
+    _units: T::Units,
+}
 
 impl<T: Values> Frozen<T> {
-    /// `value`, where every value the walk reaches is a scalar or a
-    /// published string or constant array of the engine's table
-    /// ([`FrozenZval::of`]), and, for a unit, each of its constants that is
-    /// an index, an `IS_CONSTANT_AST` or an `IS_PTR`, is below its table's
-    /// bound, none is `UNDEF`, and every op array's
-    /// offset is [`MapPtrOffset::Engine`] ([`unit_values`]); for a
-    /// declaration, every closure's cell in it is empty ([`Stray::Cell`]).
-    ///
-    /// # Errors
-    ///
-    /// `value` back, where any of those does not hold.
-    pub fn new(value: T) -> Result<Frozen<T>, T> {
-        if value.frozen() {
-            Ok(Frozen(value))
+    fn checked(value: T, units: T::Units) -> Result<Frozen<T>, T> {
+        if value.frozen(&units) {
+            Ok(Frozen {
+                value,
+                _units: units,
+            })
         } else {
             Err(value)
         }
     }
 }
 
-impl<T> Deref for Frozen<T> {
+impl Frozen<PublishedUnit> {
+    /// `unit`, where every value the walk reaches is a scalar or a
+    /// published string or constant array of the engine's table
+    /// ([`FrozenZval::of`]), each of its constants that is an index, an
+    /// `IS_CONSTANT_AST` or an `IS_PTR`, is below its table's bound, none
+    /// is `UNDEF`, and every op array's offset is [`MapPtrOffset::Engine`]
+    /// ([`unit_values`]).
+    ///
+    /// # Errors
+    ///
+    /// `unit` back, where any of those does not hold.
+    pub fn new(unit: PublishedUnit) -> Result<Frozen<PublishedUnit>, PublishedUnit> {
+        Frozen::checked(unit, ())
+    }
+}
+
+impl Frozen<ClassDecl> {
+    /// `declaration`, held with `units`, the frozen units it was composed
+    /// from: the class's own and every unit of its whole trait-use
+    /// closure, a trait's traits among them, which the caller names. It is
+    /// admitted where every value the walk reaches is a scalar or a
+    /// published string or constant array of the engine's table
+    /// ([`FrozenZval::of`]), and every closure's cell in it is empty or
+    /// bound where one of `units` stands ([`Stray::Cell`]): one compare of
+    /// an address per unit for each cell, and no unit walked again, since
+    /// each is frozen already. A declaration with no cell is admitted with
+    /// no unit. Each of `units` is a [`Frozen`] one, so a request's own
+    /// unit is never one:
+    ///
+    /// ```compile_fail,E0308
+    /// use php_unit::frozen::Frozen;
+    /// fn composed(declaration: php_unit::decl::ClassDecl) {
+    ///     let unit = php_unit::Unit::default().published(None);
+    ///     let _ = Frozen::composed(declaration, vec![unit]);
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// `declaration` back, where any of those does not hold.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the Err side is the declaration handed back once per publish, for the caller to bind as a request's own"
+    )]
+    pub fn composed(
+        declaration: ClassDecl,
+        units: Vec<Frozen<PublishedUnit>>,
+    ) -> Result<Frozen<ClassDecl>, ClassDecl> {
+        Frozen::checked(declaration, units.into_boxed_slice())
+    }
+}
+
+impl<T: Values> Deref for Frozen<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        &self.0
+        &self.value
     }
 }
 
 /// The one hand impl `state.engine` admits outside the homes (#4633,
-/// ADR-0005). A [`Frozen`] is made by [`Frozen::new`] alone, which has
+/// ADR-0005). A [`Frozen`] is made by [`Frozen::new`] or
+/// [`Frozen::composed`] alone, each of which has
 /// read every value the unit or declaration holds through the walk above,
 /// which names every field and variant of the unit format, and admitted
 /// each only where [`FrozenZval::of`] does: a scalar, or a string or
@@ -672,11 +765,20 @@ impl<T> Deref for Frozen<T> {
 /// a frozen unit, and it may be moved and shared as engine state.
 ///
 /// A declaration is walked apart from any unit, so a cell in it that is
-/// not empty names the unit the declaration was compiled in, which may be
-/// a request's own. No frozen declaration holds one: the walk over a
-/// declaration refuses every cell that is not the empty one, bound or not
+/// not empty names the unit whose source held the closure, the class's
+/// own, a used trait's or a trait's trait's, or any other unit, a
+/// request's own among them. A frozen declaration holds the frozen units
+/// it was composed from, and the walk over it refuses every cell that is
+/// not the empty one unless it is bound where one of those units stands
 /// ([`Stray::Cell`]), wherever a constant expression sits in it, a class
 /// constant, a property's default, an attribute's argument or a
-/// parameter's default. So no unit is reachable through a frozen
-/// declaration, by the type and the check alone, whoever makes one.
+/// parameter's default; a cell shared and not yet bound names no unit the
+/// check can read, and is refused. An address is identity here: the
+/// frozen declaration holds each of its units strongly for its own life,
+/// and a cell's `Weak` keeps its unit's allocation from being freed or
+/// reused while the cell lives, so an address that was a held unit's at
+/// the check stays that unit's, and a cell bound once is bound for good.
+/// So a unit reachable through a frozen declaration is one of the units
+/// it holds, itself frozen and held, and nothing else, by the type and the
+/// check alone, whoever makes one.
 impl<T: Values + Send + Sync + 'static> EngineState for Frozen<T> {}
