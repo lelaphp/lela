@@ -466,7 +466,7 @@ impl Request {
         self.arena.files.hit(held, validation, now);
         let answer = Some(Ok(PublishedUnit::clone(&held.unit)));
         let early = Some(Arc::clone(&held.early));
-        self.note_load(&answer, validation, Filed::Hit, early);
+        self.note_load(&answer, validation, Filed::Hit, early, Some(&held.unit));
         Ok(answer)
     }
 
@@ -761,12 +761,13 @@ impl Request {
             return self.compiled_alone(args, &full);
         }
         let scanned = scanned.get();
+        let frozen = crate::unit_cache::held(compiled.as_ref());
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
         self.count_keys_made(keys_counted(scanned, validation, &cached));
         if matches!(cached, Some(Ok(_))) {
             self.tell_compiled(&full, validation, filed);
         }
-        self.note_load(&cached, validation, filed, early);
+        self.note_load(&cached, validation, filed, early, frozen.as_ref());
         // The file opened as a stream where php compiles it or resolves
         // it to look it up by its full path, and not for a hit whose key
         // the cache files: one by the full path, or read back from the
@@ -889,6 +890,27 @@ impl Request {
         path: &[u8],
         optimizer: Optimizer,
     ) -> Fresh {
+        let fresh = self.compile_kind_for_cache(source, path, SourceKind::File);
+        // What the compile laid on the heap before its persist; one that
+        // meets the hard limit has ended the request.
+        if let Ok(unit) = &fresh.unit {
+            super::declared_bytes::persisted(self, unit, fresh.tree, optimizer).ok();
+        }
+        fresh
+    }
+
+    /// [`Request::compile_for_cache`] over a source of `kind`, a file's
+    /// or an `eval`'s string the preload publishes
+    /// ([`Request::preload_eval`]), with its stacks held to the request's
+    /// end and nothing else charged: the caller charges what the compile
+    /// laid, a persisted file's bytes for a file, an `eval`'s outside the
+    /// preload for a string.
+    pub(crate) fn compile_kind_for_cache(
+        &mut self,
+        source: &[u8],
+        path: &[u8],
+        kind: SourceKind,
+    ) -> Fresh {
         let shared = Arc::clone(&self.shared);
         let stack = self.stack_limit();
         let bound = crate::multibyte::bound(self, shared.compile_multibyte());
@@ -909,6 +931,7 @@ impl Request {
             shared.compile_file(
                 source,
                 path,
+                kind,
                 cwd,
                 stack,
                 request,
@@ -917,12 +940,9 @@ impl Request {
             )
         });
         self.compile_arena = arena;
-        // What the compile laid on the heap before its persist, its
-        // stacks held to the request's end; one that meets the hard
-        // limit has ended the request.
+        // The compiler's stacks, held to the request's end.
         if let Ok(unit) = &fresh.unit {
             self.note_pushed(super::Pushed::of(unit));
-            super::declared_bytes::persisted(self, unit, fresh.tree, optimizer).ok();
         }
         fresh
     }
@@ -939,6 +959,7 @@ impl Request {
         validation: Validation,
         filed: Filed,
         early: Option<crate::unit_cache::EarlyBound>,
+        frozen: Option<&php_unit::frozen::Frozen<PublishedUnit>>,
     ) {
         let served = AccelServed::of(validation, filed);
         self.accel_loaded = (cached.clone().and_then(Result::ok)).zip(served);
@@ -947,8 +968,8 @@ impl Request {
             .and_then(Result::ok)
             .zip(early)
             .filter(|(_, early)| early.iter().any(Option::is_some));
-        if let (Some(Ok(unit)), Filed::Hit | Filed::Held | Filed::Existing, Some(_)) =
-            (cached, filed, served)
+        if let (Some(unit), Filed::Hit | Filed::Held | Filed::Existing, Some(_)) =
+            (frozen, filed, served)
         {
             self.note_held(unit);
         }

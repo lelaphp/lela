@@ -13,8 +13,6 @@ use php_unit::decl::{
 };
 
 use super::EpochClassId;
-use crate::api::values::ClassId;
-use crate::arena::Arena;
 
 /// A class as a recording names it (design §5.14, *Identities*): one
 /// every request of the view's epoch shares, by the identity the arena's
@@ -238,8 +236,8 @@ fn attribute_name(attribute: &Attribute) -> Name {
 /// A class's linked record as a view reads it, each class it names as a
 /// [`RecordClass`]: a request's own class's, copied as the request
 /// linked it and keyed at record time, or one the epoch keeps, borrowed
-/// and keyed as it is read, the engine's own by their identities and a
-/// published row's by the arena's one test of each class it names.
+/// and keyed as it is read, the engine's own and a published row's by
+/// the identities the arena minted.
 #[derive(Clone, Copy)]
 pub struct Linked<'v> {
     class: RecordClass,
@@ -257,7 +255,7 @@ impl std::fmt::Debug for Linked<'_> {
 enum Record<'v> {
     Own(&'v LinkedClass<RecordClass>),
     Native(&'v LinkedClass<EpochClassId>),
-    Published(&'v LinkedClass<ClassId>, &'v Arena),
+    Published(&'v LinkedClass<EpochClassId>),
 }
 
 impl<'v> Linked<'v> {
@@ -278,15 +276,15 @@ impl<'v> Linked<'v> {
         }
     }
 
-    /// The record of `class`, a row of `arena`'s.
+    /// The record of `class`, a row of the epoch's arena, which names
+    /// every class by the identity the arena minted (#4652).
     pub(super) fn published(
         class: EpochClassId,
-        record: &'v LinkedClass<ClassId>,
-        arena: &'v Arena,
+        record: &'v LinkedClass<EpochClassId>,
     ) -> Linked<'v> {
         Linked {
             class: RecordClass::Shared(class),
-            record: Record::Published(record, arena),
+            record: Record::Published(record),
         }
     }
 
@@ -295,8 +293,7 @@ impl<'v> Linked<'v> {
     pub fn constructs(self) -> bool {
         match self.record {
             Record::Own(record) => record.constructor.is_some(),
-            Record::Native(record) => record.constructor.is_some(),
-            Record::Published(record, _) => record.constructor.is_some(),
+            Record::Native(record) | Record::Published(record) => record.constructor.is_some(),
         }
     }
 
@@ -305,8 +302,7 @@ impl<'v> Linked<'v> {
     pub fn accessors(self) -> Accessors {
         match self.record {
             Record::Own(record) => record.accessors,
-            Record::Native(record) => record.accessors,
-            Record::Published(record, _) => record.accessors,
+            Record::Native(record) | Record::Published(record) => record.accessors,
         }
     }
 
@@ -315,11 +311,9 @@ impl<'v> Linked<'v> {
     pub fn implements(self, of: RecordClass) -> bool {
         match self.record {
             Record::Own(record) => record.interfaces.contains(&of),
-            Record::Native(record) => of
+            Record::Native(record) | Record::Published(record) => of
                 .shared()
                 .is_some_and(|of| record.interfaces.contains(&of)),
-            Record::Published(record, arena) => (record.interfaces.iter())
-                .any(|class| arena.shared_class(*class).map(RecordClass::Shared) == Some(of)),
         }
     }
 
@@ -333,17 +327,13 @@ impl<'v> Linked<'v> {
     ) -> Option<(RecordClass, u32)> {
         match self.record {
             Record::Own(record) => found(&record.properties, self.class, Some, name, named),
-            Record::Native(record) => found(
+            Record::Native(record) | Record::Published(record) => found(
                 &record.properties,
                 self.class,
                 |c| Some(c.into()),
                 name,
                 named,
             ),
-            Record::Published(record, arena) => {
-                let key = |c| arena.shared_class(c).map(RecordClass::Shared);
-                found(&record.properties, self.class, key, name, named)
-            }
         }
     }
 
@@ -356,17 +346,13 @@ impl<'v> Linked<'v> {
     ) -> Option<(RecordClass, u32)> {
         match self.record {
             Record::Own(record) => found(&record.constants, self.class, Some, name, named),
-            Record::Native(record) => found(
+            Record::Native(record) | Record::Published(record) => found(
                 &record.constants,
                 self.class,
                 |c| Some(c.into()),
                 name,
                 named,
             ),
-            Record::Published(record, arena) => {
-                let key = |c| arena.shared_class(c).map(RecordClass::Shared);
-                found(&record.constants, self.class, key, name, named)
-            }
         }
     }
 }

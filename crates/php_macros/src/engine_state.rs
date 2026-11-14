@@ -67,15 +67,16 @@ pub(crate) fn expand(item: Tokens) -> syn::Result<Tokens> {
 }
 
 /// The path `#[derive(EngineState)]` names the trait by: `php_heap`'s own
-/// in a crate below the engine, `php_unit` and `php_ssa`, which depend on
-/// `php_heap` and on neither the engine nor the facade, and the root's
-/// `abi::EngineState` everywhere else (ADR-0007, #4544).
+/// in a crate below the engine, `php_unit`, `php_ssa` and `php_link`,
+/// which depend on `php_heap` and on neither the engine nor the facade,
+/// and the root's `abi::EngineState` everywhere else (ADR-0007, #4544,
+/// #4632).
 fn state_trait() -> Tokens {
     state_trait_for(std::env::var("CARGO_CRATE_NAME").ok().as_deref())
 }
 
 pub(crate) fn state_trait_for(crate_name: Option<&str>) -> Tokens {
-    if matches!(crate_name, Some("php_unit" | "php_ssa")) {
+    if matches!(crate_name, Some("php_unit" | "php_ssa" | "php_link")) {
         quote!(::php_heap::EngineState)
     } else {
         let root = root_for(crate_name);

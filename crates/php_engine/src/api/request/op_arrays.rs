@@ -295,7 +295,7 @@ impl<'r> Frames<&'r Request> {
     #[must_use]
     pub fn op_array(self, function: Function) -> Option<OpArrayView<'r>> {
         let user = self.0.user_function(function)?;
-        exec::body_of(&user.unit, user.body).map(|code| OpArrayView::of(&user.unit, code))
+        exec::body_of(user.unit(), user.body()).map(|code| OpArrayView::of(user.unit(), code))
     }
 
     /// `zend_dump_op_array(op_array, ZEND_DUMP_LINE_NUMBERS, NULL, NULL)`

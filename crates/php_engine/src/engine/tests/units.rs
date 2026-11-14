@@ -71,6 +71,245 @@ fn a_file_the_cache_holds_nowhere_moves_the_engine_s_map_pointer_count_by_nothin
     assert_eq!(count(&holding), after_first, "and took them once");
 }
 
+/// A unit [`Frozen::new`] refuses is held nowhere
+/// (`unit_cache::refused`): the asker is answered as php without the
+/// cache answers a compile, [`Filed::Compiled`] with no early-bound class
+/// published, so it binds every class it declares as its own, and each
+/// later ask compiles the file again, one compile for each. The check
+/// runs after the unit took its map-pointer offsets of the engine's, so
+/// each of those compiles moves the count by as much as the first did.
+/// No compile's unit is refused, since a unit's walk passes its
+/// closures' cells over (#4684); the refusal is driven here by the
+/// `share` the cache is handed.
+#[test]
+fn a_unit_the_check_refuses_is_held_nowhere_and_every_ask_compiles_it_again() {
+    use crate::unit_cache::{Asked, Compiled, Filed, Levels};
+    let files = Files::new(
+        "refused",
+        &[(
+            "declares.inc",
+            "<?php class Refused { function m() {} } function refused() {}",
+        )],
+    );
+    let path = files.path().join("declares.inc");
+    let path = path.to_string_lossy().into_owned().into_bytes();
+    let engine = Engine::cli_builder().build();
+    let shared = &engine.shared;
+    let arena = shared.arena.current();
+    let compiles = std::cell::Cell::new(0);
+    let count = || shared.map_ptr_last.load(Ordering::Relaxed);
+    let mut moved = Vec::new();
+    for _ in 0..3 {
+        let before = count();
+        let held = std::cell::Cell::new(false);
+        let asked = Asked {
+            path: &path,
+            source: None,
+            written: None,
+            opened: true,
+            validation: Validation::Never,
+            protection: 0,
+            now: crate::unit_cache::now(),
+            levels: Levels::Memory,
+            optimizer: shared.optimizer(),
+            laid: crate::tier::words_laid(shared, None),
+            held: &held,
+        };
+        let (answered, how, early) = shared.units.file(
+            &mut (),
+            &arena.files,
+            asked,
+            |(), source, _| {
+                compiles.set(compiles.get() + 1);
+                let request = ForRequest::none(shared.unbound());
+                let mut laid = php_compile::syntax::Arena::default();
+                let (cwd, stack) = (Path::new(""), StackLimit::UNCHECKED);
+                let heap = CompileHeap::Engine;
+                shared.compile_file(
+                    source,
+                    &path,
+                    SourceKind::File,
+                    cwd,
+                    stack,
+                    request,
+                    heap,
+                    &mut laid,
+                )
+            },
+            |_| None,
+            |unit| Err(shared.published_alone(unit)),
+            |(), _| Arc::new([]),
+        );
+        assert_eq!(how, Filed::Compiled);
+        assert!(early.is_none(), "no early-bound class published");
+        assert!(matches!(answered, Some(Ok(Compiled::Published(_)))));
+        moved.push(count() - before);
+    }
+    assert_eq!(compiles.get(), 3, "one compile for each ask");
+    assert!(
+        moved.iter().all(|moved| *moved > 0),
+        "each took offsets: {moved:?}"
+    );
+    assert!(
+        moved.windows(2).all(|pair| pair[0] == pair[1]),
+        "as many each time: {moved:?}"
+    );
+}
+
+/// `program` served three times on one engine that holds every file in
+/// the cache, never validated, each compile written to the body as
+/// `compiled <file>`: each body, and the classes the arena holds after
+/// each request beyond those it held before the first.
+fn served_held(program: &str) -> (Vec<String>, Vec<u32>) {
+    use crate::api::abi::{Admission, ExtensionBuilder, Lookup};
+    fn compiled(req: &mut Request, path: &[u8]) {
+        let name = path.rsplit(|b| *b == b'/').next().unwrap_or(path);
+        req.response_mut()
+            .write(&[b"compiled ", name, b"\n"].concat());
+    }
+    let extension = ExtensionBuilder::default()
+        .admission(|_, _| Admission::Held {
+            validation: Validation::Never,
+            lookup: Lookup::Resolved,
+            protection: 0,
+            file_cache: None,
+        })
+        .optimizer_pass(compiled)
+        .build("t");
+    let engine = Engine::cli_builder().extensions(&[extension]).build();
+    let classes = || engine.shared.arena.current().counts()[0];
+    let before = classes();
+    let mut bodies = Vec::new();
+    let mut reserved = Vec::new();
+    for _ in 0..3 {
+        bodies.push(served(&engine, program).0);
+        reserved.push(classes() - before);
+    }
+    (bodies, reserved)
+}
+
+/// A class that uses a trait and holds a closure and a first-class
+/// callable in its composed declaration is published at its first link,
+/// as the same class holding neither is (#4699): the check admits each
+/// cell against the frozen units the class was composed from, its own
+/// and its trait's (`Request::publish`). The file is compiled once and
+/// held, every later request is served the held unit with no compile,
+/// and no later request reserves a class.
+#[test]
+fn a_trait_using_class_holding_a_closure_is_published_at_its_first_link() {
+    let files = Files::new(
+        "published-link",
+        &[
+            (
+                "closures.inc",
+                "<?php trait Greets { public function hi(): string { return 'hi'; } }\n\
+                 class Greeter { use Greets; const LEN = strlen(...);\n\
+                 public $twice = static function (int $n): int { return 2 * $n; }; }",
+            ),
+            (
+                "plain.inc",
+                "<?php trait Greets { public function hi(): string { return 'hi'; } }\n\
+                 class Greeter { use Greets; const LEN = 4; public $twice = 8; }",
+            ),
+        ],
+    );
+    let serve = |file: &str, echo: &str| {
+        served_held(&format!(
+            "<?php require '{}'; $g = new Greeter; echo {echo}, $g->hi(), \"\\n\";",
+            files.path().join(file).display()
+        ))
+    };
+    let (bodies, closures) = serve("closures.inc", "(Greeter::LEN)('abcd'), ($g->twice)(4)");
+    assert_eq!(
+        bodies,
+        ["compiled closures.inc\n48hi\n", "48hi\n", "48hi\n"],
+        "compiled once, and served held after"
+    );
+    let (bodies, plain) = serve("plain.inc", "Greeter::LEN, $g->twice");
+    assert_eq!(bodies, ["compiled plain.inc\n48hi\n", "48hi\n", "48hi\n"]);
+    assert_eq!(
+        closures[0], plain[0],
+        "the class holding closures is published at its first link as the plain one is: {closures:?} {plain:?}"
+    );
+    for reserved in [&closures, &plain] {
+        assert!(
+            reserved.windows(2).all(|pair| pair[0] == pair[1]),
+            "nothing reserved by a later request: {reserved:?}"
+        );
+    }
+}
+
+/// A trait's trait is among the units a class is composed from: the
+/// first-class callable `Inner` declares in `inner.inc` reaches the
+/// class `outer.inc` declares through `Outer`, and the class is
+/// published at its first link, as the same class whose `Inner` holds
+/// none is.
+#[test]
+fn a_cell_from_a_trait_of_a_trait_in_another_file_is_published_with_its_class() {
+    let files = Files::new(
+        "trait-of-trait",
+        &[
+            (
+                "callable.inc",
+                "<?php trait Inner { const LEN = strlen(...); }",
+            ),
+            ("plain.inc", "<?php trait Inner { const LEN = 4; }"),
+            (
+                "outer.inc",
+                "<?php trait Outer { use Inner; } class Greeter { use Outer; }",
+            ),
+        ],
+    );
+    let serve = |inner: &str, echo: &str| {
+        served_held(&format!(
+            "<?php require '{}'; require '{}'; echo {echo}, \"\\n\";",
+            files.path().join(inner).display(),
+            files.path().join("outer.inc").display()
+        ))
+    };
+    let (bodies, callable) = serve("callable.inc", "(Greeter::LEN)('abcd')");
+    assert_eq!(
+        bodies,
+        [
+            "compiled callable.inc\ncompiled outer.inc\n4\n",
+            "4\n",
+            "4\n"
+        ]
+    );
+    let (bodies, plain) = serve("plain.inc", "Greeter::LEN");
+    assert_eq!(
+        bodies,
+        ["compiled plain.inc\ncompiled outer.inc\n4\n", "4\n", "4\n"]
+    );
+    assert_eq!(
+        callable, plain,
+        "the class reached by a trait's trait's callable is published as the plain one is"
+    );
+}
+
+/// The include's per-request fallback a refusal still reaches: a class
+/// in a held file that uses a trait the request declared in an `eval`
+/// is the request's own, bound per request and never published. Its
+/// trait is not shared, so `Request::fetched` finds the class nothing to
+/// look up or publish, as `zend_accel_inheritance_cache_get` asks for
+/// an immutable parent and traits; behind it, `Request::publish_link`
+/// refuses a dependency that is not shared, and `Request::publish` a
+/// trait's method over a unit no frozen unit stands for.
+#[test]
+fn a_class_using_a_trait_the_request_declared_is_bound_per_request() {
+    let files = Files::new(
+        "own-trait",
+        &[("greeter.inc", "<?php class Greeter { use Greets; }")],
+    );
+    let (bodies, reserved) = served_held(&format!(
+        "<?php eval('trait Greets {{ public function hi(): string {{ return \"hi\"; }} }}');\n\
+         require '{}'; echo (new Greeter)->hi(), \"\\n\";",
+        files.path().join("greeter.inc").display()
+    ));
+    assert_eq!(bodies, ["compiled greeter.inc\nhi\n", "hi\n", "hi\n"]);
+    assert_eq!(reserved, [0, 0, 0], "no request publishes the class");
+}
+
 /// An extension that names a file to preload as the engine
 /// finishes starting up, reading it from an ini entry of its own,
 /// and holds every file in the cache, never validated, as opcache
@@ -180,6 +419,107 @@ fn a_restart_keeps_the_preloads_rows_at_their_numbers() {
         let (was, is) = (before.function(function), after.function(function));
         assert!(was.zip(is).is_some_and(|(was, is)| std::ptr::eq(was, is)));
     }
+}
+
+/// Whether each function's and method's op array of `unit` has its row
+/// of words in `epoch`, in the order the unit holds them.
+fn words_laid(epoch: &crate::arena::Arena, unit: &PublishedUnit) -> Vec<bool> {
+    let functions = unit.functions.iter().map(|(_, code)| code);
+    let methods = unit.methods.iter().map(|method| &method.body);
+    let laid = |code: &php_unit::OpArray| {
+        crate::tier::EngineFuncRef::of(crate::tier::FuncRef::at(code.runtime_cache))
+            .is_some_and(|func| epoch.func(func.offset()).is_some())
+    };
+    functions.chain(methods).map(laid).collect()
+}
+
+/// A preload's `eval` is the preload's as a file it preloads is (design
+/// §5.14, #4696): the epoch laid after the preload holds a row of words
+/// for the op arrays of the function and the method the `eval` declared,
+/// as it holds one for the preloaded file's own function, and the
+/// request reaches all three.
+#[test]
+fn a_preload_evals_function_and_method_have_their_words_laid_as_a_preloaded_files_do() {
+    let files = Files::new(
+        "preload-eval-words",
+        &[(
+            "preload.inc",
+            "<?php\nfunction pre_w() { return 'w'; }\n\
+             eval('function eval_w() { return \"e\"; } class EvalW { function m() { return \"m\"; } }');\n",
+        )],
+    );
+    let script = files.path().join("preload.inc");
+    let engine = Engine::cli_builder()
+        .extensions(&[preloading(&script)])
+        .ini("t.preload", script.as_os_str().as_encoded_bytes())
+        .build();
+    let served = engine.serve_capture(
+        "<?php echo pre_w(), eval_w(), (new EvalW)->m();",
+        crate::test::Capture::default(),
+    );
+    assert_eq!(served.stdout_text(), "wem");
+    let epoch = engine.shared.arena.current();
+    let preloaded = engine
+        .shared
+        .units
+        .preloaded()
+        .expect("the preload published");
+    let scripts: Vec<bool> = (preloaded.scripts.iter())
+        .flat_map(|held| words_laid(&epoch, &held.unit))
+        .collect();
+    let evals: Vec<bool> = (preloaded.evals.iter())
+        .flat_map(|unit| words_laid(&epoch, unit))
+        .collect();
+    assert_eq!(scripts, [true], "the preloaded file's function");
+    assert_eq!(evals, [true, true], "the eval's function and its method");
+}
+
+/// Only a preload's `eval` with a declaration the preload keeps outlives
+/// the preload (#4696): of an `eval` that declares nothing, one that
+/// declares a function, one that declares and calls a closure alone and
+/// one that declares a function holding a closure, the preload holds the
+/// second's and the fourth's units, since no table names a closure, and
+/// both functions stand in every request.
+#[test]
+fn only_a_preload_eval_with_a_kept_declaration_outlives_the_preload() {
+    let files = Files::new(
+        "preload-eval-kept",
+        &[(
+            "preload.inc",
+            "<?php\neval('$x = 1;');\neval('function eval_k() { return \"k\"; }');\n\
+             eval('$f = function () { return 1; }; $f();');\n\
+             eval('function eval_c() { $g = function () { return \"c\"; }; return $g(); }');\n",
+        )],
+    );
+    let script = files.path().join("preload.inc");
+    let engine = Engine::cli_builder()
+        .extensions(&[preloading(&script)])
+        .ini("t.preload", script.as_os_str().as_encoded_bytes())
+        .build();
+    let served = engine.serve_capture(
+        "<?php echo eval_k(), eval_c();",
+        crate::test::Capture::default(),
+    );
+    assert_eq!(served.stdout_text(), "kc");
+    let preloaded = engine
+        .shared
+        .units
+        .preloaded()
+        .expect("the preload published");
+    // Each kept unit by the functions it declares, its closures passed
+    // over.
+    let named = |unit: &php_unit::frozen::Frozen<PublishedUnit>| {
+        let names = unit.functions.iter().map(|(decl, _)| &decl.name.0);
+        let names = names.filter(|name| !name.starts_with(b"{"));
+        let names: Vec<_> = names.map(|name| String::from_utf8_lossy(name)).collect();
+        names.join(",")
+    };
+    let kept: Vec<String> = preloaded.evals.iter().map(named).collect();
+    assert_eq!(
+        kept,
+        ["eval_k", "eval_c"],
+        "the evals that declared a function, and not the others"
+    );
 }
 
 /// An extension that keeps every file in the cache, never validated,

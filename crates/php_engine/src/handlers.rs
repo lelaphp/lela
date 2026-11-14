@@ -2007,7 +2007,7 @@ fn primed_call(req: &Request, function: Function, count: u32) -> Cached {
     let Some(user) = req.user_function(function) else {
         return Cached::Function(function);
     };
-    let shape = user.shape;
+    let shape = user.shape();
     let enters = shape.sent.plain_entry() && count <= shape.parameters;
     let base = req.cache_base(shape.cache).filter(|_| enters);
     let laid = base.is_some();
@@ -13782,7 +13782,7 @@ fn do_call_entered(
     (call, function): (FrameRef, Function),
 ) -> Edge {
     if let Some(user) = req.user_function(function) {
-        let shape = user.shape;
+        let shape = user.shape();
         return enter(req, frame, says, call, shape);
     }
     let function = match crate::trampoline::hand_to_magic(req, function) {
@@ -13793,7 +13793,7 @@ fn do_call_entered(
         }
     };
     if let Some(user) = req.user_function(function) {
-        let shape = user.shape;
+        let shape = user.shape();
         return enter(req, frame, says, call, shape);
     }
     let served = req.serve_native(function, OnThrow::Nothing);

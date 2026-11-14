@@ -27,6 +27,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use php_unit::decl::{FunctionDecl, Name, Parameter};
+use php_unit::frozen::Frozen;
 use php_unit::{OpArray, OplineIdx, PublishedUnit};
 
 use super::{Laid, SafepointIdx, Word};
@@ -42,8 +43,9 @@ pub(super) static SEALED: Word = Word::sealed();
 
 /// One op array of a held unit, design §3.1's `Func`: the unit it is of,
 /// its place there, one word per safepoint, and the landing words.
+#[derive(php_macros::EngineState)]
 pub(crate) struct Func {
-    unit: PublishedUnit,
+    unit: Frozen<PublishedUnit>,
     body: Body,
     words: Box<[Word]>,
     /// One word per opline, php's `zend_op_trace_info` of the opline a
@@ -165,6 +167,7 @@ impl Func {
 /// The rows of one epoch's held op arrays, by map-pointer offset: the
 /// offset less `first`, the first offset the epoch's rows are numbered
 /// from.
+#[derive(php_macros::EngineState)]
 pub(crate) struct Funcs {
     first: u32,
     rows: Column<Func>,
@@ -386,8 +389,8 @@ impl Funcs {
     /// `Z/ext/opcache/jit/zend_jit.c:4010-4034`): its entries and loops
     /// counting again, no landing armed, nothing blacklisted, and no word
     /// naming a trace of the table the restart dropped.
-    pub(crate) fn preloaded(units: &[PublishedUnit], laid: Laid) -> Funcs {
-        let bodies = units.iter().flat_map(bodies);
+    pub(crate) fn preloaded(units: &[Frozen<PublishedUnit>], laid: Laid) -> Funcs {
+        let bodies = units.iter().flat_map(|unit| bodies(unit));
         let least = bodies.filter_map(|(_, code)| engine_offset(code)).min();
         let funcs = Funcs::numbered_from(least.unwrap_or(0));
         for unit in units {
@@ -404,7 +407,7 @@ impl Funcs {
     /// ([`super::Tier::laid`]). An op array whose offset is the
     /// request's, or below the epoch's first, takes none and reads the
     /// sealed word.
-    pub(crate) fn publish(&self, unit: &PublishedUnit, laid: Laid) {
+    pub(crate) fn publish(&self, unit: &Frozen<PublishedUnit>, laid: Laid) {
         for (body, code) in bodies(unit) {
             let Some(offset) = engine_offset(code) else {
                 continue;
@@ -418,7 +421,7 @@ impl Funcs {
             };
             let words = code.safepoints.iter().map(|_| word()).collect();
             let row = Func {
-                unit: PublishedUnit::clone(unit),
+                unit: Frozen::clone(unit),
                 body,
                 words,
                 landings: OnceLock::new(),
@@ -514,7 +517,10 @@ pub(crate) mod tests {
 
     /// A unit whose main op array has `safepoints` safepoints and as many
     /// oplines, the last a `RETURN`, published at offset `first`.
-    pub(crate) fn published(first: u32, safepoints: u32) -> php_unit::PublishedUnit {
+    pub(crate) fn published(
+        first: u32,
+        safepoints: u32,
+    ) -> php_unit::frozen::Frozen<php_unit::PublishedUnit> {
         let opline = |at| Opline {
             opcode: if at + 1 == safepoints {
                 Opcode::Return
@@ -533,7 +539,7 @@ pub(crate) mod tests {
         };
         let numbers = std::sync::atomic::AtomicU32::new(first);
         crate::engine::assign_map_ptrs(&mut unit, &numbers);
-        unit.published(None)
+        php_unit::frozen::Frozen::new(unit.published(None)).expect("a unit of the engine's values")
     }
 
     /// Each op array of a held unit has a row at its offset with a zero

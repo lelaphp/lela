@@ -6,7 +6,7 @@
 //! php prints a method by. The area holds no state of its own: it reads
 //! the engine's linked classes and the classes the request declared.
 
-use php_link::{LinkedClass, Row};
+use php_link::Row;
 use php_unit::decl::{Bare, ClassKind, MethodDecl, PropertyDecl, Visibility};
 
 use crate::api::call::{ClassNative, Function};
@@ -117,7 +117,7 @@ impl Request {
         // A user function first, the executed scope's common ask; its
         // number is in none of the natives' spaces below.
         if let Some(user) = self.user_function(function) {
-            return user.member.map(|member| member.class);
+            return user.member().map(|member| member.class);
         }
         if let Some(method) = self.native_method(function) {
             // A parent hook's trampoline has the property's class as its
@@ -142,13 +142,15 @@ impl Request {
     /// position; none for a class with none.
     ///
     /// [`LinkedClass::constructor`]: php_link::LinkedClass::constructor
+    #[allow(clippy::redundant_closure_for_method_calls)] // the method's path names one lifetime, the closure any
     pub(crate) fn constructor(&self, class: ClassId) -> Option<Function> {
-        self.resolved_method(class, |record| record.constructor)
+        self.resolved_method(class, |record| record.constructor())
     }
 
     /// `ce->destructor`, as [`Request::constructor`] reads it.
+    #[allow(clippy::redundant_closure_for_method_calls)] // the method's path names one lifetime, the closure any
     pub(crate) fn destructor(&self, class: ClassId) -> Option<Function> {
-        self.resolved_method(class, |record| record.destructor)
+        self.resolved_method(class, |record| record.destructor())
     }
 
     /// The method at the position of `class`'s function table `at`
@@ -156,13 +158,10 @@ impl Request {
     pub(super) fn resolved_method(
         &self,
         class: ClassId,
-        at: impl FnOnce(&LinkedClass<ClassId>) -> Option<u32>,
+        at: impl FnOnce(super::ClassRecord<'_>) -> Option<u32>,
     ) -> Option<Function> {
         let record = self.linked_class(class)?;
-        let row = record
-            .methods
-            .rows()
-            .get(usize::try_from(at(record)?).ok()?)?;
+        let row = record.methods().get(usize::try_from(at(record)?).ok()?)?;
         self.method_function(row.holder_in(class), row.at)
     }
 
@@ -191,16 +190,15 @@ impl Request {
             return Vec::new();
         };
         record
-            .methods
-            .rows()
+            .methods()
             .iter()
-            .filter_map(|row| self.row_method_at(class, *row))
+            .filter_map(|row| self.row_method_at(class, row))
             .collect()
     }
 
     /// The linked record of a class: a native class's as startup linked
     /// it, a declared class's as it bound ([`Request::bind_members`]).
-    pub(crate) fn linked_class(&self, class: ClassId) -> Option<&LinkedClass<ClassId>> {
+    pub(crate) fn linked_class(&self, class: ClassId) -> Option<super::ClassRecord<'_>> {
         self.class_lookup().linked_class(class)
     }
 
@@ -208,11 +206,16 @@ impl Request {
     /// is.
     pub(super) fn method_function(&self, class: ClassId, at: u32) -> Option<Function> {
         let at = usize::try_from(at).ok()?;
-        let functions = match self.native_class_at(class) {
-            Some(native) => self.shared.method_functions.row(native)?,
-            None => &self.declared_row(class)?.bound.functions,
-        };
-        functions.get(at).copied().flatten()
+        match self.native_class_at(class) {
+            Some(native) => self
+                .shared
+                .method_functions
+                .row(native)?
+                .get(at)
+                .copied()
+                .flatten(),
+            None => self.declared_row(class)?.function(at),
+        }
     }
 
     /// The class native a function number names, the request's own or
@@ -322,7 +325,7 @@ impl Request {
                 }
             };
         }
-        let member = self.user_function(function)?.member?;
+        let member = self.user_function(function)?.member()?;
         let decl = self.symbols().class_decl(member.class)?;
         match member.at {
             MemberAt::Method(at) => decl.methods.get(usize::try_from(at).ok()?),
@@ -339,10 +342,10 @@ impl Request {
     /// `member`, a method or a hook, among the functions bound with it:
     /// one of the numbers the class took as it bound, in its own space.
     pub(crate) fn member_function(&self, member: Member) -> Option<Function> {
-        let members = self.declared_row(member.class)?.bound.members.clone();
+        let members = self.declared_row(member.class)?.members();
         members.map(Function).find(|function| {
             self.user_function(*function)
-                .is_some_and(|user| user.member == Some(member))
+                .is_some_and(|user| user.member() == Some(member))
         })
     }
 
@@ -749,11 +752,12 @@ impl<'r> Symbols<&'r Request> {
         self,
         class: ClassId,
     ) -> impl ExactSizeIterator<Item = PropertyInfoRow> + 'r {
-        self.0
-            .linked_class(class)
-            .map_or(&[][..], |record| record.properties.rows())
-            .iter()
-            .map(move |&row| PropertyInfoRow { class, row })
+        super::RowsOf::each(
+            self.0
+                .linked_class(class)
+                .map(super::ClassRecord::properties),
+        )
+        .map(move |row| PropertyInfoRow { class, row })
     }
 
     /// `zend_hash_find_ptr(&ce->properties_info, name)` as a
@@ -762,10 +766,10 @@ impl<'r> Symbols<&'r Request> {
     /// name. One lookup in the class's linked record.
     pub fn property_info_row(self, class: ClassId, name: &[u8]) -> Option<PropertyInfoRow> {
         let record = self.0.linked_class(class)?;
-        let (_, &row) = record.properties.find_at(name, |row| {
+        let (_, row) = record.properties().find_at(name, |row| {
             self.0
                 .symbols()
-                .row_property_info(PropertyInfoRow { class, row: *row })
+                .row_property_info(PropertyInfoRow { class, row })
                 .map_or(&[][..], |property| &property.name.0)
         })?;
         Some(PropertyInfoRow { class, row })
@@ -842,9 +846,9 @@ impl<'r> Symbols<&'r Request> {
     /// or allocated.
     pub fn method_row(self, class: ClassId, name: &[u8]) -> Option<MethodRow> {
         let record = self.0.linked_class(class)?;
-        let (at, &row) = record
-            .methods
-            .find_at(name, |row| self.0.row_method_name(class, *row))?;
+        let (at, row) = record
+            .methods()
+            .find_at(name, |row| self.0.row_method_name(class, row))?;
         let at = u32::try_from(at).ok()?;
         Some(MethodRow { class, row, at })
     }
@@ -855,12 +859,9 @@ impl<'r> Symbols<&'r Request> {
     /// record. The rows are read off the record in place, so the walk
     /// allocates nothing.
     pub fn method_rows(self, class: ClassId) -> impl ExactSizeIterator<Item = MethodRow> + 'r {
-        self.0
-            .linked_class(class)
-            .map_or(&[][..], |record| record.methods.rows())
-            .iter()
+        super::RowsOf::each(self.0.linked_class(class).map(super::ClassRecord::methods))
             .enumerate()
-            .map(move |(at, &row)| MethodRow {
+            .map(move |(at, row)| MethodRow {
                 class,
                 row,
                 at: u32::try_from(at).unwrap_or(u32::MAX),
@@ -873,11 +874,7 @@ impl<'r> Symbols<&'r Request> {
     /// row's prototype is, none where it has none.
     pub fn row_prototype(self, row: MethodRow) -> Option<ClassId> {
         let record = self.0.linked_class(row.class)?;
-        record
-            .prototypes
-            .get(usize::try_from(row.at).ok()?)
-            .copied()
-            .flatten()
+        record.prototype(usize::try_from(row.at).ok()?)
     }
 
     /// The declaration of the method a row of a function table is, which
@@ -979,18 +976,18 @@ impl<'r> Symbols<&'r Request> {
             return true;
         }
         if self.0.class_is(of, ClassKind::Interface) {
-            return self.0.symbols().interfaces(class).contains(&of);
+            return (self.0.linked_class(class))
+                .is_some_and(|record| record.interfaces().any(|interface| interface == of));
         }
         self.0.ancestors(class).any(|parent| parent == of)
     }
 
     /// `ce->interfaces` of a linked class: every interface it implements,
     /// each once, in php's order, which `class_implements` lists;
-    /// nothing for a class with no linked record.
-    pub fn interfaces(self, class: ClassId) -> &'r [ClassId] {
-        self.0
-            .linked_class(class)
-            .map_or(&[][..], |record| &record.interfaces)
+    /// nothing for a class with no linked record. Collected, since a
+    /// published class's record names them as the arena does.
+    pub fn interfaces(self, class: ClassId) -> Vec<ClassId> {
+        (self.0.linked_class(class)).map_or_else(Vec::new, |record| record.interfaces().collect())
     }
 
     /// The class and its parents up from it, `ce` then `ce->parent` and
@@ -1037,7 +1034,7 @@ impl<'r> Symbols<&'r Request> {
     pub fn class_parent(self, class: ClassId) -> Option<ClassId> {
         match self.0.native_class_at(class) {
             Some(at) => self.0.shared.parents.get(at).copied().flatten(),
-            None => self.0.declared_row(class)?.bound.parent,
+            None => self.0.declared_row(class)?.parent(),
         }
     }
 }

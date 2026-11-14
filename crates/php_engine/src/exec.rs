@@ -1535,7 +1535,7 @@ impl<'a> FrameAt<'a> {
         let declared = self
             .function()
             .and_then(|function| self.req.user_function(function))
-            .map_or(0, |user| user.shape.parameters);
+            .map_or(0, |user| user.shape().parameters);
         let count = self.num_args().saturating_sub(declared) as usize;
         let from = code.num_cvs.saturating_add(code.num_tmps) as usize;
         self.frame
@@ -2390,7 +2390,7 @@ pub(crate) enum PropertyOffset {
 /// placement in two registers: as an enum of a tag and a mask the pair
 /// came back through memory, and the computed name's read, write and
 /// step paid five to fifteen instructions for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) struct SlotType(u16);
 
 impl SlotType {

@@ -111,7 +111,7 @@ impl Function {
 /// `func->common.scope` names the class and an observer is asked of it
 /// once per class (`zend_observer_fcall_init`). The row beside each
 /// number is the class and this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) enum ClassNative {
     /// `zend_enum_register_funcs`: an enum's own `cases`, `from` or
     /// `tryFrom`, which a program's enum is given at its link.
@@ -131,7 +131,7 @@ pub(crate) enum ClassNative {
 /// every published and every request's function. Only the engine's
 /// classes are native, so a native trait's method a class copies
 /// ([`ClassNative::Trait`]) is always one, and names none of a request's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) struct EngineMethod(u32);
 
 impl EngineMethod {
@@ -850,7 +850,7 @@ pub(crate) fn handle_undef_args(req: &mut Request, call: FrameRef) -> Result<(),
 fn fill_undef_args(req: &mut Request, call: FrameRef, function: Function) -> Result<(), Thrown> {
     let user = req
         .user_function(function)
-        .map(|user| (php_unit::PublishedUnit::clone(&user.unit), user.body));
+        .map(|user| (php_unit::PublishedUnit::clone(user.unit()), user.body()));
     let count = req.vm().at(call).map_or(0, |header| header.num_args);
     for at in 0..count {
         let undef = req.vm().stack.frame(call).is_some_and(|frame| {

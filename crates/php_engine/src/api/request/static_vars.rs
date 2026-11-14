@@ -73,7 +73,7 @@ impl Request {
         let Some(user) = self.user_function(closure.function) else {
             return Vec::new();
         };
-        let Some(code) = exec::body_of(&user.unit, user.body) else {
+        let Some(code) = exec::body_of(user.unit(), user.body()) else {
             return Vec::new();
         };
         let table = if closure.fake {
@@ -195,7 +195,7 @@ impl Request {
         };
         let Some((unit, body)) = self
             .user_function(function)
-            .map(|user| (php_unit::PublishedUnit::clone(&user.unit), user.body))
+            .map(|user| (php_unit::PublishedUnit::clone(user.unit()), user.body()))
         else {
             return Vec::new();
         };

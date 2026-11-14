@@ -65,9 +65,14 @@ pub(crate) use class_constants::{ByValue, ConstantFetch, ConstantRead};
 mod class_data;
 pub(crate) use class_data::PropertyNames;
 mod classes;
+mod scope;
 use classes::AccelServed;
 pub use classes::Symbols;
 pub(crate) use classes::ce_cache;
+pub(crate) use scope::{
+    ClassRecord, ClassRow, FunctionRow, InArena, InRequest, LinkRecords, PlacedOf, PlacedSlots,
+    RowsOf, Scope,
+};
 mod constants;
 mod declared_bytes;
 pub(crate) use constants::{ConstantCount, halt_offset_key};
@@ -665,10 +670,17 @@ struct DeclaredSlot {
 /// `zend_function` into the class with the class as its scope and
 /// shares the trait's opcodes (`zend_add_trait_method`), so the row is
 /// the class's and the op array the trait's unit's.
-pub(crate) struct UserFunction {
-    pub(crate) unit: PublishedUnit,
+///
+/// A row stands in one [`Scope`]: a request's own, the default, holds a
+/// [`PublishedUnit`], names its class by [`ClassId`] and its cache by
+/// [`exec::CacheAt`], none of them engine state; the arena's holds the
+/// [`Frozen`](php_unit::frozen::Frozen) unit, and is engine state by the
+/// derive.
+#[derive(php_macros::EngineState)]
+pub(crate) struct UserFunction<S: Scope = InRequest> {
+    pub(crate) unit: S::Unit,
     pub(crate) body: exec::Body,
-    pub(crate) member: Option<Member>,
+    pub(crate) member: Option<Member<S>>,
     /// `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, which
     /// `zend_compile_func_decl` and the `#[\NoDiscard]` validator raise
     /// from the declaration's attributes, decoded where the function is
@@ -676,12 +688,28 @@ pub(crate) struct UserFunction {
     pub(crate) flags: crate::attributes::Flags,
     /// What every call's frame push and activation read of the
     /// function, read once where it is declared ([`FrameShape`]).
-    pub(crate) shape: FrameShape,
+    pub(crate) shape: FrameShape<S>,
     /// The function as another process reads it ([`crate::readable`]):
     /// its name, its file and its oplines, held where the row stands,
     /// which never moves ([`PinnedRows`], the arena's column), so a
-    /// frame's header names it by its place.
-    pub(crate) record: crate::readable::Record,
+    /// frame's header names it by its place. Its addresses are into the
+    /// bytes of `unit`, the unit beside it in the same row, or of the
+    /// declaration its class's row holds; in the arena's scope the record
+    /// holds the [`Frozen`](php_unit::frozen::Frozen) unit and
+    /// declaration it names itself ([`crate::readable::FrozenRecord`]).
+    /// The row is filled once and never moved out of its column, and a
+    /// unit's bytes stand behind its share, so what the record names
+    /// lives as long as the record does.
+    pub(crate) record: S::Record,
+}
+
+impl<S: Scope> UserFunction<S> {
+    /// Where the function's record stands, what a frame serving it
+    /// names.
+    #[inline]
+    pub(crate) fn callee_at(&self) -> crate::readable::CalleeAt {
+        S::callee_at(&self.record)
+    }
 }
 
 impl UserFunction {
@@ -708,13 +736,6 @@ impl UserFunction {
             shape,
             record,
         }
-    }
-
-    /// Where the function's record stands, what a frame serving it
-    /// names.
-    #[inline]
-    pub(crate) fn callee_at(&self) -> crate::readable::CalleeAt {
-        self.record.at()
     }
 }
 
@@ -825,8 +846,8 @@ impl<T> IntoIterator for PinnedRows<T> {
 /// engine reads them once where the function is declared, so a call
 /// reads them off the function table and walks neither the declaration
 /// nor the unit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct FrameShape {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, php_macros::EngineState)]
+pub(crate) struct FrameShape<S: Scope = InRequest> {
     pub(crate) parameters: u32,
     pub(crate) typed: bool,
     /// The CVs, `last_var`.
@@ -840,8 +861,10 @@ pub(crate) struct FrameShape {
     pub(crate) observed: bool,
     /// The first opline past the `RECV*` prologue, `safepoints[0]`.
     pub(crate) entry: u32,
-    /// `ZEND_MAP_PTR(op_array->run_time_cache)`.
-    pub(crate) cache: exec::CacheAt,
+    /// `ZEND_MAP_PTR(op_array->run_time_cache)`: a request's cache or
+    /// the engine's in a request's row, the engine's alone in the
+    /// arena's.
+    pub(crate) cache: S::Cache,
     /// `op_array.cache_size`, its slots and its room.
     pub(crate) cache_size: exec::CacheSize,
     /// Whether a parameter, the variadic's included, takes its argument
@@ -919,9 +942,9 @@ pub(crate) fn sent_parameter(
 
 /// A method as its class holds it: the class, `common.scope`, and
 /// where among the class's declaration it stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Member {
-    pub(crate) class: ClassId,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
+pub(crate) struct Member<S: Scope = InRequest> {
+    pub(crate) class: S::Class,
     pub(crate) at: MemberAt,
 }
 
@@ -941,11 +964,12 @@ pub(crate) enum MemberAt {
 /// binding it settled ([`Bound`]), its placed properties among it.
 /// Where it stands in `EG(class_table)` is the table's ([`Named`]), not
 /// the row's.
-pub(crate) struct Declared {
-    unit: PublishedUnit,
+#[derive(php_macros::EngineState)]
+pub(crate) struct Declared<S: Scope = InRequest> {
+    unit: S::Unit,
     at: u32,
-    composed: Option<Box<php_link::Composed>>,
-    bound: Bound,
+    composed: Option<Box<php_link::Composed<S::Decl>>>,
+    bound: Bound<S>,
 }
 
 /// The strings classes are named by, by class: what `ce->name` is to a
@@ -993,15 +1017,15 @@ impl ClassNames {
 
 /// What binding a declared class settled once, for every lookup after
 /// to read rather than walk ([`Request::bind_members`]).
-#[derive(Default)]
-pub(crate) struct Bound {
+#[derive(php_macros::EngineState)]
+pub(crate) struct Bound<S: Scope = InRequest> {
     /// The class's linked record: `ce->function_table` whole, its own
     /// methods and what it inherited, in php's order. None only while
     /// the class binds.
-    record: Option<LinkedClass<ClassId>>,
+    record: Option<LinkedClass<S::Class>>,
     /// The function each of the class's own methods is, by its index
     /// among them, which a row of a record naming the class reads.
-    functions: Box<[Option<Function>]>,
+    functions: Box<[Option<S::Function>]>,
     /// The numbers the class's methods and hooks took as user
     /// functions, first to last, all in the class's own space: the
     /// request's where the class is its own, the arena's where it is
@@ -1010,22 +1034,22 @@ pub(crate) struct Bound {
     /// `ce->parent`, where its name named a class as the class bound;
     /// none for a class with no parent and for one bound before its
     /// parent was, whose parent is looked up by name.
-    parent: Option<ClassId>,
+    parent: Option<S::Class>,
     /// The class's placed properties, built as it bound
     /// ([`objects::placed_of`]): plain data, which a published class's
     /// row carries from its publication on.
-    placed: Placed,
+    placed: Placed<S>,
 }
 
 /// Where a class's declared properties are on its objects, built once
 /// where the class is linked ([`objects::placed_of`]) and read as plain
 /// data after.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Placed {
+#[derive(Debug, Clone, Default, php_macros::EngineState)]
+pub(crate) struct Placed<S: Scope = InRequest> {
     /// The declared instance properties in slot order, each the row of
     /// the class that declared it: `ce->properties_info_table` over
     /// `ce->default_properties_table` ([`Request::placed_properties`]).
-    slots: php_link::Column<PropertyInfo>,
+    slots: php_link::Column<PropertyInfo<S>>,
     /// What each row of the class's linked record's `properties`,
     /// `ce->properties_info`, places its name at, by the row's position:
     /// what `zend_get_property_offset` reads off the
@@ -1041,16 +1065,47 @@ pub(crate) struct Placed {
 }
 
 impl Placed {
-    /// The declared instance properties in slot order.
-    pub(crate) fn slots(&self) -> &[PropertyInfo] {
-        &self.slots
+    /// Whether `shared` answers for every declaring class the placement
+    /// names, which [`Placed::published`] then keys whole.
+    pub(crate) fn names_only(&self, shared: impl Fn(ClassId) -> bool) -> bool {
+        self.slots.iter().all(|info| shared(info.declaring))
     }
 
-    /// [`Placed::holes`].
-    pub(crate) fn holes(&self) -> u32 {
-        self.holes
+    /// The placement moved into the arena's scope, each declaring class
+    /// named by the identity `class` gives it; none where it gives none.
+    pub(crate) fn published(
+        self,
+        class: impl Fn(ClassId) -> Option<crate::arena::EpochClassId>,
+    ) -> Option<Placed<InArena>> {
+        let slots = (self.slots.iter())
+            .map(|info| {
+                Some(PropertyInfo {
+                    declaring: class(info.declaring)?,
+                    at: info.at,
+                })
+            })
+            .collect::<Option<php_link::Column<_>>>()?;
+        Some(Placed {
+            slots,
+            rows: self.rows,
+            holes: self.holes,
+        })
     }
+}
 
+impl<S: Scope> Default for Bound<S> {
+    fn default() -> Bound<S> {
+        Bound {
+            record: None,
+            functions: Box::default(),
+            members: 0..0,
+            parent: None,
+            placed: Placed::default(),
+        }
+    }
+}
+
+impl Placed {
     /// Each of `placed`'s columns laid as a range of one table, as
     /// [`php_link::LinkedClass::lay`] lays the native classes' records.
     pub(crate) fn lay<'p>(placed: impl IntoIterator<Item = &'p mut Placed>) {
@@ -1071,7 +1126,7 @@ impl Placed {
 /// where the class's `properties_info` is built, as php's `prop_info`
 /// carries them (a kernel placement reads them off the declaration it
 /// placed, `DeclaredSlot`'s).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub(crate) struct RowPlace {
     pub(crate) slot: Option<u32>,
     pub(crate) changed: bool,
@@ -1084,12 +1139,12 @@ pub(crate) struct RowPlace {
 /// ([`Request::property_decl`]). Two words, so a class's slots hold
 /// what php's `properties_info_table` holds, pointers into the declaring
 /// class, and no copy of a declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct PropertyInfo {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, php_macros::EngineState)]
+pub(crate) struct PropertyInfo<S: Scope = InRequest> {
     /// `prop_info->ce`: the class whose declaration it is, the scope its
     /// visibility is measured against and, for a `static` one, the class
     /// whose slot holds it.
-    pub(crate) declaring: ClassId,
+    pub(crate) declaring: S::Class,
     /// Its index among `declaring`'s declared properties.
     pub(crate) at: u32,
 }
@@ -1133,17 +1188,22 @@ impl std::hash::Hasher for WordHasher {
     }
 }
 
-impl Declared {
+impl<S: Scope> Declared<S> {
     /// The class's linked record, once it bound.
-    pub(crate) fn record(&self) -> Option<&LinkedClass<ClassId>> {
+    pub(crate) fn record(&self) -> Option<&LinkedClass<S::Class>> {
         self.bound.record.as_ref()
+    }
+
+    /// The unit that holds the class's declaration.
+    pub(crate) fn unit(&self) -> &PublishedUnit {
+        S::unit(&self.unit)
     }
 
     /// The declaration the table holds for the class.
     pub(crate) fn decl(&self) -> Option<&ClassDecl> {
         match &self.composed {
-            Some(composed) => Some(&composed.decl),
-            None => self.unit.classes.get(usize::try_from(self.at).ok()?),
+            Some(composed) => Some(S::decl(&composed.decl)),
+            None => self.unit().classes.get(usize::try_from(self.at).ok()?),
         }
     }
 }
@@ -1152,10 +1212,11 @@ impl Declared {
 /// whichever table of its unit the body came out of: one the file
 /// declared at its top level, or one a `DECLARE_FUNCTION` bound where
 /// it stood. None for a method, whose declaration is its class's.
-fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
-    let (table, at) = match user.body {
-        exec::Body::Function(at) => (&user.unit.functions, at),
-        exec::Body::Dynamic(at) => (&user.unit.dynamic, at),
+fn user_function_decl(user: FunctionRow<'_>) -> Option<&FunctionDecl> {
+    let unit = user.unit();
+    let (table, at) = match user.body() {
+        exec::Body::Function(at) => (&unit.functions, at),
+        exec::Body::Dynamic(at) => (&unit.dynamic, at),
         exec::Body::Main | exec::Body::Method(_) | exec::Body::Hook(_) => return None,
     };
     Some(&table.get(usize::try_from(at).ok()?)?.0)

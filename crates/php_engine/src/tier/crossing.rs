@@ -141,7 +141,7 @@ pub fn primed(
         _ => return None,
     };
     let user = req.user_function(function)?;
-    let body = exec::body_of(&user.unit, user.body)?;
+    let body = exec::body_of(user.unit(), user.body())?;
     Some(FuncRef::at(body.runtime_cache))
 }
 

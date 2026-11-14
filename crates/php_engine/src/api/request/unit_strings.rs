@@ -481,6 +481,23 @@ fn point(by_bytes: &mut HashMap<Box<[u8]>, Option<PhpString>, NameHasher>, s: Ph
     }
 }
 
+/// The names of the variables of each op array of a unit, by what holds
+/// the op array, as its compile left them ([`variables_of`]).
+pub(crate) struct Variables(Vec<(Holder, Box<[u8]>)>);
+
+/// The variables' names of each op array of `unit`, a preload's
+/// `eval`'s, before the optimizer drops a variable no opline names:
+/// the scanner's strings `lookup_cv` keeps in `op_array->vars`, which no
+/// table answers while the preload runs and which php's preload
+/// optimizes only once its file is served (`preload_optimize`).
+pub(crate) fn variables_of(unit: &Unit) -> Variables {
+    let main = std::iter::once((Holder::Main, &unit.main));
+    let names = main.chain(bodies(unit)).flat_map(|(holder, body)| {
+        (body.vars.iter()).map(move |name| (holder, Box::<[u8]>::from(&*name.0)))
+    });
+    Variables(names.collect())
+}
+
 /// Each op array `unit` declares beside what holds it: a function's, a
 /// method's and a hook's the unit, a dynamic definition's its own.
 fn bodies(unit: &Unit) -> impl Iterator<Item = (Holder, &php_unit::OpArray)> {
@@ -979,6 +996,76 @@ impl Request {
         }
     }
 
+    /// The constant strings of `unit`, a preload's `eval`'s, whose bytes
+    /// the engine interned as it compiled the string, laid as the
+    /// request's own compile of it makes them ([`Compiling::add`]): a
+    /// string of the request's for each bytes of its values that is no
+    /// name its noting makes and that opcache's table does not hold,
+    /// held with its main op array's constants or the unit's as
+    /// [`Request::hold_compiled`] holds what a compile made, since php's
+    /// preload interns them in the request until it ends; and a string
+    /// of the request's for each name of more than one byte of
+    /// `variables` ([`variables_of`]), held with its op array's constants
+    /// or names. The `Err` is the memory limit.
+    pub(crate) fn hold_preload_strings(
+        &mut self,
+        unit: &PublishedUnit,
+        variables: Variables,
+    ) -> Result<(), Thrown> {
+        let Some(at) = self.unit_strings.position(PublishedUnit::as_ptr(unit)) else {
+            return Ok(());
+        };
+        let names: std::collections::HashSet<_> =
+            php_compile::named(unit).map(|(_, name)| name).collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut strings = Vec::new();
+        // A unit the check admitted holds no stray value.
+        php_unit::frozen::unit_values(unit, &mut |holder, _, z| {
+            if let Some(s) = z.as_str()
+                && seen.insert(s.bytes().to_vec())
+            {
+                strings.push((holder == Holder::Main, s));
+            }
+        })
+        .ok();
+        for (main, s) in strings {
+            let bytes = s.bytes();
+            if bytes.len() <= 1 || names.contains(bytes) || self.opcache_holds(bytes) {
+                continue;
+            }
+            let made = Zval::string(self.string(bytes)?.heap());
+            if let Some(held) = self.unit_strings.units.get_mut(at) {
+                if main {
+                    held.main.push(made);
+                } else {
+                    held.constants.push(made);
+                }
+            }
+        }
+        for (holder, name) in variables.0 {
+            if name.len() <= 1 {
+                continue;
+            }
+            // The main op array's names its CVs by, numbered as the
+            // optimizer left them; one it dropped is held to the main op
+            // array's end all the same.
+            let cv = (holder == Holder::Main)
+                .then(|| unit.main.vars.iter().position(|var| *var.0 == *name))
+                .flatten();
+            match (holder, cv) {
+                (Holder::Main, Some(cv)) => self.hold_main_var(at, cv, &name)?,
+                (Holder::Main, None) => {
+                    let made = Zval::string(self.string(&name)?.heap());
+                    if let Some(held) = self.unit_strings.units.get_mut(at) {
+                        held.main.push(made);
+                    }
+                }
+                (holder, _) => self.hold_name(at, holder, &name)?,
+            }
+        }
+        Ok(())
+    }
+
     /// The owner a request-only unit holds of `value` for a declaration
     /// written as a value, given up as the request's row takes the
     /// declaration's slot over: php's `constants_table` and
@@ -1266,7 +1353,7 @@ impl Request {
                 // a cached file's constants hold, and the one made goes
                 // (`accel_new_interned_string_for_php`).
                 Named::Class(_) | Named::ClassKey(_) | Named::MethodKey { .. } => {
-                    self.shared.existing_interned(&name).is_none()
+                    !self.opcache_holds(&name)
                 }
                 // A dynamic definition's key is its `DECLARE_FUNCTION`'s
                 // constant, the compile's, or the interned string where
@@ -1307,7 +1394,7 @@ impl Request {
         let main = std::iter::once((Holder::Main, &unit.main));
         for (holder, body) in main.chain(bodies(unit)) {
             for (cv, name) in first_bound(body) {
-                if name.len() > 1 && self.shared.existing_interned(name).is_some() {
+                if name.len() > 1 && self.opcache_holds(name) {
                     match holder {
                         Holder::Main => self.hold_main_var(at, cv, name)?,
                         holder => self.hold_name(at, holder, name)?,
@@ -1351,13 +1438,26 @@ impl Request {
     /// made as a string of the request's and held with the unit's names,
     /// unless opcache holds the bytes (`zend_new_interned_string`).
     pub(super) fn hold_class_name(&mut self, unit: *const Unit, name: &[u8]) -> Result<(), Thrown> {
-        if self.shared.existing_interned(name).is_some() {
+        if self.opcache_holds(name) {
             return Ok(());
         }
         match self.unit_strings.position(unit) {
             Some(at) => self.hold_name(at, Holder::Unit, name),
             None => Ok(()),
         }
+    }
+
+    /// Whether opcache's shared table holds `bytes`, which
+    /// `accel_new_interned_string_for_php` answers a name with before a
+    /// request's compile makes one of its own: the engine's table, and,
+    /// while the preload runs, nothing, since php asks its table only
+    /// once the request has counted itself in (`ZCG(counted)`), which no
+    /// path does with `ZCG(accelerator_enabled)` off across
+    /// `accel_preload` (`Z/ext/opcache/ZendAccelerator.c:577-588`,
+    /// `:4619-4620`), though the engine interns what the preload compiles
+    /// as it compiles it.
+    fn opcache_holds(&self, bytes: &[u8]) -> bool {
+        self.preloading.is_none() && self.shared.existing_interned(bytes).is_some()
     }
 
     /// `name` made as a string of the request's, held by the unit at
@@ -1618,17 +1718,24 @@ impl Request {
     /// array's blocks until its execution ends, and what it declares as
     /// [`Request::lay_declared`] holds it, which lays nothing more.
     pub(crate) fn hold_alone(&mut self, unit: &PublishedUnit, alone: Alone) {
-        let Alone { main, declared } = alone;
         let Some(held) = self.unit_strings.held_mut(PublishedUnit::as_ptr(unit)) else {
-            main.into_blocks().free(self);
-            return declared.free(self);
+            return self.free_alone(alone);
         };
+        let Alone { main, declared } = alone;
         held.main_op_array = main;
         if held.declared.lay() {
             declared.free(self);
         } else {
             held.declared.hold(declared);
         }
+    }
+
+    /// What the compile laid given back where no unit holds it: the main
+    /// op array's blocks, and what the unit declares.
+    pub(crate) fn free_alone(&mut self, alone: Alone) {
+        let Alone { main, declared } = alone;
+        main.into_blocks().free(self);
+        declared.free(self);
     }
 
     /// The `zend_op_array` of `unit`'s main op array the frame that runs

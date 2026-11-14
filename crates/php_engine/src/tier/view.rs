@@ -23,6 +23,7 @@ use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, Op
 use super::facts::{ClassFacts, Linked, OwnClass, RecordClass};
 use super::published::SEALED;
 use super::{FrameRef, Request, SafepointIdx, Word};
+use crate::api::request::ClassRecord;
 use crate::api::values::ClassId;
 use crate::arena::Arena;
 
@@ -31,9 +32,15 @@ use crate::arena::Arena;
 /// engine's interned strings they name, stand while any hold does,
 /// whatever restart replaced it since and whether or not the engine
 /// still stands. `Send` and `Sync`, so
-/// a claim and a view can leave the request's thread.
-#[derive(Clone)]
+/// a claim and a view can leave the request's thread. Engine state by
+/// the derive, as its arena is (#4652).
+#[derive(Clone, php_macros::EngineState)]
 pub struct Epoch(Arc<Arena>);
+
+const _: fn() = || {
+    fn held<T: crate::api::abi::EngineState + Sync>() {}
+    held::<Epoch>();
+};
 
 impl std::fmt::Debug for Epoch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -125,19 +132,64 @@ impl Epoch {
         Arc::ptr_eq(&self.0, req.arena())
     }
 
-    /// An epoch of its own over `unit`, held by its cache as an engine
-    /// holds a file, with the [`FuncRef`] of its main op array: a fixture
-    /// for a tier's tests, which build no engine.
+    /// An epoch of its own holding `unit`, as its cache holds a file for
+    /// every request: a row at each op array's offset. What the arena
+    /// holds is a unit a check froze ([`Frozen::new`]); a unit a request
+    /// compiled for itself is not one, and is held out by its type:
+    ///
+    /// ```compile_fail,E0308
+    /// let unit = php_unit::Unit::default().published(None);
+    /// let epoch = php_engine::tier::Epoch::holding(&unit);
+    /// # drop(epoch);
+    /// ```
+    ///
+    /// The same with the unit frozen:
+    ///
+    /// ```
+    /// let Ok(unit) = php_unit::frozen::Frozen::new(php_unit::Unit::default().published(None)) else { return };
+    /// let epoch = php_engine::tier::Epoch::holding(&unit);
+    /// # drop(epoch);
+    /// ```
+    ///
+    /// It exists for those two tests: no other public entry point to the
+    /// arena takes a unit, the engine's own publishers among them, which
+    /// are the crate's. Nothing in the engine calls it; the tier's
+    /// fixture lays its epoch through it.
+    ///
+    /// [`Frozen::new`]: php_unit::frozen::Frozen::new
+    #[must_use]
+    pub fn holding(unit: &php_unit::frozen::Frozen<php_unit::PublishedUnit>) -> Epoch {
+        let files = crate::unit_cache::Files::new(1);
+        files.funcs.publish(unit, crate::tier::Laid::COLD);
+        let arena = Arena::of_engine(&[], 0, files, crate::arena::Interned::default());
+        Epoch(Arc::new(arena))
+    }
+
+    /// An epoch of its own over `unit`, numbered and held as
+    /// [`Epoch::holding`] holds one, with the [`FuncRef`] of its main op
+    /// array: a fixture for a tier's tests, which build no engine. A unit
+    /// [`Frozen::new`](php_unit::frozen::Frozen::new) refuses is held by
+    /// no row.
     #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn fixture(mut unit: php_unit::Unit) -> (Epoch, FuncRef) {
         let numbers = std::sync::atomic::AtomicU32::new(0);
         crate::engine::assign_map_ptrs(&mut unit, &numbers);
         let unit = unit.published(None);
+        let main = FuncRef(unit.main.runtime_cache);
+        let epoch = match php_unit::frozen::Frozen::new(unit) {
+            Ok(frozen) => Epoch::holding(&frozen),
+            Err(_) => Epoch::holding_nothing(),
+        };
+        (epoch, main)
+    }
+
+    /// An epoch of its own holding no unit.
+    #[cfg(any(test, feature = "test"))]
+    fn holding_nothing() -> Epoch {
         let files = crate::unit_cache::Files::new(1);
-        files.funcs.publish(&unit, crate::tier::Laid::COLD);
         let arena = Arena::of_engine(&[], 0, files, crate::arena::Interned::default());
-        (Epoch(Arc::new(arena)), FuncRef(unit.main.runtime_cache))
+        Epoch(Arc::new(arena))
     }
 }
 
@@ -1017,7 +1069,7 @@ fn called(
     let decl = req.symbols().function_decl(func)?;
     let body = match req.user_function(func) {
         Some(user) => {
-            let code = crate::exec::body_of(&user.unit, user.body)?;
+            let code = crate::exec::body_of(user.unit(), user.body())?;
             EngineFuncRef::of(FuncRef(code.runtime_cache))
                 .map_or(CalledBody::Request, CalledBody::Engine)
         }
@@ -1225,7 +1277,7 @@ impl UnitView {
                     req.function_named(Bare::resolved(name)).and_then(|func| {
                         let user = req.user_function(func);
                         let elsewhere = user.is_some_and(|user| {
-                            crate::exec::body_of(&user.unit, user.body)
+                            crate::exec::body_of(user.unit(), user.body())
                                 .is_none_or(|code| code.filename != body.filename)
                         });
                         (!elsewhere).then(|| called(req, func, None)).flatten()
@@ -1363,7 +1415,9 @@ impl UnitView {
         {
             return true;
         }
-        let (Some(linked), Some(decl)) = (req.linked_class(c), req.symbols().class_decl(c)) else {
+        let (Some(ClassRecord::Request(linked)), Some(decl)) =
+            (req.linked_class(c), req.symbols().class_decl(c))
+        else {
             return false;
         };
         let Some(linked) = linked.try_map(|class| Some(self.record_class(req, class))) else {
@@ -2056,7 +2110,7 @@ impl UnitView {
                     return Some(Linked::native(shared, record));
                 }
                 let record = self.epoch.0.class(ClassId::from(shared))?.record()?;
-                Some(Linked::published(shared, record, &self.epoch.0))
+                Some(Linked::published(shared, record))
             }
         }
     }

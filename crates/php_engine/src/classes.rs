@@ -652,8 +652,8 @@ pub(crate) fn closure_cache(
     let Some(user) = req.user_function(function) else {
         return Ok(ClosureCache::Function);
     };
-    let (cache, size) = (user.shape.cache, user.shape.cache_size);
-    let real = matches!(user.body, crate::exec::Body::Dynamic(_));
+    let (cache, size) = (user.shape().cache, user.shape().cache_size);
+    let real = matches!(user.body(), crate::exec::Body::Dynamic(_));
     // Every closure over a user function is made after its cache is
     // chosen here, and counts its op array.
     req.count_closure(function);

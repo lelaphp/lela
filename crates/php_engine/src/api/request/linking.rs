@@ -26,6 +26,7 @@ use php_link::{Composed, Held, Linked, Linking, Obligation, Refused};
 use php_unit::Level;
 use php_unit::PublishedUnit;
 use php_unit::decl::{Bare, ClassDecl, ClassKind, ConstExpr, Name};
+use php_unit::frozen::Frozen;
 
 use super::Request;
 use crate::api::raising::Thrown;
@@ -43,7 +44,7 @@ use crate::arena::EpochClassId;
 pub(crate) struct Links {
     unlinked: Vec<Unlinked>,
     autoloads: Vec<Vec<u8>>,
-    held: super::WordMap<usize, PublishedUnit>,
+    held: super::WordMap<usize, Frozen<PublishedUnit>>,
 }
 
 impl Links {
@@ -231,11 +232,12 @@ impl Request {
         // `track_class_dependency` passes over the class itself.
         let names = RefCell::new(Vec::new());
         let foreign = std::cell::Cell::new(false);
+        let records = super::LinkRecords::new();
         let linking = {
             let lookup = |name: &[u8]| {
                 let own = name.eq_ignore_ascii_case(&decl.name.0);
                 let written: Box<[u8]> = name.into();
-                if let Some(held) = self.held_class(Bare::resolved(name)) {
+                if let Some(held) = self.held_class(Bare::resolved(name), &records) {
                     let found = held.record.as_ref().map(|(class, _)| *class);
                     if !own {
                         names.borrow_mut().push((written, found));
@@ -596,9 +598,9 @@ pub(super) struct Fetched {
 
 impl Request {
     /// A unit the cache served this request from what it holds.
-    pub(super) fn note_held(&mut self, unit: &PublishedUnit) {
+    pub(super) fn note_held(&mut self, unit: &Frozen<PublishedUnit>) {
         let at = PublishedUnit::as_ptr(unit).addr();
-        (self.links.held.entry(at)).or_insert_with(|| PublishedUnit::clone(unit));
+        (self.links.held.entry(at)).or_insert_with(|| Frozen::clone(unit));
     }
 
     /// What `decl`'s link fetched, each a class every request shares by
@@ -831,8 +833,21 @@ impl Request {
             }
             dependencies.push((name.clone(), class));
         }
-        let record = linking.record.clone()?;
-        let class = self.publish(unit, at, linking.composed.clone(), record, fetched.parent)?;
+        // Published only over the frozen unit the cache holds, which
+        // `fetched` found the declaration's unit to be.
+        let unit = self
+            .links
+            .held
+            .get(&PublishedUnit::as_ptr(unit).addr())?
+            .clone();
+        let record = linking.record.as_ref()?;
+        let units = |unit: &PublishedUnit| {
+            (self.links.held.get(&PublishedUnit::as_ptr(unit).addr())).cloned()
+        };
+        let composed = linking.composed.clone();
+        // Refused or with no room, the class is the request's own, bound
+        // as it was linked ([`Unpublished`](super::publish::Unpublished)).
+        let class = (self.publish((&unit, at), composed, record, fetched.parent, &units)).ok()?;
         let entry = crate::inheritance_cache::Entry {
             parent: fetched.parent,
             uses: fetched.uses,
@@ -840,7 +855,7 @@ impl Request {
             class,
             raised: linking.raised.clone().into(),
         };
-        Some(self.arena.inheritance.add(unit, at, entry))
+        Some(self.arena.inheritance.add(&unit, at, entry))
     }
 
     /// The class at `at` of `unit` declared as the published class

@@ -25,6 +25,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use php_compile::CompileError;
+use php_unit::frozen::Frozen;
 use php_unit::{PublishedUnit, Unit};
 
 use crate::api::abi::{Cache, Validation};
@@ -103,7 +104,7 @@ impl std::borrow::Borrow<[u8]> for UnitKey<'_> {
 /// [`Files`]' names, which holds no borrow. It hashes and compares as its
 /// bytes, as a `UnitKey` does, so a lookup by a borrowed name's bytes
 /// finds it (`Borrow<[u8]>`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, php_macros::EngineState)]
 pub(crate) struct FiledKey(Box<[u8]>);
 
 impl std::borrow::Borrow<[u8]> for FiledKey {
@@ -252,8 +253,9 @@ impl Stamp {
 /// served and when it is next validated. The unit is
 /// never changed; the members are atomics a racing request may write
 /// over, which costs at most one more stat.
+#[derive(php_macros::EngineState)]
 pub(crate) struct Held {
-    pub(crate) unit: PublishedUnit,
+    pub(crate) unit: Frozen<PublishedUnit>,
     /// Its early-bound classes, published as it was held, which a
     /// request loading the unit declares by their numbers.
     pub(crate) early: EarlyBound,
@@ -290,7 +292,7 @@ pub(crate) struct Held {
 /// unit, its early-bound classes published, the bytes it was read from
 /// and its stamp as observed.
 struct Read {
-    unit: PublishedUnit,
+    unit: Frozen<PublishedUnit>,
     early: EarlyBound,
     size: u64,
     observed: Option<Stamp>,
@@ -314,7 +316,7 @@ impl Held {
     /// before, `last_used` zero.
     /// Its full path is `path`, interned as `name` ([`UnitCache::name`]).
     pub(crate) fn preloaded(
-        unit: PublishedUnit,
+        unit: Frozen<PublishedUnit>,
         (name, path): (php_heap::FrozenZval, Vec<u8>),
         size: u64,
         order: u64,
@@ -460,6 +462,7 @@ fn table_keys(unit: &Unit) -> Vec<Vec<u8>> {
 /// zeroes at the restart (`Z/ext/opcache/ZendAccelerator.c:2626`). A
 /// file's early-bound classes are rows of its epoch's arena, so a request
 /// finds only the files its own epoch held.
+#[derive(php_macros::EngineState)]
 pub(crate) struct Files {
     held: Cache<FiledKey, Held>,
     /// How many names the files may be held under.
@@ -723,14 +726,33 @@ impl Optimizer {
 }
 
 /// The unit [`UnitCache::file`] answers with: one held, published for
-/// every request with its map-pointer offsets, or one held nowhere, the
-/// asking request's own (`Request::take_unit`), as php keeps a file it
-/// does not persist in process memory with heap caches
-/// (`zend_file_cache_unserialize_op_array`'s `script->corrupted` arm), so
-/// `CG(map_ptr_last)` moves only for what is held (GH-8646).
+/// every request with its map-pointer offsets; one held nowhere and
+/// never published, the asking request's own (`Request::take_unit`), as
+/// php keeps a file it does not persist in process memory with heap
+/// caches (`zend_file_cache_unserialize_op_array`'s `script->corrupted`
+/// arm), so `CG(map_ptr_last)` does not move for it (GH-8646); or one
+/// published and then refused by [`Frozen::new`], which moved it.
 pub(crate) enum Compiled {
+    /// Held for every request, frozen.
+    Held(Frozen<PublishedUnit>),
+    /// Published, and refused by [`Frozen::new`], so held nowhere
+    /// ([`refused`]). It is not answered as [`Compiled::Alone`] is: the
+    /// check admits only a unit the engine's map-pointer space numbers
+    /// ([`php_unit::frozen::Stray::Request`]), so it is asked once
+    /// `share` has numbered the unit, and a published unit does not go
+    /// back to a [`Unit`] its asker numbers as its own.
     Published(PublishedUnit),
     Alone(Box<Unit>),
+}
+
+/// The unit `answered` is where the cache holds it for every request.
+pub(crate) fn held(
+    answered: Option<&Result<Compiled, CompileError>>,
+) -> Option<Frozen<PublishedUnit>> {
+    match answered {
+        Some(Ok(Compiled::Held(unit))) => Some(Frozen::clone(unit)),
+        _ => None,
+    }
 }
 
 /// Whom a compile's answer serves: every request that asks for the file,
@@ -850,8 +872,22 @@ pub(crate) fn hit_keys(validation: Validation, unit: &Unit) -> u32 {
 /// The unit `held` holds, answered as `filed` with its early-bound
 /// classes.
 fn answered_by(held: &Held, filed: Filed) -> Answered {
-    let unit = Compiled::Published(held.unit.clone());
+    let unit = Compiled::Held(Frozen::clone(&held.unit));
     (Some(Ok(unit)), filed, Some(Arc::clone(&held.early)))
+}
+
+/// A unit `share` published that [`Frozen::new`] refused, held nowhere:
+/// answered as php without the cache answers a compile,
+/// [`Filed::Compiled`] with no early-bound class published, so the asker
+/// binds every class it declares as its own. It keeps the engine's
+/// map-pointer offsets `share` gave it, and the next request that asks
+/// for the file compiles it again and takes as many again, where php
+/// without the cache takes none. No compile makes such a unit: a unit's
+/// walk refuses no value a compile and `share` leave in it, and passes
+/// its closures' cells over (#4684), so this is the check's answer kept
+/// for a walk that comes to refuse one.
+fn refused(unit: PublishedUnit) -> Answered {
+    (Some(Ok(Compiled::Published(unit))), Filed::Compiled, None)
 }
 
 /// A unit held nowhere, answered as `filed`.
@@ -871,6 +907,7 @@ pub(crate) fn served(
     own: impl FnOnce(Unit) -> PublishedUnit,
 ) -> Cached {
     answered.map(|compiled| match compiled {
+        Ok(Compiled::Held(unit)) => Ok(PublishedUnit::clone(&unit)),
         Ok(Compiled::Published(unit)) => Ok(unit),
         Ok(Compiled::Alone(unit)) => Ok(own(*unit)),
         Err(error) => Err(CompileRefused::published(error, own)),
@@ -1142,7 +1179,9 @@ impl UnitCache {
     /// [`Levels::Disk`] asks and keeps in the file cache alone and counts
     /// nothing. Nothing where the file cannot be
     /// read. What is `compile`d or `decode`d takes no map-pointer offset
-    /// until it is held, `share`d as it is; one held nowhere is answered
+    /// until it is to be held, `share`d as it is; one `share` publishes
+    /// but no [`Frozen`] admits has taken them and is answered held
+    /// nowhere ([`refused`]); one held nowhere is answered
     /// [`Compiled::Alone`], its caller's own (GH-8646), and so is one
     /// that answers the request that asked alone ([`Answers::Asker`]).
     /// `compile` and `publish` are handed `caller`, the request the file
@@ -1156,8 +1195,8 @@ impl UnitCache {
         asked: Asked<'_>,
         compile: impl FnOnce(&mut A, &[u8], Optimizer) -> Fresh,
         decode: impl FnOnce(&[u8]) -> Option<Unit>,
-        share: impl FnOnce(Unit) -> PublishedUnit,
-        publish: impl FnOnce(&mut A, &PublishedUnit) -> EarlyBound,
+        share: impl FnOnce(Unit) -> Result<Frozen<PublishedUnit>, PublishedUnit>,
+        publish: impl FnOnce(&mut A, &Frozen<PublishedUnit>) -> EarlyBound,
     ) -> Answered {
         let Asked {
             path,
@@ -1223,7 +1262,10 @@ impl UnitCache {
             // calls (`Z/ext/opcache/zend_file_cache.c:1901-2115`,
             // `Z/ext/opcache/zend_persist.c:771-775`, `:1524-1525`), so
             // the unit counts nothing and hands nothing off (#3362, #3363).
-            let unit = share(unit);
+            let unit = match share(unit) {
+                Ok(unit) => unit,
+                Err(unit) => return refused(unit),
+            };
             let early = publish(caller, &unit);
             let read = Read {
                 unit,
@@ -1288,7 +1330,10 @@ impl UnitCache {
         if !memory || files.restart_pending() || !self.room_for(files, size) {
             return alone(Ok(unit), disk.map_or(Filed::Compiled, |_| Filed::Kept));
         }
-        let unit = share(unit);
+        let unit = match share(unit) {
+            Ok(unit) => unit,
+            Err(unit) => return refused(unit),
+        };
         let early = publish(caller, &unit);
         let read = Read {
             unit,
