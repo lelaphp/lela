@@ -232,11 +232,19 @@ impl JitRequest {
 /// The tier's engine state (`jit-design.md` §4): where a recording
 /// compiles, and what the request threads and the pipeline share. The
 /// field order joins the worker before what it shares drops.
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 pub(crate) struct JitEngine {
     compiler: compiler::Compiler,
     shared: Arc<Shared>,
 }
+
+/// The tier's engine state is engine state by the derive, held at every
+/// field: its compiler, whose worker serves the jobs queued past the
+/// request that submitted them, and what the pipeline shares (#4476).
+const _: fn() = || {
+    fn held<T: EngineState>() {}
+    held::<JitEngine>();
+};
 
 /// What a safepoint, a recording and the pipeline read, by `Arc` so a
 /// worker can hold it past the request that submitted a job

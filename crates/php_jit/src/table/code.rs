@@ -287,18 +287,6 @@ impl<P: Pages> EngineState for Code<P> where Arc<Chunk<P>>: EngineState {}
 // `Backend` cannot read through its `dyn TargetIsa`.
 impl EngineState for crate::lower::Isa {}
 
-// The tier's engine state (ADR-0005, ADR-0006). Its `Shared`, the policy,
-// the code generator and the `PERF` outputs, derives; this impl vouches
-// for its `Compiler`, the queue of jobs the worker compiles past the
-// request that submitted them (`jit-design.md` §4.8). A job's `Recorded`
-// names the recording request's classes by number, in its view and in a
-// sample's class, and has no impl of its own (#4596): this impl vouches
-// for the recordings the queue holds until #4607's question is answered.
-// A job's claim keeps the word's `Epoch`, which waits on the arena
-// (#4632, #4633, #4634); the worker, whose body is the queue, and the
-// queue's `Condvar` are #4636's.
-impl php_engine::api::abi::EngineState for crate::JitEngine {}
-
 /// The chunk being filled, and where its next body may start.
 #[derive(EngineState)]
 struct Filling<P: Pages> {

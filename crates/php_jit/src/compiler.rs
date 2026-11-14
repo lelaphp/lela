@@ -53,13 +53,13 @@ pub(crate) struct Job {
 
 /// Where a job compiles: on the request that submits it, or queued for
 /// the engine's worker.
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 pub(crate) struct Compiler {
     worker: Option<Threaded>,
 }
 
 /// The engine's worker and the queue its body serves.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EngineState)]
 struct Threaded {
     worker: Arc<tier::Worker>,
     queue: Arc<Queue>,
@@ -127,7 +127,7 @@ impl Compiler {
 /// engine's worker, through its queue, under `jit.compile=thread`;
 /// otherwise on the request. A request holds its own, laid with it, so
 /// a recording that compiles reads no engine state (#3227).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EngineState)]
 pub(crate) struct Submitter(Option<Threaded>);
 
 impl Submitter {
