@@ -778,7 +778,8 @@ impl<T: Values> Deref for Frozen<T> {
 /// and a cell's `Weak` keeps its unit's allocation from being freed or
 /// reused while the cell lives, so an address that was a held unit's at
 /// the check stays that unit's, and a cell bound once is bound for good.
-/// So a unit reachable through a frozen declaration is one of the units
-/// it holds, itself frozen and held, and nothing else, by the type and the
-/// check alone, whoever makes one.
+/// So a unit a cell of a frozen declaration names is one of the units it
+/// holds, itself frozen and held, and nothing else, by the type and the
+/// check alone, whoever makes one; what a held unit's own cells name is as
+/// the paragraph above says.
 impl<T: Values + Send + Sync + 'static> EngineState for Frozen<T> {}
