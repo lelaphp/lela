@@ -36,7 +36,7 @@ Where the last column names a file in `LICENSES/`, that file is the notice text,
 | Mersenne Twister, Matsumoto, Nishimura and Wagner | `ext/random/src/engine_mt19937.rs` | `ext/random/engine_mt19937.c` | BSD-3-Clause | `LICENSES/mt19937.txt` (item 6) |
 | uuencode, University of California, Berkeley | `ext/standard/src/uuencode.rs` | `ext/standard/uuencode.c` | BSD-4-Clause-UC | `LICENSES/uuencode.txt` (item 9) |
 | xxHash, Yann Collet | `ext/hash/src/xxhash.rs` (XXH32 and XXH64) | `ext/hash/xxhash/xxhash.h` | BSD-2-Clause | `LICENSES/xxhash.txt` (item 19) |
-| libavifinfo, Alliance for Open Media | `ext/standard/src/image/avif.rs` | `ext/standard/libavifinfo` | BSD-2-Clause, and the Alliance for Open Media Patent License 1.0 | `LICENSES/libavifinfo.txt` and `LICENSES/libavifinfo-PATENTS.txt` (`ext/standard/libavifinfo/LICENSE` and `PATENTS`) |
+| libavifinfo, Alliance for Open Media | `ext/standard/src/image/avif.rs` | `ext/standard/libavifinfo` | BSD-2-Clause | `LICENSES/libavifinfo.txt`, and the Alliance for Open Media Patent License 1.0 in `LICENSES/libavifinfo-PATENTS.txt` (`ext/standard/libavifinfo/LICENSE` and `PATENTS`) |
 | MurmurHash3 (PMurHash), Austin Appleby and Shane Day | `ext/hash/src/murmur.rs` | `ext/hash/murmur/PMurHash.c`, `PMurHash128.c` | public domain | the first comment of each file |
 | tar, Tim Kientzle (libarchive) | `ext/phar/src/tar.rs` (`phar_tar_octal`) | `ext/phar/tar.c` | BSD-2-Clause | `LICENSES/phar-tar.txt` (item 14) |
 | libbcmath, GNU bc's number package | `ext/bcmath/src/num.rs` | `ext/bcmath/libbcmath` | LGPL-2.1-or-later | `LICENSES/libbcmath.txt` (`ext/bcmath/libbcmath/LICENSE`) |
