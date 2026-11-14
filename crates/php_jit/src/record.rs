@@ -284,7 +284,7 @@ pub(crate) type Sample = tier::Sample<RecordClass>;
 /// One thing the recorder wrote down, php's `zend_jit_trace_rec`
 /// (`Z/ext/opcache/jit/zend_jit_internal.h:365-373`) as this engine's
 /// edges give it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EngineState)]
 pub(crate) enum Event {
     /// An opline about to be served, `ZEND_JIT_TRACE_VM`: where it stands and
     /// its three operands sampled, `data` being the `OP_DATA` after an
@@ -382,7 +382,7 @@ impl Began {
 /// One recording: where it started, the op array whose word claimed it,
 /// what happened, and why it stopped. [`TraceRecord::dump`] and
 /// [`TraceRecord::parse`] are inverses, so a recorded trace is a fixture.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EngineState)]
 pub(crate) struct TraceRecord {
     pub(crate) start: Start,
     pub(crate) root: EngineFuncRef,
@@ -430,11 +430,20 @@ pub(crate) struct Entered {
 /// request's epoch and every op array the recording entered, so the
 /// trace can be built on a thread with no request (`jit-design.md` §4.1
 /// *The owned view*).
-#[derive(Debug)]
+#[derive(Debug, EngineState)]
 pub(crate) struct Recorded {
     pub(crate) record: TraceRecord,
     pub(crate) view: UnitView,
 }
+
+/// A recording is engine state by the derive, held at every field: it
+/// names a class by [`RecordClass`] and reads a declaration through
+/// [`ClassFacts`](tier::ClassFacts), so a job that waits on the worker
+/// holds nothing of its request (#4660, #4718).
+const _: fn() = || {
+    fn held<T: EngineState>() {}
+    held::<Recorded>();
+};
 
 /// Where the program stands once the recorder stopped, which is where
 /// the interpreter goes on.
