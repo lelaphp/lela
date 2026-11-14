@@ -238,6 +238,11 @@ pub(crate) struct Preloaded {
     /// saved scripts, held in the cache, never validated and outliving
     /// every restart.
     pub(crate) scripts: Vec<Arc<Held>>,
+    /// Each `eval`'s unit the preload admitted, in the order compiled,
+    /// saved as no file of its own and laid with the preloaded files below
+    /// every epoch, as php's `$PRELOAD$` holds an `eval()'d code`'s op
+    /// arrays beside the files'.
+    pub(crate) evals: Vec<Frozen<PublishedUnit>>,
     /// Which declarations of which unit the preload holds, by the unit's
     /// address, which the preload keeps alive for the engine's life.
     declared: HashMap<usize, UnitDeclarations>,
@@ -622,6 +627,7 @@ impl Request {
                 return None;
             }
         };
+        let evals = preloading.evals.clone();
         let scripts = preloading
             .scripts
             .into_iter()
@@ -639,6 +645,7 @@ impl Request {
             functions: tables.functions,
             arms,
             scripts,
+            evals,
             declared,
             statistics,
         })
@@ -787,16 +794,20 @@ impl Request {
     /// `zend_shared_alloc_save_state` after preloading: the arena the
     /// preload published into laid below every epoch from now on, so a
     /// restart keeps its rows at their numbers, with the units it saved,
-    /// whose words every epoch lays its own of, counting where the tier
-    /// counts a unit the cache holds now, as php's `zend_jit_script`
-    /// lays the preload's units' words
+    /// its files' and its `eval`s' ([`Preloaded::evals`]), whose words
+    /// every epoch lays its own of, counting where the tier counts a unit
+    /// the cache holds now, as php's `zend_jit_script` lays the words of
+    /// `$PRELOAD$`'s op arrays
     /// ([`crate::arena::Epochs::lay_base`]).
     pub(crate) fn save_preload_state(&self) {
         let units = (self.shared.units.preloaded())
-            .map(|preloaded| preloaded.scripts.iter())
+            .map(|preloaded| {
+                let scripts = preloaded.scripts.iter().map(|held| &held.unit);
+                scripts.chain(&preloaded.evals)
+            })
             .into_iter()
             .flatten()
-            .map(|held| Frozen::clone(&held.unit))
+            .map(Frozen::clone)
             .collect();
         let laid = crate::tier::words_laid(&self.shared, Some(self));
         if laid.counts() {

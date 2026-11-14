@@ -345,6 +345,59 @@ fn a_restart_keeps_the_preloads_rows_at_their_numbers() {
     }
 }
 
+/// Whether each function's and method's op array of `unit` has its row
+/// of words in `epoch`, in the order the unit holds them.
+fn words_laid(epoch: &crate::arena::Arena, unit: &PublishedUnit) -> Vec<bool> {
+    let functions = unit.functions.iter().map(|(_, code)| code);
+    let methods = unit.methods.iter().map(|method| &method.body);
+    let laid = |code: &php_unit::OpArray| {
+        crate::tier::EngineFuncRef::of(crate::tier::FuncRef::at(code.runtime_cache))
+            .is_some_and(|func| epoch.func(func.offset()).is_some())
+    };
+    functions.chain(methods).map(laid).collect()
+}
+
+/// A preload's `eval` is the preload's as a file it preloads is (design
+/// §5.14, #4696): the epoch laid after the preload holds a row of words
+/// for the op arrays of the function and the method the `eval` declared,
+/// as it holds one for the preloaded file's own function, and the
+/// request reaches all three.
+#[test]
+fn a_preload_evals_function_and_method_have_their_words_laid_as_a_preloaded_files_do() {
+    let files = Files::new(
+        "preload-eval-words",
+        &[(
+            "preload.inc",
+            "<?php\nfunction pre_w() { return 'w'; }\n\
+             eval('function eval_w() { return \"e\"; } class EvalW { function m() { return \"m\"; } }');\n",
+        )],
+    );
+    let script = files.path().join("preload.inc");
+    let engine = Engine::cli_builder()
+        .extensions(&[preloading(&script)])
+        .ini("t.preload", script.as_os_str().as_encoded_bytes())
+        .build();
+    let served = engine.serve_capture(
+        "<?php echo pre_w(), eval_w(), (new EvalW)->m();",
+        crate::test::Capture::default(),
+    );
+    assert_eq!(served.stdout_text(), "wem");
+    let epoch = engine.shared.arena.current();
+    let preloaded = engine
+        .shared
+        .units
+        .preloaded()
+        .expect("the preload published");
+    let scripts: Vec<bool> = (preloaded.scripts.iter())
+        .flat_map(|held| words_laid(&epoch, &held.unit))
+        .collect();
+    let evals: Vec<bool> = (preloaded.evals.iter())
+        .flat_map(|unit| words_laid(&epoch, unit))
+        .collect();
+    assert_eq!(scripts, [true], "the preloaded file's function");
+    assert_eq!(evals, [true, true], "the eval's function and its method");
+}
+
 /// An extension that keeps every file in the cache, never validated,
 /// and names a file cache from an ini entry of its own.
 fn file_caching(dir: &Path) -> Extension {
