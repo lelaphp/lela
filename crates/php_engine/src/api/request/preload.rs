@@ -498,7 +498,12 @@ impl Request {
         let optimizer = shared.optimizer();
         let unit = match unit.map(|unit| shared.publish_compiled(optimizer.optimized(unit))) {
             Ok(Ok(unit)) => unit,
-            Ok(Err(_)) => return Err(crate::api::raising::fatal(self, EVAL_REFUSED)),
+            Ok(Err(_)) => {
+                if let Some(alone) = alone {
+                    self.free_alone(alone);
+                }
+                return Err(crate::api::raising::fatal(self, EVAL_REFUSED));
+            }
             Err(error) => {
                 let refused = crate::unit_cache::CompileRefused::published(error, |unit| {
                     self.take_unit(unit)

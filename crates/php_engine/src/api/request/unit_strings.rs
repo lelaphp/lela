@@ -1718,17 +1718,24 @@ impl Request {
     /// array's blocks until its execution ends, and what it declares as
     /// [`Request::lay_declared`] holds it, which lays nothing more.
     pub(crate) fn hold_alone(&mut self, unit: &PublishedUnit, alone: Alone) {
-        let Alone { main, declared } = alone;
         let Some(held) = self.unit_strings.held_mut(PublishedUnit::as_ptr(unit)) else {
-            main.into_blocks().free(self);
-            return declared.free(self);
+            return self.free_alone(alone);
         };
+        let Alone { main, declared } = alone;
         held.main_op_array = main;
         if held.declared.lay() {
             declared.free(self);
         } else {
             held.declared.hold(declared);
         }
+    }
+
+    /// What the compile laid given back where no unit holds it: the main
+    /// op array's blocks, and what the unit declares.
+    pub(crate) fn free_alone(&mut self, alone: Alone) {
+        let Alone { main, declared } = alone;
+        main.into_blocks().free(self);
+        declared.free(self);
     }
 
     /// The `zend_op_array` of `unit`'s main op array the frame that runs
