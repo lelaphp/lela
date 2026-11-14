@@ -1673,17 +1673,18 @@ impl Request {
     /// php's own `compile_string`, beneath every link of the pointer:
     /// `source` compiled from `position` under `name` as the request's
     /// own unit, or, while the preload runs, as the preload's
-    /// ([`Request::preload_eval`]).
+    /// ([`Request::preload_eval`]), whose `Err` ends the request.
     pub(crate) fn compile_string_own(
         &mut self,
         source: &[u8],
         name: &[u8],
         position: php_compile::syntax::Position,
-    ) -> Result<PublishedUnit, CompileRefused> {
+    ) -> Result<Result<PublishedUnit, CompileRefused>, Thrown> {
         if self.preloading.is_some() {
             return self.preload_eval(source, name, position);
         }
-        Arc::clone(&self.shared).compile_for(self, source, name, SourceKind::Eval(position))
+        let shared = Arc::clone(&self.shared);
+        Ok(shared.compile_for(self, source, name, SourceKind::Eval(position)))
     }
 
     /// [`Request::compile_string`] with the compiler's refusal raised as

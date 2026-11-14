@@ -25,6 +25,7 @@ use super::Frames;
 use super::publish::Unpublished;
 use super::{InArena, PreloadStatistics, Request, UserFunction, user_function_decl};
 use crate::api::call::Function;
+use crate::api::raising::Thrown;
 use crate::api::values::ClassId;
 use crate::arena::EpochClassId;
 use crate::engine::Cached;
@@ -472,17 +473,17 @@ impl Request {
     /// 2
     /// ```
     ///
-    /// A unit [`Frozen::new`] refuses would be served as the request's
-    /// own, charged the same, keeping the engine's offsets it took, and
-    /// what it declares left out of the preload
-    /// ([`Request::publish_tables`]); no compile makes one, since a
+    /// A preload's `eval` unit is never the request's own: one
+    /// [`Frozen::new`] refuses ends the preload's request with an
+    /// internal error, as an arena with no room ends it
+    /// ([`Request::publish_preload`]), and no compile makes one, since a
     /// unit's walk passes its closures' cells over.
     pub(crate) fn preload_eval(
         &mut self,
         source: &[u8],
         name: &[u8],
         position: php_compile::syntax::Position,
-    ) -> Result<PublishedUnit, crate::unit_cache::CompileRefused> {
+    ) -> Result<Result<PublishedUnit, crate::unit_cache::CompileRefused>, Thrown> {
         let shared = Arc::clone(&self.shared);
         let kind = php_compile::SourceKind::Eval(position);
         let unit = (self.compile_kind_for_cache(source, name, kind)).unit;
@@ -495,31 +496,32 @@ impl Request {
         }
         let variables = unit.as_ref().ok().map(super::unit_strings::variables_of);
         let optimizer = shared.optimizer();
-        let unit = unit.map(|unit| shared.publish_compiled(optimizer.optimized(unit)));
-        if let (Ok(Ok(unit)), Some(preloading)) = (&unit, &mut self.preloading) {
-            preloading.evals.push(Frozen::clone(unit));
-        }
-        let unit = unit.map(|unit| unit.map_or_else(|own| own, |unit| PublishedUnit::clone(&unit)));
-        match unit {
-            Ok(unit) => {
-                // Held as an `eval`'s outside the preload is, whose names
-                // its noting makes ([`Request::hold_unit_names`]), until
-                // the preload's request ends.
-                self.hold_compiled(&unit);
-                // The memory limit refusing them ends the request.
-                if let Some(variables) = variables {
-                    self.hold_preload_strings(&unit, variables).ok();
-                }
-                if let Some(alone) = alone {
-                    self.hold_alone(&unit, alone);
-                }
-                Ok(unit)
+        let unit = match unit.map(|unit| shared.publish_compiled(optimizer.optimized(unit))) {
+            Ok(Ok(unit)) => unit,
+            Ok(Err(_)) => return Err(crate::api::raising::fatal(self, EVAL_REFUSED)),
+            Err(error) => {
+                let refused = crate::unit_cache::CompileRefused::published(error, |unit| {
+                    self.take_unit(unit)
+                });
+                return Ok(Err(refused));
             }
-            Err(error) => Err(crate::unit_cache::CompileRefused::published(
-                error,
-                |unit| self.take_unit(unit),
-            )),
+        };
+        if let Some(preloading) = &mut self.preloading {
+            preloading.evals.push(Frozen::clone(&unit));
         }
+        let unit = PublishedUnit::clone(&unit);
+        // Held as an `eval`'s outside the preload is, whose names its
+        // noting makes ([`Request::hold_unit_names`]), until the
+        // preload's request ends.
+        self.hold_compiled(&unit);
+        // The memory limit refusing them ends the request.
+        if let Some(variables) = variables {
+            self.hold_preload_strings(&unit, variables).ok();
+        }
+        if let Some(alone) = alone {
+            self.hold_alone(&unit, alone);
+        }
+        Ok(Ok(unit))
     }
 
     /// Whether the class at `at` of `unit` is one the preload holds,
@@ -1175,6 +1177,10 @@ impl Frames<&Request> {
 /// What the arena could not take: more classes or functions published
 /// than a number can name.
 const ARENA_FULL: &str = "InternalError: the engine's published arena is full";
+
+/// What a preload's `eval` compiled that the arena refused to hold.
+const EVAL_REFUSED: &str =
+    "InternalError: the engine's published arena refused a unit the preload compiled from a string";
 
 /// The preload's tables as [`Request::publish_tables`] left them.
 struct Published {

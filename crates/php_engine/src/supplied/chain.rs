@@ -404,11 +404,8 @@ impl sealed::Kind for CompileString {
     linked!();
 
     fn own(req: &mut Request, args: StringArgs<'_>) -> <Self as ChainKind>::Answer {
-        Ok(Compiled(req.compile_string_own(
-            args.source,
-            args.name,
-            args.position,
-        )))
+        req.compile_string_own(args.source, args.name, args.position)
+            .map(Compiled)
     }
 }
 
