@@ -30,8 +30,9 @@ const UNNUMBERED: ClassId = ClassId(u32::MAX);
 /// which has no request to leave it to, tells them apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Unpublished {
-    /// The arena refused to hold it: [`Frozen::new`] refused the
-    /// declaration the class composed with its traits, or the class
+    /// The arena refused to hold it: [`Frozen::composed`] refused the
+    /// declaration the class composed with its traits, a cell of which
+    /// names none of the frozen units it was composed from, or the class
     /// names a class or a body no request but the publisher's can reach.
     Refused,
     /// The arena had no room for it.
@@ -50,9 +51,15 @@ impl Request {
     /// and so is every class its record and its placed properties name,
     /// each by the arena's one check or as the class itself, so the row
     /// stands in the arena's scope ([`InArena`]): over the frozen unit,
-    /// with the composed declaration frozen by [`Frozen::new`]. A member
-    /// whose body is in another unit, a trait's method, is published over
-    /// the frozen unit `units` finds that unit to be.
+    /// with the composed declaration admitted by [`Frozen::composed`]
+    /// against, and holding, the frozen units of its whole trait-use
+    /// closure, its own among them (`trait_use_units`), so a closure or a
+    /// first-class callable a trait or a trait's trait declares is
+    /// published with the class. A member whose body is in another unit,
+    /// a trait's method, is published over the frozen unit `units` finds
+    /// that unit to be. A class whose trait is the request's own, such as
+    /// one an `eval` declared, is never asked here: `fetched` finds it no
+    /// shared trait, and the include binds the class per request.
     ///
     /// Everything that can refuse is asked before the arena numbers
     /// anything: the composed declaration, the record's classes, each
@@ -79,11 +86,15 @@ impl Request {
                 decl,
                 bodies,
                 abstracts,
-            }) => Some(Box::new(Composed {
-                decl: Arc::new(Frozen::composed(decl, Vec::new()).map_err(|_| Refused)?),
-                bodies,
-                abstracts,
-            })),
+            }) => {
+                let witnesses = self.trait_use_units(unit, &decl, units);
+                let decl = Frozen::composed(decl, witnesses).map_err(|_| Refused)?;
+                Some(Box::new(Composed {
+                    decl: Arc::new(decl),
+                    bodies,
+                    abstracts,
+                }))
+            }
             None => None,
         };
         let row: Declared<InArena> = Declared {
@@ -138,6 +149,54 @@ impl Request {
             return Err(Full);
         }
         Ok(class)
+    }
+
+    /// The frozen units a class composed as `decl` was composed from,
+    /// which a closure's cell in it may name ([`Frozen::composed`]): its
+    /// own, `unit`, and each trait's of its whole trait-use closure, a
+    /// trait's traits among them, each once. A trait's unit is its row's:
+    /// the frozen unit an arena row holds, or the one `units` finds for a
+    /// row of the request's own, none where the unit is the request's
+    /// alone, so a cell from it names none of them and the check refuses.
+    /// Each trait is reached by its name, through the row the request
+    /// binds it to and that row's declaration's traits, so no unit is
+    /// walked.
+    fn trait_use_units(
+        &self,
+        unit: &Frozen<PublishedUnit>,
+        decl: &php_unit::decl::ClassDecl,
+        units: &dyn Fn(&PublishedUnit) -> Option<Frozen<PublishedUnit>>,
+    ) -> Vec<Frozen<PublishedUnit>> {
+        let mut found = vec![Frozen::clone(unit)];
+        let mut seen: Vec<ClassId> = Vec::new();
+        let mut names: Vec<&[u8]> = decl.traits.iter().map(|name| &*name.0).collect();
+        while let Some(name) = names.pop() {
+            let Some(class) = self.class_named(php_unit::decl::Bare::resolved(name)) else {
+                continue;
+            };
+            if seen.contains(&class) {
+                continue;
+            }
+            seen.push(class);
+            let Some(row) = self.declared_row(class) else {
+                continue;
+            };
+            let frozen = match row {
+                ClassRow::Arena(row) => Some(Frozen::clone(&row.unit)),
+                ClassRow::Own(own) => units(&own.unit),
+            };
+            if let Some(frozen) = frozen
+                && !found
+                    .iter()
+                    .any(|held| PublishedUnit::ptr_eq(held, &frozen))
+            {
+                found.push(frozen);
+            }
+            if let Some(decl) = row.decl() {
+                names.extend(decl.traits.iter().map(|name| &*name.0));
+            }
+        }
+        found
     }
 
     /// `zend_accel_store_class_table` over a unit the cache holds

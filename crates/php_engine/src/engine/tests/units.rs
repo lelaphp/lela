@@ -156,24 +156,49 @@ fn a_unit_the_check_refuses_is_held_nowhere_and_every_ask_compiles_it_again() {
     );
 }
 
-/// The refusal a compile reaches: a class that uses a trait and holds a
-/// closure in its composed declaration, which the check refuses where
-/// its link would be published (`Request::publish`, #4684), so the class
-/// is bound per request. What this holds of its cost: the file is
-/// compiled once and held, every later request is served the held unit
-/// with no compile, and the arena reserves nothing for the class, where
-/// the same class holding no closure is published at its first link;
-/// the link each request makes again is read by no count here.
-#[test]
-fn a_class_the_check_refuses_at_its_link_is_compiled_once_and_reserves_nothing() {
+/// `program` served three times on one engine that holds every file in
+/// the cache, never validated, each compile written to the body as
+/// `compiled <file>`: each body, and the classes the arena holds after
+/// each request beyond those it held before the first.
+fn served_held(program: &str) -> (Vec<String>, Vec<u32>) {
     use crate::api::abi::{Admission, ExtensionBuilder, Lookup};
     fn compiled(req: &mut Request, path: &[u8]) {
         let name = path.rsplit(|b| *b == b'/').next().unwrap_or(path);
         req.response_mut()
             .write(&[b"compiled ", name, b"\n"].concat());
     }
+    let extension = ExtensionBuilder::default()
+        .admission(|_, _| Admission::Held {
+            validation: Validation::Never,
+            lookup: Lookup::Resolved,
+            protection: 0,
+            file_cache: None,
+        })
+        .optimizer_pass(compiled)
+        .build("t");
+    let engine = Engine::cli_builder().extensions(&[extension]).build();
+    let classes = || engine.shared.arena.current().counts()[0];
+    let before = classes();
+    let mut bodies = Vec::new();
+    let mut reserved = Vec::new();
+    for _ in 0..3 {
+        bodies.push(served(&engine, program).0);
+        reserved.push(classes() - before);
+    }
+    (bodies, reserved)
+}
+
+/// A class that uses a trait and holds a closure and a first-class
+/// callable in its composed declaration is published at its first link,
+/// as the same class holding neither is (#4699): the check admits each
+/// cell against the frozen units the class was composed from, its own
+/// and its trait's (`Request::publish`). The file is compiled once and
+/// held, every later request is served the held unit with no compile,
+/// and no later request reserves a class.
+#[test]
+fn a_trait_using_class_holding_a_closure_is_published_at_its_first_link() {
     let files = Files::new(
-        "refused-link",
+        "published-link",
         &[
             (
                 "closures.inc",
@@ -189,50 +214,77 @@ fn a_class_the_check_refuses_at_its_link_is_compiled_once_and_reserves_nothing()
         ],
     );
     let serve = |file: &str, echo: &str| {
-        let extension = ExtensionBuilder::default()
-            .admission(|_, _| Admission::Held {
-                validation: Validation::Never,
-                lookup: Lookup::Resolved,
-                protection: 0,
-                file_cache: None,
-            })
-            .optimizer_pass(compiled)
-            .build("t");
-        let engine = Engine::cli_builder().extensions(&[extension]).build();
-        let classes = || engine.shared.arena.current().counts()[0];
-        let path = files.path().join(file);
-        let program = format!(
+        served_held(&format!(
             "<?php require '{}'; $g = new Greeter; echo {echo}, $g->hi(), \"\\n\";",
-            path.display()
-        );
-        let before = classes();
-        let mut bodies = Vec::new();
-        let mut reserved = Vec::new();
-        for _ in 0..3 {
-            bodies.push(served(&engine, &program).0);
-            reserved.push(classes() - before);
-        }
-        (bodies, reserved)
+            files.path().join(file).display()
+        ))
     };
-    let (bodies, refused) = serve("closures.inc", "(Greeter::LEN)('abcd'), ($g->twice)(4)");
+    let (bodies, closures) = serve("closures.inc", "(Greeter::LEN)('abcd'), ($g->twice)(4)");
     assert_eq!(
         bodies,
         ["compiled closures.inc\n48hi\n", "48hi\n", "48hi\n"],
         "compiled once, and served held after"
     );
-    let (bodies, published) = serve("plain.inc", "Greeter::LEN, $g->twice");
+    let (bodies, plain) = serve("plain.inc", "Greeter::LEN, $g->twice");
     assert_eq!(bodies, ["compiled plain.inc\n48hi\n", "48hi\n", "48hi\n"]);
     assert_eq!(
-        published[0],
-        refused[0] + 1,
-        "the plain class is published at its first link and the refused one never: {published:?} {refused:?}"
+        closures[0], plain[0],
+        "the class holding closures is published at its first link as the plain one is: {closures:?} {plain:?}"
     );
-    for reserved in [&refused, &published] {
+    for reserved in [&closures, &plain] {
         assert!(
             reserved.windows(2).all(|pair| pair[0] == pair[1]),
             "nothing reserved by a later request: {reserved:?}"
         );
     }
+}
+
+/// A trait's trait is among the units a class is composed from: the
+/// first-class callable `Inner` declares in `inner.inc` reaches the
+/// class `outer.inc` declares through `Outer`, and the class is
+/// published at its first link, as the same class whose `Inner` holds
+/// none is.
+#[test]
+fn a_cell_from_a_trait_of_a_trait_in_another_file_is_published_with_its_class() {
+    let files = Files::new(
+        "trait-of-trait",
+        &[
+            (
+                "callable.inc",
+                "<?php trait Inner { const LEN = strlen(...); }",
+            ),
+            ("plain.inc", "<?php trait Inner { const LEN = 4; }"),
+            (
+                "outer.inc",
+                "<?php trait Outer { use Inner; } class Greeter { use Outer; }",
+            ),
+        ],
+    );
+    let serve = |inner: &str, echo: &str| {
+        served_held(&format!(
+            "<?php require '{}'; require '{}'; echo {echo}, \"\\n\";",
+            files.path().join(inner).display(),
+            files.path().join("outer.inc").display()
+        ))
+    };
+    let (bodies, callable) = serve("callable.inc", "(Greeter::LEN)('abcd')");
+    assert_eq!(
+        bodies,
+        [
+            "compiled callable.inc\ncompiled outer.inc\n4\n",
+            "4\n",
+            "4\n"
+        ]
+    );
+    let (bodies, plain) = serve("plain.inc", "Greeter::LEN");
+    assert_eq!(
+        bodies,
+        ["compiled plain.inc\ncompiled outer.inc\n4\n", "4\n", "4\n"]
+    );
+    assert_eq!(
+        callable, plain,
+        "the class reached by a trait's trait's callable is published as the plain one is"
+    );
 }
 
 /// An extension that names a file to preload as the engine
