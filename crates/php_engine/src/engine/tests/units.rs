@@ -287,6 +287,29 @@ fn a_cell_from_a_trait_of_a_trait_in_another_file_is_published_with_its_class() 
     );
 }
 
+/// The include's per-request fallback a refusal still reaches: a class
+/// in a held file that uses a trait the request declared in an `eval`
+/// is the request's own, bound per request and never published. Its
+/// trait is not shared, so `Request::fetched` finds the class nothing to
+/// look up or publish, as `zend_accel_inheritance_cache_get` asks for
+/// an immutable parent and traits; behind it, `Request::publish_link`
+/// refuses a dependency that is not shared, and `Request::publish` a
+/// trait's method over a unit no frozen unit stands for.
+#[test]
+fn a_class_using_a_trait_the_request_declared_is_bound_per_request() {
+    let files = Files::new(
+        "own-trait",
+        &[("greeter.inc", "<?php class Greeter { use Greets; }")],
+    );
+    let (bodies, reserved) = served_held(&format!(
+        "<?php eval('trait Greets {{ public function hi(): string {{ return \"hi\"; }} }}');\n\
+         require '{}'; echo (new Greeter)->hi(), \"\\n\";",
+        files.path().join("greeter.inc").display()
+    ));
+    assert_eq!(bodies, ["compiled greeter.inc\nhi\n", "hi\n", "hi\n"]);
+    assert_eq!(reserved, [0, 0, 0], "no request publishes the class");
+}
+
 /// An extension that names a file to preload as the engine
 /// finishes starting up, reading it from an ini entry of its own,
 /// and holds every file in the cache, never validated, as opcache
