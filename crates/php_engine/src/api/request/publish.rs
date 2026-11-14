@@ -119,8 +119,10 @@ impl Request {
             }
         };
         // Asked above, and the arena's check answers a class the same
-        // once it answered it.
-        let placed = placed.published(keyed).ok_or(Refused)?;
+        // once it answered it; were it to answer otherwise, the number is
+        // taken, and what stops the publication past it is told as the
+        // arena's room is, which leaves a number no class takes.
+        let placed = placed.published(keyed).ok_or(Full)?;
         let (functions, members) = self.place_published(class, members).ok_or(Full)?;
         let row = Declared {
             bound: Bound {
