@@ -24,7 +24,7 @@ use crate::api::values::ClassId;
 /// `C`: by the request's number as [`sample`] reads it, and as a
 /// recording names it in its record ([`RecordClass`](super::RecordClass),
 /// made by [`UnitView::record_class`](super::UnitView::record_class)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub struct Sample<C = ClassId> {
     pub kind: ZvalType,
     pub indirect: bool,

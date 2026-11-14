@@ -618,7 +618,7 @@ fn touched_code(epoch: &Epoch, raw: MapPtrRaw) -> Option<&OpArray> {
 /// of the request it runs in from that request's cache slot
 /// ([`PropertySlot::cached`]). The class is named as the recording names
 /// it ([`RecordClass`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub struct PropertySlot {
     func: EngineFuncRef,
     at: OplineIdx,
@@ -635,7 +635,7 @@ pub struct PropertySlot {
 /// of the request it runs in, for a request-scoped class. One of the two
 /// is always the case, so a place served in place is either guarded on
 /// its class or read where the class is the request's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub enum PlaceClass {
     /// A published class's place, under a guard on the class.
     Shared(EpochClassId),
@@ -697,7 +697,7 @@ impl PropertySlot {
 /// `CACHED_PTR(opline->result.num)` and the callee past it
 /// (`zend_jit_init_method_call`, `zend_jit_init_static_method_call`,
 /// `Z/ext/opcache/jit/zend_jit_ir.c:9025-9056`, `:9255-9265`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub struct CalleeSlot {
     func: EngineFuncRef,
     at: OplineIdx,
@@ -801,7 +801,7 @@ pub use crate::arena::{EpochClassId, EpochFunction};
 ///     }
 /// }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, php_macros::EngineState)]
 pub struct UnitView {
     epoch: Epoch,
     funcs: Vec<EngineFuncRef>,
@@ -859,7 +859,7 @@ pub struct UnitView {
 /// request declares a name for one class alone; and, where
 /// the analysis binds it, its linked record, its classes named as the
 /// view names them, and what the analysis reads of its declaration.
-#[derive(Debug)]
+#[derive(Debug, php_macros::EngineState)]
 struct OwnEntry {
     name: Name,
     bound: Option<(LinkedClass<RecordClass>, ClassFacts)>,
