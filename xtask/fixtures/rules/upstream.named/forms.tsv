@@ -8,8 +8,7 @@
 # `names-one` and `stays-refused` are refused by both; `names-none` passes
 # both. A form stands in the line `see <form> for it`. A `row` names a
 # `[[rule]]` of the manifest by its id, and its whole block passes both: it is
-# read from seams.toml, or from proposal.toml beside this file while the row
-# is only proposed.
+# read from seams.toml.
 names-one	a_glob_then_a_name_under_any_depth	upstream/**/x.md
 names-one	a_glob_then_a_name	upstream/*.md
 names-one	a_brace_glob_then_a_name	upstream/{a,b}.md
