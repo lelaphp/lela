@@ -2032,9 +2032,10 @@ impl Shared {
     /// and a class that extends it, are served as php serves them, with
     /// the cache and without; so is a class that uses a trait and holds a
     /// first-class callable in a constant and a closure in a property's
-    /// default, whose composed declaration the check refuses where its
-    /// link would be published (`Request::publish`), so that with the
-    /// cache it is bound per request (#4684):
+    /// default, whose composed declaration the check admits against the
+    /// units it was composed from where its link is published
+    /// (`Request::publish`), so that with the cache it is published at its
+    /// first link and shared by every request after it (#4699):
     ///
     /// ```php
     /// $dir = sys_get_temp_dir() . '/frozen-closure-' . getmypid();
