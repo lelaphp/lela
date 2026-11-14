@@ -89,7 +89,7 @@ pub(crate) const EBUSY: i32 = 16;
 /// One thing running inside the engine: a request in flight, or a thread
 /// the engine started, from before it starts to after it is joined.
 /// While one stands beside the caller's own, nothing forks.
-#[derive(Debug)]
+#[derive(Debug, php_macros::EngineState)]
 pub(crate) struct Inside(());
 
 impl Inside {
@@ -119,11 +119,20 @@ impl Drop for Inside {
 /// A thread the engine started, which a fork waits for: [`Inside`] from
 /// before the thread exists to after it is joined; `T` is what its body
 /// answers.
-#[derive(Debug)]
+#[derive(Debug, php_macros::EngineState)]
 pub(crate) struct Thread<T = ()> {
     handle: JoinHandle<T>,
     _inside: Inside,
 }
+
+/// A thread the engine started is engine state by the derive where what
+/// its body answers is, through `php_heap`'s `JoinHandle<T>`, so the slot a
+/// [`Worker`] keeps its thread in is too (#4636).
+const _: fn() = || {
+    fn held<T: crate::api::abi::EngineState>() {}
+    held::<Thread>();
+    held::<Mutex<Option<Thread>>>();
+};
 
 /// `body` over `input` on a thread apart named `name`, with a stack of
 /// `stack_size` bytes, counted inside the engine while it stands, and
