@@ -118,20 +118,14 @@ jobs:
       # it wrote, so the binary is the test's dependency and not only the
       # regions job's (§5).
       - run: cargo install computed --locked
-      # The function-hook module (harness-design.md §1 revision 8, §6;
-      # #62). Its declarations are a tracked generated file,
-      # harness-plugins/types, rewritten at pre-commit by the committer's
-      # own Claude Code whenever a path under harness-plugins/ is staged;
-      # the build that wrote them is the header line of the committed
-      # file, `// Written by Claude Code <version>.`, which `cargo test -p
-      # xtask --test map` reads, so no Claude Code is installed here and
-      # no pin is stated here. `tsc` holds the modules and their tests to
-      # the committed file (#3831); `plugin validate --strict` ran at the
-      # same pre-commit. The
-      # wall-clock, measured on the dev machine (2026-09-10, M-series,
-      # warm npm cache): `tsc` 0.9 s; the runner's figure, with a cold npm
-      # cache, is read off the first run.
-      - run: npx -y -p typescript@5.9.3 tsc -p harness-plugins
+      # The function-hook module (harness-design.md §1 revision 8, §6).
+      # Its declarations are a file Claude Code writes, Claude Code's and
+      # not this project's, so the repository does not carry them. They
+      # are written at pre-commit by the committer's own Claude Code
+      # whenever a path under harness-plugins/ is staged, and `tsc`,
+      # `plugin validate --strict` and `plugin test` hold the modules to
+      # them there. No Claude Code is installed here, so nothing here
+      # type-checks the modules.
       # The pinned php-src (#37): the tree the tests that resolve a subset
       # of the real corpus read, named to the harness by its variable, with
       # the tree promised and not the binary: the pinned php is a macOS keg

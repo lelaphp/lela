@@ -2370,16 +2370,17 @@ fn the_stop_hook_runs_done_with_hook() {
     );
 }
 
-/// CI's per-commit job, where the harness's own tests run, holds the
-/// function-hook module to the committed declarations (harness-design.md
-/// §1 revision 8, §6; #62): `tsc -p harness-plugins` reads
-/// `harness-plugins/types`, the tracked file the committer's Claude Code
-/// rewrites at pre-commit, before the crates' tests; no Claude Code is installed on the runner and nothing writes
-/// the declarations there. The comments are stripped first, so a step
-/// named in prose does not stand in for the step, and a step that left
-/// is not found in prose either.
+/// CI's per-commit job, where the harness's own tests run, type-checks no
+/// function-hook module (harness-design.md §1 revision 8, §6): the
+/// declarations are a file Claude Code writes, Claude Code's and not this
+/// project's, so the repository does not carry them, no Claude Code is
+/// installed on the runner and nothing writes them there. `tsc`, `plugin
+/// validate` and `plugin test` hold the modules at pre-commit, on the
+/// committer's machine, where its own Claude Code has written them. The
+/// comments are stripped first, so a step named in prose does not stand in
+/// for the step, and a step that left is not found in prose either.
 #[test]
-fn ci_typechecks_the_module_against_the_committed_declarations_before_the_tests() {
+fn ci_runs_the_tests_and_typechecks_no_module_whose_declarations_it_lacks() {
     let text = read(".github/workflows/harness.yml");
     let job = &text[text.find("\n  per-commit:").unwrap()..];
     let steps = job
@@ -2387,15 +2388,12 @@ fn ci_typechecks_the_module_against_the_committed_declarations_before_the_tests(
         .filter(|l| !l.trim_start().starts_with('#'))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut last = 0;
-    for step in ["tsc -p harness-plugins", "run: cargo xtask test"] {
-        let at = steps
-            .find(step)
-            .unwrap_or_else(|| panic!("the test job lacks {step}: {steps}"));
-        assert!(at > last, "{step} is out of order: {steps}");
-        last = at;
-    }
+    assert!(
+        steps.contains("run: cargo xtask test"),
+        "the test job lacks the tests: {steps}"
+    );
     for gone in [
+        "tsc -p harness-plugins",
         "@anthropic-ai/claude-code",
         "/plugin-types",
         "plugin validate",
