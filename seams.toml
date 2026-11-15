@@ -643,9 +643,9 @@ text = "A kernel or a native without a witness fails CI (design §8)."
 id = "state.engine"
 scope = ["crates/*", "ext/*", "sapi/*"]
 check = "engine-state"   # the sensor: xtask/src/api_check/engine_state.rs (#4500)
-allow = ["php_unit::frozen"]   # Frozen<T>'s one impl, which only its checked constructor vouches for (#4633)
+allow = ["php_unit::frozen", "php_engine::fork::thread"]   # Frozen<T>'s one impl, which only its checked constructor vouches for (#4633); Thread<T>'s, which only fork::spawn vouches for, catching each body's panic (#4719)
 adr = "0005"
-text = "No handle into a request's heap enters engine-wide shared state: engine_state, process_state, register and constants_with take an EngineState, which #[derive(EngineState)] holds at every field, and an impl written by hand stands only where unsafe may (#4348 ruling 2), or in the one module `allow` names, whose impl only a checked constructor beside it vouches for (#4633)."
+text = "No handle into a request's heap enters engine-wide shared state: engine_state, process_state, register and constants_with take an EngineState, which #[derive(EngineState)] holds at every field, and an impl written by hand stands only where unsafe may (#4348 ruling 2), or in a module `allow` names, whose one impl only the constructor beside it vouches for (#4633, #4719)."
 remedy = "#[derive(EngineState)] on the type, or the impl in the crate's own src/ffi/ for a C library's object; where the sensor cannot read, write the trait's path, the file's path or the impl where it reads them"
 
 [[rule]]
