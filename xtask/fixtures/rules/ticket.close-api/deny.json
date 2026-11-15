@@ -1,1 +1,1 @@
-{"tool_name":"Bash","tool_input":{"command":"gh api -X PATCH repos/mitchellvanw/dax-php/issues/28 -f state=closed -f state_reason=completed","description":"Close the ticket through the API"}}
+{"tool_name":"Bash","tool_input":{"command":"gh api -X PATCH repos/lelaphp/lela/issues/28 -f state=closed -f state_reason=completed","description":"Close the ticket through the API"}}

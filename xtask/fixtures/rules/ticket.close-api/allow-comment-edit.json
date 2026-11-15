@@ -1,1 +1,1 @@
-{"tool_name":"Bash","tool_input":{"command":"gh api -X PATCH repos/mitchellvanw/dax-php/issues/comments/123 -f body=\"$(cat /tmp/x)\"","description":"Edit the text of a comment on the ticket through the API"}}
+{"tool_name":"Bash","tool_input":{"command":"gh api -X PATCH repos/lelaphp/lela/issues/comments/123 -f body=\"$(cat /tmp/x)\"","description":"Edit the text of a comment on the ticket through the API"}}

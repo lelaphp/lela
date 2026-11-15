@@ -1,1 +1,1 @@
-{"tool_name":"Bash","tool_input":{"command":"gh api repos/mitchellvanw/dax-php/issues/28 --jq .state; gh api -X PATCH repos/mitchellvanw/dax-php/issues/28 -f title=\"the closer\"","description":"Read the ticket's state and retitle it through the API"}}
+{"tool_name":"Bash","tool_input":{"command":"gh api repos/lelaphp/lela/issues/28 --jq .state; gh api -X PATCH repos/lelaphp/lela/issues/28 -f title=\"the closer\"","description":"Read the ticket's state and retitle it through the API"}}
