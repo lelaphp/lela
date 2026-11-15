@@ -1,4 +1,4 @@
-//! The build's facts, one answer each (#1299): the date `php -v` prints
+//! The build's facts, one answer each: the date `php -v` prints
 //! after `built:`, `PHP_BUILD_DATE` and phpinfo's `Build Date` are one
 //! stamp; `PHP_BUILD_PROVIDER`, `-v`'s `Built by` line and phpinfo's
 //! `Build Provider` row stand where the build named a provider and are

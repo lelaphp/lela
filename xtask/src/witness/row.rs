@@ -1,5 +1,5 @@
 //! One witness reading as a row of `status --section witness --format jsonl
-//! --every` (harness-design.md §4.6, #1763): the crate's tally, under a
+//! --every` (harness-design.md §4.6): the crate's tally, under a
 //! shape `v` versions. Which reading stands for a crate, and what a reader
 //! sums over crates, stay the reader's; a row says what one reading counted
 //! and leaves a count it does not keep null, never 0.
@@ -37,7 +37,7 @@ pub(crate) struct Row {
     /// Those that differ under an accepted registry row.
     diverged: Option<u64>,
     /// Those an accepted `trace:` row covers, held to their pinned
-    /// verdict against the engine alone (#1728).
+    /// verdict against the engine alone.
     covered: Option<u64>,
     /// Those with no verdict pinned yet.
     unpinned: Option<u64>,
@@ -46,7 +46,7 @@ pub(crate) struct Row {
     /// Found and not run, the oracle not here to run them.
     not_run: Option<u64>,
     /// Not served by the engine, each standing as one the oracle's run
-    /// failed does (#1535).
+    /// failed does.
     unserved: Option<u64>,
     /// The blocks the fence grammar could not read.
     unread: Option<u64>,
@@ -95,8 +95,8 @@ mod tests {
         every::reading(super::INSTRUMENT, scope, counts)
     }
 
-    /// A crate's tally renders count for count, `covered` beside `diverged`
-    /// (#2509), and a reading that counts nothing, the harness's skip, a
+    /// A crate's tally renders count for count, `covered` beside `diverged`,
+    /// and a reading that counts nothing, the harness's skip, a
     /// run cut short or one from before `covered` was kept, renders nulls.
     #[test]
     fn a_tally_renders_count_for_count_and_none_as_null() {

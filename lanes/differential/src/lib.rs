@@ -1,5 +1,5 @@
-//! The differential lane's pure part (harness §4.2, design §8; #3740,
-//! #4489): the programs a run draws beside its corpus, the grammar's
+//! The differential lane's pure part (harness §4.2, design §8):
+//! the programs a run draws beside its corpus, the grammar's
 //! ([`program`]) and a corpus program's mutations ([`mutated`]), and the
 //! loop that minimises a finding ([`minimised`]). Nothing here runs a
 //! program or reads a file: `xtask fuzz`, the adapter under

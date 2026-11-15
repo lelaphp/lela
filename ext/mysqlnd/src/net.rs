@@ -157,7 +157,7 @@ pub(crate) struct Net {
 /// read and did not read through ends with that request, so the next
 /// request lent the connection reads no envelope an earlier request
 /// left. What the socket's crypto layer holds of its own travels with
-/// the socket, as a persistent stream's does (#4602).
+/// the socket, as a persistent stream's does.
 #[derive(php_ext::abi::EngineState)]
 #[allow(clippy::struct_excessive_bools)] // `Net`'s flags, one each
 pub(crate) struct IdleNet {

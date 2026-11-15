@@ -1,4 +1,4 @@
-//! `CONFIGURE` held to the bundle's features (#1596): every switch stands
+//! `CONFIGURE` held to the bundle's features: every switch stands
 //! behind the feature of the extension it names, and every feature that
 //! names an `ext/*` crate php does not always build has its switch, an
 //! `--enable` or `--with` behind `cfg(feature)` where php's `config.m4`

@@ -1,12 +1,11 @@
-//! A stack on a mapping of its own (#4020's ruling, signed off on
-//! #4064), for the stacks a parse lends itself between compiles: one
-//! grown past what is kept goes back to the machine whole, rather than
-//! to the system allocator, which keeps the pages it frees dirty in its
-//! zone.
+//! A stack on a mapping of its own (ruled and signed off 2026-11-03),
+//! for the stacks a parse lends itself between compiles: one grown past
+//! what is kept goes back to the machine whole, rather than to the
+//! system allocator, which keeps the pages it frees dirty in its zone.
 //!
 //! A mapping is a page at least, so a stack within one page has nothing
 //! to give back, and a call that lexes a short string with stacks of its
-//! own, as `token_get_all` does, would pay the machine for each (#4019).
+//! own, as `token_get_all` does, would pay the machine for each.
 //! Its first room is that page from the system allocator.
 
 use std::alloc::Layout;

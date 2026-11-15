@@ -1,4 +1,4 @@
-//! What a process a request execs holds (#2458), held to what the oracle
+//! What a process a request execs holds, held to what the oracle
 //! at 8.5.9 lists under `php -n` with stdin on `/dev/null`: past fds 0,
 //! 1 and 2, the program's own file, which `cli_seek_file_begin` opens
 //! with `fopen` and no `O_CLOEXEC` and holds while the program runs, and

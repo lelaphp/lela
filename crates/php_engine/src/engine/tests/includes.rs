@@ -3,8 +3,8 @@
 
 use super::*;
 
-/// The realpath cache is the engine's, as php's is a php-fpm child's
-/// (#2941): the second request resolves its program's path, and an
+/// The realpath cache is the engine's, as php's is a php-fpm child's:
+/// the second request resolves its program's path, and an
 /// include's, from what the first entered, asking the file system
 /// nothing while the entries' time to live holds; once the cache is
 /// cleaned, as `clearstatcache(true)` cleans it, the next request asks
@@ -116,7 +116,7 @@ fn the_host_s_realpath_reads_and_enters_the_engine_s_realpath_cache() {
     assert_eq!(engine.realpath(&missing), None);
 }
 
-/// The once forms over a second file (#396): the file is served the
+/// The once forms over a second file: the file is served the
 /// first time and answers what it returned, and `true` every time
 /// after, from either once form, as the oracle prints for these
 /// files.
@@ -138,7 +138,7 @@ fn a_once_form_serves_a_file_once_and_answers_true_after() {
 }
 
 /// An include inside a function reads and writes the function's
-/// variables (#396): `zend_rebuild_symbol_table` gives the frame a
+/// variables: `zend_rebuild_symbol_table` gives the frame a
 /// table, the included file attaches to it, and what it wrote to
 /// `$r` is in the function's CV when the include returns, as the
 /// oracle prints for these files.
@@ -164,7 +164,7 @@ fn an_include_inside_a_function_shares_the_function_s_variables() {
 
 /// A variable an included file writes at the top level is the
 /// includer's, and stands in `EG(symbol_table)` after every name the
-/// main op array attached at its start (#396), so
+/// main op array attached at its start, so
 /// `shutdown_destructors`' reverse walk serves it first, then the
 /// main file's own in reverse: `d2`, `d3`, `d1`, as the oracle
 /// prints for these files.
@@ -186,7 +186,7 @@ fn a_variable_an_included_file_wrote_is_destructed_in_php_s_order() {
 }
 
 /// A file the parser refuses is the `ParseError` the includer may
-/// catch, at the file's own line (#396); a plain `include` whose
+/// catch, at the file's own line; a plain `include` whose
 /// compile was refused is not in the included-files table, so a
 /// once form after it compiles the file again and the uncaught
 /// `ParseError` is rendered at its level, as the oracle prints for

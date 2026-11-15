@@ -1067,7 +1067,7 @@ impl<H> Held<'_, H> {
 /// table holds them after the parent's. The declaration is `D`: a
 /// [`ClassDecl`] as the link makes it, or, where the engine published the
 /// class for every request, the declaration as a check made it engine
-/// state (`php_unit::frozen::Frozen`), which its arena holds (#4652).
+/// state (`php_unit::frozen::Frozen`), which its arena holds.
 #[derive(Debug, Clone, PartialEq, php_macros::EngineState)]
 pub struct Composed<D = ClassDecl> {
     pub decl: D,

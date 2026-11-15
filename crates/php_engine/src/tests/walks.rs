@@ -1,4 +1,4 @@
-//! The callback walks as a native meets them (#1980 candidate 3): what a
+//! The callback walks as a native meets them (design revision 92): what a
 //! walk took is given back on every way out, past the last row, at a
 //! row the body broke at and at one it threw from through `?`, so the
 //! table is freed where the program lets it go, and a guarded walk
@@ -505,7 +505,7 @@ fn a_pinned_row_appended_to_is_copied_not_moved() {
 }
 
 /// A row pinned by a walk outside a fiber and by a walk inside it that
-/// suspends in its step is kept by whichever pin is let go last (#2291):
+/// suspends in its step is kept by whichever pin is let go last:
 /// the walk outside ends its step first, the program then gives up the
 /// row's last owner and allocates strings of its size, and the fiber's
 /// walk, resumed, takes an owner of the row it was lent, the string as

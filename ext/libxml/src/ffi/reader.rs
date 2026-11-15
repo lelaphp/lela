@@ -1,5 +1,5 @@
 //! libxml2's `xmlTextReader` (`xmlreader.h`), which php's xmlreader
-//! drives call for call (design §4.10, #1323): the reader, the memory
+//! drives call for call (design §4.10): the reader, the memory
 //! input and the `RelaxNG` schema php keeps beside it, and each call that
 //! may parse wrapped in php's error capture with the request lent, so a
 //! document php's wrappers opened is read through them.

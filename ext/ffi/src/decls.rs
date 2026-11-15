@@ -146,7 +146,7 @@ impl FFI {
     ///
     /// A relative path names a file in the request's working directory,
     /// where `chdir()` moved it, as php's `stat` and `open` find it in
-    /// its process's (#2618): the file is found, and its parse fails.
+    /// its process's: the file is found, and its parse fails.
     ///
     /// ```php
     /// $d = sys_get_temp_dir() . '/ffi-load-' . getmypid(); mkdir($d); chdir($d);

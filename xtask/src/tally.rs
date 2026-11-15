@@ -14,7 +14,7 @@
 //! lane and never a reading of the engine. A [`Runner::Absent`] is a skip
 //! that says why, and so is a [`Runner::Stale`], the binary the tree has
 //! moved past, whose reading would otherwise be the engine of another tree
-//! stamped with this one (#475). The engine alone is pass or fail, and it is the engine
+//! stamped with this one. The engine alone is pass or fail, and it is the engine
 //! whether the binary served the program in a process of its own or the
 //! linked engine served it in this one ([`Runner::Linked`]): the two are
 //! the adapters of one seam over one executor (design §8).
@@ -32,7 +32,7 @@
 //! without the oracle is a claim. The same rung holds a tally whose items
 //! were found and none run because the oracle was not here to run them:
 //! coverage is the lane's and is judged first, and a snippet that did not
-//! run is counted, never a refusal (#65).
+//! run is counted, never a refusal.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -55,7 +55,7 @@ pub(crate) const RUN: &str = "run";
 /// upstream gives it; the tally reads three things of any of them.
 pub trait Judgement: Copy + Eq + fmt::Debug {
     /// What the lane keeps of an item that missed, beside its note: the
-    /// phpt lane's first differing lines and signature (#1185). A lane
+    /// phpt lane's first differing lines and signature. A lane
     /// that keeps nothing more than the note names `Infallible`.
     type Miss: Clone + Eq + fmt::Debug + Send;
     /// The one judgement the print loop leaves out.
@@ -296,7 +296,7 @@ impl<J: Judgement> Tally<J> {
         match runner {
             // A binary the tree has moved past ran nothing, as an absent
             // one did, and the reading's numbers say which of the two it
-            // was: `done` excuses the missing binary and not this (#475).
+            // was: `done` excuses the missing binary and not this.
             Runner::Absent(why) | Runner::Stale(why) => Outcome::Absent(why),
             Runner::Control(binary) => Outcome::Control(binary),
             Runner::Engine(_) | Runner::Linked if !self.against().is_empty() => Outcome::Failed,
@@ -342,7 +342,7 @@ impl<J: Judgement> Tally<J> {
 /// and an item alone runs with nothing of its run beside it; an item
 /// holding no key runs beside anything but an item alone. Two runs share
 /// no tree to be held apart in: a phpt run stands in a copy of the pinned
-/// tree of its own (#1183), and a witness in a scratch tree of its own.
+/// tree of its own, and a witness in a scratch tree of its own.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Apart {
     pub within: Within,
@@ -361,8 +361,7 @@ pub enum Within {
 
 /// `each` over every item on the seat's share of the machine, the
 /// answers in the items' order: for a lane whose items share nothing and
-/// spend their wall waiting on processes, as `crosscheck`'s renderings do
-/// (#2166).
+/// spend their wall waiting on processes, as `crosscheck`'s renderings do.
 pub(crate) fn each_beside<T: Sync, R: Send>(
     items: &[T],
     each: impl Fn(&T) -> R + Sync,
@@ -691,8 +690,8 @@ mod tests {
             Outcome::Passed
         );
         // Items found and none run, since the oracle was not here to run
-        // them: the same rung, with the count of what did not run on it
-        // (#65). Coverage is the lane's and was judged before this.
+        // them: the same rung, with the count of what did not run on it.
+        // Coverage is the lane's and was judged before this.
         assert_eq!(
             Tally::<Went>::found(3).complete(Some("not at /pinned/php")),
             Outcome::OracleAbsent("not at /pinned/php")

@@ -59,8 +59,8 @@ pub(crate) const REFCOUNT_AT: usize = std::mem::offset_of!(Refcounted, refcount)
 pub(crate) const TYPE_INFO_AT: usize = std::mem::offset_of!(Refcounted, type_info);
 
 /// The first of the walks' pins over a block other than an object, whose
-/// pins are counted ([`crate::Obj::pin`]) (design §4.4, #2197, #2230,
-/// #2291), the pins past the first counted beside it ([`Nested`]): the
+/// pins are counted ([`crate::Obj::pin`]) (design §4.4),
+/// the pins past the first counted beside it ([`Nested`]): the
 /// top bit of the count's word, which no count reaches, since two to the thirty-one
 /// owners would be thirty-two gigabytes of zvals naming one block. php's
 /// header has no bit to spare beside it: each of the six bits
@@ -294,7 +294,7 @@ impl Refcounted {
 /// by the block's own pointer. Every refcount move goes through it, so
 /// the debug build's freed-use guard ([`refuses_freed`]) reads the
 /// block's mark, past the header's eight bytes, with the provenance of
-/// the whole block, which a `&Refcounted` does not carry (#2414). It
+/// the whole block, which a `&Refcounted` does not carry. It
 /// reads as the header it points at for everything else.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Counted(std::ptr::NonNull<Refcounted>);
@@ -353,8 +353,8 @@ impl Counted {
     /// One owner given up as a release gives it up, `GC_DELREF`: what it
     /// left of the count. A count already at zero has no owner to give
     /// up: the block's destruction is under way, or done under a pin, and
-    /// a place that still names it, as a release in place leaves one
-    /// (#2245), is released again; it is left as it stands, so nothing
+    /// a place that still names it, as a release in place leaves one,
+    /// is released again; it is left as it stands, so nothing
     /// destroys it twice, where php's count wraps and does the same.
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn release(self) -> Release {
@@ -402,7 +402,7 @@ impl Counted {
     /// The freed-use guard over this header's block, for the line that
     /// asked: handed the block's own pointer, whose provenance covers
     /// the mark the guard reads past the header's eight bytes, as php's
-    /// guard reads it through a `zend_refcounted *` (#2414).
+    /// guard reads it through a `zend_refcounted *`.
     #[cfg(debug_assertions)]
     #[track_caller]
     fn refuses(self, op: crate::sensed::Use) -> bool {
@@ -413,7 +413,7 @@ impl Counted {
 /// The walks' pins over blocks other than objects past the first, which
 /// the header's bit stands for ([`PINNED`]): for each block pinned more
 /// than once, its address and how many pins past the first stand over
-/// it (#2291). The pins over one block are let go in any order, which a
+/// it. The pins over one block are let go in any order, which a
 /// call stack's walks do not need and a fiber's do: a walk's step in one
 /// execution and a walk's step in a fiber suspended inside it pin one
 /// row, and whichever is let go first, the other keeps the row's bytes.

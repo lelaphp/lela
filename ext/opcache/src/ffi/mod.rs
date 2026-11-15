@@ -1,6 +1,6 @@
 //! The calls that give the calling thread alone another user's ids, the
 //! one home of this crate's `unsafe` (`unsafe.homes`' `ext/*/src/ffi/`,
-//! as #1258's ruling of 2026-10-01 has it), each one call behind
+//! as the ruling of 2026-10-01 has it), each one call behind
 //! [`take`]. php's preload child calls `setgid`, `initgroups` and
 //! `setuid` (`Z/ext/opcache/ZendAccelerator.c:5028-5039`), which change
 //! a whole process; this engine's preload is a thread of a process that

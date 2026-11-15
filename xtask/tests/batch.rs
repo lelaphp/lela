@@ -1,9 +1,9 @@
-//! `xtask clippy` and `xtask test` measure every crate in one cargo run
-//! (#2165). The fixture at `xtask/fixtures/test/batch` is nine crates:
+//! `xtask clippy` and `xtask test` measure every crate in one cargo run.
+//! The fixture at `xtask/fixtures/test/batch` is nine crates:
 //! one clean, one carrying a lint, one built on it, one that does not
 //! compile, one built on that, a proc-macro crate, and one whose lint is
-//! behind a feature (#140), and two hosts whose binaries turn a feature of
-//! `php_heap` on and off (#2606). Each crate's reading out of the one run is the
+//! behind a feature, and two hosts whose binaries turn a feature of
+//! `php_heap` on and off. Each crate's reading out of the one run is the
 //! reading a run over it alone gives: a crate's lint is its own and blocks
 //! none above it, and a crate that does not compile stops only the crates
 //! built on it.
@@ -146,7 +146,7 @@ fn one_test_run_reads_each_crate_as_a_run_over_it_alone() {
     );
     // Each host's test starts its binary and holds it to the features its
     // own package turns on: makala's, built beside cli's, would carry
-    // cli's `loud` (#2606).
+    // cli's `loud`.
     for host in ["sapi/cli", "sapi/makala"] {
         let reading = of(&all, host);
         assert_eq!(reading.status, Status::Pass, "{reading:#?}");
@@ -226,7 +226,7 @@ fn one_clippy_run_reads_each_crate_as_a_run_over_it_alone() {
     }
 }
 
-/// The release profile's lint (#2392): a crate whose sources name
+/// The release profile's lint: a crate whose sources name
 /// `debug_assertions` is linted again in release on its library and
 /// binaries, as `<crate>/release`, and fails there on a lint the dev run
 /// cannot see; a crate naming the word in a comment or a string is not.
@@ -260,22 +260,22 @@ type Expected<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 
-    /// The sensor of the manifest's `deny_lints` rules (#1917): every such
+    /// The sensor of the manifest's `deny_lints` rules: every such
     /// rule has a fixture workspace under `xtask/fixtures/rules/<id>/` whose
     /// clippy readings carry the rule, fail where a source the scope covers
     /// sits under no module that denies the rule's lints, or under one that
     /// lifts a denial again (an inner `allow`, or one on the `mod` item),
     /// naming the source and the lints, and pass where the crate root, a
     /// module above the source or the crate's Cargo `[lints]` denies them.
-    /// The rule whose `check` names `silent-return` is held the same way
-    /// (#3079): a `return` at a `#[test]` fn's own level fails naming each
+    /// The rule whose `check` names `silent-return` is held the same way:
+    /// a `return` at a `#[test]` fn's own level fails naming each
     /// site, in `src/` and `tests/` alike, and one inside a closure or a
     /// nested fn, or `return Err(..)`, is not the test's and passes.
     #[test]

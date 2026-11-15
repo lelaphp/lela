@@ -575,7 +575,7 @@ pub trait Connection: Any + Send {
     /// take up ([`IdleConnection::take_up`]); `None` where nothing is left
     /// to keep, which the next request finds dead. php's `pdo_dbh_t`
     /// stands in `EG(persistent_list)` as it is; here the connector says
-    /// by its type what waits there (#4474).
+    /// by its type what waits there.
     fn give_back(self: Box<Self>, req: &mut Request) -> Option<Box<dyn IdleConnection>>;
 }
 
@@ -583,7 +583,7 @@ pub trait Connection: Any + Send {
 /// requests, what [`Connection::give_back`] answers: the connector's
 /// library connection and what it records beside it, with no value or
 /// allocation of a request's and no number into a request's table, so
-/// give-back is the one place a connection is converted (#4474).
+/// give-back is the one place a connection is converted.
 pub trait IdleConnection: EngineState {
     /// The connection taken up by the request PDO lends it to, kept in
     /// that request's tables again; one the request cannot keep answers

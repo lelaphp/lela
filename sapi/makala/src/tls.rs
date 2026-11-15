@@ -1,6 +1,6 @@
-//! TLS at the server (#2343), so a proxy in front is an option and not a
+//! TLS at the server, so a proxy in front is an option and not a
 //! requirement, as Kestrel's has been since 2.0: rustls on its aws-lc-rs
-//! provider (#2333), TLS 1.3 and 1.2 and nothing older, no renegotiation,
+//! provider, TLS 1.3 and 1.2 and nothing older, no renegotiation,
 //! which rustls never offers, and ALPN `http/1.1` (RFC 7301 §3.2), the
 //! one protocol stage 1 serves. Each handshake's certificate is chosen by
 //! a resolver asked once per handshake ([`Certificates`]), as OTP's

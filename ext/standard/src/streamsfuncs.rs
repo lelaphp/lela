@@ -1,7 +1,7 @@
 //! `Z/ext/standard/streamsfuncs.c`, the natives over the streams facet
 //! that need no socket and no filter chain: the stream `contexts`, the
-//! stream layer's `stream-context` resources (`StreamCtx`, as #1777
-//! ruled), with their options and their notification callback;
+//! stream layer's `stream-context` resources (`StreamCtx`, as design
+//! revision 84 has it), with their options and their notification callback;
 //! `stream_get_contents`, `stream_copy_to_stream`
 //! and `stream_get_line` over the stream's reads; the options
 //! `stream_set_*` asks of a stream, answered as the kinds this engine has
@@ -10,7 +10,7 @@
 //! is `file`'s, which declares `socket_get_status` as its alias, listed
 //! here in the stub's order. The socket
 //! natives, `stream_select`, the filter natives, `stream_isatty` and
-//! `stream_get_transports` wait on faces the api does not have (#684).
+//! `stream_get_transports` wait on faces the api does not have.
 //!
 //! The natives, as the stub declares them.
 //!

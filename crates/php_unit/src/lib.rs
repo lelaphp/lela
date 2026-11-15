@@ -55,8 +55,7 @@ mod tests {
     fn held<T: EngineState>() {}
 
     /// What the compiled tier's trace table holds of the unit format is
-    /// engine state by the derive, each field held where it is declared
-    /// (#4544).
+    /// engine state by the derive, each field held where it is declared.
     #[test]
     fn what_the_trace_table_holds_is_engine_state() {
         held::<OplineIdx>();

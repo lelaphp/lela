@@ -1,5 +1,5 @@
-//! `PHP_CLI_SERVER_WORKERS` (`Z/sapi/cli/php_cli_server.c:2503`,
-//! #1885): the server forked into worker processes before it serves,
+//! `PHP_CLI_SERVER_WORKERS` (`Z/sapi/cli/php_cli_server.c:2503`):
+//! the server forked into worker processes before it serves,
 //! each through the engine's one home for fork ([`php_sapi::fork`]) and
 //! each serving the same listening socket with its own event loop, the
 //! process that forked them among them; and, once that process's loop
@@ -57,7 +57,7 @@ impl Workers {
                     if error.raw_os_error() == Some(libc::EBUSY) {
                         log.write(
                             Type::Error,
-                            "Failed to fork a worker: the engine was not idle (#1807)",
+                            "Failed to fork a worker: the engine was not idle",
                         );
                     }
                     return Workers {

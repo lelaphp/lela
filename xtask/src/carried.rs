@@ -1,13 +1,13 @@
 //! Which of the manifest's `feature` rows a build carries
-//! (harness-design.md §7, revision 63; #1252).
+//! (harness-design.md §7, revision 63).
 //!
 //! A row's `feature` says its extension is behind a feature of
 //! `php_bundle`, outside php's default `./configure`; it does not say which
 //! builds turn that feature on. Each building crate says so itself, in the
 //! `features` of its `php_bundle` dependency, most often by naming a set
-//! the bundle defines, `host` (#3081), or in its own `default` as
+//! the bundle defines, `host`, or in its own `default` as
 //! `php_bundle/<feature>`, as each host turns the tier's `jit` on so that
-//! `--no-default-features` builds it without (#3676), and this module
+//! `--no-default-features` builds it without, and this module
 //! reads the declaration there and the set's members in the bundle and
 //! nowhere else,
 //! so no list in the harness is a second copy of either. A row with no
@@ -16,11 +16,11 @@
 //! Two builds are read. The binary under test, [`BINARY`]'s crate, is the
 //! one the per-commit phpt lane runs: the lane runs the subsets of every
 //! row it carries, and of every row naming an oracle variant on the engine
-//! built with the row's feature (#2029), `done` asks a touched crate of
+//! built with the row's feature, `done` asks a touched crate of
 //! either for a `phpt` reading, and `crosscheck` renders every extension
 //! it carries (§4.5 condition 1). `php-linked`, the engine the lanes serve a snippet
 //! through, is the other: [`BINARY`]'s crate with the bundle's `linked` set
-//! on top (revision 84; #2166). `crosscheck` serves an extension through
+//! on top (revision 84). `crosscheck` serves an extension through
 //! it where it carries the extension and through the binary where it does
 //! not.
 
@@ -86,8 +86,8 @@ impl Carried {
     }
 
     /// The features a crate's `Cargo.toml` turns on in its `php_bundle`
-    /// dependency, and those its `default` names as `php_bundle/<feature>`
-    /// (#3676); a feature of its own it does not turn on by default is not
+    /// dependency, and those its `default` names as `php_bundle/<feature>`;
+    /// a feature of its own it does not turn on by default is not
     /// read, as `linked` is [`Carried::linked`]'s.
     pub(crate) fn declared(text: &str) -> Result<Carried> {
         let table: toml::Table = toml::from_str(text).context("not TOML")?;
@@ -200,7 +200,7 @@ mod tests {
     }
 
     /// A feature of the bundle the crate's `default` turns on is carried,
-    /// and one only another of its own features turns on is not (#3676).
+    /// and one only another of its own features turns on is not.
     #[test]
     fn a_build_carries_what_its_default_features_turn_on_in_the_bundle() {
         let carried = Carried::declared(

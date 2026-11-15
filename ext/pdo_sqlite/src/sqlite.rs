@@ -386,8 +386,8 @@ enum Place {
     Gone,
 }
 
-/// A persistent connection while PDO's pool keeps it between requests
-/// (#4474): the connection idle ([`ffi::IdleConn`]) and the transaction
+/// A persistent connection while PDO's pool keeps it between requests:
+/// the connection idle ([`ffi::IdleConn`]) and the transaction
 /// style, and no function, collation or authorizer a request registered,
 /// which `persistent_shutdown` gave up as php's
 /// `pdo_sqlite_request_shutdown` cleans them up, nor `H`'s allocation, which

@@ -1,5 +1,5 @@
-//! A file outside `open_basedir` over a real socket against the binary
-//! (#4351): a program is not opened, as the pinned php-fpm refuses one in
+//! A file outside `open_basedir` over a real socket against the binary:
+//! a program is not opened, as the pinned php-fpm refuses one in
 //! `php_fopen_primary_script` (`Z/main/fopen_wrappers.c:468-473`), with
 //! its page and its line in the error log; and a static file is not sent,
 //! answered 404 as a file makala may not serve is, which no oracle holds.

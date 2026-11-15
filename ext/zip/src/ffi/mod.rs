@@ -3,8 +3,8 @@
 //! the one home of this crate's `unsafe`: zlib's deflate ([`zlib`]),
 //! liblzma for LZMA and XZ ([`lzma`]) and libzstd for ZSTD ([`zstd`]),
 //! both ways, so an entry's bytes, and the points a close reports while
-//! it compresses one, are those libzip makes through the same libraries
-//! (#1657, #3529). Everything else the crate reads and writes stays pure
+//! it compresses one, are those libzip makes through the same libraries.
+//! Everything else the crate reads and writes stays pure
 //! Rust.
 #![allow(unsafe_code)]
 #![deny(

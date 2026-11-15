@@ -38,7 +38,7 @@ pub struct Thrown {
 /// a `Result` of a value or a `Thrown`, what every entry answers, is
 /// then two words over two words, which LLVM moves as two loads and two
 /// stores, where a `bool` beside the throwable split the value's
-/// `info` word at its type byte on every move (#4062).
+/// `info` word at its type byte on every move.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u64)]
 enum Took {
@@ -920,7 +920,7 @@ pub fn call_stack_end(req: &mut Request) -> Result<(), Thrown> {
 /// (`php_compile::StackLimit::passed`), so where they stand together,
 /// under detect, a level past them is php's refusal and never the
 /// floor's `Error`, however the frames between two questions would have
-/// fallen (#4084).
+/// fallen.
 pub fn call_stack_refuses(req: &mut Request) -> Result<bool, Thrown> {
     let stack = req.stack_limit();
     match stack.passed() {
@@ -936,7 +936,7 @@ pub fn call_stack_refuses(req: &mut Request) -> Result<bool, Thrown> {
 /// under detect to the whole of the thread a host sized for that
 /// re-entry rather than php's budget, and naming php's budget either way.
 /// It is asked before the loop's frame is laid, so what that frame was
-/// measured to take ([`Request::loop_frame`]) is counted with it (#3830).
+/// measured to take ([`Request::loop_frame`]) is counted with it.
 pub(crate) fn call_stack_entry(req: &mut Request) -> Result<(), Thrown> {
     let stack = req.stack_limit();
     if !stack.entry_overflowed(req.loop_frame()) {

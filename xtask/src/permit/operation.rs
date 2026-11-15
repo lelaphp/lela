@@ -1,12 +1,12 @@
-//! The git operation in progress in a checkout (#2476, harness-design.md
+//! The git operation in progress in a checkout (harness-design.md
 //! §4.4). A merge, cherry-pick, revert,
 //! rebase or `am` in progress ends in a commit of the whole index, so a
 //! path another session stages in that checkout lands in that commit: on
 //! 2026-10-09 a settled divergence row staged by pathspec in main's
 //! checkout rode into `1bd555d0`, an unrelated merge. Whose the operation
 //! is, is whose the checkout is: one session writes in a checkout, the
-//! one its owner record names ([`crate::owner`], #3618 M1, #3621), so a
-//! rule carrying `where = "operating"` refuses the operation's steps to
+//! one its owner record names ([`crate::owner`], harness revision 179), so
+//! a rule carrying `where = "operating"` refuses the operation's steps to
 //! every other session ([`super::owned`]) and its owner's `git merge
 //! --abort` and commit pass. Who started an operation is recorded nowhere.
 //!
@@ -73,8 +73,8 @@ pub(super) fn standing_in(checkout: &Path) -> Option<Operation> {
 
 /// The operation standing in `checkout` that has staged `path`, its index
 /// entry other than `HEAD`'s and not a conflict's: the operation's commit
-/// carries it, so `permit --after` never puts it back (#2597), where a
-/// conflicted path it leaves to the hand that resolves it (#2880). An
+/// carries it, so `permit --after` never puts it back, where a
+/// conflicted path it leaves to the hand that resolves it. An
 /// index git cannot read is read as staged, the side that puts nothing
 /// back. What the index cannot say is whose hand staged the entry, so a
 /// call's own `git add` while the operation stands is read as the

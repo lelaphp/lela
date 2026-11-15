@@ -1,5 +1,5 @@
-//! The request leak sensor (#1992) over the handles the request keeps
-//! (ADR-0013, #2317): each request below gives up everything its natives
+//! The request leak sensor over the handles the request keeps
+//! (ADR-0013): each request below gives up everything its natives
 //! took, so an armed engine ends it without the `InternalError` naming a
 //! block still held.
 #![cfg(debug_assertions)]
@@ -20,7 +20,7 @@ fn served(src: &str, expected: &str) {
 /// multi is running is refused with `curl_close()`'s Error, the multi
 /// keeping the `CurlHandle` it held while the callback lets go of the
 /// program's last other reference, and the transfer runs to its end
-/// (`trace:curl-multi-closed-in-callback`, #2647).
+/// (`trace:curl-multi-closed-in-callback`).
 #[test]
 fn a_multi_closed_by_its_own_write_callback_is_refused_and_the_transfer_runs_to_its_end() {
     let files = Files::new("curl-closed-in-callback", &[]);
@@ -90,7 +90,7 @@ fn a_copy_s_lists_and_file_parts_outlive_the_original() {
 /// A form whose element throws while it is built goes on past the
 /// throw, as php's walk goes on with `EG(exception)` set, and is set as
 /// the walk ends; the `CURLFile` part's stream closes with the `CurlHandle`
-/// and the throwable reaches the `catch` (#2519).
+/// and the throwable reaches the `catch`.
 #[test]
 fn a_form_whose_element_throws_closes_its_file_parts() {
     let files = Files::new("curl-form-throws", &[("body", "x")]);
@@ -115,7 +115,7 @@ fn a_form_whose_element_throws_closes_its_file_parts() {
 /// own write callback is refused the close of its multi: the inner
 /// transfer runs to its end and its `CurlHandle` and form are cleaned up with
 /// the request's end, while the outer one still lends the request
-/// (#2520, #2647).
+/// (`trace:curl-multi-closed-in-callback`).
 #[test]
 fn a_handle_freed_inside_a_nested_transfer_is_cleaned_up_with_no_request_lent() {
     let files = Files::new("curl-nested", &[("upload", "upload body")]);

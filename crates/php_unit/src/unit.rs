@@ -197,7 +197,7 @@ pub struct Unit {
 /// its op array through the function table, which holds the unit the
 /// function was declared from as one. `execute` enters only a frame, so
 /// no opline reaches the dispatch with its handler `Unresolved` (design
-/// §5.7, #2903). A [`Unit`] is compiled, dumped,
+/// §5.7). A [`Unit`] is compiled, dumped,
 /// cached and read back, and served only once it is published. Design
 /// §5.14's `Published`, which the unit cache stores, is the engine's
 /// form of a cached unit; an `eval`'s unit is a published unit too.
@@ -270,8 +270,8 @@ impl PublishedUnit {
     }
 
     /// The room of the unit given back where this is its last share and
-    /// nothing keeps its identity, for the next unit to be published in
-    /// (#3028): what a request does with a unit compiled for it alone, as
+    /// nothing keeps its identity, for the next unit to be published in:
+    /// what a request does with a unit compiled for it alone, as
     /// php's `destroy_op_array` gives an `eval`'s op array back to the
     /// request's heap. Where another share or a [`WeakUnit`] stands, the
     /// share back:
@@ -399,8 +399,8 @@ impl Unit {
         PublishedUnit(shared)
     }
 
-    /// The sensor #3274's ruling builds where a unit is published: in a
-    /// build with debug assertions, each op array held to its own tables
+    /// The sensor the ruling of 2026-10-23 builds where a unit is published:
+    /// in a build with debug assertions, each op array held to its own tables
     /// ([`OpArray::out_of_range`]), and an opline past them a compiler
     /// bug, named with its op array. A release build holds nothing.
     fn hold_ranges(&self) {

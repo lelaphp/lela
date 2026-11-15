@@ -1,9 +1,9 @@
-//! `upstream.named`, the row settled on #4676: an `Edit` or a `Write` that
-//! adds a name of a file or folder under the private folder is refused, as
-//! the export's upstream bar reads a name (#4594, #4595, #4598). The row's
-//! `adding` and the bar's `cutlib.NAMES_ONE` are one idea in two regex
-//! dialects, so both are held to one list of forms, `forms.tsv` beside the
-//! row's fixtures, which `scripts/export/test_export.py` reads too.
+//! `upstream.named`, the row settled 2026-11-13: an `Edit` or a `Write`
+//! that adds a name of a file or folder under the private folder is
+//! refused, as the export's upstream bar reads a name. The row's `adding`
+//! and the bar's `cutlib.NAMES_ONE` are one idea in two regex dialects, so
+//! both are held to one list of forms, `forms.tsv` beside the row's
+//! fixtures, which `scripts/export/test_export.py` reads too.
 //!
 //! The row is read from `seams.toml`, as every other row is, and the walk
 //! over the tracked rules takes its fixtures. No name is spelled in this
@@ -201,12 +201,12 @@ fn the_exempt_paths_pass_and_their_neighbours_are_refused() {
     }
 }
 
-/// What a write adds is judged, not what the file carries (#510): an edit
+/// What a write adds is judged, not what the file carries: an edit
 /// beside a name the file already holds is let through, and one that adds
-/// a second of it is refused. The row has no scope (#4676), and a file
+/// a second of it is refused. The row has no scope, and a file
 /// outside the workspace, where the private project keeps its own, is
 /// still none it judges, since no row's `adding` reaches a write outside
-/// the workspace (#4679); a write under the folder itself is
+/// the workspace; a write under the folder itself is
 /// `upstream.private`'s denial first.
 #[test]
 fn a_name_the_file_carries_and_a_file_outside_the_workspace_are_let_through() {

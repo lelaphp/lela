@@ -1,5 +1,5 @@
-//! The target (#1184): the tests the pinned oracle meets under the
-//! runner, the set parity is stated over (design §1, as #1161 ruled it).
+//! The target: the tests the pinned oracle meets under the runner, the
+//! set parity is stated over (design §1, as ruled 2026-09-29).
 //! A run under the runner's control, `--engine` the pinned php, keeps the
 //! oracle's verdict on every test of the subset as a run is kept for
 //! `--against`, under the pin rather than a tree: the oracle's digest and
@@ -10,11 +10,11 @@
 //! outside, named and never counted against the engine. An engine's run of
 //! the subset is then read as met-of-target: the target's tests whose
 //! verdict under the engine is the oracle's, or whose id a registry row
-//! holds whatever the engine did, a skip included (#1161). A test the
+//! holds whatever the engine did, a skip included. A test the
 //! kept target holds no verdict for at all is neither: the target was kept
-//! over a corpus the subset no longer is, as #1598 grew `ext/intl` by
+//! over a corpus the subset no longer is, as `ext/intl` grew by
 //! `ext/intl/uchar/tests` under the same pin, and the reading counts it
-//! apart and says how to keep the target again (#1644).
+//! apart and says how to keep the target again.
 //!
 //! **Why a test is outside.** The control keeps what each test the oracle
 //! missed keeps and the reason each it skipped was given, so a reading held
@@ -25,7 +25,7 @@
 //! than that many, and the met ones, while the target is no larger. Past
 //! it the reading counts the tests outside by kind and points to the kept
 //! target, which holds each with its reason, and to the engine's kept run,
-//! which holds what the engine came to on each (#2033). A target kept
+//! which holds what the engine came to on each. A target kept
 //! before its run kept the skips' reasons does not stand, so `--unkept`
 //! takes it again.
 
@@ -50,7 +50,7 @@ pub(crate) fn key(pin: &Pin) -> String {
 
 /// Where a workspace keeps every target under the pin, relative to its
 /// root: beside the kept runs, so `worktree retire` carries them with
-/// those, and CI's cache keeps the directory between runs (#1733).
+/// those, and CI's cache keeps the directory between runs.
 pub(crate) fn kept_under(pin: &Pin) -> PathBuf {
     Path::new(RUNS).join(key(pin))
 }
@@ -70,7 +70,7 @@ fn path(root: &Path, pin: &Pin, scope: &str) -> PathBuf {
 }
 
 /// The most tests a reading names in one list; past it, it counts them and
-/// points to the kept target (#2033).
+/// points to the kept target.
 pub(crate) const NAMED: usize = 10;
 
 /// What a reading held to a target points to for the tests it does not
@@ -84,7 +84,7 @@ pub(crate) struct Kept<'a> {
 }
 
 /// Why the oracle left a test out of the target, as the kept target and
-/// the registry say (#2033).
+/// the registry say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LeftOut {
     /// The oracle skipped it, for the reason its `SKIPIF` or the runner
@@ -102,7 +102,7 @@ pub(crate) enum LeftOut {
     /// verdict's note gives: the served lane, whose request no HTTP field
     /// carries an `--ENV--` variable of ([`Judgement::Unsent`]), or a
     /// variant's, which cannot build for a test routed to it
-    /// ([`Judgement::Unbuilt`], #3312).
+    /// ([`Judgement::Unbuilt`]).
     Unlaned(String),
 }
 
@@ -195,10 +195,10 @@ impl Target {
 
     /// Whether the target stands for `subset` as it is now: it holds a
     /// verdict for each of `tests`, the subset's files, so it predates none
-    /// of them (#1644), a test that redirects to a set by a verdict kept
+    /// of them, a test that redirects to a set by a verdict kept
     /// through it for each test of the set ([`redirect::set_kept`]), and
     /// it keeps the reason for each skip ([`keeps_every_reason`]). What
-    /// `phpt --unkept` asks before the control runs a subset again (#1830).
+    /// `phpt --unkept` asks before the control runs a subset again.
     ///
     /// [`keeps_every_reason`]: Target::keeps_every_reason
     pub(crate) fn stands_for(&self, subset: &Subset, tests: &[PathBuf]) -> bool {
@@ -213,7 +213,7 @@ impl Target {
     /// Whether the target keeps the reason for each test the oracle
     /// skipped: one kept before its run kept them does not, and does not
     /// stand ([`stands_for`](Target::stands_for)), so `--unkept` takes it
-    /// again and the readings held to it name each skip's reason (#2033).
+    /// again and the readings held to it name each skip's reason.
     pub(crate) fn keeps_every_reason(&self) -> bool {
         let Run {
             verdicts, skips, ..
@@ -245,9 +245,9 @@ impl Target {
     /// Where the test stands, the engine having come to `engine` on it
     /// with `note`. A test the engine came to `Diverged` on is met, since
     /// a registry row accepted its difference, under its own id or, in the
-    /// served subset, a `makala:` one (#2644); one the lane left out is
+    /// served subset, a `makala:` one; one the lane left out is
     /// outside, whatever the oracle did, for the note's reason, but one it
-    /// had no build for that the target holds, which is a miss (#3763).
+    /// had no build for that the target holds, which is a miss.
     pub(crate) fn standing(
         &self,
         registry: &Registry,
@@ -280,16 +280,16 @@ pub(crate) struct Measure {
     /// The target's tests the engine met, by divergence key.
     pub met: Vec<String>,
     /// The subset's tests outside the target, by divergence key, each with
-    /// why the oracle left it out (#2033).
+    /// why the oracle left it out.
     pub outside: Vec<(String, LeftOut)>,
     /// The subset's tests the kept target holds no verdict for.
     pub predated: u64,
     /// The target's tests the engine missed, by divergence key.
     pub missed: Vec<String>,
-    /// Of `missed`, those the engine skipped (#1834).
+    /// Of `missed`, those the engine skipped.
     pub missed_skipped: u64,
     /// Of `missed`, those the engine had no build for, by why: each fails
-    /// the reading (#3763).
+    /// the reading.
     pub missed_unbuilt: BTreeMap<String, u64>,
 }
 
@@ -301,11 +301,11 @@ impl Measure {
     /// The key that counts the subset's tests outside the target.
     pub(crate) const OUTSIDE: &str = "outside";
     /// The key that counts the subset's tests the kept target predates,
-    /// written only where there are any (#1644).
+    /// written only where there are any.
     pub(crate) const PREDATED: &str = "predated";
     /// The key that counts the target's misses the engine skipped, written
-    /// on every reading held to a target from #1834 on, so a reading
-    /// without it is one from before the count was kept.
+    /// on every reading held to a target from harness revision 76 on, so
+    /// a reading without it is one from before the count was kept.
     pub(crate) const MISSED_SKIPPED: &str = "missed_skipped";
     /// The key that counts the target's misses the engine had no build
     /// for, written only where there are any.
@@ -313,7 +313,7 @@ impl Measure {
 
     /// The measure written into the reading's numbers, under the keys
     /// above, and the reading failed where the target misses a test the
-    /// engine had no build for (#3763).
+    /// engine had no build for.
     pub(crate) fn write(&self, reading: &mut Reading) -> Result<()> {
         reading.count(Self::TARGET, self.target)?;
         reading.count(Self::MET, u64::try_from(self.met.len())?)?;
@@ -545,10 +545,10 @@ mod tests {
         )
     }
 
-    /// The negative control of #1184: the oracle's two planted misses, one
-    /// under a registry row, and its skip are outside the target whatever
-    /// the engine did, and a reading that counted either miss in `target`
-    /// fails here.
+    /// The negative control of the target: the oracle's two planted
+    /// misses, one under a registry row, and its skip are outside the
+    /// target whatever the engine did, and a reading that counted either
+    /// miss in `target` fails here.
     #[test]
     fn a_test_the_oracle_misses_is_outside_and_never_in_the_target() {
         let target = Target::of(fixture("control.json"));
@@ -568,8 +568,8 @@ mod tests {
     }
 
     /// An engine's warned pass meets the oracle's pass, as a target kept
-    /// before #2922 holds every warned test, and misses its expected
-    /// failure.
+    /// before a warned pass was a verdict of its own holds every warned
+    /// test, and misses its expected failure.
     #[test]
     fn a_warned_pass_meets_a_pass_and_misses_an_expected_failure() {
         let target = Target::of(fixture("control.json"));
@@ -580,10 +580,10 @@ mod tests {
 
     /// A test the engine came to `Diverged` on is met, though no `phpt:`
     /// row holds it, since a `makala:` row accepted it in the served lane;
-    /// one the lane left out served (#2644) is outside the target whatever
-    /// the oracle did, and one it had no build for (#3312) where the
+    /// one the lane left out served is outside the target whatever
+    /// the oracle did, and one it had no build for where the
     /// target does not hold it, named with why; one it had no build for
-    /// that the target holds is a miss (#3763).
+    /// that the target holds is a miss.
     #[test]
     fn a_diverged_test_is_met_and_one_the_lane_left_out_is_outside() {
         let target = Target::of(fixture("control.json"));
@@ -621,7 +621,7 @@ mod tests {
 
     /// Met-of-target: the engine's verdict equal to the oracle's, an expected
     /// failure included, or a row over the id whatever the engine did, its
-    /// skip included (#1161); the one miss named.
+    /// skip included; the one miss named.
     #[test]
     fn the_target_is_met_where_the_engine_answers_as_the_oracle_or_a_row_holds_it() {
         let measure = measured();
@@ -630,7 +630,7 @@ mod tests {
     }
 
     /// Each test outside the target is named with why the oracle left it
-    /// out (#2033): its skip's reason, or what its miss keeps and the
+    /// out: its skip's reason, or what its miss keeps and the
     /// registry row that holds it where one does; and with the subset this
     /// small, the target's met tests are named too, so the reading alone
     /// says which tests the subset is held to.
@@ -674,7 +674,7 @@ mod tests {
     /// Tests outside the target that share a reason are named once under
     /// it, a row covering another id is named by its id, and a target kept
     /// before a run kept its skips' reasons says so, with the command that
-    /// keeps it again, and does not stand (#2033).
+    /// keeps it again, and does not stand.
     #[test]
     fn outside_tests_are_grouped_by_reason_and_a_reasonless_target_says_so() {
         let mut control = fixture("control.json");

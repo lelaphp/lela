@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 //! A leak from a filter an extension supplies names that extension.
@@ -23,7 +23,7 @@ fn armed(source: &str) -> String {
 
 /// `fgetcsv` and `fscanf` read a line for their parser, `fgetcsv` the
 /// next one too where an enclosure runs past the first, and keep none
-/// of it (#2086).
+/// of it.
 #[test]
 fn a_line_read_for_a_parser_is_given_up() {
     let stdout = armed(
@@ -37,7 +37,7 @@ echo implode('|', fscanf($m, "%d %s")), "\n";
 }
 
 /// `file` splits the whole file it read into the lines it returns and
-/// keeps the whole no longer (#2086, `Zend/tests/foreach/bug34065.phpt`).
+/// keeps the whole no longer (`Zend/tests/foreach/bug34065.phpt`).
 #[test]
 fn the_file_file_splits_is_given_up() {
     let stdout = armed(
@@ -51,7 +51,7 @@ echo implode('|', file($f)), count(file($f, FILE_IGNORE_NEW_LINES)), "\n"; unlin
 }
 
 /// `readdir`, `scandir` and `glob` hand each name they read to the
-/// program and keep none of it (#2087).
+/// program and keep none of it.
 #[test]
 fn the_names_a_directory_listing_reads_are_given_up() {
     let stdout = armed(
@@ -68,7 +68,7 @@ unlink("$d/a.txt"); unlink("$d/b.txt"); rmdir($d);
 /// `array_diff` and `array_intersect` compare their values as strings
 /// and keep none of the strings they converted, over the names
 /// `stream_get_wrappers` and `stream_get_filters` list and a string
-/// the program builds (#2066).
+/// the program builds.
 #[test]
 fn the_strings_a_set_function_compares_are_given_up() {
     let stdout = armed(
@@ -83,7 +83,7 @@ echo implode(',', array_intersect(stream_get_wrappers(), ['php', 'file'])), ' ',
 /// An include through `php://filter` keeps neither the path its
 /// resource opened at nor, where a filter refuses the read, anything of
 /// the open; the included file is named as the file it read, as php
-/// names it (#2067).
+/// names it.
 #[test]
 fn an_include_through_a_filter_gives_up_the_path_it_opened() {
     let stdout = armed(
@@ -102,7 +102,7 @@ unlink($f);
 }
 
 /// `get_meta_tags` reads its file a byte at a time and keeps none of the
-/// bytes past the tags it returns (#2088).
+/// bytes past the tags it returns.
 #[test]
 fn the_bytes_get_meta_tags_scans_are_given_up() {
     let stdout = armed(
@@ -118,7 +118,7 @@ echo "\n"; unlink($f);
 
 /// `copy`, `stream_copy_to_stream`, `getimagesize`,
 /// `php_strip_whitespace` and `proc_open`'s command and environment keep
-/// none of the strings they read or converted (#2090).
+/// none of the strings they read or converted.
 #[test]
 fn the_whole_file_and_copy_natives_give_up_what_they_read() {
     let stdout = armed(
@@ -141,7 +141,7 @@ unlink("$d/a"); unlink("$d/b"); unlink("$d/i.gif"); rmdir($d);
 }
 
 /// `range()` raising its `ValueError` makes no array first, as php's
-/// checks stand before `array_init_size` (#2091).
+/// checks stand before `array_init_size`.
 #[test]
 fn a_range_refused_makes_no_array() {
     let stdout = armed(
@@ -157,7 +157,7 @@ echo count(range(1, 3)), count(range(3.0, 1.0)), count(range('a', 'c')), "\n";
 
 /// `get_headers` over a user wrapper's stream keeps neither the meta
 /// data it read the headers from nor the wrapper's object that data
-/// holds (#2091).
+/// holds.
 #[test]
 fn the_meta_data_get_headers_reads_is_given_up() {
     let stdout = armed(
@@ -172,7 +172,7 @@ var_dump(get_headers('web://x'));
 
 /// A user filter whose `filter()` throws as its stream closes is given
 /// up with the stream all the same, its `onClose()` not called while
-/// the throwable is pending (#2091).
+/// the throwable is pending.
 #[test]
 fn a_user_filter_that_threw_is_given_up() {
     let stdout = armed(
@@ -189,7 +189,7 @@ try { fclose($m); } catch (TypeError $e) { echo get_class($e), "\n"; }
 
 /// The string `assert.callback` is made into, and the callable
 /// `assert_options()` sets, are given up as the request ends, as
-/// `PHP_RSHUTDOWN(assert)` gives up `ASSERTG(callback)` (#2063).
+/// `PHP_RSHUTDOWN(assert)` gives up `ASSERTG(callback)`.
 #[test]
 fn the_assert_callback_is_given_up_at_the_request_s_end() {
     for set in [
@@ -206,8 +206,8 @@ fn the_assert_callback_is_given_up_at_the_request_s_end() {
 
 /// `str_replace()` reads each search, replacement and subject row as
 /// `zval_get_tmp_string` reads it and gives the string up once it is
-/// read, a string row's added owner and a number's new string alike
-/// (#2084); the leak sensor is armed (#1992).
+/// read, a string row's added owner and a number's new string alike;
+/// the leak sensor is armed.
 #[test]
 fn str_replace_gives_up_the_strings_it_reads() {
     let stdout = armed(
@@ -226,7 +226,7 @@ fn str_replace_gives_up_the_strings_it_reads() {
 /// `implode` converts a piece that is neither a string nor an integer
 /// with `zval_get_tmp_string` and gives the string up once its bytes are
 /// copied, `zend_tmp_string_release`: what an object's `__toString()`
-/// returns and a float's rendering (#2098, #2085).
+/// returns and a float's rendering.
 #[test]
 fn the_strings_implode_converts_are_given_up() {
     let stdout = armed(
@@ -241,7 +241,7 @@ echo implode(',', [new A, 2.5, new A]), ' ', implode([1.5]), "\n";
 /// `pack` gives up the string each `a`, `A`, `Z`, `h` and `H` code
 /// reads, as php's `zend_tmp_string_release`, and the string a `*`
 /// count converted its argument to where it stood, as php's frame gives
-/// up its slot (#2095).
+/// up its slot.
 #[test]
 fn pack_gives_up_the_strings_it_reads() {
     let stdout = armed(
@@ -258,7 +258,7 @@ fn pack_gives_up_the_strings_it_reads() {
 
 /// `array_flip`, `array_count_values`, `array_fill_keys` and
 /// `array_combine` key an array by numeric strings and keep none of
-/// them: the integer key gives up the string it was read from (#1996).
+/// them: the integer key gives up the string it was read from.
 #[test]
 fn a_numeric_string_made_an_integer_key_is_given_up() {
     let stdout = armed(
@@ -276,7 +276,7 @@ foreach ([array_flip($n), array_count_values($n), array_fill_keys($n, 0), array_
 }
 
 /// `parse_str` registers each variable as `php_register_variable_ex`
-/// does, and keeps none of the keys its bracket walk makes (#2076).
+/// does, and keeps none of the keys its bracket walk makes.
 #[test]
 fn the_keys_a_variable_registration_makes_are_given_up() {
     let stdout = armed(
@@ -291,8 +291,8 @@ echo implode(',', array_keys($o)), ' ', $o['arr'][0], $o[123][0], $o['a']['b']['
 /// A user wrapper whose class is an interface, a trait or an abstract
 /// class opens nothing and makes no throwable, as php's test of the
 /// class's kind in `user_stream_create_object` returns before
-/// `object_init_ex`; an enum's `Error` is thrown to the program (#2179,
-/// `ext/standard/tests/streams/bug74951.phpt`).
+/// `object_init_ex`; an enum's `Error` is thrown to the program
+/// (`ext/standard/tests/streams/bug74951.phpt`).
 #[test]
 fn a_wrapper_class_that_cannot_be_instantiated_keeps_no_error() {
     let stdout = armed(
@@ -314,7 +314,7 @@ foreach (['A', 'I', 'T', 'E'] as $c) {
 /// makes none of the `__wakeup()` calls it queued, as
 /// `zend_call_function` returns at `EG(exception)` without calling, so
 /// the throwable a queued call would make is never made and none is
-/// dropped (#2231, `ext/standard/tests/serialize/bug64354_2.phpt`).
+/// dropped (`ext/standard/tests/serialize/bug64354_2.phpt`).
 #[test]
 fn a_read_failed_on_a_throw_makes_no_delayed_call() {
     let stdout = armed(
@@ -332,7 +332,7 @@ try { unserialize('a:2:{i:0;O:1:"A":0:{}i:1;O:1:"B":0:{}}'); } catch (Exception 
 /// it in place, as `php_splice` does under `GC_ADDREF(in_hash)` and
 /// `HT_ALLOW_COW_VIOLATION`, so a copy of the table a throwing
 /// destructor's trace takes while the removal runs is no second name
-/// for it (#2089, `ext/standard/tests/array/gh19926.phpt`).
+/// for it (`ext/standard/tests/array/gh19926.phpt`).
 #[test]
 fn a_splice_whose_destructors_throw_releases_no_freed_table() {
     let stdout = armed(
@@ -353,7 +353,7 @@ f();
 /// properties as they stand when it reads the name, as
 /// `php_var_serialize_get_sleep_props` finds each in the table: a
 /// property the warning's handler overwrote is read as it is now, not
-/// through a view of the value the write freed (#2103).
+/// through a view of the value the write freed.
 #[test]
 fn a_sleep_name_reads_the_property_as_it_stands() {
     let stdout = armed(
@@ -368,7 +368,7 @@ echo serialize($o), "\n";
 }
 
 /// A `__sleep` name whose conversion throws ends the walk, and the
-/// array the arm was gathering is given up (#2103).
+/// array the arm was gathering is given up.
 #[test]
 fn a_sleep_name_that_throws_keeps_no_array() {
     let stdout = armed(
@@ -386,7 +386,7 @@ try { echo serialize(new T), "\n"; } catch (Exception $e) { echo $e->getMessage(
 /// release serves wrote there from the object it released, even where
 /// that destructor freed the object through the variable and the
 /// program's new object took its address: the new object is released
-/// once, after the write, and nothing is held (#2242). Each round
+/// once, after the write, and nothing is held. Each round
 /// drains the debug quarantine by one more object of the same size, so
 /// rounds lay the new object where the old one stood. The variable is a
 /// CV the main file's table points at (`$p_x`), and then a bucket
@@ -437,7 +437,7 @@ echo "end\n";
 /// destroy serves a destructor that unsets the variable still naming it
 /// and writes a new object there: the cell is destroyed once, its bytes
 /// given back once, and the new object is released at the write, which
-/// php leaks until the request ends (#2245).
+/// php leaks until the request ends.
 #[test]
 fn a_cell_released_in_place_is_destroyed_once_where_its_destructor_unsets_it() {
     let stdout = armed(
@@ -515,8 +515,7 @@ fn register_leaky(req: &mut Request) -> Result<(), Thrown> {
 }
 
 /// A block a filter an extension supplied allocated is named with that
-/// extension, though `fwrite`, ext/standard's native, ran the filter
-/// (#2113).
+/// extension, though `fwrite`, ext/standard's native, ran the filter.
 #[test]
 fn a_leak_from_a_supplied_filter_names_its_extension() {
     let engine = Engine::builder()

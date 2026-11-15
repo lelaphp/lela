@@ -20,7 +20,7 @@
 //! stack they stand on, and the code a tier has the engine serve on its
 //! own account. What a frame, an op array or a linked table holds, a
 //! tier reads through the native face, as an extension does ([`frame`]
-//! hands a frame a step named over to it; #1911). What no extension
+//! hands a frame a step named over to it). What no extension
 //! reads, the recorder reads here between its steps (`jit-design.md`
 //! §4.1): the type an operand's slot holds, whether a frame is a
 //! generator's, and the call an `INIT_*` began. `php_sapi` re-exports
@@ -146,7 +146,7 @@ pub enum Flow {
 /// The tier: one method at the safepoints, and the state it declares as
 /// an extension would.
 pub trait Tier: 'static {
-    /// The tier's state on a request (`jit-design.md` §2.2, #3144): its
+    /// The tier's state on a request (`jit-design.md` §2.2): its
     /// engine state resolved once, as the request is laid, and what its
     /// visits keep on the request between them, as php's tracing tier
     /// keeps `JIT_G`. Read at one place, [`state`], with no lookup in the
@@ -155,13 +155,12 @@ pub trait Tier: 'static {
     type State: Send + 'static;
 
     /// Asked at the three sites and nowhere else, with `held`, the op
-    /// array the loop holds for the site's opline (`jit-design.md` §2.2,
-    /// #3144), so the tier reads the site's word from what the loop has
+    /// array the loop holds for the site's opline (`jit-design.md` §2.2),
+    /// so the tier reads the site's word from what the loop has
     /// in hand. At a loop's back edge and an activation `frame` is the
     /// frame the site is in; at a return it is the caller the `RETURN`
     /// popped its frame to, standing at its landing past the call, and
-    /// `held` the returning op array, which the site's number numbers
-    /// (#4056).
+    /// `held` the returning op array, which the site's number numbers.
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow;
 
     /// The tier's [`State`](Tier::State) for a request of the engine
@@ -200,7 +199,7 @@ pub trait Tier: 'static {
     /// tier's from the start, [`Nop`]'s where the tier never runs, so a
     /// safepoint costs the loop nothing, as php's VM keeps its own
     /// handlers where its compiled tier is not on, or both, where a
-    /// request may turn the tier on (ADR-0006, amended on #3301). A tier
+    /// request may turn the tier on (ADR-0006, amended 2026-10-24). A tier
     /// that [`HOLDS`](Tier::HOLDS) or hooks the compile
     /// ([`HOOKED`](Tier::HOOKED)) is bound from the start whatever it
     /// answers, since `Nop`'s loop neither holds a frame nor runs a
@@ -252,7 +251,7 @@ pub trait Tier: 'static {
 }
 
 /// Which loops an engine binds, as its tier answers at its start
-/// ([`Tier::bound`]; ADR-0006, amended on #3301).
+/// ([`Tier::bound`]; ADR-0006, amended 2026-10-24).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, php_macros::EngineState)]
 pub enum Bound {
     /// [`Nop`]'s alone: the tier never runs in the engine, and its
@@ -330,7 +329,7 @@ pub(crate) fn interpreted<T: Tier>() -> bool {
     std::any::TypeId::of::<T>() == std::any::TypeId::of::<Nop>()
 }
 
-/// Where a request keeps its tier (`jit-design.md` §2.2, #3144, #3362):
+/// Where a request keeps its tier (`jit-design.md` §2.2):
 /// the loops it is served in, which re-entry and resumption take, its
 /// tier's [`Tier::State`], laid by those loops ([`Loops::lay`]) and read
 /// by [`state`], and whether a hand-off from `Nop`'s loop to the tier's
@@ -343,7 +342,7 @@ pub(crate) fn interpreted<T: Tier>() -> bool {
 /// and the request's field holding it is private to `api::request`,
 /// which hands it out only shared ([`Request::tier_state`]). A tier
 /// lends its state across the request's own borrow on that (`php_jit`'s
-/// `enter::lent`, #3437), holding a [`Lending`] for as long as the lend
+/// `enter::lent`), holding a [`Lending`] for as long as the lend
 /// stands, so where `api::request` drops or replaces the state while one
 /// is held, a debug assertion fails as it drops. No lend stands in
 /// `Nop`'s loop, where the hand-off replaces it.
@@ -361,7 +360,7 @@ pub(crate) struct TierState {
 }
 
 /// Whether a request's hand-off from `Nop`'s loop to the tier's can
-/// come (#3362).
+/// come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Switch {
     /// None can: the engine binds one loop, or the request is in the
@@ -466,7 +465,7 @@ impl Drop for TierState {
 }
 
 /// A tier's lend of its request's state across the request's own
-/// borrow (`php_jit`'s `enter::lent`, #3437), held for as long as the
+/// borrow (`php_jit`'s `enter::lent`), held for as long as the
 /// lend stands: the state dropped or replaced meanwhile fails a debug
 /// assertion as it drops ([`TierState`]). Nothing at all where debug
 /// assertions are off, so the lend costs nothing there.
@@ -521,8 +520,8 @@ pub fn setting(req: &Request) -> &TierStatus {
 /// [`FrameView::opline`] reads it, and the op array its cache names, as
 /// [`frame_cache`] names it, none for a frame that is no activated user
 /// frame; none at all for a frame that does not stand. What a return's
-/// site and a trace's exit read of the frame they leave the loop in
-/// (#4100), where the two reads looked the frame up twice.
+/// site and a trace's exit read of the frame they leave the loop in,
+/// where the two reads looked the frame up twice.
 #[must_use]
 #[inline]
 pub fn standing_at(
@@ -543,7 +542,7 @@ pub fn state<S: Any>(req: &Request) -> Option<&S> {
 
 /// The frame the tier owes a count to, which a return into it visits
 /// [`Site::Return`] for, whatever its landing's word reads
-/// (`jit-design.md` §2.2, #4105): the one fact of the tier's a `RETURN*`
+/// (`jit-design.md` §2.2): the one fact of the tier's a `RETURN*`
 /// reads at a sealed landing, so kept beside its state, whose type a read
 /// of the state checks, and written into no word every thread reads.
 #[must_use]
@@ -970,7 +969,7 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
 /// `Threw` of `frame`, its frame having thrown or been handed on. In
 /// `Nop`'s loop, where the request published a unit with counting words
 /// since its last check ([`Switch::Due`]), the loop hands its edge to
-/// the tier's loop (ADR-0006, amended on #3301), `went`, the edge it was
+/// the tier's loop (ADR-0006, amended 2026-10-24), `went`, the edge it was
 /// taking, or `Threw` of `frame`: the request's tier is laid again with
 /// the tier's loops and state, so every serving it starts from here, a
 /// re-entry, a resumption, an `auto_append_file`, takes them, and the
@@ -982,7 +981,7 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
 /// `bool` and the one edge it leaves along, since the serving loop's
 /// registers are held there: answering a third edge from the site spilled
 /// the op array's length in the loop's dispatch, one more load at every
-/// opline, two instructions a turn of the empty loop (#3362).
+/// opline, two instructions a turn of the empty loop.
 #[cold]
 #[inline(never)]
 pub(crate) fn interrupted_at<T: Tier>(
@@ -1021,7 +1020,7 @@ pub(crate) type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 pub(crate) type BindLoops = fn(&crate::engine::Shared, TierStatus) -> Binding;
 
 /// The loops an engine binds and what its tier answers whichever serves
-/// (ADR-0006, amended on #3301): the loops a request starts in, and
+/// (ADR-0006, amended 2026-10-24): the loops a request starts in, and
 /// under [`Bound::Runtime`] the tier's beside them, which a request
 /// starts in once a unit with counting words is published in the engine
 /// and hands its frame to once it publishes one itself
@@ -1113,7 +1112,7 @@ pub(crate) struct Loops {
     /// The same loop over a generator's frame the resumption put back.
     pub(crate) resume: Loop,
     /// The loop taking up an edge another loop handed it, the rest of a
-    /// serving standing already ([`interrupted_at`], #3362).
+    /// serving standing already ([`interrupted_at`]).
     pub(crate) handed: fn(&mut Request, Stepped) -> Result<(), Fatal>,
     /// The tier's state a request served in these loops is laid with
     /// ([`Tier::lay`]).
@@ -1187,7 +1186,7 @@ pub(crate) fn execute<T: Tier, D: Telling>(
 /// once the serving is over (`php_compile::StackLimit::reentered`): six
 /// thousand levels of recursion through `array_map` take several times
 /// php's budget on this engine's stack, and the natives that walk a nest
-/// at the bottom of it walk it whole, as php's do there (#3142).
+/// at the bottom of it walk it whole, as php's do there.
 ///
 /// ```php
 /// function bottom() {
@@ -1304,7 +1303,7 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
 /// a callback is refused before it ends the process. Under detect the
 /// limit here is the whole of the thread, which the host sized so that
 /// this recursion, whose level costs a multiple of php's, reaches php's
-/// depth (design §5.6, #3043); a native's own recursion is held to
+/// depth (design §5.6); a native's own recursion is held to
 /// php's budget (`php_compile::StackLimit::entry_overflowed`), and the
 /// number named is php's either way.
 ///
@@ -1321,7 +1320,7 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
 /// ```
 ///
 /// An unbounded recursion through a callback, on the CLI's own stack, is
-/// refused the same way at whatever depth that stack allows (#3022):
+/// refused the same way at whatever depth that stack allows:
 ///
 /// ```php
 /// function f($n) { return array_map('f', [$n + 1]); }
@@ -1403,7 +1402,7 @@ fn serve_frame<T: Tier, D: Telling>(
 // the loop's body, called once a serving and once a scope
 // One function, so the optimiser reads every edge of the loop together:
 // the loop out of line, one copy for both callers, measured the call
-// edges 3 to 6% higher (#3051).
+// edges 3 to 6% higher.
 #[allow(clippy::too_many_lines)]
 // The counting build takes the slots up at every opline, so the arms'
 // letting them go is never read there.
@@ -1573,10 +1572,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
             // them where another edge went into another frame. One
             // take-up where the arms meet: the two edges into a frame
             // taking theirs up in their own arms and going on by
-            // `continue` measured the empty loop 72.9 -> 89.2 (#3345);
+            // `continue` measured the empty loop 72.9 -> 89.2;
             // the call edge going on so with its slots in hand left the
             // loop one head the other arms branch to, and read fannkuch's
-            // cycles 9.8% higher (#4039).
+            // cycles 9.8% higher.
             let took = match way {
                 Way::On(places) => {
                     at = at.wrapping_add(places);
@@ -1621,9 +1620,8 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     let entry = (start, called.entry);
                     // Where nothing is told of a `RECV`, no tier is bound
                     // and no interrupt is raised, the activation is the
-                    // passing `RECV`s alone, read over the frame in hand
-                    // (#4022), and the frame taken up where the arms meet
-                    // (#4039).
+                    // passing `RECV`s alone, read over the frame in hand,
+                    // and the frame taken up where the arms meet.
                     #[cfg(not(dispatch = "tailcall"))]
                     let received = interpreted::<T>()
                         && !declared.tells(php_unit::Opcode::Recv)
@@ -1637,8 +1635,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
                         // carried from the look at the frame above, they
                         // were one more value at the meeting, and every
                         // inline arm took one more instruction to the
-                        // loop's head, mandelbrot's oplines 1.7% more
-                        // (#3995).
+                        // loop's head, mandelbrot's oplines 1.7% more.
                         at = start.max(called.entry);
                         Took::Slots
                     } else {
@@ -1669,8 +1666,8 @@ fn serve_held<'u, T: Tier, D: Telling>(
                 // outer loop forgets them on this edge, and a frame of a
                 // function the loop called before is taken up here, as
                 // php's `zend_jit_trace_exit` hands `EX(opline)` back to
-                // the VM loop already running, with no restart of the loop
-                // (#4100); any other breaks to the outer loop, as before.
+                // the VM loop already running, with no restart of the loop;
+                // any other breaks to the outer loop, as before.
                 Way::Left(stepped @ Stepped::Same(to)) => {
                     kept.forget();
                     let Some(code) = held::taken_up(req, &mut kept, scope, to) else {
@@ -1688,7 +1685,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
             // where the edge went into another frame. Read off the frame,
             // not taken from `entered`: the position in hand from there
             // measured every dispatch of the bare loops 4% higher, by two
-            // moves the allocator added at the loop's head (#3320).
+            // moves the allocator added at the loop's head.
             #[cfg(not(dispatch = "tailcall"))]
             match took {
                 Took::Standing => (at, slots) = req.standing(frame),
@@ -1736,7 +1733,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
 /// php serves every `eval`. On a fiber's stack the limit is the
 /// fiber's floor and cannot move, so there every such frame is served
 /// without a scope, its unit given back as the loop takes its edge up
-/// afresh (#3192). A recursion through `eval` is php's depth
+/// afresh. A recursion through `eval` is php's depth
 /// whatever the limit, and past what the thread holds of scopes:
 ///
 /// ```php
@@ -1960,12 +1957,11 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
 /// its trace recorded: `frame` stood at `at` first, php's
 /// `SAVE_OPLINE()`, and the handler handed `at` as compiled code holds
 /// it, with no read of it back; no share of a unit is taken and the
-/// frame's function is not looked up (`jit-design.md` §5.2, #3147). A
+/// frame's function is not looked up (`jit-design.md` §5.2). A
 /// frame the handler pushed is activated over the op array `epoch`, the
 /// epoch the holder holds `held` in, holds for it, and over a share of
 /// its unit where the epoch holds none, a request's. Inlined into the
-/// kernel that calls it, so a crossing makes one call, the handler's
-/// (#4087).
+/// kernel that calls it, so a crossing makes one call, the handler's.
 #[inline]
 pub fn step_held(
     req: &mut Request,
@@ -2215,7 +2211,7 @@ pub fn frameless_call(
 /// recorded, `callee`, which the `INIT_*` before it pushed: the handler's
 /// inline path, php's `i_init_func_execute_data` writing the header's
 /// words ([`Request::enter_call`]), and the callee's activation over
-/// `callee`, with no dispatch (`jit-design.md` §5.2, #3147). `Pushed`
+/// `callee`, with no dispatch (`jit-design.md` §5.2). `Pushed`
 /// of the callee, or `Threw` of it where its prologue or the interrupt
 /// left a throwable pending. Where an observer of the opcode is
 /// declared, the opline is another, or the inline path refuses the call,
@@ -2254,7 +2250,7 @@ pub fn call_held(
 /// at the safepoints, the observers told as the loop tells them
 /// ([`step`]). Out of line, one copy of the dispatch for every caller:
 /// [`step_held`] is inlined into the tier's kernels, and this with it
-/// would be a second copy of the whole `match` in theirs (#4087).
+/// would be a second copy of the whole `match` in theirs.
 #[inline(never)]
 fn stepped_over(
     req: &mut Request,

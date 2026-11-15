@@ -130,7 +130,7 @@ impl<'a> Bare<'a> {
 
     /// `name`, which the compiler resolved or the engine spells in its
     /// own source, as it stands. A name as written handed here is a
-    /// strip missed, which a debug build refuses (#2711).
+    /// strip missed, which a debug build refuses.
     #[must_use]
     pub fn resolved(name: &'a [u8]) -> Bare<'a> {
         debug_assert!(

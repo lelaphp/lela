@@ -1,4 +1,4 @@
-//! The limits, timeouts and keep-alive over a real socket (#2341): each
+//! The limits, timeouts and keep-alive over a real socket: each
 //! limit crossed and held to its answer, most of them overridden small on
 //! the line so a test crosses them quickly, and the HTTP semantics a
 //! client relies on across requests.
@@ -219,7 +219,7 @@ fn a_head_past_the_header_timeout_answers_408() {
 
 /// A head whose start came in one write with the whole request before it,
 /// as a pipelining client sends it, is timed by the header timeout from
-/// that request's response's end, not by the keep-alive clock (#2572):
+/// that request's response's end, not by the keep-alive clock:
 /// the first request is answered, the second 408 within a few seconds,
 /// with a keep-alive limit of a minute.
 #[test]
@@ -280,8 +280,8 @@ fn an_idle_connection_closes_at_the_keep_alive_limit_and_not_the_header_timeout(
 /// A client that sends its body slower than the minimum rate, past the
 /// grace, has its connection closed with a 408, and the request thread
 /// that read the body is freed: with a pool of one thread, the next
-/// request is served (#2339's review: a request blocked on the body
-/// channel is freed by the connection dropping its end).
+/// request is served (a request blocked on the body channel is freed by
+/// the connection dropping its end).
 #[test]
 fn a_body_slower_than_the_minimum_rate_is_cut_and_frees_its_thread() {
     let server = server(&["--threads", "1", "--limit", "body-data-rate=1000,1s"]);
@@ -300,7 +300,7 @@ fn a_body_slower_than_the_minimum_rate_is_cut_and_frees_its_thread() {
 /// A client that stops reading the response has its connection cut once
 /// it takes less than the minimum rate past the grace, and the request
 /// thread blocked writing is freed, its next write refused: with a pool
-/// of one thread, the next request is served (#2339's review).
+/// of one thread, the next request is served.
 #[test]
 fn a_reader_slower_than_the_minimum_rate_is_cut_and_frees_its_thread() {
     let server = server(&["--threads", "1", "--limit", "response-data-rate=4000000,1s"]);

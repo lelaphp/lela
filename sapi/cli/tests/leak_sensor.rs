@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over what only the CLI host
+//! The request leak sensor over what only the CLI host
 //! registers: `STDIN`, `STDOUT` and `STDERR`, which `do_cli` registers
 //! under `Core` as resources whose one owner is the constant table. A
 //! debug binary is armed unless `PHP_SENSE_LEAKS=0` turns the sensor off,
@@ -26,7 +26,7 @@ fn armed(code: &str) -> (String, String) {
 /// `ReflectionExtension::getConstants()` copies each constant's value
 /// into the array it answers, `ZVAL_COPY_OR_DUP` in `_addconstant`, so
 /// the array given up leaves `STDIN`'s resource the table's count, which
-/// the table gives up at teardown (#2098).
+/// the table gives up at teardown.
 #[test]
 fn reflection_copies_the_host_s_constants_into_its_array() {
     assert_eq!(

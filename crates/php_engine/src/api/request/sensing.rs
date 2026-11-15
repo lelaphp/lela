@@ -31,7 +31,7 @@ pub(super) enum Sensing {
     /// A sensed defect has ended the request. What a sensor finds after
     /// it is read through memory that defect has already made
     /// untrustworthy, so php's one fatal stands alone and nothing more
-    /// is raised (#2052).
+    /// is raised.
     Ended,
 }
 
@@ -141,7 +141,7 @@ impl Request {
     }
 
     /// What a debug build's sensors found since the loop last asked
-    /// (design §10, #761): a `TMP` written over an owner it still held,
+    /// (design §10): a `TMP` written over an owner it still held,
     /// or what the heap's sensors found ([`php_heap::Heap::take_sensed`]),
     /// a refcount operation on a block the heap had freed among them, as
     /// the `InternalError` fatal that ends the request; the first of
@@ -171,7 +171,7 @@ impl Request {
     /// ran: what the sensors found ends the request in the
     /// `InternalError` rendered at that handler's line, and not at the
     /// opline the handler moved the frame to, which is the statement
-    /// after the one that tripped the sensor (#2046). The fatal is handed
+    /// after the one that tripped the sensor. The fatal is handed
     /// back for the loop to leave by; it is rendered and the request is
     /// leaving by it, so the caller's `end_in` renders nothing more, as
     /// for any fatal raised while one leaves.

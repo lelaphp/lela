@@ -1,5 +1,5 @@
 //! What a binary is built from, read off a dep-info written as cargo
-//! writes one beside a binary (#3109).
+//! writes one beside a binary.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -110,8 +110,9 @@ fn a_run_is_kept_under_the_packages_the_binary_links_and_nothing_else() {
 
 /// A binary with no dep-info, or one whose dep-info is another binary's,
 /// as a target directory copied from another checkout carries, is built
-/// from every crate directory, the key every run had before #3109; and so
-/// is one whose dep-info names no package of the workspace.
+/// from every crate directory, the key every run had before harness
+/// revision 158; and so is one whose dep-info names no package of the
+/// workspace.
 #[test]
 fn a_binary_without_a_dep_info_of_its_own_is_built_from_every_crate_directory() {
     let (tree, binary) = built("copied", Some(Path::new("/elsewhere/php")), &LISTED);
@@ -166,8 +167,9 @@ fn the_binary_is_behind_only_a_path_its_build_read() {
 }
 
 /// With no dep-info, the binary is held to the engine's sources alone, as
-/// before #3109: a generated `clippy.toml`, a guide or a test written after
-/// it does not put it behind the tree, and a source does.
+/// before harness revision 158: a generated `clippy.toml`, a guide or a
+/// test written after it does not put it behind the tree, and a source
+/// does.
 #[test]
 fn a_binary_with_no_dep_info_is_behind_only_an_engine_source() {
     let (tree, binary) = built("unlisted", None, &LISTED);

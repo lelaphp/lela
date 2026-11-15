@@ -1,4 +1,4 @@
-//! The base's worktree goes however the call that laid it ends (#3110).
+//! The base's worktree goes however the call that laid it ends.
 
 use std::path::Path;
 use std::process::Command;

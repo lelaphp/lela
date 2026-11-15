@@ -1,5 +1,5 @@
-//! A connector's calls are served as the extension that registered it
-//! (#2864): a block its factory allocates and drops is named after that
+//! A connector's calls are served as the extension that registered it:
+//! a block its factory allocates and drops is named after that
 //! extension, not ext/pdo, whose native made the call. The sensor is a
 //! debug build's alone.
 #![cfg(debug_assertions)]

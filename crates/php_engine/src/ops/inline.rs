@@ -137,7 +137,7 @@ const MUL: u32 = Opcode::Mul as u32;
 /// compare of the field where [`compound`] builds a [`Binary`] the pair
 /// then branches on again. [`binary`] and not [`arith`], whose tests
 /// put two longs and two doubles first: an accumulation is the mixed
-/// pair, a double and a long, which [`binary`] reaches in fewer (#3273).
+/// pair, a double and a long, which [`binary`] reaches in fewer.
 /// None where [`compound`] names no operator or the rule leaves the
 /// pair to the kernel.
 ///
@@ -482,7 +482,7 @@ pub(crate) fn arith(op: Arith, a: Zval, b: Zval) -> Option<Zval> {
 /// pair; None where either is no number.
 #[cfg_attr(not(debug_assertions), inline(always))] // the type tests of an inline path
 #[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
-#[allow(clippy::needless_bitwise_bool)] // the two compares meet in one branch, measured (#3273)
+#[allow(clippy::needless_bitwise_bool)] // the two compares meet in one branch, measured
 fn numbers<R>(
     a: Zval,
     b: Zval,

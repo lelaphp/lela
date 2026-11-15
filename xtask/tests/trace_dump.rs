@@ -6,8 +6,8 @@
 //! writes the fixture's lines, and reads what it wrote.
 //!
 //! The tests that spawn the oracle say so on stderr and return when the
-//! pinned binary is not on this machine, unless the machine promised it
-//! (#38); the rest run anywhere.
+//! pinned binary is not on this machine, unless the machine promised it;
+//! the rest run anywhere.
 #![cfg(tracked)]
 
 use std::fs;
@@ -39,7 +39,7 @@ fn fixtures() -> PathBuf {
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
-/// this machine promised the binary (#38).
+/// this machine promised the binary.
 fn oracle() -> Option<PathBuf> {
     Promise::Oracle
         .or_skip(pin().oracle.file().map(Path::to_path_buf))
@@ -169,8 +169,8 @@ fn the_oracles_lines_are_a_pass_and_the_engines_lines_apart_are_not() {
 }
 
 /// An accepted `trace:dump/<program>` row pinning both sides' lines as
-/// the run keeps them is what a difference passes under, naming the row
-/// (#3291); an `open` one accepts nothing.
+/// the run keeps them is what a difference passes under, naming the row;
+/// an `open` one accepts nothing.
 #[test]
 fn an_accepted_row_passes_the_difference_and_an_open_one_does_not() {
     if oracle().is_none() {

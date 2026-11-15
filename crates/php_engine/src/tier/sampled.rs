@@ -210,8 +210,7 @@ fn building_at(req: &Request, call: FrameRef) -> Option<Building> {
 /// The record of the call being built at the top of the stack, if one
 /// is: [`building`]'s `call` alone, what compiled code follows as
 /// `EX(call)` after a kernel, read without its callee's lookup. Inlined
-/// into the tier's kernels across the crate, as every step reads it
-/// (#4111).
+/// into the tier's kernels across the crate, as every step reads it.
 #[must_use]
 #[inline]
 pub fn building_call(req: &Request) -> Option<FrameRef> {

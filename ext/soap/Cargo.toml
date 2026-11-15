@@ -37,7 +37,7 @@ getrandom = { workspace = true }
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # What the extensions of the test engines require, transitively, as
 # `zend_startup_module_ex` refuses an extension whose required one is not
-# started (#1925).
+# started.
 php_ext_lexbor = { path = "../lexbor" }
 # What standard's feature brings into every bundle soap is in, whose
 # `Random\RandomException` soap's engine start resolves.

@@ -1,6 +1,6 @@
 //! The `readline` extension: `php-src/ext/readline` as one crate under
 //! `ext/` (ADR-0004), over the platform's libedit, the library the pinned
-//! php links (design §7.2, revision 72; #1540), bound by hand in
+//! php links (design §7.2, revision 72), bound by hand in
 //! [`ffi`]. `readline.c`'s natives are here; `readline_cli.c`, the CLI's
 //! interactive shell, is [`shell`], provided to a host that carries php's
 //! shell callbacks through [`ExtensionBuilder::shell`], so `php -a` lives

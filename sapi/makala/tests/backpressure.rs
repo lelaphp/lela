@@ -1,4 +1,4 @@
-//! Backpressure over a real socket (#2342), as Ranch's acceptors sleep
+//! Backpressure over a real socket, as Ranch's acceptors sleep
 //! (research/production-server.r2.md M7): at the connection cap the
 //! server stops accepting and new clients wait in the kernel's listen
 //! queue, never refused; and whole requests wait in the bounded queue,

@@ -1,14 +1,14 @@
-//! The request leak sensor as a program meets it (#1992): after a clean
+//! The request leak sensor as a program meets it: after a clean
 //! request a debug build's heap holds nothing, a deliberately faulty
 //! native that drops an owner it made ends the request in the
 //! `InternalError` naming what the heap still held, and a request that
 //! ended in a fatal reports nothing, as php's debug heap reports nothing
 //! after an unclean shutdown. The leak names the extension whose native
-//! or lifecycle hook allocated it (#1993), and with allocations traced
+//! or lifecycle hook allocated it, and with allocations traced
 //! the line that did. A debug engine is armed unless it is built with
 //! the sensor off (`EngineBuilder::sense_leaks`); each engine here names
 //! the sensor it is built with. A leak from an extension class's
-//! handler names the extension that declared the class (#2113).
+//! handler names the extension that declared the class.
 
 use php_macros::php_function;
 use php_unit::decl::ClassKind;
@@ -163,8 +163,7 @@ fn a_dropped_owner_fails_the_request_as_an_internal_error() {
 
 /// A debug engine built without a word about the sensor is armed, so
 /// the faulty native's dropped owner fails its request, and one built
-/// with the sensor off ends the request as a release engine does
-/// (#1992's default).
+/// with the sensor off ends the request as a release engine does.
 #[test]
 fn a_debug_engine_is_armed_unless_built_with_the_sensor_off() {
     let program = "<?php dropped_owner();\necho 'went on';\n";
@@ -207,8 +206,8 @@ fn a_leak_from_a_lifecycle_hook_names_its_extension() {
 /// Each allocation captures a backtrace, and the unwinder that walks the
 /// debug build's `serve_frame`, a frame of about 600 KB, takes about
 /// 1.4 MB of stack in libunwind's `parseFDEInstructions` beside it, which
-/// is more than libtest's 2 MiB thread holds (measured at #2894, where
-/// 7 KB more of `serve_frame` overflowed it). So the request is served on
+/// is more than libtest's 2 MiB thread holds (measured where 7 KB more
+/// of `serve_frame` overflowed it). So the request is served on
 /// a thread of the 8 MiB the CLI's main thread has.
 #[test]
 fn the_backtrace_mode_names_the_leaking_line() {
@@ -277,7 +276,7 @@ fn a_request_ending_in_a_fatal_reports_nothing() {
 /// A program that ends in an uncaught throwable is not one php bails out
 /// of: `zend_exception_error` renders it `E_DONT_BAIL`, so the shutdown
 /// is clean and a debug php reports the request's leaks. The faulty
-/// native's block is reported after the uncaught fatal (#2058).
+/// native's block is reported after the uncaught fatal.
 #[test]
 fn a_request_ending_in_an_uncaught_throwable_reports_its_leak() {
     let engine = Engine::cli_builder()
@@ -303,7 +302,7 @@ fn a_request_ending_in_an_uncaught_throwable_reports_its_leak() {
 }
 
 /// What a handler slot answers is the caller's one owner, and what a
-/// slot takes it keeps or gives up (#2102): `WeakMap`'s `offsetGet`
+/// slot takes it keeps or gives up: `WeakMap`'s `offsetGet`
 /// returns the owner its `read_dimension` answered, where it took a
 /// second one to return and leaked the first, and its `offsetSet`, its
 /// `InternalIterator`, its clone and its dump, a closure's clone and
@@ -380,7 +379,7 @@ fn faulty_class() -> Extension {
 
 /// A block an extension class's handler allocated is named with the
 /// extension that declared the class, though the dispatch loop called
-/// the slot from a user program while Core's code was served (#2113):
+/// the slot from a user program while Core's code was served:
 /// the slot that serves code, `read_property`, and the function a slot
 /// answers, the `clone_obj` that `clone` calls.
 #[test]
@@ -430,7 +429,7 @@ fn tick_dropping_an_owner(req: &mut Request) -> Result<(), Thrown> {
 /// A block an extension's link of a chained kind allocated and dropped
 /// is named with that extension, as the chain serves each link as the
 /// extension that supplied it, not the native or the compile the
-/// diagnostic was raised in (#2627).
+/// diagnostic was raised in.
 #[test]
 fn a_leak_from_an_error_link_names_its_extension() {
     let linked = ExtensionBuilder::default()
@@ -452,8 +451,7 @@ fn a_leak_from_an_error_link_names_its_extension() {
 }
 
 /// A block an extension's `ZEND_TICKS` hook allocated and dropped is
-/// named with that extension, as each listed hook is served as its own
-/// (#2627).
+/// named with that extension, as each listed hook is served as its own.
 #[test]
 fn a_leak_from_a_tick_function_names_its_extension() {
     let ticking = ExtensionBuilder::default()

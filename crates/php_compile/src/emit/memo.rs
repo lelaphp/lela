@@ -49,7 +49,7 @@ impl Emit<'_> {
     /// `COPY_TMP` of what it left in a temporary or a `VAR` held for the
     /// write, the original the read's own; under `ZEND_MEMOIZE_FETCH`
     /// the held copy, and no opline at all. A call of its own, so what
-    /// it takes is off the stack of every other nested compile (#3159).
+    /// it takes is off the stack of every other nested compile.
     #[inline(never)]
     pub(super) fn memoized(&mut self, node: tree::Expr) -> Result<Where, CompileError> {
         if self.memo.mode == MemoMode::Fetch {

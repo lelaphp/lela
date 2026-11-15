@@ -58,7 +58,7 @@ mod types;
 #[allow(unsafe_code, reason = "seams.toml rule unsafe.homes: php_jit::enter")]
 mod enter;
 
-/// The bench bar's program (#2742), behind the `bench` feature, so the
+/// The bench bar's program, behind the `bench` feature, so the
 /// crate's own surface stays `Jit`.
 #[cfg(feature = "bench")]
 pub use enter::bench;
@@ -74,8 +74,8 @@ impl Tier for Jit {
 
     /// The site visited ([`dispatch::safepoint`]); in the bench's build of
     /// the stepping arm alone, `cfg(php_jit_stepping)`, which only `xtask
-    /// bench` sets, the serving stepped to its end instead ([`stepping`],
-    /// #2946). Every other build's `cfg!` is `false` and the branch folds
+    /// bench` sets, the serving stepped to its end instead ([`stepping`]).
+    /// Every other build's `cfg!` is `false` and the branch folds
     /// away.
     #[inline(always)] // jit-design.md §2.2: a return's test is in the `RETURN*` arms
     #[allow(clippy::inline_always)]
@@ -170,7 +170,7 @@ impl Tier for Jit {
     /// [`JitRequest`], is the tier's own ([`Jit::lay`]).
     /// Under `cfg(php_jit_usage)`, which only `xtask bench` sets, a
     /// request's end also writes what its epoch's traces took
-    /// ([`JitEngine::request_ended`], #2961).
+    /// ([`JitEngine::request_ended`]).
     fn extension() -> Option<Extension> {
         let tier = ExtensionBuilder::default()
             .ini(policy::ini())
@@ -240,7 +240,7 @@ pub(crate) struct JitEngine {
 
 /// The tier's engine state is engine state by the derive, held at every
 /// field: its compiler, whose worker serves the jobs queued past the
-/// request that submitted them, and what the pipeline shares (#4476).
+/// request that submitted them, and what the pipeline shares.
 const _: fn() = || {
     fn held<T: EngineState>() {}
     held::<JitEngine>();
@@ -274,7 +274,7 @@ pub(crate) struct Shared {
 /// has where it writes them, as php reads `JIT_G(debug)` at each
 /// line (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250`), so a request's
 /// `ini_set('opcache.jit_debug', ...)` changes the lines it writes from
-/// then on (#3297); the bits the start alone sets, `PERF` and its kin,
+/// then on; the bits the start alone sets, `PERF` and its kin,
 /// a request cannot change ([`policy::Policy::debug`]). A recording whose
 /// bits ask for a root's end lines compiles on the request
 /// ([`policy::JitDebug::ends`]), and the worker writes none.
@@ -431,7 +431,7 @@ impl JitEngine {
         }
     }
 
-    /// The G4 bar's line (#2961), at a request's end in the bench's
+    /// The G4 bar's line, at a request's end in the bench's
     /// build alone: the bytes the epoch's traces take, the oplines they
     /// compiled and how many there are, as its tables counted them
     /// ([`table::TraceTable::usage`]); php's count of compiled oplines is
@@ -505,11 +505,11 @@ mod tests {
         assert_eq!(lane.shared.policy.mode(), Mode::Force);
     }
 
-    /// The engine start decides once how the engine binds the tier
-    /// (#3133): `Nop`'s loop wherever php's tier never starts, so under
+    /// The engine start decides once how the engine binds the tier:
+    /// `Nop`'s loop wherever php's tier never starts, so under
     /// `opcache.jit=disable` no request can switch it on, and `Jit`'s
     /// where it runs from the start or is set up and off, which a request
-    /// may turn on (#3139).
+    /// may turn on.
     #[test]
     fn the_engine_start_binds_jits_loop_only_where_the_tier_runs() {
         let bound = |asked: &[(&str, &str)], host: &'static str| {
@@ -588,7 +588,7 @@ mod tests {
     }
 
     /// On the command line php starts opcache, and so its compiled tier,
-    /// only under `opcache.enable_cli` (#3126): the loop the pinned php
+    /// only under `opcache.enable_cli`: the loop the pinned php
     /// writes no `TRACE` line for without it writes none here, and with
     /// it writes the lines of a loop it compiled.
     #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]

@@ -1,5 +1,5 @@
 //! A kept frame inside a `Fiber` that a `_ZendTestFiber::suspend()`
-//! passed through (#2765): a debugger written as an extension keeps the
+//! passed through: a debugger written as an extension keeps the
 //! frame that calls `pause()` while the fiber runs, and at the next stop,
 //! with the fiber waiting, writes `$x` of that frame and evaluates code
 //! there, as xdebug does with `EG(current_execute_data)` moved into the

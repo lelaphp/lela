@@ -13,9 +13,9 @@ follow TARGETARCH. Product naming remains governed by ADR-0016.
 
 ## A release by hand
 
-Until CD builds the release (#3526), a person builds it on an Apple silicon
-Mac with Docker, from a clean checkout of the tagged commit (#3525's
-2026-10-31 ruling): `darwin-arm64` with cargo, and `linux-aarch64` and
+Until CD builds the release, a person builds it on an Apple silicon Mac
+with Docker, from a clean checkout of the tagged commit (ruled
+2026-10-31): `darwin-arm64` with cargo, and `linux-aarch64` and
 `linux-x86_64` from the `binaries` target above. Each platform is one
 tarball, `<name>-<version>-<platform>.tar.gz`, holding one directory of
 that name, and `SHA256SUMS` is written over them by `scripts/dist-sums.sh`:
@@ -28,7 +28,7 @@ dist/release.sh 0.1.0-beta.1 /tmp/release
 The script refuses a tree with changes and prints the commit it built.
 Name platforms after `<out>` to build only those. Docker
 Desktop's default VM (about 4 GiB) links one host at a time, so
-`CARGO_BUILD_JOBS` stays at its default of one (#3213).
+`CARGO_BUILD_JOBS` stays at its default of one.
 
 Smoke each tarball on its platform before publishing it: `dist/smoke.sh`
 runs `-v`, `-r`, a file with arguments, code on stdin, `php-cgi` on a file
@@ -54,7 +54,7 @@ docker run --rm --platform linux/arm64 -v /tmp/release:/release:ro -v "$PWD/dist
 ```
 
 The macOS binaries carry the linker's ad-hoc signature, with no Developer
-ID and no notarization (#3525). Nothing here tags, pushes or publishes;
+ID and no notarization. Nothing here tags, pushes or publishes;
 that is a person's.
 
 ## The compiled tier

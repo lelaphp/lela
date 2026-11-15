@@ -13,7 +13,7 @@ use hashbrown::HashTable;
 /// names a class by: the engine's class number, or whatever the caller
 /// of the link holds its classes under. Plain data, with no cell and no
 /// per-request value, so it is `Sync` where `H` is, and engine state by
-/// the derive where `H` is (#4652).
+/// the derive where `H` is.
 #[derive(Debug, Clone, PartialEq, php_macros::EngineState)]
 pub struct LinkedClass<H> {
     /// `ce->function_table` in php's order: the class's own methods, a
@@ -1030,7 +1030,7 @@ impl FoldedHash {
 /// key is a name compared byte for byte: what every other table by name
 /// here hashes with ([`Names`], [`Rows`], [`NameMap`]), so a name is
 /// hashed one way wherever it is a key. An extension reaches it on the
-/// face, which saves it a hash crate of its own (#2157).
+/// face, which saves it a hash crate of its own.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NameHasher;
 

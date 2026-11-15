@@ -3,7 +3,7 @@
 
 use super::*;
 
-/// #303's program under the oracle's `[regime.dump]`: a five-piece
+/// This program under the oracle's `[regime.dump]`: a five-piece
 /// interpolation as `zend_compile_encaps_list` shapes it, `ROPE_INIT`
 /// with the count, three `ROPE_ADD` and `ROPE_END`, the rope's
 /// temporary taken after the value's and two more slots reserved
@@ -111,7 +111,7 @@ fn one_and_two_piece_interpolations_are_a_cast_and_a_fast_concat_and_the_rest_a_
     );
 }
 
-/// #356's program under the oracle's `[regime.dump]`: a dimension
+/// This program under the oracle's `[regime.dump]`: a dimension
 /// piece is `zend_compile_dim` under `BP_VAR_R`, `FETCH_DIM_R` over
 /// the CV and the offset as `encaps_var_offset` read it, an integer
 /// for `0` and a string for `k`; a property piece is
@@ -246,8 +246,8 @@ fn the_string_offset_spellings_and_the_variable_variable_are_php_s() {
     );
 }
 
-/// `zend_delayed_compile_prop` under `zend_compile_encaps_list`
-/// (#2676): `"$this->p"` inside a method reads the property off the
+/// `zend_delayed_compile_prop` under `zend_compile_encaps_list`:
+/// `"$this->p"` inside a method reads the property off the
 /// `IS_UNUSED` receiver, `FETCH_OBJ_R THIS`, as `"{$this->p}"` does.
 #[test]
 fn this_s_property_in_a_string_is_fetched_off_this() {

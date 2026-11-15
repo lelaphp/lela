@@ -1,10 +1,10 @@
-//! One request thread, two requests (#3199, out of #3162's reading of
-//! CVE-2026-109619): php keeps state in a worker's `*_globals` that points
-//! into a request's freed heap, the session's upload progress and the
-//! last error among it, and the worker's next request reads it before
-//! its own start. makala serves every request of a request thread on
-//! that thread, as a php-fpm child serves its requests, so a request that
-//! ends in the memory limit while a multipart body is read, with the
+//! One request thread, two requests (out of `docs/security/php2shell.md`'s
+//! reading of CVE-2026-109619): php keeps state in a worker's `*_globals`
+//! that points into a request's freed heap, the session's upload progress
+//! and the last error among it, and the worker's next request reads it
+//! before its own start. makala serves every request of a request thread
+//! on that thread, as a php-fpm child serves its requests, so a request
+//! that ends in the memory limit while a multipart body is read, with the
 //! session's upload progress under way, is followed on the same thread
 //! by one that must start with nothing of it.
 

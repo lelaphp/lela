@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -16,8 +16,7 @@ fn served(src: &str, expected: &str) {
 }
 
 /// The closure `ReflectionFunction::getClosure()` makes of a function
-/// holds the function, and the name it was looked up by is given up
-/// (#2062).
+/// holds the function, and the name it was looked up by is given up.
 #[test]
 fn a_function_s_closure_keeps_no_name() {
     served(
@@ -29,7 +28,7 @@ fn a_function_s_closure_keeps_no_name() {
 /// An attribute's arguments are given up where one of them fails to
 /// evaluate, as `getArguments` gives up `args`, and the flags of an
 /// `#[Attribute]` marker that are no int are given up after the error
-/// names them, `zval_ptr_dtor(&flags)` (#2078).
+/// names them, `zval_ptr_dtor(&flags)`.
 #[test]
 fn an_attribute_s_arguments_are_given_up_where_they_fail() {
     served(

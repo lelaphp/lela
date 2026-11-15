@@ -192,7 +192,7 @@ fn without_the_flag_the_scanner_s_names_stand() {
 /// `PhpToken` through `serve` on an engine of this crate alone:
 /// `tokenize` called on the class and `getTokenName` on an instance,
 /// each a native method the engine reached through
-/// `ExtensionBuilder::classes` (#259). What the oracle printed for the
+/// `ExtensionBuilder::classes`. What the oracle printed for the
 /// same call is beside each method in `src/lib.rs`; this holds the
 /// calls on the crate's own engine, where the bundle is not linked.
 #[test]

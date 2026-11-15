@@ -8,7 +8,7 @@ use super::*;
 /// default `Content-type` after it once the first body byte reaches
 /// the block; under the CLI's description the block
 /// carries nothing, since `sapi_cli_header_handler` answers zero and
-/// the line is freed (#289).
+/// the line is freed.
 #[test]
 fn the_default_content_type_reaches_a_web_host_s_block_and_not_the_cli_s() {
     let engine = Engine::cli_builder().build();
@@ -36,7 +36,7 @@ fn the_default_content_type_reaches_a_web_host_s_block_and_not_the_cli_s() {
 }
 
 /// `__DIR__` where the request's name has no directory is the
-/// request's working directory, `VCWD_GETCWD` (#366): two requests
+/// request's working directory, `VCWD_GETCWD`: two requests
 /// in one process described with two directories read two, which is
 /// php's under ZTS and what design §3's threads need; the process's
 /// own directory is neither.
@@ -59,7 +59,7 @@ fn dir_is_the_described_request_s_working_directory_not_the_process_s() {
 }
 
 /// `error_log=syslog` with no `request::Syslog` registered, as
-/// without ext/standard: the entry reaches the host's log (#1364).
+/// without ext/standard: the entry reaches the host's log.
 #[test]
 fn error_log_syslog_without_a_registered_syslog_reaches_the_host_s_log() {
     let engine = Engine::builder().ini("error_log", "syslog").build();

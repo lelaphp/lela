@@ -611,7 +611,7 @@ fn waited(
             ));
         }
     }
-    // The wait lends the request ([`Limits::blocking`], #2401).
+    // The wait lends the request ([`Limits::blocking`]).
     let (number, posted) = match req.limits_mut().blocking(|| ffi::wait_info(&set, timeout)) {
         Ok(taken) => taken,
         Err(nix::errno::Errno::EAGAIN) if timeout.is_some() => return Ok(OrFalse::False),

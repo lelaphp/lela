@@ -1,4 +1,4 @@
-//! The binding to the vendored uriparser (design §7.2, #1163;
+//! The binding to the vendored uriparser (design §7.2;
 //! `unsafe.homes`' `ext/*/src/ffi/`): the one home of this crate's
 //! `unsafe`, over what `build.rs` compiles. [`Uri`] is one `UriUriA` that
 //! owns its text, with the calls `uri_parser_rfc3986.c` makes on it: the

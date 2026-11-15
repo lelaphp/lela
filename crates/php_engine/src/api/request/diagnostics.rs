@@ -1703,7 +1703,7 @@ pub(super) fn fatal_errors(level: Level) -> bool {
 /// What follows a diagnostic's message in its log form, ` in <file> on
 /// line <n>` and the trace: the file is the one field there a request can
 /// name, the program a host found from its path, so a line break in it is
-/// written as two bytes ([`crate::log_field`], #4355); the message before
+/// written as two bytes ([`crate::log_field`]); the message before
 /// it and the trace are php's and keep theirs.
 fn log_site(file: &[u8], line: u32, trace: &str) -> Vec<u8> {
     let after = format!(" on line {line}{trace}");

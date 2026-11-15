@@ -173,7 +173,7 @@ pub(super) enum Connection {
 /// an entry for the log or bytes for the error stream. Kept in the
 /// order they were written, since under php's CLI the two land on one
 /// fd, and there the log form of a diagnostic stands before its
-/// `display_errors=stderr` form (#216).
+/// `display_errors=stderr` form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Aside {
     /// `OutputSink::log`: one entry, whole, ended by the host.
@@ -368,7 +368,7 @@ impl Request {
     /// php-cgi sets it after `php_request_startup` returns
     /// (`Z/sapi/cgi/cgi_main.c:2468-2471`): what an extension's `rinit`
     /// displays commits the head under `-q` too, a failed start's fatal
-    /// among it (#1879).
+    /// among it.
     pub(crate) fn send_header_block(&mut self) -> Result<(), Aborted> {
         if self.phase() != Phase::Startup
             && self
@@ -686,7 +686,7 @@ impl Response<&mut Request> {
     /// `fputs(stderr)`, which the `display_errors=stderr` form takes and
     /// the `STDERR` stream constant will. The log is another channel,
     /// [`Diagnostics::error_log`]'s; whether the host puts the two on one fd
-    /// is the host's, as it is php's CLI's (#216).
+    /// is the host's, as it is php's CLI's.
     pub fn write_stderr(self, bytes: &[u8]) {
         self.0.response.sink.write_stderr(bytes);
     }

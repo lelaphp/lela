@@ -1,6 +1,6 @@
 //! How a recording names a class, and what a trace's build reads of one
-//! (design §5.14, *Identities*; `jit-design.md` §4.1, *The owned view*;
-//! #4653): [`RecordClass`], one the epoch shares by its [`EpochClassId`]
+//! (design §5.14, *Identities*; `jit-design.md` §4.1, *The owned view*):
+//! [`RecordClass`], one the epoch shares by its [`EpochClassId`]
 //! and any other by the index its view gave it; [`ClassFacts`], the part
 //! of a declaration the build reads, copied by one projection that names
 //! every field and keeps no value; and [`Linked`], a class's linked
@@ -94,7 +94,7 @@ impl OwnClass {
     }
 }
 
-/// What a trace's build reads of a class's declaration (#4653): its
+/// What a trace's build reads of a class's declaration: its
 /// name, kind, flags and file, each property's name, visibility,
 /// staticness and type, and each constant's name, type, visibility and
 /// attribute names, which is what php's tracing tier reads. Made by one
@@ -277,7 +277,7 @@ impl<'v> Linked<'v> {
     }
 
     /// The record of `class`, a row of the epoch's arena, which names
-    /// every class by the identity the arena minted (#4652).
+    /// every class by the identity the arena minted.
     pub(super) fn published(
         class: EpochClassId,
         record: &'v LinkedClass<EpochClassId>,

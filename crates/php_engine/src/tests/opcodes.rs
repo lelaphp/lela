@@ -1,5 +1,5 @@
-//! Observation of a declared set of opcodes (design §7.1, as #1780
-//! ruled), as php's `zend_test` prints it with
+//! Observation of a declared set of opcodes (design §7.1, as ruled
+//! 2026-10-04), as php's `zend_test` prints it with
 //! `zend_test.observer.show_opcode_in_user_handler`: an extension
 //! declares from its startup ini which opcodes it observes, is told of
 //! each opline of one of them before its handler runs, and the handler

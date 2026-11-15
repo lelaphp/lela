@@ -1,7 +1,7 @@
 //! An ini value a request carries in `PHP_VALUE` or `PHP_ADMIN_VALUE` is
 //! laid over the pool's for that request and is gone when it ends; the
-//! pool's own `php_value` stays for the child's life (design §4.8, #4353,
-//! as #4445 ruled).
+//! pool's own `php_value` stays for the child's life (design §4.8, as
+//! ruled 2026-11-11).
 //!
 //! On a pool of one static child whose `php_value[precision]` is 10,
 //! request A carries `precision=7` and runs a program that reads the

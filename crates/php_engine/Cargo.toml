@@ -1,7 +1,7 @@
 # php_engine: kernels, dispatch, the tier seam, the linker, serve and api
 # (design §4.1, §5). Five edges: php_compile, php_unit, php_heap,
 # php_macros, whose attributes declare Core's natives (ADR-0007), and
-# php_process, the process-wide mechanisms it decides over (#1779).
+# php_process, the process-wide mechanisms it decides over.
 [package]
 name = "php_engine"
 version = "0.0.0"
@@ -19,7 +19,7 @@ workspace = true
 # `Engine::serve_capture`, enabled by an extension's dev-dependency on
 # php_ext with its `test` feature.
 test = []
-# The counting build of the loop (design §5.8, #4328): each opline the
+# The counting build of the loop (design §5.8): each opline the
 # loop dispatches counted by its `php_unit::Handler`, and the counts written
 # to the host's error stream where the request ends, which `xtask
 # dispatch-census` reads. Off by default, and in no host's default build.
@@ -33,7 +33,7 @@ php_link = { path = "../php_link" }
 php_macros = { path = "../php_macros" }
 php_process = { path = "../php_process" }
 # `api::abi::PoolKey`: the SHA-256 digest a pool keys a credential's
-# connection by (#4354); the lock holds it already, for ext/hash.
+# connection by; the lock holds it already, for ext/hash.
 sha2 = { workspace = true }
 
 # The dispatch is generated from ops.toml (design §4.3 seam 7).

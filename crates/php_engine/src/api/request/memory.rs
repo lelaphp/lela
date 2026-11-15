@@ -79,7 +79,7 @@ impl Request {
 /// opcache php's compile interns through `zend_new_interned_string_request`
 /// into `CG(interned_strings)`, kept to the request's end, so under the
 /// recipe's `php -n` an `eval` reads other than php's, a by-design
-/// divergence (#3224, landed by #3233): less by a class's runtime
+/// divergence (the row `witness:ddb0161408…`): less by a class's runtime
 /// definition key php keeps, the engine reading `256 576 512` (the file
 /// is written where the key's length, which names it, stands still):
 ///
@@ -518,7 +518,7 @@ impl Request {
     /// immutable array. The engine's own, where php copies a value it
     /// holds into a second place (`zend_string_copy`, `ZVAL_COPY`); a
     /// native takes an [`Owner`](crate::api::values::Owner) instead, which
-    /// only the engine names without taking (design §5.1, #2239).
+    /// only the engine names without taking (design §5.1).
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn addref(&self, value: &Value) {
         self.heap.addref(value.to_zval());

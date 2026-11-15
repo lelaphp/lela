@@ -19,7 +19,7 @@ use crate::engine::{
 /// log entry with `\n` after it (`sapi_cli_log_message`) and what the
 /// error stream was given, in the order the request wrote them, so an
 /// extension's test reads it against the oracle's stderr; `log` is the
-/// log's part of that alone, the same rendering (#216).
+/// log's part of that alone, the same rendering.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Capture {
     pub stdout: Vec<u8>,
@@ -352,7 +352,7 @@ impl Engine {
     /// working directory `dir`. The name is what
     /// `$_SERVER['SCRIPT_NAME']` and `$argv[0]` read, and, expanded
     /// against `dir` as php opens its primary file, what `__FILE__` and
-    /// every diagnostic's `in %s` read (#1569), which under the CLI is
+    /// every diagnostic's `in %s` read, which under the CLI is
     /// `argv` of that one word; the directory is what `__DIR__`, a
     /// relative `include` and `getcwd()` read.
     pub fn serve_capture_in(&self, dir: &Path, name: &[u8], source: &str, sink: Capture) -> Served {
@@ -364,13 +364,13 @@ impl Engine {
     /// through the unit cache, and held open while it is served
     /// ([`crate::engine::ProgramFile::Opened`]), so a name the program
     /// holds is in the table php compiles a file's names into, where
-    /// `zend_string_init_existing_interned` finds it (#2985). It is served
+    /// `zend_string_init_existing_interned` finds it. It is served
     /// under the environment `env`, what `getenv()`, `$_ENV` and
     /// `$_SERVER` read, with every native the request enters recorded in
     /// [`Served::entered`]: what the witness lane's linked adapter serves
     /// a fence through, the file standing in the scratch tree the oracle
-    /// serves it in, under the recipe's environment as the oracle has it
-    /// (#1077), so coverage is what the fence reached (harness §4.5 condition
+    /// serves it in, under the recipe's environment as the oracle has it,
+    /// so coverage is what the fence reached (harness §4.5 condition
     /// 2, revision 58). The others serve a source handed over as a piped
     /// one is, under no environment, so what a test reads is the same on
     /// any shell.

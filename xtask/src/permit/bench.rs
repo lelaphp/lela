@@ -134,7 +134,7 @@ fn bench(root: &Path, runs: usize) -> Result<Bench> {
 /// not the workspace's. The tests build the same repository through
 /// `tests/common`, which cannot be reached from here, with a registry of
 /// no row in place of the tracked one, whose rows no test of theirs is
-/// about (#3091); the recipe is four files and one commit, stated in both. `bench`'s A/A control over the
+/// about; the recipe is four files and one commit, stated in both. `bench`'s A/A control over the
 /// judge takes its scratch workspace from here too, at a directory of its
 /// own, so the one recipe stands in one place.
 pub(crate) fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
@@ -158,7 +158,7 @@ pub(crate) fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
 
 /// `permit --bench`: measure, print one line per shape and the verdict,
 /// record the reading, over the harness crate whose sources the judge is.
-/// A measurement, which owes no exit (§4.4, #61): the reading carries `pass`
+/// A measurement, which owes no exit (§4.4): the reading carries `pass`
 /// or `fail` against `bar_ms`, and the exit is 0 whatever it says, since
 /// a bench number is a claim a person reads with the A/A control.
 pub(crate) fn run_bench(

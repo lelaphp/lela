@@ -1,4 +1,4 @@
-//! The access log and the error log (#2345) over a real socket against
+//! The access log and the error log over a real socket against
 //! the binary: a served request's access line, and a destination that
 //! blocks costing lines, counted, and never a response's time. A request's
 //! panic in the error log is held where a request can be made to panic,
@@ -150,7 +150,7 @@ fn a_blocked_log_destination_does_not_delay_responses() {
 
 /// Each request php-fpm's loop refuses before it runs a program logs, in
 /// the error log, the line the pinned php-fpm writes for it on
-/// `FCGI_STDERR`, worded as its `zlog` words it (#2767): a path that names
+/// `FCGI_STDERR`, worded as its `zlog` words it: a path that names
 /// no file, a file past `security.limit_extensions`, a directory named
 /// `*.php`, which php's opener leaves `ENOENT`, and a file that may not
 /// be read, where the test's user is one the file's permission bits refuse.

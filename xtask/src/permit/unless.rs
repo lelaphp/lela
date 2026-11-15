@@ -3,8 +3,7 @@
 //! describes, and a hit that instrument left behind is permitted where an
 //! authored one is not. `witness.exit-authored` is the row that carries
 //! one: `cargo xtask witness --accept` writes the oracle's status onto a
-//! fence line, and the same line typed by hand is what the row refuses
-//! (#105).
+//! fence line, and the same line typed by hand is what the row refuses.
 //!
 //! **What stands as evidence.** The instrument's reading and the tree hash
 //! it carries (§4.2, §13 D.18). A hit is the instrument's own when it
@@ -17,7 +16,7 @@
 //! its file, its index or its log, as every kind of evidence below is:
 //! `worktree land` lands `_merge`'s log and index in main's store and
 //! leaves main's file of the scope as it was, so a sensor that read the
-//! file alone denied in main what `done` in `_merge` met (#3802).
+//! file alone denied in main what `done` in `_merge` met.
 //!
 //! **The record of what `--accept` took.** Every `--accept`, a run over
 //! the crate or one narrowed to a file or an item, records each verdict it
@@ -35,7 +34,7 @@
 //! state of the crate, and a merge makes a state no branch measured: a
 //! line a branch's `--accept` captured reached main beside another
 //! branch's change to the same crate, and the reading over the branch's
-//! tree was no reading over main's (#1448). So a hit the reading over the
+//! tree was no reading over main's. So a hit the reading over the
 //! tree now does not cover is looked for in the commits that last changed
 //! the file: each hit's block, its line and the lines around it up to a
 //! blank one, as the file stood at a commit whose crate a reading of the
@@ -54,7 +53,7 @@
 //! cover it — the rule's own work, since the authoring it refuses happens
 //! there. Counting the hits and not looking for the words is what makes
 //! that hold in a file already carrying seventy-eight of the same line: an
-//! edit adding a seventy-ninth adds one (#510).
+//! edit adding a seventy-ninth adds one.
 //!
 //! **What stays denied.** A line left in the tree by a hand the hook did
 //! not see: the crate has no reading of the instrument, or one taken before
@@ -81,8 +80,8 @@
 //! verdict a measured commit carries and whose new one an `--accept
 //! --item` recorded, permitted since each hit is read against every kind
 //! of evidence on its own, and `carried-and-typed.json`, the new status
-//! typed over, denied (#3441). No case of this row can be one that never fires, since what
-//! decides is the evidence and not the shape of the call (#134).
+//! typed over, denied. No case of this row can be one that never fires, since what
+//! decides is the evidence and not the shape of the call.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -130,7 +129,7 @@ pub(super) fn captured(
     }
     // Each hit is the instrument's where any one kind of evidence covers
     // it: a file of verdicts carried by measured commits gains new ones an
-    // `--accept --item` recorded, and neither kind covers both (#3441).
+    // `--accept --item` recorded, and neither kind covers both.
     let mut open = hits(regex, written);
     if open.is_empty() {
         return false;
@@ -175,8 +174,8 @@ const COMMITS: usize = 64;
 
 /// Takes out of `open` each hit whose block stands in the file at `path`
 /// as it was at a commit whose sources of `krate` a reading of
-/// `instrument` over the crate was taken over, in any of `stores`
-/// (#1448). The evidence travels with the commits: a line
+/// `instrument` over the crate was taken over, in any of `stores`.
+/// The evidence travels with the commits: a line
 /// `--accept` captured on a branch is in the branch's commit, the
 /// commit's crate is what the branch's reading measured, and the reading
 /// reaches the main checkout's store at `worktree retire`, so a merge that

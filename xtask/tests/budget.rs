@@ -36,8 +36,8 @@ fn scratch(name: &str) -> Tree {
 /// A file that is not text has no lines. A `.DS_Store` Finder left under
 /// `docs/` took the whole instrument down with "stream did not contain
 /// valid UTF-8", and an instrument that falls over measures nothing, which
-/// is the shape of the bug #16 names: the loud failure of a sensor is still
-/// a sensor that is not sensing.
+/// is the shape of the bug harness revision 13 names: the loud failure of a
+/// sensor is still a sensor that is not sensing.
 #[test]
 fn a_file_that_is_not_text_is_counted_as_no_lines_and_not_as_a_failure() {
     let root = scratch("not-text");
@@ -100,7 +100,7 @@ fn without_the_scripts_row_the_tree_is_measured_and_held_to_nothing() {
 /// A manifest that states no `bindings`, `clean_build_release_s` or
 /// `api_items` under `[budget]` loads, and states no budget for them: the
 /// workspace's reading carries no bindings count or ceiling, and the api
-/// seam's lock no ceiling (#3187's ruling, #3207).
+/// seam's lock no ceiling (ruled 2026-10-21).
 #[test]
 fn a_budget_without_the_php_measures_holds_nothing_to_them() {
     let root = scratch("no-php-measures");
@@ -134,8 +134,8 @@ fn a_budget_without_the_php_measures_holds_nothing_to_them() {
     }
 }
 
-/// `[budget] workloads` holds `docs/perf/workloads/**` apart from `docs`
-/// (#4341): with no row the programs' lines are `docs`'s and no workloads
+/// `[budget] workloads` holds `docs/perf/workloads/**` apart from `docs`:
+/// with no row the programs' lines are `docs`'s and no workloads
 /// count is read; a row of 3 holds a 3-line program and `docs` leaves it
 /// out; a row of 2 fails the workspace reading on it.
 #[test]
@@ -182,7 +182,7 @@ fn the_workloads_row_holds_the_programs_apart_from_docs() {
 }
 
 /// `[budget] harness-desk` holds `harness-plugins/desk/**` apart from
-/// `harness` (#3491): a 1301-line module under the desk fails a row of
+/// `harness`: a 1301-line module under the desk fails a row of
 /// 1300 and leaves `harness`'s count without it, and with no row the
 /// desk's lines are `harness`'s and no desk count is read.
 #[test]
@@ -225,7 +225,7 @@ fn the_harness_desk_row_holds_the_desk_apart_from_harness() {
 /// tree with a hook and a generator, the row built as the file would parse
 /// it, and the generator's lines left out of the count. Everything under
 /// `scripts/` counts except what the row names, and the instrument reads
-/// the row rather than a list of its own (#34).
+/// the row rather than a list of its own.
 #[test]
 fn the_scripts_row_names_the_generators_and_everything_else_under_scripts_counts() {
     let root = scratch("scripts");
@@ -371,8 +371,8 @@ fn clippy_refuses_a_mutex_in_an_ext_crate_under_the_generated_file() {
     );
 }
 
-/// The fixture whose `ext.no-locks` row is the one #1781 ruled, word for
-/// word: the once types beside the locks and cells, and `deny_macros`.
+/// The fixture whose `ext.no-locks` row is the one ruled 2026-10-04, word
+/// for word: the once types beside the locks and cells, and `deny_macros`.
 fn ruled_fixture() -> PathBuf {
     xtask::package_dir().join("fixtures/clippy/once-and-thread-local")
 }
@@ -390,9 +390,9 @@ fn render_ruled(name: &str) -> (Tree, xtask::manifest::Rule) {
 }
 
 /// A clippy rule's scope decides the files it lands in, and the
-/// `generated` row names files and no rule (#2473): a rule added under
-/// `ext/*` lands in `ext/clippy.toml`, beside the ruled row's lists and
-/// named in the header, with the row unchanged.
+/// `generated` row names files and no rule (ruled 2026-10-09): a rule added
+/// under `ext/*` lands in `ext/clippy.toml`, beside the ruled row's lists
+/// and named in the header, with the row unchanged.
 #[test]
 fn a_rule_added_under_ext_lands_in_ext_clippy_toml_without_naming_the_file() {
     let fixture = ruled_fixture();
@@ -430,8 +430,8 @@ fn a_rule_added_under_ext_lands_in_ext_clippy_toml_without_naming_the_file() {
 
 /// `deny_macros` renders to `disallowed-macros` beside `deny_types`'
 /// `disallowed-types`, each row with the rule's text and ADR as its
-/// reason (#1888): the ruled row's `std::thread_local`, which no type ban
-/// sees, and its once types among the types.
+/// reason: the ruled row's `std::thread_local`, which no type ban sees, and
+/// its once types among the types.
 #[test]
 fn deny_macros_renders_to_disallowed_macros_beside_the_types() {
     let (root, rule) = render_ruled("deny-macros");
@@ -480,7 +480,7 @@ fn deny_macros_renders_to_disallowed_macros_beside_the_types() {
 /// denied as the `clippy` instrument runs it, refuses the once type and
 /// the thread-local the fixture's calls write into an extension, each
 /// with the rule's text, and passes the neighbour, so no row of the file
-/// is itself a warning (#1888).
+/// is itself a warning.
 #[test]
 fn clippy_refuses_a_once_type_and_a_thread_local_under_the_ruled_row() {
     let (root, rule) = render_ruled("clippy-ruled");
@@ -534,7 +534,7 @@ fn clippy_refuses_a_once_type_and_a_thread_local_under_the_ruled_row() {
     }
 }
 
-/// The fixture whose `fork.threads` row is the one #1950 ruled: one
+/// The fixture whose `fork.threads` row is the one ruled 2026-10-07: one
 /// source per denied path, named for it with `::` written `-`, and
 /// `home.rs`, the call the rule allows.
 fn methods_fixture() -> PathBuf {
@@ -550,7 +550,7 @@ fn declared_here(path: &str) -> bool {
 
 /// `deny_methods` renders to `disallowed-methods` in the `clippy.toml` its
 /// scope reaches, a third-party package's path `allow-invalid` since its
-/// functions differ by target and feature (#1950); and clippy, under the
+/// functions differ by target and feature; and clippy, under the
 /// rendering and with every warning denied, refuses the call each
 /// fixture makes, however it is imported, and passes the home's call
 /// under its `#[expect]` and a test module's under its `allow`.
@@ -676,7 +676,7 @@ fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
 }
 
 /// `lock_packages` counts third-party packages, those with a `source`, and
-/// never the workspace's own crates (#1335). The fixture's lock holds 161
+/// never the workspace's own crates. The fixture's lock holds 161
 /// of the first beside 200 of the second and fails one over its ceiling of
 /// 160; the same 200 crates beside 88 third-party packages pass.
 #[test]
@@ -722,7 +722,7 @@ fn lock_packages_counts_the_third_party_packages_and_not_the_workspaces_crates()
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
@@ -765,7 +765,7 @@ mod tracked {
             );
         }
         // The count is `Cargo.lock`'s third-party `[[package]]` tables, those
-        // with a `source` (#1335).
+        // with a `source`.
         let packages = std::fs::read_to_string(workspace().join("Cargo.lock"))
             .unwrap()
             .lines()
@@ -841,7 +841,7 @@ mod tracked {
     /// A `deny_lints` rule's `allow_in_tests` renders as clippy's
     /// `allow-*-in-tests = true`, one key per lint, into the `clippy.toml` its
     /// scope reaches, and keeps its `exempt`, since a key only lifts a lint
-    /// inside tests (#3078); the committed files carry the three keys the
+    /// inside tests; the committed files carry the three keys the
     /// tracked `lints.no-panic` row lists.
     #[test]
     fn allow_in_tests_renders_clippys_in_tests_keys_beside_the_lists() {
@@ -935,6 +935,6 @@ mod tracked {
                 );
             }
         }
-        assert!(seen >= 8, "#1950's eight paths are denied");
+        assert!(seen >= 8, "the eight paths ruled 2026-10-07 are denied");
     }
 }

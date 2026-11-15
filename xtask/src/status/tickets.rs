@@ -1,9 +1,9 @@
 //! The `tickets` section: the week's closes, the successors they opened,
 //! the withdrawals among them and the successors opened per close, the
-//! ratio #1151 adopted in place of a limit on `--opens` (#1157). Read from
-//! the `ticket` readings of the stores alone, never the tracker: a close
+//! ratio adopted in place of a limit on `--opens`. Read from the
+//! `ticket` readings of the stores alone, never the tracker: a close
 //! lands at the merge into `main`, whose hook writes it into the main
-//! worktree's store (#2311), and a withdrawal is written where its session
+//! worktree's store, and a withdrawal is written where its session
 //! ran until `worktree retire` carries it there, so both stores are read.
 
 use std::path::Path;

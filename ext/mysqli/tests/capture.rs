@@ -49,8 +49,8 @@ fn a_persistent_link_serves_the_next_request() {
 
 /// A `p:` link's connection waits between requests in one list, mysqli's
 /// free links, with its socket, as php's `mysqli_plist_entry` holds the
-/// `MYSQLND` and mysqlnd deletes its stream from `EG(persistent_list)`
-/// (#1805): the first request fills the engine's pool of persistent
+/// `MYSQLND` and mysqlnd deletes its stream from `EG(persistent_list)`:
+/// the first request fills the engine's pool of persistent
 /// streams to its bound of 1024 with `pfsockopen` sockets before it
 /// connects, and the next request still takes up the same server thread,
 /// where a connection whose socket waited in that pool lost it past the
@@ -116,7 +116,7 @@ fn a_link_from_init_connected_without_p_is_closed_as_the_request_ends() {
 /// `mysqli_init` link without `p:` and a `p:` link alike: php frees
 /// mysqli's links in `shutdown_executor`, after every extension's
 /// `RSHUTDOWN`. The last request prints what each write left, the
-/// oracle's bytes for the same requests (#1689). Against the server of `ci/mysql/compose.yaml`;
+/// oracle's bytes for the same requests. Against the server of `ci/mysql/compose.yaml`;
 /// with none listening the test says so and passes.
 #[test]
 fn a_session_written_at_the_request_end_still_has_the_link() {
@@ -197,7 +197,7 @@ fn a_session_written_at_the_request_end_still_has_the_link() {
 /// (`mysqlnd_local_infile_read`), so a request that connects, queries,
 /// fetches, executes a prepared statement and loads a local file leaves
 /// no block of its heap held: armed, the sensor ends a request that
-/// kept a packet's string in an `InternalError` (#2092). Against the
+/// kept a packet's string in an `InternalError`. Against the
 /// server of `ci/mysql/compose.yaml`; with none listening the test says
 /// so and passes.
 #[cfg(debug_assertions)]
@@ -243,7 +243,7 @@ fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
 /// `mysqli_get_warnings()` reads `SHOW WARNINGS` off the connection and
 /// keeps each row's code and message, the message's string given back
 /// once its bytes are copied, so an armed request that reads a warning
-/// leaves no block of its heap held (#2092). Against the server of
+/// leaves no block of its heap held. Against the server of
 /// `ci/mysql/compose.yaml`; with none listening the test says so and
 /// passes.
 #[cfg(debug_assertions)]
@@ -268,7 +268,7 @@ fn an_armed_request_reading_its_warnings_leaves_none_held() {
 /// under the server's public key through openssl's natives, and the
 /// lookup of the key's size in `openssl_pkey_get_details()`'s answer
 /// allocates nothing of its own, so an armed request whose connect is
-/// refused leaves no block of its heap held (#2092). Against the server
+/// refused leaves no block of its heap held. Against the server
 /// of `ci/mysql/compose.yaml`; with none listening the test says so and
 /// passes.
 #[cfg(debug_assertions)]
@@ -288,7 +288,7 @@ fn an_armed_request_refused_by_the_server_leaves_none_held() {
 
 /// `mysqli_stmt_error_list()` answers the list it builds and allocates
 /// no other array beside it, so an armed request that reads a failed
-/// prepare's errors leaves no block of its heap held (#2092). Against
+/// prepare's errors leaves no block of its heap held. Against
 /// the server of `ci/mysql/compose.yaml`; with none listening the test
 /// says so and passes.
 #[cfg(debug_assertions)]
@@ -310,7 +310,7 @@ fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
 /// name `mysqli_result::fetch_object()` is given, are read through
 /// `zval_get_string`, whose string is the caller's, and given back once
 /// read, so an armed request that passes either leaves no block of its
-/// heap held (#2092). Against the server of `ci/mysql/compose.yaml`;
+/// heap held. Against the server of `ci/mysql/compose.yaml`;
 /// with none listening the test says so and passes.
 #[cfg(debug_assertions)]
 #[test]
@@ -330,8 +330,8 @@ fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
 /// names, as `caching_sha2_password`'s full authentication reads it over
 /// a plain socket, is copied out of the string the stream's
 /// `copy_to_mem` answered and the string given back, so an armed
-/// request whose connect reads the file leaves no block of its heap held
-/// (#2092). Against the server of `ci/mysql/compose.yaml`; with none
+/// request whose connect reads the file leaves no block of its heap held.
+/// Against the server of `ci/mysql/compose.yaml`; with none
 /// listening the test says so and passes.
 #[cfg(debug_assertions)]
 #[test]
@@ -357,7 +357,7 @@ fn an_armed_request_reading_the_servers_key_from_a_file_leaves_none_held() {
 /// `zend_shutdown` destroys `EG(persistent_list)` and
 /// `php_mysqli_dtor_p_elements` closes each free link
 /// (`mysqli_close(mysql, MYSQLI_CLOSE_IMPLICIT)`), where a dropped socket
-/// sends the server nothing and counts in its `Aborted_clients` (#1961).
+/// sends the server nothing and counts in its `Aborted_clients`.
 /// The link reaches the server through a relay of the test's own, which
 /// reads each packet the server is sent: none after the connect while the
 /// engine lives, the `COM_QUIT` last once its last clone is dropped.

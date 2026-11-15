@@ -1,7 +1,7 @@
 //! The `ftp` extension: `php-src/ext/ftp` as one crate under `ext/`
 //! (ADR-0004). One workspace dependency, the facade; the sockets are the
 //! engine's, and FTPS is the crypto layer the bundle's `openssl`
-//! registers, which the `ftp` feature turns on (#1323); one entry,
+//! registers, which the `ftp` feature turns on; one entry,
 //! `extension()`. The phpt subset is `php-src/ext/ftp/tests`, through
 //! `xtask phpt --subset`.
 //!

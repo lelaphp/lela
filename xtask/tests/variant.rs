@@ -1,4 +1,4 @@
-//! Oracle variants (#1782, #1890): `oracle.toml`'s `[variant.<name>]`, the
+//! Oracle variants: `oracle.toml`'s `[variant.<name>]`, the
 //! oracle built with flags of its own and pinned per platform, and a
 //! `[[crate]]` row's `oracle` key, which runs that crate's `crosscheck`,
 //! `witness` and `phpt` under the variant's binary for the platform they
@@ -260,7 +260,7 @@ fn a_relative_build_path_is_the_pins_directorys_on_load() {
     );
 }
 
-/// The negative control of the row (#1890): a `[[crate]]` row naming an
+/// The negative control of the row: a `[[crate]]` row naming an
 /// oracle variant the pin carries no `[variant.<name>]` for fails that
 /// crate's `witness` reading and both its `crosscheck` readings, each
 /// naming the variant asked for and the variants the pin has; `phpt`'s is
@@ -308,7 +308,7 @@ fn the_fixture_whose_row_names_a_variant_the_pin_lacks_fails_its_crate() {
     }
 }
 
-/// The negative control of the binary (#1890): a crate read under a
+/// The negative control of the binary: a crate read under a
 /// variant whose binary's md5 is not its pin's refuses `witness` and
 /// `crosscheck` as the main oracle's drift does, naming the binary, the
 /// md5 the pin says and the variant; `phpt`'s is held below, over a tree
@@ -629,7 +629,7 @@ fn phpt_runs_a_subset_whose_row_names_a_variant_under_it() {
     );
 }
 
-/// `--unkept` under a variant (#1830, #1782): the subset's target is kept
+/// `--unkept` under a variant: the subset's target is kept
 /// and found under the variant's pin, so run again under the variant's own
 /// binary it stands and is not run; and the main php, which is no control
 /// of the variant's subset, leaves it rather than running it.
@@ -686,7 +686,7 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
     assert!(format!("{refused:#}").contains("--unkept"), "{refused:#}");
 }
 
-/// The runner's control with no php named (#1970): `--control --unkept`
+/// The runner's control with no php named: `--control --unkept`
 /// runs a variant's subset under the variant's own php and keeps its target
 /// under the variant's pin, which then stands; a subset of the main oracle,
 /// whose php is not here, runs nothing and says why.
@@ -742,7 +742,7 @@ fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
 
 /// The oracle job runs the control with `--control`, so nightly.yml
 /// names no php for it and no variant: each subset's own pinned php is the
-/// harness's to find (#1970).
+/// harness's to find.
 #[test]
 fn the_oracle_jobs_control_names_no_php_and_no_variant() {
     let text = fs::read_to_string(workspace().join(".github/workflows/nightly.yml")).unwrap();
@@ -808,7 +808,7 @@ fn phpt_refuses_a_subset_whose_row_names_a_variant_the_pin_lacks() {
 
 /// `xtask phpt --subset ext/fixture` with no `--engine`, in a workspace
 /// whose row names the stand-in variant and the feature `fixture`, which
-/// no binary under test turns on there (#2029): cargo is the shell file
+/// no binary under test turns on there: cargo is the shell file
 /// `build` writes, and `target/release-da/php`, the default build, is a
 /// decoy that misses the test's expectation. The subset's reading.
 fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
@@ -978,12 +978,12 @@ fn phpt_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it() {
     );
 }
 
-/// The negative controls of the closure (#2935), one fixture each under
+/// The negative controls of the closure, one fixture each under
 /// `xtask/fixtures/oracle/closure/`: a macOS build naming no closure, a
 /// Linux build naming one, and a macOS build made against a `[closure]`
 /// the pin has moved past. Each pin loads and carries the refusal as its
 /// defect, on any machine, naming the variant's table and the person's
-/// re-pin: only what reads the pin refuses with it (#3618 ruling 4).
+/// re-pin: only what reads the pin refuses with it (harness revision 184).
 #[test]
 fn the_fixtures_whose_build_the_closure_does_not_hold_carry_the_refusal_as_a_defect() {
     let moved = "was made against the closure sha256:f3f950ce43447203da79ea7a1a4391bdbdc1963bf63528f58b46da443e68e2b8, and the pin's [closure] is sha256:f22ee36557db677d4e720a3e315fa3aa26230a9d9e6c0489eee4826a4bae71e4, so its build predates the closure";
@@ -1008,7 +1008,7 @@ fn the_fixtures_whose_build_the_closure_does_not_hold_carry_the_refusal_as_a_def
 }
 
 /// The recipe prints the closure digest a darwin-arm64 build is made
-/// against (#2935) as xtask makes it: `scripts/oracle-build.py closure`
+/// against as xtask makes it: `scripts/oracle-build.py closure`
 /// over the tracked pin is the digest its macOS build names, which the
 /// pin's grammar holds to `[closure]`'s. Run where the macOS build is
 /// made, whose runner installs the recipe's Python.

@@ -572,7 +572,7 @@ fn to_zval_object_ex(
             redo_any = get_zval_property(req, &ret, b"any").is_some();
             // `zobj->ce = ce` on what the base made, as far as
             // `PhpObject::set_class` takes it; an object it does not
-            // take keeps its class here (#2399).
+            // take keeps its class here.
             if ce != std
                 && let Some(o) = ret.as_object()
                 && o.class() != ce

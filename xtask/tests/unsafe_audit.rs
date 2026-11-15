@@ -11,7 +11,7 @@ use common::repo::Repo;
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
@@ -40,22 +40,21 @@ mod tracked {
         let xtask = readings.iter().find(|r| r.scope == "xtask").unwrap();
         assert_eq!(xtask.status, Status::Pass);
         // The bench reader's eight, in its home `xtask::bench::spent::read`
-        // (#3062's ruling): four reading a server's totals, two waiting on
-        // a process arm unreaped to read its own (#2946), and two waiting
-        // on one on Linux to read its peak resident set (#3798); on another
-        // platform a part is not compiled, but its source is read all the
-        // same.
+        // (ruled 2026-10-20): four reading a server's totals, two waiting on
+        // a process arm unreaped to read its own, and two waiting on one on
+        // Linux to read its peak resident set; on another platform a part
+        // is not compiled, but its source is read all the same.
         assert_eq!(xtask.numbers["sites"], 8.into());
         assert_eq!(xtask.numbers["outside"], 0.into());
         assert!(!xtask.key().is_empty(), "stamped");
     }
 
     /// A host's `unsafe` lives under `sapi/*/src/ffi/` and nowhere else
-    /// (ADR-0008), under the home #1249 proposes on a manifest that does not
-    /// carry it yet, which this adds and adds nothing once it does: `sapi/fpm`
-    /// with its block in `src/ffi/`
-    /// and `#![deny(unsafe_code)]` at its root passes, and `sapi/phpdbg` with
-    /// one in `src/lib.rs` fails naming the line.
+    /// (ADR-0008), under the home proposed for a manifest that does not
+    /// carry it yet, which this adds and adds nothing once it does:
+    /// `sapi/fpm` with its block in `src/ffi/` and `#![deny(unsafe_code)]`
+    /// at its root passes, and `sapi/phpdbg` with one in `src/lib.rs` fails
+    /// naming the line.
     #[test]
     fn a_host_s_unsafe_is_at_home_under_its_ffi_directory_alone() {
         let tree = xtask::scratch::Tree::new("unsafe-audit-hosts").unwrap();
@@ -114,7 +113,7 @@ mod tracked {
 }
 
 /// A manifest without `unsafe.homes` names no home, so nothing is
-/// audited: a skip per crate naming the rule, which the run meets (#3182).
+/// audited: a skip per crate naming the rule, which the run meets.
 /// The crate's `unsafe` outside any home would fail it under the rule.
 #[test]
 fn a_manifest_without_the_rule_is_a_skip_per_crate_naming_it() {

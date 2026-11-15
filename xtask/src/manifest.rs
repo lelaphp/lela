@@ -44,7 +44,7 @@ pub const SCRIPTS: &str = "scripts";
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Manifest {
-    /// `[oracle]`: absent in a repository that runs no php (#3181).
+    /// `[oracle]`: absent in a repository that runs no php.
     pub oracle: Option<PinRow>,
     pub budget: Budget,
     pub telemetry: Option<Telemetry>,
@@ -57,7 +57,7 @@ pub struct Manifest {
     #[serde(rename = "rule", default)]
     pub rules: Vec<Rule>,
     /// `[[owed]]`: the instruments a crate owes a fresh reading of before
-    /// `done`, one row per instrument ([`Owed`], #3206).
+    /// `done`, one row per instrument ([`Owed`]).
     #[serde(default)]
     pub owed: Vec<Owed>,
     /// `[lock_home]`: the crate a lock's file lives with, for a lock no
@@ -74,8 +74,8 @@ pub struct Manifest {
     /// to; `None` where the file has no table, which `status` says.
     pub divergence: Option<DivergenceTable>,
     /// `[[bench]]`: each perf bar's tolerance and the nights it was
-    /// derived over (#2659), the one place a bar's bound is written
-    /// (#3130); a bar without a row is a series held to none.
+    /// derived over, the one place a bar's bound is written; a bar without
+    /// a row is a series held to none.
     #[serde(rename = "bench", default)]
     pub(crate) tolerances: Vec<Tolerance>,
     /// `[review]`: what makes a diff review class A ([`Review`], Round 3
@@ -89,7 +89,7 @@ pub struct Manifest {
     pub pin: Option<Pin>,
     /// Where the `[oracle]` row names a file the workspace lacks, the
     /// refusal of reading it: a defect, which [`Manifest::pin`] refuses
-    /// with and loading does not (#3618 ruling 4, #3642).
+    /// with and loading does not (ruling 4 of 2026-10-30).
     #[serde(skip)]
     pin_absent: Option<String>,
     /// The workspace the manifest was loaded from; empty for `parse`.
@@ -99,11 +99,11 @@ pub struct Manifest {
 
 /// Hold `rule` to carrying what to do instead where it is judged at a
 /// call, one with a `tool`: a `remedy`, which a denial renders after its
-/// text (#3618 ruling 3, #3627).
+/// text (ruling 3 of 2026-10-30).
 fn remedied(rule: &Rule) -> Result<()> {
     if !rule.tool.is_empty() && rule.remedy.as_deref().is_none_or(|r| r.trim().is_empty()) {
         bail!(
-            "rule \"{}\" has a `tool` and no `remedy`; a denial says what to do instead, so a rule judged at a call carries one (#3618 ruling 3, #3627)",
+            "rule \"{}\" has a `tool` and no `remedy`; a denial says what to do instead, so a rule judged at a call carries one",
             rule.id
         );
     }
@@ -113,8 +113,7 @@ fn remedied(rule: &Rule) -> Result<()> {
 /// Refuse a qualifier beside no predicate it qualifies, `predicate` being
 /// the one `rule` carries, and `allow` beside a check other than the
 /// engine-state sensor's, which reads it as a list of modules
-/// ([`Predicates`]), its entries decoded where the sensor decodes them
-/// (#4633).
+/// ([`Predicates`]), its entries decoded where the sensor decodes them.
 fn qualified(rule: &Rule, predicate: &str) -> Result<()> {
     if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
         bail!(
@@ -125,7 +124,7 @@ fn qualified(rule: &Rule, predicate: &str) -> Result<()> {
     let sealed = crate::api_check::engine_state::CHECK;
     match &rule.predicate.check {
         Some(check) if rule.predicate.allow.is_some() && check != sealed => bail!(
-            "rule \"{}\" has `allow` beside check = \"{check}\"; beside a check, `allow` qualifies check = \"{sealed}\" alone, the one sensor that reads it (#4633)",
+            "rule \"{}\" has `allow` beside check = \"{check}\"; beside a check, `allow` qualifies check = \"{sealed}\" alone, the one sensor that reads it",
             rule.id
         ),
         Some(_) => crate::api_check::engine_state::admitted(rule).map(drop),
@@ -134,7 +133,8 @@ fn qualified(rule: &Rule, predicate: &str) -> Result<()> {
 }
 
 /// `text`, then ` Instead: {remedy}.` where there is a remedy: one shape
-/// for a denial at a call and a sensor's reading (#3618 ruling 3, #4500).
+/// for a denial at a call and a sensor's reading (ruling 3 of 2026-10-30
+/// for the first, ruled 2026-11-11 for the second).
 pub(crate) fn instead(text: &str, remedy: Option<&str>) -> String {
     match remedy {
         Some(remedy) => format!("{text} Instead: {remedy}."),
@@ -150,7 +150,7 @@ pub struct Defect {
     pub file: String,
     /// The check's refusal.
     pub error: String,
-    /// Whether the file is absent, which nothing parsed (#3642).
+    /// Whether the file is absent, which nothing parsed.
     absent: bool,
 }
 
@@ -180,8 +180,8 @@ pub struct Telemetry {
 
 /// `[divergence]`: what the divergence registry is held to (harness-design.md
 /// §4.3). `target` is the day-30 target: the registry's `debt` rows, a
-/// covering row once, number under it (Mitchell, under 10, on #2460); no
-/// other cause counts toward it (#2462).
+/// covering row once, number under it (Mitchell, under 10); no other
+/// cause counts toward it (ruled 2026-10-09).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -189,10 +189,10 @@ pub struct DivergenceTable {
     pub target: u64,
 }
 
-/// One `[[bench]]` row (#2659): a bar's tolerance, in percentage points
+/// One `[[bench]]` row: a bar's tolerance, in percentage points
 /// of the second arm, the 75th percentile of its A/A control's nightly
 /// |paired delta| over `nights`, floored at 2%, or the floor alone while
-/// the control has no two weeks of nights (#3130). A series is held to it
+/// the control has no two weeks of nights. A series is held to it
 /// beside its baseline, the first the median of its own nights over the
 /// same dates; a bar held to a bound is held to one plus it (protocol
 /// §12.3).
@@ -209,7 +209,7 @@ pub(crate) struct Tolerance {
 
 /// `[parity]`: the suites php builds that parity does not count (design
 /// §3, §12), each with the ruling that put it there; the reason is §12's
-/// prose, which names this table (#1739).
+/// prose, which names this table.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Parity {
@@ -245,7 +245,7 @@ fn cited<'de, D: serde::Deserializer<'de>>(given: D) -> std::result::Result<Stri
 impl Parity {
     /// Refuse a suite ruled out twice, or inside or around another ruled
     /// suite, naming both entries and their rulings: a suite is ruled out
-    /// once, under one ruling, so every reader names it once (#1930). Then
+    /// once, under one ruling, so every reader names it once. Then
     /// refuse a suite ruled out that a `[[crate]]` row's subsets own,
     /// naming both: a suite is measured or ruled out, never both. A suite
     /// inside a row's subset is the row's, and so is a subset inside a
@@ -308,7 +308,7 @@ pub struct PinRow {
 /// `[budget]`: the workspace-wide ceilings (design §4.1, §10). The php
 /// measures, `clean_build_release_s`, `api_items` and `bindings`, are
 /// optional: a manifest that omits one states no budget for it, and
-/// nothing is held to it (#3187's ruling, #3207).
+/// nothing is held to it (ruled 2026-10-21).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -318,12 +318,12 @@ pub struct Budget {
     pub docs: u64,
     pub harness: u64,
     /// `harness-plugins/desk/**` hand-written, tests included, held apart
-    /// from `harness` (#3491); absent while a person has not written the
+    /// from `harness`; absent while a person has not written the
     /// row, and the desk's tree is then counted under `harness`.
     #[serde(rename = "harness-desk")]
     pub harness_desk: Option<u64>,
     /// The workload programs, `docs/perf/workloads/**`, held apart from
-    /// `docs` (#4341); absent while a person has not written the row, and
+    /// `docs`; absent while a person has not written the row, and
     /// the programs are then counted under `docs`.
     pub workloads: Option<u64>,
     pub lock_packages: u64,
@@ -423,13 +423,13 @@ pub struct Crate {
     /// `crosscheck` and `phpt` readings are the port's meter and not a
     /// condition of done: `done` prints their numbers and holds the row
     /// met, the way it holds the skip the missing engine binary causes
-    /// (harness §4.5 condition 1, §7; #383). Every other instrument holds
+    /// (harness §4.5 condition 1, §7). Every other instrument holds
     /// the crate as it holds any other. A crate without the key is held to
     /// both readings the day it is created, and the key's deletion, a
     /// person's act, is the port's completion certificate.
     #[serde(default)]
     pub porting: bool,
-    /// The oracle variant the crate is read under (#1782): `crosscheck`,
+    /// The oracle variant the crate is read under: `crosscheck`,
     /// `witness` and `phpt` run it under the pin's `[variant.<name>]` for
     /// the platform they run on, verified by its md5, and every crate
     /// without the key under the main oracle. A name the pin does not
@@ -491,7 +491,7 @@ impl Crate {
     /// extension, whose subset the design already states (design §12,
     /// `ext/AGENTS.md`): every `.phpt` under the extension's directory, as
     /// run-tests.php walks one, so `ext/intl/uchar/tests` is `ext/intl`'s
-    /// beside `ext/intl/tests` with no key in the row (#1590, #1598). A
+    /// beside `ext/intl/tests` with no key in the row. A
     /// crate that owns none is not asked for a phpt reading, and `phpt`
     /// refuses to guess one for it (harness §4.5 condition 1, §7).
     pub fn subsets(&self) -> Vec<PathBuf> {
@@ -514,7 +514,7 @@ impl Crate {
     /// `ext/lexbor`, php-src's vendored library whose tests are
     /// `ext/dom`'s and `ext/uri`'s, is: its reading is a skip that says
     /// so. A named one the tree does not have is the manifest and the pin
-    /// disagreeing, and its reading fails (#18, #1231).
+    /// disagreeing, and its reading fails.
     pub(crate) fn derives_subset(&self) -> bool {
         self.phpt.is_empty() && self.name.starts_with("ext/")
     }
@@ -528,7 +528,7 @@ impl Crate {
 
 /// The subset the design derives for the extension `name`, relative to
 /// the pinned tree: its directory, every `.phpt` under which is the
-/// subset's (#1590). The one statement of the rule, read by a row with no
+/// subset's. The one statement of the rule, read by a row with no
 /// `phpt` key and by the nightly lane's corpus alike.
 pub(crate) fn derived_subset(name: &str) -> PathBuf {
     Path::new("ext").join(name)
@@ -553,7 +553,7 @@ pub struct Seam {
     pub allowlist: bool,
     #[serde(default)]
     pub sections: Vec<Section>,
-    /// The one module of the producer the seam is (#1959): `layer`, the
+    /// The one module of the producer the seam is: `layer`, the
     /// face `php_engine` keeps for the stream layer alone. Its lock lives
     /// with the producer and lists that module's public items as an item
     /// lock lists a crate's, and a crate outside `consumers` that `use`s
@@ -561,7 +561,7 @@ pub struct Seam {
     pub module: Option<String>,
 }
 
-/// One section of a sectioned lock (#1369): a name, which the seam's
+/// One section of a sectioned lock: a name, which the seam's
 /// consumers all read, or a name with the consumers whose imports it holds
 /// alone, `{ name = "kernels", consumers = ["php_jit"] }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -640,11 +640,11 @@ impl Edge {
 /// manifest (`unsafe.homes`, `generated.committed`) carry neither `scope`
 /// nor `tool`, so their absence is not refused. `exempt` is the paths the
 /// rule does not judge, in `scope`'s grammar: `permit` reads it for every
-/// predicate it judges (#23), so `xtask/src/witness/fence.rs`, the parser
+/// predicate it judges, so `xtask/src/witness/fence.rs`, the parser
 /// of the fence grammar `witness.exit-authored` denies, can carry the
 /// shape it parses. `exempt_label` is the same idea for a call that names
 /// an issue rather than a file: the tracker's labels under which the rule
-/// does not judge the call (#341), which only a rule `permit` judges over
+/// does not judge the call, which only a rule `permit` judges over
 /// a command may carry. `where` is the same idea for the checkout a call
 /// runs in ([`Where`]), and the same rules alone may carry it; `runs` for
 /// whether the runtime runs a `Bash` call in the foreground ([`Runs`]).
@@ -661,17 +661,17 @@ pub struct Rule {
     pub exempt: Vec<String>,
     #[serde(default)]
     pub exempt_label: Vec<String>,
-    /// `where`: the checkouts the rule judges a call in (#1149).
+    /// `where`: the checkouts the rule judges a call in.
     #[serde(default, rename = "where")]
     pub within: Where,
-    /// `runs`: the calls the rule judges by how the runtime runs them (#3624).
+    /// `runs`: the calls the rule judges by how the runtime runs them.
     #[serde(default)]
     pub runs: Runs,
     #[serde(default)]
     pub adr: OneOrMany,
     pub text: String,
-    /// What to do instead, which a denial renders after the text (#3618
-    /// ruling 3).
+    /// What to do instead, which a denial renders after the text (ruling 3
+    /// of 2026-10-30).
     #[serde(default)]
     pub remedy: Option<String>,
     #[serde(flatten)]
@@ -682,7 +682,7 @@ pub struct Rule {
 /// worktree whose branch records its ticket (`branch.<b>.ticket`, which
 /// `xtask worktree add --ticket` writes and `xtask track` reads), and the
 /// merge check runs in the merge worktree, which records none; a rule on
-/// what a builder may run is one on the first alone (#1145, #1149).
+/// what a builder may run is one on the first alone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Where {
@@ -693,29 +693,29 @@ pub enum Where {
     /// [`crate::track`]'s record; a record that is not a number is one.
     Ticketed,
     /// A checkout where a merge, cherry-pick, revert or rebase stands
-    /// and another session than the calling one owns (#2476, #3621),
+    /// and another session than the calling one owns,
     /// read by [`crate::owner`] and `permit::operation`.
     Operating,
     /// A checkout another session than the calling one owns, by its
-    /// owner record ([`crate::owner`], #3618 M1, #3621).
+    /// owner record ([`crate::owner`], M1 of the rulings of 2026-10-30).
     Owned,
     /// The repository's main checkout, the one whose `.git` is a
-    /// directory, and never a linked worktree: what moves `main` (#2751).
+    /// directory, and never a linked worktree: what moves `main`.
     Main,
     /// The merge worktree, the checkout on `staging`: where the merge
-    /// queue's merges are made (#3618 M2, #3622).
+    /// queue's merges are made (M2 of the rulings of 2026-10-30).
     Staging,
     /// A checkout of the repository, the main one or a linked worktree,
     /// as `git worktree list` names them, and never a directory outside
     /// them, such as a scratch repository: read where each command of a
-    /// shell line runs, and judged wherever `permit` cannot say (#2887).
+    /// shell line runs, and judged wherever `permit` cannot say.
     Checkout,
 }
 
 /// `runs`: whether a rule judges a `Bash` call the runtime runs in the
 /// background. A wait there blocks nothing, since the runtime notifies its
 /// end, so a rule on what a foreground wait holds judges the foreground
-/// alone (#3624).
+/// alone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Runs {
@@ -723,12 +723,12 @@ pub enum Runs {
     #[default]
     Either,
     /// Only a call without `run_in_background`, and never a `Monitor`,
-    /// which runs in the background by construction (#3637).
+    /// which runs in the background by construction.
     Foreground,
 }
 
 /// The predicates of harness-design.md §4.1, which cites [`Self::TABLE`]
-/// and [`Self::orphaned_qualifier`] and counts neither (#2250), each
+/// and [`Self::orphaned_qualifier`] and counts neither, each
 /// optional in the grammar so the file parses;
 /// `Manifest::parse` then holds every rule to exactly one. `unless` and
 /// `unless_pattern` qualify `deny_pattern`; `with` qualifies `deny_argv` and
@@ -739,7 +739,7 @@ pub enum Runs {
 /// any other predicate. `allow` is a predicate alone, the homes
 /// `unsafe.homes` names, and beside `check = "engine-state"` it qualifies
 /// the check and is none of its own: the modules where a hand-written impl
-/// of `EngineState` stands outside those homes (#4633), each one module,
+/// of `EngineState` stands outside those homes, each one module,
 /// `crate::path`; beside any other check it is refused, since no other
 /// sensor reads it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -749,29 +749,28 @@ pub struct Predicates {
     pub deny_types: Option<Vec<String>>,
     /// The macros denied beside the types, each by its full path
     /// (`std::thread_local`), a wildcard refused: what a type ban cannot
-    /// see, since a macro declares the state it hides (#1781). It renders to clippy's
+    /// see, since a macro declares the state it hides. It renders to clippy's
     /// `disallowed-macros` beside `deny_types`' `disallowed-types`, and
     /// `permit` reads an invocation of one as it reads a mention of a type.
     pub deny_macros: Option<Vec<String>>,
     /// The functions and methods denied, each by its full path
     /// (`std::thread::Builder::spawn`), a wildcard refused: clippy's
-    /// `disallowed-methods`, which resolves a call however it was imported
-    /// (#1950). It renders into the `clippy.toml` its scope reaches, and a
+    /// `disallowed-methods`, which resolves a call however it was imported.
+    /// It renders into the `clippy.toml` its scope reaches, and a
     /// site the rule allows carries `#[expect(clippy::disallowed_methods)]`.
     pub deny_methods: Option<Vec<String>>,
     pub allow: Option<Vec<String>>,
     pub deny_pattern: Option<String>,
     pub unless: Option<String>,
     /// A hit of `deny_pattern` whose command, the text between the shell
-    /// separators around it, also matches this is let through (#1149):
+    /// separators around it, also matches this is let through:
     /// the `regex` crate has no look-ahead, so "without `--subset`" is a
     /// second pattern and not a clause of the first.
     pub unless_pattern: Option<String>,
     pub deny_argv: Option<Vec<String>>,
     /// A `deny_argv` element let through where one `with` phrase runs
     /// bounded by an option, as `require_argv` reads one: `{ "--jit" =
-    /// "xtask phpt --subset" }`, the tier's one-subset reading (#3052,
-    /// #3068).
+    /// "xtask phpt --subset" }`, the tier's one-subset reading.
     pub unless_argv: Option<BTreeMap<String, String>>,
     pub require_argv: Option<String>,
     #[serde(default)]
@@ -781,24 +780,24 @@ pub struct Predicates {
     /// A pattern beside `deny = true`: past the row's scope, a write to any
     /// file of the workspace that adds a hit of it is refused as a write
     /// into the scope is, read as a `deny_pattern` over a write reads what
-    /// the write adds (#510): a `computed exec` opener line, which
-    /// `computed run` executes wherever it stands (#4363, #4348 ruling 3).
+    /// the write adds: a `computed exec` opener line, which `computed run`
+    /// executes wherever it stands (ruling 3 of 2026-11-09).
     /// A call's write of a file outside the workspace it does not reach; a
     /// diff's call that carries what it displaces, whose file a link leads
     /// outside, is reached by a row without a scope alone, its `adding`
-    /// asked of what the diff displaces (#4679).
+    /// asked of what the diff displaces.
     pub adding: Option<String>,
     /// `writes = true`: a call that writes, an `Edit`, a `Write`, or a
     /// shell command that can change the checkout it runs in or a
     /// redirection into a file (`permit::writes`); with `where = "owned"`
-    /// it is what one session per checkout refuses (#3621).
+    /// it is what one session per checkout refuses.
     pub writes: Option<bool>,
     pub deny_lints: Option<Vec<String>>,
     /// The `deny_lints` lints a test may still trip, each rendered as
     /// clippy's own `allow-*-in-tests` key ([`IN_TESTS`]) into the
     /// `clippy.toml` the scope reaches, so a `#[test]` fn and a
     /// `#[cfg(test)]` module may trip them while the deny holds every
-    /// other line (#3078). A lint clippy has no such key for, or one the
+    /// other line. A lint clippy has no such key for, or one the
     /// rule does not deny, is refused.
     pub allow_in_tests: Option<Vec<String>>,
     pub check: Option<String>,
@@ -808,11 +807,11 @@ pub struct Predicates {
 
 /// `generated`: the files the manifest renders, each from every rule whose
 /// scope reaches its directory ([`crate::generated`]), so the row names
-/// files and no rule (#2473). A file that is not a `clippy.toml` would
+/// files and no rule. A file that is not a `clippy.toml` would
 /// need its source named again; [`crate::generated::render`] says where.
 /// A row that spells anything else, the map of each file to one rule
-/// that #1950's generator wrote among them, is refused naming the row and
-/// what it takes ([`generated_refusal`], #2513).
+/// that an earlier generator wrote among them, is refused naming the row and
+/// what it takes ([`generated_refusal`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Generated(Vec<String>);
@@ -873,7 +872,7 @@ impl AvoidFrom {
 
 /// Each lint `lints.no-panic` denies that clippy exempts a test from by a
 /// key of its own configuration, with that key: what `allow_in_tests` may
-/// list and [`crate::generated`] renders (#3078). `unreachable`, `todo`
+/// list and [`crate::generated`] renders. `unreachable`, `todo`
 /// and `unimplemented` have none. Another of clippy's in-tests keys joins
 /// with the rule that first denies its lint.
 pub(crate) const IN_TESTS: [(&str, &str); 3] = [
@@ -978,7 +977,7 @@ impl Rule {
     }
 
     /// The text, then what to do instead where the rule carries a
-    /// `remedy`: the sentence a sensor names a `check` rule by (#4500).
+    /// `remedy`: the sentence a sensor names a `check` rule by.
     pub(crate) fn said(&self) -> String {
         instead(&self.text, self.remedy.as_deref())
     }
@@ -996,7 +995,7 @@ impl Rule {
     /// A rule without an exempt exempts nothing, and so does an exempt for
     /// a call without a file, a `Bash` call: an exempt names files. The
     /// sensor after a `Bash` call reads `harness.self`'s exempt over the
-    /// files the call wrote, in this grammar (`permit::after`, #626).
+    /// files the call wrote, in this grammar (`permit::after`).
     pub fn exempts(&self, path: &Path) -> bool {
         exempted(self.exempt.iter().map(String::as_str), path)
     }
@@ -1012,7 +1011,7 @@ fn any_matches<'a>(mut patterns: impl Iterator<Item = &'a str>, path: &Path) -> 
 /// scope pattern or one led by `!`, which takes back what an earlier one
 /// let off, the last that matches deciding, as gitignore reads its own. So
 /// `.claude/skills/**` lets a skill off and `!.claude/skills/**/hooks/**`
-/// holds a hooks module laid inside one (#3470).
+/// holds a hooks module laid inside one.
 pub(crate) fn exempted<'a>(patterns: impl IntoIterator<Item = &'a str>, path: &Path) -> bool {
     patterns
         .into_iter()
@@ -1177,9 +1176,9 @@ impl Manifest {
 
     /// The oracle pin, which every instrument that runs php asks for here
     /// and nowhere else: refused, naming it, where the manifest has no
-    /// `[oracle]` row (#3181), and with its first defect where the file
-    /// the row names is absent or parses but does not validate (#3618
-    /// ruling 4, #3642).
+    /// `[oracle]` row, and with its first defect where the file
+    /// the row names is absent or parses but does not validate (ruling 4
+    /// of 2026-10-30).
     pub fn pin(&self) -> Result<&Pin> {
         if let Some(defect) = self.defects().into_iter().next() {
             bail!("{defect}");
@@ -1190,10 +1189,10 @@ impl Manifest {
     }
 
     /// What the person's files carry that parses but does not validate,
-    /// apart from loading (#3618 ruling 4): a TOML or grammar error is
+    /// apart from loading (ruling 4 of 2026-10-30): a TOML or grammar error is
     /// fatal to [`Manifest::load`], and this is the rest, each a refusal
     /// of the instruments that read what failed; a pin the `[oracle]` row
-    /// names and the workspace lacks is one, absent (#3642).
+    /// names and the workspace lacks is one, absent.
     pub fn defects(&self) -> Vec<Defect> {
         let file = self.pin_file().unwrap_or_default();
         let absent = self.pin_absent.iter().map(|error| Defect {
@@ -1382,7 +1381,7 @@ impl Manifest {
     }
 
     /// The directories its crates are laid down in, derived from its
-    /// `[[crate]]` rows ([`Layout`], #3207).
+    /// `[[crate]]` rows ([`Layout`]).
     pub fn layout(&self) -> Layout {
         Layout::of(&self.crates)
     }
@@ -1432,7 +1431,7 @@ impl Manifest {
     /// [`Manifest::crates_of`] names and those whose tests or `build.rs`
     /// read one of them as the tree at `root` holds it, a `build.rs` that
     /// reads a part of a file only where that part is among `moved`
-    /// ([`crate::key::read_by_tests`], #3646, #3654, #4429).
+    /// ([`crate::key::read_by_tests`]).
     pub(crate) fn touched_by(
         &self,
         root: &Path,
@@ -1454,7 +1453,7 @@ impl Manifest {
     /// `php_ext`), else the crate `[lock_home]` names for a lock whose
     /// seam has no producing crate at all (`ops.lock`, rendered from
     /// `ops.toml`), else the producer of a seam that is one module of it
-    /// (`layer.lock`, #1959). `None` for a lock nothing names.
+    /// (`layer.lock`). `None` for a lock nothing names.
     pub fn lock_home(&self, lock: &str) -> Option<String> {
         self.crates
             .iter()
@@ -1518,7 +1517,7 @@ impl Manifest {
     ///   lock no row names.
     /// - a generated file the manifest names (`ext/clippy.toml`): its
     ///   directory, since `budget` holds the file and every clippy
-    ///   configuration below it that would stand nearer to a crate (#2475).
+    ///   configuration below it that would stand nearer to a crate.
     ///
     /// `None` for a name none of these know, or a suffix outside that
     /// grammar, which the reading's constructor refuses by name rather than

@@ -1,8 +1,8 @@
 //! A child started with no `$cwd` inherits the process's working
 //! directory where the request stands in it, as php's does, since php
 //! adds no `chdir` to the spawn then (`Z/ext/standard/proc_open.c:1394`),
-//! and `exec(2)` needs no access to the directory it is called in
-//! (#2917). Where the request stands elsewhere, the child is still
+//! and `exec(2)` needs no access to the directory it is called in.
+//! Where the request stands elsewhere, the child is still
 //! changed into the request's directory. A request given no directory,
 //! its host's `getcwd(3)` having failed, stands in the process's.
 //!

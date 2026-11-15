@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -15,8 +15,8 @@ fn armed(source: &str) -> String {
 }
 
 /// A `UrlValidationError`'s `type` is the one owner of its case that the
-/// property takes, whether the constructor writes it or the parser does
-/// (#1997): the case `IntoReturn` answers is already an owner.
+/// property takes, whether the constructor writes it or the parser does:
+/// the case `IntoReturn` answers is already an owner.
 #[test]
 fn a_validation_error_s_type_is_held_once() {
     let stdout = armed(

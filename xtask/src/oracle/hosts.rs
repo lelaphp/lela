@@ -1,9 +1,9 @@
-//! The engine's hosts a lane runs a program through (ADR-0008, #1908),
+//! The engine's hosts a lane runs a program through (ADR-0008),
 //! beside the pinned php's own (`oracle::Sapi`, `[sapi]` of the pin):
 //! the one statement of each host's crate, the binary the phpt lane runs
 //! or finds beside the binary under test, as upstream's runner finds
 //! php-cgi, php-fpm and phpdbg beside `TEST_PHP_EXECUTABLE`, and which
-//! the witness lane serves a fence through as well (#2168). The phpt
+//! the witness lane serves a fence through as well. The phpt
 //! lane's one lookup ([`EngineHost::for_run`]), the cargo line that
 //! rebuilds a stale binary, the witness lane's builds and what `xtask status --section
 //! corpus` hands CI to build all read [`HOSTS`], and none spells a host.
@@ -19,7 +19,7 @@ pub(crate) struct EngineHost {
     /// The crate's manifest name, `sapi/cgi`.
     pub(crate) krate: &'static str,
     /// The binary the phpt lane runs a test through and the witness lane
-    /// serves a fence through, with `PHP_WITNESS_TRACE` set (#2168).
+    /// serves a fence through, with `PHP_WITNESS_TRACE` set.
     pub(crate) binary: &'static str,
 }
 
@@ -51,7 +51,7 @@ pub(crate) enum Whose {
     /// run is the control: one absent is the oracle's environment.
     Pinned,
     /// The engine's own beside the binary under test: one absent is a
-    /// build the run is missing, not an environment's skip (#3763).
+    /// build the run is missing, not an environment's skip.
     Built,
 }
 
@@ -91,8 +91,8 @@ pub(crate) const PHPDBG: EngineHost = EngineHost {
 };
 
 /// The production server, which a `request makala` fence is served by
-/// (#2347) and the phpt lane's served subset is served to over HTTP
-/// (`phpt::http`, #2348); its oracle is php-fpm under the pin's
+/// and the phpt lane's served subset is served to over HTTP
+/// (`phpt::http`); its oracle is php-fpm under the pin's
 /// `[fastcgi]` mapping, and the served subset's php-cgi, so `[sapi]` pins
 /// none of its own.
 pub(crate) const MAKALA: EngineHost = EngineHost {

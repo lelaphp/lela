@@ -1,4 +1,4 @@
-//! Op-array reads for extensions (#1829, design §4.3 seam 9): a
+//! Op-array reads for extensions (design §4.3 seam 9): a
 //! function's op array as php's `zend_op_array` hands it to an observer,
 //! a profiler or a coverage tool, read through an [`OpArrayView`]: how
 //! many oplines it holds, each one's opcode, operands, line and jump
@@ -20,7 +20,7 @@
 //! none for a native, as php's `ZEND_USER_CODE(func->type)` does.
 //!
 //! The debugging host reads the same op arrays here, as an extension
-//! does (#1911): its `print` writes one as [`Frames::dump_op_array`]
+//! does: its `print` writes one as [`Frames::dump_op_array`]
 //! dumps it, then each function its body declares
 //! ([`OpArrayView::dynamic_functions`]), as phpdbg's
 //! `phpdbg_print_function_helper` does.
@@ -153,7 +153,7 @@ impl<'a> OpArrayView<'a> {
     }
 }
 
-/// One opline's opcode as an observer reads it (#2357): php's
+/// One opline's opcode as an observer reads it: php's
 /// `zend_op.opcode` byte and `zend_get_opcode_name`'s name for it, and
 /// nothing of what the compiled tier reads off the unit format's opcode.
 /// An extension tells one opcode from another by its name, `ZEND_RETURN`,

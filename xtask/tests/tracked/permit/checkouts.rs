@@ -72,7 +72,7 @@ fn a_file_in_an_agent_worktree_is_judged_against_that_checkout() {
 /// A track's worktree is named by its branch, and a branch's name is a
 /// path (`t-x/witness`), so the checkout is the first directory under
 /// `.claude/worktrees` on the way down that has a `.git`, not the first
-/// component alone (harness-design.md §5, #41).
+/// component alone (harness-design.md §5).
 #[test]
 fn a_worktree_named_by_a_branch_with_a_slash_is_a_checkout_of_its_own() {
     let track = workspace().join(format!(".claude/worktrees/t-permit-{}", std::process::id()));
@@ -92,8 +92,8 @@ fn a_worktree_named_by_a_branch_with_a_slash_is_a_checkout_of_its_own() {
 }
 
 /// A fixture that carries a `seams.toml` is a workspace of its own, and a
-/// call into it is judged by that manifest and not the workspace's
-/// (#57): under the `unsafe.homes` fixture's rule, `ext/pcre/src/ffi/` is
+/// call into it is judged by that manifest and not the workspace's:
+/// under the `unsafe.homes` fixture's rule, `ext/pcre/src/ffi/` is
 /// a home and `php_unit` is not, which is the fixture's own text and the
 /// workspace's rule says neither. The main checkout's own files resolve
 /// to the main checkout.
@@ -129,7 +129,7 @@ fn a_fixture_with_a_manifest_of_its_own_is_judged_by_that_manifest() {
         denial.text
     );
     // Under the workspace's manifest no fixture source is in a home, which
-    // is the freeze #57 lifts.
+    // is the freeze a fixture's own manifest lifts.
     let workspaces = Manifest::load(workspace()).unwrap();
     assert!(
         judge(&workspaces, workspace(), &inside)
@@ -185,7 +185,7 @@ fn a_file_of_the_main_checkout_is_judged_by_its_manifest() {
     );
 }
 
-/// `where = "ticketed"` (#1149): the rule judges a call in a checkout
+/// `where = "ticketed"`: the rule judges a call in a checkout
 /// whose branch records a ticket, a builder's worktree, and not one in a
 /// checkout that records none, main's, where the merge check runs; a
 /// leading `cd` or `pushd` moves the call to the checkout it names.
@@ -201,8 +201,8 @@ fn a_rule_where_ticketed_judges_only_a_checkout_whose_branch_records_a_ticket() 
     assert!(denied(&manifest, main.path(), &moved));
     let moved = format!("cd {} && {line}", main.path().display());
     assert!(!denied(&manifest, ticketed.path(), &moved));
-    // #2607: a `cd` to a variable the line assigned, and a `pushd`, move
-    // it as a `cd` does, and a `popd` moves it back.
+    // A `cd` to a variable the line assigned, and a `pushd`, move it as a
+    // `cd` does, and a `popd` moves it back.
     let assigned = format!("W={} && cd \"$W\" && {line}", ticketed.path().display());
     assert!(denied(&manifest, main.path(), &assigned));
     let pushed = format!("pushd {} && {line}", ticketed.path().display());
@@ -214,12 +214,11 @@ fn a_rule_where_ticketed_judges_only_a_checkout_whose_branch_records_a_ticket() 
     assert!(denied(&manifest, main.path(), line));
 }
 
-/// #2995: a `cd` into a place it cannot enter, joined to what follows by
-/// anything but `&&`, may fail, and one piped runs in a shell of its own,
-/// so `where = "ticketed"` judges what follows where the line stood as
-/// well, at the root; one into a directory it can enter moves the line
-/// however it is joined (#3257); a program moved by its own words is
-/// judged where they move it.
+/// A `cd` into a place it cannot enter, joined to what follows by anything
+/// but `&&`, may fail, and one piped runs in a shell of its own, so `where
+/// = "ticketed"` judges what follows where the line stood as well, at the
+/// root; one into a directory it can enter moves the line however it is
+/// joined; a program moved by its own words is judged where they move it.
 #[test]
 fn a_rule_where_ticketed_judges_past_a_change_that_may_not_move_the_line() {
     let manifest = probe(|rule| {
@@ -248,7 +247,7 @@ fn a_rule_where_ticketed_judges_past_a_change_that_may_not_move_the_line() {
     assert!(denied(root, format!("GIT_WORK_TREE={into} git add x")));
 }
 
-/// `where = "main"` (#2751): the rule judges a call in the repository's
+/// `where = "main"`: the rule judges a call in the repository's
 /// main checkout and not one in a linked worktree, wherever the line
 /// stands when a leading `cd` moves it; of a line's commands, the one the
 /// pattern hits is the one asked where it runs.

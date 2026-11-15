@@ -1,6 +1,6 @@
 //! A shell line read as the argv of each program it runs, and the
-//! manifest's `with`, `deny_argv` and `require_argv` read over one argv
-//! (#1001). One place for the idea: every rule that names a command's
+//! manifest's `with`, `deny_argv` and `require_argv` read over one argv.
+//! One place for the idea: every rule that names a command's
 //! words is judged here, and nowhere else.
 //!
 //! The line is split into simple commands at `;`, `&`, `&&`, `|`, `||`,
@@ -17,17 +17,17 @@
 //! assigned, standing as the program, is read as its words. xtask's argv
 //! is decoded once, however it is run (the cargo alias, `cargo run -p
 //! xtask`, a path), as its name and the words it receives, so `with =
-//! "xtask phpt"` names every form (#1860). What a shell can hide beyond
+//! "xtask phpt"` names every form. What a shell can hide beyond
 //! that (a variable the line does not assign, an alias, a function) is
 //! not read; pre-push and CI run `done` behind it. The parentheses of
 //! an array assignment, `P=(a b)`, open no subshell: its elements are
-//! words of the assignment (#3165).
+//! words of the assignment.
 //!
 //! The same reading gives a `deny_pattern` what it reads, the line's
 //! commands ([`Line::subject`]): the line with the heredoc bodies it
 //! carries as text removed, and a quoted argument read as words and never
 //! as a command position, so a pattern judges what a command runs and not
-//! what it quotes (#1771, #1832, #3635), as an argv rule does. One lexer
+//! what it quotes, as an argv rule does. One lexer
 //! decides what a body and a quote are for both.
 
 use std::collections::BTreeMap;
@@ -51,7 +51,7 @@ pub(super) struct Argv {
 
 /// A directory a command's words move its program to, or reach, apart
 /// from where its shell stands, each read from where the one before it
-/// left the program (#2995).
+/// left the program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Move {
     /// It runs there: `env -C`, git's `-C`, `patch -d`.
@@ -64,7 +64,7 @@ pub(super) enum Move {
     /// git's repository is there: `GIT_DIR`, prefixed or assigned by the
     /// line, and git's `--git-dir`. Every reader takes it as a place the
     /// program reaches; the one asking which repository git reads takes it
-    /// in place of where the program runs (#3271).
+    /// in place of where the program runs.
     GitDir(String),
     /// Somewhere its words do not say: `find -execdir`, or a variable the
     /// line did not assign.
@@ -72,7 +72,7 @@ pub(super) enum Move {
 }
 
 /// The separator on one side of a simple command, as its shell reads the
-/// list the command stands in (#2995).
+/// list the command stands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum Joint {
     /// `;`, a newline, the line's edge or a subshell's close: what
@@ -80,7 +80,7 @@ pub(super) enum Joint {
     #[default]
     Then,
     /// `||`: what follows runs only where this failed, and begins a chain
-    /// as `;` does (#3257).
+    /// as `;` does.
     Or,
     /// `&&`: what follows runs only where this succeeded.
     And,
@@ -123,8 +123,8 @@ pub(super) struct Line {
 
 /// A file one redirection writes (`>`, `>>`, `>|`, `&>`, `<>`): its target
 /// as the shell expands it as far as the line says, a variable the line
-/// assigned read as its value and `~/` as the home ([`Assigned::target`],
-/// #4250), and the command it stands on by its place in
+/// assigned read as its value and `~/` as the home ([`Assigned::target`]),
+/// and the command it stands on by its place in
 /// [`Line::commands`]; `None` for one on no command, a redirection alone or
 /// one after a subshell's `)`, which the line's shell makes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,13 +173,13 @@ impl Line {
     /// The shells each of [`Line::commands`] runs in, outermost first:
     /// one id per subshell, substitution or child shell holding it, none
     /// for the line's own, so a `cd` in one moves the commands that share
-    /// its shells alone (#2764).
+    /// its shells alone.
     pub(super) fn shells(&self) -> &[Vec<u32>] {
         &self.shells
     }
 
     /// How each of [`Line::commands`] is joined to its neighbours in its
-    /// shell ([`Joints`], #2995).
+    /// shell ([`Joints`]).
     pub(super) fn joints(&self) -> &[Joints] {
         &self.joints
     }
@@ -195,7 +195,7 @@ impl Line {
     }
 
     /// What a `deny_pattern` and its `unless_pattern` read, the line's
-    /// commands (#3635): [`Line::text`] with each `;`, `&`, `|` and newline
+    /// commands: [`Line::text`] with each `;`, `&`, `|` and newline
     /// a quote holds read as a space, since the shell reads none of them as
     /// a separator, and after it, a line each, what a line the line runs in
     /// turn reads, a `-c` argument, `eval`'s words, a backquote or a body a
@@ -207,7 +207,7 @@ impl Line {
 
     /// Each hit of `regex` over [`Line::subject`] that starts outside a
     /// quote: a quoted argument is never a command position, nor a
-    /// redirection, so no hit starts in one (#3635). Each search resumes
+    /// redirection, so no hit starts in one. Each search resumes
     /// just past the last hit's start, so a hit passed over hides none.
     pub(super) fn hits(&self, regex: &Regex) -> Vec<Range<usize>> {
         let (mut hits, mut at) = (Vec::new(), 0);
@@ -295,7 +295,7 @@ struct Command {
     /// runs one.
     redirected: bool,
     /// The index in `words` of each array assignment that word text
-    /// follows straight after its `)` (#3198): zsh ends the word there,
+    /// follows straight after its `)`: zsh ends the word there,
     /// and bash reads the word after as more of a scalar assignment.
     joined: Vec<usize>,
     /// The files its redirections write, expanded ([`Redirect`]).
@@ -307,7 +307,7 @@ impl Command {
         self.word.get_or_insert_with(Word::default).text.push(c);
     }
 
-    /// Whether a `(` here opens an array assignment (#3165): the word
+    /// Whether a `(` here opens an array assignment: the word
     /// being read is an unquoted `NAME=` or `NAME+=`, standing where an
     /// assignment does, among the command's first words or after a
     /// declaring builtin.
@@ -560,7 +560,7 @@ impl Lexer {
     }
 
     /// The elements of an array assignment, `NAME=(…)` or `NAME+=(…)`, up
-    /// to the `)` that matches its `(` (#3165): they are words of the
+    /// to the `)` that matches its `(`: they are words of the
     /// assignment and no commands, a `$(…)` among them still running, and
     /// the word ends at the `)` as zsh ends it, word text straight after
     /// it read as bash's too ([`Lexer::end`]). A process substitution
@@ -736,12 +736,12 @@ impl Lexer {
     /// `|` after it joins what follows to the chain it stands in, so after
     /// a command and a `;`, `||` or `&` it is joined as by that separator:
     /// `cd /wt; P=x && git add` runs `git add` wherever the `cd` left the
-    /// shell (#3165).
+    /// shell.
     ///
     /// Where word text follows an array's `)` straight after, `P=(a)x git
     /// commit`, the command is read as zsh runs it, `x` the program, and
     /// then as bash runs it, `P=(a)x` an assignment and `git` the program,
-    /// both joined as the command stands (#3198). What the line assigns
+    /// both joined as the command stands. What the line assigns
     /// is zsh's reading's, as before: bash's would replace a program the
     /// line runs by `$P` with a word no rule names, `P=(git)Q=1; $P
     /// commit` running `gitQ=1`.
@@ -903,8 +903,7 @@ impl Assigned {
                 continue;
             };
             // A value led by a variable the line assigned is that value,
-            // as the shell expands it: `S=/x; R=$S/repo` names `/x/repo`
-            // (#3625).
+            // as the shell expands it: `S=/x; R=$S/repo` names `/x/repo`.
             let led = self.directory(value);
             let value = led.as_deref().unwrap_or(value);
             let prior = self.0.get(name).filter(|_| append);
@@ -946,7 +945,7 @@ impl Assigned {
         Some(format!("{}{tail}", self.0.get(name)?))
     }
 
-    /// A word as the shell expands it as far as the line says (#4250): led
+    /// A word as the shell expands it as far as the line says: led
     /// by a variable the line assigned, its value ([`Assigned::directory`]),
     /// and led by `~/`, the home; any other word as it is spelled, one led
     /// by a variable the line never assigned among them, which says no
@@ -1045,9 +1044,9 @@ const RESERVED: [&str; 11] = [
 
 /// Programs that run the rest of their words as a command, with the
 /// options each reads a value after and the operands it reads before the
-/// command: `timeout`'s duration (#2668), and `caffeinate`'s, which keeps
-/// the machine awake while its command runs (#2990), and `xargs`'s, whose
-/// command may run a line a quote holds, `xargs sh -c '…'` (#3635).
+/// command: `timeout`'s duration, and `caffeinate`'s, which keeps
+/// the machine awake while its command runs, and `xargs`'s, whose
+/// command may run a line a quote holds, `xargs sh -c '…'`.
 const WRAPPERS: [(&str, &[&str], usize); 10] = [
     ("xargs", &XARGS_VALUED, 0),
     ("command", &[], 0),
@@ -1214,7 +1213,7 @@ impl Argv {
             let word = words.get(at)?;
             // A `for` loop's head, `for n in a b`, names a variable and the
             // words it takes, and runs nothing; one the shell reads as a
-            // reserved word stands first or after another (#4162).
+            // reserved word stands first or after another.
             let reserved = |w: &String| RESERVED.contains(&w.as_str());
             if word == "for" && !expanded && words[..at].iter().all(reserved) {
                 return None;
@@ -1339,7 +1338,7 @@ impl Argv {
     /// line says, a variable the line assigned read as its value and `~/`
     /// as the home ([`Assigned::target`]), one for each of
     /// [`Argv::words`] past the first: the names a program the owner lock
-    /// places by what it names lands on (#4250).
+    /// places by what it names lands on.
     pub(super) fn named(&self) -> &[String] {
         &self.named
     }
@@ -1381,7 +1380,7 @@ impl Argv {
     /// one of the denied elements stands in it (see [`Element`]), save an
     /// element `unless` excuses here: the phrase its excuse names runs,
     /// bounded by the excuse's option as [`Argv::unbounded`] reads one,
-    /// `xtask phpt --jit force --subset Zend/tests` (#3068).
+    /// `xtask phpt --jit force --subset Zend/tests`.
     pub(super) fn denies(
         &self,
         denied: &[String],
@@ -1413,7 +1412,7 @@ impl Argv {
     /// `src` and passes; an option separator bounds the one value it
     /// takes, after `=` or as its next word, `--subset=ext/pcre`, so a
     /// substitution further along the command, `--against $(git
-    /// merge-base HEAD main)`, is no path of it (#3619). A command that asks for its help (`-h`,
+    /// merge-base HEAD main)`, is no path of it. A command that asks for its help (`-h`,
     /// `--help` among its options) runs nothing and is never unbounded.
     pub(super) fn unbounded(&self, separator: &str, with: &OneOrMany) -> bool {
         self.invocations(with).any(|invocation| {
@@ -1558,7 +1557,7 @@ pub(crate) enum Element<'a> {
     /// stands among them, whatever subcommand or option stands before it
     /// (`set`, `--global`, `--unset`), and after a `--`, which introduces
     /// operands rather than ending them; the key compares without ASCII
-    /// case, as git reads it (#4363).
+    /// case, as git reads it.
     Key(&'a str),
 }
 
@@ -1629,9 +1628,9 @@ mod tests {
         commands(line).into_iter().map(|argv| argv.words).collect()
     }
 
-    /// #2764: each command names the shells it runs in, a sibling
-    /// subshell its own, `eval` the shell that runs it and a shell's `-c`
-    /// a child of it.
+    /// Each command names the shells it runs in, a sibling subshell its
+    /// own, `eval` the shell that runs it and a shell's `-c` a child of
+    /// it.
     #[test]
     fn each_command_names_the_subshells_it_runs_in() {
         let line = Line::read("(cd a; x $(y)); (cd b); eval cd c; bash -c 'cd d; z'; w");
@@ -1753,7 +1752,7 @@ mod tests {
         assert_eq!(text("echo é; ls"), "echo é; ls");
     }
 
-    /// #3635: a quoted argument is read as words and never as a command
+    /// A quoted argument is read as words and never as a command
     /// position, and a line a shell runs is read where it runs.
     #[test]
     fn a_lines_subject_reads_no_quote_as_a_command_position() {
@@ -1813,8 +1812,8 @@ mod tests {
             vec![vec!["git", "diff"], vec!["git", "commit"], vec!["fi"],]
         );
         assert_eq!(words("{ git commit; }"), vec![vec!["git", "commit"]]);
-        // #4162: a `for` loop's head and its `done` run nothing; what its
-        // list substitutes, and its body, run.
+        // A `for` loop's head and its `done` run nothing; what its list
+        // substitutes, and its body, run.
         assert_eq!(
             words("for n in a $(git stash); do gh issue view $n; done"),
             vec![vec!["git", "stash"], vec!["gh", "issue", "view", "$n"]]
@@ -1831,9 +1830,9 @@ mod tests {
         );
     }
 
-    /// #2607: the directory a `cd` or `pushd` names by a variable the
-    /// line assigned earlier is the variable's value, whole; one the line
-    /// did not assign, or assigned only in the command's own environment,
+    /// The directory a `cd` or `pushd` names by a variable the line
+    /// assigned earlier is the variable's value, whole; one the line did
+    /// not assign, or assigned only in the command's own environment,
     /// stays as written.
     #[test]
     fn a_directory_named_by_a_variable_the_line_assigned_is_its_value() {
@@ -1851,7 +1850,7 @@ mod tests {
         assert_eq!(dirs("touch $W"), Vec::<String>::new());
     }
 
-    /// #2995: what moves a program apart from its shell is read as it is
+    /// What moves a program apart from its shell is read as it is
     /// peeled: `env -C`, git's own options before its subcommand and the
     /// `GIT_DIR` or `GIT_WORK_TREE` it runs under, `patch -d`, a target
     /// directory, the directories `ln` names, and `find -execdir` or a
@@ -1900,8 +1899,8 @@ mod tests {
         );
     }
 
-    /// #2995: each command records the separators either side of it; a
-    /// line continued after `&&`, a subshell's first command and a
+    /// Each command records the separators either side of it; a line
+    /// continued after `&&`, a subshell's first command and a
     /// substitution's are joined as the separator before them.
     #[test]
     fn each_command_is_joined_by_the_separators_either_side_of_it() {
@@ -1937,8 +1936,8 @@ mod tests {
         assert_eq!(line.joints()[1].before, And);
     }
 
-    /// #3165: a `(` straight after `NAME=` or `NAME+=` where an
-    /// assignment stands opens an array, its elements words of the
+    /// A `(` straight after `NAME=` or `NAME+=` where an assignment
+    /// stands opens an array, its elements words of the
     /// assignment, a parenthesis, a quoted or escaped `)`, a comment and a
     /// separator among them alike, so the line reads as it does with a
     /// scalar; a `$(…)` among them runs, the word ends at the `)`, and a
@@ -2004,8 +2003,8 @@ mod tests {
         }
     }
 
-    /// #3198: word text straight after an array's `)` is zsh's next word
-    /// and bash's more of the assignment, so the command is read both
+    /// Word text straight after an array's `)` is zsh's next word and
+    /// bash's more of the assignment, so the command is read both
     /// ways, each joined as it stands; a space after the `)`, or nothing
     /// after the text, reads as before.
     #[test]
@@ -2052,7 +2051,7 @@ mod tests {
         commands(line).iter().any(|argv| argv.invokes(&with))
     }
 
-    /// Every way xtask is run names `xtask phpt` (#1860): the cargo alias,
+    /// Every way xtask is run names `xtask phpt`: the cargo alias,
     /// `cargo run` on the package, the binary by any path, and a variable
     /// the line assigned one of those, in an assignment of its own or an
     /// `export`. Where the words are quoted text or another program's,
@@ -2146,10 +2145,9 @@ mod tests {
         assert!(!denies("cargo xtask phpt -- --full", &lane, with));
     }
 
-    /// `lanes.nightly-flags` with the excuse #3052 ruled, `{ "--jit" =
-    /// "xtask phpt --subset" }`: the tier's lane passes on `xtask phpt`
-    /// bounded by one subset, before or after `--jit`, and on nothing else
-    /// (#3068).
+    /// `lanes.nightly-flags` with the excuse ruled 2026-10-20, `{ "--jit"
+    /// = "xtask phpt --subset" }`: the tier's lane passes on `xtask phpt`
+    /// bounded by one subset, before or after `--jit`, and on nothing else.
     #[test]
     fn a_subset_excuses_the_tier_s_lane_on_phpt_alone() {
         let lane = ["--full".to_owned(), "--jit".to_owned()];

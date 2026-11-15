@@ -1,10 +1,10 @@
 //! A debug build's record of where each owner the engine's owner type
-//! holds was made (design §5.1, #2246): the side table the owner's
+//! holds was made (design §5.1): the side table the owner's
 //! `Drop` reads the line that made it from, so the owner itself is its
 //! view and nothing more in every build, and a payload whose size is
 //! held to php's struct holds one as php holds the `zval`.
 //!
-//! The table is keyed by the block, as the origins of #1993 are
+//! The table is keyed by the block, as the allocations' origins are
 //! ([`crate::sensed::Origin`]), and kept in the block's heap's sensed
 //! record, which every chunk's header names, so the owner reaches it
 //! from the value it owns with no word of its own: php's `chunk->heap`

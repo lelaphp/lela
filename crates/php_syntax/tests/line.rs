@@ -1,20 +1,21 @@
 //! A node's `line` against what the pinned php printed for the same
 //! program, for the programs the linked engine cannot serve as a witness
-//! (design §4.9, ledger 27; #601, #603, #606). Each program is written as
+//! (design §4.9, ledger 27). Each program is written as
 //! the witness recipe runs one, `<?php` on line 1 and the code from line
-//! 2, and the number asserted is the one the oracle printed on #601,
-//! probed again at 8.5.9 on 2026-09-22. What the engine now serves is a
-//! `php` fence beside the rule it exercises, in `src/tree/line.rs` and,
-//! for the jump back of a `for`, in `php_compile`'s `emit`; what is left
-//! here is left for one of four reasons, each named on the test that
-//! carries it and each measured under the linked engine:
+//! 2, and the number asserted is the one the oracle printed when the rule
+//! was measured, probed again at 8.5.9 on 2026-09-22. What the engine now
+//! serves is a `php` fence beside the rule it exercises, in
+//! `src/tree/line.rs` and, for the jump back of a `for`, in
+//! `php_compile`'s `emit`; what is left here is left for one of four
+//! reasons, each named on the test that carries it and each measured
+//! under the linked engine:
 //!
 //! 1. **`declare(ticks=1)`**, which the two programs that observe a line
 //!    through `register_tick_function` need: the engine refuses the
 //!    statement, "a `declare(ticks)` of a count this compiler cannot read
-//!    yet", and #499 is where that work stands.
-//! 2. **The line the execution timer names**, for the third of #601's
-//!    three `for (;;)` programs: its loop holds a taken forward `JMPZ`
+//!    yet".
+//! 2. **The line the execution timer names**, for the third of the three
+//!    `for (;;)` programs measured: its loop holds a taken forward `JMPZ`
 //!    beside the jump back, and php tests the interrupt after every
 //!    jump that sets an opline where this engine tests it at a
 //!    back-edge alone, so php names line 3 on ten runs of twelve and
@@ -24,7 +25,7 @@
 //!    `xtask compile-identity --file` reads all three programs as
 //!    byte-identical with the oracle's dump.
 //! 3. **A `yield`**, which the compiler refuses, "a `yield` this compiler
-//!    cannot read yet"; #564 is where that work stands.
+//!    cannot read yet".
 //! 4. **`static` as a class reference**, which it refuses too, "a class
 //!    reference of the scope this compiler cannot read yet".
 
@@ -54,9 +55,9 @@ fn line(src: &str, kind: SyntaxKind) -> u32 {
     all[0]
 }
 
-/// #601 pin 1, under `declare(ticks=1)` (reason 1): the lines printed are
-/// 3, 5, 10, 15 and 21. An empty block is its `{`'s line, an `else` arm
-/// its block's, a `finally` clause its block's, and an `else` arm over a
+/// Under `declare(ticks=1)` (reason 1): the lines printed are 3, 5, 10,
+/// 15 and 21. An empty block is its `{`'s line, an `else` arm its
+/// block's, a `finally` clause its block's, and an `else` arm over a
 /// statement that statement's.
 #[test]
 fn an_empty_block_an_else_arm_and_a_finally_clause_under_ticks() {
@@ -100,7 +101,7 @@ fn the_line_a_for_loops_jump_back_is_left_at_over_an_else_arm() {
     assert_eq!(line(arm, SyntaxKind::ELSE_CLAUSE), 3);
 }
 
-/// #601 pin 9 and the amendment's pin (reason 3): `The "yield" expression
+/// A bare `yield` and a keyed one (reason 3): `The "yield" expression
 /// can only be used inside a function in %s on line 4`, and `… on line 5`
 /// for a `yield $k => $v` written over four lines, the value's line and
 /// not the key's, since `ZEND_AST_YIELD` is `(value, key)`.
@@ -113,9 +114,9 @@ fn a_yield_is_the_lookaheads_line_bare_and_its_values_line_keyed() {
     );
 }
 
-/// #601 pin 12, under `declare(ticks=1)` (reason 1): 5 is printed for the
-/// empty heredoc, whose line is its closing label's, and 7 for the one
-/// with a body, whose line is the body's first.
+/// Under `declare(ticks=1)` (reason 1): 5 is printed for the empty
+/// heredoc, whose line is its closing label's, and 7 for the one with a
+/// body, whose line is the body's first.
 #[test]
 fn a_heredoc_is_its_bodys_first_line_or_its_closing_labels() {
     let src = "<?php\n\
@@ -130,11 +131,11 @@ fn a_heredoc_is_its_bodys_first_line_or_its_closing_labels() {
     assert_eq!(lines(src, SyntaxKind::HEREDOC_EXPR), [5, 7]);
 }
 
-/// #601 pins 14 and 15 (reason 4): the constructor's `ArgumentCountError`
-/// names `on line 2` for `new static` written over three lines, and the
-/// method's names `on line 4` for `static::f()` written the same way:
-/// `class_name: T_STATIC` reduces before the lookahead after `new` and
-/// after it where a statement may begin.
+/// `static` as a class reference (reason 4): the constructor's
+/// `ArgumentCountError` names `on line 2` for `new static` written over
+/// three lines, and the method's names `on line 4` for `static::f()`
+/// written the same way: `class_name: T_STATIC` reduces before the
+/// lookahead after `new` and after it where a statement may begin.
 #[test]
 fn static_as_a_class_name_is_its_own_line_or_the_double_colons() {
     let new = "<?php\nclass A { function __construct($x) {} static function m() { new static /*\n\n*/ ; } }\nA::m();\n";

@@ -168,7 +168,7 @@ fn socket_export_stream(
     }
     let payload = sock(req, socket)?;
     let (family, blocking) = (payload.family, payload.blocking);
-    // A socket a wait holds (#2601) keeps its fd its own until the wait
+    // A socket a wait holds keeps its fd its own until the wait
     // returns, so a callback served in the wait exports none.
     let owned = match std::mem::take(&mut payload.handle) {
         Handle::Own(owned) => owned,

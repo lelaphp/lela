@@ -51,14 +51,14 @@ pub(crate) const MAP: &str = "AGENTS.md";
 pub(crate) const LOCAL: &str = ".claude/harness.local.md";
 /// The volatile sections of the local file, in the order it renders them:
 /// §5's eight and the review coverage line, the instrument readings first
-/// and `port-map` with them since #148, a reading that moves with the store
-/// like the others and is otherwise renderable only by name. `review`,
-/// one line of the coverage `worktree land` writes, is the ninth, as Round
-/// 4's Q35 ruled; §5's sentence that counts them waits on a person's
-/// wording. `mutants` waits on its instrument and `permits` is rendered by
-/// name, its "this session" line kept (#3620 D1). `ci` and `tickets` come
-/// last, which ask GitHub, so they are read where the local file renders
-/// and never at a prompt (#3619).
+/// and `port-map` with them since harness revision 31, a reading that
+/// moves with the store like the others and is otherwise renderable only
+/// by name. `review`, one line of the coverage `worktree land` writes, is
+/// the ninth, as Round 4's Q35 ruled; §5's sentence that counts them waits
+/// on a person's wording. `mutants` waits on its instrument and `permits`
+/// is rendered by name, its "this session" line kept (harness revision
+/// 180). `ci` and `tickets` come last, which ask GitHub, so they are read
+/// where the local file renders and never at a prompt.
 pub(crate) const LOCAL_SECTIONS: [&str; 9] = [
     "budget",
     "phpt",
@@ -78,8 +78,8 @@ fills them, once a person has run `computed trust` for this clone where it has n
 /// its machine holds, or the tree alone, as a tracked region carries it.
 /// Against the tree no reading is read, so the render is the same bytes on
 /// a full worktree and a fresh clone and only a tracked file moves it
-/// (harness-design.md §5, revision 6; #630), and a table drops its
-/// `reading` column, which could only say `no reading` (#2377).
+/// (harness-design.md §5, revision 6), and a table drops its
+/// `reading` column, which could only say `no reading`.
 #[derive(Debug, Clone, Copy)]
 pub enum Against<'a> {
     Checkout(&'a Store),
@@ -89,7 +89,7 @@ pub enum Against<'a> {
 impl<'a> Against<'a> {
     /// The checkout's readings, or none against the tree. A file of the
     /// store that is no reading costs its own row and is named on stderr,
-    /// never the section (#1235): stdout is the rendering a region holds,
+    /// never the section: stdout is the rendering a region holds,
     /// and a tracked region never carries this machine's store.
     fn readings(self) -> Result<Vec<Reading>> {
         let Against::Checkout(store) = self else {
@@ -288,10 +288,10 @@ impl Table {
 
 /// The sections that grow by a row per crate, each with its name on the
 /// command line and what its settled rows are, in the words of the line
-/// that counts them (#1608). Each is a section of the local facts, which
-/// the engine caps as one block (§5, #64), and a row per crate is a block
-/// that outgrows the cap as the crates land; so without `--uncut` the rows
-/// a session acts on are rendered, and the settled are one line.
+/// that counts them. Each is a section of the local facts, which the
+/// engine caps as one block (§5), and a row per crate is a block that
+/// outgrows the cap as the crates land; so without `--uncut` the rows a
+/// session acts on are rendered, and the settled are one line.
 fn settled_rows(section: Section) -> Option<(&'static str, &'static str)> {
     match section {
         Section::Budget => Some((
@@ -378,16 +378,16 @@ pub(crate) fn session_of_stdin() -> Option<String> {
 }
 
 /// The map and the local facts, the latter followed by the week's ticket
-/// closes in one line ([`tickets`], #1157) and, when `session_id` is
+/// closes in one line ([`tickets`]) and, when `session_id` is
 /// known and the log holds a denial of its own, by the rules this session
 /// fired with their counts (§4.6, "this session"). As Markdown
 /// the two are one text, the map first; as JSON they are the object
 /// `{"map", "facts"}`, since the engine caps a context block and the hook
-/// hands them over as two (#64). The map is tracked and must exist; the
+/// hands them over as two. The map is tracked and must exist; the
 /// local file is written from `local_template` when the clone has none or
 /// its [`skeleton`] is not the template, so a template that moved reaches
-/// a clone that rendered the old one (#3620 D1), and the hook's `computed
-/// run` has the file to render next time.
+/// a clone that rendered the old one (harness revision 180), and the
+/// hook's `computed run` has the file to render next time.
 pub fn session(
     manifest: &Manifest,
     store: &Store,
@@ -416,7 +416,8 @@ pub fn session(
         facts.push('\n');
     }
     // What a person's file carries that parses but does not validate, so
-    // an edit is seen before the next call meets it (#3618 ruling 4).
+    // an edit is seen before the next call meets it (ruling 4 of harness
+    // revision 184).
     let defects = manifest.defects();
     if !defects.is_empty() {
         write!(facts, "\n## defects\n\n").ok();
@@ -496,7 +497,7 @@ const EVERY_ROW: &str = "Every row with its reason whole: \
 `cargo xtask status --section divergence --uncut`, which `docs/divergence.md` renders.";
 
 /// What the divergence section says under its counts when a cause other
-/// than debt has rows: that the total leaves them out (#2220, #2462).
+/// than debt has rows: that the total leaves them out (ruled 2026-10-07).
 const APART: &str = "A row of another cause is counted on its own line after the total: \
 `php-ub` records php's undefined behaviour or crash, `by-design` a difference the design or an ADR \
 chose, `oracle-build` one of the oracle's build until what its `retires` names.";
@@ -519,12 +520,12 @@ fn against_target(manifest: &Manifest) -> String {
 /// The widest a reading's message renders in a Markdown cell, in
 /// characters. A Markdown table is what a session scans, and the local
 /// facts it is handed at start are eight sections under the engine's cap
-/// on one block (§5, #64); so a row says its message in one line of at
+/// on one block (§5); so a row says its message in one line of at
 /// most this many, and a number the reading holds at zero, which says
 /// nothing happened, is left out of its `numbers` cell. `--format json`
-/// is the reading whole, every number and the message uncut (#820). A
+/// is the reading whole, every number and the message uncut. A
 /// rule's text is rendered as written. An `open` divergence's reason is
-/// cut to the same width, the only rows the facts block lists (#821);
+/// cut to the same width, the only rows the facts block lists;
 /// every reason stays whole in `docs/divergence.toml`, under `--uncut`
 /// (which `docs/divergence.md` renders) and under `--format json`
 /// (Mitchell, 2026-09-26).
@@ -614,7 +615,7 @@ impl Row {
     /// The `sessions` fact as `id=count` pairs, newest first, the session
     /// by its first eight characters, a call without one as `-`; with
     /// `keep`, the newest `keep` and the rest counted as `+N more`, so the
-    /// cell does not grow with the append-only log (#1618).
+    /// cell does not grow with the append-only log.
     fn sessions(&self, keep: Option<usize>) -> String {
         self.facts
             .get("sessions")
@@ -730,7 +731,7 @@ fn budget(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
 }
 
 /// The rows whose reading says its crate is not yet created, folded into
-/// one at the end of the section (#64): twenty rows of "not yet created"
+/// one at the end of the section: twenty rows of "not yet created"
 /// carry one fact, and the session block has a cap. The row's `key` cell
 /// says "N crates not yet created", its reading is a skip naming them,
 /// stamped at the newest of the folded, and a lone row stays as it is.
@@ -765,7 +766,7 @@ fn fold_uncreated(rows: Vec<Row>, key: &str) -> Result<Vec<Row>> {
 /// The divergence section: the registry's rows, a covering row's id with
 /// how many ids it covers beside its own, then counts by kind (rows) and
 /// status (columns) of the debt rows with their total, a covering row
-/// counted once, and a line per other cause after it (#2462). The total is
+/// counted once, and a line per other cause after it. The total is
 /// what the day-30 target reads, held to the manifest's `[divergence]
 /// target`. It reads no reading; the registry is the truth and this is its
 /// view (harness-design.md §4.3).
@@ -774,7 +775,7 @@ fn fold_uncreated(rows: Vec<Row>, key: &str) -> Result<Vec<Row>> {
 /// what `docs/divergence.md` renders. Without it they are the `open` rows
 /// alone, since `done` fails while one touches the scope, followed by the
 /// command that reads the rest: the local facts carry this, and it grows
-/// with the kinds and not with each accepted row (#821).
+/// with the kinds and not with each accepted row.
 fn divergence(
     manifest: &Manifest,
     registry: &Registry,
@@ -856,7 +857,7 @@ fn divergence(
 
 /// The divergence section's counts: a line per kind a debt row is of, the
 /// total of those, which the day-30 target reads, then a line per other
-/// cause a row is of (#2220, #2462).
+/// cause a row is of (ruled 2026-10-07).
 fn counts_table(counts: &Counts, out: &mut String) {
     let lines = (count_lines(counts).into_iter()).map(|(name, [open, accepted, fixed])| {
         let counted = [open, accepted, fixed, open + accepted + fixed];
@@ -917,10 +918,10 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
 
 /// The `phpt` section: per subset, the reading off the log that stands
 /// for the track `root` is on, [`reading::Chain::standing`], and never a
-/// retired branch's appended after it (#787). This is xtask's rule; the
+/// retired branch's appended after it. This is xtask's rule; the
 /// dashboard keeps one of its own, the latest reading in time on the
 /// chain, read off the store's log itself and not off this section, as its
-/// README says (#845, #1717). A reading that [`outlived`] its subset is
+/// README says. A reading that [`outlived`] its subset is
 /// left out.
 fn standing(manifest: &Manifest, store: &Store, root: &Path) -> Result<Vec<Row>> {
     let log = store.history("phpt")?;
@@ -934,7 +935,7 @@ fn standing(manifest: &Manifest, store: &Store, root: &Path) -> Result<Vec<Row>>
 
 /// Whether a phpt row is the reading of a crate whose row owns no subset
 /// any more, as `php_sapi`'s is since each host's row took its own
-/// directory (ADR-0008, #1269): those tests are the hosts' rows' now, and
+/// directory (ADR-0008): those tests are the hosts' rows' now, and
 /// the reading that outlived its subset would stand beside them for good.
 fn outlived(manifest: &Manifest, row: &Row) -> bool {
     scope_of(row).is_some_and(|scope| {
@@ -979,7 +980,7 @@ const SIZE: [&str; 8] = [
 ];
 
 /// The phpt rows as Markdown: one per subset, each comparison folded into
-/// its subset's row (#1210). A comparison is its status and the numbers
+/// its subset's row. A comparison is its status and the numbers
 /// that judge, `held=4833` against the base, `borked=4 failed=2` under the
 /// oracle; a comparison with no row of a run to fold into, which a
 /// control's comparison against a commit is too, since the control's own
@@ -1011,8 +1012,8 @@ fn compared(rows: Vec<Row>) -> Vec<Row> {
 }
 
 /// The `track` section: the last run of `xtask track work`, read off the
-/// append-only log, whose order is the order the readings were written in
-/// (#117). One row per step of that run, then the run's own, scoped to
+/// append-only log, whose order is the order the readings were written in.
+/// One row per step of that run, then the run's own, scoped to
 /// [`track_work::RUN`], which is what closes it; a run still going is
 /// every step it has taken so far. The runs before it are in the log and
 /// not here: the section is the last run.
@@ -1031,7 +1032,7 @@ fn last_run(log: &Log) -> Vec<Row> {
         .collect()
 }
 
-/// The `usage` section (#210): the last reading of `instrument` under each
+/// The `usage` section: the last reading of `instrument` under each
 /// scope, read off the append-only log as the `track` section is, since a
 /// retired worktree's readings reach the main checkout's store through its
 /// log alone; one row per scope, a ticket's number or a session's id, in
@@ -1142,15 +1143,16 @@ fn permits(
 /// session and in total, the calls handed to the next candidate, and, when
 /// `this` names a session, its count. The manifest's rules, then permit's
 /// own three, which no manifest row names and which a section that read
-/// the manifest alone would leave unsaid (#16).
+/// the manifest alone would leave unsaid.
 ///
-/// The two columns are two questions and #118 is what came of answering
-/// them with one number: `denials` counts what a rule refused, `handed on`
-/// counts the calls a build passed to the candidate that rebuilds, which
-/// judged them. A walk is not a refusal, so the second never adds to the
+/// The two columns are two questions, and answering them with one number
+/// read a stale build that handed its call on as a failing reading:
+/// `denials` counts what a rule refused, `handed on` counts the calls a
+/// build passed to the candidate that rebuilds, which judged them. A walk
+/// is not a refusal, so the second never adds to the
 /// first. `judged` is the calls the rule judged, the denominator of its
 /// denials, and `at pre-commit` what a diff judged there was refused,
-/// never an agent's call (#3619).
+/// never an agent's call.
 fn permit_rows(
     manifest: &Manifest,
     readings: &[Reading],
@@ -1251,7 +1253,7 @@ struct InstrumentLine {
     last_failure: Option<String>,
     /// Read within the manifest's window and no failure within it; none
     /// when it has no window, and for an instrument whose reading cannot
-    /// fail, which is never quiet (#3619).
+    /// fail, which is never quiet.
     silent: Option<bool>,
 }
 
@@ -1341,7 +1343,7 @@ fn bundle(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
         .collect()
 }
 
-/// The `modules` section (#1795): each item lock's lines counted by the
+/// The `modules` section: each item lock's lines counted by the
 /// module that defines them, from the `groups` of the seam's latest
 /// api-check reading, a seam in the manifest's order and its modules the
 /// widest first, each with its share of the lock and the commit the
@@ -1415,7 +1417,7 @@ struct ModuleRow<'a> {
 
 /// The paths of the working tree's status the `git` section prints below
 /// the branch's line: a merge that stages hundreds of files would
-/// otherwise push the local facts over the engine's cap alone (#822).
+/// otherwise push the local facts over the engine's cap alone.
 const STATUS_LINES: usize = 20;
 
 /// The `git` section, volatile: the last ten commits and the status of
@@ -1447,27 +1449,27 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
     })
 }
 
-/// The `oracle` section: the pin as this machine has it (#36), from the
+/// The `oracle` section: the pin as this machine has it, from the
 /// pin and the process's environment alone. Seven rows: the tree's
 /// variable by name, its value and whether it is set; the promise's
 /// likewise; the pin's path and whether it is a directory, or that the
-/// pin states none (#4260); its tag and commit as `[source]` states
-/// them, which the corpus section clones at (#66); where
+/// pin states none; its tag and commit as `[source]` states
+/// them, which the corpus section clones at; where
 /// [`crate::oracle::Source::tree`] found the tree, the variable's or the
 /// pin's, or the absence it named; and the pinned php, its version, keg
 /// path and md5, the Homebrew formula the keg is poured from, `php`
 /// where the pin names none, and the bottle of it the keg path names,
-/// the version with the formula's revision where it has one (#4383). An
+/// the version with the formula's revision where it has one. An
 /// eighth, `closure`, names the kegs
 /// `[closure]` records php loading, each at its version, where the pin
-/// records them (#2657), with the record's digest, and a `variant` row
+/// records them, with the record's digest, and a `variant` row
 /// per `[variant.<name>]` that pins a build for this machine's platform,
-/// its path and md5 (#2298), and the macOS build's closure digest (#2935).
+/// its path and md5, and the macOS build's closure digest.
 /// CI reads the two names off the JSON, `tree.variable` and
 /// `promise.variable`, and sets them under those names, so the workflow
 /// spells neither; the oracle runner pours the formula `binary` names at
-/// its bottle, holds the keg's php to that md5 (#2253) and pins the keg
-/// (#4383), pours and pins each keg `closure` names at its version, and
+/// its bottle, holds the keg's php to that md5 and pins the keg,
+/// pours and pins each keg `closure` names at its version, and
 /// lays each of `variants` at its path by its md5.
 fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
@@ -1589,7 +1591,7 @@ fn oracle_row(out: &mut String, fact: &str, variable: &str, value: &str, state: 
     writeln!(out, "| {fact} | {variable} | {value} | {state} |").ok();
 }
 
-/// The `corpus` section: what CI checks out of the pinned php-src (#1713),
+/// The `corpus` section: what CI checks out of the pinned php-src,
 /// from the pin and [`phpt::ROOTS`] alone. The tag and the commit to clone
 /// at, the `.phpt` files the pin counts in the whole tree, which a
 /// checkout holding fewer has narrowed, git's sparse patterns for the
@@ -1598,10 +1600,9 @@ fn oracle_row(out: &mut String, fact: &str, variable: &str, value: &str, state: 
 /// Beside the checkout, `targets`: where a workspace keeps the targets
 /// under the pin, the main oracle's and each variant's this machine pins,
 /// relative to its root, which CI keeps between runs so an engine's
-/// reading is held to its subset's target (#1733) and a bound on
-/// `target/` keeps alone (#2299); and `hosts`,
-/// each host the lane hands a test to by its crate, package and binary
-/// ([`HOSTS`]), which CI builds (#1908).
+/// reading is held to its subset's target and a bound on `target/` keeps
+/// alone; and `hosts`, each host the lane hands a test to by its crate,
+/// package and binary ([`HOSTS`]), which CI builds.
 fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let patterns: Vec<String> = phpt::ROOTS.iter().map(|root| root.pattern()).collect();
@@ -1705,7 +1706,7 @@ const AT: Column = Cell("at", |r| r.of(|x| x.at.to_string()));
 /// The rules as the map carries them: rule, ADR, predicate and reading.
 /// The text a rule's failure prints is the last column, which `--uncut`
 /// and JSON alone show, so the map holds its room under the engine's cap with
-/// every row at "no reading" (harness-design.md §4.6, #1772).
+/// every row at "no reading" (harness-design.md §4.6).
 /// Where [`RULES`]' text column stands, the columns before it the map's.
 const RULE_TEXT: usize = 4;
 
@@ -1773,7 +1774,7 @@ const TICKET: Columns = &[
 ];
 
 /// The numbers the `track` section shows in columns of their own: what
-/// the ticket's session spent (#210), blank where no usage reading said.
+/// the ticket's session spent, blank where no usage reading said.
 const SPENT: [&str; 3] = ["usd", "tokens", "turn"];
 
 /// The `track` section: one row per step of the last run, the ticket it
@@ -1824,7 +1825,7 @@ const PERMITS: Columns = &[
 ];
 
 /// The rules this session fired, each with its count: the rest of each
-/// row is the local facts' `permits` section already (#1210).
+/// row is the local facts' `permits` section already.
 const THIS_SESSION: Columns = &[Fact("rule"), FIRED];
 
 /// How often a rule fired in this session.
@@ -2017,7 +2018,7 @@ mod tests {
 
     /// A reading of a crate whose row names no subset outlived its subset,
     /// its comparisons with it; a host's, a directory's and an extension's
-    /// stand (#1269).
+    /// stand.
     #[test]
     fn a_reading_of_a_crate_with_no_subset_outlived_it() {
         let manifest = crate::manifest::Manifest::load(&crate::built_root()).unwrap();
@@ -2041,7 +2042,7 @@ mod tests {
     /// included, and `@control` into the engine's run, of a lane too. A
     /// control's own
     /// comparison has no row to fold into, its control's being folded, so
-    /// it stays a row of its own rather than vanishing (#1744).
+    /// it stays a row of its own rather than vanishing.
     #[test]
     fn a_comparison_folds_into_the_row_of_its_run() {
         let row = |scope: &str| {

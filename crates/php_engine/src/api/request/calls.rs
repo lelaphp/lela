@@ -50,7 +50,7 @@ pub(super) struct Calls {
     /// The natives the request has entered, in order, where the witness
     /// runner asked for them (harness §4.5 condition 2, revision 58);
     /// `None` records nothing, and is what a request holds unless its
-    /// engine or its test asked (#2168).
+    /// engine or its test asked.
     trace: Option<Vec<crate::trace::Entered>>,
     /// Whether `trace` records, the byte every native's entry tests,
     /// where the `Option`'s own test is a word compared with a constant.
@@ -1975,8 +1975,8 @@ impl Code<&Request> {
     /// extension registers from its native or lifecycle hook, a stream
     /// wrapper or a filter, is called from wherever the program reaches
     /// it, and a debug build tags what it allocates there with the
-    /// extension that supplied it, as it tags the extension's natives
-    /// (#1993, #2113). A release build keeps nothing.
+    /// extension that supplied it, as it tags the extension's natives.
+    /// A release build keeps nothing.
     #[must_use]
     pub fn supplier(self) -> Supplier {
         Supplier {

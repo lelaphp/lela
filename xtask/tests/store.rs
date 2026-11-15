@@ -104,7 +104,7 @@ fn a_missing_reading_is_none_and_a_missing_store_has_no_readings() {
 /// The exit-code rule (harness-design.md §4.2, §4.5): an instrument whose
 /// readings all pass or are skipped exits 0, and one with any failing
 /// reading exits 1, however many it wrote. A measurement alone stands
-/// outside it (§4.4, #61): a bench's reading keeps `fail` against its
+/// outside it (§4.4): a bench's reading keeps `fail` against its
 /// bar, so `status` shows it, and the writer owes no exit for it, since a
 /// bench number is a claim a person reads with the A/A control.
 #[test]
@@ -220,7 +220,7 @@ fn a_crate_not_yet_created_gets_a_reading_without_a_stamp() {
     assert!(stamped.at.to_string().ends_with('Z'));
 }
 
-/// A reading reaches the log whole or not at all (#56): two instruments
+/// A reading reaches the log whole or not at all: two instruments
 /// appending at once, which pre-commit and a track's worktrees do, each
 /// hand a line to the file in one write, so a few hundred readings from two
 /// writers over one log leave every line parseable and every one present.
@@ -321,7 +321,7 @@ fn a_torn_line_is_counted_and_named_and_the_rest_is_read() {
 /// and in the index, a line the worktree tore kept as it was in the log's
 /// `unread` file, where it tears nothing beside it, and a last line
 /// without its newline given one. The other store's log is emptied, so a
-/// second landing lands nothing (#2164).
+/// second landing lands nothing.
 #[test]
 fn another_stores_log_is_landed_and_emptied() {
     let dir = scratch("land");
@@ -366,7 +366,7 @@ fn another_stores_log_is_landed_and_emptied() {
     );
 }
 
-/// A reading's file is replaced, never rewritten in place (#1235): the
+/// A reading's file is replaced, never rewritten in place: the
 /// new reading goes to a file beside it and is renamed over the path, so
 /// a reader holding the old file, here a hard link to it, still reads the
 /// old reading whole, where a truncate and a write would have cut it
@@ -401,7 +401,7 @@ fn a_reading_is_written_beside_its_file_and_renamed_over_it() {
 }
 
 /// A reading is written under the reading's version, `v = 2`, with the
-/// scope's key spelled `key` (harness-design.md §4.2, #1719): in the
+/// scope's key spelled `key` (harness-design.md §4.2): in the
 /// scope's file, its index entry and its line of the log alike.
 #[cfg(tracked)]
 #[test]
@@ -434,10 +434,11 @@ fn a_reading_is_written_under_its_version_with_its_key() {
     assert_eq!(store.read("witness", "ext/pcre").unwrap(), Some(written));
 }
 
-/// A reading written before #1719 carries no `v` and spells its key
-/// `tree`. The store reads it as version 1 wherever it stands: a scope's
-/// file, a line of the log, and a log another store landed here, whose
-/// reading the index then keeps under its key, written again as version 2.
+/// A reading written before harness revision 95 carries no `v` and spells
+/// its key `tree`. The store reads it as version 1 wherever it stands: a
+/// scope's file, a line of the log, and a log another store landed here,
+/// whose reading the index then keeps under its key, written again as
+/// version 2.
 #[test]
 fn a_reading_of_the_first_version_spelling_its_key_tree_still_reads() {
     const KEY: &str = "dd29800cbb457eb99968a70299edce74213a45b1";
@@ -506,7 +507,7 @@ fn a_reading_of_a_version_this_harness_does_not_know_is_refused() {
 
 /// A file of the store that is no reading, one a crash left empty or cut
 /// short, is named by its path and skipped, and every other reading is
-/// read (#1235), as the log's torn line is.
+/// read, as the log's torn line is.
 #[test]
 fn an_unreadable_file_is_named_and_the_rest_are_read() {
     let dir = scratch("unreadable");
@@ -529,7 +530,7 @@ fn an_unreadable_file_is_named_and_the_rest_are_read() {
     );
 }
 
-/// A store's log is `log/<instrument>.jsonl` alone (#2934, #2973): a
+/// A store's log is `log/<instrument>.jsonl` alone: a
 /// `log.jsonl` from before revision 83 is no log of the store's, read by
 /// no history and landed by no retire, and left where it stands.
 #[test]

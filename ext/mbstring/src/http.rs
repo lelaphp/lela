@@ -486,8 +486,8 @@ fn mb_http_input(
 /// Served as a request of the web, the `http` runs of
 /// `docs/perf/workloads/mbstring_profiles_2831.php`, its two arguments in
 /// the query where the CLI reads them from `$argv`, are the one web-only
-/// path among the native workloads, which makala's bars do not serve
-/// (#4366): the `START` call's `Content-Type`, the charset of the
+/// path among the native workloads, which makala's bars do not serve:
+/// the `START` call's `Content-Type`, the charset of the
 /// response encoding, is the response's, held to the pinned php-fpm's.
 ///
 /// ```php

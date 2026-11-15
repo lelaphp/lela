@@ -206,7 +206,7 @@ struct Query<'a> {
 impl Query<'_> {
     /// `php_url_encode_scalar`: `key=value`, the separator before any
     /// but the first. A call of its own, so what it takes is off the
-    /// stack of a nest walked level by level (#3159).
+    /// stack of a nest walked level by level.
     #[inline(never)]
     fn scalar(
         &mut self,
@@ -393,7 +393,7 @@ impl Query<'_> {
     /// The key prefix a nested array or object under `key` is walked
     /// with: `key%5B` at the top, `outer key%5D%5B` below it, an integer
     /// key behind the numeric prefix. A call of its own, so what building
-    /// it takes is off the stack of a nest walked level by level (#3159).
+    /// it takes is off the stack of a nest walked level by level.
     #[inline(never)]
     fn nested_prefix(
         &self,
@@ -445,7 +445,7 @@ enum KeyText {
 /// (`zend_unmangle_property_name_ex`): a protected one from a scope the
 /// object is an instance of, a private one from its declaring class;
 /// `None` for one the scope may not see. A call of its own, so the name
-/// it builds is off the stack of a nest walked level by level (#3159).
+/// it builds is off the stack of a nest walked level by level.
 #[inline(never)]
 fn visible_name(
     req: &mut Request,

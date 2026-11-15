@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -22,7 +22,7 @@ fn armed(source: &str) -> String {
 }
 
 /// `ZipArchive::addPattern` and `addGlob` keep none of the names they
-/// list to match (#2087).
+/// list to match.
 #[test]
 fn the_names_a_pattern_lists_are_given_up() {
     let stdout = armed(

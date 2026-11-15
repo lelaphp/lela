@@ -1124,7 +1124,7 @@ fn reset_handlers(req: &mut Request, object: PhpObject) {
 ///
 /// From inside the `CurlHandle`'s own write callback `curl_reset` and
 /// `curl_close` refuse, and the transfer, which holds its `CURL *`, runs
-/// to its end (#2317).
+/// to its end.
 ///
 /// ```php
 /// $f = tempnam(sys_get_temp_dir(), 'curl');

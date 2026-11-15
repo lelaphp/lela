@@ -1,5 +1,5 @@
 //! timelib, compiled from the sources vendored at `lib/` (design §7.2,
-//! §12's row on vendored C, #711): `php-src/ext/date/lib` at the tag
+//! §12's row on vendored C): `php-src/ext/date/lib` at the tag
 //! `oracle.toml` pins, byte for byte, with its bundled timezone database
 //! (`timezonedb.h`). The file list and the flags are `config0.m4`'s
 //! `timelib_sources` and `PHP_TIMELIB_CFLAGS`; nothing is discovered on
@@ -30,7 +30,7 @@ fn main() {
     // php compiles C and C++ with -DNDEBUG unless it is built with
     // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
     // two builds that set ZEND_DEBUG, as debug assertions are this build's:
-    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    // assert() is live exactly where Rust's debug_assertions is.
     if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
         build.define("NDEBUG", None);
     }

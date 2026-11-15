@@ -221,7 +221,7 @@ impl DbhState {
 }
 
 /// A persistent `pdo_dbh_t` while the engine's pool keeps it between
-/// requests (#4474): its attributes and its connection idle
+/// requests: its attributes and its connection idle
 /// ([`IdleConnection`]), and no field of a request's, neither the
 /// statement a failed `query()` left, the statement class or its
 /// arguments, the constructor's copies, nor the objects sharing it.
@@ -359,7 +359,7 @@ pub(crate) fn post_deactivate(req: &mut Request) {
 /// destroys `EG(persistent_list)` (`Z/Zend/zend.c:1166`): each the pool
 /// keeps closed on the shutdown request through its connector's `closer`,
 /// as `php_pdo_pdbh_dtor` reaches `dbh_free` (`pdo_dbh.c:1617`, `:1547`), so
-/// `pdo_mysql` sends its `COM_QUIT` (#1961).
+/// `pdo_mysql` sends its `COM_QUIT`.
 pub(crate) fn engine_end(req: &mut Request) {
     let idle = req
         .engine::<Pooled>()

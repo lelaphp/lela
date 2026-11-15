@@ -10,7 +10,7 @@
 //! laid there to fail some instrument on purpose. One reading per crate,
 //! of instrument `vocab`; a crate whose sources do not exist yet gets none,
 //! and where the manifest has no `avoid_from` rule each crate's is a skip
-//! that says so (#3182).
+//! that says so.
 //!
 //! The scan is textual, not a parse. A public item is a line beginning
 //! `pub` followed by an item keyword and a name, a `pub` field, a variant of
@@ -162,21 +162,22 @@ pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Rea
 
 /// The scope of the reading [`message`] writes: one scope for every
 /// commit message, whose log is the record a later ruling on refusal reads
-/// (#3629), and no crate's, so it never stands for a crate's reading.
+/// (ruled 2026-10-30), and no crate's, so it never stands for a crate's
+/// reading.
 pub(crate) const MESSAGE: &str = "message";
 
 /// A commit message held to the glossary its commit's crates are held to,
-/// as `scripts/hooks/commit-msg` asks (#3624): every `avoid_from` rule
+/// as `scripts/hooks/commit-msg` asks: every `avoid_from` rule
 /// that covers a crate with a staged change lends its terms, so a harness
 /// commit is held to the Harness section as the harness's rustdoc is, and
 /// a commit that touches no such crate is held to nothing. The prose is
 /// read as rustdoc prose is, inline code spans and fenced blocks aside,
 /// and so are what is not prose: git's `#` comments, a trailer line
-/// (`Ticket: #3624`) and the subject's leading path, the file or crate the
+/// (`Ticket: #n`) and the subject's leading path, the file or crate the
 /// commit touches. Each avoided word is printed with its line, and the
 /// reading under [`MESSAGE`], stamped over what is staged, lists them: a
 /// note and never a refusal, until a person rules otherwise on these
-/// readings (#3629).
+/// readings.
 pub fn message(root: &Path, manifest: &Manifest, file: &Path) -> Result<Reading> {
     let staged: Vec<String> = crate::git::staged(root)?
         .into_iter()
@@ -244,7 +245,7 @@ pub fn message(root: &Path, manifest: &Manifest, file: &Path) -> Result<Reading>
     } else {
         let list = joined(findings.iter(), "\n");
         format!(
-            "{} avoided words in the commit message, noted and not refused (#3629)\n{list}",
+            "{} avoided words in the commit message, noted and not refused\n{list}",
             findings.len()
         )
     };
@@ -503,7 +504,7 @@ fn without_code_spans(text: &str) -> String {
 /// a crate's key lists them ([`crate::git::files`]), in path order;
 /// `target/` is skipped, and so is `fixtures/`, whose files are other
 /// crates' sources. A file git ignores is in no commit and moves no key,
-/// so it is not read (#4620). Git lists from the workspace `root` with the
+/// so it is not read. Git lists from the workspace `root` with the
 /// crate as the pathspec, as budget does: run in the crate's directory
 /// under the `GIT_DIR` a linked worktree's hook exports, git takes that
 /// directory for the top of the work tree and reads no `.gitignore` above

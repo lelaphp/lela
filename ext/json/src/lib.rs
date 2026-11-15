@@ -209,7 +209,7 @@ fn error_message(code: i64) -> &'static str {
 
 /// `php_json_exception_ce`, resolved once as the engine starts
 /// (ADR-0005: engine state, immutable), so a raise names the class by
-/// its identity, never by a name looked up as it throws (#3403).
+/// its identity, never by a name looked up as it throws.
 #[derive(Clone, Copy, EngineState)]
 struct Raised(EngineClassId);
 
@@ -364,7 +364,7 @@ fn depth_within(req: &mut Request, depth: i64, position: u32) -> Result<(), Thro
 /// returns rather than growing on to the hard limit. Each case crosses the
 /// limit where a new chunk is asked for, whose figure is the chunk's in any
 /// layout; a huge block's growth in place names a figure the address space
-/// decides, in php's process as in the engine's (#3442):
+/// decides, in php's process as in the engine's:
 ///
 /// ```php
 /// ini_set('memory_limit', '4M');

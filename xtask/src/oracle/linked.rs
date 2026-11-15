@@ -11,12 +11,12 @@
 //! request is named the recipe's `script_name`, so `__FILE__` and the
 //! `in %s on line %d` of a diagnostic read `witness.php` as they do under
 //! the fresh-process adapter, and not `Standard input code`, the name
-//! `serve_capture` gives a piped source (#293); the file stands in a
+//! `serve_capture` gives a piped source; the file stands in a
 //! scratch tree of this run's own and the request's working directory is
 //! that tree, as the fresh-process adapter runs the program in its
 //! directory, so an `include` of the witness's own file reads the same
 //! file under both adapters and the tree's path is normalised to the
-//! recipe's token where php's would be (#396); and the recipe's ini is
+//! recipe's token where php's would be; and the recipe's ini is
 //! laid over the engine's defaults, so `precision`, `error_reporting` and
 //! the rest are the pin's, and a named `[regime.<name>]` of the pin lays
 //! its own after them, in the order the fresh-process adapter passes the
@@ -24,28 +24,28 @@
 //! runs under the recipe's environment, cleared and rebuilt from
 //! `[recipe.env]` as the fresh-process adapter's is ([`Recipe::environ`]),
 //! and its request reads that environment, so `getenv()`, `$_ENV` and the
-//! C library's time code read the recipe's `TZ` and not the shell's
-//! (#1077, #1130); of a regime's `args`
+//! C library's time code read the recipe's `TZ` and not the shell's;
+//! of a regime's `args`
 //! this adapter takes `-e`, building the engine with extended info as a
 //! host's `-e` builds it, and refuses any other, since it has no command
-//! line to hand them (#1780, #1822, [`Linked`]). An entry the engine has
+//! line to hand them ([`Linked`]). An entry the engine has
 //! no name for is carried and read by nobody, which is what php does with
 //! `opcache.*` when opcache is not loaded.
 //!
 //! **The streams.** The first stream is the sink's bytes; the second is
-//! `Capture`'s `stderr`, which is the CLI's second stream whole (#216):
+//! `Capture`'s `stderr`, which is the CLI's second stream whole:
 //! each log entry with `\n` after it, as `sapi_cli_log_message` writes,
 //! and what the error stream was given, in the order the request wrote
 //! them. That is the stream the fresh-process adapter reads from php's
 //! fd 2, and it goes through the recipe's normalisation the same way, so
 //! a `stderr` fence is held to what the engine wrote and a witness with
-//! no such fence asserts the engine wrote nothing there (#248).
+//! no such fence asserts the engine wrote nothing there.
 //!
 //! **A process of its own.** The engine is `sapi/cli`'s `php-linked`,
 //! built with the bundle's `linked` set in the lanes' profile at the
 //! first snippet that asks for it, from the workspace this harness was
 //! built in, and the harness links no engine of its own (harness §8,
-//! revision 84; #2166): an edit under `crates/` or `ext/` rebuilds that
+//! revision 84): an edit under `crates/` or `ext/` rebuilds that
 //! binary, never the one every hook runs. A thread that serves takes an
 //! idle `php-linked --serve`, or starts one, hands it the snippet as a
 //! request of files in a directory of its own, and leaves it idle again
@@ -98,7 +98,7 @@ pub(crate) fn serve(
 }
 
 /// [`serve`] by `server`, a binary standing for `php-linked` that a test
-/// hands a lane to serve through one that misbehaves (#1069), or the one
+/// hands a lane to serve through one that misbehaves, or the one
 /// built from the workspace where none is named; with the natives the
 /// request entered beside what it observed, in the order it entered them,
 /// one per line as the trace file holds them: what witness coverage counts
@@ -146,7 +146,7 @@ pub(crate) fn serve_by(
         .parse()
         .context("the linked engine wrote no status")?;
     // The request ended where php's process ends on `abort()`, which the
-    // binary, serving on, records beside its status (#3515).
+    // binary, serving on, records beside its status.
     let aborted = request.join("abort").exists();
     let observed = Observation {
         stdout: scratch.normalise(&recipe.normalise, read("stdout")),
@@ -302,7 +302,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    /// A server holds no fd beyond the three it is handed (#2550):
+    /// A server holds no fd beyond the three it is handed:
     /// one started holding the writing end of another's pipe as fd 3, as a
     /// server spawned while another thread's pipe is not yet close-on-exec
     /// holds it, lets that pipe reach its end while it stands idle.

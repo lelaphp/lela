@@ -44,8 +44,8 @@ fn str_repeat_is_declared_and_builds_a_string_past_two_mebibytes() {
 /// ArgumentCountError: str_repeat() expects exactly 2 arguments, 3 given
 /// ```
 ///
-/// The argument's name in the `ValueError` is #175's; what is held here
-/// is the class, the position and the tail.
+/// The argument's name in the `ValueError` is the argument helpers' to
+/// write; what is held here is the class, the position and the tail.
 #[test]
 fn the_count_below_zero_and_the_arity_are_php_s() {
     for (source, class, text) in [
@@ -150,7 +150,7 @@ fn extract_holds_the_array_it_walks_when_an_element_overwrites_its_variable() {
 /// as php's ref helpers walk its buckets (`ZEND_HASH_MAP_FOREACH`): a
 /// destructor served as a variable is overwritten that unsets a row
 /// ahead leaves it unvisited, and one that rewrites the row in place
-/// leaves the walk reading the new value (#2042).
+/// leaves the walk reading the new value.
 #[test]
 fn extract_refs_walks_the_array_live_under_a_destructor() {
     let script = |body: &str| {
@@ -182,14 +182,14 @@ fn armed(source: &str) -> (String, Option<String>) {
 /// brace is closed though the count said two. The strings allocated in
 /// `__serialize` are the size of the rows after it, so a walk that read
 /// on would read their blocks. Without the walk's end the debug build
-/// read the freed rows (#1989, #2150).
+/// read the freed rows.
 ///
 /// Here dax departs from php on purpose. php reads the freed table: the
 /// pinned php prints `s:10:"ZZZZZZZZZZ"` for the last row, and what it
-/// prints changes with the allocator; on #1989's own input it dies on a
-/// 4 GB allocation. No divergence row records it:
+/// prints changes with the allocator; on the input this was found with
+/// it dies on a 4 GB allocation. No divergence row records it:
 /// `docs/divergence.toml` is keyed by a compared site, and no witness or
-/// phpt compares this input. A row is added if one ever does (#1989).
+/// phpt compares this input. A row is added if one ever does.
 #[test]
 fn serialize_ends_a_nested_array_s_walk_where_a_serialize_method_destroys_it() {
     let (stdout, fatal) = armed(
@@ -203,8 +203,7 @@ fn serialize_ends_a_nested_array_s_walk_where_a_serialize_method_destroys_it() {
 /// as `print_hash` holds nothing. An element's `__debugInfo` that
 /// assigns over the reference holding the array's only owner destroys
 /// it mid-walk, and the walk ends there: the element it was lent is
-/// printed, no row after it is read, and the `)` is written (#2044,
-/// #2150).
+/// printed, no row after it is read, and the `)` is written.
 ///
 /// No divergence row records the walk's end: no witness or phpt
 /// compares this input.
@@ -225,8 +224,7 @@ fn print_r_ends_a_nested_array_s_walk_where_a_debug_info_method_destroys_it() {
 /// variable the reference names destroys the array mid-walk, and the
 /// foreach walk, holding nothing as `print_hash` holds nothing, ends
 /// there, so the strings allocated after are not read as its rows. The
-/// debug build read the freed rows and faulted before the foreach walk
-/// (#2105, #2150).
+/// debug build read the freed rows and faulted before the foreach walk.
 ///
 /// No divergence row records the walk's end: no witness or phpt
 /// compares this input.
@@ -243,9 +241,9 @@ fn print_r_ends_an_object_s_nested_array_where_a_debug_info_method_destroys_it()
 }
 
 /// `print_r` over an object whose property alone holds a nested array:
-/// the walk over the object's table pins each row for its step (#2197),
-/// and a pin keeps only a row's bytes (#2230), so an element's
-/// `__debugInfo` that assigns over the property destroys the array
+/// the walk over the object's table pins each row for its step, and a
+/// pin keeps only a row's bytes (design §4.4, revision 108), so an
+/// element's `__debugInfo` that assigns over the property destroys the array
 /// there, as php destroys it, and the walk over it ends at its
 /// destruction, its later rows unprinted.
 ///
@@ -292,7 +290,7 @@ fn accepted(listener: &std::net::TcpListener) -> Vec<(std::net::TcpStream, Vec<u
     conns
 }
 
-/// The persistent pool (design §4.10, #1172) across requests: two
+/// The persistent pool (design §4.10) across requests: two
 /// requests served in turn on one engine share one connection, as two
 /// requests of one php-fpm worker do, the second taking what the first
 /// gave back; two served at once hold two, as two workers do, since an
@@ -343,7 +341,7 @@ fn zend_multibyte_support_is_disabled_without_a_provider() {
     );
 }
 
-/// #1556: argument #5's bound is the integer php-8.5.12 prints,
+/// Argument #5's bound is the integer php-8.5.12 prints,
 /// `PHP_TIMEOUT_ULL_MAX / 1000000` (`Z/ext/standard/fsock.c:110`), on
 /// every platform, as the witness beside `fsockopen` holds it at the
 /// oracle's.
@@ -359,7 +357,7 @@ fn fsockopen_s_timeout_bound_is_the_integer_php_s_format_names() {
     );
 }
 
-/// #1986: `array_walk` holds no key of an element it has yet to visit.
+/// `array_walk` holds no key of an element it has yet to visit.
 /// The callback unsets the elements ahead, which frees their runtime
 /// keys, and then builds keys of the same size in the reverse order, so
 /// each takes the slot a freed key had. php's iterator walks the
@@ -384,8 +382,8 @@ echo implode(",", array_keys($a));"#,
     assert_eq!(stdout, "kkk0 ZZZ3 ZZZ2 ZZZ1 kkk0,ZZZ3,ZZZ2,ZZZ1");
 }
 
-/// #1987: `array_walk` over an object holds no name of a property it has
-/// yet to visit. The callback unsets the dynamic properties ahead, which
+/// `array_walk` over an object holds no name of a property it has yet
+/// to visit. The callback unsets the dynamic properties ahead, which
 /// frees their runtime-built names, and then writes properties under
 /// names of the same size in the reverse order, so each takes the slot a
 /// freed name had; php hands the callback the new properties in the
@@ -408,7 +406,7 @@ array_walk($o, function ($v, $k) use ($o) {
     assert_eq!(stdout, "ppp0=0 QQQ3=30 QQQ2=20 QQQ1=10 ");
 }
 
-/// #1987: a callback that lets go of the object the walk is over
+/// A callback that lets go of the object `array_walk` is over
 /// destroys it there, and the walk reads the variable again and raises
 /// php's `TypeError`, never reading the object's freed table.
 #[test]

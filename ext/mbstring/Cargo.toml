@@ -5,7 +5,7 @@ version = "0.0.0"
 edition.workspace = true
 # The port of php's mbstring.c, php_unicode.c, mb_gpc.c and php_mbregex.c
 # is the workspace's; libmbfl/ is vendored under its own LICENSE, the
-# LGPL-2.1, and compiled in (design §7.2, §12, revision 47, #1173).
+# LGPL-2.1, and compiled in (design §7.2, §12, revision 47).
 license = "MIT AND LGPL-2.1-only"
 rust-version.workspace = true
 publish = false
@@ -28,7 +28,7 @@ php_ext_standard = { path = "../standard" }
 
 # libmbfl is php-src's vendored copy, compiled by `build.rs` over the Zend
 # shim in `shim/`; oniguruma is the platform's, found through `pkg-config`
-# (design §7.2, #1173). Both are bound in `src/ffi/` alone (`unsafe.homes`).
+# (design §7.2). Both are bound in `src/ffi/` alone (`unsafe.homes`).
 [build-dependencies]
 cc = { workspace = true }
 pkg-config = { workspace = true }

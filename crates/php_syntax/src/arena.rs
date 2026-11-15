@@ -1,4 +1,4 @@
-//! The arena a parse lives in (ADR-0003, design §5.13, #2810): what
+//! The arena a parse lives in (ADR-0003, design §5.13): what
 //! dies with a compile, the source's tokens, its line table, the tree's
 //! shape, its nodes and their lists, and the compiler's temporaries, is
 //! bumped into one [`Arena`] and given up at once when the arena is
@@ -8,7 +8,7 @@
 //!
 //! The arena is the caller's, and nothing of it is the thread's: the
 //! engine keeps one per request and hands it to every compile the
-//! request makes, a file's bound for the unit cache among them (#4012),
+//! request makes, a file's bound for the unit cache among them,
 //! so the next compile bumps into the room the last one left and a
 //! small compile makes no allocation for its tree at all.
 //! [`crate::parse`] borrows it and the [`crate::Parsed`] it hands back
@@ -24,7 +24,7 @@
 //! own, which this crate reaches in safe code ([`ParseArena`],
 //! [`MappedVec`]): what a compile grew past [`KEPT`] and
 //! [`Scratch::KEPT`] goes back to the machine, where the system
-//! allocator would keep the pages dirty in its zone (#4020, #4064).
+//! allocator would keep the pages dirty in its zone.
 
 use std::cell::{Cell, RefCell, RefMut};
 
@@ -76,9 +76,9 @@ pub(crate) struct Scratch {
 impl Scratch {
     /// The most room of one stack an arena keeps between parses: a parse
     /// of a large file pays for its own and gives it up. It was read
-    /// with the arena's [`KEPT`] on #4064, and a compile that outgrows
-    /// either maps again, 234 mappings on Symfony's `about`, a cost ruled
-    /// on #4154.
+    /// with the arena's [`KEPT`], signed off 2026-11-03, and a compile
+    /// that outgrows either maps again, 234 mappings on Symfony's
+    /// `about`, a cost ruled 2026-11-05.
     const KEPT: usize = 64 * 1024;
 
     /// The longest source whose parse grows no stack near
@@ -108,8 +108,9 @@ impl Scratch {
 /// The most room the arena keeps when it is reset: the newest chunk,
 /// within this. A compile of a large file pays for its own and gives it
 /// up. php keeps none and starts each compile at 32 KiB; this was read
-/// with [`Scratch::KEPT`] on #4064, and a compile that outgrows either
-/// maps again, 234 mappings on Symfony's `about`, a cost ruled on #4154.
+/// with [`Scratch::KEPT`], signed off 2026-11-03, and a compile that
+/// outgrows either maps again, 234 mappings on Symfony's `about`, a cost
+/// ruled 2026-11-05.
 const KEPT: usize = 128 * 1024;
 
 impl Arena {

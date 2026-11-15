@@ -3,7 +3,7 @@
 //! the ini entries `ZEND_ATOL` reads, the status line
 //! `sapi_extract_response_code` reads with `atoi`, and the ini syntax's
 //! `get_int_val`; and, through `coerce` on the native face and `php_sapi`
-//! for the hosts, every extension's and host's call of them (#2634). One
+//! for the hosts, every extension's and host's call of them. One
 //! reading of each, so the edges agree: `strtol` saturates at the long's
 //! ends, and `atoi` is that truncated to `int`, as glibc's and the BSDs'
 //! `atoi` is `(int) strtol(s, NULL, 10)`.
@@ -15,13 +15,13 @@
 //!
 //! [`c_str`] is the string all of them read: a `char *` as `strlen` reads
 //! it, up to its first NUL, which is what php hands C, or prints with
-//! `%s`, of a string that may hold one (#2763).
+//! `%s`, of a string that may hold one.
 
 /// C's `isspace` under the thread's `LC_CTYPE`, the request's locale
 /// where `setlocale()` installed one: the six bytes [`is_whitespace`]
 /// names in the `C` locale, and under php's default `C.UTF-8` whatever
 /// the C library counts besides: `0xA0` on macOS and nothing on glibc,
-/// which `php_process`'s own test holds, so no witness pins it (#2796).
+/// which `php_process`'s own test holds, so no witness pins it.
 pub use php_process::is_space;
 
 /// php's own spelling of the white space C's `isspace` reads in the `C`

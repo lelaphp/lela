@@ -259,7 +259,7 @@ pub(crate) fn shell(req: &Request, command: &[u8]) -> Command {
 /// in a directory of its own, so the child is changed into the request's
 /// only where that is not the process's. A request whose host could not
 /// name the process's directory, `getcwd(3)` failing, was given none and
-/// stands in it (#2917).
+/// stands in it.
 fn in_request(req: &Request, command: &mut Command) {
     let cwd = req.environment().cwd();
     if !cwd.as_os_str().is_empty() && crate::ffi::process_dir().as_ref() != Some(&cwd) {
@@ -323,8 +323,8 @@ fn process_type(req: &mut Request) -> ResourceType {
 /// `waitpid_cached` (`Z/ext/standard/proc_open.c:235`): the status the
 /// resource cached once the child exited, else `waitpid(2)`, whose answer
 /// is cached where it says the child exited. A wait that blocks lends
-/// the request ([`Limits::blocking`]), `proc_close`'s (#2401); the
-/// resource is read before it and written after it, never during.
+/// the request ([`Limits::blocking`]), `proc_close`'s; the resource is
+/// read before it and written after it, never during.
 fn waitpid_cached(req: &mut Request, res: Resource, options: i32) -> std::io::Result<(i32, i32)> {
     let Some(process) = res.native::<Process>(req) else {
         return Err(std::io::Error::from(std::io::ErrorKind::NotFound));

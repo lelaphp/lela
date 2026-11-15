@@ -7,7 +7,7 @@ use super::*;
 /// tracked manifest in place of the tracked row: every `deny*.json` denied
 /// and every `allow*.json` let through. Under the row as tracked the same,
 /// save that until the paste the `allow-excused*.json` lines, the tier's
-/// one-subset reading, are denied with the rest (#3068).
+/// one-subset reading, are denied with the rest.
 #[test]
 fn the_nightly_flags_let_the_tier_s_one_subset_reading_through() {
     let tracked = Manifest::load(workspace()).unwrap();
@@ -54,10 +54,10 @@ fn the_nightly_flags_let_the_tier_s_one_subset_reading_through() {
     }
 }
 
-/// The two halves of the nightly lane the phpt runner asked for (#15):
+/// The two halves of the nightly lane the phpt runner asked for:
 /// the flag is denied wherever it stands in the call, not only beside the
-/// subcommand, by `lanes.nightly-flags` (#1860), save the tier's `--jit`
-/// lane on one subset `--subset` names (#3052), and upstream's runner is
+/// subcommand, by `lanes.nightly-flags`, save the tier's `--jit`
+/// lane on one subset `--subset` names, and upstream's runner is
 /// denied where it is run and not where it is cited, by `lanes.nightly`.
 /// The rule denied `--subset x --full` on neither count before, and denied
 /// reading the file on the second.
@@ -121,8 +121,8 @@ fn the_nightly_lane_is_denied_by_the_flag_and_not_by_a_citation() {
     }
 }
 
-/// `lanes.builder-subset`'s fixture (#1145, #1149), as `require_argv =
-/// "--subset"` under `with = "xtask phpt"` reads it (#1860): in a
+/// `lanes.builder-subset`'s fixture, as `require_argv =
+/// "--subset"` under `with = "xtask phpt"` reads it: in a
 /// checkout whose branch records a ticket the lane without `--subset` is
 /// denied, however xtask is run, and the subsets, an extension's and
 /// Zend/tests, as a word or after `=`, pass; the merge check's call
@@ -150,16 +150,16 @@ fn the_builder_subset_rule_denies_the_lane_in_a_ticketed_checkout_alone() {
     assert_eq!(rule(ticketed.path(), "deny-variable.json"), denied);
     assert_eq!(rule(ticketed.path(), "allow-equals.json"), None);
     // A message whose subject or body cites the instrument, under cargo
-    // or not, runs nothing (#790, #1771).
+    // or not, runs nothing.
     assert_eq!(rule(ticketed.path(), "allow-heredoc.json"), None);
     assert_eq!(rule(ticketed.path(), "allow-message-cargo.json"), None);
     // Reading the instrument's options runs no lane, and the exception is
-    // the instrument's own flag, not a later `-h` (#1424).
+    // the instrument's own flag, not a later `-h`.
     assert_eq!(rule(ticketed.path(), "allow-help.json"), None);
     assert_eq!(rule(ticketed.path(), "deny-help-elsewhere.json"), denied);
 }
 
-/// `lanes.nightly`'s heredoc fixtures (#790): a commit whose message has a
+/// `lanes.nightly`'s heredoc fixtures: a commit whose message has a
 /// line opening `run-tests.php:2950)` cites upstream's runner and runs
 /// nothing, so it passes; the runner first in the call, or after a
 /// separator, is still denied, and so is its run under php.
@@ -178,14 +178,14 @@ fn the_nightly_rule_denies_the_runner_where_it_is_run_and_not_a_message_line() {
     assert_eq!(rule("deny-separator.json"), denied);
     assert_eq!(rule("deny.json"), denied);
     // Flags before the runner, or a binary named by a variable, still run
-    // it; reading its source does not (#1446).
+    // it; reading its source does not.
     assert_eq!(rule("deny-flags.json"), denied);
     assert_eq!(rule("deny-variable.json"), denied);
     assert_eq!(rule("allow-read.json"), None);
 }
 
-/// A `Bash` rule judges what a command runs, not text quoted inside it
-/// (#1771, #1832): a heredoc that cites the nightly lane's command, as a
+/// A `Bash` rule judges what a command runs, not text quoted inside it:
+/// a heredoc that cites the nightly lane's command, as a
 /// ticket's draft or a program on python's stdin, passes
 /// `lanes.nightly-flags`; the same command run after the heredoc closes,
 /// or in a body a shell reads as the commands it runs, is denied.

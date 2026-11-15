@@ -9,7 +9,7 @@
 //! and which `realpath_cache_get()` and `realpath_cache_size()` show. The
 //! separator is `/` alone and [`MAXPATHLEN`] is the host's.
 //!
-//! The cache is the engine's (#2941): php's is the process's in the
+//! The cache is the engine's: php's is the process's in the
 //! non-ZTS build php-fpm runs, so a child's second request finds what its
 //! first entered and stats nothing until an entry's `realpath_cache_ttl`
 //! expires, and here one engine is what a child is, serving every thread
@@ -718,7 +718,7 @@ mod tests {
     /// overflow record (`thread_info::delete_current_info`), which the
     /// child's `std::process::exit` takes again, so a holder ending as
     /// the process was copied left the child that mutex held, and the
-    /// child waited in `__psynch_mutexwait` for good (#3880).
+    /// child waited in `__psynch_mutexwait` for good.
     #[test]
     #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
     fn a_fork_waits_out_a_held_realpath_cache_and_its_child_empties_it() {

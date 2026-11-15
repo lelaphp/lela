@@ -4,7 +4,8 @@
 //! those follow the linked library's algorithm, so the library is the
 //! one the oracle links: macOS's `/usr/lib/libz.1.dylib`, 1.2.12, where
 //! every level, strategy, window and memory level php exposes writes the
-//! oracle's bytes (#950's measurement; zlib-rs and `miniz_oxide` do not).
+//! oracle's bytes (the measurement the crate's doc gives; zlib-rs and
+//! `miniz_oxide` do not).
 //!
 //! Three safe types over it: [`Deflate`] and [`Inflate`], one `z_stream`
 //! each after `deflateInit2` or `inflateInit2`, and [`GzFile`], the

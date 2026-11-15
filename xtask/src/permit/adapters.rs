@@ -28,7 +28,7 @@ use crate::reading::{Reading, Status, Store};
 /// call there, and leaves a note to the command hook beneath, which sees
 /// the same call and records it once (harness-design.md §4.4). Pre-commit's
 /// `--diff` records every finding under its own caller, [`PRE_COMMIT`], so
-/// a diff's judgement is never counted as an agent's call (#3619).
+/// a diff's judgement is never counted as an agent's call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Adapter {
     CommandHook,
@@ -108,7 +108,7 @@ pub(super) fn record(
 /// JSON, record the findings the adapter records. A call this cannot read
 /// is a deny that says so; a manifest it cannot judge by is the refusal,
 /// the one error returned, since that is the signal each adapter walks its
-/// next candidate on (§4.4, #16). The manifest is read here and not by the
+/// next candidate on (§4.4). The manifest is read here and not by the
 /// caller for that reason: a build that cannot read it must record the
 /// refusal before it exits.
 pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
@@ -123,7 +123,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     let text = call.anchor(root, text);
     // Each adapter reads the person's answers where its own caller put
     // them: the command hook from the transcript Claude Code writes, the
-    // function hook from the records it read from the engine (#2247).
+    // function hook from the records it read from the engine.
     call.evidence = match adapter {
         Adapter::CommandHook | Adapter::PreCommit => Evidence::Transcript,
         Adapter::AboveTheCommandHook => Evidence::Engine,
@@ -138,7 +138,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     // The workspace whose manifest judges the call, and the checkout it is
     // in, whose store takes the readings and whose manifest this build is
     // held to: the two differ for a fixture workspace, whose manifest no
-    // build is compiled against (#57).
+    // build is compiled against.
     let workspace = call.workspace(root);
     let checkout = call.checkout(root);
     // What this build judges by: the manifest in front of it, the sources
@@ -146,10 +146,9 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     // three failing is a refusal to decide, and a refusal decides nothing
     // whichever way the decision would have fallen. A manifest that will
     // not parse is the refusal no rebuild repairs, so it joins the two
-    // digests as the kind of refusal that ends the walk (#118). A call in
+    // digests as the kind of refusal that ends the walk. A call in
     // a worktree whose manifest this build was not compiled against is
-    // that worktree's build's to judge, and its decision is this one's
-    // (#1047).
+    // that worktree's build's to judge, and its decision is this one's.
     let manifest = match built::judges(&checkout, root, &crate::built_root()) {
         Ok(Judge::This) => Manifest::load(&workspace).map_err(Refusal::Unreadable),
         Ok(Judge::Checkout(other)) => match hand_off(&other, &text, adapter) {
@@ -170,7 +169,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
                 return Err(refusal.into());
             }
             // No rebuild judges it either, so the decision is this one's,
-            // and the walk ends here, the call recorded once (#3619).
+            // and the walk ends here, the call recorded once.
             println!("{}", unjudged_output(&call, refusal.why()));
             return Ok(());
         }
@@ -198,7 +197,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
 
 /// The decision on a call no build judges, with the error's first line:
 /// a write no judge saw is denied, and a `Bash` call passes with the note,
-/// since an agent repairs a broken harness with `Bash` (#16, harness-design.md
+/// since an agent repairs a broken harness with `Bash` (harness-design.md
 /// §13 item 8).
 fn unjudged_output(call: &Call, why: &anyhow::Error) -> serde_json::Value {
     let why = format!("{why:#}");
@@ -239,12 +238,13 @@ fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
 }
 
 /// The checkouts an admitted writing call is placed in, kept under its
-/// session and agent for the Stop to hold (#3618 ruling 1): a file's by
-/// the file, and a `Bash` line's each checkout its writes land in, read
-/// from where the call starts ([`Call::start`], [`writes::of`], Round 2,
-/// Q34 (a)), unless it only reads ([`writes::reads_only`], which the
-/// builds and instruments of `STILL` pass); a place in no checkout of the
-/// repository is none. Best effort, as recording the decision is.
+/// session and agent for the Stop to hold (ruling 1 of harness revision
+/// 184): a file's by the file, and a `Bash` line's each checkout its
+/// writes land in, read from where the call starts ([`Call::start`],
+/// [`writes::of`], Round 2, Q34 (a)), unless it only reads
+/// ([`writes::reads_only`], which the builds and instruments of `STILL`
+/// pass); a place in no checkout of the repository is none. Best effort,
+/// as recording the decision is.
 fn record_the_write(workspace: &Path, call: &Call, judgement: &Judgement) {
     if judgement.denial().is_some() {
         return;
@@ -284,19 +284,19 @@ fn record_the_write(workspace: &Path, call: &Call, judgement: &Judgement) {
 }
 
 /// The refusal as a reading, so the store says what the judge did with
-/// this call and this session: through the outage of #16 a build that
-/// could not start recorded nothing, and `status --section permits` said
-/// the judge was up. Best effort, since the refusal stands whether or not
-/// the store takes it.
+/// this call and this session: through the outage of harness revision 11
+/// a build that could not start recorded nothing, and `status --section
+/// permits` said the judge was up. Best effort, since the refusal stands
+/// whether or not the store takes it.
 ///
-/// The two refusals are two rules and two statuses (#118). A build apart
+/// The two refusals are two rules and two statuses. A build apart
 /// from the tree hands the call to the candidate that rebuilds, which
 /// judges it; that is the walk working, not a judgement the harness is
 /// missing, so it is a skip under [`STALE_RULE`] that names where the call
 /// went. A manifest no build reads ends the walk with the call unjudged,
 /// which is the outage itself, so it is a failure under [`UNJUDGED_RULE`];
 /// so is a hand-off to a worktree's build that did not judge, since every
-/// candidate of the walk hands the call to that same build (#1047).
+/// candidate of the walk hands the call to that same build.
 /// Two rules and not one status apart, since the store keeps one file per
 /// rule and a skip would otherwise write over the failure beneath it.
 fn record_the_refusal(root: &Path, call: &Call, refusal: &Refusal) {
@@ -387,11 +387,11 @@ mod tests {
         Call::parse(&call.to_string()).unwrap()
     }
 
-    /// #3621: a merge standing in a checkout is its owner's to step, abort
-    /// and commit, under the manifest as it stands, and every other
+    /// A merge standing in a checkout is its owner's to step, abort and
+    /// commit, under the manifest as it stands, and every other
     /// session's to be refused, by `git.operation`'s more specific text
     /// first; who started it is recorded nowhere, so no admission and no
-    /// adapter can leave it foreign to its owner (#2694, #2734).
+    /// adapter can leave it foreign to its owner.
     #[test]
     fn a_merge_standing_in_an_owned_checkout_is_its_owners_to_end() {
         let workspace = crate::package_dir().parent().unwrap();

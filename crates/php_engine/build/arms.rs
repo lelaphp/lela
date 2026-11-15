@@ -176,7 +176,7 @@ pub fn held(served: &[&str], bodies: &std::path::Path) -> Result<(), String> {
 const ASSIGNED: [&str; 4] = ["ADD", "SUB", "MUL", "DIV"];
 
 /// The variants whose arms are in the loop's body (design §5.8), by the
-/// criterion #4335 ruled and #4364 amended, in its words:
+/// criterion ruled and amended 2026-11-09, in its words:
 ///
 /// ```text
 /// every variant met in more than a quarter of a percent of the oplines
@@ -190,11 +190,11 @@ const ASSIGNED: [&str; 4] = ["ADD", "SUB", "MUL", "DIV"];
 /// since it would vote in whatever it holds, nor the shape written to the
 /// pages' mix, which is kept for timing alone, the four bench pages
 /// voting in its place.
-/// The list was first taken from a counting build of the loop (#3285);
+/// The list was first taken from a counting build of the loop;
 /// `xtask dispatch-census` takes that count again, a reading for each
 /// profile a program declares and each page, on the engine built with
 /// its `dispatch-census` feature, and names the variants its vote would
-/// add to the list and take from it (#4328, #4344, #4367). The list is
+/// add to the list and take from it. The list is
 /// a person's to change. The arm of every other variant calls its
 /// handler out of line, through a call the optimiser reads as cold, so
 /// that the loop's body is the arms programs meet and the register
@@ -358,7 +358,7 @@ const IN_THE_LOOP: &[&str] = &[
 /// optimiser copies into the arms that take it while few enough do, gains
 /// no arm. `VERIFY_RETURN_TYPE`'s mask test taking that way stopped those
 /// copies (48 to 7 in `serve_frame`) and read fannkuch, which serves it
-/// once, at 1.08 of the base's cycles; taking this one, 0.99 (#3978). A
+/// once, at 1.08 of the base's cycles; taking this one, 0.99. A
 /// name here is no name of `IN_THE_LOOP`, and one that is no variant the
 /// dispatch serves is a build error.
 const PATH_IN_THE_LOOP: &[&str] = &["VerifyReturnType"];
@@ -370,7 +370,7 @@ const PATH_IN_THE_LOOP: &[&str] = &["VerifyReturnType"];
 /// the pop straight to its take-up of the callee or the caller, as php's
 /// handler goes straight to the callee's or the caller's next opline;
 /// read where the arms meet, the answer was one word of every arm, made
-/// and searched again (#3995). A name here is a name of [`IN_THE_LOOP`],
+/// and searched again. A name here is a name of [`IN_THE_LOOP`],
 /// and one that is not is a build error.
 const WAY_IN_THE_ARM: &[&str] = &[
     "DoFcall",
@@ -451,7 +451,7 @@ const INLINE_PATHS: &[&str] = &[
 /// pushed or `DO_*CALL` popped before it. Held across the loop's arms
 /// instead, refreshed where an arm took the request, it put the frame's
 /// number out of its register: single-stepped, `DO_UCALL` 103 to 111,
-/// `RETURN` 128 to 133 and `INIT_FCALL` 101 to 105 instructions (#4099).
+/// `RETURN` 128 to 133 and `INIT_FCALL` 101 to 105 instructions.
 /// A name here that is not in [`INLINE_PATHS`] is served by its handler
 /// alone.
 const CALL_PATHS: &[&str] = &[

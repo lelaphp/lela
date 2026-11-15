@@ -1,6 +1,6 @@
 //! The owners the face takes for a native and gives up, as a program
-//! meets them (#2059, #2080, design §5.1): each engine arms the request leak
-//! sensor (#1992), so an owner the face took and kept ends the request
+//! meets them (design §5.1): each engine arms the request leak
+//! sensor, so an owner the face took and kept ends the request
 //! in the `InternalError` naming what the heap still held.
 
 use php_macros::{php_class, php_function};
@@ -57,8 +57,8 @@ fn served(extensions: &[Extension], src: &str, expected: &str) {
 /// An enum argument is read off the case's `name`, as
 /// `zend_enum_fetch_case_name` reads it, and the case returned has the
 /// one owner `RETURN_OBJ_COPY` takes, so neither the cases the argument
-/// was matched against nor the returned case outlives the request
-/// (#2059). The default is the request's to keep.
+/// was matched against nor the returned case outlives the request.
+/// The default is the request's to keep.
 #[test]
 fn an_enum_argument_and_return_keep_no_case() {
     served(
@@ -72,7 +72,7 @@ fn an_enum_argument_and_return_keep_no_case() {
 /// A typed class constant whose value its type refuses gives the value
 /// up with the `TypeError`, as `zend_update_class_constant` gives up
 /// `tmp`, and keeps nothing, so the next read evaluates and refuses it
-/// again (#2080).
+/// again.
 #[test]
 fn a_class_constant_its_type_refuses_keeps_no_value() {
     served(

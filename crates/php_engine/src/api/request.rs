@@ -232,7 +232,7 @@ pub use crate::signal::{
 
 /// Which side of [`Limits::fork`] the caller stands on, and the child's
 /// id the parent is handed: `php_process`'s, which the engine's one home
-/// for fork calls (#1807).
+/// for fork calls.
 pub use crate::fork::{Forked, Pid};
 
 /// `php_select` (`Z/main/php_network.h:83`) over the host fds streams
@@ -492,7 +492,7 @@ pub struct Request {
     /// [`Request::declare_refused`]).
     keys_made: u32,
     /// The arena every compile this request makes parses into and keeps
-    /// its temporaries in, reset after each (#2810): what php's
+    /// its temporaries in, reset after each: what php's
     /// `CG(ast_arena)` is to one compile, its room kept for the next, so
     /// an `eval` of a statement allocates nothing for its tree. Not the
     /// engine's published arena of rows, the `arena` above.
@@ -500,7 +500,7 @@ pub struct Request {
     /// The last request-only unit the request gave up
     /// ([`Request::give_back`]), whose main op array's tables the next
     /// compile lays its own down in and in whose room the next unit is
-    /// published (#3028): php's `destroy_op_array` gives an `eval`'s op
+    /// published: php's `destroy_op_array` gives an `eval`'s op
     /// array back to the request's heap, from which the next `eval`'s is
     /// `emalloc`ed.
     spare_unit: Option<php_unit::SpareUnit>,
@@ -577,7 +577,7 @@ pub struct Request {
     /// opcache's `ZCG(counted)` ([`memory::SharedHold`]).
     shared_hold: memory::SharedHold,
     /// The request in flight, which no fork but its own happens beside
-    /// (#1807, [`Limits::fork`]): entered before its deadlines are laid
+    /// ([`Limits::fork`]): entered before its deadlines are laid
     /// on the engine's timer and left after they are taken out, so no
     /// fork copies the timer's mutex as the request holds it.
     _inside: crate::fork::Inside,
@@ -1239,18 +1239,18 @@ impl Request {
     }
 
     /// The loops the request is served in, which every serving it
-    /// starts takes (#3362).
+    /// starts takes.
     #[inline]
     pub(crate) fn loops(&self) -> &crate::tier::Loops {
         &self.tier.loops
     }
 
-    /// The request published a unit whose words count (#3362): the
+    /// The request published a unit whose words count: the
     /// engine notes it, so every request starting after starts in the
     /// tier's loop, and where this one is in `Nop`'s beside the tier's,
     /// a hand-off is due and the interrupt raised for the check that
     /// takes it, as publishing raises the publishing request's interrupt
-    /// (ADR-0006, amended on #3301).
+    /// (ADR-0006, amended 2026-10-24).
     pub(crate) fn published_counting(&self) {
         self.shared.binding.published();
         if self.tier.published_counting() {
@@ -1287,7 +1287,7 @@ impl Request {
     /// is served: php's request state is `EG()`, a global, so none of it
     /// stands on the C stack its walks recurse down, and a `Request` held
     /// by value put its ten kilobytes, and a copy, under every frame of
-    /// the request (#3209). A call of its own, so the value made in place
+    /// the request. A call of its own, so the value made in place
     /// before it is boxed stands in this frame and no caller's.
     #[allow(clippy::too_many_lines)] // one line per field of the request
     #[inline(never)]
@@ -1414,7 +1414,7 @@ impl Request {
             foreign: foreign::Table::default(),
         });
         // The word a delayed OOM raises, php's `EG(vm_interrupt)`, which
-        // `zend_mm_delayed_verror` stores (#3260).
+        // `zend_mm_delayed_verror` stores.
         let word = req.limits().interrupt().word();
         req.heap.wake_on_oom(word);
         req.activate();
@@ -1796,7 +1796,7 @@ impl HeapHooks for Hooks<'_> {
     /// as a release raises it ([`Hooks::released`]).
     ///
     /// A stream an assignment releases, whose user-space wrapper's
-    /// `stream_close` throws, is the release's to raise (#2536):
+    /// `stream_close` throws, is the release's to raise:
     ///
     /// ```php
     /// class W {
@@ -1924,8 +1924,8 @@ mod tests {
         }
     }
 
-    /// The rule the lend of a request's tier state stands on (#3437,
-    /// `php_jit`'s `enter::lent`): `api::request`, the one place the
+    /// The rule the lend of a request's tier state stands on
+    /// (`php_jit`'s `enter::lent`): `api::request`, the one place the
     /// types leave able to, replacing the state while a tier lends it
     /// fails the lend's debug assertion as the old state drops.
     #[cfg(debug_assertions)]
@@ -2059,8 +2059,8 @@ mod tests {
     /// it, here or in php, whose corpus names it nowhere, and
     /// [`Request::save_pending`] says which of php's releases would
     /// have to be the one that reaches it. So the state is built here
-    /// instead of witnessed, which is what harness §8 allows and #390
-    /// settled. The fatal carries no trace of its own, because php
+    /// instead of witnessed, which is what harness §8 allows and harness
+    /// revision 50 settled. The fatal carries no trace of its own, because php
     /// fetches one only while nothing is pending, and here the
     /// throwable is.
     #[test]

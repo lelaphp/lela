@@ -208,8 +208,8 @@ fn a_kept_landing_reads_the_epochs_word_and_one_armed_since() {
 }
 
 /// A runtime-cache slot read as compiled code reads it, by pointer casts
-/// at the offsets `tier::PLACE` names, at the address the touch answers
-/// (#3346): a primed property's place, whose tag, class, offset tag, slot
+/// at the offsets `tier::PLACE` names, at the address the touch answers:
+/// a primed property's place, whose tag, class, offset tag, slot
 /// and type are the interpreter's, a call's slot, whose tag is another
 /// variant's, and both unprimed on a request whose first activation of
 /// the method the touch reads them at. A variant reordered or a
@@ -713,7 +713,7 @@ pub(crate) mod entered {
         );
     }
 
-    /// The `step` kernel's crossing (#4087): a panic under the handler a
+    /// The `step` kernel's crossing: a panic under the handler a
     /// step serves, here in a trace of the error handler its warning
     /// calls, is kept by that trace's wrapper, resumed by its `enter`
     /// through the handler, caught at the `step` wrapper, and resumed by
@@ -752,7 +752,7 @@ pub(crate) mod entered {
     /// under `force`, where each diagnostic raised while a trace runs
     /// panics: inside the native or the frameless entry compiled code
     /// called, whose wrapper is the one boundary between it and the
-    /// trace (`jit-design.md` §4.6, #4104). A diagnostic the interpreter
+    /// trace (`jit-design.md` §4.6). A diagnostic the interpreter
     /// raises does not panic, so a program no trace serves answers what
     /// it wrote.
     fn compiled_boundary(program: &str) -> Result<String, String> {
@@ -774,7 +774,7 @@ pub(crate) mod entered {
     }
 
     /// A panic in a frameless entry, the wrapper that called it thinned
-    /// to the boundary (#4107): `class_exists(null)` deprecates its null
+    /// to the boundary: `class_exists(null)` deprecates its null
     /// inside the entry, and the panic stops at the wrapper and is resumed
     /// by `enter` past the code, one panic at the request's boundary.
     #[test]

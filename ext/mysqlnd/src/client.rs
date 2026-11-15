@@ -146,9 +146,9 @@ pub enum Command<'a> {
 }
 
 /// An idle persistent connection, what `mysqlnd.h`'s persistent
-/// `MYSQLND *` is between requests (#1674): it owns the connection's
+/// `MYSQLND *` is between requests: it owns the connection's
 /// data as a persistent connection holds it, with its socket and nothing
-/// of a request's (#4474), and a pool entry of `pdo_mysql` or mysqli
+/// of a request's, and a pool entry of `pdo_mysql` or mysqli
 /// holds it, so dropping the entry closes the connection, its socket
 /// closed with no `COM_QUIT` sent. [`Mysqlnd::give_back`] answers one;
 /// a request takes it up ([`Mysqlnd::take_up`]) or closes it with a

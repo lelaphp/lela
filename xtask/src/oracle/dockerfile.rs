@@ -1,4 +1,4 @@
-//! The apache image's `PHP_VERSION` held to the pin (#3533):
+//! The apache image's `PHP_VERSION` held to the pin:
 //! `dist/Dockerfile` states the version php's image sets as the default of
 //! its `ARG PHP_VERSION`, a second statement of `oracle.toml`'s, so a pin
 //! moved without it fails here, at the commit that moves it, rather than
@@ -15,11 +15,11 @@ fn holds(path: &std::path::Path, version: &str) -> Result<(), String> {
     match named[..] {
         [one] if one == version => Ok(()),
         [one] => Err(format!(
-            "{}'s ARG PHP_VERSION is {one}, and oracle.toml pins php {version}: the image's version moves with the oracle (#3533)",
+            "{}'s ARG PHP_VERSION is {one}, and oracle.toml pins php {version}: the image's version moves with the oracle",
             path.display()
         )),
         _ => Err(format!(
-            "{} names {} `ARG PHP_VERSION=` lines, where the apache stage names one, the pinned php's (#3533)",
+            "{} names {} `ARG PHP_VERSION=` lines, where the apache stage names one, the pinned php's",
             path.display(),
             named.len()
         )),

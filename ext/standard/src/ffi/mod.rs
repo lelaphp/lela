@@ -1269,7 +1269,7 @@ pub(super) fn place_fds(command: &mut std::process::Command, moves: Vec<(RawFd, 
 /// `chdir` inherits, as the kernel names it: `proc_pidinfo(2)`'s
 /// `PROC_PIDVNODEPATHINFO` on macOS, whose `getcwd(3)` opens `.` to name
 /// it and so fails where the caller may not read the directory, which
-/// is the case a child that inherits it must still start in (#2917).
+/// is the case a child that inherits it must still start in.
 #[cfg(target_os = "macos")]
 pub(super) fn process_dir() -> Option<std::path::PathBuf> {
     use std::os::unix::ffi::OsStringExt;

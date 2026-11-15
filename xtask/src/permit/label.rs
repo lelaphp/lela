@@ -1,12 +1,13 @@
 //! The `exempt_label` qualifier's sensor: whether every issue the call
-//! names carries a label the rule stands down for (#341).
+//! names carries a label the rule stands down for.
 //!
 //! `ticket.close` denies an agent `gh issue close`, so that nothing closes
 //! a ticket but the instrument that read its acceptance criteria. A chart
 //! sheet carries none: it is a container, its continuation is the decision
-//! #266 settled, and closing a filled one is the bookkeeping the frontier
-//! skill spells out step by step (CONTEXT.md, Chart). So the rule's row
-//! names the label it does not judge, `frontier:chart`, and this reads it.
+//! a person took on 2026-09-14, and closing a filled one is the bookkeeping
+//! the frontier skill spells out step by step (CONTEXT.md, Chart). So the
+//! rule's row names the label it does not judge, `frontier:chart`, and
+//! this reads it.
 //!
 //! The label is the tracker's fact and nothing in the tree carries it, so
 //! the sensor asks the tracker, through [`Gh`], the one program the ticket

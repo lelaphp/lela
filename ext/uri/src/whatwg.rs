@@ -70,7 +70,7 @@ fn reported(kind: ErrorKind) -> (UrlValidationErrorType, bool) {
 /// Since 8.5.12 the errors stop once the memory limit was met. The case
 /// crosses the limit where a new chunk is asked for, whose figure holds in
 /// any layout, where a huge block's growth names one the address space
-/// decides (#3442):
+/// decides:
 ///
 /// ```php
 /// ini_set('memory_limit', '4M');
@@ -184,8 +184,8 @@ pub(crate) struct State {
 /// `InternalError`, since only an allocation lexbor could not make
 /// refuses it, and the memory limit's fatal comes first.
 ///
-/// What it lays, 73,952 bytes (#2923), is the last item of a request's
-/// memory at its first line (design §5.13, #2863), so an empty program's
+/// What it lays, 73,952 bytes, is the last item of a request's
+/// memory at its first line (design §5.13), so an empty program's
 /// `memory_get_usage()` reads php's under opcache's regime. The strings
 /// that move with the directory and the environment are taken out, the
 /// working directory's two copies, the file's path and each variable, so
@@ -1083,8 +1083,8 @@ impl Url {
     /// string(15) "https://h/c?x#y"
     /// ```
     ///
-    /// What the request's heap counts: lexbor's pool on it holds the parse
-    /// (#2925), a path past the pool's first block grows it, a freed URL
+    /// What the request's heap counts: lexbor's pool on it holds the parse,
+    /// a path past the pool's first block grows it, a freed URL
     /// gives back its object and leaves the pool as it grew, and the next
     /// parse of that length takes nothing more than its object.
     ///

@@ -1,5 +1,5 @@
 //! The LLVM option every profile passes, held where the engine is built
-//! (design §10 Profiles; #3372). `.cargo/config.toml`'s rustflags table
+//! (design §10 Profiles). `.cargo/config.toml`'s rustflags table
 //! passes `-C llvm-args=--cgp-max-address-users-to-scan=1000`, so
 //! `CodeGenPrepare` folds a request field's address into each access of
 //! `serve_frame`'s loop. A `RUSTFLAGS` variable replaces that table, and
@@ -19,8 +19,9 @@ use std::env;
 /// The LLVM option, as `-C llvm-args` passes it.
 pub const OPTION: &str = "--cgp-max-address-users-to-scan";
 
-/// The least value of [`OPTION`] the ruling takes: at 1000 every field
-/// `serve_frame` reaches is folded, and 100000 measured the same (#3372).
+/// The least value of [`OPTION`] the ruling of 2026-10-24 takes: at 1000
+/// every field `serve_frame` reaches is folded, and 100000 measured the
+/// same.
 pub const LEAST: u64 = 1000;
 
 /// The variable a build asks for the refusal through: `refuse`, or
@@ -45,7 +46,7 @@ impl Ask {
             Some("refuse") => Ok(Ask::Refuse),
             Some("warn") | None => Ok(Ask::Warn),
             Some(other) => Err(format!(
-                "{ASK}={other:?} is neither `refuse` nor `warn` (design §10 Profiles, #3372)"
+                "{ASK}={other:?} is neither `refuse` nor `warn` (design §10 Profiles)"
             )),
         }
     }
@@ -108,7 +109,7 @@ pub fn hold() {
     };
     let said = format!(
         "this release build of php_engine {what}, so serve_frame's accesses to the request may go unfolded \
-         (design §10 Profiles, #3372); .cargo/config.toml's [target.'cfg(all())'] rustflags passes \
+         (design §10 Profiles); .cargo/config.toml's [target.'cfg(all())'] rustflags passes \
          -C llvm-args={OPTION}={LEAST} to every profile, and a RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS \
          variable replaces that table: add flags with --config \"target.'cfg(all())'.rustflags=[...]\" \
          instead, or set {ASK}=warn to build it unfolded"

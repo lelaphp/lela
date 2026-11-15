@@ -1,5 +1,5 @@
 //! Web servers `FCGI_WEB_SERVER_ADDRS` does not allow, held here where
-//! `lines.toml` cannot hold them (#4398), each to the bytes the pinned
+//! `lines.toml` cannot hold them, each to the bytes the pinned
 //! php-cgi 8.5.12 (md5 f4f783bf54d2bfa24a558693f7c12188) wrote on
 //! 2026-11-10 for the same list and environment:
 //!

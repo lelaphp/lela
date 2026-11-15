@@ -1,5 +1,5 @@
 //! The memory limit's two ends of a request, as php 8.5.12 raises them
-//! (CVE-2026-109618, #3260). An allocation past `memory_limit` is served,
+//! (CVE-2026-109618). An allocation past `memory_limit` is served,
 //! and the heap records a delayed OOM and raises the request's interrupt
 //! ([`php_heap::DelayedOom`]); this file names the site php records with
 //! it, and raises it where php's `zend_handle_delayed_oom` does: at the

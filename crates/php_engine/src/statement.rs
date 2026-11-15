@@ -1,6 +1,6 @@
 //! Statement events: a Zend extension's `statement_handler`
 //! (`Z/Zend/zend_extensions.h:93`), told at each `EXT_STMT` a compile
-//! with extended info leaves before a statement (`-e`, #1780, #1822),
+//! with extended info leaves before a statement (`-e`),
 //! as `ZEND_EXT_STMT` applies `zend_extension_statement_handler` to
 //! every loaded Zend extension in the order they were loaded
 //! (`Z/Zend/zend_vm_def.h:7928-7938`, `Z/Zend/zend_execute.c:2457-2462`).

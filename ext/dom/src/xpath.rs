@@ -155,7 +155,7 @@ impl Validation {
 /// span of an evaluation: the request keeps libxml's evaluator
 /// ([`Memory::adopt`], ADR-0013) and the evaluation holds it, so PHP
 /// code a function serves reaches the object as php's does, evaluating
-/// again, registering on it or constructing it anew (#2318).
+/// again, registering on it or constructing it anew.
 pub(crate) struct XPathState {
     ctx: Foreign<ffi::XPath>,
     register_node_ns: bool,
@@ -298,7 +298,7 @@ impl XPathCallbacks {
 /// Where an owner keeps its [`XPathCallbacks`]: the object, and how its
 /// payload is reached, read afresh at each step of a call, since the PHP
 /// code a call serves may register on them, replace them or free them,
-/// as php's table is the object's own throughout (#2318, #2319).
+/// as php's table is the object's own throughout.
 #[derive(Clone, Copy)]
 pub struct CallbacksAt {
     pub object: PhpObject,
@@ -930,7 +930,7 @@ fn node_list(
 
 /// The node-set's documents, one count of each taken before the first
 /// node's object is made and held while the objects are made, so each
-/// node's object counts its own node's document (#3541). php reads
+/// node's object counts its own node's document. php reads
 /// `dom_xpath_intern_for_doc`'s object again for each node and counts its
 /// document, which an autoloader served while an object is made can
 /// change: one that constructs the evaluator anew lets the values the
@@ -1276,7 +1276,7 @@ impl DOMXPath {
     ///
     /// The evaluator stays on the object while it evaluates, so a
     /// function the expression calls evaluates on it again, and what it
-    /// registers holds for the rest of the evaluation and after (#2318).
+    /// registers holds for the rest of the evaluation and after.
     ///
     /// ```php
     /// $d = new DOMDocument;

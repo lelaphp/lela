@@ -2,7 +2,7 @@
 //! `php --re pcntl` prints them there, in its order, the same on `x86_64`
 //! and `aarch64`: the oracle of record is macOS's, so the Linux rows are
 //! held at compile time by `cargo check --tests` for a Linux target, and
-//! the two glibc computes when asked by the test (#1063).
+//! the two glibc computes when asked by the test.
 
 use crate::constants as c;
 

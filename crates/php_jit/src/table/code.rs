@@ -16,7 +16,7 @@
 //! around each write, with `sys_icache_invalidate` over the bytes written;
 //! `Remapped`, macOS on x86-64, one anonymous mapping, never executed, and
 //! the second address `mach_vm_remap` gives its pages, never written, each
-//! held to its protection by its maximum (#4356); and `Memfd`, Linux on
+//! held to its protection by its maximum; and `Memfd`, Linux on
 //! x86-64 and aarch64, one sealed `memfd` file mapped twice, written
 //! through the one view and executed through the other, with §4.4's cache
 //! maintenance over the executable addresses on aarch64. Where the build
@@ -128,7 +128,7 @@ pub(crate) trait Pages: Sized + Send + Sync {
 }
 
 /// Why a fork's child could not take its copy ([`Pages::adopt`]), by
-/// whether its code still stands (`jit-design.md` §4.4, #4501's ruling).
+/// whether its code still stands (`jit-design.md` §4.4, ruled 2026-11-11).
 #[derive(Debug)]
 pub(crate) enum Unadopted {
     /// Refused where every byte a `Code` names stands at its address: the
@@ -274,8 +274,8 @@ unsafe impl<P: Pages> Send for Code<P> {}
 // SAFETY: the same, and `&Code` hands out only the address and two counts.
 unsafe impl<P: Pages> Sync for Code<P> {}
 
-// A body is engine state where its chunk is (`tier::epoch_state`,
-// #4492): its entry is an address in the arena's executable view, of
+// A body is engine state where its chunk is (`tier::epoch_state`):
+// its entry is an address in the arena's executable view, of
 // compiled code the arena holds, and its length a count, neither a
 // request's; the derive cannot read through the address.
 impl<P: Pages> EngineState for Code<P> where Arc<Chunk<P>>: EngineState {}
@@ -319,7 +319,7 @@ impl<P: Pages> Arena<P> {
     /// An arena of `capacity` bytes, mapped through `P`, in chunks of
     /// [`CHUNK`] bytes but the last, which holds what is left; a buffer
     /// below one chunk is one chunk of its own length, held by the cursor
-    /// inside it (#3112's ruling). A capacity of none is refused.
+    /// inside it (ruled 2026-10-21). A capacity of none is refused.
     pub(crate) fn new(capacity: usize) -> io::Result<Arena<P>> {
         if capacity == 0 {
             return Err(io::Error::new(
@@ -516,7 +516,7 @@ pub(crate) struct HeapPages {
 // byte unsynchronised.
 unsafe impl Sync for HeapPages {}
 
-// Engine state (#4492): bytes a test's arena copies bodies into, owned
+// Engine state: bytes a test's arena copies bodies into, owned
 // here and never a request's; the derive cannot read through the cells.
 #[cfg(test)]
 impl EngineState for HeapPages {}
@@ -752,7 +752,7 @@ unsafe impl Send for Mapping {}
 #[cfg(unix)]
 unsafe impl Sync for Mapping {}
 
-// Engine state (#4492): pages of this process's own that the adapter
+// Engine state: pages of this process's own that the adapter
 // mapped, holding compiled code, a copy of it or a table's null slots,
 // and never a request's heap; the derive cannot read through the
 // address.
@@ -818,7 +818,7 @@ pub(crate) struct NullTable<T> {
 }
 
 // Engine state where what its slots point at is, and `Sync`, since every
-// reader of the table loads them at once (#4492): a page of its own
+// reader of the table loads them at once: a page of its own
 // holding one pointer a slot, null or written once by the table's owner,
 // to a `T` that owner keeps; the derive cannot read through the mapping.
 #[cfg(unix)]
@@ -857,7 +857,7 @@ impl<T> Deref for NullTable<T> {
 
 /// The pages this process's allocator holds freed given back to the
 /// system, all it can give: what a compile's job ends on, whose bytes are
-/// freed and whose pages would stay (#4121). Off a request, as the call
+/// freed and whose pages would stay. Off a request, as the call
 /// walks every zone, and an allocation in one waits for it.
 ///
 /// macOS alone. Linux's `malloc_trim(0)` is the nearest call and is not
@@ -937,8 +937,8 @@ pub(crate) fn thread_id() -> u32 {
 /// the mapping only between its own `pthread_jit_write_protect_np(0)` and
 /// `(1)`, and every other thread sees it executable throughout. `MAP_JIT`
 /// is what a hardened runtime with the `allow-jit` entitlement maps it
-/// under (#3524). macOS x86-64 has no per-thread protection and takes the
-/// two views of `Remapped` instead (#4356).
+/// under. macOS x86-64 has no per-thread protection and takes the
+/// two views of `Remapped` instead.
 #[cfg(all(php_jit_arena, target_os = "macos", target_arch = "aarch64"))]
 mod mac {
     use std::io;
@@ -1047,7 +1047,7 @@ mod mac {
     }
 }
 
-/// The macOS x86-64 adapter (`jit-design.md` §4.4, #4356): one anonymous
+/// The macOS x86-64 adapter (`jit-design.md` §4.4): one anonymous
 /// private mapping, `PROT_READ | PROT_WRITE`, the write view, and a second
 /// address of the same pages that `mach_vm_remap` makes without copying,
 /// `PROT_READ | PROT_EXEC`, the executable view; each view's maximum
@@ -1217,7 +1217,7 @@ mod remap {
         /// replaces the executable view with `VM_FLAGS_OVERWRITE`, which
         /// removes the old mapping first, and XNU links the new one before
         /// it lets another call change the map, so no refusal leaves the
-        /// view unmapped (`jit-design.md` §4.4, #4471).
+        /// view unmapped (`jit-design.md` §4.4).
         unsafe fn adopt(&self, own: Mapping) -> Result<(), Unadopted> {
             let rx = libc::PROT_READ | libc::PROT_EXEC;
             // SAFETY: `own` is this call's alone, and no thread runs it.
@@ -1256,7 +1256,7 @@ mod remap {
     /// and kills the process at the first instruction it runs from the
     /// executable view, unless the binary carries
     /// `allow-unsigned-executable-memory`; the two agreed under each of
-    /// seven signings, measured under Rosetta 2 (#4356).
+    /// seven signings, measured under Rosetta 2.
     fn runs_unsigned_pages() -> bool {
         let rwx = libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC;
         Mapping::new(page_size(), rwx, libc::MAP_PRIVATE | libc::MAP_ANON, None).is_ok()
@@ -1391,8 +1391,8 @@ mod remap {
 /// `PROT_READ | PROT_WRITE`, written only by the thread holding the arena
 /// mutably and never executed, and once `PROT_READ | PROT_EXEC`. The
 /// file is closed once both views stand; they keep its pages. The file,
-/// its seals and the two mappings go through `rustix`, as #2945 ruled; a
-/// view is a [`Mapping`], unmapped when it drops.
+/// its seals and the two mappings go through `rustix`, as ruled
+/// 2026-10-19; a view is a [`Mapping`], unmapped when it drops.
 ///
 /// A shared mapping is shared with a forked child too, so a fork's child
 /// takes a file of its own (`jit-design.md` §4.4): before the fork a
@@ -1494,9 +1494,9 @@ mod linux {
         /// the page executable. Linux unmaps the range before it maps the
         /// executable view's replacement, and an allocation of its own
         /// refused after that, `ENOMEM`, leaves the code there unmapped
-        /// (`jit-design.md` §4.4, #4471), so a refusal of the first
+        /// (`jit-design.md` §4.4), so a refusal of the first
         /// mapping is one where the code may be gone; the range is not
-        /// probed (#4501's ruling).
+        /// probed (ruled 2026-11-11).
         unsafe fn adopt(&self, file: OwnedFd) -> Result<(), Unadopted> {
             let rx = ProtFlags::READ | ProtFlags::EXEC;
             // SAFETY: the caller hands a copy of every byte any thread
@@ -1627,7 +1627,7 @@ impl<T> NullTable<T> {
     /// granule a write makes resident, of which `mincore` reports a byte
     /// per page of the process's: an x86-64 process under Rosetta 2 reads
     /// four 4 KiB bytes for each 16 KiB page, all four or none, counted
-    /// from the mapping's base (#4460).
+    /// from the mapping's base.
     pub(crate) fn resident_pages(&self) -> usize {
         let Some(map) = &self.map else {
             return 0;
@@ -1654,7 +1654,7 @@ impl<T> NullTable<T> {
 /// The kernel's page, the granule `mincore` reads residency in: on macOS
 /// libSystem's `vm_kernel_page_size`, which is the process's page natively
 /// and four of them for an x86-64 process under Rosetta 2, measured 16384
-/// there against `sysconf`'s 4096 (#4460); the process's page elsewhere,
+/// there against `sysconf`'s 4096; the process's page elsewhere,
 /// or where the word is no page.
 #[cfg(all(test, unix))]
 fn kernel_page_size() -> usize {
@@ -2031,7 +2031,7 @@ mod native {
     /// translation of it stands, dropped with the filler beside it, and 8
     /// published at the same address. Under Rosetta 2 the macOS x86-64
     /// adapter answers 7 here without [`Pages::retaken`]'s protection
-    /// change (#4356).
+    /// change.
     ///
     /// [`Pages::retaken`]: super::Pages::retaken
     #[test]
@@ -2048,7 +2048,7 @@ mod native {
         Ok(())
     }
 
-    /// macOS x86-64's two views (#4356): two addresses of one span, what
+    /// macOS x86-64's two views: two addresses of one span, what
     /// the write view holds the executable view reads and runs, and each
     /// refuses, by `mprotect`'s answer, the protection that would make it
     /// the other: the write view is never made executable and the

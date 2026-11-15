@@ -1,4 +1,4 @@
-//! The `CARGO_CRATE_NAME` path switch, pinned (ADR-0007, #947 story 58):
+//! The `CARGO_CRATE_NAME` path switch, pinned (ADR-0007):
 //! this test crate is named `php_engine`, so the expansion names
 //! `crate::api` and not `::php_ext`. Here `crate::api` is the facade with
 //! one piece changed, its static entry a type of this file's own, so a

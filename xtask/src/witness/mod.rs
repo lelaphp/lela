@@ -10,10 +10,10 @@
 //!
 //! **What runs the snippet.** The engine linked into this process,
 //! [`oracle::linked`], one fresh engine per snippet over the `Capture`
-//! sink, and never the engine's own binary (harness §7, revision 48;
-//! #401). The seam `phpt` names (design §8's `ScriptExec`) has two
+//! sink, and never the engine's own binary (harness §7, revision 48).
+//! The seam `phpt` names (design §8's `ScriptExec`) has two
 //! adapters and this lane stands on one of them by decision: the linked
-//! engine carries every extension feature (revision 43, #314) where
+//! engine carries every extension feature (revision 43) where
 //! `target/*/php` is php's default build, so under a lane that resolved a
 //! binary the same fence beside `ext/curl` read pass or fail by which rung
 //! happened to run, which is a reading that says nothing. A witness is a
@@ -27,21 +27,21 @@
 //! **The one fence it does not serve: one marked `process`.** A snippet that forks,
 //! sends or takes a signal, or sets the process's ids, session or limits
 //! is served by the `php` binary in a process of its own ([`process`];
-//! harness §8, revision 61; #1062): pcntl's fences, posix's that change the process, and the
+//! harness §8, revision 61): pcntl's fences, posix's that change the process, and the
 //! engine's that send one a signal. So no witness forks this process, and
 //! the linked engine does not carry pcntl at all, so a fence that would
 //! fork here and is not marked fails on the undefined function rather
 //! than forking the harness. Coverage is observed the same way: the
 //! binary appends what each request entered to a file the lane names. `phpt` has no second adapter and keeps its own rung
-//! in `done`, since nothing stands in for a corpus (#132). The oracle runs
+//! in `done`, since nothing stands in for a corpus. The oracle runs
 //! beside the linked engine and is held to the fences by the same rule,
 //! because what a fence pins is the oracle's bytes: a fence the oracle
-//! does not meet fails and says so, whatever the engine wrote (#783), and
+//! does not meet fails and says so, whatever the engine wrote, and
 //! the oracle's status is what `--accept` captures. A reading with nothing
 //! judged, `run == 0`, is the run the pinned oracle was absent for, and is
 //! a skip that says so.
 //!
-//! **A host's own lines** ([`host`], #1975). A host crate's
+//! **A host's own lines** ([`host`]). A host crate's
 //! `tests/lines.toml` holds the command lines no fence can carry, each run
 //! under the pinned host of its kind and then the engine's, and held
 //! equal; they are judged among the crate's witnesses, and one whose
@@ -50,21 +50,21 @@
 //! **Which process serves it.** Not the one the command line started:
 //! that one starts this binary again over the crates the run is for and
 //! watches it, so a run that dies on a signal still leaves a failing
-//! reading naming the signal and the snippets in flight ([`watch`]; #1037).
+//! reading naming the signal and the snippets in flight ([`watch`]).
 //! The engine is the same linked one either way.
 //!
 //! **What a feature row reads.** Nothing here. The bundle the harness
 //! links carries every extension feature `php_bundle` declares, so a crate
 //! the manifest marks `feature =` is held to its witnesses under
 //! [`Runner::Linked`] as any other crate is, pass or fail on its merits
-//! (harness §7, revision 43; #314). The rows name what stands outside
+//! (harness §7, revision 43). The rows name what stands outside
 //! php's default build, which is the binary's and the phpt lane's concern:
 //! a witness is a claim about a kernel or native, and a claim the harness
-//! cannot run is not a reading. The skip #292 gave the lane, `unlinked`,
+//! cannot run is not a reading. The skip the lane once had, `unlinked`,
 //! went with the reason for it; a reading carrying that number is the
 //! check revision 43 names, failing. A fence marked `process` of such a
 //! crate is served by `php` built with its feature where the binary under
-//! test does not turn it on, as the phpt lane runs its subset (#2721).
+//! test does not turn it on, as the phpt lane runs its subset.
 //!
 //! **What `--accept` writes.** The `expect` fence line, and nothing else:
 //! the oracle's status in place of a bare `exit` or a stale one, so the
@@ -73,7 +73,7 @@
 //! call, and this is why: nothing an agent writes can put a number
 //! there. Read the diff it produces.
 //!
-//! **What `--accept --streams` writes** (harness §8, #801). The same, and
+//! **What `--accept --streams` writes** (harness §8). The same, and
 //! into each fence marked `capture` the oracle's two streams after the
 //! recipe's normalisation, the `expect` fence's body and a `stderr`
 //! fence's; a fence not marked is left byte for byte. The oracle runs the
@@ -84,10 +84,10 @@
 //! capture never invents one. What it wrote is printed fence by fence,
 //! and held as any fence is.
 //!
-//! **What `--accept --bodies` writes** (#3455, as Mitchell ruled on
-//! #3429). The status, and into each plain fence the oracle does not
-//! meet, the fence whole from the instrument's own two runs of the oracle,
-//! the same two a capture stands on: a fence's body is its author's and
+//! **What `--accept --bodies` writes** (as Mitchell ruled 2026-10-25).
+//! The status, and into each plain fence the oracle does not meet, the
+//! fence whole from the instrument's own two runs of the oracle, the
+//! same two a capture stands on: a fence's body is its author's and
 //! the oracle judges it, so a fence the oracle meets is left byte for
 //! byte. Each authored line whose wildcards the oracle's line still meets
 //! in both runs is kept as written ([`body`]), and the oracle's line is
@@ -123,14 +123,14 @@
 //! a person writes them, so a fence carries the name alone; a name the pin
 //! does not carry is read before anything runs, and the block is one the
 //! lane cannot run, named beside the regimes the pin has. A regime's
-//! `args` stand after the recipe's on a binary's command line (#1780), the
+//! `args` stand after the recipe's on a binary's command line, the
 //! oracle's and, for a fence marked `process`, the engine's; the linked
 //! engine and the request hosts take none, so any other fence under such
 //! a regime is a block the lane cannot run, read before anything runs as
 //! an unknown name is.
 //!
 //! **What `locale=<name>` is.** A locale the snippet needs the host to
-//! know, as a `.phpt`'s `--SKIPIF--` asks `setlocale` for one (#1678).
+//! know, as a `.phpt`'s `--SKIPIF--` asks `setlocale` for one.
 //! Where neither the oracle nor the linked engine can move `LC_ALL` to it,
 //! the witness is not run: it is a skip that names the locale, counted as
 //! `skipped` in the reading, and neither a pass nor a fail.
@@ -186,7 +186,7 @@ pub(crate) mod numbers {
     pub(crate) const FAILED: &str = "failed";
     /// Witnesses that differ under an accepted registry row.
     pub(crate) const DIVERGED: &str = "diverged";
-    /// Witnesses a `trace:` row covers, held to the engine alone (#1650).
+    /// Witnesses a `trace:` row covers, held to the engine alone.
     pub(crate) const COVERED: &str = "covered";
     /// Witnesses with no verdict pinned yet.
     pub(crate) const UNPINNED: &str = "unpinned";
@@ -203,7 +203,7 @@ pub(crate) mod numbers {
     /// Witnesses found and not run, the oracle not here to run them.
     pub(crate) const NOT_RUN: &str = "not_run";
     /// Witnesses the engine did not serve, each standing as one the
-    /// oracle's run failed does (#1535).
+    /// oracle's run failed does.
     pub(crate) const UNSERVED: &str = "unserved";
     /// The sum of the witnesses' declared durations, in milliseconds.
     pub(crate) const WALL_MS: &str = "wall_ms";
@@ -220,7 +220,7 @@ pub(crate) enum Judgement {
     /// A fence an accepted `trace:` row covers, which the engine met: it
     /// is held to its pinned `expect` against the engine alone, and the
     /// note records how the oracle's run ended, not judged (harness §4.3,
-    /// §8; #1650).
+    /// §8).
     Covered,
     /// The bytes differ and nothing accepts it.
     Fail,
@@ -230,7 +230,7 @@ pub(crate) enum Judgement {
     /// The witness could not be run or read at all.
     Bork,
     /// A `locale=<name>` the host knows to neither run: not run, counted,
-    /// and neither a pass nor a fail (#1678).
+    /// and neither a pass nor a fail.
     Skipped,
 }
 
@@ -309,11 +309,11 @@ pub(crate) struct Tally {
     /// The fences the engine did not serve where the oracle is absent,
     /// each as `at: trouble`: each stands as [`Record::Unserved`], as one
     /// the oracle's run failed does, so its natives are no witness short,
-    /// and the reading names why it did not serve (#1535).
+    /// and the reading names why it did not serve.
     pub unserved: Vec<String>,
     /// What each server's line that missed saw, as `id: what`
     /// ([`host::seen`]): the reading's message keeps it, so a miss that
-    /// does not come again on a rerun can still be read (#3846).
+    /// does not come again on a rerun can still be read.
     pub saw: Vec<String>,
 }
 
@@ -336,7 +336,7 @@ impl Tally {
 /// absent oracle could not run, is complete on coverage, and green there
 /// only while the pinned oracle is here: without it the pass would be a
 /// claim, and the reading is a skip that counts what did not run (harness
-/// §4.3; #60, #65).
+/// §4.3).
 pub(crate) fn reading(
     tally: &Tally,
     snapshot: &Snapshot,
@@ -439,7 +439,7 @@ pub(crate) fn reading(
 fn tail(tally: &Tally) -> String {
     let run = &tally.witnesses;
     // What the oracle did on each fence a `trace:` row holds to the engine
-    // alone, recorded and not judged (harness §4.3, §8; #1650).
+    // alone, recorded and not judged (harness §4.3, §8).
     let covered: Vec<String> = run
         .judged
         .iter()
@@ -447,14 +447,14 @@ fn tail(tally: &Tally) -> String {
         .map(|j| format!("{}: {}", j.id, j.note))
         .collect();
     // The server's lines whose engine's host ended only on its stop sent
-    // again, a loss its loop has not had since #3869 (#3879).
+    // again, a loss its loop is built not to have.
     let again = run.judged.iter().filter(|j| j.note.ends_with(host::AGAIN));
     let again: Vec<&str> = again.map(|j| j.id.as_str()).collect();
     let why = tally.oracle_absent.as_deref();
     // Each clause with its count, said where the count is not zero: what
     // did not run for want of the oracle, what the engine did not serve for
     // its trace there, what a `locale=<name>` the host lacks kept from
-    // running (#1678), and the fences held to the engine alone.
+    // running, and the fences held to the engine alone.
     let clauses = [
         (
             why.map_or(0, |_| run.not_run()),
@@ -531,7 +531,7 @@ pub struct Ask {
     pub scope: Scope,
 }
 
-/// What `--accept` writes (design §8; harness §8, #801).
+/// What `--accept` writes (design §8; harness §8).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Accept {
     /// Nothing: the run judges and writes no fence.
@@ -546,7 +546,7 @@ pub enum Accept {
     /// `--accept --bodies`: the status, and into each plain fence the
     /// oracle does not meet, the oracle's two streams where a second run
     /// apart prints them again, each authored line the oracle's still
-    /// meets kept as written ([`body`]; #3455, as #3429 ruled).
+    /// meets kept as written ([`body`]; ruled 2026-10-25).
     Bodies,
 }
 
@@ -573,7 +573,7 @@ impl Accept {
     }
 }
 
-/// Which of a crate's fences a run serves (#1146). A crate's reading is a
+/// Which of a crate's fences a run serves. A crate's reading is a
 /// claim over every fence it carries and the coverage beside them, and
 /// only [`Scope::Crate`] makes it: a narrowed run serves the fences it
 /// names, `--accept` pins those alone, coverage is not counted, and what
@@ -696,15 +696,15 @@ fn run_in(
     // One oracle for the run, and one for each variant a row names: each
     // digest is asserted before the first snippet under it and never per
     // witness or per crate (harness §4.3). A crate whose row names a
-    // variant is read under it (#1782).
+    // variant is read under it.
     let variants = manifest.variants();
     let oracles = Oracles::new(pin, &variants);
-    // Each crate is read in three steps (#2212): found and prepared in the
+    // Each crate is read in three steps: found and prepared in the
     // manifest's order, its fences served on one pool with every other
     // crate's, so no crate's last fences leave a thread idle while the
     // next crate's wait, and finished in the manifest's order again.
     let (slots, ready, served) = find(root, manifest, &crates, &oracles, ask, journal);
-    // No room for a scratch tree (#644): the volume is full for every
+    // No room for a scratch tree: the volume is full for every
     // crate the pool serves, so none was measured, and each one's reading
     // is a skip naming the volume rather than a bork or a refusal.
     let (mut finished, full): (Vec<Option<Tally>>, Option<anyhow::Error>) =
@@ -721,8 +721,8 @@ fn run_in(
     let mut readings = Vec::new();
     // Every reading is journaled as it is made, the ones said without a
     // run among them: the watching run reads the journal alone, so a
-    // reading kept from it is one the run never wrote (#3457 found a host's
-    // lines that did not parse printing nothing and writing nothing).
+    // reading kept from it is one the run never wrote (a host's lines that
+    // did not parse once printed nothing and wrote nothing).
     let mut keep = |reading: Reading| -> Result<()> {
         if let Some(journal) = journal {
             journal.judged(&reading)?;
@@ -838,7 +838,7 @@ fn find<'a>(
     (slots, ready, served)
 }
 
-/// Every crate's fences on one pool (#2212), in the order the crates
+/// Every crate's fences on one pool, in the order the crates
 /// stand, and each crate's tally finished: a crate where the oracle is
 /// absent served for its trace alone, as [`judge`] serves it.
 fn serve_all(
@@ -889,7 +889,7 @@ fn serve_all(
         };
         finished.push(finish(&one.found, crate_, witnesses, gathered, unserved));
     }
-    // A host's own lines beside its fences (#1975): each judged among the
+    // A host's own lines beside its fences: each judged among the
     // crate's witnesses, whether or not the pinned php is here, since a
     // line whose pinned host is absent fails and is never a skip.
     let lines: Vec<(usize, &host::Held, &host::Line)> = ready
@@ -977,7 +977,7 @@ fn finished_reading(
         record_accepted(root, &krate.name, &taken)?;
     }
     // The diff is the review, fence by fence, as a person reads it before
-    // the commit (#801).
+    // the commit.
     for captured in &tally.captured {
         print!(
             "accepted {}:{}:\n{}",
@@ -1023,7 +1023,7 @@ pub(crate) fn coverage_rule(manifest: &Manifest) -> Option<&Rule> {
 /// **A kernel is a function of the crate's `ops` module** (design §8,
 /// `php_engine::ops`): [`fence::Subject`]'s count over `src/ops.rs` and
 /// `src/ops/**`, which is what the rule's scope read for `php_engine`
-/// before the anchor (#1264). An anchored crate keeps its kernels as
+/// before the anchor. An anchored crate keeps its kernels as
 /// subjects beside its natives, since the anchor replaced the count of a
 /// crate's other functions and not of its kernels; a native the attributes
 /// declare in `ops` is counted once, as a native.
@@ -1036,7 +1036,7 @@ pub(crate) fn extract(
     let mut out = Extracted::default();
     let mut anchored = anchor::Anchored::default();
     // The `php` that serves its `process` fences carries the crate's own
-    // extension (#2721).
+    // extension.
     let feature = (krate.feature.clone())
         .filter(|_| !Carried::binary(root).is_ok_and(|carried| carried.carries(krate)));
     for path in sources::rust(root, krate)? {
@@ -1062,7 +1062,7 @@ pub(crate) fn extract(
     anchored.settle();
     // A crate whose natives stand on the attributes is counted by them,
     // once the fences have run, and by its kernels; so is a crate outside
-    // `ext/` that declares none, whose other functions are neither (#1917).
+    // `ext/` that declares none, whose other functions are neither.
     if anchored.declares() || !krate.path().starts_with("ext") {
         let ops = krate.path().join("src/ops");
         out.subjects.retain(|subject| {
@@ -1088,8 +1088,8 @@ fn covered(rule: Option<&Rule>, path: &Path) -> bool {
 
 /// Judge every witness of one crate, and count the kernels and natives
 /// without one: [`prepare`], the crate's fences on a pool of their own,
-/// and [`finish`]. `run` serves every crate's fences on one pool instead
-/// (#2212); a crate's tally is the same either way.
+/// and [`finish`]. `run` serves every crate's fences on one pool instead;
+/// a crate's tally is the same either way.
 #[cfg(test)]
 #[cfg(tracked)]
 pub(crate) fn judge(
@@ -1145,7 +1145,7 @@ pub(crate) struct Gathered {
 /// snippet, and a mismatch refuses the whole run (§4.3), never caught per
 /// witness as a bork. A binary that is not at the path is no refusal:
 /// nothing runs, each witness is a snippet that did not run, and the
-/// reading says why (#65).
+/// reading says why.
 fn prepare<'a>(oracle: &'a Oracle<'_>, found: &'a Extracted) -> Result<Prepared<'a>> {
     let oracle_absent = oracle.pin().oracle.absent();
     if oracle_absent.is_none() {
@@ -1202,7 +1202,7 @@ fn serve(
 /// binary needs php: where the oracle is absent and the attributes declare
 /// natives, each fence is still served, for its trace alone, though
 /// nothing is judged. A serve that fails is `Unserved`, as it is beside
-/// the oracle, and named, never a fence that entered nothing (#1535).
+/// the oracle, and named, never a fence that entered nothing.
 fn serve_absent(
     oracle: &Oracle<'_>,
     binary: &Binary,
@@ -1289,13 +1289,13 @@ fn finish(
 /// nothing where it carries none, and where it names one the pin does not
 /// have, the line a person reads, at the fence and beside the regimes the
 /// pin does have. A regime that carries `args` reaches a binary's command
-/// line (#1780): a fence marked `process` hands them to the engine's
+/// line: a fence marked `process` hands them to the engine's
 /// binary as the oracle's run hands them to php, and the linked engine
-/// takes `-e` as a host builds it and no other ([`Linked`], #1822).
+/// takes `-e` as a host builds it and no other ([`Linked`]).
 /// php-cgi takes a regime on its command line as `php` does, in the
-/// oracle's run and the engine's (#1729); php-fpm and phpdbg are handed
+/// oracle's run and the engine's; php-fpm and phpdbg are handed
 /// none, so a `request fpm` or `request phpdbg` fence under one would run
-/// under the recipe alone (#1932). A fence served where its regime cannot
+/// under the recipe alone. A fence served where its regime cannot
 /// reach is the same kind of line, naming why.
 fn under<'a>(pin: &'a Pin, witness: &fence::Witness) -> Result<Option<&'a Regime>, String> {
     let Some(name) = witness.regime.as_deref() else {
@@ -1418,9 +1418,9 @@ pub fn record_accepted(root: &Path, krate: &str, taken: &[(&Path, usize)]) -> Re
 
 /// Every crate that exists less those whose `witness` reading passes and
 /// was taken over the crate's key now ([`Snapshot::key`], its tree and
-/// its dependency closure's, #1318) under the pin now, `done`'s fresh:
+/// its dependency closure's) under the pin now, `done`'s fresh:
 /// what the merge check measures after pre-commit measured the staged
-/// crates (#1312).
+/// crates.
 fn unmeasured(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<String>> {
     let snapshot = Snapshot::disk(root)?;
     let mut left = Vec::new();

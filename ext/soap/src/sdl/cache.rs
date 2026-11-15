@@ -961,7 +961,7 @@ fn deserialize_parameters(r: &Refs, input: &mut In<'_>) -> Option<Option<Table<P
 enum Cached {
     /// The header is whole and the body not one to read, cut short or
     /// naming a type or an encoder it does not hold: read as none, and
-    /// the WSDL read again replaces the file (#2395).
+    /// the WSDL read again replaces the file.
     Unreadable,
     /// The file is stale or not this URI's, and is removed.
     Stale,

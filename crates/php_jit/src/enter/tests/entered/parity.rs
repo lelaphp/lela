@@ -1,5 +1,5 @@
-//! The safety net under #3230: a known callee's push, call and leave
-//! written in place leave the request's stack, byte for byte, as the
+//! The safety net under the inline calls: a known callee's push, call and
+//! leave written in place leave the request's stack, byte for byte, as the
 //! engine's own push, call and leave do (`jit-design.md` §5.3). `f` calls
 //! `g(1, 2)` four times. On the first, the test steps `f`'s `INIT_FCALL`,
 //! its sends and its `DO_UCALL` and `g`'s `RETURN` through the
@@ -718,7 +718,7 @@ fn a_call_made_in_place_leaves_the_stack_as_the_engines_own() {
 
 /// A constant array returned in place, copied as it is, as php's
 /// `zend_jit_return` copies a constant (`ZVAL_COPY_CONST`), leaves the
-/// caller's slot and the stack as `leave_plainly` leaves them (#2963).
+/// caller's slot and the stack as `leave_plainly` leaves them.
 #[test]
 fn an_array_returned_in_place_leaves_the_stack_as_the_engines_own() {
     let engine = testing::engine::<Paired>(&[]);
@@ -746,7 +746,7 @@ fn an_array_returned_in_place_leaves_the_stack_as_the_engines_own() {
 /// possible root, and the other, which the collector then holds, by a
 /// `GC_DELREF` inline, as php's `zend_jit_free_cv` gives each up, leaves
 /// the caller's slots, the array's count and the stack as
-/// `leave_plainly` leaves them (#2963).
+/// `leave_plainly` leaves them.
 #[test]
 fn a_leave_that_frees_an_array_leaves_the_stack_as_the_engines_own() {
     let engine = testing::engine::<Paired>(&[]);

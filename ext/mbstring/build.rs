@@ -1,5 +1,5 @@
 //! libmbfl, compiled from the sources vendored at `libmbfl/` (design
-//! §7.2, revision 47, #1173): `php-src/ext/mbstring/libmbfl` at the tag
+//! §7.2, revision 47): `php-src/ext/mbstring/libmbfl` at the tag
 //! `oracle.toml` pins, byte for byte, under its `LICENSE`, the LGPL-2.1.
 //! The file list is the one php's `config.m4` compiles, read off the copy
 //! beside this file; the include path is php's, `libmbfl` and
@@ -47,7 +47,7 @@ fn compile_libmbfl() {
     // php compiles C and C++ with -DNDEBUG unless it is built with
     // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
     // two builds that set ZEND_DEBUG, as debug assertions are this build's:
-    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    // assert() is live exactly where Rust's debug_assertions is.
     if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
         build.define("NDEBUG", None);
     }

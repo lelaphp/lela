@@ -180,7 +180,7 @@ fn a_pair_running_past_the_end_is_malformed() {
 
 /// A name of 130 bytes and a value of 200, each past the 127 a one-byte
 /// length holds, are written with four-byte lengths, the high bit set, as
-/// `fcgi_get_params` reads them, and read back whole (#3092).
+/// `fcgi_get_params` reads them, and read back whole.
 #[test]
 fn a_name_and_a_value_past_127_bytes_take_four_byte_lengths_both_ways() {
     let (name, value) = ([b'n'; 130], [b'v'; 200]);

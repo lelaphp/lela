@@ -1,7 +1,7 @@
 //! The system allocator with a count of the allocations it serves to
 //! one thread: what a test reads to hold a path to allocating nothing past
 //! the request's own heap, as a native's variadic tail allocates
-//! nothing, `Z_PARAM_VARIADIC` pointing into the frame (#4014). A debug
+//! nothing, `Z_PARAM_VARIADIC` pointing into the frame. A debug
 //! build's alone, and a test binary's global allocator where it is one.
 
 use std::alloc::{GlobalAlloc, Layout, System};

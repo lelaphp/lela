@@ -2136,7 +2136,7 @@ mod tests {
     /// bytes wait for the pins. A second pin over a pinned table is
     /// counted, so the bytes wait for whichever of the two is let go
     /// last, the first taken let go first here, as a fiber lets go a
-    /// pin it took after the one let go outside it (#2291).
+    /// pin it took after the one let go outside it.
     #[test]
     fn a_pinned_block_is_destroyed_at_its_last_release_and_only_its_bytes_wait() {
         let _alone = alone();

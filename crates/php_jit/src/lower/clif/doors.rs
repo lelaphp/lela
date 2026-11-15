@@ -1,4 +1,4 @@
-//! A body's jumps to another trace (#3229's ruling, `jit-design.md` §4.3,
+//! A body's jumps to another trace (ruled 2026-10-22, `jit-design.md` §4.3,
 //! §4.6): a link, a jump in the body's own bytes to the trace it links
 //! to, written before the body is published, as php's
 //! `zend_jit_trace_link_to_root` writes it
@@ -234,8 +234,8 @@ impl Emit<'_> {
     /// body was compiled against and the exit jumps, its stores and the
     /// link's jump; otherwise the exit's block.
     ///
-    /// #3195's program: a loop that closes through a side trace linking
-    /// to its own root. The side's jump lands at the root's first op, and
+    /// A loop that closes through a side trace linking to its own
+    /// root: the side's jump lands at the root's first op, and
     /// php's side tests the interrupt before it jumps
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:7285-7303`), so the side's
     /// jump meets the timeout as php's does, at the loop's line:

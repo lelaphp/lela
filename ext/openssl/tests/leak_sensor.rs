@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -17,7 +17,7 @@ fn armed(source: &str) -> String {
 /// What an array hands the extension as text, a CA path of `ca_info`, a
 /// subject entry, an extra attribute and a PKCS#7 header, is converted
 /// with `zval_try_get_string` and given up once read,
-/// `zend_string_release` (#2093). Each value here is an integer, so each
+/// `zend_string_release`. Each value here is an integer, so each
 /// conversion makes a string of the request's.
 #[test]
 fn the_strings_an_array_s_values_convert_to_are_given_up() {
@@ -39,7 +39,7 @@ var_dump(openssl_pkcs7_sign('{dir}/in.txt', '{dir}/out.txt', $x, $k, ['X' => 42]
 /// stands answers the error, and what the body made is given up, as the
 /// VM's `zval_ptr_dtor` of the return value frees it: here the
 /// `OpenSSLCertificateSigningRequest` `openssl_csr_new` makes under a
-/// refused key path (#2126, `ext/openssl/tests/bug81713.phpt`).
+/// refused key path (`ext/openssl/tests/bug81713.phpt`).
 #[test]
 fn an_answer_made_under_a_deferred_error_is_given_up() {
     let stdout = armed(

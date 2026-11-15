@@ -1,7 +1,7 @@
 //! A lock file (design §4.5): comment lines, then one item per line. The
 //! comments are a person's; the lines are the instrument's.
 //!
-//! **One order** (#403). A lock's body is what `render` writes from the
+//! **One order**. A lock's body is what `render` writes from the
 //! set it parsed: the lines ascending by `Ord` on their bytes, which is
 //! `BTreeSet`'s own, each line once. `render` writes that order and
 //! `disorder` reads it back, so the two are one statement in one place
@@ -24,7 +24,7 @@ pub struct Lock {
     pub lines: BTreeSet<String>,
     /// The body in the file's order: the lines before any `[name]` marker,
     /// which are every line of a lock without sections, then one block per
-    /// marker (#1369).
+    /// marker.
     pub blocks: Vec<Block>,
 }
 
@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(lock.render(&[Block::of(None, lines)]), "# one\n# two\nz\n");
     }
 
-    /// The one order, read both ways (#403): a file `render` would write
+    /// The one order, read both ways: a file `render` would write
     /// unchanged has no disorder, one with a pair swapped names the line
     /// that stands and the line written in its place, and one with a line
     /// twice says so. `Arr::live_from` before `Arr::len` is the pair

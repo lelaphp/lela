@@ -295,8 +295,8 @@ fn curl_share_strerror(
     }
 }
 
-/// `CURL_G(persistent_curlsh)` as the engine keeps it (design §4.10,
-/// #1172): the persistent shares no request holds, each under the bits
+/// `CURL_G(persistent_curlsh)` as the engine keeps it (design §4.10):
+/// the persistent shares no request holds, each under the bits
 /// of the options it was made with, lent to one request at a time.
 #[derive(EngineState)]
 pub(crate) struct Pooled {

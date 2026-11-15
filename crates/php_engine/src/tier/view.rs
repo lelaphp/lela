@@ -33,7 +33,7 @@ use crate::arena::Arena;
 /// whatever restart replaced it since and whether or not the engine
 /// still stands. `Send` and `Sync`, so
 /// a claim and a view can leave the request's thread. Engine state by
-/// the derive, as its arena is (#4652).
+/// the derive, as its arena is.
 #[derive(Clone, php_macros::EngineState)]
 pub struct Epoch(Arc<Arena>);
 
@@ -205,8 +205,8 @@ pub fn epoch(req: &Request) -> Epoch {
 /// (`jit-design.md` §4.5). A borrow of the request's own hold, which
 /// takes nothing; none where the epoch holds a value of another type.
 ///
-/// Every request of the epoch reads it, so it is engine state (ADR-0005,
-/// #4492): a value holding a request's, a pointer into that request's
+/// Every request of the epoch reads it, so it is engine state (ADR-0005):
+/// a value holding a request's, a pointer into that request's
 /// heap, is refused,
 ///
 /// ```compile_fail,E0277
@@ -227,7 +227,7 @@ pub fn epoch_state<T: EngineState + std::any::Any + Send + Sync>(
 /// own offset where it was compiled for the request alone.
 ///
 /// So it may be a request's, and is no engine state (design §5.14,
-/// *Identities*; #4631): engine state names an op array by the
+/// *Identities*): engine state names an op array by the
 /// [`EngineFuncRef`] made from one, and a `FuncRef` asked to stand there
 /// is refused,
 ///
@@ -240,7 +240,7 @@ pub fn epoch_state<T: EngineState + std::any::Any + Send + Sync>(
 pub struct FuncRef(MapPtrOffset);
 
 /// An op array the engine numbered, by the map-pointer offset its unit's
-/// publication gave it (design §5.14, *Identities*; #4631): the name an
+/// publication gave it (design §5.14, *Identities*): the name an
 /// op array has in engine state, the epoch's tier state among it.
 ///
 /// It may stand there, and derives `EngineState`, because the engine
@@ -299,7 +299,7 @@ impl FuncRef {
     }
 }
 
-/// The op array a holder holds for a frame (`jit-design.md` §2.2, #3144):
+/// The op array a holder holds for a frame (`jit-design.md` §2.2):
 /// the one the loop has in hand at a safepoint, or the one an epoch holds
 /// for a trace that recorded it ([`Epoch::held`]). Only those hand one
 /// out, so the borrow is the hold: the op array stands for as long as the
@@ -565,7 +565,7 @@ impl CachedSlot {
     }
 }
 
-/// The touch (`jit-design.md` §4.6, #2957's note): where slot `raw` of
+/// The touch (`jit-design.md` §4.6): where slot `raw` of
 /// the runtime cache of the op array `epoch` holds at its offset stands
 /// in `req`, where the request has laid that cache down. php lays a
 /// function's cache at the first `INIT_*` that pushes its call in the
@@ -753,7 +753,7 @@ pub use crate::arena::{EpochClassId, EpochFunction};
 /// It names a class as a recording does ([`RecordClass`]), never by a
 /// request's number, and holds no declaration: what a trace's build reads
 /// of one it reads through [`UnitView::class_facts`], copied by one
-/// projection that keeps no value (#4653). So no reader of a view on the
+/// projection that keeps no value. So no reader of a view on the
 /// worker reaches a value of the request's, and none is handed a
 /// declaration. What the view answers for a class is its facts, which
 /// are not a declaration: this does not compile, for that reason alone,
@@ -874,7 +874,7 @@ struct OwnEntry {
 /// (`zend_jit_trace_build_ssa`); two builds that bind the same find the
 /// same in them, so an analysis kept under one binding set is the one
 /// php would build at the next build that binds it (ADR-0015, as amended
-/// on #3571; #3579). The epoch keeps an analysis under these alone, so
+/// 2026-10-27). The epoch keeps an analysis under these alone, so
 /// each class is named as every request of the epoch names it
 /// ([`EpochClassId`]), and no op array is named at all.
 #[derive(Debug, Clone, PartialEq, Eq, php_macros::EngineState)]
@@ -886,7 +886,7 @@ pub struct Bindings {
 }
 
 /// What the body of a function a call reaches is to the op array the
-/// call is in, as [`Bindings`] names it (#4628): none, a native's; the
+/// call is in, as [`Bindings`] names it: none, a native's; the
 /// op array itself, a recursive call's; or another user function's. The
 /// key names the kind and no body, so no [`FuncRef`] and no map-pointer
 /// number, a request's above all, stands in it by type.
@@ -900,7 +900,7 @@ pub struct Bindings {
 /// identity, and two builds whose bindings differ only in which other
 /// user function a call reaches read the same analysis. The key still
 /// tells a call bound from one left unbound, and a native from a user
-/// function, as the ruling on #3589 keeps `called` for.
+/// function, as the ruling of 2026-10-28 keeps `called` for.
 ///
 /// A change that reads a kept callee's body for anything else, or keeps
 /// an analysis that read what another function returns, must name the
@@ -1562,7 +1562,7 @@ impl UnitView {
     }
 
     /// Class `c`, the recording request's number for it, as a recording
-    /// names it (design §5.14, *Identities*; #4653): by the identity
+    /// names it (design §5.14, *Identities*): by the identity
     /// every request of the view's epoch names it by where the arena's one
     /// test finds it shared ([`UnitView::shared`]), and otherwise by the
     /// index the view gives a class of the request's own, the one it gave
@@ -1839,7 +1839,7 @@ impl UnitView {
     /// ([`super::plain_call`]) to an op array the view holds, or to a
     /// request-scoped class's own method whose op array is the request's,
     /// which the view never holds and the call names by its class's name
-    /// and its own (#3561, #3570), so a trace that recorded it writes it
+    /// and its own, so a trace that recorded it writes it
     /// in place; `false`, taking nothing, for any other.
     pub fn hold_call(&mut self, req: &Request, call: FrameRef) -> bool {
         let Some((scope, plain)) = super::layout::scoped_call(self, req, call) else {
@@ -2156,7 +2156,7 @@ mod tests {
     }
 
     /// The key a view binds for `f`'s analysis names the body of the
-    /// function its call of `g` reaches by its kind (#4628): bound to
+    /// function its call of `g` reaches by its kind: bound to
     /// another user op array than `g`'s, the file's own code or a
     /// request's own op array, the key is the one it binds for `g`; bound
     /// to a native, to `f` itself, or to nothing, the key is another.

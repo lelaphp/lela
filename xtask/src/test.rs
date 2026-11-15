@@ -2,31 +2,31 @@
 //! tests, as a reading per crate. What this instrument adds over a bare
 //! `cargo test` is the reading `done` reads, stamped with the crate's tree,
 //! so a crate changed since its tests last passed is stale and not green,
-//! which a bare `cargo test` in a hook has no way to say (#191). One
+//! which a bare `cargo test` in a hook has no way to say. One
 //! reading per crate that exists; `--crate` narrows it to the ones named,
 //! `--staged` to the crates with a staged change. The numbers are the sums
 //! over every test binary and the doctests of the crate: `passed`,
 //! `failed`, `ignored` and `filtered`, with `ms` beside them, and
 //! `skipped_unpromised`, the tests among the passed that skipped for a
 //! fact this machine did not promise, read off the file each executable
-//! is handed under [`SKIPPED_VARIABLE`] (#3085); a crate whose tests do
+//! is handed under [`SKIPPED_VARIABLE`]; a crate whose tests do
 //! not build has none and fails all the same. An executable that ends
 //! badly before its `test result:` line, as the engine's hard timeout ends
 //! one, counts each `... FAILED` line it printed, and a failing reading's
 //! message names every run that failed and its failed tests ahead of the
-//! tail of what they printed ([`Runs::judge`], #3698). `--target` builds
+//! tail of what they printed ([`Runs::judge`]). `--target` builds
 //! the named crates' tests for another target and runs them on this
 //! machine, a second reading of each over `<crate>/<triple>` that says how
-//! the code ran ([`Target`], #4462).
+//! the code ran ([`Target`]).
 //!
 //! A run is three steps over every crate at once, as `cargo test` would
-//! take them one crate at a time (#2165), and a crate with a binary takes
+//! take them one crate at a time, and a crate with a binary takes
 //! them alone, so its binary is built with its own features
-//! ([`batch::runs`], #2606). A crate whose `Cargo.toml` names `profile =
+//! ([`batch::runs`]). A crate whose `Cargo.toml` names `profile =
 //! "release-da"` under `[package.metadata.xtask.test]` takes them under
 //! that profile, its doctests too, so the binary its tests start runs the
 //! debug build's sensors at release optimisation, as `sapi/makala`'s do
-//! (#4348's ruling 4, [`TestProfile`], #4361). One `cargo build --tests
+//! (ruled 2026-11-09, [`TestProfile`]). One `cargo build --tests
 //! --keep-going` builds every crate's test targets, cargo building crates
 //! side by side, and a crate that does not compile stops only the crates
 //! built on it ([`batch::Run`]). Next, one `cargo test --doc` runs the
@@ -42,11 +42,11 @@
 //! `[package.metadata.xtask.test]`: then as many run at once as
 //! [`Beside::schedule`] says, an executable that does share something held
 //! apart from the others that name its key ([`Beside`]), what each one
-//! printed kept whole and read in the executables' order (#2869). Under
+//! printed kept whole and read in the executables' order. Under
 //! `--staged` an executable the `Cargo.toml` names in `own` runs only
 //! where a staged path is one of its own sources, and a crate that passes
 //! with any left out has no reading, since `done` asks the whole crate's
-//! run (#2982): xtask's executables that build with cargo inside a test
+//! run: xtask's executables that build with cargo inside a test
 //! held a commit's hook for minutes when their own code was untouched. The
 //! reading is stamped once they have ended, `ms` counts how long they
 //! ran, and a group per executable, `test worktree`, how long that one
@@ -54,7 +54,7 @@
 //!
 //! **A pinned error code.** A `compile_fail,E0382` block passes the stable
 //! rustdoc when it fails to compile for any reason; only a nightly's
-//! checks the code (#2049). So the doctests of the files that pin one are
+//! checks the code. So the doctests of the files that pin one are
 //! run once more, one at a time with the compiler's words let through
 //! (`--nocapture`), and a block whose
 //! compile names no `error[E0382]` fails its crate's reading as a failed
@@ -92,7 +92,7 @@ pub use crate::batch::without_git;
 /// show :<path>` in `root`: under pre-commit the one git handed the hook,
 /// which [`without_git`] keeps for a test as `XTASK_COMMIT_INDEX`, where
 /// it lies in `root`'s git directory, and the checkout's own elsewhere, a
-/// scratch repository's among them (#1416, #2747).
+/// scratch repository's among them.
 pub fn committed(root: &Path, path: &str) -> Result<String> {
     let mut git = Command::new("git");
     if let Some(index) = std::env::var_os(batch::COMMIT_INDEX) {
@@ -116,7 +116,7 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
 
 /// [`run`] where `triple` is none; otherwise the tests of `only` built for
 /// it and run on this machine, natively or translated, one reading each
-/// over `<crate>/<triple>` ([`Target`], #4462).
+/// over `<crate>/<triple>` ([`Target`]).
 pub(crate) fn run_on(
     root: &Path,
     manifest: &Manifest,
@@ -189,7 +189,7 @@ fn measure(
 
 /// `--staged`: the crates with a staged change, pre-commit's touched
 /// crates (harness-design.md §6), less those whose reading stands for
-/// what is staged (#1143); no readings when none is left.
+/// what is staged; no readings when none is left.
 pub fn run_staged(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<Reading>> {
     let measured = sources::for_commit(root, manifest, store, INSTRUMENT)?;
     if measured.is_empty() {
@@ -209,7 +209,7 @@ enum Ending {
     /// Badly, once its `test result:` line was read.
     Failed,
     /// Badly, with this status, before any `test result:` line: the
-    /// engine's hard timeout ending it, a crash or a signal (#3698).
+    /// engine's hard timeout ending it, a crash or a signal.
     Cut(ExitStatus),
 }
 
@@ -399,7 +399,7 @@ fn reading(
     let batch = NonZeroUsize::MIN;
     tally::pool(&executables, jobs, batch, &apart, each, on)?;
     // Stamped once the executables have ended, so a span read off the
-    // store's stamps holds their run (#2869).
+    // store's stamps holds their run.
     let mut reading = stamped()?;
     reading.count("ms", millis(started.elapsed()))?;
     reading.groups = took;
@@ -425,7 +425,7 @@ fn reading(
 /// How many items of `krate`'s tests its build left out under
 /// `cfg(tracked)`, each a line carrying the attribute, and why: none where
 /// the workspace carries every file [`crate::inputs::TRACKED`] names, or
-/// where the crate leaves nothing out under that cfg (#3188).
+/// where the crate leaves nothing out under that cfg.
 fn not_built(root: &Path, krate: &Crate) -> Result<Option<(u64, String)>> {
     let Some(why) = crate::inputs::untracked(root) else {
         return Ok(None);
@@ -464,7 +464,7 @@ enum Beside {
         apart: BTreeMap<String, Vec<String>>,
         /// By target name, the paths under the package that are an
         /// executable's own: under `--staged` it runs only where one of
-        /// them is staged (#2982).
+        /// them is staged.
         #[serde(default)]
         own: BTreeMap<String, Vec<String>>,
     },
@@ -581,7 +581,7 @@ fn execute(executable: &Executable, built: &Built, run: &Run) -> Result<Ran> {
 /// The `CARGO` a test executable is handed: the one this run was started
 /// with where it was started by cargo, and otherwise the `cargo` on `PATH`
 /// that built the test, by its absolute path, so a cargo stand-in never
-/// hands a call on to itself (#3683). Bare only where `PATH` holds no
+/// hands a call on to itself. Bare only where `PATH` holds no
 /// cargo, where that build had already failed.
 fn cargo() -> OsString {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -1038,7 +1038,7 @@ mod tests {
 
     /// A table's `profile` is the build's, so beside it the executables
     /// stand as the rest of the table says, one at a time where it says
-    /// nothing else (#4361).
+    /// nothing else.
     #[test]
     fn a_tables_profile_leaves_how_the_executables_stand_to_the_rest() {
         let declaring = |table: serde_json::Value| {
@@ -1063,7 +1063,7 @@ mod tests {
     /// A staged topic of `tests/common` runs every test binary whose module
     /// tree loads it, the library's unit tests among them, under the
     /// `[package.metadata.xtask.test]` this crate declares: a binary its
-    /// `own` names lists `tests/common` among its paths (#3087).
+    /// `own` names lists `tests/common` among its paths.
     #[test]
     fn a_staged_topic_runs_every_binary_that_includes_it() {
         let dir = crate::package_dir();
@@ -1135,7 +1135,7 @@ mod tests {
 
     /// The engine's hard timeout ends an executable after two `... FAILED`
     /// lines and before its `test result:` line: each is a failed test,
-    /// and the message names the exit (#3698).
+    /// and the message names the exit.
     #[test]
     fn an_executable_ended_before_its_result_line_fails_each_test_it_printed_failed() {
         let text = "\nrunning 4 tests\ntest a ... FAILED\ntest b ... ok\ntest c ... FAILED\nFatal error: Maximum execution time of 30+2 seconds exceeded (terminated)\n";
@@ -1159,7 +1159,7 @@ mod tests {
 
     /// Two executables fail, the first printing more than the tail's 40
     /// lines: the message names both and each one's failed tests ahead of
-    /// the tail, which holds only the second's (#3698).
+    /// the tail, which holds only the second's.
     #[test]
     fn every_failing_executable_is_named_ahead_of_the_tail() {
         let mut first = String::from(
@@ -1191,7 +1191,7 @@ mod tests {
 
     /// A pin is a `compile_fail` fence of a doc comment with a code among
     /// its words, at the fence's line; one with no code, or a code on a
-    /// fence that is not `compile_fail`, pins nothing (#2049).
+    /// fence that is not `compile_fail`, pins nothing.
     #[test]
     fn a_pin_is_a_compile_fail_fence_with_a_code_at_its_line() {
         let text = "/// ```compile_fail,E0382\n/// x\n/// ```\n//! ```compile_fail\n//! ```\n    /// ```rust, compile_fail, E0277 E0308\n/// ```ignore,E0001\n";
@@ -1209,7 +1209,7 @@ mod tests {
     /// The codes are read off each `compile_fail` test's words in the order
     /// one process wrote them, and a pin is missed where its block's
     /// compile named another code, none, or did not run: the mutation a
-    /// stable rustdoc passes (#2049).
+    /// stable rustdoc passes.
     #[test]
     fn a_pin_its_compile_does_not_name_is_missed() {
         let text = "running 2 tests\ntest crates/a/src/o.rs - o::T (line 115) - compile fail ... error[E0382]: use of moved value\nerror: aborting due to 1 previous error\n\nFor more information about this error, try `rustc --explain E0382`.\nok\ntest crates/a/src/o.rs - o::T (line 162) - compile fail ... error: cannot construct\nok\ntest result: ok. 2 passed\n";

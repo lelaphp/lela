@@ -47,8 +47,8 @@ pub(crate) enum Fail {
 
 /// The file a header's path names while a request runs: a relative path
 /// against the request's working directory, where php's `stat` and
-/// `open` find it against its process's, which `chdir()` moved there
-/// (#2618). At startup no request stands, and the path is the process's
+/// `open` find it against its process's, which `chdir()` moved there.
+/// At startup no request stands, and the path is the process's
 /// to resolve.
 pub(crate) fn header_file(req: &Request, path: &[u8]) -> PathBuf {
     req.environment().cwd().join(OsStr::from_bytes(path))

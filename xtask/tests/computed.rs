@@ -1,5 +1,5 @@
-//! `xtask regions`, the one reader of what `computed run` answered (#43;
-//! harness-design.md §5): each outcome against a stand-in `computed` on
+//! `xtask regions`, the one reader of what `computed run` answered
+//! (harness-design.md §5): each outcome against a stand-in `computed` on
 //! `PATH` that answers with one shape, so the exit and the lines the
 //! reader interprets are the ones the spec names, not this machine's
 //! trust grant. `new-ext` and `worktree add` read the same value in
@@ -198,7 +198,7 @@ fn laid(name: &str) -> (Tree, String) {
 }
 
 /// `xtask regions --staged` against the real `computed`, as pre-commit
-/// runs it (#2236): a region it would write that reads a path whose
+/// runs it: a region it would write that reads a path whose
 /// working copy the commit does not stage is refused before anything is
 /// written, naming the region and the path, whether the region reads it
 /// as an input, a lock, or as a directory a `tree` region lists; once the
@@ -240,7 +240,7 @@ fn staged_refuses_a_region_that_would_carry_an_unstaged_change() {
     assert!(!err.contains("does not stage"), "{err}");
 }
 
-/// The commit #2236 names, by pathspec through a pre-commit hook that
+/// A commit by pathspec through a pre-commit hook that
 /// runs `xtask regions --staged`, as scripts/hooks/pre-commit does: git
 /// hands the hook a temporary index of HEAD and the named paths. A region
 /// rendered from an unstaged lock, its file named in the commit and the

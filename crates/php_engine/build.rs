@@ -24,8 +24,8 @@
 //! it; every other arm writes the position first, php's `SAVE_OPLINE()`
 //! (`crate::tier::Next`).
 //!
-//! Where each variant's arm sits, in the loop's body or out of line
-//! (#3285), is its placement, `arms::place`'s answer from the lists of
+//! Where each variant's arm sits, in the loop's body or out of line,
+//! is its placement, `arms::place`'s answer from the lists of
 //! `build/arms.rs`, and every point of generation below reads that and
 //! none of the lists.
 //!
@@ -62,12 +62,11 @@ use arms::{Answer, InlinePath, Placement, Reads};
 
 fn main() {
     // Design §10 Profiles: a release-like build without the LLVM option
-    // every profile passes is refused where the build asks (#3372).
+    // every profile passes is refused where the build asks.
     rustflags::hold();
     build_defs();
     // Read when `build.rs` runs, not when it compiles: cargo runs one
-    // compiled `build.rs` for every checkout sharing a target directory
-    // (#2628).
+    // compiled `build.rs` for every checkout sharing a target directory.
     let Some(dir) = env::var_os("CARGO_MANIFEST_DIR") else {
         println!("cargo:warning=CARGO_MANIFEST_DIR is unset; cargo sets it for every `build.rs`");
         std::process::exit(1);
@@ -268,7 +267,7 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          /// `php_unit::PublishedUnit` the frame's annex or the function table\n\
          /// holds (`Request::unit_of`), which `Unit::published` alone makes\n\
          /// and which resolves every opline's handler, and a published unit\n\
-         /// is read and never written (#2907). It stays because `Unresolved`\n\
+         /// is read and never written. It stays because `Unresolved`\n\
          /// stays a `php_unit::Handler`, the value the compiler writes and\n\
          /// the unit cache's file reads back before publication, so a `match`\n\
          /// that names every variant names it; it is the fatal it always\n\

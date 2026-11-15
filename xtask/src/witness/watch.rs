@@ -1,5 +1,5 @@
-//! A witness run served in a process of its own and watched from this one
-//! (#976, #1037, #1043, #1060). The lane serves every snippet through the
+//! A witness run served in a process of its own and watched from this one.
+//! The lane serves every snippet through the
 //! engine linked into the harness, on every core at once, so what the
 //! engine or a C library it calls does wrong can end the process on a
 //! signal: an abort, a trap, a fault. A process that dies that way writes
@@ -24,8 +24,8 @@
 //! always what damaged it, so the reading names what was in flight and
 //! claims no more.
 //!
-//! The journal is the run's claim on System V IPC ([`sysv::Claim`],
-//! #2115): a fence that makes a segment, a semaphore set or a queue and
+//! The journal is the run's claim on System V IPC ([`sysv::Claim`]):
+//! a fence that makes a segment, a semaphore set or a queue and
 //! is cut off before it removes it, and php's own `msg_get_queue(0)`,
 //! which leaves one nobody can use, leave objects the kernel's small
 //! tables keep after every process is gone. When the served process ends,
@@ -213,7 +213,7 @@ impl Signal {
 
 /// The crates a run is for, by manifest name: the ones asked for, or with
 /// `--staged` the ones with a staged change less those whose reading
-/// stands for what is staged (#1143), or every crate the manifest names.
+/// stands for what is staged, or every crate the manifest names.
 /// `None` is a staged run with nothing left to measure.
 fn planned(
     root: &Path,
@@ -260,7 +260,7 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     served.args(ask.accept.args());
     served.args(ask.scope.args());
     served.arg("--journal").arg(&journal);
-    // The served run is this one's child, seated with it (#2982).
+    // The served run is this one's child, seated with it.
     crate::seat::lend(&mut served);
     let status = served
         .status()

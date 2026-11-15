@@ -40,7 +40,7 @@ mod refusals;
 /// extensions it names in the order it first names them, past the
 /// extensions the pinned build has and the bundle has not, `pcntl`,
 /// which the harness's engine leaves out, and `zend_test`, which it
-/// carries and the pinned build does not (#1782):
+/// carries and the pinned build does not:
 ///
 /// ```php
 /// $order = function (iterable $names): string { $absent = ['ldap', 'odbc', 'pdo_dblib', 'pdo_odbc', 'pdo_pgsql', 'pgsql', 'snmp', 'pcntl', 'zend_test']; $seen = []; foreach ($names as $name) { $name = strtolower($name); if (!in_array($name, $absent, true)) { $seen[$name] = true; } } return implode(' ', array_keys($seen)) . "\n"; };

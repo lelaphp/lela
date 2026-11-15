@@ -2277,7 +2277,7 @@ mod tests {
     /// value is taken, what it raises raised, and its refusal leaving the
     /// entry as it was. No witness holds it, because the entry is no
     /// entry of the oracle's; `assert.c`'s `OnUpdateAssert` family is
-    /// the one php-src has, which reaches it with #753.
+    /// the one php-src has, which reaches it in ext/standard.
     #[test]
     fn an_extension_entrys_on_modify_is_served_by_ini_set() {
         #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature

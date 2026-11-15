@@ -156,7 +156,7 @@ enum Mode {
 /// pipe is php's plain stream, whose reads clear the stat cache. Each
 /// read and the wait for the child lend the request
 /// ([`Limits::blocking`]), so a callback C makes from another thread
-/// meanwhile is served there (#2401).
+/// meanwhile is served there.
 fn php_exec(
     req: &mut Request,
     mode: Mode,

@@ -143,7 +143,7 @@ pub(crate) fn unrefused<'m>(
 }
 
 /// The phpt subsets the `[[crate]]` row names, under the pinned corpus:
-/// the row's sentence, never spelled again here (#18, harness §4.1).
+/// the row's sentence, never spelled again here (harness §4.1).
 pub(crate) fn subsets(krate: &Crate) -> Vec<String> {
     (krate.subsets().iter())
         .map(|under| format!("{}/{}", phpt::CORPUS, under.display()))
@@ -483,9 +483,9 @@ fn table_end(text: &str, table: &str) -> Option<usize> {
 /// The features of the bundle a new extension is listed in: `default`, the
 /// build a person prunes a non-default extension from when porting it
 /// (design §4.10), and `host`, the set every host links, which
-/// `one_thread` and `linked` are built of (#3081), so a branch that adds an
+/// `one_thread` and `linked` are built of, so a branch that adds an
 /// extension links it into the hosts and `php-linked` in the same commit,
-/// its merge breaks no harness test (#1252), and the pruning leaves it
+/// its merge breaks no harness test, and the pruning leaves it
 /// linked.
 const LISTS: [&str; 2] = ["default", "host"];
 
@@ -553,7 +553,7 @@ fn bundle_feature(root: &Path, name: &str) -> Result<Edit> {
 /// The bundle's `enabled()` gains `php_ext_<name>::extension` behind
 /// `#[cfg(feature = "<name>")]`, appended last, where the witness on
 /// `enabled()` names it until a person moves the line to its place in
-/// php's registration order (#1778). The tier's alias is never touched. The edit is
+/// php's registration order. The tier's alias is never touched. The edit is
 /// textual, so the comments stay; nothing is written here.
 fn bundle_line(root: &Path, name: &str) -> Result<Edit> {
     let path = root.join(BUNDLE).join("src/lib.rs");

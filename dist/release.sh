@@ -1,5 +1,5 @@
 #!/bin/bash
-# A release by hand (#3525, ruled 2026-10-31): the CLI, CGI and FPM hosts
+# A release by hand (ruled 2026-10-31): the CLI, CGI and FPM hosts
 # of each platform built from this checkout's HEAD, one tarball per
 # platform in <out>, and SHA256SUMS over them, from scripts/dist-sums.sh.
 #
@@ -16,7 +16,7 @@
 # runtime-packages.txt, the Ubuntu packages the hosts load. The tree must
 # be clean, since a release is built from a commit, whose id the script
 # prints. CARGO_BUILD_JOBS (default 1) reaches the Linux builds, which a
-# 4 GiB Docker VM links one at a time (#3213); NAME (default php) is the
+# 4 GiB Docker VM links one at a time; NAME (default php) is the
 # hosts' name (ADR-0016).
 set -euo pipefail
 

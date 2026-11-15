@@ -30,7 +30,7 @@
 //! So a kept chunk carries what its last request wrote into the next
 //! request's pages, as a php-fpm child's does, and under makala into a
 //! request on another thread. That is the default, php's ([`Residue`],
-//! #4348's ruling 4). A process started with [`ZEROED`] set to a number
+//! ruled 2026-11-09). A process started with [`ZEROED`] set to a number
 //! that is not zero zeroes the pages each request touched before its
 //! chunks are kept, at a cost that follows the request's writes and not
 //! the chunk's size; nothing a request reads moves.
@@ -73,11 +73,11 @@ impl Default for ChunkCache {
 /// to a number that is not zero, as `ZEND_ATOL` reads one, as php's
 /// `USE_ZEND_ALLOC` is read. It is the engine's own and not a php.ini
 /// directive, since php has none, and `ini_get_all()` names nothing of
-/// it (#4348's ruling 4), so it carries the product's prefix and none of
-/// php's (#4478).
+/// it (ruled 2026-11-09), so it carries the product's prefix and none of
+/// php's (ruled 2026-11-11).
 ///
 /// The name promises that the pages a request touched are zeroed before
-/// its chunks are kept, and no more (#4478): it is no security boundary,
+/// its chunks are kept, and no more: it is no security boundary,
 /// it covers nothing the system allocator hands out, and it says nothing
 /// of a request still running.
 pub(super) const ZEROED: &str = "LELA_ZERO_TOUCHED_PAGES";
@@ -339,7 +339,7 @@ mod tests {
 
     /// php's `zend_mm_shutdown(full=0)` zeroes nothing, so by default the
     /// next request's pages hold what the last one wrote, the pages it
-    /// gave back before its end among them (#4348's ruling 4); with
+    /// gave back before its end among them (ruled 2026-11-09); with
     /// [`Residue::Zeroed`] every page it touched reads zero.
     #[test]
     fn the_pages_a_request_touched_read_zero_in_the_next_only_where_the_cache_zeroes() {

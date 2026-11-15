@@ -63,7 +63,7 @@ pub fn laid(req: &Request, f: FuncRef) -> bool {
 /// innermost down, where the frames compiled code runs in stand. The
 /// top is asked first, where a kernel's frame stands unless a call is
 /// under way over it, with no bounds check or index conversion of the
-/// walk's (#4087); the walk visits the same frames in the same order,
+/// walk's; the walk visits the same frames in the same order,
 /// so what is found is what it found, and it costs the frames above the
 /// one found, not the stack's depth.
 #[must_use]

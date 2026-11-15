@@ -6,13 +6,14 @@ use super::*;
 
 /// `zend_compile_class_const` under `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`,
 /// which opcache sets, so `zend_try_ct_eval_class_const` folds
-/// nothing and `M::K` is fetched as the program serves (#372): the
+/// nothing and `M::K` is fetched as the program serves: the
 /// class's constant pair in `op1` (`zend_set_class_name_op1` over
 /// `zend_resolve_class_name`, which takes the namespace as
 /// `zend_compile_class_decl` took it on the declaration), the
 /// constant's name in `op2`, into a temporary. The dump is the
 /// oracle's under `[regime.dump]` at 8.5.9 of this program, which is
-/// #322's own with the `echo M::K` it stood aside from.
+/// the namespaced class test's in classes.rs with the `echo M::K` that
+/// test stands aside from.
 #[test]
 fn a_class_constant_is_fetch_class_constant_over_the_resolved_class_name() {
     let (unit, _strings) =
@@ -36,7 +37,7 @@ fn a_class_constant_is_fetch_class_constant_over_the_resolved_class_name() {
     .assert_eq(&unit.dump(&[]).text());
 }
 
-/// The constant table `zend_compile_class_const` leaves (#392):
+/// The constant table `zend_compile_class_const` leaves:
 /// `zend_emit_op_tmp` adds the constant's name, then
 /// `zend_set_class_name_op1` the class's pair, so the name stands
 /// before the pair, as it does under `zend_compile_static_prop`.
@@ -71,7 +72,7 @@ fn a_class_constant_fetch_adds_the_constant_s_name_before_the_class_s_pair() {
     );
 }
 
-/// `zend_compile_static_prop` under `BP_VAR_R` (#372): the
+/// `zend_compile_static_prop` under `BP_VAR_R`: the
 /// property's name in `op1`, the class's constant pair in `op2`, into
 /// a temporary (`zend_adjust_for_fetch_type`). The dump is the
 /// oracle's under `[regime.dump]` at 8.5.9 of `<?php echo C::$p;`,
@@ -106,7 +107,7 @@ fn a_static_property_read_is_fetch_static_prop_r_over_the_resolved_class_name() 
     .assert_eq(&dump_of(b"<?php namespace A; class C { } echo C::$p;"));
 }
 
-/// `zend_compile_assign`'s `ZEND_AST_STATIC_PROP` arm (#470): the
+/// `zend_compile_assign`'s `ZEND_AST_STATIC_PROP` arm: the
 /// fetch's own opline turned into `ASSIGN_STATIC_PROP`, its
 /// `result` a temporary and the value in the `OP_DATA` beside it.
 /// The dump is the oracle's under `[regime.dump]` at 8.5.9; the
@@ -137,7 +138,7 @@ fn a_static_property_write_is_assign_static_prop_over_the_op_data_beside_it() {
 
 /// `zend_compile_compound_assign`, `zend_compile_pre_incdec`,
 /// `zend_compile_post_incdec` and `zend_compile_assign_ref` over a
-/// `ZEND_AST_STATIC_PROP` (#487): one opline each, the fetch's own
+/// `ZEND_AST_STATIC_PROP`: one opline each, the fetch's own
 /// with its opcode set, the operator where the cache slot stood for
 /// the compound form and the slot moved onto its `OP_DATA`. The
 /// dump is the oracle's under `[regime.dump]` at 8.5.9; `C::$p++`
@@ -176,14 +177,14 @@ fn the_compound_step_and_reference_writes_to_a_static_property_are_the_oracle_s_
 }
 
 /// What stands beside a `C::$p` read and is not read yet is refused
-/// as such (#372): a compound assignment over what is no variable,
+/// as such: a compound assignment over what is no variable,
 /// `self`, `parent` and `static` as the class, and such a fetch in a
 /// constant expression, which php refuses outright. `C::$p = &$o->q`
-/// was one of them until #611 made the source of a `= &`
+/// was one of them until the source of a `= &` was made
 /// `zend_compile_var`'s, `C::$p()`, whose method the local `$p`
 /// names, until it was read as `INIT_STATIC_METHOD_CALL` over the
 /// CV, and the property the program names as it serves, `C::$$p`
-/// and `C::${'p'}`, until #1189.
+/// and `C::${'p'}`, until that too was read.
 #[test]
 fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
     let refused = |source: &[u8]| {
@@ -206,7 +207,7 @@ fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
     );
 }
 
-/// `zend_is_assign_to_self` through a property (#2683): `$a->x[] =
+/// `zend_is_assign_to_self` through a property: `$a->x[] =
 /// $a` and `$a[0]->p[1] = $a` read `$a` into a temporary first,
 /// numbered after the delayed fetches, and `OP_DATA` carries it.
 #[test]
@@ -453,7 +454,7 @@ fn a_property_assignment_compiles_to_assign_obj_as_php_emits_it() {
     }
 }
 
-/// `zend_separate_if_call_and_write` under a property write (#336),
+/// `zend_separate_if_call_and_write` under a property write,
 /// the oracle's dump under `[regime.dump]` at 8.5.9: a call under
 /// the chain is compiled where it stands and `SEPARATE` reads and
 /// writes the one `VAR` it returned into, before the fetches the
@@ -510,7 +511,7 @@ fn a_call_under_a_property_write_is_the_oracle_s_separate() {
     ));
 }
 
-/// #444's shapes under the oracle's `[regime.dump]`: a property as
+/// These shapes under the oracle's `[regime.dump]`: a property as
 /// the target of `= &` is `ASSIGN_OBJ_REF` over its object with the
 /// source in an `OP_DATA`, `(function)` and a `MAKE_REF` over a call.
 #[test]

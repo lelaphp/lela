@@ -240,7 +240,7 @@ impl _ZendTestFiber {
     /// the dead fiber into it, and the dead fiber's destroy before the
     /// target runs. The child is served with the observers on, which
     /// only startup sets, and its addresses numbered by first
-    /// appearance (#2506):
+    /// appearance:
     ///
     /// ```php
     /// $code = '$fiber = new _ZendTestFiber(fn () => 2);
@@ -284,7 +284,7 @@ impl _ZendTestFiber {
     /// A body that throws ends into its target all the same: the
     /// throwable is lost to the transfer the target's start overwrites,
     /// and the target is served with the value nothing wrote, an
-    /// argument not passed (#2871):
+    /// argument not passed:
     ///
     /// ```php
     /// $f = new _ZendTestFiber(function () { throw new Exception('boom'); });
@@ -437,7 +437,7 @@ impl _ZendTestFiber {
     /// `ReflectionFiber` reads it where php's `fiber->execute_data` was
     /// left by its start, its bottom frame: the executing line is the
     /// resumer's, the line that started it, and the trace from it is
-    /// empty, php cutting the chain under the bottom (#2505):
+    /// empty, php cutting the chain under the bottom:
     ///
     /// ```php
     /// $test = new _ZendTestFiber(function (): void {
@@ -497,7 +497,7 @@ impl _ZendTestFiber {
     /// each `start` into the test fiber's closure, whose bottom frame names
     /// no resumer's; a suspend that passes through both leaves the chain
     /// standing as it is, and a debugger's evaluation in the inner fiber's
-    /// frame reads it so (`tests/frames.rs`, #2765):
+    /// frame reads it so (`tests/frames.rs`):
     ///
     /// ```php
     /// function f() {

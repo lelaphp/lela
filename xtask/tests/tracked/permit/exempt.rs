@@ -3,7 +3,7 @@
 
 use super::*;
 
-/// The `exempt` key (#23): a rule `permit` judges does not judge a call
+/// The `exempt` key: a rule `permit` judges does not judge a call
 /// whose file `exempt` covers, under the path grammar `scope` uses. The
 /// fixture is the `witness.exit-authored` edit under the fence grammar's
 /// own parser, `xtask/src/witness/fence.rs`, which the tracked row denies
@@ -106,7 +106,7 @@ fn every_judged_predicate_honours_exempt_under_the_scope_grammar() {
     }
 }
 
-/// `unless_pattern` (#1149): a hit of the `deny_pattern` whose own command
+/// `unless_pattern`: a hit of the `deny_pattern` whose own command
 /// also matches it is let through, and a hit in another command of the
 /// same line is not.
 #[test]

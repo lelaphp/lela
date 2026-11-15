@@ -310,7 +310,7 @@ impl<P: UriParser> ObjectHandlers for Handlers<P> {
 /// A copy the memory limit refused since 8.5.12 leaves the clone with no
 /// URI, and the limit's fatal is raised at the next check, here the
 /// method's return, where php raises it at the clone itself (the line
-/// the engine names is the check's, #3260):
+/// the engine names is the check's):
 ///
 /// ```php
 /// ini_set("memory_limit", "8M");

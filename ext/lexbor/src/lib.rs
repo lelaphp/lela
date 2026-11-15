@@ -1,7 +1,7 @@
 //! The `lexbor` extension: `php-src/ext/lexbor` as one crate under `ext/`
 //! (ADR-0004), as php 8.5 has it, an extension of its own with no function
 //! and no class, which `dom` requires. The library is php-src's vendored
-//! lexbor, compiled by `build.rs` (design §7.2, #731) and bound in
+//! lexbor, compiled by `build.rs` (design §7.2) and bound in
 //! [`ffi`] alone. One dependency, the facade; one entry, `extension()`; one
 //! process start, lexbor's allocator pointed at the request's heap, and
 //! no other state (ADR-0005, ADR-0010). Beside `extension()` the crate exports [`ffi`]'s safe

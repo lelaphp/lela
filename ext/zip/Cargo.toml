@@ -20,14 +20,14 @@ workspace = true
 php_ext = { path = "../../crates/php_ext" }
 php_ext_standard = { path = "../standard" }
 php_ext_pcre = { path = "../pcre" }
-# libzip's behaviour re-derived in pure Rust (design §7.2, revision 70;
-# #1515): ext/zip finds and reads the central directory as libzip's
-# zip_open does (#3380), and the codecs and ciphers below read and write
-# each entry, a buffer at a time (#1545); deflate is written through the
+# libzip's behaviour re-derived in pure Rust (design §7.2, revision 70):
+# ext/zip finds and reads the central directory as libzip's
+# zip_open does, and the codecs and ciphers below read and write
+# each entry, a buffer at a time; deflate is written through the
 # platform's zlib, bound in `src/ffi/` over the libz-sys ext/zlib binds,
-# at libzip's memLevel (#1657, #1651), and LZMA, XZ and ZSTD are read
+# at libzip's memLevel, and LZMA, XZ and ZSTD are read
 # and written through the platform's liblzma and libzstd, bound in
-# `src/ffi/` and found by `build.rs` (#3529).
+# `src/ffi/` and found by `build.rs`.
 flate2 = { workspace = true }
 libz-sys = { workspace = true }
 libc = { workspace = true }
@@ -40,8 +40,8 @@ crc32fast = { workspace = true }
 getrandom = { workspace = true }
 
 # `build.rs` compiles `zlib.h`'s `ZLIB_VERSION` as C, the string libzip's
-# `deflateInit2` hands zlib (#2426), and finds liblzma and libzstd
-# through pkg-config (#3529).
+# `deflateInit2` hands zlib, and finds liblzma and libzstd
+# through pkg-config.
 [build-dependencies]
 cc = { workspace = true }
 pkg-config = { workspace = true }
@@ -51,6 +51,6 @@ pkg-config = { workspace = true }
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # What the extensions of the test engines require, transitively, as
 # `zend_startup_module_ex` refuses an extension whose required one is not
-# started (#1925).
+# started.
 php_ext_lexbor = { path = "../lexbor" }
 php_ext_uri = { path = "../uri" }

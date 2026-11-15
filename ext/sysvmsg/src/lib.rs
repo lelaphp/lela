@@ -3,7 +3,7 @@
 //! `standard`, whose serializer `sysvmsg.c` calls through
 //! `ext/standard/php_var.h` (design §4.10); System V message queues
 //! through `libc` in [`ffi`] alone, since nix binds none of them (design
-//! §7.2, #1323); one entry, `extension()`. The phpt subset is
+//! §7.2); one entry, `extension()`. The phpt subset is
 //! `php-src/ext/sysvmsg/tests`, through `xtask phpt --subset`.
 //!
 //! Every native is `sysvmsg.c`'s at the tag, in `sysvmsg.stub.php`'s

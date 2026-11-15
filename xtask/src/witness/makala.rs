@@ -1,13 +1,13 @@
-//! A fence with a `request makala` (#2347): the snippet served as a
+//! A fence with a `request makala`: the snippet served as a
 //! request of the web by the production server, `sapi/makala`'s `makala`
 //! over HTTP for the engine, and for the oracle by the pinned php-fpm
 //! handed the same request under the HTTP-to-FastCGI mapping the pin
-//! records (`[fastcgi]`, [`Mapping`], #2334), its variables filled as the
+//! records (`[fastcgi]`, [`Mapping`]), its variables filled as the
 //! server fills them, so the server's own copy of the mapping, which it
 //! may not read from the pin, is held to the pin. Two values differ by what they are and a snippet that
 //! prints them masks them: the ports, which are the run's own, and
 //! `SERVER_SOFTWARE`, nginx's in the recipe and the server's own name
-//! under #2335's ruling, which makala's own test holds. The request is
+//! as ruled 2026-10-09, which makala's own test holds. The request is
 //! the one the fence's sections describe (`cgi::request`): its method,
 //! query string, cookie and body, an HTTP/1.0 one to `localhost` for the
 //! file the recipe names, so the response ends at the close; a field
@@ -21,7 +21,7 @@
 //! `Status:` line is the code, 200 where it sends none; the server's own
 //! `date` and `connection` are no line PHP set; and a name's case is
 //! lowercased on both sides, since the server's HTTP stack writes no
-//! other (#2570).
+//! other.
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -231,8 +231,8 @@ pub(crate) struct Server {
     child: Child,
     addr: String,
     port: u16,
-    /// What it names itself by, `makala/<version>` (#2335), as its first
-    /// line on stderr says.
+    /// What it names itself by, `makala/<version>` (ruled 2026-10-09), as
+    /// its first line on stderr says.
     pub(crate) software: String,
 }
 
@@ -396,7 +396,7 @@ fn upstream_closed(closed: Closed) -> (Vec<u8>, Vec<u8>) {
 /// A pool of its own of the php-fpm at `host`, kept to hand one request,
 /// `http` to `program` under the pin's `[fastcgi]` mapping, as
 /// many times as it is asked, by as many clients at once as there are: what
-/// [`by_fpm`] asks once and a bench arm asks each rep (#2351, #2660).
+/// [`by_fpm`] asks once and a bench arm asks each rep.
 /// Ended when dropped.
 pub(crate) struct Fpm {
     /// Held only where a client cannot reach `address` at once,
@@ -609,8 +609,8 @@ mod tests {
     /// Every parameter of the pinned mapping is filled for a request, in
     /// the order nginx sends them, `HTTPS` left out on a plain connection,
     /// and the header fields after them as `HTTP_` ones; the path past the
-    /// program is `PATH_INFO`, empty where there is none (#2637), and
-    /// `PATH_TRANSLATED` the root and it, none where there is none (#2650).
+    /// program is `PATH_INFO`, empty where there is none, and
+    /// `PATH_TRANSLATED` the root and it, none where there is none.
     #[test]
     fn the_pinned_mapping_is_filled_in_nginx_s_order_with_the_fields_after() {
         let workspace = crate::package_dir();

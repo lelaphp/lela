@@ -6,7 +6,7 @@
 //! the paths are kept in the run. So a commit that writes no source of the
 //! binary keeps the run where it was, and the run at the merge base is the
 //! one, in any checkout of the repository, whose paths the base's tree
-//! hashes to its name, as `phpt --against` finds a subset's (#725).
+//! hashes to its name, as `phpt --against` finds a subset's.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -38,7 +38,7 @@ pub(crate) enum Verdict {
 }
 
 /// One run as it is kept. A field it does not know is ignored, as a
-/// reading's is (harness-design.md §4.2, #4404): a run passed over is no
+/// reading's is (harness-design.md §4.2): a run passed over is no
 /// base, and with no base a program that met php there and differs now
 /// refuses nothing, so refusing a newer harness's run would loosen the
 /// lane it is meant to hold. So a field is added only where the run read

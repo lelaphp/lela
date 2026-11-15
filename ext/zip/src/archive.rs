@@ -1163,7 +1163,7 @@ impl Archive {
     /// `_zip_file_replace`: `idx` given new data, or with `None` a new
     /// entry, or the one named `name` under `ZIP_FL_OVERWRITE`. Its extra
     /// fields are cleared while torrentzip is wanted too, as 1.11.4 and
-    /// 1.12.1 clear them and 1.12 alone refuses (#2667). Its method is
+    /// 1.12.1 clear them and 1.12 alone refuses. Its method is
     /// the entry's until the close, whose merge leaves new data to the
     /// default method: libzip 1.12 marks no `ZIP_CM_REPLACED_DEFAULT`.
     ///

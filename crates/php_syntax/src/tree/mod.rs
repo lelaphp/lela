@@ -11,7 +11,7 @@
 //! scope downward.
 //!
 //! **Where it lives.** In the [`crate::Arena`] the parse was handed, and
-//! nowhere else (#2810): a node is plain data, `Copy` and with nothing to
+//! nowhere else: a node is plain data, `Copy` and with nothing to
 //! drop, so the tree is given up with the arena, whole, and a [`Tree`] is
 //! three references into it.
 //!

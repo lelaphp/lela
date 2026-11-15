@@ -1,6 +1,6 @@
 //! System V shared memory, `<sys/shm.h>` from the C library (design §7.2;
-//! `unsafe.homes`' `ext/*/src/ffi/`), since nix binds no System V IPC
-//! (#1323): `shmget`, `shmctl` and `shmat` behind safe functions, and the
+//! `unsafe.homes`' `ext/*/src/ffi/`), since nix binds no System V IPC:
+//! `shmget`, `shmctl` and `shmat` behind safe functions, and the
 //! attached mapping as a value that detaches when it is dropped. The one
 //! home of this crate's `unsafe`.
 #![allow(unsafe_code)]

@@ -1,7 +1,7 @@
 //! Where a request goes under the document root: a program's path split
-//! at its first `.php` segment as the recipe's nginx splits it (#2693),
-//! else `php -S`'s path rules (`php_proto::vpath`, #2346, #2588), and over
-//! them the refusals of a server that faces the internet (#2586). The
+//! at its first `.php` segment as the recipe's nginx splits it,
+//! else `php -S`'s path rules (`php_proto::vpath`), and over
+//! them the refusals of a server that faces the internet. The
 //! path is `normalize_vpath`'s, decoded and with every `..` taken, so no
 //! request names a file outside the root; a symlink under the root is
 //! followed wherever it leads, as `php -S` and nginx's `disable_symlinks
@@ -17,7 +17,7 @@ use php_sapi::{HostPath, ResponseHead};
 use crate::options::{Hidden, Options};
 use crate::static_file::StaticFile;
 
-/// The extensions of PHP's source under another name than `php` (#2586):
+/// The extensions of PHP's source under another name than `php`:
 /// a file with one is never sent as a static file unless the operator
 /// serves hidden paths, matched without regard to case.
 const SOURCE_EXTENSIONS: [&[u8]; 9] = [
@@ -62,10 +62,10 @@ impl Router {
     /// Where `method path` goes: a path [`Hidden`] refuses is not found,
     /// before the disk is asked; else a program's where a segment of the
     /// path ends in `.php`, split there as the recipe's nginx splits it
-    /// (`vpath::split_at_program`, #2693), whatever is on the disk; else
+    /// (`vpath::split_at_program`), whatever is on the disk; else
     /// the path translated as `php -S` translates it, a program's where
-    /// `php_cli_server_dispatch` says so, the path past it its path's info
-    /// (#2637), and a static file's otherwise, in
+    /// `php_cli_server_dispatch` says so, the path past it its path's info,
+    /// and a static file's otherwise, in
     /// `php_cli_server_begin_send_static`'s order: a method that writes
     /// refused, then a path that translated to nothing, then, under
     /// [`Hidden::Refused`], a path past the file it found or a file of
@@ -76,7 +76,7 @@ impl Router {
     /// [`Hidden::Refused`] as a path with nothing at it is; under
     /// [`Hidden::Served`] a static file's is refused with 400 after a
     /// method that writes, and a program's is routed as one, whose request
-    /// serves nothing, as `php -S` refuses them (#2695). The walk that
+    /// serves nothing, as `php -S` refuses them. The walk that
     /// routes is the walk that splits, so `/upload/x.jpg/y.php` serves no
     /// program the walk finds; split at `y.php`, `cgi.fix_pathinfo`'s walk
     /// in php-fpm's checks finds `x.jpg`, the exploit's shape, and
@@ -85,7 +85,7 @@ impl Router {
     /// named `d.php` is answered 404, as php-fpm under the recipe answers.
     /// `php -S` sends `x.jpg` for `/upload/x.jpg/`, and so does
     /// [`Hidden::Served`], where [`Hidden::Refused`] serves a static file
-    /// only as named (#2642).
+    /// only as named.
     pub(crate) fn route(&self, method: &[u8], path: &[u8]) -> Route {
         let hidden = self.hidden;
         let mut uri = php_proto::http::normalize_vpath(path);

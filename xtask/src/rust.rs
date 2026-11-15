@@ -9,14 +9,14 @@
 //! whole; before this module each carried a blanker of its own, and the
 //! harness's own negative controls are strings
 //! (`unsafe_sites("unsafe { a(); }")`), so the fidelity of the blanker
-//! decided whether a sensor could be edited at all (#18). The matcher then
+//! decided whether a sensor could be edited at all. The matcher then
 //! stayed split, `permit` on the keyword before a block or an item and the
 //! audit on every word-bounded keyword, so an unsafe attribute was a site
-//! for one and not the other (#46). The line counter `budget` read through
+//! for one and not the other. The line counter `budget` read through
 //! kept a string scanner of its own, which knew escaped double-quoted
 //! strings and nothing else, so a quote inside a character literal opened
 //! a string that never closed and a `/*` inside a raw string opened a
-//! comment that swallowed the rest of the file (#47). A rule read two ways
+//! comment that swallowed the rest of the file. A rule read two ways
 //! is two rules, which is what harness-design.md §4.1 says of a rule stated
 //! anywhere but the manifest, and what the two hook adapters were taught on
 //! 2026-09-08. One parse of a file as Rust beside it, [`parse_file`], so every

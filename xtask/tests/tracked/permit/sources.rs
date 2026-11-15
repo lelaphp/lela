@@ -48,7 +48,7 @@ fn an_edit_inside_a_computed_region_body_is_denied_and_one_beside_it_allowed() {
 /// `unsafe.homes` judges code, and the harness's own sensors carry the
 /// keyword in their negative controls, which are strings and comments: the
 /// audit's tests pin `unsafe_sites("unsafe { a(); }")`, and while that read
-/// as a site the file could not be written to at all (#18).
+/// as a site the file could not be written to at all.
 #[test]
 fn an_unsafe_inside_a_string_or_a_comment_is_not_a_site() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -91,7 +91,7 @@ fn an_unsafe_inside_a_string_or_a_comment_is_not_a_site() {
 
 /// An unsafe attribute, `#[unsafe(no_mangle)]`, asserts an unsafe contract
 /// as a block does, and is a site for both sensors of `unsafe.homes`: the
-/// rule's fixture carries it outside a home and inside one (#46).
+/// rule's fixture carries it outside a home and inside one.
 #[test]
 fn an_unsafe_attribute_is_a_site_outside_a_home_and_not_a_finding_inside_one() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -113,7 +113,7 @@ fn an_unsafe_attribute_is_a_site_outside_a_home_and_not_a_finding_inside_one() {
     );
 }
 
-/// End to end (#105): `xtask witness --accept` captures the oracle's
+/// End to end: `xtask witness --accept` captures the oracle's
 /// status onto the fence line and writes its reading and its record of
 /// the verdict, and `xtask permit --diff` over that tree permits the line
 /// it wrote. Take the reading away and the record still says the line is
@@ -150,7 +150,7 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
 
     // The reading taken away whole, its file, its index and its lines of
     // the log, since a reading over the tree in any of them covers the
-    // line (#3802); the record's stay.
+    // line; the record's stay.
     let store = Store::of_workspace(&root);
     let reading = store.path("witness", CRATE).unwrap();
     std::fs::remove_file(&reading).unwrap();

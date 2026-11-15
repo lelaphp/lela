@@ -1,12 +1,12 @@
-//! Copying a table as php copies it, as a program meets it (#2005,
-//! design §5.3): the copy `get_defined_vars()` and `$GLOBALS` hand back
+//! Copying a table as php copies it, as a program meets it
+//! (design §5.3): the copy `get_defined_vars()` and `$GLOBALS` hand back
 //! holds the value of a reference nothing else holds, so writing to it
 //! changes no variable; the `(object)` cast of an array whose keys are
 //! all strings, and the `(array)` cast, `get_object_vars()` and
 //! `get_mangled_object_vars()` of an object with no declared property,
 //! share the table where php shares it, so `memory_get_usage()` reads
 //! php's delta, and a write to either holder separates. Each engine
-//! arms the leak sensor (#1992), so a copy that shares where php shares
+//! arms the leak sensor, so a copy that shares where php shares
 //! leaks nothing and gives up nothing twice.
 
 use crate::engine::{Engine, LeakSensor};

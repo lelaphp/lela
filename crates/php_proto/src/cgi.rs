@@ -150,7 +150,7 @@ impl RequestInfo {
     /// `Z/sapi/fpm/fpm/fpm_main.c:433`). A negative length wraps, as in a
     /// release build, whose `assert` on it is compiled out, so the body is
     /// read to its end, held to `post_max_size` by the readers that pull
-    /// it (#3457).
+    /// it.
     #[must_use]
     pub fn body_length(&self) -> u64 {
         self.content_length.cast_unsigned()
@@ -786,8 +786,7 @@ mod tests {
     }
 
     /// A parameter holding a NUL is read up to it, so the file it names
-    /// is the one before the NUL, and a value with none stands whole
-    /// (#2757).
+    /// is the one before the NUL, and a value with none stands whole.
     #[test]
     fn a_parameter_cut_at_its_nul_names_the_file_before_it() {
         let mut vars = env(&[

@@ -11,7 +11,7 @@
 //! so by reading every byte as the character of the same value
 //! ([`bytewise`]) on both sides, which the engine here, matching code
 //! point by code point with ASCII classes, then matches as PCRE does; a
-//! test whose expectation is not UTF-8 is held to its bytes (#1937).
+//! test whose expectation is not UTF-8 is held to its bytes.
 //!
 //! The engine behind an `--EXPECTF--` has RE2 semantics (design §8), since
 //! `expectf_to_regex` writes nothing past them but `%f`'s lookahead, which
@@ -19,8 +19,8 @@
 //! test's own PCRE, look-around and all (`ok((?!memory leaks
 //! detected).)*` in `ext/zip/tests/bug76524.phpt`), so a lane that has the
 //! oracle matches it as run-tests.php does, by the pinned php's
-//! `preg_match` ([`Expectation::met_under`], design §8, revision 73,
-//! #1543); the RE2 engine reads it only where no oracle runs.
+//! `preg_match` ([`Expectation::met_under`], design §8, revision 73);
+//! the RE2 engine reads it only where no oracle runs.
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -121,7 +121,7 @@ pub(crate) fn lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
 impl Expectation {
     /// Whether `actual`, already normalised, meets the expectation, an
     /// `--EXPECTREGEX--` matched by `oracle`'s pinned php as run-tests.php
-    /// matches it, with `preg_match` (#1543); the other two as
+    /// matches it, with `preg_match`; the other two as
     /// [`Expectation::met`] matches them.
     pub(crate) fn met_under(&self, oracle: &Oracle<'_>, actual: &[u8]) -> Result<bool> {
         let Expectation::Pattern(body) = self else {
@@ -154,7 +154,7 @@ impl Expectation {
 }
 
 /// One line of an expectation, held to one line of what ran: where a
-/// test's first difference is found (phpt's miss, #1185). An
+/// test's first difference is found (phpt's miss). An
 /// `--EXPECT--` line is its bytes; a line of either pattern form is its
 /// own pattern, anchored at the line's ends, and its text where it is no
 /// pattern this engine takes alone. Upstream matches the whole section at

@@ -18,7 +18,7 @@ workspace = true
 php_ext = { path = "../../crates/php_ext" }
 php_ext_pdo = { path = "../pdo" }
 # The platform's libsqlite3, the keg the oracle links, found through
-# pkg-config and never vendored (design §7.2, #1510), bound in `src/ffi/`
+# pkg-config and never vendored (design §7.2), bound in `src/ffi/`
 # alone (`unsafe.homes`).
 libsqlite3-sys = { workspace = true }
 
@@ -26,12 +26,12 @@ libsqlite3-sys = { workspace = true }
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # session, and standard below it, for the save handler that writes through
-# a persistent link in session's `RSHUTDOWN` (#1695).
+# a persistent link in session's `RSHUTDOWN`.
 php_ext_session = { path = "../session" }
 php_ext_standard = { path = "../standard" }
 # What the extensions of the test engines require, transitively, as
 # `zend_startup_module_ex` refuses an extension whose required one is not
-# started (#1925).
+# started.
 php_ext_json = { path = "../json" }
 php_ext_lexbor = { path = "../lexbor" }
 php_ext_spl = { path = "../spl" }

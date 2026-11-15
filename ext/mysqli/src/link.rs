@@ -381,7 +381,7 @@ fn give_to_pool(req: &mut Request, key: PoolKey, handle: Mysqlnd) {
 /// keeps closed on the shutdown request, the last given back first, as
 /// `php_mysqli_dtor` cleans `plist->free_links` with
 /// `php_mysqli_dtor_p_elements` (`mysqli.c:89-104`), an implicit close
-/// that sends the server its `COM_QUIT` (#1961).
+/// that sends the server its `COM_QUIT`.
 pub(crate) fn engine_end(req: &mut Request) {
     let idle = req
         .engine::<crate::Pooled>()

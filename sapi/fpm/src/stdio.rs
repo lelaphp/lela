@@ -328,7 +328,7 @@ pub(crate) fn child_said(fpm: &mut Fpm, pid: i32, pipe: Pipe) {
 /// read to the end of what stands and logged a line at a time, and the
 /// pipe, where it ended, taken out of the loop while the fd is
 /// still open and closed after, as php's `fpm_event_del` comes before its
-/// `close` (#2793).
+/// `close`.
 pub(crate) fn pipe_said(fpm: &mut Fpm, pool: usize, child: &mut Child, pipe: Pipe) {
     let Some(fd) = pipe.of_mut(child).take() else {
         return;

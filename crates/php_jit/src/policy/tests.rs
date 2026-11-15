@@ -241,7 +241,7 @@ fn the_status_is_the_requests_jit_g_and_its_buffer() {
 /// `JIT_G` says. Counting words start cold where the tier was on
 /// at the start, which fills php's pool of counters at each request
 /// start, and primed where it was set up and off, whose pool nothing
-/// fills, so each roots at its first arrival (#3363).
+/// fills, so each roots at its first arrival.
 #[test]
 fn a_units_words_are_laid_as_its_request_has_the_tier() {
     let laid = |entries: &[(&str, &str)], on: Option<bool>| {
@@ -317,7 +317,7 @@ fn a_landing_is_armed_from_the_pool_php_hands_it_a_slot_of() {
     }
 }
 
-/// A landing a loop's trace was published at is headed (#4105's ruling):
+/// A landing a loop's trace was published at is headed (ruled 2026-11-04):
 /// neither sealed, so a return visits, nor armed, so it counts nothing,
 /// and blacklisted to a read of the word, so no visit claims it and
 /// compiled code reads no trace in it. A head leaves an armed word as it
@@ -831,8 +831,8 @@ fn a_failed_attempt_keeps_its_stop_and_a_release_counts_none() {
 
 /// A lane's `jit.mode` leaves to the interpreter a program whose
 /// directives say php's tier never starts, `opcache.jit=disable`, a
-/// refused setting or a zero buffer, with no note, and still
-/// names its lane over `off`, `tracing` and nothing set (#3136's ruling).
+/// refused setting or a zero buffer, with no note, and still names its
+/// lane over `off`, `tracing` and nothing set (ruled 2026-10-21).
 #[test]
 fn a_lane_leaves_a_tier_that_never_starts_to_the_interpreter() {
     for lane in ["force", "exit-fuzz"] {

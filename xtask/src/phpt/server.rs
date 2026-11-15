@@ -1,4 +1,4 @@
-//! The `MySQL` server the `mysqli` and `pdo_mysql` suites need (#1345, #1366).
+//! The `MySQL` server the `mysqli` and `pdo_mysql` suites need.
 //! Without one the oracle skips 412 of `mysqli`'s 449 tests and 161 of
 //! `pdo_mysql`'s 167, and a reading of those skips would be a verdict on a
 //! server that was not there. So before a run of such a subset the pinned
@@ -14,7 +14,7 @@
 //! `test` by default, and the conflict keys hold them apart within a run
 //! and, by key, across runs, but a test whose own `--CONFLICTS--` names
 //! another key runs beside another run's tests, and two runs in two
-//! worktrees read each other's `Table 'test.test' doesn't exist` (#1546).
+//! worktrees read each other's `Table 'test.test' doesn't exist`.
 //! So each run of such a subset makes a database of its own on the server,
 //! names it to its programs through the variables `connect.inc` and
 //! `inc/config.inc` read, as upstream's README asks of a database other
@@ -32,7 +32,7 @@ use super::Subset;
 use crate::oracle::{Ended, Oracle, Pin, Program};
 
 /// The corpus directories whose tests need the server: the extensions'
-/// subsets as the design derives them (#1590), and any directory inside.
+/// subsets as the design derives them, and any directory inside.
 const SUITES: [&str; 2] = ["ext/mysqli", "ext/pdo_mysql"];
 
 /// What the pinned php runs to ask: the suites' own defaults where the

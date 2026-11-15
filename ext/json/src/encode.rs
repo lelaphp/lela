@@ -110,7 +110,7 @@ pub(super) fn encode(
 
 /// [`encode`]'s arms over a value that holds no other, a call of their
 /// own, so what writing one takes is off the stack of a nest encoded
-/// level by level (#3159).
+/// level by level.
 #[inline(never)]
 fn encode_scalar(
     req: &mut Request,
@@ -658,7 +658,7 @@ impl Guard {
 /// ```
 ///
 /// A call of its own, so what reading an object's table takes is off
-/// the stack of a nest of arrays encoded level by level (#3159).
+/// the stack of a nest of arrays encoded level by level.
 #[inline(never)]
 fn encode_object(
     req: &mut Request,

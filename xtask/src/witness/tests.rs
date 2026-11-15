@@ -5,9 +5,9 @@
 //!
 //! The tests that run a snippet run it through the engine linked into the
 //! harness, which is what the lane serves every witness through (harness
-//! §7, revision 48; #401), with the pinned oracle beside it for the status
+//! §7, revision 48), with the pinned oracle beside it for the status
 //! a fence pins. They return when the pinned binary is not on this
-//! machine, unless the machine promised it (#38).
+//! machine, unless the machine promised it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ fn manifest() -> Manifest {
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
-/// this machine promised the binary (#38).
+/// this machine promised the binary.
 fn oracle() -> Option<PathBuf> {
     let pin = manifest().pin.unwrap();
     Promise::Oracle
@@ -105,7 +105,7 @@ fn only(tally: &Tally) -> (Judgement, String) {
 /// What php writes on the first stream for an uncaught error at line 2,
 /// which the engine writes with it, opted in to the status `--accept`
 /// captures. The path is `%s`, since the oracle runs the snippet in a
-/// scratch directory and the linked engine as `witness.php` (#293).
+/// scratch directory and the linked engine as `witness.php`.
 const FATAL: &str = "/// ```expect exit\n/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2\n/// Stack trace:\n/// #0 {main}\n///   thrown in %s on line 2\n/// ```\n";
 
 /// A block whose snippet prints `1` and whose fences pin what `fences` says.
@@ -150,7 +150,7 @@ fn the_digest_is_asserted_once_over_a_run_of_three_witnesses() {
     assert_eq!(manifest.pin().unwrap().digests_asserted(), 1);
 }
 
-/// Coverage first, the digest only before a snippet runs (#65): with no
+/// Coverage first, the digest only before a snippet runs: with no
 /// binary at the pin's path the kernel without a witness still fails the
 /// crate, the witness is a snippet that did not run rather than a
 /// refusal, and the pin is never hashed.
@@ -226,10 +226,10 @@ fn the_snippet_runs_as_witness_php_with_the_code_on_line_two() {
     // php's own error text names the file and the line, which is what the
     // recipe's preamble is for (design §8). The oracle runs the snippet as
     // `%SCRATCH%/witness.php` and the linked engine, which serves the run
-    // of record, names it `witness.php` (#293), and `%s` is one character
+    // of record, names it `witness.php`, and `%s` is one character
     // at least (run-tests.php's `[^\r\n]+`), so the pin both meet is
     // `%s 2`, the one the witness beside `magic_const` in php_compile
-    // writes (#364).
+    // writes.
     let text = format!(
         "/// ```php\n/// echo __FILE__, ' ', __LINE__;\n/// ```\n{}pub fn native() {{}}\n",
         "/// ```expect\n/// %s 2\n/// ```\n"
@@ -243,9 +243,9 @@ fn the_snippet_is_named_witness_php_as_the_recipe_names_it() {
     // The linked adapter serves the snippet under the recipe's
     // `script_name`, so a diagnostic's `in %s on line %d` names the file
     // the fresh-process adapter runs it as, and not `Standard input
-    // code`, `serve_capture`'s name for a piped source (#293). The engine
+    // code`, `serve_capture`'s name for a piped source. The engine
     // compiles a served source under its name expanded, as php compiles
-    // its primary file (#1569), so the name is the scratch path the
+    // its primary file, so the name is the scratch path the
     // normaliser writes `%SCRATCH%` for, as the oracle's is.
     let recipe = manifest().pin.unwrap().recipe;
     let snippet = "ini_set('display_errors', 'stderr');\necho $u, 'to the first';";
@@ -261,7 +261,7 @@ fn the_linked_snippet_is_served_in_the_tree_its_file_stands_in() {
     // The linked adapter writes the snippet where the fresh-process
     // adapter writes it and serves it there, so `__DIR__`, a relative
     // `include` and the token the normaliser puts where the directory
-    // was all read the one tree (#396). No oracle is asked: the run of
+    // was all read the one tree. No oracle is asked: the run of
     // record is the linked engine's, and the token is the recipe's.
     let recipe = manifest().pin.unwrap().recipe;
     let served = crate::oracle::linked::serve(&recipe, None, "echo __DIR__;").unwrap();
@@ -278,7 +278,7 @@ fn the_linked_engine_runs_under_the_recipes_environment_alone() {
     // environment, so `getenv()` answers the recipe's variables and none
     // of the harness's, the oracle's where it is here (the system adds
     // its own at exec to both, `__CF_USER_TEXT_ENCODING` on macOS), and
-    // the C library's time code reads the recipe's `TZ` (#1077, #1130). A
+    // the C library's time code reads the recipe's `TZ`. A
     // recipe that names another environment is served by a binary
     // started under it, never one the pool kept.
     let snippet = r#"foreach (getenv() as $n => $v) echo "$n=$v\n";"#;
@@ -384,18 +384,18 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_is_a_block_the_lane_cannot_run
     }
 }
 
-/// A regime that carries `args` reaches a binary's command line (#1780,
-/// #1887): the linked engine takes `-e` as a host builds it (#1822) and
+/// A regime that carries `args` reaches a binary's command line:
+/// the linked engine takes `-e` as a host builds it and
 /// no other, so a fence naming a regime whose arguments cannot reach what
 /// serves it is a block the lane cannot run unless it is marked
 /// `process`, read off the pin before anything runs: the line names the
 /// regime, its arguments and the mark that serves it. Marked `process`,
 /// the fence stands under the regime, whose arguments the binary's run
 /// and the oracle's are both handed, and so does a `request` fence, whose
-/// php-cgi takes them on its command line on both sides (#1729). php-fpm
+/// php-cgi takes them on its command line on both sides. php-fpm
 /// and phpdbg are handed no regime on either side, of ini or of
 /// arguments, so a `request fpm` or `request phpdbg` fence naming one is
-/// such a line too, never a run under the recipe alone (#1932).
+/// such a line too, never a run under the recipe alone.
 #[test]
 fn a_fence_under_a_regime_of_args_is_served_where_they_reach_or_not_at_all() {
     let mut pin = manifest().pin.unwrap();
@@ -457,12 +457,12 @@ fn a_fence_under_a_regime_of_args_is_served_where_they_reach_or_not_at_all() {
     assert!(super::under(&pin, &short_tags).unwrap().is_some());
 }
 
-/// A regime names a file of the workspace by `{workspace}` (#1634), and
+/// A regime names a file of the workspace by `{workspace}`, and
 /// the pin as it is loaded hands the oracle and the engine the one path:
 /// a regime whose `auto_prepend_file` is `{workspace}/prepend.php`, in a
 /// pin standing in a tree of its own beside that file, prepends it in the
 /// oracle's run and the linked engine's, and in php-cgi's on both sides
-/// for a `request` fence (#1729). The recipe pins `auto_prepend_file`
+/// for a `request` fence. The recipe pins `auto_prepend_file`
 /// empty, so a pass is the expanded path reaching every run.
 #[test]
 fn a_regimes_workspace_token_is_the_workspace_in_every_run() {
@@ -564,7 +564,7 @@ fn held_ending(
     (judged.judgement, judged.note)
 }
 
-/// The oracle's run is held to the fences as the engine's is (#783): a
+/// The oracle's run is held to the fences as the engine's is: a
 /// fence the oracle does not meet fails however the engine ran, and the
 /// note names the run that missed, by its stream or by its status.
 #[test]
@@ -600,7 +600,7 @@ fn a_fence_the_oracle_does_not_meet_fails_and_names_the_oracle() {
 
 /// A fence pinning a signal is met by a run that ends on that signal, and
 /// missed by one that ends on another or on a status, the status
-/// `128 + 6` a shell reports of an abort among them (#3545).
+/// `128 + 6` a shell reports of an abort among them.
 #[test]
 fn a_pinned_signal_is_met_by_that_signal_alone() {
     let fence = "/// ```expect signal=6\n/// 1\n/// ```\n";
@@ -617,7 +617,7 @@ fn a_pinned_signal_is_met_by_that_signal_alone() {
     assert!(note.contains("+status 134"), "{note}");
 }
 
-/// The negative control of the rule (harness §4.1, #783): the fixture's
+/// The negative control of the rule (harness §4.1): the fixture's
 /// one fence pins `__FILE__` as the linked engine names the snippet, and
 /// the oracle, which runs it by its scratch path, misses it.
 #[test]
@@ -642,7 +642,7 @@ fn the_fixture_whose_fence_the_oracle_does_not_meet_fails_naming_the_oracle() {
     assert!(note.contains("not what the oracle ran"), "{note}");
 }
 
-/// A `trace:` row's `covers` may name a fence (harness §4.3, §8; #1650):
+/// A `trace:` row's `covers` may name a fence (harness §4.3, §8):
 /// the fixture's first fence, which the row covers, is held to its pinned
 /// `expect` against the engine alone and comes to `covered`, the oracle's
 /// signal recorded in the note and not judged; its second, which nothing
@@ -703,13 +703,13 @@ fn a_fence_a_trace_row_covers_is_held_to_the_engine_alone_and_one_it_does_not_bo
 }
 
 /// A row naming the regime its cause is proven at runs each fence it
-/// covers again under the oracle in that regime (#3365, #3369): the
+/// covers again under the oracle in that regime: the
 /// fixture's fence the oracle agrees on there is covered, as is the one
 /// whose pid its wildcard meets in both runs, and the one it
 /// still differs on, the engine carrying `zend_test` and the oracle not,
 /// fails naming its id and the regime, which is the negative control.
-/// #3366's snippet, which the oracle meets only with the regime's ini
-/// applied, is covered, so a regime named and not applied fails it. A
+/// The snippet the oracle meets only with the regime's ini applied
+/// is covered, so a regime named and not applied fails it. A
 /// diverged fence a `witness:` row naming the regime accepts is run the
 /// same way: diverged where the oracle there prints the engine's bytes,
 /// and failing where it does not. The tracked pin carries no
@@ -788,7 +788,7 @@ fn a_proven_rows_fences_run_again_under_its_regime_and_one_still_differing_fails
 
 /// A fence a `trace:` row covers is held to the engine alone: the row
 /// accepts no difference for it, so the engine's miss is a failure and
-/// not `diverged`, and an `open` row pins nothing (#1650). A `witness:`
+/// not `diverged`, and an `open` row pins nothing. A `witness:`
 /// id is admitted under a `trace:` row's `covers` alone.
 #[test]
 fn a_trace_row_pins_the_fences_it_covers_and_accepts_no_difference_for_them() {
@@ -822,7 +822,7 @@ fn a_trace_row_pins_the_fences_it_covers_and_accepts_no_difference_for_them() {
 }
 
 /// The capture's refusal, by the fixture `witness --accept --streams` must
-/// fail (#801): the oracle's two runs, from scratch directories of two
+/// fail: the oracle's two runs, from scratch directories of two
 /// lengths, print two `string(N)`, so nothing is captured and the note
 /// names the line and each run's text of it.
 #[test]
@@ -857,8 +857,8 @@ fn a_capture_whose_two_runs_differ_names_the_line_and_captures_nothing() {
     );
 }
 
-/// The refusals of `--accept --bodies`, by the fixtures it must refuse
-/// (#3455): a plain fence whose two oracle runs print two `string(N)` and
+/// The refusals of `--accept --bodies`, by the fixtures it must refuse:
+/// a plain fence whose two oracle runs print two `string(N)` and
 /// whose body has no wildcard meeting both is written nothing and fails,
 /// its note naming the line and each run's text of it; a fence a `trace:`
 /// row covers is written nothing and stays covered, its note naming the
@@ -958,7 +958,7 @@ fn the_second_stream_is_handed_over_and_a_fence_is_held_apart_to_it() {
     }
     // A snippet whose diagnostic goes to the error stream under the
     // linked engine, which is `Capture`'s `stderr` handed over as the
-    // fresh-process adapter hands php's fd 2 over (#248): a fence pinning
+    // fresh-process adapter hands php's fd 2 over: a fence pinning
     // it passes, and one pinning nothing there fails on what was written,
     // an absent `stderr` fence asserting an empty second stream.
     let text = format!(
@@ -1056,7 +1056,7 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
 /// of its own and covered by what that process entered, a forked child's
 /// request beside its parent's; the same snippet unmarked is served by
 /// `php-linked` and forks that, never the harness (harness §8, revisions
-/// 61 and 84; #1062, #2166).
+/// 61 and 84).
 #[test]
 fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     if oracle().is_none() {
@@ -1089,7 +1089,7 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     // Unmarked, the fence forks `php-linked`, which carries pcntl as the
     // CLI does and serves one request at a time: its child ends with its
     // own request and never reads the next, so the fence passes there too,
-    // and nothing forks the harness (harness §8, revision 84; #2166).
+    // and nothing forks the harness (harness §8, revision 84).
     let unmarked = marked.replace("expect process", "expect");
     let (judgement, note) = only(&judge_text(&unmarked, &registry("")));
     assert_eq!(judgement, Judgement::Pass, "{note}");
@@ -1097,11 +1097,11 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
 
 /// A `process` fence of a crate behind a feature the binary under test
 /// does not turn on is served by `php` built with that feature, and one
-/// of a crate it carries by the binary under test (#2721); under a
+/// of a crate it carries by the binary under test; under a
 /// regime that sets the tier's `jit.mode`, by `php` built with the
 /// tier's feature beside the crate's, where the binary under test would
-/// serve it with no tier (#2962), and so under one that turns
-/// `opcache.jit` on, but not under one that sets it off (#3193): in the
+/// serve it with no tier, and so under one that turns
+/// `opcache.jit` on, but not under one that sets it off: in the
 /// fixture, `sapi/cli` turns `posix` on and not `zend_test`, and each
 /// stand-in prints its own name.
 #[test]
@@ -1167,7 +1167,7 @@ fn printed(triple: &str) -> Target {
 }
 
 /// The fixture of `a_native_under_a_cfg_the_target_denies_is_no_subject`
-/// read as a Linux build and as a Darwin one would read it (#1068): the
+/// read as a Linux build and as a Darwin one would read it: the
 /// lane on CI is the first and the oracle's host the second, so each
 /// counts the native its own `#[cfg]` has and neither counts the other's.
 #[test]
@@ -1227,7 +1227,7 @@ fn committed_xtask(name: &str) -> Tree {
 
 /// `--unmeasured` leaves out a crate whose pass was taken over its tree
 /// now and measures it again once one byte of it moves: what the merge
-/// check runs after pre-commit measured the staged crates (#1312).
+/// check runs after pre-commit measured the staged crates.
 #[test]
 fn unmeasured_leaves_out_a_crate_with_a_pass_over_its_tree_now() {
     use crate::reading::{Reading, Status, Store};
@@ -1270,7 +1270,7 @@ fn unmeasured_leaves_out_a_crate_with_a_pass_over_its_tree_now() {
 
 /// A witness reading is taken under the oracle's recipe, so a change to
 /// `oracle.toml`'s `[recipe.env]` stales it as a change to its crate's tree
-/// does (#1387): 84a55f66 added two variables there, an absolute
+/// does: 84a55f66 added two variables there, an absolute
 /// `memory_get_usage()` moved with them, and `--unmeasured` ran nothing.
 /// The fixture's entry is laid under the tracked pin's `[recipe.env]`; the
 /// reading taken under the pin without it is stale under the pin with it,
@@ -1327,7 +1327,7 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
 
 /// With the pinned php absent, a `request fpm` fence the engine's php-fpm
 /// fails is `Unserved`, as it is beside the oracle, so its native is no
-/// witness short, and the reading names the serve's failure (#1535). The
+/// witness short, and the reading names the serve's failure. The
 /// fixture `request-empty`'s stand-in, which reads the request and closes
 /// it with no response, stands in for the engine's `php-fpm`. The
 /// control: a fence whose serve failed recorded nothing, which read the
@@ -1390,7 +1390,7 @@ fn with_the_oracle_absent_a_fence_the_engine_did_not_serve_is_named_and_not_miss
 }
 
 /// A fence naming a locale the host knows to neither run is a skip, as a
-/// `.phpt` whose `--SKIPIF--` dies on `!setlocale(...)` is (#1678): not
+/// `.phpt` whose `--SKIPIF--` dies on `!setlocale(...)` is: not
 /// run, so its pinned bytes, which nothing prints, neither pass nor fail
 /// it; named in the note, counted in the reading as `skipped`, and the
 /// crate's reading does not fail on it. The control: the same fence
@@ -1469,7 +1469,7 @@ fn a_fence_naming_a_locale_the_host_knows_runs_and_is_held() {
 /// a crate it is built from, does not stand after it: `--unmeasured` runs
 /// it again with every crate above `php_engine`, as cargo's fingerprint
 /// rebuilds them. A change to `ext/ctype` alone runs `ext/ctype` alone
-/// (#1318, `xtask/fixtures/closure`).
+/// (`xtask/fixtures/closure`).
 #[test]
 fn unmeasured_measures_a_crate_again_once_a_crate_it_is_built_from_changes() {
     use crate::reading::{Reading, Status, Store};
@@ -1523,7 +1523,7 @@ fn unmeasured_measures_a_crate_again_once_a_crate_it_is_built_from_changes() {
     );
 }
 
-/// A full volume is no witness that borked (#644): the trouble that
+/// A full volume is no witness that borked: the trouble that
 /// carries [`crate::scratch::Full`] leaves the judge as the error the
 /// crate's reading says as a skip naming the volume, and any other trouble
 /// is the witness's bork, its whole sentence kept.
@@ -1550,7 +1550,7 @@ fn a_witness_the_volume_had_no_room_for_is_no_bork() {
 }
 
 /// A crate outside `ext/` that declares no native is counted by its
-/// kernels alone (#1917): under the coverage rule widened to `php_streams`,
+/// kernels alone: under the coverage rule widened to `php_streams`,
 /// the textual count read every `pub` and `pub(crate)` function of the
 /// crate as a kernel or native, 28 of them and 27 without a fence, where
 /// it has neither. The fixture's `php_streams` has two such functions and
@@ -1580,7 +1580,7 @@ fn a_crate_outside_ext_with_no_native_counts_its_kernels_alone() {
     );
 }
 
-/// The negative control of a host's own lines (#1975, as #2468 ruled):
+/// The negative control of a host's own lines (as ruled 2026-10-09):
 /// the fixture's `sapi/cgi` carries one line and no fence. Run under the
 /// pinned php-cgi and a host standing in for the engine's that answers it
 /// otherwise, the crate's reading fails on that line; under a pin whose
@@ -1630,7 +1630,7 @@ fn the_fixture_whose_line_the_engine_s_host_answers_otherwise_fails() {
 }
 
 /// A crate whose reading is said before anything runs is journaled as a
-/// judged one is (#3457): the watching run reads the journal alone, and a
+/// judged one is: the watching run reads the journal alone, and a
 /// host's lines file that did not parse printed nothing, wrote no reading
 /// and exited 0. The fixture's `sapi/cgi` carries a `then` with a key no
 /// `then` takes.
@@ -1674,7 +1674,7 @@ fn a_crate_unread_before_the_run_is_journaled_as_failed() {
 }
 
 /// A server's line that missed is named in its crate's reading with what
-/// it saw (#3846), so a miss a rerun does not repeat can still be read.
+/// it saw, so a miss a rerun does not repeat can still be read.
 #[test]
 fn a_reading_keeps_what_a_server_s_line_that_missed_saw() {
     let saw = "sapi/cgi/tests/lines.toml#one: -== run 1 ended with exit status: 0";
@@ -1687,9 +1687,9 @@ fn a_reading_keeps_what_a_server_s_line_that_missed_saw() {
 }
 
 /// A server's line that passed with the engine's host ended only on its
-/// stop sent again is named in its crate's reading (#3879), so a stop the
-/// engine's loop loses, which #3869 made a loss it should not have, is
-/// read there rather than absorbed by the resend.
+/// stop sent again is named in its crate's reading, so a stop the
+/// engine's loop loses, a loss it should not have, is read there rather
+/// than absorbed by the resend.
 #[test]
 fn a_reading_names_a_line_whose_engine_s_host_was_sent_its_stop_again() {
     let mut tally = Tally::default();

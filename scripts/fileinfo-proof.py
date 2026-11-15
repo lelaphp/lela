@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded #2827 oracle observations; no engine switch or benchmark timing."""
+"""Bounded fileinfo oracle observations; no engine switch or benchmark timing."""
 import argparse
 import hashlib
 import json

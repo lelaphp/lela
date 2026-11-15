@@ -15,7 +15,7 @@ workspace = true
 # (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
-# timelib, vendored and compiled in its own crate (design §7.2, #711), and
+# timelib, vendored and compiled in its own crate (design §7.2), and
 # wrapped here in `src/ffi/`.
 timelib_sys = { path = "../../crates/timelib_sys" }
 # `strftime(3)`, under the request's locale, in `src/ffi/` alone

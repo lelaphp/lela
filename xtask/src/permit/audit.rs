@@ -1,5 +1,5 @@
-//! The audit record of the person's approvals (#2247, harness-design.md
-//! §4.4), written by `permit` itself as #2281 ruled: one entry per change
+//! The audit record of the person's approvals (harness-design.md §4.4),
+//! written by `permit` itself as ruled 2026-10-08: one entry per change
 //! an approval admitted ([`super::approval`]), carrying the approval whole
 //! (the question and its options, the answer and notes, the file, the diff
 //! and its hash, the file's blob before and after) beside the session, the
@@ -14,8 +14,8 @@
 //! the file, and the first one written stands.
 //!
 //! Where: the store of the main worktree, under `permit/approvals/`, one
-//! file per entry. Not a committed file beside the change, as #2247 first
-//! had it: an entry written at the call stands before the person has let
+//! file per entry. Not a committed file beside the change, as was first
+//! proposed: an entry written at the call stands before the person has let
 //! the call run, so one for a call they then refused would be an untracked
 //! file in a checkout every session shares, which `git worktree remove`
 //! refuses and a pathspec commit leaves behind; and not the worktree's own

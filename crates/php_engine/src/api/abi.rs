@@ -41,7 +41,7 @@ use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
 pub use crate::statement::{Statement, StatementHandler};
 pub use crate::supplied::{Beneath, ChainKind, Compiled};
 
-/// The chained kinds (#1945), each a marker [`Beneath`] is generic
+/// The chained kinds, each a marker [`Beneath`] is generic
 /// over: php's saved pointer of the name, entered from the top with each
 /// link handed the ones beneath.
 pub mod chain {
@@ -63,7 +63,7 @@ pub use marshal::{
 /// [`ExtensionBuilder::encodings`].
 pub use php_compile::multibyte::{Encoding, Encodings, Unicode};
 /// What engine state, process state and a registered value may hold:
-/// no pointer into a request's heap, at any depth (ADR-0005, #4348), and
+/// no pointer into a request's heap, at any depth (ADR-0005), and
 /// its derive, which holds each field to it. The four entries that keep
 /// a value engine-wide, [`ExtensionBuilder::engine_state`],
 /// [`ExtensionBuilder::process_state`], [`ExtensionBuilder::register`]
@@ -120,7 +120,7 @@ impl Start<'_> {
     /// `*_ce_*` and those of the extensions it includes: what an
     /// extension raises names its class by this identity, held in its
     /// engine state (ADR-0005), and never looks a class up as it
-    /// throws (#3403). A class the engine does not link refuses the
+    /// throws. A class the engine does not link refuses the
     /// start, naming it, as the template's `InternalError` names what
     /// it cannot reach.
     pub fn class<C: crate::api::abi::Class>(&self) -> Result<EngineClassId, Refusal> {
@@ -218,7 +218,7 @@ pub(crate) enum IniVerdict {
 /// [`ExtensionBuilder::dependencies`], read from its sources and held
 /// against `php_bundle`'s features: each feature switches on the
 /// extensions its own declares required, and a crate's Cargo link with
-/// no such row requires nothing (#1915).
+/// no such row requires nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency {
     pub name: String,
@@ -357,7 +357,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
 }
 
 /// The engine-owned pool of persistent resources (ADR-0005's amendment of
-/// design ledger 51, #1172; design §4.10): php's `EG(persistent_list)`,
+/// design ledger 51; design §4.10): php's `EG(persistent_list)`,
 /// one list per php-fpm process or per ZTS thread, as entries lent to one
 /// request at a time. A request takes an idle entry out by php's key,
 /// holds it alone for the rest of the request, and gives it back at its
@@ -366,7 +366,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
 /// holds no request memory, only what the connection is: the socket, the
 /// `transport`'s and the crypto layer's state, a database connection.
 /// The `Mutex` is here and nowhere an extension can see. A pool is
-/// engine state where `V` is (#4474): an idle entry is held as the `V`
+/// engine state where `V` is: an idle entry is held as the `V`
 /// it is, so what a pool keeps between requests holds nothing of a
 /// request's by its type, not by its lender's care at give-back.
 #[derive(EngineState)]
@@ -1641,8 +1641,8 @@ impl ExtensionBuilder {
     }
 
     /// The request-start function, `RINIT`, served in bundle order as the
-    /// request starts. What it raises is php's fatal inside `RINIT`
-    /// (#1775): the throwable rendered as the uncaught fatal with no frame
+    /// request starts. What it raises is php's fatal inside `RINIT`:
+    /// the throwable rendered as the uncaught fatal with no frame
     /// standing, no later extension's `rinit` and no program served, no
     /// request-end phase but under the built-in server, and the host
     /// ending as php's does after `php_request_startup` fails.
@@ -1900,8 +1900,8 @@ impl ExtensionBuilder {
         self
     }
 
-    /// Observation of a declared set of opcodes (design §7.1, as #1780
-    /// ruled), php's `zend_set_user_opcode_handler` with a handler that
+    /// Observation of a declared set of opcodes (design §7.1, as ruled
+    /// 2026-10-04), php's `zend_set_user_opcode_handler` with a handler that
     /// answers `ZEND_USER_OPCODE_DISPATCH`: `declared` is asked once, as
     /// the engine starts, which opcodes the extension observes, handed
     /// what its `MINIT` is; `handler` is told of each opline of one of
@@ -2041,7 +2041,7 @@ impl ExtensionBuilder {
     /// The host's table has one slot, so the last extension with a hook
     /// is the log, and the host's own extension starts last. An
     /// extension a host declares for itself is the one that hands it
-    /// (ADR-0008, #1348).
+    /// (ADR-0008, ruled 2026-10-01).
     #[must_use]
     pub fn fatal_logged(mut self, hook: fn(&mut Request) -> AfterLog) -> ExtensionBuilder {
         self.entry.supplies.fatal_logged = Some(hook);
@@ -2055,7 +2055,8 @@ impl ExtensionBuilder {
     /// `fastcgi.error_header` names into the head just before
     /// (`Z/sapi/fpm/fpm/fpm_main.c:1931-1940`): every extension's hook in
     /// bundle order, on every host's request. An extension a host
-    /// declares for itself is the one that hands it (ADR-0008, #1348).
+    /// declares for itself is the one that hands it (ADR-0008, ruled
+    /// 2026-10-01).
     #[must_use]
     pub fn program_ended(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
         self.entry.supplies.program_ended = Some(hook);

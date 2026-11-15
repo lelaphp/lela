@@ -2,7 +2,7 @@
 # the binary `php`: the bundle's enabled set on one engine, the tier the
 # bundle names, the command line read as php's CLI reads it. Four edges,
 # php_bundle, php_sapi, php_proto, and php_ext for the natives it declares
-# itself (ADR-0008 as amended by #1348); the engine is named through the
+# itself (ADR-0008 as amended 2026-10-01); the engine is named through the
 # facade alone.
 [package]
 name = "php_sapi_cli"
@@ -27,7 +27,7 @@ path = "src/main.rs"
 # process the harness starts and feeds snippet after snippet: the bundle's
 # `linked` set beside this host's own, a fresh engine per snippet, and the
 # natives each entered written beside what it printed (harness §8, revision
-# 84; #2166). The harness links no engine of its own.
+# 84). The harness links no engine of its own.
 [[bin]]
 name = "php-linked"
 path = "src/linked.rs"
@@ -38,22 +38,22 @@ required-features = ["linked"]
 # release build among them: the bundle's `jit`, which binds `php_jit::Jit`
 # on the four targets its row names, with `opcache.jit` defaulting to
 # `disable` as php's does, so a request traces only where `opcache.jit`
-# asks, and tracing is experimental (ADR-0017, #3676). Without the default
+# asks, and tracing is experimental (ADR-0017). Without the default
 # features the host is built with no tier, the build G1 holds the door
 # cost against (`xtask bench`'s `no-jit-feature` arm).
 default = ["php_bundle/jit"]
 # `php-linked`: the bundle's `linked` set, this host's own and the two
 # extensions no host links, so every extension feature (harness §8,
-# revision 84; #3081).
+# revision 84).
 linked = ["php_bundle/linked", "php_bundle/test"]
 
 [dependencies]
 # The bundle's default set and `one_thread`, the set a host serving on
-# one thread links, whose comment and `host`'s say why each (#1477, #3081).
+# one thread links, whose comment and `host`'s say why each.
 php_bundle = { path = "../../crates/php_bundle", features = ["one_thread"] }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its `additional_functions` and the built-in server's module are
-# declared with, as an extension declares its own (ADR-0008, #1348).
+# declared with, as an extension declares its own (ADR-0008).
 php_ext = { path = "../../crates/php_ext" }
 php_proto = { path = "../../crates/php_proto" }
 # The C library in `src/ffi/` alone, for what the standard library does

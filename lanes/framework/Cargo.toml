@@ -1,7 +1,7 @@
-# php_lanes_framework: the framework lane's pure part, #2140's, with its
-# own ceiling so other harness work cannot spend its lines (#3740). It
-# depends on no workspace crate; xtask holds the adapter and calls this.
-# Nothing of #2140 is written yet.
+# php_lanes_framework: the framework lane's pure part, with its own
+# ceiling so other harness work cannot spend its lines. It depends on no
+# workspace crate; xtask holds the adapter and calls this. Nothing of the
+# lane is written yet.
 [package]
 name = "php_lanes_framework"
 version = "0.0.0"
@@ -9,7 +9,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "The framework lane's pure part (#2140), which xtask's adapter calls"
+description = "The framework lane's pure part, which xtask's adapter calls"
 
 [lints]
 workspace = true

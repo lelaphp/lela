@@ -44,7 +44,7 @@
 //! on the same handles, shares and session while the request's thread is
 //! inside libcurl, which php's one thread never does. A callback another
 //! thread makes during them is served at the request's next interrupt
-//! check after the native returns (Mitchell's ruling on #2595).
+//! check after the native returns (Mitchell ruled 2026-10-10).
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,

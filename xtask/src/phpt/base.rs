@@ -1,5 +1,5 @@
 //! `xtask phpt --base [REF]`: the runs `--against` holds a subset to,
-//! taken at the merge base in one call (#2364). A run is kept at the tree
+//! taken at the merge base in one call. A run is kept at the tree
 //! the engine is built from ([`against`]), so the merge base's is taken
 //! by a checkout of that commit with its engine built, and it outlives
 //! that checkout only once it is carried into the main worktree.
@@ -18,7 +18,7 @@
 //! and one set of tests and differ in the engine alone; the runs carried
 //! into the main worktree ([`worktree::carry_runs`]) and the worktree
 //! removed, whatever the build or the runs came to, the call stopped by a
-//! signal among them ([`Laid`], #3110). The readings of the
+//! signal among them ([`Laid`]). The readings of the
 //! runs at the base are printed and not recorded: they are the base's,
 //! and what the call keeps is the runs. Its exit is 1 while a subset it
 //! was asked for has no run kept at the base afterwards, naming why.
@@ -189,7 +189,7 @@ fn run_at(
 }
 
 /// A detached worktree laid down for a base's runs, which goes however the
-/// call that laid it ends (#3110): [`Laid::remove`] where it runs to the
+/// call that laid it ends: [`Laid::remove`] where it runs to the
 /// end, its drop where it returns early or panics, and, where the process
 /// that owns it is stopped by a signal, which no drop outlives, a watcher
 /// in a process group of its own, so the terminal's interrupt does not

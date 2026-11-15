@@ -49,14 +49,14 @@
 //! written when it is the union of what each side carries over the merge
 //! base, and the reading names what each side brings. A side's own change
 //! over the base, a reworded value or a dropped row, was settled where that
-//! side landed, so the union carries it as it stands there (#3633). Two
-//! sides that changed one path differently, and a change, drop or row
-//! beyond what either side carries, are refused by the path.
+//! side landed, so the union carries it as it stands there. Two sides
+//! that changed one path differently, and a change, drop or row beyond
+//! what either side carries, are refused by the path.
 //!
 //! A file both sides changed that git merged cleanly is judged the same
-//! way (#4441): its working copy is already the merged text, which no
+//! way: its working copy is already the merged text, which no
 //! side committed, so pre-commit refuses an agent's merge of it until a
-//! steer reading covers it (#3644), and judged against that copy a
+//! steer reading covers it, and judged against that copy a
 //! proposal of the same text adds nothing. The ground is then the merge
 //! base's file, `HEAD`'s and `MERGE_HEAD`'s, read from their commits, and
 //! the proposal is held as well to the text git's own three-way merge of
@@ -96,7 +96,7 @@ const RULE: &str = "harness.self";
 
 /// Whether this instrument may write `file`: a TOML file the scope of the
 /// manifest's `harness.self` names as written, not by a glob, and does not
-/// exempt (#3183). That scope is the one list of the harness's own files,
+/// exempt. That scope is the one list of the harness's own files,
 /// and every reader of it asks here: `steer` before anything is read,
 /// since steering is for the files no other hand may touch and every other
 /// file is an `Edit` away, `permit`'s guard on what steer wrote, and a
@@ -127,7 +127,7 @@ pub(crate) fn binding(root: &Path) -> Result<Manifest> {
 /// that adds a row whose identity an existing row already carries is
 /// refused, since two rows of one name is how a row is shadowed rather
 /// than added. An `[[owed]]` row is one per instrument, so its
-/// `instrument` names it, and a key added to one is an addition (#3636).
+/// `instrument` names it, and a key added to one is an addition.
 const IDENTITY: [&str; 4] = ["id", "name", "from", "instrument"];
 
 /// What a proposal does to the tracked file, as the judge reads it.
@@ -181,8 +181,8 @@ pub(crate) enum Ground {
     /// them. Unmerged in the index, its working copy holding git's conflict
     /// markers, which no reader parses, they are the blobs git keeps for
     /// the conflict (stages 1, 2 and 3); two branches that each append a
-    /// ruled row conflict this way at the second's merge (#2880). Merged
-    /// cleanly, they are the three commits' files (#4441).
+    /// ruled row conflict this way at the second's merge. Merged cleanly,
+    /// they are the three commits' files.
     Merge {
         base: String,
         head: String,
@@ -206,8 +206,7 @@ pub(crate) enum Merged {
     Conflicted,
     /// Merged cleanly, and this is the text `git merge-file` gives of the
     /// three blobs, git's own three-way merge: a proposal is that text,
-    /// byte for byte, as well as the union of what each side carries
-    /// (#4441).
+    /// byte for byte, as well as the union of what each side carries.
     Clean(String),
     /// Merged cleanly where `git merge-file` of the three blobs conflicts:
     /// a strategy option such as `-X ours` took one side's hunk and dropped
@@ -266,7 +265,7 @@ impl Ground {
         })
     }
 
-    /// The ground of `file` in a merge git merged it in cleanly (#4441):
+    /// The ground of `file` in a merge git merged it in cleanly:
     /// where `HEAD` and `MERGE_HEAD` have one merge base, or none, and
     /// both changed the file over it, differently, the three commits'
     /// files and the text git's three-way merge of them gives; otherwise
@@ -328,7 +327,7 @@ impl Ground {
     /// first side changed; what it adds to one side's file is what the
     /// other adds over the base; and a path the two sides changed
     /// differently, or one inside what the other changed, is refused by
-    /// both sides' paths (#3633).
+    /// both sides' paths.
     pub(crate) fn judge(&self, proposed: &str) -> Result<Verdict> {
         let (base, head, merged, git) = match self {
             Ground::File(tracked) => return judge(tracked, proposed),
@@ -474,7 +473,7 @@ pub fn run(
                 // The reading is stamped over what steer left, a snapshot
                 // taken after the write, so the sensor beside `permit` can
                 // tell steer's write from one made beside it in the same
-                // call (#1516).
+                // call.
                 reading = stamped()?;
             }
             let dry = if dry_run {
@@ -522,12 +521,12 @@ pub fn run(
 
 /// Each of the harness's own files the commits since `base` changed,
 /// judged as a proposal against the file `base` carries, the land's steer
-/// (#4372, #4348 ruling 5): the files are those `base`'s `harness.self`
+/// (harness revision 198): the files are those `base`'s `harness.self`
 /// names, read with this build's judge, so a merge is held by main's tip
 /// and not by the steer it carries. A proposal that adds alone passes; one
 /// that would not load fails, and the land refuses it; one that changes
 /// what binds is a skip that names each path, since a person's commit
-/// does that, and nothing yet tells it from an agent's (#4370, #4371).
+/// does that, and nothing yet tells it from an agent's.
 /// The readings are unstamped and the land records none of them: a
 /// passing steer reading over a file is what `permit` reads as steer's
 /// write of it, and the land writes nothing.
@@ -561,7 +560,7 @@ pub(crate) fn since(root: &Path, base: &str) -> Result<Vec<Reading>> {
                 reading.message = format!(
                     "{file}: {} of what main's tip carries changed since, which is a person's \
                      (harness §11), read as theirs until a person's signature can be asked \
-                     for (#4371): {}",
+                     for: {}",
                     changed.len(),
                     changed.join(", ")
                 );
@@ -657,7 +656,7 @@ impl Walk {
         // An array of tables the tracked file does not carry is its rows,
         // each added by its identity as a row appended to one it carries
         // is: so a merge base with no row and the side that adds one name
-        // the row by one path (#3141).
+        // the row by one path.
         for (key, new_value) in new.iter().filter(|(k, _)| !old.contains_key(*k)) {
             match new_value {
                 Value::Array(added) if rows(added) => self.rows(&path_of(at, key), &[], added),
@@ -847,8 +846,8 @@ mod tests {
 
     #[test]
     fn an_exempt_added_to_a_rule_that_binds_is_an_addition_the_reading_names() {
-        // The widening the maintainer accepted with its risk named (#387,
-        // ledger 51): the exemption lands and every reader sees it.
+        // The widening the maintainer accepted with its risk named
+        // (ledger 51): the exemption lands and every reader sees it.
         let old = "[[rule]]\nid = \"witness.exit-authored\"\ndeny_pattern = \"exit=\"\n";
         let exempted = format!("{old}exempt = [\"crates/php_engine/**\"]\n");
         assert_eq!(
@@ -878,7 +877,7 @@ mod tests {
     }
 
     /// An array of tables a file does not carry is its rows, each added by
-    /// its identity as one appended beside a row is (#3141); a value of
+    /// its identity as one appended beside a row is; a value of
     /// another shape where none stood is one addition.
     #[test]
     fn rows_where_the_file_has_none_are_each_an_addition_by_identity() {
@@ -898,7 +897,7 @@ mod tests {
     }
 
     /// A merge whose base holds no row: each side's row is named by its id
-    /// on both walks, so the union is a union (#3141).
+    /// on both walks, so the union is a union.
     #[test]
     fn a_merge_over_a_base_of_no_row_is_the_union_of_each_sides_row() {
         let (head, merged) = (
@@ -948,8 +947,9 @@ mod tests {
         assert_eq!(verdict.additions(), ["divergence[trace:merged]"]);
     }
 
-    /// The merge #3633 met: main reworded a rule's text and appended a
-    /// row, the branch appended its own, and the union carries main's text.
+    /// A merge one side of which changed over the base: main reworded a
+    /// rule's text and appended a row, the branch appended its own, and
+    /// the union carries main's text.
     fn reworded() -> Ground {
         let rule = |id: &str, text: &str| format!("[[rule]]\nid = \"{id}\"\ntext = \"{text}\"\n");
         let base = rule("git.operation", "t");
@@ -1063,7 +1063,7 @@ mod tests {
         );
     }
 
-    /// A merge git took cleanly (#4441): the union is written only as the
+    /// A merge git took cleanly: the union is written only as the
     /// text git's three-way merge of the three files gives it, and never
     /// where that merge conflicts and git staged the file cleanly anyway.
     #[test]
@@ -1107,7 +1107,7 @@ mod tests {
         }
     }
 
-    /// An `[[owed]]` row is named by its instrument (#3636): a key added to
+    /// An `[[owed]]` row is named by its instrument: a key added to
     /// one is an addition, a changed value and a second row are not.
     #[test]
     fn an_owed_row_is_named_by_its_instrument() {

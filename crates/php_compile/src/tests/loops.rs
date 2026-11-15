@@ -95,9 +95,9 @@ fn a_for_lays_its_lists_down_in_php_s_order() {
     assert_eq!(unit.main.oplines[14].op2, 4, "the JMPNZ lands on the body");
 }
 
-/// php's own loop, the shape #156's bench runs and the witness beside
-/// `php_heap::Str::bytes` is, under the dump recipe: the `$i++` in
-/// the step is `PRE_INC` with its temporary unread, which is
+/// php's own loop, the shape the echo-loop bench runs and the witness
+/// beside `php_heap::Str::bytes` is, under the dump recipe: the `$i++`
+/// in the step is `PRE_INC` with its temporary unread, which is
 /// `zend_do_free`'s conversion, and the condition is `IS_SMALLER`
 /// into the temporary the `JMPNZ` tests, `T3 = ` before it.
 #[test]
@@ -136,7 +136,7 @@ fn php_s_own_for_loop_is_an_is_smaller_and_a_pre_inc() {
     );
 }
 
-/// One rule for `OpArray.safepoints` whatever the loop (#353): the
+/// One rule for `OpArray.safepoints` whatever the loop: the
 /// entry a backward jump names holds the opline it lands on. A
 /// `while`'s `JMPNZ` lands on the body's first opline and a
 /// `foreach`'s `JMP`, and the `continue` inside it, land on the
@@ -216,7 +216,7 @@ fn a_while_is_the_same_shape_and_the_body_keeps_its_lines() {
     assert_eq!(lines, vec![2, 3, 2, 2, 2, 2, 4]);
 }
 
-/// `zend_compile_foreach` over `$this` (#2687): by reference the
+/// `zend_compile_foreach` over `$this`: by reference the
 /// subject is compiled under `BP_VAR_W`, `FETCH_THIS` into a `VAR`
 /// and `FE_RESET_RW` over it; by value under `BP_VAR_R`, into a
 /// temporary.
@@ -260,7 +260,7 @@ class C {
     ));
 }
 
-/// #301's program under the oracle's `[regime.dump]`: `foreach` as
+/// This program under the oracle's `[regime.dump]`: `foreach` as
 /// `zend_compile_foreach` shapes it, the constant array folded by
 /// `zend_try_ct_eval_array`, `FE_RESET_R` into a `VAR` whose `op2`
 /// and the fetch's `extended_value` point past the loop, the `JMP`
@@ -312,8 +312,8 @@ fn a_foreach_is_php_s_op_array_ending_in_its_loop_live_range() {
 /// The same program with `return` inside the loop, the oracle's
 /// dump: `FE_FREE` flagged `ZEND_FREE_ON_RETURN` before the `RETURN`,
 /// its `op2` the distance to the loop's own `FE_FREE`, and the `loop`
-/// range split around the return (#255's split, read off a dump of
-/// the oracle's for the first time).
+/// range split around the return (`zend_calc_live_ranges`'s split,
+/// read off a dump of the oracle's for the first time).
 #[test]
 fn an_early_return_in_a_foreach_splits_the_loop_range_around_its_fe_free() {
     let (unit, _strings) =

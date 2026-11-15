@@ -31,8 +31,8 @@ pub(crate) enum Handle {
     /// holds one owner. The number stays the socket's after the stream
     /// is closed, as php's `bsd_socket` does.
     Stream { fd: RawFd, stream: Owner<Resource> },
-    /// Out of the socket for a wait that stands on its fd ([`wait_on`],
-    /// #2601), which holds what stood here and gives it back when it
+    /// Out of the socket for a wait that stands on its fd ([`wait_on`]),
+    /// which holds what stood here and gives it back when it
     /// returns: the fd, and the stream the socket holds an owner of
     /// where it holds one, as a callback served in the wait reaches them.
     Waiting { fd: RawFd, stream: Option<Resource> },
@@ -129,25 +129,25 @@ pub(crate) enum Waited<R> {
 
 /// `wait` on the fds of `sockets`, in their order, with the request lent
 /// to a callback C makes from another thread meanwhile
-/// ([`Limits::blocking`], #2401), and each socket's [`Handle`] out of
+/// ([`Limits::blocking`]), and each socket's [`Handle`] out of
 /// the socket for the wait's length, as the streams layer takes a stream
-/// out of its resource for an op (#2601). A callback served in the wait
+/// out of its resource for an op. A callback served in the wait
 /// that closes one of them closes it to the program at once, and the fd
 /// is let go only when the wait returns, so the fd the wait stands on is
 /// the socket's until then and nothing opened meanwhile takes its
 /// number through a `socket_close` (a stream that owns the fd, closed by
-/// `fclose`, is #2664's). php shows none of this, since no code of the program is
-/// served during its wait. The close is deferred rather than refused
-/// because the streams layer defers an `fclose` of a stream that is out
-/// the same way, and a refusal would raise in the callback what php
-/// never raises for an open socket. The close does not wake the wait: it
-/// returns as it would have, and the native then answers as for a socket
-/// closed before it, the order php's one thread would have taken the two
-/// in. A socket a wait holds already, the same socket twice in one list
-/// or one a callback waits on inside an outer wait, is waited on where
-/// it stands and let go by the wait that holds it. Each socket is kept
-/// alive for the wait, whatever the callback does to the variables that
-/// name it.
+/// `fclose`, is the streams layer's). php shows none of this, since no
+/// code of the program is served during its wait. The close is deferred
+/// rather than refused because the streams layer defers an `fclose` of a
+/// stream that is out the same way, and a refusal would raise in the
+/// callback what php never raises for an open socket. The close does not
+/// wake the wait: it returns as it would have, and the native then
+/// answers as for a socket closed before it, the order php's one thread
+/// would have taken the two in. A socket a wait holds already, the same
+/// socket twice in one list or one a callback waits on inside an outer
+/// wait, is waited on where it stands and let go by the wait that holds
+/// it. Each socket is kept alive for the wait, whatever the callback does
+/// to the variables that name it.
 pub(crate) fn wait_on<R>(
     req: &mut Request,
     sockets: &[PhpObject],
@@ -179,7 +179,7 @@ pub(crate) fn wait_on<R>(
     }
     // A socket over a stream's fd: the stream held out of its resource
     // for the wait too, so a callback's `fclose` of it closes no fd the
-    // wait stands on until it returns (#2664).
+    // wait stands on until it returns.
     let streams: Vec<Stream> = held
         .iter()
         .filter_map(|(_, handle)| match handle {

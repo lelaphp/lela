@@ -1,4 +1,4 @@
-//! A body the host streams (#2338, design §4.3 seam 4): the request pulls
+//! A body the host streams (design §4.3 seam 4): the request pulls
 //! it as php's `sapi_read_post_block` pulls stdin, while the program
 //! runs, so a body that arrives in pieces reads as one handed over whole,
 //! and one declared over `post_max_size` is never read. What `php://input`
@@ -301,7 +301,7 @@ fn a_body_declared_over_post_max_size_is_warned_of_and_never_read() {
 /// body's `smart_str`, grown `BUFSIZ` at a time, first asks past the limit.
 /// php-cgi under `-d memory_limit=4M -d html_errors=0` writes the same
 /// fatal and its one-row trace for `a=` and three million `x`, and
-/// `ran 1 2 3` for a small form. Measured on #3583: the pinned build
+/// `ran 1 2 3` for a small form. Measured: the pinned build
 /// asks for 2101248 bytes on x86-64 Linux (4 KiB pages) and 2097152
 /// on arm64 macOS (16 KiB pages), with the same body and limit.
 #[test]
@@ -541,7 +541,7 @@ fn max_file_uploads_and_body_parts_read_by_base_zero_strtol() {
 }
 
 /// An uploaded file costs the program's `memory_get_usage()` what it
-/// costs php-cgi 8.5.12's (#3426): `$_FILES[f][name]`, `[full_path]`
+/// costs php-cgi 8.5.12's: `$_FILES[f][name]`, `[full_path]`
 /// and `[type]` are made as `php_register_variable_safe`'s
 /// `ZVAL_STRINGL_FAST` makes them, `zend_string_finit`'s ask of the
 /// bytes past the empty string's aligned header, so the two names step
@@ -628,7 +628,7 @@ impl Read for Large {
 }
 
 /// A body whose host declares no length it keeps to, php-cgi's for a
-/// negative `CONTENT_LENGTH` (#3457), is pulled no further than one read
+/// negative `CONTENT_LENGTH`, is pulled no further than one read
 /// past `post_max_size` before the program runs, so nothing that holds it
 /// is larger: the form reader stops one `SAPI_POST_BLOCK_SIZE` block past
 /// the limit with php's warning, and the multipart reader one buffer past

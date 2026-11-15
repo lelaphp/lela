@@ -2,7 +2,7 @@
  * The Zend names php 8's libmbfl includes (`mbfl/mbfilter.h:88`,
  * `mbfl/mbfl_encoding.h:34`, `mbfl/mbfl_memory_device.c:34`), defined
  * over the C library so the vendored copy compiles byte for byte outside
- * php-src (third-engine-design.md §7.2, #1173). `zend_string` keeps
+ * php-src (third-engine-design.md §7.2). `zend_string` keeps
  * php's layout, `Zend/zend_types.h`, because libmbfl writes its header
  * fields; the allocators are php_heap's `emalloc` and kin, the request's
  * heap under a lend, as php's are `zend_mm`'s.

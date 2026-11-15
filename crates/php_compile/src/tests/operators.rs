@@ -165,7 +165,7 @@ fn a_modulo_and_a_power_over_constants_fold_the_way_php_folds_them() {
 /// under `isset` and under `empty`, which php compiles as the `!` of it;
 /// `-` over two arrays and `+` over an array and a number stay the
 /// opcodes, which throw. The dump is the oracle's under `[regime.dump]` at
-/// 8.5.9 (#2682).
+/// 8.5.9.
 #[test]
 fn two_constant_arrays_under_a_plus_fold_to_the_array_php_s_add_makes() {
     expect![[r#"
@@ -926,7 +926,7 @@ fn an_array_and_an_object_cast_are_php_s_oplines() {
     ));
 }
 
-/// `zend_compile_unary_op` for `ZEND_BW_NOT` (#478): one `BW_NOT`
+/// `zend_compile_unary_op` for `ZEND_BW_NOT`: one `BW_NOT`
 /// where the operand is no constant, and
 /// `zend_try_ct_eval_unary_op` where it is one php's
 /// `zend_unary_op_produces_error` lets through. `~1` and `~1.0` are
@@ -971,7 +971,7 @@ fn a_bitwise_not_is_the_oracle_s_opline_or_its_fold() {
     ));
 }
 
-/// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm (#357): the walk
+/// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm: the walk
 /// inside an array expression folds every key and value in place
 /// (`zend_try_ct_eval_array`'s first pass), so a cast over a
 /// constant is the value it casts to even where the array itself is

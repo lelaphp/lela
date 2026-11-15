@@ -24,7 +24,7 @@
 //! each list their own methods alone.
 //!
 //! Each line is also known by the module that defines it
-//! ([`Inventory::defining_modules`], #1795): an item's by the module it is
+//! ([`Inventory::defining_modules`]): an item's by the module it is
 //! written in, after every `pub use` is followed; an inherent impl's item
 //! by the module the impl block is written in, which need not be the
 //! type's; a trait's item by the trait's; a re-export from outside the
@@ -36,7 +36,7 @@
 //! nothing there defines or may import, never one a glob through it asks: `pub use opcode::Opcode` beside
 //! `mod opcode { include!(...) }` names a type of that module, and the
 //! inherent impls written on `Opcode` elsewhere in the crate list under
-//! it (#2025).
+//! it.
 //!
 //! Known limits: `#[path]` on a `mod` is not read; `cfg` is not evaluated,
 //! so a `pub` item behind a feature is always listed.
@@ -125,7 +125,7 @@ enum Target {
         name: String,
     },
     /// A child module of `module` and an item there of one name, which
-    /// rustc keeps in two namespaces, `mod x;` beside `pub fn x` (#2791):
+    /// rustc keeps in two namespaces, `mod x;` beside `pub fn x`:
     /// a path goes on through the module, and a `use` of the name brings
     /// in the item and, where it is `pub`, the module.
     Both {
@@ -176,7 +176,7 @@ impl<'a> Inventory<'a> {
     /// The public items of `krate`, as lock lines, each with the module
     /// that defines it as a path from its crate's name:
     /// `php_engine::api::request::hooks` for a method of `Request` written
-    /// in that file (#1795).
+    /// in that file.
     pub fn defining_modules(&mut self, krate: &Present) -> Result<BTreeMap<String, String>> {
         Ok(self
             .lines(krate)?
@@ -524,7 +524,7 @@ impl<'a> Inventory<'a> {
     /// What `name` is in module `id`, asked of that module by path: what
     /// [`Inventory::find`] answers, else, in a module that `include!`s a
     /// file generated into `OUT_DIR`, an item that file defines, the code
-    /// compiling (#2025). A name a `use` there may bring in, a glob's
+    /// compiling. A name a `use` there may bring in, a glob's
     /// included, is never taken for the file's, and a glob through the
     /// module asks [`Inventory::find`] alone, so the module does not
     /// answer for names it does not define.
@@ -771,7 +771,7 @@ pub enum Written {
     /// segments are the path of the `use` in scope that names its first
     /// segment, `tier::room` read as `php_engine::tier::room` beside `use
     /// php_engine::tier`; 1 for a path no `use` names, written from a
-    /// crate's name, `crate`, `self` or `super` (#3033).
+    /// crate's name, `crate`, `self` or `super`.
     Path { import: usize },
 }
 
@@ -814,7 +814,7 @@ impl Import {
 /// function bodies included, in one walk ([`Walk`]): each `use` item's,
 /// and each path its code writes through a `use` in scope or from a
 /// crate's name, so `tier::room(..)` beside `use php_engine::tier` is the
-/// import `php_engine::tier::room` (#3033).
+/// import `php_engine::tier::room`.
 ///
 /// A `use` is in scope in the module or block that writes it and the
 /// blocks inside, never inside an inline `mod`, as rustc reads it; an
@@ -1076,7 +1076,7 @@ mod tests {
     use crate::manifest::Manifest;
 
     /// The walk reads a written path through the `use` in scope where it
-    /// is written (#3033): a block's `use` inside the block alone, a type
+    /// is written: a block's `use` inside the block alone, a type
     /// the block defines shadowing the file's `use` of its name, an inline
     /// `mod` seeing none of the file's, and `::`-rooted and in-crate paths
     /// as written; only a path through a `use` is `through_use`.
@@ -1111,8 +1111,8 @@ mod tests {
 
     /// The `same-name` fixture: `reading::Outcome` and `work::Outcome`, with
     /// `work.rs` writing impls as a plain name, `self::`, `crate::` and a
-    /// module imported by `use`, and `glob.rs` through a glob and `super::`
-    /// (#79). The crate is named `php_heap` for `Crates::scan` alone, which
+    /// module imported by `use`, and `glob.rs` through a glob and `super::`.
+    /// The crate is named `php_heap` for `Crates::scan` alone, which
     /// finds a crate through a manifest row.
     #[test]
     fn an_inherent_impl_lands_under_the_type_it_is_written_on_alone() {
@@ -1140,7 +1140,7 @@ mod tests {
         );
     }
 
-    /// The `include` fixture (#2025): `Kind`, `include!`d from `OUT_DIR`,
+    /// The `include` fixture: `Kind`, `include!`d from `OUT_DIR`,
     /// lists the methods `kind.rs` writes on it, and `Plain`, reached
     /// through a glob after a glob of the including module, lists its
     /// own; the including module answers for no name a glob asks.
@@ -1170,7 +1170,7 @@ mod tests {
 
     /// Each line is defined where its item is written: a method by the
     /// module its impl block is in, which for `reading::Outcome` is three
-    /// modules, and a type by its own (#1795). Every line has one module,
+    /// modules, and a type by its own. Every line has one module,
     /// so the per-module counts sum to the lock's.
     #[test]
     fn a_method_is_defined_by_the_module_its_impl_block_is_written_in() {

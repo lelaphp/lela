@@ -152,7 +152,7 @@ impl Row {
 /// seed's qualifier does not reach by a prefix alone, and the seed keeps
 /// its spelling, which is the one `data/api-lock-v0.md` was joined by
 /// hand to; the join takes each table's shape to the name the census
-/// prints (#209).
+/// prints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Spelling {
     /// The name with this prefix taken off: `semantics::throw_internal`
@@ -728,7 +728,7 @@ fn joined<'a>(
         // the row stays on the checklist. This branch is written out
         // rather than left to `all` over an empty list, which is true of
         // the engine that ports nothing as readily as of the one that
-        // ports everything (#104).
+        // ports everything.
         [] => (false, false),
         ext => (true, ext.iter().all(|name| ported.carries(name))),
     };

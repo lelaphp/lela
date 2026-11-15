@@ -56,7 +56,7 @@ pub fn is_binding(path: &str) -> bool {
 }
 
 /// What a reading says of a crate that has no `Cargo.toml` yet, after the
-/// scope and a colon; `status` folds the rows that say it into one (#64).
+/// scope and a colon; `status` folds the rows that say it into one.
 pub(crate) const NOT_YET_CREATED: &str = "not yet created";
 
 /// Whether the crate has been created: its directory holds a `Cargo.toml`.
@@ -108,19 +108,19 @@ pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<Stri
         .collect())
 }
 
-/// The readings that stand for a commit (#1143): of one instrument, each
+/// The readings that stand for a commit: of one instrument, each
 /// that passes and was taken over exactly what the index holds of its
-/// scope and of its dependency closure ([`key::Snapshot::key`], #1318), by scope, so pre-commit measures what none covers and writes no
+/// scope and of its dependency closure ([`key::Snapshot::key`]), by scope, so pre-commit measures what none covers and writes no
 /// reading for the rest. The one asked is the reading that stands over
 /// that content, [`Store::over`]'s: the scope's file, or the index's
-/// entry for the key, which is where a retired worktree's pass is landed
-/// (#1252). A reading taken over a working tree that differs
+/// entry for the key, which is where a retired worktree's pass is landed.
+/// A reading taken over a working tree that differs
 /// from the index there is over content the commit does not take, and
 /// stands for nothing. A staged file outside every crate is stamped into
 /// no reading, so each voids the readings it can change, as [`Reach`]
-/// sorts them (#1312), and what they void is kept beside the readings
+/// sorts them, and what they void is kept beside the readings
 /// ([`Outside`]), for an instrument that measures what nothing stands for
-/// rather than what is staged under a crate (#1738).
+/// rather than what is staged under a crate.
 #[derive(Debug, Default)]
 pub(crate) struct Standing {
     readings: BTreeMap<String, Reading>,
@@ -217,8 +217,8 @@ impl Standing {
 
     /// [`Standing::for_commit`] over scopes each named with the path its
     /// reading is stamped over, for an instrument whose scope is no name
-    /// [`Manifest::scope_path`] maps, such as crosscheck's `ext/<name>/ri`
-    /// (#1159): the key is still [`key::Snapshot::key`] over that path.
+    /// [`Manifest::scope_path`] maps, such as crosscheck's `ext/<name>/ri`:
+    /// the key is still [`key::Snapshot::key`] over that path.
     pub(crate) fn for_commit_over(
         root: &Path,
         manifest: &Manifest,
@@ -357,9 +357,9 @@ impl Standing {
 
 /// Of `taken`, each a scope, the path its reading is keyed over and the
 /// commit it was taken at, the scopes whose crate's dependency closure the
-/// staged lock pins otherwise than the lock at that commit (#1312): the
-/// standing readings' commits, or `HEAD` for what the commit itself moves
-/// (#1738). A scope at no commit git can show, or over no crate the lock
+/// staged lock pins otherwise than the lock at that commit: the
+/// standing readings' commits, or `HEAD` for what the commit itself moves.
+/// A scope at no commit git can show, or over no crate the lock
 /// names, is counted moved. A reading's own staged lock, when the commit
 /// it was taken for staged one, is not kept; the lock at its commit stands
 /// for it.
@@ -406,7 +406,7 @@ pub(crate) fn for_commit(
     Ok(Standing::for_commit(root, manifest, store, instrument, &touched)?.unmeasured(&touched))
 }
 
-/// The index laid down as a repository of its own (#4620): every file it
+/// The index laid down as a repository of its own: every file it
 /// holds at stage 0 checked out, its own index the same entries, its
 /// objects borrowed from the workspace's and its `HEAD` the workspace's.
 /// `vocab`, `budget`, `unsafe-audit` and `api-check` under `--staged` read
@@ -605,7 +605,7 @@ mod tests {
     }
 
     /// A staged census is read by xtask's tests and by no build: xtask is
-    /// measured again and every other crate's pass stands (#1312).
+    /// measured again and every other crate's pass stands.
     #[cfg(tracked)]
     #[test]
     fn a_staged_file_only_the_harness_reads_voids_xtasks_reading_alone() {
@@ -620,7 +620,7 @@ mod tests {
     }
 
     /// A staged lock voids the reading of a crate whose closure it moves,
-    /// and leaves one whose closure it pins as before standing (#1312).
+    /// and leaves one whose closure it pins as before standing.
     #[cfg(tracked)]
     #[test]
     fn a_staged_lock_voids_only_the_crates_whose_closure_it_moves() {
@@ -648,7 +648,7 @@ mod tests {
     /// main moves on without touching `xtask`: at the merge, what the
     /// index holds of `xtask` is what the worktree measured, so its pass,
     /// which the retire appended into main's log and nowhere else, stands
-    /// and `test` is not run again (#1252). Before the retire the pass is
+    /// and `test` is not run again. Before the retire the pass is
     /// in the worktree's store alone and nothing stands.
     #[test]
     fn a_retired_worktrees_pass_stands_at_the_merge_of_its_branch() {
@@ -695,7 +695,7 @@ mod tests {
     }
 
     /// Pre-commit's standing readings are keyed on each crate's closure
-    /// (#1318, `xtask/fixtures/closure`): a staged change to `ext/ctype`
+    /// (`xtask/fixtures/closure`): a staged change to `ext/ctype`
     /// alone leaves every other crate's pass standing, and one to
     /// `php_engine` leaves standing no crate built from it.
     #[cfg(tracked)]
@@ -776,7 +776,7 @@ mod tests {
     /// A file marked `skip-worktree` or `assume-unchanged` whose working
     /// copy differs from its staged one is hidden from `ls-files
     /// --modified`; the index is laid down all the same, and holds the
-    /// staged copy (#4620).
+    /// staged copy.
     #[test]
     fn a_marked_file_that_differs_lays_the_index_down() {
         for mark in ["--skip-worktree", "--assume-unchanged"] {

@@ -1,12 +1,13 @@
 //! Watchpoints (`Z/sapi/phpdbg/phpdbg_watch.c`), compared between steps
-//! (#1308): php protects the pages a watched value lives on and, once a
-//! write faulted, compares the value it backed up with what the page
-//! holds at the next opline boundary; this host reads each watched value
-//! at every boundary and compares it with the copy it kept, by the same
-//! rules. A zval that changed its type, its scalar, or the string, array,
-//! object or reference it points to is reported as php reports a
-//! `WATCH_ON_ZVAL`; a string changed in place as a `WATCH_ON_STR`; an
-//! array that grew or shrank as a `WATCH_ON_HASHTABLE`.
+//! (`trace:phpdbg-watch-page-fault`): php protects the pages a watched
+//! value lives on and, once a write faulted, compares the value it backed
+//! up with what the page holds at the next opline boundary; this host
+//! reads each watched value at every boundary and compares it with the
+//! copy it kept, by the same rules. A zval that changed its type, its
+//! scalar, or the string, array, object or reference it points to is
+//! reported as php reports a `WATCH_ON_ZVAL`; a string changed in place as
+//! a `WATCH_ON_STR`; an array that grew or shrank as a
+//! `WATCH_ON_HASHTABLE`.
 
 use php_sapi::tier::{FrameRef, Request};
 

@@ -936,7 +936,7 @@ impl ReflectionParameter {
     /// A native's default is the text `gen_stub.php` printed from the
     /// stub's expression, a string double-quoted with its escapes, and
     /// `<default>` for the stub's `UNKNOWN`, which reads as optional with no
-    /// value to fetch (#377):
+    /// value to fetch:
     ///
     /// ```php
     /// echo new ReflectionParameter('trim', 1), "\n", new ReflectionParameter('str_getcsv', 3), "\n", new ReflectionParameter('get_class', 0), "\n";
@@ -981,7 +981,7 @@ impl ReflectionParameter {
     /// `ZEND_ARG_SEND_MODE`, which is set for `ZEND_SEND_BY_REF` and for
     /// `ZEND_SEND_PREFER_REF`. The declaration model carries the `&` of
     /// the declaration and not php's third way of sending, so a
-    /// `prefer-ref` parameter answers as php's by-value one does (#413).
+    /// `prefer-ref` parameter answers as php's by-value one does.
     ///
     /// ```php
     /// var_dump((new ReflectionParameter('str_repeat', 0))->isPassedByReference());
@@ -1535,7 +1535,7 @@ impl ReflectionParameter {
 
     /// `ReflectionParameter::getAttributes(?string $name = null, int
     /// $flags = 0)`: `reflect_attributes` over the function's attributes
-    /// at this offset. `ReflectionAttribute` is declared and not served (#414),
+    /// at this offset. `ReflectionAttribute` is declared and not served,
     /// so a parameter that carries one is php's `ReflectionException` for
     /// the missing class rather than a wrong list, and one that carries
     /// none is the empty array php gives it.

@@ -434,7 +434,7 @@ fn shifted_iterators(req: &mut Request, table: PhpArray) {
 ///
 /// A `foreach` by reference over the array goes on past the values put
 /// before it, php's `zend_hash_iterators_advance` over the table it
-/// swaps the new data into (#1216).
+/// swaps the new data into.
 ///
 /// ```php
 /// $a = [1, 2, 3];

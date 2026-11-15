@@ -1,5 +1,5 @@
 # The MySQL server the mysqli and pdo_mysql suites run against, as Mitchell
-# ruled on #1345: one service on mysql:8.4, a floating tag that follows the
+# ruled 2026-10-01: one service on mysql:8.4, a floating tag that follows the
 # LTS line's patches, on 127.0.0.1:3306, root with an empty password and a
 # `test` database, the defaults both suites read when no env is set
 # (ext/mysqli/tests/connect.inc, ext/pdo_mysql/tests/inc/config.inc).
@@ -14,18 +14,18 @@
 # answers only once the real server is listening, and a run never starts
 # against a cold one. `xtask phpt` records the server's `SELECT VERSION()`
 # with a reading of these suites, so a shift in the oracle's verdict can be
-# traced to an image bump, and refuses the run when nothing answers (#1366).
+# traced to an image bump, and refuses the run when nothing answers.
 name: dax-php-mysql
 services:
   mysql:
     image: mysql:8.4
-    # Binary logging off (#2466). MySQL 8.4 writes binlogs by default, and
+    # Binary logging off. MySQL 8.4 writes binlogs by default, and
     # the two suites grew them to 18 GB in one container's anonymous volume
     # (22 files of about 1 GB each, 2026-10-09). Nothing in either suite
     # reads them: no test under ext/mysqli or ext/pdo_mysql names log_bin,
     # a binlog or SHOW BINARY LOGS (mysqli_get_client_stats lists only the
-    # client's com_binlog_dump counter). A server flag leaves #1345's image,
-    # port, credentials and database as ruled.
+    # client's com_binlog_dump counter). A server flag leaves the image, port,
+    # credentials and database as ruled.
     command: ["mysqld", "--skip-log-bin"]
     environment:
       MYSQL_ALLOW_EMPTY_PASSWORD: "yes"

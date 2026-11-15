@@ -48,8 +48,8 @@
 //! after the link says what each room serves. Every push links its
 //! room, a call being built and a native's call as a user frame, and a
 //! pop moves the word back to the room's link, so the chain is the
-//! stack's records whichever tier the engine is bound to (#2553). A
-//! frameless call lays no record down, as php's lays none (#3302).
+//! stack's records whichever tier the engine is bound to. A
+//! frameless call lays no record down, as php's lays none.
 
 use std::marker::PhantomData;
 use std::mem::{MaybeUninit, align_of, needs_drop, offset_of, size_of};
@@ -137,7 +137,7 @@ impl Kind {
 /// several arms, it merged those of every width into one `bzero` call
 /// with the length from a table, 28 to 33 instructions a call; read
 /// through the load, a frame of one slot is 15 with the width's tests
-/// and no call (#4022, #3994). Every byte of every slot is still
+/// and no call. Every byte of every slot is still
 /// written, the value word with the type word, as the compiled tier's
 /// push writes them (`php_jit::lower`), so a slot over a page's fresh
 /// memory or an old header's room reads as the whole zval it is.
@@ -500,7 +500,7 @@ impl<H> FakeRoom<H> {
 /// table and the innermost room's address, stand where [`StackLayout`]
 /// says, so compiled code that pushes and pops a plain call's frame
 /// inline moves them as [`VmStack::push_frame`] and [`VmStack::pop_frame`]
-/// do (`jit-design.md` §5.3, #3230).
+/// do (`jit-design.md` §5.3).
 #[derive(Debug)]
 pub struct VmStack<H> {
     kind: Kind,

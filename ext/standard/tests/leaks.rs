@@ -1,5 +1,5 @@
-//! The leaks the request leak sensor found in this extension's natives
-//! (#2057), each a program served with the sensor armed: what it wrote,
+//! The leaks the request leak sensor found in this extension's natives,
+//! each a program served with the sensor armed: what it wrote,
 //! and no `InternalError` naming a block the heap still held after it.
 
 #![cfg(debug_assertions)]
@@ -19,7 +19,7 @@ fn armed(source: &str) -> (String, Option<String>) {
 /// `proc_open` reads each element of its command array and each value
 /// of its environment as a string and gives the string up once it has
 /// copied its bytes, as `get_command_from_array` and `php_array_to_envp`
-/// release what `zval_get_string` answered (#2064).
+/// release what `zval_get_string` answered.
 #[test]
 fn proc_open_gives_up_the_strings_of_its_command_and_environment() {
     let (stdout, fatal) = armed(
@@ -38,7 +38,7 @@ proc_close($p);
 /// to once it has copied the bytes, as `zend_ini_get_constant` releases
 /// its `convert_to_string` copy, whether the constant is the value, an
 /// operand, a `${…}` fallback, an offset or a concatenation's right
-/// side (#2065).
+/// side.
 #[test]
 fn the_ini_parser_gives_up_the_strings_of_the_constants_it_expands() {
     let (stdout, fatal) = armed(
@@ -57,7 +57,7 @@ echo serialize(parse_ini_string("a = E_ALL\nb = E_ALL & ~E_NOTICE\nc = \${nope:-
 /// `highlight_file` and `php_strip_whitespace` give up the string they
 /// read the file into once the scanner has its bytes, as php's
 /// `zend_destroy_file_handle` frees the buffer `open_file_for_scanning`
-/// filled (#2068).
+/// filled.
 #[test]
 fn highlight_file_and_php_strip_whitespace_give_up_the_source_they_read() {
     let files = Files::new(
@@ -79,7 +79,7 @@ echo php_strip_whitespace('{path}'), "\n";
 /// The URL rewriter's query pairs and hidden inputs go back to the heap
 /// at the request's end, as `PHP_RSHUTDOWN_FUNCTION(url_scanner)`
 /// `smart_str_free`s them, whether or not the program reset them, and
-/// whatever their length (#2069).
+/// whatever their length.
 #[test]
 fn the_url_rewriter_gives_its_buffers_back_at_the_request_s_end() {
     for (source, written) in [
@@ -102,7 +102,7 @@ fn the_url_rewriter_gives_its_buffers_back_at_the_request_s_end() {
 /// `count()` method, as php's `ZEND_COUNT` takes `GC_ADDREF` and gives
 /// `OBJ_RELEASE` back after, so a method that frees the variable holding
 /// the object reads a live `$this`, and the table its dump lays down is
-/// freed with the object after the call (#2082, Zend/tests/gh21605.phpt).
+/// freed with the object after the call (Zend/tests/gh21605.phpt).
 #[test]
 fn count_of_a_countable_holds_the_object_across_its_method() {
     let (stdout, fatal) = armed(
@@ -129,7 +129,7 @@ echo "after\n";
 /// `gc_check_possible_root` over its return value
 /// (`Z/ext/standard/var.c:1483`): a cycle handed straight to a native,
 /// whose argument is freed with no root offered, is collected at the
-/// request's end and leaves no block behind (#2444).
+/// request's end and leaves no block behind.
 #[test]
 fn unserialize_offers_its_answer_to_the_collector() {
     let (stdout, fatal) = armed(

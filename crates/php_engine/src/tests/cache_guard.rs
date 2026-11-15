@@ -1,5 +1,5 @@
 //! Compiled code's guard on a method's pair held to the interpreter's
-//! read-back of it (`jit-design.md` §4.3, #4326). Compiled code tests a
+//! read-back of it (`jit-design.md` §4.3). Compiled code tests a
 //! slot's tag and that the class past it is the object's (`php_jit`'s
 //! `cache_guard` over [`PLACE`]'s `pair` and `pair_class`), where
 //! [`Request::cached_callee`] also tests that the frame reads the slot

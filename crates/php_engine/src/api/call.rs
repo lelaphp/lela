@@ -291,7 +291,7 @@ impl Iter {
 ///
 /// A serve on a thread C called back from, with the request lent to it,
 /// is held to that thread's own stack limit for its length
-/// ([`Request::stack_for_this_thread`], #3742).
+/// ([`Request::stack_for_this_thread`]).
 fn serve(
     req: &mut Request,
     target: Target,
@@ -1059,7 +1059,7 @@ pub(crate) fn handle_named_arg(
 /// `zend_bailout`, as [`call`]'s does ([`Request::thrown_without_frame`]):
 /// a user filter's `filter()` as the request's resources are closed, and
 /// a session's `__unserialize()` in session's `rinit`, whose warning that
-/// the data did not decode then follows the fatal (#1879).
+/// the data did not decode then follows the fatal.
 ///
 /// ```php
 /// class F extends php_user_filter { function filter($in, $out, &$consumed, $closing): int { if ($closing) throw new Exception("closing"); return PSFS_PASS_ON; } }
@@ -1879,7 +1879,7 @@ pub fn passthrough(req: &mut Request, first: Option<Owner<Value>>) -> Result<Own
     let above = beneath.saturating_sub(1);
     req.serve_beneath(beneath);
     // The replaced entry served as the extension that supplied it, the
-    // interception before or the native's own (#2627).
+    // interception before or the native's own.
     let served = match by {
         Some(by) => req.serve_for(by, entry),
         None => entry(req),

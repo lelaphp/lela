@@ -1,4 +1,4 @@
-# The workloads (measurement protocol §11; #4335 ruled it, #4344 built it):
+# The workloads (measurement protocol §11; design revision 177):
 # every program under docs/perf/workloads/, and the programs the dispatch
 # census counts that live elsewhere, each declared once. `xtask bench`, `xtask
 # dispatch-census` and `xtask trace-dump` reach a program only through its row
@@ -16,18 +16,18 @@
 #   native   a program whose time is spent in an extension's natives
 # A kernel's and the bench's counts vote in IN_THE_LOOP's criterion
 # (crates/php_engine/build/arms.rs); a shape's, a probe's and a native's do
-# not, as #4364 amended #4335's ruling, and `Role::votes` in
+# not, as the ruling was amended (design revision 178), and `Role::votes` in
 # xtask/src/workloads.rs is where that is decided. A role is a person's to
 # give: a workload added later votes only once a person gives it a role that
 # votes. `exit` is the status each of its runs ends on, 0 where it states
 # none. Each `profile` is one run, its `name` and the `args` after the
 # program's path; a workload that lists none runs once, with none. makala's
 # bars and soak serve each file of every role but native as a request, which
-# carries no arguments, so only its runs that take none (#4366);
+# carries no arguments, so only its runs that take none (ruled 2026-11-09);
 # `Role::served` is where the role is decided.
 #
 # `[pages]` declares the bench's pages, which `xtask dispatch-census` counts
-# beside the programs (#4364, #4367). The site that serves them is kept off
+# beside the programs. The site that serves them is kept off
 # the repository: the variable XTASK_RIG names a description of it on this
 # machine, outside the repository (xtask/src/dispatch_census/pages.rs says
 # what it holds), and where none is described each page's reading is a skip
@@ -87,25 +87,25 @@ role = "bench"
 [[workload]]
 stem = "wordpress_shapes"
 first_read = 4329
-about = "original code, written from the opline counts, its side panels' sizes and sort orders following WordPress's widget defaults, with the mix a counting build of the loop met over the four WordPress bench pages; #4329's last comment sets their top twenty variants side by side"
+about = "original code, written from the opline counts, its side panels' sizes and sort orders following WordPress's widget defaults, with the mix a counting build of the loop met over the four WordPress bench pages"
 role = "shape"
 
 [[workload]]
 stem = "calls"
 first_read = 2011
-about = "#1808's `calls.php` rebuilt from #1808's comment, not #1809's file, so its medians are not comparable to #1809's rows"
+about = "the first G1 reading's `calls.php` rebuilt from the comment that describes it, not the file the observer's user-call rows ran over, so its medians are not comparable to those rows"
 role = "probe"
 
 [[workload]]
 stem = "frame_chain"
 first_read = 1301
-about = "recursive user calls, then a loop of native calls: the bar #1384 holds the readable frame header to"
+about = "recursive user calls, then a loop of native calls: the bar the readable frame header is held to"
 role = "probe"
 
 [[workload]]
 stem = "natives"
 first_read = 2209
-about = "a loop of native calls, each return kind #2209 names"
+about = "a loop of native calls, each return kind the native-return bar names"
 role = "probe"
 
 [[workload]]
@@ -124,34 +124,34 @@ pinned = "Zend/micro_bench.php"
 [[workload]]
 stem = "loop-empty"
 first_read = 3273
-about = "#3273's counting loop, a million rounds of an empty body"
+about = "the bare counting loop, a million rounds of an empty body"
 role = "probe"
 code = "function k($n){ $s=0.0; for($i=1;$i<$n;$i++){  } return $s; } k(1000000);\n"
 
 [[workload]]
 stem = "loop-add"
 first_read = 3273
-about = "#3273's counting loop, a million rounds of `$s = $i + 1;`"
+about = "the bare counting loop, a million rounds of `$s = $i + 1;`"
 role = "probe"
 code = "function k($n){ $s=0.0; for($i=1;$i<$n;$i++){ $s = $i + 1; } return $s; } k(1000000);\n"
 
 [[workload]]
 stem = "loop-add-assign"
 first_read = 3273
-about = "#3273's counting loop, a million rounds of `$s += $i;`"
+about = "the bare counting loop, a million rounds of `$s += $i;`"
 role = "probe"
 code = "function k($n){ $s=0.0; for($i=1;$i<$n;$i++){ $s += $i; } return $s; } k(1000000);\n"
 
 [[workload]]
 stem = "loop-mul"
 first_read = 3273
-about = "#3273's counting loop, a million rounds of `$s = $s * 1.0000001;`"
+about = "the bare counting loop, a million rounds of `$s = $s * 1.0000001;`"
 role = "probe"
 code = "function k($n){ $s=0.0; for($i=1;$i<$n;$i++){ $s = $s * 1.0000001; } return $s; } k(1000000);\n"
 
 [pages]
 first_read = 4329
-about = "the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them"
+about = "the four pages of the WordPress bench, each served by the counting build from a copy of the rig as the count behind `wordpress_shapes.php` served them"
 role = "bench"
 warm = 3
 ini = ["memory_limit=512M", "opcache.enable=1", "opcache.enable_cli=1", "opcache.jit=off"]

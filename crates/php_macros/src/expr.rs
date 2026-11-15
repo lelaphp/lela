@@ -465,7 +465,7 @@ mod tests {
         }
     }
 
-    /// #4050: `PHP_INT_MAX` alone is the value an omitted argument takes
+    /// `PHP_INT_MAX` alone is the value an omitted argument takes
     /// with no search, as php's `ZEND_LONG_MAX`; in an expression it is
     /// still the expression the request evaluates.
     #[test]

@@ -1106,7 +1106,7 @@ enum FieldPacket {
 /// request ends and found again at the next ask. So under php -n the name
 /// costs 8 bytes less (`12345` takes the 32-byte bin, not finit's 40) and
 /// only once. Whether the `trace:immutable-literal-arrays` row covers
-/// that difference is a person's ruling, asked on #3425 (#3412):
+/// that difference is a person's ruling, which has been asked for:
 ///
 /// ```php
 /// mysqli_report(MYSQLI_REPORT_OFF);

@@ -29,8 +29,8 @@ fn read(path: &str) -> String {
 /// A file with regions as the index holds it, `git show :<path>`, never the
 /// working copy: another session's `SessionStart` hook or pre-commit
 /// rewrites a region in place while these tests run, and a read in the
-/// middle of that write saw a bare closer that no commit held (#1322).
-/// Under pre-commit it is the index the commit is written from (#2747).
+/// middle of that write saw a bare closer that no commit held.
+/// Under pre-commit it is the index the commit is written from.
 fn staged(root: &Path, path: &str) -> String {
     xtask::test::committed(root, path).unwrap_or_else(|e| panic!("{e:#}"))
 }
@@ -43,7 +43,7 @@ fn map() -> String {
 /// The reader is the index and not the disk: a scratch repository stages a
 /// rendered map, then its working copy is caught half-way through a render,
 /// the closer written and the body not yet, and what the tests read is the
-/// staged map (#1322).
+/// staged map.
 #[test]
 fn the_map_is_read_from_the_index_and_not_from_a_render_in_flight() {
     let root = Tree::new("map-staged").unwrap();
@@ -63,7 +63,7 @@ fn the_map_is_read_from_the_index_and_not_from_a_render_in_flight() {
 
 /// A test under pre-commit inherits the commit's index and reads scratch
 /// repositories as well: that index is read for its own repository alone,
-/// and a scratch one is read from its own index (#2747).
+/// and a scratch one is read from its own index.
 #[test]
 fn the_commit_s_index_is_read_for_its_own_repository_alone() {
     if let Some(root) = std::env::var_os("MAP_SCRATCH") {
@@ -210,7 +210,7 @@ fn tracked() -> Vec<String> {
 
 /// Every tracked file with a region is one pre-commit renders and CI
 /// holds with `computed check`, so no region's render waits on a session
-/// that happens to run `computed` on its file (#631); a fixture's are the
+/// that happens to run `computed` on its file; a fixture's are the
 /// harness's own tests'.
 #[test]
 fn pre_commit_renders_and_ci_checks_every_tracked_file_with_a_region() {
@@ -320,7 +320,7 @@ fn tracked_tree(root: &Path, regions: &[(String, String)]) {
 /// A tracked region renders against an empty store, every reading `no
 /// reading`, since a store is one machine's and its render would churn
 /// the map on every checkout; the live numbers are the local file's
-/// (harness-design.md §5, revision 6; #630). Each `xtask status` region
+/// (harness-design.md §5, revision 6). Each `xtask status` region
 /// is rendered over a scratch workspace with the tracked locks and the
 /// files the regions read ([`tracked_tree`]), once with
 /// no store and once after a reading for every seam, rule and bundle edge
@@ -395,7 +395,7 @@ fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
         .position(|(_, l)| l.contains(" name=seams "))
         .unwrap();
     // A tracked table has no `reading` column, which could only say
-    // `no reading` there (#2377).
+    // `no reading` there.
     assert!(
         full[seams].starts_with("| seam | lock | items | ceiling |\n")
             && !full[seams].contains("reading"),
@@ -415,8 +415,8 @@ fn inputs(opener: &str) -> impl Iterator<Item = &str> {
         .filter(|i| !i.is_empty())
 }
 
-/// harness-design.md §4.3's fields of an `Invocation` are the type's
-/// (#1305, #1319): the region renders `status --section invocation` and
+/// harness-design.md §4.3's fields of an `Invocation` are the type's:
+/// the region renders `status --section invocation` and
 /// names the type's source among its inputs, as `computed affected`
 /// says, so a field the type gains, here added to a copy of the source
 /// beside the staged design, fails `computed check` until the region is
@@ -496,7 +496,7 @@ fn the_invocation_region_is_the_types_and_a_field_it_gains_stales_it() {
 
 /// The `seams` region names every lock its section counts among its
 /// inputs, so a commit that changes only one of them, the harness's own
-/// `xtask/xtask.lock` included, renders the region again (#631): asked of
+/// `xtask/xtask.lock` included, renders the region again: asked of
 /// `computed affected`, which reads the openers' `inputs=`.
 #[test]
 fn every_lock_the_seams_region_counts_is_one_of_its_inputs() {
@@ -527,7 +527,7 @@ fn every_lock_the_seams_region_counts_is_one_of_its_inputs() {
 }
 
 /// A help line says what the instrument does in one sentence and leaves
-/// the rest to `xtask <name> --help` (#64): the `instruments` region is
+/// the rest to `xtask <name> --help`: the `instruments` region is
 /// the map's widest, and a line of it stays under 200 characters.
 #[test]
 fn every_help_line_of_the_instruments_region_is_under_200_characters() {
@@ -626,7 +626,7 @@ fn the_declarations_carry_the_version_that_wrote_them_where_they_stand() {
 }
 
 /// The room a block keeps under the cap: what a day's growth of the
-/// regions came to before the block was measured (#64), so a region that
+/// regions came to before the block was measured, so a region that
 /// crosses the line fails here and not a session.
 const MARGIN: usize = 4_000;
 
@@ -679,7 +679,7 @@ fn over(name: &str, text: &str, cap: usize) -> Option<String> {
 
 /// The engine caps one context block at what `harness.ts` states, and a
 /// session on 2026-09-10 started with no map because the map and the
-/// local facts together were over it (#64). The map is one block and the
+/// local facts together were over it. The map is one block and the
 /// local facts another, and each is held here under the cap with room:
 /// the map as the hook hands it, and the facts as the template's regions,
 /// every one of them, render from this workspace's store, whatever the
@@ -764,7 +764,7 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
 
 /// The hook reads the same line the test does, and hands the engine the
 /// facts as one block held to the cap; the map reaches the model by
-/// CLAUDE.md's `@AGENTS.md`, never as a block (#3620 D1).
+/// CLAUDE.md's `@AGENTS.md`, never as a block (harness revision 182).
 #[test]
 fn the_function_hook_states_the_cap_once_and_hands_over_the_facts_alone() {
     let hook = read(HOOK);
@@ -820,7 +820,7 @@ fn the_session_start_hook_wires_the_clone_and_renders_the_local_file_on_the_four
     // The local file is laid down, where missing or where its template
     // moved, before it is rendered; the map reaches the model through
     // CLAUDE.md's `@AGENTS.md`, so the hook ends with the render and
-    // prints no map (#3620 D1).
+    // prints no map (harness revision 182).
     let laid = command.find("status --session >/dev/null").expect(command);
     assert!(
         laid < computed,

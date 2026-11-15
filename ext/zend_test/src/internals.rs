@@ -1,13 +1,14 @@
 //! The test functions of php's `test.c` that reach past what a program
-//! sees, each over the face item that answers it here (#2388): the
+//! sees, each over the face item that answers it here: the
 //! machine stack's bounds and `EG(stack_limit)`, whether an address is
 //! the request heap's, `CG(map_ptr_last)`, the log at a severity,
 //! opcache's preload, libxml's process defaults through ext/libxml, and
 //! the URI parsers through ext/standard and ext/uri (design §4.10). Each
 //! is laid into [`crate::functions`]' list at its place in the stub.
 //!
-//! Three of `test.stub.php`'s functions #2388 set out break what the
-//! engine holds. Two are ported as php's (ruled on #2937 and #2976):
+//! Three of `test.stub.php`'s functions, set out at first, break what the
+//! engine holds. Two are ported as php's (ruled 2026-10-18 and
+//! 2026-10-19):
 //!
 //! - `zend_test_crash(?string $message = null)` prints its message and
 //!   ends the process with the `SIGSEGV` php's read of `(char *) 1`
@@ -20,7 +21,7 @@
 //! The third, `zend_delref(mixed $variable)`, is registered as php
 //! declares it and takes no count off, where php's drops one by hand: the
 //! engine exposes no unsound refcount decrement, a `by-design` row
-//! (`trace:zend-delref-no-decrement`, ruled on #3016).
+//! (`trace:zend-delref-no-decrement`, ruled 2026-10-20).
 //!
 //! `zend_test_set_fmode` is Windows' alone, and is left out as php
 //! leaves it out on every other platform.
@@ -44,7 +45,7 @@ const LOG_DEBUG: i32 = 7;
 /// panic, `zend_mm_panic`: its line alone on the standard error, with no
 /// `Fatal error:`, file or line, and php's process ends on `abort()`,
 /// which the CLI copies and a host that serves many requests ends the
-/// request alone for (`Ending::Terminated`, #3515). php's leak
+/// request alone for (`Ending::Terminated`). php's leak
 /// lasts until its heap is freed whole; here the request state keeps
 /// the block and frees it at `RSHUTDOWN`, as [`crate::functions`]'
 /// `zend_leak_variable` keeps its owner, so nothing the program sees
@@ -98,7 +99,7 @@ pub(crate) fn zend_leak_bytes(
 /// a refcounted argument with `Z_TRY_DELREF_P` and frees nothing
 /// (`Z/ext/zend_test/test.c:213-224`); this one takes the argument and
 /// returns null, the divergence `trace:zend-delref-no-decrement`
-/// (ruled on #3016). php's own tests reach it only with `null` or the
+/// (ruled 2026-10-20). php's own tests reach it only with `null` or the
 /// wrong argument count, where the two do the same.
 ///
 /// ```php
@@ -347,7 +348,7 @@ pub(crate) fn zend_test_log_err_debug(req: &mut Request, str: PhpString) {
 /// as `php_printf` prints it, what the host holds pushed as
 /// `sapi_flush` pushes it, so the message is seen before the end as
 /// php's unbuffered CLI shows it, and the process ended by `SIGSEGV`, the
-/// signal php's read of `(char *) 1` delivers (`crate::ffi`, #2976). No
+/// signal php's read of `(char *) 1` delivers (`crate::ffi`). No
 /// witness reaches the end; `tests/crash.rs` holds it to the oracle's
 /// bytes and signal.
 ///

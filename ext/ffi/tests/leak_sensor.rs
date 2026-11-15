@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -17,7 +17,7 @@ fn armed(source: &str) -> String {
 
 /// A type `FFI::new` takes from a `FFI\CType` it does not solely own is
 /// remembered in `FFI_G(weak_types)` until the request ends, where
-/// `RSHUTDOWN` destroys the table and frees what it remembered (#2100).
+/// `RSHUTDOWN` destroys the table and frees what it remembered.
 #[test]
 fn a_remembered_type_is_freed_at_the_request_s_end() {
     let stdout = armed(

@@ -69,7 +69,7 @@ use php_sapi::{Engine, EngineBuilder, OutputSink};
 use crate::natives::ProcessTitle;
 
 /// What `php-linked --serve` does first, so a pool's server holds only
-/// its own pipes (#2550).
+/// its own pipes.
 #[cfg(feature = "linked")]
 pub use ffi::close_inherited_fds;
 pub use options::{
@@ -122,7 +122,7 @@ pub fn version(engine: &Engine) -> String {
 /// is served on the thread the process's work moves onto, of
 /// [`php_sapi::REQUEST_STACK`] bytes, so recursion through a native's
 /// callback reaches the depth php reaches on its main thread (design
-/// §5.6, #3043), and the process ends there, in the child of a fork as
+/// §5.6), and the process ends there, in the child of a fork as
 /// in the process that started it.
 pub fn main() -> ! {
     // The host's own copy of its arguments, taken before `save_ps_args`:
@@ -287,7 +287,7 @@ fn print(text: &str) -> i32 {
 ///
 /// A call of its own, so the builder, two kilobytes moved through each
 /// step, stands in a frame that is gone before the first request is
-/// served, and not under every frame of it (#3209).
+/// served, and not under every frame of it.
 #[inline(never)]
 fn engine(startup: &Startup) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();

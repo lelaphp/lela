@@ -1293,7 +1293,7 @@ pub(crate) fn landed(
 /// is the `TypeError`, save for the int a float type takes, which php
 /// converts there too. That arm is served and carries no witness: the
 /// compiler does not read a `declare` statement yet, so no snippet can
-/// ask for strict typing (#411).
+/// ask for strict typing.
 pub(crate) fn verify_property_type(
     req: &mut Request,
     value: &Value,
@@ -2778,7 +2778,7 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
 /// ab|n=2|22|1||2.5x|2|2|1
 /// ```
 ///
-/// Two constants fold where they stand, so #162's fourth program is
+/// Two constants fold where they stand, so the program below is
 /// three `ECHO`s of a constant in both engines.
 ///
 /// ```php
@@ -2804,8 +2804,7 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
 ///
 /// The joined string is the request's, one allocation of both sides'
 /// bytes, and `memory_get_usage()` moves by that allocation's bin, a
-/// constant string on one side as much as a string a native made
-/// (#2661).
+/// constant string on one side as much as a string a native made.
 ///
 /// ```php
 /// echo "joined, moved\n"; $a = str_repeat('a', 10); $b = str_repeat('b', 20); $c = $e = $g = null;
@@ -3057,7 +3056,7 @@ fn concat_sides(req: &mut Request, left: &Value, right: &Value) -> Result<Concat
 ///
 /// One byte at a time from empty, `memory_get_usage()` steps where the
 /// string's allocation crosses into the next bin, then the next `run`
-/// of pages, each step php's (#2661); a string another variable holds is
+/// of pages, each step php's; a string another variable holds is
 /// copied, its new allocation counted whole. The program writes its
 /// first line before it measures, since the first byte a request writes
 /// holds the thirty-two of the default mimetype.
@@ -3334,7 +3333,7 @@ pub(crate) fn concat_assign(
 /// and the greater side for a class with none; against a null or a bool
 /// its truth, which is true, with no notice. An object with a dynamic
 /// property compares as `zend_compare_symbol_tables` compares the two
-/// rebuilt tables, the count first; that arm waits on #335 for a witness,
+/// rebuilt tables, the count first; that arm waits for a witness,
 /// since the engine's creation of one raises no deprecation yet.
 ///
 /// ```php
@@ -3413,8 +3412,7 @@ pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<
         // itself, and two are the left one's `compare` handler's, which
         // `ZEND_UNCOMPARABLE` answers as `1`. Here and not in
         // [`compare_values`], so a nest of objects compared level by
-        // level keeps this frame between two handlers and no other
-        // (#3159).
+        // level keeps this frame between two handlers and no other.
         (ValueRef::Object(a), ValueRef::Object(b)) => {
             if a == b {
                 Ok(Ordering::Equal)
@@ -3444,7 +3442,7 @@ fn handler_compare(
 
 /// [`compare`] over what a reference on either side holds. A call of its
 /// own, so the values it reads out are off the stack of a nest compared
-/// level by level through [`compare`], which holds none (#3159).
+/// level by level through [`compare`], which holds none.
 #[inline(never)]
 fn compare_dereferenced(
     req: &mut Request,
@@ -3457,7 +3455,7 @@ fn compare_dereferenced(
 /// [`compare`] past `TYPE_PAIR(IS_ARRAY, IS_ARRAY)` and
 /// `TYPE_PAIR(IS_OBJECT, IS_OBJECT)`, which it never sees: a call of its
 /// own, so that what the other pairs take is off the stack while two
-/// nested arrays or objects are compared level by level (#2221, #3159).
+/// nested arrays or objects are compared level by level.
 #[inline(never)]
 fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
@@ -3854,7 +3852,7 @@ struct Walked {
 
 /// One step of a comparison's walk of two tables, taken in a frame of
 /// its own so the frame the recursion repeats holds the two tables and
-/// the walk's place and no row (#3261): the walk's end, a pair that
+/// the walk's place and no row: the walk's end, a pair that
 /// decides the comparison, a pair that leaves it to the next step, or
 /// two arrays for the walk to descend into.
 enum Paired {
@@ -4034,8 +4032,7 @@ fn silent_number(value: ValueRef) -> Scalar<'static> {
 /// ```
 ///
 /// A call of its own, so the walk it keeps across each element's compare
-/// is off the stack of a nest of objects compared through [`compare`]
-/// (#3159).
+/// is off the stack of a nest of objects compared through [`compare`].
 #[inline(never)]
 fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Ordering, Thrown> {
     if left.heap().is_same(right.heap()) {
@@ -4113,9 +4110,8 @@ fn compare_held(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Or
 /// How deep a nest reaches the limit is each engine's frame, php's C
 /// frames there and this engine's here, so neither depth is php's to
 /// match; this engine's level is the smaller (2,001 levels of `==` under
-/// 256K where php's is 871, #3261), which errs on the side the design
-/// asks: a nest php compares whole is compared whole here too (§5.6,
-/// #3142).
+/// 256K where php's is 871), which errs on the side the design
+/// asks: a nest php compares whole is compared whole here too (§5.6).
 #[inline]
 fn compare_stack(req: &mut Request) -> Result<(), Thrown> {
     let stack = req.stack_limit();
@@ -6099,7 +6095,7 @@ fn lacking(req: &mut Request, union: PhpArray, right: PhpArray) -> Vec<(Key, Val
 /// root and php counts one. This engine runs no optimizer on an executed op array
 /// (design §6.1), so it counts the two php counts with
 /// `opcache.optimization_level=0`: the fence pins the engine's side of
-/// the `by-design` row `trace:sccp-folded-roots` (#3334, #3366).
+/// the `by-design` row `trace:sccp-folded-roots`.
 ///
 /// ```php
 /// class D { private array $p = [];

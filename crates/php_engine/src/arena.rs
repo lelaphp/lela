@@ -352,7 +352,7 @@ pub(crate) struct Arena {
 }
 
 /// The arena is engine state by the derive, held at every field, and
-/// shared by every request of its epoch at once (ADR-0005, #4652).
+/// shared by every request of its epoch at once (ADR-0005).
 const _: fn() = || {
     fn held<T: crate::api::abi::EngineState + Sync>() {}
     held::<Arena>();
@@ -726,7 +726,7 @@ impl Epochs {
     /// epoch publishes its own trace 1 first, and the preloaded loop,
     /// counting again, records as trace 2 rather than entering the new
     /// table's trace 1, as php's `zend_jit_restart` resets a preloaded op
-    /// array (#3564):
+    /// array:
     ///
     /// ```php
     /// $dir = realpath(sys_get_temp_dir()) . '/jit-preload-' . getmypid(); mkdir($dir);
@@ -940,7 +940,7 @@ mod tests {
         assert_eq!(arena.shared_function(Function(3)), None, "no row holds it");
     }
 
-    /// A restart after a preloaded op array's trace compiled (#3564):
+    /// A restart after a preloaded op array's trace compiled:
     /// the restart's epoch reads that op array's words as php's
     /// `zend_jit_restart` leaves them, counting from where they were laid
     /// with no landing armed, never the number of a trace of the table
@@ -991,8 +991,8 @@ mod tests {
     }
 
     /// A landing armed in a preloaded op array is named in the landing
-    /// index of the epoch that armed it, as one of the epoch's own is
-    /// (#3568), and a restart's epoch, which
+    /// index of the epoch that armed it, as one of the epoch's own is,
+    /// and a restart's epoch, which
     /// lays the preload's words afresh, names none of the old epoch's,
     /// and its own where it arms one.
     #[test]

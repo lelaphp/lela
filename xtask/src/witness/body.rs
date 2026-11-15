@@ -1,9 +1,9 @@
 //! What `xtask witness --accept --bodies` writes into one stream of a
-//! plain fence the oracle does not meet (#3455, as Mitchell ruled on
-//! #3429): the oracle's lines from the instrument's own two runs, and each
+//! plain fence the oracle does not meet (as Mitchell ruled 2026-10-25):
+//! the oracle's lines from the instrument's own two runs, and each
 //! authored line whose wildcards the oracle's line still meets kept as
 //! written, so a fence written for one machine with `%d` or `%s` stays
-//! written for every machine (#783).
+//! written for every machine.
 //!
 //! An authored line is held to the oracle's by the matcher the judge
 //! reads a fence with, [`Expectation::lines`], so a line is kept by the

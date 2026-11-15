@@ -2,7 +2,7 @@
 //! starts, as php's `MINIT` keeps `zend_ce_error`, `zend_ce_value_error`
 //! and `dom_domexception_class_entry` (ADR-0005: engine state,
 //! immutable): a raise names its class by the identity, never by a name
-//! looked up as it throws (#3403).
+//! looked up as it throws.
 
 use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::attr::php_class;

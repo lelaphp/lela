@@ -1,6 +1,6 @@
 //! What php-fpm hands `php_module_startup` beside the bundle, declared
 //! here over `php_ext` as an extension declares its own (ADR-0008 as
-//! amended by #1348): its `cgi_module_entry`
+//! amended 2026-10-01): its `cgi_module_entry`
 //! (`Z/sapi/fpm/fpm/fpm_main.c:1543`), named `cgi-fcgi` as php-cgi's is,
 //! with the entries and natives of `fpm_main.stub.php`, and the line
 //! `fastcgi.error_header` puts into the head of a program that failed

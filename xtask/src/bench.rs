@@ -18,19 +18,19 @@
 //! verdict, that the rig cannot tell the arm from itself (§2): the judge
 //! at the tool call, and makala against itself over each bench workload. A
 //! series is two arms that are two things, the production server against
-//! php-fpm behind a `FastCGI` client over the same workload (#2351,
-//! `makala::bench`). Its reading states the measurement and the distance
+//! php-fpm behind a `FastCGI` client over the same workload
+//! (`makala::bench`). Its reading states the measurement and the distance
 //! still to go to its second arm, harness §3's "`FastCGI` ≥ php-fpm",
-//! which holds nothing (#1902). A series with a `[[bench]]` tolerance is
-//! held by [`series`]'s rule, beside a baseline the store keeps: one
-//! established regression warns, two in a row fail the reading and the
-//! run (#2659); one without a tolerance passes whatever it measured.
+//! which holds nothing. A series with a `[[bench]]` tolerance is held by
+//! [`series`]'s rule, beside a baseline the store keeps: one established
+//! regression warns, two in a row fail the reading and the run; one
+//! without a tolerance passes whatever it measured.
 //!
 //! **One pair, or a pair per program.** A bar's [`Arms`] are one pair, or
 //! one pair per program of a set, each measured as a pair is and the
 //! reading carrying each program's ratio and their geomean, whose sign
 //! stands only where every program's does (§10's floor) and is `mixed`
-//! where they point both ways (#3127): the seven kernels and
+//! where they point both ways: the seven kernels and
 //! `Zend/bench.php`, which the G-bars measure ([`kernels`]).
 //!
 //! **Why the A/A verdict is a reading and not a refusal.** §4.3 is a
@@ -97,13 +97,13 @@ const MIN_REPS_TO_RESOLVE: usize = 4;
 const AA_RESOLVES: f64 = 1.0 / 17.0;
 
 /// §2: the chance at or below which a count of an A/A set's rows resolving
-/// is the pattern that is the defect, and not evidence (#3127).
+/// is the pattern that is the defect, and not evidence.
 const PATTERN: f64 = 0.01;
 
 /// The fewest of an A/A set's `n` rows whose resolving is §2's pattern:
 /// the smallest count whose chance of being reached or passed, each row
 /// resolving at [`AA_RESOLVES`], is at most [`PATTERN`], the binomial's
-/// upper tail (#3127): 3 of 8. None where no count is that unlikely, a set
+/// upper tail: 3 of 8. None where no count is that unlikely, a set
 /// of one, whose one row is evidence alone.
 #[allow(clippy::cast_precision_loss)]
 fn aa_fails_at(n: usize) -> Option<usize> {
@@ -145,7 +145,7 @@ impl Label {
     }
 }
 
-/// What a run may assume of the machine it measures on (#3767).
+/// What a run may assume of the machine it measures on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum Machine {
     /// Shared with other work: one seat taken, and the load recorded as
@@ -154,7 +154,7 @@ pub enum Machine {
     Shared,
     /// Held for the bench while it runs, as dax-build is: every seat
     /// taken ([`crate::seat`]), and each bar measured only once the
-    /// 1-minute load is below [`QUIET`], waited for (#3767, #2714).
+    /// 1-minute load is below [`QUIET`], waited for.
     Dedicated,
 }
 
@@ -181,7 +181,7 @@ impl Conditions {
     fn text(&self) -> String {
         let waited = (self.waited).map_or_else(String::new, |(took, highest)| {
             format!(
-                ", after {}s waiting for the 1-minute load to fall below {QUIET} from {highest:.2} (#3767)",
+                ", after {}s waiting for the 1-minute load to fall below {QUIET} from {highest:.2}",
                 took.as_secs()
             )
         });
@@ -217,7 +217,7 @@ impl Machine {
         loop {
             let Some(load) = read() else {
                 return Err(format!(
-                    "the machine states no load average, so none is known to be below {QUIET} (#3767)"
+                    "the machine states no load average, so none is known to be below {QUIET}"
                 ));
             };
             if load[0] < QUIET {
@@ -231,7 +231,7 @@ impl Machine {
             highest = Some(highest.map_or(load[0], |h| h.max(load[0])));
             if took >= PATIENCE {
                 return Err(format!(
-                    "the 1-minute load stayed at {QUIET} or above for {}s, at most {:.2} and last {}, so the dedicated machine measures nothing (#3767)",
+                    "the 1-minute load stayed at {QUIET} or above for {}s, at most {:.2} and last {}, so the dedicated machine measures nothing",
                     took.as_secs(),
                     highest.unwrap_or(load[0]),
                     load_text(Some(load))
@@ -243,7 +243,7 @@ impl Machine {
     }
 }
 
-/// §7's hardware: the processor, its cores and the kernel (#3774).
+/// §7's hardware: the processor, its cores and the kernel.
 fn hardware() -> String {
     let said = |program: &str, args: &[&str]| {
         let out = Command::new(program).args(args).output().ok()?;
@@ -392,7 +392,7 @@ pub(crate) enum Sign {
     /// A set whose rows all resolved, some each way: published unsigned
     /// with the count each way ([`Took::each_way`]), since a geomean near
     /// 1.00 over +20% and −17% would claim no change while hiding a
-    /// regression (#3127).
+    /// regression.
     Mixed,
 }
 
@@ -408,7 +408,7 @@ impl Sign {
 }
 
 /// §4.3 over a delta's reps and quartiles, as a reading keeps them: the
-/// one rule a run and a row of its reading judge by (`row`, #2646). `<=`
+/// one rule a run and a row of its reading judge by (`row`). `<=`
 /// and `>=` and not `<` and `>`, since a quartile exactly at zero still
 /// straddles it; a delta above zero is the first arm slower in a cost
 /// and faster in a rate ([`Unit::worse`]).
@@ -445,14 +445,14 @@ impl Correctness {
 
 /// One run of one arm: what it measured in its arm's [`Unit`], what it
 /// wrote, the bytes the two arms' runs of one rep are held equal by (§5),
-/// and what a server arm's processes spent per request (#3013).
+/// and what a server arm's processes spent per request.
 pub(crate) struct Sample {
     pub(crate) value: f64,
     pub(crate) wrote: Vec<u8>,
     pub(crate) spent: Spent,
     /// A process arm's peak memory in bytes, as [`spent::Peak::HERE`]
     /// names it, where it asked for what its process retired and the
-    /// platform states it (#2961, #3798).
+    /// platform states it.
     pub(crate) peak: Option<u64>,
 }
 
@@ -471,8 +471,8 @@ impl Sample {
 
 /// What a rep of an arm measures (§3): the milliseconds one run took, a
 /// cost, the nanoseconds per call of a run making a known count of calls,
-/// a cost (#2879), or the requests a second its clients were answered at,
-/// a rate (#2660). The paired delta is taken in it, `a - b`, so a rate's
+/// a cost, or the requests a second its clients were answered at,
+/// a rate. The paired delta is taken in it, `a - b`, so a rate's
 /// loss is a negative delta; [`Unit::worse`] turns each into a cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -481,7 +481,7 @@ pub(crate) enum Unit {
     Ns,
     Rps,
     /// Bytes, a cost: a process's peak footprint, or its traces' code per
-    /// opline compiled (G4, #2961).
+    /// opline compiled (G4).
     Bytes,
 }
 
@@ -577,18 +577,18 @@ pub(crate) type Sides = Result<Arms, String>;
 pub(crate) enum Held {
     /// An A/A control: a pair passes while its paired delta has its sign
     /// swamped (§2, §4.3), and a set until its rows resolve in the count
-    /// [`aa_fails_at`] makes §2's pattern (#3127).
+    /// [`aa_fails_at`] makes §2's pattern.
     Control,
     /// A series: two arms that differ, its reading stating the measurement
     /// and the distance to go to the second arm, and held by [`series`]'s
-    /// rule where the manifest gives it a tolerance (#1902, #2336, #2659).
+    /// rule where the manifest gives it a tolerance.
     Series,
     /// A series held to a bound, its `[[bench]]` row's tolerance
-    /// ([`Shown::tolerance`]), G1's (design §9.2, #2947, #3130), row by
-    /// row and never by a set's geomean, as Mitchell ruled on #3280: a
-    /// fail where any row resolves slower (§4.3) with its ratio beyond one
-    /// plus the tolerance, or with no finite ratio, and a pass otherwise,
-    /// or where the bar has no `[[bench]]` row. A `NOISE-SWAMPED` row is never a
+    /// ([`Shown::tolerance`]), G1's (design §9.2), row by row and never by
+    /// a set's geomean, as Mitchell ruled 2026-10-23: a fail where any row
+    /// resolves slower (§4.3) with its ratio beyond one plus the tolerance,
+    /// or with no finite ratio, and a pass otherwise, or where the bar has
+    /// no `[[bench]]` row. A `NOISE-SWAMPED` row is never a
     /// regression (protocol §1.2) and holds nothing; the geomean, signed,
     /// `mixed` or unsigned, is published and holds nothing (§10), since it
     /// averages away a regression concentrated on one row.
@@ -713,8 +713,7 @@ impl Took {
 
     /// The ratio's sign: one row's its own, and a set's established only
     /// where every row's is, the floor protocol §10 holds a geomean over
-    /// workloads to, and signed only where every row points one way
-    /// (#3127).
+    /// workloads to, and signed only where every row points one way.
     fn sign(&self) -> Sign {
         match self.each_way() {
             [faster, slower] if faster + slower < self.rows.len().max(1) => Sign::Swamped,
@@ -752,7 +751,7 @@ impl Measured {
     }
 
     /// How far this row's first arm stands behind its second, where it
-    /// resolved slower: what a bound holds each row to (#3280). A row
+    /// resolved slower: what a bound holds each row to. A row
     /// resolved slower whose ratio is no finite number, its second arm
     /// measuring nothing, is behind by more than any tolerance.
     fn behind(&self) -> Option<f64> {
@@ -1014,8 +1013,8 @@ const CALL: &str = r#"{"tool_name":"Edit","tool_input":{"file_path":"seams.toml"
 /// tool call, whose two arms are one call of `xtask permit` over a scratch
 /// workspace under `target/`, so the denials a shape provokes land in that
 /// store and not this one; and the production server's, makala against
-/// php-fpm and against itself over each bench workload (#2351,
-/// `makala::bench`). The other perf bars of harness-design.md §3 join them
+/// php-fpm and against itself over each bench workload
+/// (`makala::bench`). The other perf bars of harness-design.md §3 join them
 /// as the engine reaches what they measure.
 fn declared(root: &Path) -> Result<Vec<Declared>> {
     const WRAPPER: &str = "wrapper";
@@ -1064,7 +1063,7 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
     Ok(bars)
 }
 
-/// `php_jit`'s bars (#2742, #2879): `CALLS` calls of its test kernel, each
+/// `php_jit`'s bars: `CALLS` calls of its test kernel, each
 /// arm's way and each through a function pointer: `wrapper`, the kernel's
 /// `extern "C"` wrapper with its `catch_unwind` and `Status`;
 /// `wrapper-bare`, the bench's same frame with no `catch_unwind`; or
@@ -1112,8 +1111,8 @@ pub(crate) fn second(a: &str, b: &str) -> String {
 
 /// A process arm that makes a known count of calls or executes a known
 /// count of oplines, each run, which [`Spawned`] reads in milliseconds,
-/// read in nanoseconds per call (#2879) or per opline, and what its process
-/// retired, where it asks, per opline (#2946).
+/// read in nanoseconds per call or per opline, and what its process
+/// retired, where it asks, per opline.
 struct Counted {
     side: Spawned,
     count: f64,
@@ -1156,7 +1155,7 @@ pub(crate) const RUNNER_ENVIRONMENT: &str = "RUNNER_ENVIRONMENT";
 /// runner is a shared VM whose neighbours move every arm, and its reading
 /// would be noise a person could mistake for a measurement. So the command
 /// refuses one before it measures, whatever workflow asked it to, and
-/// writes nothing (#2477, #2259). The library entry is not held to it:
+/// writes nothing. The library entry is not held to it:
 /// the negative control under `xtask/tests/bench.rs` tests the rig, and
 /// runs wherever `xtask`'s tests run.
 pub(crate) fn refuse_a_hosted_runner(environment: Option<&str>) -> Result<()> {
@@ -1164,7 +1163,7 @@ pub(crate) fn refuse_a_hosted_runner(environment: Option<&str>) -> Result<()> {
         bail!(
             "bench measures on the quiet self-hosted machine and never on a GitHub-hosted runner \
              ({RUNNER_ENVIRONMENT}=github-hosted): a shared VM's numbers are noise a person could \
-             read as a measurement (#2477)"
+             read as a measurement"
         );
     }
     Ok(())
@@ -1319,7 +1318,7 @@ fn measure_bars(
 }
 
 /// Where a run leaves, under the store, one ticket per bar that regressed
-/// two nights running, for the nightly lane to file (#2659).
+/// two nights running, for the nightly lane to file.
 pub(crate) const FAILED: &str = "bench-regressed";
 
 /// The ticket a bar that regressed two nights running is filed as: its
@@ -1342,7 +1341,7 @@ struct Shown<'a> {
 
 impl Shown<'_> {
     /// The tolerance a bound bar is held to, its row's, the one place it
-    /// is written (protocol §12.3, #3130); none for another bar, and for a
+    /// is written (protocol §12.3); none for another bar, and for a
     /// bound without a row, a series held to none.
     fn tolerance(&self) -> Option<f64> {
         Some(self.row.filter(|_| self.held == Held::Bound)?.pct)
@@ -1435,11 +1434,11 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
                 |k| format!("where {k} of them resolve, the fewest whose chance"),
             );
             format!(
-                "the bar is the A/A control of {PROTOCOL} §2 over {rows} rows, failing {fails} at 1 row in {rate:.0} is at most {chance}% (#3127)"
+                "the bar is the A/A control of {PROTOCOL} §2 over {rows} rows, failing {fails} at 1 row in {rate:.0} is at most {chance}%"
             )
         }
         Held::Series => format!(
-            "a series, held to its tolerance where `[[bench]]` gives one (#2659); {}",
+            "a series, held to its tolerance where `[[bench]]` gives one; {}",
             to_go(took).map_or_else(
                 || format!("the sign is not established, so no distance to go is stated ({PROTOCOL} §1.2)"),
                 |to_go| format!("{} is {to_go:.2}% to go to {}", bar.names[0], bar.names[1]),
@@ -1687,7 +1686,7 @@ mod tests {
     /// A control fails on a resolved sign and passes on a swamped one; a
     /// series passes either way, and states how far its first arm stands
     /// behind its second only where the sign is established, nothing where
-    /// it is ahead (#2351, §1.2).
+    /// it is ahead (§1.2).
     #[test]
     fn a_control_fails_on_a_resolved_sign_and_a_series_states_the_distance_to_go() {
         let one = |unit, deltas: &[f64], pct| took(vec![row(unit, deltas, pct)], false);
@@ -1718,7 +1717,7 @@ mod tests {
     /// A set's ratio is the geomean of its rows', 0.5 and 2.0 making 1.0,
     /// its sign established only where every row's is (protocol §10) and
     /// signed only where every row points one way, `mixed` with the count
-    /// each way where they do not (#3127), and no distance to go stated
+    /// each way where they do not, and no distance to go stated
     /// where it is unsigned.
     #[test]
     fn a_set_s_geomean_is_signed_only_where_every_row_points_one_way() {
@@ -1754,8 +1753,8 @@ mod tests {
         );
     }
 
-    /// A bound holds each row and never the geomean, as Mitchell ruled on
-    /// #3280: one kernel at +10% beside six at +0.1% is a geomean of
+    /// A bound holds each row and never the geomean, as Mitchell ruled
+    /// 2026-10-23: one kernel at +10% beside six at +0.1% is a geomean of
     /// 1.0145, within 2%, and fails on its one row; +20% beside −17%
     /// fails, and still beside a swamped row; six at −3% beside one at
     /// +0.2% pass, `mixed` as their geomean is. A swamped row holds
@@ -1831,7 +1830,7 @@ mod tests {
     }
 
     /// An A/A set fails at the fewest resolved rows whose chance at §2's
-    /// one in seventeen is at most 1% (#3127): P(>= 2 of 8) is 7.7% and
+    /// one in seventeen is at most 1%: P(>= 2 of 8) is 7.7% and
     /// P(>= 3 of 8) 0.9%; P(>= 4 of 17) is 1.5% and P(>= 5 of 17) 0.24%;
     /// one row resolves 5.9% of the time, so a set of one fails at none,
     /// where a pair fails on its one row (§2).
@@ -1861,7 +1860,7 @@ mod tests {
         assert!(shown.contains("over 8 rows, failing where 3 of them resolve, the fewest whose chance at 1 row in 17 is at most 1%"), "{shown}");
     }
 
-    /// G1's bound is its `[[bench]]` row's (#3130): a manifest carrying
+    /// G1's bound is its `[[bench]]` row's: a manifest carrying
     /// `g1` at the 2% floor and no nights holds a bound bar to 2% behind,
     /// a ratio of 1.02 in time and 0.98 in rate, a series to none of it,
     /// and a bound with no row to none.
@@ -1941,7 +1940,7 @@ mod tests {
         assert_eq!(measured.correctness, Correctness::Bytes(Stream::Stdout));
         // Each rep's server read nothing, as on a platform without
         // proc_pid_rusage: the rate stands, and each arm says why its
-        // figures are absent (#3013).
+        // figures are absent.
         let absent = super::Spent::over(None, None, 1);
         assert_eq!(measured.spent, [absent; 2]);
         let bar = super::Shown {
@@ -1968,7 +1967,7 @@ mod tests {
     }
 
     /// A GitHub-hosted runner is refused, and a machine of ours or one
-    /// outside CI is not (#2477).
+    /// outside CI is not.
     #[test]
     fn a_github_hosted_runner_is_refused_and_no_other_machine_is() {
         let refused = refuse_a_hosted_runner(Some("github-hosted")).unwrap_err();
@@ -1985,8 +1984,8 @@ mod tests {
         super::Machine::Shared.settle("a stub machine", || Some([9.0, 8.0, 7.0]), |_| {})
     }
 
-    /// A dedicated machine measures a bar only below a 1-minute load of 2
-    /// (#3767): a load that falls is waited out and named; one that never
+    /// A dedicated machine measures a bar only below a 1-minute load of 2:
+    /// a load that falls is waited out and named; one that never
     /// falls, or a machine that states none, refuses the bar, which reads
     /// skip naming the load and measures nothing; a shared machine
     /// measures at any load and never waits.
@@ -2045,7 +2044,7 @@ mod tests {
 
     /// An arm whose reps take what `ms` says of each, as a stub states
     /// them: the timings a test feeds the instrument, so its verdict is
-    /// the rule's and never the machine's load (#3235). It writes nothing
+    /// the rule's and never the machine's load. It writes nothing
     /// and pins `/bin/sh`, which it never runs.
     struct Stub {
         name: &'static str,
@@ -2104,7 +2103,7 @@ mod tests {
     /// The A/A control whose arms differ by a known twenty milliseconds,
     /// with a jitter of its own, reads fail on the resolved sign: the
     /// negative control of the verdict, fed by a stub so a loaded
-    /// machine's noise never swamps it (#3235). Six measured reps after the
+    /// machine's noise never swamps it. Six measured reps after the
     /// two discarded, the load beside the number, and the arms' empty
     /// streams the vacuous value of §5.
     #[test]
@@ -2162,8 +2161,8 @@ mod tests {
     /// twenty milliseconds behind its second after a night that already
     /// regressed, both read from a history handed in as the nightly lane
     /// hands the published one, fails its reading and the run and leaves
-    /// the ticket the lane files, naming the commits (#2659); the arms'
-    /// timings fed by a stub (#3235). The same night not regressed before
+    /// the ticket the lane files, naming the commits; the arms'
+    /// timings fed by a stub. The same night not regressed before
     /// leaves the run standing.
     #[test]
     fn a_series_that_regressed_two_nights_running_fails_and_leaves_its_ticket() {

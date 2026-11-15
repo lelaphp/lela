@@ -159,8 +159,8 @@ fn two_requests_serving_one_file_share_the_one_constant_string() {
 /// that built strings: a request that compiles for itself makes its
 /// constants in its own memory, and the next request starts where the first
 /// one did, because the first request's end took every byte of it
-/// (design §5.2). The native that asks is #165; the accountant it
-/// asks is this one.
+/// (design §5.2). The native that asks is `memory_get_usage()`; the
+/// accountant it asks is this one.
 #[test]
 fn what_memory_get_usage_reads_starts_where_it_started_for_every_request() {
     let engine = Engine::cli_builder().build();

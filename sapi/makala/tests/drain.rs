@@ -1,4 +1,4 @@
-//! The drain SIGTERM begins (#2344), Ranch's suspend, wait and stop and
+//! The drain SIGTERM begins, Ranch's suspend, wait and stop and
 //! Kestrel's (research/production-server.r2.md M8, M10), held over a real
 //! socket against the binary: the listener closes, a request in flight
 //! finishes, an idle keep-alive connection closes, and what is still in

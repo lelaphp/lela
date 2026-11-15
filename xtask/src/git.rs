@@ -29,11 +29,11 @@ pub struct Stamp {
 /// Seven is fixed ([`crate::track::short`]), not git's own `--short`,
 /// which grows with the repository (eight since `d32ff307`), nor
 /// `--short=7`, a minimum that grows where seven characters are shared
-/// with another object (#4442): either would make one commit two stamps.
+/// with another object: either would make one commit two stamps.
 /// A stamp is taken at every denial, so it spawns git once (`ls-files`)
 /// and not four times. A repository with no commit yet has no `HEAD` to
 /// stamp with, and is refused in a sentence rather than in git's "Needed
-/// a single revision" (#3189).
+/// a single revision".
 pub fn head_commit(root: &Path) -> Result<String> {
     match read_head(root) {
         Some(id) => Ok(id),
@@ -128,7 +128,7 @@ pub(crate) fn files_under(root: &Path, scopes: &[impl AsRef<Path>]) -> Result<Ve
 /// tracked or not, with its content as it is on disk: the blob id of each
 /// file, then the blob id of the sorted `<id> <path>` listing, which is
 /// what `git hash-object` would print for the same bytes. A reading's key
-/// was this over its scope's closure until #2163 made it a lookup on a
+/// was this over its scope's closure until it became a lookup on a
 /// [`crate::key::Snapshot`]; it stays as the reference the tests hold
 /// every snapshot's key to, file by file read and hashed.
 #[cfg(test)]
@@ -149,7 +149,7 @@ pub(crate) fn file_hash(path: &str, blob: &str) -> String {
     listing_id(&[(path.to_owned(), blob.to_owned())])
 }
 
-/// The index as a commit takes it (#1143): each tracked file's staged
+/// The index as a commit takes it: each tracked file's staged
 /// blob id by path, read once from `ls-files --stage`, under the
 /// `GIT_INDEX_FILE` git hands a hook when it keeps one of its own.
 #[derive(Debug, Clone, Default)]
@@ -266,7 +266,7 @@ pub(crate) fn listing_id(listing: &[(String, String)]) -> String {
 /// and an untracked `.DS_Store` would otherwise leave a clean checkout
 /// matching no commit. A tracked file gone from disk is listed as gone.
 /// The reference [`crate::key::Snapshot::tracked_over`] and
-/// [`crate::key::Snapshot::commit`] are held to (#2163).
+/// [`crate::key::Snapshot::commit`] are held to.
 #[cfg(test)]
 pub(crate) fn tracked_hash(root: &Path, paths: &[&str], at: Option<&str>) -> Result<String> {
     let mut listing = Vec::new();
@@ -426,10 +426,10 @@ mod recorder {
 
     /// What `f` returns and every question asked of git in `root` or below
     /// it while `f` ran, each as its arguments: the seam a test counts git
-    /// calls through, at the one function every call spawns git from
-    /// (#2972). Each test lays a repository of its own, so its `root` is
+    /// calls through, at the one function every call spawns git from.
+    /// Each test lays a repository of its own, so its `root` is
     /// its own and no other test's questions are counted, from whichever
-    /// thread they are asked (#2994).
+    /// thread they are asked.
     #[cfg(tracked)]
     pub(crate) fn asked<T>(root: &Path, f: impl FnOnce() -> T) -> (T, Vec<Vec<String>>) {
         listening(|listeners| listeners.insert(root.to_path_buf(), Vec::new()));
@@ -579,7 +579,7 @@ pub(crate) fn binary(root: &Path, side: Side, paths: &[&str]) -> Result<BTreeSet
 #[cfg(test)]
 mod tests {
     /// A repository `git init` laid down and nothing committed has no
-    /// commit to stamp a reading with, and says so (#3189).
+    /// commit to stamp a reading with, and says so.
     #[test]
     fn a_repository_with_no_commit_is_refused_in_a_sentence() {
         let dir = crate::scratch::Tree::new("git-unborn").unwrap();
@@ -598,7 +598,7 @@ mod tests {
     /// its stamp is the fallback's. Its two commits, found offline, share
     /// their first seven characters, `5abe859`, so git's `--short=7` grows
     /// to eight for either; the stamp is still seven, the full id cut as
-    /// `read_head` cuts it, by [`crate::track::short`] (#4442).
+    /// `read_head` cuts it, by [`crate::track::short`].
     #[test]
     fn a_repository_the_reader_does_not_read_is_stamped_at_seven_where_git_prints_more() {
         let dir = crate::scratch::Tree::new("git-sha256").unwrap();
@@ -756,7 +756,7 @@ mod tests {
     /// commit is the first seven characters of `rev-parse HEAD`, a fixed
     /// width, where `--short=7` grows past seven once they are ambiguous.
     /// Over a scratch repository of its own, so a merge in progress in
-    /// this one, or a file it adds under `docs/`, moves nothing (#1252).
+    /// this one, or a file it adds under `docs/`, moves nothing.
     #[test]
     fn the_stamp_agrees_with_git() {
         let root = crate::scratch::Tree::new("stamp").unwrap();

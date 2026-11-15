@@ -73,8 +73,8 @@ impl Conn {
 
 /// Request-scoped (ADR-0005): the authorizers `SQLite3::open` forgot,
 /// `db_obj->authorizer_fcc = empty_fcall_info_cache` with no
-/// `zend_fcc_dtor` (`Z/ext/sqlite3/sqlite3.c:169`), which php leaks
-/// (#2514). The leak is copied where it is observable: no object owns
+/// `zend_fcc_dtor` (`Z/ext/sqlite3/sqlite3.c:169`), which php leaks.
+/// The leak is copied where it is observable: no object owns
 /// them, so what they hold is destructed by the store's walk at the
 /// request's end, and `rshutdown`, which runs after that walk, gives
 /// them up, where php frees them with the request's memory.
@@ -840,7 +840,7 @@ impl SQLite3 {
     /// `authorizer_fcc = empty_fcall_info_cache` with no `zend_fcc_dtor`
     /// (`Z/ext/sqlite3/sqlite3.c:169`), so php leaks it: its callable
     /// outlives the object and what it holds is destructed at the
-    /// request's end (#2514):
+    /// request's end:
     ///
     /// ```php
     /// class A { function __destruct() { echo "dtor\n"; } }

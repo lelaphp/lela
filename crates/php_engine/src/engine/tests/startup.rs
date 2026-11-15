@@ -29,7 +29,7 @@ fn the_request_starts_the_buffer_output_handler_or_output_buffering_names() {
 
 /// A startup diagnostic is its message's bytes: `extension_dir` set to
 /// `a/<0xE4>/w`, which a host's ini text can carry and `-d` does not
-/// yet (#1686), is written as php writes it,
+/// yet, is written as php writes it,
 /// `php -n -d extension_dir=a/$'\xe4'/w -d extension=x -r ''` with
 /// the `dlopen` parentheses the engine cannot make.
 #[test]
@@ -270,7 +270,7 @@ fn a_section_s_table_nests_its_arrays_and_activates_its_strings() {
 /// and a user function may take a disabled native's name (Zend's
 /// `bug79382.phpt`). A list a host lays over the started engine, as
 /// php-fpm's child lays its pool's (`fpm_php_apply_defines_ex`), takes
-/// the same natives out and raises nothing a request shows (#2273).
+/// the same natives out and raises nothing a request shows.
 #[test]
 fn disable_functions_takes_its_natives_out_of_the_function_table() {
     const PROBE: &str = r#"<?php
@@ -376,9 +376,9 @@ fn a_whole_number_ini_value_is_read_as_php_s_quantity_reads_it() {
 
 /// Each table `EngineBuilder::build` and `link_classes` lay themselves
 /// is one allocation at the length it ends at, as `zend_hash_init` sizes
-/// a startup table before it is filled (#3991, #4011, #4013, #4017): none
+/// a startup table before it is filled: none
 /// keeps room it never fills. The names and rows a row owns are each
-/// their own (#4027).
+/// their own.
 #[test]
 fn the_tables_build_and_link_classes_lay_are_each_one_allocation_at_its_length() {
     let engine = Engine::cli_builder().build();
@@ -439,8 +439,7 @@ fn the_tables_build_and_link_classes_lay_are_each_one_allocation_at_its_length()
         "laid past their length"
     );
     // `parameter_classes`, `method_functions` and `trampoline_tables` are
-    // two boxes each and `replaced` one, at their length as made (#4027,
-    // #4098).
+    // two boxes each and `replaced` one, at their length as made.
     assert_eq!(laid.len(), 19, "the tables build and link_classes lay");
     assert!(
         laid.iter().all(|(_, len, _)| *len > 0),
@@ -459,7 +458,7 @@ static CONSTANT: &[u8] = b"NAMED_BY_ITS_ENTRY";
 /// at the bytes its static entries spell them with and copy none, as
 /// php's `zend_register_functions` names a function by its
 /// `zend_function_entry`'s `const char *` and opcache re-points every
-/// other startup name at one permanent copy (#4027): startup allocates
+/// other startup name at one permanent copy: startup allocates
 /// nothing per name.
 #[test]
 fn a_natives_names_are_its_entries_bytes_and_no_copy() {
@@ -512,8 +511,7 @@ static INTERCEPTED: &[u8] = b"strlen";
 /// `const char *` that opcache moves into its one buffer, and an
 /// interception's name is the bytes its extension spells it with,
 /// as phar's `PHAR_G(orig_fopen)` names nothing it allocates: neither
-/// the table nor the supplies resolved from the builders copy them
-/// (#4098).
+/// the table nor the supplies resolved from the builders copy them.
 #[test]
 fn a_core_entry_and_an_interception_are_named_by_the_binarys_bytes() {
     let extension = crate::api::abi::ExtensionBuilder::default()

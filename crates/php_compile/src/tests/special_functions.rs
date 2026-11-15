@@ -3,8 +3,8 @@
 
 use super::*;
 
-/// The oracle's dump under the pin's `dump` regime of #162's third
-/// program, `echo 1 + strlen('a');`:
+/// The oracle's dump under the pin's `dump` regime of
+/// `echo 1 + strlen('a');`:
 ///
 /// ```text
 /// 0000 ECHO int(2)
@@ -175,7 +175,7 @@ fn a_special_name_the_bundle_has_not_is_the_call_by_name() {
     }
 }
 
-/// The oracle's dump under the pin's `dump` regime of #219's program
+/// The oracle's dump under the pin's `dump` regime of `strlen($a)`
 /// and of its kin: `STRLEN` over the CV, over a constant
 /// that is not a string and over what a `CONCAT` left, `COUNT` for
 /// `count` and `sizeof` alike, `TYPE_CHECK` with the mask each
@@ -314,7 +314,7 @@ fn the_type_check_and_count_rows_are_php_s_masks() {
         ));
 }
 
-/// `zend_compile_func_cast` as the oracle at 8.5.9 dumps it (#1251):
+/// `zend_compile_func_cast` as the oracle at 8.5.9 dumps it:
 /// `BOOL` for `boolval`, `CAST` with its type for `intval`,
 /// `floatval`, `doubleval` and `strval`, a fully qualified name
 /// alike; a second argument, an unpacked one or none is the call.
@@ -360,7 +360,7 @@ fn the_cast_rows_are_bool_and_cast() {
 
 /// `zend_compile_cast` folds nothing, so the unary operators over a
 /// cast fold nothing either and `-(float)"0"` is the `CAST` and the
-/// `MUL` over it (#1251, `Zend/tests/bug52355.phpt`), while an array
+/// `MUL` over it (`Zend/tests/bug52355.phpt`), while an array
 /// of constants, which `zend_eval_const_expr` folds, folds the cast
 /// inside it; as the oracle at 8.5.9 dumps it.
 #[test]
@@ -400,7 +400,7 @@ fn a_cast_under_a_unary_operator_is_its_opline() {
 }
 
 /// `zend_compile_func_get_class`, `_get_called_class` and `_gettype`
-/// as the oracle at 8.5.9 dumps them (#1251): `GET_CLASS` with no
+/// as the oracle at 8.5.9 dumps them: `GET_CLASS` with no
 /// operand or over the one argument, `GET_CALLED_CLASS` and
 /// `GET_TYPE`, in a method and in the main op array alike, since
 /// none of the three reads the op array; a count they refuse is the
@@ -458,7 +458,7 @@ fn get_class_get_called_class_and_gettype_are_their_opcodes() {
 }
 
 /// `zend_compile_func_num_args` and `zend_compile_func_array_slice`
-/// as the oracle at 8.5.9 dumps them (#1251): in a function,
+/// as the oracle at 8.5.9 dumps them: in a function,
 /// `FUNC_NUM_ARGS`, and `FUNC_GET_ARGS` with the offset as a constant
 /// for `array_slice(func_get_args(), n)`, `n` a long written as such
 /// and not below zero, the inner name in any case and fully
@@ -544,7 +544,7 @@ fn func_num_args_and_array_slice_of_func_get_args_are_their_opcodes() {
 /// (`zend_compile_ns_call`) and reach no row, and the `func_get_args`
 /// inside a fully qualified `array_slice` resolves into the
 /// namespace, which `zend_compile_func_array_slice` refuses; a fully
-/// qualified name is served, as the oracle at 8.5.9 dumps it (#1251).
+/// qualified name is served, as the oracle at 8.5.9 dumps it.
 #[test]
 fn a_special_name_waiting_for_its_namespace_is_no_row() {
     expect![[r#"
@@ -588,7 +588,7 @@ fn a_special_name_waiting_for_its_namespace_is_no_row() {
 }
 
 /// `zend_compile_func_array_key_exists` as the oracle at 8.5.9 dumps
-/// it (#1251): `ARRAY_KEY_EXISTS` over the key and then the array,
+/// it: `ARRAY_KEY_EXISTS` over the key and then the array,
 /// each compiled first, read by a `JMPZ` and freed where nothing
 /// reads it; one argument is the call.
 #[test]

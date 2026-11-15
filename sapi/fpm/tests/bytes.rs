@@ -1,5 +1,5 @@
 //! Words that are not UTF-8 in php-fpm's log, held here where
-//! `lines.toml`, whose files are TOML text, cannot lay them (#4401), each
+//! `lines.toml`, whose files are TOML text, cannot lay them, each
 //! to the bytes the pinned php-fpm 8.5.12 (md5
 //! f7b17a549250f398e137eef2bd917f1c) wrote on 2026-11-10 for the same
 //! configuration, the time and the pids masked and the directory named
@@ -20,14 +20,14 @@
 //! - `-t` over a pool entry whose name is not UTF-8: the reader's line
 //!   for the unknown entry.
 //! - `-h` under an `argv[0]` that is not UTF-8: the usage's first line,
-//!   which names the program (#4455).
+//!   which names the program.
 //! - a pool's `env[A] = $B\xff`, the master started with `B\xff` set to
 //!   `val`: php hands the bytes after `$` to `getenv`
 //!   (`Z/sapi/fpm/fpm/fpm_env.c:172`), so a request's `getenv("A")` is
 //!   the variable's value, and the request's body is held to the pinned
-//!   php-fpm's, `string(3) "val"`, written on 2026-11-11 (#4453).
+//!   php-fpm's, `string(3) "val"`, written on 2026-11-11.
 //! - a POST whose `REQUEST_BODY_FILE` names `{dir}/no\xff`, which does
-//!   not open: the warning names the path with its bytes (#4444).
+//!   not open: the warning names the path with its bytes.
 
 #![allow(
     clippy::disallowed_methods,
@@ -317,7 +317,7 @@ fn an_env_value_naming_a_variable_finds_it_by_its_bytes() {
 /// A body file the server names that does not open is warned of with
 /// the path's bytes (`sapi_cgi_read_post`'s `%s`,
 /// `Z/sapi/fpm/fpm/fpm_main.c:448`), a `\xff` one byte where a decoding
-/// would write U+FFFD's three (#4444). The response's body is held to the
+/// would write U+FFFD's three. The response's body is held to the
 /// bytes the pinned php-fpm 8.5.12 (md5 f7b17a549250f398e137eef2bd917f1c)
 /// wrote on 2026-11-11 for the same request on this machine, a macOS one,
 /// the directory written `{dir}`: the errno's text and number are the

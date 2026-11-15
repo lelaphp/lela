@@ -17,7 +17,7 @@ fn the_extension_is_loaded() {
 /// redeclares a symbol of the scope another header made: php warns and
 /// refuses to start the extension, which serves nothing and ends the
 /// process with `exit(-2)`. The bytes are the oracle's under `php -n -d
-/// ffi.enable=1 -d ffi.preload=...` (#1614).
+/// ffi.enable=1 -d ffi.preload=...`.
 #[test]
 fn a_failed_preload_refuses_startup() {
     let files = Files::new(

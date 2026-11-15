@@ -18,15 +18,14 @@
 //! declare no attribute is counted by [`super::fence::Subject`]'s older
 //! sentence, so the anchor moves coverage one crate at a time as natives
 //! move onto the attributes; an anchored crate's kernels, the functions of
-//! its `ops` module, are still counted by that sentence beside its natives
-//! (#1264).
+//! its `ops` module, are still counted by that sentence beside its natives.
 //!
 //! The scan is textual over the source with its comments and literals
 //! blanked ([`rust::without_comments_or_literals`]), which keeps offsets
 //! and lines; the attribute's path is read as written, its last segment
 //! naming it (`#[php_function]`, `#[php_ext::attr::php_function]`).
 //!
-//! **What the build compiled out is no native** (#1068). A `#[cfg(..)]`
+//! **What the build compiled out is no native**. A `#[cfg(..)]`
 //! the target's set decides against ([`cfg::Target`]), on the `fn`, on
 //! the impl or the inline `mod` around it, as `#![cfg(..)]` over the file
 //! or the block, or on the `mod name;` whose file holds it, takes the item
@@ -63,7 +62,7 @@ pub(crate) enum Record {
     Entered(Vec<Entry>),
     /// The fence borked before its run of record entered anything: the
     /// oracle did not run it, its server reset the connection or never
-    /// answered, or the run of record could not serve it (#1426). The bork
+    /// answered, or the run of record could not serve it. The bork
     /// fails the crate in the transport's own words, and what the fence
     /// would have entered is not known, so its subjects are not read as
     /// subjects without a witness: a flake of the transport is a failed
@@ -416,7 +415,7 @@ pub(super) fn scan(
     out
 }
 
-/// What of a file the build has, as [`scan`] walks it (#1068).
+/// What of a file the build has, as [`scan`] walks it.
 #[derive(Debug, Default)]
 struct Build {
     /// The member depth and the name of each inline `mod` open here.

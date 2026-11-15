@@ -805,7 +805,7 @@ impl Composer<'_, '_> {
     /// ```
     ///
     /// A bare constant written in a namespace is the namespace's, so it
-    /// is the same value as the one written fully qualified (#1270):
+    /// is the same value as the one written fully qualified:
     ///
     /// ```php
     /// namespace N { const FOO = "foo"; trait T1 { public $var = FOO; } }

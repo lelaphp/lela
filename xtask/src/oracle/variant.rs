@@ -1,4 +1,4 @@
-//! Oracle variants (#1782): the pinned tag built with the main oracle's own
+//! Oracle variants: the pinned tag built with the main oracle's own
 //! configure line plus only the flags a variant names, so it differs from
 //! the oracle only where intended, and pinned per platform beside it. A
 //! `[[crate]]` row names its variant, and `crosscheck`, `witness` and
@@ -23,7 +23,7 @@ use crate::sha256::Sha256;
 
 /// One platform an oracle build is pinned for, by the key its table
 /// carries in `oracle.toml`: the maintainer's macOS arm64, and the two
-/// Linux architectures built in Docker (#1782, #1889).
+/// Linux architectures built in Docker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     DarwinArm64,
@@ -66,7 +66,7 @@ impl Platform {
 
     /// Whether a build for the platform is made in a container whose image
     /// the pin names by digest: Linux's are, macOS's is made on the
-    /// maintainer's machine (#1782).
+    /// maintainer's machine.
     fn imaged(self) -> bool {
         self != Platform::DarwinArm64
     }
@@ -78,7 +78,7 @@ impl Platform {
 #[serde(deny_unknown_fields)]
 pub struct Variant {
     /// What the variant's build adds to the main oracle's configure line
-    /// (`--enable-zend-test`); the recipe that builds it reads them (#1889),
+    /// (`--enable-zend-test`); the recipe that builds it reads them,
     /// and a lane reads only the binary.
     pub flags: Vec<String>,
     #[serde(rename = "darwin-arm64", default)]
@@ -101,9 +101,9 @@ impl Variant {
 
     /// Hold each platform's table to what the platform's build is: a Linux
     /// build names the base image's manifest digest, which the recipe pins
-    /// and rebuilds from (#1948), and no closure; the macOS one, made on no
+    /// and rebuilds from, and no closure; the macOS one, made on no
     /// image, names none and names `closure`, the digest of the pin's
-    /// `[closure]` it was made against (#2935), so a bump of the record
+    /// `[closure]` it was made against, so a bump of the record
     /// refuses the build it left behind until a person re-pins it. `name`
     /// is the variant's, for the refusal.
     pub(super) fn held(&self, name: &str, closure: Option<&Sha256>) -> Result<()> {
@@ -122,22 +122,22 @@ impl Variant {
             } = &build.provenance;
             match (imaged, image, named, closure) {
                 (true, None, ..) => bail!(
-                    "{at} names no image; a Linux build is pinned by its base image's manifest digest beside its md5 (#1782, #1948)"
+                    "{at} names no image; a Linux build is pinned by its base image's manifest digest beside its md5"
                 ),
                 (false, Some(image), ..) => bail!(
-                    "{at} names the image {image}; the macOS build is made on the maintainer's machine and names none (#1782)"
+                    "{at} names the image {image}; the macOS build is made on the maintainer's machine and names none"
                 ),
                 (true, _, Some(named), _) => bail!(
-                    "{at} names the closure {named}; a Linux build is made in its image, against no Homebrew closure, and names none (#2935); {repin}"
+                    "{at} names the closure {named}; a Linux build is made in its image, against no Homebrew closure, and names none; {repin}"
                 ),
                 (false, _, None, _) => bail!(
-                    "{at} names no closure, so its build predates the pin's [closure]: the macOS build names the digest of the [closure] it was made against beside its md5 (#2935); {repin}"
+                    "{at} names no closure, so its build predates the pin's [closure]: the macOS build names the digest of the [closure] it was made against beside its md5; {repin}"
                 ),
                 (false, _, Some(named), recorded) if recorded != Some(named) => {
                     let recorded =
                         recorded.map_or("records none".to_owned(), |d| format!("is {d}"));
                     bail!(
-                        "{at} was made against the closure {named}, and the pin's [closure] {recorded}, so its build predates the closure (#2935); {repin}"
+                        "{at} was made against the closure {named}, and the pin's [closure] {recorded}, so its build predates the closure; {repin}"
                     )
                 }
                 _ => {}
@@ -179,10 +179,10 @@ pub struct Build {
 
 /// What a build was made from, never an input to a run: for a Linux build
 /// the base image's manifest digest, which the recipe pins and rebuilds
-/// from, the md5 holding the binary it rebuilt (#1948); for the macOS
-/// build, the digest of the `[closure]` it was made against (#2935). The
-/// pin's digest leaves out every field declared here and nothing else
-/// (#2969), so a key added to a build later is digested unless it is
+/// from, the md5 holding the binary it rebuilt; for the macOS
+/// build, the digest of the `[closure]` it was made against. The
+/// pin's digest leaves out every field declared here and nothing else,
+/// so a key added to a build later is digested unless it is
 /// declared provenance.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Provenance {
@@ -221,7 +221,7 @@ impl<'a> Oracles<'a> {
     /// The oracle a crate runs under: the variant its row names, or the
     /// main oracle where it names none. A name the pin does not carry is
     /// refused naming it beside the variants the pin has, which the lane
-    /// writes as that crate's failing reading (#1890).
+    /// writes as that crate's failing reading.
     pub fn of(&self, variant: Option<&str>) -> Result<&Oracle<'a>> {
         let Some(name) = variant else {
             return Ok(&self.main);
@@ -369,7 +369,7 @@ mod tests {
     }
 
     /// A build's provenance is the keys its type declares, and the pin's
-    /// digest leaves those out and nothing else (#2969): adding `closure`
+    /// digest leaves those out and nothing else: adding `closure`
     /// to a build keeps the digest a kept run and a reading under the
     /// recipe record, and a key not declared provenance moves it.
     #[test]
@@ -391,7 +391,7 @@ mod tests {
     }
 
     /// A key a build does not declare is refused as it was before its
-    /// provenance was a type of its own (#2969).
+    /// provenance was a type of its own.
     #[test]
     fn an_unknown_key_in_a_build_is_refused() {
         let text = "flags = []\ndarwin-arm64 = { path = \"php\", md5 = \"0\", closure = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\", built = \"0\" }\n";

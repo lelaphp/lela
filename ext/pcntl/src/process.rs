@@ -40,7 +40,7 @@ use crate::{State, failed, ffi};
 /// int(3)
 /// ```
 ///
-/// The fork is the engine's ([`Limits::fork`], #1807): its timer thread
+/// The fork is the engine's ([`Limits::fork`]): its timer thread
 /// is joined before the fork and started again after it in the parent,
 /// over the deadlines it had, so the parent's limit, counted from before
 /// the fork, still stops it, and the child inherits none.
@@ -199,7 +199,7 @@ fn waited(
     let options = i32::try_from(flags).unwrap_or_default();
     let mut usage = resource_usage.is_given().then(ffi::zeroed_usage);
     // The wait lends the request ([`Limits::blocking`]), so a callback C
-    // makes from another thread meanwhile is served in it (#2401).
+    // makes from another thread meanwhile is served in it.
     let waited = req
         .limits_mut()
         .blocking(|| ffi::wait(pid, &mut word, options, usage.as_mut()));

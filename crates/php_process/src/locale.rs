@@ -62,7 +62,7 @@ mod tests {
     /// Under `C.UTF-8`, php's default, the bytes past the six are the C
     /// library's: macOS's counts `0xA0` and glibc's nothing, so this test
     /// and not a witness, whose pin is one platform's oracle, holds that
-    /// reading (#2796). The locale is the test thread's own, so the other
+    /// reading. The locale is the test thread's own, so the other
     /// tests of the process keep the `C` locale.
     #[test]
     fn is_space_reads_the_c_libraries_c_utf8() {

@@ -3,11 +3,11 @@
 //! own. On macOS the Rust runtime remaps the lowest page of the main
 //! thread's stack `PROT_NONE` before `main`, so a walk down to the end
 //! `php_heap::call_stack_bounds` answers faults there unless the bounds
-//! end above that page (#1104). They end one page above the end php's
+//! end above that page. They end one page above the end php's
 //! `zend_call_stack_get_macos` reckons, which `docs/divergence.toml`
-//! records as `trace:macos-main-thread-guard-page` (#2583). The size
+//! records as `trace:macos-main-thread-guard-page`. The size
 //! those bounds answer is what `php_heap::main_call_stack_size` answers
-//! from any thread (#3142).
+//! from any thread.
 
 #![allow(
     clippy::disallowed_methods,

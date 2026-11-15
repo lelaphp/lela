@@ -1,4 +1,4 @@
-//! A scratch tree that owns itself (#194): one directory under the
+//! A scratch tree that owns itself: one directory under the
 //! system's temporary directory, or under `/tmp` for a program the oracle
 //! runs and the phpt run's copy of the pinned tree ([`Tree::short`]),
 //! made by the constructor and taken away again when the value goes out
@@ -120,8 +120,8 @@ impl Tree {
     /// trees that process made before it and whatever `TMPDIR` the
     /// session has: where a program the oracle runs stands. php reads the
     /// path back, a unix socket's into its 104 bytes and a program file's into
-    /// `$_SERVER`, whose strings a witness's memory count reads (#1730,
-    /// #2523): under the temporary directory, the count moved with the
+    /// `$_SERVER`, whose strings a witness's memory count reads:
+    /// under the temporary directory, the count moved with the
     /// session's `TMPDIR`.
     pub(crate) fn short(name: &str) -> Result<Tree> {
         Tree::under(Path::new(SHORT), &unique(name))
@@ -155,7 +155,7 @@ impl Tree {
             .map_err(|err| made(err, &named, "creating the scratch tree"))?;
         // A file takes its directory's group on macOS, and `/tmp`'s is
         // `wheel`, which the user running a lane is not in: there a
-        // `chmod` drops the setgid bit, as php's chmod tests read (#2807).
+        // `chmod` drops the setgid bit, as php's chmod tests read.
         // The tree takes the process's own group, so what is made in it
         // does too.
         std::os::unix::fs::chown(&named, None, Some(nix::unistd::getegid().as_raw()))
@@ -191,7 +191,7 @@ impl Tree {
 /// and a counter of the trees this process has made at a width no run
 /// reaches. A number written at its own width moved the path by a byte
 /// whenever the pid or the counter crossed a digit, and with it every
-/// number php reads off the path (#2523).
+/// number php reads off the path.
 fn unique(name: &str) -> String {
     const _: () = assert!(NUMBERED == "-0000000-000000".len());
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -203,7 +203,7 @@ fn unique(name: &str) -> String {
 const NUMBERED: usize = 15;
 
 /// A scratch tree, its lock, or a file a lane writes into one, that could
-/// not be made for want of space (#644). The volume it would stand on is
+/// not be made for want of space. The volume it would stand on is
 /// full, so the run it was for was not measured: a lane reads this off the
 /// error ([`Full::of`]) and says so as a skip naming the volume, where it
 /// would otherwise be a witness that borked or a subset refused, a red line
@@ -313,9 +313,9 @@ fn volume(path: &Path) -> PathBuf {
 /// that changed the harness, is answered with nothing: no test reads that
 /// judge, and handed on, it was a cold release build started detached in a
 /// scratch repository its test then removed under it, which left the tree
-/// half removed (#4437). Any other `cargo` call goes to the
+/// half removed. Any other `cargo` call goes to the
 /// `cargo` this process was started by, or to the one on `PATH` where
-/// `CARGO` names none by its absolute path (#3683). The one test that
+/// `CARGO` names none by its absolute path. The one test that
 /// holds the build itself, the seeded worktree's, runs without it.
 pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -326,7 +326,7 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
 /// test run by the bare harness binary was handed, is resolved on `path`
 /// before the stand-in's directory goes first on it, and one that resolves
 /// to the stand-in itself is refused: the stand-in once execed itself for
-/// 75 minutes (#3683).
+/// 75 minutes.
 fn stand_in(
     dir: &Path,
     xtask: &Path,
@@ -376,7 +376,7 @@ fn stand_in(
 
 /// The call `scripts/hooks/post-merge` and `post-commit` make in the
 /// background after a merge that changed the harness, rebuilding main's
-/// release judge (#2982): what the stand-in answers with nothing.
+/// release judge: what the stand-in answers with nothing.
 const REBUILD: &str = "build -q --release -p xtask";
 
 /// The cargo `named` says, as an absolute path: `named` itself where it is
@@ -398,7 +398,7 @@ pub(crate) fn absolute_cargo(
 /// A program copied into a scratch tree of its own and held there for as
 /// long as the value lives, so a call through [`Binary::path`] runs the
 /// program as it stood when it was held, whatever has since happened at
-/// the path it was copied from (#2756).
+/// the path it was copied from.
 ///
 /// `CARGO_BIN_EXE_xtask` is `target/debug/xtask`, and cargo relinks that
 /// path by removing it and linking the new build in its place: the permit
@@ -485,7 +485,7 @@ pub fn xtask(bin: &'static str) -> &'static Path {
 /// alternate, so `git add` writes only the blobs of what the workspace has
 /// not committed, and the trees and the commit above them. Written out,
 /// they were a scratch's real cost on disk, 36 MB of loose objects each,
-/// and a suite lays a dozen at once (#644). What it borrows is reachable
+/// and a suite lays a dozen at once. What it borrows is reachable
 /// in the workspace, or a loose object `git add` found there and freshened,
 /// which `gc` keeps for two weeks from then; a scratch lives for one test,
 /// so only a `git gc --prune=now` in the workspace during it can take a
@@ -545,8 +545,7 @@ pub(crate) fn committing(dir: &Path, args: &[&str]) {
 /// never meets the lock before it is held. Made under its own name, it
 /// stood unlocked between the open and the lock, and a sweep that opened
 /// it there took it, read the tree as a dead run's and left this run
-/// refusing its own lock, which two runs starting at once under load did
-/// (#1252).
+/// refusing its own lock, which two runs starting at once under load did.
 ///
 /// A lock that will not come says another live process is working at this
 /// exact path, which the process id and the counter in the name are
@@ -584,7 +583,7 @@ fn beside(tree: &Path, suffix: &str) -> PathBuf {
 /// every test running beside the one that spawned a child — out of each
 /// other's way. A tree with no lock beside it was kept on purpose and is
 /// never a candidate. Every sweep takes it shared, so one holding it is
-/// never a live run to another reading it (#2942). A tree that will not go
+/// never a live run to another reading it. A tree that will not go
 /// keeps its lock ([`removed`]), so the next sweep tries it again.
 ///
 /// Nothing here reports. A temporary directory this process may not read,
@@ -622,7 +621,7 @@ fn reap(base: &Path) {
 /// whose removal failed part way, as it does while something still writes
 /// into it, is not, and keeps its lock: a lock removed with its tree
 /// standing left a tree no sweep reads, since the sweep reads the locks,
-/// and it stood half removed for good (#4437).
+/// and it stood half removed for good.
 fn removed(tree: &Path) -> bool {
     match std::fs::remove_dir_all(tree) {
         Ok(()) => true,
@@ -641,12 +640,12 @@ fn names(path: &Path, file: &File) -> bool {
     }
 }
 
-/// A process a run left standing in its scratch tree (#2663): an orphan
+/// A process a run left standing in its scratch tree: an orphan
 /// ([`Orphan`]) whose command line names a path inside a tree, as a
 /// test's php names its program in the run's copy of the pinned tree and
 /// a php-fpm master that left its group by `setsid()` names its ini there
 /// in its title, or, naming none, whose working directory is inside one,
-/// as a `setsid`'d `sleep` or a daemon given a relative path is (#2760).
+/// as a `setsid`'d `sleep` or a daemon given a relative path is.
 /// Its group goes with it where it leads one, as a program's does
 /// (`oracle::Group`), and a php-fpm master's workers are in its. A
 /// process whose parent lives is some program's still, an agent's shell
@@ -783,7 +782,7 @@ const INIT: u32 = 1;
 /// The processes an orphan of this process's programs is handed to: init,
 /// and on Linux the subreaper this process stands under, where one is
 /// (`PR_SET_CHILD_SUBREAPER`, which `systemd --user` sets for a desktop
-/// session), whose children are otherwise read as some program's (#2761).
+/// session), whose children are otherwise read as some program's.
 /// Read once, by the parent the kernel gives a `sleep` its shell left.
 fn adopters() -> &'static [u32] {
     static ADOPTERS: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
@@ -859,9 +858,9 @@ fn stop_strays_in(name: &str, ours: impl Fn(&Path) -> bool) -> Vec<u32> {
 /// the php-fpm it starts by its configuration `<that>ini`: what a program
 /// killed past its limit started outside its group, stopped with their
 /// groups, and their pids, so a php-fpm master that left by `setsid()`
-/// holds no port past the test that started it (#2777). None for a
-/// program run by a relative name, a snippet's, which names no test, nor
-/// for one whose name has no extension.
+/// holds no port past the test that started it. None for a program run
+/// by a relative name, a snippet's, which names no test, nor for one
+/// whose name has no extension.
 pub(crate) fn stop_naming(script: &Path) -> Vec<u32> {
     let (Some(path), Some(extension)) = (script.to_str(), script.extension()) else {
         return Vec::new();
@@ -908,12 +907,12 @@ fn stop_orphans(pick: impl FnOnce(&[Orphan]) -> Vec<Stray>) -> Vec<u32> {
 /// will not come is a run's still going, whose strays are its own to stop
 /// ([`Tree::stop_strays`]); and one standing with no lock was kept
 /// ([`KEEP`]) and is never a candidate. Every session's runs lay their
-/// trees in that one directory (#2626), so the lock is the only guard: a
+/// trees in that one directory, so the lock is the only guard: a
 /// dead run's strays are stopped by the next run of any session, and a
 /// live run's by none but itself. A cut-off System V run's programs are
 /// stopped by its own claims first (`sysv::stop_cut_off`). What a run's
 /// start does before it makes its tree, so the files a killed run's
-/// programs hold open in a tree removed under them are let go (#2663).
+/// programs hold open in a tree removed under them are let go.
 pub(crate) fn stop_forsaken(name: &str) -> Vec<u32> {
     let Ok(base) = std::fs::canonicalize(SHORT) else {
         return Vec::new();
@@ -936,7 +935,7 @@ pub(crate) fn stop_forsaken(name: &str) -> Vec<u32> {
 impl Tree {
     /// The strays standing in this tree, stopped, and their pids: what a run
     /// does once every program it started in the tree has ended, for what
-    /// one of them started that left its group (#2663).
+    /// one of them started that left its group.
     pub(crate) fn stop_strays(&self) -> Vec<u32> {
         let named = self.path.file_name().and_then(|n| n.to_str());
         let name = named
@@ -1005,7 +1004,7 @@ mod tests {
     };
     use crate::reading::{Reading, Status};
 
-    /// A held program runs as it stood when it was held (#2756): the path
+    /// A held program runs as it stood when it was held: the path
     /// it was copied from is removed after one spawn, as cargo's relink
     /// removes `target/debug/xtask`, and the next spawn still runs; then
     /// another program is laid at that path, and the held one is still
@@ -1036,7 +1035,7 @@ mod tests {
         );
     }
 
-    /// The stand-in never names itself (#3683): built with `CARGO=cargo`
+    /// The stand-in never names itself: built with `CARGO=cargo`
     /// and then first on `PATH`, it hands `cargo --version` on to the cargo
     /// that `PATH` held before it, which answers within the minute where the
     /// stand-in once execed itself for 75; built again with its own
@@ -1073,7 +1072,7 @@ mod tests {
     }
 
     /// A land's fast-forward of a harness change in a scratch repository
-    /// starts no build of the release judge (#4437): `main` is
+    /// starts no build of the release judge: `main` is
     /// fast-forwarded over a change to `xtask/src` with the stand-in first
     /// on `PATH`, as a land test runs it, and the real `post-merge` runs,
     /// as the ticket it names reaching the harness says; the build it
@@ -1141,7 +1140,7 @@ mod tests {
         }
     }
 
-    /// A tree that will not go keeps its lock (#4437): a directory in it
+    /// A tree that will not go keeps its lock: a directory in it
     /// that may not be written holds a file, so removing the tree fails
     /// part way, as it did under a build writing into it. Dropped, the
     /// tree stands with its lock beside it, which a sweep can take; swept
@@ -1197,7 +1196,7 @@ mod tests {
         assert!(!lock.exists(), "the sweep left the lock of a tree it took");
     }
 
-    /// A sweep never meets a lock before it is held (#1252): one thread
+    /// A sweep never meets a lock before it is held: one thread
     /// takes lock after lock in a directory of its own while another sweeps
     /// that directory without pause, and every lock is taken, and each is
     /// still its taker's when the taker lets it go.
@@ -1231,7 +1230,7 @@ mod tests {
     }
 
     /// A program's tree is one length however many trees came before it,
-    /// under `/tmp` whatever the session's `TMPDIR` (#2523): a dozen made
+    /// under `/tmp` whatever the session's `TMPDIR`: a dozen made
     /// in a row, so the counter crosses a digit wherever it stood, each
     /// named `xtask-<name>-<7 digits>-<6 digits>` under one directory.
     #[test]
@@ -1251,7 +1250,7 @@ mod tests {
 
     /// A program's tree under `/tmp` is the process's group and not
     /// `/tmp`'s, and so is a file made in it: a `chmod` there keeps the
-    /// setgid bit, as php's chmod tests read (#2807).
+    /// setgid bit, as php's chmod tests read.
     #[test]
     fn a_programs_tree_and_its_files_are_the_processs_group() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1267,7 +1266,7 @@ mod tests {
 
     /// A scratch tree the volume has no room for is [`Full`], naming the
     /// volume `df` says it stands on, under whatever context is added
-    /// above it; any other trouble making it is not (#644). And the reading
+    /// above it; any other trouble making it is not. And the reading
     /// of the run it ended is the skip that says so, never a fail.
     #[test]
     fn a_scratch_the_volume_has_no_room_for_is_full_and_its_run_a_skip_naming_the_volume() {
@@ -1314,10 +1313,10 @@ mod tests {
         assert!(Full::of(&made(denied, &path, "opening")).is_none());
     }
 
-    /// What a stray is read from `ps`'s lines (#2663): an orphan, this
-    /// user's process whose parent is one an orphan is handed to (#2761),
+    /// What a stray is read from `ps`'s lines: an orphan, this
+    /// user's process whose parent is one an orphan is handed to,
     /// naming a path in a tree made as the name, its trees each once per
-    /// mention, or naming none and standing in one (#2760); never a
+    /// mention, or naming none and standing in one; never a
     /// process whose parent lives or another user's, nor a path whose
     /// numbers are not a tree's, nor a tree made as another name.
     #[test]
@@ -1357,7 +1356,7 @@ mod tests {
         );
     }
 
-    /// A dead run's stray is stopped, and nothing else is (#2663, #2760):
+    /// A dead run's stray is stopped, and nothing else is:
     /// an orphan naming a tree whose run is gone is, with its group, and so
     /// is one that names none and stands in a tree whose run is dead; an
     /// orphan in a tree a run still holds, named or standing there, is
@@ -1379,7 +1378,7 @@ mod tests {
         crate::locked(&STRAYS)
     }
 
-    /// The same under a subreaper (#2761): a test process run under a perl
+    /// The same under a subreaper: a test process run under a perl
     /// that took `PR_SET_CHILD_SUBREAPER`, as `systemd --user` takes it,
     /// and reaps every child it is handed, so each orphan's parent is the
     /// perl and not init.
@@ -1415,7 +1414,7 @@ mod tests {
 
     fn strays_stopped() {
         let marks = Tree::new("strays-marks").unwrap();
-        // Named for this process: another process's sweep never meets it (#2942).
+        // Named for this process: another process's sweep never meets it.
         let strays = &format!("strays{:07}", std::process::id());
         let held = Tree::short(strays).unwrap();
         let dead = Tree::short(strays).unwrap();
@@ -1466,7 +1465,7 @@ mod tests {
             .spawn()
             .unwrap();
         drop(cut.held.take());
-        // Held as a sweep elsewhere holds it, once one holding it whole lets go (#2942).
+        // Held as a sweep elsewhere holds it, once one holding it whole lets go.
         let _sweeping =
             std::fs::File::open(beside(&cut, LOCK)).inspect(|lock| lock.lock_shared().unwrap());
         let stopped = stop_forsaken(strays);

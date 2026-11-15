@@ -1,4 +1,4 @@
-//! Frame reads for extensions (#1827): an observer's handler reads the
+//! Frame reads for extensions: an observer's handler reads the
 //! frame it is handed, and the frames below it, through a borrowed
 //! [`FrameView`], and keeps a frame past the handler as a [`FrameId`],
 //! which [`Frames::of`] checks against the stacks that stand before
@@ -318,9 +318,9 @@ fn an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op() {
 /// one, and `ZEND_FAST_RET` dispatches to
 /// `zend_dispatch_try_catch_finally_helper` without `SAVE_OPLINE`.
 /// `docs/divergence.toml`'s `trace:fast-ret-frame-opline` row records
-/// the difference as php's. The program is #2478's, its `ArrayIterator`
-/// a plain object with one property, which this crate serves without
-/// ext/spl; the pinned php prints line 10 for either.
+/// the difference as php's. The program's `ArrayIterator` is a plain
+/// object with one property, which this crate serves without ext/spl;
+/// the pinned php prints line 10 for either.
 #[test]
 fn a_backtrace_the_unwind_past_a_finally_calls_reads_its_fast_ret_line() {
     let engine = Engine::cli_builder().build();

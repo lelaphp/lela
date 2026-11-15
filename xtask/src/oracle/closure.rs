@@ -1,6 +1,6 @@
-//! `[closure]` of the pin (#2654, #2657): the Homebrew kegs the pinned
-//! binaries load, each at the version Homebrew names it by (its
-//! `pkg_version`, `1.12_1`), held with php's digest as one oracle. The
+//! `[closure]` of the pin: the Homebrew kegs the pinned binaries load,
+//! each at the version Homebrew names it by (its `pkg_version`,
+//! `1.12_1`), held with php's digest as one oracle. The
 //! md5 holds php's own bytes and none of what it loads, so a `brew
 //! upgrade` that moved pcre2 or libzip under it moved the oracle with no
 //! pin changing; this record is what such a move is refused against.
@@ -19,10 +19,10 @@
 //!
 //! **What holds a keg still** is its pin: every keg the record names is
 //! `brew pin`ned, a link under `<prefix>/var/homebrew/pinned/`, so a `brew
-//! upgrade` run for another reason passes it over (#3468). The walk sees a
+//! upgrade` run for another reason passes it over. The walk sees a
 //! keg move only after it moved, by when the recorded version is gone from
 //! the Cellar; an unpinned keg is refused before it can. So is the keg the
-//! pinned binaries stand in themselves, php's own (#4383): the md5 sees it
+//! pinned binaries stand in themselves, php's own: the md5 sees it
 //! move as the walk sees the others, after, when the pinned path is gone.
 //! A machine with no Homebrew prefix under its binaries, a Linux runner,
 //! holds neither, a binary under no Cellar, a variant's build, stands in
@@ -30,12 +30,12 @@
 //! since `scripts/ci/pinned-php.sh` pins php's keg and each keg it pours
 //! before any lane. A refusal's `brew pin` names each keg as
 //! `pinned-php.sh` pins it, by the tap its receipt records, so no alias of homebrew-core's
-//! stands in for a keg poured from another tap (#4423).
+//! stands in for a keg poured from another tap.
 //!
 //! **What a build was made against** is the record's digest, [`Closure::digest`]: a
 //! variant's macOS build is made against the Homebrew the record names, so
 //! its pin names the digest beside its md5, as a Linux build names its
-//! image (#2935).
+//! image.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -59,7 +59,7 @@ impl Closure {
     }
 
     /// The record's digest: SHA-256 over each keg's `name=version\n`, in
-    /// name order, so one closure always gives one digest (#2935).
+    /// name order, so one closure always gives one digest.
     pub(crate) fn digest(&self) -> Sha256 {
         let lines = self
             .0
@@ -145,7 +145,7 @@ impl Closure {
                 loose.push(format!("{} of the pin's [closure]", unpinned.join(", ")));
             }
             refusal.push(format!(
-                "{} {is} not `brew pin`ned, so a `brew upgrade` can move {it} before this walk sees the move (#3468): `brew pin {}`",
+                "{} {is} not `brew pin`ned, so a `brew upgrade` can move {it} before this walk sees the move: `brew pin {}`",
                 loose.join(", and "),
                 pin.join(" ")
             ));
@@ -157,7 +157,7 @@ impl Closure {
     }
 
     /// The record `binaries` stand to on this machine, walked as
-    /// [`Closure::held`] walks them, which a bump writes (#4384): each keg
+    /// [`Closure::held`] walks them, which a bump writes: each keg
     /// they load at the version it resolved to, and each keg of `named`,
     /// the runtime kegs of their keg's receipt, that none loads, at the
     /// version `<prefix>/opt/<keg>` points at; nothing else. A keg
@@ -231,7 +231,7 @@ impl Walked {
 
 /// The libraries one binary names in its own load commands, each by the
 /// file it resolves to and the keg that file stands in, beside the
-/// Homebrew prefix the binary stands under (#3458). A crate built against
+/// Homebrew prefix the binary stands under. A crate built against
 /// a keg is held to these, so it links the keg the oracle loads itself
 /// and not another the closure carries only because a library php loads
 /// links it.
@@ -284,7 +284,7 @@ impl Own {
 
 /// The name a `brew pin` of the keg `<prefix>/Cellar/<keg>/<version>`
 /// gives the formula it was poured from, as `scripts/ci/pinned-php.sh`
-/// pins it (#4423) and as brew names a formula (`Formula#full_name`):
+/// pins it and as brew names a formula (`Formula#full_name`):
 /// `<tap>/<keg>` where the keg's receipt records a tap other than
 /// homebrew-core, `dax/pin/php@8.5` for one `pinned-php.sh` poured, and the
 /// bare name otherwise. A bare name brew resolves through homebrew-core's
@@ -348,7 +348,7 @@ const VERSION_MIN_MACOSX: u32 = 0x24;
 
 /// The oldest macOS a Mach-O file was linked to run on, `LC_BUILD_VERSION`'s
 /// `minos` as the command encodes it, `xxxx.yy.zz` in one word, and the
-/// version a `MACOSX_DEPLOYMENT_TARGET` names (#3356).
+/// version a `MACOSX_DEPLOYMENT_TARGET` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Minos(u32);
 
@@ -673,7 +673,7 @@ mod tests {
         assert_eq!(
             err,
             "ca-certificates, zip of the pin's [closure] are not `brew pin`ned, so a `brew upgrade` \
-             can move them before this walk sees the move (#3468): `brew pin ca-certificates zip`"
+             can move them before this walk sees the move: `brew pin ca-certificates zip`"
         );
         // A keg that drifted is named as drift and offered no pin, which
         // would hold it at the version it drifted to.
@@ -703,7 +703,7 @@ mod tests {
     }
 
     /// The keg the pinned php stands in is held pinned as each keg of the
-    /// record is (#4383): unpinned, it refuses with its `brew pin`, alone
+    /// record is: unpinned, it refuses with its `brew pin`, alone
     /// and beside a keg of the record, in the one sentence.
     #[test]
     fn the_keg_the_pinned_php_stands_in_refuses_unpinned_naming_the_pin() {
@@ -717,21 +717,21 @@ mod tests {
         assert_eq!(
             err,
             "php, where the pinned binaries stand, is not `brew pin`ned, so a `brew upgrade` can \
-             move it before this walk sees the move (#3468): `brew pin php`"
+             move it before this walk sees the move: `brew pin php`"
         );
         fs::remove_file(root.join("var/homebrew/pinned/zip")).unwrap();
         let err = closure(&RECORD).held(&[&php]).unwrap_err().to_string();
         assert_eq!(
             err,
             "php, where the pinned binaries stand, and zip of the pin's [closure] are not `brew \
-             pin`ned, so a `brew upgrade` can move them before this walk sees the move (#3468): \
+             pin`ned, so a `brew upgrade` can move them before this walk sees the move: \
              `brew pin php zip`"
         );
     }
 
     /// The pin a refusal asks for names each keg as brew names the formula
     /// its receipt says it was poured from, as `scripts/ci/pinned-php.sh`
-    /// pins it (#4423): a php poured from the tap `dax/pin` by its tap, so
+    /// pins it: a php poured from the tap `dax/pin` by its tap, so
     /// homebrew-core's alias of the same name, `php@8.5` of `php`, cannot
     /// stand in for it, and a keg of homebrew-core's bare; the sentence
     /// names each by its keg.
@@ -756,7 +756,7 @@ mod tests {
         assert_eq!(
             err,
             "php, where the pinned binaries stand, and zip of the pin's [closure] are not `brew \
-             pin`ned, so a `brew upgrade` can move them before this walk sees the move (#3468): \
+             pin`ned, so a `brew upgrade` can move them before this walk sees the move: \
              `brew pin dax/pin/php zip`"
         );
     }

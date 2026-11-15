@@ -55,12 +55,12 @@
 //! -S`) and by the engine's witness build of the same host, the
 //! response's head let go ([`host`]). The readings stand under the host's
 //! row, `sapi/cgi/cgi-fcgi`, `sapi/fpm/cgi-fcgi` and
-//! `sapi/cli/cli_server`, each with its `/ri` beside it (#1496).
+//! `sapi/cli/cli_server`, each with its `/ri` beside it.
 //!
 //! **The load number.** The first line, `Extension [ <persistent>
 //! extension #10 ctype version ... ]`, carries the module's load number,
 //! which is the oracle's build order and not the bundle's. The pin's
-//! `[recipe.normalise] extension_number_token` row (#317) replaces the
+//! `[recipe.normalise] extension_number_token` row replaces the
 //! digits by its token in both streams, the oracle's as its run normalises
 //! it and the engine's through [`oracle::normalise`], so a rendering
 //! differs only where the extension does; a pin without the row compares
@@ -175,7 +175,7 @@ pub struct Ask {
     pub renderings: Option<PathBuf>,
     /// A binary standing for `php-linked`, which serves the linked
     /// engine's side: what a test hands the lane to hold a rendering
-    /// served through one that dies (#1069); without it, the one built
+    /// served through one that dies; without it, the one built
     /// from the workspace.
     pub linked: Option<PathBuf>,
 }
@@ -361,7 +361,7 @@ pub fn run(
     ask: &Ask,
 ) -> Result<Vec<Reading>> {
     // The main oracle, and one for each variant a row names, under which
-    // that row's extension is rendered (#1782); each digest is asserted at
+    // that row's extension is rendered; each digest is asserted at
     // the first rendering under it and never again.
     let variants = manifest.variants();
     let pin = manifest.pin()?;
@@ -383,13 +383,13 @@ pub fn run(
         })
         .collect();
     // Each rendering waits on two processes and shares nothing with the
-    // next, so the items run side by side, in their order still (#2166).
+    // next, so the items run side by side, in their order still.
     tally::each_beside(&items, |&(name, host, column)| {
             let mut reading = reading_of(&snapshot, manifest, name, host, column)?;
             let recipe = recipe(pin, name, host, column);
             // A row whose crate the linked engine's workspace has not
             // created yet has no rendering to hold, as `budget` and
-            // `unsafe-audit` count nothing for it (#64); for a host's own
+            // `unsafe-audit` count nothing for it; for a host's own
             // module, the host's row.
             let row = host.krate().map_or_else(|| format!("ext/{name}"), str::to_owned);
             if let Some(krate) = manifest.crates.iter().find(|k| k.name == row)
@@ -608,8 +608,8 @@ fn stamped_path(manifest: &Manifest, name: &str, host: Host) -> PathBuf {
         .map_or_else(|| PathBuf::from("."), crate::manifest::Crate::path)
 }
 
-/// What one rendering reads, as directories of the workspace (#1159).
-/// The stamp's key ([`Snapshot::key`] over [`stamped_path`], #1318) covers the
+/// What one rendering reads, as directories of the workspace.
+/// The stamp's key ([`Snapshot::key`] over [`stamped_path`]) covers the
 /// extension's crate and its workspace dependency closure: its own
 /// declarations, `php_ext`, `php_engine` and what that is built from.
 /// The rendering reads three more things the closure does not reach:
@@ -673,8 +673,8 @@ impl Reads {
     }
 }
 
-/// `crosscheck --staged`, a run over what a commit would take (#1159;
-/// pre-commit's until revision 140): of the extensions
+/// `crosscheck --staged`, a run over what a commit would take
+/// (pre-commit's until revision 140): of the extensions
 /// `carried` names, the ones to render again for what is staged. One
 /// whose rendering reads no staged file ([`Reads`]) is not rendered,
 /// whatever its reading says, since nothing it reads is in the commit;
@@ -685,7 +685,7 @@ impl Reads {
 /// over the commit's content, or a change to an extension's closure that
 /// was rendered before it was staged, is relied on and named. A staged
 /// file outside every crate reaches renderings as [`sources::Outside`]
-/// sorts it (#1738): one every reading reads, such as `oracle.toml` or
+/// sorts it: one every reading reads, such as `oracle.toml` or
 /// `docs/divergence.toml`, renders every extension again, and a staged
 /// lock reaches, as a staged change to its crate would, each extension
 /// whose closure it pins otherwise than `HEAD` ([`sources::lock_moved`]).

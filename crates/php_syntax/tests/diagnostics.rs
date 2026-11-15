@@ -358,7 +358,7 @@ fn the_options_are_the_file_and_the_lexers() {
 #[test]
 fn instanceof_takes_a_class_name_reference() {
     // php's `class_name_reference`: `class_name` is `T_STATIC | name`, so
-    // `static` stands alone on the right of `instanceof` (#262), and a
+    // `static` stands alone on the right of `instanceof`, and a
     // `new_variable` or a parenthesised expression stands there too.
     for src in [
         "<?php $x instanceof static;",
@@ -552,7 +552,7 @@ fn a_fused_set_visibility_is_the_one_token_phps_scanner_fused() {
 
 /// A diagnostic that names the token it wanted as the token it did not
 /// want: `unexpected token "X", expecting "X"`. No site can raise one;
-/// the halt rule did (#265), taking `;` alone where php's scanner
+/// the halt rule did, taking `;` alone where php's scanner
 /// returns `?>` as `';'`.
 fn names_the_wanted_token_as_unwanted(message: &str) -> bool {
     let Some(rest) = message.strip_prefix("syntax error, unexpected token \"") else {

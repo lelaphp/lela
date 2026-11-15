@@ -4,7 +4,7 @@
 //! first. Each rule is the entry's `on_modify` on the face, so
 //! `ini_set()` and the natives, which call [`alter`] where php calls
 //! `zend_alter_ini_entry`, meet the same rule; the engine runs them
-//! over the values the host started the engine with (#744).
+//! over the values the host started the engine with.
 
 use php_ext::abi::{ExtensionBuilder, IniStage, OnModify};
 use php_ext::coerce::{atoi, numeric_string, strtol};

@@ -1,35 +1,35 @@
-//! `xtask fpm-compare` (#2349): the oracle for what PHP code sees under
+//! `xtask fpm-compare`: the oracle for what PHP code sees under
 //! makala. Each request of the HTTP-served subset is served by a makala of
 //! its own over HTTP and by a pool of its own of the pinned php-fpm under
-//! the pin's `[fastcgi]` mapping (#2334), the same client the `request
+//! the pin's `[fastcgi]` mapping, the same client the `request
 //! makala` witnesses are served by (`witness::makala`), and the two
 //! responses are held to each other as a client of nginx in front of
 //! php-fpm reads them: the status code, each header line PHP set, in
 //! order within its name, and the body. One reading, at makala's crate.
 //!
 //! **The differences known before a request is sent**, each handled in
-//! the one place this list names (#2349, from #2347's witnesses):
+//! the one place this list names, and known from makala's witnesses:
 //!
 //! 1. *A header name's case.* makala's HTTP stack writes every name in
-//!    lowercase (#2570), so both responses are read with their names
+//!    lowercase, so both responses are read with their names
 //!    lowercased, and without the server's own `date` and `connection`
 //!    lines, by `witness::makala`'s rendering, the witnesses' too.
 //! 2. *The ports.* `REMOTE_PORT` and `SERVER_PORT` are each connection's
 //!    own, so php-fpm is handed makala's two through the mapping's
 //!    `$remote_port` and `$server_port`, and they agree by construction.
-//! 3. *`SERVER_SOFTWARE`.* makala names itself `makala/<version>` (#2335)
-//!    where the mapping's nginx names itself `nginx/<version>`, so makala's
-//!    name is replaced in its response by the mapping's, [`software`].
+//! 3. *`SERVER_SOFTWARE`.* makala names itself `makala/<version>` where
+//!    the mapping's nginx names itself `nginx/<version>`, so makala's name
+//!    is replaced in its response by the mapping's, [`software`].
 //! 4. *What php makes at random per request*, an uploaded file's temporary
-//!    name and a session id it made (#2706), each read as one token on
+//!    name and a session id it made, each read as one token on
 //!    both sides (`Entry::randoms_named_alike`), as the scratch directory
 //!    each side's program stands in is by the recipe's own normalisation,
 //!    the two directories of one length, and named as `{PWD}` in the
-//!    entry's ini (`Entry::ini_in`, #2705).
+//!    entry's ini (`Entry::ini_in`).
 //! 5. *The order of header lines across names.* hyper's `HeaderMap`
 //!    keeps every value of a name together at the name's first place, so
 //!    makala cannot interleave two lines of one name with another's, as
-//!    php's header list may (#2640). Both responses are read with their
+//!    php's header list may. Both responses are read with their
 //!    lines in the order of their names, the lines of one name in the
 //!    order they came, [`names_folded`]: RFC 9110 §5.3 makes the order
 //!    across names insignificant and the order within one significant.
@@ -48,10 +48,10 @@
 //! the binary is (`phpinfo()`) moves on both sides and differs on both
 //! runs, and was once counted apart as unstable and passed; a side that
 //! moves is no reason to hold nothing, so it is a difference, and a
-//! by-design one is a row (#2337). A request either side could not be
+//! by-design one is a row. A request either side could not be
 //! served is a bork. A difference an accepted `makala:` row names is accepted,
 //! counted apart and named under its row, and a row whose test agrees is
-//! named stale (`super::held`, #2629). The reading passes with no other
+//! named stale (`super::held`). The reading passes with no other
 //! difference and no bork, and is a skip where nothing was compared; a
 //! difference that stands is filed as a ticket, and its acceptance is a
 //! row, a person's.
@@ -127,7 +127,7 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<R
 
 /// The corpus and the tests it left out narrowed to the tests `only`
 /// names, where it names any, so a narrowed run counts as left out only
-/// the tests it was asked for (#2662).
+/// the tests it was asked for.
 fn narrowed(entries: &mut Vec<Entry>, left: &mut Vec<String>, only: &[String]) {
     if !only.is_empty() {
         entries.retain(|entry| only.contains(&entry.id));
@@ -252,7 +252,7 @@ fn software(response: &[u8], own: &str, nginx: &str) -> Vec<u8> {
 /// A rendered response with its header lines in the order of their names,
 /// the lines of one name in the order they came: known difference 5, the
 /// order across names folded as RFC 9110 §5.3 makes it insignificant, and
-/// held within a name, where it is not (#2640, #2643).
+/// held within a name, where it is not.
 fn names_folded(rendered: &[u8]) -> Vec<u8> {
     let Some(end) = rendered.windows(2).position(|w| w == b"\n\n") else {
         return rendered.to_vec();
@@ -285,7 +285,7 @@ fn word(came: &Came) -> &'static str {
 
 /// A run's entries, each held to the `makala:` rows as it comes: the one
 /// place a row is read, for the line an entry prints and for the reading
-/// alike (#2662).
+/// alike.
 struct Ledger<'r> {
     registry: &'r Registry,
     consulted: Consulted<'r>,
@@ -442,7 +442,7 @@ mod tests {
 
     /// A narrowed run counts as left out only the tests it asked for that
     /// the corpus leaves out, and compares only those it asked for; a run
-    /// that names none keeps the whole corpus (#2662).
+    /// that names none keeps the whole corpus.
     #[test]
     fn a_narrowed_run_counts_only_the_asked_for_tests_left_out() {
         let entry = |id: &str| Entry {
@@ -482,7 +482,7 @@ mod tests {
     /// The line a request prints is the rows' word on it, over the fixture
     /// (`xtask/fixtures/makala`): a difference the row accepts prints
     /// `accepted` and the row with no diff, one no row names prints
-    /// `differs` and its changed lines (#2662).
+    /// `differs` and its changed lines.
     #[test]
     fn a_difference_a_row_accepts_prints_accepted_and_its_row_and_no_diff() {
         let registry = crate::makala::fixture();
@@ -545,7 +545,7 @@ mod tests {
     /// A pair that agrees, first or once more, is the same; one that
     /// differs twice is a difference named by its second diff, though a
     /// side's answer moved between its runs, as `phpinfo()`'s page does
-    /// (`ext/standard/tests/general_functions/phpinfo2.phpt`, #2337).
+    /// (`ext/standard/tests/general_functions/phpinfo2.phpt`).
     #[test]
     fn a_pair_that_differs_twice_is_a_difference_though_a_side_moved() {
         let asked = |pairs: &[[&[u8]; 2]]| {

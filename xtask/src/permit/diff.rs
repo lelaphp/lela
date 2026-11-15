@@ -5,7 +5,7 @@
 //!
 //! Each file carries what the base has at its path beside what it would
 //! carry, so a rule that fires on what a write adds is asked of the diff
-//! and not of the file against itself (#510): the base is the index's
+//! and not of the file against itself: the base is the index's
 //! `HEAD` and the commit `done` measures since, and a path the base has
 //! not, or a base that cannot be read, displaces nothing, which is the
 //! reading that denies rather than excuses.
@@ -32,7 +32,7 @@ use crate::{git, steer};
 /// manifest marks `deny = true`, the harness's own files, stands apart: a
 /// person commits those, so it is reported as a note, except where an
 /// agent's commit stages one no steer reading covers ([`Judged::refuse`],
-/// #3644 ruling 3).
+/// ruling 3 of harness revision 185).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Judged {
     /// Each file's judgement, in the order given.
@@ -61,10 +61,11 @@ impl Judged {
 
     /// An agent's commit (`CLAUDE_CODE_SESSION_ID` set), refused for each
     /// harness file it stages that no steer reading covers: one that
-    /// passed, wrote, and is stamped over the staged blob (#3644 ruling 3). This closes the gap where an agent clears `done`'s
-    /// kept change by committing the file itself. A merge's file taken
-    /// whole from one side is that side's commit and never staged here
-    /// ([`staged_files`]); a person's commit is not asked.
+    /// passed, wrote, and is stamped over the staged blob (ruling 3 of
+    /// harness revision 185). This closes the gap where an agent clears
+    /// `done`'s kept change by committing the file itself. A merge's file
+    /// taken whole from one side is that side's commit and never staged
+    /// here ([`staged_files`]); a person's commit is not asked.
     pub(crate) fn refuse(&mut self, root: &Path) -> Result<()> {
         let paths: BTreeSet<String> = self.a_persons().map(|(p, _)| p.to_owned()).collect();
         for path in paths {
@@ -104,7 +105,7 @@ impl Judged {
                 writeln!(
                     out,
                     "deny {path}: an agent's commit (CLAUDE_CODE_SESSION_ID is set) stages it, and \
-                     no steer reading covers what is staged, so the commit is refused (#3644); a \
+                     no steer reading covers what is staged, so the commit is refused; a \
                      person commits it, a row a person settled lands by `cargo xtask steer`, and \
                      `git restore --staged -- {path}` takes it out of this commit"
                 )
@@ -166,15 +167,14 @@ pub(crate) enum Content {
     },
     /// Bytes git reads as binary, judged by the path alone as the `Write`
     /// of no text: what a rule reads is text, and a binary file read as
-    /// text, a stand-in build in a fixture, is bytes no rule describes
-    /// (#3458).
+    /// text, a stand-in build in a fixture, is bytes no rule describes.
     Binary,
 }
 
 /// Judge `files`, each a path relative to `root` and the content that
 /// would be committed there. A file in a workspace of its own under
 /// `root`, a fixture that carries a manifest, is judged by that manifest
-/// as the hook judges an edit to it (`Call::workspace`, #57); the
+/// as the hook judges an edit to it (`Call::workspace`); the
 /// manifest is read once per workspace, and one that cannot be read is
 /// the error, since a file no manifest describes is not a file nothing
 /// denies.
@@ -268,8 +268,8 @@ fn text(bytes: Vec<u8>) -> String {
 /// merge the commit displaces both parents, so it is judged against each
 /// parent's text whole ([`super::rules::adds`]): a hit either parent
 /// carried, such as an `exit=` the branch's `witness --accept` captured,
-/// is that parent's and not the merge's (#1312), a block over several
-/// lines among them, whose lines the merge base may carry apart (#2783);
+/// is that parent's and not the merge's, a block over several
+/// lines among them, whose lines the merge base may carry apart;
 /// and a file the merge takes whole from the merged parent is that
 /// parent's, judged at its own commits, so the merge is not asked of it.
 /// A hit neither parent carried as often is the merge's. A file git
@@ -320,7 +320,7 @@ fn staged_files(root: &Path) -> Result<Vec<Diffed>> {
 /// The commit a merge takes in: `MERGE_HEAD`, which a merge stopped
 /// before its commit keeps, or, for a merge git commits itself, whose
 /// pre-merge-commit runs with no `MERGE_HEAD` written, the first name
-/// `GIT_REFLOG_ACTION` gives after `merge` that is a commit (#3644).
+/// `GIT_REFLOG_ACTION` gives after `merge` that is a commit.
 fn merged(root: &Path) -> Option<String> {
     if let Ok(head) = git::rev_parse(root, &["-q", "--verify", "MERGE_HEAD"]) {
         return Some(head);

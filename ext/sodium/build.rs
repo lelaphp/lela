@@ -1,11 +1,11 @@
 //! libsodium is the library the pinned php links (design §7.2, revision
-//! 72; #1540): found through `pkg-config libsodium`, which on an Apple
+//! 72): found through `pkg-config libsodium`, which on an Apple
 //! silicon Mac is Homebrew's keg, and linked as the shared library the
 //! oracle links, never vendored. A miss fails the build rather than
 //! falling back to a library the oracle does not link.
 //!
 //! The link line is safe against the SDK's `/usr/lib`, which the SDK's
-//! libxml2 puts ahead of the kegs (#1510): neither it nor the SDK ships
+//! libxml2 puts ahead of the kegs: neither it nor the SDK ships
 //! a libsodium, so `-l sodium` finds the keg's whatever the order. The
 //! version `pkg-config` reports is the headers' version `PHP_MINFO`
 //! prints, `SODIUM_VERSION_STRING`, handed to the crate as

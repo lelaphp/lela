@@ -715,8 +715,8 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
 /// ```
 ///
 /// A call from another thread, after the call into C that made it
-/// returned (#1640, #1614): php calls the callable on that thread at
-/// once, concurrently with the request; here the thread waits, the
+/// returned: php calls the callable on that thread at once,
+/// concurrently with the request; here the thread waits, the
 /// request serves the call at its next check and hands back the return,
 /// which is one interleaving of php's race. A thread still waiting when
 /// the request blocks in a call into C, `pthread_join` here, or in a

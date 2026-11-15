@@ -1,7 +1,7 @@
 //! `xtask ticket view <n> [--since <time>]`: a ticket as a builder reads
 //! it, the body and the comments it may act on, and a count of what was
-//! left out (#4263; Round 3, Q16 (c)). It finishes Round 2, Q13's comment
-//! rule, since a reader that drops outsiders' comments is that filter:
+//! left out (Round 3, Q16 (c)). It finishes Round 2, Q13's comment rule,
+//! since a reader that drops outsiders' comments is that filter:
 //! `gh issue view --comments` prints everyone's.
 //!
 //! Which comments are printed, the rule stated once, in [`Kept::of`]:

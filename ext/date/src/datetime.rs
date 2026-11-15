@@ -1684,10 +1684,10 @@ impl DateTime {
     /// ```
     ///
     /// So a `memory_limit` falls where php's does: under opcache's regime a
-    /// request starts with php's memory (design §5.13, #2863), each object
-    /// costs what php's does, and the array of them meets the limit on
-    /// the same growth of its buckets (#2854), where php 8.5.12 names the
-    /// chunk the growth asks the system for:
+    /// request starts with php's memory (design §5.13), each object costs
+    /// what php's does, and the array of them meets the limit on the same
+    /// growth of its buckets, where php 8.5.12 names the chunk the growth
+    /// asks the system for:
     ///
     /// ```php
     /// ini_set('memory_limit', '2M');

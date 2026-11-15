@@ -1,4 +1,4 @@
-//! The concurrency soak's smoke, per commit (#2350, as #2336 rules): many
+//! The concurrency soak's smoke, per commit (as ruled 2026-10-09): many
 //! clients sending a mixed set of requests to one makala at once, each
 //! response held to the same request served alone, and the request leak
 //! sensor, armed in this debug build, finding nothing in the error log.
@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 
 use common::{Request, Server, read_response};
 
-/// How long the clients send. #2336 rules 30 s; under a loaded machine's
-/// debug build each client still sends tens of requests in that time.
+/// How long the clients send. The ruling of 2026-10-09 sets 30 s; under a
+/// loaded machine's debug build each client still sends tens of requests
+/// in that time.
 const SMOKE: Duration = Duration::from_secs(30);
 
 /// How many clients send at once: more than the request threads and their

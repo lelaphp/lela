@@ -1,5 +1,5 @@
-// What a build of the harness judges by, digested (harness-design.md §4.4,
-// #16): the seam manifest, and `xtask`'s own sources. `build.rs` includes
+// What a build of the harness judges by, digested (harness-design.md §4.4):
+// the seam manifest, and `xtask`'s own sources. `build.rs` includes
 // this file textually and writes each digest into the binary; `built`
 // compares them with the tree at run time. One definition, two
 // compilations, so the digest taken at build time and the one taken at run
@@ -55,7 +55,7 @@ pub fn sources_digest(root: &Path) -> io::Result<String> {
 /// `SOURCES_DIR`, and nothing else there: an editor's swap file or a
 /// `.DS_Store` left beside them is not a change to the code, and before this
 /// rule it moved the digest after the build, so every built candidate
-/// refused until cargo rebuilt (#48). The rule is stated here once, for both
+/// refused until cargo rebuilt. The rule is stated here once, for both
 /// compilations. It is an extension filter and not a git call, since this
 /// file names nothing outside `std` and `sha1_smol`; a `.rs` file git ignores
 /// is still compiled, so it is still digested.
@@ -91,8 +91,8 @@ fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Result<()> {
 /// read: dax-php's pin, glossary, map, readme and divergence registry.
 /// Where one is absent, as in a repository that copied `xtask/` in, the
 /// tests that read them are not built: `build.rs` leaves `cfg(tracked)`
-/// unset and names the absent files, and `test` counts what it left out
-/// (#3188). libtest has no skip at run time, so the build leaves them out.
+/// unset and names the absent files, and `test` counts what it left out.
+/// libtest has no skip at run time, so the build leaves them out.
 pub const TRACKED: [&str; 5] = [
     "oracle.toml",
     "CONTEXT.md",

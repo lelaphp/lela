@@ -34,8 +34,7 @@ use std::sync::OnceLock;
 /// and is held to its limit by the bytes it asks for. The fatal's stack
 /// trace is cut: past the limit every ask of a tracked heap is held to
 /// it, so php 8.5.12's `zend_fetch_debug_backtrace`, which asks for its
-/// frames fallibly, lists none, which the engine's does not do yet
-/// (#3260).
+/// frames fallibly, lists none, which the engine's does not do yet.
 ///
 /// ```php
 /// $code = '$m = memory_get_usage(); $s = str_repeat("x", 5000);'

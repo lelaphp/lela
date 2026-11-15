@@ -1,4 +1,4 @@
-//! `NOTICE`'s php-src tag held to the pin (ruled on #4663): the sentence
+//! `NOTICE`'s php-src tag held to the pin (ruled 2026-11-13): the sentence
 //! that says the derived parts follow php-src "at tag" names the tag and
 //! its commit, `<tag> (<commit>)`, a second statement of `oracle.toml`'s
 //! `[source]`. `oracle propose` writes it from the checkout a bump moves
@@ -80,7 +80,7 @@ fn holds(path: &std::path::Path, tag: &str, commit: &str) -> Result<(), String> 
         return Ok(());
     }
     Err(format!(
-        "{} names php-src at {} ({}), and oracle.toml pins {tag} ({commit}): the tag moves with the oracle, and `cargo xtask oracle propose` writes it (#4663)",
+        "{} names php-src at {} ({}), and oracle.toml pins {tag} ({commit}): the tag moves with the oracle, and `cargo xtask oracle propose` writes it",
         path.display(),
         named.tag(),
         named.commit()

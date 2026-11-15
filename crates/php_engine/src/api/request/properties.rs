@@ -1941,7 +1941,7 @@ impl Request {
     /// copy has no effect on anything (`zend_std_read_property`, `Indirect
     /// modification of overloaded property`), naming the object's class.
     ///
-    /// A private property the scope may not reach is `__get`'s too (#513):
+    /// A private property the scope may not reach is `__get`'s too:
     /// an int it answers is the notice, and an object is written through.
     ///
     /// ```php

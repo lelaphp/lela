@@ -215,7 +215,7 @@ fn worktrees(root: &Path) -> Vec<String> {
 /// worktree beside the checkout (revision 56), builds `xtask` so the first
 /// `Edit` is judged by a built binary rather than a cold `cargo run` (§12
 /// item 8), lays the local file down and prints the one grant that covers
-/// the worktrees' directory, waiting on none (#74, §11).
+/// the worktrees' directory, waiting on none (§11).
 #[test]
 fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
     let root = repository("add");
@@ -250,7 +250,7 @@ fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
     // The local file is laid down by that build. The worktree is beside
     // the clone, so no grant on it covers the worktree: the line is the
     // one grant over the directory the worktrees are laid down in, and
-    // nothing waits on it (#74, revision 56).
+    // nothing waits on it (revision 56).
     assert!(dir.join(".claude/harness.local.md").is_file(), "{out}");
     let homes = root.with_file_name("repo-worktrees");
     assert!(
@@ -324,7 +324,7 @@ fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
 /// A worktree the instrument lays down is one `permit` resolves as a
 /// workspace of its own: an `Edit` in it is judged by that worktree's
 /// manifest, not as `.claude/**` of the main checkout and not by the main
-/// checkout's rules (harness-design.md §4.4, #41).
+/// checkout's rules (harness-design.md §4.4).
 #[test]
 fn an_edit_in_a_laid_worktree_is_judged_by_that_worktrees_manifest() {
     let root = repository("permit");
@@ -386,7 +386,7 @@ fn a_branch_is_cut_from_mains_tip_through_the_add_command() {
 
 /// A worktree's `target/` is its own, seeded from the clone's `target/debug`
 /// by `cp -c -R` before `xtask` is built there (harness-design.md §5,
-/// "Worktrees"; #245, #251): the dependencies are blocks the two
+/// "Worktrees"): the dependencies are blocks the two
 /// directories share and the build compiles the workspace's own crates
 /// alone, and what the worktree holds afterwards is a `target/debug/xtask`
 /// built from its own sources, whose root is the checkout it runs in, with
@@ -429,7 +429,7 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
     );
 
     // The binary's root is the checkout it runs in, never this
-    // workspace's (#2719): with no `--root` it answers for the worktree's
+    // workspace's: with no `--root` it answers for the worktree's
     // branch from inside it and for the clone's `main` from the clone.
     for (from, branch) in [(dir.as_path(), "t44"), (root.as_ref(), "main")] {
         let track = Command::new(&built)
@@ -459,7 +459,7 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
         );
     } else {
         // The clone holds no build, so the line is the add's "holds no
-        // build, so it starts cold", worded so since #3622 (#3615).
+        // build, so it starts cold", worded so since the merge queue.
         assert_eq!(
             out.lines().filter(|l| l.contains("starts cold")).count(),
             1,
@@ -498,14 +498,14 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
 /// makes, where the volume clones: this workspace's copied in as a head
 /// start and then `xtask`'s dependencies built in the clone, so what the
 /// copy lacks the clone compiles here and the worktree does not. The copy
-/// alone was the clone's build until #2261, and it lacked every dependency
+/// alone was once the clone's build, and it lacked every dependency
 /// whenever a `cargo sweep --maxsize` had pruned this workspace's
 /// `target/` during the run, the oldest artifacts first: the worktree then
 /// compiled them all and the test failed on a tree it does not own. A
 /// dependency's build does not read the sources of the crate that uses it,
 /// so `xtask`'s two roots stand empty for the length of the clone's build
 /// and are checked out again after: the add's build is the one that
-/// compiles `xtask` (#2882). Whether the volume clones, which is the branch
+/// compiles `xtask`. Whether the volume clones, which is the branch
 /// the add takes; where it does not, the clone holds no build and the add
 /// says it starts cold.
 fn warm_clone(root: &Path) -> bool {
@@ -514,7 +514,7 @@ fn warm_clone(root: &Path) -> bool {
     }
     // Seeded as the add seeds, so a workspace whose `target/debug` is a
     // link seeds a directory of the clone's own and the build below writes
-    // there, not into the workspace's (#4589). A copy that fails, a sweep
+    // there, not into the workspace's. A copy that fails, a sweep
     // mid-copy or a link to another volume, leaves the clone cold; the
     // build below compiles what it lacks, so the copy's result is not this
     // test's.
@@ -563,7 +563,7 @@ fn clones(root: &Path) -> bool {
 }
 
 /// A seed from a `target/debug` that is a symbolic link copies what the
-/// link names and not the link (#4589): `cp -R` copies a link named on
+/// link names and not the link: `cp -R` copies a link named on
 /// its command line as the link, and a seeded tree whose `target/debug`
 /// were the source's link would relink the source's binaries when it
 /// builds. The link here names a directory on the same volume, inside the
@@ -658,7 +658,7 @@ fn a_seed_from_a_target_that_is_a_link_is_a_directory_of_its_own() {
 /// The per-key files beside the log stay with the worktree: each is a
 /// scope's latest run, and the main checkout's own are not overwritten by
 /// a tree it does not have, which is what the design says (§5,
-/// "Worktrees"; #35).
+/// "Worktrees").
 #[test]
 fn retiring_appends_the_readings_to_the_main_store_and_removes_the_worktree() {
     let root = repository("retire");
@@ -805,7 +805,7 @@ fn a_worktree_with_no_readings_is_retired_through_the_retire_command() {
     assert!(out.contains("git branch -D t46"), "{out}");
 }
 
-/// The branch's record names its ticket (#30): the add writes it on the
+/// The branch's record names its ticket: the add writes it on the
 /// branch, `xtask track` in the worktree reads it by name, a second
 /// branch on the same ticket is refused before anything is laid down, and
 /// the retire keeps the record with the branch it keeps.
@@ -877,7 +877,7 @@ fn phpt_against_head(root: &Path, subset: &str) -> String {
 /// worktree's, where `phpt --against` looks for a base's run: a run is
 /// keyed by the engine's tree, so one taken in a worktree at the base is
 /// the run the comparison asks for, and before this it went with the
-/// worktree (#1268). A run main keeps already is not overwritten.
+/// worktree. A run main keeps already is not overwritten.
 #[test]
 fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
     if Promise::Tree
@@ -953,9 +953,9 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
 }
 
 /// A run CI's dashboard kept at a `main` commit, fetched by the line the
-/// comparison's skip names, is found as that commit's base run (#2362).
+/// comparison's skip names, is found as that commit's base run.
 /// The skip names the fetch before the call that takes a run; a stand-in
-/// stash holds the upload as scripts/ci/stash.sh keeps it (#3554), the
+/// stash holds the upload as scripts/ci/stash.sh keeps it, the
 /// kept runs each under its engine's tree in `latest/phpt-runs.tar.gz`,
 /// here a run of `ext/pcre` under the tree the skip named, and a stand-in
 /// `ssh` answers as the server's `rrsync` does, running rsync's far side in
@@ -1086,7 +1086,7 @@ fn phpt_in(dir: &Path, args: &[&str], cargo: &Path, corpus: &Path) -> (i32, Stri
     joined(&out)
 }
 
-/// One call takes the merge base's run of each touched subset (#2364): it
+/// One call takes the merge base's run of each touched subset: it
 /// lays a worktree at the base, builds the hosts there through `cargo`,
 /// runs the subset, carries the run into the main worktree and removes
 /// the worktree, and the comparison from the branch's worktree finds the
@@ -1132,7 +1132,7 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
     commit(&dir, "touch ext/ctype");
 
     // A run of none kept at the base, as a scratch corpus's stood in main's
-    // store (#3143), is no run, and the call takes one in its place.
+    // store, is no run, and the call takes one in its place.
     let none = format!(
         "target/harness/phpt-runs/{}/ext/ctype.json",
         engine_tree(&root)
@@ -1157,7 +1157,7 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
     );
     // The base named as xtask names it: git's `--short=7` grows past seven
     // where the scratch's commit shares seven with an object of the
-    // workspace it borrows (#4442).
+    // workspace it borrows.
     let base = sh(&root, &["git", "rev-parse", "main"]);
     let base = xtask::track::short(base.trim());
     let call = format!("cargo xtask phpt --base {base} --subset ext/ctype");
@@ -1240,12 +1240,12 @@ fn commit_all(root: &Path, message: &str) -> String {
     sh(root, &["git", "rev-parse", "HEAD"]).trim().to_owned()
 }
 
-/// The merge queue's worktree (#3622): `queue` lays `_merge` down beside
+/// The merge queue's worktree: `queue` lays `_merge` down beside
 /// the clone on `staging`, cut from `main`, owned by the calling session,
 /// each build the merge lanes run seeded from main's with main's harness
 /// binary taken out of it; the same session's second call claims it as it
 /// stands, and another session's is refused. Where the volume does not
-/// clone ([`clones`]), each build starts cold, one line saying so (#3615).
+/// clone ([`clones`]), each build starts cold, one line saying so.
 #[test]
 fn the_queue_lays_the_merge_worktree_on_staging_owned_and_seeded_from_mains() {
     let root = repository("queue");
@@ -1296,7 +1296,7 @@ fn the_queue_lays_the_merge_worktree_on_staging_owned_and_seeded_from_mains() {
 
 /// The judge `land` finds kept for main's tip in `root`, written as a
 /// shell file at `target/judge/<tip>/xtask` with `body` after its first
-/// line, so the land builds nothing (#4372); the tip.
+/// line, so the land builds nothing; the tip.
 fn judge_kept(root: &Path, body: &str) -> String {
     use std::os::unix::fs::PermissionsExt;
     let tip = sh(root, &["git", "rev-parse", "main"]).trim().to_owned();
@@ -1315,9 +1315,9 @@ fn judged_by_this_build(root: &Path) -> String {
     judge_kept(root, &format!("exec '{xtask}' \"$@\"\n"))
 }
 
-/// `land` is the one step that moves `main` (#3622), run in main's
-/// checkout and refused in `_merge`'s, whose xtask is the merge's own
-/// (#4372). A harness source committed on `staging` with no reading over
+/// `land` is the one step that moves `main`, run in main's
+/// checkout and refused in `_merge`'s, whose xtask is the merge's own.
+/// A harness source committed on `staging` with no reading over
 /// it is unmet in `done`, as main's judges read it, so the land refuses
 /// and `main` stands where it was, its store unwritten. Once `staging` is
 /// reset to `main` with `--keep` and holds a change `done` meets, `main`
@@ -1395,10 +1395,10 @@ fn a_red_merge_check_leaves_main_untouched_and_a_met_one_fast_forwards_it() {
 }
 
 /// The judges a land runs are main's tip's and never the branch's
-/// (#4372, #4348 ruling 5): a branch that changes `budget`'s source, and
-/// stands a passing judge at its own head beside it, is judged by the
-/// one kept for main's tip, which refuses here, and the call it was asked
-/// is `_merge`'s judgement since that tip.
+/// (ruled 2026-11-09): a branch that changes `budget`'s source, and stands
+/// a passing judge at its own head beside it, is judged by the one kept
+/// for main's tip, which refuses here, and the call it was asked is
+/// `_merge`'s judgement since that tip.
 #[test]
 fn a_branchs_change_to_a_judge_does_not_judge_that_branch() {
     let root = repository("land-judge");
@@ -1446,9 +1446,9 @@ fn a_branchs_change_to_a_judge_does_not_judge_that_branch() {
 }
 
 /// A merge whose `seams.toml` main's xtask cannot read is refused with
-/// the two steps such a change lands in, `main` untouched (#4372): the
+/// the two steps such a change lands in, `main` untouched: the
 /// fixture is a table no reader at main's tip knows, the row of a grammar
-/// change merged before the xtask that reads it, as #4343's was.
+/// change merged before the xtask that reads it, as one was.
 #[test]
 fn a_manifest_mains_xtask_cannot_read_is_refused_with_the_two_steps() {
     let root = repository("land-grammar");
@@ -1480,7 +1480,7 @@ fn a_manifest_mains_xtask_cannot_read_is_refused_with_the_two_steps() {
 
 /// A merge that changes how the harness keys and writes its readings is
 /// refused naming the case and the commands that take them by main's
-/// xtask, and lands once they are taken (#4378). `xtask/src/key.rs` is
+/// xtask, and lands once they are taken. `xtask/src/key.rs` is
 /// changed on `staging`; the harness's `clippy` readings stand over the
 /// merged tree under another keying, a crate's `src` alone, as the
 /// merge's own xtask would key them, and its `test` reading is written
@@ -1572,7 +1572,7 @@ fn a_merge_that_rekeys_its_readings_lands_once_mains_xtask_took_them() {
 
 /// A merge of the harness whose lock fails main's `api-check` is told,
 /// beside `done`'s count, the instrument, the two things the failure can
-/// be and the two steps, `main` untouched (#4378):
+/// be and the two steps, `main` untouched:
 /// `xtask/src/api_check/mod.rs` is changed on `staging` and `xtask.lock`
 /// committed with its lines in the other order. What this holds is that
 /// the text is said and names the tree's own case first. It does not
@@ -1580,7 +1580,7 @@ fn a_merge_that_rekeys_its_readings_lands_once_mains_xtask_took_them() {
 /// passes and main's fails: the judge here is the build under test, so
 /// the merge's xtask and main's are one, and a lock out of order fails
 /// both. Two builds that render a lock differently, and the steps
-/// themselves, are #4405's to stand.
+/// themselves, no test stands yet.
 #[test]
 fn a_lock_mains_xtask_renders_otherwise_is_refused_with_the_two_steps() {
     let root = repository("land-lock");
@@ -1632,7 +1632,7 @@ fn a_lock_mains_xtask_renders_otherwise_is_refused_with_the_two_steps() {
 }
 
 /// A merge that leaves `xtask/` alone is told neither text, though
-/// `done` counts the harness as touched (#4378): `docs/divergence.toml`
+/// `done` counts the harness as touched: `docs/divergence.toml`
 /// is a file xtask's tests read (`key::READ_BY_TESTS`), so a merge that
 /// changes it alone is asked the harness's readings, missing here, and
 /// its xtask is the one main has, which keys and writes them as the
@@ -1695,9 +1695,9 @@ fn land_with_deny(root: &Path, body: &str) -> (i32, String) {
 
 /// Where `Cargo.lock` differs from main's, the land runs `cargo deny
 /// check advisories sources` under main's `deny.toml`, never the merge's
-/// (#4372, #4348 ruling 5): a release other than the one nightly.yml
-/// installs refuses, and so does a check that finds anything; one that
-/// finds nothing hands the merge on to `done`. The stand-in refuses
+/// (ruled 2026-11-09): a release other than the one nightly.yml installs
+/// refuses, and so does a check that finds anything; one that finds
+/// nothing hands the merge on to `done`. The stand-in refuses
 /// `check --config` with a usage error, exit 2, as 0.20.2 does, so the
 /// argv is held to `--config <path> check advisories sources`, and a
 /// usage error refuses as a check that judged nothing, never as a

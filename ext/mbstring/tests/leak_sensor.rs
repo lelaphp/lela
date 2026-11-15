@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -16,7 +16,7 @@ fn armed(source: &str) -> String {
 
 /// `mb_ereg_replace_callback` appends what the callback returns as its
 /// string, `zval_try_get_string`, and gives that string up after,
-/// whether the return was a string or a number converted (#2100).
+/// whether the return was a string or a number converted.
 #[test]
 fn a_replacement_callback_s_answer_is_given_up() {
     let stdout = armed(

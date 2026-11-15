@@ -1,10 +1,10 @@
-//! The process-wide mechanisms (design §4.1, #1779): what a process has
+//! The process-wide mechanisms (design §4.1): what a process has
 //! one of, whichever request or engine asks. Each is a mechanism that
 //! decides nothing of when or why it is used:
 //!
 //! - [`fork`], the one call in the workspace that makes a process
 //!   (`fork.home`); `php_engine` decides around it, the threads it joins
-//!   first and what the child restores (#1807);
+//!   first and what the child restores;
 //! - [`post`], the pool a signal handler writes and safe code reads, with
 //!   the wake set it raises (design §5.8, revision 38), which `php_engine`
 //!   holds the one instance of;
@@ -13,19 +13,19 @@
 //!   thread's;
 //! - [`stand_aside`], a host's main thread out of every signal's way once
 //!   the thread `php_engine` moved the process's work onto stands for it
-//!   (design §5.6, #3067), and [`started_aside`], a thread the engine
-//!   starts for itself out of it from its first instruction (#3861);
+//!   (design §5.6), and [`started_aside`], a thread the engine
+//!   starts for itself out of it from its first instruction;
 //! - [`process`], the process's identity, its real user and group and its
 //!   supplementary groups (revision 41);
 //! - the calls on the process's file descriptors that `std` has no answer
 //!   for, [`poll_fd`], [`select_fds`] and the socket calls, which the
-//!   streams layer reaches through `php_engine`'s face (#1874).
+//!   streams layer reaches through `php_engine`'s face.
 //!
 //! Revision 38 kept the pool in `php_heap` until more than signals and
 //! `LC_CTYPE` arrived; `fork` is what arrived, and the two moved here
 //! unchanged. The process's identity and its file descriptors followed by
 //! the rule that `php_heap` holds memory and stacks and this crate the
-//! process and its file descriptors (#1935), moved as they stood. The
+//! process and its file descriptors, moved as they stood. The
 //! crate is an `unsafe` home of its own, every block one operation with
 //! its `SAFETY` comment.
 #![deny(

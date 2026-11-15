@@ -420,7 +420,7 @@ fn write(
 /// Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
 /// ```
 ///
-/// The walk holds no owner of the table, as php's holds none (#2043): a
+/// The walk holds no owner of the table, as php's holds none: a
 /// row an element's `__serialize` rewrites in place through the
 /// reference that holds the table is written as it now is, a table that
 /// assignment gives up is destroyed there, its other elements' last
@@ -440,7 +440,7 @@ fn write(
 ///
 /// Nor does it hold an owner of a row, so two tables down a row the
 /// program rewrites through its reference is rewritten in place and
-/// written as it now is, as php writes it (#2159):
+/// written as it now is, as php writes it:
 ///
 /// ```php
 /// class C { function __serialize(): array { $GLOBALS['r'][0][1] = 'new'; return []; } }

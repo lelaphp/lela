@@ -78,7 +78,7 @@ fn dump_under_short_open_tag(source: &[u8], short_open_tag: bool) -> String {
         .text()
 }
 
-/// [`Options::short_open_tag`] reaching the scanner (#608): with the
+/// [`Options::short_open_tag`] reaching the scanner: with the
 /// entry off the `<?` and everything after it is the one
 /// `T_INLINE_HTML` php's `inline_char_handler` takes it into, and
 /// with it on the same source is the code inside the tag. The
@@ -114,7 +114,7 @@ fn a_short_tag_opens_code_only_while_short_open_tag_is_on() {
     .assert_eq(&dump_under_short_open_tag(source, true));
 }
 
-/// A unit laid down in the room of one given up (#3028) is the unit
+/// A unit laid down in the room of one given up is the unit
 /// laid down in none, and an `eval` of one line in a loop takes its
 /// oplines', its constants' and its file name's room from the last.
 /// A compile cut short by a refusal gives its arena up as one that
@@ -381,8 +381,8 @@ fn what_php_refuses_is_the_first_parse_error_in_phps_words() {
 /// An expression the walk cannot emit yet inside parentheses: the
 /// refusal names the expression itself, in the sentence the phpt
 /// lane reads as a construct not read yet, where the reader named
-/// the parenthesis before (#395), and is [`crate::Raise::Unread`]
-/// (#3215). A parenthesis nothing closes is the parser's own
+/// the parenthesis before, and is [`crate::Raise::Unread`].
+/// A parenthesis nothing closes is the parser's own
 /// refusal, raised before the walk runs, and php's fatal.
 #[test]
 fn an_unread_expression_inside_parentheses_names_the_expression() {
@@ -413,10 +413,10 @@ fn an_unread_expression_inside_parentheses_names_the_expression() {
     assert_eq!(unclosed.raise, crate::Raise::Fatal);
 }
 
-/// #3029: a refusal carries what landed in php's tables before it,
-/// each top-level function and each class bound early in the order
-/// it landed, beside what was raised by then; a class its opline
-/// binds, and a closure slot the refused statement took, are not.
+/// A refusal carries what landed in php's tables before it, each
+/// top-level function and each class bound early in the order it
+/// landed, beside what was raised by then; a class its opline binds,
+/// and a closure slot the refused statement took, are not.
 #[test]
 fn a_refusal_carries_the_functions_and_the_early_bound_classes_that_landed() {
     use php_unit::TopLevel;
@@ -440,7 +440,7 @@ fn a_refusal_carries_the_functions_and_the_early_bound_classes_that_landed() {
     assert_eq!(keys, Some(1), "the key counted with what landed");
 }
 
-/// #3029: a refusal php throws is its parser's, before `zend_compile`
+/// A refusal php throws is its parser's, before `zend_compile`
 /// declared anything, so it carries nothing that landed.
 #[test]
 fn a_thrown_refusal_carries_nothing_declared() {
@@ -454,7 +454,7 @@ fn a_thrown_refusal_carries_nothing_declared() {
     assert!(refused.is_some_and(|error| error.declared.is_none()));
 }
 
-/// #3041: a refusal carries the keys its compile had made whatever it
+/// A refusal carries the keys its compile had made whatever it
 /// declared, an anonymous class's among them and one whose body the
 /// compile refused in; a parse error made none.
 #[test]
@@ -467,7 +467,7 @@ fn a_refusal_carries_the_keys_it_made_declared_or_not() {
     assert_eq!(parse, Some(0), "a parse error compiled nothing");
 }
 
-/// `zend_compile_declare` (#411): the statement leaves no opline,
+/// `zend_compile_declare`: the statement leaves no opline,
 /// so the oracle's dump of a file that opens with one is the dump of
 /// the file without it, and `declare(strict_types=1)` shows in the
 /// bit every op array of the file then carries. The dumps are the
@@ -560,8 +560,8 @@ fn what_a_declare_refuses_is_what_php_refuses() {
         Some("declare(ticks) value must be a literal")
     );
     // What php compiles and this compiler does not: the alternative
-    // syntax. A tick count was one of them until #1190, the encoding
-    // pragma until #1272, which is held to `zend_is_first_statement`
+    // syntax. A tick count was once one of them, and so was the
+    // encoding pragma, which is held to `zend_is_first_statement`
     // without `allow_nop` (the parser's own reading of it is
     // `multibyte`'s tests).
     assert_eq!(refused(b"<?php declare(ticks=1); echo 1;").as_deref(), None);

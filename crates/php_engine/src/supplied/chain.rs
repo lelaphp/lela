@@ -1,4 +1,4 @@
-//! The one shape of every chained kind (#1945): php's saved pointer,
+//! The one shape of every chained kind: php's saved pointer,
 //! which each supplier overwrites and keeps as the one beneath, and
 //! calls before its own work, after it, around it or not at all, as it
 //! chooses. Each link is handed [`Beneath`], every link under it and,
@@ -109,7 +109,7 @@ impl<'a, K: ChainKind> Beneath<'a, K> {
 
     /// The one beneath served: the next link down, handed the ones
     /// beneath it and served as the extension that supplied it, so what
-    /// it allocates is that extension's in a debug build (#2627), or
+    /// it allocates is that extension's in a debug build, or
     /// php's own function of the kind.
     pub fn serve(self, req: &mut Request) -> K::Answer {
         match self.links.split_last() {
@@ -132,7 +132,7 @@ pub enum Interrupt {}
 /// with beneath every link the engine's cached compile of it, the unit
 /// cache's lookup and compile ([`Request::cached_source`]), in which
 /// opcache's admission decides as the one question the cache asks
-/// (ADR-0005, #2457). A link wraps it and may post-process what it
+/// (ADR-0005). A link wraps it and may post-process what it
 /// answers, as phpdbg's `phpdbg_compile_file` keeps a file's source, or
 /// hands the ones beneath a source of its own, as phar's
 /// `phar_compile_file` hands `phar_orig_compile_file` an archive's stub
@@ -352,7 +352,7 @@ impl<'a> Beneath<'a, CompileFile> {
     /// archive: a `zend_file_handle` php destroys only once the program
     /// has been served, `auto_prepend_file`'s, `auto_append_file`'s or the built-in
     /// server's router's and program's, holds it until then, inherited by
-    /// a process the request execs ([`HandlePath::Kept`], #2561).
+    /// a process the request execs ([`HandlePath::Kept`]).
     #[must_use]
     pub fn opened<'b>(self, path: &'b [u8]) -> Beneath<'b, CompileFile>
     where

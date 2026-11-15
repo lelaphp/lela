@@ -1,13 +1,13 @@
 //! A callback C calls from a thread of its own while the request runs
-//! PHP code (#1640): the thread waits, and the request serves the call
+//! PHP code: the thread waits, and the request serves the call
 //! at its next interrupt check, or lends itself to the thread while it
 //! blocks, or ends with the call still posted and C reads zero. The C
 //! side is a Rust function with C's calling convention, reached from
 //! PHP code by `FFI::cast` of its address; its thread writes what the
 //! callback returned to a file of its own, which the test reads. Every
-//! engine native that blocks lends the request (#2401) but `curl_exec`
-//! and `curl_multi_select`, whose waits are libcurl's (#2595), so the
-//! window in which a call stays posted is held open by a native of this
+//! engine native that blocks lends the request but `curl_exec` and
+//! `curl_multi_select`, whose waits are libcurl's, so the window in
+//! which a call stays posted is held open by a native of this
 //! test's own, `hold_unlent`, which blocks without lending and needs no
 //! server to wait on.
 //!
@@ -17,9 +17,9 @@
 //! past the limit and refused, as every thread started later is on
 //! Linux, which maps each thread's stack below the ones before it, and
 //! one above is checked against nothing, as every later thread is on
-//! macOS (#3615). This engine holds the serve to the limit
+//! macOS. This engine holds the serve to the limit
 //! `zend_call_stack_init` works out on C's thread, the row
-//! `trace:ffi-callback-thread-stack-limit` (#3697, #3742), so it is
+//! `trace:ffi-callback-thread-stack-limit`, so it is
 //! served wherever the thread stands and refused at that thread's own
 //! depth. Each test serves the request on a thread of its own and gives
 //! C one of several started before it and after it, whichever stands
@@ -71,7 +71,7 @@ extern "C" fn later(callback: Callback, to: &Sender<Callback>) {
 
 /// `hold_unlent(float $seconds): void`: the request held for that long in
 /// a native that never lends it, as only curl's waits among the engine's
-/// natives are (#2595).
+/// natives are.
 #[php_function]
 fn hold_unlent(seconds: f64) {
     std::thread::sleep(Duration::from_secs_f64(seconds));
@@ -79,7 +79,7 @@ fn hold_unlent(seconds: f64) {
 
 /// `hold_unlent_and_throw(float $seconds): void`: [`hold_unlent`], then
 /// a `ValueError` thrown, so the call posted while it held is served at
-/// the interrupt check after a native that threw (#3658).
+/// the interrupt check after a native that threw.
 #[php_function]
 fn hold_unlent_and_throw(req: &mut Request, seconds: f64) -> Result<(), Thrown> {
     std::thread::sleep(Duration::from_secs_f64(seconds));
@@ -148,7 +148,7 @@ fn served(name: &str, source: &str) -> (String, Option<String>) {
 /// wrote it: `None` where the thread was still waiting ten seconds on.
 /// What it returned is written under a name of its own and renamed into
 /// place, so the poll never reads the file between its creation and its
-/// write, which a plain `fs::write` lets it read as `""` (#2699).
+/// write, which a plain `fs::write` lets it read as `""`.
 fn served_with(
     name: &str,
     source: &str,
@@ -246,11 +246,11 @@ echo "slept\n";
 /// The same sleep, with C's thread below the request's, as every thread
 /// a library starts stands on Linux: php refuses the call there before
 /// the callable runs, its frames past the stack limit the request took
-/// on its own thread (php 8.4.27 NTS in Docker, 3 runs of 3, #3615), and
+/// on its own thread (php 8.4.27 NTS in Docker, 3 runs of 3), and
 /// the pinned php on macOS, where the thread stands above, serves it
 /// unchecked. This engine holds the serve to the limit worked out on C's
 /// thread, so it is served wherever the thread stands
-/// (`trace:ffi-callback-thread-stack-limit`, #3697).
+/// (`trace:ffi-callback-thread-stack-limit`).
 #[test]
 fn a_callback_from_a_thread_below_the_request_s_stack_is_served_at_that_thread_s_limit() {
     let (stdout, returned) = served_with(
@@ -314,7 +314,7 @@ echo "slept\n";
 }
 
 /// The thread calls back while the request waits for a child in
-/// `proc_close`: the wait lends the request (#2401), so the callback runs
+/// `proc_close`: the wait lends the request, so the callback runs
 /// inside it, on the thread, and C reads what it returned.
 #[test]
 fn a_callback_posted_while_proc_close_waits_is_served_in_the_wait() {
@@ -338,7 +338,7 @@ echo "closed $code\n";
 /// never lends it and then throws: the interrupt check after the throw
 /// serves the call with the throwable set aside, so the callback runs
 /// before the `catch` takes it and C reads what it returned, as php,
-/// which calls the callable on C's thread at once, has it (#3658).
+/// which calls the callable on C's thread at once, has it.
 #[test]
 fn a_callback_posted_while_a_native_that_throws_holds_is_served_before_the_catch() {
     let (stdout, returned) = served(
@@ -352,7 +352,7 @@ try { hold_unlent_and_throw(0.6); } catch (ValueError $e) { echo "caught ", $e->
 }
 
 /// The thread calls back while the request reads a socket in
-/// `socket_read`, and the callback closes that socket (#2601): the fd the
+/// `socket_read`, and the callback closes that socket: the fd the
 /// read waits on stays the socket's until the read returns, which the
 /// write after the close wakes, and the read then answers as php's
 /// closed-socket path does. The socket's receive timeout bounds the read
@@ -384,7 +384,7 @@ try { socket_write($p[1], "y"); } catch (Error $e) { echo $e->getMessage(), "\n"
 
 /// The thread calls back while the request waits in `stream_select`, and
 /// the callback closes the stream the wait stands on, then writes to its
-/// pair (#2664): the stream's fd stays open until the wait returns, which
+/// pair: the stream's fd stays open until the wait returns, which
 /// the write wakes, and the walk after it meets the stream closed, php's
 /// `TypeError` for a closed element.
 #[test]
@@ -407,7 +407,7 @@ echo hrtime(true) - $t0 < 2000000000 ? "woke" : "slept", "\n";
 }
 
 /// The callback a `stream_select` wait serves assigns `null` to the
-/// array the wait was handed (#2664): the call holds it, and the walk
+/// array the wait was handed: the call holds it, and the walk
 /// after the wait reads it and writes the ready streams back.
 #[test]
 fn stream_select_holds_its_arrays_across_the_wait() {
@@ -428,7 +428,7 @@ var_dump(stream_select($r, $w, $e, 3), array_keys($r), $r['kkk'] === $p[0]);
 
 /// The callback a `socket_read` wait serves closes the stream the socket
 /// was imported from, which owns the fd the read waits on, and writes to
-/// its pair (#2664): the fd stays open until the read returns, which reads
+/// its pair: the fd stays open until the read returns, which reads
 /// what was written.
 #[test]
 fn a_stream_closed_under_its_imported_socket_s_read_keeps_its_fd() {

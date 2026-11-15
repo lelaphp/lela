@@ -270,7 +270,7 @@ fn the_control_is_scoped_apart_from_the_engines_reading() {
     .unwrap();
     assert_eq!(control.scope, format!("{}@control", corpus.scope));
     // A run under a regime beside `dump` keeps a reading of its own too,
-    // its control's after the control's mark (#1822).
+    // its control's after the control's mark.
     let under = |runner: &Runner| {
         reading(
             &tally(1, &[Judgement::Pass]),
@@ -341,8 +341,8 @@ fn a_file_outside_the_corpus_is_named_by_its_own_name() {
 
 /// The engine's side of a file it finished no dump of is that file's
 /// verdict and never the run's end (design §8): a dump past the recipe's
-/// limit is the file's `fail` naming the limit (#699), one a signal ended
-/// is the file's `fail` naming the signal (#1069), and a binary that would
+/// limit is the file's `fail` naming the limit, one a signal ended
+/// is the file's `fail` naming the signal, and a binary that would
 /// not run is the file's `bork`.
 #[test]
 fn a_dump_past_the_limit_or_ended_by_a_signal_is_the_files_fail_naming_it() {
@@ -420,7 +420,7 @@ fn compared(expected: Dumped, actual: Dumped) -> OneJudged<Judgement> {
     )
 }
 
-/// #2692: two dumps that differ in each binary's own `PHP_BINARY` and
+/// Two dumps that differ in each binary's own `PHP_BINARY` and
 /// `PHP_BUILD_DATE` alone are identical once each binary's own values are
 /// put out of its dump, and no registry row is consulted to say so.
 #[test]

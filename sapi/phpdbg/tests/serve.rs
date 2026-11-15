@@ -1,7 +1,7 @@
 //! The binary is php's debugger: the file its line names compiled and
 //! the prompt read off stdin. What the pinned phpdbg writes for a session
-//! is held beside it by `xtask witness`, from `tests/lines.toml` (#1975,
-//! #2507); what is held here is a relation within one session, not bytes.
+//! is held beside it by `xtask witness`, from `tests/lines.toml`;
+//! what is held here is a relation within one session, not bytes.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -36,7 +36,7 @@ fn debugged(name: &str, source: &str, commands: &str) -> String {
 /// engine's and `class_alias()`'s, and the iterator wrapper php never
 /// adds not: what `get_declared_classes()`, `get_declared_interfaces()`
 /// and `get_declared_traits()` list together, read through the native
-/// face's linked tables (#1911).
+/// face's linked tables.
 #[test]
 fn clean_counts_the_class_tables_keys() {
     let out = debugged(

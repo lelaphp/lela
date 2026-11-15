@@ -2,8 +2,8 @@
 //! the C library classes it: macOS's counts `\xE9` a letter, `\xA0`
 //! printable and a space, and `\xC9` upper case, as the macOS oracle does,
 //! where glibc's classes no such byte. A fence would pin one platform's
-//! reading, so the macOS one is held here (#2816, as #2796 held
-//! `is_space`'s in `php_process::locale`'s test).
+//! reading, so the macOS one is held here (as `is_space`'s is held in
+//! `php_process::locale`'s test).
 
 #[cfg(target_os = "macos")]
 #[test]

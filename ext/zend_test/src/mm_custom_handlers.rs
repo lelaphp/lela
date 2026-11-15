@@ -1,6 +1,6 @@
 //! php's allocator hooks in its test extension,
 //! `ext/zend_test/zend_mm_custom_handlers.c`, by observation (design
-//! §7.1, as #1780 ruled): where php's `zend_test` installs a heap of its
+//! §7.1, revision 83): where php's `zend_test` installs a heap of its
 //! own whose custom handlers serve each allocation from the heap beneath
 //! and print it, this one puts an observer in the request's heap
 //! ([`Memory::observe_allocations`]), which is told of each allocation

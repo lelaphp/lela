@@ -1,5 +1,5 @@
 # php_streams: php's main/streams/ and main/network.c (design §4.1, §4.3
-# seam 5; #1773, #1874): wrappers, transports, filters, the user wrapper
+# seam 5): wrappers, transports, filters, the user wrapper
 # and the stream context, above php_engine over its api. The engine
 # reaches it only through the open hook ext/standard hands it, php's
 # `zend_stream_open_function`, and through request state; extensions reach

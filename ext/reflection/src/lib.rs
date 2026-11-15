@@ -5490,7 +5490,7 @@ fn this_class_constant(
 /// `_class_string` per class, each preceded by a blank line as
 /// `_extension_class_string` writes it. Every bundled extension is
 /// `<persistent>`, as one compiled in is, and its version is the
-/// extension's own. The `INI` block is not rendered yet (#375); `json` has
+/// extension's own. The `INI` block is not rendered yet; `json` has
 /// no ini entry.
 fn extension_string(
     req: &mut Request,
@@ -7832,7 +7832,7 @@ impl ReflectionExtension {
     /// extension `$name` names, indent empty. The load number in the first
     /// line is the oracle's build order there and the bundle's here, `#10`
     /// against `#15` for ctype, a difference that is nobody's defect; the
-    /// pin's `[recipe.normalise] extension_number_token` (#317) replaces
+    /// pin's `[recipe.normalise] extension_number_token` replaces
     /// the digits after `extension #` in both streams, so the fence below
     /// holds every byte the oracle prints and the token stands where the
     /// number was.

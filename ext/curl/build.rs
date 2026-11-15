@@ -1,4 +1,4 @@
-//! libcurl is the platform's (design §7.2, #1324, #1332): the library the
+//! libcurl is the platform's (design §7.2): the library the
 //! oracle links, declared and linked by `curl-sys`, never vendored; here
 //! curl-sys is held to that, and a miss fails the build.
 //!

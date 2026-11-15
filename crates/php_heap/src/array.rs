@@ -253,7 +253,7 @@ pub(crate) fn persistent_array(entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
 /// takes it, laid by the table ([`crate::Strings`]'s
 /// `constant_array`) or by a set the table publishes
 /// ([`crate::Strings::publish`]): beside `IS_ARRAY_IMMUTABLE`, what says
-/// the array is the table's ([`Arr::is_permanent`], #4656). Written while
+/// the array is the table's ([`Arr::is_permanent`]). Written while
 /// whoever laid the array alone names it. The process's empty array
 /// carries the bit from its lay ([`Arr::empty`]) and, read by every
 /// thread, is never written here.
@@ -701,7 +701,7 @@ impl Arr {
     /// no data, no rows and no recursion mark, the type `IS_ARRAY` again and the
     /// count and the pin kept. So what names it through its pin reads an
     /// empty table and never freed memory, and an owner taken of it
-    /// since gives it up as any table (design §4.4, #2230).
+    /// since gives it up as any table (design §4.4).
     pub(crate) fn emptied(self) {
         let header = self.header();
         header.gc.set_kind(ZvalType::Array);
@@ -1619,11 +1619,11 @@ impl Arr {
     /// slots, php's `perealloc2` over the used part of the data, so a
     /// table whose data is a `run` of pages grows where it stands when
     /// the pages after it are free and `memory_get_peak_usage()` never
-    /// holds the two sizes at once (#278).
+    /// holds the two sizes at once.
     ///
     /// A list appended to from empty moves `memory_get_usage()` at its
-    /// first element and at each doubling past eight, by php's numbers
-    /// (#2661): the 56-byte header and data of eight slots of sixteen
+    /// first element and at each doubling past eight, by php's numbers:
+    /// the 56-byte header and data of eight slots of sixteen
     /// bytes and two of hash, each size rounded up to its bin to 3072
     /// bytes, past that to a `run` of whole pages, and past the 2 MB chunk
     /// to a huge block. The program writes its first line before it
@@ -1672,7 +1672,7 @@ impl Arr {
     /// relinked.
     ///
     /// A hash appended to from empty moves `memory_get_usage()` at its
-    /// first element and at each doubling past eight (#2661): the header
+    /// first element and at each doubling past eight: the header
     /// and data of `HT_SIZE_EX`, forty bytes a bucket and four of hash
     /// for each of twice as many slots, rounded up as a list's data is
     /// ([`Arr::packed_grow`]). Under negative integer keys nothing else is
@@ -3547,8 +3547,8 @@ mod tests {
     /// owner only under `Z_REFCOUNTED_P`, and an immutable array is not
     /// refcounted; here [`Arr::delref`] is what refuses to write, so the
     /// header's own count reads after what it read before and the
-    /// `Cell`s of a value the unit published are never written. #442
-    /// asked whether the count went to zero; it does not.
+    /// `Cell`s of a value the unit published are never written. The
+    /// question was whether the count went to zero; it does not.
     #[test]
     fn a_separated_immutable_array_keeps_the_count_it_was_published_with() {
         let _alone = alone();
@@ -4208,7 +4208,7 @@ mod tests {
 
     /// `zend_hash_clean` over a hash of 100,000 rows, each key and value
     /// a string of the request's own: one pass, not the n²/2 bucket reads
-    /// of a delete per row from position 0 that #2284 measured, which at
+    /// of a delete per row from position 0, measured before, which at
     /// this size is five billion reads and takes minutes; this test holds
     /// the clean to five seconds where one pass takes milliseconds. The
     /// table is left empty where it stands, its data and size kept, every

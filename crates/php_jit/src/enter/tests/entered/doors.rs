@@ -1,5 +1,5 @@
-//! An exit's door under a publish on another thread (#3231, #4108's
-//! ruling, `jit-design.md` §4.4): a root whose entry guard always fails
+//! An exit's door under a publish on another thread (ruled 2026-11-04,
+//! `jit-design.md` §4.4): a root whose entry guard always fails
 //! leaves through exit 0 on every turn of one thread, while a second
 //! thread compiles the side trace grown from that exit and publishes it,
 //! which writes nothing the root reads: no published word is written after

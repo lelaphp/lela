@@ -189,7 +189,7 @@ fn a_blank_line_is_the_first_only_where_nothing_else_differs() {
     assert_eq!(blank.signature, Signature::Differs);
 }
 
-/// Lines are held as bytes, as the whole section is (#1937): replacement
+/// Lines are held as bytes, as the whole section is: replacement
 /// characters where the test expects Windows-1251 are the engine's own
 /// line, not a line the two share.
 #[test]
@@ -205,7 +205,7 @@ fn a_line_is_held_to_its_bytes() {
 /// A run is kept as one that died where a signal ended it or it exited as
 /// a shell says a signal ended its child, 129 to 159, and never otherwise;
 /// its stderr is kept to the last [`TAIL`] lines, and the note names the
-/// ending and indents the lines under it (#4130).
+/// ending and indents the lines under it.
 #[test]
 fn a_death_is_a_signal_or_a_shells_status_for_one_and_keeps_the_last_of_stderr() {
     for exited in [0, 1, 127, 128, 160, 255] {
@@ -231,7 +231,7 @@ fn a_death_is_a_signal_or_a_shells_status_for_one_and_keeps_the_last_of_stderr()
 
 /// A miss kept before it kept how a program died reads with none, and one
 /// that died is kept with its ending as the oracle names it, so a run kept
-/// on disk says it of the test it ran (#4130).
+/// on disk says it of the test it ran.
 #[test]
 fn a_miss_keeps_its_death_on_disk_and_one_kept_before_reads_with_none() {
     let before: Miss = serde_json::from_str(r#"{"signature":"differs"}"#).unwrap();

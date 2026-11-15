@@ -1,8 +1,7 @@
 //! What one extension declares it requires, read from its library's
 //! sources as `api-check` reads the bundle's `cfg`s: the rows of php's
 //! `zend_module_dep` list (`ZEND_MOD_REQUIRED`, `ZEND_MOD_OPTIONAL`,
-//! `ZEND_MOD_CONFLICTS`) an extension hands `ExtensionBuilder::dependencies`
-//! (#1915).
+//! `ZEND_MOD_CONFLICTS`) an extension hands `ExtensionBuilder::dependencies`.
 //!
 //! A row is read when it is written as one of:
 //!
@@ -296,7 +295,7 @@ mod tests {
     /// a literal in a `vec!` (`ext/pdo_sqlite`), rows a function returns
     /// (standard), a closure taking the kind (phar), a function fixing it
     /// (mysqli, xsl), and Optional and Conflicts rows left out (dom).
-    /// sqlite3 declares nothing, so links nothing into the bundle (#1915).
+    /// sqlite3 declares nothing, so links nothing into the bundle.
     #[test]
     fn the_tracked_extensions_declare_php_s_required_rows() {
         let none: Vec<String> = Vec::new();

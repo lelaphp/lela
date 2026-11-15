@@ -1,5 +1,5 @@
 //! libmagic, compiled from the sources vendored at `libmagic/` (design
-//! §7.2, #1451): `php-src/ext/fileinfo/libmagic` at the tag `oracle.toml`
+//! §7.2): `php-src/ext/fileinfo/libmagic` at the tag `oracle.toml`
 //! pins, byte for byte, with php's patches applied and its `LICENSE`, and
 //! `data_file.c`, the compiled magic database php builds in, which
 //! `apprentice.c` includes. The file list is the one `config.m4` compiles,
@@ -15,7 +15,7 @@ fn main() {
     // php compiles C and C++ with -DNDEBUG unless it is built with
     // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
     // two builds that set ZEND_DEBUG, as debug assertions are this build's:
-    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    // assert() is live exactly where Rust's debug_assertions is.
     if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
         build.define("NDEBUG", None);
     }

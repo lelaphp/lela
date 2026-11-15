@@ -1,4 +1,4 @@
-//! The owner type as a program meets it (#1995): an owner a native
+//! The owner type as a program meets it: an owner a native
 //! drops without handing it to a sink or giving it up is reported, in a
 //! debug build, as the `InternalError` naming the line that made it,
 //! whatever counted value it owns; one given up or returned is reported
@@ -146,9 +146,9 @@ fn owners() -> Extension {
 /// the `InternalError` naming the line that took it, and nothing after it
 /// runs. An owner of what no count owns, a string the engine's table
 /// holds or an integer, leaks nothing and is reported nowhere: its line
-/// is kept beside a block, and it has none (#2246). A constant string the
+/// is kept beside a block, and it has none. A constant string the
 /// engine's table does not hold is the unit's own string, counted, as a
-/// request-only unit's constants are under opcache (#2930).
+/// request-only unit's constants are under opcache.
 #[test]
 fn an_owner_dropped_unconsumed_is_reported_with_the_line_that_made_it() {
     let engine = Engine::cli_builder().extensions(&[owners()]).build();
@@ -237,8 +237,8 @@ fn returning_a_view_of_an_element_takes_the_engines_own_owner() {
 
 /// An owner a native holds as it meets the hard memory limit is dropped
 /// on the path that ends the request, which php leaves by `_exit` with
-/// the native's locals unfreed: the request writes php's line alone
-/// (#2048). The same native given room gives its owner up.
+/// the native's locals unfreed: the request writes php's line alone.
+/// The same native given room gives its owner up.
 #[test]
 fn an_owner_dropped_on_the_path_to_a_fatal_is_not_reported() {
     let engine = Engine::cli_builder().extensions(&[owners()]).build();
@@ -259,7 +259,7 @@ fn an_owner_dropped_on_the_path_to_a_fatal_is_not_reported() {
 
 /// An owner dropped unconsumed as its native leaves by a throwable is on
 /// an ordinary path, which the native was to clean up after: it is
-/// reported with the line that made it (#2048).
+/// reported with the line that made it.
 #[test]
 fn an_owner_dropped_on_an_exceptions_path_is_reported() {
     let engine = Engine::cli_builder().extensions(&[owners()]).build();

@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -18,7 +18,7 @@ fn served(src: &str, expected: &str) {
 /// A modern document made by `Dom\Implementation` or cloned keeps the
 /// one private data it is given, as php's `php_dom_instantiate_object_helper`
 /// makes none of its own, and one that throws before it is made gives
-/// that data up, `php_dom_private_data_destroy` (#2094).
+/// that data up, `php_dom_private_data_destroy`.
 #[test]
 fn a_modern_document_keeps_one_private_data() {
     served(
@@ -34,7 +34,7 @@ fn a_modern_document_keeps_one_private_data() {
 
 /// `Dom\HTMLDocument::createFromFile` gives up the empty read that ends
 /// the stream, as `php_stream_read` into php's own buffer makes no
-/// string of it (#2094).
+/// string of it.
 #[test]
 fn an_html_document_from_a_file_keeps_no_read() {
     served(
@@ -45,8 +45,7 @@ fn an_html_document_from_a_file_keeps_no_read() {
 
 /// The string an `XPath` PHP function answers, and the name an int-keyed
 /// `registerPhpFunctions` entry is read off, are given up once their
-/// bytes are copied, as php's `zend_tmp_string_release` gives them up
-/// (#2094).
+/// bytes are copied, as php's `zend_tmp_string_release` gives them up.
 #[test]
 fn an_xpath_callback_s_answer_is_given_up() {
     served(
@@ -63,10 +62,9 @@ fn an_xpath_callback_s_answer_is_given_up() {
 }
 
 /// A callback answer whose conversion throws is given up all the same,
-/// as php's `zval_ptr_dtor(&callback_retval)` follows every arm (#2094),
+/// as php's `zval_ptr_dtor(&callback_retval)` follows every arm,
 /// and the callbacks a `registerPhpFunctions` array names before a
-/// refused one stay in the table and are given up with the evaluator
-/// (#2128).
+/// refused one stay in the table and are given up with the evaluator.
 #[test]
 fn an_xpath_callback_given_up_where_its_conversion_or_registration_fails() {
     served(
@@ -84,7 +82,7 @@ fn an_xpath_callback_given_up_where_its_conversion_or_registration_fails() {
 
 /// `registerPhpFunctions()` with no argument after a set keeps the
 /// callbacks the set held, which the evaluator gives up when it goes
-/// (`ext/dom/tests/DOMXPath_callables.phpt`, #2128).
+/// (`ext/dom/tests/DOMXPath_callables.phpt`).
 #[test]
 fn registering_every_function_keeps_the_set() {
     served(
@@ -103,7 +101,7 @@ echo "end\n";
 /// caches name each other; the collection is offered to the collector
 /// where the element's only other owner is that temporary, as php's
 /// `dom_parent_node_children_read` does, so the cycle a discarded read
-/// leaves is collected (#2241).
+/// leaves is collected.
 #[test]
 fn a_discarded_children_read_is_collected() {
     served(
@@ -116,7 +114,7 @@ fn a_discarded_children_read_is_collected() {
 }
 
 /// A function an evaluation calls evaluates on the same evaluator and
-/// registers on it, the evaluator staying on the object (#2318).
+/// registers on it, the evaluator staying on the object.
 #[test]
 fn an_xpath_callback_evaluates_and_registers_on_its_own_evaluator() {
     served(
@@ -132,7 +130,8 @@ fn an_xpath_callback_evaluates_and_registers_on_its_own_evaluator() {
 /// `DOMXPath::__construct` from inside a function its own evaluation
 /// calls is refused (php 8.5.12, GH-23729), and the evaluation runs to its
 /// end on the evaluator it started with, which its hold keeps until then
-/// (#2318, #2511); the object evaluates on that one after.
+/// (`trace:dom-xpath-constructed-in-callback`); the object evaluates on
+/// that one after.
 #[test]
 fn an_evaluator_constructed_anew_in_its_own_callback_is_refused_and_evaluates_to_its_end() {
     served(
@@ -146,8 +145,8 @@ fn an_evaluator_constructed_anew_in_its_own_callback_is_refused_and_evaluates_to
     );
 }
 
-/// lexbor allocates on the request's heap under its lend (ADR-0014,
-/// #2925), and everything it made is given back by the request's end: an
+/// lexbor allocates on the request's heap under its lend (ADR-0014),
+/// and everything it made is given back by the request's end: an
 /// HTML5 parse, a fragment, a selector list, and the request's URL pool,
 /// parser and IDNA converter with every URL in it. One armed engine
 /// serves many such requests, as a long-running host does, each ending

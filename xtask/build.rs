@@ -3,12 +3,12 @@
 //! `xtask/src`, the code that reads them, as they stood when this binary was
 //! built, handed to the crate as `XTASK_MANIFEST_DIGEST` and
 //! `XTASK_SOURCES_DIGEST`; and the cfg set of the target it builds for,
-//! in `target.cfg` under `OUT_DIR`, which witness coverage reads (#1068).
+//! in `target.cfg` under `OUT_DIR`, which witness coverage reads.
 //! `permit` compares
 //! them with the tree and refuses to judge when either differs, so a build
 //! older than what it judges by is the loud kind of stale rather than the
 //! quiet kind that exits 0 and judges by rules, or with code, that have
-//! moved (#16 item 1 and its residue).
+//! moved (harness revision 13).
 //!
 //! `src/inputs.rs` is included rather than imported: `build.rs` cannot
 //! depend on the lib it builds, and one definition of the digest in two
@@ -29,8 +29,7 @@ use inputs::{
 
 fn main() {
     // Read when `build.rs` runs, not when it compiles: cargo runs one
-    // compiled `build.rs` for every checkout sharing a target directory
-    // (#2628).
+    // compiled `build.rs` for every checkout sharing a target directory.
     let dir = std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
     let root = Path::new(&dir)
         .parent()
@@ -58,7 +57,7 @@ fn main() {
     println!("cargo::rustc-env=XTASK_MANIFEST_DIGEST={manifest}");
     println!("cargo::rustc-env=XTASK_SOURCES_DIGEST={code}");
     // The tests that read the workspace's tracked files are built where it
-    // carries every one of them, and the build says which it lacks (#3188).
+    // carries every one of them, and the build says which it lacks.
     println!("cargo::rustc-check-cfg=cfg(tracked)");
     match untracked(&root) {
         None => println!("cargo::rustc-cfg=tracked"),
@@ -72,12 +71,12 @@ fn main() {
 /// The cfg set of the target this build is for, as rustc prints it under
 /// the build's own flags, which is how cargo takes it: `src/cfg.rs` reads
 /// the lines, so witness coverage holds a native to the `#[cfg]` of the
-/// build that links it (#1068).
+/// build that links it.
 fn print_target_cfg() {
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let target = std::env::var("TARGET").expect("cargo names the target");
     // The target's name, which a cargo configuration's `[env]` variable
-    // for one target carries (`api_check::binding`, #3458).
+    // for one target carries (`api_check::binding`).
     println!("cargo::rustc-env=XTASK_TARGET={target}");
     let mut command = std::process::Command::new(rustc);
     command.args(["--print", "cfg", "--target", &target]);

@@ -1,4 +1,4 @@
-//! `xtask ticket`, the closer (#28): the judgement held without the
+//! `xtask ticket`, the closer: the judgement held without the
 //! network. Every test here runs the instrument's `run` over a
 //! [`Tracker`], which answers `issue view` from the issues the test laid
 //! and records what `issue edit` and `issue close` asked, so what the
@@ -39,14 +39,14 @@ fn workspace() -> &'static Path {
 
 /// The manifest a mechanics test judges by: a row, the tracked pin and no
 /// rule, so no criterion is held to a `deny = true` rule; the tracked
-/// rules a ticket an agent may take is held to (#153) are read in
+/// rules a ticket an agent may take is held to are read in
 /// [`tracked`].
 fn manifest() -> Manifest {
     of_rows([xtask::manifest::Crate::named("xtask")])
 }
 
 /// The manifest of this workspace, whose `deny = true` rules a ticket an
-/// agent may take is held to (#153).
+/// agent may take is held to.
 fn tracked_manifest() -> Manifest {
     Manifest::load(workspace()).unwrap()
 }
@@ -76,7 +76,7 @@ fn closed(number: u64, body: &str) -> Issue {
 }
 
 /// A chart sheet as the tracker answers it: an issue holding `total`
-/// sub-issues, the count the cap is measured against (#448).
+/// sub-issues, the count the cap is measured against.
 fn sheet(number: u64, state: State, total: u64) -> Issue {
     Issue {
         title: format!("Chart: a track at a row, sheet {number}"),
@@ -209,9 +209,9 @@ fn repository(name: &str) -> Tree {
 }
 
 /// `ticket ready` holds the boxes and the successors as a close does,
-/// writes a ready record of the ticket on the branch and closes nothing
-/// (#2311); a second ticket readied on the same branch keeps the first's
-/// record, and readying a ticket again replaces its own (#2358).
+/// writes a ready record of the ticket on the branch and closes nothing;
+/// a second ticket readied on the same branch keeps the first's
+/// record, and readying a ticket again replaces its own.
 #[test]
 fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothing() {
     let root = repository("ticket-ready");
@@ -382,8 +382,8 @@ fn ready_names_the_found_work_one_way_or_is_refused() {
 }
 
 /// `ticket ready` runs `done` over its own worktree and refuses, naming the
-/// list, while anything is unmet (#3618 ruling 2): a change to the harness
-/// with no reading of it holds the ticket, and nothing is recorded.
+/// list, while anything is unmet (ruled 2026-10-30): a change to the
+/// harness with no reading of it holds the ticket, and nothing is recorded.
 #[test]
 fn ready_refuses_while_done_is_unmet_in_its_worktree() {
     let root = repository("ticket-ready-unmet");
@@ -421,8 +421,8 @@ fn ready_refuses_while_done_is_unmet_in_its_worktree() {
 }
 
 /// The merge into `main` closes every open ticket its subject names with
-/// the successors that ticket's ready record names (#2311), a bundle's
-/// three tickets readied on one branch all three (#2358); one with no
+/// the successors that ticket's ready record names, a bundle's
+/// three tickets readied on one branch all three; one with no
 /// record fails naming it, is left open and is what `done` names after
 /// the merge, one closed already is passed over, and off `main` nothing
 /// is closed.
@@ -524,7 +524,7 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
 }
 
 /// The run's reading of the merge of #7 to #11 names each phase with its
-/// time (#2813): every close, the tracker by verb, each ticket read once
+/// time: every close, the tracker by verb, each ticket read once
 /// but #11, which as unready is read again after the closes, and #12 as
 /// #8's successor, and the run whole.
 fn phases_named(phases: &Reading) {
@@ -551,7 +551,7 @@ fn phases_named(phases: &Reading) {
     }
 }
 
-/// A merge that lands part of a ticket (#2394): the ticket it names with
+/// A merge that lands part of a ticket: the ticket it names with
 /// no ready record has a box unticked and stands blocked by an open one,
 /// as the build skill leaves a ticket whose last box waits on another, so
 /// the merge skips its close, says it is left open and what holds it,
@@ -633,7 +633,7 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
 
 /// [`merged`] on `main` over the merge at `HEAD`: the readings of the
 /// tickets, and the run's own, the last, set apart once it is held to be
-/// the run's (#2813).
+/// the run's.
 fn tickets_merged(root: &Path, tracker: &Tracker) -> (Vec<Reading>, Reading) {
     tickets_merged_since(root, tracker, "HEAD^1")
 }
@@ -675,16 +675,16 @@ fn merged_with_ready(
     (root, tracker)
 }
 
-/// The two merges post-commit left half closed (#2804), replayed with the
+/// The two merges post-commit left half closed, replayed with the
 /// fault that left them so: under load `gh` fails a read for a moment
 /// ("can't assign requested address", the ports run out). In fb2e2b1c
 /// that passed #2536 over as no issue at all, its first read failing; in
-/// 86edf384, #2631's read in the close failing after #2754 closed took the
-/// whole run down before one reading was written, so #2631, #2156 and
-/// #2621 stayed open and #2754's close went unrecorded. The close reads
-/// no ticket again since #2813, so #2631's one read, after #2754 closed,
-/// is the one that fails here. A read is asked again, so every ticket the
-/// merge names closes, each with its own successors.
+/// 86edf384, the read of #2631 in the close failing after #2754 closed
+/// took the whole run down before one reading was written, so #2631,
+/// #2156 and #2621 stayed open and the close of #2754 went unrecorded. The
+/// close no longer reads a ticket again, so the one read of #2631, after
+/// #2754 closed, is the one that fails here. A read is asked again, so
+/// every ticket the merge names closes, each with its own successors.
 #[test]
 fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_names() {
     for (branch, subject, ready, (flaky, answered)) in [
@@ -738,8 +738,8 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
     }
 }
 
-/// A pull request merged on GitHub (#3243): its subject, `Merge pull
-/// request #3167 from mitchellvanw/t3129` as b40d71039's, names the pull
+/// A pull request merged on GitHub: its subject, `Merge pull
+/// request #30 from owner/t29`, shaped as b40d71039's, names the pull
 /// request, which `gh issue view` answers as `MERGED`. The ticket is the
 /// branch's: #29 closes, and the tracker is never asked for #30.
 #[test]
@@ -770,7 +770,7 @@ fn a_pull_request_merged_on_github_names_its_branchs_ticket_and_not_its_own_numb
 }
 
 /// A ticket the tracker will not answer for, every read asked again, is
-/// not passed over and does not take the run down (#2804): the tickets
+/// not passed over and does not take the run down: the tickets
 /// around it close, each close is recorded, and it is a failed reading
 /// saying what to run again, which `done` names until the run, asked
 /// again, closes it. A number the tracker answers is no issue at all is
@@ -834,13 +834,13 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
     assert!(stranded(&root, &store, &head).unwrap().is_empty());
 }
 
-/// main's own history replayed (#3244): GitHub merged pull request #30
-/// as `Merge pull request #30 from owner/t29`, as b40d71039 merged #3167,
-/// and a builder then merged main into its branch as `Merge main into
-/// t31: the ftp wrapper (#30, #31, #32)`, as b519f1c89 named #3167 again.
-/// `gh issue view` answers a pull request too, in state `MERGED`. One run
-/// over both merges takes each case its one way: GitHub's own subject
-/// closes its branch's ticket, #29, and the other subject's #30 is
+/// main's own history replayed: GitHub merged pull request #30
+/// as `Merge pull request #30 from owner/t29`, as b40d71039 merged one,
+/// and a builder then merged main into its branch under a subject that
+/// names the pull request beside its own tickets, as b519f1c89 named it
+/// again. `gh issue view` answers a pull request too, in state `MERGED`.
+/// One run over both merges takes each case its one way: GitHub's own
+/// subject closes its branch's ticket, #29, and the other subject's #30 is
 /// skipped with a reading that names it a pull request, which replaces
 /// the one that left it unclosed, so `done` names it no longer; an open
 /// issue beside it is closed and a closed one passed over, as before, and
@@ -936,7 +936,7 @@ fn a_pull_request_a_merge_names_is_skipped_and_the_issues_beside_it_read_as_befo
     );
 }
 
-/// Where a close's commit stands against `main` (#2249): `main`'s own
+/// Where a close's commit stands against `main`: `main`'s own
 /// tip is landed, a branch's commit `main` does not contain is unmerged
 /// and named with its branch, and the same commit is landed once `main`
 /// has merged it.
@@ -966,7 +966,7 @@ fn a_commit_is_landed_once_main_contains_it_and_unmerged_before() {
 
 /// A close of work done at a commit `main` does not contain is refused
 /// with every box ticked, naming the commit and the branch and the two
-/// ways on, and asks the tracker nothing (#2249); a withdrawal there is
+/// ways on, and asks the tracker nothing; a withdrawal there is
 /// not held to it, since it says nothing of the work is in the tree.
 #[test]
 fn close_refuses_a_commit_main_does_not_contain_and_changes_nothing_at_the_tracker() {
@@ -1113,7 +1113,7 @@ fn close_with_every_box_ticked_closes_and_records_what_closed_it_and_the_session
 
 /// The successors are fetched, each must be open, and the edge is the
 /// tracker's own blocking relation set before the close; the reading
-/// carries them by number (#29). Whose a successor is is not held:
+/// carries them by number. Whose a successor is is not held:
 /// one `for-a-person`, one `ready-for-agent`.
 #[test]
 fn close_names_what_it_opened_through_the_tracker_s_blocking_relation() {
@@ -1202,7 +1202,7 @@ fn close_sets_only_the_edges_the_tracker_does_not_have_yet() {
 /// The close of a ticket labelled `track:<name>` refuses a successor that
 /// carries no such label, which would be `main`'s (ADR-0009), names the
 /// edit that adds it, and asks the tracker for nothing but the two `issue
-/// view` calls (#141). The track is the closed ticket's own label, not
+/// view` calls. The track is the closed ticket's own label, not
 /// where the close runs from.
 #[test]
 fn closing_a_tracks_ticket_refuses_a_successor_that_carries_no_track_label() {
@@ -1256,7 +1256,7 @@ fn closing_a_tracks_ticket_refuses_a_successor_that_carries_no_track_label() {
 /// The successor carrying the closed ticket's track label closes as it
 /// always did, and the close of one of `main`'s tickets, unlabelled or
 /// labelled `track:main`, asks nothing of a successor's labels, since
-/// work on `main` may file for any track (#141).
+/// work on `main` may file for any track.
 #[test]
 fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
     let tracker = Tracker::empty("labelled");
@@ -1356,7 +1356,7 @@ fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
 }
 
 /// `--opens-nothing` is an assertion: no edge, the close alone, and the
-/// reading says who asserted it (#29).
+/// reading says who asserted it.
 #[test]
 fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
     let tracker = Tracker::empty("nothing");
@@ -1478,7 +1478,7 @@ fn a_ticket_call_naming_no_session_is_taken_in_the_session_its_process_runs_in()
 
 /// A successor that is closed and was filed before the ticket it would
 /// succeed, missing or unreadable refuses the close, and the tracker is
-/// asked nothing but `issue view` (#29).
+/// asked nothing but `issue view`.
 #[test]
 fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_nothing() {
     let tracker = Tracker::empty("successor");
@@ -1518,11 +1518,11 @@ fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_no
     assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 }
 
-/// A successor the work filed stays its successor however it ended
-/// (#3390): t3398's ready record named #3409 and #3412, both filed by that
-/// work and both closed as done before the merge, and the close refused
-/// them as closed. A closed ticket filed after the one it succeeds is held
-/// as an open one is, its edge set and the close made; ready holds its
+/// A successor the work filed stays its successor however it ended:
+/// t3398's ready record named two tickets, both filed by that work and
+/// both closed as done before the merge, and the close refused them as
+/// closed. A closed ticket filed after the one it succeeds is held as an
+/// open one is, its edge set and the close made; ready holds its
 /// successors through the same `Successors::held`.
 #[test]
 fn a_successor_filed_by_the_work_and_closed_since_is_still_its_successor() {
@@ -1546,7 +1546,7 @@ fn a_successor_filed_by_the_work_and_closed_since_is_still_its_successor() {
 }
 
 /// The edge is set before the close: a tracker that refuses the edge
-/// leaves the ticket open and unchanged (#29).
+/// leaves the ticket open and unchanged.
 #[test]
 fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
     let tracker = Tracker::empty("edge");
@@ -1598,7 +1598,7 @@ fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
 }
 
 /// The edge is set and then the close is refused: the reading says the
-/// edge stands, since the tracker did change (#29).
+/// edge stands, since the tracker did change.
 #[test]
 fn a_tracker_that_refuses_the_close_after_the_edge_says_the_edge_stands() {
     let tracker = Tracker::empty("edge-stands");
@@ -1665,16 +1665,16 @@ fn a_tracker_that_refuses_the_close_is_a_failed_reading_carrying_its_text() {
     );
 }
 
-/// A ticket withdrawn rather than done (#185): #167's shape, boxes all
-/// unticked because there is nothing in the tree to build, closed under
-/// `--withdrawn` with the measurement as the reason. The reading passes,
-/// counts `withdrawn` so `status --section ticket` tells it from a close
-/// of work, carries the reason and the session, and the closing comment
-/// at the tracker says withdrawn and carries the reason too. The edge to
-/// what it opened is set the way a close of work sets it. A ticket with
-/// no `## Acceptance criteria` heading at all is withdrawn the same way,
-/// since no box of it is ticked, and so is one carrying `for-a-person`:
-/// the label says whose the work is, and there is none.
+/// A ticket withdrawn rather than done: boxes all unticked because there
+/// is nothing in the tree to build, closed under `--withdrawn` with the
+/// measurement as the reason. The reading passes, counts `withdrawn` so
+/// `status --section ticket` tells it from a close of work, carries the
+/// reason and the session, and the closing comment at the tracker says
+/// withdrawn and carries the reason too. The edge to what it opened is set
+/// the way a close of work sets it. A ticket with no `## Acceptance
+/// criteria` heading at all is withdrawn the same way, since no box of it
+/// is ticked, and so is one carrying `for-a-person`: the label says whose
+/// the work is, and there is none.
 #[test]
 fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement() {
     let tracker = Tracker::empty("withdrawn");
@@ -1759,7 +1759,7 @@ fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement()
     assert_eq!(reading.numbers["withdrawn"], 0.into(), "{reading:#?}");
 }
 
-/// The negative control of a withdrawal (#185): the ticket laid down
+/// The negative control of a withdrawal: the ticket laid down
 /// under `xtask/fixtures/ticket/half-done.md`, one box ticked. Work half
 /// done is not withdrawn, so the close fails naming the ticked box and
 /// asks the tracker nothing; and a ticket closed already is not withdrawn
@@ -1820,8 +1820,8 @@ fn a_withdrawal_of_a_ticket_with_a_box_ticked_is_refused_and_changes_nothing() {
     assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
 }
 
-/// The cap before the ticket is filed and not the tracker's refusal after
-/// (#448): a sheet at 100 sub-issues fails naming what
+/// The cap before the ticket is filed and not the tracker's refusal after:
+/// a sheet at 100 sub-issues fails naming what
 /// `gh issue create --parent` would answer, one under it passes naming the
 /// room, and a closed sheet fails whatever it holds. The scope is the
 /// sheet's own, `parent/<n>`, so a reading here never stands over the one
@@ -1886,14 +1886,14 @@ fn a_sheet_at_the_cap_fails_before_a_ticket_is_filed_against_it_and_one_with_roo
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
 mod tracked {
     use super::*;
 
-    /// The negative control of `harness.self` at the read (#153): the ticket
+    /// The negative control of `harness.self` at the read: the ticket
     /// laid down under `xtask/fixtures/rules/harness.self/`, which carries
     /// `ready-for-agent` and asks in two criteria for a write into the rule's
     /// scope, one the pin that `xtask steer` writes for an agent and one the
@@ -1942,8 +1942,7 @@ mod tracked {
             reading.message
         );
         // The criterion whose object is the pin is said and not refused: the
-        // write is an agent's through the instrument sanctioned to make it
-        // (#152).
+        // write is an agent's through the instrument sanctioned to make it.
         assert!(
             reading
                 .message
@@ -1973,8 +1972,8 @@ mod tracked {
         );
     }
 
-    /// The narrowing #152 measured (#153): a ticket the maintainer handed to
-    /// an agent, every box ticked, whose first criterion's object is the pin.
+    /// The narrowing, as measured: a ticket the maintainer handed to an
+    /// agent, every box ticked, whose first criterion's object is the pin.
     /// `xtask steer` is the sanctioned writer of that file, so the label is
     /// not wrong; the read passes and the message still says what it matched.
     #[test]
@@ -2014,10 +2013,10 @@ mod tracked {
         );
     }
 
-    /// A criterion whose denied subject stays as it is asks for no write
-    /// (#2391): #630's third box asks that the live numbers still render, and
-    /// the read passes it, while #111's "`oracle.toml` carries" beside it is
-    /// still the write, said as the steer that makes it.
+    /// A criterion whose denied subject stays as it is asks for no write:
+    /// a box that asks that the live numbers still render is passed by
+    /// the read, while the "`oracle.toml` carries" beside it is still the
+    /// write, said as the steer that makes it.
     #[test]
     fn a_criterion_saying_a_denied_path_still_behaves_as_before_asks_for_no_write() {
         let body = "## Acceptance criteria\n\n- [x] `.claude/harness.local.md` still renders this machine's live numbers, and `cargo xtask status --section rules` still prints them\n- [x] `seams.toml` is unchanged\n- [x] `oracle.toml` carries a `[regime.dump]` with the ini above\n";
@@ -2045,7 +2044,7 @@ mod tracked {
     }
 }
 
-/// The merge queue (#3622): a merge on `staging` closes nothing there,
+/// The merge queue: a merge on `staging` closes nothing there,
 /// since `staging` is not `main`, and the fast-forward of `main` to it
 /// closes the ticket its subject names, read since `ORIG_HEAD` as
 /// post-merge reads it, with the successors the branch's ready record
@@ -2131,7 +2130,7 @@ fn gh_s_own_answer_with_comments_parses_as_a_thread() {
 /// `ticket view` prints the body and a maintainer's and CI's comments,
 /// and counts what it withheld: an outsider's by association, a hidden
 /// one, CI's "Still red" lines, and with `--since` the earlier ones
-/// (#4263, Round 3, Q16 (c)).
+/// (Round 3, Q16 (c)).
 #[test]
 fn view_prints_the_body_and_maintainers_comments_and_counts_what_it_withheld() {
     let tracker = Tracker::empty("view");
@@ -2233,7 +2232,7 @@ fn ready_prints_the_comments_newer_than_the_branchs_first_commit() {
     assert!(said.contains("withheld 2: 1 written before"), "{said}");
 }
 
-/// The brief (#4263): the template's lines from `## Brief` on, each field
+/// The brief: the template's lines from `## Brief` on, each field
 /// filled from the ticket, the branch recording it and the flags; a line
 /// whose field is empty left out, so the unmerged base's line stands only
 /// for a branch laid on another and the track's only for a labelled
@@ -2329,8 +2328,8 @@ fn the_brief_fills_the_template_from_the_ticket_and_its_branch() {
         "{eight}"
     );
 
-    // The number alone, as a hook that expands `/build <n>` has it
-    // (#4270): the lines of what the dispatcher did not say are left out.
+    // The number alone, as a hook that expands `/build <n>` has it:
+    // the lines of what the dispatcher did not say are left out.
     let bare = brief::Ask {
         scratch: None,
         owns: Vec::new(),
@@ -2372,7 +2371,7 @@ fn the_brief_refuses_a_build_apart_from_the_trees_sources() {
 
 /// The template the brief is rendered from: it renders with every field
 /// filled, opens with the heading the builder's role looks for, leaves no
-/// field unfilled, and carries no line naming cq while #3680's census is
+/// field unfilled, and carries no line naming cq while the cq census is
 /// open (Round 2, Q5).
 #[test]
 fn the_brief_template_renders_whole_and_names_no_cq() {

@@ -1,7 +1,7 @@
 //! The `zend_test` extension: `php-src/ext/zend_test` as one crate under
 //! `ext/` (ADR-0004), off by default as php builds it only with
 //! `--enable-zend-test`, and held by the oracle variant that loads it
-//! (`oracle = "zend-test"`, #1782). Beside the facade it depends on
+//! (`oracle = "zend-test"`). Beside the facade it depends on
 //! ext/standard alone, for `php_var_export_ex`; one entry,
 //! `extension()`; its state on the value (ADR-0005). The phpt subset is
 //! every `.phpt` under `php-src/ext/zend_test`, through `xtask phpt
@@ -16,7 +16,7 @@
 //! are [`object_handlers`]. The observer of `observer.c` is [`observer`], the one
 //! bundled user of design §4.3 seam 9, and the allocator hooks of
 //! `zend_mm_custom_handlers.c` are ported by observation
-//! ([`mm_custom_handlers`], #2024).
+//! ([`mm_custom_handlers`]).
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -272,7 +272,7 @@ fn rshutdown(req: &mut Request) {
 /// entry stands on: a line printed for each file opcache compiles and
 /// stores, and none for a file it serves as stored, nor where opcache
 /// is off (`optimizer_register_pass.phpt`). The witness starts a child
-/// with the entry on, served by a `php` carrying this extension (#2721):
+/// with the entry on, served by a `php` carrying this extension:
 /// the passes are called in registration order over each file opcache compiles,
 /// and over none it serves as stored, nor where opcache is off.
 ///

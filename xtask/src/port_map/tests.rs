@@ -129,7 +129,7 @@ fn the_census_marks_the_ext_state_impl_and_neither_mark_is_the_key() {
 }
 
 /// Three tables print a name the seed's qualifier does not reach by a
-/// prefix alone (#209): the free functions bare where the seed keeps the
+/// prefix alone: the free functions bare where the seed keeps the
 /// `convert::` path, the abi methods bare where the seed keeps the type,
 /// the macros as an attribute where the seed keeps the crate. Each row's
 /// key is what the census prints, and the census's own spelling keys to
@@ -433,7 +433,7 @@ fn under_a_tree_a_row_resolves_on_the_census_names_and_not_the_map_rows() {
 }
 
 /// The committed census joined to the lock, held to what stays true as
-/// either grows (#1252): every row is one of the three statuses and its
+/// either grows: every row is one of the three statuses and its
 /// `api` item is one the lock carries, and the committed census names no
 /// extension on any row (design §4.4), so with none ported every row is
 /// unresolved. A row added, a status rewritten or a lock line added moves
@@ -479,12 +479,12 @@ fn a_tree_without_crates_is_refused_and_nothing_is_joined() {
 }
 
 /// The evidence is which extensions are ported here, and the premise
-/// held is one no commit ends (#217): `Ported::read` names exactly the
+/// held is one no commit ends: `Ported::read` names exactly the
 /// laid-down crates whose sources take a registering step of the
 /// builder, and a crate `new-ext` laid down, whose `extension()`
 /// declares its state and registers nothing, is not evidence however
 /// many stand beside the ported ones. `ext/standard` is among the ported
-/// since `str_repeat` (#174); which others are is the workspace's to
+/// since `str_repeat`; which others are is the workspace's to
 /// say, not this test's. The committed census names
 /// no extension on any row, so no row is resolved by any of them yet.
 #[test]

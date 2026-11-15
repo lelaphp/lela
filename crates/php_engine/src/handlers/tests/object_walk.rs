@@ -3,11 +3,10 @@
 
 use super::*;
 
-/// #367, the first acceptance: a `foreach` by value over a plain
-/// object walks the properties the scope may see, the private one
-/// stepped over from outside the class, the key the name as
-/// written. The witness beside [`fe_reset_r`] pins the same line
-/// against the oracle; this holds the engine to it.
+/// A `foreach` by value over a plain object walks the properties the
+/// scope may see, the private one stepped over from outside the class,
+/// the key the name as written. The witness beside [`fe_reset_r`] pins
+/// the same line against the oracle; this holds the engine to it.
 #[test]
 fn a_foreach_over_an_object_walks_the_properties_the_scope_may_see() {
     let served = Engine::cli_builder().build().serve_capture(
@@ -28,10 +27,9 @@ fn a_foreach_over_this_walks_the_private_properties_too() {
     served.assert_clean("n=1 s=x n=1 p=2 s=x q=3 ");
 }
 
-/// #367, the second acceptance: an object of no properties runs the
-/// body no time, and a property declared with no default is the
-/// `null` `default_properties_table` put there, walked like any
-/// other.
+/// An object of no properties runs the body no time, and a property
+/// declared with no default is the `null` `default_properties_table`
+/// put there, walked like any other.
 #[test]
 fn a_foreach_over_an_object_of_no_properties_runs_its_body_no_time() {
     let served = Engine::cli_builder().build().serve_capture(

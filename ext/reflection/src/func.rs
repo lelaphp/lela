@@ -733,8 +733,8 @@ impl ReflectionFunctionAbstract {
     ///
     /// A name bound by reference stands for the cell, as php's bucket
     /// does, and php's `var_dump` prints such an element with a `&` before
-    /// its value; this engine's dereferences first and prints no `&`
-    /// (#449), so what a witness here can pin is the binding by value.
+    /// its value; this engine's dereferences first and prints no `&`,
+    /// so what a witness here can pin is the binding by value.
     ///
     /// ```php
     /// $b = 1;
@@ -823,8 +823,8 @@ impl ReflectionFunctionAbstract {
     /// `reflection_extension_factory` over the same name, and `null`
     /// where `getExtensionName()` is `false`. Zend's own natives and
     /// classes name `Core` and the bundle has no value under it, a
-    /// question #379 asks, so a method of a Zend class answers `null`
-    /// where php answers the `Core` reflector.
+    /// question design revision 25 takes up, so a method of a Zend class
+    /// answers `null` where php answers the `Core` reflector.
     ///
     /// ```php
     /// var_dump((new ReflectionFunction('json_encode'))->getExtension());
@@ -2019,7 +2019,7 @@ impl ReflectionMethod {
     /// as `mptr->common.scope->name` is. php keeps the class it was asked
     /// about too, `intern->ce`, which `__toString` renders against; the
     /// reflector here keeps the two properties alone until a native
-    /// payload can hold it (#360), so it renders against the declaring
+    /// payload can hold it, so it renders against the declaring
     /// class.
     ///
     /// ```php
@@ -2632,7 +2632,7 @@ impl ReflectionMethod {
     /// The method is the one the reflector holds, served as php fills
     /// `fcc` by hand and not resolved through `zend_is_callable_ex`: a
     /// private or protected method is served from outside its class, and
-    /// one the class declares on itself with no receiver (#733).
+    /// one the class declares on itself with no receiver.
     ///
     /// ```php
     /// class Vault {
@@ -2649,7 +2649,7 @@ impl ReflectionMethod {
     ///
     /// What is no array is php's `TypeError`, whose tail names the value as
     /// `zend_zval_value_name` does and not as `zend_zval_type_name` does, so
-    /// `true` stands where the type alone would read `bool` (#462):
+    /// `true` stands where the type alone would read `bool`:
     ///
     /// ```php
     /// (new ReflectionMethod('Exception', 'getCode'))->invokeArgs(new Exception, true);

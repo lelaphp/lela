@@ -1,12 +1,12 @@
 //! The reader behind [`Retired::of`](super::Retired::of) on macOS and
 //! [`exited`](super::exited) on macOS and Linux, xtask's one `unsafe` home
-//! (`unsafe.homes`, #3062's ruling): what a process and its children had
+//! (`unsafe.homes`, ruled 2026-10-20): what a process and its children had
 //! retired, from `proc_pid_rusage(RUSAGE_INFO_V4)` over the process and
 //! each pid `proc_listchildpids` names, summed. Apple silicon states user,
 //! system and runnable time in mach ticks, so each is taken to nanoseconds
 //! through `mach_timebase_info`; on Intel the timebase is one, and the
 //! conversion is the identity. Linux states none of these figures here,
-//! only an exited child's peak resident set (#3798).
+//! only an exited child's peak resident set.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block

@@ -40,7 +40,7 @@ impl CargoLock {
 
     /// The number of third-party packages, those with a `source`:
     /// `[budget] lock_packages` measures this. A workspace crate is held by
-    /// its `[[crate]]` row and its line ceiling, so it is not counted (#1335).
+    /// its `[[crate]]` row and its line ceiling, so it is not counted.
     pub fn packages(&self) -> usize {
         self.package.iter().filter(|p| p.source.is_some()).count()
     }
@@ -54,8 +54,8 @@ impl CargoLock {
     /// Expand `prefix::*` to the type paths the module holds. A standard
     /// library module comes from the table below; a package from its
     /// source in the cargo registry at the locked version, each type at
-    /// the path its public modules make it reachable at ([`public_types`],
-    /// #1910); a package not in the lock expands to nothing, since no
+    /// the path its public modules make it reachable at ([`public_types`]);
+    /// a package not in the lock expands to nothing, since no
     /// extension can name a type of a crate the workspace does not link.
     pub(crate) fn expand(&self, prefix: &str) -> Result<Vec<Expanded>> {
         if let Some((_, types)) = STD.iter().find(|(module, _)| *module == prefix) {
@@ -277,7 +277,7 @@ impl Package {
 /// The packages `package` reaches in the lock `text`, itself first and
 /// the rest in the lock's order, each whole as the lock pins it: two
 /// locks resolve a build of the crate alike when the two closures are
-/// equal (#1312). A dependency is written `name`, `name version` or
+/// equal. A dependency is written `name`, `name version` or
 /// `name version (source)`, and matches every package of that name and
 /// version. `None` when the text is no lock or names no such package.
 pub(crate) fn closure(text: &str, package: &str) -> Option<Vec<Package>> {
@@ -323,7 +323,7 @@ mod tests {
 
     /// A package's closure moves with what it reaches and with nothing
     /// else: a bump of the `dep` only `other` reaches leaves `app`'s
-    /// closure as it was (#1312).
+    /// closure as it was.
     #[test]
     fn a_closure_moves_only_with_what_the_package_reaches() {
         let bumped = LOCK.replace("checksum = \"bb\"", "checksum = \"cc\"");
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(closure("not a lock [", "app"), None);
     }
 
-    /// A package laid out as `once_cell` is (#1910): types at the root, in
+    /// A package laid out as `once_cell` is: types at the root, in
     /// an inline `pub mod`, one gated by a `#[cfg]`, in a file module and
     /// a file module of that, re-exported out of a private module, and
     /// held in a private module alone.

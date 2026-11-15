@@ -2,8 +2,7 @@
 //! `Z/ext/standard/basic_functions.c` reads them: the short options'
 //! string by `parse_opts` and each long option's spelling. The walk over
 //! the program's `argv` is php's one `php_getopt`, the engine's, which
-//! every host reads its own command line with (`php_ext::syntax::Getopt`,
-//! #889).
+//! every host reads its own command line with (`php_ext::syntax::Getopt`).
 
 use php_ext::syntax::{Need, Opt};
 

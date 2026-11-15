@@ -16,8 +16,8 @@ pub use php_heap::Exponent;
 /// C's `strtol(s, NULL, 10)`, `atoi` and `isspace` as php's extensions
 /// call them, `ZEND_STRTOL`, `ZEND_ATOL` and `zend_atoi`'s C library
 /// (`Z/Zend/zend_long.h:77`): the engine's one reading, so an extension
-/// reads a value past `int` or the long as php does (#2634); and
-/// `c_str`, a string's bytes as C reads them, up to its first NUL (#2763).
+/// reads a value past `int` or the long as php does; and
+/// `c_str`, a string's bytes as C reads them, up to its first NUL.
 pub use crate::c_number::{atoi, c_str, is_space, strtol};
 use php_heap::ZvalType;
 use php_unit::decl::{Bare, Type};
@@ -126,7 +126,7 @@ pub fn int_to_string(req: &mut Request, n: i64) -> Result<Owner<PhpString>, Thro
 /// `zend_double_to_str` at the request's `precision` over the same
 /// `zend_gcvt`, so `1.5` reads `1.5` on either path and never at a fixed
 /// number of places. The shorter form, the exponent, the signed zero and
-/// the two non-finite words, through each caller's own arm (#408):
+/// the two non-finite words, through each caller's own arm:
 ///
 /// ```php
 /// function s(string $s): string { return $s; }
@@ -1284,7 +1284,7 @@ pub(crate) fn scalar_type_hint(
             // `crate::ops::to_string`, the kernel that copies
             // `zend_double_to_str` at the request's `precision`; this
             // module's `float_format` is the same `zend_gcvt` at a
-            // precision the caller names (#408).
+            // precision the caller names.
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
                 return Ok(Some(Value::string(crate::ops::to_string(req, &value)?)));
             }

@@ -1,5 +1,5 @@
-//! One request thread with `LELA_ZERO_TOUCHED_PAGES` on (#4348's ruling 4,
-//! #4361): each request's heap zeroes the pages it touched before its
+//! One request thread with `LELA_ZERO_TOUCHED_PAGES` on (ruled
+//! 2026-11-09): each request's heap zeroes the pages it touched before its
 //! chunks are kept for the next, which this one thread is then handed.
 //! What PHP reads moves for none of it, and a request that wrote across
 //! many chunks, one the memory limit ended and the one after them are

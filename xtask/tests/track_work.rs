@@ -1,6 +1,6 @@
 //! `xtask track work`, one ticket from start to retire without a person
-//! (#77) and the frontier until it empties (#78), a closed ticket's branch
-//! left for /specs and `main` never moved (#1749): held against a scratch
+//! and the frontier until it empties, a closed ticket's branch
+//! left for /specs and `main` never moved: held against a scratch
 //! repository shaped as main's checkout, on `main` with no record of a
 //! track or a model (ADR-0009), a bare `origin` beside it, a [`Tracker`]
 //! answering `issue list` and `issue view` with what each test lays, as
@@ -67,9 +67,8 @@ fn has_ref(root: &Path, name: &str) -> bool {
 
 /// What `track work` reads of the checkout, and the worktree it lays
 /// down of it: the harness's own files, the map `status --session` renders,
-/// the tracked settings and what git ignores there. Each test laid the
-/// whole tree, some 4,400 files, and checked a worktree of it out, until
-/// #2882.
+/// the tracked settings and what git ignores there. Each test once laid
+/// the whole tree, some 4,400 files, and checked a worktree of it out.
 const READ: [&str; 6] = [
     "seams.toml",
     "oracle.toml",
@@ -95,7 +94,7 @@ impl Scratch {
     /// `origin`, and the checkout on `main`. `origin` is a bare clone borrowing the
     /// checkout's objects, as the checkout borrows the workspace's, so the
     /// push writes no pack and each scratch holds no copy of the tree's
-    /// objects (#644).
+    /// objects.
     fn lay(name: &str) -> Scratch {
         let dir = Tree::new(&format!("track-work-{name}")).unwrap();
         let root = dir.join("repo");
@@ -209,7 +208,7 @@ impl Scratch {
     /// What the session started on `/frontier` does, as shell: the first
     /// time it replaces the tracker's open list with `filed`, the tickets
     /// it filed, each `ready-for-agent` and unblocked unless it names its
-    /// own labels; the second time it files nothing (#85).
+    /// own labels; the second time it files nothing.
     fn frontier_files(&self, filed: &[(u64, &[&str])]) {
         let filed: Vec<Open> = filed
             .iter()
@@ -309,7 +308,7 @@ impl Scratch {
     }
 
     /// One section of `xtask status` over the checkout's store, as Markdown:
-    /// what a person reads the run back from (#117).
+    /// what a person reads the run back from.
     fn section(&self, name: &str) -> String {
         let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
@@ -330,7 +329,7 @@ impl Scratch {
 
     /// What the sessions were started with, `session.args`, each ticket's
     /// own session id taken out: a fresh one per session, which its
-    /// worktree's owner record names (#3621) and [`Scratch::ids`] reads.
+    /// worktree's owner record names and [`Scratch::ids`] reads.
     fn args(&self) -> String {
         let raw = self.wrote("session.args");
         let mut words: Vec<&str> = Vec::new();
@@ -401,9 +400,9 @@ fn listed(issues: &[(u64, &[&str])]) -> Vec<Open> {
 /// `main`, the session started as `claude -p --model <model>` with the
 /// subagents' model in its environment and the defaults for the mode
 /// and the effort, in the worktree, with the prompt running `/build
-/// <n>`; the branch recorded ready (#2311), so the worktree is retired
+/// <n>`; the branch recorded ready, so the worktree is retired
 /// and the branch left for /specs to merge with its records kept, `main` and `origin`'s
-/// `main` where they were (#1749, ADR-0009); one line naming the ticket,
+/// `main` where they were (ADR-0009); one line naming the ticket,
 /// the commit and the outcome; no trust line waited on.
 #[test]
 fn a_ready_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
@@ -442,7 +441,7 @@ fn a_ready_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
         scratch.args(),
         "-p --model claude-opus-5 --permission-mode auto --effort high /build 20"
     );
-    // The prompt names the exit condition the run reads back (#115).
+    // The prompt names the exit condition the run reads back.
     let prompt = scratch.wrote("session.prompt");
     assert!(
         prompt.contains("cargo xtask ticket ready 20"),
@@ -471,7 +470,7 @@ fn a_ready_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
     );
 
     // The one trust line is the grant over the worktrees' directory, and
-    // nothing waited on it (#74, revision 56); the tracker was asked
+    // nothing waited on it (revision 56); the tracker was asked
     // nothing but the list and the view.
     assert!(
         out.contains(&format!(
@@ -527,7 +526,7 @@ fn a_run_without_the_harness_plugin_is_refused_before_a_worktree() {
 }
 
 /// A worktree left standing whose ticket a person closes later is not
-/// the loop's (#1755): the next run works the next ticket, retires that
+/// the loop's: the next run works the next ticket, retires that
 /// one's worktree alone, and leaves the standing worktree, its branch
 /// and `main` as they were; retiring it is /specs' or a person's, with
 /// `xtask worktree retire`, once its branch is merged or waits to be.
@@ -607,7 +606,7 @@ fn a_run_on_a_label_track_names_its_ticket_and_lays_its_branch_off_main() {
 /// record is kept and the exit is 1 with the reason; and
 /// `--permission-mode` and `--effort` override the defaults. The
 /// worktree is the session's while it runs and no session's once it has
-/// ended, as `xtask worktree whose` says (#3782).
+/// ended, as `xtask worktree whose` says.
 #[test]
 fn a_ticket_left_open_leaves_the_worktree_standing() {
     let scratch = Scratch::lay("open");
@@ -642,8 +641,8 @@ fn a_ticket_left_open_leaves_the_worktree_standing() {
         "-p --model claude-opus-5 --permission-mode acceptEdits --effort max /build 20"
     );
     // The session was started under the id its worktree's owner record
-    // names, so its writes there are its own (#3621); once it has ended,
-    // the record names a session no process runs, and is gone (#3782).
+    // names, so its writes there are its own; once it has ended,
+    // the record names a session no process runs, and is gone.
     let worktree = scratch.worktree("t20");
     let id = &scratch.ids()[0];
     assert_eq!(
@@ -672,7 +671,7 @@ fn a_ticket_left_open_leaves_the_worktree_standing() {
 /// A worktree laid down but not ready, the stand-in build failing, stops
 /// the run before any session starts, the exit a not-ready add's: the
 /// worktree stands, and is no session's, since the id its record named
-/// never ran and names no process to lapse with (#3789).
+/// never ran and names no process to lapse with.
 #[test]
 fn a_worktree_that_is_not_ready_stops_the_run_and_is_no_sessions() {
     let scratch = Scratch::lay("not-ready");
@@ -699,7 +698,7 @@ fn a_worktree_that_is_not_ready_stops_the_run_and_is_no_sessions() {
 }
 
 /// A ticket closed with nothing committed, as a withdrawn one is, is
-/// closed all the same: the close is the one signal (#115), so the
+/// closed all the same: the close is the one signal, so the
 /// worktree is retired and the branch, at `main`'s own commit, left with
 /// its record; what /specs merges of it is nothing.
 #[test]
@@ -729,7 +728,7 @@ fn a_ticket_closed_with_nothing_committed_is_retired_all_the_same() {
 /// A run with no `--model` refuses before any worktree is laid down, and
 /// an empty frontier lays none down and is not an error: without
 /// `--fill` the run ends at "none" and starts no `/frontier` session,
-/// though the stand-in would file a ticket (#85).
+/// though the stand-in would file a ticket.
 #[test]
 fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
     let scratch = Scratch::lay("refuse");
@@ -760,10 +759,10 @@ fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
 /// ticket and `track next` names it no more; the run ends at "none",
 /// exit 0, one line per ticket and a closing line naming each with its
 /// outcome. A run that lands one ticket and strands another is also what
-/// the readings say (#117): one per step scoped to the ticket, a pass and
+/// the readings say: one per step scoped to the ticket, a pass and
 /// a fail, each with its commit and its reason, and the run's own closing
 /// one, which is what `status --section track` renders the run from.
-/// What each session spent rides on its step (#210): the first's usage
+/// What each session spent rides on its step: the first's usage
 /// reading reached the checkout's store by the retire, the second's is
 /// still the standing worktree's, and each step carries its own, the run
 /// the total.
@@ -836,7 +835,7 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     );
 
     // One reading per step and one for the run, which is what the section
-    // renders, in the order the run took them (#117).
+    // renders, in the order the run took them.
     let section = scratch.section("track");
     let rows: Vec<&str> = section.lines().skip(2).collect();
     assert_eq!(rows.len(), 3, "{section}");
@@ -907,7 +906,7 @@ fn a_tracker_that_stops_answering_stops_the_run_named() {
 }
 
 /// A run that readies a blocker does not lay its dependent down in the
-/// same run (#2270, #2326): #21 is blocked by #20, the session writes
+/// same run: #21 is blocked by #20, the session writes
 /// #20's ready record, and #20 stays open at the tracker until /specs
 /// merges `t20`, so the run ends at "none" with #21 never laid down. Once
 /// the merge holds `t20` in `main` and closes #20, the next run names #21
@@ -969,7 +968,7 @@ fn blocked(rows: &[Row]) -> Vec<Open> {
 }
 
 /// With `--fill`, an empty frontier starts the `/frontier` session in
-/// the checkout (#85): #22 waits on #23, open and a person's, so it is
+/// the checkout: #22 waits on #23, open and a person's, so it is
 /// blocked, and the planner is started in the checkout.
 #[test]
 fn an_empty_frontier_starts_the_fill_session_in_the_checkout() {
@@ -1000,7 +999,7 @@ fn an_empty_frontier_starts_the_fill_session_in_the_checkout() {
 }
 
 /// A ticket labelled `frontier:research` starts the session on
-/// `/research <n>` (#81): the skill's line is the one thing that
+/// `/research <n>`: the skill's line is the one thing that
 /// changes, the model, the mode and the effort as the flags set them,
 /// and the path from the close to the retire is the same.
 #[test]
@@ -1023,7 +1022,7 @@ fn a_research_ticket_starts_the_session_on_research() {
 }
 
 /// A ticket labelled `frontier:decision` starts the session on
-/// `/grill-design <n>` (#81).
+/// `/grill-design <n>`.
 #[test]
 fn a_decision_ticket_starts_the_session_on_grill_design() {
     let scratch = Scratch::lay("decision");
@@ -1043,7 +1042,7 @@ fn a_decision_ticket_starts_the_session_on_grill_design() {
 
 /// A ticket carrying both `frontier:` labels names no one skill: the
 /// step refuses before any worktree is laid down, naming the ticket and
-/// both labels, no session started (#81).
+/// both labels, no session started.
 #[test]
 fn a_ticket_with_both_frontier_labels_refuses_before_a_worktree() {
     let scratch = Scratch::lay("both");
@@ -1064,7 +1063,7 @@ fn a_ticket_with_both_frontier_labels_refuses_before_a_worktree() {
     assert_eq!(scratch.args(), "", "no session started");
 }
 
-/// With `--fill` the run fills its own frontier (#85): the one ticket
+/// With `--fill` the run fills its own frontier: the one ticket
 /// closed, `next` answers "none", so a `/frontier` session is started in
 /// the checkout itself, on the same model, mode and effort, and the run
 /// goes on with the ticket it filed; that one closed, the frontier is

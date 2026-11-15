@@ -1,4 +1,4 @@
-//! The binding to the vendored libmagic (design §7.2, #1451;
+//! The binding to the vendored libmagic (design §7.2,
 //! `unsafe.homes`' `ext/*/src/ffi/`): the one home of this crate's
 //! `unsafe`, over what `build.rs` compiles. A [`Magic`] is one
 //! `struct magic_set`, closed when it is dropped; what libmagic reports

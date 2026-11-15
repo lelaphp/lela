@@ -46,7 +46,7 @@
 //! name in a namespace is `zend_compile_ns_call`'s call by name,
 //! `INIT_NS_FCALL_BY_NAME` over three constants, in a `JMP_FRAMELESS`
 //! branch beside the frameless call where the global function has an
-//! entry (#254).
+//! entry.
 //!
 //! A variable read is a `CV` operand and no opline (`zend_try_compile_cv`),
 //! and an assignment to one is `ASSIGN` with the CV in `op1` and the value
@@ -463,7 +463,7 @@ pub(crate) struct Emit<'a> {
     /// comment are read from.
     parsed: &'a Parsed<'a>,
     /// The compile's arena, the parse's own, which the compiler's
-    /// temporaries are bumped into and given up with it (#2810): a name
+    /// temporaries are bumped into and given up with it: a name
     /// as resolved or lowered on its way to the op array's constants,
     /// which copy it, and the lists of a call's arguments, an array's
     /// elements and an `if`'s arms.
@@ -1584,8 +1584,7 @@ fn zval_type_name(kind: ZvalType) -> &'static str {
 /// not taken apart again: the array the fold built is kept, as a
 /// [`UnitValue`], so a declaration reads that one array, and a write
 /// through a copy of it separates first. That is so for code `eval`
-/// compiles as for a file's, where a parameter defaults to an array
-/// (#3121):
+/// compiles as for a file's, where a parameter defaults to an array:
 ///
 /// ```php
 /// eval('function settings($o = ["depth" => [2, 3], "strict" => false]) { $o[] = count($o); return $o; }');
@@ -2230,10 +2229,9 @@ impl<'a> Emit<'a> {
     }
 
     /// The compile-time fatal for what stands on the statement's line,
-    /// in this compiler's own sentence at `Level::Parse`, the parse error
-    /// #163 framed it as, which no fold passes over. A construct this
-    /// compiler cannot read yet is [`Self::unread`], which a fold leaves
-    /// unfolded.
+    /// in this compiler's own sentence at `Level::Parse`, framed as a
+    /// parse error, which no fold passes over. A construct this compiler
+    /// cannot read yet is [`Self::unread`], which a fold leaves unfolded.
     fn fatal(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
         Refused {
             level: Level::Parse,
@@ -2252,7 +2250,7 @@ impl<'a> Emit<'a> {
     /// `zend_eval_const_expr`: php's `E_COMPILE_ERROR` once the frame
     /// stands past the thread's limit. The refusal is a cold call of its
     /// own, so the sentence it formats is off the stack of every level
-    /// of a nested expression (#3159).
+    /// of a nested expression.
     fn check_stack(&self) -> Result<(), CompileError> {
         if self.stack.overflowed() {
             return self.stack_refused();
@@ -8610,7 +8608,7 @@ impl<'a> Emit<'a> {
     /// A property fetch's object is evaluated before the fetch is looked
     /// at, as `zend_eval_const_expr` walks it, so what the object
     /// refuses is refused first, and an attribute's argument is compiled
-    /// at the line of the declaration it stands on (#855):
+    /// at the line of the declaration it stands on:
     ///
     /// ```php
     /// #[Attribute([,]->e)]
@@ -9966,7 +9964,7 @@ impl<'a> Emit<'a> {
     /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
     /// ```
     ///
-    /// The third shape #601 measured, `for (;;) if ($x) ; else\n{ … }`,
+    /// The third shape measured, `for (;;) if ($x) ; else\n{ … }`,
     /// is not a witness: its loop holds two jumps, the `JMPZ` of the
     /// condition on line 2 and the jump back on line 3, and php tests
     /// the interrupt after either of them, so the line it names is
@@ -12423,7 +12421,7 @@ impl<'a> Emit<'a> {
     /// `JMP_NULL` its compile laid down aimed past it. A call of its own,
     /// so the value it holds for the aim is off the frame every other
     /// node's compile answers straight into, a level of a nested
-    /// expression among them (#3208).
+    /// expression among them.
     #[inline(never)]
     fn chain_ended(
         &mut self,
@@ -12452,8 +12450,8 @@ impl<'a> Emit<'a> {
     /// gave it and a left-nested chain stands in one 160-byte frame per
     /// operator, php's two frames' size. Left to the optimiser, which
     /// inlines it nowhere once it has two callers, it is a frame of its
-    /// own with its arms inlined into it, 2,048 bytes a level (#3208).
-    #[allow(clippy::inline_always)] // measured on #3208: the dispatch stands in expr_under's frame
+    /// own with its arms inlined into it, 2,048 bytes a level.
+    #[allow(clippy::inline_always)] // measured: the dispatch stands in expr_under's frame
     #[inline(always)]
     fn expr_node(&mut self, expr: tree::Expr, fetch: Fetch) -> Result<Where, CompileError> {
         let line = expr.line(self.parsed);
@@ -12683,8 +12681,8 @@ impl<'a> Emit<'a> {
     /// Inlined into [`Self::expr_node`], with [`Self::binary`], so a
     /// left-nested chain stands in one frame per operator, where php's
     /// stands in `zend_compile_expr_inner` and `zend_compile_binary_op`,
-    /// rather than two each saving every register it uses (#3159).
-    #[allow(clippy::inline_always)] // measured on #3159: one frame a level of `1+1+…`, not two
+    /// rather than two each saving every register it uses.
+    #[allow(clippy::inline_always)] // measured: one frame a level of `1+1+…`, not two
     #[inline(always)]
     fn binary_expr(&mut self, id: NodeId<tree::BinaryExpr>) -> Result<Where, CompileError> {
         let node = &self.parsed.tree[id];
@@ -13527,7 +13525,7 @@ impl<'a> Emit<'a> {
     /// two oplines any other pair is.
     ///
     /// A call of its own, so what it takes is off the stack of a
-    /// left-nested chain of the other operators (#3159).
+    /// left-nested chain of the other operators.
     #[inline(never)]
     fn coalesce(&mut self, left: tree::Expr, right: tree::Expr) -> Result<Where, CompileError> {
         let held = self.silent_read(left)?;
@@ -13579,7 +13577,7 @@ impl<'a> Emit<'a> {
     /// side compiles, and given back last, as php frees it.
     ///
     /// A call of its own, so what it takes is off the stack of a
-    /// left-nested chain of the other operators (#3159).
+    /// left-nested chain of the other operators.
     #[inline(never)]
     fn short_circuiting(
         &mut self,
@@ -15493,7 +15491,7 @@ impl<'a> Emit<'a> {
     /// its own and the opcode into a temporary (`zend_emit_op_tmp`). A
     /// call of its own, so what an arm takes is off the stack of a
     /// left-nested chain, which stands in [`Self::binary`] once per
-    /// operator (#3159).
+    /// operator.
     #[inline(never)]
     fn binary_operands(
         &mut self,
@@ -17408,7 +17406,7 @@ impl<'a> Emit<'a> {
     /// value left to the request. The steps are [`Self::fold_over`]'s
     /// spelled out: a closure here stands in the frame a left-nested
     /// chain repeats, 171 links under a 512K stack in a debug build where
-    /// this reaches 206 (measured on #3240).
+    /// this reaches 206, as measured.
     fn binary_constant(
         &mut self,
         id: NodeId<tree::BinaryExpr>,
@@ -22289,12 +22287,12 @@ mod tests {
     }
 
     /// `zend_get_compatible_func_or_null` over a class this file bound
-    /// under `namespace A;` (#322): the class stands in the table as
+    /// under `namespace A;`: the class stands in the table as
     /// `A\M`, and `M::f` written in the same namespace resolves to that
     /// name, so its public `f` is a known callee, where the same fetch
     /// written outside the namespace or with a leading `\` names the
     /// global `M` the table has not. The methods a file declares are
-    /// #309's to read, so the declaration here carries one directly.
+    /// not read here, so the declaration here carries one directly.
     #[test]
     fn a_known_method_is_found_on_a_class_the_file_declared_in_a_namespace() {
         let mut strings = php_heap::Strings::new();
@@ -22354,11 +22352,11 @@ mod tests {
         assert_eq!(emit.known_method(b"A\\M", b"f"), user);
     }
 
-    /// #3215: a node `zend_eval_const_expr` leaves unfolded because a
-    /// child it waits on is one this compiler cannot read yet answers
-    /// the child's [`eval::Unfolded::Unread`], so a compile that needs
-    /// the value refuses in the innermost sentence, the one the phpt lane
-    /// counts; a child that is no constant leaves the node's own sentence.
+    /// A node `zend_eval_const_expr` leaves unfolded because a child it
+    /// waits on is one this compiler cannot read yet answers the child's
+    /// [`eval::Unfolded::Unread`], so a compile that needs the value
+    /// refuses in the innermost sentence, the one the phpt lane counts;
+    /// a child that is no constant leaves the node's own sentence.
     /// The `()` is a tree the parser refuses, read here past its
     /// diagnostic: no program reaches these arms over an unread child
     /// and then a compile that reads the answer, so this test holds the
@@ -22412,7 +22410,7 @@ mod tests {
         );
     }
 
-    /// Design §5.7's assertion, on an op array laid down by hand (#353):
+    /// Design §5.7's assertion, on an op array laid down by hand:
     /// a backward `JMP` whose `out` names no entry of `safepoints` is
     /// refused, as is one whose entry is another opline; a `FAST_RET`
     /// to an earlier index and a forward jump are not read; a backward

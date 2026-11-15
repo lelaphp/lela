@@ -18,7 +18,7 @@ php_ext = { path = "../../crates/php_ext" }
 libc = { workspace = true }
 # libcurl's declarations, re-exported by `src/ffi/sys.rs` and called in
 # `src/ffi/` alone; the library is the platform's, the one the oracle
-# links, which `build.rs` holds curl-sys to (design §7.2, #1332).
+# links, which `build.rs` holds curl-sys to (design §7.2).
 curl-sys = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).

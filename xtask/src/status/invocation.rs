@@ -1,7 +1,7 @@
 //! The `invocation` section: the fields of `oracle::Invocation` past the
 //! binary and the program, read from the type's own source, so the region
-//! under harness-design.md §4.3 is the type and not a sentence about it
-//! (#1305, #1319). Each row is a field's name, its type, which of §4.3's
+//! under harness-design.md §4.3 is the type and not a sentence about it.
+//! Each row is a field's name, its type, which of §4.3's
 //! two groups it is in and the first sentence of its rustdoc; the group is
 //! the field's rustdoc's last paragraph, one of [`Group`]'s two sentences,
 //! so a field that names neither fails the rendering, naming it.

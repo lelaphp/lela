@@ -1,4 +1,4 @@
-//! A handler that blocks with the time limit suspended (#1814): an
+//! A handler that blocks with the time limit suspended: an
 //! observer's begin handler for a function named `blocks` sleeps past
 //! `max_execution_time` and `hard_timeout` both, as a debugger waits on
 //! its client, holding [`crate::api::abi::Observed::suspend_time_limit`]'s

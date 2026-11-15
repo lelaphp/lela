@@ -1,6 +1,6 @@
 //! System V shared memory, `<sys/shm.h>` from the C library (design §7.2;
-//! `unsafe.homes`' `ext/*/src/ffi/`), since nix binds no System V IPC
-//! (#1323): `shmget`, `shmctl` and `shmat` behind safe functions, and the
+//! `unsafe.homes`' `ext/*/src/ffi/`), since nix binds no System V IPC:
+//! `shmget`, `shmctl` and `shmat` behind safe functions, and the
 //! attached segment as a value that detaches when it is dropped, read and
 //! written only within the size `IPC_STAT` answers, whatever the bytes
 //! another process wrote there claim. The one home of this crate's

@@ -6,7 +6,7 @@
 //! The request's fields, the method, path and query of the line naming a
 //! slow or timed-out request, and the slow log's `script_filename` and
 //! each frame's name and file, which hold the program's path, have each
-//! `\r` and `\n` written as two bytes ([`php_sapi::log_field`], #4355), so
+//! `\r` and `\n` written as two bytes ([`php_sapi::log_field`]), so
 //! no request writes a line of its own into either log. A slow log the
 //! trace finds gone is made again owner-only, `0600`, as the
 //! configuration makes it at the start, so only its owner reads what a
@@ -69,7 +69,7 @@ pub(crate) fn check_timed_out(
     let pid = child.pid;
     let name = fpm.pools[p].name();
     // The request's method, path and query are its own, each with a line
-    // break escaped (#4355).
+    // break escaped.
     let (method, uri, query) = (
         field(&proc.request_method),
         field(&proc.request_uri),
@@ -136,7 +136,7 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
     zlog!(Notice @ fpm_php_trace:195, "about to trace {pid}");
     let path = fpm.pools[p].config.slowlog.clone().unwrap_or_default();
     // `fopen(slowlog, "a+")`; the trace makes a slow log it finds gone
-    // `0600`, as the configuration's open made it (#4355).
+    // `0600`, as the configuration's open made it.
     let opened = std::fs::OpenOptions::new()
         .read(true)
         .append(true)

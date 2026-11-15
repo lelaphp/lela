@@ -632,7 +632,7 @@ impl Decompressor {
     /// ```
     ///
     /// Four damages each library reads its own way, which the pure-Rust
-    /// codecs ext/zip read them with before #3529 did not (#1648).
+    /// codecs ext/zip read them with before design revision 166 did not.
     ///
     /// An XZ entry's LZMA2 chunk header with its compressed size damaged:
     /// liblzma delivers the chunk's first 16384 bytes before its error.

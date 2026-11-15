@@ -122,7 +122,7 @@ fn drivers(req: &Request) -> impl Iterator<Item = &'static dyn Connector> + '_ {
 
 /// The extension that registered `driver`, as whose code its calls are
 /// served, so what a connector allocates is its own extension's in a debug
-/// build and not ext/pdo's (#2864).
+/// build and not ext/pdo's.
 fn supplier_of(req: &Request, driver: &'static dyn Connector) -> Option<Supplier> {
     req.registered_by::<&'static dyn Connector>()
         .find(|(_, registered)| registered.name() == driver.name())

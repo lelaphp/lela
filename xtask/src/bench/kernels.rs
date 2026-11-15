@@ -5,16 +5,16 @@
 //! program under, measured program by program under the protocol, the
 //! reading carrying each program's ratio and their geomean (`Arms::Set`).
 //!
-//! **The bars today.** G3's denominator (#2948, [`oracle`]): the pinned
+//! **The bars today.** G3's denominator ([`oracle`]): the pinned
 //! php under `[regime.jit-tracing]` against itself under
 //! `[regime.jit-off]`, what php's own JIT buys on these programs, and its
-//! A/A control, `jit-off` against `jit-off`. G2 (#2965, [`compiled`]):
+//! A/A control, `jit-off` against `jit-off`. G2 ([`compiled`]):
 //! the same pair and control on the engine built with the tier's feature,
-//! what the engine's tier buys. G1 (#2947, [`door`]): the engine built
+//! what the engine's tier buys. G1 ([`door`]): the engine built
 //! with the tier's feature against the engine built without it over the
 //! seven kernels alone, [`Programs::Kernels`], each kernel's row held to a bound,
-//! one plus the tolerance of its `[[bench]]` row in `seams.toml` (#3130),
-//! and its geomean to nothing (#3280).
+//! one plus the tolerance of its `[[bench]]` row in `seams.toml`,
+//! and its geomean to nothing.
 //!
 //! **What every arm runs under.** The recipe, as the oracle's every run
 //! is, then the regimes, then [`INI`]: php.ini-production's values for the
@@ -45,7 +45,7 @@ use crate::workloads::{Declaration, Role, Run};
 /// declaration's order with the arguments it declares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Programs {
-    /// The seven kernels (#2736, #2740) and `bench_quiet.php`, php-src's
+    /// The seven kernels and `bench_quiet.php`, php-src's
     /// `Zend/bench.php` at the pinned tag with its two timing lines
     /// printing names alone, so the arms' bytes can be held equal
     /// (protocol §5, §11): the kernel role and the bench role.
@@ -133,12 +133,12 @@ pub(crate) enum Read {
     /// Its time.
     Time,
     /// Its time and what its process retired, per opline of the count
-    /// [`counted`] takes of the program (#2946).
+    /// [`counted`] takes of the program.
     PerOpline,
-    /// Its process's peak memory, as [`Peak::HERE`] names it (G4, #2961).
+    /// Its process's peak memory, as [`Peak::HERE`] names it (G4).
     Peak,
     /// Its traces' code per opline they compiled ([`code_per_opline`],
-    /// G4, #2961).
+    /// G4).
     Code,
 }
 
@@ -252,7 +252,7 @@ fn tracing(
     })
 }
 
-/// G3's denominator and its control (#2948): the pinned php's tier, as
+/// G3's denominator and its control: the pinned php's tier, as
 /// [`pinned::php`] finds it on this machine. A Mac without the keg
 /// measures neither, each a skip that says so.
 pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
@@ -260,7 +260,7 @@ pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
     tracing(root, bar, (Programs::Benched, Read::Time), pinned::php)
 }
 
-/// G2 and its control (#2965): the tier of the engine built with its
+/// G2 and its control: the tier of the engine built with its
 /// feature, the build [`door`]'s first arm runs. `jit-tracing` asks the
 /// engine's `Policy` for `Mode::Tracing` and `jit-off` for `Mode::Off`
 /// (`jit-design.md` §4.7); its traces compile on the worker thread, as
@@ -278,20 +278,20 @@ enum Build {
     /// With the tier's feature of the bundle on, `php_jit::Jit` bound.
     Jit,
     /// The engine without it: the host's default features off, since
-    /// each host turns the bundle's `jit` on by default (#3676), into a
+    /// each host turns the bundle's `jit` on by default, into a
     /// target directory of its own, so `target/release` keeps the shipped
     /// build.
     Plain,
     /// [`Build::Jit`] with `cfg(php_jit_stepping)` set, whose tier steps
     /// a serving to its end at the first safepoint it is asked at
-    /// (`php_jit`'s `stepping`, #2946).
+    /// (`php_jit`'s `stepping`).
     Stepping,
     /// [`Build::Jit`] with `cfg(php_jit_usage)` set, whose request's end
     /// writes `JIT usage: <bytes> bytes, <oplines> oplines, <traces>
-    /// traces`, what its traces took (G4, #2961).
+    /// traces`, what its traces took (G4).
     Usage,
     /// [`Build::Jit`] with `cfg(php_jit_untested_loops)` set, whose loops
-    /// compile without the interrupt test at their header (#2960).
+    /// compile without the interrupt test at their header.
     Untested,
 }
 
@@ -333,12 +333,12 @@ impl Build {
     }
 }
 
-/// G1, the door cost, and its control (#2947): the engine built with the
+/// G1, the door cost, and its control: the engine built with the
 /// tier's feature, `php_jit::Jit` bound and `opcache.jit_buffer_size=0`,
 /// against the engine built without the feature, over the seven kernels
 /// and held to a bound, its `[[bench]]` row's: within the A/A drift,
 /// floored at 2%, above which `jit-design.md` §3 is revisited (design
-/// §9.2, protocol §12.3, #3130); and the build without the feature against
+/// §9.2, protocol §12.3); and the build without the feature against
 /// itself, its A/A control. Both arms of each run one command line,
 /// `[regime.jit-tracing]` and the zero buffer, so the binary is the one
 /// difference: the featured engine's `Policy` asks for tracing and runs
@@ -360,7 +360,7 @@ pub(crate) fn door(root: &Path) -> [Declared; 2] {
 }
 
 /// What the interrupt test costs a compiled loop, one load and one branch
-/// at its header (`jit-design.md` §4.3, §10), and its control (#2960): the
+/// at its header (`jit-design.md` §4.3, §10), and its control: the
 /// engine built as [`Build::Jit`] against [`Build::Untested`], whose loops
 /// compile the same traces without the test, both under
 /// `[regime.jit-force]`, every eligible root compiled at its first
@@ -384,13 +384,13 @@ pub(crate) fn interrupt(root: &Path) -> [Declared; 2] {
     })
 }
 
-/// G1 under `opcache.jit=off` with a buffer (#3139), and its control:
+/// G1 under `opcache.jit=off` with a buffer, and its control:
 /// the engine built as [`Build::Jit`] against [`Build::Plain`] under
 /// `[regime.jit-off]`, its buffer php's default, over the seven kernels;
 /// and [`Build::Plain`] against itself. Set up and off, the featured
 /// engine binds both loops, and a request whose engine has published no
 /// unit with counting words serves in `Nop`'s, as php's VM keeps its own
-/// handlers (#3362): the bar holds that this costs nothing beside the
+/// handlers: the bar holds that this costs nothing beside the
 /// engine without the tier.
 pub(crate) fn runtime(root: &Path) -> [Declared; 2] {
     let pairs = [
@@ -452,7 +452,7 @@ fn builds(
     })
 }
 
-/// What `step` costs per opline under recording (#2946, `jit-design.md`
+/// What `step` costs per opline under recording (`jit-design.md`
 /// §4.1, §10), and its control: [`Build::Stepping`]'s tier, which steps
 /// each kernel to its end at the first safepoint it is asked at and
 /// samples each opline's operands as the recorder does, under
@@ -468,10 +468,10 @@ pub(crate) fn stepping(root: &Path) -> [Declared; 2] {
     )
 }
 
-/// G4, memory and code (#2961, `research/jit-research.r1.md` §E.11), on
+/// G4, memory and code (`research/jit-research.r1.md` §E.11), on
 /// the seven kernels, from [`Build::Usage`]: its peak memory, as
 /// [`Peak::HERE`] names it, the footprint on macOS and the resident set on
-/// Linux (#3798), with the tier compiling, under `jit-tracing`, against
+/// Linux, with the tier compiling, under `jit-tracing`, against
 /// the interpreter's, under `jit-off`, the bar `g4-rss` and its control; and
 /// `g4-code`, the bytes its traces take per opline they compiled against
 /// the pinned php's under `jit-tracing`, each as its own `jit_debug`
@@ -521,7 +521,7 @@ const SIZE: u32 = 1 << 9;
 const LISTED: u32 = (1 << 12) | (1 << 13) | (1 << 14) | (1 << 16) | (1 << 18);
 
 /// A process arm whose run's value is read from what it wrote and what
-/// its process retired, in bytes (G4, #2961).
+/// its process retired, in bytes (G4).
 struct Parsed {
     side: Spawned,
     value: fn(&Sample, &[u8]) -> Result<f64>,
@@ -613,7 +613,7 @@ fn compiled_oplines(said: &str) -> u64 {
 /// How many oplines the stepping arm executes of `program`, the sum of
 /// the `stepped <n> oplines` lines its tier writes on the second stream,
 /// once its first stream is held equal to `execute::<Nop>`'s run of the
-/// same program: the assertion #2946 asks of the bar before it measures.
+/// same program: the assertion asked of the bar before it measures.
 fn counted(program: &str, [stepping, nop]: [Result<Arm>; 2]) -> Result<f64> {
     let (stepping, nop) = (Spawned::from(stepping?), Spawned::from(nop?));
     let (stepped, said) = ran(&stepping.arm, &stepping.program)?;
@@ -642,7 +642,7 @@ mod tests {
 
     /// php's listing counts the oplines of each trace it compiled and
     /// none of one it aborted, over its `JIT memory usage`; the engine's
-    /// line states both; a run that compiled nothing is refused (#2961).
+    /// line states both; a run that compiled nothing is refused.
     #[test]
     fn code_per_opline_is_each_runs_bytes_over_the_oplines_it_compiled() {
         let php = "---- TRACE 1 start (enter) fib() f.php:13\n0000 CV0($n) = RECV 1\n\
@@ -663,7 +663,7 @@ mod tests {
     /// The engine's tier and php's are each a series beside its A/A
     /// control, named for whose tier it is, G1 is held to its bound, and
     /// the stepping loop and the interrupt test are each a series beside
-    /// its control (#2946, #2960).
+    /// its control.
     #[test]
     fn each_tier_and_each_cost_is_a_series_beside_its_control_and_the_door_a_bound() {
         let root = Path::new(".");

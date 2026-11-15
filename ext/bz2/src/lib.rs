@@ -11,11 +11,11 @@
 //! on the filters, as php's does.
 //!
 //! The library is libbzip2 ported to Rust and not the platform's libbz2:
-//! php's tests observe the compressed bytes, and on #1116's measurement
-//! over nine inputs, every block size 1 to 9 and every work factor 0 to
-//! 250 (20,331 rows), `libbz2-rs-sys` 0.2.5 wrote the oracle's bytes on
-//! every row, as the platform's libbz2 1.0.8 does, where `oxiarc-bzip2`
-//! and `crabz2` wrote them for the empty input alone.
+//! php's tests observe the compressed bytes, and on a measurement over
+//! nine inputs, every block size 1 to 9 and every work factor 0 to 250
+//! (20,331 rows), `libbz2-rs-sys` 0.2.5 wrote the oracle's bytes on every
+//! row, as the platform's libbz2 1.0.8 does, where `oxiarc-bzip2` and
+//! `crabz2` wrote them for the empty input alone.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(

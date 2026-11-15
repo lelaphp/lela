@@ -1,4 +1,4 @@
-//! A native's variadic tail as `Z_PARAM_VARIADIC` reads it (#4014): in
+//! A native's variadic tail as `Z_PARAM_VARIADIC` reads it: in
 //! place over the frame's slots, so a call of any length allocates
 //! nothing past the request's own heap for a tail of a type that takes
 //! each argument as it stands, and `Z_PARAM_VARIADIC_WITH_NAMED` lays

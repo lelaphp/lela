@@ -1,4 +1,4 @@
-//! What the native attributes refuse at build time (design §7.1; #955),
+//! What the native attributes refuse at build time (design §7.1),
 //! each a `compile_fail` block, the type-level ones pinned to their
 //! error code. Here and not in `php_macros` because the expansion names
 //! the facade, which `php_macros` does not depend on (ADR-0007). Compiled
@@ -118,8 +118,8 @@
 //! # fn main() {}
 //! ```
 //!
-//! A pointer into a request's heap held in engine state (ADR-0005, #4348
-//! ruling 2), the `engine-state` rule's compile-fail fixtures under
+//! A pointer into a request's heap held in engine state (ADR-0005, ruled
+//! 2026-11-09), the `engine-state` rule's compile-fail fixtures under
 //! `xtask/fixtures/api-check/engine-state/`: a type derived over a field
 //! holding a request's value, refused at the field,
 //!
@@ -137,7 +137,7 @@
 //! ```
 //!
 //! A class identity held in engine state is the `EngineClassId` an
-//! extension's start resolves (#4477), and a type derived over a field
+//! extension's start resolves, and a type derived over a field
 //! holding a `ClassId`, which may be a class of one request's own, is
 //! refused at the field:
 //!

@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -17,7 +17,7 @@ fn armed(source: &str) -> String {
 /// `GMP::__unserialize` writes each member it is handed, under an
 /// integer key and under a string one, with one owner of the value the
 /// table's: the property sinks take an owner, and the native takes the
-/// one it hands them (#1997).
+/// one it hands them.
 #[test]
 fn the_members_gmp_unserializes_are_the_table_s() {
     let stdout = armed(

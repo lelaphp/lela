@@ -1,5 +1,5 @@
 //! libedit's readline layer, the library the pinned php links
-//! (`/usr/lib/libedit.3.dylib`; design §7.2, revision 72; #1540): the
+//! (`/usr/lib/libedit.3.dylib`; design §7.2, revision 72): the
 //! calls and the variables of `<editline/readline.h>` that `readline.c`
 //! and `readline_cli.c` reach, declared by hand, no bindgen. The one home
 //! of this crate's `unsafe` (`unsafe.homes`' `ext/*/src/ffi/`).
@@ -77,7 +77,7 @@ static mut ONCE: libc::pthread_once_t = libc::PTHREAD_ONCE_INIT;
 /// call in progress on the thread, null outside one: libedit's callbacks
 /// carry no user data, so what php keeps per thread under `ZEND_TLS` is
 /// kept in a slot of a `pthread_key_t`, made once through `pthread_once`
-/// (design §7.2's readline row, revision 76; #1606, #2821). The key is
+/// (design §7.2's readline row, revision 76). The key is
 /// written once, by [`key`]'s `make_key`, and read after; no request's
 /// pointer stands in a process-wide static.
 static mut KEY: libc::pthread_key_t = 0;

@@ -1,19 +1,18 @@
 //! What an arm's processes retired beside the time or rate a rep
 //! measured: instructions, cycles, CPU time and runnable time, the time a
 //! process ran or waited for a CPU. On a shared machine a makala bar's
-//! rate moves with the load while these hold to a fraction of a percent
-//! (#3010), so a reading taken under load states a cost the spread does
-//! not hide (#3013); and a process arm that asks for them states what one
-//! opline of its run retired, the `step` bar's cost in instructions
-//! (#2946).
+//! rate moves with the load while these hold to a fraction of a percent,
+//! so a reading taken under load states a cost the spread does
+//! not hide; and a process arm that asks for them states what one
+//! opline of its run retired, the `step` bar's cost in instructions.
 //!
 //! Each is read from `proc_pid_rusage`: for a server, summed over its
 //! processes, makala's one and php-fpm's master and children, before and
 //! after a rep, the difference divided by the requests answered in the
 //! rep; for a process arm, over its life, read once it has exited and
 //! before it is reaped. An arm's figure is the median over its reps. The
-//! call is macOS's, read in `read`, xtask's one `unsafe` home (#3062's
-//! ruling); elsewhere every such arm says its figures are absent. A
+//! call is macOS's, read in `read`, xtask's one `unsafe` home (ruled
+//! 2026-10-20); elsewhere every such arm says its figures are absent. A
 //! process arm's peak memory is read there too, on macOS and on Linux,
 //! each as its platform states it, which [`Peak`] names.
 
@@ -101,7 +100,7 @@ pub(crate) fn exited(pid: u32) -> (Option<Retired>, Option<u64>) {
 /// child has exited. At the exec Linux takes the spawning map's high-water
 /// mark into the child's `ru_maxrss` (`fs/exec.c`'s `exec_mmap`), and a
 /// `posix_spawn`ed child's map is its spawner's, so a peak no higher than
-/// the spawner's own may be the spawner's, and is none (#3798).
+/// the spawner's own may be the spawner's, and is none.
 #[cfg(target_os = "linux")]
 pub(crate) fn exited(pid: u32) -> (Option<Retired>, Option<u64>) {
     let peak = read::exited(pid);
@@ -148,7 +147,7 @@ fn high_water(status: &str) -> Option<u64> {
 }
 
 /// Which peak of a process's memory the platform states, and so the one a
-/// peak bar's reading names. They are not one measure (#3368): the
+/// peak bar's reading names. They are not one measure: the
 /// footprint leaves out the clean pages of the binary that the resident
 /// set counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +155,7 @@ pub(crate) enum Peak {
     /// macOS's `ri_lifetime_max_phys_footprint` from `proc_pid_rusage`.
     Footprint,
     /// Linux's `ru_maxrss` from `waitid`, the kernel's `VmHWM` at the
-    /// exit (#3798).
+    /// exit.
     Resident,
 }
 
@@ -367,7 +366,7 @@ mod tests {
 
     /// A child that held a known allocation peaks above it by no more than
     /// its own image, read once it has exited and before it is reaped, as
-    /// [`Peak::HERE`] names the peak (#3798). The child is this test binary
+    /// [`Peak::HERE`] names the peak. The child is this test binary
     /// run again on this test alone, holding the MiB `HOLD` names; on Linux
     /// it holds 64 MiB more than this process does, so its peak stands
     /// above the floor [`exited`] holds it to.
@@ -409,7 +408,7 @@ mod tests {
     }
 
     /// A process arm's run states what it retired over its life, and the
-    /// `step` bar each figure over the oplines the run executed (#2946):
+    /// `step` bar each figure over the oplines the run executed:
     /// 2,000 instructions over 400 oplines are 5 per opline, and the
     /// figures a run could not read stay absent.
     #[test]

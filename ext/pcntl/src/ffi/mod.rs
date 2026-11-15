@@ -191,7 +191,7 @@ pub(crate) type Usage = libc::rusage;
 
 /// An `rusage` of zeroes, php's `memset`. Made as php makes it, and not
 /// field by field: musl's carries a private reserved tail that no struct
-/// expression can fill (#2308).
+/// expression can fill.
 pub(crate) fn zeroed_usage() -> Usage {
     // SAFETY: `rusage` is plain integers and `timeval`s, for which all
     // zeroes is a value.
@@ -448,7 +448,7 @@ pub(crate) fn set_qos_class(class: u32) -> Result<(), Errno> {
 }
 
 /// What the kernel writes into a `siginfo_t` on Linux, read back as the
-/// record php renders it from (#1063).
+/// record php renders it from.
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
     use super::{SignalSet, mask, wait_info, waitid};

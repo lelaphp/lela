@@ -70,7 +70,7 @@ fn a_ruled_out_suite_a_crate_owns_is_refused_naming_both() {
 }
 
 /// The tracked manifest's `[parity] out` is the seven server-bound suites
-/// under the ruling that put them there, read as typed data (#1739, #1759).
+/// under the ruling that put them there, read as typed data.
 #[test]
 fn the_tracked_parity_table_is_the_seven_suites_under_design_12() {
     let manifest = Manifest::load(&crate::built_root()).unwrap();
@@ -94,7 +94,7 @@ fn the_tracked_parity_table_is_the_seven_suites_under_design_12() {
 
 /// A suite is ruled out once, under one ruling: one listed twice, under
 /// two rulings or one, or one inside another ruled suite, is refused,
-/// naming both entries and their rulings (#1930).
+/// naming both entries and their rulings.
 #[test]
 fn a_suite_ruled_out_twice_or_inside_another_is_refused_naming_both() {
     let cases = [
@@ -127,7 +127,7 @@ fn a_suite_ruled_out_twice_or_inside_another_is_refused_naming_both() {
 }
 
 /// A pin the `[oracle]` row names and the workspace lacks is a defect and
-/// not a refusal to load (#3618 ruling 4, #3642): the manifest loads,
+/// not a refusal to load (ruling 4 of 2026-10-30): the manifest loads,
 /// `defects` names the file as absent, and `pin` refuses with it; the
 /// stale fixture, whose row names a pin it does not carry, loads so, as
 /// `permit --diff` and `done` load it to judge a change under it.
@@ -154,7 +154,7 @@ fn a_pin_the_workspace_lacks_is_a_defect_and_only_pin_refuses() {
     assert!(manifest.pin().is_err());
 }
 
-/// `adding` qualifies `deny = true` (#4363): beside it the row loads, and
+/// `adding` qualifies `deny = true`: beside it the row loads, and
 /// beside another predicate, `deny = false` or none at all, it is refused
 /// as an orphaned qualifier, naming the row and the key.
 #[test]

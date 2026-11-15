@@ -34,7 +34,7 @@ pub struct CacheSlot(pub u32);
 /// first offset, which the engine overwrites before the unit is shared.
 ///
 /// So one may be a request's, and is no engine state (design §5.14,
-/// *Identities*; #4631): engine state names an op array the engine
+/// *Identities*): engine state names an op array the engine
 /// numbered by the tier's `EngineFuncRef`, and a type of this crate that
 /// holds an offset is refused at the field,
 ///
@@ -742,7 +742,7 @@ impl OpArray {
     /// that goes on, at or past `oplines`. php's `pass_two` holds none of
     /// these; the handlers' bounds compares stand behind them, and
     /// publication holds them in a build with debug assertions, the
-    /// sensor #3274's ruling builds ([`crate::Unit::published`]).
+    /// sensor the ruling of 2026-10-23 builds ([`crate::Unit::published`]).
     pub(crate) fn out_of_range(&self) -> Option<String> {
         let slots = self.num_cvs + self.num_tmps;
         let (len, k) = (self.oplines.len(), self.literals.len());
@@ -877,7 +877,7 @@ mod tests {
 
     /// Publication holds every op array of a unit to its tables in a
     /// build with debug assertions, and names the op array and the
-    /// opline of an operand past its frame: a compiler bug (#3274).
+    /// opline of an operand past its frame: a compiler bug.
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(

@@ -5,13 +5,13 @@
 //! waited on at once, each request read as its bytes arrive, so a client
 //! that sends slowly holds no other back, and the requests served through
 //! the engine one after another on that thread ([`client`]), as
-//! `php_cli_server_do_event_loop` serves them (#1884, as #1779 ruled). No
+//! `php_cli_server_do_event_loop` serves them (design §4.8, revision 122). No
 //! request is ever in flight beside another, so a `pcntl_fork` from one
 //! forks as under the CLI, and the child serves on in the loop it was
 //! forked from, as php's does. `PHP_CLI_SERVER_WORKERS` forks the server
 //! into worker processes before it serves, each through the engine's
 //! one home for fork and each with a loop of its own on the same socket
-//! ([`workers`], #1885). The log is php's: the startup line, one line as
+//! ([`workers`]). The log is php's: the startup line, one line as
 //! each connection is accepted and closed, one per response, each
 //! after the local time `asctime` writes, on stderr, as many as the level
 //! `-q` lowers leaves.

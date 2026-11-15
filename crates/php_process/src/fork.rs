@@ -1,8 +1,8 @@
-//! `fork(2)`, the one call in the workspace that makes a process (#1779;
-//! `fork.home`), and nothing around it. Whether a fork may happen, which
+//! `fork(2)`, the one call in the workspace that makes a process
+//! (`fork.home`), and nothing around it. Whether a fork may happen, which
 //! of the engine's own threads are joined first, what the child restores
-//! (php's `php_child_init`) and what the parent re-arms are `php_engine`'s
-//! (#1807); the `process` seam makes the engine the one crate that imports
+//! (php's `php_child_init`) and what the parent re-arms are `php_engine`'s;
+//! the `process` seam makes the engine the one crate that imports
 //! this one, so pcntl reaches a fork through the request and a host through
 //! `php_sapi`, never here.
 
@@ -45,7 +45,7 @@ impl Pid {
 /// nothing, so a caller that `exec`s or exits straight after stays within
 /// that. A process whose calling thread is its only one holds nothing it
 /// could lose, and its child goes on as the parent would: that is the
-/// process the engine makes before it forks (#1807).
+/// process the engine makes before it forks.
 ///
 /// # Errors
 ///
@@ -61,7 +61,7 @@ pub fn fork() -> io::Result<Forked> {
     // other threads is not one this function can see or enforce: no type
     // here witnesses that the process has one thread, so it rests on the
     // engine, the one importer the `process` seam admits, whose one home
-    // for fork (#1807) calls this only while it holds the type that says
+    // for fork calls this only while it holds the type that says
     // every thread it started is joined and no other request is in
     // flight; a host's own threads are the host's to keep out of a
     // process that forks.

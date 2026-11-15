@@ -1,4 +1,4 @@
-//! Frame writes and evaluation in a paused frame (#1828): a debugger
+//! Frame writes and evaluation in a paused frame: a debugger
 //! written as an extension stops where the program calls `pause()`, its
 //! observer's begin handler standing in that call, writes a variable of
 //! a frame it holds a [`FrameId`] of ([`Frames::set_var`]) and

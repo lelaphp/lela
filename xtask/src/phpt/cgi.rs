@@ -7,10 +7,10 @@
 //!
 //! The host is the php-cgi `[sapi]` pins for the runner's control, and
 //! the engine's own `php-cgi` beside the binary under test, `sapi/cgi`'s
-//! binary (#1197, ADR-0008), which is where a test that looks for php-cgi
+//! binary (ADR-0008), which is where a test that looks for php-cgi
 //! beside `TEST_PHP_EXECUTABLE` finds it.
 //! [`request`] is the one translation of a test's sections into what its
-//! host is handed, whichever host it is (#1198).
+//! host is handed, whichever host it is.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
@@ -336,7 +336,7 @@ pub(super) enum Names {
     /// As written, as run-tests.php holds php-cgi's.
     AsWritten,
     /// Without regard to case, as the served subset holds makala's, which
-    /// writes every name lowercase by design (#2570).
+    /// writes every name lowercase by design.
     Folded,
 }
 
@@ -471,7 +471,7 @@ mod tests {
             None
         );
         // A name of another case is met only where names are folded, as
-        // makala's lowercase ones are (#2570).
+        // makala's lowercase ones are.
         let lower = [("content-length".to_owned(), "3".to_owned())];
         assert!(headers_missed("Content-length: 3", (&lower, Names::AsWritten)).is_some());
         assert_eq!(

@@ -42,7 +42,7 @@ fn a_persistent_connection_serves_the_next_request() {
 /// that connection: php gives pdo's persistent connections back in
 /// `shutdown_executor`, after every extension's `RSHUTDOWN`. The second
 /// request prints what the write left, the oracle's bytes for the same
-/// two requests (#1695).
+/// two requests.
 #[test]
 fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
     let engine = Engine::builder()
@@ -97,8 +97,7 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
 /// the end of one request is rolled back before the next is lent it:
 /// php's `pdo_dbh_free_storage` rolls back what the object leaves open.
 /// The second request prints the oracle's bytes for the same two
-/// requests under its built-in web server, `bool(false)` and `int(0)`
-/// (#1784).
+/// requests under its built-in web server, `bool(false)` and `int(0)`.
 #[test]
 fn a_persistent_connection_s_open_transaction_is_rolled_back_at_the_request_end() {
     let engine = support::engine();

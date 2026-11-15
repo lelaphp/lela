@@ -11,7 +11,7 @@ use super::*;
 /// the class `C`; a string written where the class goes, folded by the
 /// parser from `"A" . "B"` too, is the class it names as written
 /// (`ZEND_NAME_FQ`). The dump is the oracle's under `[regime.dump]` at
-/// 8.5.9 (#2680).
+/// 8.5.9.
 #[test]
 fn a_class_in_parentheses_is_the_expression_and_a_string_the_class_it_names() {
     expect![[r#"
@@ -128,7 +128,7 @@ fn new_compiles_to_php_s_op_array() {
     );
 }
 
-/// `zend_get_compatible_func_or_null` under a namespace (#322): the
+/// `zend_get_compatible_func_or_null` under a namespace: the
 /// callee is known by the name the fetch resolves to, so `M::f(1)`
 /// under `namespace A;` finds the public `f` of the `A\M` the engine
 /// declared and sends `SEND_VAL`, where `\M::f(1)` names the global
@@ -197,7 +197,7 @@ fn a_method_of_a_namespaced_class_is_a_known_callee_in_its_namespace() {
 }
 
 /// `zend_compile_method_call` and `zend_compile_static_call` against
-/// the class being compiled (#2675): `$this->p()` to a private and
+/// the class being compiled: `$this->p()` to a private and
 /// `$this->f()` to a final method the class declared before the call
 /// are `DO_UCALL` with the arguments sent by the parameters, by
 /// reference to `&$a`, where a public one stays `DO_FCALL` and so
@@ -295,7 +295,7 @@ class C {
     ));
 }
 
-/// `zend_compile_static_call` over a class bound early (#2016):
+/// `zend_compile_static_call` over a class bound early:
 /// `zend_get_compatible_func_or_null` finds the method in the linked
 /// class's `function_table`, which holds what it inherited, so
 /// `B::foo($x)` over `A::foo(&$a)` is `DO_UCALL` with `$x` sent by
@@ -770,7 +770,7 @@ fn a_class_reference_of_the_scope_or_an_expression_compiles_as_php_emits_it() {
     );
 }
 
-/// #531's program under the oracle's `[regime.dump]`: a `JMP_NULL`
+/// This program under the oracle's `[regime.dump]`: a `JMP_NULL`
 /// over the object before each `?->`, its target the opline after
 /// the chain and its `result` the chain's own, a call's arguments
 /// inside the jump, and `"$a?->b"` a chain of its own inside the

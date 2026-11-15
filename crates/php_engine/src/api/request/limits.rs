@@ -155,7 +155,7 @@ impl AsRef<AtomicBool> for State {
 }
 
 /// The time limit suspended while this stands
-/// ([`Limits::suspend_time_limit`], #1814), over the request or over
+/// ([`Limits::suspend_time_limit`]), over the request or over
 /// what holds it, an observer's frame ([`Observed`]): what it derefs to,
 /// so the handler that holds it keeps everything it had. Its drop is
 /// the resume.
@@ -240,7 +240,7 @@ pub(super) struct LimitsState {
 
 impl Drop for LimitsState {
     /// The request's end, for a thread waiting on it: what is still
-    /// posted is abandoned and returns zero to C (#1640).
+    /// posted is abandoned and returns zero to C.
     fn drop(&mut self) {
         if let Some(reentry) = &self.reentry {
             reentry.close();
@@ -375,7 +375,7 @@ impl Request {
     /// the call that began it to its body: what every scope after it is
     /// charged: the loop's bodies are near one size, one scope's frame
     /// for each of the binary's tiers and observers (1,760 to 1,792
-    /// bytes measured on #3051), and the room twice the charge.
+    /// bytes measured), and the room twice the charge.
     pub(crate) fn note_scope_cost(&mut self, cost: std::num::NonZeroUsize) {
         self.limits.scope_cost = Some(cost);
     }
@@ -383,7 +383,7 @@ impl Request {
     /// `frame`, the stack the request's first serving took from the call
     /// that began it to the loop's body: what the loop's entry counts
     /// below the frame it is asked from ([`Request::loop_frame`]),
-    /// 193,200 bytes unoptimised, every handler in line (#3830). Kept
+    /// 193,200 bytes unoptimised, every handler in line. Kept
     /// apart from a scope's charge, which an optimised build measures
     /// from inside the loop's body and which this measurement, from the
     /// frame that called the loop, would understate there.
@@ -517,7 +517,7 @@ impl<'r> Limits<&'r Request> {
     /// and under detect php's own budget, the process's main thread's
     /// size, below the frame that last called back into PHP, however
     /// much larger the thread a host serves on is
-    /// (`php_compile::StackLimit`, #3142).
+    /// (`php_compile::StackLimit`, design revision 156).
     /// A native that walks a nest by recursing asks it at each level and
     /// raises its own refusal, as `php_url_encode_hash_ex` raises
     /// `Maximum call stack size reached.`; the one php's engine raises is
@@ -562,7 +562,7 @@ impl<'r> Limits<&'r Request> {
 }
 
 impl<'r> Limits<&'r mut Request> {
-    /// A periodic interrupt (#1806): this request's interrupt raised
+    /// A periodic interrupt: this request's interrupt raised
     /// `first` from now and every `every` after it, once where `every`
     /// is `None` (Excimer's one-shot `ExcimerTimer`), until
     /// [`Limits::stop_periodic`] stops it or the request reaches
@@ -595,7 +595,7 @@ impl<'r> Limits<&'r mut Request> {
         self.0.limits.deadlines.start_periodic(first, every)
     }
 
-    /// The time limit suspended (#1814) for as long as the guard this
+    /// The time limit suspended for as long as the guard this
     /// answers stands: the execution timer that `max_execution_time` and
     /// `set_time_limit()` arm stops counting, its `hard_timeout` stage
     /// with it, and the time it had left counts on from the guard's drop.
@@ -651,8 +651,8 @@ impl<'r> Limits<&'r mut Request> {
         self.0.limits.deadlines.stop_periodic(periodic);
     }
 
-    /// `fork(2)` from this request, the engine's one home for it (#1807, as
-    /// #1779 ruled), which `pcntl_fork` asks: the process copied with this
+    /// `fork(2)` from this request, the engine's one home for it (as ruled
+    /// 2026-10-04), which `pcntl_fork` asks: the process copied with this
     /// request alone inside the engine and no thread of the engine's alive
     /// (ADR-0010, Threads), returning in both as [`Forked::Parent`] with the
     /// child's id and as [`Forked::Child`]. The engine's timer thread is joined
@@ -712,9 +712,9 @@ impl<'r> Limits<&'r mut Request> {
         crate::fork::fork_request()
     }
 
-    /// How a function C calls back reaches this request (#1638, #1640):
-    /// one per request, made at the first ask, which ext/ffi makes at
-    /// its first call into C or callback, and closed when the request
+    /// How a function C calls back reaches this request (design revision
+    /// 112): one per request, made at the first ask, which ext/ffi makes
+    /// at its first call into C or callback, and closed when the request
     /// ends.
     pub fn reentry(self) -> Arc<Reentry> {
         let interrupt = &self.0.limits.interrupt;
@@ -730,18 +730,17 @@ impl<'r> Limits<&'r mut Request> {
     /// another thread meanwhile, which takes it, served on that thread
     /// and held to that thread's stack limit
     /// ([`Request::stack_for_this_thread`]), and gives it back before
-    /// this returns (#1640): what a call into C
-    /// and an engine native that blocks (`sleep`, `usleep`,
-    /// `stream_select`, a blocking read, a child's wait, `flock`,
-    /// `stream_socket_accept`, and
-    /// ext/pcntl's and ext/sockets' waits, #2401) wait through, so the
-    /// request never waits on C while C waits on the request. `wait`
-    /// reaches nothing of the request, which is borrowed for its length;
-    /// where no [`Reentry`] was made, nothing can call back and nothing
+    /// this returns: what a call into C and an engine native that blocks
+    /// (`sleep`, `usleep`, `stream_select`, a blocking read, a child's
+    /// wait, `flock`, `stream_socket_accept`, and ext/pcntl's and
+    /// ext/sockets' waits) wait through, so the request never waits on C
+    /// while C waits on the request. `wait` reaches nothing of the
+    /// request, which is borrowed for its length; where no [`Reentry`]
+    /// was made, nothing can call back and nothing
     /// is lent. `curl_exec` and `curl_multi_select` wait inside libcurl
     /// without it, as php's one thread runs one libcurl call of a request
     /// at a time, and a callback made meanwhile is served at the next
-    /// interrupt check after they return (#2595).
+    /// interrupt check after they return.
     pub fn blocking<T>(self, wait: impl FnOnce() -> T) -> T {
         let Some(reentry) = self.0.limits.reentry.clone() else {
             return wait();

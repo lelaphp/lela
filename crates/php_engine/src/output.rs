@@ -9,8 +9,9 @@
 //! header callback, take `&mut Request`; the stack's own moves take the
 //! heap alone.
 //!
-//! What the first non-empty write holds, and #244, which named it: `php_output_op` (`Z/main/output.c:1098`) reaches
-//! `php_output_header` (`:102`) once bytes are about to reach the host
+//! What the first non-empty write holds: `php_output_op`
+//! (`Z/main/output.c:1098`) reaches `php_output_header` (`:102`) once
+//! bytes are about to reach the host
 //! (`:1131`), which is `php_header()` (`Z/ext/standard/head.c:70`) and
 //! `sapi_send_headers()` (`Z/main/SAPI.c:861`). That lays down the
 //! default `Content-type`: `get_default_content_type` (`:299`)
@@ -638,8 +639,8 @@ fn pop_verb(flags: u32) -> &'static str {
 ///
 /// The first non-empty write holds thirty-two bytes, the mimetype this
 /// file's doc names, and an empty one holds nothing; a second write holds no
-/// more (#211's witness reads its deltas before it prints for this
-/// reason, and this is the reason).
+/// more (the huge-block witness of `memory_get_usage()` reads its deltas
+/// before it prints for this reason, and this is the reason).
 ///
 /// ```php
 /// $b = memory_get_usage(); echo ""; var_dump(memory_get_usage() - $b);
@@ -1683,7 +1684,8 @@ pub(crate) fn deactivate(req: &mut Request) {
     if req.output().flags & ACTIVATED != 0 {
         // php's `_exit(137)` at the hard memory limit never reaches
         // `php_output_deactivate`, so a request ended there commits no
-        // head and runs no header callback (`Ending::Terminated`, #3435).
+        // head and runs no header callback (`Ending::Terminated`, the row
+        // `trace:hard-limit-ends-request`).
         if !req.terminated() {
             header(req);
         }
@@ -2171,7 +2173,7 @@ mod tests {
 
     /// `sapi_send_headers` under a web host: the default `Content-type`
     /// goes on the end of the list when the first byte reaches the host,
-    /// after the lines `header()` left, and the block is sent (#289).
+    /// after the lines `header()` left, and the block is sent.
     #[test]
     fn a_web_host_s_block_ends_in_the_default_content_type_after_the_first_byte() {
         let mut req = web_request();

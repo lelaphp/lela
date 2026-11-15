@@ -29,7 +29,7 @@ pub struct Present {
     /// kind, by package name (`openssl-sys`).
     pub external: BTreeSet<String>,
     /// Whether its `Cargo.toml` carries `[lints] workspace = true`, the one
-    /// way the root manifest's `[workspace.lints]` reaches a member (#2111).
+    /// way the root manifest's `[workspace.lints]` reaches a member.
     pub inherits_lints: bool,
 }
 
@@ -72,7 +72,7 @@ impl Present {
     /// Every `.rs` file under the crate's source directories and its
     /// `build.rs`, in path order, as git lists them ([`crate::git::files`]):
     /// a file git ignores is in no commit and moves no key, so it is not
-    /// read (#4620). Git lists from the workspace root with the crate's
+    /// read. Git lists from the workspace root with the crate's
     /// directories as the pathspecs, as budget does: run in the crate's
     /// directory under the `GIT_DIR` a linked worktree's hook exports, git
     /// takes that directory for the top of the work tree and reads no
@@ -233,7 +233,7 @@ mod tests {
     use crate::scratch::Tree;
 
     /// A crate's sources are the `.rs` files git lists under it: one git
-    /// ignores is in no commit and moves no key, so it is not read (#4620).
+    /// ignores is in no commit and moves no key, so it is not read.
     #[test]
     fn a_source_git_ignores_is_not_among_a_crates() {
         let root = Tree::new("api-check-ignored").unwrap();

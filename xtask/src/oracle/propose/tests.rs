@@ -279,7 +279,7 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (Vec<u8>, Option<SystemTime>)> {
 /// `TEST_PHP_EXECUTABLE`, the three `[sapi]` hosts and the configure
 /// line's md5 and arguments; beside them `[oracle].formula`,
 /// `dist/inputs.toml`, the Dockerfile's version, `NOTICE`'s tag and commit,
-/// nothing else on their line moved (#4674), and the settings' tree
+/// nothing else on their line moved, and the settings' tree
 /// (box 2). `icu4c@78`, which the new keg loads at its next major and its
 /// receipt no longer names, leaves the closure with one note, and
 /// `icu4c@79` takes its place. The variant's build line and `ops.toml`

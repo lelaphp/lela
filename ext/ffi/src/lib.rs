@@ -1,7 +1,7 @@
 //! The `ffi` extension: `php-src/ext/ffi` as one crate under `ext/`
 //! (ADR-0004), `ffi.c` and its C-declaration parser ported over the
 //! platform's libffi, as the oracle links it, bound by hand in [`ffi`]
-//! (design §7.2, revision 75; #1573). This file is the extension value,
+//! (design §7.2, revision 75). This file is the extension value,
 //! its ini entries and its state; [`decls`] is the `FFI` class,
 //! [`cdata`] `FFI\CData`, [`ctype`] `FFI\CType`, [`call`] the call
 //! into C and back, [`types`] the C type model and [`parse`] the
@@ -153,7 +153,7 @@ fn restriction(req: &Request) -> Restriction {
 ///
 /// Under php-cgi, whose `ffi.enable` is `preload`, a function and a
 /// method `ext/ffi/tests/preload.php` declared call FFI in a request
-/// after the preload, and the request's own code is refused (#1614):
+/// after the preload, and the request's own code is refused:
 ///
 /// ```php
 /// var_dump(preloaded_abs(-7), PreloadedFfi::abs(-2));

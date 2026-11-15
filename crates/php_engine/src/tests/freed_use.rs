@@ -1,4 +1,4 @@
-//! The freed-use guard as a program meets it (#1990): a deliberately
+//! The freed-use guard as a program meets it: a deliberately
 //! faulty native takes an owner of a block the heap has just freed,
 //! through the type's own addref and not the request's, and the debug
 //! build refuses it at the refcounted header and ends the request in
@@ -7,7 +7,7 @@
 //! request ends when it ran outside the loop, in a request-end function
 //! or in a start that then failed.
 //!
-//! And the debug quarantine that makes the guard deterministic (#1991):
+//! And the debug quarantine that makes the guard deterministic:
 //! a value used after its block is freed and one of its size made is
 //! refused the first time it happens, and a write into a freed block while its
 //! bin holds it back is found as the block leaves.
@@ -93,9 +93,10 @@ fn freed_addref_at_rshutdown(req: &mut Request) {
 
 /// `freed_then_made(string $kind): void`, faulty on purpose: a value
 /// of `$kind` freed, one more of its kind and size made, and then one
-/// more owner of the freed one taken, the slot-reuse pattern of #1984's
-/// union. A free list that handed the freed block straight back would
-/// have the stale owner count the new value one more.
+/// more owner of the freed one taken, the slot-reuse pattern of an array
+/// union that took no owner of a key it added. A free list that handed
+/// the freed block straight back would have the stale owner count the
+/// new value one more.
 #[php_function]
 fn freed_then_made(req: &mut Request, kind: PhpString) {
     let Some(stale) = freed(req, kind.as_bytes()) else {
@@ -122,8 +123,8 @@ fn freed_protected(req: &mut Request) {
 const READ_AT: u32 = line!() + 9;
 
 /// `freed_read(): int`, faulty on purpose: a string freed, then its
-/// bytes read, the stale read of #1985-#1989's regressions; what it
-/// read is the length it answers.
+/// bytes read, the stale read of a native that held no owner of what it
+/// walked; what it read is the length it answers.
 #[php_function]
 fn freed_read(req: &mut Request) -> i64 {
     freed(req, b"string")
@@ -190,7 +191,7 @@ fn an_addref_of_a_freed_block_during_shutdown_is_raised_at_the_request_end() {
 
 /// A request a sensed refusal has ended renders that one fatal alone: a
 /// later refusal, here in a request-end function, is read through
-/// memory the first has made untrustworthy, and is not raised (#2052).
+/// memory the first has made untrustworthy, and is not raised.
 #[test]
 fn a_request_a_sensed_refusal_ended_renders_no_second() {
     let engine = Engine::cli_builder()
@@ -211,8 +212,7 @@ fn a_request_a_sensed_refusal_ended_renders_no_second() {
 
 /// A refusal made after a fatal, in a request-end function, is still
 /// raised where the request ends: the fatal's `zend_bailout` was caught
-/// before it, and a refused refcount change is a defect on any path
-/// (#2048).
+/// before it, and a refused refcount change is a defect on any path.
 #[test]
 fn an_addref_of_a_freed_block_after_a_fatal_is_raised_at_the_request_end() {
     let engine = Engine::cli_builder()
@@ -333,7 +333,7 @@ fn a_write_into_a_freed_block_is_found_as_it_leaves_the_quarantine() {
 /// A write into a freed block its bin still holds back when the request
 /// ends is found there: the request leak sensor's sweep drains the
 /// quarantine through the same check before it walks, and the write is
-/// raised where the request ends, with nothing executing (#2053). A
+/// raised where the request ends, with nothing executing. A
 /// clean request, its sensor armed as it is, reports nothing.
 #[test]
 fn a_write_into_a_freed_block_still_held_at_the_end_is_raised_there() {
@@ -367,7 +367,7 @@ fn a_write_into_a_freed_block_still_held_at_the_end_is_raised_there() {
 /// A read of a freed string's bytes is refused rather than aborting the
 /// process on a slice the length of the freed-block mark: the native
 /// reads no bytes, and the request ends in the `InternalError` naming
-/// the block and the line that read (#2051).
+/// the block and the line that read.
 #[test]
 fn a_read_of_a_freed_strings_bytes_ends_the_request_and_names_the_line() {
     let engine = Engine::cli_builder().extensions(&[faulty()]).build();

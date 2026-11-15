@@ -1,4 +1,4 @@
-//! `zend_test_crash('x')` ends its process as php's does (ruled on #2976):
+//! `zend_test_crash('x')` ends its process as php's does (ruled 2026-10-19):
 //! the message on fd 1, then the end by `SIGSEGV`. The
 //! process is this test's own binary started again as the request's host, its
 //! bytes the process's own as php's CLI writes them

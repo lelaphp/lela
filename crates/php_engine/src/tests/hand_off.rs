@@ -1,5 +1,5 @@
-//! The hand-off from `Nop`'s loop to the tier's (#3362; ADR-0006,
-//! amended on #3301): under [`Bound::Runtime`] a request starts in
+//! The hand-off from `Nop`'s loop to the tier's (ADR-0006,
+//! amended 2026-10-24): under [`Bound::Runtime`] a request starts in
 //! `Nop`'s loop until a unit with counting words is published in the
 //! engine, and one that publishes such a unit hands its frame to the
 //! tier's loop at the next interrupt check, for the rest of the request.
@@ -236,7 +236,7 @@ fn a_hand_off_owed_past_a_natives_check_is_taken_at_the_next_back_edge() {
 /// served, so the code a hook serves, at the check after the native that
 /// published the unit, runs in `Nop`'s loop to its end, its closure's
 /// activation asked by no tier, and the interrupted loop's next back edge takes the
-/// hand-off as it would with no hook (#3362).
+/// hand-off as it would with no hook.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_hooks_serving_does_not_take_the_hand_off_it_interrupted() {

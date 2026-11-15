@@ -1,9 +1,9 @@
-//! `oracle propose` (#4384, ruled on #4373): the whole diff a bump of the
+//! `oracle propose` (ruled 2026-11-10): the whole diff a bump of the
 //! oracle writes, read off the keg a person has poured and the php-src
 //! checkout at its tag, for the person to apply with `git apply` and
 //! commit. The pin moves only by a person's hand, and this is what the hand
 //! applies, so `[sapi]` and `TEST_PHP_EXECUTABLE`, which the last bump left
-//! at the keg before it (#3374), are written from the same reading as
+//! at the keg before it, are written from the same reading as
 //! `[oracle]`.
 //!
 //! **What it reads** is the machine and the tracked files: the keg's
@@ -25,8 +25,8 @@
 //! `TEST_PHP_EXECUTABLE` and `[sapi]`; `ci/oracle/configure.toml` below its
 //! header; `dist/inputs.toml`'s `[php]` and `[php.ini]`; and
 //! `dist/Dockerfile`'s `ARG PHP_VERSION`; `NOTICE`'s php-src tag and its
-//! commit, as `[source]` states them, in the one sentence that names them
-//! (#4663), no line of it wrapped again; and `.claude/settings.json`'s
+//! commit, as `[source]` states them, in the one sentence that names them,
+//! no line of it wrapped again; and `.claude/settings.json`'s
 //! tree where it names `[source].path`. A `[variant.*]` build is made from
 //! the tag and, on macOS, against `[closure]`, so it is rebuilt and never
 //! proposed, and `ops.toml` and `data/func-infos.toml` are regenerated
@@ -183,7 +183,7 @@ fn proposed_notes(
                 .collect();
             if !platforms.is_empty() {
                 notes.push(format!(
-                    "[variant.{name}] pins builds for {}, each made from the tag the diff replaces and left as it stands: `scripts/oracle-build.py build <platform> {name}` rebuilds each once the diff is applied (#4373)",
+                    "[variant.{name}] pins builds for {}, each made from the tag the diff replaces and left as it stands: `scripts/oracle-build.py build <platform> {name}` rebuilds each once the diff is applied",
                     platforms.join(", ")
                 ));
             }

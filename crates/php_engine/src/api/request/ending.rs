@@ -200,7 +200,7 @@ impl Request {
     /// served: the request leaves what it was serving, and the collector
     /// and `CG(unclean_shutdown)` stand as they were, so a debug build's
     /// shutdown collects and its leak sensor reads the request as a debug
-    /// php does (#2058). Where no frame stands, php bails out after the
+    /// php does. Where no frame stands, php bails out after the
     /// rendering ([`Request::thrown_without_frame`]).
     pub(crate) fn end_in_uncaught(&mut self, level: Level, message: &[u8], file: &[u8], line: u32) {
         if self.bailout {

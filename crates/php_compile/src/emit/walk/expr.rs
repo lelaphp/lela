@@ -1,5 +1,5 @@
 //! The walk over a closure written inside an expression of
-//! `php_syntax`'s tree (design §4.9, #595): what [`Emit`] reads
+//! `php_syntax`'s tree (design §4.9): what [`Emit`] reads
 //! `function (…) use (…) {…}` and `fn (…) => e` as, in the [`Closure`]
 //! shape that stands beside the other declarations', since a closure
 //! is a declaration and reaches the emitter as they do.
@@ -80,7 +80,7 @@ impl Emit<'_> {
     /// `fn (…) => expr`, php's `ZEND_AST_ARROW_FUNC`: a closure whose
     /// body is the one `return` php makes of the expression
     /// (`zend_compile_func_decl`), and whose end line is the token after
-    /// the body's (#601 row 18).
+    /// the body's.
     fn arrow_fn(&mut self, id: NodeId<ArrowFnExpr>, line: u32) -> Result<Closure, CompileError> {
         let node = self.parsed.tree[id];
         let attributes = self.walk_attributes(self.list(node.attrs))?;
@@ -131,7 +131,7 @@ impl Emit<'_> {
 
     /// The line of the first significant token after `range`, or the
     /// last line where none follows: where an arrow function's
-    /// `end_lineno` stands (#601 row 18).
+    /// `end_lineno` stands.
     fn line_after(&self, range: TextRange) -> u32 {
         let at = self
             .parsed

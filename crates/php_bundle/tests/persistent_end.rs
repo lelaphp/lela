@@ -1,5 +1,5 @@
-//! The stream layer's idle persistent sockets close first at engine end
-//! (#1962), as `zend_shutdown` destroys `EG(persistent_list)` before any
+//! The stream layer's idle persistent sockets close first at engine end,
+//! as `zend_shutdown` destroys `EG(persistent_list)` before any
 //! `MSHUTDOWN` (`Z/Zend/zend.c:1166-1170`): the pool is the layer's
 //! engine state, and the engine serves the layer's engine end on the
 //! shutdown request before any extension's. A tripwire extension

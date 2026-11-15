@@ -1,4 +1,4 @@
-//! What may stand in engine state (ADR-0005; #4348 ruling 2): a value
+//! What may stand in engine state (ADR-0005; ruled 2026-11-09): a value
 //! every request thread reads at once, so one that holds no pointer into a
 //! request's heap. A request's string, array, object, reference or
 //! resource moves with the request that owns it and is touched by its
@@ -8,7 +8,7 @@
 //! shares, so [`EngineState`] says it, and each slot the engine keeps a
 //! value engine-wide in, an extension's entries and the stream layer's
 //! state beside them, is bounded by it and by `Sync` beside it.
-//! The trait asks `Send` and not `Sync` (#4474): a value behind a `Mutex`,
+//! The trait asks `Send` and not `Sync`: a value behind a `Mutex`,
 //! an idle entry `api::Pool` keeps, is moved and never shared, and is
 //! engine state all the same; where a value is shared, through an `Arc`,
 //! a `&'static` or one of those slots, `Sync` is asked there.
@@ -24,7 +24,7 @@
 //! and [`AnyState`](crate::AnyState).
 //! An `AnyState` is a value of engine state behind its erased type, which
 //! the engine holds where it keeps a value it does not name, the compiled
-//! tier's for an epoch (#4492): its one constructor takes engine state,
+//! tier's for an epoch: its one constructor takes engine state,
 //! so a field of it is held to the bound where the value is made and not
 //! where it is kept. In an extension's `src/ffi/`, an impl by hand stands
 //! for a C library's object, beside its `Send` or `Sync` argument, which
@@ -43,8 +43,8 @@
 //! `build.rs` that writes the impl without naming the trait, an impl a proc
 //! macro parses from a string, a local macro that forwards the trait to a
 //! macro outside the workspace, and a rename another crate exports stand
-//! outside what it reads (#4463). [`Zval`] and every pointer into a
-//! request's heap have no impl.
+//! outside what it reads, a gap that is not closed yet. [`Zval`] and every
+//! pointer into a request's heap have no impl.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -216,7 +216,7 @@ impl EngineState for ZvalType {}
 #[cfg(debug_assertions)]
 impl EngineState for crate::Origin {}
 
-/// The engine's permanent table (`string.rs`, #4633's ruling): the
+/// The engine's permanent table (`string.rs`, ruled 2026-11-13): the
 /// blocks it holds are its own, laid off every request's heap, and
 /// immutable once it is published. A string of it is "immutable, hashed
 /// before it is published, never refcounted and never freed while the
@@ -225,10 +225,10 @@ impl EngineState for crate::Origin {}
 /// of it is one `persistent_array` laid on the system allocator, marked
 /// `IS_ARRAY_IMMUTABLE`, and freed with the table. Each carries
 /// `IS_STR_PERMANENT`'s bit from the moment the table holds it, a set's
-/// as [`Strings::publish`] takes the set in (#4656). The pointers it holds
+/// as [`Strings::publish`] takes the set in. The pointers it holds
 /// are to those blocks and its bump's chunks, beside the class caches'
 /// numbers. A constant array's keys and elements are held to the table's
-/// values as it is laid (#4655): the table's [`Intern::constant_array`]
+/// values as it is laid: the table's [`Intern::constant_array`]
 /// refuses a key or an element [`FrozenZval::of`] refuses, and a set's
 /// ([`crate::Pending::constant_array`]) one that is neither that nor a
 /// string or array of the set, which [`Strings::publish`] makes the
@@ -249,7 +249,7 @@ impl EngineState for Strings {}
 /// ([`FrozenZval::interned`]), or from a value [`FrozenZval::of`] has
 /// read through, so no request's value can be one.
 ///
-/// One thing neither constructor can check (#4656): the table whose
+/// One thing neither constructor can check: the table whose
 /// block a frozen value names outlives the value. The bits a value
 /// carries say a table laid it and published it, never which table or
 /// for how long, so a frozen value is held no longer than its table, and
@@ -293,7 +293,7 @@ impl FrozenZval {
 
     /// `z`, where no request owns it or anything it reaches, and `None`
     /// where a request may: what a walk over a value the engine
-    /// publishes asks of each value it reaches (#4633's ruling, #4649).
+    /// publishes asks of each value it reaches (ruled 2026-11-13).
     /// Each type is decided by name, so a type [`ZvalType`] gains does
     /// not compile until it is decided here:
     ///
@@ -312,15 +312,15 @@ impl FrozenZval {
     ///   the table holds and the process's empty array do (`array.rs`),
     ///   a set's taking the bit as the set is published, and is admitted
     ///   where each key and element is in turn. A table's homes refuse
-    ///   to lay an array holding anything else ([`Intern::constant_array`],
-    ///   #4655), and each is read here all the same, an array named
+    ///   to lay an array holding anything else ([`Intern::constant_array`]),
+    ///   and each is read here all the same, an array named
     ///   twice once, so that what this admits rests on no maker;
     /// - `UNDEF`, a constant expression's index (`IS_CONSTANT_AST`) and an
-    ///   `IS_PTR`'s are refused, at the top and as an element (#4656):
+    ///   `IS_PTR`'s are refused, at the top and as an element:
     ///   an index means something only beside the table it names, which
     ///   a frozen value read by any request outside its unit is not, so
-    ///   deciding one against its own table is the walk's over the unit
-    ///   (#4649), and an `UNDEF` is a value no publisher is shown to
+    ///   deciding one against its own table is the walk's over the unit,
+    ///   and an `UNDEF` is a value no publisher is shown to
     ///   write;
     /// - an object, a resource, a reference and an `IS_INDIRECT` are a
     ///   request's or point at what may be, and are refused.
@@ -475,7 +475,7 @@ mod tests {
     }
 
     /// Constant arrays laid as the table lays one and published, past the
-    /// refusal its homes make of a value no table holds (#4655): what a
+    /// refusal its homes make of a value no table holds: what a
     /// home without that refusal would have laid, for `of` to be shown
     /// reading it. Each is freed as this is dropped, as the table frees
     /// its own.
@@ -563,9 +563,9 @@ mod tests {
     }
 
     /// An index means something only beside the table it names, and an
-    /// `UNDEF` is no value a publisher writes (#4656): each is refused
+    /// `UNDEF` is no value a publisher writes: each is refused
     /// as the value and as an element of a constant array, which the
-    /// table refuses to lay (#4655) and `of` refuses where one stands.
+    /// table refuses to lay and `of` refuses where one stands.
     #[test]
     fn of_refuses_undef_and_a_constant_expressions_and_an_is_ptrs_index() {
         let _alone = crate::serial::alone();
@@ -585,10 +585,10 @@ mod tests {
         }
     }
 
-    /// The bit means published (#4656): a set lays its strings and its
+    /// The bit means published: a set lays its strings and its
     /// constant arrays without it, so `of` refuses each until the set
     /// enters the table, and admits each after. The table's own constant
-    /// array of a set's string is refused at its lay until then (#4655),
+    /// array of a set's string is refused at its lay until then,
     /// and laid and admitted after.
     #[test]
     fn of_refuses_a_sets_string_and_constant_array_until_it_is_published() {
@@ -685,7 +685,7 @@ mod tests {
     }
 
     /// The table's homes refuse to lay a constant array holding a
-    /// request's value (#4655), and `of` does not rest on that: laid as
+    /// request's value, and `of` does not rest on that: laid as
     /// the table lays one, past the refusal ([`Unrefused`]), an array one
     /// of whose keys or elements is a request's, at any depth, is
     /// refused, so `of` reads every key and element.

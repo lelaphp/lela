@@ -12,7 +12,7 @@ use crate::tier::Site;
 /// A class the compiler bound with no opline (`zend_compile_class_decl`
 /// under `toplevel`) is declared into the request's table before the
 /// main op array runs, so the source the doc-comment witness of
-/// `php_syntax` declares runs (#257). A name the table already holds
+/// `php_syntax` declares runs. A name the table already holds
 /// is no early bind: its `DECLARE_CLASS` raises
 /// `zend_class_redeclaration_error` where it stands, after what ran
 /// before it, in the wording for an internal class, or naming the
@@ -266,10 +266,10 @@ fn the_loop_asks_the_tier_at_the_entry_and_at_no_entry_frames_return() {
 
 /// Design §5.6, §8: a user frame is activated after its `RECV*`
 /// prologue, so `Probe` sees `(Entry, callee)` once per call and
-/// `Return` once per callee frame, in the caller it returned to
-/// (#4056); a call whose `RECV` throws is
+/// `Return` once per callee frame, in the caller it returned to;
+/// a call whose `RECV` throws is
 /// reported `Threw` before the activation, so no `Entry` is raised
-/// for it (#309).
+/// for it.
 #[test]
 fn a_call_activates_its_frame_once_and_a_recv_that_throws_never_does() {
     let engine = Engine::cli_builder().tier::<Probe>().build();
@@ -325,7 +325,7 @@ fn array_map(
 /// harness's own thread, in the debug build too, whose loop frame,
 /// every handler in line, is many times `zend.reserved_stack_size`:
 /// the entry counts that frame below the one it is asked from, so the
-/// frame is never laid past the thread's end (#3830). The number is
+/// frame is never laid past the thread's end. The number is
 /// the thread's, so it is masked; the depth is whatever the thread
 /// held.
 #[test]

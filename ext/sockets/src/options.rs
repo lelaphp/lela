@@ -224,7 +224,7 @@ fn meminfo(req: &mut Request, socket: Instance<Socket>, fd: i32) -> Result<Answe
 /// ```
 ///
 /// A stream client made with `socket.tcp_nodelay` has `TCP_NODELAY`
-/// set, which the kernel reports as its bit (#936):
+/// set, which the kernel reports as its bit:
 ///
 /// ```php
 /// $srv = stream_socket_server('tcp://127.0.0.1:0');

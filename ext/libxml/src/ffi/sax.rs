@@ -1,5 +1,5 @@
 //! libxml2's SAX2 push parser as php's xml extension lays it down
-//! (`compat.c`, design §4.10, #1323): the `xmlParserCtxt` over the handler
+//! (`compat.c`, design §4.10): the `xmlParserCtxt` over the handler
 //! table `php_xml_compat_handlers`, each callback handed to a [`Sax`] with
 //! its arguments read out of libxml's, and [`At`], what `compat.c` reads
 //! of the parser from inside a callback. What the callbacks decide is the

@@ -78,7 +78,7 @@ pub(crate) struct ResHeader {
     /// The rest of that word, written zero: no byte of the header's
     /// second and third words is padding, so the debug build's freed-use
     /// guard reads them all initialised as it looks for the freed-block
-    /// mark there ([`crate::mm::freed::is_freed`], #2414).
+    /// mark there ([`crate::mm::freed::is_freed`]).
     spare: [u8; 2],
     /// `ptr`: the payload allocation, none for a resource of no payload
     /// and none once closed.

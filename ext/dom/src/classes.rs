@@ -314,7 +314,7 @@ impl DOMImplementation {
             doc.set_root(root);
         }
         // The object made here counts the document's first reference,
-        // `DocOf::under` finding no object counting it (#3541).
+        // `DocOf::under` finding no object counting it.
         let value = match object_for(req, doc, None) {
             Ok(value) => value,
             Err(thrown) => {

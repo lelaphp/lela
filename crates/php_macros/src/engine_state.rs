@@ -1,4 +1,4 @@
-//! `#[derive(EngineState)]` (ADR-0005; #4348 ruling 2): a `struct` or an
+//! `#[derive(EngineState)]` (ADR-0005; ruled 2026-11-09): a `struct` or an
 //! `enum` is engine state where every field is, at any depth. A field
 //! whose type names a type parameter is held to the bound in the impl's
 //! `where` clause, so a generic type is engine state for the parameters
@@ -7,7 +7,7 @@
 //! request's heap fails to compile at that field, which the error shows.
 //! A field written as `fn(..)` is code and is passed unread. The trait is
 //! `php_heap`'s, re-exported at the api's `abi::EngineState`, and named
-//! at `php_heap` itself in a crate below the engine (#4544).
+//! at `php_heap` itself in a crate below the engine.
 
 use proc_macro2::TokenStream as Tokens;
 use quote::{quote, quote_spanned};
@@ -69,8 +69,7 @@ pub(crate) fn expand(item: Tokens) -> syn::Result<Tokens> {
 /// The path `#[derive(EngineState)]` names the trait by: `php_heap`'s own
 /// in a crate below the engine, `php_unit`, `php_ssa` and `php_link`,
 /// which depend on `php_heap` and on neither the engine nor the facade,
-/// and the root's `abi::EngineState` everywhere else (ADR-0007, #4544,
-/// #4632).
+/// and the root's `abi::EngineState` everywhere else (ADR-0007).
 fn state_trait() -> Tokens {
     state_trait_for(std::env::var("CARGO_CRATE_NAME").ok().as_deref())
 }

@@ -1,8 +1,8 @@
-//! The facts #3619 makes honest, each read where the local facts render
-//! and never at a prompt: whether CI runs and passes on `main`, the
-//! tracker's week beside the store's closes, and the divergence rows that
-//! moved cause beside the rows fixed. What GitHub cannot be asked is said
-//! as unknown, never as green.
+//! The facts harness revision 184 made honest, each read where the local
+//! facts render and never at a prompt: whether CI runs and passes on
+//! `main`, the tracker's week beside the store's closes, and the
+//! divergence rows that moved cause beside the rows fixed. What GitHub
+//! cannot be asked is said as unknown, never as green.
 
 use std::path::Path;
 use std::process::Command;
@@ -165,8 +165,8 @@ mod tests {
     use super::{ci_line, moved_line, tracker_line};
     use crate::divergence::Registry;
 
-    /// The row over `gh run list`'s answer on `main`, recorded 2026-10-30
-    /// (#3619): 90 cancelled runs and 10 failures, none passed; no answer
+    /// The row over `gh run list`'s answer on `main`, recorded 2026-10-30:
+    /// 90 cancelled runs and 10 failures, none passed; no answer
     /// is unknown, never green.
     #[test]
     fn the_ci_row_reads_the_last_run_that_executed_a_job_and_the_last_that_passed() {

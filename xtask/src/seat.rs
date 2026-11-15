@@ -1,4 +1,4 @@
-//! A seat (#2982): one of the few places on the machine a building
+//! A seat: one of the few places on the machine a building
 //! instrument runs in. Five worktrees each building under
 //! `CARGO_BUILD_JOBS=3` on twelve cores measured a load of 32 at the
 //! median and 100 at the most on 2026-10-18, and every build and test ran
@@ -16,9 +16,9 @@
 //! no seat and never a failed run. A seat is also a share of the machine:
 //! a seated instrument runs [`jobs`] at once, its cores divided among the
 //! seats, and hands cargo that share as `CARGO_BUILD_JOBS`, so three seats
-//! ask for the machine once and not three times (#3624). A bench on a
+//! ask for the machine once and not three times. A bench on a
 //! dedicated machine takes every seat, so nothing else seated builds while
-//! it measures, and builds with the whole machine (#3767, #3774).
+//! it measures, and builds with the whole machine.
 
 use std::fs::File;
 use std::io::Write;
@@ -61,7 +61,7 @@ impl Drop for Seat {
     /// The lock is given back by name, not by closing the file: `flock`
     /// is the open file description's, and a child another thread forks
     /// holds a duplicate of the descriptor until its `exec` closes it, so
-    /// a close alone leaves the seat held for that window (#3004).
+    /// a close alone leaves the seat held for that window.
     fn drop(&mut self) {
         for file in self.held.drain(..) {
             file.unlock().ok();
@@ -199,7 +199,7 @@ impl Seats {
 /// The seat `command` builds in, taken before it runs: every building
 /// instrument's but `clippy`'s and `test`'s, which take theirs once they
 /// know they have a crate to build; and every seat for a bench on a
-/// dedicated machine (#3767).
+/// dedicated machine.
 pub(crate) fn of_command(command: &crate::cli::Command) -> Option<Seat> {
     use crate::cli::Command;
     if let Command::Bench(ask) = command
@@ -237,7 +237,7 @@ fn machine_seats() -> usize {
 /// How many jobs a seated instrument runs at once unless told: the share
 /// `CARGO_BUILD_JOBS` names, which a seated parent hands its children, and
 /// otherwise the machine's cores divided among its seats, times the seats
-/// it holds (#3624).
+/// it holds.
 pub(crate) fn jobs() -> NonZeroUsize {
     let cores = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
     let held = HELD.load(Ordering::Relaxed).max(1);
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(seats.holders().len(), 1);
         assert!(seats.holders()[0].starts_with("test pid "));
         // A duplicate of the descriptor, as a child forked by a sibling
-        // test holds one until its `exec` (#3004): the seat comes back
+        // test holds one until its `exec`: the seat comes back
         // when it drops all the same.
         let forked = first.held[0].try_clone().unwrap();
         drop(first);
@@ -301,7 +301,7 @@ mod tests {
     }
 
     /// A bench on a dedicated machine holds every seat, so no other
-    /// instrument is seated until it drops (#3767).
+    /// instrument is seated until it drops.
     #[test]
     fn every_seat_taken_leaves_none_until_it_drops() {
         let (_tree, seats) = seats("seat-every", 3);

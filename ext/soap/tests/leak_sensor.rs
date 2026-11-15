@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -17,7 +17,7 @@ fn armed(source: &str) -> String {
 /// A fault the client raises while it goes on is kept in its
 /// `__soap_fault` alone, `add_soap_fault`'s `zval_ptr_dtor(&fault)`
 /// after `add_soap_fault_ex` copied it there: a `__doRequest` that
-/// answers no string (#2100).
+/// answers no string.
 #[test]
 fn a_fault_the_client_keeps_is_kept_once() {
     let stdout = armed(
@@ -37,7 +37,7 @@ echo $c->hello(1, 'two')->faultstring, "\n";
 /// array the class's default table shares appends to a copy the
 /// property takes, `SEPARATE_ARRAY(prop)`, and the default keeps its
 /// own: the class data's release at the request's end frees it once
-/// (#2129, `ext/soap/tests/bugs/segfault_assertion_props.phpt`).
+/// (`ext/soap/tests/bugs/segfault_assertion_props.phpt`).
 #[test]
 fn a_classmapped_default_array_is_separated_once() {
     let stdout = armed(

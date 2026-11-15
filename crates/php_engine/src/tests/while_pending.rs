@@ -1,13 +1,13 @@
 //! What a step inside [`crate::api::raising::while_pending`] answers
-//! naming the pending throwable, which is no second owner (#2648,
-//! #2858): php's `zend_call_function` returns at once while a throwable
+//! naming the pending throwable, which is no second owner:
+//! php's `zend_call_function` returns at once while a throwable
 //! is pending (`Z/Zend/zend_execute_API.c:822`), so a conversion that
 //! would serve a `__toString` serves nothing and answers the pending
 //! throwable itself; and a typed property's write refused while it is
 //! pending raises nothing over it (`zend_verify_property_type_error`)
 //! and answers it the same way. A throw the handler `set_exception_handler()`
 //! set took with no frame standing leaves nothing pending, and the face goes on
-//! past it as php's C goes on with `EG(exception)` empty (#3906).
+//! past it as php's C goes on with `EG(exception)` empty.
 
 use crate::api::values::ClassId;
 use php_macros::php_function;

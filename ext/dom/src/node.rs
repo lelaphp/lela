@@ -278,7 +278,7 @@ fn clone_under(
 /// [`clone_under`]'s copy, which frees nothing: `false` where a
 /// document's internal subset could not be copied, and the `Err` the
 /// memory limit, `outer` left to its owner either way, as a document's
-/// copy is its [`NewDoc`]'s (#3842).
+/// copy is its [`NewDoc`]'s.
 fn copy_under(
     req: &mut Request,
     mapper: &mut Mapper,

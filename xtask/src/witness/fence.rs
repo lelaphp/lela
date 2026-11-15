@@ -19,7 +19,7 @@
 //! with `<?php` on line 1 and the snippet on line 2, so php's own error text
 //! matches. The `expect` fence's body is the pinned first stream; `exit=N`
 //! is the pinned status, `signal=N` the signal pinned in its place where the
-//! oracle's run ends on one (#3545), an absent `exit` asserts zero, and a
+//! oracle's run ends on one, an absent `exit` asserts zero, and a
 //! bare `exit` is the opt-in `xtask witness --accept` fills with how the
 //! oracle's run ended. A
 //! `wall=D` is disclosure and gates nothing. A `stderr` fence, when one
@@ -30,7 +30,7 @@
 //! stands after the recipe's for the oracle run and for the linked engine
 //! alike (harness-design.md §8, ledger 55), and whose arguments, where it
 //! carries any, stand after the recipe's on a binary's command line and
-//! so serve only a fence marked `process` (#1780): the way to pin a behaviour the
+//! so serve only a fence marked `process`: the way to pin a behaviour the
 //! recipe's own ini holds off, such as what `<?` opens while
 //! `short_open_tag` is on. The name is all a fence carries; the values are
 //! the pin's, written by a person, so a fence that would set an ini of its
@@ -42,37 +42,37 @@
 //! `--POST_RAW--`, `--COOKIE--`, `--ENV--`): the snippet is served by php-cgi beside
 //! the pinned php for the oracle and by the engine's `php-cgi` for the
 //! engine (`sapi/cgi`, ADR-0008), each in a process of its own, and the `expect` fence
-//! pins what php-cgi writes, its head and its body (#1197). A `request fpm`
+//! pins what php-cgi writes, its head and its body. A `request fpm`
 //! fence is the same request handed to a php-fpm as `FastCGI` records, the
 //! oracle's pinned php-fpm and the engine's `php-fpm` each over a pool of
-//! one child, for the natives php-fpm's own module declares (#1291). A
+//! one child, for the natives php-fpm's own module declares. A
 //! `request phpdbg` fence hands the snippet to phpdbg as a `--PHPDBG--`
 //! test is handed (`-qIb -f`), the pinned phpdbg for the oracle and the
 //! engine's `phpdbg` for the engine, the fence's body the commands the
-//! prompt reads, for the natives phpdbg's own module declares (#1348). A
+//! prompt reads, for the natives phpdbg's own module declares. A
 //! `request makala` fence hands the request to the production server over
 //! HTTP for the engine, and to the pinned php-fpm under the pin's
 //! `[fastcgi]` mapping for the oracle, each response read as a client of
-//! nginx in front of php-fpm reads it (#2347).
+//! nginx in front of php-fpm reads it.
 //!
 //! A `process` says the snippet changes the process it runs in: it forks,
 //! sends or takes a signal, or sets the process's ids, session or limits.
 //! Such a fence is served by the `php` binary in a process of its own, a
 //! single-threaded one as design revision 35 requires of pcntl, and never
 //! by the engine linked into the harness, whose process runs the lane on
-//! threads (harness-design.md §8, revision 61; #1062). What the oracle
+//! threads (harness-design.md §8, revision 61). What the oracle
 //! does is not moved by it, so it is no part of the divergence key.
 //!
 //! A `mysql` says the snippet needs the `MySQL` server the recipe's
 //! `PDO_MYSQL_TEST_DSN` names (`ci/mysql/compose.yaml`): a crate whose
 //! fences carry it is refused, not judged, where the server does not
-//! answer, as `phpt` refuses a `MySQL` subset (#1366).
+//! answer, as `phpt` refuses a `MySQL` subset.
 //!
 //! A `capture` says the fence's streams are the oracle's to write: `xtask
 //! witness --accept --streams` writes the oracle's stdout into the
 //! `expect` fence and its stderr into a `stderr` fence, after the recipe's
 //! normalisation, and leaves every fence without it as its author wrote it
-//! (harness-design.md §8, #801). The marker is a word and not an empty
+//! (harness-design.md §8). The marker is a word and not an empty
 //! `expect` fence, since an empty fence is what a snippet that prints
 //! nothing pins; and it stays on the fence once written, so the text under
 //! it is known to be the oracle's and the next capture, after an oracle
@@ -83,7 +83,7 @@
 //! dies on `!setlocale(LC_CTYPE, "de_DE")` does: where neither the oracle
 //! nor the linked engine can `setlocale(LC_ALL, <name>)` for one of them,
 //! the witness is a skip that names the locale and is counted, never a
-//! pass or a fail (#1678). Where either can, it runs and is held as any
+//! pass or a fail. Where either can, it runs and is held as any
 //! other. The name is letters, digits and `_ . - @`, so it stands in the
 //! probe's string as written. What the snippet runs is not moved by it,
 //! so it is no part of the divergence key.
@@ -116,7 +116,7 @@ const FPM: &str = "fpm";
 const PHPDBG: &str = "phpdbg";
 /// The word after `request` that hands the request to the production
 /// server over HTTP, and to php-fpm under the pin's mapping for the
-/// oracle (#2347).
+/// oracle.
 const MAKALA: &str = "makala";
 
 /// What the `exit` attribute of an `expect` fence says.
@@ -128,7 +128,7 @@ pub enum Exit {
     /// `exit=N`: the number a run of `--accept` captured.
     Pinned(i32),
     /// `signal=N`: the signal a run of `--accept` captured, where the run
-    /// ended on one and left no status, as php's `abort()` does (#3545).
+    /// ended on one and left no status, as php's `abort()` does.
     Signal(i32),
     /// A bare `exit`: the opt-in that fails the run until `--accept` writes
     /// how the oracle's run ended in its place.
@@ -167,19 +167,18 @@ pub enum Served {
     /// `process` (harness §8, revision 61).
     Binary,
     /// The engine's `php-cgi`, beside php-cgi for the
-    /// oracle: a `request` fence describes what the CGI host is handed
-    /// (#1197).
+    /// oracle: a `request` fence describes what the CGI host is handed.
     Cgi,
     /// The engine's `php-fpm`, beside php-fpm for the
-    /// oracle: the fence is `request fpm` (#1291).
+    /// oracle: the fence is `request fpm`.
     Fpm,
     /// The engine's `phpdbg`, beside phpdbg for the
     /// oracle: the fence is `request phpdbg`, its body the commands the
-    /// prompt reads (#1348).
+    /// prompt reads.
     Phpdbg,
     /// The production server's `makala` over HTTP, beside php-fpm under
     /// the pin's `[fastcgi]` mapping for the oracle: the fence is
-    /// `request makala` (#2347).
+    /// `request makala`.
     Makala,
 }
 
@@ -219,21 +218,21 @@ pub struct Witness {
     /// What serves the snippet beside the oracle.
     pub served: Served,
     /// `capture`: the streams are the oracle's, written by `--accept
-    /// --streams` (#801).
+    /// --streams`.
     pub capture: bool,
     /// `mysql`: the snippet needs the `MySQL` server.
     pub server: bool,
     /// The locales the snippet needs, each a `locale=<name>` in the order
     /// written: the witness is a skip where the host knows one of them to
-    /// neither run (#1678).
+    /// neither run.
     pub locales: Vec<String>,
     /// The `request` fence's body: the `.phpt` sections of a CGI-shaped
     /// test (`--GET--`, `--POST--`, `--POST_RAW--`, `--COOKIE--`) the CGI
     /// host is handed, read by the phpt lane's one translation of them.
     pub request: Option<String>,
     /// The bundle feature the `php` serving a `process` fence is built
-    /// with: its crate's, where the binary under test does not turn it on
-    /// (#2721). The crate's, never the grammar's: [`super::extract`] sets
+    /// with: its crate's, where the binary under test does not turn it on.
+    /// The crate's, never the grammar's: [`super::extract`] sets
     /// it.
     pub feature: Option<String>,
 }
@@ -322,7 +321,7 @@ pub struct Extracted {
     /// The natives the attributes declare, where the crate's covered
     /// sources carry one: coverage is then what the fences' runs entered
     /// (harness §4.5 condition 2, revision 58), and `subjects` holds the
-    /// crate's kernels alone (#1264).
+    /// crate's kernels alone.
     pub(crate) anchored: Option<super::anchor::Coverage>,
 }
 
@@ -806,7 +805,7 @@ pub(crate) fn verdict(text: &str, line: usize) -> Option<String> {
     Some(crate::git::blob_id(body.join("\n").as_bytes()))
 }
 
-/// The block's fences as `--accept --streams` writes them (#801): `head`,
+/// The block's fences as `--accept --streams` writes them: `head`,
 /// the `expect` fence's line as the status leaves it, then `stdout`, and a
 /// `stderr` fence over `stderr` where it is not empty; each line under the
 /// head's indentation and marker, an empty one under the marker alone. A
@@ -939,7 +938,7 @@ mod tests {
     }
 
     /// `signal=N` pins a run that ended on a signal where a status would
-    /// stand, and a word after it that is no number is refused (#3545).
+    /// stand, and a word after it that is no number is refused.
     #[test]
     fn a_signal_is_pinned_where_a_status_would_stand() {
         let found =
@@ -1056,7 +1055,7 @@ mod tests {
     }
 
     /// A `mysql` fence needs the server and is keyed as the same fence
-    /// without it (#1366).
+    /// without it.
     #[test]
     fn a_mysql_fence_needs_the_server_under_the_same_key() {
         let marked = php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect mysql\n/// 1\n/// ```\n");
@@ -1068,7 +1067,7 @@ mod tests {
     }
 
     /// A `request` fence between the two is the request a CGI host serves
-    /// the snippet as, and part of what the key names (#1197).
+    /// the snippet as, and part of what the key names.
     #[test]
     fn a_request_fence_serves_the_snippet_as_a_request_of_the_web() {
         let request = php(
@@ -1085,7 +1084,7 @@ mod tests {
     }
 
     /// `request fpm` hands the same request to a php-fpm, and is a run of
-    /// its own under the key (#1291).
+    /// its own under the key.
     #[test]
     fn a_request_fpm_fence_serves_the_snippet_by_a_process_manager() {
         let block = |info: &str| {
@@ -1119,7 +1118,7 @@ mod tests {
     /// A fence carries a regime's name and never its values: an ini on the
     /// fence would let the fence approve itself against a pin nobody wrote,
     /// so it is an attribute the grammar has no meaning for, and so is a
-    /// `regime=` that names none (#610).
+    /// `regime=` that names none.
     #[test]
     fn a_fence_that_sets_its_own_ini_is_a_problem_naming_the_attributes() {
         for word in ["ini=short_open_tag=1", "-d", "regime="] {

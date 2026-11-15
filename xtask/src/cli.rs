@@ -30,8 +30,8 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "staged")]
         write: bool,
         /// For pre-commit: leave out each crate whose reading passes and
-        /// was taken over what is staged, naming the reading (#1143), and
-        /// read the rest as the index holds them (#4620).
+        /// was taken over what is staged, naming the reading, and
+        /// read the rest as the index holds them.
         #[arg(long)]
         staged: bool,
     },
@@ -68,7 +68,7 @@ pub(crate) enum Command {
         uncut: bool,
         /// Render against the tree alone, as a tracked region carries the
         /// section: no reading is read and a table drops its `reading`
-        /// column, so the bytes are the same on any checkout (#2377); a
+        /// column, so the bytes are the same on any checkout; a
         /// section whose rows are this checkout's alone is refused
         /// (harness-design.md §5, revision 6).
         #[arg(long, requires = "section", conflicts_with_all = ["session_id", "every"])]
@@ -137,14 +137,14 @@ pub(crate) enum Command {
         /// otherwise print the block JSON with the list while anything is unmet.
         #[arg(long)]
         hook: bool,
-        /// Who asks, which the reading carries (#3619); CI where
+        /// Who asks, which the reading carries; CI where
         /// `GITHUB_ACTIONS` is set, a hand otherwise. The hook's is the
         /// event it came in on.
         #[arg(long, value_enum, conflicts_with = "hook")]
         caller: Option<crate::done::Caller>,
         /// The list as text, or with `json` as one object: each unmet
         /// condition with its kind, instrument, scope, message and the
-        /// command that clears it (#3494).
+        /// command that clears it.
         #[arg(long, value_enum, default_value = "text", conflicts_with = "hook")]
         format: crate::done::Format,
         /// Judge and print, and write nothing: no reading, and no kept
@@ -188,7 +188,7 @@ pub(crate) enum Command {
     /// `add` lays the worktree down ready to be worked in, the branch cut
     /// from `main` with the ticket it is for recorded on it, `xtask` built
     /// there, the local file laid and rendered under the grant over the
-    /// worktrees' directory (#74, §11); refuses a branch that exists and
+    /// worktrees' directory (§11); refuses a branch that exists and
     /// a directory that does. `retire` appends the worktree's log into the
     /// main checkout's store, removes the worktree and prints the
     /// branch-delete line as a person's; refuses uncommitted work.
@@ -258,7 +258,7 @@ pub(crate) enum Command {
         /// For pre-commit: refuse, before rendering, a region the commit
         /// would carry, one it would write or one of a file the commit
         /// stages, that reads a path whose working copy is not what the
-        /// commit stages, since its render carries that change (#2236).
+        /// commit stages, since its render carries that change.
         #[arg(long)]
         staged: bool,
         /// The files, relative to the root.
@@ -275,8 +275,8 @@ pub(crate) enum Command {
     /// `build.rs` that bakes its crate's directory in.
     Budget {
         /// For pre-commit: leave out each crate whose reading passes and
-        /// was taken over what is staged, naming the reading (#1143), and
-        /// read the rest as the index holds them (#4620).
+        /// was taken over what is staged, naming the reading, and
+        /// read the rest as the index holds them.
         #[arg(long)]
         staged: bool,
     },
@@ -303,7 +303,7 @@ pub(crate) enum Command {
         staged: bool,
         /// Build the named crates' tests for this target and run them on
         /// this machine, natively or translated: one reading per crate over
-        /// `<crate>/<triple>` (#4462).
+        /// `<crate>/<triple>`.
         #[arg(
             long,
             value_name = "TRIPLE",
@@ -367,7 +367,7 @@ pub(crate) enum Command {
         /// Before a commit: only the extensions the binary carries whose
         /// rendering reads a staged file, an engine crate's reaching
         /// every one, less those whose two readings pass over what is
-        /// staged, naming the readings (#1312, #1159). Pre-commit ran it
+        /// staged, naming the readings. Pre-commit ran it
         /// until revision 140 and runs it no more.
         #[arg(long)]
         staged: bool,
@@ -389,7 +389,7 @@ pub(crate) enum Command {
     /// `[regime.jit-force]`, as does a program that met php at the merge
     /// base and differs now; any other difference is counted. The oracle's
     /// side is kept per pin, and the interpreter's verdicts at
-    /// `target/harness/hostile-runs/<engine tree>.json` (#4265).
+    /// `target/harness/hostile-runs/<engine tree>.json`.
     Hostile,
     /// Hold the engine to the oracle on a corpus's programs and as many
     /// again drawn from a seed, generated or mutated; one reading per crate
@@ -405,13 +405,13 @@ pub(crate) enum Command {
     /// through an address held apart from the request's register fails.
     /// The fold is what `.cargo/config.toml`'s LLVM
     /// `--cgp-max-address-users-to-scan=1000` buys every profile (design
-    /// §10 Profiles, #3372), and the sensor is how a toolchain that keeps
+    /// §10 Profiles), and the sensor is how a toolchain that keeps
     /// the option's name and changes its meaning is found: `done` asks for
     /// a fresh passing reading on a diff that changes the toolchain file or
     /// `.cargo/config.toml`. A site is an `add xN, <request>, #C` whose
     /// sum the next instruction naming `xN` loads or stores through at
-    /// an offset `[<request>, #C + offset]` could encode, the shape #3345
-    /// found; an `aarch64` Mac alone, a skip elsewhere.
+    /// an offset `[<request>, #C + offset]` could encode; an `aarch64` Mac
+    /// alone, a skip elsewhere.
     Fold(crate::fold::Ask),
     /// Each variant's share of the oplines the loop dispatched, over every
     /// program `IN_THE_LOOP`'s doc names; one reading per program.
@@ -420,7 +420,7 @@ pub(crate) enum Command {
     /// `dispatch-census` feature, whose loop counts each opline it
     /// dispatches and whose request writes the counts where it ends. Each
     /// program of `docs/perf/workloads`, php-src's `Zend/micro_bench.php`
-    /// and the four counting loops of #3273 runs on it under the recipe;
+    /// and the four counting loops runs on it under the recipe;
     /// its reading is scoped `workloads/<stem>`, `Zend/micro_bench` or
     /// `loops/<name>`, holds each variant's share in percent in its
     /// groups and names those over a quarter of a percent, the threshold
@@ -431,7 +431,7 @@ pub(crate) enum Command {
     /// one reading, at makala's crate.
     ///
     /// php-fpm is handed each request under the pin's `[fastcgi]` mapping,
-    /// as nginx in front of it would hand it on (#2349); a machine without
+    /// as nginx in front of it would hand it on; a machine without
     /// the pinned php-fpm and php-src measures nothing, stated as a skip.
     FpmCompare {
         /// One test of the subset by its path in the pinned tree,
@@ -444,8 +444,8 @@ pub(crate) enum Command {
     ///
     /// The reading counts the requests served, mismatches, leak findings
     /// and memory growth. A bare call is the 30-second smoke; `--nightly`
-    /// is the nightly lane's ten minutes, #2336's ruling, which runs in CI
-    /// only (#2632).
+    /// is the nightly lane's ten minutes, as ruled 2026-10-09, which runs in
+    /// CI only (ruled 2026-10-10).
     Soak {
         /// The nightly lane's length, ten minutes, in place of the smoke's
         /// 30 seconds.
@@ -461,8 +461,8 @@ pub(crate) enum Command {
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit {
         /// For pre-commit: leave out each crate whose reading passes and
-        /// was taken over what is staged, naming the reading (#1143), and
-        /// read the rest as the index holds them (#4620).
+        /// was taken over what is staged, naming the reading, and
+        /// read the rest as the index holds them.
         #[arg(long)]
         staged: bool,
     },
@@ -542,13 +542,13 @@ pub(crate) struct Vocab {
     #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
     pub crates: Vec<String>,
     /// For pre-commit: leave out each crate whose reading passes and
-    /// was taken over what is staged, naming the reading (#1143), and
-    /// read the rest as the index holds them (#4620).
+    /// was taken over what is staged, naming the reading, and
+    /// read the rest as the index holds them.
     #[arg(long)]
     pub staged: bool,
     /// For commit-msg: the message git is about to commit, noted against
     /// the glossary each staged crate is held to; one reading, exit 0
-    /// whatever it finds (#3624, #3629).
+    /// whatever it finds.
     #[arg(long, value_name = "FILE", conflicts_with_all = ["crates", "staged"])]
     pub message: Option<PathBuf>,
 }
@@ -569,7 +569,7 @@ pub(crate) struct Bench {
     pub reps: usize,
     /// What the run may assume of the machine: `dedicated` holds every
     /// seat and measures each bar only below a 1-minute load of 2,
-    /// waiting for it, as dax-build is held for the bench (#3767).
+    /// waiting for it, as dax-build is held for the bench.
     #[arg(long, value_enum, default_value = "shared")]
     pub machine: crate::bench::Machine,
     /// The standing the numbers are offered with (protocol §8).
@@ -581,7 +581,7 @@ pub(crate) struct Bench {
     pub note: Option<String>,
     /// The log a bar held to a tolerance reads its earlier nights and its
     /// baseline from, in place of the store's: the published history the
-    /// nightly lane fetches, since its store starts empty (#2659).
+    /// nightly lane fetches, since its store starts empty.
     #[arg(long, value_name = "FILE")]
     pub log: Option<PathBuf>,
 }
@@ -598,7 +598,7 @@ pub(crate) struct Witness {
     pub staged: bool,
     /// Only the crates with no passing reading over their tree now, as
     /// `done` reads fresh: the merge check's, after pre-commit measured
-    /// the staged crates (#1312).
+    /// the staged crates.
     #[arg(long, conflicts_with_all = ["crates", "staged"])]
     pub unmeasured: bool,
     #[command(flatten)]
@@ -635,14 +635,13 @@ pub(crate) struct Accepting {
     pub accept: bool,
     /// With `--accept`, also write the oracle's two streams, normalised,
     /// into each fence marked `capture`, refusing a line that differs
-    /// between two runs from two scratch directories (#801).
+    /// between two runs from two scratch directories.
     #[arg(long, requires = "accept")]
     pub streams: bool,
     /// With `--accept`, also write each plain fence the oracle does not
     /// meet from the oracle's two runs, normalised, keeping each authored
     /// line whose wildcards the oracle's line still matches, and refusing
-    /// a line the two runs differ on and a fence a `trace:` row covers
-    /// (#3455).
+    /// a line the two runs differ on and a fence a `trace:` row covers.
     #[arg(long, requires = "accept", conflicts_with = "streams")]
     pub bodies: bool,
 }
@@ -694,8 +693,7 @@ pub(crate) struct Phpt {
     /// php-src's own `run-tests.php` beside this runner, both under the
     /// pinned oracle, over these `.phpt` files of the subset only, each
     /// verdict printed beside the other; a test judged apart is the exit,
-    /// and nothing is recorded. A directory, a glob or no file is refused
-    /// (#1973).
+    /// and nothing is recorded. A directory, a glob or no file is refused.
     #[arg(
         long,
         value_name = "FILE",
@@ -713,7 +711,7 @@ pub(crate) struct PhptBase {
     /// with this ref, `main` unless named, as `done --base` takes it: the
     /// subset named or every touched one the lane runs, run in a worktree
     /// laid at the base with its hosts built, the runs kept in the main
-    /// worktree and the worktree removed (#2364).
+    /// worktree and the worktree removed.
     #[arg(
         long,
         value_name = "REF",
@@ -843,7 +841,7 @@ pub(crate) enum WorktreeCommand {
     },
     /// Record the session that owns the checkout this runs in, the
     /// calling session's own unless a person names one, or let it go;
-    /// refused where another session owns it (#3621).
+    /// refused where another session owns it.
     Own {
         /// The session to record, which only a person names.
         #[arg(long, value_name = "ID")]
@@ -853,27 +851,27 @@ pub(crate) enum WorktreeCommand {
         release: bool,
     },
     /// Say whose the checkout this runs in is; exit 1 where another
-    /// session owns it, as pre-commit asks (#3621).
+    /// session owns it, as pre-commit asks.
     Whose,
     /// Lay the merge queue's worktree down beside the checkout, `_merge`
     /// on `staging`, its builds seeded from main's, owned by the calling
-    /// session; or claim the one that stands (#3622).
+    /// session; or claim the one that stands.
     Queue,
     /// Fast-forward `main` to `staging`'s head once an xtask built at
     /// main's tip judges `_merge` since that tip (`judge`), landing
     /// `_merge`'s log in main's store first; run in main's checkout, and
-    /// refused, `main` untouched, while anything is unmet (#3622, #4372).
+    /// refused, `main` untouched, while anything is unmet.
     Land,
     /// The land's judgement of the checkout this runs in since `--base`,
-    /// which `land` asks of `_merge` from an xtask built at main's tip
-    /// (#4372): the harness's own files read, refused with the two steps a
+    /// which `land` asks of `_merge` from an xtask built at main's tip:
+    /// the harness's own files read, refused with the two steps a
     /// grammar change lands in where one does not; `budget`, `api-check`
     /// and `unsafe-audit` taken; each harness file changed since the base
     /// judged by steer; `cargo deny` where `Cargo.lock` moved; then `done`
     /// as land's caller, whose verdict is the exit. Where the merge
     /// changes the harness, the refusal names the two steps for an
     /// instrument taken here that fails, and prints the commands that
-    /// take a stale or missing reading by this build (#4378).
+    /// take a stale or missing reading by this build.
     Judge {
         /// The commit judged since, main's tip.
         #[arg(long, value_name = "COMMIT")]
@@ -897,8 +895,8 @@ pub(crate) enum TicketCommand {
     },
     /// Read as `read` does, then record the ticket ready to merge on the
     /// branch with what the work opened, `branch.<name>.ready-<n>`, one per
-    /// ticket (#2358), which the merge into `main` closes the ticket by
-    /// (#2270, #2311), counting the found work by outcome on the reading;
+    /// ticket, which the merge into `main` closes the ticket by,
+    /// counting the found work by outcome on the reading;
     /// refuse while a box is unticked, while a successor is closed or
     /// missing, while the found work names a filed ticket `--opens` does
     /// not, and without `--opens` or `--opens-nothing` and `--found` or
@@ -932,10 +930,10 @@ pub(crate) enum TicketCommand {
     /// Close each open ticket the merge commits since `--since` name as
     /// `#n`, with the successors its ready record names; one with no ready
     /// record fails, named, and `done` names it. What the hooks on a merge into `main`
-    /// run (#2311); off `main` it closes nothing. On `main` it writes one
+    /// run; off `main` it closes nothing. On `main` it writes one
     /// reading more, `ticket merged`, naming each phase with its time: each
     /// close, the `gh` calls by verb, the read of the workspace and the run
-    /// whole (#2813).
+    /// whole.
     Merged {
         /// The commit `main` stood at before the merge.
         #[arg(long, value_name = "REV")]
@@ -945,7 +943,7 @@ pub(crate) enum TicketCommand {
     /// work opened and close the issue at the tracker with a comment naming
     /// the commit and the successors; refuse while a box is unticked, while
     /// a successor is closed or missing, while `main` does not contain the
-    /// commit (#2249), and without `--opens` or `--opens-nothing`. With
+    /// commit, and without `--opens` or `--opens-nothing`. With
     /// `--withdrawn <reason>` the ticket is closed as withdrawn rather than
     /// done, refused while any box is ticked.
     Close {
@@ -1054,7 +1052,7 @@ pub(crate) enum OracleCommand {
     /// `dist/Dockerfile`'s `PHP_VERSION`. A `[variant.*]` build is rebuilt
     /// from the new tag, not proposed, and a note names it. Pointed at the
     /// pinned keg and checkout, the diff is empty. It writes no file and no
-    /// reading, and reads the pin whatever its defects (#4384).
+    /// reading, and reads the pin whatever its defects.
     Propose {
         /// The keg, any path in `<prefix>/Cellar/<formula>/<bottle>`, a
         /// formula's `opt` link such as `/opt/homebrew/opt/php@8.5` among
@@ -1105,7 +1103,7 @@ pub(crate) enum ReviewCommand {
 pub enum Section {
     /// The manifest's rules, each with its ADR number, the predicate that
     /// judges it and its reading; the text its failure prints is under
-    /// `--uncut` and in JSON (#1772).
+    /// `--uncut` and in JSON.
     Rules,
     /// Each lock's width, as the tree's lock lists it, against
     /// `api_items`, with its api-check reading; `--every` renders every
@@ -1137,8 +1135,8 @@ pub enum Section {
     /// The last 7 days of `ticket` readings in the main worktree's store
     /// and this checkout's: the closes, the successors they opened, the
     /// withdrawals among them and the successors opened per close, in
-    /// one line (#1157); and the tracker's week beside it, tickets created
-    /// against closed and how many are open (#3619).
+    /// one line; and the tracker's week beside it, tickets created
+    /// against closed and how many are open.
     Tickets,
     /// The review coverage of the last 7 days in one line: the class A
     /// merges covered, partial and unreviewed, and the class B merges
@@ -1147,7 +1145,7 @@ pub enum Section {
     Review,
     /// Whether CI runs and passes on `main`: the last run that executed a
     /// job and the last that passed, from GitHub, unknown where it cannot
-    /// be asked (#3619).
+    /// be asked.
     Ci,
     /// The last run of `xtask track work`: one row per ticket it worked,
     /// with the outcome, what its session spent and the commit its branch
@@ -1162,7 +1160,7 @@ pub enum Section {
     /// last finding, denial or note, the denials the log holds per session
     /// and in total, and beside `denials` the `handed on` column: the calls
     /// a stale build handed to the candidate that rebuilds, which judged
-    /// them, so a walk is never counted as a refusal (#118, #125). Then the
+    /// them, so a walk is never counted as a refusal. Then the
     /// log per instrument, with the candidates for silent (the CI section
     /// of §7).
     Permits,
@@ -1172,46 +1170,45 @@ pub enum Section {
     Bundle,
     /// The manifest's `[[crate]]` rows counted by the directory each is
     /// laid down in, and how many are behind a feature; under `--uncut`
-    /// and in JSON every row, with whether it is created (#2250).
+    /// and in JSON every row, with whether it is created.
     Crates,
     /// The manifest's `[[edge]]` rows: each edge, how its row qualifies
-    /// it and its ADRs (#2250).
+    /// it and its ADRs.
     Edges,
     /// Each item lock's lines counted by the module that defines them,
     /// the widest first: the groups of the seam's api-check reading, which
-    /// `locks` totals (#1795).
+    /// `locks` totals.
     Modules,
     /// The pin as this machine has it: the tree's variable and the
     /// promise's, each by name and whether it is set, the pin's path, tag
-    /// and commit (#66), which of the two places the tree was found at,
+    /// and commit, which of the two places the tree was found at,
     /// and the pinned binary. CI reads the names
-    /// here and spells them nowhere (#36).
+    /// here and spells them nowhere.
     Oracle,
     /// The corpus CI checks out at the pin: the tag, the commit, the
     /// `.phpt` files the pin counts, the sparse patterns the subsets need
     /// and the cache key they make, where the targets under the pin are
     /// kept, and the hosts the lane runs a test through. CI reads them
-    /// here and writes no directory of the corpus and no host (#1713,
-    /// #1733, #1908).
+    /// here and writes no directory of the corpus and no host.
     Corpus,
     /// Met-of-target per suite and in total, from the phpt reading that
     /// stands for each suite parity counts, and the suites outside parity
     /// with the ruling that put them there or as not built (design §1,
-    /// §12; #1761).
+    /// §12).
     Parity,
     /// The fields of `oracle::Invocation` past the binary and the
     /// program, read from the type's source: each one's type, whether a
     /// `.phpt` section adds it or none gives it, and the first sentence
-    /// of its rustdoc; harness-design.md §4.3's region (#1319).
+    /// of its rustdoc; harness-design.md §4.3's region.
     Invocation,
     /// The conditions of done, each the first rustdoc paragraph of a
     /// variant of `done::Condition`, read from its source and numbered;
-    /// harness-design.md §4.5's region (#2309).
+    /// harness-design.md §4.5's region.
     Conditions,
     /// The workloads `docs/perf/workloads.toml` declares, each with where
     /// its text is, its role, its runs' arguments, how they end, the
     /// ticket that first read it and what it is; measurement protocol
-    /// §11's region (#4344).
+    /// §11's region.
     Workloads,
 }
 

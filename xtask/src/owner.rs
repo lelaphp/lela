@@ -1,10 +1,10 @@
 //! Whose a checkout is: one writing session per checkout, held by an
-//! owner record (#3618 M1, #3621). A merge, cherry-pick, revert or rebase
-//! commits the whole index, and an edit lands in whatever commit the
-//! checkout makes next, so a write is only ever safe where one session
-//! writes; which session made a change is what no sensor can read from
-//! git. So the record says it before any change is made: `xtask worktree
-//! add` names the session that lays the worktree down, and main's
+//! owner record (M1 of the rulings of 2026-10-30). A merge, cherry-pick,
+//! revert or rebase commits the whole index, and an edit lands in whatever
+//! commit the checkout makes next, so a write is only ever safe where one
+//! session writes; which session made a change is what no sensor can read
+//! from git. So the record says it before any change is made: `xtask
+//! worktree add` names the session that lays the worktree down, and main's
 //! checkout and the merge worktree are taken by `xtask worktree own`.
 //! pre-commit and pre-merge-commit refuse a commit from another session
 //! (`xtask worktree whose`), and `permit` refuses that session's writing
@@ -25,7 +25,7 @@
 //! worktree; a checkout with none is no session's, and nothing is refused
 //! there.
 //!
-//! An owner whose process has ended lapses, with no timer (#3755). A
+//! An owner whose process has ended lapses, with no timer. A
 //! session recording itself records its Claude Code process too: the pid
 //! Claude Code hands every process a call starts (`CLAUDE_PID`), which is
 //! the parent of each call's shell, and its start as `ps` prints it, the
@@ -33,7 +33,7 @@
 //! `~/.claude/sessions/<pid>.json`. A record whose pid no process has now,
 //! or one started at another time, a reused pid, is no session's. A
 //! record with no process, the harness's for a session not yet started
-//! (which `xtask track work` takes away once that session ends, #3782)
+//! (which `xtask track work` takes away once that session ends)
 //! and every one written before, and one whose process `ps` cannot
 //! judge, stands: the lock fails closed.
 
@@ -113,7 +113,7 @@ impl fmt::Display for SessionId {
 }
 
 /// The owner record as it is kept. A field it does not know is refused,
-/// unlike a reading's (harness-design.md §4.2, #4404): the record is a
+/// unlike a reading's (harness-design.md §4.2): the record is a
 /// lock with no `v`, and one that does not read is an error, which
 /// refuses, never an owner nobody holds. Read past, a field a newer
 /// harness wrote could admit a write that harness refuses.
@@ -312,7 +312,7 @@ mod tests {
         );
     }
 
-    /// #3755: an owner whose process has ended lapses, by a pid no
+    /// An owner whose process has ended lapses, by a pid no
     /// process has or one reused by a process started at another time;
     /// one that runs, a record with no process and the caller's own stand.
     #[test]

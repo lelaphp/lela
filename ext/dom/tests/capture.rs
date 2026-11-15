@@ -144,7 +144,8 @@ W::$doc = Dom\XMLDocument::createFromString('<root xmlns="urn:a" xmlns:p="urn:p"
 /// since the file is written once the tree is restored; php 8.5.12 writes
 /// while the tree is relinked and its wrapper reads 1 attribute each
 /// time, then 1 after the call, where this engine's reads 3 throughout
-/// (#3961, the difference #3959 proposes).
+/// (the difference the divergence row named for
+/// `c14nfile_puts_a_modern_tree_back` records).
 #[test]
 fn a_c14nfile_wrapper_sees_the_restored_tree() {
     let served = c14nfile_through_a_wrapper(
@@ -163,7 +164,7 @@ echo "after: ", W::$doc->documentElement->attributes->length, "\n";"#,
 
 /// A wrapper that removes and frees the root element in `stream_close`:
 /// the tree was restored before the file opened, so nothing reads the
-/// freed element; php 8.5.12 prints the same and exits 0 (#3961).
+/// freed element; php 8.5.12 prints the same and exits 0.
 #[test]
 fn a_c14nfile_wrapper_frees_the_root_in_stream_close() {
     let served = c14nfile_through_a_wrapper(
@@ -206,7 +207,7 @@ echo W::$doc->saveXml(), "\n";"#,
 /// A wrapper that frees the root element in `stream_write` and writes
 /// nothing: the one write the closing flush makes answers 0, so the call
 /// answers `int(0)`; php 8.5.12 flushes twice, and its second
-/// `stream_write` throws an `Error` (#3961).
+/// `stream_write` throws an `Error`.
 #[test]
 fn a_c14nfile_wrapper_frees_the_root_in_stream_write_and_writes_nothing() {
     let served = c14nfile_through_a_wrapper(
@@ -223,9 +224,9 @@ echo W::$doc->saveXml(), "\n";"#,
     assert_eq!(served.exit_code, 0);
 }
 
-/// Serves #3962's `handler-*.php`: an error handler that removes the root
-/// element and collects while `call` canonicalizes a `Dom\XMLDocument`,
-/// then the document as it stands.
+/// Serves an error handler that removes the root element and collects
+/// while `call` canonicalizes a `Dom\XMLDocument`, then the document as it
+/// stands.
 fn c14n_under_a_handler_that_frees_the_root(call: &str) -> php_ext::test::Served {
     let engine = support::engine();
     let sink = Capture::default();
@@ -277,7 +278,7 @@ fn a_handler_that_frees_the_root_at_c14ns_query_error_frees_a_restored_tree() {
 
 /// A class `registerNodeClass()` maps elements to, whose default property
 /// names a class that is not there: the engine throws the `Error` the
-/// evaluation raised and goes on (#3912).
+/// evaluation raised and goes on (the divergence row named for this test).
 #[test]
 fn a_registered_class_whose_default_cannot_be_evaluated_throws() {
     let engine = support::engine();
@@ -307,7 +308,7 @@ echo "end\n";
 /// and a declaration attribute held across the call whose element is
 /// removed after it: the engine canonicalizes into memory, puts the tree
 /// back, then writes the file, so it reads `int(3)`, and `ownerElement`
-/// reads `NULL` (#3959).
+/// reads `NULL` (the divergence row named for this test).
 #[test]
 fn c14nfile_puts_a_modern_tree_back() {
     let engine = support::engine();

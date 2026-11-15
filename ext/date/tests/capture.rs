@@ -39,7 +39,7 @@ fn a_startup_timezone_the_database_has_not_leaves_the_default() {
 /// `\0*\0p` and `\0I\0a`, as interned strings, as php's `prop_info->name`
 /// is one, so no reader of the class's rows, `get_object_vars()`, the
 /// `(array)` cast, `__serialize` or a dumper, leaves one held: armed, the
-/// request ends with no block of its heap held (#2072).
+/// request ends with no block of its heap held.
 #[cfg(debug_assertions)]
 #[test]
 fn a_subclass_s_mangled_property_names_are_left_held_by_no_reader() {

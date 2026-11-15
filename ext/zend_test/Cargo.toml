@@ -32,10 +32,10 @@ libc = { workspace = true }
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # ext/reflection, whose `ReflectionFiber` reads a `Fiber` a test fiber's
-# suspend passed through (`tests/popped_frame.rs`, #4357).
+# suspend passed through (`tests/popped_frame.rs`).
 php_ext_reflection = { path = "../reflection" }
 
-# `zend_test_crash`'s end, its process this test's own `main` (#2976).
+# `zend_test_crash`'s end, its process this test's own `main`.
 [[test]]
 name = "crash"
 harness = false

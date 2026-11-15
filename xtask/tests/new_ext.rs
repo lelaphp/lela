@@ -1,9 +1,9 @@
-//! `xtask new-ext` over the fixture of `xtask/fixtures/new-ext` (issue #9;
-//! harness-design.md §5, design §4.10, ADR-0004, ADR-0005): the crate it
+//! `xtask new-ext` over the fixture of `xtask/fixtures/new-ext`
+//! (harness-design.md §5, design §4.10, ADR-0004, ADR-0005): the crate it
 //! lays down has the template topology, passes `budget`, `unsafe-audit`
 //! and `api-check` untouched, its row is rendered into the extensions
 //! region of `ext/AGENTS.md`, the bundle gains its feature and its
-//! `enabled()` line (#14; ADR-0004), and a second run for the same name
+//! `enabled()` line (ADR-0004), and a second run for the same name
 //! refuses.
 //! The fixture is copied to a scratch directory first; nothing is generated
 //! in place, and the workspace's own `ext/` gains no crate.
@@ -80,8 +80,8 @@ fn the_bundle_gains_the_feature_and_the_enabled_line() {
     let laid = new_ext::run(&root, &manifest, "demo").unwrap();
 
     // The optional dependency, the feature in default and in host, which
-    // linked is built of and so names unchanged (#3081), and the
-    // `enabled()` line behind the feature (#14; ADR-0004); the tier's alias
+    // linked is built of and so names unchanged, and the
+    // `enabled()` line behind the feature (ADR-0004); the tier's alias
     // as it was, and never in `enabled()`.
     let bundle: toml::Table = toml::from_str(&read(&root, "crates/php_bundle/Cargo.toml")).unwrap();
     assert_eq!(
@@ -251,7 +251,7 @@ fn a_name_without_a_crate_row_refuses_naming_the_manifest() {
 }
 
 /// A second crate is registered after the first; under `order =
-/// "registration"`, the one order api-check serves (#1778, #2255), the
+/// "registration"`, the one order api-check serves, the
 /// order written is php's and free, so the two reordered by hand still
 /// pass.
 #[test]
@@ -348,7 +348,7 @@ fn the_binary_prints_what_it_laid_down_and_exits_nonzero_on_a_refusal() {
     assert!(err.contains("exists"), "{err}");
 }
 
-/// A root whose `members` name `ext/*`, as the workspace's do (#4458),
+/// A root whose `members` name `ext/*`, as the workspace's do,
 /// takes the crate in by the glob, so the binary lays it down and leaves
 /// the root manifest byte for byte as it was.
 #[test]
@@ -368,7 +368,7 @@ fn a_glob_member_leaves_the_root_manifest_as_it_was() {
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
@@ -447,7 +447,7 @@ mod tracked {
         );
 
         // The note names the subset the crate's row owns, read from the
-        // manifest rather than spelled a second time here (#18).
+        // manifest rather than spelled a second time here.
         let note = laid
             .notes
             .iter()
@@ -455,7 +455,7 @@ mod tracked {
             .unwrap_or_else(|| panic!("{:#?}", laid.notes));
         assert!(
             note.contains("php-src/ext/demo") && !note.contains("php-src/ext/demo/tests"),
-            "the subset is the extension's directory whole (#1590): {note}"
+            "the subset is the extension's directory whole (harness revision 67): {note}"
         );
 
         // Tests through the capture sink (design §4.10).

@@ -3,11 +3,11 @@
 
 use super::*;
 
-/// `git.no-verify` reads git commit's own argv (#1001): every `deny*.json`
+/// `git.no-verify` reads git commit's own argv: every `deny*.json`
 /// under its fixtures is denied and every `allow*.json` let through, under
 /// the row as tracked and under the row as proposed. A grep for the word
 /// with line numbers, a `sed -n` over it, a `head -n` over a `commit.txt`,
-/// a heredoc body naming the bypass and `git log -n 3` are allowed (#517);
+/// a heredoc body naming the bypass and `git log -n 3` are allowed;
 /// `-n`, `--no-verify`, `-anm` and a commit after a `cd` are denied. `deny-hooks-path.json` is the proposed row's
 /// alone until a person lands it, the tracked row naming no hooks path.
 #[test]
@@ -56,11 +56,11 @@ fn git_no_verify_reads_git_commit_s_own_argv() {
     }
 }
 
-/// `git.operation` (#2476, as #2530 ruled it): `git add -- <path>`, a
-/// commit by pathspec, another hand's `git merge --continue` and a `git
-/// restore --staged` are refused in a checkout with `MERGE_HEAD` present,
-/// the denial naming the merge and the checkout, and each is let through
-/// in one without it; a leading `cd` into the merging checkout is refused
+/// `git.operation` (ruled 2026-10-10): `git add -- <path>`, a commit by
+/// pathspec, another hand's `git merge --continue` and a `git restore
+/// --staged` are refused in a checkout with `MERGE_HEAD` present, the
+/// denial naming the merge and the checkout, and each is let through in
+/// one without it; a leading `cd` into the merging checkout is refused
 /// from anywhere, every subcommand the widened argv names is refused
 /// there, and what reads the index is let through. The walks of
 /// `rule_fixtures.rs` hold the fixtures where a merge stands; this adds the
@@ -133,12 +133,12 @@ fn the_git_operation_rule_refuses_staging_where_another_hand_s_merge_stands() {
     }
 }
 
-/// #3165 as it happened: from a checkout where another session's merge
+/// A refusal as it happened: from a checkout where another session's merge
 /// stands, `allow-array.json`, a `cd` into a linked worktree joined by
 /// `&&` to `P=(…)` and the commit, and `allow-git-c.json`'s `git -C` are
 /// judged in the worktree alone and let through; `deny-array-then.json`'s
 /// `;` after a `cd` into the worktree's `.git` file, which fails, runs the
-/// commit where the line started (#2995), and is refused.
+/// commit where the line started, and is refused.
 #[test]
 fn an_array_assignment_after_a_cd_leaves_the_commit_in_the_worktree() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -155,7 +155,7 @@ fn an_array_assignment_after_a_cd_leaves_the_commit_in_the_worktree() {
     }
 }
 
-/// #3257 as it happened: from a checkout where another session's merge
+/// A refusal as it happened: from a checkout where another session's merge
 /// stands, `allow-other-repository.json` `cd`s into another repository
 /// and, past a `;`, stages and commits there by pathspec. The `cd` into a
 /// directory it can enter does not fail, so the commit writes that
@@ -165,7 +165,7 @@ fn an_array_assignment_after_a_cd_leaves_the_commit_in_the_worktree() {
 /// moved into the merging checkout are refused, as the walks of
 /// `rule_fixtures.rs` refuse `deny-own-checkout.json` and
 /// `deny-git-c-own-checkout.json`, and so is a `cd` into a file there,
-/// which fails and leaves the commit where the line started (#2995), as
+/// which fails and leaves the commit where the line started, as
 /// the walks refuse `deny-or-then-cd.json`'s and `deny-and-then-cd.json`'s
 /// `cd`, which may not run.
 #[test]
@@ -210,11 +210,12 @@ fn operation_refuses(
     judged.denial().is_some_and(|d| d.rule == "git.operation")
 }
 
-/// The placement #2751 ruled, which `git.main-ff-only` holds since
-/// `git.merge-commits-itself` moved to the merge worktree (#3622, #3639):
-/// a merge is refused in the main checkout and let through in a linked
-/// worktree, where a builder merges `main` into its branch; a neighbour
-/// in main does not place a merge `-C` runs in the worktree there.
+/// The placement ruled 2026-10-12, which `git.main-ff-only` holds since
+/// `git.merge-commits-itself` moved to the merge worktree (ruled
+/// 2026-10-30): a merge is refused in the main checkout and let through in
+/// a linked worktree, where a builder merges `main` into its branch; a
+/// neighbour in main does not place a merge `-C` runs in the worktree
+/// there.
 #[test]
 fn a_merge_is_refused_in_main_alone_and_a_builders_goes_through() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -239,7 +240,7 @@ fn a_merge_is_refused_in_main_alone_and_a_builders_goes_through() {
     assert!(!refused(main.path(), &apart));
 }
 
-/// A denial names the checkout it judged (#3619): `git.operation`'s own
+/// A denial names the checkout it judged: `git.operation`'s own
 /// fixture, a commit by pathspec where another hand's merge stands, is
 /// denied as judged in that checkout; the must-pass beside it, the same
 /// commit run in a quiet checkout the line `cd`s into, is let through
@@ -253,7 +254,7 @@ fn a_denial_names_the_checkout_it_judged_and_the_remedy() {
     let judged = judge(&manifest, merging.path(), &commit).unwrap();
     let denial = judged.denial().unwrap_or_else(|| panic!("{judged:?}"));
     let top = merging.path().canonicalize().unwrap();
-    // The rule's remedy, then the checkout (#3618 ruling 3).
+    // The rule's remedy, then the checkout (ruled 2026-10-30).
     let remedy = manifest
         .rules
         .iter()
@@ -275,7 +276,7 @@ fn a_denial_names_the_checkout_it_judged_and_the_remedy() {
     assert!(judged.denial().is_none(), "{judged:?}");
 }
 
-/// A line permit cannot place says so and guesses no checkout (#3619):
+/// A line permit cannot place says so and guesses no checkout:
 /// past `cd "$UNSET_BY_THE_LINE"` a commit is denied under
 /// `git.operation` where a merge stands in a checkout of the repository,
 /// naming the command and the change it lost the line at; the must-pass,
@@ -301,13 +302,13 @@ fn a_line_permit_cannot_place_is_denied_saying_so_only_where_an_operation_stands
     assert!(judged.denial().is_none(), "{judged:?}");
 }
 
-/// The merge queue's rows (#3618 M2, #3622) as tracked:
+/// The merge queue's rows (harness revision 183) as tracked:
 /// `git.main-ff-only`, and `git.merge-commits-itself` on `where =
-/// "staging"` as #3639 ruled. Main's checkout refuses every merge but the
-/// end of one, a fast-forward among them, since `worktree land` moves main
-/// and no hand does (Round 5, Q6 (a)), and the merge worktree refuses a merge
-/// that commits itself and lets one through that leaves its commit to
-/// `git commit`. Each fixture of `git.main-ff-only` holds in main, and
+/// "staging"` as ruled 2026-10-30. Main's checkout refuses every merge but
+/// the end of one, a fast-forward among them, since `worktree land` moves
+/// main and no hand does (Round 5, Q6 (a)), and the merge worktree refuses
+/// a merge that commits itself and lets one through that leaves its commit
+/// to `git commit`. Each fixture of `git.main-ff-only` holds in main, and
 /// each of `git.merge-commits-itself` in the merge worktree, its
 /// `deny-after-cd.json` a `cd` into it.
 #[test]

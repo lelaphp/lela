@@ -5,22 +5,22 @@
 //!
 //! - A seam's lock is regenerated and diffed against the committed file. An
 //!   item lock (`heap.lock`, `unit.lock`, `api.lock`, and `xtask.lock`, the
-//!   harness's own, #55) is the public items of the crate the lock lives
+//!   harness's own) is the public items of the crate the lock lives
 //!   with, `lock_from` deciding which for the facade, or of one module of
-//!   its producer for a seam with `module` (`layer.lock`, #1959), whose
+//!   its producer for a seam with `module` (`layer.lock`), whose
 //!   `use` by a crate outside the seam's consumers fails; an import lock
 //!   (`sapi.lock`, `tier.lock`, the ones an `[[edge]]` cites by `lock` or
 //!   `allowlist`, or a seam with `allowlist = true`) is what the consumers
 //!   `use` from the producer; a rendered lock (`ops.lock`, the seam whose
 //!   producer is a file rather than a crate) is that file's rows, one line
 //!   an opcode. A seam with `sections` is an import lock diffed per
-//!   `[name]` section, each against the consumers that read it (#1369), and
+//!   `[name]` section, each against the consumers that read it, and
 //!   an import another lock of the consumer's holds is not this one's.
 //!   `api.lock` is held under `[budget] api_items`, and its
 //!   `__private` lines, where a person has written the row, under
 //!   `api_private_items` instead.
 //! - A crate's `Cargo.toml` carries `[lints] workspace = true`, the one
-//!   way the root manifest's `[workspace.lints]` reaches it (#2111).
+//!   way the root manifest's `[workspace.lints]` reaches it.
 //! - A crate's workspace dependencies are held to the `[[edge]]` rows whose
 //!   `from` matches it: every row is exclusive, so `only = true` restates
 //!   what the instrument does for each crate. A `use` path across a `deny = true`
@@ -28,12 +28,13 @@
 //! - `php_bundle`'s registrations, read as the `php_ext_<name>::extension`
 //!   paths in its sources and the features they stand behind, are held to
 //!   the `ext/*` dependency graph under its row's `order =
-//!   "registration"`, the one order #1778 ruled and api-check serves: the
-//!   order written is php's and free, and each extension's feature switches
-//!   on the features of every extension it declares `Required` ([`bundle`]).
+//!   "registration"`, the one order ruled 2026-10-04 and api-check serves:
+//!   the order written is php's and free, and each extension's feature
+//!   switches on the features of every extension it declares `Required`
+//!   ([`bundle`]).
 //!
 //! An item lock's reading counts its lines by the module that defines each
-//! in its `groups`, a key per module, beside the total in `numbers` (#1795):
+//! in its `groups`, a key per module, beside the total in `numbers`:
 //! a type whose methods are written in one file per area is counted per
 //! file, so a split of one module into several, or the growth of one, is
 //! read off the reading and not off `api.lock`, whose format it leaves as
@@ -43,13 +44,12 @@
 //! `php_engine::api::__private` and so are that module's row; an import
 //! lock, sectioned or not, and a rendered lock keep no groups.
 //!
-//! Design §4.10's list of surfaces is held at two places ([`surfaces`],
-//! #2251): an `ext/*` crate's library dependency on another fails its
+//! Design §4.10's list of surfaces is held at two places ([`surfaces`]):
+//! an `ext/*` crate's library dependency on another fails its
 //! reading unless a row a person wrote names both, and an extension's
 //! `pub` items beyond `extension()` are its `surface.lock`, regenerated
 //! and diffed as an item lock is; `--write` rewrites those too. A surface
-//! item's `#[mirrors]` is held against the pinned php-src ([`mirrors`],
-//! #2353).
+//! item's `#[mirrors]` is held against the pinned php-src ([`mirrors`]).
 
 mod binding;
 mod bundle;
@@ -126,7 +126,7 @@ pub fn hold(manifest: &Manifest, root: &Path, write: bool) -> Result<Vec<Reading
     measure(manifest, root, write, &Standing::default())
 }
 
-/// [`hold`] less the crates whose reading stands for the commit (#1143),
+/// [`hold`] less the crates whose reading stands for the commit,
 /// save one whose verdict reads the other crates' edges, as the bundle's
 /// order does, which its own stamp does not cover. Every seam is held:
 /// an import lock reads its consumers, which its stamp does not cover
@@ -181,8 +181,8 @@ pub(crate) fn measure(
 /// lines, its re-exports from the workspace included, each with the module
 /// that defines it as a path from its crate's name (`php_engine::engine`);
 /// the sources are read and nothing is built. The new-sapi fixture's
-/// stand-ins are held to the real crates through it, by name (#2544) and
-/// by shape (#2545).
+/// stand-ins are held to the real crates through it, by name and
+/// by shape.
 pub fn defining_modules(
     manifest: &Manifest,
     root: &Path,
@@ -447,7 +447,7 @@ fn hold_lock<'s>(
             ));
         }
     }
-    // The one order a lock's lines stand in (`lock`, #403), read off the
+    // The one order a lock's lines stand in (`lock`), read off the
     // committed file: what `--write` would rewrite even where every line
     // is the right one, which is the churn a write taken for another seam
     // carried into a commit.
@@ -461,7 +461,7 @@ fn hold_lock<'s>(
 
 /// The paths each of the seam's consumers imports from its producer, as
 /// lock lines, less what the lock of another seam it consumes from the
-/// producer holds (#1369): `php_sapi`'s `tier::*` imports are `tier.lock`'s
+/// producer holds: `php_sapi`'s `tier::*` imports are `tier.lock`'s
 /// face, and so not `sapi.lock`'s. An import neither lists is missing from
 /// both.
 ///
@@ -470,7 +470,7 @@ fn hold_lock<'s>(
 /// `php_engine::tier::room` written in place, is the item it reaches, cut
 /// to the longest of its prefixes that names a public item of the
 /// producer, so `tier::Flow::Exit` is `tier::Flow` and an associated
-/// function its own line, and kept whole where none does (#3033). A path
+/// function its own line, and kept whole where none does. A path
 /// written through a type or a function the consumer imports, and a
 /// method call, add nothing past the `use` of the type.
 fn imports(
@@ -539,11 +539,11 @@ fn imports(
 }
 
 /// The `use` paths into a seam's `module` of its producer written by a
-/// crate outside the seam's consumers (#1959): `php_ext` re-exporting
+/// crate outside the seam's consumers: `php_ext` re-exporting
 /// `php_engine::layer`, or an extension reaching past its facade for it,
 /// each a face the seam keeps for its consumers alone, and the paths into
 /// it written in place, each once per file; a path written through a
-/// `use` says nothing past the `use` (#3033). None for a seam that is no
+/// `use` says nothing past the `use`. None for a seam that is no
 /// module.
 fn strangers(crates: &Crates, seam: &Seam) -> Result<Vec<String>> {
     let mut out = Vec::new();
@@ -578,7 +578,7 @@ fn strangers(crates: &Crates, seam: &Seam) -> Result<Vec<String>> {
 }
 
 /// A sectioned lock's blocks, one per section in the manifest's order, and
-/// what is wrong with where the committed file places an import (#1369).
+/// what is wrong with where the committed file places an import.
 /// Each consumer's import stands in the section the file lists it under
 /// when the consumer reads that section; one the file does not list goes
 /// to the first section the consumer reads, where the diff finds it
@@ -671,11 +671,11 @@ fn kernel_lines(crates: &Crates, seam: &Seam) -> Result<BTreeSet<String>> {
 /// The holds read once per run and asked of each crate, each making
 /// problems and notes of it ([`Held`]): an extension's links to others,
 /// each held to a row of design §4.10's list of surfaces, and its surface
-/// to its lock (#2251); a crate's links to a native library, each held to
-/// the keg the pinned php loads that library from (#3458); and a host's
-/// link, held to the macOS the pinned php is linked for (#3356); and its
+/// to its lock; a crate's links to a native library, each held to
+/// the keg the pinned php loads that library from; and a host's
+/// link, held to the macOS the pinned php is linked for; and its
 /// raises, each naming its class by a handle and php's typed ones at php's
-/// sites alone (#3656).
+/// sites alone.
 struct Holds {
     surfaces: Surfaces,
     bindings: Bindings,
@@ -755,10 +755,10 @@ fn crate_reading(
     }
 
     // The workspace's lints reach a member only through its own
-    // `[lints] workspace = true` (#1998, #2111).
+    // `[lints] workspace = true`.
     if !krate.inherits_lints {
         problems.push(format!(
-            "{}'s Cargo.toml lacks `[lints] workspace = true`, so the root manifest's [workspace.lints] do not reach it (#2111)",
+            "{}'s Cargo.toml lacks `[lints] workspace = true`, so the root manifest's [workspace.lints] do not reach it",
             krate.name
         ));
     }
@@ -787,7 +787,7 @@ fn crate_reading(
             problems.extend(bundle::unswitched(crates, &read));
         } else {
             problems.push(format!(
-                "order = \"{order}\" is not an order api-check knows; it serves \"{}\" alone (#2255)",
+                "order = \"{order}\" is not an order api-check knows; it serves \"{}\" alone",
                 bundle::REGISTRATION
             ));
         }
@@ -871,7 +871,7 @@ fn engine_state_held(
 /// The `use` paths of `krate` that cross a `deny = true` module edge such
 /// as `php_engine::{executor,kernels}` to `php_engine::{serve,...}`, and
 /// the `crate::`, `self::` and `super::` paths written in place that do,
-/// each once per file (#3033).
+/// each once per file.
 fn denied_uses(manifest: &Manifest, krate: &Present) -> Result<Vec<String>> {
     let rows: Vec<(Vec<String>, Vec<String>)> = manifest
         .edges
@@ -1024,9 +1024,9 @@ impl Counted {
     }
 }
 
-/// The public items of `krate` as lock lines, or of its one `module` alone
-/// (#1959); on the way, `reading` gains one group per module that defines
-/// any, its count of them (#1795).
+/// The public items of `krate` as lock lines, or of its one `module` alone;
+/// on the way, `reading` gains one group per module that defines
+/// any, its count of them.
 fn lines_counted_by_module(
     inventory: &mut Inventory<'_>,
     krate: &Present,
@@ -1071,7 +1071,7 @@ fn adr_cite(manifest: &Manifest, adr: &[&str]) -> String {
 mod tests {
     use super::*;
 
-    /// The `tier-module` fixture (#3033): `tier.lock`'s `[face]` lists the
+    /// The `tier-module` fixture: `tier.lock`'s `[face]` lists the
     /// module `tier`, `tier::Flow` and `tier::listed`, and `php_jit` reaches
     /// four more items through the module, by its name, a rename, a path
     /// written in place and a `use` inside a function, each of which fails

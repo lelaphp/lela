@@ -1,4 +1,4 @@
-//! TLS over a real socket against the binary (#2343): a PHP request served
+//! TLS over a real socket against the binary: a PHP request served
 //! over TLS 1.3 and 1.2 and TLS 1.1 refused, each host's certificate
 //! through SNI, and a TLS listener with no certificate refused at
 //! startup. A TLS handshake on the clear listener is held in `framing.rs`.

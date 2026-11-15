@@ -3,7 +3,7 @@
 //! nowhere else. Every other crate is `#![forbid(unsafe_code)]` at its
 //! root; a crate whose home is one module is `#![deny(unsafe_code)]` with
 //! the allowance on that module alone. One reading per crate; a skip
-//! naming the rule for each where the manifest has none (#3182).
+//! naming the rule for each where the manifest has none.
 
 use std::path::Path;
 
@@ -27,7 +27,7 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
 }
 
 /// [`run`], and with `staged` less the crates whose reading stands for
-/// the commit (#1143).
+/// the commit.
 pub(crate) fn measure(
     root: &Path,
     manifest: &Manifest,

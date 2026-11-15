@@ -1,7 +1,7 @@
 //! What php's compile `emalloc`s for each op array and class a
 //! request-only unit declares, held beside the unit's strings
-//! ([`super::unit_strings`]) and given back where php gives it back
-//! (#3042). The engine's op arrays and classes are the unit's and the
+//! ([`super::unit_strings`]) and given back where php gives it back.
+//! The engine's op arrays and classes are the unit's and the
 //! linked tables'; these are php's bytes, so `memory_get_usage` reads
 //! what php's does after an `eval` that declares a function, a closure
 //! or a class.
@@ -1221,14 +1221,14 @@ pub(super) fn attributes<'a>(
 /// and so no block; an enum case's own name and its class's are the
 /// constant's key and the class's name, which the node shares.
 ///
-/// The six declarations and reads #3241 measured: an enum whose constant names a case, the enum
-/// without it, a class whose constant names one of a class not yet
-/// declared, and the first read of that constant, which gives the copy
-/// back; then a constant naming one by two longer names, an array still
-/// to evaluate, and a backed case whose value is an expression, each
-/// against its like written out; and a backed enum's first `from()`,
-/// which evaluates its constants with its cases and gives back their
-/// copies, so the constant's first read costs nothing:
+/// The six declarations and reads measured: an enum whose constant names
+/// a case, the enum without it, a class whose constant names one of a
+/// class not yet declared, and the first read of that constant, which
+/// gives the copy back; then a constant naming one by two longer names,
+/// an array still to evaluate, and a backed case whose value is an
+/// expression, each against its like written out; and a backed enum's
+/// first `from()`, which evaluates its constants with its cases and gives
+/// back their copies, so the constant's first read costs nothing:
 ///
 /// ```php
 /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
@@ -1712,8 +1712,8 @@ fn lay_class(
 /// costs what opcache's lookup allocates, where `php -n` compiles it
 /// into the request's heap and keeps its op arrays' and declarations'
 /// blocks, and the strings it interns, to the request's end: a
-/// by-design divergence (#3224, landed by #3233). A request's primary
-/// file is one too (design §5.13), laid nothing here: two programs
+/// by-design divergence (the row `witness:ddb0161408…`). A request's
+/// primary file is one too (design §5.13), laid nothing here: two programs
 /// of one length, one of which reads an element, apart by the delayed
 /// oplines' stack alone here, `512`, and by the main op array's block too
 /// under php's:

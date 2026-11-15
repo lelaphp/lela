@@ -1,5 +1,5 @@
 //! Who may read the server's logs, and what a request can write into
-//! them (#4355): a log file the server makes is its owner's alone, `0600`
+//! them: a log file the server makes is its owner's alone, `0600`
 //! whatever the umask, and one that stands already keeps its permissions; and no
 //! request writes a line of its own, the line breaks a request's decoded
 //! path can carry written as two bytes where a refusal names the path and

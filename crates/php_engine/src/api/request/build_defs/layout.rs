@@ -1,10 +1,10 @@
 //! The install layout configure writes into php's `main/build-defs.h`,
 //! read from the build's environment, one variable under each macro's
 //! name, and where one is unset what `Z/configure.ac` computes with no
-//! option given (#1371): the prefix first, then what it derives from the
-//! prefix and from the directories before it, so a packager who sets
-//! `PHP_PREFIX` alone moves every other value with it. `build.rs` stamps
-//! what this gives, and the crate's test holds it.
+//! option given (design revision 60): the prefix first, then what it
+//! derives from the prefix and from the directories before it, so a
+//! packager who sets `PHP_PREFIX` alone moves every other value with it.
+//! `build.rs` stamps what this gives, and the crate's test holds it.
 
 /// `ZEND_MODULE_API_NO` (`Z/Zend/zend_modules.h:34`), the extension
 /// directory's last part.

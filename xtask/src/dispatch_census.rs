@@ -1,9 +1,9 @@
-//! `xtask dispatch-census`, the census behind `IN_THE_LOOP` (design §5.8,
-//! #4328): each variant's share of the oplines the loop dispatched, over
+//! `xtask dispatch-census`, the census behind `IN_THE_LOOP` (design §5.8):
+//! each variant's share of the oplines the loop dispatched, over
 //! every run of every program `docs/perf/workloads.toml` declares
 //! ([`crate::workloads`]), each with the arguments it declares, and over
 //! each of the bench's pages it declares, served from the rig ([`pages`]).
-//! The list's doc admits [`CRITERION`] (#4335, as #4364 amended it), so a
+//! The list's doc admits [`CRITERION`] (as amended 2026-11-09), so a
 //! run votes where its role votes ([`Role::votes`]) and it ended as
 //! declared, and a variant over [`THRESHOLD`] in any run that votes is
 //! voted in.
@@ -40,7 +40,7 @@
 //! and that run ([`Vote`]). The placement is `IN_THE_LOOP` and
 //! `PATH_IN_THE_LOOP` in [`ARMS`], a variant of the second counting as
 //! in. That reading informs and fails nothing: the list is a person's to
-//! change (#4335), and the instrument decides nothing. It names each
+//! change, and the instrument decides nothing. It names each
 //! declared run of a role that votes that did not vote, a skip, such as a
 //! page where no rig is here, or a fail, its `missed` number counting
 //! them, and where there is one it is a skip, not a pass: a vote over part
@@ -81,8 +81,8 @@ const LINE: &str = "dispatch-census ";
 /// [`ARMS`], admits it: "more than a quarter of a percent".
 pub(crate) const THRESHOLD: f64 = 0.25;
 
-/// `IN_THE_LOOP`'s criterion, word for word as #4335 ruled it and #4364
-/// amended it, which the list's doc in [`ARMS`] and design §5.8 carry.
+/// `IN_THE_LOOP`'s criterion, word for word as ruled and amended
+/// 2026-11-09, which the list's doc in [`ARMS`] and design §5.8 carry.
 pub(crate) const CRITERION: &str = "every variant met in more than a quarter of a percent of the oplines dispatched by any run docs/perf/workloads.toml declares in a role that votes, a kernel's or the bench's: a program run with the arguments it declares and ending as it declares, or a bench page served from the rig as it declares and answering 200";
 
 /// The file whose doc of `IN_THE_LOOP` states [`CRITERION`], and whose
@@ -682,7 +682,7 @@ mod tests {
     /// A run the engine wrote no counts for fails, naming the feature;
     /// one that ended otherwise than declared fails, saying how, its
     /// counts kept and out of the vote; and one that ended as declared
-    /// passes, as #4335's (c) ruled.
+    /// passes, as ruled 2026-11-09.
     #[test]
     fn a_run_fails_with_no_counts_or_an_end_other_than_its_declared() {
         let mut reading = Reading::new(INSTRUMENT, "workloads/fib");

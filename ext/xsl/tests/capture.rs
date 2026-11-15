@@ -36,7 +36,8 @@ echo "end\n";
 
 /// A `$returnClass` whose default property names a class that is not
 /// there, and an abstract one: the engine throws the `Error` the
-/// initialisation raised and goes on (#3912).
+/// initialisation raised and goes on (the divergence row named for this
+/// test).
 #[test]
 fn a_return_class_that_cannot_be_instantiated_throws() {
     let call = r#"try {
@@ -62,7 +63,8 @@ fn a_return_class_that_cannot_be_instantiated_throws() {
 }
 
 /// `DOMElement` as `$returnClass`: the engine accepts it, wraps the new
-/// document in it, and reads an empty string for its `tagName` (#3918).
+/// document in it, and reads an empty string for its `tagName` (the
+/// divergence row named for this test).
 #[test]
 fn a_non_document_return_class_reads_empty() {
     let served = transform_to_doc(

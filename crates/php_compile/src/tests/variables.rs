@@ -197,8 +197,8 @@ fn a_temporary_read_past_the_next_opline_has_php_s_live_range() {
 
 /// A CV is sent by `SEND_VAR` as a call's `VAR` is
 /// (`zend_compile_args`), and the value a native returned is
-/// assigned from its `VAR`, which is the shape #174's witness
-/// compiles to.
+/// assigned from its `VAR`, which is the shape the huge-block
+/// witness compiles to.
 #[test]
 fn a_cv_is_sent_by_send_var_and_assigned_from_a_call_s_var() {
     use OperandKind::{Const, Cv, Unused, Var};
@@ -229,7 +229,7 @@ fn a_cv_is_sent_by_send_var_and_assigned_from_a_call_s_var() {
     assert_eq!(sent.main.oplines[2].op1_type, Cv);
 }
 
-/// #302's program under the oracle's `[regime.dump]`: `@` as
+/// This program under the oracle's `[regime.dump]`: `@` as
 /// `zend_compile_silence` shapes it, `BEGIN_SILENCE` into a
 /// temporary, the call, `END_SILENCE` over that temporary, and the
 /// `silence` live range from the opline after the begin to the end,
@@ -352,7 +352,7 @@ fn a_global_statement_binds_each_cv_by_name() {
     .assert_eq(&oplines_of(b"<?php global $a, ${'b'}; echo $a;"));
 }
 
-/// `zend_compile_compound_assign`, the `ZEND_AST_VAR` arm (#479):
+/// `zend_compile_compound_assign`, the `ZEND_AST_VAR` arm:
 /// the twelve operators over a plain variable, each one `ASSIGN_OP`
 /// with the binary operator's own opcode in `extended_value`, which
 /// the dump prints in brackets. The temporary is numbered for every
@@ -647,14 +647,14 @@ fn a_by_reference_assignment_compiles_to_assign_ref_as_php_emits_it() {
     }
 }
 
-/// `zend_compile_list_assign`'s oplines over the four shapes #583
-/// names, as the oracle's `[regime.dump]` prints them: a plain list
-/// reads the right side's copy once per element with `FETCH_LIST_R`
-/// and frees it after the last, a keyed list reads by the key, a
-/// nested list reads the element and then its elements, and an
-/// element taken by reference is `FETCH_LIST_W` and `MAKE_REF` over
-/// the right side made a reference; a `foreach` value that is a list
-/// is fetched into a `VAR` and read the same way.
+/// `zend_compile_list_assign`'s oplines over four shapes, as the
+/// oracle's `[regime.dump]` prints them: a plain list reads the right
+/// side's copy once per element with `FETCH_LIST_R` and frees it
+/// after the last, a keyed list reads by the key, a nested list reads
+/// the element and then its elements, and an element taken by
+/// reference is `FETCH_LIST_W` and `MAKE_REF` over the right side made
+/// a reference; a `foreach` value that is a list is fetched into a
+/// `VAR` and read the same way.
 #[test]
 #[allow(clippy::too_many_lines)] // one snapshot per case: the table is the test
 fn a_list_compiles_to_what_zend_compile_list_assign_emits() {
@@ -831,7 +831,7 @@ fn a_list_of_the_wrong_shape_is_phps_compile_error() {
 /// names it by `ZEND_AST_CONST`, which `zend_compile_simple_var_no_cv`
 /// compiles, converts to a string and fetches by name, `FETCH_W (local)`
 /// under the write and `FETCH_R (local)` under the read. The dump is the
-/// oracle's under `[regime.dump]` at 8.5.9 (#2686).
+/// oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn a_name_written_as_a_constant_other_than_a_string_is_fetched_by_name_not_a_cv() {
     expect![[r#"
@@ -853,7 +853,7 @@ fn a_name_written_as_a_constant_other_than_a_string_is_fetched_by_name_not_a_cv(
     ));
 }
 
-/// #690's shapes under the oracle's `[regime.dump]`: a `global` over
+/// These shapes under the oracle's `[regime.dump]`: a `global` over
 /// a name no CV has is `FETCH_W (global+lock)` and an `ASSIGN_REF`
 /// over a fetch by the same name, the local variable's or, for an
 /// auto-global, the global's; `$$x++` is `FETCH_RW (local)` and the
@@ -917,7 +917,7 @@ fn a_variable_named_at_run_time_is_fetched_by_name_as_php_emits_it() {
     }
 }
 
-/// #633's shapes under the oracle's `[regime.dump]`: an auto-global
+/// These shapes under the oracle's `[regime.dump]`: an auto-global
 /// under an element's write is `FETCH_W (global)`, under a compound
 /// assignment `FETCH_RW (global)`, under an `unset` of its element
 /// `FETCH_UNSET (global)`; `isset` and `empty` over a variable fetched

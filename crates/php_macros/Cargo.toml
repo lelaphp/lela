@@ -3,10 +3,10 @@
 # and emits its entry as php's ZPP, naming `::php_ext` paths in an
 # extension, `::php_engine::api` in php_jit and php_streams, and
 # `crate::api` inside php_engine; the EngineState derive names
-# `::php_heap::EngineState` in php_unit, php_ssa and php_link (#4544,
-# #4632). Depends on no workspace crate: a macro emits paths and never
+# `::php_heap::EngineState` in php_unit, php_ssa and php_link.
+# Depends on no workspace crate: a macro emits paths and never
 # links what they name. Beside them `mirrors`, a marker on a surface
-# item that expands to the item (#2353).
+# item that expands to the item.
 [package]
 name = "php_macros"
 version = "0.0.0"

@@ -1,4 +1,4 @@
-//! The host a module is rendered through (#1496). php registers most
+//! The host a module is rendered through. php registers most
 //! modules in every host, and the lane renders those through the CLI's
 //! `--re` and `--ri`; a host's own module exists only in that host:
 //! `cgi-fcgi` in php-cgi and php-fpm (`sapi/cgi/cgi_main.c`,

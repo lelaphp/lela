@@ -1,7 +1,7 @@
 //! php-cgi reads `CONTENT_LENGTH` with C's `strtol` under the process's
 //! `LC_CTYPE`, `C.UTF-8`, whose `isspace` on macOS counts `0xA0`: a length
-//! opening with that byte is read past it, as the pinned php-cgi reads it
-//! (#2712). An environment value may hold a byte no `lines.toml` string
+//! opening with that byte is read past it, as the pinned php-cgi reads it.
+//! An environment value may hold a byte no `lines.toml` string
 //! carries, so the shell's half is held here.
 
 #[cfg(target_os = "macos")]
@@ -47,7 +47,7 @@ fn a_content_length_opening_with_0xa0_is_read_past_it() {
 /// A negative `CONTENT_LENGTH` reads stdin to its end, as the pinned
 /// php-cgi's wrapped `size_t` does, but the host hands the body out only
 /// as the request pulls it, so 256 MiB on stdin past a `post_max_size` of
-/// 64K never stand in the process's memory (#3457): the form reader stops
+/// 64K never stand in the process's memory: the form reader stops
 /// a block past the limit with php's warning and the request reads no
 /// more of it. The process's peak resident set stays under half the body,
 /// where a host that read the body before the request would hold all of

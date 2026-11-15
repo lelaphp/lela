@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -19,7 +19,7 @@ fn armed(source: &str) -> String {
 /// A cookie parameter given twice in `session_set_cookie_params`'
 /// array keeps the last, and the first's string stays held to the end
 /// of the request, as php overwrites it unreleased and
-/// `memory_get_usage()` reads it, where the request gives it up (#2100).
+/// `memory_get_usage()` reads it, where the request gives it up.
 #[test]
 fn a_cookie_parameter_given_twice_is_given_up_at_the_request_s_end() {
     let stdout = armed(
@@ -35,7 +35,7 @@ $m = memory_get_usage(); session_set_cookie_params(['path' => 123456, 'PATH' => 
 /// `__wakeup()` calls queued before it, as php's `zend_call_function`
 /// refuses each at `EG(exception)`, so the throwing `__wakeup()` makes
 /// no second throwable to drop, under the `php` and the
-/// `php_serialize` handlers alike (#2235).
+/// `php_serialize` handlers alike.
 #[test]
 fn a_read_that_throws_in_a_session_decode_makes_no_delayed_call() {
     let engine = support::engine();
@@ -57,7 +57,7 @@ ob_end_flush();
 
 /// A `__wakeup()` that throws after a good `php_serialize` read leaves
 /// the value bound as `$_SESSION` and its throwable pending, as php's
-/// decode answers by the read alone (#2244); the armed engine ends the
+/// decode answers by the read alone; the armed engine ends the
 /// request with no block held.
 #[test]
 fn a_delayed_throw_after_a_good_php_serialize_read_binds_the_value() {

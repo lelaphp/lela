@@ -1,5 +1,5 @@
-//! The workspace's lints refuse an owner dropped in silence (#1980,
-//! #1998): a member crate inherits the root manifest's
+//! The workspace's lints refuse an owner dropped in silence:
+//! a member crate inherits the root manifest's
 //! `[workspace.lints]`, and clippy with every warning denied, as the
 //! `clippy` instrument runs it, refuses `let _ = owner;` and
 //! `mem::forget(owner)` and passes an owner given up.

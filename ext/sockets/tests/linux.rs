@@ -1,4 +1,4 @@
-//! What ext/sockets does under Linux's `#ifdef`s (#1096), each program
+//! What ext/sockets does under Linux's `#ifdef`s, each program
 //! held to what `php -n` of a Linux build of the pinned tag printed for it
 //! (the `dax-php-oracle` image of `ci/oracle/Dockerfile`, aarch64). The
 //! oracle of record is macOS's, so these are held on a Linux host alone,

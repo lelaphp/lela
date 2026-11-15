@@ -18,7 +18,7 @@ fn the_extension_is_loaded() {
 /// `zlib.output_compression` turned on by `ini_set` asks whether its
 /// handler is on the stack as `php_output_handler_started` does, by
 /// reading the stack, and keeps nothing: armed, the request ends with no
-/// block of its heap held (#2070).
+/// block of its heap held.
 #[cfg(debug_assertions)]
 #[test]
 fn turning_output_compression_on_keeps_nothing_of_the_output_layer_s() {

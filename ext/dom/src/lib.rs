@@ -862,7 +862,7 @@ fn made_over(
 /// under the reference `counted` holds: how a `DOMXPath` evaluation makes its
 /// node set's objects, the class from the object php's
 /// `dom_xpath_intern_for_doc` answers for each node and the document the
-/// node's own, which the evaluation holds for the loop (#3541).
+/// node's own, which the evaluation holds for the loop.
 pub(crate) fn object_counting(
     req: &mut Request,
     node: Node,
@@ -875,7 +875,7 @@ pub(crate) fn object_counting(
 
 /// [`DocOf::under`], or where no reference to the node's document is in
 /// reach, the `InternalError` fatal: an object that stood for the node
-/// counting another document would outlive the node's (#3541).
+/// counting another document would outlive the node's.
 pub(crate) fn doc_of<'d>(
     req: &mut Request,
     node: Node,

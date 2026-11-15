@@ -88,8 +88,7 @@ pub(super) struct Writes {
 /// `Z/Zend/Optimizer/zend_inference.c:3169-3177`). A loop that binds a
 /// property of a variable it writes nowhere else then takes a phi of it,
 /// which no guard holds, and a test of the variable after the binding
-/// reads an object and holds no guard of its type at the loop's entry
-/// (#3862):
+/// reads an object and holds no guard of its type at the loop's entry:
 ///
 /// ```php
 /// class C { public $p; }
@@ -687,7 +686,7 @@ pub(super) fn needs_call_chain(init: Opcode, after: impl IntoIterator<Item = Opc
 /// call's frame may not fit, a value sent where the callee takes a
 /// reference is refused. A `DO_*CALL` the trace follows is not among
 /// them: php's code takes no exit there, and what the call's kernel
-/// throws, a parameter's check among it, unwinds (#3203's measurement).
+/// throws, a parameter's check among it, unwinds (as measured).
 pub(super) fn inline_may_leave(line: &Line) -> bool {
     let arithmetic = match (line.opcode, line.imm) {
         (Opcode::AssignOp, Imm::Binary(binary)) => Some(binary),
@@ -826,9 +825,9 @@ pub(super) fn guard_sites(
 /// increments and decrements, `ASSIGN_OP`, the sends and the rest, and
 /// the cases above for an operand they do not fetch.
 ///
-/// The program #3688 found, a reference `ECHO` reads in a side trace
-/// that php's trace holds by no guard, so the exit after it is php's
-/// third, not a fourth:
+/// A program with a reference `ECHO` reads in a side trace that php's
+/// trace holds by no guard, so the exit after it is php's third, not a
+/// fourth:
 ///
 /// ```php
 /// function h() { return 1; }
@@ -1428,7 +1427,7 @@ pub(super) fn packed_guard(
 ///
 /// So the `ADD` that reads a reference past php's fetch of it takes two
 /// exits, the fetch's at its opline and the overflow's past it, and the
-/// loop's direction is php's exit 3 (#3710):
+/// loop's direction is php's exit 3:
 ///
 /// ```php
 /// function f() { $x = 0; $r = &$x; $c = 0; for ($i = 0; $i < 100; $i++) { $t = $x + 1; $x = $t; if ($i > 50) { $c++; } } return $c + $x; }
@@ -1456,7 +1455,7 @@ pub(super) fn packed_guard(
 /// ```
 ///
 /// And an increment that overflows leaves past itself, so its side trace
-/// starts at the `+=` on the line after it, as php's does (#3720):
+/// starts at the `+=` on the line after it, as php's does:
 ///
 /// ```php
 /// function f() { $x = PHP_INT_MAX - 60; $c = 0; for ($i = 0; $i < 100; $i++) {
@@ -1529,7 +1528,7 @@ pub(super) fn packed_guard(
 /// A recursion whose second level's `$x++` overflowed as it was
 /// recorded holds that step a double, and takes that level's exit 7 at
 /// line 4, past the step where it did not overflow, as php's does
-/// ([`Within::Stayed`], #3828):
+/// ([`Within::Stayed`]):
 ///
 /// ```php
 /// function r($n, $x) { if ($n == 0) { return $x; }

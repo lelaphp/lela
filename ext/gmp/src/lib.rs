@@ -1,7 +1,7 @@
 //! The `gmp` extension: `php-src/ext/gmp` as one crate under `ext/`
 //! (ADR-0004), `gmp.c` ported over the libgmp the pinned php links,
 //! found through `pkg-config` and bound in [`ffi`], never vendored
-//! (design §7.2, revision 72; #1540). This file is the extension value,
+//! (design §7.2, revision 72). This file is the extension value,
 //! the argument decoder every `GMP|string|int` parameter is read
 //! through, and the `gmp_*` natives; [`object`] is the `GMP` class
 //! with its handlers. The phpt subset is `php-src/ext/gmp/tests`,

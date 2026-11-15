@@ -1,5 +1,5 @@
-//! Allocation observation as `TestExt` records it (design §7.1, as
-//! #1780 ruled): an extension's observer told of the allocations, frees
+//! Allocation observation as `TestExt` records it (design §7.1, as ruled
+//! 2026-10-04): an extension's observer told of the allocations, frees
 //! and collections a request's heap serves while its entry is
 //! on, the three acts `Z/ext/zend_test/tests/zend_mm_custom_handlers_{alloc,free,gc}_01.phpt`
 //! drive, and the heap's readings what they are with no observer.

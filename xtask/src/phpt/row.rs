@@ -1,5 +1,5 @@
 //! One phpt reading as a row of `status --section phpt --format jsonl
-//! --every` (harness-design.md §4.6, #1745): the facts of that reading
+//! --every` (harness-design.md §4.6): the facts of that reading
 //! alone, under a shape `v` versions. Which reading stands for a subset,
 //! which subsets overlap, which a crate owns and which parity counts all
 //! depend on the manifest at the ref a reader views, so they stay the
@@ -19,9 +19,9 @@ use crate::tally;
 /// and never for a new reading; a reader refuses a `v` it does not know
 /// (harness-design.md §4.6, revision 76). A field a row may omit, whose
 /// absence a reader of the earlier shape already handles correctly, is
-/// added under the same `v`, as `target.missed_skipped` was (#1834): a
+/// added under the same `v`, as `target.missed_skipped` was: a
 /// reader of `v = 1` that never reads it keeps its own estimate of the
-/// target's skipped misses. `message` was added the same way (#1912): a
+/// target's skipped misses. `message` was added the same way: a
 /// reader that never reads it says why a subset ran nothing in words of
 /// its own, as it did before. A field removed, renamed or retyped, or a
 /// meaning changed, is a new `v`.
@@ -49,7 +49,7 @@ pub(crate) struct Row {
     /// The tests the subset holds.
     tests: u64,
     /// The corpus's files the subset holds; its tests where a reading
-    /// from before #1589 counted none.
+    /// from before the files were counted has none.
     files: u64,
     /// Passed.
     p: u64,
@@ -65,12 +65,12 @@ pub(crate) struct Row {
     s: u64,
     /// The tests that met their expectation, passed, warned or diverged.
     met: u64,
-    /// Met-of-target, where the reading was held to one (#1184); null
+    /// Met-of-target, where the reading was held to one; null
     /// where it was not.
     target: Option<Target>,
     /// The reading's own message, whole: what it found, or why it ran
     /// nothing, an absent or stale binary, a refused subset or no test of
-    /// it run, in the instrument's words (#1912). Omitted where the
+    /// it run, in the instrument's words. Omitted where the
     /// reading's message is empty, which is how a lean row of the
     /// published history reads, as [`V`] allows.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,7 +87,7 @@ pub(crate) enum Role {
     Engine,
     /// The runner's control: the pinned php run in the engine's place.
     Control,
-    /// A run's comparison against the run kept at a commit (#664).
+    /// A run's comparison against the run kept at a commit.
     Against,
 }
 
@@ -102,7 +102,7 @@ pub(crate) struct Target {
     /// missed them.
     pub(crate) outside: u64,
     /// The subset's tests the kept target holds no verdict for, kept apart
-    /// from `outside` (#1644); 0 where the reading counts none.
+    /// from `outside`; 0 where the reading counts none.
     pub(crate) predated: u64,
     /// The target's tests the engine missed by skipping them, where the
     /// reading counts them ([`Measure::MISSED_SKIPPED`]); omitted from the
@@ -230,7 +230,7 @@ mod tests {
     /// One fixture row per keyset the log has held, in the order they
     /// arrived: each renders the five outcomes summing to its tests, met
     /// as passed and diverged, and `files` its tests until it counted
-    /// files of its own (#1589).
+    /// files of its own.
     #[test]
     fn every_historical_keyset_renders_its_outcomes() {
         let stale_and_unread = [FIRST, &[("engine_stale", 0), ("unread", 5)]].concat();
@@ -266,7 +266,7 @@ mod tests {
 
     /// A binary absent or stale ran nothing, and the row says so whatever
     /// else the reading counts; a subset run whose every test skipped did
-    /// run (#475, #132).
+    /// run.
     #[test]
     fn an_absent_or_stale_engine_measured_nothing() {
         let quiet = [("run", 0), ("tests", 50), ("engine_stale", 0)];
@@ -291,7 +291,7 @@ mod tests {
     }
 
     /// A reading held to a target that predates some of the subset's
-    /// tests keeps those apart from the ones outside it (#1644).
+    /// tests keeps those apart from the ones outside it.
     #[test]
     fn a_predated_row_keeps_outside_and_predated_apart() {
         let counts = [
@@ -317,7 +317,7 @@ mod tests {
     }
 
     /// A reading that counts the target's misses the engine skipped
-    /// carries the count in its target (#1834); one from before the count
+    /// carries the count in its target; one from before the count
     /// was kept carries no such field at all, so its line is the shape it
     /// always had under `v = 1`.
     #[test]
@@ -340,7 +340,7 @@ mod tests {
     }
 
     /// A reading's own message is on its row, so a reader draws why a
-    /// subset ran nothing in xtask's words (#1912); a reading that keeps
+    /// subset ran nothing in xtask's words; a reading that keeps
     /// none, as a lean row of the published history, carries no such field
     /// at all, so its line is the shape it always had under `v = 1`.
     #[test]

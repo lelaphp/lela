@@ -165,7 +165,7 @@ impl<'r> Environment<&'r Request> {
     /// `getenv(name)`: `sapi_getenv`, the request's own variable, which
     /// no name `HTTP_PROXY` begins with answers (bug #72573), then the
     /// bytes the host's environment holds. The CLI's is the process's,
-    /// which the witness recipe clears and rebuilds (#1077):
+    /// which the witness recipe clears and rebuilds:
     ///
     /// ```php
     /// var_dump(getenv('TZ'), $_ENV['LANG'] ?? null);
@@ -284,7 +284,7 @@ impl<'r> Environment<&'r Request> {
     /// one trailing slash taken off either; else the C library's
     /// `P_tmpdir` as it stands ([`P_TMPDIR`]), trailing slash and all.
     ///
-    /// The recipe names a `TMPDIR` of the harness's own (#1730); emptied
+    /// The recipe names a `TMPDIR` of the harness's own; emptied
     /// before the first answer, the directory is the platform's own:
     ///
     /// ```php

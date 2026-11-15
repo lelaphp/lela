@@ -1,5 +1,5 @@
-//! Seam 1 of #947's Testing Decisions: an extension declared with the
-//! attributes alone, held to the oracle's bytes.
+//! The native attributes' parity with the oracle: an extension declared
+//! with the attributes alone, held to the oracle's bytes.
 //!
 //! - **Renderings.** Each mirror's Reflection signature lines (headers,
 //!   parameters, returns, properties, constants), the extension's name
@@ -215,7 +215,7 @@ fn an_alias_declares_no_frameless_entry() {
 
 /// This crate's directory as cargo sets `CARGO_MANIFEST_DIR` when it runs
 /// the test, never the path `env!` compiled in: cargo reuses a test binary
-/// across two checkouts that share a target directory (#2790).
+/// across two checkouts that share a target directory.
 fn manifest_dir() -> PathBuf {
     std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)

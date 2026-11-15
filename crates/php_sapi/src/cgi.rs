@@ -23,7 +23,7 @@ use crate::{Engine, HostPage, IniEvent, IniValue, Method, ResponseHead, WebReque
 /// as `realpath(3)` and
 /// `stat(2)` read the C string php hands them: up to its first NUL. So
 /// `run.php\0.txt` finds `run.php`, as php -S's walk finds it before
-/// refusing the path for its NUL (#2695).
+/// refusing the path for its NUL.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Disk;
 
@@ -350,7 +350,7 @@ mod tests {
     /// `EACCES` alone is `Access denied.`: `EPERM`, which macOS answers
     /// for a file under a directory the process may not read, is `No
     /// input file specified.`, as is every other errno and no path at
-    /// all, each php's page whole (#2876).
+    /// all, each php's page whole.
     #[test]
     fn a_script_that_does_not_open_is_denied_for_eacces_alone() {
         let page = |errno: Option<i32>| {
@@ -369,7 +369,7 @@ mod tests {
 
     /// A path is asked of the disk as far as its first NUL, as `stat(2)`
     /// and `realpath(3)` read a C string: `t.txt\0.php` is `t.txt`, and a
-    /// path cut short of anything there finds nothing (#2695).
+    /// path cut short of anything there finds nothing.
     #[test]
     fn the_disk_reads_a_path_up_to_its_first_nul() {
         let dir = std::env::temp_dir().join(format!("php-sapi-disk-nul-{}", std::process::id()));

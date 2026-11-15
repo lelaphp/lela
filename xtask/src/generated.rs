@@ -1,22 +1,22 @@
 //! The files the manifest's `generated` predicate names, each rendered
 //! from every rule whose scope reaches its directory ([`reaches`];
-//! harness-design.md §4.1, §13 D.19): the row names the files and no rule
-//! (#2473). Each is a `clippy.toml`, which clippy finds by nearest-file
+//! harness-design.md §4.1, §13 D.19): the row names the files and no rule.
+//! Each is a `clippy.toml`, which clippy finds by nearest-file
 //! search: the one at `<dir>/clippy.toml` carries every rule whose scope
 //! reaches `<dir>`, so a crate under it is held to all of them.
 //! `deny_types` renders to `disallowed-types`, with the rule's text as each reason and wildcards
 //! expanded from `Cargo.lock` to the paths a package's types are reachable
-//! at (#1910); its `deny_macros` to `disallowed-macros` (#1781); and
-//! `deny_methods` to `disallowed-methods` (#1950); and a `deny_lints`
+//! at; its `deny_macros` to `disallowed-macros`; and
+//! `deny_methods` to `disallowed-methods`; and a `deny_lints`
 //! rule's `allow_in_tests` to clippy's `allow-*-in-tests = true`, one key
-//! per lint listed ([`crate::manifest::IN_TESTS`], #3078). The committed
+//! per lint listed ([`crate::manifest::IN_TESTS`]). The committed
 //! copies are held to the rendering by `budget`.
 //!
 //! Clippy reads the nearest configuration alone and merges nothing, and
 //! in one directory a `.clippy.toml` before a `clippy.toml`: a crate
 //! carrying either of its own, below a generated file, is held to none of
 //! the rules that file carries. `budget` refuses each such file
-//! ([`nearer`], #2475). `CLIPPY_CONF_DIR`, set, starts clippy's search in
+//! ([`nearer`]). `CLIPPY_CONF_DIR`, set, starts clippy's search in
 //! one directory for every crate, past every generated file. Neither the
 //! workflows, the scripts nor `xtask` set it, and three things keep it
 //! from `xtask clippy`, the instrument CI and pre-commit run: its cargo

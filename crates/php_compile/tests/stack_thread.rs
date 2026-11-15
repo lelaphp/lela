@@ -9,7 +9,7 @@
 //! spawned thread is far smaller than the assumption, and the main
 //! thread's environment block, laid at the top of the stack by
 //! `execve`, is what pushed the assumption over the real stack under
-//! `git hook run pre-commit` (#297). libtest runs every `#[test]` on a
+//! `git hook run pre-commit`. libtest runs every `#[test]` on a
 //! thread of its own, so this binary is `harness = false`: `main` is the
 //! main thread, and the larger environment is this binary started again
 //! with one variable more.

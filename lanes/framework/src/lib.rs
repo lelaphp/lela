@@ -1,7 +1,8 @@
-//! The framework lane's pure part (#2140; #3740): its own crate with its
-//! own ceiling, so the lines ruled for it cannot be spent by other
+//! The framework lane's pure part (ruled 2026-10-31): its own crate with
+//! its own ceiling, so the lines ruled for it cannot be spent by other
 //! harness work. Nothing here serves a project or reads the store; the
 //! adapter under `xtask/src` does, and calls this crate. It depends on no
-//! workspace crate. #2140 has written nothing here yet.
+//! workspace crate. The lane is not built yet, and nothing is written
+//! here.
 
 #![forbid(unsafe_code)]

@@ -1,5 +1,5 @@
 //! The cargo profiles a lane's binaries are built in (harness-design.md
-//! §7, revision 82; #1994): the one statement of each profile's name and
+//! §7, revision 82): the one statement of each profile's name and
 //! the directory cargo builds it into, of the order the phpt lane looks
 //! for the engine's binary in, and of the profile the correctness lanes
 //! run, [`LANE`]. `Runner::resolve`, the cargo line a stale binary's skip
@@ -67,8 +67,8 @@ impl Profile {
 /// directory of the build's own ([`featured`]), else the target directory
 /// cargo was told of, or `root`'s own. Every binary the harness builds,
 /// `php-linked` and the hosts' own, is built in the lanes' profile,
-/// whatever profile the harness itself was built in (harness revision 92,
-/// #2217): a reading's key covers the source and not the profile, so one
+/// whatever profile the harness itself was built in (harness revision 92):
+/// a reading's key covers the source and not the profile, so one
 /// key is read off one build, and the `php` the witness lane builds is the
 /// one the phpt lane looks for first. The one binary built otherwise is a
 /// bench bar's arm, in the bench lane's profile ([`released`]).
@@ -84,12 +84,12 @@ pub(crate) fn build(
 }
 
 /// The same in `release`, the bench lane's profile: what a bar's arm of
-/// the engine's own runs, never a correctness lane's build (#2351); under
+/// the engine's own runs, never a correctness lane's build; under
 /// `into` as [`build`]'s, the engine with the tier's feature beside the
 /// lanes' build of it ([`featured`]); and with `cfg` set where one is
 /// named, a cfg only a bench build sets, added to the workspace's
 /// rustflags ([`Added`]), which is why such a build goes into a directory
-/// of its own (#2946).
+/// of its own.
 pub(crate) fn released(
     root: &Path,
     (package, binary): (&str, &str),
@@ -101,8 +101,8 @@ pub(crate) fn released(
 }
 
 /// [`released`] with the package's default features off, under `into`:
-/// a host without the bundle's `jit`, which each host turns on by default
-/// (#3676), the build G1 holds the tier's door cost against, in a target
+/// a host without the bundle's `jit`, which each host turns on by default,
+/// the build G1 holds the tier's door cost against, in a target
 /// directory of its own so the default one keeps the shipped build.
 pub(crate) fn released_bare(
     root: &Path,
@@ -166,7 +166,7 @@ fn built(
 /// Where the engine turning the bundle's `feature` on, or a build named
 /// `feature` of other features than the default's, is built: a target
 /// directory of its own under `root`'s, so `target/<profile>/php` stays
-/// the binary under test's default build (#2029, #3676).
+/// the binary under test's default build.
 pub(crate) fn featured(root: &Path, feature: &str) -> PathBuf {
     root.join("target").join("featured").join(feature)
 }
@@ -218,7 +218,7 @@ fn run(root: &Path, cargo: &mut Command, added: &Added, what: &str) -> Result<()
 /// a `--config` line names it: `cfg(all())` holds for every target, and
 /// the table is the one that passes LLVM's
 /// `--cgp-max-address-users-to-scan` to every profile (design §10
-/// Profiles, #3372).
+/// Profiles).
 pub(crate) const RUSTFLAGS_TABLE: &str = "target.'cfg(all())'.rustflags";
 
 /// What a build the harness runs adds to the workspace's rustflags table
@@ -380,7 +380,7 @@ mod tests {
     }
 
     /// What the harness builds is built in the lanes' profile whatever
-    /// profile the harness was built in (revision 92, #2217): this test
+    /// profile the harness was built in (revision 92): this test
     /// runs in a dev build, and a binary it builds lands under the lanes'
     /// directory and not under `debug/`.
     #[test]
@@ -404,7 +404,7 @@ mod tests {
 
     /// The bare build turns the package's default features off and lands
     /// in the directory it is given, where the release build of the same
-    /// package keeps them (#3676): the probe prints whether its default
+    /// package keeps them: the probe prints whether its default
     /// feature is on.
     #[test]
     fn the_bare_build_is_without_the_default_features_in_a_directory_of_its_own() {
@@ -433,7 +433,7 @@ mod tests {
 
     /// A cfg a bench build names reaches rustc beside the flags of the
     /// workspace's own rustflags table, which a `RUSTFLAGS` variable would
-    /// have replaced (#3372): the probe's `build.rs` writes the flags
+    /// have replaced: the probe's `build.rs` writes the flags
     /// cargo hands it, and the binary prints them.
     #[test]
     fn a_cfg_the_harness_names_is_added_to_the_workspaces_rustflags() {
@@ -508,7 +508,7 @@ mod tests {
     /// The lane that holds the threaded dispatch adds its cfg as the
     /// harness does, through a `--config` line on each cargo line it runs,
     /// and sets no rustflags variable, which would replace the workspace's
-    /// table (#3372): the line it names parses to the flags [`Added`]
+    /// table: the line it names parses to the flags [`Added`]
     /// would add for the cfg.
     #[cfg(tracked)]
     #[test]

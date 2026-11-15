@@ -1,4 +1,4 @@
-"""Negative controls for #2827's receipt comparison, with no oracle execution."""
+"""Negative controls for the fileinfo proof's receipt comparison, with no oracle execution."""
 import copy
 import json
 from pathlib import Path

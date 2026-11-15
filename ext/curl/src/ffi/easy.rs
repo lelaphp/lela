@@ -1194,7 +1194,7 @@ impl EasyId {
     }
 
     /// `curl_easy_perform`, the request reachable by the callbacks. The
-    /// transfer's waits are libcurl's and lend nothing (#2595, `ffi`'s
+    /// transfer's waits are libcurl's and lend nothing (`ffi`'s
     /// *Waits*).
     pub(crate) fn perform(self, req: &mut Request) -> Called {
         self.call(req, GONE, |live| {

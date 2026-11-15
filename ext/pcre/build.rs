@@ -1,13 +1,13 @@
-//! libpcre2-8 is the library the pinned keg links (design §7.2, #624,
-//! #717): `pcre2-sys` finds it through `pkg-config libpcre2-8` and links
+//! libpcre2-8 is the library the pinned keg links (design §7.2):
+//! `pcre2-sys` finds it through `pkg-config libpcre2-8` and links
 //! it, the keg's archive where the workspace sets `LIBPCRE2_8_STATIC`.
 //! Where `pkg-config` misses, `pcre2-sys` builds the source it bundles, a
 //! release the oracle does not link; the same lookup here, emitting
 //! nothing, fails the build there instead.
 //!
 //! `PCRE_JIT_SUPPORT` is php's `HAVE_PCRE_JIT_SUPPORT`, which its
-//! `configure` decides at build, not the library once loaded (#1958,
-//! #1974): `Z/ext/pcre/config0.m4` compiles a program that asks the
+//! `configure` decides at build, not the library once loaded:
+//! `Z/ext/pcre/config0.m4` compiles a program that asks the
 //! external library `pcre2_config_8(PCRE2_CONFIG_JIT)`, starts it, and
 //! defines the macro where it exits 0. The same program is compiled and
 //! started here, against the library `pkg-config` found, and the cfg
@@ -18,8 +18,8 @@
 //!
 //! `PCRE_VERSION_MAJOR` and `PCRE_VERSION_MINOR` are `@cvalue PCRE2_MAJOR`
 //! and `@cvalue PCRE2_MINOR` (`Z/ext/pcre/php_pcre.stub.php`), the header
-//! a build compiles against, not the library it later loads (#1978, as
-//! #1974 reads the other header macros). They are read here, as the C
+//! a build compiles against, not the library it later loads (as the other
+//! extensions' header macros are read). They are read here, as the C
 //! preprocessor expands the two macros of the `pcre2.h` that
 //! `config0.m4`'s program compiles against, under the include directories
 //! `pkg-config` found, never from `pcre2-sys`, whose pregenerated bindings
@@ -86,7 +86,7 @@ fn c_build(library: &pkg_config::Library) -> cc::Build {
     // php compiles C and C++ with -DNDEBUG unless it is built with
     // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
     // two builds that set ZEND_DEBUG, as debug assertions are this build's:
-    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    // assert() is live exactly where Rust's debug_assertions is.
     if env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
         build.define("NDEBUG", None);
     }

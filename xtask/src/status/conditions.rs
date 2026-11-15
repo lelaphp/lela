@@ -1,6 +1,6 @@
 //! The `conditions` section: the conditions of done, read from
 //! `done::Condition`'s own source, so the list under harness-design.md
-//! §4.5 is what `done` judges and not a copy of it (#2309). Each item is
+//! §4.5 is what `done` judges and not a copy of it. Each item is
 //! a variant's first rustdoc paragraph, numbered in the order the enum
 //! declares them; a variant without one fails the rendering, naming it.
 

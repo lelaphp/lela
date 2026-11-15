@@ -1,7 +1,7 @@
 //! The `mbstring` extension: `php-src/ext/mbstring` as one crate under
 //! `ext/` (ADR-0004), over php-src's libmbfl, vendored under its LGPL
 //! and compiled by `build.rs`, and the platform's oniguruma (design
-//! §7.2, revision 47, #1173). One dependency beside the facade for each
+//! §7.2, revision 47). One dependency beside the facade for each
 //! extension php's mbstring includes: ext/pcre for
 //! `mbstring.http_output_conv_mimetypes`, ext/standard for `php_mail`.
 //! One entry, `extension()`; its state on the value (ADR-0005). The
@@ -252,7 +252,7 @@ fn info(req: &mut Request) {
 /// `On` or `Off`, in `display_ini_entries`' table, an empty one `no
 /// value`. In HTML the table is php's directive table and the licence
 /// line above it a header, `php_info_print_table_header(1, ..)`, as
-/// `phpinfo()`'s page shows them (#2337):
+/// `phpinfo()`'s page shows them:
 ///
 /// ```php
 /// ob_start(); (new ReflectionExtension('mbstring'))->info(); $page = ob_get_clean();

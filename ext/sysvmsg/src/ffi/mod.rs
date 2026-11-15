@@ -1,6 +1,6 @@
 //! System V message queues, `<sys/msg.h>` from the C library (design
 //! §7.2; `unsafe.homes`' `ext/*/src/ffi/`), since nix binds no System V
-//! IPC (#1323): `msgget`, `msgsnd`, `msgrcv` and `msgctl` behind safe
+//! IPC: `msgget`, `msgsnd`, `msgrcv` and `msgctl` behind safe
 //! functions. The `libc` crate declares them for Linux and not for
 //! Apple's targets, whose `struct msqid_ds` is `<sys/msg.h>`'s own,
 //! packed to four bytes; both are read through [`Stat`]. The one home of

@@ -32,8 +32,8 @@ pub struct Call {
     pub tool_use_id: String,
     /// What the call displaces, where the caller knows it and the file at
     /// the path is not it: the diff judge's, the tracked content at the
-    /// base it measures since, or in a merge each parent's ([`Call::diff_of`],
-    /// #2783). Empty at the hook, whose JSON never carries it, since a call
+    /// base it measures since, or in a merge each parent's ([`Call::diff_of`]).
+    /// Empty at the hook, whose JSON never carries it, since a call
     /// there displaces what is at the path. Its presence is also what
     /// places a file outside the workspace as a diff's ([`Call::touched`]).
     #[serde(skip)]
@@ -47,7 +47,7 @@ pub struct Call {
     pub agent_id: Option<String>,
     /// The hook event the call came in on, which the hook's answer names
     /// again: `PostToolUse`, or `PostToolUseFailure` for a `Bash` call that
-    /// exited non-zero, which gets no `PostToolUse` (#2762).
+    /// exited non-zero, which gets no `PostToolUse`.
     pub(super) hook_event_name: Option<String>,
     /// The answered `AskUserQuestion` calls the function hook read from
     /// the engine, read only by that adapter ([`Evidence`]).
@@ -72,7 +72,7 @@ pub struct Arguments {
     pub content: Option<String>,
     pub command: Option<String>,
     /// A `Bash` call the runtime runs in the background and notifies the
-    /// end of, which a `runs = "foreground"` rule does not judge (#3624).
+    /// end of, which a `runs = "foreground"` rule does not judge.
     #[serde(default)]
     pub run_in_background: bool,
 }
@@ -87,17 +87,17 @@ pub(super) enum Touched {
     /// A file of the workspace, relative to its root.
     Workspace(PathBuf),
     /// A file outside the workspace, which no row's scope names and no
-    /// row's `adding` reaches (#4679).
+    /// row's `adding` reaches.
     Outside,
     /// A diff's call that carries what it displaces ([`Call::diff_of`]),
     /// whose file on disk resolves outside the workspace through a link:
     /// git names the path in the checkout and no commit carries a file
     /// outside the repository, so a row without a scope reaches it as it
     /// reaches a call without a file, its `adding` asked of what the diff
-    /// displaces (#4679). A binary file of a diff carries nothing it
+    /// displaces. A binary file of a diff carries nothing it
     /// displaces and so reads [`Touched::Outside`], with no finding lost by
     /// it, since no `adding` fires on a call that writes no text. Placing
-    /// a diff's call by git's path for every row is #4434's.
+    /// a diff's call by git's path for every row is not built yet.
     Diffed,
 }
 
@@ -170,7 +170,7 @@ impl Call {
 
     /// What the call displaces and what it would leave in its place, both
     /// as whole texts, for a rule that fires on what a write adds rather
-    /// than on what the file already carries (#510). `None` for a call
+    /// than on what the file already carries. `None` for a call
     /// that writes no file.
     ///
     /// A `Write` leaves its `content`; what it displaces is the caller's
@@ -212,11 +212,11 @@ impl Call {
 
     /// Whether the runtime runs the call in the background and notifies
     /// its end: a `Bash` call with `run_in_background`, or a `Monitor`,
-    /// which runs so by construction (#3637). A `Monitor` is known only by
+    /// which runs so by construction. A `Monitor` is known only by
     /// its name: the runtime hands a hook whose matcher names `Bash` alone
     /// the `Monitor`'s `command` and `description` under the name `Bash`,
     /// nothing else of it, which no judge tells from a foreground call, and
-    /// hands one whose matcher names `Monitor` the call as it is (#3781).
+    /// hands one whose matcher names `Monitor` the call as it is.
     pub(super) fn in_background(&self) -> bool {
         self.tool_input.run_in_background || self.tool_name == "Monitor"
     }
@@ -224,7 +224,7 @@ impl Call {
     /// The name a rule's `tool` reads the call by: a `Monitor` that runs a
     /// command is the `Bash` call it runs, as the runtime reads it when it
     /// matches a hook, so every shell rule judges what a `Monitor` runs;
-    /// every other call goes by its `tool_name` (#3781).
+    /// every other call goes by its `tool_name`.
     pub(super) fn judged_as(&self) -> &str {
         match (self.tool_name.as_str(), self.command()) {
             ("Monitor", Some(_)) => "Bash",
@@ -245,13 +245,13 @@ impl Call {
     /// The file the call touches, relative to the workspace root; `None`
     /// for a call without one or for a file outside the workspace, which
     /// [`Call::touched`] tells apart. No row's scope names a file outside
-    /// the workspace and no row's `adding` reaches one written by a call
-    /// (#4679); a row with neither still judges the call, with no path to
+    /// the workspace and no row's `adding` reaches one written by a call;
+    /// a row with neither still judges the call, with no path to
     /// read, and a diff's call that carries what it displaces, whose file
     /// a link leads outside, is a row's without a scope, `adding` among
     /// them ([`Touched::Diffed`]). Read off [`Call::file`], so
     /// `seams.toml`, `./seams.toml` and `docs/../seams.toml` are one path
-    /// and every scope sees it as such (#4430).
+    /// and every scope sees it as such.
     pub fn path(&self, root: &Path) -> Option<PathBuf> {
         self.touched(root).path().map(Path::to_path_buf)
     }
@@ -277,7 +277,7 @@ impl Call {
     /// places the call, the scopes that judge it, the reading that names
     /// it and the worktree's build it is handed to each read the path
     /// under a root of its own, to which a relative one would be a place
-    /// of its own (#4430). Both as they came where the path is absent or
+    /// of its own. Both as they came where the path is absent or
     /// absolute already, or resolves to a name that is not UTF-8.
     pub(super) fn anchor(&mut self, root: &Path, text: String) -> String {
         let given = self.tool_input.file_path.as_deref();
@@ -306,7 +306,7 @@ impl Call {
     /// otherwise, as the tool that runs it reads it, and an absolute one
     /// as it stands. Every spelling of a file is that file, a `..` climbing
     /// out of `root` among them, which names the place it climbs to and
-    /// is judged where that place is (#4430). `None` for a call without
+    /// is judged where that place is. `None` for a call without
     /// one.
     pub(super) fn file(&self, root: &Path) -> Option<PathBuf> {
         let given = Path::new(self.tool_input.file_path.as_deref()?);
@@ -322,7 +322,7 @@ impl Call {
     /// `seams.toml` of its own under `root` or in another checkout of
     /// `root`'s repository ([`nearest`]), else `root`. A directory with a
     /// manifest is a workspace of its own, and a call into it is judged
-    /// by that manifest (#57): a worktree of the repository, wherever it
+    /// by that manifest: a worktree of the repository, wherever it
     /// was laid down, whose files are judged against that checkout and
     /// not as `.claude/**` of the main one or as no file of the manifest
     /// at all, and a fixture under `xtask/fixtures/**` that carries one,
@@ -339,7 +339,7 @@ impl Call {
     /// is: a file in `root` is `root`'s whatever directory the shell stands
     /// in, since a worktree's build handed a call in its own tree would
     /// otherwise place it by the session's directory in the checkout that
-    /// handed it over (#1047). A call without one in a subagent, one whose
+    /// handed it over. A call without one in a subagent, one whose
     /// `agent_id` is set, is `root`'s wherever its shell stands, so a
     /// builder whose shell starts in its worktree is judged by the session
     /// root's manifest and build, and a branch's `seams.toml` never judges
@@ -352,7 +352,7 @@ impl Call {
     /// describes the fixture's sources and not what a shell may run. A
     /// fixture's manifest itself, one in a directory with no `.git`, is
     /// test data and not that workspace's harness file, so it is placed
-    /// from the directory above (#3644 ruling 2): the guard on a negative
+    /// from the directory above (ruled 2026-10-30): the guard on a negative
     /// control is its test, every rule having a fixture that must fail.
     pub(super) fn nested(&self, root: &Path) -> Option<PathBuf> {
         let root = canonical(root);
@@ -472,8 +472,7 @@ fn nearest_under(root: &Path, place: &Path, names: &[&str]) -> Option<PathBuf> {
 /// time from the left, each prefix resolved where it is on disk, so a `..`
 /// steps up from the place a link leads, as the kernel steps, and steps
 /// up lexically past a directory not made yet: no `.` or `..` is left in
-/// what it returns, for `docs/../seams.toml` and `new/../seams.toml` alike
-/// (#4430).
+/// what it returns, for `docs/../seams.toml` and `new/../seams.toml` alike.
 fn canonical(path: &Path) -> PathBuf {
     if let Ok(real) = path.canonicalize() {
         return real;
@@ -604,7 +603,7 @@ mod tests {
         call
     }
 
-    /// #4430: every spelling of a file is the one path, a `..` through a
+    /// Every spelling of a file is the one path, a `..` through a
     /// directory on disk, one not made yet and one under a link alike,
     /// read from the call's `cwd` where it carries one and from the root
     /// otherwise.
@@ -642,12 +641,12 @@ mod tests {
         assert_eq!(through(&linked), Some(PathBuf::from("docs/x.md")));
     }
 
-    /// #4430: a relative path that climbs out of the workspace names the
-    /// place it climbs to, judged as that absolute path is: in a worktree
+    /// A relative path that climbs out of the workspace names the place
+    /// it climbs to, judged as that absolute path is: in a worktree
     /// of the repository, by that worktree's manifest and as its file;
     /// anywhere else, as no file of the manifest, and as a file outside
     /// the workspace, which a call without one is not and a diff's path is
-    /// apart (#4679).
+    /// apart.
     #[test]
     fn a_relative_path_climbing_out_of_the_workspace_is_the_absolute_path_it_names() {
         let tree = Tree::new("call-climbing").unwrap();

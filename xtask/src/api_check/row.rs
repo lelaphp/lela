@@ -1,5 +1,5 @@
 //! One api-check reading as a row of `status --section api-check --format
-//! jsonl --every` (harness-design.md §4.6, #1763), `locks` by its other
+//! jsonl --every` (harness-design.md §4.6), `locks` by its other
 //! name, the section that renders the api-check readings: what the reading
 //! counted, under a shape `v` versions. A seam's reading counts its lock's items and a crate's its
 //! edges; which scope is a seam is the manifest's at the ref a reader
@@ -39,7 +39,7 @@ pub(crate) struct Row {
     edges: Option<u64>,
     /// The extensions the bundle registers, on the bundle's reading.
     extensions: Option<u64>,
-    /// An item lock's lines by the module that defines each (#1795), the
+    /// An item lock's lines by the module that defines each, the
     /// growth of one module read across a series; left out where the
     /// reading keeps none, a crate's or one taken before api-check counted
     /// them, which a reader of the earlier shape already handles.
@@ -97,7 +97,7 @@ mod tests {
     }
 
     /// A seam's per-module counts are its row's `modules`, and a row
-    /// without them leaves the field out of its line (#1795).
+    /// without them leaves the field out of its line.
     #[test]
     fn a_seam_carries_its_lines_per_module() {
         let mut reading = reading("api", &[("items", 3)]);

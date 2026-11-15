@@ -1,10 +1,10 @@
-//! The production server's bars of `xtask bench` (#2351): makala against
+//! The production server's bars of `xtask bench`: makala against
 //! php-fpm behind a `FastCGI` client, over each workload
 //! `docs/perf/workloads.toml` declares in a role served on the web, every
 //! role but a native, to run as a file with no arguments (measurement
 //! protocol §11, [`workloads`]), and makala against itself over the
 //! same, the A/A control that says what the rig can resolve at that
-//! scale. A native workload has no bar, as #4366 ruled: its time is
+//! scale. A native workload has no bar, as ruled 2026-11-09: its time is
 //! spent in an extension's natives, and what a served request adds to it
 //! the other workloads' bars measure already.
 //!
@@ -20,16 +20,16 @@
 //! so the series times makala's HTTP against php-fpm's `FastCGI` and not
 //! against nginx and php-fpm together. What the two arms' reps
 //! are held equal by is the response's body, the bytes PHP wrote, since
-//! the heads differ by what each host is (#2570, #2335). Both run under the
-//! recipe's ini with php.ini-production's values for the two entries the
-//! recipe sets for correctness and that cost every request:
+//! the heads differ by what each host is. Both run under the recipe's ini
+//! with php.ini-production's values for the two entries the recipe sets
+//! for correctness and that cost every request:
 //! `zend.assertions=-1` and `opcache.protect_memory=0` ([`PRODUCTION`]).
 //!
 //! **Two loads** ([`Load`]). `makala-fpm/<workload>` sends one request a
 //! rep from one client, so it measures latency, against a makala at its
 //! default request threads and a pool of one child. `makala-fpm-c8/<workload>`
 //! is §9.2's worker-throughput bar, "8 threads, one process ≥ php-fpm
-//! with 8 workers" (#2336's ruling, #2660): [`CLIENTS`] clients a rep, each
+//! with 8 workers" (ruled 2026-10-11): [`CLIENTS`] clients a rep, each
 //! asking until [`ASKING`] have passed and finishing the request it has
 //! in flight, against a makala of [`CLIENTS`] request threads and a pool of
 //! `pm = static`, `pm.max_children` [`CLIENTS`], behind the same clients as
@@ -38,7 +38,7 @@
 //! took to end, and every answer of the rep carries the body the rep is
 //! held to (§5), so a rep is refused on the first answer that differs.
 //!
-//! **The heap's opt-in** (#4348's ruling 4, #4361). `makala-zeroed-c8/<workload>`
+//! **The heap's opt-in** (ruling 4 of 2026-11-09). `makala-zeroed-c8/<workload>`
 //! is the throughput load against two makalas, the first started with
 //! [`ZEROED`] set, so each request's heap zeroes the pages it touched
 //! before its chunks are kept, and the second without: what the opt-in
@@ -50,13 +50,13 @@
 //! Its A/A control is `makala-c8-aa/<workload>`, under the same load.
 //!
 //! **How each is held.** Each series is held to no bound until a person
-//! writes one in the manifest once the nightly series is read (#2336's
-//! ruling, after #1902's); its reading states the paired delta and how far
-//! makala stands behind php-fpm, harness §3's "`FastCGI` ≥ php-fpm" as the
-//! distance to go. `makala-aa/<workload>` and `makala-c8-aa/<workload>` are
-//! their A/A controls, makala against itself under the same load. A
-//! machine without the pinned php-fpm measures none of them, each a skip
-//! that says so.
+//! writes one in the manifest once the nightly series is read (ruled
+//! 2026-10-09, after the ruling of 2026-10-07 on the engine's bars); its
+//! reading states the paired delta and how far makala stands behind
+//! php-fpm, harness §3's "`FastCGI` ≥ php-fpm" as the distance to go.
+//! `makala-aa/<workload>` and `makala-c8-aa/<workload>` are their A/A
+//! controls, makala against itself under the same load. A machine without
+//! the pinned php-fpm measures none of them, each a skip that says so.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -90,7 +90,7 @@ enum Load {
 }
 
 /// The clients of a [`Load::Clients`] rep, and the request threads and
-/// php-fpm children each host has for them (§9.2, #2660).
+/// php-fpm children each host has for them (§9.2).
 const CLIENTS: usize = 8;
 
 /// How long the clients of a rep ask, each then finishing the request it
@@ -334,7 +334,7 @@ fn fpm_body((stdout, stderr): (Vec<u8>, Vec<u8>)) -> Result<Vec<u8>> {
 
 /// An arm that asks a host the workload's request, `ask` giving the
 /// response's body, under its bar's [`Load`], and reads what the server's
-/// process `pid` and its children retired across each rep (#3013).
+/// process `pid` and its children retired across each rep.
 struct ByRequest {
     name: &'static str,
     program: PathBuf,
@@ -427,8 +427,8 @@ mod tests {
     /// Each workload is four bars: the latency series against php-fpm and
     /// its A/A control, and the throughput series at [`CLIENTS`] clients
     /// and its control, named by the workload's stem and stating their
-    /// clients (#2660); a native workload has none, the six `uri-*` and
-    /// the three profiled programs among them (#4366), nor one declared
+    /// clients; a native workload has none, the six `uri-*` and
+    /// the three profiled programs among them, nor one declared
     /// with a pinned file or code of its own.
     #[cfg(tracked)]
     #[test]
@@ -484,7 +484,7 @@ mod tests {
     /// started with the variable `php_heap` reads: a rename there that
     /// left this copy behind would make the bar an A/A control in all but
     /// its name, so the copy is held to `php_heap`'s constant, and its
-    /// arms named for what each is (#4361).
+    /// arms named for what each is.
     #[cfg(tracked)]
     #[test]
     fn the_opt_ins_bar_starts_its_first_makala_with_the_variable_php_heap_reads() {

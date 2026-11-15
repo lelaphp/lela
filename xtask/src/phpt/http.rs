@@ -1,15 +1,15 @@
-//! The CGI-shaped tests served to the production server over HTTP
-//! (#2348): `sapi/makala`'s own subset, the one adapter beside the CGI
+//! The CGI-shaped tests served to the production server over HTTP:
+//! `sapi/makala`'s own subset, the one adapter beside the CGI
 //! translation.
 //!
 //! **Which tests.** Every CGI-shaped test ([`Phpt::is_cgi`], upstream's
 //! `isCGI`) of the corpus's subsets ([`super::ROOTS`]), one subset scoped
 //! by the host's crate. Its row keeps no `phpt` key: each test is already
-//! counted under the subset whose directory it stands in, and #2334 ruled
-//! this lane reported per host and never added to the parity total twice,
-//! so the tests are chosen here and never by naming their directories on
-//! the row. The corpus `fpm-compare` and `soak` serve is the tests of this
-//! subset one file serves whole (`crate::makala::subset`).
+//! counted under the subset whose directory it stands in, and the ruling of
+//! 2026-10-09 has this lane reported per host and never added to the parity
+//! total twice, so the tests are chosen here and never by naming their
+//! directories on the row. The corpus `fpm-compare` and `soak` serve is the
+//! tests of this subset one file serves whole (`crate::makala::subset`).
 //!
 //! **What serves them.** The runner's control runs them as it runs every
 //! CGI-shaped test, through the php-cgi `[sapi]` pins, so the target
@@ -21,16 +21,16 @@
 //! the code is not 200, the header lines, a blank line and the body. The
 //! rest of the judge is the CGI one, but for a header's name, which is held
 //! without regard to its case, since makala writes every name lowercase by
-//! design (#2570). The judge holds `--EXPECTHEADERS--` as run-tests.php
+//! design. The judge holds `--EXPECTHEADERS--` as run-tests.php
 //! does, each wanted name by the last line of that name, so it reads no
-//! order across names and makala's grouping of a name's lines (#2640)
+//! order across names and makala's grouping of a name's lines
 //! cannot miss it; within a name it reads which line comes last, which
 //! the grouping keeps. The served lane needs no fold of its own. A difference an accepted
 //! `makala:` row names is accepted, as `fpm-compare` reads it
-//! (`crate::makala::held`, #2644). What CGI has and HTTP cannot carry is
+//! (`crate::makala::held`). What CGI has and HTTP cannot carry is
 //! not sent: the words of `--ARGS--`, and an environment variable no field
 //! stands for, whose test is left out of the lane, outside the target
-//! ([`unsent`], #2639).
+//! ([`unsent`]).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -93,7 +93,7 @@ const CARRIED: [&str; 7] = [
 
 /// Why the served lane leaves the test at `path` out, where it does: its
 /// `--ENV--` sets a variable no HTTP field carries, which a request
-/// cannot hand the server, so no verdict on it would be makala's (#2639).
+/// cannot hand the server, so no verdict on it would be makala's.
 /// Counted outside the target and named, never a row.
 pub(super) fn unsent(phpt: &Phpt, path: &Path) -> Option<String> {
     let carried = |name: &str| name.starts_with("HTTP_") || CARRIED.contains(&name);
@@ -112,7 +112,7 @@ pub(super) fn unsent(phpt: &Phpt, path: &Path) -> Option<String> {
 /// A served test's verdict, `compared` as the registry read it under the
 /// test's `phpt:` key `id`: a difference no row accepted there is accepted
 /// where an accepted `makala:` row names the test, as `fpm-compare` reads
-/// it (#2644), and stands otherwise.
+/// it, and stands otherwise.
 pub(super) fn accepted(registry: &Registry, id: &str, compared: Verdict) -> Verdict {
     match (&compared, held(registry, named(id), false)) {
         (Verdict::Differs(_), Held::Accepted(row)) => Verdict::Diverged(row.clone()),
@@ -122,7 +122,7 @@ pub(super) fn accepted(registry: &Registry, id: &str, compared: Verdict) -> Verd
 
 /// The `makala:` rows that accepted a difference in the engine's run of
 /// the served subset, counted on `reading` and each test named under its
-/// row, as `fpm-compare` counts and names them (#2644); nothing for
+/// row, as `fpm-compare` counts and names them; nothing for
 /// another subset or the runner's control. The lane
 /// names no row stale: a row records what php-fpm shows, and a test held
 /// to its own expectation may not show it, as bug60761.phpt, which
@@ -297,11 +297,11 @@ mod tests {
         );
     }
 
-    /// The negative control of #2644, over the fixture `fpm-compare` is
-    /// held to: a difference on a test an accepted `makala:` row names is
-    /// accepted under the row and counted apart, one on a test no row
-    /// names stands and fails, and a test the row covers that met its
-    /// expectation is no row stale.
+    /// The negative control of the served lane's reading of `makala:`
+    /// rows, over the fixture `fpm-compare` is held to: a difference on a
+    /// test an accepted `makala:` row names is accepted under the row and
+    /// counted apart, one on a test no row names stands and fails, and a
+    /// test the row covers that met its expectation is no row stale.
     #[test]
     fn the_served_lane_reads_makala_rows_as_fpm_compare_does() {
         let registry = crate::makala::fixture();
@@ -377,7 +377,7 @@ mod tests {
 
     /// The served lane holds `--EXPECTHEADERS--` by name, the last line of
     /// a name standing, as run-tests.php does, so the order across names
-    /// is never read (#2640): makala's grouped `Vary` lines meet
+    /// is never read: makala's grouped `Vary` lines meet
     /// bug51269.phpt's expectation, and the same two lines swapped, whose
     /// last line is then another, miss it.
     #[test]

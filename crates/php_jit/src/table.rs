@@ -32,7 +32,7 @@
 //! (`Z/ext/opcache/jit/zend_jit_trace.c:8164-8167`). A full arena stops
 //! nothing: each publish that finds no room is [`Full::Code`], php's
 //! `COMPILER_ERROR`, and the next may find room for a smaller body
-//! (`jit-design.md` §4.5, #3015's ruling).
+//! (`jit-design.md` §4.5, ruled 2026-10-19).
 //!
 //! **php's `PERF` and `PERF_DUMP` writers** ([`Perf`]) are the table's,
 //! written under the mutex by the publish that places the code.
@@ -49,7 +49,7 @@
 //! freed before the table. Where the mapping is refused and the kernel
 //! may have taken the executable view away ([`code::Unadopted::Lost`]),
 //! the child ends there, before it returns into any frame, with
-//! opcache's fatal line and status (#4501's ruling).
+//! opcache's fatal line and status (ruled 2026-11-11).
 //! The copy is the asking process's to pay, at each fork, for the chunks
 //! in use alone.
 
@@ -493,10 +493,10 @@ impl<P: Pages> std::fmt::Debug for TraceTable<P> {
 impl<P: Pages> TraceTable<P> {
     /// An empty table under `policy`'s bounds, its arena as many bytes as
     /// php's buffer, `opcache.jit_buffer_size` rounded up to the page
-    /// ([`code::capacity`], #3112's ruling), its `PERF` lines and `PERF_DUMP` records written as
-    /// the engine's `outputs` started them. An arena that cannot be
-    /// mapped is none: each publish numbers its trace and keeps no code
-    /// (revision 27).
+    /// ([`code::capacity`], ruled 2026-10-21), its `PERF` lines and
+    /// `PERF_DUMP` records written as the engine's `outputs` started
+    /// them. An arena that cannot be mapped is none: each publish numbers
+    /// its trace and keeps no code (revision 27).
     ///
     /// A buffer smaller than a chunk holds what php's holds, so a trace
     /// that fits php's fits this one:
@@ -516,7 +516,7 @@ impl<P: Pages> TraceTable<P> {
     ///
     /// A loop php's buffer cannot hold is a compile that finds no room,
     /// php's `COMPILER_ERROR`, at each of its sixteen attempts, which
-    /// blacklist it (#3015's and #3112's rulings):
+    /// blacklist it (ruled 2026-10-19 and 2026-10-21):
     ///
     /// ```php
     /// $s = 0;
@@ -652,8 +652,8 @@ impl<P: Pages> TraceTable<P> {
         &self.analyses
     }
 
-    /// What the traces published into this epoch's table so far take
-    /// (#2961), each trace counted last in its publish: what
+    /// What the traces published into this epoch's table so far take,
+    /// each trace counted last in its publish: what
     /// `opcache_get_status()['jit']` reads of the buffer
     /// ([`crate::policy::Policy::status`]); atomics read with nothing
     /// taken, so a reader never waits on a compile.
@@ -930,7 +930,7 @@ impl<P: Pages + 'static> tier::Inherited for TraceTable<P> {
 }
 
 /// A fork's child whose executable view may be gone, ended before it
-/// returns into any frame (`jit-design.md` §4.4, #4501's ruling): one line
+/// returns into any frame (`jit-design.md` §4.4, ruled 2026-11-11): one line
 /// on its error stream, `zend_accel_error`'s word for `ACCEL_LOG_FATAL`
 /// and the message, and opcache's fatal status, the `exit(-2)` php ends
 /// a process with that cannot use the tier's code buffer

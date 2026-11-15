@@ -3,7 +3,7 @@
 //! that end, so a connection made after the stop is queued and reset at
 //! the exit, as the pinned php-cgi 8.5.12 queues and resets it. The
 //! handler takes the accept loop's number from the socket so a stop
-//! handled after the loop's check is not lost (#3869), and keeps the
+//! handled after the loop's check is not lost, and keeps the
 //! socket itself open; `lines.toml` sends no stop while a request runs,
 //! so this half is held here.
 

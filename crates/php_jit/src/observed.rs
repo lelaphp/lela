@@ -79,7 +79,7 @@ fn observing(observing: ExtensionBuilder, ini: &[(&str, &str)]) -> Engine {
 
 /// The tier's force lane with the `TRACE` lines a compile and an exit
 /// write, `compiled` (1<<14) and `exit` (1<<15), opcache on for the
-/// command line, as php starts its tier only there (#3126), and
+/// command line, as php starts its tier only there, and
 /// diagnostics displayed as the command line displays them.
 const FORCE: [(&str, &str); 5] = [
     ("opcache.enable_cli", "1"),

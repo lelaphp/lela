@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's wrapper: each
+//! The request leak sensor over this extension's wrapper: each
 //! request below gives up everything the wrapper's hooks took, so an
 //! armed engine ends it without the `InternalError` naming a block
 //! still held.
@@ -29,7 +29,7 @@ file_put_contents($p, $data . sha1($data, true) . pack('V', 2) . 'GBMB');
 
 /// The wrapper's `url_stat` answers the array the stream layer reads
 /// its thirteen fields out of, and the stream layer gives it up once
-/// read (#2102): `stat`, `filesize` and `file_exists` over an entry.
+/// read: `stat`, `filesize` and `file_exists` over an entry.
 #[test]
 fn the_array_a_wrapper_stat_answers_is_given_up() {
     let stdout = armed(&format!(
@@ -44,7 +44,7 @@ unlink($p);
 /// `buildFromDirectory` hands the directory to the
 /// `RecursiveDirectoryIterator` it constructs and keeps no owner of it
 /// after, as php's `zval_ptr_dtor(&arg)` gives up the one it made
-/// (#2210, `ext/phar/tests/bug54289.phpt`,
+/// (`ext/phar/tests/bug54289.phpt`,
 /// `cache_list/copyonwrite5.phar.phpt` and `copyonwrite6.phar.phpt`).
 #[test]
 fn the_directory_a_build_iterates_is_given_up() {

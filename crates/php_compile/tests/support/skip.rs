@@ -1,5 +1,5 @@
 //! A test's skip for a fact this machine lacks, as the tests that cannot
-//! depend on xtask take it (#3085, #3180): `ext/standard`'s for a locale
+//! depend on xtask take it: `ext/standard`'s for a locale
 //! the C library has not, `php_compile`'s for a main thread whose size
 //! cannot be read, and `ext/mysqlnd/tests/support/mysql.rs`'s for the
 //! `MySQL` server, each including this file with `#[path]`. It lives in

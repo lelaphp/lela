@@ -2,14 +2,14 @@
 //! 41): each extension of the bundle's default set rendered by the pinned
 //! oracle's `php --re <name>` under the recipe, kept in the store, and
 //! held against the engine's rendering, one reading per extension per
-//! column, `--re` and `--ri` (#273). Every
+//! column, `--re` and `--ri`. Every
 //! test here goes through the instrument's `run` and reads what it wrote;
 //! the verdict on two renderings and the negative control are held
 //! beside the lane, in its own tests.
 //!
 //! The tests that spawn the oracle say so on stderr and return when the
-//! pinned binary is not on this machine, unless the machine promised it
-//! (#38); the rest run anywhere.
+//! pinned binary is not on this machine, unless the machine promised it;
+//! the rest run anywhere.
 #![cfg(tracked)]
 
 use std::fs;
@@ -49,7 +49,7 @@ fn manifest() -> Manifest {
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
-/// this machine promised the binary (#38).
+/// this machine promised the binary.
 fn oracle() -> Option<PathBuf> {
     let pin = pin();
     Promise::Oracle
@@ -128,11 +128,11 @@ fn count(reading: &Reading, key: &str) -> i64 {
 }
 
 /// The floor: the scopes whose rendering is the oracle's and may not stop
-/// being, one entry per column (harness-design.md §7, ledger 49; #389).
-/// Under `--re`: ctype (#271), json (#272), reflection, whose twenty-six
+/// being, one entry per column (harness-design.md §7, ledger 49).
+/// Under `--re`: ctype, json, reflection, whose twenty-six
 /// classes render whole from the commit that declared them (d8bc96d), and
 /// tokenizer, whose constants and signatures reached php's order in
-/// 2f23e89. Under `--ri` (#273): those four and `random` beside them,
+/// 2f23e89. Under `--ri`: those four and `random` beside them,
 /// whose whole table is the `Version` line every extension's header
 /// carries (a3c01d0 wrote tokenizer's).
 ///
@@ -146,9 +146,10 @@ fn count(reading: &Reading, key: &str) -> i64 {
 ///
 /// It rises onto one of the six extensions whose columns differ between
 /// the keg and a Linux build (`ext/standard`, `ext/pcre`, `ext/pdo`,
-/// `ext/pdo_sqlite`, `ext/dom`, `ext/iconv`) only under #635's ruling
-/// (harness-design.md §7, revision 103): when the engine renders the
-/// pinned keg's bytes, with no library version or driver list normalised.
+/// `ext/pdo_sqlite`, `ext/dom`, `ext/iconv`) only under the ruling of
+/// 2026-09-28 (harness-design.md §7, revision 103): when the engine renders
+/// the pinned keg's bytes, with no library version or driver list
+/// normalised.
 const FLOOR: [&str; 9] = [
     "ext/ctype",
     "ext/ctype/ri",
@@ -163,7 +164,7 @@ const FLOOR: [&str; 9] = [
 
 /// Every reading of `FLOOR` that is not a pass, named: what turns the
 /// harness's own suite red is a rendering that went backwards, and an
-/// extension the port has not reached yet is not one (#389). A scope
+/// extension the port has not reached yet is not one. A scope
 /// absent from `readings` is not read here, so the caller that runs the
 /// whole default set holds the floor's presence beside this.
 fn below_the_floor(readings: &[Reading]) -> Result<(), String> {
@@ -182,24 +183,24 @@ fn below_the_floor(readings: &[Reading]) -> Result<(), String> {
     }
 }
 
-/// Design §11 days 1–2, the two halves met (#269) and the second column
-/// beside them (#273): every extension of the default set is rendered by
+/// Design §11 days 1–2, the two halves met and the second column
+/// beside them: every extension of the default set is rendered by
 /// the oracle and by the linked engine under `--re` and under `--ri`, two
 /// readings each, the `--ri` one scoped `ext/<name>/ri`. What each row
 /// reads is the port's reach and is read off the run rather than pinned
-/// here (#389): a pass says the engine's rendering is the oracle's, a
+/// here: a pass says the engine's rendering is the oracle's, a
 /// fail names the engine's rendering as the cause, the first differing
 /// line or the engine's own words for rendering nothing, and `FLOOR` is
 /// what may not go backwards. The oracle's bytes are kept for each
 /// column, and the section renders every row with the status its reading
 /// carries.
-/// Whether a reading rendered anything: a row laid before its crate
-/// (#1163's) is a skip that says it is not yet created.
+/// Whether a reading rendered anything: a row laid before its crate is a
+/// skip that says it is not yet created.
 fn rendered(reading: &Reading) -> bool {
     !reading.message.ends_with(": not yet created")
 }
 
-/// The floor is a sensor and not a comment (#389, harness-design.md §7,
+/// The floor is a sensor and not a comment (harness-design.md §7,
 /// ledger 49). `ext/ctype`'s `--re` rendering carried one byte off the
 /// oracle's is below the floor and the failure names that scope alone,
 /// its `--ri` column beside it untouched; an extension outside the floor
@@ -365,7 +366,7 @@ fn the_fixture_through_run_is_a_pass_and_the_one_byte_apart_is_not() {
     );
 }
 
-/// The load number (#317): the rendering whose `#10` stands as `#7` is a
+/// The load number: the rendering whose `#10` stands as `#7` is a
 /// pass through `run` under the pin's `extension_number_token` row, both
 /// streams renumbered before the verdict, and the oracle's bytes are kept
 /// as they were compared; the same bytes under a pin without the row are
@@ -443,7 +444,7 @@ fn an_absent_oracle_is_a_skip_and_not_a_pass() {
     }
 }
 
-/// `--staged`, pre-commit's (#1312, #1159): a commit that stages only a
+/// `--staged`, pre-commit's: a commit that stages only a
 /// harness file, which no extension's rendering reads, renders nothing
 /// and writes no reading, where the lane without it renders every one.
 #[test]
@@ -468,7 +469,7 @@ fn staged_with_no_file_a_rendering_reads_renders_nothing() {
 }
 
 /// A `php-linked` that dies on a signal ends one extension's rendering,
-/// not the run (#1069, design §8): the extension it died serving reads
+/// not the run (design §8): the extension it died serving reads
 /// `fail` in both columns naming the signal, and the next is served by a
 /// binary started again and renders. The binary is a stand-in that
 /// speaks `--serve`'s protocol, a request directory per line answered
@@ -516,7 +517,7 @@ fn a_php_linked_that_dies_on_a_signal_fails_that_extension_and_the_next_still_re
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
@@ -602,7 +603,7 @@ mod tracked {
         );
         // The fixture is php's own bytes; what is kept is what a run compares,
         // the fixture under the recipe's normalisation, its load number the
-        // pin's token (#317).
+        // pin's token.
         assert_eq!(
             fs::read(&kept).unwrap(),
             oracle::normalise(
@@ -624,8 +625,7 @@ mod tracked {
         )
         .unwrap();
         // Every row the run wrote, with the status its reading carries: the
-        // section renders what the lane read and never a set pinned here
-        // (#389).
+        // section renders what the lane read and never a set pinned here.
         for reading in &readings {
             let row = format!("| {} | {} |", reading.scope, reading.status.as_str());
             assert!(rendered.contains(&row), "{row} in {rendered}");

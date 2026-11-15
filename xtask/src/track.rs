@@ -10,7 +10,7 @@
 //! is named by `--track`.
 //!
 //! The ticket is a record on the branch, `branch.<name>.ticket` in the
-//! repository's configuration (#30): git's own per-branch record, shared
+//! repository's configuration: git's own per-branch record, shared
 //! by every worktree of the clone, written once by `xtask worktree add
 //! --ticket`, read by name here, kept when the worktree is retired, since
 //! the branch is, and gone with the branch when a person deletes it. A
@@ -156,7 +156,7 @@ fn ticket_of(root: &Path, branch: &str) -> Result<Option<Ticket>> {
 
 /// The ticket recorded on the branch `HEAD` is on, `None` for a branch
 /// that records none and for a detached `HEAD`: what `done` asks for
-/// condition 7 (#31, harness-design.md §4.5), the record alone, with no
+/// condition 7 (harness-design.md §4.5), the record alone, with no
 /// merge base taken, so a base a caller passed is not second-guessed and
 /// a `main` that is missing is not a reason to skip the ticket.
 pub(crate) fn head_ticket(root: &Path) -> Result<Option<Ticket>> {
@@ -200,8 +200,8 @@ pub(crate) fn branch_records(root: &Path) -> Vec<(String, Ticket)> {
 /// The repository's branch records as the frontier reads them, once per
 /// `track next`: the branch recording each ticket, which takes the ticket
 /// off the frontier. Whether `main` contains that branch is not read: a
-/// ticket closes when its work is on `main` (#2270), so what waits on a
-/// branch's merge is the ticket's own open state (#2326).
+/// ticket closes when its work is on `main`, so what waits on a
+/// branch's merge is the ticket's own open state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Records {
     branches: BTreeMap<Ticket, String>,
@@ -255,8 +255,8 @@ pub(crate) fn merge_base(root: &Path, from: &str, other: &str) -> Result<String>
 /// `track work` all cut through this. Seven is fixed, where git's
 /// `rev-parse --short=7` is a minimum that grows once seven characters
 /// are ambiguous among the repository's objects, so a test names the
-/// commit it looks for in a message through this and not through git
-/// (#4442). Counted in characters, so a revision named by a ref that is
+/// commit it looks for in a message through this and not through git.
+/// Counted in characters, so a revision named by a ref that is
 /// not ASCII is cut and not refused.
 pub fn short(commit: &str) -> &str {
     commit

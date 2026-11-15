@@ -12,7 +12,7 @@
 //! `SessionHandler` class of `mod_user_class.c` (`user`), and the on-modify
 //! rules of every `session.*` entry (`ini`). The session's variables are
 //! the `$_SESSION` superglobal's array, which the natives read and write;
-//! a program reads it once the compiler fetches a superglobal (#633, #745).
+//! a program reads it once the compiler fetches a superglobal.
 //! The process's real and effective uids, which the files handler
 //! reads, are the engine's (`php_ext::process`). Upload progress is the engine's upload hook
 //! (`progress`). The mm handler is not ported: it is not in php's

@@ -1,7 +1,7 @@
-//! A host's own lines, held beside the pinned host's (#1975; ruled on
-//! #2468, option C). What a fence cannot carry, an ini of the line's own
-//! (#1634), a file laid before the run, a request a server takes, a
-//! process that ends at its startup, is a line in the host crate's
+//! A host's own lines, held beside the pinned host's (ruled 2026-10-09,
+//! option C). What a fence cannot carry, an ini of the line's own, a file
+//! laid before the run, a request a server takes, a process that ends at
+//! its startup, is a line in the host crate's
 //! `tests/lines.toml`: a command line, an environment over the recipe's,
 //! the files laid in a directory of the line's own, what stdin reads, and
 //! the masks the line names, never one by default. Each line runs under the
@@ -164,15 +164,15 @@ struct Serve {
     /// A file and a pattern its text is waited to match after the last
     /// answer and before the stop: the event a stop would otherwise race,
     /// such as php-fpm replacing a child that ended at its
-    /// `pm.max_requests` after answering (#2531).
+    /// `pm.max_requests` after answering.
     settled: Option<(String, String)>,
     stop: String,
 }
 
 /// One request: the bytes of an HTTP one, or the parameters and body of a
 /// `FastCGI` one, and whether the client shuts its half of the connection
-/// once the request is written, as a server that sends nothing more does
-/// (#3457). A `FastCGI` one the server drops unanswered is answered by
+/// once the request is written, as a server that sends nothing more does.
+/// A `FastCGI` one the server drops unanswered is answered by
 /// that ([`DROPPED`]).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -355,7 +355,7 @@ fn both(
 /// How many ports a server is offered, a server's line here and the
 /// built-in server `crosscheck` starts: a port found free can be taken by
 /// another process before the host binds it, which then says so and
-/// serves nothing (#2653).
+/// serves nothing.
 pub(crate) const ATTEMPTS: usize = 3;
 
 /// A loopback port no process holds as it is asked, which one may take
@@ -489,7 +489,7 @@ fn ran(
 /// How much of what a server's line saw a reading keeps, in characters.
 const SEEN: usize = 1500;
 
-/// What a server's line that missed saw, as its reading keeps it (#3846):
+/// What a server's line that missed saw, as its reading keeps it:
 /// where the two hosts' renderings `differs`, the note's `==` headings and
 /// the lines only one host wrote, each request's answer among them, and
 /// otherwise the note whole, a refused connection's or an unread answer's
@@ -611,13 +611,13 @@ fn served(serve: &Serve, pid: u32, dir: &Path, port: u16) -> Result<(Vec<String>
 /// then blocks in `accept` (`Z/main/fastcgi.c:1361-1368`), so a stop
 /// handled between the two is lost, and the process waits in `accept` for
 /// a connection that never comes; under load that reads as a line past the
-/// recipe's limit (#3846), 2 in 1000 in #3869's control. A second stop
-/// interrupts the `accept` and ends it as the first would have; php-fpm's
-/// master ignores a stop it is already acting on. The engine's loop ends on
-/// a stop handled in that window since #3869, its `accept` failing on a
+/// recipe's limit, 2 in 1000 in the control that measured it. A second
+/// stop interrupts the `accept` and ends it as the first would have;
+/// php-fpm's master ignores a stop it is already acting on. The engine's
+/// loop ends on a stop handled in that window, its `accept` failing on a
 /// socket that listens on nothing, so the engine's host sent its stop again
 /// has lost one it should not have, and its line's note says so
-/// ([`AGAIN`]; #3879).
+/// ([`AGAIN`]).
 fn stopped(pid: u32, signal: Signal) -> Result<bool> {
     let host = Pid::from_raw(i32::try_from(pid).context("a process id past pid_t")?);
     // The host leads its group, and a group that ended and is not yet
@@ -635,8 +635,8 @@ fn stopped(pid: u32, signal: Signal) -> Result<bool> {
 }
 
 /// What a server's line's note says, last, where the engine's host ended
-/// only on its stop sent again ([`stopped`]): a loss its loop has not had
-/// since #3869, which the line's reading names (#3879).
+/// only on its stop sent again ([`stopped`]): a loss its loop is built
+/// not to have, which the line's reading names.
 pub(crate) const AGAIN: &str = "the engine's host ended only on its stop sent again";
 
 /// A program that does not end on its own, a session that loops or one
@@ -644,10 +644,10 @@ pub(crate) const AGAIN: &str = "the engine's host ended only on its stop sent ag
 /// once it has written `head` bytes to stdout, or nothing for [`QUIET`]
 /// since its last byte. Before its first it has [`PATIENCE`], a server's
 /// time to be ready: on a loaded machine a program may not have run at
-/// all by [`QUIET`], and one killed then reads as one that wrote nothing
-/// (#3616). After it, one still runnable when [`QUIET`] runs out has not
+/// all by [`QUIET`], and one killed then reads as one that wrote nothing.
+/// After it, one still runnable when [`QUIET`] runs out has not
 /// reached its input, being busy or not yet scheduled, and is given a
-/// further [`QUIET`] (#3779); one asleep or reading is killed there. Each
+/// further [`QUIET`]; one asleep or reading is killed there. Each
 /// gap is bounded at [`PATIENCE`], and one whose group has ended is waited
 /// for no longer.
 fn headed(running: &Running<'_>, head: u64) -> Result<()> {
@@ -658,7 +658,7 @@ fn headed(running: &Running<'_>, head: u64) -> Result<()> {
 /// given the instant the gap began: [`QUIET`] by the clock for every line,
 /// and for the test of a program asleep through the gap, the moment `ps`
 /// reads it stopped, so no margin of time orders the reading and the
-/// program's next write (#4436).
+/// program's next write.
 fn headed_after(
     running: &Running<'_>,
     head: u64,
@@ -842,7 +842,7 @@ fn answered(request: &Request, listen: &str, fill: &dyn Fn(&str) -> String) -> R
 
 /// What a `FastCGI` request's answer ends with where the server ended the
 /// connection, closed or reset, before its `FCGI_END_REQUEST`
-/// ([`Closed`], #4397), after what it wrote in whole records until then.
+/// ([`Closed`]), after what it wrote in whole records until then.
 /// It names neither a close nor a reset, nor whether a read met it or a
 /// write: php drops a peer its `listen.allowed_clients` does not name
 /// with a bare `close` (`Z/main/fastcgi.c:1401-1405`), which resets the
@@ -891,8 +891,7 @@ mod tests {
 
     /// Whether the tracked pin's php is on this machine, which a line
     /// judged under the pin whole reads beside its stand-in host; a skip
-    /// where this machine did not promise it, and a failure where it did
-    /// (#38, #3249).
+    /// where this machine did not promise it, and a failure where it did.
     fn oracle() -> bool {
         let pin = tracked();
         Promise::Oracle
@@ -1017,13 +1016,13 @@ mod tests {
     /// and killed there, and one that waits at its input is killed once it
     /// has written nothing for a while: both held as any line is. One whose
     /// first byte comes later than [`super::QUIET`] after it starts, as a
-    /// program the machine has not yet run, keeps it (#3616); one that
+    /// program the machine has not yet run, keeps it; one that
     /// writes nothing at all is killed all the same, and fails where the
     /// other host wrote; one that ends on its own is not waited for. One
     /// runnable through a gap past [`super::QUIET`] between two writes, as
-    /// a program busy or starved, keeps its next write (#3779), one asleep
+    /// a program busy or starved, keeps its next write, one asleep
     /// through it is cut there whatever the machine's load, its gap an
-    /// event and not a margin of time ([`asleep`], #4436), and one that
+    /// event and not a margin of time ([`asleep`]), and one that
     /// spins for good is still killed.
     #[test]
     fn a_line_s_head_ends_a_program_that_does_not_end_on_its_own() {
@@ -1096,7 +1095,7 @@ mod tests {
     }
 
     /// A program asleep through a quiet gap, run under [`super::headed_after`]
-    /// with the gap's end an event and not a time (#4436): it writes `x` and
+    /// with the gap's end an event and not a time: it writes `x` and
     /// stops itself, the gap is told passed only once `ps` reads it stopped,
     /// and a host that keeps it past that reading has it continued, so it
     /// writes `y`. A host that cuts a program asleep keeps `x` alone; one
@@ -1152,7 +1151,7 @@ mod tests {
     }
 
     /// A server's port taken by another process between the probe and the
-    /// host's bind is not the line's miss (#2653): the pinned host here
+    /// host's bind is not the line's miss: the pinned host here
     /// says, once, what php -S says of a port in use and serves nothing,
     /// and the line is run again, both hosts, on another port, and passes.
     #[test]
@@ -1198,8 +1197,8 @@ mod tests {
     }
 
     /// A server's stop waits for what its `settled` file must match after
-    /// the last answer (#2531): here the pinned host writes its log line
-    /// some seconds after it is ready and the engine's at once, so a stop
+    /// the last answer: here the pinned host writes its log line some
+    /// seconds after it is ready and the engine's at once, so a stop
     /// sent at the answer finds the two files apart, and one sent once the
     /// line is there finds them alike. The stop at the answer is held
     /// against a host whose line comes thirty seconds late, when the host
@@ -1236,14 +1235,14 @@ mod tests {
     }
 
     /// A stop the server loses, as php-cgi's accept loop loses one handled
-    /// between its `in_shutdown` read and its `accept` (#3846), is sent
+    /// between its `in_shutdown` read and its `accept`, is sent
     /// again once the server stands asleep [`super::QUIET`] after it: the
     /// engine's stand-in ends only on its second `SIGTERM` and the pinned
     /// one on its first, and the line passes well inside the recipe's
     /// limit, which it ran to while the stop was sent once. The pass's
     /// note says the engine's host was sent its stop again, a loss its
-    /// loop has not had since #3869 (#3879), and a pinned host's lost stop
-    /// sent again is said nowhere, php-cgi's loop losing one as it stands.
+    /// loop is built not to have, and a pinned host's lost stop sent
+    /// again is said nowhere, php-cgi's loop losing one as it stands.
     #[test]
     fn a_stop_the_server_loses_is_sent_again() {
         if !oracle() {
@@ -1297,7 +1296,7 @@ mod tests {
 
     /// A `FastCGI` request whose server ends the connection before
     /// `FCGI_END_REQUEST` is answered by that, and the answer is held
-    /// between the two hosts (#4397). The pinned stand-in closes each
+    /// between the two hosts. The pinned stand-in closes each
     /// connection with the request unread, as php drops a peer its
     /// `listen.allowed_clients` does not name, which the client meets as a
     /// reset or, its request longer than the socket holds, as a write
@@ -1343,7 +1342,7 @@ mod tests {
         }
     }
 
-    /// What a server's line that missed keeps for its reading (#3846): a
+    /// What a server's line that missed keeps for its reading: a
     /// difference's headings and changed lines, any other note whole, on
     /// one line and no longer than [`super::SEEN`] characters.
     #[test]

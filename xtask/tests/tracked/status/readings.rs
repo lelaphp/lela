@@ -23,7 +23,7 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
     // The items column is what the tree's lock lists, `__private`'s lines
     // apart as `api_items` holds them, and not the reading's count; the
     // ceiling column is the tracked manifest's `[budget] api_items`,
-    // whatever a person has it at (#338, #631).
+    // whatever a person has it at.
     std::fs::create_dir_all(root.join("crates/php_ext")).unwrap();
     std::fs::write(
         root.join("crates/php_ext/api.lock"),
@@ -74,11 +74,11 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
 }
 
 /// The sections that grow by a row per crate render the rows a session
-/// acts on and count the settled rest in one line (#1608): a failure, a
-/// skip, a row with no reading, a budget within a tenth of its ceiling and
-/// a phpt subset whose comparison fails are rows; a pass is a count. Fifty
-/// more passing crates are the same section, `--uncut` is every row, and
-/// the JSON is every reading whatever the flag.
+/// acts on and count the settled rest in one line (harness revision 88): a
+/// failure, a skip, a row with no reading, a budget within a tenth of its
+/// ceiling and a phpt subset whose comparison fails are rows; a pass is a
+/// count. Fifty more passing crates are the same section, `--uncut` is
+/// every row, and the JSON is every reading whatever the flag.
 #[test]
 fn the_settled_rows_of_a_section_fold_into_one_line_that_does_not_grow() {
     let root = tracked_scratch("settled");
@@ -179,9 +179,9 @@ fn the_settled_rows_of_a_section_fold_into_one_line_that_does_not_grow() {
 }
 
 /// `--tracked` renders a section against the tree alone, as a tracked
-/// region carries it (harness-design.md §5, revision 6; #630): a reading
+/// region carries it (harness-design.md §5, revision 6): a reading
 /// the store holds is still the plain section's, the tracked table has no
-/// `reading` column, which could only say `no reading` there (#2377), and
+/// `reading` column, which could only say `no reading` there, and
 /// a section whose rows are this checkout's alone is refused.
 #[test]
 fn tracked_renders_no_reading_whatever_the_store_holds() {

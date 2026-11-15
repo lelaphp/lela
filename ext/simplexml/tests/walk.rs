@@ -1,5 +1,5 @@
 //! The walks over the table `sxe_get_properties` keeps in place of an
-//! element's (#2122, #2198): what `PhpObject::property_table` answers for
+//! element's: what `PhpObject::property_table` answers for
 //! a class that keeps its own, which a foreach walk that holds it keeps
 //! while the element's next build gives it up.
 #![cfg(debug_assertions)]

@@ -7,8 +7,8 @@
 //! Its three words are the table's whole state, laid out as
 //! [`FramesLayout`] says, so compiled code that pushes a frame inline
 //! writes the record at `at + len` and bumps `len` while `len < cap`,
-//! and one that pops it takes `len` back by one (`jit-design.md` §5.3,
-//! #3230). The invariant every method keeps, and what compiled code must
+//! and one that pops it takes `len` back by one (`jit-design.md` §5.3).
+//! The invariant every method keeps, and what compiled code must
 //! keep: the first `len` records are live, `len <= cap`, and `at` is the
 //! start of an allocation of `cap` records, dangling while `cap` is zero.
 //!

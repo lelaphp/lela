@@ -3,7 +3,7 @@
 //! block at a time, as `php_std_post_handler` reads
 //! `SG(request_info).request_body`, so the body never stands in the
 //! process's memory whole, mbstring linked and its `encoding_translation`
-//! off (#3651); and one whose spill has nowhere to go spills where php's
+//! off; and one whose spill has nowhere to go spills where php's
 //! does. Held in a test binary of its own, since
 //! `getrusage(RUSAGE_CHILDREN)` is the peak of every child its process
 //! waited for, and the spill's child peaks far under the large form's.

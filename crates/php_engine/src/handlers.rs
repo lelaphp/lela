@@ -10,7 +10,7 @@
 //! call sequence `INIT_FCALL`, `SEND_VAL`, `SEND_VAR`, `DO_ICALL`, and
 //! the one php's compiler emits for a name its function table has not,
 //! `INIT_FCALL_BY_NAME`, `SEND_VAL_EX`, `SEND_VAR_EX`,
-//! `SEND_VAR_NO_REF_EX`, `DO_FCALL_BY_NAME` (#252), `RETURN`, which
+//! `SEND_VAR_NO_REF_EX`, `DO_FCALL_BY_NAME`, `RETURN`, which
 //! raises the return safepoint, `JMP` and `JMPNZ`, which
 //! raise the loop safepoint when they jump backward, `ASSIGN`, which
 //! writes a CV, the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL`,
@@ -22,31 +22,31 @@
 //! `ZEND_SPACESHIP`, `ZEND_PRE_INC` and
 //! `ZEND_POST_INC`, which step a CV in place, `ZEND_FREE`, which
 //! gives up a temporary nothing reads, and the four opcodes php's
-//! compiler emits for a call in `zend_try_compile_special_func`'s table
-//! (#219): `ZEND_STRLEN`, `ZEND_TYPE_CHECK`, `ZEND_DEFINED` and
-//! `ZEND_COUNT`; and the ones a `switch` and a `match` compile to
-//! (#256): `ZEND_SWITCH_LONG`, `ZEND_SWITCH_STRING` and `ZEND_MATCH`
+//! compiler emits for a call in `zend_try_compile_special_func`'s table:
+//! `ZEND_STRLEN`, `ZEND_TYPE_CHECK`, `ZEND_DEFINED` and
+//! `ZEND_COUNT`; and the ones a `switch` and a `match` compile to:
+//! `ZEND_SWITCH_LONG`, `ZEND_SWITCH_STRING` and `ZEND_MATCH`
 //! over their jump tables, `ZEND_CASE` and `ZEND_CASE_STRICT`, which
 //! keep the subject alive for the next case, `ZEND_QM_ASSIGN`, which
 //! moves an arm's value into the one temporary, `ZEND_MATCH_ERROR`,
 //! which throws for the subject no arm took, and `ZEND_JMPZ`;
 //! the frameless call `zend_compile_frameless_icall` emits
-//! for a native with an entry of the call's arity (#254),
+//! for a native with an entry of the call's arity,
 //! `ZEND_FRAMELESS_ICALL_0` to `ZEND_FRAMELESS_ICALL_3`, and the two
 //! `zend_compile_ns_call` puts around it for an unqualified name in a
 //! namespace, `ZEND_JMP_FRAMELESS` and `ZEND_INIT_NS_FCALL_BY_NAME`;
-//! and `ZEND_CLONE`, the class's `clone_obj` through its handler table
-//! (#281); and `ZEND_ASSIGN_REF`, which binds two CVs to one cell
-//! (#286); and the three a `foreach` over an array compiles to (#305):
+//! and `ZEND_CLONE`, the class's `clone_obj` through its handler table;
+//! and `ZEND_ASSIGN_REF`, which binds two CVs to one cell;
+//! and the three a `foreach` over an array compiles to:
 //! `ZEND_FE_RESET_R`, `ZEND_FE_FETCH_R` and `ZEND_FE_FREE`; and the
-//! four an interpolated string compiles to (#355): `ZEND_FAST_CONCAT`
+//! four an interpolated string compiles to: `ZEND_FAST_CONCAT`
 //! for two pieces, `ZEND_ROPE_INIT`, `ZEND_ROPE_ADD` and `ZEND_ROPE_END`
-//! for more; and the ones a user function's call and body need (#309):
+//! for more; and the ones a user function's call and body need:
 //! `ZEND_DO_UCALL`, which enters the callee's op array as the
 //! `ZEND_USER_FUNCTION` arm of every `DO_*CALL` does, `ZEND_RECV` and
 //! `ZEND_RECV_INIT`, the parameter prologue, `ZEND_FETCH_THIS` on a
 //! frame with a receiver, and `ZEND_FETCH_CLASS_CONSTANT`; and the three
-//! a `@` compiles to (#354): `ZEND_BEGIN_SILENCE` and `ZEND_END_SILENCE`
+//! a `@` compiles to: `ZEND_BEGIN_SILENCE` and `ZEND_END_SILENCE`
 //! around the expression, and `ZEND_FETCH_R` by a constant name, which
 //! is how a variable under `@` is read inside the span.
 
@@ -114,7 +114,7 @@ pub(crate) fn nop<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, _: &
 }
 
 /// `ZEND_EXT_STMT` (`Z/Zend/zend_vm_def.h:7928`), which a compile with
-/// extended info leaves before each statement (`-e`, #1780): each Zend
+/// extended info leaves before each statement (`-e`): each Zend
 /// extension's `statement_handler` told of the statement the frame
 /// stands at, and on to the opline after, or what a handler threw
 /// raised here ([`crate::statement`]). The bundle declares none, so the
@@ -149,7 +149,7 @@ pub(crate) fn ext_stmt<T: Tier>(
 /// `ZEND_EXT_FCALL_BEGIN` (`Z/Zend/zend_vm_def.h:7940`), before a call
 /// op compiled with extended info: php tells each loaded Zend
 /// extension's `fcall_begin_handler`, and no Zend extension here has one:
-/// its row carries a statement handler alone (#2038; [`ext_stmt`]'s
+/// its row carries a statement handler alone ([`ext_stmt`]'s
 /// witness serves it).
 pub(crate) fn ext_fcall_begin<T: Tier>(
     req: &mut Request,
@@ -163,7 +163,7 @@ pub(crate) fn ext_fcall_begin<T: Tier>(
 /// `ZEND_EXT_FCALL_END` (`Z/Zend/zend_vm_def.h:7952`), after a call op
 /// compiled with extended info: php tells each loaded Zend extension's
 /// `fcall_end_handler`, and no Zend extension here has one: its row
-/// carries a statement handler alone (#2038; [`ext_stmt`]'s witness
+/// carries a statement handler alone ([`ext_stmt`]'s witness
 /// serves it).
 pub(crate) fn ext_fcall_end<T: Tier>(
     req: &mut Request,
@@ -4980,7 +4980,7 @@ fn collect_variadics(req: &mut Request, frame: FrameRef, op: &Opline) -> Result<
 /// A `CONST` operand is copied into the temporary the opline writes
 /// before it is checked, so the `RETURN` after reads the coerced value,
 /// or the constant itself where it passes, wherever the constant stands
-/// in the op array's table, a jump table's arms included (#2276):
+/// in the op array's table, a jump table's arms included:
 ///
 /// ```php
 /// function f($m): int { switch ($m) { case "a": return 1.5; case "b": return 2; } }
@@ -9520,7 +9520,7 @@ fn inline_place(
 /// place [`declared_place`] finds on one that does.
 /// A call of its own, so that the constant name's path keeps to the
 /// registers it needs: inlined, it put ten instructions on a constant
-/// name's `+=` in the release build (#3045).
+/// name's `+=` in the release build.
 #[inline(never)]
 fn computed_place(
     req: &Request,
@@ -10861,7 +10861,7 @@ fn property_place_on(
         // write goes through the object and the property is untouched.
         // And `zend_std_get_property_ptr_ptr`'s `NULL` for a name the
         // class's `__get` answers: the fetch falls back to
-        // `read_property` (#513).
+        // `read_property`.
         PropertyPlace::Std
             if req.write_fetch_reads_object(object, &name, op.opcode == Opcode::FetchObjUnset)
                 || req.overloaded_fetch(object, &name) =>
@@ -14235,7 +14235,7 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// handler reads it (`GET_OP*_ZVAL_PTR_DEREF`), with one more owner
 /// only where php's pointer is a named variable's that the native
 /// could reassign. No record is laid down: what one would answer is
-/// read off the caller's opline (#3302), and each operand is freed
+/// read off the caller's opline, and each operand is freed
 /// after the native returned where php's `FREE_OP*` frees it. What the
 /// native returned is the temporary's, `ZVAL_NULL(result)` and then
 /// the body's write of it; a native that threw leaves the throwable
@@ -14604,7 +14604,7 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// caught dtor prev=tostring
 /// end
 /// ```
-#[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
+#[inline(never)] // out of the loop's body, whose held state was measured at its optimum
 fn frameless_call<const N: usize>(
     req: &mut Request,
     frame: FrameRef,
@@ -15510,7 +15510,7 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     // `zend_binary_assign_op_typed_ref`: the operation is over what the
     // cell holds either way, and the value it comes to is held to each
     // type the cell carries before it lands, which
-    // [`assign_to_place`] does under the frame's own regime (#496).
+    // [`assign_to_place`] does under the frame's own regime.
     // What landed is what `result` takes, so the copy is after the
     // write and not before it.
     // `zend_binary_assign_op_typed_ref` moves what it made in.
@@ -16906,7 +16906,7 @@ fn assign_property(
 /// ```
 ///
 /// Which of the two rules the write is held under is the one the file
-/// this frame's op array was compiled from declared (#411): the weak
+/// this frame's op array was compiled from declared: the weak
 /// one converts `"5"` where the declared type is `int`, and a file that
 /// declares `strict_types=1` raises over the same write.
 ///
@@ -18893,7 +18893,7 @@ fn entry_landed(
 /// written and gone
 /// ```
 ///
-/// The same opline under a property write (#336), which is where a
+/// The same opline under a property write, which is where a
 /// chain rooted at a call lands: the write reaches the object the call
 /// answered with, whether the call answered by value or by reference.
 ///
@@ -19915,7 +19915,7 @@ fn binary_assign_op_obj_dim(
 /// where `__get` and `__set` are served. A name no class declared and
 /// no object holds yet is created by the write, so this engine raises
 /// its `Undefined property` warning before the deprecation for the
-/// dynamic property where php raises the deprecation first (#505).
+/// dynamic property where php raises the deprecation first.
 ///
 /// ```php
 /// class C { public $p = 1; public int $n = 2; private $q = 3; }
@@ -23335,9 +23335,9 @@ fn positional_after_named(req: &mut Request) -> Thrown {
 /// `default_properties_table` put there and is walked like any other. A
 /// slot that holds nothing at all is stepped over as php steps over an
 /// `IS_UNDEF` bucket; the two that make one, `unset` over a property
-/// (#435) and a typed property with no default (#407), are not compiled
-/// yet, so nothing in a program reaches that arm and #435's witness is
-/// what will hold it.
+/// and a typed property with no default, are not compiled
+/// yet, so nothing in a program reaches that arm and the witness of
+/// `unset` over a property is what will hold it.
 ///
 /// ```php
 /// foreach (new stdClass as $v) echo 'no';
@@ -23350,7 +23350,7 @@ fn positional_after_named(req: &mut Request) -> Thrown {
 ///
 /// A packed array, a hash with string keys and an empty one: the loop
 /// over the second runs its body no time, and the third's key and
-/// value are one interpolated string (#355).
+/// value are one interpolated string.
 ///
 /// ```php
 /// foreach (['x', 'y'] as $p) echo $p; foreach ([] as $v) echo 'no'; foreach (['k' => 1] as $k => $v) echo "$k=$v";
@@ -23377,7 +23377,7 @@ fn positional_after_named(req: &mut Request) -> Thrown {
 /// was given up again on the return, and the next blocks of its size
 /// were handed out of a broken free list. `Zend/tests/gc_051.phpt`'s
 /// early return out of a loop over a cast is one shape, a loop walked to
-/// its end over an `INIT_ARRAY` the other (#771).
+/// its end over an `INIT_ARRAY` the other.
 ///
 /// ```php
 /// function f(string $s): object { foreach ((array) $s as $v) { $o = new stdClass; return $o; } }
@@ -23413,7 +23413,7 @@ fn positional_after_named(req: &mut Request) -> Thrown {
 /// The `TMP` a dimension read leaves is the loop's from the reset, so
 /// the `FETCH_DIM_R` of the next pass writes its slot over nothing: an
 /// array a native built, whose second element is the subject, is read
-/// thirty times over with its previous copy gone each time (#723).
+/// thirty times over with its previous copy gone each time.
 ///
 /// ```php
 /// for ($i = 0; $i < 30; $i++) {
@@ -23462,7 +23462,7 @@ pub(crate) fn fe_reset_r<T: Tier>(
         if let Some(cell) = req.slot_ptr(frame, slot) {
             // `Z_FE_POS_P(EX_VAR(opline->result.var)) = pos`, which php
             // writes after the copy and not through it: the word is the
-            // slot's, not the value's (`ZvalRef::write`, #491).
+            // slot's, not the value's (`ZvalRef::write`).
             cell.set_fe_pos(0);
         }
         if op.op1_type == OperandKind::Var {
@@ -23771,7 +23771,7 @@ fn foreach_var(req: &Request, held: php_heap::Zval) -> ForeachVar {
 /// `Z_FE_ITER_P(EX_VAR(opline->result.var)) = idx`, [`NO_WALK`] for
 /// none: the loop variable's `u2` word, written after the value as php
 /// writes it, since a value write leaves `u2` where it stands
-/// (`ZvalRef::write`, #491).
+/// (`ZvalRef::write`).
 fn set_fe_iter(req: &mut Request, frame: FrameRef, slot: u32, walk: Option<HashIter>) {
     if let Some(cell) = req.slot_ptr(frame, slot) {
         cell.set_fe_pos(walk.map_or(NO_WALK, |walk| walk.0));
@@ -23929,8 +23929,7 @@ fn fetched_element(req: &mut Request, frame: FrameRef, op: &Opline) -> Edge {
                 return jump_to(op.extended_value);
             };
             // `Z_FE_POS_P(array) = pos + 1`: the word alone, since a
-            // value write is `ZVAL_COPY_VALUE` and leaves `u2` standing
-            // (#491).
+            // value write is `ZVAL_COPY_VALUE` and leaves `u2` standing.
             at.set_fe_pos(found.saturating_add(1));
             (Some(key), Value::of_slot(value))
         }
@@ -24521,8 +24520,8 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
 /// generator itself, so a write through the loop's variable is a write
 /// to what the body yielded; `zend_user_it_get_iterator` refuses a loop
 /// by reference, and a class's own `get_iterator` that takes one is
-/// #735's. A generator that does not yield by reference is
-/// `zend_generator_get_iterator`'s refusal.
+/// the one an extension's class declares. A generator that does not
+/// yield by reference is `zend_generator_get_iterator`'s refusal.
 ///
 /// ```php
 /// function &g() { $a = 1; yield $a; echo "a=$a\n"; }
@@ -25827,7 +25826,7 @@ pub(crate) fn bw_xor<T: Tier>(
 
 /// `ZEND_BW_AND` (`Z/Zend/zend_vm_def.h:863`), what `&` compiles to:
 /// [`crate::ops::bitwise_and`] the same way. Its arm is in the loop's
-/// body (#3982): two longs are served inline, and every other pair
+/// body: two longs are served inline, and every other pair
 /// by the kernel.
 ///
 /// ```php
@@ -27767,7 +27766,7 @@ fn discard_temporary(req: &mut Request, frame: FrameRef, op: &Opline) -> Stepped
 /// php's interpreter runs the `RETURN`'s handler once and goes on
 /// through the handler of the opline the caller lands on, which at a
 /// landing a trace armed is the return trace's
-/// (`zend_jit_trace_setup_ret_counter`, #4056). The return of the
+/// (`zend_jit_trace_setup_ret_counter`). The return of the
 /// serving's entry frame pops to no caller and raises nothing, nor does
 /// one that left a throwable pending, which the caller raises at its
 /// call opline. The edge on: the popped one where the tier answered
@@ -28204,7 +28203,7 @@ fn inline_arith(
 /// one dispatch here and two oplines in the op array and the dump,
 /// which a stepping host and the tier's recorder serve one by one.
 /// Written as [`inline_assign`]'s path after [`inline_arith`]'s, it
-/// read 3.1 Gcyc for mandelbrot against 2.65 written as here (#3982).
+/// read 3.1 Gcyc for mandelbrot against 2.65 written as here.
 ///
 /// ```php
 /// class D { function __destruct() { echo "gone\n"; } }
@@ -28459,7 +28458,7 @@ fn inline_assign<R: Retval>(
 /// `ZVAL_COPY_VALUE(EX_VAR(opline->result.var), z)` for a zval that owns
 /// nothing, into a temporary that owns nothing either; `None`, nothing
 /// written, where the temporary holds an owner, since a write over it
-/// would give the owner up twice (#723) and [`set_out`] is where that is
+/// would give the owner up twice and [`set_out`] is where that is
 /// sensed.
 #[inline(always)] // as `inline_arith`
 fn write_owning_nothing(slots: &mut [Zval], op: &Opline, z: Zval) -> Option<()> {
@@ -29960,7 +29959,7 @@ pub(crate) mod inline_path {
     /// touched, for a call the handler serves. The loop's arm of each of
     /// those handlers serves it first and reads the callee as the push
     /// itself, so the loop goes from the push to its take-up of the
-    /// callee with no answer made and read again (#3995).
+    /// callee with no answer made and read again.
     #[inline(always)] // in the loop's arms of the calls and in their handlers
     pub(crate) fn enter(
         req: &mut crate::api::request::Request,

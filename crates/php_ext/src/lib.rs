@@ -45,7 +45,7 @@ pub mod attr {
 #[cfg(feature = "test")]
 pub mod test {
     /// A debug build's request leak sensor, armed on every engine a test
-    /// builds unless the test sets it otherwise (#1992), so an
+    /// builds unless the test sets it otherwise, so an
     /// extension's test sees the blocks its natives leave held.
     #[cfg(debug_assertions)]
     pub use php_engine::LeakSensor;

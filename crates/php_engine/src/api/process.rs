@@ -1,9 +1,9 @@
-//! The process group of the native face (design §4.4, revision 41; #1128):
+//! The process group of the native face (design §4.4, revision 41):
 //! the process's real and effective user and group ids and its
-//! supplementary groups (the effective pair by #1132's ruling),
+//! supplementary groups (the effective pair as ruled 2026-09-28),
 //! which php reads from `<unistd.h>` wherever it asks. The engine owns
 //! them as it owns the signal record (ADR-0005): they are the process's,
-//! one binding in `php_process`'s `unsafe` home (#1935), and every
+//! one binding in `php_process`'s `unsafe` home, and every
 //! extension that chooses a permission mask, checks a session file's
 //! owner or answers `posix_getuid` reads the same one. They are not an extension-to-extension export (§4.10): no
 //! extension binds them and none takes them from another.

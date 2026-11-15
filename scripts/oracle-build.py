@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""oracle-build.py — an oracle build from the pinned tag, as #1782 ruled.
+"""oracle-build.py — an oracle build from the pinned tag, as ruled 2026-10-04.
 
 A build is the pinned tag (`oracle.toml` `[source]`) configured with the
 main oracle's own configure line, less its install paths, plus only the
 flags `[variant.<name>]` names, so it differs from the oracle only where
-intended (#1782, #1889). `main` names the main oracle itself, no flags
-added: CI's Linux platform oracle (#1891).
+intended. `main` names the main oracle itself, no flags added: CI's Linux
+platform oracle.
 
 Usage (`--pin FILE` before the command reads another pin than oracle.toml,
 and `--tree DIR` builds from another checkout of the pinned tag than
-`[source]`'s path, as the oracle runner's corpus checkout, #2298):
+`[source]`'s path, as the oracle runner's corpus checkout):
   scripts/oracle-build.py configure-line
       Print ci/oracle/configure.toml afresh from the pinned oracle's
       `php -n -i` "Configure Command" row, after asserting its md5.
@@ -19,14 +19,14 @@ and `--tree DIR` builds from another checkout of the pinned tag than
       target/oracle/<platform>/<variant>/php, and the last line is the
       platform's table for the pin. On Linux php-fpm lands beside it, and
       for `main` its `[sapi.<platform>]` table is printed before that line
-      and written to sapi.toml (#3385): the php-fpm the bench's tables
-      take as their baseline on dax-build (#3774). On macOS a person lays
+      and written to sapi.toml: the php-fpm the bench's tables take as
+      their baseline on dax-build. On macOS a person lays
       it at the table's path, the prefix, which is root's (`sudo mkdir -p`
       and `cp`). On Linux runtime.txt lands beside the binary too: the
       packages that ship the libraries php and php-fpm link, which a host
-      running them out of the image installs (#3825).
+      running them out of the image installs.
       The darwin-arm64 table names the digest of the pin's `[closure]`, the
-      Homebrew kegs the build is made against, beside its md5 (#2935).
+      Homebrew kegs the build is made against, beside its md5.
   scripts/oracle-build.py closure
       Print that digest: SHA-256 over each keg's `name=version\n` in name
       order, as xtask's `Closure::digest` makes it and its tests hold.
@@ -52,7 +52,7 @@ What makes two runs give the same md5, each neutralised here:
   - Libraries and tools: Linux's come from the base image pinned by digest
     and Ubuntu's archive snapshot SNAPSHOT; macOS's are the maintainer's
     Homebrew, which a person keeps at the versions `[closure]` records, and
-    the table names that record's digest (#2935).
+    the table names that record's digest.
 """
 
 import argparse
@@ -75,14 +75,14 @@ DOCKERFILE = ROOT / "ci/oracle/Dockerfile"
 PACKAGES = ROOT / ".github/actions/platform-libraries/packages.txt"
 # The install prefix every build is configured for, one directory per
 # variant; on Linux the image installs there, and a runner lays the binary
-# it takes out of the image at the same path (#1948).
+# it takes out of the image at the same path.
 PREFIX = "/opt/dax-php/oracle"
 # Where the tree is laid and built, the same path on every platform.
 BUILD = "/tmp/dax-php-oracle"
 # Ubuntu's archive as it stood at this instant (snapshot.ubuntu.com), so a
 # rebuild installs the same packages the pinned build linked.
 SNAPSHOT = "20261005T000000Z"
-# ubuntu:26.04, CI's release (`runs-on: ubuntu-26.04`, #1891), by the digest
+# ubuntu:26.04, CI's release (`runs-on: ubuntu-26.04`), by the digest
 # of each platform's manifest under the index
 # sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7.
 # A pin's `image` for the platform stands in for these.
@@ -170,7 +170,7 @@ class Pin:
             else:
                 table = pin.get("variant", {}).get(variant)
                 if table is None:
-                    fail(f"{path} names no [variant.{variant}]; its `flags` are what the build adds (#1782)")
+                    fail(f"{path} names no [variant.{variant}]; its `flags` are what the build adds")
                 self.flags = list(table["flags"])
                 self.tables = {k: v for k, v in table.items() if k in PLATFORMS}
         except KeyError as e:
@@ -200,7 +200,7 @@ class Pin:
     def closure_digest(self) -> str:
         """The digest of `[closure]`, as xtask's `Closure::digest` makes it."""
         if not self.closure:
-            fail("the pin records no [closure], which a darwin-arm64 build is made against and names (#2935)")
+            fail("the pin records no [closure], which a darwin-arm64 build is made against and names")
         kegs = "".join(f"{keg}={version}\n" for keg, version in sorted(self.closure.items()))
         return "sha256:" + hashlib.sha256(kegs.encode()).hexdigest()
 
@@ -222,7 +222,7 @@ def configure_line(pin: Pin) -> None:
     if args[:1] != ["./configure"]:
         fail(f"the Configure Command starts {args[:1]}, not ./configure")
     print("# The pinned oracle's configure line, one argument per line, as `php -n -i`'s")
-    print("# \"Configure Command\" row prints it (#1782). Written by")
+    print("# \"Configure Command\" row prints it. Written by")
     print("# `scripts/oracle-build.py configure-line` and read by its `build`, which drops")
     print("# the install paths, adds a variant's flags, and refuses this file once the")
     print("# pin's [oracle].md5 is not the one it was read from.")

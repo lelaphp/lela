@@ -3,7 +3,7 @@
 # php.ungram, the lexer with the source model under it, the arena, the
 # tree builder and the dump, the parser and the grammar written against
 # it; `parse()` hands back the tree with the diagnostics in the inherited
-# wording until #206 settles both.
+# wording until php's parse-error text and the parse entry are settled.
 [package]
 name = "php_syntax"
 version = "0.0.0"
@@ -18,11 +18,11 @@ workspace = true
 
 [dependencies]
 # The parse arena's chunks and the stacks' mappings, which stay php_heap's,
-# an `unsafe` home, so this crate keeps none (#4064).
+# an `unsafe` home, so this crate keeps none.
 php_heap = { path = "../php_heap" }
 
 [dev-dependencies]
 expect-test.workspace = true
 # The calling thread's CPU clock, so the linear-time test measures the
-# parse and not the load beside it (#2205).
+# parse and not the load beside it.
 nix = { workspace = true, features = ["time"] }

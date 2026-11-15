@@ -1,5 +1,5 @@
 //! An extension's optimizer passes as the unit cache calls them
-//! ([`ExtensionBuilder::optimizer_pass`], #2386): where php's
+//! ([`ExtensionBuilder::optimizer_pass`]): where php's
 //! `zend_optimize_script` calls `zend_optimizer_call_registered_passes`,
 //! over each file an accelerator admitted and the cache compiles and
 //! stores, in the order the passes were registered, and over nothing it

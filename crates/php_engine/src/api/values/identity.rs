@@ -1,7 +1,7 @@
 //! A counted value told apart by its place, as php compares
 //! `zend_refcounted *`: what a debugger's watch list keeps of a value it
 //! copied, to say whether the value it reads after a step is the one it
-//! copied from (#1911). The face compares strings by their bytes, so the
+//! copied from. The face compares strings by their bytes, so the
 //! place is a type of its own, holding no owner and never read through.
 
 use php_heap::{Arr, Obj, Ref, Str};

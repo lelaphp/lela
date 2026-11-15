@@ -1,4 +1,4 @@
-//! `upstream/`, the folder that left the tree (#4380): an `Edit` and a
+//! `upstream/`, the folder that left the tree: an `Edit` and a
 //! `Write` under it are refused by either spelling of the path, a folder
 //! of that name anywhere else is let through, and so is one outside the
 //! workspace, where the private project is; an agent's commit of a file a
@@ -84,10 +84,10 @@ fn a_folder_of_the_name_elsewhere_and_one_outside_the_workspace_are_let_through(
 /// sees, and the folder still does not come back into the tree by an
 /// agent's hand: `permit --diff` judges each staged file as the `Write`
 /// of its content, a `deny = true` rule's file in an agent's commit is
-/// refused unless a steer reading covers it (#3644 ruling 3), and steer
-/// writes no file under `upstream/`. A file git reads as binary is judged
-/// by its path alone, and refused the same. In a person's commit, one
-/// from no session, each is a note.
+/// refused unless a steer reading covers it (harness revision 185, ruling
+/// 3), and steer writes no file under `upstream/`. A file git reads as
+/// binary is judged by its path alone, and refused the same. In a person's
+/// commit, one from no session, each is a note.
 #[test]
 fn an_agent_s_commit_that_brings_upstream_back_is_refused_and_a_person_s_is_a_note() {
     let root = scratch("upstream-diff");

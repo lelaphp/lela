@@ -2,7 +2,7 @@
 //! extension of the `cli` class for the CLI, CGI, embed and phpdbg alike
 //! (`EXT_CLI_STATIC`, `Z/build/php.m4`) and links phpdbg from the CLI's
 //! objects, so the host turns on the bundle's `host`, the set every host
-//! links (#1450, #3081), and `get_loaded_extensions()` lists what it
+//! links, and `get_loaded_extensions()` lists what it
 //! carries.
 
 #[test]

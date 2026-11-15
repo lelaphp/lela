@@ -418,7 +418,7 @@ fn element(
 /// `Generator`, and a third over an internal class whose `getIterator()`
 /// hands out the `InternalIterator` of its own C iterator ([`Funcs::Element`]).
 /// Any other class php walks with an iterator of its own in C
-/// (`zend_class_entry.get_iterator`, #735) is walked through its methods
+/// (`zend_class_entry.get_iterator`) is walked through its methods
 /// here, so it is the first table's.
 #[derive(Default)]
 pub(crate) struct ObjectIterator {

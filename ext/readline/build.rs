@@ -1,5 +1,5 @@
 //! libedit is the library the pinned php links (design §7.2, revision
-//! 72; #1540): the platform's, `/usr/lib/libedit.3.dylib` on a Mac, found
+//! 72): the platform's, `/usr/lib/libedit.3.dylib` on a Mac, found
 //! through `pkg-config libedit`, whose file the package manager keeps
 //! for the SDK's, and linked as the shared library the oracle links,
 //! never vendored. A miss fails the build rather than falling back to a

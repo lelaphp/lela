@@ -1,4 +1,4 @@
-//! The counting build of the loop (design §5.8, #4328): under the
+//! The counting build of the loop (design §5.8): under the
 //! `dispatch-census` feature, off by default and in no host's default
 //! build, the loop counts each opline it dispatches by the
 //! `php_unit::Handler` it is served by, and the request writes the counts

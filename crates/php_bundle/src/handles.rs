@@ -1,5 +1,5 @@
 //! The family witness of the classes that refuse direct construction
-//! (design §5.4; #1770, #1790): every such class the bundle carries,
+//! (design §5.4): every such class the bundle carries,
 //! held to the oracle on what php's handler table and class flags decide
 //! about it, which is whether it can be constructed, cloned, compared
 //! with another of its class and given a dynamic property. Here, in the
@@ -7,8 +7,8 @@
 //! from twenty-three extensions and the engine, and this is the one
 //! crate below the hosts that links every one of them. And here because
 //! nothing the witness holds is written here: when the refusals move
-//! from hand-written handler tables to the engine's default handlers
-//! (#1791, #1792), this text stays as it is, and a handler pasted,
+//! from hand-written handler tables to the engine's default handlers,
+//! this text stays as it is, and a handler pasted,
 //! dropped or defaulted wrongly is a line of it that moved. `done` asks
 //! for this crate's witness reading only when the crate changes, so a
 //! change to those handlers is held to it by `xtask witness --crate
@@ -693,7 +693,7 @@
 //! The rest of the refusing handlers: classes that construct, but whose
 //! php handler table refuses cloning or answers that two of them do not
 //! compare, one class per table, held the same way. These are the
-//! refusing methods #1792 moves beside the whole tables.
+//! refusing methods that move beside the whole tables.
 //!
 //! ```php
 //! enum Suit { case Hearts; case Spades; }

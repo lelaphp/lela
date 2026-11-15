@@ -82,8 +82,7 @@ pub struct Options {
 /// stream over it, its line table, the tree, the diagnostics in php's
 /// phase order and the promises the grammar broke. The stream, the table
 /// and the tree are in the [`Arena`] the parse was handed, and borrow it:
-/// a parse lives as long as its compile and is given up with the arena
-/// (#2810).
+/// a parse lives as long as its compile and is given up with the arena.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Parsed<'a> {
     /// The source as given; tokens are offsets into it.

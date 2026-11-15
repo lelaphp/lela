@@ -1,7 +1,7 @@
 //! The extension phpdbg registers beside the bundle,
 //! `sapi_phpdbg_module_entry` (`Z/sapi/phpdbg/phpdbg.c:682`): the eleven
 //! natives of `phpdbg.stub.php` and its four constants, declared here
-//! beside the debugger whose state they read and write (#1348), and handed
+//! beside the debugger whose state they read and write, and handed
 //! to the engine as the host's own extension. A native reaches the session
 //! where it stands in the request's sink; inside what the prompt serves, an `ev`,
 //! the prompt holds it and the native finds none, as it finds no

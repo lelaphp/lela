@@ -2,19 +2,19 @@
 //! the tally. The snippet runs under the oracle, whose status is what
 //! `--accept` captures onto a bare `exit`; then under the engine linked
 //! into this process, the one adapter this lane has and never the engine's
-//! own binary (harness §7, revision 48; #401). Both runs are held to what
+//! own binary (harness §7, revision 48). Both runs are held to what
 //! the fences pin by one rule, [`held`]: the two streams and the status
 //! through [`met`] and [`oracle::verdict`], so the registry decides what a
 //! difference means (harness §4.3). The oracle's run is held as the
 //! engine's is, since what a fence pins is the oracle's bytes (design §8),
 //! and a fence typed by hand that the oracle does not print fails however
-//! the engine ran (#783).
+//! the engine ran.
 //!
 //! A fence marked `process` is run of record by the `php` binary in a
 //! process of its own instead ([`super::process`]; harness §8, revision
 //! 61), held by the same rule; one with a `request` fence is served as a
 //! request of the web, by the php-cgi `[sapi]` pins and by the engine's
-//! `php-cgi` (#1197).
+//! `php-cgi`.
 //!
 //! Both runs stand under the recipe, and under the `[regime.<name>]` the
 //! fence names where it names one, its ini after the recipe's in each
@@ -22,14 +22,14 @@
 //! anything runs, so the two runs are handed one regime and never two.
 //!
 //! A fence an accepted `trace:` row covers pins the engine's side of the
-//! row ([`alone`]; harness §4.3, §8; #1650): it is held to its pinned
+//! row ([`alone`]; harness §4.3, §8): it is held to its pinned
 //! `expect` against the engine alone, and the oracle still runs, its
 //! signal, status and bytes recorded in the verdict's note and not judged.
 //! A fence no such row covers whose oracle ends on a signal it does not pin
-//! is a bork; `signal=N` pins one, captured onto a bare `exit` (#3545).
+//! is a bork; `signal=N` pins one, captured onto a bare `exit`.
 //!
 //! A fence naming a `locale=<name>` is asked first whether the host knows
-//! it, as a `.phpt`'s `--SKIPIF--` asks `setlocale` (#1678): the oracle
+//! it, as a `.phpt`'s `--SKIPIF--` asks `setlocale`: the oracle
 //! and the linked engine each run [`probe`], and where neither can move
 //! `LC_ALL` to one of the names the witness is a skip naming it, run by
 //! neither and counted in the reading.
@@ -89,7 +89,7 @@ pub(super) struct Kept {
 /// trouble and the linked engine's included, but one: a scratch tree the
 /// volume had no room for ([`Full`]), which is no verdict on the witness
 /// but the run not measured, and the `Err` the crate's reading says as a
-/// skip naming the volume (#644).
+/// skip naming the volume.
 pub(super) fn one(
     oracle: &Oracle<'_>,
     registry: &Registry,
@@ -139,7 +139,7 @@ pub(super) fn one(
 /// from the oracle, the streams a `capture` writes from it, the run of
 /// record, and the verdict. An oracle that ends on a signal leaves a
 /// fence that pins a status nothing to judge, and it borks; a bare `exit`
-/// captures the signal and `signal=N` pins it (#3545).
+/// captures the signal and `signal=N` pins it.
 fn both(
     on: &On<'_>,
     witness: &Witness,
@@ -165,10 +165,10 @@ fn both(
         exit = Exit::of(ended);
     }
     // A fence marked `capture` is written whole from the oracle's streams,
-    // where a second run from a scratch tree apart prints them again
-    // (#801); one it refuses is written nothing, and names the line. A
+    // where a second run from a scratch tree apart prints them again;
+    // one it refuses is written nothing, and names the line. A
     // plain fence the oracle does not meet is written so under `--bodies`,
-    // its authored wildcard lines kept (#3455); one it refuses is written
+    // its authored wildcard lines kept; one it refuses is written
     // nothing, judged as it stands, and its note names why.
     let mut captured = witness.clone();
     let mut refused = None;
@@ -282,7 +282,7 @@ struct On<'a> {
 impl On<'_> {
     /// Whether the run asks `--bodies` of `witness`: a plain fence, not
     /// marked `capture`, whose pins under `exit` the oracle's run does not
-    /// meet (#3455).
+    /// meet.
     fn body_asked(&self, witness: &Witness, exit: Exit, oracle_out: &Observation) -> bool {
         self.ask.accept == Accept::Bodies
             && !witness.capture
@@ -291,7 +291,7 @@ impl On<'_> {
 }
 
 /// A fence `row`, an accepted `trace:` row, covers: held to its pinned
-/// `expect` against the engine alone (harness §4.3, §8; #1650). The oracle
+/// `expect` against the engine alone (harness §4.3, §8). The oracle
 /// has run, and how it ended and what it printed is recorded in the note,
 /// not judged. The engine's run is the one the fence is held to, so it is
 /// the one `--accept` captures a bare `exit` from; a fence marked
@@ -310,7 +310,7 @@ fn alone(
         ended(oracle_out)
     );
     // The fence pins the engine's side of the row, so the oracle's streams
-    // are no body for it (#3455).
+    // are no body for it.
     if on.body_asked(witness, witness.exit, oracle_out) {
         recorded = format!(
             "`--bodies` wrote nothing: the fence pins the engine's side of {}, not the oracle's; {recorded}",
@@ -368,12 +368,12 @@ fn alone(
 }
 
 /// `verdict` on a fence `row` holds, where the row names the regime its
-/// cause is proven at (#3365): the oracle's run of the snippet again under
+/// cause is proven at: the oracle's run of the snippet again under
 /// that regime beside the fence's own, held to the engine's run `ran`.
 /// The verdict stands where the two are one run's bytes, or, for a fence
 /// pinning the engine's side under `exit`, where the run meets the fence
 /// as the engine's did, its wildcards over what moves; and the fence
-/// fails, naming its id and the regime, where they still differ (#3369);
+/// fails, naming its id and the regime, where they still differ;
 /// a request fence, whose host takes the fence's regime alone, fails so.
 fn proven(
     on: &On<'_>,
@@ -458,8 +458,8 @@ fn ran_by_oracle(oracle: &Oracle<'_>, witness: &Witness) -> Result<Observation> 
 
 /// The oracle's run of `witness` again from a scratch tree apart
 /// ([`oracle::Place::Apart`]), held to `first`'s status: the second run a
-/// write of the oracle's streams stands on, a capture's (#801) and a
-/// body's (#3455), since a line that moves with the directory, the
+/// write of the oracle's streams stands on, a capture's and a
+/// body's, since a line that moves with the directory, the
 /// process or the clock is the author's to write with a wildcard
 /// (harness §8). `Err` names a status the two runs did not agree on.
 fn apart(
@@ -619,8 +619,8 @@ fn lacking<'w>(oracle: &Oracle<'_>, witness: &'w Witness) -> Result<Option<&'w s
 /// with: its crate's where the binary under test does not turn it on,
 /// and the tier's where its regime sets the lane's `jit.mode`, so the
 /// lane runs on a binary that carries the tier, as the phpt lane's
-/// `--jit` builds it (#2962), or turns php's compiled tier on, so what a
-/// program sees of the tier is the tier's (#3193).
+/// `--jit` builds it, or turns php's compiled tier on, so what a
+/// program sees of the tier is the tier's.
 fn features<'w>(witness: &'w Witness, regime: Option<&Regime>) -> Vec<&'w str> {
     let mut features: Vec<&str> = witness.feature.as_deref().into_iter().collect();
     if regime.is_some_and(tiered) && !features.contains(&Lane::FEATURE) {
@@ -641,7 +641,7 @@ fn tiered(regime: &Regime) -> bool {
 }
 
 /// The run of record, and what it entered: the engine linked into the
-/// harness, which needs no binary (design §8; #119, #401), or for a fence
+/// harness, which needs no binary (design §8), or for a fence
 /// marked `process` the `php` binary in a process of its own (harness
 /// §8, revision 61). A panic in the linked engine is trouble the witness
 /// borks on, never the lane's end; the trouble is the sentence it borks

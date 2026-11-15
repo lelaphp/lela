@@ -1,7 +1,7 @@
 //! The `shmop` extension: `php-src/ext/shmop` as one crate under `ext/`
 //! (ADR-0004). One workspace dependency, the facade; System V shared
 //! memory through `libc` in [`ffi`] alone, since nix binds none of it
-//! (design §7.2, #1323); one entry, `extension()`. The phpt subset is
+//! (design §7.2); one entry, `extension()`. The phpt subset is
 //! `php-src/ext/shmop/tests`, through `xtask phpt --subset`.
 //!
 //! Every native is `shmop.c`'s at the tag, in `shmop.stub.php`'s order.

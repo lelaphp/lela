@@ -165,7 +165,7 @@ pub(crate) struct Compiled {
 /// shares them as it shares the bytes that name them.
 ///
 /// A loop whose guards each fail once, the interrupt test's among them
-/// and its jump's direction not (#3055's ruling), lands in the
+/// and its jump's direction not (ruled 2026-10-20), lands in the
 /// interpreter at each and prints what php prints:
 ///
 /// ```php
@@ -331,8 +331,8 @@ const _: () = assert!(
 );
 
 /// Where a trace's escape reads the landing it reached where its [`Door`]
-/// is closed or names another (`jit-design.md` §4.9, #3299's and #4108's
-/// rulings): a return that leaves its lowest frame at an opline the trace
+/// is closed or names another (`jit-design.md` §4.9, ruled 2026-10-24 and
+/// 2026-11-04): a return that leaves its lowest frame at an opline the trace
 /// does not go on at runs, as php's escape stub runs the handler of the
 /// opline the frame stands at (`zend_jit_trace_escape_stub`,
 /// `Z/ext/opcache/jit/zend_jit_ir.c:2488-2497`), which the root's publish
@@ -443,7 +443,7 @@ pub(crate) const RETURNED: u32 = u32::MAX - 5;
 /// Where compiled code reads the interrupt pointer in the `ExitCtx`
 /// (`jit-design.md` §4.6): the request at offset zero, the pointer to its
 /// interrupt byte at offset eight, the field `enter` lays down with the
-/// first trace it enters (#2957).
+/// first trace it enters.
 pub(crate) const INTERRUPT_AT: i32 = 8;
 
 /// Where compiled code reads, in the `ExitCtx`, the address of the
@@ -874,7 +874,7 @@ impl Kernel {
 /// The kernel symbol table (`jit-design.md` §4.3): the address of each
 /// kernel's wrapper, which compiled code calls as a 64-bit constant, so
 /// its bytes are final. `enter`'s `kernels!` list makes the one the
-/// engine's `Backend` is built with (#2957).
+/// engine's `Backend` is built with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EngineState)]
 pub(crate) struct Symbols([usize; Kernel::ALL.len()]);
 

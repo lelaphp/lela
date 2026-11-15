@@ -2503,7 +2503,7 @@ mod tests {
     /// is live takes no owner from what its variables hold: nothing is
     /// destructed inside `gc_collect_cycles()`, and both destructors are
     /// called at the request's end. php names the table twice and calls
-    /// both inside the collection (#2582); `docs/divergence.toml`'s
+    /// both inside the collection; `docs/divergence.toml`'s
     /// `trace:fiber-gc-shared-symbol-table` row records that as php's.
     #[test]
     fn a_collection_frees_nothing_a_table_two_suspended_frames_share_holds() {

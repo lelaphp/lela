@@ -62,12 +62,11 @@ const MAX_FUNCS: usize = 30;
 
 /// An epoch's analyses by op array and the classes and functions its
 /// view bound for it, each written once (`jit-design.md` §4.6; ADR-0015
-/// as amended on #3571): php rebuilds an op array's analysis at every
+/// as amended 2026-10-27): php rebuilds an op array's analysis at every
 /// trace's build, and a build that binds what an earlier one bound
 /// finds what php's rebuild would. Engine state by its derive, which
 /// holds each field, each analysis it keeps and each class one names by
-/// an identity of the epoch's, to the bound by the trait's letter
-/// (#4492, #4628).
+/// an identity of the epoch's, to the bound by the trait's letter.
 #[derive(Debug, Default, EngineState)]
 pub(crate) struct Analyses(Mutex<HashMap<EngineFuncRef, Vec<(Bindings, Kept)>>>);
 

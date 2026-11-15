@@ -238,7 +238,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
                 scoreboard: None,
                 access_log: None,
                 // The loop reaches this pool too, and its default pass
-                // gives it php's `.php .phar`, as php's does (#4352).
+                // gives it php's `.php .phar`, as php's does.
                 limit_extensions: Vec::new(),
             });
         }

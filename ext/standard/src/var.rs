@@ -671,7 +671,7 @@ const INDENT: usize = 4;
 ///
 /// An array's rows are walked as `print_hash` walks them, holding no
 /// owner of a row: a count a `__debugInfo` reads of its own object is
-/// php's, the array's and the call's (#2159).
+/// php's, the array's and the call's.
 ///
 /// ```php
 /// class F { public $x = 1; function __debugInfo() { debug_zval_dump($this); return []; } }

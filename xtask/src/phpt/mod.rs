@@ -23,7 +23,7 @@
 //! `engine_stale`, beside the `engine_absent` one `done` excuses. A
 //! reading is stamped with the tree, and before this one tree carried two
 //! readings 37 tests apart depending on which binary happened to stand in
-//! `target` (#475).
+//! `target`.
 //!
 //! **What a difference means.** Every verdict goes through
 //! [`oracle::verdict`], so the divergence registry is what decides whether
@@ -40,23 +40,22 @@
 //! refused keeps its first differing lines and a signature on its verdict,
 //! decoded once where the verdict is made (the `miss` module), and the
 //! kept run carries them; `--census` groups every miss of the run by that
-//! signature, the widest first (#1185).
+//! signature, the widest first.
 //!
 //! **Held to the target.** The runner's control, `--control`, runs each
-//! subset under its own oracle's pinned php, a variant's included (#1970),
+//! subset under its own oracle's pinned php, a variant's included,
 //! and keeps that php's verdict on every test of it under its pin; every
 //! engine's reading of the subset carries met-of-target, `target`, `met`
 //! and `outside`, with the tests outside the target named with the
-//! oracle's reason (#2033), the target's misses named and `missed_skipped` counting
-//! those the engine skipped (#1834), and `predated` where the target was
+//! oracle's reason, the target's misses named and `missed_skipped` counting
+//! those the engine skipped, and `predated` where the target was
 //! kept over another corpus than the subset holds now, with the command
-//! that keeps it again (#1644); the `target` module says what is in it
-//! (#1184).
+//! that keeps it again; the `target` module says what is in it.
 //!
 //! **Held against a commit.** Every run the engine judged whole is kept
 //! as its verdicts, and `--against <commit>` holds each subset to the run
 //! kept at the commit, test by test, in one more reading per subset; the
-//! `against` module says what keys a run and what gives no verdict (#664).
+//! `against` module says what keys a run and what gives no verdict.
 //!
 //! **What one run is.** One process per test, on a pool of threads the
 //! size of the seat's share of the machine or of `--jobs`, and the tests held apart as
@@ -65,21 +64,21 @@
 //! another (run-tests.php:1537-1546, 1742-1744), so the tests of a batch
 //! here are judged in sequence and the batches beside each other: two
 //! neighbours that make one path relative to php-src's root, where every
-//! program runs, do not meet (#1091). A batch is neighbours and not a
+//! program runs, do not meet. A batch is neighbours and not a
 //! directory, as upstream's is, so its length is upstream's too, from the
 //! pool's size. Two tests naming one key in their `--CONFLICTS--`, or in
 //! their directory's `CONFLICTS` file, never run at once, and one naming
 //! `all` runs with nothing beside it (run-tests.php:1341-1372). A test
 //! holds its conflict keys among every run on the machine too, since a
 //! port or a server is the machine's and not the run's copy of the tree,
-//! and the reading counts the tests that waited (the `across` module,
-//! #1313). A test past the recipe's limit holds up only its batch and the
+//! and the reading counts the tests that waited (the `across` module).
+//! A test past the recipe's limit holds up only its batch and the
 //! tests it conflicts with. The verdicts are printed and kept in the
 //! tests' order whatever order they finish in, so the lines, the reading
-//! and the kept run are the ones a pool of one writes (#938).
+//! and the kept run are the ones a pool of one writes.
 //!
 //! **Where a test writes.** Nowhere in the pinned tree, which is read
-//! only (#1183). A run copies the files the pin holds, what git tracks in
+//! only. A run copies the files the pin holds, what git tracks in
 //! a checkout, into a scratch tree of its own, and every subset of the run
 //! stands there: each test's program and its `SKIPIF` and `CLEAN` sections
 //! beside it, where upstream puts them, the working directory and
@@ -96,24 +95,24 @@
 //! a queue a test creates and leaves outlives its process, and the
 //! kernel's tables are small; after each subset the objects the run's own
 //! processes left are removed, told by the processes the kernel names on
-//! them; the reading counts them as `sysv_removed` (the `sysv` module,
-//! #1412). A System V subset holds a claim while it runs, first takes
+//! them; the reading counts them as `sysv_removed` (the `sysv` module).
+//! A System V subset holds a claim while it runs, first takes
 //! what subsets and witness runs killed before their sweeps left, which
-//! its reading names (#2448), and takes too what names no process by its
+//! its reading names, and takes too what names no process by its
 //! maker, its private key and the second it was made in, inside one of
-//! its programs' runs and before any other run's claim (#1482, #2563). On Linux a System V subset's programs run in
+//! its programs' runs and before any other run's claim. On Linux a System V subset's programs run in
 //! a private IPC namespace where `unshare` permits, and the run's line
 //! says so.
 //!
 //! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
 //! a crate owns the directories of the corpus its row names, an extension
-//! owns every `.phpt` under `ext/<name>` by the design (#1590), and a
+//! owns every `.phpt` under `ext/<name>` by the design, and a
 //! crate that owns none is asked for no phpt reading. A bare call is the
 //! per-commit lane, which is every subset of every crate the binary under
 //! test carries, in manifest order (harness §7, revision 63;
 //! [`Carried`]), and of every crate whose row names an oracle variant,
 //! run on the engine built with the row's feature in a target directory
-//! of its own where none is named (#2029); `--subset` is one crate's
+//! of its own where none is named; `--subset` is one crate's
 //! subsets or one directory of the pinned tree.
 //!
 //! **What is not run here.** The full corpus, the nightly verdict control
@@ -121,19 +120,19 @@
 //! manifest; the per-commit lane and one subset are an agent's to run. A
 //! `--PHPDBG--` test runs through the debugger host beside the binary, the
 //! phpdbg `[sapi]` pins for the control and the engine's own `phpdbg`,
-//! `sapi/phpdbg`'s binary, for the engine, as the `phpdbg` module has it
-//! (#1304); a `--REDIRECTTEST--` runs
-//! as the set it names, counted in its own subset (the `redirect` module,
-//! #814); a CGI-shaped one runs through the CGI host beside the binary,
+//! `sapi/phpdbg`'s binary, for the engine, as the `phpdbg` module has it;
+//! a `--REDIRECTTEST--` runs
+//! as the set it names, counted in its own subset (the `redirect` module);
+//! a CGI-shaped one runs through the CGI host beside the binary,
 //! the php-cgi `[sapi]` pins for the control and the engine's own
 //! `php-cgi`, `sapi/cgi`'s binary, for the engine, as the `cgi` module
-//! has it (#1198, ADR-0008), or in `sapi/makala`'s served subset is
-//! served to the production server over HTTP, as the `http` module has it
-//! (#2348); and a test of `sapi/fpm/tests` finds the
+//! has it (ADR-0008), or in `sapi/makala`'s served subset is
+//! served to the production server over HTTP, as the `http` module has it;
+//! and a test of `sapi/fpm/tests` finds the
 //! engine's own `php-fpm` where upstream's `FPM\Tester` looks, as the
-//! `fpm` module places it (#1291). Beyond those, the process adapter
+//! `fpm` module places it. Beyond those, the process adapter
 //! gives a test run-tests.php's environment and pipes for its streams, the
-//! `environment` module's and [`oracle::Streams::Pipes`] (#1186), and
+//! `environment` module's and [`oracle::Streams::Pipes`], and
 //! never a terminal, so it sets `SKIP_IO_CAPTURE_TESTS` as upstream does
 //! off one; a test that wants a terminal, an interactive shell or a
 //! listening server is where the runner and upstream still part; the four
@@ -197,15 +196,15 @@ pub(crate) const INSTRUMENT: &str = "phpt";
 /// The keys of a phpt reading's `numbers` that its rendering reads back,
 /// beside the verdicts' ([`Judgement::key`]), the target's
 /// ([`target::Measure`]) and the tally's `run` ([`tally::RUN`]): the run
-/// writes each under its name here (#1745).
+/// writes each under its name here.
 pub(crate) mod numbers {
     /// The tests the subset holds.
     pub(crate) const TESTS: &str = "tests";
-    /// The corpus's files the subset holds (#1589).
+    /// The corpus's files the subset holds.
     pub(crate) const FILES: &str = "files";
-    /// 1 where nothing ran because the engine has no binary (#132).
+    /// 1 where nothing ran because the engine has no binary.
     pub(crate) const ENGINE_ABSENT: &str = "engine_absent";
-    /// 1 where nothing ran because the tree moved past the binary (#475).
+    /// 1 where nothing ran because the tree moved past the binary.
     pub(crate) const ENGINE_STALE: &str = "engine_stale";
 }
 /// The first segment of a phpt divergence key, so a row names the corpus
@@ -237,12 +236,12 @@ impl Lane {
     }
 
     /// The engine-only directive that names a lane, which a witness's
-    /// regime sets to run its fence under one (#2962).
+    /// regime sets to run its fence under one.
     pub(crate) const DIRECTIVE: &'static str = "jit.mode";
 
     /// The bundle's feature the lane's engine is built with: `jit.mode`
     /// reaches the compiled tier only in a `php` built with
-    /// `php_bundle/jit`, the build that binds `php_bundle::Tier` (#3053).
+    /// `php_bundle/jit`, the build that binds `php_bundle::Tier`.
     pub(crate) const FEATURE: &str = "jit";
 }
 
@@ -272,10 +271,10 @@ impl Dir {
 
 /// Where the corpus's subsets stand in the pinned tree: the one table the
 /// nightly lane's corpus is walked by and CI checks the tree out by,
-/// through `status --section corpus` (#1713), so the checkout is never
+/// through `status --section corpus`, so the checkout is never
 /// narrower than a subset the lane or a `[[crate]]` row holds. An
 /// extension's place is the rule a row with no `phpt` key derives,
-/// `ext/<name>` whole (#1590), and a host's is its `tests` directory.
+/// `ext/<name>` whole, and a host's is its `tests` directory.
 pub(crate) const ROOTS: [Root; 4] = [
     Root::Dir("Zend/tests"),
     Root::Dir("tests"),
@@ -363,13 +362,13 @@ pub(crate) struct Subset {
     pub dirs: Vec<Dir>,
     /// The php-src tree the subset stands in: the pinned one, which it is
     /// resolved and read against, or the run's copy of it, which it runs
-    /// in (#1183). The working directory every program of the subset runs
+    /// in. The working directory every program of the subset runs
     /// in, as run-tests.php runs them from `TEST_PHP_SRCDIR`
-    /// (run-tests.php:1173, #952).
+    /// (run-tests.php:1173).
     pub root: PathBuf,
     /// Which tests of its directories it holds, and how they run.
     pub holds: Holds,
-    /// The tests routing moves into the subset or out of it (#3312).
+    /// The tests routing moves into the subset or out of it.
     pub routed: Routed,
 }
 
@@ -380,7 +379,7 @@ pub(crate) enum Holds {
     Every,
     /// The CGI-shaped ones alone, served to the production server over
     /// HTTP under the engine: `sapi/makala`'s served subset (the `http`
-    /// module, #2348).
+    /// module).
     Served,
 }
 
@@ -399,7 +398,7 @@ impl Subset {
     /// (`php_engine`, `pcre`, `ext/pcre`), whose subsets its row owns, or
     /// a directory of the pinned tree at `source` (`Zend/tests`), whose
     /// scope is that path, or `sapi/makala`, the served subset its row
-    /// names no directory of (the `http` module, #2348). A crate that owns
+    /// names no directory of (the `http` module). A crate that owns
     /// none is refused by saying so: which subsets are a crate's is the
     /// manifest's sentence, and an absent one is an answer, not a lookup
     /// that failed.
@@ -461,8 +460,9 @@ impl Subset {
     /// the tree has them is not asked here: a directory the tree lacks is
     /// a reading that says so, since dropping it quietly would leave
     /// `done` asking a crate for a phpt reading nothing could write, which
-    /// is the hole #18 closed. What a variant's row holds beyond them is
-    /// derived when the run routes ([`route::route`], #3312).
+    /// is the hole naming a subset on the crate's row closed. What a
+    /// variant's row holds beyond them is derived when the run routes
+    /// ([`route::route`]).
     pub(crate) fn of(source: &Path, krate: &Crate) -> Option<Subset> {
         let unders = krate.subsets();
         (!unders.is_empty()).then(|| Subset::over(krate.name.clone(), source, unders, Holds::Every))
@@ -482,7 +482,7 @@ impl Subset {
     }
 
     /// Whether the subset's tests make System V objects naming no process,
-    /// so its run holds a windowed claim ([`sysv::makes_unnamed`], #2811).
+    /// so its run holds a windowed claim ([`sysv::makes_unnamed`]).
     fn makes_unnamed(&self) -> bool {
         sysv::makes_unnamed(
             &self.scope,
@@ -502,9 +502,9 @@ impl Subset {
 
     /// Whether the subset is an extension's with no tests of its own, as
     /// `ext/lexbor`'s is: one the design derives whose directory the tree
-    /// has not, or holds no `.phpt` under (#1231, #1598). Its reading is a
+    /// has not, or holds no `.phpt` under. Its reading is a
     /// skip naming the directory, no run of it is kept, and it holds
-    /// nothing against any base (#725, #3143).
+    /// nothing against any base.
     pub(crate) fn testless(&self, manifest: &Manifest) -> Result<bool> {
         let derived = (manifest.crate_named(&self.scope)).is_some_and(Crate::derives_subset);
         Ok(derived && (!self.absent().is_empty() || self.tests()?.is_empty()))
@@ -512,7 +512,7 @@ impl Subset {
 
     /// The per-commit lane (harness §7, revision 63): every subset of
     /// every crate the binary under test carries or whose row names an
-    /// oracle variant (#2029), in manifest order, under the pinned tree at
+    /// oracle variant, in manifest order, under the pinned tree at
     /// `source`. The row is the statement of which subsets a crate owns
     /// and `carried` of which crates the binary has, each read in one
     /// place, so the lane is never a second copy of the design's table;
@@ -547,7 +547,7 @@ impl Subset {
 
     /// Every test the subset holds under its directories, sorted within
     /// each: every `.phpt`, or the served subset's CGI-shaped ones, less
-    /// those routed out; then those routed in, in corpus order (#3312).
+    /// those routed out; then those routed in, in corpus order.
     pub(crate) fn tests(&self) -> Result<Vec<PathBuf>> {
         let mut all = Vec::new();
         for place in &self.dirs {
@@ -600,7 +600,7 @@ impl Subset {
 
     /// The test's name: where it stands in the corpus, whatever number of
     /// directories the subset has, so a directory a row gains renames
-    /// none of its tests (#3312).
+    /// none of its tests.
     pub(crate) fn name(&self, test: &Path) -> String {
         self.under(test).to_string_lossy().into_owned()
     }
@@ -642,18 +642,18 @@ pub(crate) enum Judgement {
     /// the `cannot read yet` refusal `php_compile` raises for a construct
     /// it does not read, before any test code ran: a skip of the
     /// compiler's and not a failure of the crate whose subset it is
-    /// (harness §4.5 condition 1, #319).
+    /// (harness §4.5 condition 1).
     Unread,
     /// A test of the served subset whose request HTTP cannot carry, its
     /// `--ENV--` setting a variable no field stands for: left out of the
-    /// lane, outside the target, and never run (#2639).
+    /// lane, outside the target, and never run.
     Unsent,
     /// A test routed to a variant's subset that the lane cannot build
     /// for, needing another feature or a host ([`route::Unbuilt`]): left
-    /// out of the lane, outside the target, and never run (#3312). Or a
+    /// out of the lane, outside the target, and never run. Or a
     /// test whose host the engine has none of beside it, a build the run is
     /// missing: never run, and a miss that fails the reading where the
-    /// target holds it (#3763).
+    /// target holds it.
     Unbuilt,
 }
 
@@ -708,7 +708,7 @@ impl Judgement {
 
     /// The key of a reading's `numbers` that counts the verdict: the one
     /// place it is named, for the run that writes the count and the
-    /// rendering that reads it back (#1745).
+    /// rendering that reads it back.
     pub(crate) fn key(self) -> &'static str {
         self.spelled().key
     }
@@ -734,7 +734,7 @@ struct Spelled {
 
 impl tally::Judgement for Judgement {
     /// A fail, a bork or an unread test keeps its first differing lines
-    /// and its signature on the run (#1185).
+    /// and its signature on the run.
     type Miss = miss::Miss;
     const PASS: Judgement = Judgement::Pass;
 
@@ -806,13 +806,13 @@ pub(crate) fn reading(
     // has not, or that holds no `.phpt`: an extension with no tests of its
     // own, whose reading is a skip naming the directory, and not the
     // manifest and the pin disagreeing, which a row that names its
-    // directories is (#1231, #1598).
+    // directories is.
     let testless = subset.testless(manifest)?;
     // A subset of a crate not yet created: its tests are that crate's, and
     // an engine built without it would not answer for it, so the reading
     // says so ahead of whether an engine is built, as `budget` and
     // `witness` do; the control of the runner is the oracle's, whatever
-    // stands where the crate would (#64).
+    // stands where the crate would.
     let uncreated = !matches!(runner, Runner::Control(_))
         && manifest
             .crate_named(&subset.scope)
@@ -833,7 +833,7 @@ pub(crate) fn reading(
         // A binary is built and the pinned php is not here: the engine
         // could run, and the recipe it would run under is the pin's,
         // whose digest cannot be asserted; or the control was asked for
-        // and its php is not here (#1970). Nothing ran, and this is why;
+        // and its php is not here. Nothing ran, and this is why;
         // `done` excuses the absent engine and not this.
         Outcome::OracleAbsent(why)
     } else {
@@ -854,8 +854,8 @@ pub(crate) fn reading(
     };
     // Which engine wrote these numbers. The reading's own stamp is the
     // tree's, and one tree had two binaries under it and two readings 37
-    // tests apart before this line, with nothing to tell them apart
-    // (#475); the binary's path and the md5 of its bytes are what does.
+    // tests apart before this line, with nothing to tell them apart;
+    // the binary's path and the md5 of its bytes are what does.
     let message = match runner.stamp() {
         Some(engine) => format!("{message}; run by {engine}"),
         None => message,
@@ -871,7 +871,7 @@ pub(crate) fn reading(
     // The corpus's files the subset holds, which are its tests but where a
     // `--REDIRECTTEST--` ran a set in its place: a PDO driver's reading
     // judges `ext/pdo/tests` beside its own, which `ext/pdo`'s reading holds
-    // too, so a count of the lane sums this and not `tests` (#1589). A
+    // too, so a count of the lane sums this and not `tests`. A
     // subset whose directory the tree has not holds none.
     let files = if absent.is_empty() {
         subset.tests()?.len()
@@ -883,12 +883,12 @@ pub(crate) fn reading(
     // its own parse error before any test code ran: a skip of the
     // compiler's, held to that cause alone, and the one `done` meets
     // beside `engine_absent` when it is every test of the subset (harness
-    // §4.5 condition 1, #319).
+    // §4.5 condition 1).
     for judgement in Judgement::ALL {
         reading.count(judgement.key(), tally.count(judgement))?;
     }
     // Why nothing ran, where nothing did: the engine has no binary yet,
-    // which is the one cause `done` excuses (#132). A subset of a crate
+    // which is the one cause `done` excuses. A subset of a crate
     // not yet created, and a subset whose every test skipped, are the
     // other two ways this lane skips and are not this number.
     reading.count(
@@ -898,8 +898,7 @@ pub(crate) fn reading(
     // The other way nothing ran: a binary is built and the tree has moved
     // past it, so running it would measure an engine this tree no longer
     // describes. It is a skip of its own and not the absent binary `done`
-    // excuses, since the engine is there to be measured once it is rebuilt
-    // (#475).
+    // excuses, since the engine is there to be measured once it is rebuilt.
     reading.count(
         numbers::ENGINE_STALE,
         u64::from(!uncreated && matches!(runner, Runner::Stale(_))),
@@ -912,13 +911,13 @@ pub(crate) fn reading(
     Ok(reading)
 }
 
-/// The reading held to the target of the subset `scope` names (#1184). A
+/// The reading held to the target of the subset `scope` names. A
 /// run of the engine that judged a test carries met-of-target, its numbers
 /// `target`, `met`, `outside` and `missed_skipped`, the tests outside the
-/// target named with the oracle's reason (#2033) and the target's misses
+/// target named with the oracle's reason and the target's misses
 /// named, and `predated` with the command that keeps the target again
-/// where the kept target holds no verdict for some of the subset's tests
-/// (#1644), or says how to take a target where none is kept under the
+/// where the kept target holds no verdict for some of the subset's tests,
+/// or says how to take a target where none is kept under the
 /// pin; the runner's control says it kept its verdicts as the target,
 /// where it judged every test. `run` is where the engine's run is kept,
 /// which the reading points to for the met tests it does not name.
@@ -964,7 +963,7 @@ fn told(reading: &mut Reading, runner: &Runner, words: &str) {
 }
 
 /// Why an extension whose derived directory the pinned tree has not has
-/// no reading but a skip (#1231).
+/// no reading but a skip.
 const NO_TESTS: &str = "the extension has no tests of its own in php-src, so its subset is none";
 
 /// The reading's words: the rung's sentence over the subset's numbers,
@@ -1017,7 +1016,7 @@ fn words(
                 tally.found
             ),
             // Every verdict the run gave, under the key its count is kept
-            // in, so the counts named add up to the tests (#2939).
+            // in, so the counts named add up to the tests.
             Outcome::Passed => {
                 let counts = Judgement::ALL.map(|j| (tally.count(j), j.key()));
                 let named = counts.iter().filter(|(n, _)| *n > 0);
@@ -1066,27 +1065,27 @@ pub struct Ask {
     /// The binary the process adapter runs.
     pub engine: Engine,
     /// Render the census beside the run: every miss grouped by the
-    /// signature it kept (#1185), and the unread constructs among them,
-    /// whose groups each reading carries (#617). The lane, the verdicts
-    /// and every count are the same either way: this asks for one more
+    /// signature it kept, and the unread constructs among them,
+    /// whose groups each reading carries. The lane, the verdicts and
+    /// every count are the same either way: this asks for one more
     /// rendering of what the run already reached, never for a second run.
     pub census: bool,
     /// The commit whose kept run each subset is held to, test by test:
     /// one more reading per subset, at its scope with `@against` after it,
-    /// failing while a test met there is not met here (#664).
+    /// failing while a test met there is not met here.
     pub against: Option<String>,
     /// How many tests run at once; the seat's share of the machine unless
     /// named ([`crate::seat::jobs`]).
     pub jobs: Option<NonZeroUsize>,
     /// The directory a test's conflict keys are held in as locks, where
-    /// every run on the machine meets (#1313): the temporary directory
+    /// every run on the machine meets: the temporary directory
     /// unless named. A test of the harness names one of its own, so a real
-    /// run beside it holding `all` makes it wait for nothing (#1675).
+    /// run beside it holding `all` makes it wait for nothing.
     pub locks: Option<PathBuf>,
     /// Under the runner's control alone: run only the subsets whose kept
     /// target does not stand, none kept under the pin or one that predates
-    /// a test the subset has now, and say of each other one that it stands
-    /// (#1830). What CI runs after every push, before the engine's lane.
+    /// a test the subset has now, and say of each other one that it stands.
+    /// What CI runs after every push, before the engine's lane.
     pub unkept: bool,
 }
 
@@ -1095,8 +1094,8 @@ pub struct Ask {
 pub enum Engine {
     /// The engine's own: the build cargo puts where `Runner::resolve`
     /// looks, or for a subset whose row names an oracle variant the build
-    /// with the row's feature (#2029); under a tier's lane, the build with
-    /// the tier's feature, and the row's beside it (#3053).
+    /// with the row's feature; under a tier's lane, the build with
+    /// the tier's feature, and the row's beside it.
     #[default]
     Built,
     /// The binary at this path: a pinned php's is the runner's control of
@@ -1104,8 +1103,7 @@ pub enum Engine {
     Named(PathBuf),
     /// The runner's control: each subset under its own oracle's pinned
     /// php, the main one or the variant its row names, so a variant's
-    /// subset keeps its target under the variant's pin with no php named
-    /// (#1970).
+    /// subset keeps its target under the variant's pin with no php named.
     Control,
 }
 
@@ -1121,7 +1119,7 @@ pub(crate) fn testless(manifest: &Manifest, scope: &str) -> bool {
 
 /// Run what was asked for: one reading per subset, each written by the
 /// caller through `record`; a subset refused is its own failing reading,
-/// and the rest of the lane runs (#1612).
+/// and the rest of the lane runs.
 pub fn run(
     root: &Path,
     manifest: &Manifest,
@@ -1133,7 +1131,7 @@ pub fn run(
     let source = manifest.pin()?.source.tree()?;
     let subsets = asked(root, manifest, &source, ask)?;
     // The main oracle, and one per variant a row names, whose crate's subset
-    // runs under it (#1782); each digest asserted once a run (harness §4.3).
+    // runs under it; each digest asserted once a run (harness §4.3).
     let variants = manifest.variants();
     let oracles = Oracles::new(manifest.pin()?, &variants);
     let runners = Runners::resolve(root, manifest, &variants, ask, &subsets)?;
@@ -1155,7 +1153,7 @@ pub fn run(
     let jobs = ask.jobs.unwrap_or_else(crate::seat::jobs);
     // No room for the copy every subset runs in leaves the copy's error
     // standing, and each subset is a run not measured, its reading the
-    // skip that names the volume (#644); any other trouble ends the run.
+    // skip that names the volume; any other trouble ends the run.
     let copy = match copied(&todo, &source, jobs) {
         Err(why) if Full::of(&why).is_none() => return Err(why),
         copy => copy,
@@ -1170,7 +1168,7 @@ pub fn run(
     // commit. A subset refused, for a server that did not answer or for
     // any other cause, is that subset's failing reading, and the lane goes
     // on, so one missing service never takes the readings the subsets
-    // before and after it wrote with it (#1612).
+    // before and after it wrote with it.
     let mut taken = |subset: &Subset, side: &Side, held_as: &Scope| -> Result<Vec<Reading>> {
         let scope = &held_as.to_string();
         let copy = tree.filter(|_| side.runs());
@@ -1252,7 +1250,7 @@ pub fn run(
 /// Nothing to run, or a binary the tree has moved past, under a subset of
 /// the run: either way the lane says so once before the subsets rather
 /// than at each reading alone, and not of a binary no subset runs on, the
-/// default build beside a featured one (#2029).
+/// default build beside a featured one.
 fn unrunnable(sides: &[Result<Side>]) {
     let mut said = Vec::new();
     for side in sides.iter().flatten() {
@@ -1297,9 +1295,9 @@ fn copied(
 
 /// The subsets a run under `ask` runs, each beside its side: all of them,
 /// or under `--unkept` all but each whose kept target stands under its own
-/// oracle's pin, as its [`Side`] resolves it (#1830, #1782), and each the
+/// oracle's pin, as its [`Side`] resolves it, and each the
 /// named binary is no control of, a variant's subset under the main php,
-/// which `--control` never leaves (#1970); each said, and set
+/// which `--control` never leaves; each said, and set
 /// aside before anything is copied, so a lane whose every target stands
 /// copies no tree and runs nothing. Only the control keeps a target, and
 /// only outside a tier's lane (`Runs::target_of`), so `--unkept` is
@@ -1377,7 +1375,7 @@ fn stands(runs: &against::Runs, pin: &Pin, subset: &Subset) -> bool {
 }
 
 /// What one subset runs under: the oracle its crate's row names, the main
-/// one or a variant (#1782), the binary resolved against that oracle's pin,
+/// one or a variant, the binary resolved against that oracle's pin,
 /// and why that oracle cannot run on this machine, where it cannot.
 struct Side<'r, 'o> {
     oracle: &'r Oracle<'o>,
@@ -1415,11 +1413,11 @@ impl Side<'_, '_> {
 
 /// The binary under test as each oracle of the run resolves it: a binary
 /// named for the run is the control under the oracle whose digest it has,
-/// so each variant resolves it under its own pin (#1782). Where none is
+/// so each variant resolves it under its own pin. Where none is
 /// named, a subset whose row names a variant and a feature the binary
-/// under test does not turn on runs on the engine built with that feature
-/// (#2029), the build's failure refusing it. Under a tier's lane the
-/// binary under test is the engine built with the tier (#3053), and its
+/// under test does not turn on runs on the engine built with that feature,
+/// the build's failure refusing it. Under a tier's lane the
+/// binary under test is the engine built with the tier, and its
 /// build's failure refuses the run.
 struct Runners<'v> {
     main: Runner,
@@ -1442,7 +1440,7 @@ impl<'v> Runners<'v> {
             .transpose()
             .map_err(|why| anyhow::anyhow!("{why}"))?;
         // The control is each oracle's own php, standing for the engine
-        // under its own pin (#1970).
+        // under its own pin.
         let layout = manifest.layout();
         let resolve = |pin: &Pin| match &ask.engine {
             Engine::Built => tiered
@@ -1464,7 +1462,7 @@ impl<'v> Runners<'v> {
             Engine::Built | Engine::Named(_) | Engine::Control => BTreeMap::new(),
         };
         // The served subset's host, built now in the lanes' profile, where
-        // the engine's own build stands, as `fpm-compare` builds it (#2348).
+        // the engine's own build stands, as `fpm-compare` builds it.
         if ask.engine == Engine::Built && subsets.iter().any(|subset| subset.holds == Holds::Served)
         {
             crate::makala::makala(root)?;
@@ -1514,7 +1512,7 @@ impl<'v> Runners<'v> {
 /// feature: one built with each feature a row of theirs turns on beside an
 /// oracle variant whose php is on this machine, where the binary under
 /// test does not turn it on, into a target directory of its own
-/// ([`profile::featured`]), so the default build stands (#2029). The
+/// ([`profile::featured`]), so the default build stands. The
 /// variant is the statement that php loads what the feature builds, so a
 /// row with a feature and no variant is the nightly lane's, and a variant
 /// whose php is not here runs nothing, so nothing is built for it. Built
@@ -1553,11 +1551,11 @@ fn featured(
 
 /// An engine the run builds for itself: `php` with these features of the
 /// bundle on, in the lanes' profile, into a target directory of its own
-/// ([`profile::featured`]) so the default build stands (#2029). A row's
-/// feature beside its oracle variant, the tier's under a tier's lane
-/// (#3053), or both; the tier's alone is where the witness lane builds
-/// it (#2721). The witness lane's `process` fences are built by the same
-/// value, so the two lanes name one build alike (#2962).
+/// ([`profile::featured`]) so the default build stands. A row's
+/// feature beside its oracle variant, the tier's under a tier's lane,
+/// or both; the tier's alone is where the witness lane builds
+/// it. The witness lane's `process` fences are built by the same
+/// value, so the two lanes name one build alike.
 ///
 /// [`profile::featured`]: crate::oracle::profile::featured
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1655,7 +1653,7 @@ fn asked(root: &Path, manifest: &Manifest, source: &Path, ask: &Ask) -> Result<V
         );
     }
     // What each subset holds beyond its directories, and leaves to a
-    // variant's, routed from the two listings (#3312).
+    // variant's, routed from the two listings.
     let variants = manifest.variants();
     let oracles = Oracles::new(manifest.pin()?, &variants);
     let carried = Carried::binary(root)?;
@@ -1665,9 +1663,9 @@ fn asked(root: &Path, manifest: &Manifest, source: &Path, ask: &Ask) -> Result<V
 
 /// The reading of a subset the lane could not run, a fail whose message
 /// is the cause and whose `refused` counts it, so the lane's other
-/// readings are written beside it and its exit says it (#1612). A scratch
+/// readings are written beside it and its exit says it. A scratch
 /// tree the volume had no room for is no refusal but a run not measured,
-/// and the reading is the skip that names the volume (#644).
+/// and the reading is the skip that names the volume.
 fn refused(
     snapshot: &Snapshot,
     manifest: &Manifest,
@@ -1689,8 +1687,8 @@ fn refused(
 /// where it needs the server and its tests run (the `server` module), and
 /// where it runs its programs otherwise than the run does, a pin of its
 /// own beside the run's: a `MySQL` one in a database of its own on the
-/// server, made here and dropped when this drops (#1546), and a System V
-/// one in a namespace (#1482), each said on its own line.
+/// server, made here and dropped when this drops, and a System V
+/// one in a namespace, each said on its own line.
 struct Own<'o> {
     served: Option<String>,
     pin: Option<Pin>,
@@ -1731,16 +1729,16 @@ impl<'o> Own<'o> {
 /// One subset run by `run`, and where its tests run, what its processes
 /// left of System V IPC removed after it, each sweep said on a line: the
 /// objects standing are read before it, and the processes spawned before
-/// it forgotten (the `sysv` module, #1412). A System V subset holds a
+/// it forgotten (the `sysv` module). A System V subset holds a
 /// claim for its length, written to as each program starts and ends, and
 /// takes what subsets and witness runs cut off left before it starts, so
 /// a run killed before its sweep leaves nothing the next one does not
-/// remove (#2448); its own sweep settles the claim. Any other subset
+/// remove; its own sweep settles the claim. Any other subset
 /// holds a claim of its processes alone, written to the same way, so no
-/// other run's sweep takes what they left before this one's does (#2750).
+/// other run's sweep takes what they left before this one's does.
 /// A subset runs where there is a `copy` of the pinned tree, and what its
 /// tests left standing there outside their programs' groups is stopped
-/// before the sweep (`scratch::Stray`, #2663).
+/// before the sweep (`scratch::Stray`).
 fn swept_around<T>(
     oracle: &Oracle<'_>,
     (scope, claims): (&str, bool),
@@ -1770,11 +1768,11 @@ fn swept_around<T>(
 }
 
 /// What the run around a subset adds to its reading: the System V objects
-/// removed around it, what its tests left (the `sysv` module, #1412) and
-/// what runs cut off before it left (#2448), each sweep's words told, and the
+/// removed around it, what its tests left (the `sysv` module) and
+/// what runs cut off before it left, each sweep's words told, and the
 /// tests that waited for a key another run on the machine held, and for
 /// how long, in its numbers and the tail of its message (the `across`
-/// module, #1313); each only where there was any.
+/// module); each only where there was any.
 fn around(
     reading: &mut Reading,
     runner: &Runner,
@@ -1800,7 +1798,7 @@ fn around(
     Ok(())
 }
 
-/// A copy of the pinned tree at `source` made for one run (#1183): the
+/// A copy of the pinned tree at `source` made for one run: the
 /// files the pin holds ([`Source::files`]), each cloned where the file
 /// system clones, on `jobs` threads, into a scratch tree the run owns. A
 /// test run there writes nothing into the pinned tree, and a file some
@@ -1811,8 +1809,7 @@ fn around(
 /// own path back: `socket-uds-too-long-filename-start.phpt` binds
 /// `__DIR__` and a long name cut to `sun_path`'s 104 bytes, and under
 /// macOS's per-user `TMPDIR` the cut fell on `sapi/fpm/tests/` itself, a
-/// directory php-fpm's bind refuses under the oracle as under the engine
-/// (#2626).
+/// directory php-fpm's bind refuses under the oracle as under the engine.
 ///
 /// [`Source::files`]: crate::oracle::Source::files
 fn copy_of(source: &Path, jobs: NonZeroUsize) -> Result<Tree> {
@@ -1852,7 +1849,7 @@ fn copy_of(source: &Path, jobs: NonZeroUsize) -> Result<Tree> {
 const COPY: &str = "phpt-tree";
 
 /// The processes `who` left standing in a copy of the pinned tree once
-/// their programs ended, stopped (`scratch::Stray`, #2663), said on a line
+/// their programs ended, stopped (`scratch::Stray`), said on a line
 /// where there were any.
 fn said_stopped(who: &str, pids: &[u32]) {
     if !pids.is_empty() {
@@ -1957,7 +1954,7 @@ fn run_tests(
         .map(|item| adapter::apart(item, &mut dirs))
         .collect();
     // What each test holds among every run on the machine beside what the
-    // run holds apart within itself (#1313).
+    // run holds apart within itself.
     let held: Vec<(_, Vec<String>)> = items
         .iter()
         .map(|item| (item, adapter::held(item, &mut dirs)))

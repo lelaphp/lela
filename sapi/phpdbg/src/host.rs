@@ -124,7 +124,7 @@ pub fn serve(engine: &Engine, mut s: Session) -> i32 {
 }
 
 /// Where `php_request_startup` failed, an extension's `rinit` having
-/// raised (#1775): `PUTS("Could not startup")` after what the failure
+/// raised: `PUTS("Could not startup")` after what the failure
 /// displayed, and 1 out of `main` (`Z/sapi/phpdbg/phpdbg.c:1449-1452`),
 /// every later cycle and the prompt left.
 fn start_failed(sink: &mut dyn OutputSink) -> i32 {
@@ -625,7 +625,7 @@ mod tests {
     }
 
     /// An engine whose one extension's `rinit` throws, as session's does
-    /// where its data does not decode (#1775); phpdbg reads no cookie, so
+    /// where its data does not decode; phpdbg reads no cookie, so
     /// no extension of the bundle fails its request's start.
     fn failing_start() -> Engine {
         /// Core's `Error`.

@@ -4,7 +4,7 @@
 //! and its statement holds three rowsets of two rows each. php's loop
 //! (`ext/pdo/pdo_stmt.c:1923-1938` at php-8.5.12) fetches every row of
 //! every rowset through `pdo_stmt_do_next_rowset` and clears no error,
-//! because its `PDO_STMT_CLEAR_ERR` comes after the emulation (#3391).
+//! because its `PDO_STMT_CLEAR_ERR` comes after the emulation.
 
 mod support;
 

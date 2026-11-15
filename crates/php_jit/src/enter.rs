@@ -371,7 +371,7 @@ impl<'a> Holding<'a> {
 }
 
 /// What the request lends a crossing of its own state for as long as the
-/// crossing serves (`jit-design.md` §4.6, #3437): the tier's state, and
+/// crossing serves (`jit-design.md` §4.6): the tier's state, and
 /// through it the engine's `Shared`; the request's hold on the epoch it
 /// started in, which its traces are taken from and their kernels serve
 /// out of, taken once, at the request's first visit; and the epoch's
@@ -742,7 +742,7 @@ kernels! {
 /// The frame is found by its room ([`found`]) and stood at `at` by the
 /// step itself, and a step that went on in the frame it served, the
 /// common one, is answered from the room compiled code handed and the
-/// op array it named, with no frame looked for again (#4087): a frame
+/// op array it named, with no frame looked for again: a frame
 /// never moves while it stands on the stack, and a handler that goes on
 /// in its frame neither pops it nor puts another at its place.
 fn step(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<Stood, Fatal> {
@@ -1223,7 +1223,8 @@ fn stood(
 /// its opline. A trait's method copied into its class reads a cache of
 /// its own, which is no op array's, so its frame is named by the op array
 /// it runs, the one its trace recorded, and its recursive return roots
-/// and escapes as php's does (the exit numbers are #1220's):
+/// and escapes as php's does (php's optimizer numbers the exits
+/// otherwise, design §6.1):
 ///
 /// ```php
 /// trait T { function fib($n) { if ($n < 2) { return $n; } return $this->fib($n - 1) + $this->fib($n - 2); } }
@@ -1605,7 +1606,7 @@ fn untouched(epoch: &Epoch, raw: tier::MapPtrRaw, at: usize) -> bool {
     at == no_place() && tier::touchable(epoch, raw)
 }
 
-/// The touch (`jit-design.md` §4.6, #2957's note; [`tier::touch`]): the
+/// The touch (`jit-design.md` §4.6, revision 32's note; [`tier::touch`]): the
 /// address of each runtime-cache slot `trace`'s code reads in `req`, one
 /// a slot of `Trace.map_ptrs`, where the request laid its cache down, and
 /// [`NO_PLACE`]'s where it has not yet, since php lays a callee's cache at
@@ -2335,7 +2336,7 @@ fn tally(t: &mut Tally, _: On<'_, '_>, n: u64) -> Result<u64, Fatal> {
 #[cfg(any(test, feature = "bench"))]
 kernels! { Tally => mod tallied { tally(n: u64) -> u64; } }
 
-/// The bench bar's program (#2742): the same loop of kernel calls, through
+/// The bench bar's program: the same loop of kernel calls, through
 /// the wrapper or straight to the kernel, each through a function pointer
 /// the optimiser cannot see through, as compiled code calls a wrapper by
 /// its address.
@@ -2354,7 +2355,7 @@ pub mod bench {
         /// Each call through the kernel's `extern "C"` wrapper.
         Wrapper,
         /// Each call through [`tally_without_unwind_guard`]: the wrapper
-        /// with no `catch_unwind`, which no production wrapper is (#2879).
+        /// with no `catch_unwind`, which no production wrapper is.
         WrapperBare,
         /// Each call to the kernel itself.
         Direct,
@@ -2383,7 +2384,7 @@ pub mod bench {
     /// through `out` and mapped to a `Status`, with no `catch_unwind`
     /// around the kernel, so `wrapper` against it is what the guard costs
     /// on the path that does not unwind, and it against `direct` what the
-    /// frame costs (#2879). A kernel's panic here aborts the process, as
+    /// frame costs. A kernel's panic here aborts the process, as
     /// one through an `extern "C"` function does, so a wrapper compiled
     /// code calls is never this (`jit-design.md` §4.6); the test kernel
     /// raises none.

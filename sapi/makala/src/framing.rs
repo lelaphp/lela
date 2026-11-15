@@ -1,5 +1,5 @@
 //! RFC 9112's framing rules that hyper's HTTP/1.1 server leaves to the
-//! host (#2340), refused from the head it parsed before a request reaches
+//! host, refused from the head it parsed before a request reaches
 //! the request side.
 //!
 //! hyper's parser refuses with 400 and a close, before a `Service` sees

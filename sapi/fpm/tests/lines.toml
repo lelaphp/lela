@@ -2,8 +2,8 @@
 # (oracle.toml's [sapi]) and then under this crate's, in one directory laid
 # afresh, and held equal: a master over a pool of one static child, the
 # requests handed to it as FastCGI records, and its log; a startup that ends
-# the process (#1975, as #2468 ruled). No byte here is the oracle's; the
-# oracle's run is the expectation. The grammar is
+# the process (harness revision 110, as ruled 2026-10-09). No byte here is
+# the oracle's; the oracle's run is the expectation. The grammar is
 # xtask/src/witness/host.rs's. `-R` lets the master run as root, as a
 # container's tests do; the log's times, its pids and a child's lifetime are
 # masked.
@@ -11,10 +11,10 @@
 # A child that has served `pm.max_requests` ends its engine on the way out,
 # as php's child calls `php_module_shutdown`: a `dba_popen` `cdb_make` file
 # the request left open is finished there, so the next child's request reads
-# the value (#1804). That child ends at its own `pm.max_requests` too, after
+# the value. That child ends at its own `pm.max_requests` too, after
 # the reader's answer, and the master logs it and its replacement only if
 # the stop has not come first, under either host: so the stop waits for the
-# second `started` in the log (#2531).
+# second `started` in the log.
 [[line]]
 name = "a-child-past-its-max-requests-finishes-a-persistent-cdb-make-file"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -32,7 +32,7 @@ params = [["SCRIPT_FILENAME", "{dir}/reader.php"], ["REQUEST_METHOD", "GET"], ["
 # `listen.allowed_clients` lets a peer over IPv6 in by its whole address, as
 # `fcgi_is_allowed` compares `sizeof(sin6_addr)` (`Z/main/fastcgi.c:1334`):
 # `::1`, connecting to a pool on the IPv6 loopback that allows `::2`, in its
-# /96, and `::1`, is served (#4349).
+# /96, and `::1`, is served.
 [[line]]
 name = "an-ipv6-peer-allowed-by-its-whole-address-is-served"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -48,7 +48,7 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 # And it keeps one out by its whole address: `::1` where only `::2`, in its
 # /96, is allowed is dropped by the child as it is accepted, the connection
 # closed with no record written (`Z/main/fastcgi.c:1401-1405`), which is the
-# request's answer (#4397), and the child says so into its stderr, which the
+# request's answer, and the child says so into its stderr, which the
 # pool's log holds under `catch_workers_output`. The master logs that line
 # on a turn of its own after the child wrote it, so the stop waits for it.
 [[line]]
@@ -66,12 +66,12 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 
 # A request whose start fails, session's `rinit` raising under
 # `session.auto_start` over a session file whose `DateTime` does not
-# unserialize (#1775): the child renders the uncaught fatal and session's
+# unserialize: the child renders the uncaught fatal and session's
 # warning, finishes the FastCGI request with what they wrote and closes the
 # connection (`fcgi_finish_request(request, 1)`), and ends with
 # `FPM_EXIT_SOFTWARE` (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`), which the
-# master logs before it starts the next child, whose request is served
-# (#1879).
+# master logs before it starts the next child, whose request is served.
+#
 [[line]]
 name = "a-child-whose-request-start-fails-finishes-the-request-and-ends"
 args = ["-R", "-n", "-F", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "-y", "{dir}/php-fpm.conf"]
@@ -88,8 +88,8 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 # php-fpm's loop answers its ping and status pages after
 # `php_request_startup` (`Z/sapi/fpm/fpm/fpm_main.c:1838-1852`), so session's
 # `RINIT` under `session.auto_start` has sent its cookie and its cache
-# headers before the page's lines, which replace those of their names
-# (#1968). The status page past its pool's name counts the pool's life.
+# headers before the page's lines, which replace those of their names.
+# The status page past its pool's name counts the pool's life.
 [[line]]
 name = "a-ping-and-a-status-page-are-answered-once-the-request-started"
 args = ["-R", "-n", "-F", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "-y", "{dir}/php-fpm.conf"]
@@ -107,7 +107,7 @@ params = [["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/status"], ["SCRIPT_FILENA
 # its script (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`), so neither `Primary
 # script unknown` nor `Unable to open primary script` reaches the request's
 # `FCGI_STDERR`, where the same request with a session that reads writes
-# each (#1968). Each failing start destroys the session it read, so each
+# each. Each failing start destroys the session it read, so each
 # script is a line of its own. A third request, served by the child started
 # after the failed one ended, settles the log before the stop: without it the
 # master may take the stop before it reaps the child, and the log's lines
@@ -147,7 +147,7 @@ params = [["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/t.php"], ["SCRIPT_FILENAM
 # php reads `ffi.preload` in `MINIT` alone, which ran once in the master
 # under the master's ini, and its child lays the pool's value over the
 # running engine as the master value, so the child serves its requests and
-# `ini_get()` answers the pool's value (#1944).
+# `ini_get()` answers the pool's value.
 [[line]]
 name = "a-pool-s-failing-ffi-preload-is-not-an-engine-start-of-the-child"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -160,7 +160,7 @@ stop = "SIGTERM"
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
 
 # The lines a static pool of one child writes at `log_level = debug`,
-# started on a loopback port and sent `SIGQUIT` once ready (#1382, #1502).
+# started on a loopback port and sent `SIGQUIT` once ready.
 # The master sends its child `SIGQUIT` and, milliseconds later on its next
 # event, `SIGTERM` (`fpm_pctl_kill_all`); whether the idle child's soft quit
 # ends it with code 0 before the second signal kills it is the scheduler's
@@ -177,7 +177,7 @@ stop = "SIGQUIT"
 
 # A php.ini's `[HOST=]` table of the request's `SERVER_NAME`, lowered, and
 # its `[PATH=]` tables along the script's directory, set for that request
-# alone as `PHP_INI_SYSTEM`, served on the pool's one child (#1692).
+# alone as `PHP_INI_SYSTEM`, served on the pool's one child.
 [[line]]
 name = "a-request-s-host-and-directory-tables-are-set-for-it-alone"
 args = ["-R", "-c", "{dir}/php.ini", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -197,8 +197,8 @@ params = [["SCRIPT_FILENAME", "{dir}/www/t.php"], ["REQUEST_METHOD", "GET"], ["S
 # `accel_post_startup` for `opcache.file_cache_only` with no
 # `opcache.file_cache`. php-fpm's master ends there, before it reads its
 # configuration or binds a socket, under `-t` with no configuration there and
-# in the foreground over a pool that listens, which never says it is running
-# (#1943). `zend_accel_error` writes the time `asctime` prints and the
+# in the foreground over a pool that listens, which never says it is running.
+# `zend_accel_error` writes the time `asctime` prints and the
 # process's id before its message.
 [[line]]
 name = "post-startup-refused"
@@ -225,7 +225,7 @@ args = ["-n", "-t", "-y", "{dir}/owner.conf"]
 # process from `php_error_cb`, `exit(-2)` for the `E_CORE_ERROR` of a failed
 # `MINIT` (`Z/main/main.c:1505-1507`), before the host does anything of its
 # own: the diagnostics on stdout in php-fpm's `html_errors`, the
-# configuration `-t` asks to test never read (#1802).
+# configuration `-t` asks to test never read.
 [[line]]
 name = "startup-refused"
 args = ["-n", "-d", "ffi.preload=/nonexistent/startup-refused.h", "-t", "-y", "/nonexistent/php-fpm.conf"]
@@ -233,7 +233,7 @@ args = ["-n", "-d", "ffi.preload=/nonexistent/startup-refused.h", "-t", "-y", "/
 # `opcache.preload` named on the master's line: php runs it once, in the
 # master, inside `php_module_startup` before it reads its configuration, so
 # what it echoes goes to the master's stdout and it logs one pid; each of the
-# two children keeps what it declared and runs it no more (#2273).
+# two children keeps what it declared and runs it no more.
 [[line]]
 name = "a-preload-named-on-the-line-runs-once-in-the-master"
 args = ["-R", "-n", "-d", "opcache.preload={dir}/preload.php", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -254,7 +254,7 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["Q
 # `opcache.preload` in a pool's `php_admin_value`: php reads it at startup
 # alone, in the master, before the child lays its pool's values over the
 # started engine, so nothing is preloaded and `ini_get()` answers the pool's
-# value (#2273).
+# value.
 [[line]]
 name = "a-pool-s-preload-is-not-run"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -276,7 +276,7 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["Q
 # date's `on_modify` as it lays the pool's values over the started engine,
 # which refuses it with a warning that reaches neither a request nor the log,
 # so the first request shows nothing of it and `ini_get()` answers the
-# default (#2273).
+# default.
 [[line]]
 name = "a-pool-value-s-refusal-reaches-no-request"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -289,9 +289,9 @@ stop = "SIGTERM"
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
 
 # What a process a request execs holds of the files php opens for the
-# program (#2492), named by inode in the order of their fds: the request's
+# program, named by inode in the order of their fds: the request's
 # file, which `php_fopen_primary_script` opened before the program and the
-# scanner keeps listed through the shutdown functions (#2458), then
+# scanner keeps listed through the shutdown functions, then
 # `auto_prepend_file` from its compile through the program and the append
 # file, and `auto_append_file` while it runs, each opened with no
 # `O_CLOEXEC` and destroyed by `php_execute_script_ex` once the append file
@@ -331,7 +331,7 @@ params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 # `opened_path`, so `php_execute_script_ex` does not put it in
 # `EG(included_files)` before `auto_prepend_file`; `zend_execute_script`
 # does once the program has compiled (`Z/Zend/zend.c:1971-1974`), after the
-# prepend file (#2558). The prepend file and the program each print the
+# prepend file. The prepend file and the program each print the
 # table's names, in each of two requests.
 [[line]]
 name = "the-program-is-noted-as-it-compiles-after-the-prepend-file"
@@ -349,7 +349,7 @@ params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 # A request starts in the child's working directory, the pool's `chdir`
 # (`fpm_unix_init_child`), and `php_execute_script` enters the program's and
 # leaves it once the program has been served, so shutdown functions and
-# destructors run where the request started (#2748).
+# destructors run where the request started.
 [[line]]
 name = "a-request-enters-the-program-directory-and-leaves-it-before-shutdown"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -378,7 +378,7 @@ params = [["SCRIPT_FILENAME", "{dir}/www/t.php"], ["REQUEST_METHOD", "GET"]]
 # (`FCGI_GETENV`, `sapi_cgibin_getenv`), so each stops at its NUL, and
 # `security.limit_extensions` judges the file it names there; `$_SERVER`
 # registers each through `strlen` too (`cgi_php_load_env_var`), and
-# `getallheaders()` alone reads one whole (`sapi_add_request_header`) (#2757).
+# `getallheaders()` alone reads one whole (`sapi_add_request_header`).
 [[line]]
 name = "a-parameter-holding-a-nul-is-read-up-to-it"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -404,7 +404,7 @@ params = [["SCRIPT_FILENAME", "{dir}/a.txt\u0000.php"], ["REQUEST_METHOD", "GET"
 params = [["SCRIPT_FILENAME", "{dir}/run.php/x\u0000y"], ["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/run.php"], ["PATH_INFO", "/x\u0000y"]]
 
 # `user_ini.cache_ttl` is `PG(user_ini_cache_ttl)`, the quantity its
-# `OnUpdateLong` read (#2745): `-0x1` is -1, so the `.user.ini` read for the
+# `OnUpdateLong` read: `-0x1` is -1, so the `.user.ini` read for the
 # first request has expired by the second, which reads it again and sees the
 # first request's rewrite; C's `atoi` reads 0, and a second request in the
 # same second would take the cached entries.
@@ -427,7 +427,7 @@ params = [["SCRIPT_FILENAME", "{dir}/b.php"], ["REQUEST_METHOD", "GET"], ["DOCUM
 # to its end, takes its event out of the queue while the pipe is still open and only
 # then closes it (`fpm_stdio_child_said`, `fpm_event_del`), so terminating
 # writes no `kevent: unable to delete event` and no `epoll: unable to remove
-# fd` (#2793).
+# fd`.
 [[line]]
 name = "a-pool-catching-its-workers-output-terminates-without-an-event-error"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -446,7 +446,7 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 
-# A child's request starts on what its heap kept of the last (#2940):
+# A child's request starts on what its heap kept of the last:
 # `zend_mm_shutdown(full=0)` keeps the main chunk and caches the others
 # against an average it halves towards each request's peak, and
 # `memory_get_usage(true)` counts the cached chunks, so after a request that
@@ -468,8 +468,8 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 
-# A program's first line reads what opcache's regime laid down for it
-# (#3008): the request's path copies, `X-Powered-By` on the header list, on
+# A program's first line reads what opcache's regime laid down for it:
+# the request's path copies, `X-Powered-By` on the header list, on
 # a miss the program's file opened as a stream with the stream's
 # `opened_path` as its `included_files` key, and on the child's first
 # request the master's `CWDG(cwd)`, which the first request frees; so each
@@ -496,7 +496,7 @@ params = [["SCRIPT_FILENAME", "{dir}/two.php"], ["REQUEST_METHOD", "GET"]]
 params = [["SCRIPT_FILENAME", "{dir}/two.php"], ["REQUEST_METHOD", "GET"]]
 
 # The program's `zend_file_handle` stands to the request's end where the
-# scanner listed it (#3059): on a miss `open_file_for_scanning` puts it on
+# scanner listed it: on a miss `open_file_for_scanning` puts it on
 # `CG(open_files)`, `fpm_main` destroys no handle that is listed
 # (`Z/sapi/fpm/fpm/fpm_main.c:1905`), and `shutdown_executor`'s
 # `zend_stream_shutdown` frees `zend_stream_fixup`'s buffer, the list's
@@ -517,7 +517,7 @@ params = [["SCRIPT_FILENAME", "{dir}/end.php"], ["REQUEST_METHOD", "GET"]]
 params = [["SCRIPT_FILENAME", "{dir}/end.php"], ["REQUEST_METHOD", "GET"]]
 
 # The realpath cache is the child's, `CWDG(realpath_cache)` a process
-# global (#2941): the second request lists what the first entered, each
+# global: the second request lists what the first entered, each
 # entry's time to live counting from the first request, a second earlier,
 # and resolves its program's path from it.
 [[line]]
@@ -560,10 +560,10 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 # with `strerror` on the request's `FCGI_STDERR`, which
 # `catch_workers_output` logs (`Z/sapi/fpm/fpm/fpm_main.c:1879-1888`); its
 # warnings, named for `PHP Request Startup`, go only where `log_errors`
-# sends them (#4351); a directory, a FIFO or a device is resolved as a file
+# sends them; a directory, a FIFO or a device is resolved as a file
 # is and refused by the same check. A program within them runs. Each request
 # that shows its warnings carries `log_errors` itself, since a value a
-# request carries ends with that request (#4353, design §4.8).
+# request carries ends with that request (design §4.8).
 [[line]]
 name = "a-program-outside-the-pool-s-open-basedir-is-not-opened"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -608,8 +608,8 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 # a pipe, while `-i`'s page and `-h`'s usage go out past it with `write(2)`
 # (`sapi_cgibin_ub_write` with no request, under `php_output_activate`): so
 # a startup warning, the timezone's or the memory limit's, reaches the pipe
-# after the page's last line and after the usage, as `exit` flushes it
-# (#2899). The page past its first line and the usage's default prefix name
+# after the page's last line and after the usage, as `exit` flushes it.
+# The page past its first line and the usage's default prefix name
 # the build, which is not the oracle's.
 [[line]]
 name = "a-startup-warning-is-held-behind-the-page"
@@ -624,7 +624,7 @@ args = ["-n", "-h", "-d", "date.timezone=Foo/Bar"]
 # `sapi_cgi_read_post` takes what the length leaves as a `size_t`, which
 # wraps (`Z/sapi/fpm/fpm/fpm_main.c:433`), and reads `FCGI_STDIN`, or the
 # file `REQUEST_BODY_FILE` names, until it ends, held to `post_max_size` by
-# the readers that pull it (#3457). php's `fcgi_read` waits past the record
+# the readers that pull it. php's `fcgi_read` waits past the record
 # that ends the body until the web server shuts its half of the connection,
 # as these requests do.
 [[line]]

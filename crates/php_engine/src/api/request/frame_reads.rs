@@ -1,4 +1,4 @@
-//! Frame reads for extensions (#1827, design §4.3 seam 9): a frame read
+//! Frame reads for extensions (design §4.3 seam 9): a frame read
 //! through a [`FrameView`], borrowed from the request, so nothing can
 //! push, pop or switch a stack while it is held; and a frame kept past
 //! that borrow as a [`FrameId`], checked against the stacks that stand
@@ -10,7 +10,7 @@
 //! swaps the whole stack, so a position kept across either reads
 //! whichever frame stands there now. The view is php's `execute_data`
 //! for the span of a borrow, which a handler's [`Observed::frame`]
-//! hands out (#1776's ruling: a borrowed, frame-focused view, no check
+//! hands out (ruled 2026-10-04: a borrowed, frame-focused view, no check
 //! per read). The identity is php's `execute_data` pointer as an
 //! extension keeps it, which names one frame however its stack moves:
 //! a number the request gives a frame the first time one is asked of it
@@ -28,7 +28,7 @@
 //! extension asks.
 //!
 //! The walk php's `prev_execute_data` makes from a frame is
-//! [`FrameView::walk`] (#2027): every frame of the chain, the user frames
+//! [`FrameView::walk`]: every frame of the chain, the user frames
 //! [`FrameView::caller`] steps between and the frames php has where this
 //! engine has none, a native's call, a suspended generator's frame a
 //! resumption runs through, and a fiber's bottom frame, each a

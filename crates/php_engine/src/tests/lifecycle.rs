@@ -456,7 +456,7 @@ fn piped(program: &str) -> RequestDescription {
     }
 }
 
-/// An error from `rinit` is php's fatal inside `RINIT` (#1775): the
+/// An error from `rinit` is php's fatal inside `RINIT`: the
 /// throwable is rendered as php renders one thrown with no frame
 /// standing, at `[no active file]` on line zero, the extension after it
 /// is handed no start, the program is not served, and no extension is
@@ -643,7 +643,7 @@ fn starts_from_ini() -> Extension {
 /// start saw the startup ini alone, the `-d` value where one was given
 /// and the default where none was, and the master value every request
 /// starts with is the host's after, whether or not the entry has an
-/// `on_modify` (#1944, #2273). With a clone of the engine standing,
+/// `on_modify`. With a clone of the engine standing,
 /// nothing is laid.
 #[test]
 fn a_host_s_entries_are_laid_over_the_started_engine() {
@@ -732,7 +732,7 @@ fn the_built_in_server_ends_a_request_whose_start_failed() {
 /// that started is told both diagnostics, as php's `php_error_cb` is the
 /// error callback a link saved at `MINIT` while php starts; the refused
 /// extension's and the never-started one's are told nothing, since no
-/// `MINIT` of theirs installed them (#1953), so the sequence is read
+/// `MINIT` of theirs installed them, so the sequence is read
 /// without the error links and the links are read apart.
 #[test]
 fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_request() {
@@ -1147,7 +1147,7 @@ fn lived(builder: EngineBuilder) -> (String, Events) {
 }
 
 /// The tier declares its state as an extension declares it and is no
-/// extension (`jit-design.md` §2.3, §4; #2988): an engine bound to a
+/// extension (`jit-design.md` §2.3, §4): an engine bound to a
 /// tier whose extension is named `test_ext_3` lists the bundle's
 /// extensions and no other, in `get_loaded_extensions()` and `extension_loaded()`,
 /// while the tier's ini entry answers `ini_get`, and its request and

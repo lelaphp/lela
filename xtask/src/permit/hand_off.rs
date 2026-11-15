@@ -1,4 +1,4 @@
-//! The call handed to the build of the checkout it is in (#1047).
+//! The call handed to the build of the checkout it is in.
 //!
 //! The hook runs the checkout's `xtask`, and `permit` places a call in
 //! whichever checkout of the repository its file or its working directory
@@ -101,7 +101,7 @@ pub(super) fn hand_off(checkout: &Path, stdin: &str, adapter: Adapter) -> Result
 /// `args` asked of the build of `checkout`, `stdin` handed to it, over
 /// the walk the command hook takes: the stdout of the first candidate
 /// that exits 0, or the last one's stderr. What `done --hook` hands each
-/// checkout a session wrote in (#3619).
+/// checkout a session wrote in.
 pub(crate) fn walk(
     checkout: &Path,
     adapter: Adapter,

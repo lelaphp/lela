@@ -17,7 +17,7 @@
 //! `zend_test.observer.execute_internal` sets php's `zend_execute_internal`
 //! to a function that writes `<!-- internal enter f() -->` and serves
 //! the native. The engine's equivalent of that pointer for a tool is the
-//! observer of natives (#1770), so the switch is a second observer,
+//! observer of natives, so the switch is a second observer,
 //! [`execute_internal_init`], declared after the first: its begin
 //! handler is called after [`fcall_init`]'s, where php's `ZEND_DO_FCALL`
 //! calls `zend_execute_internal` after `ZEND_OBSERVER_FCALL_BEGIN`, and
@@ -26,7 +26,7 @@
 //! `zend_test.observer.show_opcode` writes the opcode a frame stands
 //! at, read through [`FrameView::opcode`], where the init, the begin and
 //! the end are written; `show_opcode_in_user_handler` names the opcodes
-//! the extension observes (design §7.1, #1824), declared as the engine
+//! the extension observes (design §7.1), declared as the engine
 //! starts, each written as it is told of one before its handler runs.
 
 use std::fmt::Write as _;
@@ -571,7 +571,7 @@ fn indent(depth: usize) -> Vec<u8> {
 /// ```
 ///
 /// A native's `DO_ICALL` and a frameless call that compiled code makes
-/// (`jit-design.md` §4.3, #3560) are begun and ended as the
+/// (`jit-design.md` §4.3) are begun and ended as the
 /// interpreter begins and ends them, a native whose return nothing reads
 /// and one that throws among them, under the force lane and where every
 /// guard fails once:

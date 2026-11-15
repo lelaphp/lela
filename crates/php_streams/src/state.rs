@@ -47,9 +47,9 @@ pub(crate) struct State {
     pub(crate) stream_ctx: Option<StreamCtx>,
     /// `FG(default_context)`, made on its first use
     /// ([`StreamCtx::default_ctx`]): the id of a resource the request's
-    /// list owns and closes with itself, as php's does (#2246), and no
+    /// list owns and closes with itself, as php's does, and no
     /// owner of it. Where php keeps it is not observable, so the layer
-    /// keeps it beside the `context` (#1777).
+    /// keeps it beside the `context`.
     pub(crate) default_context: Option<i64>,
     /// `PG(in_user_include)`: a user-space wrapper that is no URL wrapper
     /// is opening for an include under `allow_url_include=0`, so the
@@ -118,7 +118,7 @@ pub(crate) struct State {
 /// requests does not leave every connection it opened held open.
 const PERSISTENT_ENTRIES: usize = 1024;
 
-/// The layer's engine state (#1962): what it keeps across the engine's
+/// The layer's engine state: what it keeps across the engine's
 /// requests, built as the engine starts, its pool empty
 /// ([`StreamHooks::state`]), and reached through any of them
 /// ([`crate::api::layer::Face::layer_state`]). Engine state by type, as

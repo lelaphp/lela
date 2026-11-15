@@ -46,8 +46,8 @@ extern "C" fn on_term(signo: libc::c_int) {
 /// listens on nothing, so an `accept` the loop enters after its
 /// `in_shutdown` check fails at once where it would wait for the next
 /// connection. php-cgi's handler sets `in_shutdown` alone, and a stop handled
-/// between the check and `accept` is lost until a connection comes
-/// (#3869). The socket itself is kept open under another number until the
+/// between the check and `accept` is lost until a connection comes.
+/// The socket itself is kept open under another number until the
 /// process ends, as php-cgi keeps it, so a web server's connection is
 /// queued and reset at the exit as php-cgi's is, and a sibling child's
 /// `accept` is untouched. errno is left as the handler found it.

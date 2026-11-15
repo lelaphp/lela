@@ -607,8 +607,8 @@ impl Accepting {
 }
 
 /// One request (`Z/sapi/cgi/cgi_main.c:2207-2560` past the loop's
-/// accept): its variables, each read up to a NUL as a `char *` reads it
-/// (#2757), made a request as `init_request_info` makes it, its body
+/// accept): its variables, each read up to a NUL as a `char *` reads it,
+/// made a request as `init_request_info` makes it, its body
 /// read from its `FCGI_STDIN`, and the program served, or php's page
 /// where the file does not open. `None` where the request's start failed.
 fn serve_one(engine: &Engine, params: Environment, wire: &Arc<Mutex<Wire>>) -> Option<i32> {
@@ -736,7 +736,7 @@ mod tests {
 
     /// The pinned php-cgi 8.5.12's stderr, before its `Couldn't create`
     /// line, for `env -i php-cgi -n -b dns.google:19999`, a name whose two
-    /// A records the resolver answered (#4402).
+    /// A records the resolver answered.
     #[test]
     fn a_name_with_two_addresses_is_refused_with_php_s_line() {
         let two = [Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(8, 8, 4, 4)];

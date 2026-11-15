@@ -48,9 +48,8 @@ const BLOCKS: usize = 16;
 /// stack, before it is measured ([`Scope::measured`]): php's limit
 /// moves this far below it ([`php_compile::StackLimit::nested`]), so a
 /// scope costs a native's recursion below it none of php's budget. An
-/// optimised loop's frame is about 1,800 bytes (#3051); an unoptimised
-/// one's, with every handler in line, 193,200 bytes on macOS arm64
-/// (#3830).
+/// optimised loop's frame is about 1,800 bytes; an unoptimised
+/// one's, with every handler in line, 193,200 bytes on macOS arm64.
 const FIRST_SCOPE_CHARGE: usize = if cfg!(debug_assertions) {
     512 * 1024
 } else {
@@ -208,7 +207,7 @@ impl<'u> Scope<'u> {
     /// scope's number that serves another unit is not its own: a tier
     /// that answered the return out of the scope's frame went on in
     /// frames it pushed there, a recording begun at the return that
-    /// called on from the frame below (#3561).
+    /// called on from the frame below.
     #[inline]
     pub(super) fn own(
         self,

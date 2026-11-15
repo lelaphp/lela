@@ -1,5 +1,5 @@
 //! `php-linked`, the engine the witness and crosscheck lanes serve a
-//! snippet through (harness-design.md §8, revision 84; #2166). The harness
+//! snippet through (harness-design.md §8, revision 84). The harness
 //! once linked this engine into itself, so every edit under `crates/` or
 //! `ext/` relinked the binary every hook runs; now it starts this binary
 //! and hands it snippets.
@@ -8,7 +8,7 @@
 //! a request as files: `script_name`, the program's file, which the
 //! harness has written in `cwd`, the directory it is served in, and
 //! which is served as `php <script_name>` serves it there, compiled as a
-//! file (#2985); `source`, the bytes it holds, which the harness's own
+//! file; `source`, the bytes it holds, which the harness's own
 //! stand-ins read; `ini`, one
 //! `name=value` per line, laid over the CLI's own defaults as `-d` lays
 //! them; and `extended`, `1` where it is compiled with extended info as
@@ -19,11 +19,11 @@
 //! request entered one per line as the trace file holds them, into the
 //! same directory, and `abort` beside them where php's process would
 //! have ended on `abort()`, which this one, serving the next, does not
-//! (`php_sapi::abort_as_php`, #3515); then it answers `served` on a line
+//! (`php_sapi::abort_as_php`); then it answers `served` on a line
 //! of its own and reads the next. A request that panics leaves `panicked` instead, and
 //! the binary goes on to the next. End of input ends it. Before the
 //! first line it closes every fd beyond its three streams, so it
-//! holds no pipe of the harness's but its own two (#2550).
+//! holds no pipe of the harness's but its own two.
 //!
 //! A request that forks leaves a child that returns here after its
 //! request ends; the child ends then, with its request's status, and
@@ -47,7 +47,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     // An fd beyond its three streams is one the harness's other
-    // threads leaked into it, which it must not hold while idle (#2550).
+    // threads leaked into it, which it must not hold while idle.
     php_sapi_cli::close_inherited_fds();
     // Served on the stack the CLI serves on, as `php` serves them.
     php_sapi::main_on_request_stack(served)
@@ -76,7 +76,7 @@ fn served() -> i32 {
 }
 
 /// The CLI's environment, the process's: what the harness started this
-/// binary under, the recipe's (#1077).
+/// binary under, the recipe's.
 fn environ() -> Vec<(Vec<u8>, Vec<u8>)> {
     std::env::vars_os()
         .map(|(name, value)| (name.into_encoded_bytes(), value.into_encoded_bytes()))

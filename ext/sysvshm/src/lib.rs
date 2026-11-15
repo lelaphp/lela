@@ -3,7 +3,7 @@
 //! `standard`, whose serializer `sysvshm.c` calls through
 //! `ext/standard/php_var.h` (design §4.10); System V shared memory
 //! through `libc` in [`ffi`] alone, since nix binds none of it (design
-//! §7.2, #1323); one entry, `extension()`. The phpt subset is
+//! §7.2); one entry, `extension()`. The phpt subset is
 //! `php-src/ext/sysvshm/tests`, through `xtask phpt --subset`.
 //!
 //! Every native is `sysvshm.c`'s at the tag, in `sysvshm.stub.php`'s

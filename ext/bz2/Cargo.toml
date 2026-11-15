@@ -19,14 +19,14 @@ php_ext = { path = "../../crates/php_ext" }
 php_ext_standard = { path = "../standard" }
 # bzip2 is libbz2-rs-sys, libbzip2 ported to Rust and bound in `src/ffi/`
 # alone (`unsafe.homes`): it writes the oracle's libbz2 bytes at every
-# block size and work factor (design §7.2, revision 39; #1116).
+# block size and work factor (design §7.2, revision 39).
 libbz2-rs-sys = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # ext/standard for the files the leak sensor's requests write, and what it
-# requires, transitively (#1925).
+# requires, transitively.
 php_ext_standard = { path = "../standard" }
 php_ext_lexbor = { path = "../lexbor" }
 php_ext_uri = { path = "../uri" }

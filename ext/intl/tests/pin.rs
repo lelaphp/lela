@@ -2,9 +2,9 @@
 //! to versions made up for `pkg-config` to have found: the bump that
 //! re-freezes the closure on `icu4c@79` asks for 79, a key the reading
 //! does not know is no concern of it, a pin that names no one ICU keg is
-//! refused in the build's words (#4406), and on macOS an ICU of another
+//! refused in the build's words, and on macOS an ICU of another
 //! major than the pin's, or none, is refused naming the keg, where any
-//! other target links what it finds at or above php's floor (#4428).
+//! other target links what it finds at or above php's floor.
 
 #[path = "../build/pin.rs"]
 mod pin;

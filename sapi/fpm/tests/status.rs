@@ -1,5 +1,5 @@
-//! The full status page's process cells in the html, xml and json forms
-//! (#4350): every word the request carried, its method, its URI and
+//! The full status page's process cells in the html, xml and json forms:
+//! every word the request carried, its method, its URI and
 //! query, its Basic user and its `SCRIPT_FILENAME`, is written through
 //! the escape php's `fpm_status_handle_request` gives the URI in that
 //! form,

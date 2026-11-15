@@ -1,5 +1,5 @@
 //! PDO's persistent connections past the engine's pool's bound
-//! (ADR-0010's amendment of ADR-0005, #1798): an entry leaves the pool
+//! (ADR-0010's amendment of ADR-0005): an entry leaves the pool
 //! only through its extension, which closes it with the request that is
 //! ending, never by a drop no request sees. A connector of the test's own
 //! writes a line to a file each time PDO calls its `closer`, so the test
@@ -144,7 +144,7 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed_with_the_ending_reque
 
 /// A persistent connection found dead is closed through the connector's
 /// `closer` before the one opened in its place replaces it, as
-/// `zend_list_close` closes it in php's constructor (#1957): the one the
+/// `zend_list_close` closes it in php's constructor: the one the
 /// request holds, found dead by the second constructor, and the one the
 /// pool kept from the last request, found dead as it is taken out.
 #[test]
@@ -173,7 +173,7 @@ fn a_persistent_connection_found_dead_is_closed() {
 /// A persistent connection waiting in the engine's pool as the engine
 /// ends is closed through the connector's `closer` on the shutdown
 /// request, once, as php's `zend_shutdown` destroys `EG(persistent_list)`
-/// and `php_pdo_pdbh_dtor` reaches `dbh_free` (#1961): nothing is closed
+/// and `php_pdo_pdbh_dtor` reaches `dbh_free`: nothing is closed
 /// while the engine lives, and the one connection is closed by the drop
 /// of its last clone.
 #[test]

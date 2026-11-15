@@ -1,11 +1,10 @@
 //! What the operator sets on the line: where the server listens, clear
-//! and under TLS with its certificates (#2343), the document root, the
+//! and under TLS with its certificates, the document root, the
 //! request pool and its queue, the php ini the engine starts with, and
-//! the limits (#2337's Implementation Decisions, #2341):
-//! one table of Kestrel's defaults, each overridden by `--limit
-//! <name>=<value>`, and each applied by the connection side, the
-//! connection cap by its accept loop (#2342) and the shutdown timeout by
-//! the drain SIGTERM begins (#2344).
+//! the limits: one table of Kestrel's defaults, each overridden by
+//! `--limit <name>=<value>`, and each applied by the connection side, the
+//! connection cap by its accept loop and the shutdown timeout by
+//! the drain SIGTERM begins.
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -67,14 +66,14 @@ pub struct Options {
     /// `-n` and `-c`, which steer the ini file search.
     pub ini_search: Search,
     /// Where the access log goes, a line for each response; none is kept
-    /// without `--access-log` (#2345).
+    /// without `--access-log`.
     pub access_log: Option<Destination>,
     /// Where the error log goes: stderr without `--error-log`.
     pub error_log: Destination,
     pub limits: Limits,
 }
 
-/// The TLS listener (#2343): TLS 1.2 and 1.3, ALPN `http/1.1`, and the
+/// The TLS listener: TLS 1.2 and 1.3, ALPN `http/1.1`, and the
 /// certificate each handshake gets, chosen by the name it asks for
 /// (SNI). TLS is configured only with a certificate: a line that asks
 /// for the listener without one is refused, as Kestrel requires one
@@ -102,13 +101,13 @@ pub struct CertificateFiles {
 }
 
 /// What the document root shows that `php -S` serves and a server facing
-/// the internet does not (#2586).
+/// the internet does not.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Hidden {
     /// Answered 404 as though absent: a path with a segment that starts
     /// with `.`, but under `/.well-known/` (RFC 8615), a static file whose
     /// extension is one of PHP's source (`route::SOURCE_EXTENSIONS`), in
-    /// any case, and a static file with a path past it (#2642).
+    /// any case, and a static file with a path past it.
     #[default]
     Refused,
     /// Served by `php -S`'s rules exactly: `--serve-hidden`.
@@ -159,7 +158,7 @@ pub struct Limits {
     pub shutdown_timeout: Duration,
     /// How many log lines wait for the log thread, past which a line is
     /// dropped and counted rather than waited for, so a slow destination
-    /// never stalls a request: 4096 (#2345).
+    /// never stalls a request: 4096.
     pub log_lines: usize,
 }
 

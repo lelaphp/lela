@@ -13,7 +13,7 @@
 //!
 //! The library is the platform's zlib and not a pure-Rust deflate: php's
 //! tests observe the compressed bytes, which follow the linked zlib's
-//! algorithm, and on #950's measurement over eight inputs, every level,
+//! algorithm, and on a measurement over eight inputs, every level,
 //! strategy, window and memory level `deflate_init` takes (31,680 rows),
 //! the platform's zlib 1.2.12 wrote the oracle's bytes on every row,
 //! zlib-rs on 22,459 (its level 0 and `ZLIB_HUFFMAN_ONLY` alone whole)
@@ -40,9 +40,9 @@ mod output;
 mod throwables;
 
 /// The values php compiles in from `<zlib.h>`, read by `build.rs` off the
-/// header a C build finds, as php's `@cvalue` reads the macro at its build
-/// (#1974): after the library is upgraded without a rebuild, these keep
-/// the header's version as php's do.
+/// header a C build finds, as php's `@cvalue` reads the macro at its
+/// build: after the library is upgraded without a rebuild, these keep the
+/// header's version as php's do.
 mod header {
     include!(concat!(env!("OUT_DIR"), "/header.rs"));
 }

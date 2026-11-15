@@ -40,13 +40,13 @@ fn call(path: &Path) -> Call {
 
 /// An `allow-excused*.json` neighbour, the call an `unless_argv` lets
 /// through, while the tracked row carries none: a person has yet to paste
-/// it, and the row's own test holds it under the row as proposed (#3068).
+/// it, and the row's own test holds it under the row as proposed.
 fn unpasted(rule: &Rule, name: &str) -> bool {
     name.starts_with("allow-excused") && rule.predicate.unless_argv.is_none()
 }
 
-/// The manifest with the `git.pathspec` row #33 proposes, as the tracked
-/// file carries it or as the constructors build it.
+/// The manifest with the proposed `git.pathspec` row, as the tracked file
+/// carries it or as the constructors build it.
 fn with_the_pathspec_rule(mut manifest: Manifest) -> Manifest {
     if manifest.rule("git.pathspec").is_none() {
         let mut rule = Rule::named("git.pathspec", "");
@@ -71,10 +71,10 @@ fn bash(line: &str) -> Call {
     Call::parse(&call.to_string()).unwrap()
 }
 
-/// The `lanes.nightly-flags` row #3052 ruled and #3068 proposes, as a
-/// person would paste it: `--jit` passes on `xtask phpt` where `--subset`
-/// names one subset, and `--full`, `--jit` with no subset and `xtask
-/// bench --jit` stay denied.
+/// The proposed `lanes.nightly-flags` row, ruled 2026-10-20, as a person
+/// would paste it: `--jit` passes on `xtask phpt` where `--subset` names
+/// one subset, and `--full`, `--jit` with no subset and `xtask bench --jit`
+/// stay denied.
 const PROPOSED_NIGHTLY_FLAGS: &str = r#"
 tool = "Bash"
 deny_argv = ["--full", "--jit"]
@@ -84,8 +84,8 @@ text = "Nightly lanes run in CI only; run the per-crate subset, and the tier's `
 remedy = "`cargo xtask phpt --subset <crate>`, with `--jit` on one subset"
 "#;
 
-/// The `git.no-verify` row #1001 proposes: `with` names git's `commit` and
-/// not the word, and the global option that points the hooks elsewhere is
+/// The proposed `git.no-verify` row: `with` names git's `commit` and not
+/// the word, and the global option that points the hooks elsewhere is
 /// denied beside `-n` and `--no-verify`.
 const PROPOSED_NO_VERIFY: [&str; 4] = [
     "--no-verify",
@@ -95,7 +95,7 @@ const PROPOSED_NO_VERIFY: [&str; 4] = [
 ];
 
 /// A worktree carries the tracked manifest, so it is a workspace of its
-/// own by the one rule (`Call::workspace`, #57); it also has a `.git`, so
+/// own by the one rule (`Call::workspace`); it also has a `.git`, so
 /// it is the checkout its readings go to. This one is gitignored.
 fn lay_worktree(worktree: &Path) {
     std::fs::create_dir_all(worktree).unwrap();
@@ -164,7 +164,7 @@ fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
     // And a file places a call by itself, wherever the shell stands: an
     // edit in the checkout from a session in the worktree is the
     // checkout's, and one in the worktree asked of the worktree is the
-    // worktree's own (#1047).
+    // worktree's own.
     let across = Call::parse(
         &serde_json::json!({"tool_name": "Edit", "cwd": beside.to_str().unwrap(),
             "tool_input": {"file_path": root.join("oracle.toml").to_str().unwrap(),
@@ -218,8 +218,8 @@ fn hook_stdin(tool: &str, cwd: &Path, input: &serde_json::Value) -> String {
 /// A worktree laid before a `seams.toml` change carries rules no build of
 /// the checkout is compiled against, and each tree is judged by the rules
 /// it carries: the checkout's build hands a call there to the worktree's
-/// own, which judges it against its own tree, and returns its decision
-/// (#1047). A rule only the worktree's manifest carries fires on a write
+/// own, which judges it against its own tree, and returns its decision.
+/// A rule only the worktree's manifest carries fires on a write
 /// there and not on the same write in the checkout; the main loop's Bash
 /// call is placed by its working directory the same way, and a row the
 /// worktree words differently is denied in the worktree's words, while a
@@ -257,7 +257,7 @@ remedy = "write it in your own worktree"
         .write(&beside);
     // The checkout's dependency build, seeded by what `worktree add` seeds
     // it with, so a checkout whose `target/debug` is a link seeds a
-    // directory of the worktree's own (#4589); where the volume cannot
+    // directory of the worktree's own; where the volume cannot
     // clone, the build there starts cold.
     seed_build(&beside, workspace(), "debug").ok();
 
@@ -324,9 +324,9 @@ remedy = "write it in your own worktree"
 }
 
 /// A hand-off that does not run decides nothing, and nothing is allowed on
-/// its silence (#1047): the worktree here has no build to hand the call
+/// its silence: the worktree here has no build to hand the call
 /// to, so the call is unjudged, and the checkout's build denies it in its
-/// own words (#3619). Every candidate of that walk hands the call to the same
+/// own words. Every candidate of that walk hands the call to the same
 /// worktree, so it is the failure no rebuild repairs, in the worktree's
 /// store, naming the worktree's manifest.
 #[test]
@@ -346,7 +346,7 @@ fn a_hand_off_that_does_not_run_leaves_the_call_unjudged() {
             "content": "one\n"}),
     );
     // No rebuild judges it either, so the build says so in its own
-    // decision and exits 0, the walk ending here (#3619): a write no
+    // decision and exits 0, the walk ending here: a write no
     // judge saw is denied, naming the error's first line.
     let out = permit(&root, &stdin, &[]).ok();
     assert!(out.contains("\"deny\""), "{out}");
@@ -380,10 +380,10 @@ fn edit_of(file: &Path) -> Call {
     .unwrap()
 }
 
-/// The `ext.no-locks` row #1781 ruled, in the fixture that carries it word
-/// for word (#1888): permit denies the once type and the thread-local,
-/// each a write into an extension, and lets the neighbour through, whose
-/// prose names `thread_local` without invoking it. The thread-local is
+/// The `ext.no-locks` row ruled 2026-10-04, in the fixture that carries it
+/// word for word: permit denies the once type and the thread-local, each a
+/// write into an extension, and lets the neighbour through, whose prose
+/// names `thread_local` without invoking it. The thread-local is
 /// denied by `deny_macros` alone: under the same row without it, the type
 /// ban lets the write through. Once the tracked manifest carries the row,
 /// `ext.no-locks`' own fixture walk holds the rule as it holds it today.
@@ -418,8 +418,8 @@ fn the_ruled_no_locks_row_denies_a_once_type_and_a_thread_local_and_not_their_ne
 }
 
 /// A fixture without a manifest of its own is judged by the workspace's,
-/// as before #57: its directory is under the workspace and nothing
-/// between them carries a `seams.toml`.
+/// as every fixture once was: its directory is under the workspace and
+/// nothing between them carries a `seams.toml`.
 #[test]
 fn a_fixture_without_a_manifest_is_judged_by_the_workspaces() {
     let file = fixtures().join("rules/ext.no-locks/deny.json");
@@ -439,7 +439,7 @@ fn a_fixture_without_a_manifest_is_judged_by_the_workspaces() {
 }
 
 /// `permit --diff` and `done` apply the same resolution to a diff that
-/// touches a fixture source (#57): the diff judge resolves each file's
+/// touches a fixture source: the diff judge resolves each file's
 /// workspace as the hook does, so a source in a home of the fixture's
 /// manifest passes and one outside it is refused with the fixture's text.
 #[test]
@@ -477,7 +477,7 @@ fn diff_judges_a_fixture_source_by_the_fixture_manifest() {
     );
 }
 
-/// The label a rule does not judge (#341, harness-design.md ledger 52).
+/// The label a rule does not judge (harness-design.md ledger 52).
 /// `ticket.close` denies `gh issue close` so that nothing closes a ticket
 /// but the instrument that read its acceptance criteria; a chart sheet
 /// carries none, so the row names `frontier:chart` and the close of a
@@ -560,7 +560,7 @@ fn scratch(name: &str) -> Tree {
 /// The stdin `name` under `fixtures/hooks` records, with its `cwd` the
 /// scratch workspace `root` the test runs as the project directory: the
 /// hook's `cwd` is where the session stands and a relative `file_path`
-/// is read from there (#4430), and the checkout it was recorded in is
+/// is read from there, and the checkout it was recorded in is
 /// not the scratch one.
 fn recorded(name: &str, root: &Path) -> String {
     let text = std::fs::read_to_string(fixtures().join("hooks").join(name)).unwrap();
@@ -682,12 +682,12 @@ fn above_the_command_hook_a_denial_is_recorded_and_a_note_is_left_to_it() {
     assert_eq!(reading.status, Status::Fail);
 }
 
-/// #2734 as it happened: an agent's merge stands in main's checkout, and
+/// A refusal as it happened: an agent's merge stands in main's checkout, and
 /// its line aborting it there and starting a merge in its own worktree is
 /// judged by both adapters, the function hook's first. When the start was
 /// recorded at the call, that admission dropped the record before the
 /// command hook beneath judged the same call, which refused the abort.
-/// Whose the merge is, is whose the checkout is (#3621), which no
+/// Whose the merge is, is whose the checkout is, which no
 /// adapter writes: the owner's abort passes under both, and another
 /// session's is refused under both.
 #[test]
@@ -793,7 +793,7 @@ fn bench_measures_p99_against_the_bar_and_writes_a_reading() {
     );
 }
 
-/// The bench is a measurement, which owes no exit (harness-design.md §4.4, #61):
+/// The bench is a measurement, which owes no exit (harness-design.md §4.4):
 /// with the bar missed the exit is 0, the reading records `fail` and the
 /// numbers, and the verdict is printed for a person to read.
 #[test]
@@ -852,8 +852,7 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
         "the rule id is printed: {out}"
     );
     assert!(out.contains("ext/pcre/src/cache.rs"), "{out}");
-    // Recorded under pre-commit's own caller, never as an agent's call
-    // (#3619).
+    // Recorded under pre-commit's own caller, never as an agent's call.
     let reading = Store::of_workspace(&root)
         .read("permit", "pre-commit/ext.no-locks")
         .unwrap()
@@ -903,11 +902,12 @@ fn diff_from(root: &Path, session: Option<&str>) -> Ran {
     .go()
 }
 
-/// #3644 ruling 3: an agent's commit that stages a harness file is refused
-/// unless a steer reading covers what is staged, and the same staged file
-/// in a person's commit is a note. Steer's write is covered; an edit after
-/// it moves the staged blob from under the reading, and is refused again.
-/// A fixture's manifest is test data (ruling 2), and no harness file.
+/// Harness revision 185, ruling 3: an agent's commit that stages a harness
+/// file is refused unless a steer reading covers what is staged, and the
+/// same staged file in a person's commit is a note. Steer's write is
+/// covered; an edit after it moves the staged blob from under the reading,
+/// and is refused again. A fixture's manifest is test data (ruling 2), and
+/// no harness file.
 #[test]
 fn an_agent_s_commit_of_a_harness_file_no_steer_covers_is_refused() {
     let root = scratch("diff-agent");
@@ -918,7 +918,10 @@ fn an_agent_s_commit_of_a_harness_file_no_steer_covers_is_refused() {
     let ran = diff_from(&root, Some("an-agent"));
     assert_eq!(ran.code(), 1, "{ran}");
     assert!(
-        ran.stdout.contains(&format!("deny {pin}")) && ran.stdout.contains("#3644"),
+        ran.stdout.contains(&format!("deny {pin}"))
+            && ran
+                .stdout
+                .contains("no steer reading covers what is staged"),
         "{ran}"
     );
     assert_eq!(diff_from(&root, None).code(), 0, "a person's commit");
@@ -944,9 +947,9 @@ fn an_agent_s_commit_of_a_harness_file_no_steer_covers_is_refused() {
     assert!(!ran.stdout.contains(fixture), "{ran}");
 }
 
-/// #3644 ruling 2: an Edit of a fixture's manifest, test data, is judged
-/// by the checkout's manifest and goes through; the checkout's own
-/// manifest is still denied as `harness.self`.
+/// Harness revision 185, ruling 2: an Edit of a fixture's manifest, test
+/// data, is judged by the checkout's manifest and goes through; the
+/// checkout's own manifest is still denied as `harness.self`.
 #[test]
 fn an_edit_of_a_fixture_s_manifest_is_allowed_and_the_root_s_is_denied() {
     let root = scratch("fixture-manifest");
@@ -977,7 +980,7 @@ const BINARY: &[u8] = b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01\xff php_ext::__private\
 /// A staged binary file is judged by its path alone: `permit --diff`
 /// read every staged file as UTF-8 and refused the whole diff on one,
 /// "git wrote something that is not UTF-8", which kept t3468's stand-in
-/// php builds out of its fixture (#3458). The name its bytes spell is no
+/// php builds out of its fixture. The name its bytes spell is no
 /// denial, a denied text file beside it still refuses the commit, and a
 /// binary at a harness path is that path's note.
 #[test]
@@ -1026,7 +1029,7 @@ fn diff_judges_a_staged_binary_file_by_its_path_alone() {
 }
 
 /// A binary the merge takes whole from the merged branch is that
-/// branch's, as a text file is (#1312): a stand-in at a harness path the
+/// branch's, as a text file is: a stand-in at a harness path the
 /// branch committed is judged at the branch's own commits, so the merge
 /// carrying it notes nothing.
 #[test]
@@ -1118,7 +1121,7 @@ fn pre_tool_use_entries() -> Vec<(Vec<String>, serde_json::Value)> {
 /// The one command hooks.json declares for one `tool_name` at `PreToolUse`: the
 /// line the hook runs before every call of it. Two entries walk the same
 /// candidates and differ in what they do when none judges, so the `tool_name`
-/// picks the line (#16 items 2 and 5).
+/// picks the line (harness revision 13).
 fn pre_tool_use_command(tool: &str) -> String {
     let commands: Vec<String> = pre_tool_use_entries()
         .into_iter()
@@ -1174,12 +1177,12 @@ fn the_hook_leaves_room_for_the_rebuild_its_last_candidate_may_do() {
     }
 }
 
-/// The two adapters do not resolve the built binaries in one order (#16
-/// item 4): the command hook takes the release build first and the module
-/// beside it the debug one, so one stale build no longer silences both
-/// layers at once, which is how an hour of calls went unjudged. The
-/// candidate that closes each list is the same rebuild, so a tree in which
-/// every build is stale still ends in one place.
+/// The two adapters do not resolve the built binaries in one order
+/// (harness revision 13): the command hook takes the release build first
+/// and the module beside it the debug one, so one stale build no longer
+/// silences both layers at once, which is how an hour of calls went
+/// unjudged. The candidate that closes each list is the same rebuild, so a
+/// tree in which every build is stale still ends in one place.
 #[test]
 fn the_two_adapters_do_not_walk_the_built_binaries_in_one_order() {
     let command = pre_tool_use_command("Edit");
@@ -1328,7 +1331,7 @@ fn the_walk_is_the_same_for(tool: &str, call: &str) {
     assert!(out.contains(call), "the call reaches cargo");
 }
 
-/// Where the two entries part (#16 items 2 and 5): with every candidate
+/// Where the two entries part (harness revision 13): with every candidate
 /// refusing, an Edit or a Write is denied, since a write no judge saw does
 /// not proceed, and a Bash call is handed on, since an agent repairs a
 /// broken harness with Bash and denying all three deadlocks the repair. A
@@ -1367,7 +1370,7 @@ fn with_no_candidate_judging_a_write_is_denied_and_a_bash_call_is_handed_on() {
 
 // ------------------------------ the build against the manifest it judges by
 
-/// The manifest an earlier build was compiled against (#16): it parses
+/// The manifest an earlier build was compiled against: it parses
 /// under today's grammar and judges the same call differently, which an
 /// exit code cannot see.
 fn stale_manifest() -> String {
@@ -1396,7 +1399,7 @@ fn bash_call(command: &str) -> Call {
 /// permit's exit is 0 whatever it decides, so the refusal is the one thing
 /// it says with an exit: a build that would judge by rules it was not
 /// compiled against decides nothing, names both digests, and leaves the
-/// call to the next candidate (#16, harness-design.md §4.4). The call this
+/// call to the next candidate (harness-design.md §4.4). The call this
 /// one reads is denied by both manifests, and the refusal still stands: a
 /// decision that happens to agree is not a decision this build may make.
 #[test]
@@ -1425,12 +1428,12 @@ fn a_build_the_manifest_moved_under_refuses_to_judge_rather_than_judging_stale()
 }
 
 /// The refusal is a reading, so the store says what the judge did with the
-/// call where the facts already are; through the outage of #16 nothing
-/// said it. A build apart from the tree hands the call to the candidate
-/// that rebuilds, which judges it, so the reading is a skip that names
-/// where the call went and not a failure (#118): the store of the main
-/// checkout held 5687 such failures against 23 denials, and the one number
-/// a person wants was under them.
+/// call where the facts already are; through the outage of harness
+/// revision 11 nothing said it. A build apart from the tree hands the call
+/// to the candidate that rebuilds, which judges it, so the reading is a
+/// skip that names where the call went and not a failure: the store of the
+/// main checkout held 5687 such failures against 23 denials, and the one
+/// number a person wants was under them.
 #[test]
 fn the_refusal_that_hands_the_call_on_is_a_skip_that_names_the_next_candidate() {
     let root = scratch_with_a_stale_manifest("stale-reading");
@@ -1487,7 +1490,7 @@ fn permits_row(root: &Path, rule: &str) -> serde_json::Value {
         .clone()
 }
 
-/// The denominator (#3619): each call a rule judged is counted, whether or
+/// The denominator: each call a rule judged is counted, whether or
 /// not it found, so a rule's deny rate is a reading. A call the rule's tool
 /// does not name is not one it judged.
 #[test]
@@ -1508,8 +1511,8 @@ fn permit_counts_the_calls_each_rule_judged_beside_its_denials() {
     assert_eq!(row["denials"], 1, "{row}");
 }
 
-/// A run of calls handed on with none judged is the walk failing open
-/// (#3619): the hook passes a Bash call on when no candidate judges it, so
+/// A run of calls handed on with none judged is the walk failing open:
+/// the hook passes a Bash call on when no candidate judges it, so
 /// the third such call within a minute writes a failing reading; a call
 /// judged between them ends the run, and nothing fails.
 #[test]
@@ -1553,10 +1556,10 @@ fn a_burst_of_calls_handed_on_writes_a_failing_reading_and_a_judged_call_ends_it
 }
 
 /// A pin that parses but does not validate narrows the harness and does
-/// not blind it (#3618 ruling 4): a variant made against a closure the pin
-/// has moved past is a defect, so the pin refuses whoever asks for it,
-/// while permit judges by what loaded and notes the defect, `done` notes
-/// it and the session's facts list it.
+/// not blind it (harness revision 184): a variant made against a closure
+/// the pin has moved past is a defect, so the pin refuses whoever asks for
+/// it, while permit judges by what loaded and notes the defect, `done`
+/// notes it and the session's facts list it.
 #[test]
 fn a_pin_that_does_not_validate_refuses_only_what_reads_it() {
     let root = scratch("pin-defect");
@@ -1606,15 +1609,14 @@ fn a_pin_that_does_not_validate_refuses_only_what_reads_it() {
     );
 }
 
-/// The outage of #16 was the loud staleness: a manifest no build reads at
-/// all. It exited without judging, which the fallback walks, and every
-/// candidate walked to did the same, so the call proceeded unjudged and
-/// `status --section permits` said the judge was up for the hour it was
-/// down. That one stays a failure, since no rebuild repairs it (#118), and
-/// the build decides it in its own words (#3619). The
-/// manifest here is a fixture workspace's, the one place a build standing
-/// over the checkout it was compiled against still meets rules it cannot
-/// read (#57).
+/// The outage of harness revision 11 was the loud staleness: a manifest no
+/// build reads at all. It exited without judging, which the fallback walks,
+/// and every candidate walked to did the same, so the call proceeded
+/// unjudged and `status --section permits` said the judge was up for the
+/// hour it was down. That one stays a failure, since no rebuild repairs it,
+/// and the build decides it in its own words. The manifest here is a
+/// fixture workspace's, the one place a build standing over the checkout it
+/// was compiled against still meets rules it cannot read.
 #[test]
 fn a_manifest_no_candidate_can_read_is_a_failure_the_build_records() {
     let root = scratch("unjudged");
@@ -1636,7 +1638,7 @@ fn a_manifest_no_candidate_can_read_is_a_failure_the_build_records() {
     .to_string();
     // The write is denied in permit's own words, with the error's first
     // line, and the exit is 0: only a stale build exits non-zero, so the
-    // walk ends here and the call is recorded once (#3619).
+    // walk ends here and the call is recorded once.
     let out = permit(&root, &stdin, &[]).ok();
     assert!(out.contains("\"deny\""), "{out}");
     assert!(out.contains("seams.toml"), "{out}");
@@ -1667,9 +1669,10 @@ fn a_manifest_no_candidate_can_read_is_a_failure_the_build_records() {
     );
 }
 
-/// A denial is the other half of #118 and it does not move: a call a rule
-/// refuses is a failing reading under that rule, with the call and the
-/// rule's text on it, whatever the refusals beside it read as.
+/// A stale build that hands the call on is a skip; a denial is the other
+/// half and it does not move: a call a rule refuses is a failing reading
+/// under that rule, with the call and the rule's text on it, whatever the
+/// refusals beside it read as.
 #[test]
 fn a_denial_is_still_a_failing_reading_under_the_rule_that_denied_it() {
     let root = scratch("denial-reading");
@@ -1704,7 +1707,7 @@ fn a_build_over_the_manifest_it_was_compiled_against_judges_as_it_did() {
     }
 }
 
-/// The manifest with the two `ticket.close*` rows #28 proposes, as the
+/// The manifest with the two proposed `ticket.close*` rows, as the
 /// tracked file carries them or as the constructors build them.
 fn with_the_ticket_close_rules(mut manifest: Manifest) -> Manifest {
     if manifest.rule("ticket.close").is_none() {
@@ -1807,8 +1810,8 @@ fn edit_call(path: &str, old: &str, new: &str) -> Call {
     .unwrap()
 }
 
-/// What a call at the hook is measured against is the file it would change
-/// (#510): a write that adds an `exit=` is denied whatever the store holds,
+/// What a call at the hook is measured against is the file it would change:
+/// a write that adds an `exit=` is denied whatever the store holds,
 /// since the authoring the row refuses happens here, and one that leaves
 /// every pinned verdict where it stood adds none and is permitted with no
 /// reading behind it. The count decides and not the words, so a second copy
@@ -1849,10 +1852,9 @@ fn a_write_that_adds_an_exit_is_denied_and_one_that_adds_none_is_permitted() {
     .expect("a second copy of the pinned line is a line added");
     assert!(denied.contains(EXIT_AUTHORED), "{denied}");
 
-    // The shape #510 named: an edit beside a pinned verdict, in a file
-    // that carries one, adding another. The status is built from the
-    // number, as `block` builds it, so this file carries no fence line of
-    // its own for the row to read.
+    // An edit beside a pinned verdict, in a file that carries one, adding
+    // another. The status is built from the number, as `block` builds it,
+    // so this file carries no fence line of its own for the row to read.
     let status = 3;
     let fence = format!("/// ```expect exit={status}");
     let beside = edit_call(
@@ -1870,7 +1872,7 @@ fn a_write_that_adds_an_exit_is_denied_and_one_that_adds_none_is_permitted() {
 }
 
 /// A `deny_pattern` over a write is asked of the file the write leaves and
-/// not of the fragment it types (#2413): an edit whose `new_string` holds
+/// not of the fragment it types: an edit whose `new_string` holds
 /// no hit of its own can still finish one, a digit changed after `exit=`,
 /// and that is a status authored. A pattern over a block, which the
 /// fragment of an edit inside the block never holds whole, rests on the
@@ -1903,7 +1905,7 @@ fn an_exit_in_a_file_no_crate_row_names_is_denied() {
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
-/// this machine promised the binary (#38).
+/// this machine promised the binary.
 fn oracle_is_here() -> bool {
     let pin = Manifest::load(workspace()).unwrap().pin.unwrap();
     Promise::Oracle
@@ -1912,7 +1914,7 @@ fn oracle_is_here() -> bool {
         .is_some()
 }
 
-/// A merge commit displaces both its parents (#1312): a verdict the merged
+/// A merge commit displaces both its parents: a verdict the merged
 /// branch's `--accept` captured is the branch's, so `permit --diff` over
 /// the staged merge permits it with no witness reading over the merged
 /// tree, and a verdict the merge itself adds is still denied.
@@ -1949,7 +1951,7 @@ fn a_verdict_the_merged_branch_carried_is_the_branchs_and_not_the_merges() {
     assert!(out.contains(EXIT_AUTHORED), "{out}");
 }
 
-/// A merge displaces both parents whole (#2783): a capture fence the
+/// A merge displaces both parents whole: a capture fence the
 /// merged side carries is that side's, though the fence's own lines, its
 /// closing fence line among them, stand in the merge base too and a judge
 /// of the lines the side brought read the block as broken; a fence taken
@@ -2007,7 +2009,7 @@ fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits
 }
 
 /// A capture fence both parents inherit from the merge base stands once,
-/// not once per parent (#2783): a merge that writes a second copy of it
+/// not once per parent: a merge that writes a second copy of it
 /// adds one, and is denied.
 #[test]
 fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
@@ -2047,7 +2049,7 @@ fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
     assert!(out.contains("witness.capture-authored"), "{out}");
 }
 
-/// The evidence travels with the commits (#1448): a verdict a branch's
+/// The evidence travels with the commits: a verdict a branch's
 /// `--accept` captured, and the reading `witness` took over the branch's
 /// commit, stand on main after a merge that also moved the crate, so
 /// `done` over the merge reports no `witness.exit-authored`; the same
@@ -2119,7 +2121,7 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
     );
 }
 
-/// What `worktree land` carries is evidence in main (#3802): `_merge`'s
+/// What `worktree land` carries is evidence in main: `_merge`'s
 /// `witness` reading over the merged tree reaches main's store as a line
 /// of the log and an entry of the index, while main's file of the scope
 /// stays the reading main took over its tree before. `permit --diff` in
@@ -2200,7 +2202,7 @@ fn a_verdict_an_item_run_accepted_is_captured_and_one_typed_over_it_is_not() {
 }
 
 /// Each verdict is captured by whichever evidence covers it, not by one
-/// kind of evidence covering every verdict of the file (#3441): the old
+/// kind of evidence covering every verdict of the file: the old
 /// verdict stands in a commit `witness` measured, the new one in the
 /// record `--accept --item` wrote, and neither kind covers both, so the
 /// file is permitted only where the hits are read one by one, as
@@ -2319,7 +2321,7 @@ fn checkout(name: &str, ticket: Option<u32>) -> Tree {
 }
 
 /// A scratch checkout `the-owner` owns, as `xtask worktree add` records
-/// it (#3621).
+/// it.
 fn owned(name: &str) -> Tree {
     let dir = checkout(name, None);
     xtask::owner::record(&dir, &xtask::owner::SessionId::new("the-owner").unwrap()).unwrap();
@@ -2336,7 +2338,7 @@ fn operating(name: &str) -> Tree {
 }
 
 /// A scratch checkout and its merge worktree, `_merge` on `staging`
-/// inside it, as `xtask worktree queue` lays one beside a clone (#3622).
+/// inside it, as `xtask worktree queue` lays one beside a clone.
 fn staging(name: &str) -> (Tree, PathBuf) {
     let main = checkout(name, None);
     Repo::at(&main).git(&["worktree", "add", "-q", "-b", "staging", "_merge"]);
@@ -2344,14 +2346,14 @@ fn staging(name: &str) -> (Tree, PathBuf) {
     (main, merge)
 }
 
-/// #2991 and #3413 replayed (#3621): each call refused then, verbatim, a
-/// session's commit and its `git merge --abort` of the merge standing in
-/// the checkout it owned, a builder's worktree and main's checkout, now
-/// passes in a scratch checkout standing for that one, owned by that
-/// session with a merge standing in it; the same call from another
+/// Two incidents replayed (harness revision 179): each call refused then,
+/// verbatim, a session's commit and its `git merge --abort` of the merge
+/// standing in the checkout it owned, a builder's worktree and main's
+/// checkout, now passes in a scratch checkout standing for that one, owned
+/// by that session with a merge standing in it; the same call from another
 /// session is refused by `git.operation`. Who started the merge is
-/// recorded nowhere: `caffeinate` hid #2991's start from the hook, and
-/// #3413's start ran before the build that judged its commit.
+/// recorded nowhere: `caffeinate` hid the first's start from the hook, and
+/// the second's start ran before the build that judged its commit.
 #[test]
 fn the_owner_s_commit_and_abort_of_the_merge_in_its_checkout_pass() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -2414,7 +2416,7 @@ fn denied(manifest: &Manifest, root: &Path, line: &str) -> bool {
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).

@@ -1,9 +1,10 @@
 # php-cgi's own lines, each run by `xtask witness` under the pinned php-cgi
 # (oracle.toml's [sapi]) and then under this crate's, in one directory laid
 # afresh, and held equal: what a fence cannot carry, an ini of the line's
-# own (#1634), a file laid before the run, a startup that ends the process
-# (#1975, as #2468 ruled). No byte here is the oracle's; the oracle's run is
-# the expectation. The grammar is xtask/src/witness/host.rs's.
+# own, a file laid before the run, a startup that ends the process (harness
+# revision 110, as ruled 2026-10-09). No byte here is the oracle's; the
+# oracle's run is the expectation. The grammar is
+# xtask/src/witness/host.rs's.
 
 # `-i` is php-cgi's `php_print_info` in a request of its own
 # (`Z/sapi/cgi/cgi_main.c`, `case 'i'`), printed before `main` would open a
@@ -20,8 +21,8 @@ args = ["-n", "-i", "{dir}/missing.php"]
 # php-cgi reads its own `cgi.*` entries from the engine's ini, a php.ini's
 # value included, as `INI_BOOL` and `CGIG()` read them in php: a `-c` file's
 # `cgi.check_shebang_line=0` leaves a `#!` line in the output, and its
-# `cgi.redirect_status_env` names the variable the redirect check asks for
-# (#1693).
+# `cgi.redirect_status_env` names the variable the redirect check asks for.
+#
 [[line]]
 name = "ini-file-entries"
 args = ["-c", "{dir}/php.ini", "sb.php", "a=1"]
@@ -33,7 +34,7 @@ env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD =
 
 # A php.ini's `[HOST=]` table of the request's `SERVER_NAME`, lowered, and its
 # `[PATH=]` tables along the script's directory, set at `sapi_cgi_activate`
-# as `PHP_INI_SYSTEM`, so `ini_set` refuses them after (#1692).
+# as `PHP_INI_SYSTEM`, so `ini_set` refuses them after.
 [[line]]
 name = "ini-sections-host-and-directories"
 args = ["-c", "{dir}/php.ini"]
@@ -48,7 +49,7 @@ env = { SCRIPT_FILENAME = "{dir}/www/t.php", SERVER_NAME = "other" }
 # `accel_post_startup` for `opcache.file_cache_only` with no
 # `opcache.file_cache`. php ends the process there, before `main` reads its
 # line further, so the file named on the line is never opened and no head is
-# written (#1943). `zend_accel_error` writes the time `asctime` prints and the
+# written. `zend_accel_error` writes the time `asctime` prints and the
 # process's id before its message.
 [[line]]
 name = "post-startup-refused"
@@ -58,7 +59,7 @@ mask = [['(?m)^.{24} \(\d+\): ', '<asctime> (<pid>): ']]
 # The request `opcache.preload`'s file is served in sends no head:
 # `accel_finish_startup_preload` sets `SG(headers_sent)` and
 # `SG(request_info).no_headers` once it started, so what the file echoes
-# reaches stdout bare and its `header()` reaches no one (#1633).
+# reaches stdout bare and its `header()` reaches no one.
 [[line]]
 name = "preload-sends-no-head"
 args = ["-n", "-q", "-d", "opcache.enable=1", "-d", "opcache.preload={dir}/preload.php", "{dir}/main.php"]
@@ -69,8 +70,8 @@ args = ["-n", "-d", "opcache.enable=1", "-d", "opcache.preload={dir}/preload.php
 # `cgi.redirect_status_env` set to the empty string, by a php.ini or by `-d`,
 # names a variable no environment has, so a server's request is refused with
 # the Security Alert, as `CGIG(redirect_status_env)` set to `""` refuses it;
-# unset, the entry is `NULL` and `REDIRECT_STATUS` lets the request through
-# (#1698).
+# unset, the entry is `NULL` and `REDIRECT_STATUS` lets the request through.
+#
 [[line]]
 name = "redirect-status-env-empty-or-unset"
 args = ["-c", "{dir}/php.ini"]
@@ -82,14 +83,14 @@ args = ["-n", "-d", "cgi.redirect_status_env="]
 args = ["-n"]
 
 # A request whose start fails: an extension's `rinit` raises, which is php's
-# fatal inside `RINIT` (#1775). Session's, under `session.auto_start`, over a
+# fatal inside `RINIT`. Session's, under `session.auto_start`, over a
 # session file whose `DateTime` does not unserialize: the throwable is
 # rendered as the uncaught fatal with no frame standing, session's warning
 # that the data did not decode follows it, and php-cgi's `main` returns
 # `FAILURE` where `php_request_startup` failed
 # (`Z/sapi/cgi/cgi_main.c:2460-2467`), the program never run and no
 # request-end phase served, so the session's file, destroyed as the data
-# failed, is not written again (#1879).
+# failed, is not written again.
 [[line]]
 name = "start-failed-ends-before-the-program"
 args = ["-n", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "{dir}/t.php"]
@@ -125,7 +126,7 @@ files = { "t.php" = "<?php echo \"ran\\n\";", "sess_t1879" = "x|O:8:\"DateTime\"
 # missing script writes what the failure wrote under a head with no
 # `Status:` line, and never `No input file specified.`; a server's request
 # with no path translated carries the 404 `init_request_info` set before the
-# start, and nothing more (#2272).
+# start, and nothing more.
 [[line]]
 name = "start-failed-over-a-missing-script"
 args = ["-n", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "{dir}/missing.php"]
@@ -143,7 +144,7 @@ files = { "t.php" = "<?php echo \"ran\\n\";", "sess_t1879" = "x|O:8:\"DateTime\"
 # process from `php_error_cb`, `exit(-2)` for the `E_CORE_ERROR` of a failed
 # `MINIT` (`Z/main/main.c:1505-1507`), before the host does anything of its
 # own: the diagnostics on stdout in php-cgi's `html_errors`, no head before
-# them, the file named on the line never opened (#1802). `-h` is answered
+# them, the file named on the line never opened. `-h` is answered
 # after php has started, so the refusal stands in its place.
 [[line]]
 name = "startup-refused"
@@ -156,7 +157,7 @@ args = ["-n", "-d", "ffi.preload=/nonexistent/startup-refused.h", "-h"]
 # php.ini's `[PATH=]` tables as `PHP_INI_PERDIR` at the htaccess stage: a
 # deeper file's value wins, a `[PATH=]` entry is not overridden, a
 # `PHP_INI_SYSTEM` entry is refused, and a `PHP_INI_ALL` one still changes at
-# runtime (#1699).
+# runtime.
 [[line]]
 name = "user-ini-from-the-root-down"
 args = ["-c", "{dir}/php.ini"]
@@ -174,7 +175,7 @@ env = { SCRIPT_FILENAME = "{dir}/out/t.php" }
 # relative or whole, and leaves it once the program has been served, so
 # shutdown functions and destructors run where the request started; `-C` is
 # `SAPI_OPTION_NO_CHDIR` (`Z/sapi/cgi/cgi_main.c:2304`), and the program is
-# served where the process stands (#2748).
+# served where the process stands.
 [[line]]
 name = "a-request-enters-the-program-directory-and-leaves-it-before-shutdown"
 args = ["-n", "www/t.php"]
@@ -201,7 +202,7 @@ env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD =
 # `opened_path`, so `php_execute_script_ex` does not put it in
 # `EG(included_files)` before `auto_prepend_file`; `zend_execute_script`
 # does once the program has compiled (`Z/Zend/zend.c:1971-1974`), after the
-# prepend file (#2558). The prepend file and the program each print the
+# prepend file. The prepend file and the program each print the
 # table's names.
 [[line]]
 name = "the-program-is-noted-as-it-compiles-after-the-prepend-file"
@@ -219,7 +220,7 @@ args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "{dir}/t.php"]
 # `PHP Request Startup`, and leaves `errno` `EPERM`: not `EACCES`, so the
 # page is `No input file specified.` with a 404 (`Z/sapi/cgi/cgi_main.c:2478`),
 # and `main` returns `FAILURE`, under `-l` and `-s` too, by the path on the
-# line or a server's `SCRIPT_FILENAME` (#4351); a directory, a FIFO or a
+# line or a server's `SCRIPT_FILENAME`; a directory, a FIFO or a
 # device is resolved as a file is and refused by the same check, and a link
 # by the file it resolves to. A program within them runs.
 [[line]]
@@ -268,7 +269,7 @@ params = [["SCRIPT_FILENAME", "{dir}/base/in.php"], ["REQUEST_METHOD", "GET"]]
 # socket bound where the switch names, each request's variables read from its
 # `FCGI_PARAMS` as `init_request_info` reads them, its body from its
 # `FCGI_STDIN`, and a file that does not open answered with php's page; the
-# process serves until it is stopped (#2792).
+# process serves until it is stopped.
 [[line]]
 name = "fastcgi-serves-requests-on-its-port"
 args = ["-n", "-b", "127.0.0.1:{port}"]
@@ -284,8 +285,8 @@ body = "a=1&b=2"
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/missing.php"], ["REQUEST_METHOD", "GET"]]
 
-# A FastCGI parameter holding a NUL is read up to it, as php-fpm reads one
-# (#2757): `init_request_info` and the loop read each through a `char *`, and
+# A FastCGI parameter holding a NUL is read up to it, as php-fpm reads one:
+# `init_request_info` and the loop read each through a `char *`, and
 # `$_SERVER` registers each through `strlen`.
 [[line]]
 name = "fastcgi-a-parameter-holding-a-nul-is-read-up-to-it"
@@ -323,8 +324,8 @@ env = { PHP_FCGI_CHILDREN = "", PHP_FCGI_MAX_REQUESTS = "-2" }
 # `PHP_FCGI_MAX_REQUESTS` is: each word that is no address is said as
 # `fcgi_log` says it, on stderr with no newline after it, the empty word
 # between two commas among them, and a list that names no address is said
-# once more (`Z/main/fastcgi.c:793`, `:800`). A Unix socket reads no list
-# (#4398). The list set but empty is held by tests/disallowed.rs, since an
+# once more (`Z/main/fastcgi.c:793`, `:800`). A Unix socket reads no list.
+# The list set but empty is held by tests/disallowed.rs, since an
 # empty value here takes the variable out.
 [[line]]
 name = "fastcgi-a-wrong-allowed-address-is-said"
@@ -369,7 +370,7 @@ params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 # A `-b` address `fcgi_listen` cannot bind or listen on is said twice:
 # `fcgi_listen`'s `Cannot bind/listen socket - [<errno>] <strerror>.`
 # (`Z/main/fastcgi.c:756`), then cgi_main's `Couldn't create FastCGI listen
-# socket on port <address>`, and `FAILURE` (#3860): an address the host
+# socket on port <address>`, and `FAILURE`: an address the host
 # cannot assign, and a Unix socket in a directory that does not exist.
 [[line]]
 name = "fastcgi-an-address-that-cannot-be-bound-is-said-before-the-refusal"
@@ -379,7 +380,7 @@ args = ["-n", "-b", "{dir}/missing/php.sock"]
 
 # A Unix socket path `sun_path` cannot hold with its NUL, of its length or
 # more, is refused before a socket is made with `Listening socket's path
-# name is too long.` (`Z/main/fastcgi.c:733`, #3860): one far past it, and
+# name is too long.` (`Z/main/fastcgi.c:733`): one far past it, and
 # one of exactly 104 bytes, `sun_path`'s length on macOS.
 [[line]]
 name = "fastcgi-a-unix-socket-path-past-sun-path-is-refused"
@@ -388,7 +389,7 @@ args = ["-n", "-b", "{dir}/a-socket-path-far-past-what-sun-path-holds-xxxxxxxxxx
 args = ["-n", "-b", "/tmp/a-path-of-exactly-sun-path-s-length-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
 
 # A Unix socket's path is unlinked before the socket is made (`unlink(path)`,
-# `Z/main/fastcgi.c:744`, #3866): a file left at the path, as a run that was
+# `Z/main/fastcgi.c:744`): a file left at the path, as a run that was
 # killed leaves its socket, is replaced by the socket bound, which serves, and
 # no regular file stands at the path after.
 [[line]]
@@ -401,8 +402,8 @@ stop = "SIGTERM"
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 
-# A `-b` port is read into `fcgi_listen`'s `short` (`Z/main/fastcgi.c:660`,
-# #3867), and `65536`'s low 16 bits are 0, which is no port: the whole
+# A `-b` port is read into `fcgi_listen`'s `short` (`Z/main/fastcgi.c:660`),
+# and `65536`'s low 16 bits are 0, which is no port: the whole
 # address names a Unix socket in the directory the process starts in, which
 # serves.
 [[line]]
@@ -417,7 +418,7 @@ params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 
 # A `-b` host is TCP's only while it is shorter than `MAXPATHLEN`, 1024
 # bytes on macOS, as `fcgi_listen`'s `(s-path) < MAXPATHLEN` judges it
-# (`Z/main/fastcgi.c:661`, #3882): a host of exactly 1024 bytes makes the
+# (`Z/main/fastcgi.c:661`): a host of exactly 1024 bytes makes the
 # whole address a Unix socket's path, which `sun_path` refuses as too long,
 # and one of 1023 bytes stays a host, longer than `MAXFQDNLEN`, which is
 # refused as a name that does not resolve and never looked up.
@@ -428,7 +429,7 @@ args = ["-n", "-b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 args = ["-n", "-b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:9000"]
 
 # A `-b` host that is no dotted address is looked up, and a name with one
-# IPv4 address binds it (`Z/main/fastcgi.c:684-699`, #4402): `localhost`,
+# IPv4 address binds it (`Z/main/fastcgi.c:684-699`): `localhost`,
 # which the hosts file answers with 127.0.0.1 alone. A name with more than
 # one is refused, which src/fastcgi.rs's tests hold, since no name answers
 # two without the network.
@@ -443,7 +444,7 @@ stop = "SIGTERM"
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 
 # A bare port, and a host that starts with `*`, bind every address, before
-# any lookup (`Z/main/fastcgi.c:666-682`, #4402).
+# any lookup (`Z/main/fastcgi.c:666-682`).
 [[line]]
 name = "fastcgi-a-bare-port-binds-every-address"
 args = ["-n", "-b", "{port}"]
@@ -471,7 +472,7 @@ params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 # them, where the request's end flushes stdout (`sapi_cgi_deactivate`), or
 # where the program's `flush()` does (`sapi_cgi_flush`). The usage and a
 # refused redirect's alert, written with no request started, are buffered
-# behind it, and `-a`'s line is flushed with it (#2899).
+# behind it, and `-a`'s line is flushed with it.
 [[line]]
 name = "a-startup-warning-is-held-behind-the-body"
 args = ["-n", "-d", "date.timezone=Foo/Bar", "b.php"]
@@ -492,7 +493,7 @@ env = { GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME =
 # word's, `Z/sapi/cgi/cgi_main.c:2315, 2404`), and it is freed before the
 # request shuts down, with the program's handle, which php-cgi destroys
 # whether or not the scanner listed it (`:2558`): the last line and the
-# shutdown function read the same under both (#3059).
+# shutdown function read the same under both.
 [[line]]
 name = "the-program-s-path-copy-and-handle-are-freed-before-the-shutdown-functions"
 args = ["-n", "-d", "opcache.file_update_protection=0", "end.php"]
@@ -508,7 +509,7 @@ env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD =
 # `php_request_shutdown` runs: a head not yet sent is never sent, and what a
 # buffer held is dropped. The engine ends the request there
 # (`Ending::Terminated`) and a one-request host writes no head after it
-# (#3435, trace:hard-limit-ends-request).
+# (trace:hard-limit-ends-request).
 [[line]]
 name = "hard-limit-sends-no-head"
 args = ["-n", "-d", "memory_limit=128M", "{dir}/t.php"]
@@ -518,7 +519,7 @@ files = { "t.php" = "<?php\nob_start();\nheader('X-A: 1');\necho \"body\\n\";\nh
 # is sent, `sapi_send_headers`, which the request's output deactivation
 # reaches in `php_request_shutdown`; the hard limit's `_exit(137)` comes
 # before it, so the callback never runs and what it would write is never
-# written (#3435).
+# written (trace:hard-limit-ends-request).
 [[line]]
 name = "hard-limit-runs-no-header-callback"
 args = ["-n", "-d", "memory_limit=128M", "{dir}/t.php"]
@@ -531,7 +532,7 @@ files = { "t.php" = "<?php\nheader_register_callback(function () { echo \"cb\\n\
 # (`Z/sapi/cgi/cgi_main.c:483, 509`). The readers that pull it hold it to
 # `post_max_size`: the form reader stops a block past it with php's
 # warning (`Z/main/SAPI.c:287`) and `php://input` reads the rest, and the
-# multipart reader reads its fields as from a declared length (#3457).
+# multipart reader reads its fields as from a declared length.
 # Under FastCGI php's `fcgi_read` goes on past the empty record that ends
 # the body, to the next record's header, and so waits until the web server
 # shuts its half of the connection, as these requests do: the engine's
@@ -574,7 +575,7 @@ body = "--b\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nhello\r\n--b--\
 shut = true
 
 # What a body costs the program's `memory_get_usage()` at its first line,
-# as php-cgi 8.5.12 counts it (#3439): the form reader buffers the body in
+# as php-cgi 8.5.12 counts it: the form reader buffers the body in
 # a temp stream, `php_stream_temp_create_ex(TEMP_STREAM_DEFAULT,
 # SAPI_POST_BLOCK_SIZE, PG(upload_tmp_dir))` (`Z/main/SAPI.c:264`), two
 # streams and two resources on the request's heap until its end, so the
@@ -615,7 +616,7 @@ files = { "m.php" = "<?php echo memory_get_usage(), \"\\n\";\n" }
 stdin = "x=hello"
 
 # And what a form `POST` peaks at by the program's first line, as php-cgi
-# 8.5.12 counts it (#3793): not the form's reading, whose temp stream and
+# 8.5.12 counts it: not the form's reading, whose temp stream and
 # variables stand below it, but opcache's compile of the program, whose
 # `zend_optimize_script` lays its arena, `zend_arena_create(64 * 1024)`
 # (`Z/Zend/Optimizer/zend_optimizer.c:1606`), beside the op arrays it
@@ -633,14 +634,14 @@ env = { REQUEST_METHOD = "GET", CONTENT_TYPE = "", CONTENT_LENGTH = "" }
 
 # And what a `GET` reads at the program's first line where php-cgi 8.5.12
 # compiles the program without persisting it, as it does a file written
-# within `opcache.file_update_protection` (#3805): `zend_compile` lays
+# within `opcache.file_update_protection`: `zend_compile` lays
 # `CG(ast_arena)`, the scanner's strings and stacks, the main op array, its
 # oplines and literals and `FC(seen_symbols)`, and `pass_two` packs the
 # oplines beside them, so the peak is that window's and the usage is the
 # main op array's blocks after it, its filename the string
 # `EG(included_files)` keeps. The second program declares a class and a
 # function before any statement, which php compiles at their place, as the
-# window lays them (#3822). The protection here is long enough that the
+# window lays them. The protection here is long enough that the
 # file laid before the run is new to both binaries.
 [[line]]
 name = "a-get-of-a-program-php-cgi-compiles-without-persisting-it"
@@ -652,7 +653,7 @@ args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/d.php" }
 
 # The declarations of such a program laid at their place among its
-# statements (#3822): php compiles a function where it stands, with the
+# statements: php compiles a function where it stands, with the
 # variable and the constant the statement before it laid standing in the
 # main op array, and a closure inside a method while the method's oplines
 # stand, so the peak is the closure's `pass_two` beside the method's
@@ -668,7 +669,7 @@ files = { "a.php" = "<?php $abcdef = 1; function f() {} class D { function m() {
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/h.php" }
 
-# An arrow function of such a program that reads a variable (#3837): php's
+# An arrow function of such a program that reads a variable: php's
 # compile lays `find_implicit_binds`' table at the first name it adds and
 # keeps it while the arrow function's variables grow to its parameters and
 # binds, giving it back before the body, so the peak is that table beside
@@ -683,7 +684,7 @@ files = { "a.php" = "<?php $f = fn () => $b; echo memory_get_usage(), \" \", mem
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/f.php" }
 
-# A loop or `switch` of such a program (#3823): php's compile grows
+# A loop or `switch` of such a program: php's compile grows
 # `CG(context).brk_cont_array` an element at each, which stands through
 # the op array's `pass_two` and is freed by `zend_oparray_context_end`, so
 # the first program's peak is that block's 24 bytes above the window's.
@@ -702,8 +703,8 @@ env = { SCRIPT_FILENAME = "{dir}/b.php" }
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/c.php" }
 
-# A constant php's compile makes after a declaration of such a program
-# (#3836): the `[1, 2]` array `zend_try_ct_eval_array` makes, a call's
+# A constant php's compile makes after a declaration of such a program:
+# the `[1, 2]` array `zend_try_ct_eval_array` makes, a call's
 # names in a namespace (`zend_add_ns_func_name_literal`) and a string
 # `zend_compile_binary_op` folds, each after the function's `pass_two`, so
 # none stands at the compile's peak; and a namespaced function's key,
@@ -720,8 +721,8 @@ env = { SCRIPT_FILENAME = "{dir}/b.php" }
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/c.php" }
 
-# A class's methods' table of such a program, laid at its first method
-# (#3838): `zend_initialize_class_data` lays no table's data, and
+# A class's methods' table of such a program, laid at its first method:
+# `zend_initialize_class_data` lays no table's data, and
 # `zend_begin_method_decl` lays `ce->function_table` as it adds the first
 # method's row, so a hook written above the method compiles, its
 # `pass_two` among it, without the table standing. The second program
@@ -735,7 +736,7 @@ files = { "a.php" = "<?php class C { public $p { set { } } function m() {} } ech
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/b.php" }
 
-# A method's key of such a program, laid as the method begins (#3900):
+# A method's key of such a program, laid as the method begins:
 # `zend_begin_method_decl` lowers `doIt` to `doit` (`zend_string_tolower`),
 # a string of its own where opcache's table holds no such bytes, which
 # stands through the method's `pass_two`, as a function's key does.
@@ -748,7 +749,7 @@ files = { "a.php" = "<?php class C { function doIt() {} } echo memory_get_usage(
 args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/b.php" }
 
-# A class of such a program that implements an interface (#3901), which
+# A class of such a program that implements an interface, which
 # no top-level class early-binds: `zend_compile_implements` lays its
 # `interface_names` and lowers `I` as the class begins, both standing
 # through the compile's peak until the link gives them back, and its
@@ -768,7 +769,7 @@ args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/c.php" }
 
 # A class of such a program that writes `implements Stringable` beside its
-# `__toString` (#3924): `zend_compile_implements` lays the name and lowers
+# `__toString`: `zend_compile_implements` lays the name and lowers
 # it as the class begins, and `add_stringable_interface` finds it and adds
 # none, where a class that writes none has both of `Stringable`'s strings
 # laid as `__toString` begins. The unit says which (`stringable_added`).
@@ -785,7 +786,7 @@ args = ["-n", "-d", "opcache.file_update_protection=3600"]
 env = { SCRIPT_FILENAME = "{dir}/c.php" }
 
 # A class's constants' and properties' tables of such a program, each laid
-# at its first row (#3907): `zend_initialize_class_data` lays neither's
+# at its first row: `zend_initialize_class_data` lays neither's
 # data, and `zend_declare_typed_class_constant` and
 # `zend_declare_typed_property` lay `ce->constants_table` and
 # `ce->properties_info`, and the default slot, where the member is

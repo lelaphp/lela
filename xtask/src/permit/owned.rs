@@ -1,5 +1,5 @@
-//! The checkouts a writing call is placed in, and whose each is (#3618
-//! M1, #3621): what a rule scoped `where = "owned"` refuses, a write in
+//! The checkouts a writing call is placed in, and whose each is (harness
+//! revision 179): what a rule scoped `where = "owned"` refuses, a write in
 //! a checkout another session owns, and what one scoped `where =
 //! "operating"` refuses, a step of an operation in progress there. The
 //! owner is the checkout's record ([`crate::owner`]); the session is the
@@ -10,13 +10,12 @@
 //! is refused there.
 //!
 //! An `Edit` or a `Write` is placed by its file. For `where = "owned"` a
-//! shell line is placed where each of its writes lands ([`writes::of`],
-//! #4250): a listed program by what it names, any other where it runs or
+//! shell line is placed where each of its writes lands ([`writes::of`]):
+//! a listed program by what it names, any other where it runs or
 //! reaches, and a redirection on its target, read where its own command's
 //! shell stands. For `where = "operating"` a command the rule fires on is
 //! placed where git reads its repository, in the git dir `GIT_DIR` or
-//! `--git-dir` names in place of where it runs ([`Places::Repositories`],
-//! #3271).
+//! `--git-dir` names in place of where it runs ([`Places::Repositories`]).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -169,8 +168,8 @@ mod tests {
         .unwrap()
     }
 
-    /// #3621: another session's write in an owned checkout is placed there
-    /// and named with its owner, by an edit's file, a command that
+    /// Another session's write in an owned checkout is placed there and
+    /// named with its owner, by an edit's file, a command that
     /// changes the checkout, or a redirection into it, from wherever the
     /// shell stands; its reads, its writes elsewhere and the owner's own
     /// are not, nor a call that names no session.

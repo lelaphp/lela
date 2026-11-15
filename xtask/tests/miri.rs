@@ -1,7 +1,7 @@
 //! The negative control of `xtask miri` (harness-design.md §4.1, §7's Miri
-//! row; #1916): a crate whose test reads a box after freeing it fails the
+//! row): a crate whose test reads a box after freeing it fails the
 //! instrument as undefined behaviour, and the test beside it still runs,
-//! each in a Miri process of its own (#4117). Where the pinned nightly or
+//! each in a Miri process of its own. Where the pinned nightly or
 //! cargo-nextest is not installed, the reading is a skip naming the
 //! command that installs it, and the control returns; CI's Miri job
 //! installs both.

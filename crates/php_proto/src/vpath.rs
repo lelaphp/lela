@@ -1,8 +1,8 @@
 //! The built-in server's path rules (`Z/sapi/cli/php_cli_server.c`), which
 //! `php -S` finds a request's file by and the production server routes a
-//! request by where no segment of its path ends in `.php` (#2346, #2588,
-//! #2637); where one does, the production server splits it as nginx's
-//! recipe does instead ([`split_at_program`], #2693). The path, made
+//! request by where no segment of its path ends in `.php`;
+//! where one does, the production server splits it as nginx's
+//! recipe does instead ([`split_at_program`]). The path, made
 //! [`normalize_vpath`](crate::http::normalize_vpath)'s, translated under
 //! the document root as `php_cli_server_request_translate_vpath`
 //! translates it, its extension read as `php_cli_server_request_ctor`
@@ -50,7 +50,7 @@ impl Translated {
 /// (`php_cli_server_begin_send_static`); a program's request starts and
 /// its program is never served (`php_cli_server_dispatch_script`), so it
 /// ends with the head the request has, a 200's, and no body, while the
-/// server logs the 400 of the page it built and never sent (#2695).
+/// server logs the 400 of the page it built and never sent.
 #[must_use]
 pub fn holds_nul(path_translated: &[u8]) -> bool {
     path_translated.contains(&0)
@@ -121,7 +121,7 @@ pub fn translate(vpath: &[u8], root: &[u8], files: &dyn Files) -> Option<Transla
 /// leaves it, so the pattern's `.+?` has its one byte before the `.php`.
 /// The production server splits by it where `php -S` walks
 /// ([`translate`]), whatever is on the disk, so a directory named `*.php`
-/// is the program's path and no program is found in it (#2693). A path
+/// is the program's path and no program is found in it. A path
 /// holding a NUL is not split: nginx refuses one before any location.
 #[must_use]
 pub fn split_at_program(vpath: &[u8], root: &[u8]) -> Option<Translated> {
@@ -215,7 +215,7 @@ mod tests {
         let index = translate(b"/a/", b"/r", &TREE);
         assert_eq!(index.map(|t| t.vpath), Some(b"/a/index.html".to_vec()));
         // php -S's walk runs a directory named `*.php`'s index, which the
-        // production server's split does not (#2693).
+        // production server's split does not.
         for path in [&b"/d.php/"[..], b"/d.php", b"/d.php/index.php"] {
             let found = translate(path, b"/r", &TREE);
             assert_eq!(found.map(|t| t.vpath), Some(b"/d.php/index.php".to_vec()));
@@ -289,7 +289,7 @@ mod tests {
     /// A path with a NUL is found as far as the NUL, as php -S's walk
     /// finds it, and is translated whole, NUL and all: a program's where
     /// it ends in `.php`, a static file's otherwise, and either one
-    /// holding the NUL php -S refuses (#2695).
+    /// holding the NUL php -S refuses.
     #[test]
     fn a_path_with_a_nul_is_found_up_to_it_and_holds_it() {
         let found = translate(b"/t.php\0.txt", b"/r", &AsC);

@@ -1,4 +1,4 @@
-//! php's raises held in each crate's own sources (#3403, #3656), a hold of
+//! php's raises held in each crate's own sources, a hold of
 //! the crate's `api-check` reading, so the reading of the crate that raises
 //! is the one a raise fails and no crate's test reads another's sources. A
 //! raise names its class by the identity the engine resolved once, never

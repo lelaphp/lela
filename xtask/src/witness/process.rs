@@ -1,5 +1,5 @@
 //! What serves a fence marked `process` (harness-design.md §8, revision
-//! 61; #1062): the `php` binary in a process of its own, never the engine
+//! 61): the `php` binary in a process of its own, never the engine
 //! linked into this one. Such a snippet forks, sends or takes a signal, or
 //! sets the process's ids, session or limits, and the harness runs its
 //! lane on threads: a `fork()` there copies one thread of a process whose
@@ -9,10 +9,10 @@
 //! requires of pcntl.
 //!
 //! The binary is `php`, `sapi/cli`'s host as it is built for every other
-//! lane (#2168), which this module builds once per run with cargo where
+//! lane, which this module builds once per run with cargo where
 //! the run meets its first such fence, in the lanes' profile whatever
 //! profile this harness was built in (`profile::build`, harness revision
-//! 92, #2217), the build the phpt lane looks for first. It runs
+//! 92), the build the phpt lane looks for first. It runs
 //! under the recipe exactly as the oracle does
 //! ([`Oracle::run_under`]), and every request it serves appends the
 //! natives it entered to the file `PHP_WITNESS_TRACE` names, a forked
@@ -22,23 +22,21 @@
 //! only spells.
 //!
 //! A fence with a `request` is served by `sapi/cgi`'s php-cgi, through a
-//! link of that name, beside php-cgi for the oracle ([`served_as_cgi`],
-//! #1197, ADR-0008); a fence with a `request fpm` by `sapi/fpm`'s
-//! php-fpm, beside php-fpm (`served_as_fpm`, #1291); and one with a
+//! link of that name, beside php-cgi for the oracle ([`served_as_cgi`], ADR-0008); a fence with a `request fpm` by `sapi/fpm`'s
+//! php-fpm, beside php-fpm (`served_as_fpm`); and one with a
 //! `request makala` by `sapi/makala`'s makala over HTTP, beside php-fpm
-//! under the pin's `[fastcgi]` mapping (`makala::served`, #2347).
+//! under the pin's `[fastcgi]` mapping (`makala::served`).
 //!
 //! A `process` fence of a crate behind a bundle feature the binary under
 //! test does not turn on (`Witness::feature`) is served by `php` built
 //! with that feature, into the target directory the phpt lane builds that
 //! engine in ([`profile::featured`]), so the child it starts carries its
 //! own extension as the oracle's variant does, and the two lanes share
-//! one build (#2721). A `process` fence under a regime that sets the
+//! one build. A `process` fence under a regime that sets the
 //! tier's `jit.mode`, or turns `opcache.jit` on, is served by `php`
 //! built with the tier's feature beside it, as the phpt lane's `--jit`
-//! builds it (#3053), so the lane the regime names runs on a binary that
-//! carries the tier (#2962), and so does a program that reads the tier
-//! (#3193).
+//! builds it, so the lane the regime names runs on a binary that
+//! carries the tier, and so does a program that reads the tier.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -60,9 +58,9 @@ use crate::scratch::Tree;
 
 // The hosts a fence is served by, each its own binary: `sapi/cli`'s
 // serves a fence marked `process`, `sapi/cgi`'s one with a `request`,
-// `sapi/fpm`'s one with a `request fpm` (#1291), `sapi/phpdbg`'s one
-// with a `request phpdbg` (#1348) and `sapi/makala`'s one with a
-// `request makala` (#2347); `oracle::hosts` states each once.
+// `sapi/fpm`'s one with a `request fpm`, `sapi/phpdbg`'s one
+// with a `request phpdbg` and `sapi/makala`'s one with a `request
+// makala`; `oracle::hosts` states each once.
 
 /// The variable the binaries read the trace file's path from
 /// (`php_sapi::start`).
@@ -121,7 +119,7 @@ impl Binary {
 
     /// Where `host`'s binary is, built from the tree now if this run has
     /// not built it yet: what a fence with a request is served by, what a
-    /// host's own line runs (#1975), and the CLI's what `crosscheck`
+    /// host's own line runs, and the CLI's what `crosscheck`
     /// starts as the built-in server.
     pub(crate) fn host(&self, host: EngineHost) -> Result<PathBuf> {
         self.built(host, &[])
@@ -133,7 +131,7 @@ impl Binary {
     /// lanes' profile ([`profile::build`]) if this run has not built it
     /// yet: every request it serves records the natives it entered where
     /// `PHP_WITNESS_TRACE` names a file, with no build of its own for the
-    /// lane (#2168).
+    /// lane.
     fn built(&self, host: EngineHost, features: &[&str]) -> Result<PathBuf> {
         // The map's lock is held to find the build's slot alone, so one
         // host's build never waits on another's.
@@ -283,7 +281,7 @@ pub(crate) fn served_as_phpdbg(
 /// translated as the phpt lane translates a CGI-shaped test's
 /// ([`cgi::request`]), over `env` with the request's `--ENV--` after it;
 /// and the program run under the recipe and `regime`, whose arguments and
-/// ini php-cgi takes on its command line as `php` does (#1729), by its
+/// ini php-cgi takes on its command line as `php` does, by its
 /// path with `-C -f` before it, the body on stdin. What the oracle and the
 /// engine are each held to for a fence with a `request`.
 pub(crate) fn served_as_cgi(

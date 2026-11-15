@@ -1,13 +1,13 @@
 //! `pipeline.self`, what main executes or is read for when it judges,
-//! builds or runs CI (#4348 ruling 3, #4458, #4482): each path of the row
-//! is refused to an `Edit` and a `Write`, a crate's own `Cargo.toml` and a
-//! `build.rs` are let through, an added `computed exec` or `computed
+//! builds or runs CI (ruled 2026-11-09 and 2026-11-11): each path of the
+//! row is refused to an `Edit` and a `Write`, a crate's own `Cargo.toml`
+//! and a `build.rs` are let through, an added `computed exec` or `computed
 //! transcript` opener line is refused in any file and one the file already
 //! carried is not, nor a `computed use` or one behind a code file's comment
 //! leader; and an agent's commit that stages any of them, however it was
 //! written, is refused at the index while a person's is a note. And
 //! `pipeline.lock`, a third-party package added to a `Cargo.lock`, held
-//! by what a change adds to the lock rather than by its path (#4458).
+//! by what a change adds to the lock rather than by its path.
 //!
 //! The opener is spelled here with its first byte escaped, so this file
 //! carries no line the row refuses and `computed run` executes nothing
@@ -45,11 +45,11 @@ fn denied_by_the_row(judged: &xtask::permit::Judgement) -> bool {
 
 /// The negative control: every path the row names is refused to both
 /// tools by its absolute path, a `computed.toml` in any directory among
-/// them (#4482), and the denial says whose the change is; the paths beside
+/// them, and the denial says whose the change is; the paths beside
 /// them that stay an agent's, a crate's own `Cargo.toml`, a `build.rs`
-/// (#4363's third ruling comment), a file under `scripts/` outside
-/// `hooks/` and `ci/`, and `Cargo.lock`, which `pipeline.lock` holds by
-/// what a change adds to it (#4458), are no finding of the row's.
+/// (ruled 2026-11-10), a file under `scripts/` outside `hooks/` and `ci/`,
+/// and `Cargo.lock`, which `pipeline.lock` holds by what a change adds to
+/// it, are no finding of the row's.
 #[test]
 fn every_path_of_the_row_is_refused_and_a_crate_s_cargo_toml_is_not() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -105,7 +105,7 @@ fn every_path_of_the_row_is_refused_and_a_crate_s_cargo_toml_is_not() {
 /// `computed tree` opener, which runs nothing, a `computed use`, which
 /// runs what a `computed.toml` defines, and an opener behind a code file's
 /// comment leader, which computed reads only where a hook or a
-/// `[discover]` table names the file (#4482), are no finding of the row's.
+/// `[discover]` table names the file, are no finding of the row's.
 #[test]
 fn an_added_exec_opener_is_refused_anywhere_and_one_a_file_carries_is_not() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -200,15 +200,15 @@ fn an_added_exec_opener_is_refused_anywhere_and_one_a_file_carries_is_not() {
 /// paths no `Edit` or `Write` rule sees, and it still does not reach main
 /// by an agent's commit (a hook is refused to a shell line at the call
 /// too, by `pipeline.hooks-shell`, since a hook runs before any commit):
-/// `permit --diff` judges each staged file as the
-/// `Write` of its content, and a `deny = true` rule's file in an agent's
-/// commit is refused unless a steer reading covers it (#3644 ruling 3),
-/// which steer writes for none of these. Here each file is laid by a
-/// plain write, as any program lays it. A file that carried its opener
-/// at `HEAD`, edited elsewhere, is no finding, and neither is a
-/// `Cargo.lock`, which leaves the row's scope (#4458). In a person's
-/// commit, one from no session, each refused file is a note: a person
-/// commits these from the diff on a ticket (#4458).
+/// `permit --diff` judges each staged file as the `Write` of its content,
+/// and a `deny = true` rule's file in an agent's commit is refused unless
+/// a steer reading covers it (harness revision 185, ruling 3), which steer
+/// writes for none of these. Here each file is laid by a plain write, as
+/// any program lays it. A file that carried its opener at `HEAD`, edited
+/// elsewhere, is no finding, and neither is a `Cargo.lock`, which leaves
+/// the row's scope. In a person's commit, one from no session, each
+/// refused file is a note: a person commits these from the diff on a
+/// ticket.
 #[test]
 fn an_agent_s_commit_of_a_pipeline_path_is_refused_however_it_was_written_and_a_person_s_is_a_note()
 {
@@ -259,7 +259,10 @@ fn an_agent_s_commit_of_a_pipeline_path_is_refused_however_it_was_written_and_a_
         );
     }
     assert!(
-        ran.stdout.contains(RULE) && ran.stdout.contains("#3644"),
+        ran.stdout.contains(RULE)
+            && ran
+                .stdout
+                .contains("no steer reading covers what is staged"),
         "{ran}"
     );
     assert!(!ran.stdout.contains("docs/kept.md"), "{ran}");
@@ -276,13 +279,13 @@ fn an_agent_s_commit_of_a_pipeline_path_is_refused_however_it_was_written_and_a_
     assert!(!ran.stdout.contains("docs/kept.md"), "{ran}");
 }
 
-/// `pipeline.lock` (#4458): a third-party package added to a `Cargo.lock`,
+/// `pipeline.lock`: a third-party package added to a `Cargo.lock`,
 /// a new `checksum` line or a git `source`, is refused to an `Edit` and a
 /// `Write`, in the workspace's lock and in any other of the workspace; an
 /// edge to a package the lock holds, a removal, a workspace crate's entry,
 /// which carries neither line, and a lock written whole with its packages
 /// reordered are no finding of the row's, since a line the file carried,
-/// kept or moved, adds nothing (#510).
+/// kept or moved, adds nothing.
 #[test]
 fn a_package_added_to_a_lock_is_refused_and_a_lock_that_moves_among_its_own_is_not() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -354,7 +357,7 @@ fn a_package_added_to_a_lock_is_refused_and_a_lock_that_moves_among_its_own_is_n
     }
 }
 
-/// A `Cargo.lock` outside the workspace is no lock of its own (#4679): an
+/// A `Cargo.lock` outside the workspace is no lock of its own: an
 /// `Edit` and a `Write` there that add a registry package are no finding
 /// of `pipeline.lock`'s, nor any denial, since no row's `adding` reaches a
 /// file outside the workspace, as `Call::path` says; the same text
@@ -394,9 +397,9 @@ fn a_package_added_to_a_lock_outside_the_workspace_is_no_finding_of_the_row() {
 
 /// A `Cargo.lock` that `cargo` rewrote is held at the commit as an
 /// `Edit` is at the call: an agent's commit staging a lock that gained a
-/// package is refused with the row's id and #3644, a person's is a note,
-/// and one that only moved among its own packages, here dropping one and
-/// reordering the rest, is no finding.
+/// package is refused with the row's id, since no steer reading covers it,
+/// a person's is a note, and one that only moved among its own packages,
+/// here dropping one and reordering the rest, is no finding.
 #[test]
 fn an_agent_s_commit_of_a_lock_that_gained_a_package_is_refused_and_one_that_moved_is_not() {
     let root = scratch("pipeline-lock-diff");
@@ -418,7 +421,9 @@ fn an_agent_s_commit_of_a_lock_that_gained_a_package_is_refused_and_one_that_mov
     assert!(
         ran.stdout.contains("deny Cargo.lock: ")
             && ran.stdout.contains(LOCK)
-            && ran.stdout.contains("#3644"),
+            && ran
+                .stdout
+                .contains("no steer reading covers what is staged"),
         "{ran}"
     );
     let ran = diff_from(&root, None);
@@ -441,8 +446,8 @@ fn an_agent_s_commit_of_a_lock_that_gained_a_package_is_refused_and_one_that_mov
     assert!(!ran.stdout.contains("Cargo.lock"), "{ran}");
 }
 
-/// A staged path is the checkout's, whatever the work tree holds there
-/// (#4679): a staged `Cargo.lock` that gained a package, its work tree's
+/// A staged path is the checkout's, whatever the work tree holds there:
+/// a staged `Cargo.lock` that gained a package, its work tree's
 /// file replaced by a link to a file outside the workspace, is refused at
 /// the commit as the staged lock is without the link, since no commit
 /// carries a file outside the repository.

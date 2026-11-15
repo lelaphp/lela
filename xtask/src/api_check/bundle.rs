@@ -1,14 +1,14 @@
 //! `php_bundle`'s registrations held to the `ext/*` graph under the
-//! `order = "registration"` of the bundle's `[[edge]]` row, as #1778
-//! ruled (design §4.10, ADR-0004), the one order api-check serves
-//! (#2255): the order written is php's registration order for the
-//! oracle's enabled set, which the engine sorts as `zend_sort_modules`
-//! does and `php_bundle`'s witness holds to the oracle, and which Cargo
-//! edges do not constrain; each extension's feature switches on the
-//! features of every extension it declares `Required` through
+//! `order = "registration"` of the bundle's `[[edge]]` row, as ruled
+//! 2026-10-04 (design §4.10, ADR-0004), the one order api-check serves:
+//! the order written is php's registration order for the oracle's
+//! enabled set, which the engine sorts as `zend_sort_modules` does and
+//! `php_bundle`'s witness holds to the oracle, and which Cargo edges do
+//! not constrain; each extension's feature switches on the features of
+//! every extension it declares `Required` through
 //! `ExtensionBuilder::dependencies` (php's `ZEND_MOD_REQUIRED`), so a
 //! build that registers an extension registers what php requires loaded
-//! beside it (#1915), read as [`declared`] says. What its crate links
+//! beside it, read as [`declared`] says. What its crate links
 //! requires nothing: `ext/sqlite3` links `ext/pdo_sqlite` for its
 //! libsqlite3 binding and declares no dependency, as php's does, so its
 //! feature registers no PDO.
@@ -33,7 +33,7 @@ mod declared;
 
 use declared::Declared;
 
-/// The one `order` the bundle's `[[edge]]` row may name (#1778, #2255).
+/// The one `order` the bundle's `[[edge]]` row may name.
 pub(super) const REGISTRATION: &str = "registration";
 
 /// What the instrument reads of `php_bundle`: its registrations, in the
@@ -113,7 +113,7 @@ struct Registration {
 /// nowhere, or registers only behind features the first one's do not
 /// switch on, named together in one line per registration. What its
 /// crate links is not read: a link with no declaration behind it, as
-/// `ext/sqlite3`'s of `ext/pdo_sqlite`, requires nothing (#1915).
+/// `ext/sqlite3`'s of `ext/pdo_sqlite`, requires nothing.
 pub(super) fn unswitched(crates: &Crates, bundle: &Bundle) -> Vec<String> {
     let mut out = Vec::new();
     let mut read: BTreeMap<&str, Option<Declared>> = BTreeMap::new();

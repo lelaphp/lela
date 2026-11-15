@@ -4,7 +4,7 @@
 //! hands out, whether a frame takes what is pending, and the code a
 //! tier has the engine serve on its own account. What a frame is, its
 //! function, file, line, op array and variables, a tier reads through
-//! the native face ([`frame`]), as an extension reads it (#1911).
+//! the native face ([`frame`]), as an extension reads it.
 
 use std::os::fd::OwnedFd;
 

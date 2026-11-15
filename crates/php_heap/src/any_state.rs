@@ -1,4 +1,4 @@
-//! Engine state whose type is erased (#4492): a slot the engine keeps
+//! Engine state whose type is erased: a slot the engine keeps
 //! for a value it does not name, such as the compiled tier's value for an
 //! epoch (`php_engine`'s `Arena::tier`), which every request of the epoch
 //! reads. `Box<dyn Any + Send + Sync>` says nothing of what it holds, so

@@ -7,9 +7,9 @@ php fixed two remote-code-execution bugs, together called php2shell, in 8.5.12, 
 
 Neither bug is in the C that Dax PHP compiles from php-src (timelib, libmbfl, lexbor, uriparser).
 
-#3162 read the source and decided that neither bug carries over to Dax PHP. #3199 turned that decision into two tests, so a later change that breaks either property fails a test. This document gives what the tests showed, why each CVE does or does not carry over, what the tests leave out, and the five defects found on the way.
+A first reading of the source decided that neither bug carries over to Dax PHP. The work this document reports turned that decision into two tests, so a later change that breaks either property fails a test. This document gives what the tests showed, why each CVE does or does not carry over, what the tests leave out, and the five defects found on the way.
 
-Each `path:line` below is as of the commit that last changed this file, and the commits it names are on #3199's branch.
+Each `path:line` below is as of the commit that last changed this file, and the commits it names are on the branch that added the two tests.
 
 In short: on the evidence of these tests, Dax PHP was not vulnerable to either CVE as published. The work did find five places where a request that met its memory limit left state wrong for the code that runs after the fatal. Two of them could reach memory that was no longer what it claimed to be: an array written past its data, and an iterator moving through a freed array. These are the general form of CVE-2026-109618, and neither had a known route to code execution. All five are fixed on this branch.
 
@@ -30,7 +30,7 @@ Miri's view inside the heap has a limit. A 2 MiB chunk is a single allocation to
 
 `sapi/makala/tests/worker.rs` starts makala with one request thread, so both requests run on one worker, as a php-fpm child serves its requests one after another.
 
-#3199 asked for this test in php_engine. php_engine sits below the extensions and cannot load ext/session, so it cannot see the session's progress state. A php_engine test that called `Engine::serve` twice would also only imitate a worker. makala's request thread is a real one.
+The ticket for the two tests asked for this one in php_engine. php_engine sits below the extensions and cannot load ext/session, so it cannot see the session's progress state. A php_engine test that called `Engine::serve` twice would also only imitate a worker. makala's request thread is a real one.
 
 - The first request posts a multipart body. The body holds the session's upload-progress field, a file, and then a 5 MB form field, under `memory_limit=4M`. The request ends in `Allowed memory size of 4194304 bytes exhausted (tried to allocate 5000032 bytes) in Unknown on line 0`. That fatal comes while the body is read, before the program starts and after the progress hook has written the file into the session.
 - Before the second request, the test reads the session's file: it holds the first file's progress, not done, so the first request left progress behind to carry over.
@@ -69,8 +69,8 @@ The worker test reads all three across two requests on one thread.
 
 ## What the tests do not cover
 
-- **The hand-written `Send` and `Sync`.** `Zval` is `unsafe impl Send` and `Sync` (`crates/php_heap/src/zval.rs:308`, `:311`). `Arr`, `Obj`, `Str`, `Ref` and `Res` are `Send` (`array.rs:554`, `object.rs:137`, `string.rs:678`, `reference.rs:59`, `resource.rs:145`). The compiler would therefore not stop a request's value from being stored in engine-wide state. ADR-0005 and the manifest's `state.no-thread-local` and `ext.no-locks` rules stop it. The worker test checks the three places #3162 named, and it would miss a value stored anywhere else.
-- **The multipart limits.** Dax PHP follows php 8.5.9's limits on multipart bodies. The advisory's route to the limit, through a body with no declared length and part headers with no bound, is a denial-of-service matter here, because meeting the limit corrupts nothing. The limits will change when the oracle moves to 8.5.12 (#3197), which also brings php's new soft OOM at the next safe point and a hard `_exit()` at a second threshold.
+- **The hand-written `Send` and `Sync`.** `Zval` is `unsafe impl Send` and `Sync` (`crates/php_heap/src/zval.rs:308`, `:311`). `Arr`, `Obj`, `Str`, `Ref` and `Res` are `Send` (`array.rs:554`, `object.rs:137`, `string.rs:678`, `reference.rs:59`, `resource.rs:145`). The compiler would therefore not stop a request's value from being stored in engine-wide state. ADR-0005 and the manifest's `state.no-thread-local` and `ext.no-locks` rules stop it. The worker test checks the three places the first reading named, and it would miss a value stored anywhere else.
+- **The multipart limits.** Dax PHP follows php 8.5.9's limits on multipart bodies. The advisory's route to the limit, through a body with no declared length and part headers with no bound, is a denial-of-service matter here, because meeting the limit corrupts nothing. The limits will change when the oracle moves to 8.5.12, which also brings php's new soft OOM at the next safe point and a hard `_exit()` at a second threshold.
 - **Three allocator arms the limit cannot reach.** The system allocator alone can refuse a new chunk or huge mapping (`Out of memory`), or the bin slot for a huge block's list node, which is asked for after the mapping while at least a chunk of the limit is still free. The sweep does not reach these three.
 - **Builds without debug assertions.** The lend-slot reading uses a debug-build sensor, and a release build compiles none of it.
 

@@ -7,7 +7,7 @@
 //! expansion names, held to a cap of its own. `php_streams` adds its
 //! streams facet to the request group in `php_ext`, one face. What the
 //! stream layer alone reaches, the socket and fd calls among it, is
-//! [`crate::layer`], counted in `layer.lock` (#1959). Every item is a
+//! [`crate::layer`], counted in `layer.lock`. Every item is a
 //! line of `api.lock`; a new `pub` here lands with its line.
 
 #[doc(hidden)]

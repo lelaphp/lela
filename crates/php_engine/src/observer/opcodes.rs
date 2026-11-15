@@ -1,5 +1,5 @@
 //! Observation of a declared set of opcodes (design §7.1, revisions 83
-//! and 107, as #1780 and #2032 ruled): php's
+//! and 107, as ruled 2026-10-04 and 2026-10-07): php's
 //! `zend_set_user_opcode_handler` with a handler that answers
 //! `ZEND_USER_OPCODE_DISPATCH`, and nothing else of it. An extension
 //! declares, as the engine starts, which opcodes it observes
@@ -265,7 +265,7 @@ impl Telling for Declared {
 /// by a stepping host's [`crate::tier::step`], which is not generic over
 /// the loop's choice and so pays one test of the set, a word that is zero
 /// while none is declared, made on the engine's set where it stands, as
-/// php's test of an opline's handler is one compare (#4111). `at` is the
+/// php's test of an opline's handler is one compare. `at` is the
 /// opline the step stood `frame` at, which its caller holds. A parameter
 /// prologue served outside the loop reads the set through [`Declared`]
 /// ([`crate::exec::parameter_prologue`]).

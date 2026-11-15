@@ -1,4 +1,4 @@
-//! The engine's one home for `fork` (#1807, as #1779 ruled): what the
+//! The engine's one home for `fork` (as ruled 2026-10-04): what the
 //! engine decides around `php_process`'s one `fork`, which nothing else
 //! calls. php forks with one thread in the process, since its timer
 //! is an interval timer and its server serves on one thread; the engine
@@ -22,8 +22,7 @@
 //! hangs. What the engine cannot see is a host's own thread that holds
 //! no request, such as the accept loop `php -S` kept beside its
 //! connections' threads; no host that forks or carries pcntl may keep
-//! one, which is why `php -S` serves in php's one-threaded event loop
-//! (#1884).
+//! one, which is why `php -S` serves in php's one-threaded event loop.
 //!
 //! Two ways in, as the ruling has them, and one way through. pcntl asks
 //! through the request,
@@ -127,7 +126,7 @@ pub(crate) struct Thread<T = ()> {
 
 /// A thread the engine started is engine state by the derive where what
 /// its body answers is, through `php_heap`'s `JoinHandle<T>`, so the slot a
-/// [`Worker`] keeps its thread in is too (#4636).
+/// [`Worker`] keeps its thread in is too.
 const _: fn() = || {
     fn held<T: crate::api::abi::EngineState>() {}
     held::<Thread>();
@@ -204,7 +203,7 @@ pub(crate) fn spawn<T: Send + 'static>(
 /// ([`php_process::started_aside`]): a thread the engine starts for
 /// itself that runs no PHP, its timer and a [`Worker`]'s, so a signal sent
 /// to the process is delivered to the thread doing the request's work and
-/// interrupts its blocking call, as php's one thread takes it (#3861).
+/// interrupts its blocking call, as php's one thread takes it.
 ///
 /// ```php
 /// set_time_limit(30);
@@ -283,7 +282,7 @@ fn on_main_thread() -> bool {
 
 /// `body`, the whole of a host's `main`, as the process's main thread on
 /// a stack of `stack_size` bytes, which `body` ends the process from
-/// (design §5.6, #3043): the stack a request served on it has, whose
+/// (design §5.6): the stack a request served on it has, whose
 /// bounds the engine reads for php's "Maximum call stack size", so a host
 /// whose process serves on its main thread, as php's CLI does, sizes the
 /// stack its recursion through a native's callback needs, where the
@@ -333,7 +332,7 @@ where
 /// tier's compile queue (`jit-design.md` §4.8). The engine owns the
 /// thread; the tier owns the body and the word that ends it. A body is
 /// engine state, as the [`Worker`] that keeps it is, so it holds nothing
-/// of a request, whose thread it outlives (ADR-0005, #4636).
+/// of a request, whose thread it outlives (ADR-0005).
 pub trait Parked: crate::api::abi::EngineState + Send + Sync + 'static {
     /// The thread's body: it serves until [`Parked::end`] asks it to
     /// return, which it does between two of its jobs, keeping the ones
@@ -350,7 +349,7 @@ pub trait Parked: crate::api::abi::EngineState + Send + Sync + 'static {
 /// one home, out of every signal's way ([`spawn_aside`]), so a fork
 /// counts it, parked in its body between jobs, joined before every fork,
 /// a host's and a request's alike, and started again after it in the
-/// process that asked, as the engine's timer thread is (#2541), and
+/// process that asked, as the engine's timer thread is, and
 /// joined when the worker drops.
 /// A child forked meanwhile has no thread for it until it wakes one.
 #[derive(php_macros::EngineState)]
@@ -362,7 +361,7 @@ pub struct Worker {
 
 /// A worker is engine state by the derive, held at every field, its body
 /// by [`Parked`]'s bound, and shared by the engine and every request that
-/// submits to it (ADR-0005, #4636).
+/// submits to it (ADR-0005).
 const _: fn() = || {
     fn held<T: crate::api::abi::EngineState + Sync>() {}
     held::<Worker>();
@@ -674,7 +673,7 @@ fn busy() -> io::Error {
 /// held, so nothing enters the engine from here; refused with `EBUSY`,
 /// touching no timer, where anything stands inside beside `asker` other
 /// than the timer threads of the process's engines, each parked between
-/// requests while its engine lives (#2541), and the threads of the
+/// requests while its engine lives, and the threads of the
 /// process's [`Worker`]s, each parked between its jobs; those threads
 /// joined, a worker's once the job under way is done; then
 /// [`Alone::fork`], which reads the number again; and, the hold let go,
@@ -741,7 +740,7 @@ pub(crate) fn fork_request() -> io::Result<Forked> {
     fork_as(Asker::Request)
 }
 
-/// `fork(2)` for a host (#1807): the process copied with no request in
+/// `fork(2)` for a host: the process copied with no request in
 /// flight, as php-fpm's master makes a child (`fpm_children_make`) and
 /// daemonizes (`fpm_unix_init_main`), returning in both as
 /// [`Forked::Parent`] with the child's id and as [`Forked::Child`]. In
@@ -757,7 +756,7 @@ pub(crate) fn fork_request() -> io::Result<Forked> {
 /// The engine's timer thread, which stays parked between requests once
 /// a request has set a deadline, the startup request's among them, is
 /// joined first and started again in the parent, so a host's fork after
-/// a timed request is not refused (#2541).
+/// a timed request is not refused.
 ///
 /// # Errors
 ///
@@ -770,7 +769,7 @@ pub fn fork() -> io::Result<Forked> {
     fork_as(Asker::Host)
 }
 
-/// The tests' one rule for forks (#2715). A fork takes every engine's
+/// The tests' one rule for forks. A fork takes every engine's
 /// timer and every [`Worker`] in the process and holds the inside
 /// count's [`FORKING`] bit, all for the length of the fork. Every test in
 /// the binary shares the process, so a test that forks, that takes the

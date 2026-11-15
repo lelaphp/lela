@@ -1,5 +1,5 @@
-//! The memory limit as php 8.5.12 holds a request to it (CVE-2026-109618,
-//! #3260): `Z/Zend/zend_alloc.c`'s `zend_mm_check_limit` and its two
+//! The memory limit as php 8.5.12 holds a request to it (CVE-2026-109618):
+//! `Z/Zend/zend_alloc.c`'s `zend_mm_check_limit` and its two
 //! thresholds. An allocation past `memory_limit`, the soft limit, is
 //! served and leaves a delayed OOM behind, php's `EG(delayed_oom)`, which
 //! the engine raises as the limit's fatal at its next safepoint; one past

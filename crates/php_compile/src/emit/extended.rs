@@ -1,5 +1,5 @@
 //! What php compiles beside the program under `ZEND_COMPILE_EXTENDED_INFO`,
-//! which a host's `-e` sets (#1780, [`crate::Options::extended_info`]):
+//! which a host's `-e` sets ([`crate::Options::extended_info`]):
 //! the oplines a profiler or a debugger is told at, each emitted where
 //! php's compiler emits it and nowhere while the engine compiles without
 //! it.

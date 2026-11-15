@@ -1015,7 +1015,7 @@ fn packed_used(req: &Request, array: PhpArray) -> u32 {
 
 /// `array_map` over two arrays or more. A call of its own, so that what
 /// it holds is not in the frame a recursion through a one-array
-/// `array_map` stands on (#3022).
+/// `array_map` stands on.
 #[inline(never)]
 fn mapped_together(
     req: &mut Request,

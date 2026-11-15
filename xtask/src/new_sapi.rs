@@ -194,7 +194,7 @@ fn lib_rs(lints: &str, name: &str, bin: &str) -> String {
 }
 
 /// The binary: the host's `main`, and nothing else, under the lints the
-/// library's root carries too (#2524).
+/// library's root carries too.
 fn main_rs(lints: &str, package: &str, bin: &str) -> String {
     format!(
         "//! `{bin}`, the binary (design §4.1; ADR-0008): [`{package}::main`].\n\

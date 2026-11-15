@@ -1,13 +1,13 @@
 //! What php's CLI and its built-in server hand `php_module_startup` beside
 //! the bundle, declared here over `php_ext` as an extension declares its
-//! own (ADR-0008 as amended by #1348): the CLI's `additional_functions`,
+//! own (ADR-0008 as amended 2026-10-01): the CLI's `additional_functions`,
 //! `dl()` and the process title's two (`Z/sapi/cli/php_cli.c:449-453`),
 //! which php registers under `standard`; and the built-in server's
 //! `cli_server_module_entry`, named `cli_server`, with its one entry, and
 //! its `server_additional_functions` in the CLI's place
 //! (`Z/sapi/cli/php_cli_server.c:463-510`, `Z/sapi/cli/php_cli.c:1302`).
 //! The process title is the memory `ps` shows the command line from,
-//! which the host saved before it read its arguments (#1175), so its
+//! which the host saved before it read its arguments, so its
 //! natives and the area are this crate's alone.
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]

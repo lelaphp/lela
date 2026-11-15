@@ -82,7 +82,7 @@ enum PrimaryOpen {
 /// A file one of the request's `zend_file_handle`s holds open past the
 /// read that compiled it, with no `O_CLOEXEC`, as php's `fopen` and
 /// `zend_stream_open` open it, so a process the request execs inherits
-/// it (#2458, #2492): the program's file as its host hands it over
+/// it: the program's file as its host hands it over
 /// ([`ProgramFile`]), and `auto_prepend_file`'s, `auto_append_file`'s and
 /// the built-in server's router's as `php_execute_script_ex` and
 /// `php_cli_server_dispatch_router` keep theirs ([`HandlePath::Kept`]);
@@ -580,7 +580,7 @@ impl Request {
     /// expands to nothing. A source the host
     /// `served` under a name is the file php would have opened by it, its
     /// name expanded into the table and compiled under, so `__FILE__` and
-    /// a diagnostic's file are the table's path (#1569); one named
+    /// a diagnostic's file are the table's path; one named
     /// `Standard input code`, or nothing, is in no table.
     ///
     /// ```php
@@ -748,7 +748,7 @@ impl Request {
     ///
     /// A file that resolves and then does not read compiles to nothing,
     /// and the include fails as one nothing opens; the reason the stream
-    /// warning gives is #2766's:
+    /// warning gives is the one the read failed with:
     ///
     /// ```php
     /// $f = __DIR__ . '/locked.inc';

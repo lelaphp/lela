@@ -867,7 +867,7 @@ pub fn php_unserialize_with_options(
         // `gc_check_possible_root(Z_COUNTED_P(return_value))`
         // (`Z/ext/standard/var.c:1481-1484`), so a cycle the caller frees
         // with no root offered, as a native's argument is freed, is still
-        // the collector's to find (#2444).
+        // the collector's to find.
         (Ok(true), None) => {
             let root = state.take_root();
             req.memory_mut().gc_possible_root(&root);

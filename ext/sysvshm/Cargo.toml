@@ -15,7 +15,7 @@ workspace = true
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 # System V IPC from the C library in `src/ffi/` alone, since nix binds
-# none of it (design §7.2, #1323).
+# none of it (design §7.2).
 libc = { workspace = true }
 # The serializer `sysvshm.c` calls through `ext/standard/php_var.h`
 # (design §4.10).

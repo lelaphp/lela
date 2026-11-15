@@ -1,7 +1,7 @@
 //! The rule a bar with a `[[bench]]` tolerance is held by, as Mitchell
-//! ruled on #1902 and #2336 (#2659; protocol §12). Each night is the
-//! paired delta as a share of the second arm, its median and quartiles, set
-//! beside the bar's baseline and its tolerance, both in percentage points.
+//! ruled 2026-10-11 (protocol §12). Each night is the paired delta as a
+//! share of the second arm, its median and quartiles, set beside the bar's
+//! baseline and its tolerance, both in percentage points.
 //!
 //! A night whose whole IQR lies worse than the baseline by more than the
 //! tolerance is an established regression, and a `NOISE-SWAMPED` night is
@@ -149,7 +149,7 @@ pub(crate) fn hold(
     };
     let Some(baseline) = baseline else {
         let waits = dates.map_or_else(
-            || "its row names no nights, the floor alone (#3130)".to_owned(),
+            || "its row names no nights, the floor alone".to_owned(),
             |(from, to)| format!("no night of the bar stands from {from} to {to}"),
         );
         write!(
@@ -231,8 +231,8 @@ mod tests {
         }
     }
 
-    /// The fixture series of #2659's first box, against a baseline of 10%
-    /// and a tolerance of 2 points.
+    /// The rule's fixture series, against a baseline of 10% and a
+    /// tolerance of 2 points.
     #[test]
     fn a_night_warns_fails_or_moves_the_baseline_as_the_night_before_it_stood() {
         let (held, worse, better) = (

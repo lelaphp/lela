@@ -1,5 +1,5 @@
 //! The environment a test's programs get, built in this one place as
-//! run-tests.php builds it at the pinned tag (#1186): what the runner adds
+//! run-tests.php builds it at the pinned tag: what the runner adds
 //! to its own environment once for every test (run-tests.php:215-216,
 //! 645-677),
 //! then, for each test, a redirect's environment (run-tests.php:2228), the
@@ -56,7 +56,7 @@ impl Environment {
     /// host beside it, `cgi`, and the debugger host, `phpdbg`, each empty
     /// where there is none, as `get_binary` leaves a host it finds none of
     /// (run-tests.php:667-677, 1003-1019); and `TEST_PHP_SRCDIR`, `root`,
-    /// the tree the programs run in, never the pinned one (#1183).
+    /// the tree the programs run in, never the pinned one.
     pub(crate) fn of_runner(
         binary: &Path,
         (cgi, phpdbg): (Option<&Path>, Option<&Path>),
@@ -252,7 +252,7 @@ mod tests {
     /// environment gives none (run-tests.php:215-216): the recipe's
     /// `TMPDIR` less a trailing slash, the C library's `P_tmpdir` where
     /// the recipe names none, and the recipe's own `TEMP` where it names
-    /// one (#1730).
+    /// one.
     #[test]
     fn the_runner_gives_temp_as_its_own_sys_get_temp_dir_answers() {
         let temp = |recipe: &[(&str, &str)]| {

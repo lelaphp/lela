@@ -164,7 +164,7 @@ fn set_zone(req: &mut Request, object: PhpObject, kind: TzKind) -> Result<(), Th
 /// makes it, so timelib's transient copy of the name peaks over it; a
 /// name it refuses has its warning printed into `spprintf`'s buffer,
 /// which stands while the warning is raised and the object is released
-/// after (#2481):
+/// after:
 ///
 /// ```php
 /// function m($f) { memory_reset_peak_usage(); $u = memory_get_usage(); $f(); echo memory_get_peak_usage() - $u, ' ', memory_get_usage() - $u, "\n"; }

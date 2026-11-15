@@ -84,8 +84,7 @@ fn a_proposal_that_only_adds_is_written() {
         "the proposal is the file now"
     );
     // Stamped over what steer left, a snapshot taken after the write, so
-    // `permit --after` can tell steer's write from one beside it (#1516,
-    // #2163).
+    // `permit --after` can tell steer's write from one beside it.
     let now = xtask::key::Snapshot::disk(&root).expect("the tree");
     assert_eq!(
         reading.key(),
@@ -150,7 +149,7 @@ fn a_file_that_is_not_the_harnesss_own_is_refused() {
 }
 
 /// The files steer writes are the ones the manifest's `harness.self`
-/// names (#3183): a manifest naming another file has steer write that one
+/// names: a manifest naming another file has steer write that one
 /// and refuse `oracle.toml`, which it no longer names.
 #[test]
 fn steer_writes_the_files_the_manifests_harness_self_names_and_no_other() {
@@ -186,7 +185,7 @@ fn fixture(name: &str) -> String {
 
 #[test]
 fn a_key_added_to_a_rule_row_the_file_carries_is_written_and_named() {
-    // The widening the maintainer settled on #387 with its risk named:
+    // The widening the maintainer settled 2026-09-18 with its risk named:
     // `exempt` on a `[[rule]]` row is an addition, so it lands, and the
     // reading is where a person reads that it did (ledger 51).
     let tracked = fixture("tracked.toml");
@@ -246,7 +245,7 @@ fn every_negative_control_is_refused_at_the_path_it_moved_and_writes_nothing() {
 }
 
 /// The registry the covering row is proposed beside, in place of the
-/// tracked one, whose rows a person keeps (#3091): one row, whose id a
+/// tracked one, whose rows a person keeps: one row, whose id a
 /// covering row may not cover again.
 const REGISTRY: &str = "# The divergence registry (fixture).\n\n[[divergence]]\n\
 id = \"phpt:php-src/ext/opcache/tests/gh9164.phpt\"\nkind = \"phpt\"\n\
@@ -318,7 +317,7 @@ fn a_new_row_with_covers_is_one_addition_to_the_registry() {
     }
 }
 
-/// A row's `proven_at`, the regime its cause is proven at (#3369), is
+/// A row's `proven_at`, the regime its cause is proven at, is
 /// part of the row a proposal adds: steer writes it, and the registry
 /// reads it back; on a row holding an id that is no fence, which no lane
 /// runs again under a regime, it is refused as the registry would at load.
@@ -356,8 +355,8 @@ fn a_proven_rows_regime_is_written_with_the_row_and_one_on_no_fence_is_refused()
     assert_eq!(row.as_deref(), Some("optimizer-off"));
 }
 
-/// A trace-dump row's digests are part of the row a proposal adds
-/// (#3291): steer writes them as the proposal spells them, and refuses a
+/// A trace-dump row's digests are part of the row a proposal adds:
+/// steer writes them as the proposal spells them, and refuses a
 /// row naming one side's alone, as the registry would at load.
 #[test]
 fn a_dump_rows_digests_are_written_with_the_row_and_one_alone_is_refused() {
@@ -404,7 +403,7 @@ fn a_dump_rows_digests_are_written_with_the_row_and_one_alone_is_refused() {
 /// A proposal is held to the reader the harness reads its file with, where
 /// the tracked file loads through it: a table the pin's reader does not
 /// know is refused and written nowhere, since written it would stop every
-/// instrument that reads the pin (#1161's `[sapi]`, which the reader
+/// instrument that reads the pin (the `[sapi]` table, which the reader
 /// learned in the same change), and a table it knows is an addition.
 #[cfg(tracked)]
 #[test]
@@ -525,7 +524,7 @@ fn a_conflicted_merge_of_two_additions_is_resolved_by_their_union() {
 }
 
 /// A merge base whose registry holds no row, as a scratch's empty one
-/// does, each side appending one (#3141): the whole array is new on
+/// does, each side appending one: the whole array is new on
 /// both sides, and the union is still each side's row by its id, not a
 /// row `MERGE_HEAD` carries named as carried by neither.
 #[test]
@@ -547,7 +546,7 @@ fn a_conflicted_merge_over_a_base_of_no_row_is_resolved_by_their_union() {
 }
 
 /// A side that rewords a reason the base carries, while each side appends
-/// a row: that side's reason is part of the union and written (#3633).
+/// a row: that side's reason is part of the union and written.
 #[test]
 fn a_conflicted_merge_takes_a_reason_one_side_reworded_over_the_base() {
     let root = merging("union-reworded", "merge/merged-reworded.toml");
@@ -608,7 +607,7 @@ fn a_conflicted_merge_refuses_a_reworded_reason_and_a_row_neither_side_carries()
 
 /// A scratch workspace standing in a merge of `file`, one of the harness's
 /// own files and tracked at `root`, that git took cleanly and did not
-/// commit, as pre-merge-commit leaves one it refused (#4441): `base`
+/// commit, as pre-merge-commit leaves one it refused: `base`
 /// committed, `merged` on a branch beside it, `head` on `HEAD`, and
 /// `git merge --no-commit` of the branch with `how`, the strategy options
 /// it was given. The file is staged, unmerged nowhere.
@@ -649,12 +648,13 @@ fn agents_diff(root: &Path) -> (i32, String) {
     (ran.code(), format!("{ran}"))
 }
 
-/// The clean merge #4441 met, end to end through the binaries the hooks
-/// run: a person's commit rewords a reason on `HEAD` and the branch adds a
-/// steered row, which git merges with no conflict. Pre-commit refuses the
-/// agent's merge (#3644), the one step merging.md gives, steer over a copy
-/// of the merged file, writes a reading that names what each side brings
-/// and is stamped over the staged blob, and pre-commit then admits it.
+/// A clean merge of a harness file, end to end through the binaries the
+/// hooks run: a person's commit rewords a reason on `HEAD` and the branch
+/// adds a steered row, which git merges with no conflict. Pre-commit
+/// refuses the agent's merge, the one step merging.md gives, steer over a
+/// copy of the merged file, writes a reading that names what each side
+/// brings and is stamped over the staged blob, and pre-commit then admits
+/// it.
 #[test]
 fn a_cleanly_merged_harness_file_is_covered_by_steering_its_merged_copy() {
     let file = xtask::divergence::FILE;
@@ -677,7 +677,10 @@ fn a_cleanly_merged_harness_file_is_covered_by_steering_its_merged_copy() {
     );
     let (code, said) = agents_diff(&root);
     assert_eq!(code, 1, "the merge is refused before steer: {said}");
-    assert!(said.contains("#3644"), "{said}");
+    assert!(
+        said.contains("no steer reading covers what is staged"),
+        "{said}"
+    );
 
     let copy = Tree::new("steer-clean-copy").expect("the scratchpad");
     let at = copy.join("divergence.toml");
@@ -773,7 +776,10 @@ fn a_cleanly_merged_manifest_is_covered_by_steering_its_merged_copy() {
         code, 1,
         "the merge is refused before steer covers it: {said}"
     );
-    assert!(said.contains("#3644"), "{said}");
+    assert!(
+        said.contains("no steer reading covers what is staged"),
+        "{said}"
+    );
 
     let reading = steered(&staged);
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
@@ -982,7 +988,7 @@ fn a_criss_cross_merge_of_a_file_both_sides_changed_is_refused() {
     }
 }
 
-/// An `[[owed]]` row named by its instrument (#3636): `held_at` added to
+/// An `[[owed]]` row named by its instrument: `held_at` added to
 /// two rows is written, and the negative controls beside it, a changed
 /// `when` and a second row of one instrument, are refused with nothing
 /// written (xtask/fixtures/steer/README.md).

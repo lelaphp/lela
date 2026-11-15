@@ -1,7 +1,7 @@
 //! The two constants php registers from `<openssl/opensslv.h>`,
 //! `OPENSSL_VERSION_TEXT` and `OPENSSL_VERSION_NUMBER` (`@cvalue` in
 //! `Z/ext/openssl/openssl.stub.php`), are the values of the headers a build
-//! compiles against, not the libcrypto it later loads (#1958, #1974). They
+//! compiles against, not the libcrypto it later loads. They
 //! are read here, from the headers openssl-sys found: the number is the one
 //! openssl-sys hands a dependent as `DEP_OPENSSL_VERSION_NUMBER`, which it
 //! synthesizes from the header's `OPENSSL_VERSION_MAJOR`, `_MINOR` and
@@ -69,7 +69,7 @@ fn expand(out: &Path, include: Option<&Path>) -> Result<Headers, String> {
     // php compiles C and C++ with -DNDEBUG unless it is built with
     // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
     // two builds that set ZEND_DEBUG, as debug assertions are this build's:
-    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    // assert() is live exactly where Rust's debug_assertions is.
     if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
         build.define("NDEBUG", None);
     }

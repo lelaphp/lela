@@ -662,7 +662,7 @@ pub(crate) mod tests {
 
     /// An index over the preload's rows names them past the epoch's own,
     /// each by its offset in the stretch it is of, and an offset in
-    /// neither stretch at no place (#3568).
+    /// neither stretch at no place.
     #[test]
     fn the_landing_index_names_the_preloads_rows_past_the_epochs_own() {
         use super::{LandingRows, Landings};

@@ -1,5 +1,5 @@
 //! What php's request heap holds for state this engine keeps typed and
-//! elsewhere (design §5.13, #2863): the bytes alone, at php's sizes and
+//! elsewhere (design §5.13): the bytes alone, at php's sizes and
 //! for as long as php holds them, which is all `memory_get_usage()`
 //! observes of that state. Each is a structure php allocates whatever
 //! the request compiles: what the request's start lays down, the

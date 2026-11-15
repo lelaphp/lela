@@ -1,7 +1,7 @@
 //! The binary tests its configuration as `-t` asks, and serves a request
 //! handed to it as `FastCGI` records under php-fpm's name. What the
 //! oracle's php-fpm writes for a pool's requests and log is held beside
-//! it by `xtask witness`, from `tests/lines.toml` (#1975).
+//! it by `xtask witness`, from `tests/lines.toml`.
 
 #![allow(
     clippy::disallowed_methods,
@@ -59,7 +59,7 @@ fn conf(dir: &Path, more: &str) -> PathBuf {
 
 /// Where a pool in `dir` listens: a socket in the test's own directory,
 /// which no other process names, so nothing else can listen there before
-/// the master does (#1474). A loopback `port` found free and let go was
+/// the master does. A loopback `port` found free and let go was
 /// anyone's until the master bound it, and a request sent there reached
 /// whatever took it.
 fn socket(dir: &Path) -> PathBuf {
@@ -83,7 +83,7 @@ struct Pool<'a> {
 /// the test's own, which it owns before anything can panic: dropped, as a
 /// test that panics drops it, it halts the master and removes the
 /// directory, so no master outlives its test to hold a socket another
-/// test's descriptors can see (#3093).
+/// test's descriptors can see.
 struct Master {
     dir: PathBuf,
     child: Option<Child>,
@@ -231,7 +231,7 @@ fn a_configuration_test_says_the_file_is_sound() {
 }
 
 /// With no `-y`, the file tested is `php-fpm.conf` under the engine's
-/// `PHP_SYSCONFDIR`, the build's layout (#1404), named whether it opens
+/// `PHP_SYSCONFDIR`, the build's layout, named whether it opens
 /// or not.
 #[test]
 fn with_no_file_named_the_configuration_is_the_builds_sysconfdirs() {
@@ -356,7 +356,7 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
 }
 
 /// A test that panics while its master serves leaves neither the master,
-/// nor a child of its pool, nor its directory (#3093): the panic drops the
+/// nor a child of its pool, nor its directory: the panic drops the
 /// [`Master`], whose `Drop` halts the master and removes the directory.
 /// The panic carries the master's pid and directory out; the pid names
 /// the pool's process group too, which the master's `setsid` made, and a
@@ -454,7 +454,7 @@ fn quit(pid: Pid) {
 }
 
 /// A child sent `SIGQUIT` as it waits in `accept` ends on its own with
-/// code 0, as the oracle's does, and never aborts (#2400): the listening
+/// code 0, as the oracle's does, and never aborts: the listening
 /// socket its handler closes is closed by nothing else.
 #[test]
 fn a_child_sent_sigquit_while_it_waits_exits_with_code_0() {
@@ -468,7 +468,7 @@ fn a_child_sent_sigquit_while_it_waits_exits_with_code_0() {
 }
 
 /// A child sent `SIGQUIT` mid-request serves the request, then ends with
-/// code 0, as the oracle's does (#2400).
+/// code 0, as the oracle's does.
 #[test]
 fn a_child_sent_sigquit_mid_request_serves_it_and_exits_with_code_0() {
     let (body, line) = quit_child("quit-busy", true);
@@ -509,7 +509,7 @@ fn a_request_body_file_that_does_not_open_is_a_warning_the_pool_logs() {
     assert!(String::from_utf8_lossy(&body).ends_with("ran"), "{body:?}");
 }
 
-/// #1807: the fork stress of the engine's execution timer
+/// The fork stress of the engine's execution timer
 /// (`crates/php_engine/src/interrupt.rs`, which the CLI serves), served
 /// by php-fpm's child: eight workers each fork 1875 children straight
 /// after a `set_time_limit()`, and each child arms a timer of its own,
@@ -591,7 +591,7 @@ echo "$hung of 15000 children hung, $otherwise did not fork or end with status 0
 echo "$workers_otherwise of 8 workers did not end with status 0\n";
 "#;
 
-/// What a process a request execs holds (#2428, #2458), each fd
+/// What a process a request execs holds, each fd
 /// named by what it is: the oracle's php-fpm, a static pool of one child
 /// with its master's stderr on a file, lists `0` `/dev/null`, `1` the
 /// pipe `shell_exec` reads, `2` `/dev/null`, `5` the master's stderr,
@@ -783,7 +783,7 @@ fn slow_frames(name: &str, more: &str, files: &[(&str, &str)]) -> (Vec<String>, 
 
 /// A request past `request_slowlog_timeout` whose child the master can
 /// read is logged with its frames after the head, as php's
-/// `fpm_php_trace_dump` writes them (#1301): one line per frame from the
+/// `fpm_php_trace_dump` writes them: one line per frame from the
 /// innermost, its address, the name of what it serves, a method's alone,
 /// `[INCLUDE_OR_EVAL]` for an included file, and the file and line it
 /// was called from; the main program's frame ends the walk. The engine
@@ -815,7 +815,7 @@ fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
 /// frame that resumed it, so `fpm_php_trace_dump` writes `???()` for the
 /// placeholder, with the line of the loop below it, and the running
 /// frame's line is `unknown:0`, its walk below stopping at the
-/// placeholder (#2897).
+/// placeholder (design §5.6, revision 143).
 #[test]
 #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
 fn a_slow_request_in_a_delegated_generator_writes_php_s_placeholder_line() {
@@ -855,7 +855,8 @@ fn a_slow_request_s_frames_stop_at_the_trace_depth() {
 /// sleep through the fiber's callable into `Fiber::start` and the main
 /// program. php's own walk meets the fiber's zeroed bottom frame there,
 /// whose `function_name` is NULL and whose call kind is no kind it names
-/// (`ZEND_UNREACHABLE`), so this line has no oracle (#2897).
+/// (`ZEND_UNREACHABLE`), so this line has no oracle
+/// (`trace:fpm-slowlog-fiber-bottom`).
 #[test]
 #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
 fn a_slow_request_s_frames_run_through_a_fiber_into_its_resumer() {

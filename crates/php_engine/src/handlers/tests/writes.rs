@@ -91,8 +91,8 @@ fn an_assign_into_a_cv_holding_a_reference_writes_the_referent() {
 }
 
 /// A debug build stops at a write of a `TMP` over an owner the slot
-/// still holds, #723's shape planted: a string left in the `TMP` a
-/// `QM_ASSIGN` writes, as `FE_RESET_R` left its subject before #723,
+/// still holds, the shape of a fixed defect planted: a string left in
+/// the `TMP` a `QM_ASSIGN` writes, as `FE_RESET_R` once left its subject,
 /// is the `InternalError` naming the opcode, the opline and the
 /// temporary, raised by the loop after the handler and before the
 /// next one, and not a second release several allocations later.
@@ -145,8 +145,7 @@ fn a_write_over_a_temporary_that_still_holds_a_value_is_an_internal_error() {
         Some(7),
         "the write itself stood"
     );
-    // Rendered at the line of the handler that wrote the temporary
-    // (#2046).
+    // Rendered at the line of the handler that wrote the temporary.
     assert!(
         matches!(req.ending(), Some(crate::api::request::Ending::Fatal(logged)) if logged.contains(" in planted.php on line 5")),
         "{:?}",

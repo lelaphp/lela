@@ -9,7 +9,7 @@
 //! is stale in a way which still parses, a rule removed or a pattern
 //! loosened, exits 0 and judges by rules that are no longer the rules; a
 //! build stale in its own code judges by a matcher that has since been
-//! fixed, with no rule moved at all (#16 item 1 and its residue).
+//! fixed, with no rule moved at all (harness revision 13).
 //!
 //! So the build records what it judges by: `build.rs` takes the digest of
 //! `seams.toml`, the rules, and of `xtask/src`, the code that reads them,
@@ -23,12 +23,12 @@
 //! The manifest is compared against the checkout the call belongs to,
 //! since that is where the rules a build could have been compiled against
 //! are: a fixture workspace inside it carries a manifest of its own that
-//! judges the call (#57) and that no build is compiled against, so the
+//! judges the call and that no build is compiled against, so the
 //! build that judges by it is held to the checkout's. The sources are
 //! compared against the workspace this binary runs in ([`built_root`]),
 //! the code it must have been built from: a binary cargo reused from
 //! another checkout sharing the target directory is held to this one's
-//! sources, and is stale where they differ (#2719).
+//! sources, and is stale where they differ.
 //!
 //! [`built_root`]: crate::built_root
 //!
@@ -38,15 +38,15 @@
 //! `seams.toml` change carries rules no build of the checkout is compiled
 //! against. No rebuild of the checkout repairs that, so the answer is not
 //! a refusal but [`Judge::Checkout`]: the worktree's own build judges the
-//! call, and `permit` hands it over (#1047).
+//! call, and `permit` hands it over.
 //!
 //! A refusal says which of the two it is, since only one of them is a
 //! judgement the harness is missing. A build apart from the tree is passed
 //! over by one that rebuilds from it, so the call is judged and the
 //! refusal is a step of the walk; a manifest no build can read ends the
-//! walk with the call unjudged, which is the outage of #16. `permit`
-//! records the first as a skip that names where the call went and the
-//! second as a failure (#118).
+//! walk with the call unjudged, which is the outage of harness revision
+//! 11. `permit` records the first as a skip that names where the call went
+//! and the second as a failure.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -64,8 +64,8 @@ pub const SOURCES: &str = env!("XTASK_SOURCES_DIGEST");
 
 /// Why a build will not judge one call, and whether the candidate after it
 /// will. The hook walks its candidates and stops at the first that exits 0
-/// (§4.4), so the two refusals are not one thing, and #118 is what came of
-/// spelling them as one.
+/// (§4.4), so the two refusals are not one thing, and a walk recorded as
+/// a failure is what came of spelling them as one.
 #[derive(Debug)]
 pub enum Refusal {
     /// This build is not the tree's: another manifest, other sources, or
@@ -81,7 +81,7 @@ pub enum Refusal {
     /// The build of the checkout the call is in, which [`Judge::Checkout`]
     /// named, did not judge it: none of its candidates exited 0. Every
     /// candidate of this walk hands the call to that same build, so the
-    /// call reaches the end of the walk unjudged, never allowed (#1047).
+    /// call reaches the end of the walk unjudged, never allowed.
     HandOff(anyhow::Error),
 }
 
@@ -93,7 +93,7 @@ pub enum Judge {
     This,
     /// The build of this checkout, another checkout of the repository than
     /// the one this build was asked about, whose manifest is not the one
-    /// this build was compiled against (#1047). Each tree is judged by the
+    /// this build was compiled against. Each tree is judged by the
     /// rules it carries, so that build judges the call, against its own
     /// tree, where the checkout it is asked about is its root and it never
     /// hands the call on again.
@@ -136,19 +136,19 @@ impl From<Refusal> for anyhow::Error {
 /// [`Refusal`] naming the one that is not when either has moved; except
 /// that a manifest apart in a `checkout` that is not `root`, the checkout
 /// this build was asked about, is [`Judge::Checkout`], since that
-/// checkout's own build is compiled against it (#1047). The caller refuses to
+/// checkout's own build is compiled against it. The caller refuses to
 /// judge on that rather than deciding by rules or with code it was not
 /// built from, whichever way the decision would fall: a stale build that
 /// happens to agree is still a build whose agreement means nothing.
 ///
 /// Any byte apart is apart, a comment included. A build cannot say which
 /// differences change a judgement without reading rules it may be too old
-/// to understand, which is the whole of what went wrong in #16; the cost of
-/// the blunt answer is a rebuild, which the candidate that closes the
-/// hook's list does anyway. That is why a digest apart is
-/// [`Refusal::Stale`] and hands the call on, while a digest that cannot be
-/// taken at all is [`Refusal::Unreadable`]: no rebuild repairs a manifest
-/// that is not there.
+/// to understand, which is the whole of what went wrong in the outage of
+/// harness revision 11; the cost of the blunt answer is a rebuild, which
+/// the candidate that closes the hook's list does anyway. That is why a
+/// digest apart is [`Refusal::Stale`] and hands the call on, while a
+/// digest that cannot be taken at all is [`Refusal::Unreadable`]: no
+/// rebuild repairs a manifest that is not there.
 pub fn judges(checkout: &Path, root: &Path, built_root: &Path) -> Result<Judge, Refusal> {
     let manifest = manifest_digest(checkout)
         .with_context(|| {
@@ -256,8 +256,8 @@ mod tests {
     }
 
     /// A build stale in its own code judges by a matcher that has since
-    /// been fixed, with no rule moved at all: the residue of #16 item 1,
-    /// and the half an exit code and a manifest digest both miss.
+    /// been fixed, with no rule moved at all (harness revision 13): the
+    /// half an exit code and a manifest digest both miss.
     #[test]
     fn a_build_the_harnesss_own_sources_moved_under_refuses_too() {
         let workspace = built_root();
@@ -286,7 +286,7 @@ mod tests {
     }
 
     /// The digest is of the files the crate is compiled from, `*.rs` under
-    /// `xtask/src`, and of nothing else there (#48): an editor's swap file
+    /// `xtask/src`, and of nothing else there: an editor's swap file
     /// or a `.DS_Store` left beside the sources is not a change to the
     /// code, so a built candidate over that tree still judges. A new `.rs`
     /// file is one, and it is in the list `build.rs` watches, so cargo
@@ -337,8 +337,8 @@ mod tests {
         judges(&workspace, &workspace, &root).unwrap_err();
     }
 
-    /// The two refusals are told apart by whether a rebuild repairs them
-    /// (#118). A digest apart from the tree is [`Refusal::Stale`]: the
+    /// The two refusals are told apart by whether a rebuild repairs them.
+    /// A digest apart from the tree is [`Refusal::Stale`]: the
     /// candidate that closes the hook's list rebuilds and judges the call.
     /// A manifest that is not there at all is [`Refusal::Unreadable`]:
     /// every candidate reads the same absence, so the walk ends with the
@@ -363,7 +363,7 @@ mod tests {
     }
 
     /// A manifest apart in another checkout than the one this build was
-    /// asked about is no refusal (#1047): that checkout's own build is
+    /// asked about is no refusal: that checkout's own build is
     /// compiled against it, so the answer names the checkout whose build
     /// judges the call. The same manifest in the checkout asked about is
     /// the refusal it was, since there the build that rebuilds is this

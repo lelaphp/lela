@@ -1,27 +1,27 @@
 //! The engine's tests that belong to no one file of it: the Extension
 //! seam's adapter, `TestExt`, the lifecycle it records (design §4.3),
 //! the observer's order and pairing (seam 9), the frames its handlers
-//! read, keep and write and the op arrays they read (#1828, #1829),
+//! read, keep and write and the op arrays they read,
 //! its notices and the handlers added while a request is served, the
 //! opcodes an extension observes, a periodic interrupt as an extension
-//! sees it (#1806), the pool's drain, a handler that blocks with the
-//! time limit suspended (#1814), allocations as an extension observes
+//! sees it, the pool's drain, a handler that blocks with the
+//! time limit suspended, allocations as an extension observes
 //! them (design §7.1), the statements a Zend extension is told of
-//! under extended info (#1823), and a debug build's freed-use guard
-//! (#1990) and request leak sensor (#1992) as a program meets them,
-//! the leaks that sensor found in the engine (#2057), the owner type
-//! as one meets it (#1995), a table copied as php copies it (#2005),
-//! the callback walks as a native meets them (#1980), the owners the
-//! face takes for a native and gives up (#2059, #2080), and the frames
-//! a fatal leaves, whose annexes leave with them (#2554), an
-//! extension's optimizer passes where the unit cache runs them (#2386),
+//! under extended info, and a debug build's freed-use guard
+//! and request leak sensor as a program meets them,
+//! the leaks that sensor found in the engine, the owner type
+//! as one meets it, a table copied as php copies it,
+//! the callback walks as a native meets them, the owners the
+//! face takes for a native and gives up, and the frames
+//! a fatal leaves, whose annexes leave with them, an
+//! extension's optimizer passes where the unit cache runs them,
 //! the running execution's trace number across a fiber switch and a
-//! generator's resume (#2738), and the request's storage as a native
+//! generator's resume, and the request's storage as a native
 //! holds it, an `Emalloc` and a `FreshString` (design §5.13), and a
-//! call's closure taken for the closure `CALLABLE_CONVERT` writes
-//! (#3335), php's typed throws held to their typed functions across
-//! the workspace (#3261), and compiled code's guard on a method's pair
-//! held to the interpreter's read-back of it (#4326).
+//! call's closure taken for the closure `CALLABLE_CONVERT` writes,
+//! php's typed throws held to their typed functions across
+//! the workspace, and compiled code's guard on a method's pair
+//! held to the interpreter's read-back of it.
 
 use crate::api;
 

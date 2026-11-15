@@ -10,7 +10,7 @@
 //! stderr and return when the pinned binary is not on this machine, as
 //! the ones that resolve a subset of the real corpus do when the pinned
 //! tree is on neither place `Source::tree` looks, and fail there instead
-//! where this machine promised the fact (#38); the rest run anywhere,
+//! where this machine promised the fact; the rest run anywhere,
 //! the subsets they resolve being a fixture tree's.
 
 use std::fs;
@@ -71,7 +71,7 @@ fn resolve(manifest: &Manifest, name: &str) -> Result<Subset> {
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
-/// this machine promised the binary (#38).
+/// this machine promised the binary.
 fn oracle() -> Option<PathBuf> {
     let pin = manifest().pin.unwrap();
     Promise::Oracle
@@ -80,7 +80,7 @@ fn oracle() -> Option<PathBuf> {
 }
 
 /// The tracked pin's php-src tree, when it is on this machine; a failure
-/// where this machine promised the tree (#38).
+/// where this machine promised the tree.
 fn source() -> Option<PathBuf> {
     Promise::Tree
         .or_skip(manifest().pin().unwrap().source.tree())
@@ -132,8 +132,8 @@ fn a_lane_names_the_engine_only_directive() {
 
 /// Under a tier's lane with no binary named, the binary under test is
 /// `php` built with `php_bundle/jit` into `target/featured/jit`, where the
-/// witness lane builds it (#2721), and the reading's `run by` names that
-/// binary as it names any engine. Before #3053 `--jit force` resolved the
+/// witness lane builds it, and the reading's `run by` names that
+/// binary as it names any engine. Before this, `--jit force` resolved the
 /// default build, which binds no tier, so its reading was the plain
 /// lane's under another name. A variant's row is built with its feature
 /// and the tier's; a named binary, the control and a run with no lane
@@ -195,7 +195,7 @@ fn a_test_and_its_skipif_run_from_the_php_src_root_as_run_tests_php_runs_them() 
     if oracle().is_none() {
         return;
     }
-    // The program and its SKIPIF each ask where they run (#952).
+    // The program and its SKIPIF each ask where they run.
     let asks = "getcwd() === realpath(__DIR__ . '/../../..')";
     let (_root, subset) = rooted(
         "cwd",
@@ -224,7 +224,7 @@ fn a_test_s_dir_is_its_own_directory_and_stands_in_what_it_printed() {
         return;
     }
     // The EXPECTF asks for the directory's last segment, which a token in
-    // the directory's place would have taken (#1089, #906).
+    // the directory's place would have taken.
     let (_root, subset) = rooted(
         "dir",
         "--TEST--\n__DIR__\n--FILE--\n<?php\nvar_dump(__DIR__);\nvar_dump(__DIR__ === realpath('ext/fixture/tests'));\nvar_dump(basename(__FILE__));\n--EXPECTF--\nstring(%d) \"%s%efixture%etests\"\nbool(true)\nstring(7) \"dir.php\"\n",
@@ -244,7 +244,7 @@ fn a_test_and_its_skipif_spawn_the_binary_under_test_with_its_extra_args() {
     };
     // The SKIPIF runs under the oracle and still names the binary under
     // test; the FILE spawns that binary with TEST_PHP_EXTRA_ARGS, which
-    // carries the test's own --INI-- (#906).
+    // carries the test's own --INI--.
     let (_root, subset) = rooted(
         "spawn",
         "--TEST--\nspawn\n--INI--\nprecision=3\n--SKIPIF--\n<?php if (getenv('TEST_PHP_EXTRA_ARGS') === false || getenv('TEST_PHP_CGI_EXECUTABLE') === '') echo 'skip no environment';\n--FILE--\n<?php\n$php = getenv('TEST_PHP_EXECUTABLE_ESCAPED');\n$extra = getenv('TEST_PHP_EXTRA_ARGS');\necho shell_exec(\"$php $extra -r 'echo 1/3, ini_get(\\\"error_reporting\\\");'\"), \"\\n\";\nvar_dump(getenv('TEST_PHP_EXECUTABLE') === realpath(getenv('TEST_PHP_EXECUTABLE')));\n--EXPECT--\n0.33330719\nbool(true)\n",
@@ -328,7 +328,7 @@ fn a_missed_expectation_fails_with_the_difference() {
     assert!(note.contains("-five") && note.contains("+four"), "{note}");
     assert_eq!(tally.against(), ["ext/fixture/tests/missed.phpt"]);
     // The miss keeps the lines where the two part and what they come to,
-    // decoded where the verdict was made (#1185).
+    // decoded where the verdict was made.
     assert_eq!(
         tally.judged[0].miss,
         Some(miss::Miss {
@@ -343,7 +343,7 @@ fn a_missed_expectation_fails_with_the_difference() {
 #[test]
 fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
     // Room for the quick tests' php to start under any load the machine
-    // runs at; one second was not, at a load average of 48 to 75 (#1105).
+    // runs at; one second was not, at a load average of 48 to 75.
     const LIMIT: u64 = 10;
     if oracle().is_none() {
         return;
@@ -351,7 +351,7 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
     // Three tests in order, the middle one a program that never ends and
     // says first which process it is. Under the limit it is that test's
     // fail, naming the limit; the process is killed and reaped, not left
-    // running; and the test after it is still judged (#691). Before, the
+    // running; and the test after it is still judged. Before, the
     // limit ended the whole run and took every verdict with it. The
     // program sleeps rather than spins, so its wait adds no load.
     let (tree, subset) = subset("past-limit", &[]);
@@ -455,8 +455,8 @@ fn a_missed_expectation_a_row_covers_is_diverged_and_fails_without_it() {
 /// `Parse error` line ending in `this compiler cannot read yet`, is
 /// unread and the construct is the note; the `PHP ` prefix `log_errors`
 /// gives it reads the same, and so does the reader's `this compiler
-/// cannot read`, the same refusal for a shape of a construct it does read
-/// (#319). Anything else the program wrote is the
+/// cannot read`, the same refusal for a shape of a construct it does read.
+/// Anything else the program wrote is the
 /// test's own: php's own parse error, a body that ran and then met the
 /// refusal, a body that ran and wrote nothing, or one that wrote the words
 /// itself.
@@ -493,7 +493,7 @@ fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
     assert_eq!(unread("this compiler cannot read yet"), None);
 }
 
-/// The fixture at `xtask/fixtures/phpt/UnreadConstruct.phpt` (#395): a
+/// The fixture at `xtask/fixtures/phpt/UnreadConstruct.phpt`: a
 /// program php runs and this compiler cannot read. The refusal
 /// `php_compile` gives that program ends in the words [`adapter::unread`]
 /// reads, so the lane counts the test a construct not read yet and not a
@@ -502,13 +502,13 @@ fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
 ///
 /// The construct moves as the compiler grows, and the fixture moves with
 /// it: `$a and $b`, `1 | 2`, `print`, `eval` and `C::$$p` were each read in
-/// turn (#483, #1214). While an expression stood unread, the fixture put it
+/// turn. While an expression stood unread, the fixture put it
 /// inside parentheses, since `emit`'s walk names the construct inside them
-/// and not the parentheses (#595); `php_compile`'s own test,
+/// and not the parentheses; `php_compile`'s own test,
 /// `an_unread_expression_inside_parentheses_names_the_expression`, holds
 /// that half. With no expression left unread, the fixture was the one
 /// statement the census of Zend/tests still counted, `declare(encoding)`,
-/// until #1272 read it (#1352). Since then the fixture is a refusal
+/// until the compiler read it. Since then the fixture is a refusal
 /// `php_compile`'s own tests hold, `declare(ticks=1): … enddeclare;`,
 /// the alternative syntax php runs and no test of Zend/tests writes.
 #[test]
@@ -545,14 +545,14 @@ fn a_skipif_is_judged_by_what_it_says_as_upstream_judges_it() {
             "nothing to see here",
         ),
         // A warning before the skip, as mcast_ipv6_recv.phpt's unsilenced
-        // `socket_sendto` writes one: upstream borks it (#2857).
+        // `socket_sendto` writes one: upstream borks it.
         (
             "trigger_error('w', E_USER_WARNING); echo 'skip';",
             Judgement::Bork,
             "invalid output from SKIPIF: Warning: w in ",
         ),
         // A SKIPIF a signal ended having written nothing: upstream's
-        // `Termsig=` line is what it wrote (#2908).
+        // `Termsig=` line is what it wrote.
         (
             "posix_kill(getmypid(), 9);",
             Judgement::Bork,
@@ -594,8 +594,8 @@ fn a_run_a_signal_ended_is_trimmed_after_its_termsig_line_as_upstream_trims_it()
 /// A test whose program a signal ended keeps how it died on its miss, and
 /// its note says so, with the last of what it wrote on stderr, whether
 /// stderr is the stream stdout is too or a pipe of its own; a test whose
-/// program exited as a run does, having written on stderr too, keeps none
-/// (#4130). Before, the miss kept the lines and the signature alone, and a
+/// program exited as a run does, having written on stderr too, keeps none.
+/// Before, the miss kept the lines and the signature alone, and a
 /// run that read `Termsig=11` once kept nothing to say what ended it. The
 /// fixture is a program that kills itself, run the adapter's own way;
 /// SIGKILL, which leaves no crash log on the machine.
@@ -649,7 +649,7 @@ fn a_program_a_signal_ended_keeps_its_ending_and_its_stderr_on_the_miss() {
 
 /// A test whose `--XFAIL--` section is there and which passes is
 /// upstream's lone `WARN` and this runner's `Warn`, which `--upstream`
-/// reads alike (#2922).
+/// reads alike.
 #[test]
 fn an_xfail_test_that_passes_is_warned_alike_by_both_runners() {
     let (Some(_), Some(source)) = (oracle(), source()) else {
@@ -668,7 +668,7 @@ fn an_xfail_test_that_passes_is_warned_alike_by_both_runners() {
 
 /// A green reading's message names every verdict its run gave, each by
 /// the key its count is kept under, and the counts it names add up to
-/// the tests it says it is over (#2939).
+/// the tests it says it is over.
 #[test]
 fn a_green_message_accounts_for_every_test_it_is_over() {
     use Judgement::{Diverged, Pass, Skip, Unread, Unsent, Warn, XFail};
@@ -732,7 +732,7 @@ fn a_file_that_is_not_a_test_borks_and_the_subset_fails_on_it() {
     );
 }
 
-/// The fixture at `xtask/fixtures/phpt/cgi` (#1198): a `--POST--` test
+/// The fixture at `xtask/fixtures/phpt/cgi`: a `--POST--` test
 /// with a query string, a cookie and a header it wants, which passes only
 /// where the runner hands it to a CGI host with its request described, so
 /// a runner that skips it, or serves it the command line, fails here; and
@@ -761,7 +761,7 @@ fn a_post_test_runs_through_the_cgi_host() {
     );
 }
 
-/// The fixture at `xtask/fixtures/phpt/fpm` (#1291): a test standing in
+/// The fixture at `xtask/fixtures/phpt/fpm`: a test standing in
 /// `sapi/fpm/tests` finds a php-fpm where `FPM\Tester::findExecutable`
 /// looks last, which the runner put there, so a runner that puts none
 /// fails here; the same test standing anywhere else finds none and skips.
@@ -794,7 +794,7 @@ fn a_test_of_sapi_fpm_finds_the_process_manager() {
     );
 }
 
-/// The fixture at `xtask/fixtures/phpt/phpdbg` (#1304): a `--PHPDBG--`
+/// The fixture at `xtask/fixtures/phpt/phpdbg`: a `--PHPDBG--`
 /// test whose `SKIPIF` skips it outside the debugger and whose program
 /// prints the SAPI and its arguments, which passes only where the runner
 /// hands it to a phpdbg with its commands on stdin and its `--ARGS--`
@@ -852,7 +852,7 @@ fn the_subset_of_an_extension_is_its_tests_at_the_pinned_tag_and_the_scope_is_th
 
 /// The nightly lane's corpus holds what the rows derive: an extension's
 /// subset is `ext/<name>` whole, a nested test directory in it, and an
-/// extension with no `.phpt` is no subset of it (#1590, #1598).
+/// extension with no `.phpt` is no subset of it.
 #[test]
 fn the_corpus_holds_each_extension_whole_as_a_row_derives_it() {
     let tree = fixture_tree();
@@ -893,7 +893,7 @@ fn the_corpus_holds_each_extension_whole_as_a_row_derives_it() {
     );
 }
 
-/// The patterns CI checks the corpus out by (#1713) take every subset the
+/// The patterns CI checks the corpus out by take every subset the
 /// manifest's rows hold, `sapi/cgi/tests`, `sapi/fpm/tests`,
 /// `sapi/phpdbg/tests` and the nested `ext/intl/uchar/tests` among them,
 /// and every subset of the nightly lane's corpus, as git itself reads
@@ -907,7 +907,7 @@ fn the_sparse_patterns_check_out_every_subset_the_manifest_and_the_corpus_hold()
     assert_eq!(
         patterns,
         ["/Zend/tests/", "/tests/", "/ext/*/", "/sapi/*/tests/"],
-        "every .phpt under ext/<name> is the extension's, as Mitchell ruled on #1713"
+        "every .phpt under ext/<name> is the extension's (harness revision 67)"
     );
 
     let mut held: Vec<PathBuf> = manifest().crates.iter().flat_map(Crate::subsets).collect();
@@ -992,7 +992,7 @@ fn the_sparse_patterns_check_out_every_subset_the_manifest_and_the_corpus_hold()
 
 /// Every `.phpt` of the pinned tree is in exactly one subset of the
 /// nightly lane's corpus, `ext/intl/uchar/tests` among them, so the lane
-/// holds the whole corpus and nothing twice (#1598).
+/// holds the whole corpus and nothing twice.
 #[test]
 fn every_test_of_the_pinned_tree_is_in_one_subset_of_the_corpus() {
     let Some(tree) = source() else { return };
@@ -1082,7 +1082,7 @@ fn a_crate_resolves_to_every_subset_its_row_names() {
     );
 }
 
-/// Routing (#3312): a variant's row holds, beside its own tests, each
+/// Routing: a variant's row holds, beside its own tests, each
 /// test of the corpus whose `--EXTENSIONS--` names an extension its
 /// variant loads and the main oracle does not, on a line of its own,
 /// among others, and no other: not one that spells it otherwise, which
@@ -1194,7 +1194,7 @@ fn a_variants_row_holds_the_tests_elsewhere_that_need_what_only_it_loads() {
 /// pin does not carry, is refused in its own subset and in no other's:
 /// the run routes on, the row's subset fails its reading naming the
 /// variant, and every other subset runs as with no variant's row, leaving
-/// nothing to it (harness §4.3, #3312).
+/// nothing to it (harness §4.3).
 #[test]
 fn a_variant_routing_cannot_list_refuses_its_own_subset_alone() {
     if oracle().is_none() {
@@ -1260,12 +1260,12 @@ fn a_directory_the_pinned_tree_has_not_is_kept_and_named_absent() {
 
 /// An extension's row derives its subset, `ext/<name>`, and where the
 /// pinned tree has no such directory, or no `.phpt` under it, the
-/// extension has no tests of its own, as `ext/lexbor` has none
-/// (#1598): its reading, asked for by name and in
+/// extension has no tests of its own, as `ext/lexbor` has none:
+/// its reading, asked for by name and in
 /// the lane alike, is a skip naming the directory, not the standing fail
 /// a row that names a directory the tree has not earns. A subset named on
 /// the command line that is no crate and no directory is still refused,
-/// so a typo is not a skip (#1231).
+/// so a typo is not a skip.
 #[test]
 fn an_extension_with_no_test_directory_reads_as_a_skip_and_a_name_that_is_nothing_fails() {
     let tree = fixture_tree();
@@ -1279,7 +1279,7 @@ fn an_extension_with_no_test_directory_reads_as_a_skip_and_a_name_that_is_nothin
     );
     let registry = registry("");
     // A scratch workspace, so a run over this corpus is kept in no
-    // checkout's store (#3143).
+    // checkout's store.
     let root = Tree::new("phpt-testless").unwrap();
     crate::permit::scratch_workspace(&workspace(), &root).unwrap();
     for (subset, has) in [
@@ -1349,7 +1349,7 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
     // set's and the one behind a feature it turns on (revision 63). One
     // behind a feature it does not turn on is the nightly lane's unless
     // its row names an oracle variant, which the lane runs on the engine
-    // built with the feature (#2029), and a crate with no subset owns none.
+    // built with the feature, and a crate with no subset owns none.
     assert_eq!(
         lane,
         [
@@ -1366,7 +1366,7 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
 /// every row whose `feature` the binary turns on and which owns a subset
 /// is in it, so a lane that drops one, by a filter that reads the
 /// manifest's `feature` alone or by a second list of the binary's
-/// features gone stale, is this test red (revision 63, #1252).
+/// features gone stale, is this test red (revision 63).
 #[test]
 fn the_lane_runs_every_feature_row_the_binary_turns_on() {
     let tree = Tree::new("phpt-lane-carried").unwrap();
@@ -1506,9 +1506,9 @@ fn missed(name: &str, judgement: Judgement, miss: Option<miss::Miss>) -> Judged 
 
 /// The census folds the misses by the signature each kept, the widest
 /// first, and a tie is broken by the signature's own order so one run
-/// prints the same twice (#617, #1185). The unread census is the groups
-/// whose signature is the compiler's refusal; a fail whose line reads
-/// like one is not one, and a skip keeps nothing.
+/// prints the same twice. The unread census is the groups whose
+/// signature is the compiler's refusal; a fail whose line reads like one
+/// is not one, and a skip keeps nothing.
 #[test]
 fn the_census_groups_every_miss_by_signature_and_the_unread_by_construct() {
     let foreach = || {
@@ -1622,7 +1622,7 @@ fn kept(run: &against::Run) -> impl Iterator<Item = (&str, Judgement, Option<&mi
 
 /// The census of the fixture run groups each of its twelve misses under
 /// its signature, the widest first, and nothing the run met, skipped or
-/// expected to fail (#1185).
+/// expected to fail.
 #[test]
 fn the_census_of_a_kept_run_groups_every_miss_it_kept() {
     let run = census_fixture();
@@ -1748,7 +1748,7 @@ fn over(scope: &str, root: &Path, under: &str) -> Subset {
     Subset::over(scope.to_owned(), root, [PathBuf::from(under)], Holds::Every)
 }
 
-/// `--unkept`'s reading of a redirect (#1830): a target stands for the
+/// `--unkept`'s reading of a redirect: a target stands for the
 /// redirecting test only where it kept a verdict through it for every test
 /// of the set as the tree holds it now. A test added to the set is one the
 /// target predates, as one added to the subset is.
@@ -1790,7 +1790,7 @@ fn a_redirect_stands_only_where_every_test_of_its_set_was_kept_through_it() {
 /// both tests; the redirecting test is no verdict of its own. The set's
 /// own directory run as a subset has no driver and skips, and a redirect
 /// whose extension is not loaded or whose section names no directory runs
-/// no set and is a skip or a bork in upstream's words (#814).
+/// no set and is a skip or a bork in upstream's words.
 #[test]
 fn a_redirecttest_runs_its_set_under_the_environment_its_section_returns() {
     if oracle().is_none() {
@@ -1865,7 +1865,7 @@ fn a_redirecttest_runs_its_set_under_the_environment_its_section_returns() {
 /// its run judged: the driver's directory holds two files, and its run
 /// judges the set of two its `common.phpt` names and its own test, so a
 /// count of the lane does not hold the set again beside the set's own
-/// subset (#1589).
+/// subset.
 #[test]
 fn a_reading_counts_the_files_its_subset_holds_beside_the_tests_a_redirect_ran() {
     let Some(binary) = oracle() else { return };
@@ -1931,7 +1931,7 @@ fn overlap(a: (f64, f64), b: (f64, f64)) -> bool {
 
 /// The `.here` files a fixture's control pair leaves, each waiting a
 /// bounded time for the other's, removed before a run, so the pair meets
-/// on this run's files and not on a run's before it (#1105).
+/// on this run's files and not on a run's before it.
 fn clear_here(tree: &Tree, tests: &[&str]) {
     for test in tests {
         let here = tree.join(test).with_extension("php.here");
@@ -1941,7 +1941,7 @@ fn clear_here(tree: &Tree, tests: &[&str]) {
     }
 }
 
-/// The fixture at `xtask/fixtures/phpt/conflicts` (#938), on a pool of
+/// The fixture at `xtask/fixtures/phpt/conflicts`, on a pool of
 /// eight, which cuts its seven tests that do not run alone into batches of
 /// two neighbours: the two tests naming `shared` never run at once, the one
 /// naming `all` runs beside nothing, the directory's `CONFLICTS` file holds
@@ -1950,7 +1950,7 @@ fn clear_here(tree: &Tree, tests: &[&str]) {
 /// is the key. The negative controls are the tests naming no key, which
 /// run at once, and `own.phpt`, which runs beside the directory's second;
 /// each pair waits, bounded, for the other's `.here` file, so they meet
-/// however long the load holds one up and not by the clock (#1105). The
+/// however long the load holds one up and not by the clock. The
 /// verdicts, in order and word for word, are the ones a pool of one
 /// reaches, which finds the pooled run's `.here` files and waits on none.
 #[test]
@@ -2002,7 +2002,7 @@ fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() 
     );
 }
 
-/// The fixture at `xtask/fixtures/phpt/relative` (#1091): two neighbours
+/// The fixture at `xtask/fixtures/phpt/relative`: two neighbours
 /// that each make and remove one directory relative to the root every
 /// program runs from, which met on `mkdir(): File exists` when the pool
 /// judged them at once. On a pool of eight the three tests are cut into
@@ -2012,8 +2012,7 @@ fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() 
 /// negative control that shows the pool runs anything at once at all.
 /// The control is held on every run: the first and the third each wait,
 /// bounded, for the other's `.here` file, so they meet however long the
-/// load holds one up, where a race against the clock lost under load
-/// (#1152, #1105).
+/// load holds one up, where a race against the clock lost under load.
 #[test]
 fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
     if oracle().is_none() {
@@ -2037,10 +2036,10 @@ fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
     }
 }
 
-/// The fixture at `xtask/fixtures/phpt/past-limit` (#938): a test that
+/// The fixture at `xtask/fixtures/phpt/past-limit`: a test that
 /// never ends first, and two after it that conflict with nothing. On a
-/// pool of three the batches are two neighbours (run-tests.php:1537-1541,
-/// #1091), so the second waits for the first, its batch's, and the third,
+/// pool of three the batches are two neighbours (run-tests.php:1537-1541),
+/// so the second waits for the first, its batch's, and the third,
 /// in a batch of its own, is done before the first is past its limit; on
 /// a pool of one, the negative control, the third starts after it too.
 /// The verdicts are the same either way: the first fails naming the limit.
@@ -2048,11 +2047,11 @@ fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
 /// The limit runs from the spawn and the spans from each program's first
 /// line, so a php's start-up stands on both sides of the line between
 /// "done before the first is past its limit" and "after it", and it took
-/// more than 1.7 s at a load average of 50 to 108 (#2293). The line is
+/// more than 1.7 s at a load average of 50 to 108. The line is
 /// drawn at half a limit of ten seconds past the first's first line, so
 /// the start-ups of two programs may differ by five seconds, and the
-/// third's 300 ms run may start that late, before load crosses it
-/// (#2315); a limit of three and a line half a second early left 0.5 s.
+/// third's 300 ms run may start that late, before load crosses it;
+/// a limit of three and a line half a second early left 0.5 s.
 #[test]
 fn a_test_past_the_limit_holds_up_only_its_batch_and_what_it_conflicts_with() {
     const LIMIT: u64 = 10;
@@ -2096,15 +2095,15 @@ fn stands(pid: i32) -> bool {
 }
 
 /// A test whose program leaves a child sleeping and exits, and one whose
-/// program leaves one and passes the limit (#1211): each child is in its
+/// program leaves one and passes the limit: each child is in its
 /// program's process group, which the runner kills whole, so neither
 /// outlives its run. Each program writes the child's pid beside itself,
 /// which is how the test learns it; the child ran, which is the control.
 /// A program that exits pays none of its limit, so the first has thirty
 /// seconds of room; the second's limit is ten, past which its `sleep(60)`
 /// always runs and before which its php has started and written the pid
-/// under any load (#2315), where two seconds raced a start-up that took
-/// more than 1.7 s at a load average of 50 to 108 (#2293).
+/// under any load, where two seconds raced a start-up that took
+/// more than 1.7 s at a load average of 50 to 108.
 #[test]
 fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
     if oracle().is_none() {
@@ -2139,7 +2138,7 @@ fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
 /// names the program's files, as php-fpm's master names the configuration
 /// `FPM\Tester` wrote beside the test: once the program passes the limit
 /// it goes with it, and the test's note names it, rather than standing
-/// on the test's port until the subset ends (#2777).
+/// on the test's port until the subset ends.
 #[test]
 fn what_a_program_past_the_limit_left_outside_its_group_goes_with_it() {
     if oracle().is_none() {
@@ -2169,8 +2168,8 @@ nothing
 }
 
 /// A child that shares its program's stdout and writes there after the
-/// program exits is read, as upstream reads a test's stdout to its end
-/// (#1491): gh20582.phpt's `proc_open`ed `php -r` lost its `var_dump` to
+/// program exits is read, as upstream reads a test's stdout to its end:
+/// gh20582.phpt's `proc_open`ed `php -r` lost its `var_dump` to
 /// the group kill 13 times in 200 at twelve jobs, the oracle's as often as
 /// the engine's. One that still holds the pipe at the limit leaves what
 /// came by then and goes with its group, so it neither holds the run nor
@@ -2178,9 +2177,9 @@ nothing
 /// which it sees as the program's number leaving its `posix_getppid()`, so
 /// its `child` comes after the program's `parent` and after the program's
 /// end under any load; a 300 ms sleep let it come first at a load average
-/// of 30 to 38 (#4421). Its limit is one that child meets with room, since
+/// of 30 to 38. Its limit is one that child meets with room, since
 /// a run read to its end pays none of it; two seconds was not, at a load
-/// average of 80 to 108 (#2293).
+/// average of 80 to 108.
 #[test]
 fn a_child_sharing_stdout_is_read_to_the_end_and_killed_at_the_limit() {
     if oracle().is_none() {
@@ -2223,7 +2222,7 @@ fn a_child_sharing_stdout_is_read_to_the_end_and_killed_at_the_limit() {
     assert!(!stands(pid), "the child {pid} outlived its run");
 }
 
-/// The fixture at `xtask/fixtures/phpt/mysql` (#1366): a subset of a `MySQL`
+/// The fixture at `xtask/fixtures/phpt/mysql`: a subset of a `MySQL`
 /// suite whose server does not answer is refused, by the probe that asks
 /// the server and by the runner handed it with no server named, and never
 /// read as the skips its tests would make; where the pinned recipe's server
@@ -2272,7 +2271,7 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
 /// A lane whose second subset is refused for a `MySQL` server that does
 /// not answer still writes the first subset's reading, and the refusal is
 /// the second's own failing reading with its cause, so the lane's exit
-/// says it without erasing the rest (#1612). Before, the refusal was the
+/// says it without erasing the rest. Before, the refusal was the
 /// lane's error and no reading of the lane was written.
 #[test]
 fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading() {
@@ -2296,7 +2295,7 @@ fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading(
     // asks the server; it never runs a test, the refusal comes first. The
     // workspace is a scratch one with no engine source in it, so this
     // binary is fresh by construction and never held to the real tree,
-    // whose sources a merge writes after the test binary is built (#2557).
+    // whose sources a merge writes after the test binary is built.
     let root = Tree::new("phpt-refused-lane").unwrap();
     crate::permit::scratch_workspace(&workspace(), &root).unwrap();
     let ask = Ask {
@@ -2332,7 +2331,7 @@ fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading(
 }
 
 /// A run's database is named in the DSN as in the two variables php's
-/// suites read (#1546), and a database of the runs' is dropped only once
+/// suites read, and a database of the runs' is dropped only once
 /// the process its name carries is gone; one of another name never.
 #[test]
 fn a_runs_database_is_named_to_its_programs_and_a_dead_runs_is_dropped() {
@@ -2349,7 +2348,7 @@ fn a_runs_database_is_named_to_its_programs_and_a_dead_runs_is_dropped() {
 }
 
 /// Each run of a `MySQL` subset runs in a database of its own on the
-/// server (#1546): made before the subset, the one its programs connect
+/// server: made before the subset, the one its programs connect
 /// to through `connect.inc`'s and `inc/config.inc`'s variables, and gone
 /// after; a database a run that is gone left is dropped by the next. The
 /// control: the run's own pin, with no database laid over it, names
@@ -2409,7 +2408,7 @@ fn a_mysql_subset_runs_in_a_database_of_its_own() {
 }
 
 /// An `--EXPECTREGEX--` is matched as run-tests.php matches it, by the
-/// pinned php's `preg_match` (#1543): `ext/zip/tests/bug76524.phpt`'s
+/// pinned php's `preg_match`: `ext/zip/tests/bug76524.phpt`'s
 /// negative lookahead meets what has no leak line after `ok` and misses
 /// what has one, a back-reference is PCRE's, a pattern PCRE does not
 /// compile is an error naming the section, and a test carrying the
@@ -2505,9 +2504,9 @@ fn number(reading: &Reading, key: &str) -> Option<crate::reading::Number> {
     reading.numbers.get(key).copied()
 }
 
-/// A target kept over another corpus than the one the subset holds now
-/// (#1644), as #1598 grew `ext/intl` by `ext/intl/uchar/tests` under the
-/// same pin: the tests it holds no verdict for are counted as `predated`
+/// A target kept over another corpus than the one the subset holds now,
+/// as `ext/intl` grew by `ext/intl/uchar/tests` under the same
+/// pin: the tests it holds no verdict for are counted as `predated`
 /// and not `outside`, met-of-target stays over the target's own tests, and
 /// the reading says how many and the command that keeps the target again.
 /// The negative control is the same run held to a target that has a
@@ -2571,7 +2570,7 @@ fn a_test_the_kept_target_has_no_verdict_for_is_predated_and_not_outside() {
 }
 
 /// A run whose target misses include a test the engine skipped counts it
-/// as `missed_skipped` (#1834), so the forecast reads how many of the
+/// as `missed_skipped`, so the forecast reads how many of the
 /// tests still to meet are skips off the reading and not an estimate: of
 /// the target, `skipped.phpt` skipped is a miss and a skipped one,
 /// `failed.phpt` is a miss and not, and `row.phpt` skipped under an
@@ -2630,7 +2629,7 @@ fn a_run_counts_the_targets_misses_the_engine_skipped() {
     );
 }
 
-/// The fixture at `xtask/fixtures/phpt/unhosted` (#3763), run on an engine
+/// The fixture at `xtask/fixtures/phpt/unhosted`, run on an engine
 /// with no php-cgi or phpdbg built beside it: its CGI-shaped and its
 /// debugger's test are `unbuilt`, a build the run is missing, and held to a
 /// target that holds them the reading fails naming each host, where a run
@@ -2709,7 +2708,7 @@ fn a_target_test_no_host_of_ours_stands_beside_the_engine_for_fails_the_reading(
 /// A subset the lane could not run is refused, a fail whose message is
 /// the cause; one a full volume kept from running is not refused but not
 /// measured, a skip naming the volume, so the session reads the disk and
-/// not a red subset (#644).
+/// not a red subset.
 #[test]
 fn a_subset_a_full_volume_kept_from_running_is_a_skip_and_not_a_refusal() {
     let snapshot = crate::key::Snapshot::disk(&workspace()).unwrap();
@@ -2738,7 +2737,7 @@ fn a_subset_a_full_volume_kept_from_running_is_a_skip_and_not_a_refusal() {
 }
 
 /// nightly.yml's oracle job, the one CI job that runs the phpt lane on
-/// `main`, stashes the runs it keeps beside its store (#2362, #3554): one
+/// `main`, stashes the runs it keeps beside its store: one
 /// put is the store's log, `oracle`, and one is [`against::RUNS`] under
 /// [`against::UPLOAD`], the name the fetch line reads. The job is the
 /// lines from its key to the next job's, each put the lines from its
@@ -2748,7 +2747,7 @@ fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
     let text = fs::read_to_string(workspace().join(".github/workflows/nightly.yml")).unwrap();
     assert!(
         !text.contains("upload-artifact") && !text.contains("download-artifact"),
-        "the hand-offs are the stash's, not GitHub artifacts (#3554)"
+        "the hand-offs are the stash's, not GitHub artifacts"
     );
     let job = |name: &str| -> String {
         let key = |line: &str| {

@@ -4,7 +4,7 @@
 # requests on an engine of the bundle's enabled set with `cgi-fcgi` after
 # it. Four edges, php_bundle, php_sapi, php_proto for the FastCGI and
 # CGI codecs, and php_ext for the natives its own extension declares
-# (ADR-0008 as amended by #1348); the engine is named through the facade
+# (ADR-0008 as amended 2026-10-01); the engine is named through the facade
 # alone.
 [package]
 name = "php_sapi_fpm"
@@ -25,17 +25,17 @@ path = "src/main.rs"
 [features]
 # The compiled tier in every build that keeps the default features, the
 # release build among them, `opcache.jit=disable` its default and tracing
-# experimental, as `sapi/cli`'s says (ADR-0017, #3676).
+# experimental, as `sapi/cli`'s says (ADR-0017).
 default = ["php_bundle/jit"]
 
 [dependencies]
 # The bundle's default set and `one_thread`, the set a host serving on
-# one thread links, whose comment and `host`'s say why each (#1477, #3081).
+# one thread links, whose comment and `host`'s say why each.
 php_bundle = { path = "../../crates/php_bundle", features = ["one_thread"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its `cgi_module_entry`'s natives are declared with, as an
-# extension declares its own (ADR-0008, #1348).
+# extension declares its own (ADR-0008).
 php_ext = { path = "../../crates/php_ext" }
 # The process manager's system calls, safe where `nix` wraps them, and
 # `libc` in `src/ffi/` alone for the fork, the signal handlers, the

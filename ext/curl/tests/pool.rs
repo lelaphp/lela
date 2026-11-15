@@ -1,5 +1,5 @@
 //! `curl_share_init_persistent`'s shares lent from the engine's pool
-//! (ADR-0005's amendment, #1172, #1334): php keeps one `CURLSH` per set
+//! (ADR-0005's amendment): php keeps one `CURLSH` per set
 //! of options in `CURL_G(persistent_curlsh)`, one table per php-fpm
 //! worker, so the next request on the worker reuses the share and, with
 //! `CURL_LOCK_DATA_CONNECT`, its connections. A server of the test's own

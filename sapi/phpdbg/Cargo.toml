@@ -1,9 +1,9 @@
 # sapi/phpdbg: php-src/sapi/phpdbg, one crate under `sapi/` (ADR-0008), laid
 # down by `xtask new-sapi`: the binary `phpdbg`, the debugging host, which
-# binds a tier of its own (#1308). Three edges, php_bundle, php_sapi, and
-# php_ext for the natives its own extension declares (ADR-0008 as amended
-# by #1348); the engine and its tier face are named through the facade
-# alone.
+# binds a tier of its own (design revision 51). Three edges, php_bundle,
+# php_sapi, and php_ext for the natives its own extension declares (ADR-0008
+# as amended 2026-10-01); the engine and its tier face are named through the
+# facade alone.
 [package]
 name = "php_sapi_phpdbg"
 version = "0.0.0"
@@ -22,9 +22,9 @@ path = "src/main.rs"
 
 [dependencies]
 # The bundle's default set and `one_thread`, the set a host serving on
-# one thread links, whose comment and `host`'s say why each (#1450, #3081).
+# one thread links, whose comment and `host`'s say why each.
 php_bundle = { path = "../../crates/php_bundle", features = ["one_thread"] }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its natives are declared with, as an extension declares its own
-# (ADR-0008, #1348).
+# (ADR-0008).
 php_ext = { path = "../../crates/php_ext" }

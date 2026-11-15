@@ -1,5 +1,5 @@
 //! The binding of the platform's libsqlite3, the one the oracle links,
-//! through `libsqlite3-sys`'s prebuilt declarations (design §7.2, #1510,
+//! through `libsqlite3-sys`'s prebuilt declarations (design §7.2,
 //! `unsafe.homes`' `ext/*/src/ffi/`): the calls
 //! `sqlite_driver.c`, `sqlite_statement.c` and `pdo_sqlite.c` make, and
 //! the calls `ext/sqlite3`'s `sqlite3.c` makes over the same library,
@@ -171,8 +171,8 @@ pub trait Callbacks: Sync {
     ) -> Result<i32, Thrown>;
 }
 
-/// `sqlite3_libversion()`: the keg's library, the one the oracle links
-/// (#1510), its version and its compile options the oracle's.
+/// `sqlite3_libversion()`: the keg's library, the one the oracle links,
+/// its version and its compile options the oracle's.
 ///
 /// ```php
 /// $db = new PDO('sqlite::memory:');
@@ -476,7 +476,7 @@ impl Conn {
     }
 
     /// What PDO's pool keeps of a persistent connection the request gives
-    /// back (#4474): the library's connection, its lend emptied of what a
+    /// back: the library's connection, its lend emptied of what a
     /// request put there, the authorizer's view of its callable and a
     /// throwable a callback left, and `H->einfo` with its message the
     /// process's.

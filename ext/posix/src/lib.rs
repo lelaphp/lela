@@ -492,7 +492,7 @@ fn posix_setegid(req: &mut Request, group_id: i64) -> bool {
 /// ```
 ///
 /// macOS's variant reads Open Directory, and the kernel's list
-/// does not (#2772): with the lookup denied to the child by a sandbox,
+/// does not: with the lookup denied to the child by a sandbox,
 /// the call fails with `EINVAL`, where the plain `getgroups` would still
 /// answer.
 ///

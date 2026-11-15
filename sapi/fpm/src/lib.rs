@@ -11,7 +11,7 @@
 //!
 //! What php-fpm has that this host leaves out: ACLs on a UNIX socket,
 //! `listen.setfib`, `AppArmor` and systemd, which the oracle's macOS build
-//! leaves out too; and `-c`, since no php.ini is read (#1176). A slow
+//! leaves out too; and `-c`, since no php.ini is read. A slow
 //! request's trace is php's: the child stopped and its memory asked for
 //! as php asks, and where it opens, the request's frames read out of it
 //! from the chain the engine lays and the child publishes in its
@@ -205,8 +205,7 @@ fn parse(argv: &[Vec<u8>], search: &mut Search, extended_info: &mut bool) -> (Ve
 ///
 /// A call of its own, as the CLI's engine is, so the builder, two
 /// kilobytes moved through each step, stands in a frame that is gone
-/// before the first request is served, and not under every frame of it
-/// (#3209).
+/// before the first request is served, and not under every frame of it.
 #[inline(never)]
 fn engine(ini: &[Define], startup: &Startup) -> Engine {
     php_sapi::start(builder(startup), ini, log_message)

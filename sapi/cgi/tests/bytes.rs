@@ -1,5 +1,5 @@
 //! Words that are not UTF-8 on php-cgi's stderr or stdout, held here where
-//! `lines.toml`, whose files are TOML text, cannot lay them (#4450), each
+//! `lines.toml`, whose files are TOML text, cannot lay them, each
 //! to the bytes the pinned php-cgi 8.5.12 (md5
 //! f4f783bf54d2bfa24a558693f7c12188) wrote on 2026-11-11 for the same
 //! command line. php writes a `%s` word as its bytes, so a `\xe9` stays

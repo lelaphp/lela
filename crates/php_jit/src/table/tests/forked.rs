@@ -259,7 +259,7 @@ fn lost(req: &mut Request) -> Result<String, String> {
 /// A fork's child whose first mapping was refused, where Linux may have
 /// taken its executable view away, writes opcache's fatal line and exits
 /// with its status, 254 (`exit(-2)`), before it returns into any frame
-/// (`jit-design.md` §4.4, #4501's ruling): the process apart passes only
+/// (`jit-design.md` §4.4, ruled 2026-11-11): the process apart passes only
 /// where its parent read that status, and printed holds the child's line.
 #[test]
 fn a_forks_child_whose_code_may_be_gone_ends_with_opcaches_fatal_line_and_status() {

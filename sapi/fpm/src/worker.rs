@@ -315,7 +315,7 @@ pub(crate) fn init(fpm: &mut Fpm, pool: usize, slot: usize) -> Worker {
     // `fd_stderr_original`, the master's stderr as
     // `fpm_stdio_save_original_stderr` dup'd it, with no `FD_CLOEXEC`: php's
     // child never closes it, so a process a request execs holds it, and
-    // this child lets go of it unclosed (#2428).
+    // this child lets go of it unclosed.
     if let Some(saved) = fpm.stderr_original.take() {
         let _unclosed = saved.into_raw_fd();
     }
@@ -664,7 +664,7 @@ fn url_decode(text: &[u8]) -> Vec<u8> {
 enum Served {
     /// It started, and ended with its access log line written.
     Ended,
-    /// Its start failed, an extension's `rinit` having raised (#1775):
+    /// Its start failed, an extension's `rinit` having raised:
     /// it ends before `fpm_request_end` writes the `scoreboard` and the
     /// access log, and the child ends after it
     /// (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`).
@@ -683,7 +683,7 @@ impl Worker {
         // `apache_request_headers` reads each parameter whole
         // (`sapi_add_request_header`); every other reading php makes of
         // one, `init_request_info`'s, the loop's, `getenv()`'s and
-        // `$_SERVER`'s, goes through a `char *` and stops at a NUL (#2757).
+        // `$_SERVER`'s, goes through a `char *` and stops at a NUL.
         let headers = php_proto::cgi::request_headers(&Environment(
             fcgi::newest_first(&params).cloned().collect(),
         ));
@@ -827,7 +827,7 @@ impl Worker {
 
     /// `fpm_php_limit_extensions`: a path the list refuses is logged with
     /// each `\r` and `\n` of it written as two bytes
-    /// ([`php_sapi::log_field`], #4355), so it is one line of the log.
+    /// ([`php_sapi::log_field`]), so it is one line of the log.
     fn extension_allowed(&self, path: &[u8]) -> bool {
         if self.limit_extensions.is_empty() {
             return true;
@@ -1043,7 +1043,7 @@ impl Worker {
 /// `sapi_cgi_read_post`: the body, as the request pulls it, up to what
 /// `CONTENT_LENGTH` leaves as a `size_t`, which a negative length wraps
 /// (`Z/sapi/fpm/fpm/fpm_main.c:433`), so such a body is read to its end,
-/// held to `post_max_size` by the readers that pull it (#3457): from
+/// held to `post_max_size` by the readers that pull it: from
 /// `REQUEST_BODY_FILE` where the server names one and otherwise from the
 /// request's `FCGI_STDIN` records. A file that does not open is refused
 /// with php's warning, which the request raises where php reads the
@@ -1111,7 +1111,7 @@ impl Read for Stdin {
 /// A program that did not open with `error`
 /// (`Z/sapi/fpm/fpm/fpm_main.c:1879-1888`): the line php-fpm logs for it,
 /// the path's `\r` and `\n` written as two bytes each
-/// ([`php_sapi::log_field`], #4355), then its page, `Access denied.` for
+/// ([`php_sapi::log_field`]), then its page, `Access denied.` for
 /// `EACCES` alone ([`php_sapi::cgi::unopened`]).
 fn unopened(path: &[u8], error: &std::io::Error) -> HostPage {
     zlog!(
@@ -1127,8 +1127,8 @@ fn unopened(path: &[u8], error: &std::io::Error) -> HostPage {
 mod tests {
     /// php-fpm denies a program whose open met `EACCES` and answers every
     /// other errno as no input file, `EPERM` among them, which macOS
-    /// answers for a file under a directory the process may not read
-    /// (#2876); `EACCES` itself is held against the pinned php-fpm by
+    /// answers for a file under a directory the process may not read;
+    /// `EACCES` itself is held against the pinned php-fpm by
     /// tests/lines.toml's program whose permissions are 0.
     #[test]
     fn a_script_that_does_not_open_with_eperm_is_no_input_file() {

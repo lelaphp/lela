@@ -1,21 +1,21 @@
 //! `xtask fold`: the sensor for a toolchain that loses LLVM's fold of a
-//! request field's address into each access (design §10 Profiles; #3372,
-//! #3345). In `serve_frame` a field of the request is reached through one
+//! request field's address into each access (design §10 Profiles).
+//! In `serve_frame` a field of the request is reached through one
 //! address computed from `%req`, which LLVM hoists to the function's entry
 //! and shares among every handler laid in the loop; `CodeGenPrepare` folds
 //! it back into each access, `ldr x8, [x19, #0x5c8]`, only while the
 //! address has at most `--cgp-max-address-users-to-scan` users, which
 //! every profile raises to 1000 through `.cargo/config.toml`. An LLVM
 //! that keeps the option's name and changes its meaning builds and runs,
-//! and the loop is slower by what #3345 measured; so the release `php` is
-//! disassembled and each instantiation of `serve_frame` is held to the
-//! fold.
+//! and the loop is slower by an instruction at every frame lookup; so the
+//! release `php` is disassembled and each instantiation of `serve_frame`
+//! is held to the fold.
 //!
-//! The shape held is the one #3345 found, matched by its form and never
-//! by an offset: an `add xN, <req>, #C`, whose sum the next instruction
-//! that names `xN` uses as the base of a load or store of one register at
-//! an immediate offset that `[<req>, #C + offset]` could encode. `<req>`
-//! is the register the prologue copies the first argument into, `mov xR,
+//! The shape held is matched by its form and never by an offset: an
+//! `add xN, <req>, #C`, whose sum the next instruction that names `xN`
+//! uses as the base of a load or store of one register at an immediate
+//! offset that `[<req>, #C + offset]` could encode. `<req>` is the
+//! register the prologue copies the first argument into, `mov xR,
 //! x0`. An address computed for a call's argument, for a register-offset
 //! access (`ldr x11, [x12, x11]`) or for a pair (`ldp`), whose offsets
 //! reach no further than 504, is no such site. A call ends what a
@@ -190,7 +190,7 @@ fn said(reading: &mut Reading, over: &str, sizes: &[(String, u64)], held: &[Held
             })
             .collect();
         reading.message = format!(
-            "{SCOPE}: {over}'s serve_frame reaches a request field through an address held apart from the request's register {hoisted} times, which LLVM's --cgp-max-address-users-to-scan folds (design §10 Profiles, #3372): a toolchain that keeps the option's name may have changed its meaning; {}{beside}",
+            "{SCOPE}: {over}'s serve_frame reaches a request field through an address held apart from the request's register {hoisted} times, which LLVM's --cgp-max-address-users-to-scan folds (design §10 Profiles): a toolchain that keeps the option's name may have changed its meaning; {}{beside}",
             each.join("; ")
         );
     }
@@ -252,8 +252,8 @@ pub(crate) struct Held {
     pub(crate) hoisted: Vec<Site>,
     /// Each access through a hoisted address a call is also handed: the
     /// field's address escapes, and no limit of `CodeGenPrepare`'s folds
-    /// it, so it is no sign of the option's meaning (#3345's
-    /// `Frames::grow`).
+    /// it, so it is no sign of the option's meaning (the frame table's,
+    /// handed to `Frames::grow`, was one).
     pub(crate) escaped: Vec<Site>,
     /// Each field whose address is handed to a call, and the call.
     pub(crate) escapes: Vec<Escape>,
@@ -712,8 +712,9 @@ mod tests {
         held.remove(0)
     }
 
-    /// The shape #3345 found is a site, a folded access is none, and the
-    /// request's register is the one the prologue copies `x0` into.
+    /// An access through a hoisted address is a site, a folded access is
+    /// none, and the request's register is the one the prologue copies `x0`
+    /// into.
     #[test]
     fn an_access_through_an_address_made_from_the_request_is_a_site() {
         let held = one(
@@ -769,7 +770,7 @@ mod tests {
 
     /// An access through an address a call is also handed is escaped and
     /// not hoisted: no limit of `CodeGenPrepare`'s folds a field whose
-    /// address escapes, as `Frames::grow`'s did (#3345).
+    /// address escapes, as `Frames::grow`'s did.
     #[test]
     fn an_address_a_call_is_handed_escapes_and_is_no_site() {
         let held = one(concat!(
@@ -807,7 +808,7 @@ mod tests {
     }
 
     /// An address spilled to the stack and loaded back is followed, as
-    /// the allocator may hold an unfolded field (#3345); a slot written
+    /// the allocator may hold an unfolded field; a slot written
     /// over in between holds it no longer. Each slot is spilled from a
     /// register that still holds the address, since a store names its
     /// data register and drops it.
@@ -892,7 +893,7 @@ mod tests {
         );
     }
 
-    /// The negative controls and their pair: #3345's instantiation at
+    /// The negative controls and their pair: the instantiation at
     /// 037f359d8 built without the option, and main e61851ebe's, hold sites;
     /// this branch's, built with it, holds none and one escape.
     #[test]

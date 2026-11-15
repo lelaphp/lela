@@ -1,12 +1,12 @@
 //! `PHP_CLI_SERVER_WORKERS=N`: `php -S` forks N workers before it serves
 //! (`php_cli_server_startup_workers`, `Z/sapi/cli/php_cli_server.c:2503`),
-//! each through the engine's one home for fork (#1885), and every one of
+//! each through the engine's one home for fork, and every one of
 //! the N + 1 processes serves the same socket in its own event loop and
 //! writes its log lines after its process id. Which process serves a
 //! request is the kernel's to say, so this is held by what the processes
 //! do and not by bytes; a number that is not above 1, which forks
 //! nothing, is held to the oracle by `xtask witness`, from
-//! `tests/lines.toml` (#1975).
+//! `tests/lines.toml`.
 
 mod server;
 

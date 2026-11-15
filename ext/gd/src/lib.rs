@@ -1,7 +1,7 @@
 //! The `gd` extension: `php-src/ext/gd` as one crate under `ext/`
 //! (ADR-0004), over the libgd the pinned keg links, 2.3.3, found
 //! through `pkg-config gdlib` and bound in [`ffi`] alone, never vendored
-//! (design §7.2, revision 75; #1573). The phpt subset is
+//! (design §7.2, revision 75). The phpt subset is
 //! `php-src/ext/gd/tests`, through `xtask phpt --subset`.
 //!
 //! The oracle builds gd against that external libgd, so this is `gd.c`

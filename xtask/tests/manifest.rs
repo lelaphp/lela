@@ -21,7 +21,7 @@ bindings = 1
 
 /// A repository that runs no php has no `[oracle]` row: its manifest
 /// loads with no pin, and `phpt`, which runs php under one, refuses naming
-/// the absent pin (#3181).
+/// the absent pin.
 #[test]
 fn a_manifest_with_no_oracle_row_loads_and_phpt_refuses_naming_the_pin() {
     let root = xtask::scratch::Tree::new("manifest-no-pin").unwrap();
@@ -42,10 +42,10 @@ fn a_manifest_with_no_oracle_row_loads_and_phpt_refuses_naming_the_pin() {
     );
 }
 
-/// A rule judged at a call carries what to do instead (#3618 ruling 3,
-/// #3627): `fixtures/manifest/tool-rule-without-remedy.toml`, a `tool`
-/// rule with no `remedy`, is refused naming the rule, as is one whose
-/// remedy is blank; the must-pass, the same row with a remedy, parses.
+/// A rule judged at a call carries what to do instead (ruled 2026-10-30):
+/// `fixtures/manifest/tool-rule-without-remedy.toml`, a `tool` rule with no
+/// `remedy`, is refused naming the rule, as is one whose remedy is blank;
+/// the must-pass, the same row with a remedy, parses.
 #[test]
 fn a_rule_with_a_tool_and_no_remedy_is_refused_by_name() {
     let path = xtask::package_dir().join("fixtures/manifest/tool-rule-without-remedy.toml");
@@ -64,7 +64,7 @@ fn a_rule_with_a_tool_and_no_remedy_is_refused_by_name() {
 
 /// `[budget] scripts` is one row, the ceiling and the generators it leaves
 /// out, read as the file writes it and absent when the file has none; the
-/// constructor a test builds it by is the row the file would parse (#34).
+/// constructor a test builds it by is the row the file would parse.
 #[test]
 fn the_scripts_row_is_the_ceiling_and_its_generators_and_is_absent_when_unwritten() {
     let parsed = Manifest::parse(MINIMAL).unwrap();
@@ -119,7 +119,7 @@ fn a_row_built_by_name_is_the_row_the_file_would_parse() {
 }
 
 /// A `!` in `exempt` takes back what an earlier pattern let off, the last
-/// that matches deciding (#3470): a skill's own files stay exempt and a
+/// that matches deciding: a skill's own files stay exempt and a
 /// plugin laid inside one does not. A `!` is refused in `scope`, and at the
 /// head of an `exempt`, where it takes back nothing.
 #[test]
@@ -171,8 +171,7 @@ fn a_key_outside_the_grammar_is_refused_by_name() {
 }
 
 /// `runs` says how the runtime runs a `Bash` call, so it is refused on a
-/// rule that judges any other tool, and read on one that judges `Bash`
-/// (#3624).
+/// rule that judges any other tool, and read on one that judges `Bash`.
 #[test]
 fn runs_qualifies_a_bash_rule_alone() {
     let rule = |tool: &str| {
@@ -235,7 +234,7 @@ fn an_empty_with_phrase_is_refused() {
 }
 
 /// A `deny_argv` element is an option, an option and the name its value
-/// sets, or a subcommand (#1001); any other shape would match nothing and
+/// sets, or a subcommand; any other shape would match nothing and
 /// deny nothing, so the manifest refuses it.
 #[test]
 fn a_deny_argv_element_of_no_known_shape_is_refused() {
@@ -250,7 +249,7 @@ fn a_deny_argv_element_of_no_known_shape_is_refused() {
 }
 
 /// `unless_argv` excuses a `deny_argv` element by one `with` phrase and
-/// the option that bounds it (#3068): an element the row does not deny,
+/// the option that bounds it: an element the row does not deny,
 /// a phrase it does not name, or an excuse with no option is refused,
 /// naming the row and the excuse.
 #[test]
@@ -291,7 +290,7 @@ fn a_qualifier_without_its_predicate_is_refused() {
     let err = Manifest::parse(&text).unwrap_err().to_string();
     assert!(err.contains("x.orphan") && err.contains("unless"), "{err}");
 
-    // `deny_macros` qualifies `deny_types` (#1888): the macros a type ban
+    // `deny_macros` qualifies `deny_types`: the macros a type ban
     // cannot see, rendered beside the types, and nothing on their own or
     // beside another predicate.
     let text = format!(
@@ -326,8 +325,7 @@ fn a_qualifier_without_its_predicate_is_refused() {
 /// and no table of a module's macros or functions expands a wildcard, so
 /// the manifest refuses `deny_macros = ["std::*"]` and
 /// `deny_methods = ["std::thread::*"]` rather than hand `generate` a row
-/// that denies nothing and `permit` a pattern that matches nothing (#1888,
-/// #1950).
+/// that denies nothing and `permit` a pattern that matches nothing.
 #[test]
 fn a_wildcard_of_macros_or_methods_is_refused() {
     for (id, row) in [
@@ -373,7 +371,7 @@ fn a_crate_row_names_the_phpt_subsets_the_crate_owns() {
         [Path::new("Zend/tests"), Path::new("tests")]
     );
     // An extension's subset is its own by the design (§12, ext/AGENTS.md):
-    // every `.phpt` under its directory (#1590), so its row says nothing;
+    // every `.phpt` under its directory, so its row says nothing;
     // a row that names subsets is what it owns.
     assert_eq!(subsets("ext/pcre"), [Path::new("ext/pcre")]);
     assert_eq!(
@@ -407,7 +405,7 @@ fn a_scope_maps_to_the_path_its_reading_is_stamped_over() {
     // A subset: the crate whose subset it is, under the crate's name and
     // beside a tier lane, a control of the runner or a comparison alike,
     // so `done` finds the engine's reading under the crate and neither
-    // displaces it; a suffix the grammar has not is no scope (#1744).
+    // displaces it; a suffix the grammar has not is no scope.
     assert_eq!(path("ext/pcre@control").unwrap(), Path::new("ext/pcre"));
     assert_eq!(
         path("php_engine@force").unwrap(),
@@ -438,7 +436,7 @@ fn a_scope_maps_to_the_path_its_reading_is_stamped_over() {
 }
 
 /// `avoid_from` is the glossary file, or a table naming the file and one
-/// heading of it (#63); a table without the file is refused.
+/// heading of it; a table without the file is refused.
 #[test]
 fn avoid_from_names_the_glossary_whole_or_one_section_of_it() {
     let head = "[oracle]\npin = \"oracle.toml\"\n[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n";
@@ -486,10 +484,9 @@ fn a_lock_home_table_names_the_home_of_a_lock_no_row_carries() {
     assert_eq!(bare.lock_home("ops.lock"), None);
 }
 
-/// `generated` is the list of files the manifest renders (#2473); any
+/// `generated` is the list of files the manifest renders; any
 /// other shape is refused naming the row and what it takes, the map of
-/// each file to one rule that seams.toml wrote until #2474 among them
-/// (#2513).
+/// each file to one rule that seams.toml once wrote among them.
 #[test]
 fn generated_decodes_as_a_list_of_files_and_any_other_shape_is_refused() {
     let row = |generated: &str| {
@@ -517,12 +514,12 @@ fn generated_decodes_as_a_list_of_files_and_any_other_shape_is_refused() {
     }
 }
 
-/// `[[owed]]` rows are refused by name (#3206): the fixtures name an
+/// `[[owed]]` rows are refused by name: the fixtures name an
 /// instrument that writes no reading of a crate (`status`), a predicate
 /// the harness does not derive, and a crate no row of the manifest is,
 /// a misspelling that would drop the obligation unseen; a second row of
-/// one instrument and a row narrowed by `exempt`, which left the grammar
-/// (#3278, #3292), are refused as well.
+/// one instrument and a row narrowed by `exempt`, which left the grammar,
+/// are refused as well.
 /// The rows the grammar reads load.
 #[test]
 fn an_owed_row_naming_an_unknown_instrument_predicate_or_crate_is_refused_by_name() {
@@ -566,7 +563,7 @@ fn an_owed_row_naming_an_unknown_instrument_predicate_or_crate_is_refused_by_nam
 }
 
 /// `allow_in_tests` lists lints its rule denies that clippy exempts tests
-/// from by a key (#3078). The fixture lists `clippy::todo`, which has no
+/// from by a key. The fixture lists `clippy::todo`, which has no
 /// such key, and is refused naming the lint; so is a lint the rule does
 /// not deny, and the key on a rule with no `deny_lints` to qualify.
 #[test]
@@ -596,7 +593,7 @@ fn allow_in_tests_takes_only_denied_lints_clippy_has_an_in_tests_key_for() {
 }
 
 /// `allow` is a predicate alone, the homes of `unsafe`, and beside
-/// `check = "engine-state"` it qualifies the check (#4633, #4647): the rule
+/// `check = "engine-state"` it qualifies the check: the rule
 /// carries one predicate, `check`, which `permit` does not judge at the
 /// call, and each entry is one module. A crate, a directory or a module of
 /// a crate under a directory is refused naming the rule and the entry, and
@@ -647,7 +644,7 @@ fn allow_qualifies_the_engine_state_check_with_modules_and_no_other_check() {
 }
 
 /// A `[[crate]]` row serialises and parses back as itself, a row with no
-/// `lock` among them (#3091): the key is left out where it is empty, as
+/// `lock` among them: the key is left out where it is empty, as
 /// the file writes such a row, since `OneOrMany::None` is no TOML value.
 /// So a test builds a row as a [`Crate`] and writes it into a manifest.
 #[test]
@@ -666,7 +663,7 @@ fn a_crate_row_round_trips_through_its_serialisation() {
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).

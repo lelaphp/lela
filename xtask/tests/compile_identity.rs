@@ -8,13 +8,13 @@
 //!
 //! The engine's side is the engine's own binary, `sapi/cli`'s `php`,
 //! which honours php's dump flags; the harness links no compiler of its
-//! own (harness §8, revision 84; #2166), so the tests that hold the
+//! own (harness §8, revision 84), so the tests that hold the
 //! compiler build that binary once ([`php`]). The tests that hold the
 //! lane's plumbing run the pinned oracle behind a shell file standing
 //! where the engine's own binary would: the runner reads the file as an
 //! engine, its bytes not being the oracle's, which is how a dump on disk
 //! is made measurable. They say so on stderr and return when the pinned
-//! binary is not on this machine, unless the machine promised it (#38);
+//! binary is not on this machine, unless the machine promised it;
 //! the rest run anywhere.
 //!
 //! **The dump regime.** The recipe both binaries dump under is the pin's
@@ -51,7 +51,7 @@ fn workspace() -> &'static Path {
 
 /// The engine's own binary, `sapi/cli`'s `php`, built once for these
 /// tests in the workspace's target: what the lane dumps the engine's side
-/// with (#2166). A test runs it through [`Scratch::cli`], never from the
+/// with. A test runs it through [`Scratch::cli`], never from the
 /// target itself.
 fn php() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
@@ -68,7 +68,7 @@ fn php() -> &'static Path {
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
-/// this machine promised the binary (#38).
+/// this machine promised the binary.
 fn oracle() -> Option<PathBuf> {
     let pin = pin();
     Promise::Oracle
@@ -77,7 +77,7 @@ fn oracle() -> Option<PathBuf> {
 }
 
 /// The tracked pin's php-src tree, when it is on this machine; a failure
-/// where this machine promised the tree (#38).
+/// where this machine promised the tree.
 fn source() -> Option<PathBuf> {
     Promise::Tree.or_skip(pin().source.tree()).unwrap()
 }
@@ -182,7 +182,7 @@ impl Scratch {
     /// The engine's binary [`php`] built, standing alone in a directory of
     /// the scratch's own as links to it and to its dep-info. The lane
     /// holds a binary to the tree by that dep-info, and every other host
-    /// standing beside it to its own (#3109); these tests build `php`
+    /// standing beside it to its own; these tests build `php`
     /// alone, so in the target a `php-cgi` an earlier build left behind an
     /// engine merge failed them for a build they never asked for. Here
     /// `php` is held to its own sources as cargo relinks it, and to no
@@ -251,9 +251,8 @@ fn count(reading: &Reading, key: &str) -> i64 {
 /// come to byte for byte, which is both of the two php dumps an op array
 /// for (6043007). It is a floor and not the reach: `php_compile`
 /// advancing moves `identical` up and this number is raised beside such a
-/// commit or not at all, where the constant it replaces (#235) was a
-/// number the next advance made wrong (harness-design.md §7, ledger 49;
-/// #389).
+/// commit or not at all, where the constant it replaces was a
+/// number the next advance made wrong (harness-design.md §7, ledger 49).
 const REACHED: i64 = 2;
 
 /// The reach of one corpus reading against the floor, the number named
@@ -310,7 +309,7 @@ fn a_compiler_that_emits_nothing_is_red_on_every_file_with_the_denominator() {
 /// dumped an op array for differs, and the count of the files the
 /// compiler has come to byte for byte. A skip for want of a binary would
 /// say nothing about how far the compiler has to come. The reach is read
-/// off the reading and not pinned here (#389, #235): `plain.php`, one
+/// off the reading and not pinned here: `plain.php`, one
 /// assignment and an `echo`, reached identity with `Unit::dump` in php's
 /// format (0c80b02) and `INIT_FCALL`'s op1 (535cdd6); `identity.phpt`
 /// calls a user function and reached it with the op array a function body
@@ -377,7 +376,7 @@ fn the_engines_binary_dumps_the_corpus_at_its_reach() {
     }
 }
 
-/// The floor is a sensor and not a comment (#389, harness-design.md §7,
+/// The floor is a sensor and not a comment (harness-design.md §7,
 /// ledger 49): the reading of a compiler that emits nothing is below it
 /// and the failure names both numbers, and the engine's binary's is not
 /// below it. So a commit that carries `php_compile` further through the
@@ -521,7 +520,7 @@ fn a_pin_without_the_dump_regime_refuses_the_run() {
     assert!(format!("{refused:#}").contains("dump"), "{refused:#}");
 }
 
-/// A regime's `args` reach both binaries' command lines (#1780, #1887):
+/// A regime's `args` reach both binaries' command lines:
 /// under a `dump` regime that carries `-e`, php dumps with extended info,
 /// so the binary that hands php every argument it was given is identical
 /// on every file, and the one that hands it all but `-e` differs on each
@@ -551,7 +550,7 @@ fn a_regimes_args_reach_both_binaries() {
 }
 
 /// With no engine binary built, and none named, nothing dumps the
-/// engine's side: the harness links no compiler to fall back to (#2166),
+/// engine's side: the harness links no compiler to fall back to,
 /// so every file is found and none is run, and the run says why.
 #[test]
 fn with_no_engine_binary_nothing_is_dumped_and_the_reading_says_so() {
@@ -577,7 +576,7 @@ fn with_no_engine_binary_nothing_is_dumped_and_the_reading_says_so() {
 
 /// The program `--regime extended-info` is held to beside the fixture
 /// corpus: a statement of each kind php puts an extended opline before,
-/// at or around (#1822).
+/// at or around.
 const EXTENDED: &str = "<?php\nfunction f($a) { return $a + 1; }\n\
     if ($x) { f(1); } elseif ($y) { echo 2; } else { echo 3; }\n\
     for ($i = 0; $i < 2; $i++) { echo $i; }\ninclude 'x.php';\n\
@@ -585,7 +584,7 @@ const EXTENDED: &str = "<?php\nfunction f($a) { return $a + 1; }\n\
     $o = new ArrayObject([]);\nclass C { public $p; public $q, $r; function m() { return 1; } }\n\
     enum E { case A; case B; }\n$g = fn($x) => $x;\n";
 
-/// A second regime beside `dump` (#1822): `--regime extended-info`, the
+/// A second regime beside `dump`: `--regime extended-info`, the
 /// tracked pin's row of php's `-e`, is handed to both sides after `dump`,
 /// so the oracle and the engine's binary each dump with extended info,
 /// php's `-e` on both command lines, and the reading keeps a scope of its
@@ -762,13 +761,13 @@ fn one_file_of_the_pinned_tree_is_keyed_by_the_corpus_it_stands_in() {
 
 /// A binary under measurement whose dump of one file runs past the
 /// recipe's limit, or dies on a signal, fails that file and the lane goes
-/// on to the next (#699, #1069): of three files, the one it hangs on and
+/// on to the next: of three files, the one it hangs on and
 /// the one it dies on differ, and the one after both is still dumped and
 /// identical. The limit is ten seconds, in the test's own pin, against
 /// the thirty the hang holds for: the files meant to pass, and the pinned
 /// php's probe of its own `PHP_BINARY`, need finish only inside it, a margin
 /// a loaded machine's process start does not eat (at one second they did
-/// not, two whole-crate runs in four at load 19-35, #3238).
+/// not, two whole-crate runs in four at load 19-35).
 #[test]
 fn a_dump_past_the_limit_or_ended_by_a_signal_fails_that_file_and_the_rest_are_judged() {
     let Some(php) = oracle() else {
@@ -804,7 +803,7 @@ fn a_dump_past_the_limit_or_ended_by_a_signal_fails_that_file_and_the_rest_are_j
 }
 
 /// The reading names the binary that dumped the corpus, its path and the
-/// md5 of its bytes, as `phpt`'s does (#506, `Runner::stamp`), so two
+/// md5 of its bytes, as `phpt`'s does (`Runner::stamp`), so two
 /// readings over one tree under two binaries are told apart; where no
 /// binary dumped, the engine's absent, the reading names none.
 #[test]

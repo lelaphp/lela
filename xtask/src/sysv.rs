@@ -1,5 +1,5 @@
 //! What a lane's programs leave of System V IPC, removed after them: a
-//! phpt subset's tests (#1412) and a witness run's fences (#2115). A test
+//! phpt subset's tests and a witness run's fences. A test
 //! that creates a shared memory segment, a semaphore set or a message
 //! queue and ends before it removes it, as `shmop`'s private
 //! segments do under php itself, leaves the object standing after its
@@ -27,7 +27,7 @@
 //! use, a semaphore set nobody operated on, or one whose semaphores this
 //! user may not read: the kernel names no process on it. Such an object is
 //! a System V subset's, and removed, when all three of these hold, as
-//! Mitchell ruled on #1469 (#1482): its creator is the runner's own user;
+//! Mitchell ruled 2026-10-01: its creator is the runner's own user;
 //! its key is `IPC_PRIVATE`, which no database or other program can look
 //! up; and the kernel's whole-second `CTIME` falls inside the run of one
 //! of the subset's own programs, the oracle's or the engine's, from spawn
@@ -35,11 +35,11 @@
 //! no process stands, and the run counts it apart from those it removed.
 //! Such objects are made by the subsets of [`SUBSETS`], whose tests call
 //! System V IPC, and by those holding a test of [`UNNAMED_MAKERS`], which
-//! calls every function (#2811); only they hold the claim the next
+//! calls every function; only they hold the claim the next
 //! paragraphs and the one on two runs at once rest on ([`makes_unnamed`]),
 //! so any other subset removes only what its own processes are named on:
 //! a pooled run of `echo`s took another run's private queue of the same
-//! second (#2563).
+//! second.
 //! Such a subset holds a claim of its processes alone ([`Claim::own`]),
 //! with no window, so it covers nothing another run made and leaves
 //! nothing to reclaim.
@@ -60,11 +60,11 @@
 //! that long after it. The same sweep takes every private segment of the
 //! runner's that is forsaken and names a process, a dead creator's that
 //! nothing attaches, which a phpt run killed before its sweep leaves too:
-//! the segments are the table that fills first (#2115).
+//! the segments are the table that fills first.
 //!
 //! **A System V subset's.** A phpt subset of [`SUBSETS`] holds a claim
 //! too, for its length, and reclaims before it starts as a witness run
-//! does (#2448). Its oracle writes the claim a line as each program starts,
+//! does. Its oracle writes the claim a line as each program starts,
 //! naming its process, and as it ends, so a subset killed before its sweep
 //! leaves a window ending a recipe's timeout past its last program's start
 //! or end, and the next run takes, beside what the window takes, every
@@ -78,13 +78,13 @@
 //! that still stands, as [`Process::spawned_as`] tells it, so a process
 //! that took the number since is never signalled. Its end is
 //! written to the claim as the run would have written it, and the window
-//! reaches the kill (#2522).
+//! reaches the kill.
 //!
 //! **Two runs at once.** The kernel keeps no maker for an object that
 //! names no process, so a window tells a run's from another's only while
 //! no other run is making them: a private queue a concurrent run made in
 //! the same second, still its test's to use, met every clause above and
-//! was taken (#2563). So a claim another run holds, still locked, covers
+//! was taken. So a claim another run holds, still locked, covers
 //! the machine from the second it was made ([`Held`]): no window takes an
 //! object made since, nor does [`abandoned`], and a run that settles while
 //! one is held leaves its claim standing, its lock released, for a later
@@ -95,10 +95,10 @@
 //! of them is named on. Without that, a reclaim took a phpt subset's
 //! segment as [`abandoned`], dead creator and all, between the test that
 //! made it ending and the subset's own sweep, which then counted two of
-//! the three objects its test left (#2750). The claims are the machine's
+//! the three objects its test left. The claims are the machine's
 //! as its tables are, in one directory under `/tmp` whatever `TMPDIR`
 //! says: a run under a `TMPDIR` of its own read the claims there alone,
-//! and its reclaim took the same segment (#2902). A run a test lays apart
+//! and its reclaim took the same segment. A run a test lays apart
 //! in a directory of its own still holds back from what the machine's
 //! held claims cover.
 //!
@@ -108,7 +108,7 @@
 //!
 //! Where `unshare` is refused, as Docker's default seccomp profile refuses
 //! it, they run in the machine's own, and the sweep removes what they left
-//! as it does on macOS (#1643).
+//! as it does on macOS.
 //!
 //! **How the kernel is read.** On Linux, `/proc/sysvipc/shm`, `msg` and
 //! `sem` list the objects with their processes, keys, creators' uids and
@@ -574,7 +574,7 @@ fn window(from: SystemTime, to: Option<SystemTime>, clock: &Clock) -> (i64, i64)
 }
 
 /// The objects of `after` that name no process and are the run's by the
-/// rule Mitchell ruled on #1469 (#1482): new since `before`, forsaken by
+/// rule Mitchell ruled 2026-10-01: new since `before`, forsaken by
 /// `runner`, at a second inside one of `runs`, each rounded out to whole
 /// seconds, a run not seen to end lasting until `clock`'s now.
 pub(crate) fn unnamed_left<'a>(
@@ -594,8 +594,8 @@ pub(crate) fn unnamed_left<'a>(
         .collect()
 }
 
-/// The objects of `standing` a witness run's claims over `windows` take
-/// (#2115): each forsaken by `runner`, as `alive` reads the processes it
+/// The objects of `standing` a witness run's claims over `windows` take:
+/// each forsaken by `runner`, as `alive` reads the processes it
 /// names, and made inside one of the windows.
 pub(crate) fn claimed<'a>(
     standing: &'a Standing,
@@ -609,7 +609,7 @@ pub(crate) fn claimed<'a>(
 /// The objects of `standing` the programs a cut-off run's journals name
 /// left, as [`left`] tells them, and made inside one of `windows`: what a
 /// phpt subset killed before its sweep left that names one of its
-/// programs, under a key or not (#2448).
+/// programs, under a key or not.
 pub(crate) fn journaled<'a>(
     standing: &'a Standing,
     spawned: &BTreeSet<u32>,
@@ -621,7 +621,7 @@ pub(crate) fn journaled<'a>(
 
 /// The segments of `standing` forsaken by `runner` that name a process:
 /// private ones nothing attaches whose creator and last user are dead,
-/// whatever run made them (#2115).
+/// whatever run made them.
 pub(crate) fn abandoned<'a>(
     standing: &'a Standing,
     runner: &Runner,
@@ -635,8 +635,8 @@ pub(crate) fn abandoned<'a>(
 /// order removed, how many of those named no process, the new ones it
 /// left because the kernel names no process on them and the rule for
 /// those does not take them, and whether the claim it settled stands for a
-/// later reclaim, another run holding one (#2563), which the run then says,
-/// so a reader of its lines, a test among them, knows why it stands (#3007).
+/// later reclaim, another run holding one, which the run then says, so a
+/// reader of its lines, a test among them, knows why it stands.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Swept {
     pub removed: BTreeMap<Kind, Vec<u64>>,
@@ -700,14 +700,14 @@ impl fmt::Display for Swept {
 
 /// Remove what the programs of `spawned` named on themselves since
 /// `before`, read again now, and say what was done: how a subset that
-/// holds no claim sweeps, by its own processes alone (#2563).
+/// holds no claim sweeps, by its own processes alone.
 pub(crate) fn sweep(before: &Standing, spawned: &Programs) -> Result<Swept> {
     removed(left(before, &Standing::now()?, &spawned.pids, alive))
 }
 
 /// Each of `objects` removed by an `ipcrm` of its own and counted, so one
 /// that another run's sweep took in the moment between is passed over and
-/// not the whole sweep refused (#1582).
+/// not the whole sweep refused.
 fn removed(objects: Vec<&Object>) -> Result<Swept> {
     let mut swept = Swept::default();
     let mut refused = Vec::new();
@@ -734,7 +734,7 @@ fn removed(objects: Vec<&Object>) -> Result<Swept> {
     // An object `ipcrm` refused that is no longer standing was removed in
     // the moment between: by another run's sweep on the machine, which the
     // rule for an object naming no process lets take one of this user's
-    // private objects of the same second (#1582). It is that run's to
+    // private objects of the same second. It is that run's to
     // count, and this sweep goes on; one still standing is a refusal.
     let now = Standing::now()?;
     for (object, removed) in refused {
@@ -762,7 +762,7 @@ fn claims() -> PathBuf {
 }
 
 /// The directory every run of the user's on the machine meets in, under
-/// `/tmp` whatever `TMPDIR` says (#2902).
+/// `/tmp` whatever `TMPDIR` says.
 fn machine() -> PathBuf {
     Path::new(crate::scratch::SHORT).join(format!("xtask-sysv-claims-{}", nix::unistd::getuid()))
 }
@@ -773,9 +773,9 @@ fn machine() -> PathBuf {
 const CLAIMS: &str = "XTASK_SYSV_CLAIMS";
 
 /// What the claims other runs still hold keep from a sweep: the second
-/// from which a claim with a window covers the machine (#2563), the
+/// from which a claim with a window covers the machine, the
 /// earliest making of one, none where no other run holds one; and the
-/// processes every held claim's journal started (#2750). An object made
+/// processes every held claim's journal started. An object made
 /// since that second may be that run's, made in a second one of this
 /// run's windows holds too, and no window takes it; an object that names
 /// one of those processes is that run's, whenever it was made.
@@ -809,7 +809,7 @@ impl Held {
 
 /// The claims of one directory as a sweep reads them: those of runs that
 /// ended without settling, each locked while this value lives, and from
-/// when one another run holds covers the machine (#2115, #2448, #2563).
+/// when one another run holds covers the machine.
 #[derive(Debug)]
 struct Claims {
     ended: Vec<Ended>,
@@ -861,7 +861,7 @@ impl Claims {
             }
             if own {
                 // A run that held its processes alone and ended: its own
-                // sweep took what they left, or nothing will (#2750).
+                // sweep took what they left, or nothing will.
                 fs::remove_file(&path).ok();
                 continue;
             }
@@ -880,7 +880,7 @@ impl Claims {
     }
 
     /// The claims of `dir` but `own`, as [`Claims::read`] reads them, and
-    /// those held in the machine's directory where `dir` is not it (#2902).
+    /// those held in the machine's directory where `dir` is not it.
     fn seen(dir: &Path, own: Option<&Path>) -> Claims {
         let mut claims = Claims::read(dir, own);
         if dir != machine() {
@@ -926,7 +926,7 @@ impl Claims {
     /// Each program an ended claim's journal started and never saw end
     /// that still stands as [`Group::standing`] finds it, killed with its
     /// group, as the run's limit would have killed it had the run not been
-    /// cut off (#2522). Its end is written to the journal as the run would
+    /// cut off. Its end is written to the journal as the run would
     /// have written it, so the claim's window reaches the kill and takes
     /// what the program made until then.
     fn stop(&mut self) {
@@ -966,15 +966,15 @@ impl Claims {
 /// [`reclaim`] passes over, as a scratch tree's is ([`crate::scratch`]).
 const TAKING: &str = "taking";
 
-/// What a claim of its processes alone is named ([`Claim::own`], #2750):
+/// What a claim of its processes alone is named ([`Claim::own`]):
 /// held, it keeps every sweep from an object one of them is named on;
 /// let go, nothing reclaims it.
 const OWN: &str = "own";
 
 /// The first word of a claim's line for a program started, its number and
-/// its process after it, as a phpt subset's oracle writes one (#2448):
+/// its process after it, as a phpt subset's oracle writes one:
 /// the processes [`reclaim`] holds a cut-off run's objects by, and kills
-/// where they still stand (#2522).
+/// where they still stand.
 pub(crate) const STARTED: &str = "started";
 
 /// The first word of a claim's line for a program ended, its number after.
@@ -1032,10 +1032,10 @@ impl Journal {
 }
 
 /// A run's claim on the System V objects made while it runs, a witness
-/// run's (#2115) or a System V subset's (#2448): a file of the claims
+/// run's or a System V subset's: a file of the claims
 /// directory, locked for as long as this value lives, which the run
 /// writes to as it goes. Settled, what the run left is removed and the
-/// file goes, unless another run held its claim meanwhile (#2563); a run
+/// file goes, unless another run held its claim meanwhile; a run
 /// that ends without settling leaves the file with its lock released, for
 /// the next run's [`reclaim`].
 #[derive(Debug)]
@@ -1048,7 +1048,7 @@ pub(crate) struct Claim {
 
 /// What a claim covers: the machine's seconds from its making, a window,
 /// as a witness run's and a System V subset's does, or its processes
-/// alone ([`Claim::own`], #2750).
+/// alone ([`Claim::own`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Covers {
     Window,
@@ -1057,7 +1057,7 @@ pub(crate) enum Covers {
 
 impl Claim {
     /// A claim of `lane`'s processes alone, for a phpt subset outside
-    /// [`SUBSETS`] (#2750). It has no window, so it covers nothing another
+    /// [`SUBSETS`]. It has no window, so it covers nothing another
     /// run made and leaves nothing for a reclaim; while it is held, the
     /// processes its journal names keep every other run's sweep from
     /// what they are named on, a dead creator's segment [`abandoned`]
@@ -1103,7 +1103,7 @@ impl Claim {
 
     /// A claim of `lane`'s from now, taken once what runs cut off left
     /// is reclaimed ([`reclaim`], over `grace`) and said in `removed`:
-    /// how every lane that holds one starts (#2115, #2448).
+    /// how every lane that holds one starts.
     pub(crate) fn taken(lane: &str, grace: Duration, removed: &mut Removed) -> Result<Claim> {
         removed.add("before the run, of what runs cut off left", reclaim(grace));
         Claim::laid(&claims(), lane, Covers::Window)
@@ -1111,7 +1111,7 @@ impl Claim {
 
     /// The claim's file opened for appending, a handle apart from the
     /// lock's, for a lane that writes to it as each program starts and
-    /// ends (#2448).
+    /// ends.
     pub(crate) fn journal(&self) -> Result<File> {
         File::options()
             .append(true)
@@ -1161,7 +1161,7 @@ impl Claim {
     /// The claim settled by `sweep`, given from when another run's claim
     /// covers the machine: the claim goes once the sweep has done where no
     /// other run holds one, and stands, its lock released, for a later
-    /// run's [`reclaim`] where one does or the sweep failed (#2563).
+    /// run's [`reclaim`] where one does or the sweep failed.
     fn settled(self, sweep: impl FnOnce(Held) -> Result<Swept>) -> Result<Swept> {
         let dir = self.path.parent().unwrap_or(Path::new("."));
         let held = Claims::seen(dir, Some(&self.path)).held;
@@ -1183,7 +1183,7 @@ pub(crate) const REMOVED: &str = "sysv_removed";
 
 /// What the sweeps around one run removed, each said on a line of the
 /// lane's as it is done and kept for the run's readings: the count, and
-/// each sweep's words (#2115, #2448).
+/// each sweep's words.
 #[derive(Debug)]
 pub(crate) struct Removed {
     line: String,
@@ -1223,10 +1223,10 @@ impl Removed {
 }
 
 /// What runs that ended without settling their claims left, removed
-/// before a run starts (#2115): what [`Claims::taken`] takes of the user's
+/// before a run starts: what [`Claims::taken`] takes of the user's
 /// claims, each window ending `grace` past its claim's last write, once
 /// the programs they started that still stand are killed
-/// ([`Claims::stop`], #2522). The
+/// ([`Claims::stop`]). The
 /// claims go with it but those whose windows reach a second another run's
 /// claim covers; a claim whose lock will not come is a run still going.
 pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
@@ -1240,9 +1240,9 @@ pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
 }
 
 /// Each program a cut-off run's claim started and never saw end stopped,
-/// as [`reclaim`] stops them first (#2522): what every phpt run does
+/// as [`reclaim`] stops them first: what every phpt run does
 /// before it stops what runs cut off left in their copies of the pinned
-/// tree (#2663), so a System V program is stopped by its claim, whose
+/// tree, so a System V program is stopped by its claim, whose
 /// window then reaches the kill.
 pub(crate) fn stop_cut_off() {
     Claims::read(&claims(), None).stop();
@@ -1253,11 +1253,11 @@ pub(crate) fn stop_cut_off() {
 pub(crate) const SUBSETS: [&str; 4] = ["ext/shmop", "ext/sysvmsg", "ext/sysvsem", "ext/sysvshm"];
 
 /// The tests outside [`SUBSETS`] that make System V objects naming no
-/// process, by their place in the corpus (#2811): `arginfo_zpp_mismatch`
+/// process, by their place in the corpus: `arginfo_zpp_mismatch`
 /// calls every function with nulls, so `msg_get_queue(null)`,
 /// `msg_get_queue(null, null)` and `msg_queue_exists(null)` each make a
 /// private queue of mode 0 nobody sends to, three per php that runs it,
-/// which nothing removed and which filled the machine's 40 on #2808.
+/// which nothing removed and which once filled the machine's 40.
 const UNNAMED_MAKERS: [&str; 1] = ["Zend/tests/arginfo_zpp_mismatch.phpt"];
 
 /// Whether a subset of `scope` over the corpus directories `dirs` makes
@@ -1273,7 +1273,7 @@ pub(crate) fn makes_unnamed<'a>(scope: &str, mut dirs: impl Iterator<Item = &'a 
 }
 
 /// The private IPC namespace a System V subset's programs run in on Linux
-/// where `unshare` permits (#1482): each program in one of its own, made
+/// where `unshare` permits: each program in one of its own, made
 /// by `unshare` around the binary, so whatever it makes goes with it and
 /// what a test forks is in it too. Tried first as it is, which a root
 /// user or a container may, then in a user namespace of its own mapped to

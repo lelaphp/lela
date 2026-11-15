@@ -18,7 +18,7 @@ php_ext = { path = "../../crates/php_ext" }
 
 # libsodium is the library the pinned keg links, found through pkg-config
 # and never vendored; its calls are declared by hand in `src/ffi/`, no
-# bindgen (design §7.2, revision 72; #1540).
+# bindgen (design §7.2, revision 72).
 [build-dependencies]
 pkg-config = { workspace = true }
 
@@ -27,7 +27,7 @@ pkg-config = { workspace = true }
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # What the extensions of the test engines require, transitively, as
 # `zend_startup_module_ex` refuses an extension whose required one is not
-# started (#1925).
+# started.
 php_ext_lexbor = { path = "../lexbor" }
 php_ext_standard = { path = "../standard" }
 php_ext_uri = { path = "../uri" }

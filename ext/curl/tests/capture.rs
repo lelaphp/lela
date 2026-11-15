@@ -61,7 +61,8 @@ echo "end\n";
 /// `curl_getinfo` on it ends the request with the `InternalError` of a
 /// method served on an object without its payload, status 255, as on
 /// every destroyed `CurlHandle`. php's answer there is not held, so no
-/// witness can pin it; this holds the engine's side of #3926's program.
+/// witness can pin it; this holds the engine's side of
+/// `trace:curl-multi-get-handles-lists-collected-handle`.
 #[test]
 fn a_curl_object_the_collection_destroyed_listed_to_a_sibling_ends_the_request() {
     let engine = Engine::builder()

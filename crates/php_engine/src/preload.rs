@@ -59,7 +59,7 @@ impl Engine {
         // chain's heap is the one this request kept, and then the first
         // request's: php's process holds one heap from its start, and a
         // request that stood beside the chain's would leave a second kept
-        // that no request takes (#3984).
+        // that no request takes.
         drop(req);
         if failed {
             return (Some(1), sink);

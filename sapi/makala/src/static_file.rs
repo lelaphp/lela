@@ -1,4 +1,4 @@
-//! A static file, sent from the connection side (#2587), as nginx sends
+//! A static file, sent from the connection side, as nginx sends
 //! one in front of php-fpm with no PHP worker held: no request thread
 //! waits on a client that takes a large file slowly, so a handful of slow
 //! downloads cannot starve the bounded pool of its programs. The disk

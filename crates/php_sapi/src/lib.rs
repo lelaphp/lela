@@ -19,7 +19,8 @@
 //! and [`REQUEST_STACK`], the stack the CLI and makala serve a request
 //! on (design §5.6).
 //! [`tier`] is
-//! the tier face beside the host face, for the debugging host (#1308).
+//! the tier face beside the host face, for the debugging host (design
+//! revision 51).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -56,7 +57,7 @@ pub use php_engine::{
 /// C's `strtol(s, NULL, 10)` and `atoi` as php's hosts call them on what
 /// they were given, `fpm_conf.c`'s values, `php_cli.c`'s `--repeat` and
 /// `PHP_CLI_SERVER_WORKERS`, phpdbg's numbers: the engine's one reading,
-/// which an extension reads through `coerce` (#2634).
+/// which an extension reads through `coerce`.
 pub mod c_number {
     pub use php_engine::c_number::{atoi, strtol};
 }
@@ -90,7 +91,7 @@ pub fn strerror(error: &std::io::Error) -> String {
 /// with, the stack it steps and what it writes between the steps,
 /// re-exported as the host face is, so no host names `php_engine`. What
 /// a frame, an op array or a linked table holds, the host reads through
-/// the native face, as an extension does ([`tier::frame`]; #1911).
+/// the native face, as an extension does ([`tier::frame`]).
 pub mod tier {
     pub use php_engine::tier::{
         Argument, Aside, Called, Compiled, Evaluated, Flow, FrameRef, Held, Hooked, Request,
@@ -208,7 +209,7 @@ fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuilder 
 /// The variable naming the file every request appends the natives it
 /// entered to; the witness lane sets it for a fence it serves through a
 /// host's binary (harness §8, revision 61), and a host's own binary reads
-/// it, with no build of its own for the lane (#2168).
+/// it, with no build of its own for the lane.
 const TRACE: &str = "PHP_WITNESS_TRACE";
 
 /// The leak sensor the host's environment asks for in place of the
@@ -226,8 +227,8 @@ fn leak_sensor(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<LeakS
     }
 }
 
-/// The variable that turns a debug build's request leak sensor (#1992,
-/// `EngineBuilder::sense_leaks`) off when it is `0`, so a debug request
+/// The variable that turns a debug build's request leak sensor
+/// (`EngineBuilder::sense_leaks`) off when it is `0`, so a debug request
 /// ends as a release one does; the sensor is armed without it. Read once,
 /// as the host builds its engine, and never per request. It is the
 /// unarmed side of a census, the same debug binary measured unarmed to
@@ -238,7 +239,7 @@ fn leak_sensor(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<LeakS
 const SENSE_LEAKS: &str = "PHP_SENSE_LEAKS";
 
 /// The variable that arms a debug build's request leak sensor with a
-/// backtrace kept per allocation (#1993, `LeakSensor::Traced`) when it is
+/// backtrace kept per allocation (`LeakSensor::Traced`) when it is
 /// `1`, whatever [`SENSE_LEAKS`] says: the leak then names the frames
 /// that allocated its first block, each with its line in a build that
 /// carries line tables, as the dev profile does, and by its function
@@ -315,7 +316,7 @@ pub fn exit(status: i32) -> ! {
 /// the process aborted, as php's ends on `SIGABRT`
 /// (`Z/Zend/zend_alloc.c:394-405`); after any other ending it returns. A
 /// host that serves many requests ends that request alone and serves on
-/// (design §3.4, #3515).
+/// (design §3.4).
 pub fn abort_as_php(served: &Observables) {
     if served.ending == Some(Ending::Terminated(ProcessEnd::Abort)) {
         stdio::flush();
@@ -327,10 +328,10 @@ pub fn abort_as_php(served: &Observables) {
 /// its `main` onto ([`main_thread`]) and by makala on each request thread
 /// ([`host_thread`]), so that recursion through a native's callback
 /// reaches the depth php reaches on its 8 MiB main thread (design §5.6,
-/// #3043's ruling). About 8 MiB × 4,208 ÷ 672, 50 MiB, rounded up to the
+/// ruled 2026-10-20). About 8 MiB × 4,208 ÷ 672, 50 MiB, rounded up to the
 /// ruling's 52: a level of that recursion costs 4,208 bytes of native
-/// stack here, the loop's frame among them, against php's about 672
-/// (#3022). The stack is reserved, not
+/// stack here, the loop's frame among them, against php's about 672.
+/// The stack is reserved, not
 /// committed: the system maps a thread's stack and commits its pages as
 /// they are touched, so a request that does not recurse holds what it
 /// would on 8 MiB. When the tail-call dispatch of §5.8 (revision 147)
@@ -340,10 +341,10 @@ pub fn abort_as_php(served: &Observables) {
 /// size the process's main thread has, as php's is, and the number in
 /// php's stack-limit `Error` is that size less `zend.reserved_stack_size`,
 /// php's main thread's, which the shell's `ulimit -s` sets
-/// (`php_compile::StackLimit`, #3142).
+/// (`php_compile::StackLimit`, design revision 156).
 ///
-/// The witness recurses through `array_map` 6,000 levels deep, #3022's
-/// bar, which php takes whole on its main thread and the lanes' build
+/// The witness recurses through `array_map` 6,000 levels deep, the bar
+/// set for it, which php takes whole on its main thread and the lanes' build
 /// takes here, then without end until the limit throws, with the number
 /// masked; the CLI serves it first, then makala beside the pinned
 /// php-fpm.
@@ -429,7 +430,7 @@ mod tests {
     /// A debug host keeps the builder's armed sensor unless
     /// `PHP_SENSE_LEAKS=0` turns it off; `1`, the opt-in it once was,
     /// changes nothing, and `PHP_SENSE_LEAKS_BACKTRACE=1` traces whatever
-    /// the other says (#1992).
+    /// the other says.
     #[test]
     fn the_host_keeps_the_armed_default_unless_turned_off() {
         assert_eq!(picked(&[]), None);

@@ -1,5 +1,5 @@
 //! The sensor over `harness.self`'s own files, beside the judge of the
-//! call's words (#625, #1516). `permit` reads a `Bash` call by its argv,
+//! call's words. `permit` reads a `Bash` call by its argv,
 //! and a write a program makes from inside an interpreter or a built
 //! binary never puts its path on the command line. So before an agent's
 //! `Bash` call `permit` takes the git blob id of every tracked file the
@@ -20,10 +20,10 @@
 //! where the call acts, its start ([`Call::start`]) moved by the line's
 //! leading `cd`, `pushd` and `popd`, or by git's `-C` where every command
 //! past them is git and names one directory, at the top of its worktree
-//! ([`Walk::ran_in`], #2607), and not the hook's own: a subagent's shell
+//! ([`Walk::ran_in`]), and not the hook's own: a subagent's shell
 //! starts in the main checkout and `cd`s into its worktree, so the hook's
 //! checkout is often one the call never touched, and another session's
-//! merge may stand there (#2597). The line's words are read where its
+//! merge may stand there. The line's words are read where its
 //! shell stands, the call's `cwd` moved by those changes. The checkout
 //! and the start are taken as the call begins and kept in its record, and
 //! `--after` reads both there, the words read from that start, since the
@@ -32,8 +32,8 @@
 //!
 //! What it leaves alone, on purpose:
 //!
-//! - A file that moved while the call ran and that its line cannot write
-//!   (#1895). Several sessions share one checkout, so a person's edit made
+//! - A file that moved while the call ran and that its line cannot write.
+//!   Several sessions share one checkout, so a person's edit made
 //!   in an editor lands inside some call's window most of the time, and a
 //!   change the line does not account for is as likely theirs as the
 //!   call's. The sensor cannot tell whose it is, so it keeps it as it
@@ -46,8 +46,8 @@
 //!   owns, where persons edit. In a linked worktree the call's session
 //!   owns ([`crate::owner`]), the change is the session's whichever of its
 //!   calls made it, a background one among them: where it differs from
-//!   `HEAD` it is put back and the call denied, saying so (#3644).
-//! - A file history carries (#3220): `HEAD` moved during the call, its
+//!   `HEAD` it is put back and the call denied, saying so.
+//! - A file history carries: `HEAD` moved during the call, its
 //!   blob for the file moved with it, and the file stands at the blob
 //!   `HEAD` holds now, as another session's merge or commit in the
 //!   checkout leaves it ([`landed_at`]). Putting it back would leave the
@@ -68,7 +68,7 @@
 //!   A path
 //!   the operation left conflicted, unmerged in the index, is not staged:
 //!   its markers are guarded as any file is, so the one hand that resolves
-//!   it is `steer`'s ([`crate::steer::Ground`], #2880).
+//!   it is `steer`'s ([`crate::steer::Ground`]).
 //! - What the call wrote: it goes into the object database before the file
 //!   is put back, and the denial names its blob, so a person's edit made
 //!   in an editor while a long call ran is a `git cat-file` away, not gone.
@@ -81,14 +81,14 @@
 //!   sanctioned writer, and a file it moved stands where steer's own
 //!   reading of that call says it wrote exactly that ([`steered`]), as
 //!   judged by a build compiled from the sources the checkout carries that
-//!   reads the manifest it commits ([`Steering`], #3631): another
+//!   reads the manifest it commits ([`Steering`]): another
 //!   checkout's own build where this one is not that ([`handed`]), the
 //!   next build the hook runs where this one is stale, its record left for
 //!   it, and where no build is, every file is kept and the answer says it
 //!   could not judge.
 //! - A file the rule's `exempt` covers: `.claude/skills/**` is an ordinary
-//!   file (#626), so a `Bash` write there stands as an `Edit` there does,
-//!   but for what a `!` pattern takes back, a plugin laid in a skill (#3470).
+//!   file, so a `Bash` write there stands as an `Edit` there does,
+//!   but for what a `!` pattern takes back, a plugin laid in a skill.
 //!
 //! Each session keeps its records in a directory of its own, a file per
 //! call, so two sessions in one checkout, or two calls of one session side
@@ -143,7 +143,7 @@ struct Record {
     start: Option<PathBuf>,
     /// The checkout the call ran in ([`held`]), the last; a list since a
     /// record an older build wrote holds the hook's own before it, which
-    /// `--after` does not compare (#2597).
+    /// `--after` does not compare.
     checkouts: Vec<Guarded>,
 }
 
@@ -194,10 +194,10 @@ enum Verdict {
     /// cannot tell a person's edit from a write the line does not show.
     Kept,
     /// The line wrote it as the person approved in the session: kept, and
-    /// named (#2247).
+    /// named.
     Approved,
     /// History carries it, a commit `HEAD` moved to during the call
-    /// ([`landed_at`]): kept, named, and recorded nowhere (#3220).
+    /// ([`landed_at`]): kept, named, and recorded nowhere.
     Landed,
 }
 
@@ -316,7 +316,7 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     let said = joined(moved.iter().map(|m| format!("{RULE}: {}", m.said)), "\n");
     // The answer names the event it answers. A failed call's event takes
     // no `decision`: the call has already failed, and what was put back is
-    // said as context (#2762).
+    // said as context.
     let event = call.hook_event_name.as_deref().unwrap_or("PostToolUse");
     let context = serde_json::json!({"hookEventName": event, "additionalContext": said});
     let hook = if event == "PostToolUse" && moved.iter().any(|m| m.verdict == Verdict::PutBack) {
@@ -368,7 +368,8 @@ fn sort_moved(record: &Record, call: &Call, held: &Path, unread: Option<&str>) -
             let writes = landed.is_none() && writes::can_write(&line, &place);
             // In a linked worktree the session owns, a change its line
             // cannot be read to write is the session's all the same, where
-            // it now differs from `HEAD` (#3644 rulings 1 and 4).
+            // it now differs from `HEAD` (rulings 1 and 4 of harness
+            // revision 185).
             let sessions = landed.is_none()
                 && !writes
                 && owned
@@ -418,7 +419,7 @@ fn sort_moved(record: &Record, call: &Call, held: &Path, unread: Option<&str>) -
                         "changed while this call, {} `{}`, ran, whose line cannot be read to \
                          write it, and it differs from HEAD; {} is a linked worktree this \
                          session owns, so the change is the session's whichever of its calls \
-                         made it, and the write may have come from a background call (#3644); \
+                         made it, and the write may have come from a background call; \
                          {what}",
                         call.tool_use_id,
                         call.subject(held),
@@ -447,7 +448,7 @@ fn sort_moved(record: &Record, call: &Call, held: &Path, unread: Option<&str>) -
 
 /// The checkout the call ran in, and the tracked files of `harness.self`'s
 /// scope there that the call's line can write, read where it stands: what
-/// an approval must cover before the line runs (#2247).
+/// an approval must cover before the line runs.
 pub(super) fn written(
     root: &Path,
     call: &Call,
@@ -471,7 +472,7 @@ pub(super) fn written(
 /// carries the file at `path` as it stands, `now` its blob on disk: the
 /// commit `HEAD` stood at as the call began is not `tip`, the two hold
 /// different blobs for the file, and the file stands at `tip`'s, absent
-/// where `tip` holds none (#3220). `None` where any of it does not hold,
+/// where `tip` holds none. `None` where any of it does not hold,
 /// where `tip` is `None` since the call's line moves `HEAD` itself
 /// ([`moves_head`]), or where git cannot say, so the file is judged as
 /// any write is.
@@ -509,7 +510,7 @@ fn approved(checkout: &Path, path: &str, was: Option<&str>, call: &Call) -> Opti
 /// What a kept file says when it moved: `why` it is kept, where what it
 /// was before stands, and, where it does not stand at `HEAD`'s blob and
 /// so [`kept::keep`] records it, that `done` lists it; a file a `git
-/// switch` left at `HEAD`'s blob is no record (#2995).
+/// switch` left at `HEAD`'s blob is no record.
 fn kept_words(checkout: &Path, path: &str, why: &str, was: Option<&str>) -> String {
     let before = kept::before_the_call(was);
     let listed = match kept::at_head(checkout, path) {
@@ -647,10 +648,10 @@ fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>, by
 }
 
 /// Whether `checkout` is a linked worktree whose owner record names
-/// `session` (#3621): where a change to a guarded file is the session's
-/// whichever of its calls was running, and is put back (#3644 rulings 1
-/// and 4). Main's checkout, where a person edits, and a checkout no
-/// record names, or another's, are not.
+/// `session` (harness revision 179): where a change to a guarded file is
+/// the session's whichever of its calls was running, and is put back
+/// (rulings 1 and 4 of harness revision 185). Main's checkout, where a
+/// person edits, and a checkout no record names, or another's, are not.
 fn sessions_own(checkout: &Path, session: &str) -> bool {
     let linked = git::own_dir(checkout)
         .zip(git::common_dir(checkout))
@@ -702,7 +703,7 @@ fn steered_by(checkout: &Path, path: &str, was: &str, since: i64) -> Option<()> 
     .then_some(())
 }
 
-/// Which build judges a call that runs steer (#3631). Steer's write is
+/// Which build judges a call that runs steer. Steer's write is
 /// judged with steer's own code and by the manifest the checkout commits,
 /// so a build compiled from other sources than the checkout carries, or
 /// one that cannot read that manifest, is no judge of it.
@@ -745,7 +746,7 @@ impl Steering {
 
 /// The call handed to the build of `held`, the checkout it ran in: the
 /// record laid in `held`'s store, where its build looks for it, and what
-/// that build printed, whose decision is this one's (#1047, #3631). `None`
+/// that build printed, whose decision is this one's. `None`
 /// where no build of it judged the call.
 fn handed(held: &Path, call: &Call, taken: &str, text: &str) -> Option<Vec<u8>> {
     reading::replace(&record_path(held, call)?, taken.as_bytes()).ok()?;
@@ -770,7 +771,7 @@ fn runs_steer(command: &str) -> bool {
 
 /// The file's blob, read by `blob`, and the commit `HEAD` stood at across
 /// that read, read by `head` before it and after it. Another session's
-/// merge can land between the reads (#3220), and a blob judged against a
+/// merge can land between the reads, and a blob judged against a
 /// `HEAD` it was not read under puts back what the merge wrote, so the
 /// file is read again while the two reads of `HEAD` differ, at most
 /// three times; where `HEAD` never stands still, the last read and the
@@ -818,7 +819,7 @@ fn moves_head(line: &argv::Line) -> bool {
 /// Where the call starts ([`Call::start`]), and the one checkout it is
 /// held in: the one it ran in, where that start moved by its line acts
 /// ([`Walk::ran_in`]), and never the hook's own where the call ran
-/// elsewhere (#2597, #2607).
+/// elsewhere.
 fn held(root: &Path, call: &Call) -> (PathBuf, PathBuf) {
     let line = call.command().map(argv::Line::read);
     let workspace = call.workspace(root);
@@ -871,7 +872,7 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
             continue;
         }
         // A conflict's path is listed once per stage and has no staged
-        // blob; its markers on disk are what a write is put back to (#2880).
+        // blob; its markers on disk are what a write is put back to.
         let blob = on_disk(&checkout.join(path));
         if blob
             .as_deref()
@@ -1037,8 +1038,8 @@ mod tests {
     use crate::reading::{Reading, Status, Store};
     use crate::{git, steer};
 
-    /// #3183: `steered` stands on a passing steer reading over the write
-    /// only for a file `harness.self` names, the list steer reads; a
+    /// `steered` stands on a passing steer reading over the write only
+    /// for a file `harness.self` names, the list steer reads; a
     /// reading over the same addition to a file the rule does not name,
     /// one left behind or written under another manifest, lets nothing
     /// through.
@@ -1077,8 +1078,8 @@ mod tests {
         assert!(!steered_over("notes.toml"));
     }
 
-    /// #3220: a merge lands between the first read of `HEAD` and the
-    /// file's, so the file is read again under the `HEAD` it stands at;
+    /// A merge lands between the first read of `HEAD` and the file's,
+    /// so the file is read again under the `HEAD` it stands at;
     /// a `HEAD` that never stands still is read three times and no more.
     #[test]
     fn the_file_is_read_again_while_head_moves_across_the_read() {

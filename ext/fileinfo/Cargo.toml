@@ -24,8 +24,8 @@ workspace = true
 php_ext = { path = "../../crates/php_ext" }
 pcre2-sys = { workspace = true }
 
-# libmagic is php-src's vendored copy, compiled by `build.rs` (design §7.2,
-# #1451) and bound in `src/ffi/` alone (`unsafe.homes`).
+# libmagic is php-src's vendored copy, compiled by `build.rs` (design §7.2)
+# and bound in `src/ffi/` alone (`unsafe.homes`).
 [build-dependencies]
 cc = { workspace = true }
 

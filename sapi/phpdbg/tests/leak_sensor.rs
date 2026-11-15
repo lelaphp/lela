@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over phpdbg's own natives: a debug
+//! The request leak sensor over phpdbg's own natives: a debug
 //! binary is armed unless `PHP_SENSE_LEAKS=0` turns it off, so a program that
 //! keeps a block ends in the `InternalError` naming it.
 #![cfg(debug_assertions)]
@@ -30,7 +30,7 @@ fn armed(name: &str, source: &str) -> String {
 
 /// `phpdbg_end_oplog` and `phpdbg_get_executable` look their options up
 /// by name and read the `files` they are given as strings, and keep
-/// nothing of either (#2100).
+/// nothing of either.
 #[test]
 fn the_options_and_files_the_natives_read_are_given_up() {
     let stdout = armed(

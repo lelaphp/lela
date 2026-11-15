@@ -182,7 +182,7 @@ impl Heap {
     /// before the host and the extensions start it.
     ///
     /// Under opcache, the regime a request's memory is held to from its
-    /// first line (design §5.13, #2863), php keeps no
+    /// first line (design §5.13), php keeps no
     /// `CG(interned_strings)` on the request's heap:
     /// `zend_string_init_interned` and `zend_new_interned_string` are
     /// `accel_init_interned_string_for_php` and
@@ -662,7 +662,7 @@ impl Heap {
     /// over it, the free counted now, where php counts it, and the bytes
     /// kept for the last pin's let-go ([`Heap::unpin_block`]), so a
     /// frame or a walk that still names the block reads it destroyed
-    /// and never freed (design §4.4, #2230). A block whose free was
+    /// and never freed (design §4.4). A block whose free was
     /// counted already, given up again by an owner taken of it since,
     /// has its bytes back with nothing counted twice.
     ///
@@ -670,7 +670,7 @@ impl Heap {
     ///
     /// `at` is a block of this heap whose destruction is done, and
     /// nothing but a pin names it, which `pinned` says.
-    #[allow(clippy::inline_always)] // measured on #3448: a plain `#[inline]` left it a call at every free
+    #[allow(clippy::inline_always)] // measured: a plain `#[inline]` left it a call at every free
     #[inline(always)]
     pub(crate) unsafe fn give_back(&mut self, at: NonNull<u8>, pinned: bool) {
         if !self.retiring(at, pinned) {
@@ -953,7 +953,7 @@ impl Heap {
         }
     }
 
-    /// A pin over the block `z` names (design §4.4, #2197, #2230): an
+    /// A pin over the block `z` names (design §4.4): an
     /// uncounted guard over the block's bytes. Where the block's last
     /// owner goes while the pin stands, it is destroyed then, as php
     /// destroys it, its destructor served, its rows or members released,
@@ -966,8 +966,8 @@ impl Heap {
     /// takes of its receiver among them, and any other block's by the
     /// header's bit and the heap's count of the pins past the first, so
     /// the pins over one block are let go in any order, as a walk's step
-    /// suspended in a fiber and a walk's step outside it let go theirs
-    /// (#2291), and the last let go gives the bytes back. A value that
+    /// suspended in a fiber and a walk's step outside it let go theirs,
+    /// and the last let go gives the bytes back. A value that
     /// carries no count takes no pin.
     ///
     /// A row the program frees while a walk reads it is destroyed at the
@@ -1492,7 +1492,7 @@ mod tests {
     /// count, still mapped. php's `zend_mm_realloc_huge` rounds without
     /// the check (`Z/Zend/zend_alloc.c:1757`), so its rounding wraps to
     /// zero and `zend_mm_chunk_truncate` unmaps the whole block it then
-    /// returns (#3602). Asked infallibly, the refusal is the allocator
+    /// returns. Asked infallibly, the refusal is the allocator
     /// panic; asked fallibly, as `SplFixedArray::setSize()` asks, it is
     /// the refusal with the delayed fatal naming the overflow.
     #[test]
@@ -1504,7 +1504,7 @@ mod tests {
         let mut block = heap.block(len).expect("a huge block");
         block.bytes_mut().fill(0x5a);
         // One slice compare, which Miri runs natively; a closure per byte
-        // cost it 18M interpreted calls over the six refusals (#4116).
+        // cost it 18M interpreted calls over the six refusals.
         let filled = vec![0x5a; len];
         let at = block.bytes().as_ptr().addr();
         let counted = (heap.memory_usage(false), heap.memory_usage(true));
@@ -1607,7 +1607,7 @@ mod tests {
     /// with the line that made it, and raised once where the heap is next
     /// asked; where another owner of the block stands, its line is named
     /// beside it. An owner consumed leaves nothing in the table, and one
-    /// of what no count owns is recorded nowhere (#2246).
+    /// of what no count owns is recorded nowhere.
     #[cfg(debug_assertions)]
     #[test]
     fn an_owner_dropped_unconsumed_is_recorded_with_the_line_that_made_it() {
@@ -1648,7 +1648,7 @@ mod tests {
 
     /// While a fatal leaves the request, an owner dropped unconsumed is
     /// not recorded, and a refused refcount change still is; once the
-    /// fatal is caught, the owner is a defect again (#2048).
+    /// fatal is caught, the owner is a defect again.
     #[cfg(debug_assertions)]
     #[test]
     fn an_owner_dropped_while_a_fatal_leaves_is_not_recorded() {
@@ -1685,7 +1685,7 @@ mod tests {
     /// its bin's quarantine holds carries the freed-block mark over the
     /// header's hash and length, so the read answers no bytes rather
     /// than a slice of the mark's length, and is recorded as the
-    /// `InternalError` naming the block and the line that read (#2051).
+    /// `InternalError` naming the block and the line that read.
     /// Its length reads as zero the same way.
     #[cfg(debug_assertions)]
     #[test]
@@ -1713,7 +1713,7 @@ mod tests {
         assert!(hooks.heap.take_sensed().is_some(), "the length's read too");
     }
 
-    /// A debug build stops at a second release of a block, #723's
+    /// A debug build stops at a second release of a block, a fixed
     /// defect planted: the first release frees the string, the second
     /// finds the block the heap's own and is refused, recorded as the
     /// `InternalError` naming the block, the operation and this line.

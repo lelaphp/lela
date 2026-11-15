@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over a transformation whose callbacks
+//! The request leak sensor over a transformation whose callbacks
 //! reach the processor transforming: each request below gives up
 //! everything its natives took, so an armed engine ends it without the
 //! `InternalError` naming a block still held.
@@ -26,7 +26,7 @@ fn sheet(body: &str) -> String {
 
 /// A callback transforms with the processor again and registers on it:
 /// the nested transformation runs with the stylesheet, and the
-/// registration holds for the rest of the outer one and after (#2319).
+/// registration holds for the rest of the outer one and after.
 #[test]
 fn a_callback_transforms_and_registers_on_its_own_processor() {
     let one = sheet(
@@ -50,8 +50,9 @@ fn a_callback_transforms_and_registers_on_its_own_processor() {
 /// `Error` (GH-23730), so the transformation runs to its end with the
 /// stylesheet it started with, and so does the next. php 8.5.9 freed the
 /// stylesheet libxslt was transforming with and died on SIGSEGV
-/// (`trace:xsl-stylesheet-replaced-in-callback` in `docs/divergence.toml`,
-/// #2319, #2511); 8.5.12 refuses the import as the engine now does.
+/// (`trace:xsl-stylesheet-replaced-in-callback` in
+/// `docs/divergence.toml`); 8.5.12 refuses the import as the engine now
+/// does.
 #[test]
 fn a_stylesheet_replaced_in_its_own_callback_transforms_to_its_end() {
     let one = sheet("<xsl:value-of select=\"php:function(\\'inner\\', string(/r))\"/>");

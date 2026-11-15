@@ -2,7 +2,8 @@
 //! `libbz2-rs-sys`, libbzip2 ported to Rust, and the one home of this
 //! crate's `unsafe`. php's tests observe the compressed bytes, and the
 //! library writes the oracle's libbz2 1.0.8 bytes at every block size and
-//! work factor (#1116's measurement), so no C library is linked.
+//! work factor (the measurement the crate's doc gives), so no C library is
+//! linked.
 //!
 //! Four safe types over it, one `bz_stream` each after
 //! `BZ2_bzCompressInit` or `BZ2_bzDecompressInit`: [`Compress`] and

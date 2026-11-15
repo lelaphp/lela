@@ -85,7 +85,7 @@ fn the_engine_s_persistent_constants_stand_for_their_values_where_they_are_writt
     .assert_eq(&lowered.expect("the source compiles").dump(&[]).text());
 }
 
-/// `zend_try_ct_eval_magic_const`'s `T_DIR` arm (#366): `__DIR__` is
+/// `zend_try_ct_eval_magic_const`'s `T_DIR` arm: `__DIR__` is
 /// `zend_dirname` over the file's name, and where that answers `.`,
 /// the working directory of the request, `VCWD_GETCWD`, which is per
 /// request under ZTS and so the option's, never the process's. Two
@@ -120,7 +120,7 @@ fn dir_is_the_option_s_working_directory_where_the_name_has_no_directory() {
     );
 }
 
-/// A constant no table here holds was refused until #380 and is now
+/// A constant no table here holds was once refused and is now
 /// `zend_compile_const`'s `FETCH_CONSTANT`, looked up as the program
 /// serves. The oracle's dump under `[regime.dump]` at 8.5.9 over
 /// `echo FOO;` is the same three oplines.
@@ -164,7 +164,7 @@ fn a_special_constant_written_fully_qualified_is_substituted() {
     .assert_eq(&dump_of(b"<?php echo \\true, \\NULL, \\False, TRUE;"));
 }
 
-/// `zend_compile_const_decl` (#476): one `DECLARE_CONST` per
+/// `zend_compile_const_decl`: one `DECLARE_CONST` per
 /// declarator, in written order, before anything else the file
 /// does, the name prefixed with the namespace the statement stands
 /// in and the value folded. The dumps are the oracle's under
@@ -255,7 +255,7 @@ fn what_a_const_statement_refuses_is_what_php_refuses() {
     );
 }
 
-/// `zend_compile_const`'s second half (#380), the oracle's dump
+/// `zend_compile_const`'s second half, the oracle's dump
 /// under `[regime.dump]` at 8.5.9: a name `zend_try_ct_eval_const`
 /// cannot fold is `FETCH_CONSTANT` into a temporary over the name
 /// `zend_resolve_const_name` resolved. A bare name inside a
@@ -300,7 +300,7 @@ fn a_constant_the_compiler_cannot_fold_is_the_oracle_s_fetch_constant() {
 /// dimension folds to, one `FETCH_CLASS_CONSTANT string("a")
 /// string("d")`, while the same dimension under a `new`, which runs no
 /// evaluator, is the `FETCH_DIM_R` and the `FETCH_CLASS` over it. The
-/// dump is the oracle's under `[regime.dump]` at 8.5.9 (#2691).
+/// dump is the oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn the_class_of_a_class_constant_is_read_as_the_constant_evaluator_folds_it() {
     expect![[r#"
@@ -353,7 +353,7 @@ fn a_class_name_folds_where_php_resolves_it_and_is_fetched_where_not() {
 /// `static $v = null ?? A[1] ?? 1;` compiles `A[1] ?? 1`: one `COALESCE`
 /// over the `FETCH_DIM_IS`. Outside an initializer nothing folds the
 /// `??`, and `$x = null ?? $a ?? 1;` keeps both. The dump is the oracle's
-/// under `[regime.dump]` at 8.5.9 (#2681).
+/// under `[regime.dump]` at 8.5.9.
 #[test]
 fn a_static_initializer_compiles_what_the_constant_evaluator_left_of_it() {
     expect![[r#"
@@ -393,7 +393,7 @@ fn a_static_initializer_compiles_what_the_constant_evaluator_left_of_it() {
 /// of each is what `zend_compile_array` compiles where it does not: a
 /// conditional over a constant is the branch it picks, a cast over a
 /// constant its value, a `??` over `null` its right side. The dump is the
-/// oracle's under `[regime.dump]` at 8.5.9 (#2681).
+/// oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn an_array_element_compiles_what_the_constant_evaluator_left_of_it() {
     expect![[r#"
@@ -425,7 +425,7 @@ fn an_array_element_compiles_what_the_constant_evaluator_left_of_it() {
 /// 6` are a `SWITCH_LONG` and the case compiles to `int(5)`, and folds no
 /// call, so a `match` over `1` and `strlen("ab")` is the chain of
 /// `IS_IDENTICAL` though the compile folds the call to `int(2)`. The dump
-/// is the oracle's under `[regime.dump]` at 8.5.9 (#2681).
+/// is the oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn a_switch_and_a_match_read_their_cases_as_the_constant_evaluator_folds_them() {
     expect![[r#"

@@ -1,5 +1,5 @@
-//! The tripwire #1960's ruling asks for: each extension closes the
-//! persistent entries of its own `abi::Pool`s in its own engine-end
+//! The tripwire the ruling of 2026-10-07 asks for: each extension closes
+//! the persistent entries of its own `abi::Pool`s in its own engine-end
 //! function, which `end_phase` serves in reverse bundle order, where php
 //! destroys every extension's entries in `EG(persistent_list)` before
 //! any `MSHUTDOWN` (`Z/Zend/zend.c:1166-1170`). That order is not
@@ -8,11 +8,11 @@
 //! end of its own, which would be served before the drain that needs it.
 //! A further pool-holding extension that declares an engine end, or an
 //! engine end in a crate that requires one of those three, fails here,
-//! and option 2 of #1960 (a phase that closes persistent entries alone,
+//! and the ruling's option 2 (a phase that closes persistent entries alone,
 //! served in reverse bundle order before the engine-end phase) is decided
 //! then. A pool whose entries only release, with no engine end, is a
 //! `Drop` (ADR-0010) and trips nothing: ext/curl's persistent shares
-//! (daeef7b3, #1334) are one. Read from the sources' syntax and the
+//! (daeef7b3) are one. Read from the sources' syntax and the
 //! manifests' tables, so a crate's commit trips it whatever the features
 //! of this build.
 
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use syn::visit::{self, Visit};
 
 /// The extensions that hold an `abi::Pool`, each closing it in its
-/// engine-end function, as #1960's ruling and #1961 left them.
+/// engine-end function, as the ruling of 2026-10-07 left them.
 const POOLED_ENDS: &[&str] = &["dba", "mysqli", "pdo"];
 
 /// The face's pool, as a path from the crate root names it.
@@ -157,7 +157,7 @@ fn visit_sources(dir: &Path, krate: &mut Crate) {
 
 /// This crate's directory as cargo sets `CARGO_MANIFEST_DIR` when it runs
 /// the test, never the path `env!` compiled in: cargo reuses a test binary
-/// across two checkouts that share a target directory (#2790).
+/// across two checkouts that share a target directory.
 fn manifest_dir() -> PathBuf {
     std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
@@ -207,8 +207,8 @@ fn dba_mysqli_and_pdo_alone_close_a_pool_in_an_engine_end_as_1960_ruled() {
             .unwrap_or_else(|| panic!("ext/{name} is read"));
         assert!(
             c.pool && c.engine_end,
-            "{name} no longer holds an abi::Pool closed in its own engine end, as #1961 left it \
-             (ADR-0010): this list is to shorten"
+            "{name} no longer holds an abi::Pool closed in its own engine end (ADR-0010): this \
+             list is to shorten"
         );
     }
     if let Some(c) = crates
@@ -219,8 +219,8 @@ fn dba_mysqli_and_pdo_alone_close_a_pool_in_an_engine_end_as_1960_ruled() {
             "{} holds an abi::Pool and declares an engine end beside dba, mysqli and pdo: its \
              entries close in its own engine end (ADR-0010), drained in reverse bundle order \
              while the others' entries are still open, where php closes them all before any \
-             MSHUTDOWN, and #1960's option 2 (a phase closing persistent entries alone, in \
-             reverse bundle order, before the engine-end phase) is decided now",
+             MSHUTDOWN, and option 2 of the ruling of 2026-10-07 (a phase closing persistent \
+             entries alone, in reverse bundle order, before the engine-end phase) is decided now",
             c.name
         );
     }
@@ -228,9 +228,9 @@ fn dba_mysqli_and_pdo_alone_close_a_pool_in_an_engine_end_as_1960_ruled() {
         if let Some(pool) = POOLED_ENDS.iter().find(|&&p| p != c.name && c.requires(p)) {
             panic!(
                 "{0} requires {pool} and declares an engine end, which end_phase serves before \
-                 {pool}'s drain closes the entries {0} may close through: #1960's option 2 (a \
-                 phase closing persistent entries alone, in reverse bundle order, before the \
-                 engine-end phase) is decided now",
+                 {pool}'s drain closes the entries {0} may close through: option 2 of the ruling \
+                 of 2026-10-07 (a phase closing persistent entries alone, in reverse bundle \
+                 order, before the engine-end phase) is decided now",
                 c.name
             );
         }

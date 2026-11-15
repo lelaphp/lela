@@ -1,4 +1,4 @@
-//! `zend_compile_property_hooks` (`Z/Zend/zend_compile.c:8655`, #427):
+//! `zend_compile_property_hooks` (`Z/Zend/zend_compile.c:8655`):
 //! a property's hook list, each hook compiled to an op array of its
 //! own named `$name::get` or `$name::set`, with `$this` in scope and
 //! the class as its scope, the declaration going on the property as a

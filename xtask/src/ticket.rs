@@ -1,5 +1,5 @@
-//! `xtask ticket`, the instrument that owns what a ticket is (#28;
-//! CONTEXT.md, Ticket): `read <n>` fetches the issue, reads the boxes under
+//! `xtask ticket`, the instrument that owns what a ticket is
+//! (CONTEXT.md, Ticket): `read <n>` fetches the issue, reads the boxes under
 //! its `## Acceptance criteria` heading and writes a reading of instrument
 //! `ticket` over the ticket's number, the criteria counted, the ticked, and
 //! the unticked named in the message; `close <n>` reads the same way and
@@ -10,17 +10,17 @@
 //! `git.no-verify` has, so the checkbox grammar lives here once and not in
 //! a `permit` regex, the Stop hook and CI. With no number, the ticket is
 //! the branch's, the record `xtask worktree add --ticket` wrote and
-//! [`Track::of`] reads (#30); a branch that records none is refused by
+//! [`Track::of`] reads; a branch that records none is refused by
 //! name, and no number is guessed from the branch.
 //!
 //! The reading holds the ticket to its boxes: `pass` when every criterion
 //! is ticked, `fail` while one is not, and `fail` for a ticket with no
 //! criteria at all, since a ticket with no box cannot be shown done.
 //!
-//! A ticket an agent may take is held to its label beside its boxes
-//! (#153): `ready-for-agent` says an agent works it, and a criterion
+//! A ticket an agent may take is held to its label beside its boxes:
+//! `ready-for-agent` says an agent works it, and a criterion
 //! asking for a write into a path the manifest denies an agent
-//! contradicts that label before the work starts, the way #111's first
+//! contradicts that label before the work starts, the way one ticket's first
 //! criterion, "`oracle.toml` carries a `[regime.dump]`", did. The paths
 //! are the manifest's own, every rule carrying `deny = true` over `Edit`
 //! or `Write` read through [`Rule::covers`], so a rule added to
@@ -34,8 +34,8 @@
 //! those paths that is no longer the whole of it: `xtask steer`
 //! ([`crate::steer::steerable`]) is the sanctioned writer of `seams.toml`,
 //! `oracle.toml` and the divergence registry, and an agent may run it for
-//! an addition a person has settled. #152 is the measurement: the
-//! maintainer settled the `[regime.dump]` block on the ticket, labelled it
+//! an addition a person has settled. One ticket is the measurement: the
+//! maintainer settled the `[regime.dump]` block on it, labelled it
 //! `ready-for-agent`, and an agent landed it, so a criterion whose object
 //! is `oracle.toml` stood beside a label that was right. A criterion
 //! naming a steerable path is therefore not a mislabel and does not fail
@@ -56,23 +56,23 @@
 //! a path named after one is a path the clause describes something else
 //! by: "a ticket whose criterion names `oracle.toml`" asks for no write
 //! into the pin. Inside that clause the path is the thing asked for when
-//! the clause is about it — it opens the clause, as #111's "`oracle.toml`
+//! the clause is about it — it opens the clause, as "`oracle.toml`
 //! carries a `[regime.dump]`" does — or when a verb of writing stands in
 //! the clause, "a `[regime.dump]` added to `oracle.toml`". A clause that
 //! names the file as where something is read stays clean, "the ceiling in
 //! `seams.toml`", which is what the open tickets this was measured over
 //! mostly say. A clause that lands its text somewhere other than the path
-//! asks for no write either (#1672): a verb of drafting, proposing or
+//! asks for no write either: a verb of drafting, proposing or
 //! quoting with a comment, the ticket or the commit message as its place,
-//! #1516's "the `.claude/settings.json` `PostToolUse` entry is drafted in a
+//! as in "the `.claude/settings.json` `PostToolUse` entry is drafted in a
 //! comment on the person's ticket", asks for a comment an agent posts. A
 //! verb of writing in the same clause still asks for the write. Nor does
-//! a clause whose subject stays as it is (#2391): #630's
+//! a clause whose subject stays as it is:
 //! "`.claude/harness.local.md` still renders this machine's live numbers"
 //! asks that nothing regress, where "`oracle.toml` carries" asks for new
 //! content.
 //!
-//! Ticked boxes are not enough (#29): work that found a thing it did not
+//! Ticked boxes are not enough: work that found a thing it did not
 //! do has three homes, a ticket of its own, a divergence row, or a rule
 //! proposed in a commit message, and a reply is not one of them. So a close
 //! names what it opened, as an argument and not a sentence after it:
@@ -80,11 +80,11 @@
 //! and a close that names neither is refused before the tracker is asked
 //! anything ([`Successors::named`]). Each successor is fetched and must be
 //! open, or closed and filed after the ticket it succeeds, since what the
-//! work filed stays its successor however it ended (#3390); one closed and
+//! work filed stays its successor however it ended; one closed and
 //! filed before, missing or unreadable refuses the close with nothing
 //! changed. Whose the successor is is not held, `for-a-person`
 //! as good as `ready-for-agent`: the bar is that it was filed. Which
-//! track's it is, is held (#141): a ticket carrying no `track:` label is
+//! track's it is, is held: a ticket carrying no `track:` label is
 //! `main`'s (ADR-0009, CONTEXT.md, Track), so a close of a ticket whose
 //! own `track:` label names another track refuses a successor without
 //! that label, names the `gh issue edit <n> --add-label track:<name>`
@@ -111,9 +111,9 @@
 //! merge closes the ticket with. `--found-nothing` is an assertion as
 //! `--opens-nothing` is, and as strong.
 //!
-//! A ticket can also describe nothing that is in the tree (#185): #167
+//! A ticket can also describe nothing that is in the tree: one
 //! was filed from a worktree behind the track, measured a defect that
-//! #135 had already answered on the tip, and had boxes no work could
+//! another had already answered on the tip, and had boxes no work could
 //! tick, one of them a person's decision on a question that was no
 //! longer open. Such a ticket is withdrawn rather than done, and the
 //! verdict is the same instrument's: `close <n> --withdrawn <reason>`,
@@ -133,22 +133,23 @@
 //! withdrawal back from the store's reading of the close, never from the
 //! comment: such a read passes carrying `withdrawn` and the close, so a
 //! branch that withdrew its own ticket and then landed other work renews
-//! the reading `done` holds it to (#3476). A withdrawal names what it opened as a close
+//! the reading `done` holds it to. A withdrawal names what it opened as a close
 //! of work does, `--opens` or `--opens-nothing`, since the measurement
-//! may have found the real defect elsewhere, as #167's found #169.
+//! may have found the real defect elsewhere, as that first ticket's did.
 //!
-//! Whose act a withdrawal is, the question #185 asked inside itself: an
-//! agent's, guarded by the measurement. The guard is that the reason is
-//! required and recorded with the session, that one ticked box refuses
-//! it, and that the act leaves a comment a person reads; the recovery
-//! from a false withdrawal is `gh issue reopen`, which an agent is denied
-//! by `ticket.close` and a person is not. A ticket filed against a stale
-//! branch is handed to a session by `track next` like any other, and that
-//! session's own branch is then the one the withdrawal comes from, so a
-//! verdict reserved for a person would stall the track on every such
-//! ticket. #167 is the instance: the maintainer said on it that it should
-//! close as answered by #135 and filed #185 `ready-for-agent` with the
-//! close as a criterion.
+//! Whose act a withdrawal is, the question the ticket for this verdict
+//! asked inside itself: an agent's, guarded by the measurement. The guard
+//! is that the reason is required and recorded with the session, that one
+//! ticked box refuses it, and that the act leaves a comment a person
+//! reads; the recovery from a false withdrawal is `gh issue reopen`, which
+//! an agent is denied by `ticket.close` and a person is not. A ticket
+//! filed against a stale branch is handed to a session by `track next`
+//! like any other, and that session's own branch is then the one the
+//! withdrawal comes from, so a verdict reserved for a person would stall
+//! the track on every such ticket. The withdrawn ticket above is the
+//! instance: the maintainer said on it that it should close as answered by
+//! the other and filed the ticket for this verdict `ready-for-agent` with
+//! the close as a criterion.
 //!
 //! A close that went through records what closed it: the commit and
 //! tree it was stamped at, the way every reading is, and the session the
@@ -172,7 +173,7 @@
 //! A chart sheet holds at most 100 sub-issues, GitHub's cap on the parent
 //! of a sub-issue relation, and a session learnt that from the refusal
 //! `gh issue create --parent <n>` gave after its ticket was filed: four
-//! sessions of one run left a ticket no chart indexes (#448). `parent <n>`
+//! sessions of one run left a ticket no chart indexes. `parent <n>`
 //! is the same fact before the call, measured where the criteria are: the
 //! sheet's sub-issue count as the tracker answers it, `subIssuesSummary`,
 //! against [`CAP`], as a reading of instrument `ticket` under the scope
@@ -186,7 +187,7 @@
 //! not judge the close of an issue labelled `frontier:chart` (CONTEXT.md,
 //! Chart; harness-design.md ledger 53).
 //!
-//! Two readers write no reading (#4263): `brief <n>` renders the brief a
+//! Two readers write no reading: `brief <n>` renders the brief a
 //! spawned builder starts with from a skill's template ([`brief`]), and
 //! `view <n>` prints the ticket with the comments a builder may act on,
 //! counting what it withheld ([`view`]), which `ready` prints too for the
@@ -221,7 +222,7 @@ pub mod view;
 pub(crate) const INSTRUMENT: &str = "ticket";
 /// The path every reading of ticket is stamped over: the workspace, since
 /// a ticket has no tree of its own, so `done` holds the reading fresh
-/// while the workspace's tree still matches (#31; the rule is stated in
+/// while the workspace's tree still matches (the rule is stated in
 /// `done`'s rustdoc). One statement, read by the writer and the reader.
 pub(crate) const STAMPED_OVER: &str = ".";
 
@@ -234,9 +235,9 @@ pub(crate) fn stamped_over(instrument: &str, scope: &str, snapshot: &Snapshot) -
 /// What a ready record says of a branch whose work opened nothing.
 const NOTHING: &str = "nothing";
 
-/// The configuration key of `ticket`'s ready record on `branch` (#2311),
+/// The configuration key of `ticket`'s ready record on `branch`,
 /// one per ticket, so a branch carrying a bundle keeps every ticket it
-/// readied (#2358): written by `ticket ready` beside
+/// readied: written by `ticket ready` beside
 /// `branch.<name>.ticket`, in the configuration every worktree of the
 /// repository shares, read at the merge, and dropped with the branch.
 fn ready_key(branch: &str, ticket: Ticket) -> String {
@@ -250,7 +251,7 @@ fn ready_name(ticket: Ticket) -> String {
 }
 
 /// The successors `ticket`'s ready record on `branch` names, `None` where
-/// it records none: what `track work` reads a session's end by (#2311).
+/// it records none: what `track work` reads a session's end by.
 pub fn ready_of(root: &Path, branch: &str, ticket: Ticket) -> Result<Option<Successors>> {
     let key = ready_key(branch, ticket);
     let Ok(text) = crate::git::git(root, &["config", "--get", &key]) else {
@@ -263,7 +264,7 @@ pub fn ready_of(root: &Path, branch: &str, ticket: Ticket) -> Result<Option<Succ
 /// wrote it, the last in the configuration's order where two branches did,
 /// so a retry on a later branch wins, `None` where no branch has one:
 /// what the merge closes the ticket with, since a bundle's tickets are
-/// readied on a branch that records only the first of them (#2358).
+/// readied on a branch that records only the first of them.
 fn record_of(root: &Path, ticket: Ticket) -> Result<Option<Successors>> {
     let pattern = format!(r"^branch\..*\.{}$", ready_name(ticket));
     let Ok(found) = crate::git::git(root, &["config", "--get-regexp", &pattern]) else {
@@ -286,7 +287,7 @@ const HEADING: &str = "acceptance criteria";
 pub const CAP: u64 = 100;
 
 /// What `xtask ticket` does: read the criteria; read them and record the
-/// branch ready to merge, naming what the work opened (#2311) and what it
+/// branch ready to merge, naming what the work opened and what it
 /// found, each item with its verifier's outcome ([`found`]); or read
 /// them and close under a verdict, naming what the work opened, at a
 /// commit that stands where [`Reach`] says.
@@ -297,10 +298,10 @@ pub enum Act {
     Close(Verdict, Successors, Reach),
 }
 
-/// Where the commit a close is made at stands against `main` (#2249). A
+/// Where the commit a close is made at stands against `main`. A
 /// ticket closed on a commit `main` does not contain says work is in
 /// `main` that is not, which hides it from the frontier and from every
-/// reader of the tracker, as #2163 to #2168 were closed on a stack that
+/// reader of the tracker, as six tickets were once closed on a stack that
 /// had not merged; so a close of work done is refused off `main`, and a
 /// withdrawal, which says nothing is in the tree, is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,7 +329,7 @@ impl Reach {
 }
 
 /// What a close says of the ticket: done, every box ticked, or withdrawn,
-/// nothing in the tree to build, with the measurement that says so (#185).
+/// nothing in the tree to build, with the measurement that says so.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Done,
@@ -353,7 +354,7 @@ impl Verdict {
 
 /// What a close names as opened: the tickets filed for what the work
 /// found and did not do, or the assertion that there was nothing to file.
-/// One of the two, always (#29).
+/// One of the two, always.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Successors {
     Tickets(Vec<Ticket>),
@@ -435,7 +436,7 @@ impl Successors {
     /// Each successor exists at the tracker, is open or was filed after
     /// `closed`, the ticket that opens it, and shares one of its tracks,
     /// where those are not `main`'s; the first that is not is the refusal.
-    /// A successor the work filed stays one however it ended (#3390): the
+    /// A successor the work filed stays one however it ended: the
     /// tracker numbers issues as it files them, so one closed since and
     /// numbered after `closed` was filed after it.
     fn held(&self, gh: &Gh, root: &Path, closed: &Issue) -> Result<()> {
@@ -669,8 +670,7 @@ fn checkbox(line: &str) -> Option<(bool, &str)> {
 /// One acceptance criterion asking for a write into a path a rule denies
 /// the agent: the criterion as the body writes it, the path its main
 /// clause names, the rule of the manifest whose scope covers that path,
-/// and the instrument sanctioned to write that file where one stands
-/// (#153).
+/// and the instrument sanctioned to write that file where one stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Denied {
     pub criterion: String,
@@ -703,12 +703,12 @@ pub fn denied(manifest: &Manifest, labels: &[Label], criteria: &Criteria) -> Vec
         let writing = words(clause).any(|word| WRITING.contains(&word.as_str()));
         // A clause that lands its text elsewhere, drafted in a comment or
         // proposed on the ticket, asks for no write into the path it is
-        // about (#1672).
+        // about.
         if !writing && elsewhere(clause) {
             continue;
         }
         // The path is the thing asked for while the clause is about it,
-        // and not where the clause says it stays as it is (#2391).
+        // and not where the clause says it stays as it is.
         let asked = paths(clause).into_iter().filter(|(at, named)| {
             writing || (subject(clause, *at) && !kept(&clause[at + named.len()..]))
         });
@@ -789,12 +789,12 @@ const PLACES: [&str; 7] = [
     "comment", "comments", "ticket", "issue", "message", "thread", "reply",
 ];
 
-/// Whether a clause lands its text somewhere other than the path it names
-/// (#1672): a verb of [`LANDING`] stands in it, and `in` or `on` opens a
-/// phrase one of [`PLACES`] stands in within the five words after it, as #1516's
-/// "the `.claude/settings.json` `PostToolUse` entry is drafted in a comment on
-/// the person's ticket" does. A verb of writing in the same clause wins,
-/// and the caller reads it first.
+/// Whether a clause lands its text somewhere other than the path it names:
+/// a verb of [`LANDING`] stands in it, and `in` or `on` opens a
+/// phrase one of [`PLACES`] stands in within the five words after it, as
+/// "the `.claude/settings.json` `PostToolUse` entry is drafted in a comment
+/// on the person's ticket" does. A verb of writing in the same clause
+/// wins, and the caller reads it first.
 fn elsewhere(clause: &str) -> bool {
     let words: Vec<String> = words(clause).collect();
     let landing = words.iter().any(|word| LANDING.contains(&word.as_str()));
@@ -824,16 +824,16 @@ const STAYING: [&str; 9] = [
 ];
 
 /// The words that say a thing kept is changed all the same, so the
-/// clause asks for the write (#2396): "keeps its ceiling raised to
+/// clause asks for the write: "keeps its ceiling raised to
 /// 40000". `set` is one of them only before `to`, since "the set of
 /// rules" changes nothing.
 const CHANGING: [&str; 4] = ["raised", "lowered", "changed", "moved"];
 
 /// Whether what follows a clause's subject says the subject stays as it
-/// is (#2391): one of [`STAYING`] among its first two words, as #630's
+/// is: one of [`STAYING`] among its first two words, as
 /// "`.claude/harness.local.md` still renders this machine's live numbers"
 /// or "`seams.toml` is unchanged" says, and no word of [`CHANGING`] after
-/// it (#2396). A possessive subject, "`seams.toml`'s ceiling stays", is
+/// it. A possessive subject, "`seams.toml`'s ceiling stays", is
 /// read past the noun it possesses. A word of staying further on is
 /// about something else the clause names.
 fn kept(after: &str) -> bool {
@@ -913,7 +913,7 @@ pub struct Issue {
     pub state: State,
     pub url: String,
     /// The labels the tracker carries on it, which a close reads its own
-    /// track from and holds a successor to (#141).
+    /// track from and holds a successor to.
     #[serde(default)]
     pub labels: Vec<Label>,
     /// The tickets this one blocks, nested as `blockedBy` is; an edge the
@@ -921,11 +921,11 @@ pub struct Issue {
     #[serde(default)]
     pub blocking: BlockedBy,
     /// The tickets blocking this one, which a merge naming it with no
-    /// ready record reads as a partial landing while one is open (#2394).
+    /// ready record reads as a partial landing while one is open.
     #[serde(default, rename = "blockedBy")]
     pub blocked_by: BlockedBy,
     /// How many sub-issues stand under it, which a chart sheet is held to
-    /// [`CAP`] by (#448); zero for an issue the tracker answered before
+    /// [`CAP`] by; zero for an issue the tracker answered before
     /// the field was asked for.
     #[serde(default, rename = "subIssuesSummary")]
     pub sub_issues: SubIssues,
@@ -972,8 +972,8 @@ pub struct BlockedBy {
 
 impl BlockedBy {
     /// The blockers still open, by number: what blocks a ticket, since a
-    /// ticket closes when its work is on `main` (#2270, #2326). The
-    /// frontier, the chains and a merge's partial landing (#2394) read
+    /// ticket closes when its work is on `main`. The
+    /// frontier, the chains and a merge's partial landing read
     /// the rule here.
     pub(crate) fn open(&self) -> impl Iterator<Item = u64> + '_ {
         self.nodes
@@ -992,8 +992,8 @@ pub struct Blocker {
 
 /// An issue's state as `gh` spells it, and `MERGED`, which `gh issue
 /// view` answers of a number that is a merged pull request: a subject
-/// can name one as `#n`, as b519f1c89's `Merge main into t3216: … (#3167)`
-/// did (#3244), and no ticket is ever merged.
+/// can name one as `#n`, as b519f1c89's `Merge main into t3216: …`, which
+/// ends in a pull request's number, did, and no ticket is ever merged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum State {
@@ -1019,8 +1019,7 @@ impl State {
 /// test runs [`Gh::at`] over a shell file that answers `issue view` from
 /// a recorded transcript and writes what `issue close` asked, so the
 /// judgement is held without the network. Every call is timed, by its
-/// verb, for the reading of [`merged`] that names what the tracker cost
-/// (#2813).
+/// verb, for the reading of [`merged`] that names what the tracker cost.
 #[derive(Debug)]
 pub struct Gh {
     program: PathBuf,
@@ -1068,7 +1067,7 @@ impl Gh {
     }
 
     /// What `gh issue view <n>` answers: the issue, or none where `#n` is
-    /// a merged pull request, which `gh` answers as well (#3244).
+    /// a merged pull request, which `gh` answers as well.
     fn answer(&self, root: &Path, ticket: Ticket) -> Result<Option<Issue>> {
         let number = ticket.number().to_string();
         let text = self
@@ -1101,7 +1100,7 @@ impl Gh {
     }
 
     /// `gh issue list --state open --json …`: every open issue with its
-    /// labels and what blocks it, the one call `track next` makes (#73).
+    /// labels and what blocks it, the one call `track next` makes.
     /// Every open issue, not the labelled ones alone, so the frontier's
     /// filters are judged here, where a test can hold each of them.
     pub fn open(&self, root: &Path) -> Result<Vec<Open>> {
@@ -1185,7 +1184,7 @@ impl Gh {
 
 /// How often a read of the tracker is asked before its failure stands.
 /// Under load the machine runs out of ports for a moment, and `gh` fails
-/// with "can't assign requested address" a call later would not (#2804);
+/// with "can't assign requested address" a call later would not;
 /// a read changes nothing at the tracker, so asking it again is safe,
 /// where a close asked twice would comment twice.
 const READS: u32 = 3;
@@ -1226,10 +1225,10 @@ fn mislabel(ticket: Ticket, rows: &[&Denied], nothing: &str) -> String {
     )
 }
 
-/// What a reading says of a withdrawal refused by a ticked box (#185):
+/// What a reading says of a withdrawal refused by a ticked box:
 /// the boxes ticked by name, and what work half done is instead.
 /// What a close of work done at a commit `main` does not contain is
-/// refused with: the commit, its branch and the two ways on (#2249).
+/// refused with: the commit, its branch and the two ways on.
 fn unlanded(commit: &str, branch: &str) -> String {
     format!(
         "{commit} on {branch} is not in main: merge it first, or close with --withdrawn where nothing of the work is in the tree"
@@ -1279,7 +1278,7 @@ pub fn parent_scope(sheet: Ticket) -> String {
 
 /// `xtask ticket parent <n>`: how many sub-issues one chart sheet holds
 /// and whether the tracker will take another, as one reading, so a
-/// session knows before it files and not from the refusal after (#448).
+/// session knows before it files and not from the refusal after.
 /// Pass while there is room, naming how much; fail at [`CAP`], and fail
 /// for a sheet that is closed, which indexes nothing filed under it. The
 /// tracker is read and nothing there is asked to change.
@@ -1367,7 +1366,7 @@ pub fn run(
 }
 
 /// [`run`] over an issue already read, stamped over `snapshot`: [`merged`]
-/// reads each ticket once and the workspace once for all of them (#2813).
+/// reads each ticket once and the workspace once for all of them.
 fn judged(
     root: &Path,
     manifest: &Manifest,
@@ -1389,7 +1388,7 @@ fn judged(
     let mut reading = stamped(snapshot, &scope(ticket), session_id)?;
     counted(&mut reading, &criteria, &denied, steered.len(), &act)?;
     // A read of a ticket the instrument withdrew carries the withdrawal,
-    // read back from the store's reading of the close (#3476): its boxes
+    // read back from the store's reading of the close: its boxes
     // are unticked by construction, and a reading of them alone would
     // hold the branch it was withdrawn on once the tree moved on, with no
     // withdrawal left to take again.
@@ -1474,7 +1473,7 @@ fn judged(
             format!("{ticket}: {boxes}; closed already, nothing changed at the tracker"),
         ),
         // Every box ticked says the work is done, and a commit `main`
-        // does not contain says it is not there yet (#2249).
+        // does not contain says it is not there yet.
         Act::Close(Verdict::Done, _, Reach::Unmerged { commit, branch }) => (
             Status::Fail,
             format!("{ticket}: {boxes}; {}{nothing}", unlanded(&commit, &branch)),
@@ -1556,14 +1555,14 @@ fn withdrawn_before(root: &Path, ticket: Ticket, criteria: &Criteria) -> Result<
 const OPENS: &str = "opens";
 /// Whether a close was a withdrawal, 1 or 0: counted on a close, which is
 /// how a close's reading is told from a ready record's, and as 1 on a read
-/// of a ticket a close withdrew (#3476).
+/// of a ticket a close withdrew.
 const WITHDRAWN: &str = "withdrawn";
 /// How the comment a withdrawal closes its ticket with opens, the commit
 /// it was measured at following, for a person reading the tracker.
 const WITHDRAWN_BY: &str = "Withdrawn by `xtask ticket close` at ";
 
 /// A close as its reading says it, read back from the store: what it
-/// opened and whether it withdrew the ticket (#1157).
+/// opened and whether it withdrew the ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Closed {
     pub(crate) opens: u64,
@@ -1584,26 +1583,26 @@ impl Closed {
 }
 
 /// The tickets the merge commits `since..HEAD` name, each closed as it
-/// lands (#2270, #2311): the hook on a merge commit, and on a fast-forward
+/// lands: the hook on a merge commit, and on a fast-forward
 /// of `main`, calls this. An open ticket a subject names as `#n` is
 /// closed through [`run`] with the successors its ready record names,
-/// whichever branch wrote it (#2358). Those with no ready record are read
+/// whichever branch wrote it. Those with no ready record are read
 /// after every close, so a blocker the same merge closes holds nothing,
 /// and each is left open as [`left_open`] says. A ticket closed already,
 /// and a number the tracker answers is no issue, is passed over; a number
 /// it answers as a merged pull request is [`pulled`], skipped with a
-/// reading that says so (#3244). GitHub's own subject never reaches the
+/// reading that says so. GitHub's own subject never reaches the
 /// tracker under its pull request's number: [`named_by_merges`] reads it
-/// as its branch's ticket (#3243). One the
+/// as its branch's ticket. One the
 /// tracker cannot read, or whose close it refuses, is [`unclosed`] and the
 /// run goes on, so one failure of the network neither passes a ticket
-/// over nor loses the closes made before it (#2804). Off `main` nothing is closed: the fast-forward that brings
+/// over nor loses the closes made before it. Off `main` nothing is closed: the fast-forward that brings
 /// the merge there calls this again.
 ///
 /// On `main` the last reading is the run's own, under [`MERGED`]: what
 /// each phase took, each ticket's close and every `gh` call by its verb,
 /// and the run whole, so a merge's post-commit time is read from the
-/// store and not guessed (#2813). The whole is the time inside this
+/// store and not guessed. The whole is the time inside this
 /// call: cargo's start of the binary before it, a no-op build of a fraction
 /// of a second where pre-commit has built it, and the store's write of
 /// the readings after it are outside.
@@ -1752,10 +1751,10 @@ fn unclosed(mut reading: Reading, again: &str) -> Result<Reading> {
 }
 
 /// The reading of a number a merge names that `gh` answers as a merged
-/// pull request (#3244): skipped, since a subject other than GitHub's own
+/// pull request: skipped, since a subject other than GitHub's own
 /// can name a pull request as `#n`, and the ticket that pull request was
 /// for is closed under its own merge, whose subject names its branch's
-/// ticket (#3243). It replaces a reading that left the number
+/// ticket. It replaces a reading that left the number
 /// [`unclosed`], so `done` names it no longer.
 fn pulled(snapshot: &Snapshot, pull: Ticket) -> Result<Reading> {
     let mut reading = stamped(snapshot, &scope(pull), None)?;
@@ -1766,7 +1765,7 @@ fn pulled(snapshot: &Snapshot, pull: Ticket) -> Result<Reading> {
 }
 
 /// The reading of a ticket a merge names with no ready record, which it
-/// leaves open. It is a partial landing (#2394) while a box stands
+/// leaves open. It is a partial landing while a box stands
 /// unticked and an open ticket still blocks it ([`BlockedBy::open`]):
 /// the build skill leaves a ticket
 /// whose last box waits on another open and wires that one on, so the
@@ -1804,13 +1803,13 @@ const UNCLOSED: &str = "unclosed";
 
 /// The number a reading of [`merged`] counts for a ticket the merge
 /// landed part of: named, with no ready record, and blocked by an open
-/// ticket (#2394).
+/// ticket.
 const PARTIAL: &str = "partial";
 
 /// The tickets the subjects of the merge commits of `range` name as `#n`,
 /// each once, in the order named. GitHub's own subject for a pull request
 /// merged there names the pull request, never a ticket: its ticket is the
-/// branch's, `t<n>` as `worktree add` names it (#3243).
+/// branch's, `t<n>` as `worktree add` names it.
 fn named_by_merges(root: &Path, range: &str) -> Result<Vec<Ticket>> {
     let subjects = crate::git::git(root, &["log", "--merges", "--format=%s", range])?;
     let mut named: Vec<Ticket> = Vec::new();
@@ -1861,7 +1860,7 @@ fn branch_ticket(branch: &str) -> Option<u64> {
     }
 }
 
-/// What `done` names of the merges since `base` (#2358): the last `ticket`
+/// What `done` names of the merges since `base`: the last `ticket`
 /// reading of each ticket a merge commit's subject names, where it says
 /// [`merged`] left it [`unclosed`], until a close replaces it. Where `base` is `HEAD`, as on `main`, the merges are
 /// `HEAD`'s own, so the session that made the merge reads what it
@@ -1889,7 +1888,7 @@ pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Resul
     Ok(unmet)
 }
 
-/// The branch ready to merge (#2311): every ticket the found work names as
+/// The branch ready to merge: every ticket the found work names as
 /// filed among the successors, `done` met in this worktree, every
 /// successor held as a close holds it, and the record written on the
 /// branch `HEAD` is on, which the merge reads to close the ticket. Nothing
@@ -1932,7 +1931,7 @@ fn ready(
 }
 
 /// `done` over this worktree, refused while anything is unmet, naming the
-/// list (#3618 ruling 2). The boxes this reading holds are the ticket's
+/// list (ruled 2026-10-30). The boxes this reading holds are the ticket's
 /// condition, so it is recorded first, as the reading `done` reads.
 fn unmet_here(root: &Path, manifest: &Manifest, reading: &Reading) -> Result<()> {
     let store = crate::reading::Store::of_workspace(root);
@@ -2029,7 +2028,7 @@ mod tests {
     }
 
     /// What a criterion asks for is its main clause's: the path the clause
-    /// opens with, or the path a verb of writing stands beside (#153).
+    /// opens with, or the path a verb of writing stands beside.
     #[test]
     fn a_criterion_whose_object_is_a_denied_path_asks_for_the_write_and_one_naming_it_does_not() {
         let subject = read(
@@ -2050,7 +2049,7 @@ mod tests {
         );
         // The path `permit` denies but `xtask steer` writes, so the row is
         // a note and not a refusal, and a path no instrument writes is the
-        // refusal (#152).
+        // refusal.
         assert!(subject[0].sanctioned.is_some(), "{subject:?}");
         let hook = read("ready-for-agent", "`.claude/settings.json` gains a hook");
         assert_eq!(hook.len(), 1, "{hook:?}");
@@ -2075,7 +2074,7 @@ mod tests {
     }
 
     /// A criterion whose path is the subject of a text drafted in a comment
-    /// asks for a comment and not for a write (#1672), and one that writes
+    /// asks for a comment and not for a write, and one that writes
     /// the path stays a write whatever else it names.
     #[test]
     fn a_criterion_drafting_a_denied_path_in_a_comment_asks_for_no_write() {
@@ -2122,11 +2121,11 @@ mod tests {
         );
     }
 
-    /// A subject said to stay as it is asks for no write (#2391), and a
+    /// A subject said to stay as it is asks for no write, and a
     /// word of staying past the two after the subject is about something
     /// else the clause names, so the write stands. A possessive subject
     /// is read past the noun it possesses, and a word of change after
-    /// the staying word is the write it says (#2396).
+    /// the staying word is the write it says.
     #[test]
     fn a_criterion_whose_denied_subject_stays_as_it_is_asks_for_no_write() {
         for kept in [
@@ -2166,7 +2165,7 @@ mod tests {
         );
     }
 
-    /// The grammar of the flags (#29): one of the two, not neither, not
+    /// The grammar of the flags: one of the two, not neither, not
     /// both, not the ticket itself, each successor once.
     #[test]
     fn a_close_names_its_successors_or_asserts_none_and_never_neither() {
@@ -2212,7 +2211,7 @@ mod tests {
     }
 
     /// The grammar over a body with ticked, unticked, indented and
-    /// non-criteria boxes (#28).
+    /// non-criteria boxes.
     #[test]
     fn the_boxes_under_the_heading_are_the_criteria_and_no_others() {
         let body = "## What to build\n\n- [ ] a box in the wrong section\n\n## Acceptance criteria\n\n- [x] ticked\n- [ ] unticked\n  - [X] indented and ticked\n    * [ ] indented twice, unticked\n- not a box\n```\n- [ ] a box in a fence\n```\n- [ ]no space, not a box\n\n### A sub-heading stays inside\n\n+ [ ] under the sub-heading\n\n## Blocked by\n\n- [ ] a box after the section\n";
@@ -2231,7 +2230,7 @@ mod tests {
         assert!(!criteria.met());
     }
 
-    /// #1314's body as it was first filed (#1320): a diff quoted in a
+    /// A ticket's body as it was first filed: a diff quoted in a
     /// fenced block, the diff carrying the quoted file's own fence line
     /// four spaces in. That line is the block's text, not its close, so the
     /// heading below the block is read; an outer `~~~` reads the same.
@@ -2264,7 +2263,7 @@ mod tests {
         }
     }
 
-    /// The close as `CommonMark` has it (#1320): the same character, a run
+    /// The close as `CommonMark` has it: the same character, a run
     /// at least the opening's, indented at most three spaces past the
     /// opening, nothing but whitespace after; a fence never closed runs to
     /// the end of the body.
@@ -2354,7 +2353,7 @@ x
         assert!(empty.found && empty.count() == 0 && !empty.met());
     }
 
-    /// A withdrawal is its reason (#185): the flag absent is the close of
+    /// A withdrawal is its reason: the flag absent is the close of
     /// work done, the flag with a reason is the withdrawal with it trimmed,
     /// and the flag with nothing or with whitespace withdraws nothing.
     #[test]
@@ -2370,7 +2369,7 @@ x
         }
     }
 
-    /// #1314's body as filed, before the diff was dropped (efc13721).
+    /// That ticket's body as filed, before the diff was dropped (efc13721).
     const BODY_1314: &str = r"#1312 adds `cargo xtask witness --unmeasured`, which measures only the crates with no passing witness reading over their tree now. The merge check in `.claude/skills/specs/SKILL.md` §6 still runs `cargo xtask witness` over every crate, right after the merge commit's hook measured the staged ones over the same tree, and says nothing about not running while a merge commit's hook runs, which is where a session's load-flaky witnesses and tests came from. The file is under harness.self, so the edit is a person's.
 
 The proposed patch (`patch -p0 < SKILL-1312.patch` from the checkout, or by hand):

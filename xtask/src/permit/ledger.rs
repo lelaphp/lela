@@ -1,8 +1,8 @@
 //! What permit keeps beside its readings, in main's store, since a reading
-//! per call would grow the store by one per `Bash` call (#3619): how many
+//! per call would grow the store by one per `Bash` call: how many
 //! calls each rule judged, the denominator its denials are read against,
 //! and per session and agent the checkouts its writing calls were placed
-//! in, which the Stop holds (harness-design.md §4.5, #3618 ruling 1).
+//! in, which the Stop holds (harness-design.md §4.5).
 //!
 //! Each is one JSON file rewritten whole under a lock, since the two
 //! adapters and every session's calls write it at once.
@@ -23,7 +23,7 @@ const JUDGED: &str = "judged.json";
 const HANDED: &str = "handed.json";
 /// How many calls handed on within [`WINDOW`] with none judged are a burst:
 /// the walk ending in a cargo that cannot build, which the hook passes on
-/// unjudged and nothing else records (#3619).
+/// unjudged and nothing else records.
 pub(super) const BURST: usize = 3;
 /// The window a burst falls in, in seconds.
 const WINDOW: u64 = 60;

@@ -187,7 +187,7 @@ impl ZvalRef {
     /// single-bucket chain then named itself and `zend_hash_find_bucket`
     /// walked it forever, which is what hung
     /// `Zend/tests/ArrayAccess/bug63217.phpt` past the recipe's limit
-    /// with nothing printed (#491): `$a[123] = 1` wrote the value through
+    /// with nothing printed: `$a[123] = 1` wrote the value through
     /// this slot after `link` had set the bucket's next, and `$a['abc']`
     /// hashes to the same chain.
     ///
@@ -285,7 +285,7 @@ pub(crate) struct WeakMarks {
 /// pointer to a refcounted value or to a slot in place. A pointer is kept
 /// as a pointer, its provenance with it, so a value read back out of a
 /// zval reaches its block through the pointer that was stored and never
-/// through an integer (#2528, #2441); bits are kept as a pointer with no
+/// through an integer; bits are kept as a pointer with no
 /// provenance, `ptr::without_provenance_mut`, and read back as its
 /// address. Which of the two a word holds is the zval's type byte's to
 /// say; the word itself does not know.
@@ -293,7 +293,7 @@ pub(crate) struct WeakMarks {
 /// One pointer and not a union of a `u64` and a pointer: a union is an
 /// aggregate to rustc, so a [`Zval`] over one was passed by a pointer to
 /// a copy and returned through memory, where a zval over a scalar word is
-/// a pair of scalars, passed and returned in two registers (#4084).
+/// a pair of scalars, passed and returned in two registers.
 ///
 /// Every bit pattern is a word, the ones no allocation could be at among
 /// them: a long whose top bit is set, and a double's sign, infinity and

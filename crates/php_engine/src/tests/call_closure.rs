@@ -1,5 +1,5 @@
 //! A call's owner of the `Closure` it was made through, taken off the
-//! call for the closure `CALLABLE_CONVERT` writes (#3335): the header holds none
+//! call for the closure `CALLABLE_CONVERT` writes: the header holds none
 //! once it is taken, so a second take finds none and the call's pop
 //! gives up no owner of the closure.
 

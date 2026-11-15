@@ -1,5 +1,5 @@
 //! A person's approval of one change to a file `harness.self` scopes
-//! (#2247, harness-design.md §4.4, §11). What only a person decides stays
+//! (harness-design.md §4.4, §11). What only a person decides stays
 //! theirs; once they have approved a change in the session, typing it is
 //! the agent's. The approval is their answer to an `AskUserQuestion` call:
 //! a question that names the file, whose chosen option's `preview` carries

@@ -7,14 +7,14 @@ rust-version.workspace = true
 publish = false
 description = "The harness: instruments, readings and the one renderer (harness-design.md §4)"
 
-# `xtask test` runs these test executables side by side (#2869): each lays
+# `xtask test` runs these test executables side by side: each lays
 # what it writes down in trees of its own (`scratch::Tree`), so none shares
 # a store, a port or a System V key with another. One path is shared: the
 # workspace's own `target/debug`, which compile_identity builds `php` into
 # and worktree and permit copy whole, so the three hold one key. Those
 # three, phpt and new_sapi build with cargo or serve the engine inside a
 # test, about two minutes of a run, so `--staged` runs each only where a
-# path of its own is staged; `done` asks the whole run (#2982).
+# path of its own is staged; `done` asks the whole run.
 [package.metadata.xtask.test]
 executables = "side-by-side"
 apart = { compile_identity = ["target"], worktree = ["target"], permit = ["target"] }
@@ -31,7 +31,7 @@ workspace = true
 sha1_smol.workspace = true          # the digest of seams.toml this build is compiled against (src/built.rs)
 
 [dependencies]
-# No engine crate (harness §8, revision 84; #2166): the witness and
+# No engine crate (harness §8, revision 84): the witness and
 # crosscheck lanes serve a snippet through `php-linked`, `sapi/cli` built
 # with the bundle's `linked` set, which this harness builds and starts as a
 # process; so an edit under `crates/` or `ext/` rebuilds that binary and
@@ -39,26 +39,27 @@ sha1_smol.workspace = true          # the digest of seams.toml this build is com
 anyhow.workspace = true
 clap.workspace = true
 # The oracle module's runner kills a program's process group whole, so what a
-# test started goes with it (harness §4.3, #1211); phpt's System V sweep reads
-# the runner's user by name, as `ipcs` prints an object's creator (#1482).
+# test started goes with it (harness §4.3); phpt's System V sweep reads
+# the runner's user by name, as `ipcs` prints an object's creator.
 nix = { workspace = true, features = ["signal", "user"] }
 regex-lite.workspace = true
 sha1_smol.workspace = true
 md5.workspace = true
-sha2.workspace = true               # a variant's macOS build names the digest of the [closure] it was made against (#2935)
+sha2.workspace = true               # a variant's macOS build names the digest of the [closure] it was made against
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 syn.workspace = true
-proc-macro2 = { workspace = true, features = ["span-locations"] }   # the line of a test-level return clippy's reading names (#3105)
+proc-macro2 = { workspace = true, features = ["span-locations"] }   # the line of a test-level return clippy's reading names
 # The lanes, each the pure part of one, with a ceiling of its own so the
 # lines ruled for it cannot be spent by other harness work; the adapter
-# under src/ runs, compares and records, and calls them (#3740, #4489).
+# under src/ runs, compares and records, and calls them (ruled 2026-10-31;
+# design revision 185).
 php_lanes_differential = { path = "../lanes/differential" }
 php_lanes_framework = { path = "../lanes/framework" }
 php_lanes_fuzz = { path = "../lanes/fuzz" }
 
 [dev-dependencies]
 # tests/new_sapi.rs: a stand-in's parameter types as written, held to the
-# real facade's (#2545); already in the lock under syn.
+# real facade's; already in the lock under syn.
 quote.workspace = true

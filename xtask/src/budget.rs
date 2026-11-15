@@ -75,7 +75,7 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
 }
 
 /// [`run`], and with `staged` less the crates whose reading stands for
-/// the commit (#1143).
+/// the commit.
 pub(crate) fn measure(
     root: &Path,
     manifest: &Manifest,
@@ -86,7 +86,7 @@ pub(crate) fn measure(
     over(root, manifest, &standing)
 }
 
-/// Every reading, less a crate whose reading stands for the commit (#1143):
+/// Every reading, less a crate whose reading stands for the commit:
 /// each counts toward the workspace's total with the numbers its standing
 /// reading carries, and writes no reading of its own.
 fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Reading>> {
@@ -312,7 +312,7 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
     }
     for path in build_rs_baking_their_dir(root, &layout)? {
         failures.push(format!(
-            "{path} reads {MANIFEST_DIR_AT_COMPILE} when it compiles; a build.rs reads std::env::var_os(\"CARGO_MANIFEST_DIR\") when it runs, since cargo runs one compiled build.rs for every checkout sharing a target directory (#2628)"
+            "{path} reads {MANIFEST_DIR_AT_COMPILE} when it compiles; a build.rs reads std::env::var_os(\"CARGO_MANIFEST_DIR\") when it runs, since cargo runs one compiled build.rs for every checkout sharing a target directory"
         ));
     }
     if failures.is_empty() {
@@ -333,8 +333,8 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
 /// Each generated, committed file against its rendering
 /// (`generated.committed`), and against what would stand between it and
 /// the crates below it: a clippy configuration nearer to one of them, or
-/// a cargo configuration that sets `CLIPPY_CONF_DIR` (#2475;
-/// [`generated::nearer`], [`generated::conf_dir_set`]). The reading's ADRs
+/// a cargo configuration that sets `CLIPPY_CONF_DIR`
+/// ([`generated::nearer`], [`generated::conf_dir_set`]). The reading's ADRs
 /// are the rules the file carries, which decided its lists, beside the
 /// generated rule's own.
 fn generated_readings(snapshot: &Snapshot, manifest: &Manifest) -> Result<Vec<Reading>> {
@@ -425,7 +425,7 @@ pub(crate) fn count(root: &Path, krate: &Crate) -> Result<Count> {
 
 /// `docs/**` and the living documents at the root (`*-design.md`), the
 /// workload programs left out where `workloads_apart`, as
-/// `[budget] workloads` holds them on their own (#4341).
+/// `[budget] workloads` holds them on their own.
 fn docs(root: &Path, workloads_apart: bool) -> Result<u64> {
     let mut paths = git::files(root, Path::new("docs"))?;
     paths.retain(|p| !(workloads_apart && Path::new(p).starts_with(workloads::DIR)));
@@ -438,7 +438,7 @@ fn docs(root: &Path, workloads_apart: bool) -> Result<u64> {
 }
 
 /// The desk plugin's tree, which `[budget] harness-desk` holds apart from
-/// `harness` where a person has written the row (#3491).
+/// `harness` where a person has written the row.
 const DESK: &str = "harness-plugins/desk";
 
 /// `.claude/**` and `harness-plugins/**` hand-written: generated types
@@ -478,7 +478,7 @@ fn lines_of(root: &Path, path: &str) -> Result<Option<u64>> {
 /// file that is not text has no lines. A `.DS_Store` Finder left under
 /// `docs/` took the whole instrument down with a UTF-8 error, and an
 /// instrument that falls over measures nothing, which is the shape of the
-/// bug #16 names.
+/// outage harness revision 11 records.
 fn text_of(root: &Path, path: &str) -> Result<Option<String>> {
     let bytes = std::fs::read(root.join(path)).with_context(|| format!("reading {path}"))?;
     Ok(String::from_utf8(bytes).ok())
@@ -492,7 +492,7 @@ const MANIFEST_DIR_AT_COMPILE: &str = "env!(\"CARGO_MANIFEST_DIR\")";
 /// directory in: cargo reuses one compiled `build.rs` for every checkout
 /// whose crate sits at the same path below its workspace root, so one
 /// sharing a target directory with another checkout reads that checkout's
-/// files (#2628). The `build.rs` held is the one beside a `Cargo.toml`,
+/// files. The `build.rs` held is the one beside a `Cargo.toml`,
 /// which cargo runs when the package names no other.
 fn build_rs_baking_their_dir(root: &Path, layout: &Layout) -> Result<Vec<String>> {
     let mut out = crate_tree_files(root, layout)?;

@@ -2,10 +2,10 @@
 //! `<subset>[@control][@<lane>][@regime=<name>][@against]`: the subset,
 //! and what the run was beside it. The writers render it here and every
 //! reader parses it here, so `status`, `done`'s stamp and the comparisons
-//! all read one subset off `X@control@against` (#1744).
+//! all read one subset off `X@control@against`.
 //! `compile-identity` writes its control's scope through it as well, the
 //! same grammar over a corpus of its own, and the regime it dumped under
-//! beside `dump` where it was asked for one (#1822).
+//! beside `dump` where it was asked for one.
 
 use std::fmt;
 use std::str::FromStr;
@@ -31,9 +31,9 @@ pub(crate) struct Scope {
     /// The compiled tier's lane the run was under (jit-design.md §7).
     pub lane: Option<Lane>,
     /// The `[regime.<name>]` of the pin the run stood under beside the
-    /// lane's own, by name (#1822).
+    /// lane's own, by name.
     pub regime: Option<String>,
-    /// The comparison of the run against a kept commit's (#664).
+    /// The comparison of the run against a kept commit's.
     pub against: bool,
 }
 
@@ -179,7 +179,7 @@ mod tests {
     use super::{Comparison, Lane, Scope};
 
     /// Every scope the writers spell reads back as the parts that spelled
-    /// it, and renders as the same bytes (#1744).
+    /// it, and renders as the same bytes.
     #[test]
     fn a_scope_round_trips_through_its_parts() {
         let cases = [
@@ -235,7 +235,7 @@ mod tests {
 
     /// `compile-identity` under a regime beside `dump` keeps a reading of
     /// its own, its control's too, and reads back as the parts that
-    /// spelled it (#1822).
+    /// spelled it.
     #[test]
     fn a_regime_is_a_suffix_of_its_own_after_the_lane() {
         for (text, control) in [

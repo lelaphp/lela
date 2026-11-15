@@ -8,7 +8,7 @@
 //! tree it walks is `php_syntax`'s, [`Parsed::tree`] (design §4.9):
 //! `emit` reads every statement, every expression and every
 //! declaration from its own node, and no second parser stands between
-//! the source and the unit (#595). What it cannot read is refused as a
+//! the source and the unit. What it cannot read is refused as a
 //! [`CompileError`].
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
@@ -25,7 +25,7 @@ mod emit;
 mod live;
 pub mod multibyte;
 /// A test's skip for a fact this machine lacks, shared with the tests
-/// that cannot depend on xtask (#3180).
+/// that cannot depend on xtask.
 #[cfg(test)]
 #[path = "../tests/support/skip.rs"]
 mod skip;
@@ -183,8 +183,8 @@ pub struct Options<'a> {
     /// which `zend_get_call_op` reads; none for an engine with no tier.
     pub hooked: Hooked,
     /// `CG(compiler_options) & ZEND_COMPILE_EXTENDED_INFO`, which a
-    /// host's `-e` sets for every file and `eval` the engine compiles
-    /// (#1780): an `EXT_STMT` before each statement, and an
+    /// host's `-e` sets for every file and `eval` the engine compiles:
+    /// an `EXT_STMT` before each statement, and an
     /// `EXT_FCALL_BEGIN` and `EXT_FCALL_END` around each call
     /// `zend_compile_call_common` makes and each `include` or `eval`,
     /// where `zend_do_extended_stmt`, `zend_do_extended_fcall_begin` and
@@ -491,7 +491,7 @@ impl SourceKind {
 /// and a nested expression keeps one answer a level on the stack while
 /// the level below compiles, so the answer is as wide as what succeeds,
 /// the 24 bytes of where an expression's value stands, and not the 72
-/// of a refusal held in place (#3208).
+/// of a refusal held in place.
 #[derive(Clone, PartialEq)]
 pub struct CompileError(Box<Refused>);
 
@@ -583,10 +583,10 @@ pub enum Raise {
     Thrown,
     /// php would have compiled what stands here, and this compiler cannot
     /// read it yet: its own sentence, `… this compiler cannot read yet`,
-    /// raised at `Level::Parse` as #163 framed it, which the phpt lane
-    /// counts as unread. A fold that meets one leaves the node unfolded
-    /// for the compile to read or refuse, as it leaves a node that is no
-    /// constant.
+    /// raised at `Level::Parse`, framed as a parse error, which the phpt
+    /// lane counts as unread. A fold that meets one leaves the node
+    /// unfolded for the compile to read or refuse, as it leaves a node
+    /// that is no constant.
     Unread,
     /// The heap met php 8.5.12's hard limit as the compile asked for
     /// memory (`zend_mm_hard_limit_error`): the process ends where it
@@ -671,7 +671,7 @@ pub enum Stage {
 /// around it is gone. The entry is `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so no
 /// snippet turns it on from inside: the fence names `[regime.short-tags]`
 /// of the pin, whose ini stands after the recipe's for the oracle and for
-/// the engine alike (harness-design.md §8, ledger 55; #610):
+/// the engine alike (harness-design.md §8, ledger 55):
 ///
 /// ```php
 /// ?>
@@ -720,7 +720,7 @@ impl Drop for Reset<'_> {
 }
 
 /// The room a unit's main op array is laid down in, taken from a unit
-/// the caller gave up rather than asked of the allocator (#3028): its
+/// the caller gave up rather than asked of the allocator: its
 /// oplines' and its constants' vectors, emptied, and its file's name,
 /// which a unit of a name as long writes over. php `emalloc`s an
 /// `eval`'s op array and its tables from the request's heap, which the

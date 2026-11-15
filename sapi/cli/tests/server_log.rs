@@ -1,4 +1,4 @@
-//! What a request can write into `php -S`'s log (#4559): the line for a
+//! What a request can write into `php -S`'s log: the line for a
 //! request that ended in a fatal names the file the fatal was raised in,
 //! and a `\r` or `\n` in that file's name is written as two bytes
 //! (`php_sapi::log_field`), so the request writes no line of its own.

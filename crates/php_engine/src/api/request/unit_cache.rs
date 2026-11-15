@@ -1677,7 +1677,7 @@ mod tests {
 
     /// A unit the cache holds for a request is held for it alone where
     /// the cache built its entry, so that request alone owes the hand-off
-    /// its counting words raise (#3362): where another request held the
+    /// its counting words raise: where another request held the
     /// path's copy while this one compiled it, the race this one lost,
     /// `cache_script_in_shared_memory` answers that copy
     /// (`Filed::Existing`), and nothing is held for this request.

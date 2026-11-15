@@ -35,7 +35,7 @@ pub struct Server {
 
 /// This crate's directory as cargo sets `CARGO_MANIFEST_DIR` when it runs
 /// the test, never the path `env!` compiled in: cargo reuses a test binary
-/// across two checkouts that share a target directory (#2790).
+/// across two checkouts that share a target directory.
 pub fn manifest_dir() -> PathBuf {
     std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)

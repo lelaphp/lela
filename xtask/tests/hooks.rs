@@ -9,7 +9,7 @@
 //! and the base it handed `done`, since a hook that exits without doing
 //! its job is invisible to a substring over its text. Each runs git with
 //! no session of its own, as a person's terminal does, unless the test
-//! names one (#3621).
+//! names one.
 #![cfg(tracked)]
 
 use std::fs;
@@ -30,7 +30,7 @@ fn workspace() -> &'static Path {
 }
 
 /// The region files pre-commit renders, in the order it names them; the
-/// gitignored local file is not one of them (#1312).
+/// gitignored local file is not one of them.
 const REGIONS: [&str; 7] = [
     "AGENTS.md",
     "ext/AGENTS.md",
@@ -397,15 +397,15 @@ fn as_xtask_test_runs_a_map_test() {
 /// `api-check`, `budget`, `unsafe-audit`, `vocab` and `permit --diff`;
 /// then `xtask regions --staged` over the six region files and not the
 /// gitignored local one, which reaches `computed run`, and `computed
-/// check` over the six; then `clippy` and `test` (#1252), and no
-/// `witness`, which `done` asks of a branch once (#2982), and no
+/// check` over the six; then `clippy` and `test`, and no
+/// `witness`, which `done` asks of a branch once, and no
 /// `crosscheck`, whose exit the hook never read (revision 140). The region
 /// file `computed` rewrote is re-staged before `test` runs, so the map
-/// tests read the map the commit carries from the index (#1416): a hook
+/// tests read the map the commit carries from the index: a hook
 /// that renders after `test` hands it the map before the render and fails
 /// here. The commit carries the rendered file and the tree is clean after.
 /// commit-msg runs last, handing `vocab --message` the file git wrote the
-/// message to, as a whole path (#3624).
+/// message to, as a whole path.
 #[test]
 fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     let scratch = scratch("rendered", &Computed::Rendered);
@@ -415,7 +415,7 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
 
     let regions = REGIONS.join(" ");
-    // A group runs at once, so its steps start in any order (#1144); what
+    // A group runs at once, so its steps start in any order; what
     // they print comes out whole and in the hook's order, though
     // `api-check`, the first, ends last.
     let reading = [
@@ -482,7 +482,7 @@ fn message(scratch: &Scratch) -> String {
 /// second index git hands the hook, and the checkout's own stays locked
 /// and stale through it: the map test `xtask test` runs reads the render
 /// the hook re-staged, the map the commit carries, and not the one before
-/// it, though the instrument takes git's variables from its tests (#2747).
+/// it, though the instrument takes git's variables from its tests.
 #[test]
 fn a_commit_by_pathspec_tests_the_map_it_carries() {
     let scratch = scratch("rendered-by-path", &Computed::Rendered);
@@ -506,7 +506,7 @@ fn fields(call: &str) -> std::collections::BTreeMap<&str, &str> {
         .collect()
 }
 
-/// The declarations step (#62, #1736): with a path under
+/// The declarations step: with a path under
 /// `harness-plugins/` staged, the committer's own Claude Code rewrites the
 /// tracked declaration file. `claude auth status` first, then one `-p`
 /// that invokes the plugin-authoring skill, whose files the build extracts
@@ -516,7 +516,7 @@ fn fields(call: &str) -> std::collections::BTreeMap<&str, &str> {
 /// loads none of their settings sources, MCP servers or tools, nor the
 /// hooks a launcher would add, with the variable that gates function
 /// hooks; then `tsc` through the pinned `npx`, then `plugin validate
-/// --strict`, then `plugin test` (#2247); what was written is re-staged,
+/// --strict`, then `plugin test`; what was written is re-staged,
 /// so the commit, by pathspec, carries the file whose header names the
 /// version.
 #[test]
@@ -628,7 +628,7 @@ fn pre_commit_without_claude_skips_the_declarations_by_name_and_allows_the_commi
 }
 
 /// A `claude` that is not logged in writes no declarations, and says so
-/// by name (#1736): no `-p` runs, the commit stages no declaration, so it
+/// by name: no `-p` runs, the commit stages no declaration, so it
 /// is allowed, and `tsc`, `plugin validate` and `plugin test` still hold
 /// the module to the committed file.
 #[test]
@@ -719,7 +719,7 @@ fn pre_commit_names_a_build_that_writes_no_declarations_and_allows_the_commit() 
     assert!(!committed.contains("harness-plugins/types"), "{committed}");
 }
 
-/// A region refusal ends before building instruments start (#3611),
+/// A region refusal ends before building instruments start,
 /// preserving the staged change for the person who can resolve it.
 fn assert_no_builds(scratch: &Scratch) {
     let calls = scratch.calls("cargo");
@@ -749,7 +749,7 @@ fn a_hand_edited_region_refuses_the_commit_naming_computed_check() {
 
 /// A region whose command fails is never committed unrendered: `xtask
 /// regions` passes on `computed run`'s exit 1, and the `computed check`
-/// after it refuses the commit naming the region (#2744).
+/// after it refuses the commit naming the region.
 #[test]
 fn a_region_whose_command_fails_refuses_the_commit() {
     let scratch = scratch("failing-render", &Computed::Failing);
@@ -831,7 +831,7 @@ fn refused_after_its_render(name: &str, path: &str) -> (Scratch, String) {
 }
 
 /// A pathspec commit refused after its render, then committed again,
-/// carries the rendered region (#3638): the second run finds the region
+/// carries the rendered region: the second run finds the region
 /// fresh on disk and writes nothing, and the hook stages `AGENTS.md`
 /// because its working copy differs from the commit's index only inside
 /// its region, and the region lists a directory the commit adds. A hook
@@ -848,7 +848,7 @@ fn a_render_a_refused_commit_wrote_is_carried_by_the_next() {
     assert_eq!(scratch.git(&["status", "--porcelain"], false), "");
 }
 
-/// What is not the commit's render is left where it stands (#3638): a
+/// What is not the commit's render is left where it stands: a
 /// commit that stages no path the region reads leaves `AGENTS.md`, whose
 /// listing names a crate that commit does not carry; and once a person
 /// has written a line outside the region, the commit that adds the crate
@@ -878,7 +878,7 @@ fn a_region_file_that_is_not_the_commit_s_render_is_left() {
     let (code, out) = scratch.run(&["commit", "-q", "-m", "a crate", "--", path], true);
     assert_eq!(code, 0, "{out}");
     assert!(!out.contains("staged AGENTS.md"), "{out}");
-    // The file left is named, with the staged path its region reads (#3645).
+    // The file left is named, with the staged path its region reads.
     let left = out.lines().find(|l| l.contains("left AGENTS.md"));
     assert!(
         left.is_some_and(|l| l.contains("crates/php_stack") && l.contains("unrendered")),
@@ -924,7 +924,7 @@ fn a_failing_instrument_refuses_the_commit_by_name() {
 /// A merge committed through `git commit` after `--no-commit`, the way
 /// /specs merges into `main`, runs `clippy` and `test` and no `witness`,
 /// as no commit does: the merge check's `witness --unmeasured` measures
-/// the merged tree (revision 140, #2982).
+/// the merged tree (revision 140).
 #[test]
 fn a_merge_commit_runs_no_witness() {
     let scratch = scratch("merge-witness", &Computed::Rendered);
@@ -953,8 +953,8 @@ fn a_merge_commit_runs_no_witness() {
     );
 }
 
-/// One session writes in a checkout, its owner (#3618 M1, #3621): with an
-/// owner record naming `the-owner`, a commit from another session is
+/// One session writes in a checkout, its owner (harness revision 179): with
+/// an owner record naming `the-owner`, a commit from another session is
 /// refused by pre-commit before any instrument starts, naming the owner,
 /// the session and the checkout, and so is a merge git commits itself,
 /// by pre-merge-commit, the merge left standing; the owner's commit and
@@ -1051,7 +1051,7 @@ fn a_missing_message_file_is_refused_before_anything_runs() {
 }
 
 /// A refusal among the instruments that only read the tree ends the hook
-/// there (#1252): `vocab` refuses, the rest of its group still runs, and
+/// there: `vocab` refuses, the rest of its group still runs, and
 /// neither `clippy`, `test` nor anything after them is started,
 /// so the commit is refused in the seconds the group takes and not after a
 /// build.
@@ -1100,10 +1100,10 @@ fn with_glossary(scratch: &Scratch) -> PathBuf {
 }
 
 /// commit-msg notes the message against the glossary its staged crate is
-/// held to and refuses nothing (#3624, ruled on #3629), through the real
+/// held to and refuses nothing (ruled 2026-10-30), through the real
 /// `vocab --message` against the workspace's `CONTEXT.md`: the text of
 /// `fixtures/hooks/commit-msg/avoided.txt`, handed over by `-m` as a `-F`
-/// file is pre-commit's (#3630), is committed, each word printed with its
+/// file is pre-commit's, is committed, each word printed with its
 /// line and the word the glossary says, and the reading under `message`
 /// fails listing them; `clean.txt`, which carries avoided words only in a
 /// code span, its subject's path and a trailer, is committed and its
@@ -1145,9 +1145,9 @@ fn commit_msg_notes_an_avoided_word_by_line_and_refuses_nothing() {
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
 }
 
-/// A `-F` message is noted by pre-commit before its first instrument
-/// (#3630), so an avoided word is said in the seconds before any build
-/// and not after it, and refused by nothing (#3629):
+/// A `-F` message is noted by pre-commit before its first instrument,
+/// so an avoided word is said in the seconds before any build
+/// and not after it, and refused by nothing:
 /// `fixtures/hooks/commit-msg/avoided.txt`, committed with `-F`, is the
 /// hook's first `cargo` call, ahead of `fmt`, `clippy` and `test`, its
 /// words printed by line though `clippy` then refuses the commit; once
@@ -1201,12 +1201,12 @@ fn a_message_file_is_noted_before_any_build_and_once() {
 }
 
 /// A revision a branch adds is written `NEXT` and numbered by the merge
-/// into `main` (#2982), its ledger row and every citation of it: a commit
+/// into `main`, its ledger row and every citation of it: a commit
 /// on `main` whose Markdown or Rust still cites one, as
 /// `fixtures/hooks/next/cited.md` and `cited.rs` do in each shape that has
 /// landed, one wrapped onto the next line among them, is refused before
 /// anything runs, naming each line, as it is on `staging`, the merge
-/// queue's branch, which `main` fast-forwards to (#3622), and the same
+/// queue's branch, which `main` fast-forwards to, and the same
 /// commit on a ticket's branch is not.
 /// Prose that names NEXT and cites no revision, the convention quoted in
 /// backticks and a line that ends in "revision" among it, is no citation.
@@ -1258,7 +1258,7 @@ fn a_revision_still_cited_as_next_is_refused_on_main_and_not_on_a_branch() {
 }
 
 /// The lines of the workspace's .gitattributes that set a
-/// `conflict-marker-size`, the one place a file is exempted (#2996).
+/// `conflict-marker-size`, the one place a file is exempted.
 fn marker_exemptions() -> String {
     fs::read_to_string(workspace().join(".gitattributes"))
         .unwrap()
@@ -1270,7 +1270,7 @@ fn marker_exemptions() -> String {
 
 /// A commit whose staged text adds a line git's check reads as a
 /// conflict marker left in is refused before anything runs, naming file and
-/// line (#2996); a reStructuredText section rule of the same seven `=`
+/// line; a reStructuredText section rule of the same seven `=`
 /// is admitted by the workspace's .gitattributes.
 #[test]
 fn a_conflict_marker_left_in_is_refused_naming_file_and_line() {
@@ -1297,7 +1297,7 @@ fn a_conflict_marker_left_in_is_refused_naming_file_and_line() {
 /// Both sides of a merge change one line; `git commit` concluding it with
 /// the markers left in and staged is refused naming them, and so is a
 /// merge `git merge` commits itself, through pre-merge-commit, whose other
-/// side carries a marker line (#2996). Each merge stands uncommitted.
+/// side carries a marker line. Each merge stands uncommitted.
 #[test]
 fn a_merge_that_carries_a_conflict_marker_is_refused() {
     let scratch = scratch("merge-markers", &Computed::Rendered);
@@ -1354,7 +1354,7 @@ fn a_merge_that_carries_a_conflict_marker_is_refused() {
 
 /// No file the workspace's index holds carries a line the commit hooks
 /// would refuse as a conflict marker left in: each that holds one on
-/// purpose is exempted in .gitattributes (#2996).
+/// purpose is exempted in .gitattributes.
 #[test]
 fn no_tracked_file_carries_a_conflict_marker_left_in() {
     let empty = Command::new("git")
@@ -1378,7 +1378,7 @@ fn no_tracked_file_carries_a_conflict_marker_left_in() {
 
 // ---------------------------------------------------------- post-commit, post-merge
 
-/// A merge closes the tickets it names (#2311): a merge `git merge`
+/// A merge closes the tickets it names: a merge `git merge`
 /// commits itself reaches `xtask ticket merged` through post-merge, since
 /// `ORIG_HEAD`; one committed by `git commit` after `--no-commit`, the way
 /// /specs merges, reaches it through post-commit, since `HEAD^1`; and a
@@ -1432,7 +1432,7 @@ fn a_merge_reaches_ticket_merged_and_a_plain_commit_does_not() {
 
 /// A merge into the main checkout that changes the harness rebuilds
 /// `target/release/xtask`, the judge every tool call tries first, in the
-/// background (#2982); one that leaves the harness alone does not.
+/// background; one that leaves the harness alone does not.
 #[test]
 fn a_merge_that_changes_the_harness_rebuilds_the_release_judge() {
     let scratch = scratch("rebuild", &Computed::Rendered);
@@ -1480,7 +1480,7 @@ fn a_merge_that_changes_the_harness_rebuilds_the_release_judge() {
 /// pre-merge-commit, and what that hook stages never reaches the merge's
 /// tree, which git wrote before it ran; so a region `computed merge` left
 /// unrendered, both sides having re-rendered it, was committed as a bare
-/// closer four times on `main` (#2744). Pre-merge-commit refuses that
+/// closer four times on `main`. Pre-merge-commit refuses that
 /// merge naming the region and the way through, and the merge stands
 /// uncommitted; `git commit` then renders it through pre-commit, and the
 /// merge commit carries the render.
@@ -1564,7 +1564,7 @@ fn a_merge_that_brings_a_revision_still_cited_as_next_onto_main_is_refused() {
 }
 
 /// A fast-forward onto `main` writes no commit, so neither commit hook
-/// reads what it brings (#3138): pre-push reads it instead. The branch
+/// reads what it brings: pre-push reads it instead. The branch
 /// carrying `fixtures/hooks/next/cited.rs` is pushed as itself and not
 /// read; `main` fast-forwarded onto it is refused naming the line, the
 /// remote's `main` unmoved and `done` not asked, and so is the same
@@ -1738,7 +1738,7 @@ fn niceness(pid: &str) -> i32 {
     String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
 }
 
-/// The merge queue's commits run at full priority (#3622): pre-commit
+/// The merge queue's commits run at full priority: pre-commit
 /// renices a commit in a linked worktree, a builder's, so it yields the
 /// cores to the merge, and the merge worktree, the linked worktree on
 /// `staging`, is that merge, so its hook is not reniced. Each call of the
@@ -1792,7 +1792,7 @@ fn a_commit_on_staging_runs_at_full_priority_and_a_builder_s_yields() {
     }
 }
 
-/// The merge queue's fast-forward closes the tickets (#3622): a merge
+/// The merge queue's fast-forward closes the tickets: a merge
 /// committed on `staging` reaches `xtask ticket merged` through
 /// post-commit, which closes nothing off `main`, and `main`'s `git merge
 /// --ff-only staging` reaches it through post-merge, since `ORIG_HEAD`,
@@ -1842,10 +1842,10 @@ fn agent_s(name: &str) -> Scratch {
     scratch
 }
 
-/// #3644 ruling 3: a commit from an agent's session that stages a harness
-/// path no steer reading covers is refused by pre-commit's `permit
-/// --diff`, naming the path; the same commit from no session, a person's,
-/// is admitted, the path a note.
+/// Harness revision 185, ruling 3: a commit from an agent's session that
+/// stages a harness path no steer reading covers is refused by pre-commit's
+/// `permit --diff`, naming the path; the same commit from no session, a
+/// person's, is admitted, the path a note.
 #[test]
 fn pre_commit_refuses_an_agent_s_uncovered_harness_path_and_admits_a_person_s() {
     let scratch = agent_s("agent-harness");
@@ -1858,7 +1858,8 @@ fn pre_commit_refuses_an_agent_s_uncovered_harness_path_and_admits_a_person_s() 
     let (code, out) = scratch.run_as(&commit, true, Some("an-agent"));
     assert_eq!(code, 1, "{out}");
     assert!(
-        out.contains(&format!("deny {path}")) && out.contains("#3644"),
+        out.contains(&format!("deny {path}"))
+            && out.contains("no steer reading covers what is staged"),
         "{out}"
     );
     assert_eq!(scratch.head(), before, "{out}");
@@ -1867,12 +1868,12 @@ fn pre_commit_refuses_an_agent_s_uncovered_harness_path_and_admits_a_person_s() 
     assert!(out.contains(&format!("note {path}")), "{out}");
 }
 
-/// #3644 ruling 3 and #3622: the coordinator merges in the merge worktree,
-/// a linked one on `staging` its session owns. A merge that takes a
-/// person's committed manifest whole from one side is admitted, committed
-/// through pre-commit after `--no-commit` or by `git merge` through
-/// pre-merge-commit; one whose manifest neither side committed, git's
-/// union of both, is refused to the agent until steer writes it.
+/// Harness revisions 183 and 185 (ruling 3): the coordinator merges in the
+/// merge worktree, a linked one on `staging` its session owns. A merge that
+/// takes a person's committed manifest whole from one side is admitted,
+/// committed through pre-commit after `--no-commit` or by `git merge`
+/// through pre-merge-commit; one whose manifest neither side committed,
+/// git's union of both, is refused to the agent until steer writes it.
 #[test]
 fn a_merge_taking_one_side_s_committed_manifest_is_admitted_and_a_union_is_refused() {
     let scratch = agent_s("agent-merge");
@@ -1932,7 +1933,7 @@ fn a_merge_taking_one_side_s_committed_manifest_is_admitted_and_a_union_is_refus
     let (code, out) = coordinator(&["merge", "-q", "--no-ff", "-m", "Merge t9", "t9"], true);
     assert_ne!(code, 0, "{out}");
     assert!(
-        out.contains("deny seams.toml") && out.contains("#3644"),
+        out.contains("deny seams.toml") && out.contains("no steer reading covers what is staged"),
         "{out}"
     );
     let after = scratch.git(

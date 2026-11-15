@@ -127,7 +127,7 @@ fn seen(receipt: &str) -> Vec<&str> {
 
 /// An interval's `timelib_rel_time` is the one timelib made, so the
 /// constructor and the clone ask for the oracle's two 104-byte blocks,
-/// in its order, and free them where it frees them (#2855).
+/// in its order, and free them where it frees them.
 #[test]
 fn dates_zones_and_intervals_request_what_the_oracle_requests() {
     let receipt = receipt_of(include_str!("storage/allocations.php"));
@@ -146,7 +146,7 @@ fn periods_request_what_the_oracle_requests() {
 
 /// An abbreviation zone's abbreviation is the `timelib_strdup` copy php's
 /// `tzi.z.abbr` is, made where `timezone_initialize`, the clone and a
-/// date's `getTimezone()` make it and freed where the zone is (#2885).
+/// date's `getTimezone()` make it and freed where the zone is.
 #[test]
 fn abbreviation_zones_request_what_the_oracle_requests() {
     let receipt = receipt_of(include_str!("storage/abbreviations.php"));

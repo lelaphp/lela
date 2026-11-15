@@ -1,4 +1,4 @@
-//! The binding (design §7.2, revision 47, #1173; `unsafe.homes`'
+//! The binding (design §7.2, revision 47; `unsafe.homes`'
 //! `ext/*/src/ffi/`): the one home of this crate's `unsafe`, over what
 //! `build.rs` compiles and links, each as a safe type:
 //!

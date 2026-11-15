@@ -1,8 +1,8 @@
-//! libgd is the keg's (design §7.2, revision 75; #1573): the library the
+//! libgd is the keg's (design §7.2, revision 75): the library the
 //! oracle links, found through `pkg-config gdlib` and never vendored, its
 //! declarations written in `src/ffi/`. The oracle links the shared
 //! library, and neither the SDK's `/usr/lib`, which the SDK's libxml2
-//! puts ahead of the kegs on the link line (#1510), nor the SDK ships a
+//! puts ahead of the kegs on the link line, nor the SDK ships a
 //! libgd, so `-l gd` finds the keg's whatever the order, as libgmp's
 //! does. A host `pkg-config` finds no libgd on fails the build.
 //!
@@ -30,7 +30,7 @@ fn main() {
     // php compiles C and C++ with -DNDEBUG unless it is built with
     // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
     // two builds that set ZEND_DEBUG, as debug assertions are this build's:
-    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    // assert() is live exactly where Rust's debug_assertions is.
     if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
         build.define("NDEBUG", None);
     }

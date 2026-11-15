@@ -1,4 +1,4 @@
-//! The third layer of #2020's ruling (#2353): an item of an extension's
+//! The third layer of the ruling of 2026-10-07: an item of an extension's
 //! surface may carry `#[mirrors("ext/x/php_x.h", "sym")]`, the php-src
 //! declaration it stands for, and the hold reads the pinned php-src for it.
 //! The header is named from the tree's root, as a dependent extension's

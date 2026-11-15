@@ -2244,7 +2244,7 @@ impl<'a> Builder<'a> {
     /// the trace recorded. A
     /// return trace whose `RETURN_BY_REF` returns into the file's code,
     /// away from its recursion's header, takes that exit and grows a side
-    /// trace there, #3688's program:
+    /// trace there:
     ///
     /// ```php
     /// function h() { return 1; }
@@ -2925,7 +2925,7 @@ impl<'a> Builder<'a> {
     /// `UPDATE_SSA_TYPE`'s widening, a variable assigned from it holds no
     /// type the trace knows, and the `ASSIGN` that reads that variable
     /// next holds it by an exit, php's exit 2, so the loop's direction is
-    /// php's exit 3 (#3711):
+    /// php's exit 3:
     ///
     /// ```php
     /// function f() { $x = 0; $y = 0; $r = &$x; $c = 0; for ($i = 0; $i < 100; $i++) { $x = $i; $y = $x; $x = $y; if ($i > 50) { $c++; } } return $c + $x; }
@@ -3148,7 +3148,7 @@ impl<'a> Builder<'a> {
     /// A register holds what its op computed, a boolean either way where
     /// the recording saw `true` or `false`, so the guard is tested on the
     /// register before the opline, as php's `zend_jit_type_guard` tests
-    /// the type of the value an op wrote (#3076): narrowed to the one
+    /// the type of the value an op wrote: narrowed to the one
     /// seen, the register would hold a constant, the guard would test
     /// nothing, and the trace would go the recorded way past the
     /// iteration where the comparison turns.
@@ -3164,7 +3164,7 @@ impl<'a> Builder<'a> {
     /// The `VAR` a `function &f()` returns, recorded through the reference
     /// it is, is fetched where php's code generator fetches it, a
     /// `COUNT` of a packed array its handler's and a `FETCH_DIM_R` held to
-    /// the reference and its array's layout read through it (#3706):
+    /// the reference and its array's layout read through it:
     ///
     /// ```php
     /// function &f() { static $a = [1, 2, 3]; return $a; } $s = 0; for ($i = 0; $i < 100; $i++) { $s += count(f()) + f()[1]; } echo $s, "\n";
@@ -3950,7 +3950,7 @@ impl<'a> Builder<'a> {
     /// over a constant name, on `$this`, a variable or a temporary that holds an object
     /// as it is, whose class's call the recording took
     /// ([`UnitView::calls_of`]). On a published class, under the class
-    /// guard on the object; on a request-scoped one (#3558), under the
+    /// guard on the object; on a request-scoped one, under the
     /// guard on the pair the opline's runtime-cache slot holds, its class
     /// the object's and its callee the method, as php compares
     /// `CACHED_PTR(opline->result.num)` with `obj->ce` for a class that is
@@ -4076,7 +4076,7 @@ impl<'a> Builder<'a> {
 
     /// The plain call the recording took of a method of the request-scoped
     /// class `scope` whose op array is the request's own, an evaluated
-    /// class's, which the record names by no number (#3570): found by the
+    /// class's, which the record names by no number: found by the
     /// method's name, the constant the `INIT_*` at `op` of the op array
     /// `func` names, lowered, and its argument count.
     fn request_call(
@@ -4583,7 +4583,7 @@ impl<'a> Builder<'a> {
     }
 
     /// php's `RECV` exits, numbered ahead of every other exit of an
-    /// entered trace (`jit-design.md` §4.2, #3269): one
+    /// entered trace (`jit-design.md` §4.2): one
     /// `ZEND_JIT_EXIT_TO_VM` exit per `RECV` [`recv_exits`] names in the
     /// root's prologue. The prologue ran before `Site::Entry`, so no code
     /// tests them, and each lands where the interpreter goes on past it,
@@ -5155,7 +5155,7 @@ impl<'a> Builder<'a> {
     /// `MAY_BE_GUARD` in the phi's stead, so its phi propagation
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:2690-2760`) moves nothing to
     /// the loop's entry and the guard stays at `reader`, its exit numbered
-    /// there (#3865).
+    /// there.
     ///
     /// A closure that takes `$c` by value before the loop's `+=`:
     ///
@@ -5233,7 +5233,7 @@ impl<'a> Builder<'a> {
     /// a `SEND_VAR`, the `$c` of `$y = $c`, numbers it anew under
     /// `ZEND_SSA_RC_INFERENCE` ([`Builder::writes_anew`]). Its definition
     /// is that line, which `is_checked_guard` holds nothing of, so the
-    /// phi keeps its guard at the header, #3712's program, whose array
+    /// phi keeps its guard at the header, as in this program, whose array
     /// takes `$c` after the `+=`:
     ///
     /// ```php

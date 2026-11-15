@@ -74,8 +74,8 @@ fn a_call_and_its_return_are_entered_and_left() -> Result<(), String> {
     Ok(())
 }
 
-/// A return trace roots at its caller's landing (`jit-design.md` §2.2,
-/// #3036): its first opline is the one past `f`'s call to `g`, in `f`,
+/// A return trace roots at its caller's landing (`jit-design.md` §2.2):
+/// its first opline is the one past `f`'s call to `g`, in `f`,
 /// and it goes on there to `f`'s own return, which, with no recursion
 /// below, ends it as php's "Return from function" does.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -108,7 +108,7 @@ fn a_return_trace_roots_at_its_callers_landing_and_goes_on_there() -> Result<(),
 
 /// A return trace rooted inside the arguments of calls its frame began
 /// before it writes those calls down first, the outermost first, as php's
-/// fake inits (`zend_jit_trace_record_fake_init_call`, #3254): a user
+/// fake inits (`zend_jit_trace_record_fake_init_call`): a user
 /// function's by its op array, a native's by none, and then the landing.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
@@ -243,7 +243,7 @@ fn a_do_while_not_loop_closes_at_its_header() -> Result<(), String> {
 /// condition at 3, the body at 4 and 5, `IS_SMALLER` at 6 fused to the
 /// `JMPNZ` at 7, one `Op` (design §5.8), so the record is the condition,
 /// then the body, as the pinned php's `TRACE_BYTECODE` dump lists
-/// `IS_SMALLER`, `JMPNZ`, then the body (#3134).
+/// `IS_SMALLER`, `JMPNZ`, then the body.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_for_loop_roots_at_its_condition_as_php_does() -> Result<(), String> {
@@ -313,7 +313,7 @@ fn a_for_loop_roots_at_its_condition_as_php_does() -> Result<(), String> {
 /// lands, and not at its condition: php's optimizer makes the `JMPNZ` on
 /// `true` a `JMP` back to the body and threads the `JMP` into the loop
 /// onto the body, so php's CFG heads the loop there
-/// (`Z/Zend/Optimizer/pass1.c:315-333`, #3317). The back edge lands on
+/// (`Z/Zend/Optimizer/pass1.c:315-333`). The back edge lands on
 /// the root, so nothing is stepped on to a condition or recorded from
 /// behind one ([`super::behind`]), and the condition is no header, so a
 /// trace arms a landing there ([`super::landings`]).
@@ -348,7 +348,7 @@ fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
     let header = super::header_at(code, body, FOLDS).ok_or("the body is no header")?;
     assert_eq!(super::loop_root(code, header, FOLDS), Some(body));
     // Where php's optimizer folds nothing, its CFG heads the loop at the
-    // condition, as it heads a `for`'s (#3578).
+    // condition, as it heads a `for`'s.
     let unfolded = super::Folds(false);
     let at_condition = super::header_at(code, condition, unfolded).ok_or("no header")?;
     assert_eq!(super::header_at(code, body, unfolded), None);
@@ -368,8 +368,7 @@ fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
 /// condition, pass 5, or pass 1 with pass 3, as the pinned php's `TRACE`
 /// lines root a `while (true)` at its body at 5, 16, 17, 21, 37 and its
 /// default and at its condition at 0, 1, 4, 32, 33, 160 and `0x7FFEBFEA`,
-/// the default less passes 1, 3 and 5, whose DFA folds no loop's entry
-/// (#3578).
+/// the default less passes 1, 3 and 5, whose DFA folds no loop's entry.
 #[test]
 fn the_levels_that_fold_a_constant_condition_are_phps() {
     let folds = |level: i64| super::Folds::of(level).0;
@@ -463,8 +462,7 @@ fn a_loop_past_each_jump_is_counted() -> Result<(), String> {
 
 /// A loop reached through a `catch` alone is no loop php counts: one in
 /// the `catch`, and one past a `try` that always throws, where a `finally`
-/// the `try` reaches normally leaves the loops in it and past it counted
-/// (#3201).
+/// the `try` reaches normally leaves the loops in it and past it counted.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_loop_reached_through_a_catch_alone_is_not_counted() -> Result<(), String> {
@@ -485,7 +483,7 @@ fn a_loop_reached_through_a_catch_alone_is_not_counted() -> Result<(), String> {
 
 /// A loop's root php counts is never a landing a trace arms, so a return
 /// that lands there reads the loop's word and no landing's
-/// (`dispatch::goes_on`, #3318), as php's `zend_jit_trace_setup_ret_counter`
+/// (`dispatch::goes_on`), as php's `zend_jit_trace_setup_ret_counter`
 /// leaves an opline whose `trace_flags` are set
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`): a trace that hands
 /// on to the interpreter at a call whose landing is a `while`'s condition
@@ -595,8 +593,7 @@ fn a_conditional_jump_says_which_way_it_went() -> Result<(), String> {
 /// `Interpreter`, as php's `zend_jit_trace_execute` stops at a frame whose
 /// op array keeps no `jit_extension` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`):
 /// the trace compiles, ends at the `DO_UCALL` the interpreter makes, and
-/// arms `f`'s landing past it; the call it wrote down names no op array
-/// (#3570).
+/// arms `f`'s landing past it; the call it wrote down names no op array.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_into_an_evaled_function_exits_to_the_interpreter() -> Result<(), String> {
@@ -637,8 +634,7 @@ fn a_call_into_an_evaled_function_exits_to_the_interpreter() -> Result<(), Strin
 /// A return trace that follows a recursive return past its root into a
 /// frame an `eval`'d function runs stops there with `Return`, on the
 /// branch of php's recorder that stops at a frame whose op array keeps no
-/// `jit_extension` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`;
-/// #3570).
+/// `jit_extension` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_return_followed_into_an_evaled_caller_stops_with_return() -> Result<(), String> {

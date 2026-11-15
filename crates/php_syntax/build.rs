@@ -26,8 +26,7 @@ use codegen::ungram::Error;
 
 fn main() {
     // Read when `build.rs` runs, not when it compiles: cargo runs one
-    // compiled `build.rs` for every checkout sharing a target directory
-    // (#2628).
+    // compiled `build.rs` for every checkout sharing a target directory.
     let Some(dir) = env::var_os("CARGO_MANIFEST_DIR") else {
         println!("cargo:warning=CARGO_MANIFEST_DIR is unset; cargo sets it for every `build.rs`");
         std::process::exit(1);

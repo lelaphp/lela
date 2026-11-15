@@ -8,7 +8,7 @@
 //! path natives in `path`, the replacements in `replace`, the escapes in
 //! `slashes`, `strip_tags`'s state machine in `strip_tags`, the locale
 //! natives in `locale` and `parse_str` in `parse_str`. The C locale is
-//! the only one this engine has (#640), so `isalpha` and the case maps
+//! the only one this engine has, so `isalpha` and the case maps
 //! are ASCII's, as php's are under it.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
@@ -254,7 +254,7 @@ fn chr(req: &mut Request, codepoint: i64) -> Result<Owner<PhpString>, Thrown> {
 /// `zend_parse_arg_long_weak` reads it: truncated behind the 8.1
 /// deprecation, so `1.5` and `'1.5'` are one repeat each; a float that
 /// is NAN or past the long's range is the `TypeError` the parser refuses
-/// it with (#253).
+/// it with.
 ///
 /// ```php
 /// var_dump(str_repeat('x', 1.5), str_repeat('x', '1.5'));
@@ -351,7 +351,7 @@ fn chr(req: &mut Request, codepoint: i64) -> Result<Owner<PhpString>, Thrown> {
 /// ```
 ///
 /// Across the allocator's classes, a small bin, a `run` of pages and a
-/// huge block, the step is php's (#2661): the product and the 32-byte
+/// huge block, the step is php's: the product and the 32-byte
 /// header of an empty string, so a string of seven bytes takes the
 /// 40-byte bin where its own allocation would take the 32-byte one.
 ///
@@ -479,9 +479,10 @@ fn str_repeat(
 /// Declared, the name is one `ob_start()` accepts as a handler and
 /// `ob_get_status()` reports under `name`. What php then does with it
 /// is call it with the buffer and the `PHP_OUTPUT_HANDLER_*` bits, two
-/// arguments to a native of one, so the oracle ends in `ArgumentCountError` at the first
-/// handler call with the buffer lost; the `ob_*` layer's call of a
-/// native handler is #288's, and the witness for it stands there.
+/// arguments to a native of one, so the oracle ends in
+/// `ArgumentCountError` at the first handler call with the buffer lost;
+/// the `ob_*` layer's call of a native handler is that layer's, and the
+/// witness for it stands there.
 #[php_function]
 fn strtoupper(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     cased(req, string, u8::to_ascii_uppercase)

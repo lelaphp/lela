@@ -10,8 +10,8 @@
 //! beside its target, and the constants as `PHP_MINIT(basic)` registers
 //! them, so `get_defined_functions()`, `get_defined_constants()` and
 //! `php --re standard` list them as php does. The compiler serves some
-//! calls itself (`count`, `chr`, `ord`, the `is_*` checks, #219) and
-//! emits a frameless call for the natives that declare one (#254); what
+//! calls itself (`count`, `chr`, `ord`, the `is_*` checks) and
+//! emits a frameless call for the natives that declare one; what
 //! reaches a native is the call it could not shape.
 // `unsafe` is `src/ffi/`'s alone, the C library calls `filestat.c` makes.
 #![deny(unsafe_code)]
@@ -55,7 +55,7 @@ mod image;
 pub use image::{ImageHandler, ImageSize};
 /// What `php_image.h` and `php_string.h` declare `PHPAPI` for ext/exif,
 /// which includes both: an image's type, a type's MIME type, and the
-/// base name of the file it reports (#1330).
+/// base name of the file it reports.
 pub use image::{php_getimagetype, php_image_type_to_mime_type};
 pub use string::path::php_basename;
 mod info;

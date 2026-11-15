@@ -1,5 +1,5 @@
-//! Frame writes and evaluation in a paused frame for extensions (#1828,
-//! design §4.3 seam 9): what a debugger written as an extension does
+//! Frame writes and evaluation in a paused frame for extensions
+//! (design §4.3 seam 9): what a debugger written as an extension does
 //! where it has stopped, as xdebug's `property_set` and `eval` do in
 //! php. A variable of the frame is written ([`Frames::set_var`],
 //! php's `zend_set_local_var`), and code is evaluated in the frame's
@@ -7,8 +7,8 @@
 //! `EG(current_execute_data)` at the frame, as xdebug's `xdebug_do_eval`
 //! serves it).
 //!
-//! The frame is named by its [`FrameId`], kept from a [`FrameView`]
-//! (#1827), and checked where it stands each time
+//! The frame is named by its [`FrameId`], kept from a [`FrameView`],
+//! and checked where it stands each time
 //! ([`Request::in_frame`]). A frame that stands on the running stack is
 //! paused: the innermost, whose call or native the handler stands in,
 //! and every one below it. A frame below a fiber, on the stack that

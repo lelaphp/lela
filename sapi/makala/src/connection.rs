@@ -1,15 +1,15 @@
-//! The connection side (#2337): hyper's HTTP/1.1 server on a tokio
+//! The connection side: hyper's HTTP/1.1 server on a tokio
 //! runtime of one thread, which owns every socket, reads each request's
 //! framing as RFC 9112 has it and never runs PHP, as the BEAM keeps
 //! anything that blocks off the schedulers that own sockets
 //! (research/production-server.r2.md §4.10, M2 and M4). Each request is
 //! routed on tokio's blocking pool, which may wait on the disk where this
 //! thread may not, and a static file is sent from here
-//! ([`crate::static_file`], #2587), so no request thread waits on a
+//! ([`crate::static_file`]), so no request thread waits on a
 //! client taking one. A program's request goes to the request side
 //! whole, on the bounded queue: while the queue is full its connection
 //! waits for room. That and the connection cap are the
-//! backpressure (#2342), Ranch's (research/production-server.r2.md M7):
+//! backpressure, Ranch's (research/production-server.r2.md M7):
 //! at the cap the accept loop stops accepting, so new clients wait in
 //! the kernel's listen queue and none is refused. The body follows on a
 //! bounded channel as hyper reads it, and the response comes back on
@@ -19,23 +19,23 @@
 //! response has none: PHP writes no body for one (php's `headers_only`),
 //! and hyper sends none.
 //!
-//! Every limit of [`Limits`] (#2341) is applied on this side: the head's
+//! Every limit of [`Limits`] is applied on this side: the head's
 //! request line, field bytes and declared body length where hyper has
 //! parsed it ([`over_limit`]), the field count by hyper's parser, the
 //! keep-alive and header clocks and the response's minimum rate by the
 //! connection's socket ([`Socket`]), a chunked body's length and the
 //! body's minimum rate as the body is read ([`pump`]), and the cap on
 //! requests per connection as each request begins ([`respond`]); the
-//! cap on connections is the accept loop's (#2342). hyper
+//! cap on connections is the accept loop's. hyper
 //! answers `100 Continue` when the body is first read, which is after
 //! the head has passed its limits.
 //!
 //! A connection to the TLS listener is served once its handshake has
-//! ended ([`open_connection`], #2343), within
+//! ended ([`open_connection`]), within
 //! [`Limits::handshake_timeout`].
 //!
 //! SIGTERM ends the accept loop and begins the drain
-//! ([`serve_until_drained`], #2344),
+//! ([`serve_until_drained`]),
 //! bounded by [`Limits::shutdown_timeout`].
 
 use std::convert::Infallible;
@@ -524,8 +524,8 @@ async fn respond(
 /// One request: refused where it is past a limit ([`over_limit`]) or its
 /// framing does not hold ([`framing`]); else routed on tokio's blocking
 /// pool, which asks the disk ([`Router::route`]): a static file is sent
-/// from here and a refusal answered, neither holding a request thread
-/// (#2587), and a program's request is handed to the request side with
+/// from here and a refusal answered, neither holding a request thread,
+/// and a program's request is handed to the request side with
 /// its body following it, and answered with the head the request sends
 /// and the body it writes after it. The server answers on its own with a
 /// 503 where the request side has stopped and takes no program; with the
@@ -667,7 +667,7 @@ fn headless(ending: Option<&Ending>) -> StatusCode {
     }
 }
 
-/// The limits a parsed head is held to (#2341): its request line, 414
+/// The limits a parsed head is held to: its request line, 414
 /// past [`Limits::request_line`]; its fields' bytes, each counted as its
 /// name, value, colon, space and CRLF, 431 past [`Limits::header_bytes`];
 /// and its body's length, 413 past [`Limits::body_bytes`] before a byte of
@@ -849,7 +849,7 @@ fn cut(connection: &Connection, fault: BodyFault) {
 }
 
 /// The response for the head a request sent, as php-fpm writes it and
-/// the web server in front of it reads it (#2636, #2608): the lines
+/// the web server in front of it reads it: the lines
 /// `sapi_cgi_send_headers` writes ([`php_sapi::cgi::lines`]), so a 304
 /// carries no `Content-Type` of PHP's; the status their status line says,
 /// 200 where there is none, with the reason phrase it carries, which is

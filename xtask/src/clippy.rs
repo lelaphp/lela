@@ -1,13 +1,13 @@
 //! `xtask clippy` (harness-design.md §4.5 condition 1, §6): `cargo clippy`
 //! on every target of each crate under every feature it declares
-//! ([`Targets::All`], #140), every warning a failure, as a reading per
+//! ([`Targets::All`]), every warning a failure, as a reading per
 //! crate. What this instrument adds is the reading `done` reads,
 //! stamped with the crate's tree, so a crate changed since its last clean
 //! run is stale and not clean. One reading per crate that exists;
 //! `--crate` narrows it to the ones named.
 //!
 //! One `cargo clippy --keep-going --all-targets --all-features` checks
-//! every crate at once, cargo checking crates side by side (#2165).
+//! every crate at once, cargo checking crates side by side.
 //! Warnings are not denied on the command line, so a lint stays a warning
 //! and the crates built on the one that carries it are still checked; each
 //! warning is counted against the crate it is of, by its package
@@ -16,7 +16,7 @@
 //!
 //! A crate whose library or binary sources name `debug_assertions` is
 //! linted a second time, in the release profile on its library and
-//! binaries, as a second reading, `<crate>/release` ([`Profile`], #2392):
+//! binaries, as a second reading, `<crate>/release` ([`Profile`]):
 //! the dev run lints one side of the cfg split alone, and the bench lane
 //! and the shipped binaries build the other. The crates are found by a
 //! scan of their sources ([`splits`]), not a list, so the cost is the
@@ -24,7 +24,7 @@
 //! keeps debug assertions on, the dev profile's side of the split.
 //!
 //! The reading is also the sensor of the manifest's `deny_lints` rules
-//! (`lints.no-panic`, `unsafe.one-op`; #1917): a clean run says nothing of
+//! (`lints.no-panic`, `unsafe.one-op`): a clean run says nothing of
 //! a lint the crate never turned on, so each source a rule's scope covers
 //! must sit under a module that denies, or forbids, every lint the rule
 //! lists, read off the inner attributes of the source and of each module
@@ -35,7 +35,7 @@
 //!
 //! It is the sensor of `tests.no-silent-return` too, the rule whose
 //! `check` names [`returns::CHECK`]: a crate the rule reaches fails naming
-//! each return at a `#[test]` fn's own level ([`returns`], #3079).
+//! each return at a `#[test]` fn's own level ([`returns`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -89,7 +89,7 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
 }
 
 /// The profile a reading lints under, the side of the `debug_assertions`
-/// split it reads (#2392).
+/// split it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Profile {
     /// Every target under every feature in the dev profile, the reading
@@ -165,7 +165,7 @@ fn names_debug_assertions(text: &str) -> bool {
 
 /// `--staged`: the crates with a staged change, pre-commit's touched
 /// crates (harness-design.md §6), less those each of whose readings
-/// stands for what is staged (#1143); no readings when none is left.
+/// stands for what is staged; no readings when none is left.
 pub fn run_staged(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<Reading>> {
     let touched = sources::staged_crates(root, manifest)?;
     if touched.is_empty() {

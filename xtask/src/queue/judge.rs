@@ -1,4 +1,4 @@
-//! The land's judges, built at main's tip (#4372, #4348 ruling 5).
+//! The land's judges, built at main's tip (harness revision 198).
 //!
 //! The merge lanes in `_merge` run the xtask `staging` builds, so the
 //! readings of `budget`, `api-check` and `unsafe-audit` that `done` held a
@@ -20,15 +20,16 @@
 //!
 //! A merge whose harness files main's readers cannot read is refused with
 //! the two steps that land it ([`TWO_STEPS`]): first the xtask that reads
-//! the new grammar, then the row that uses it. #4343 was such a merge, and
-//! landed from `_merge` by hand.
+//! the new grammar, then the row that uses it. The merge that gave
+//! `[budget]` its `workloads` row was such a merge, and landed from
+//! `_merge` by hand.
 //!
 //! A merge that changes the harness itself, a file under `xtask/`
 //! ([`of_the_harness`]), is judged the same way, and what its own xtask
-//! wrote for the judge to read is not what main's reads (#4378): a
+//! wrote for the judge to read is not what main's reads: a
 //! reading it keyed under a rule of `key.rs` it changed is stale here,
 //! and one it wrote under a `v` of `reading.rs` main's does not know is
-//! missing; a field added under the same `v` main's reads past (#4404). The judge keeps its own keying and its own reader, since one
+//! missing; a field added under the same `v` main's reads past. The judge keeps its own keying and its own reader, since one
 //! that held a reading to the key the merge computes would let a merge
 //! whose key is a constant land on readings of another tree, which is
 //! the branch deciding its own land again. So the land refuses, names
@@ -45,7 +46,7 @@
 //! refuses and says both ([`Held`]): such a tree is the batch's to mend,
 //! and a change to what an instrument holds a tree to is meant to land
 //! in two steps, first the xtask that changes the instrument, over a
-//! tree both builds pass, then the tree. Nobody has walked them (#4405).
+//! tree both builds pass, then the tree. Nobody has walked them yet.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -95,8 +96,8 @@ const TAKEN: [&str; 3] = [
 /// What a land refuses with where the merge changes the harness's own
 /// sources and an instrument of [`TAKEN`] fails ([`Held`]): the two
 /// cases the judge cannot tell apart, the one the batch mends first, and
-/// the two steps the other is meant to land in (merging.md), which #4405
-/// has yet to walk.
+/// the two steps the other is meant to land in (merging.md), which
+/// nobody has walked yet.
 pub(crate) const HELD: &str = "where the merge's own xtask fails it over this tree as well, the tree \
      is the batch's to mend, and nothing here changes that. Where the merge's own passes it, the \
      merge changes what the instrument holds a tree to, a lock's rendering or a generated file's \
@@ -104,7 +105,7 @@ pub(crate) const HELD: &str = "where the merge's own xtask fails it over this tr
      land in two steps: first the xtask that changes the instrument, merged and landed over a tree \
      main's xtask passes, which that xtask has to pass as well, so it takes the tree either way; \
      then, once main's xtask is that one, what the tree changes by, in a batch of its own. Nobody \
-     has walked the two steps yet (#4405, .claude/skills/specs/merging.md)";
+     has walked the two steps yet (.claude/skills/specs/merging.md)";
 
 /// The cargo-deny release land runs and nightly.yml installs: one older
 /// cannot read the advisory database's CVSS 4.0 scores, and so judges
@@ -326,7 +327,7 @@ fn of_the_harness(verdict: &done::Verdict) -> bool {
 
 /// The instruments of [`TAKEN`] a verdict holds failing where the merge
 /// changes the harness: what a land that refuses such a merge says
-/// beside `done`'s count ([`HELD`], #4378). Where the merge's own xtask
+/// beside `done`'s count ([`HELD`]). Where the merge's own xtask
 /// passes one over the same tree, the two builds hold the tree to
 /// different things, and the land holds it to main's. Nothing here says
 /// that it does: a merge commit git makes itself runs pre-merge-commit,
@@ -373,7 +374,7 @@ impl std::fmt::Display for Held<'_> {
 /// The readings of a verdict that no run of the merge's own xtask is
 /// sure to clear, and the commands that take them by this build, main's:
 /// what a land that refuses a merge of the harness says beside `done`'s
-/// count ([`RETAKEN`], #4378).
+/// count ([`RETAKEN`]).
 #[derive(Debug, PartialEq)]
 struct Retaken<'a> {
     /// The checkout judged, `_merge`.

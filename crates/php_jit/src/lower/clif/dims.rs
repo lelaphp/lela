@@ -494,7 +494,8 @@ impl Emit<'_> {
     /// `Z/ext/opcache/jit/zend_jit_ir.c:17724-17728`), which an unguarded
     /// fetch, typed with `null` beside what the array holds, never is.
     /// Such a register here would be a fetch that wrote its slot alone,
-    /// #3665's defect, so it is refused as php's `COMPILER_ERROR`.
+    /// a defect this tier once had, so it is refused as php's
+    /// `COMPILER_ERROR`.
     ///
     /// Elements of an array of `null`s, by a long key and by a string, the
     /// second through `??`, each kept in a register that is a constant:
@@ -1225,7 +1226,7 @@ impl Emit<'_> {
     /// indirect `VAR` points at, as php's `zend_jit_fetch_indirect_var`
     /// follows it (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`), and on
     /// through the reference it points at, as `zend_jit_fetch_reference`
-    /// follows it (`:17021-17085`, #3410), each of either layout.
+    /// follows it (`:17021-17085`), each of either layout.
     ///
     /// Elements written, compounded and fetched for writing through the
     /// `VAR` a fetch for writing left indirect: an inner array copied

@@ -1,11 +1,11 @@
-//! The pinned php a bar measures on this machine (#3799): on macOS the
+//! The pinned php a bar measures on this machine: on macOS the
 //! keg `[oracle]` names, asserted as every lane asserts it; on Linux, php
 //! built from the pinned tag by `scripts/oracle-build.py build <platform>
-//! main`, which bench.yml's `baseline` job runs on dax-build (#3774). That
-//! build is a performance baseline and not an oracle (#2253, #3741): it
-//! is held to the md5 the recipe recorded beside it, its `pin.toml`, and
-//! a bar is refused, naming the path and the md5 it expected, wherever
-//! the binary is absent or another.
+//! main`, which bench.yml's `baseline` job runs on dax-build. That build
+//! is a performance baseline and not an oracle: it is held to the md5 the
+//! recipe recorded beside it, its `pin.toml`, and a bar is refused, naming
+//! the path and the md5 it expected, wherever the binary is absent or
+//! another.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -89,7 +89,7 @@ mod tests {
 
     /// On Linux a bar takes the php the recipe landed, held to the md5 its
     /// `pin.toml` records; absent, another or unrecorded, the bar is
-    /// refused naming the path and the md5 it expected (#3799).
+    /// refused naming the path and the md5 it expected.
     #[test]
     fn the_build_from_the_tag_is_held_to_its_recorded_md5_and_refused_otherwise() {
         let tree = Tree::new("bench-pinned").unwrap();

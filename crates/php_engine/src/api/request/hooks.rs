@@ -1,4 +1,4 @@
-//! Property hooks as the standard handlers serve them (#427): the
+//! Property hooks as the standard handlers serve them: the
 //! `IS_HOOKED_PROPERTY_OFFSET` arms of `zend_std_read_property`,
 //! `zend_std_write_property`, `zend_std_has_property`,
 //! `zend_std_unset_property` and `zend_std_get_property_ptr_ptr`

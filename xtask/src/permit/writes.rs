@@ -1,4 +1,4 @@
-//! Whether a shell line can write one file (#1895): what `permit --after`
+//! Whether a shell line can write one file: what `permit --after`
 //! asks before it puts a `harness.self` file back, so that a person's edit
 //! made while some session's call runs is not taken for the call's. The
 //! answer is read from the line as [`argv`] lexes it, and only from what
@@ -21,8 +21,8 @@
 //! it, the line cannot be read to write, and the sensor keeps the change.
 //!
 //! Whether a command can change the checkout it runs in at all is the
-//! other question asked here ([`changes`], #3621), and where each write a
-//! line makes lands is the third ([`of`], #4250): what a rule with
+//! other question asked here ([`changes`]), and where each write a
+//! line makes lands is the third ([`of`]): what a rule with
 //! `writes = true` fires on and the owner lock judges, so that one
 //! session's writes in a checkout another owns are refused and its reads,
 //! and its writes elsewhere, are not.
@@ -93,8 +93,8 @@ const READERS: [(&str, &[&str]); 30] = [
 
 /// Commands that leave the checkout they run in as it was, beside
 /// [`READERS`]: what writes nothing of its working tree, its index, its
-/// HEAD or its operation files, which is all the owner lock covers
-/// (#3755). A change of directory; what reads the repository's history,
+/// HEAD or its operation files, which is all the owner lock covers.
+/// A change of directory; what reads the repository's history,
 /// refs or settings; what writes only what checkouts share, refs, objects,
 /// settings and a new worktree beside them; what reaches the tracker alone;
 /// and the instruments that say where things stand. Each with the words
@@ -117,7 +117,7 @@ const LEAVES: [(&str, &[&str]); 38] = [
     ("jq", &[]),
     ("sort", &["-o", "--output"]),
     // `-exec` stands for `-execdir` too, `-ok` for `-okdir`, `-fprint` for
-    // `-fprint0` and `-fprintf` (#4162).
+    // `-fprint0` and `-fprintf`.
     ("find", &["-delete", "-exec", "-ok", "-fprint", "-fls"]),
     ("gh", &["checkout", "clone"]),
     ("git rev-parse", &[]),
@@ -128,9 +128,9 @@ const LEAVES: [(&str, &[&str]); 38] = [
     ("git describe", &[]),
     ("git for-each-ref", &[]),
     ("git fetch", &[]),
-    // It writes `refs/remotes/<name>/HEAD` alone (#4066).
+    // It writes `refs/remotes/<name>/HEAD` alone.
     ("git remote set-head", &[]),
-    // git refuses every other mode of `branch` beside `--list` (#4162).
+    // git refuses every other mode of `branch` beside `--list`.
     ("git branch --list", &[]),
     ("git config --get", &[]),
     ("git config --get-all", &[]),
@@ -149,9 +149,8 @@ const LEAVES: [(&str, &[&str]); 38] = [
 const READS_REF: [&str; 5] = ["-q", "--quiet", "--short", "--recurse", "--no-recurse"];
 
 /// Where each write of the line `walk` reads lands, read from where it
-/// starts (#4250, Mitchell's
-/// rulings of 2026-11-06 on c9.b and c9.c): the places a rule with `writes
-/// = true` judges.
+/// starts (Mitchell's rulings of 2026-11-06 on c9.b and c9.c): the places
+/// a rule with `writes = true` judges.
 ///
 /// - A command that can change the checkout it runs in ([`changes`]) and
 ///   that [`LANDS`] lists lands on what it names, each word read where it
@@ -218,7 +217,7 @@ fn is_no_file(target: &str) -> bool {
         || target.chars().all(|c| c.is_ascii_digit())
 }
 
-/// One program the owner lock places by what it names (#4250): its phrase,
+/// One program the owner lock places by what it names: its phrase,
 /// the words one of which it needs to write at all (`sed -i`, `find
 /// -delete`), the words whose presence leave it unlisted, since what they
 /// make it run its words do not name (`find -exec`), its options that take
@@ -510,7 +509,7 @@ fn read_options(words: &[String], valued: &[&str]) -> (Vec<String>, Vec<(String,
 
 /// What `perl`'s switches say of its words: whether `-i` edits in place,
 /// and where the files it reads, and so writes, start among
-/// [`Argv::named`] (#4250). A switch cluster ends at `-e` or `-E`, whose
+/// [`Argv::named`]. A switch cluster ends at `-e` or `-E`, whose
 /// program is the rest or the next word, and at a switch that takes the
 /// rest as its value (`-i.bak`, `-Ilib`, `-Mstrict`); the first word past
 /// the switches is the program's file where no `-e` gave one.
@@ -637,7 +636,7 @@ pub(super) fn can_write(line: &Line, place: &impl Place) -> bool {
         })
 }
 
-/// Whether `argv` can change the checkout it runs in (#3621, #3755): its
+/// Whether `argv` can change the checkout it runs in: its
 /// working tree, its index, its HEAD or its operation files. Every command can but a reader that
 /// leaves the index alone ([`READERS`] less git's `add` and `commit`),
 /// `sed` without `-i`, what [`LEAVES`] names, a `git symbolic-ref` that
@@ -655,8 +654,8 @@ pub(super) fn changes(argv: &Argv) -> bool {
     index || !(operands_of(argv) == Operands::None || leaves())
 }
 
-/// Whether `argv` is a `git symbolic-ref` that reads the one ref it names
-/// (#4066), its options all [`READS_REF`]: with a second operand it points
+/// Whether `argv` is a `git symbolic-ref` that reads the one ref it names,
+/// its options all [`READS_REF`]: with a second operand it points
 /// the first, `HEAD` among them, at it, and `-d` deletes the first.
 fn reads_ref(argv: &Argv) -> bool {
     argv.after("git symbolic-ref").is_some_and(|own| {
@@ -673,7 +672,7 @@ fn carries(argv: &Argv, options: &[&str]) -> bool {
 }
 
 /// Commands beyond what [`changes`] reads as leaving a checkout alone that
-/// leave its diff as it was (#3619): the builds and instruments whose
+/// leave its diff as it was: the builds and instruments whose
 /// writes stay under `target/` and in the store; `cargo xtask` reads as
 /// `xtask`.
 const STILL: [&str; 8] = [
@@ -693,11 +692,11 @@ const WRITING: [&str; 8] = [
 ];
 
 /// Whether `line` leaves every checkout's diff as it was, so the Stop does
-/// not hold its session for it (#3618 ruling 1): it redirects only to a
-/// device, a variable's directory or a path outside the directory the
-/// checkouts of `root` stand in, and runs only what does not [`change`]
-/// one, less a program text it interprets, and [`STILL`]. What it cannot
-/// be read to leave alone it writes, the side that holds.
+/// not hold its session for it (ruling 1 of harness revision 184): it
+/// redirects only to a device, a variable's directory or a path outside
+/// the directory the checkouts of `root` stand in, and runs only what does
+/// not [`change`] one, less a program text it interprets, and [`STILL`].
+/// What it cannot be read to leave alone it writes, the side that holds.
 ///
 /// [`change`]: changes
 pub(super) fn reads_only(line: &Line, root: &Path) -> bool {
@@ -789,7 +788,7 @@ mod tests {
         can_write(&Line::read(line), &At(path))
     }
 
-    /// #1895: the routes by which a line writes the file.
+    /// The routes by which a line writes the file.
     #[test]
     fn a_line_writes_what_it_redirects_into_or_hands_a_writer_or_an_interpreter() {
         assert!(can("echo x >> seams.toml", "seams.toml"));
@@ -806,8 +805,8 @@ mod tests {
             "cd docs && echo x >> divergence.toml",
             "docs/divergence.toml"
         ));
-        // #2607: a `pushd`, a git `-C` and a `cd` to a variable the line
-        // assigned move where a word is read, as a `cd` does.
+        // A `pushd`, a git `-C` and a `cd` to a variable the line assigned
+        // move where a word is read, as a `cd` does.
         assert!(can(
             "pushd docs && echo x >> divergence.toml",
             "docs/divergence.toml"
@@ -844,7 +843,7 @@ mod tests {
         assert!(can("./tool.sh", "docs/divergence.toml"));
     }
 
-    /// #3621: what a command can change in the checkout it runs in. git's
+    /// What a command can change in the checkout it runs in. git's
     /// staging and committing write the index and the history though they
     /// write no file; what reads, moves the shell or reaches the tracker
     /// changes nothing.
@@ -869,13 +868,13 @@ mod tests {
             "git worktree remove wt",
             "cargo xtask track work --track x",
             "cargo xtask worktree own",
-            // #4066: what can point the checkout's HEAD elsewhere or delete it.
+            // What can point the checkout's HEAD elsewhere or delete it.
             "git symbolic-ref HEAD refs/heads/x",
             "git symbolic-ref -m why HEAD refs/heads/x",
             "git symbolic-ref -d HEAD",
             "git symbolic-ref --delete HEAD",
             "git symbolic-ref -qd HEAD",
-            // #4160, #4162.
+            // An instrument, a loop, `find` and `git branch` where each writes.
             "cargo xtask ticket close 4160 --opens-nothing",
             "for n in a b; do touch $n; done",
             "find . -name '*.orig' -delete",
@@ -900,7 +899,7 @@ mod tests {
             "cd /tmp",
             "gh issue view 3621",
             "echo x",
-            // #3755: what writes only what checkouts share.
+            // What writes only what checkouts share.
             "git worktree list --porcelain",
             "git -C wt worktree add -q -b t1 ../t1",
             "git config --get branch.t1.ticket",
@@ -909,13 +908,14 @@ mod tests {
             "cargo xtask worktree whose",
             "cargo xtask track",
             "cargo xtask status --section git",
-            // #4066: what writes only `refs/remotes/<name>/HEAD`, or reads a ref.
+            // What writes only `refs/remotes/<name>/HEAD`, or reads a ref.
             "git remote set-head origin main",
             "git remote set-head origin --auto",
             "git remote set-head origin -d",
             "git symbolic-ref refs/remotes/origin/HEAD",
             "git -C wt symbolic-ref -q --short HEAD",
-            // #4160, #4162.
+            // An instrument, a loop, `find` and `git branch` where each only
+            // reads.
             "cargo xtask ticket read 4160",
             "for n in 4160 4162; do gh issue view $n; done",
             "find . -name '*.rs' -type f -newer a",
@@ -965,7 +965,7 @@ mod tests {
         assert!(!can("computed run AGENTS.md", "seams.toml"));
     }
 
-    /// What the Stop holds a session for (#3619): a line that only asks,
+    /// What the Stop holds a session for: a line that only asks,
     /// builds or measures leaves every diff as it was, and one that writes,
     /// commits, interprets or redirects into the checkouts' directory does
     /// not.
@@ -1005,8 +1005,8 @@ mod tests {
             .collect()
     }
 
-    /// #4250 (Round 1, Q19 (a)): a listed program lands on what it names,
-    /// read where it runs, and not where it runs; a word the line does not
+    /// Round 1, Q19 (a): a listed program lands on what it names, read
+    /// where it runs, and not where it runs; a word the line does not
     /// resolve, and a listed program that names nothing, land where it
     /// runs, as every other program does.
     #[test]
@@ -1051,8 +1051,8 @@ mod tests {
         );
     }
 
-    /// #4250 (Round 1, Q20 (a)): a redirection lands on its target read
-    /// where its own command's shell stands, a variable the line assigned
+    /// Round 1, Q20 (a): a redirection lands on its target read where
+    /// its own command's shell stands, a variable the line assigned
     /// and `~/` expanded; one on no command where the line stands; and a
     /// target the line still does not resolve, a descriptor and a device,
     /// nowhere.

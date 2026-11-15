@@ -3,7 +3,7 @@
 //! and `zend_ce_exception` (ADR-0005: engine state, immutable), kept in
 //! the extension's one engine state, [`crate::observer::Started`]: a
 //! raise names its class by the identity, never by a name looked up as it
-//! throws (#3403).
+//! throws.
 
 use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::attr::php_class;

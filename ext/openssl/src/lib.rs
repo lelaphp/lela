@@ -45,7 +45,7 @@ mod xp_ssl;
 
 /// The values php compiles in from `<openssl/opensslv.h>`, read by
 /// `build.rs` off the headers openssl-sys found, as php's `@cvalue` reads
-/// the macro at its build (#1974): after the library is upgraded without
+/// the macro at its build: after the library is upgraded without
 /// a rebuild, these keep the headers' version as php's do.
 mod header {
     include!(concat!(env!("OUT_DIR"), "/header.rs"));

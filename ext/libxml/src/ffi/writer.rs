@@ -1,5 +1,5 @@
 //! libxml2's `xmlTextWriter` (`xmlwriter.h`), which php's xmlwriter
-//! drives call for call (design §4.10, #1323): the emitter, where its bytes
+//! drives call for call (design §4.10): the emitter, where its bytes
 //! go, and each of its calls wrapped in php's error capture with the
 //! request lent, so an emitter whose buffer php's wrappers opened writes
 //! through them whenever libxml flushes.

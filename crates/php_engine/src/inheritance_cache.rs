@@ -16,7 +16,7 @@
 //! The map is engine-wide and lives in the arena of the epoch it
 //! publishes into, so an opcache restart, which hands the next request a
 //! new epoch, leaves it behind and it is dropped with the classes it
-//! names once no request of its epoch runs (#2184, #2215). It is read on
+//! names once no request of its epoch runs. It is read on
 //! every link the program makes and written once per
 //! declaration and dependency set, so it is sharded by declaration, each
 //! shard an `RwLock` that readers share: two requests linking at once

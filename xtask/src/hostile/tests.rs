@@ -275,7 +275,7 @@ fn the_run_kept_at_the_bases_engine_tree_is_the_one_a_run_is_held_to() {
     assert_eq!(kept::at(root, "main", "another").unwrap(), Base::Stale);
 
     // A newer harness's run, carrying a field this one does not know, is
-    // the run all the same, so the base's verdicts still hold (#4404).
+    // the run all the same, so the base's verdicts still hold.
     let mut newer = serde_json::to_value(&run).unwrap();
     newer["later"] = "a field this harness does not know".into();
     fs::write(&file, newer.to_string()).unwrap();
@@ -299,10 +299,10 @@ fn the_run_kept_at_the_bases_engine_tree_is_the_one_a_run_is_held_to() {
     ));
 }
 
-/// The row box 4 of #4265 lands by `steer` decodes now, so the parser
-/// stands before the row (`deny_unknown_fields`): it names the lane, held
-/// at the merge as Round 2's Q31 (a) ruled, and covers each crate that
-/// owes it and no other.
+/// The `[[owed]]` row the lane waits on, which is not landed yet and lands
+/// by `steer`, decodes now, so the parser stands before the row
+/// (`deny_unknown_fields`): it names the lane, held at the merge as Round
+/// 2's Q31 (a) ruled, and covers each crate that owes it and no other.
 #[test]
 fn the_owed_row_the_lane_waits_on_decodes_and_covers_the_crates_that_owe_it() {
     let crates: Vec<String> = super::OWING.iter().map(|c| format!("{c:?}")).collect();

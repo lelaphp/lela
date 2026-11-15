@@ -1,4 +1,4 @@
-//! `xtask track next`, the ticket a track works next (#73): the frontier
+//! `xtask track next`, the ticket a track works next: the frontier
 //! held without the network. The tracker is a [`Tracker`] answering
 //! `issue list` with the open issues each test lays, and the clone is a
 //! scratch repository with one commit on `main` whose branch records are
@@ -121,7 +121,7 @@ fn a_blocker_that_is_closed_does_not_block() {
     assert_eq!(found.map(|n| n.number), Some(5));
 }
 
-/// A ticket with no `track:` label is `main`'s alone (ADR-0009, #1836):
+/// A ticket with no `track:` label is `main`'s alone (ADR-0009):
 /// `track next --track parity-hosts` passes over the lower-numbered
 /// unlabelled ticket to name the one labelled `track:parity-hosts`, and
 /// `main`'s run names the unlabelled one, so the two never compete for it.
@@ -184,7 +184,7 @@ fn a_found_ticket_is_printed_by_number_and_title() {
     );
 
     // The census's own timestamp travels with the weight, so a ranking
-    // made on a stale reading is seen to be one (#618).
+    // made on a stale reading is seen to be one.
     let at: toml::value::Datetime = "2026-09-23T09:25:00Z".parse().unwrap();
     assert_eq!(
         Next::to_json(Some(&found), "t-y", Some(&at))["census_at"],

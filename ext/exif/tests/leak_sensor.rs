@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -17,7 +17,7 @@ fn armed(source: &str) -> String {
 /// `exif_read_data` lays a section's values into an array of their own
 /// only where the section is one, `add_assoc_image_info`'s
 /// `array_init(&tmpi)` under `sub_array`, and otherwise into the
-/// answer, making no array it does not hand on (#2100).
+/// answer, making no array it does not hand on.
 #[test]
 fn a_section_laid_into_the_answer_makes_no_array_of_its_own() {
     let files = Files::new("exif-leak", &[]);

@@ -1,8 +1,8 @@
 //! The fresh-process adapter of design §8's `ScriptExec` seam: how one
 //! `.phpt` is judged. The test's program is written where upstream writes
 //! it, beside the test in the tree the subset stands in, the run's copy
-//! of the pinned one (#1183), and run through the binary under test by its absolute path, as
-//! upstream hands it (#331), with the sections that shape one run
+//! of the pinned one, and run through the binary under test by its absolute path, as
+//! upstream hands it, with the sections that shape one run
 //! (`--INI--`, `--ARGS--`, `--ENV--`, `--STDIN--`, `--CAPTURE_STDIO--`),
 //! in the environment the `environment` module builds as upstream builds
 //! it and with stdin a pipe as upstream's is,
@@ -60,7 +60,7 @@ pub(super) struct Adapter<'a> {
 /// The hosts beside the binary under test a test of another shape runs
 /// through: the CGI host and the debugger host, and for the served subset
 /// the production server a CGI-shaped test is served to over HTTP in the
-/// CGI host's place (the `http` module, #2348); and whose they are.
+/// CGI host's place (the `http` module); and whose they are.
 #[derive(Debug)]
 pub(super) struct Hosts {
     pub(super) cgi: Option<PathBuf>,
@@ -71,7 +71,7 @@ pub(super) struct Hosts {
 
 impl Hosts {
     /// How a CGI-shaped test's header names are held: folded where the
-    /// production server writes them (#2570), as written otherwise.
+    /// production server writes them, as written otherwise.
     fn names(&self) -> cgi::Names {
         match self.http {
             Some(_) => cgi::Names::Folded,
@@ -337,7 +337,7 @@ impl<'a> Adapter<'a> {
     /// file already standing where the program goes borks the test rather
     /// than being overwritten, and a program still running at the
     /// recipe's limit fails it, since a hang is the engine's failure on
-    /// this test as a wrong answer is and not the end of the lane (#691). Upstream's limit is the same 60 s
+    /// this test as a wrong answer is and not the end of the lane. Upstream's limit is the same 60 s
     /// (run-tests.php:1187), and past it upstream kills the process and
     /// holds what it wrote, with its `** ERROR: process timed out **`
     /// line, to the expectation, which fails (run-tests.php:1205-1209).
@@ -565,7 +565,7 @@ enum Stopped {
 /// three files its run writes beside it, so no two tests whose files would
 /// stand at one path run at once; alone where its conflict keys name
 /// `all`, as upstream has it (run-tests.php:1365-1370). Another run is in
-/// a copy of its own and holds nothing against this one (#1183). A test of
+/// a copy of its own and holds nothing against this one. A test of
 /// a redirected set holds its redirecting test as a key too, so the set
 /// runs one test after another, as upstream's worker runs it inside the
 /// redirecting test (run-tests.php:2230-2232). A verdict reached where the
@@ -590,7 +590,7 @@ pub(super) fn apart(item: &Item, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> A
 
 /// What `item` holds among every run on the machine while it runs: its
 /// conflict keys as upstream reads them, `all` among them, and none of the
-/// paths of the run's own copy (the `across` module, #1313).
+/// paths of the run's own copy (the `across` module).
 pub(super) fn held(item: &Item, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Vec<String> {
     let Item::Test(test) = item else {
         return Vec::new();
@@ -607,7 +607,7 @@ pub(super) fn held(item: &Item, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Ve
 /// no more than those tests (run-tests.php:1383). Neighbours in the sort
 /// share a worker this way, not a directory: a directory larger than a
 /// batch runs over several at once, and a boundary may fall between two
-/// tests that make one path relative to the root (#1091).
+/// tests that make one path relative to the root.
 pub(super) fn batch(apart: &[Apart], jobs: NonZeroUsize) -> NonZeroUsize {
     const MOST: usize = 32;
     let tests = apart
@@ -624,7 +624,7 @@ pub(super) fn batch(apart: &[Apart], jobs: NonZeroUsize) -> NonZeroUsize {
 /// `get_loaded_extensions()` joined by `implode`; this lane asks the
 /// binary's own listing, `-m`, which ends at the first blank line, so
 /// the answer is the host's and stands before the engine serves one
-/// native of `ext/standard` (#261). php reads `-m` off the line whatever
+/// native of `ext/standard`. php reads `-m` off the line whatever
 /// follows it, so the recipe's program is written and not served.
 pub(super) fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> {
     let listing = [String::from("-m")];
@@ -646,7 +646,7 @@ pub(super) fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Ve
 /// stands beside `binary`, and a debugger's where no debugger host does.
 /// Where the hosts are the pin's, a skip in upstream's words
 /// (run-tests.php:1894-1896, 1914); where they are the engine's own,
-/// `unbuilt`, a build the run is missing (#3763).
+/// `unbuilt`, a build the run is missing.
 fn unhosted(phpt: &Phpt, hosts: &Hosts, binary: &Path) -> Option<(Judgement, String)> {
     let (host, upstream) = if phpt.is_cgi() && hosts.cgi.is_none() && hosts.http.is_none() {
         (CGI, "CGI")
@@ -674,11 +674,11 @@ fn unhosted(phpt: &Phpt, hosts: &Hosts, binary: &Path) -> Option<(Judgement, Str
 /// whose message ends in `this compiler cannot read yet`, the sentence
 /// `php_compile` raises for a construct it does not read, or in `this
 /// compiler cannot read`, the same refusal from its reader for a shape of
-/// one it does, both in the frame php gives a parse error (#163). php never writes those words, and a
+/// one it does, both in the frame php gives a parse error. php never writes those words, and a
 /// parse error stands before any test code ran, so a body that is the one
 /// line is the compiler's refusal and a body with anything else in it is
-/// the test's own, held to its expectation (harness §4.5 condition 1,
-/// #319). The `PHP ` prefix is `log_errors`' rendering, read for a test
+/// the test's own, held to its expectation (harness §4.5 condition 1).
+/// The `PHP ` prefix is `log_errors`' rendering, read for a test
 /// whose `--INI--` sends the diagnostic to the log the runner captures.
 pub(super) fn unread(actual: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(actual);
@@ -760,7 +760,7 @@ pub(crate) fn ini_of(phpt: &Phpt, test: &Path) -> Result<Vec<String>, String> {
 /// A test's `--INI--` as [`ini_of`] reads it, with `{PWD}` kept for the
 /// directory its program is served from: a host that serves the program
 /// elsewhere than beside the test puts its own there by [`with_pwd`]
-/// (`fpm-compare`, #2705).
+/// (`fpm-compare`).
 pub(crate) fn ini_before_pwd(phpt: &Phpt) -> Result<Vec<String>, String> {
     let Some(body) = phpt.text("INI") else {
         return Ok(Vec::new());
@@ -878,7 +878,7 @@ pub(crate) enum Said {
     /// act on.
     Run,
     /// Anything else, which upstream borks as no answer a `SKIPIF` may
-    /// give: a warning before a `skip` among it (#2857).
+    /// give: a warning before a `skip` among it.
     Bork(String),
 }
 
@@ -926,7 +926,7 @@ pub(crate) fn system_with_timeout(oracle: &Oracle<'_>, call: &Invocation<'_>) ->
 /// What [`system_with_timeout`] hands back of a run, and how the program
 /// died where it did: the one thing of a run upstream's `Termsig=` line
 /// does not keep, which says neither whether a signal or a shell's status
-/// of 129 to 159 ended it nor what it wrote last (#4130).
+/// of 129 to 159 ended it nor what it wrote last.
 struct Handed {
     said: Vec<u8>,
     died: Option<Died>,
@@ -993,7 +993,7 @@ fn words(text: &str) -> Vec<String> {
 /// A file written beside a test for the length of its run and taken away
 /// after, which is where upstream puts a test's program too. A run killed
 /// while it stands leaves it in the run's copy, which the next run's sweep
-/// takes away whole (#1183).
+/// takes away whole.
 pub(super) struct Written {
     path: PathBuf,
 }

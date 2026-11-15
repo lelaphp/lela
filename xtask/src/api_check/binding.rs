@@ -1,4 +1,4 @@
-//! A crate's binding to the keg the oracle loads (#3458, as #3414 ruled):
+//! A crate's binding to the keg the oracle loads (as ruled 2026-10-25):
 //! a package that links a native library php links too, openssl-sys,
 //! libsqlite3-sys or curl-sys, finds it where a cargo configuration's
 //! `[env]` points its build, a Homebrew keg. That keg is the one the
@@ -168,7 +168,7 @@ impl Bindings {
             let (name, package, library) = (&krate.name, native.package, native.library);
             let Some(loaded) = own.keg_loading(library) else {
                 held.problems.push(format!(
-                    "{name} links {package}, and the pinned php loads no {library} of its own, so no keg holds the binding (#3458)"
+                    "{name} links {package}, and the pinned php loads no {library} of its own, so no keg holds the binding"
                 ));
                 continue;
             };
@@ -178,7 +178,7 @@ impl Bindings {
                 .peekable();
             if binds.peek().is_none() {
                 held.problems.push(format!(
-                    "{name} links {package}, and no cargo configuration's [env] names its {}, so its build links the first {library} a search finds where the pinned php loads {loaded}'s (#3458)",
+                    "{name} links {package}, and no cargo configuration's [env] names its {}, so its build links the first {library} a search finds where the pinned php loads {loaded}'s",
                     native.variable
                 ));
             }
@@ -194,7 +194,7 @@ impl Bindings {
                         "{package} bound to {keg}, the keg the pinned php loads {library} from"
                     )),
                     keg => held.problems.push(format!(
-                        "{config}'s {variable} binds {package} to {}, and the pinned php loads {library} from {loaded}: the binding moves with the oracle (#3414, #3458)",
+                        "{config}'s {variable} binds {package} to {}, and the pinned php loads {library} from {loaded}: the binding moves with the oracle",
                         keg.unwrap_or_else(|| format!("{}, no keg of the pinned php's Homebrew", path.display()))
                     )),
                 }
@@ -209,7 +209,7 @@ mod names {
     use super::NATIVES;
 
     /// Each native's variable binds in the forms its build reads and no
-    /// other (#3458): openssl-sys's bare or after the name of the target
+    /// other: openssl-sys's bare or after the name of the target
     /// the harness is built for, libsqlite3-sys's bare alone, and ext/curl's
     /// after the target alone; none after another target's name or any
     /// other prefix.
@@ -282,8 +282,8 @@ mod tests {
         fs::write(tree.path().join(".cargo/config.toml"), config).unwrap();
     }
 
-    /// A crate's binding is the keg the pinned php loads its library from
-    /// (#3458): the fixture binds ext/openssl's openssl-sys to openssl@4,
+    /// A crate's binding is the keg the pinned php loads its library from:
+    /// the fixture binds ext/openssl's openssl-sys to openssl@4,
     /// and of two stand-in php builds laid in its Cellar, 1.0 loads libssl
     /// from openssl@4 and holds it, and 2.0, a pin that moved OpenSSL's
     /// major, loads it from openssl@5 and fails naming both.
@@ -307,7 +307,7 @@ mod tests {
     }
 
     /// Each binding the pinned php cannot hold fails the crate's reading
-    /// saying why (#3458): no `[env]` line naming openssl-sys's variable,
+    /// saying why: no `[env]` line naming openssl-sys's variable,
     /// so its build links the first libssl a search finds; a binding to a
     /// directory in no keg of the php's Homebrew; a php that loads no
     /// libssl of its own; and a php whose loads cannot be read, a name

@@ -1,4 +1,4 @@
-//! The binary over a real socket (#2339): started on a `port` the system
+//! The binary over a real socket: started on a `port` the system
 //! picks, sent HTTP/1.1 requests as bytes, and held to what a client
 //! reads back, the status, the header lines and the body, and to what
 //! the PHP program saw.
@@ -22,7 +22,7 @@ use common::{Request, Server, read_response, root, unchunked};
 /// set no length; the program served under the host's name, with its
 /// query string and `$_SERVER` as the request described them, with
 /// neither `pcntl` nor `posix` loaded, and `PHP_ZTS` and
-/// `ZEND_THREAD_SAFE` false, as #2335 ruled.
+/// `ZEND_THREAD_SAFE` false, as ruled 2026-10-09.
 #[test]
 fn a_get_is_answered_with_php_s_status_headers_and_body() {
     let root = root(
@@ -84,11 +84,11 @@ fn a_path_with_no_php_file_is_not_served_as_a_program() {
 }
 
 /// The path past the program is its `PATH_INFO`, split at the first
-/// segment that ends in `.php` as the recipe's nginx splits it (#2637,
-/// #2693): `SCRIPT_NAME` and `SCRIPT_FILENAME` the program's, `PHP_SELF`
+/// segment that ends in `.php` as the recipe's nginx splits it:
+/// `SCRIPT_NAME` and `SCRIPT_FILENAME` the program's, `PHP_SELF`
 /// the two, an empty `PATH_INFO` where nothing is past it, and
 /// `PATH_TRANSLATED` the root and `PATH_INFO`, none where that is empty
-/// (RFC 3875 §4.1.6, #2650). What is split meets php-fpm's own checks,
+/// (RFC 3875 §4.1.6). What is split meets php-fpm's own checks,
 /// and is answered as the pinned php-fpm answers it under the recipe: a
 /// program named past a file that is not one is refused and runs
 /// nothing, a directory named `*.php` is no program's and its index never
@@ -169,7 +169,7 @@ fn the_path_past_the_program_is_its_path_info() {
 }
 
 /// A body reaches `php://input` through the stream while the program
-/// runs (#2338): the program answers before it reads the input, and the
+/// runs: the program answers before it reads the input, and the
 /// client sends the second half of the body only once it has that answer,
 /// so a server that read the body before running the program would wait
 /// on the client forever, which the read's timeout fails. The request is
@@ -215,7 +215,7 @@ fn a_post_body_reaches_php_input_through_the_stream() {
 }
 
 /// `php://input` asks the host for the body as the program reads it, as
-/// php's `php_stream_input_read` does (#3522): opening it reads nothing,
+/// php's `php_stream_input_read` does: opening it reads nothing,
 /// and reading 10 bytes fills the stream's buffer with one read of 8192,
 /// so a client that sends exactly that much and waits for the program's
 /// answer before sending the rest is answered, where a stream that read
@@ -315,7 +315,7 @@ fn a_form_post_is_post_and_input_whole() {
 
 /// A relative `upload_tmp_dir` puts an upload under the process's working
 /// directory, as php-fpm's rfc1867 resolves it at request startup in its
-/// pool's (#2610), and not under the program's, which the program itself
+/// pool's, and not under the program's, which the program itself
 /// is served in.
 #[test]
 fn a_relative_upload_tmp_dir_is_under_the_process_s_working_directory() {
@@ -351,7 +351,7 @@ fn a_relative_upload_tmp_dir_is_under_the_process_s_working_directory() {
 }
 
 /// `connection_aborted()` turns true on the write after the client has
-/// gone, and not before (#2337, user story 23): the program writes once,
+/// gone, and not before (user story 23): the program writes once,
 /// waits until the client has read that and closed, reads
 /// `connection_aborted()` with no write since, and then writes until a
 /// write finds the client gone, under `ignore_user_abort(true)` so it
@@ -390,8 +390,8 @@ fn connection_aborted_turns_true_on_the_write_after_the_client_closes() {
     drop(server);
 }
 
-/// The header fields reach `$_SERVER` as nginx passes them to php-fpm
-/// (#2347): a name with `_` in it left out, as nginx's
+/// The header fields reach `$_SERVER` as nginx passes them to php-fpm:
+/// a name with `_` in it left out, as nginx's
 /// `underscores_in_headers off` ignores it, so `X_Forwarded_For` cannot
 /// pose as `X-Forwarded-For`; a name sent twice joined with `, `, a
 /// cookie's with `; `; and the fields first, newest first, as php-fpm
@@ -460,7 +460,7 @@ fn get(server: &Server, path: &str) -> Vec<u8> {
 }
 
 /// The status line carries the reason phrase PHP set, as php-fpm hands it
-/// on in `Status:` and the web server in front of it writes it (#2636):
+/// on in `Status:` and the web server in front of it writes it:
 /// phar's `403 Access Denied`, a code hyper has no phrase for with one,
 /// and with none the code and a space, never hyper's `<none>`. A phrase
 /// set on a 200 is no status php-fpm writes, so the line is `200 OK`.
@@ -498,7 +498,7 @@ fn the_status_line_carries_the_reason_php_set() {
 }
 
 /// A 304 the program sets carries no `content-type`, as php-fpm's
-/// `sapi_cgi_send_headers` drops PHP's under a 304 (#2608), and keeps the
+/// `sapi_cgi_send_headers` drops PHP's under a 304, and keeps the
 /// rest of PHP's lines.
 #[test]
 fn a_304_carries_no_content_type() {
@@ -518,7 +518,7 @@ fn a_304_carries_no_content_type() {
 }
 
 /// A response's header names go out lowercase, in the order PHP set them,
-/// with PHP's values (`trace:makala-lowercase-header-names`, #2600): the
+/// with PHP's values (`trace:makala-lowercase-header-names`): the
 /// head read as the bytes on the wire, where `Response::header` folds a
 /// name's case.
 #[test]
@@ -555,8 +555,8 @@ fn a_response_s_header_names_go_out_lowercase_in_php_s_order() {
 
 /// `include_path`'s default is the build's `PHP_INCLUDE_PATH`, the CLI's
 /// too: `.:` and the PEAR directory the build was handed, where it was
-/// handed one (`php_engine`'s `build_defs/layout.rs`, #1371), and never
-/// another installed php's (#2704). The witness on makala's `engine`
+/// handed one (`php_engine`'s `build_defs/layout.rs`), and never
+/// another installed php's. The witness on makala's `engine`
 /// holds it to `DEFAULT_INCLUDE_PATH` beside the pinned php-fpm.
 #[test]
 fn include_path_defaults_to_the_build_s() {

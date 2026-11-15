@@ -1,5 +1,5 @@
 //! libsodium, the library the pinned php links (design §7.2, revision
-//! 72; #1540): the calls `libsodium.c` makes, declared by hand from
+//! 72): the calls `libsodium.c` makes, declared by hand from
 //! `sodium.h`, no bindgen, behind safe functions over slices. Each
 //! function holds the lengths the C signature reads to the slices it
 //! is given and answers [`Failed`] where one is short, so no caller can

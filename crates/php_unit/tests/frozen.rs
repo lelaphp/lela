@@ -1,10 +1,10 @@
-//! `Frozen::new`, `Frozen::composed` and the walk they read through
-//! (#4649): a unit or a class declaration is admitted only where every
+//! `Frozen::new`, `Frozen::composed` and the walk they read through:
+//! a unit or a class declaration is admitted only where every
 //! value it holds is the engine table's, each of its constants that is an
 //! index, an `IS_CONSTANT_AST` or an `IS_PTR`, names an entry of its own
 //! tables, and every op array is numbered by the engine; and a
 //! declaration's closure cell only where it names a frozen unit the
-//! declaration was composed from (#4690).
+//! declaration was composed from.
 
 use php_heap::{Heap, Intern, Key, Strings, Zval};
 use php_unit::decl::{

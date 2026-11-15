@@ -117,7 +117,7 @@ fn a_crate_php_names_otherwise_is_rendered_under_the_module_name() {
     assert_eq!(crate::oracle::crate_name("SPL"), "spl");
 }
 
-/// The `--ri` column (#273): php's own `--ri ctype` standing for the
+/// The `--ri` column: php's own `--ri ctype` standing for the
 /// engine's is a pass, and the one a byte apart, `Enabled` for `enabled`
 /// on line 3, is not; the fixture carries no load number to renumber.
 #[test]
@@ -188,7 +188,7 @@ fn the_two_columns_have_their_own_flag_scope_and_key() {
     );
 }
 
-/// The load number (#317): the rendering with `#10` standing as `#7` is
+/// The load number: the rendering with `#10` standing as `#7` is
 /// the oracle's own under the pin's `extension_number_token` row, since
 /// both streams go through [`oracle::normalise`] before the verdict, and
 /// the same bytes against a pin without the row are not.
@@ -234,7 +234,7 @@ fn the_renumbered_fixture_is_a_pass_under_the_row_and_not_without_it() {
     );
 }
 
-/// The registry's `crosscheck` kind (#318): a difference an accepted row
+/// The registry's `crosscheck` kind: a difference an accepted row
 /// names under `crosscheck:<name>` is `Diverged` with the row's reason and
 /// a pass; the same row with status `open`, or a row for another
 /// extension, accepts nothing.
@@ -347,7 +347,7 @@ fn the_oracles_bytes_are_kept_under_the_scope_and_the_digest() {
     );
 }
 
-/// The negative control for #1479: the linked engine, built with no host,
+/// The negative control: the linked engine, built with no host,
 /// renders `standard` without the natives the CLI registers under it, so a
 /// run holding that rendering to the oracle's `php --re standard` fails,
 /// and the lane serves `standard` through the `php` binary instead; an
@@ -375,7 +375,7 @@ fn standard_is_the_binarys_since_the_linked_engine_lacks_a_hosts_natives() {
     assert!(served_linked(&manifest, &carried, "ctype"));
 }
 
-/// A host's own module is rendered by that host on both sides (#1496):
+/// A host's own module is rendered by that host on both sides:
 /// `cgi-fcgi` by php-cgi and by php-fpm, `cli_server` by the built-in
 /// server, every other module by the CLI's flags; each host's readings
 /// stand under its row with the module beneath, so php-cgi's and
@@ -459,8 +459,8 @@ fn staging(tree: &std::path::Path, path: &str, text: &str) {
     crate::git::git(tree, &["add", "--", path]).unwrap();
 }
 
-/// `crosscheck --staged` over the closure fixture of #1318, both
-/// extensions rendered and passing (#1159): a staged xtask file renders
+/// `crosscheck --staged` over the closure fixture, both extensions
+/// rendered and passing: a staged xtask file renders
 /// nothing; a staged change to `ext/ctype` alone renders ctype alone, and
 /// once its readings are taken over what is staged, nothing; a staged
 /// `php_engine` change, in every extension's closure, renders every one.
@@ -530,7 +530,7 @@ fn a_staged_change_beyond_the_key_renders_again_though_the_reading_stands() {
 /// A staged `docs/divergence.toml` with nothing else staged renders every
 /// carried extension again, though both pass over what is staged: an
 /// accepted `crosscheck:` row turns a rendering's fail into a pass, and
-/// the file is under no crate's key ([`sources::Outside::Every`], #1738).
+/// the file is under no crate's key ([`sources::Outside::Every`]).
 #[cfg(tracked)]
 #[test]
 fn a_staged_file_every_reading_reads_renders_every_extension_again() {
@@ -548,7 +548,7 @@ fn a_staged_file_every_reading_reads_renders_every_extension_again() {
 
 /// A staged `Cargo.lock` that bumps a dependency only `ext/ctype`'s
 /// closure reaches renders ctype again and leaves reflection, whose
-/// closure the lock pins as `HEAD` does, unrendered (#1738).
+/// closure the lock pins as `HEAD` does, unrendered.
 #[cfg(tracked)]
 #[test]
 fn a_staged_lock_renders_again_only_the_extensions_whose_closure_it_moves() {

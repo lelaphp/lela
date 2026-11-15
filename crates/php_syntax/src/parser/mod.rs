@@ -1,8 +1,8 @@
 //! The parser (design §4.9, ADR-0003): a cursor over the significant
 //! tokens, markers that open and close nodes as [`Event`]s for the
 //! builder, the forward-progress fuel, the nesting cap and the open-delimiter stack
-//! from which php's bracket-balance text is spelled. The grammar (#203 to
-//! #205) is written against this surface and nothing else sees it.
+//! from which php's bracket-balance text is spelled. The grammar is
+//! written against this surface and nothing else sees it.
 //!
 //! **What is php's.** The text of a diagnostic is php's: the unexpected
 //! token is named as `zend_yytnamerr` names it
@@ -23,13 +23,13 @@
 //! **What is bounded.** Grammar recursion is capped at [`MAX_DEPTH`]
 //! levels through [`Parser::enter_depth`]; php's bison stack refuses on
 //! the same axis near 10,000 levels of `(`, so a source between the two
-//! parses under php and is refused here, a divergence to propose
-//! when #206 pins the text. Lookahead without consuming spends fuel, and
-//! a loop that looks without consuming trips [`Parser::is_stuck`], which
-//! the statement and expression loops answer by consuming into an `ERROR`
-//! node. The cap keeps the parser's own stack bounded only on a thread
-//! that can absorb `MAX_DEPTH` levels before the cap refuses, which is
-//! [`MIN_THREAD_STACK`].
+//! parses under php and is refused here, a divergence to propose when
+//! the parse-error text is pinned. Lookahead without consuming spends
+//! fuel, and a loop that looks without consuming trips
+//! [`Parser::is_stuck`], which the statement and expression loops answer
+//! by consuming into an `ERROR` node. The cap keeps the parser's own
+//! stack bounded only on a thread that can absorb `MAX_DEPTH` levels
+//! before the cap refuses, which is [`MIN_THREAD_STACK`].
 
 mod input;
 
@@ -254,7 +254,7 @@ impl<'t> Parser<'t> {
 
     /// The file being parsed, for a diagnostic's span.
     // The surface of record §3.5: kept whole; what the grammar does not
-    // call today, #206 reads or the next grammar site does.
+    // call today, the parse entry reads or the next grammar site does.
     #[allow(dead_code)]
     pub fn file(&self) -> FileId {
         self.file

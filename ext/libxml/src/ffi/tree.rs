@@ -1602,12 +1602,12 @@ impl Library {
 /// A document no reference counts yet, its maker's to own: what
 /// `xmlNewDoc`, `htmlNewDocNoDtD`, `xmlCopyDoc`, the parsers and libxslt's
 /// transformation answer. It is neither `Copy` nor `Clone`, so it is given
-/// up once (#3819): to [`DocOf::first`] for an object's first reference,
+/// up once: to [`DocOf::first`] for an object's first reference,
 /// or to [`NewDoc::taken_by_object`] where `php_dom_create_object` took
 /// it. Dropped any other way, an early return's among them, it frees the
-/// tree, so no path leaves one uncounted (#3842), and a tree its maker
+/// tree, so no path leaves one uncounted, and a tree its maker
 /// keeps for itself, as ext/soap keeps a message or a WSDL, is freed where
-/// the value goes (#3849). [`NewDoc::node`] names the tree meanwhile, to
+/// the value goes. [`NewDoc::node`] names the tree meanwhile, to
 /// build on.
 #[derive(Debug)]
 #[must_use]
@@ -1673,9 +1673,9 @@ impl NewDoc {
 /// the node's document, and [`DocOf::first`], from a [`NewDoc`] no
 /// reference counts, so no object stands for a node of one document
 /// while counting another's, which lets the node's document go under the
-/// object with its last real owner (#3541). It is neither `Copy` nor
+/// object with its last real owner. It is neither `Copy` nor
 /// `Clone`, so one check makes one count, and a first reference is taken
-/// once (#3819). `'d` is the borrow of what the reference was read off,
+/// once. `'d` is the borrow of what the reference was read off,
 /// within one native call.
 #[derive(Debug)]
 pub struct DocOf<'d> {
@@ -1724,8 +1724,8 @@ impl<'d> DocOf<'d> {
     /// counting no document yet. Only a [`NewDoc`] gives one, and it is
     /// given up to this, so no document another object counts takes a
     /// second first reference, whose owner would free the tree under the
-    /// other's (#3819). The tree is taken and never freed here: the
-    /// object that counts it frees it with itself (#3842).
+    /// other's. The tree is taken and never freed here: the
+    /// object that counts it frees it with itself.
     ///
     /// ```compile_fail,E0308
     /// # use php_ext_libxml::ffi::{DocOf, Node};
@@ -1752,7 +1752,7 @@ impl<'d> DocOf<'d> {
     /// The `InternalError` fatal where no reference to the node's document
     /// is in reach: an object standing for the node, or holding its
     /// document, while counting another document would outlive the
-    /// node's (#3541).
+    /// node's.
     pub fn uncounted(req: &mut Request) -> Thrown {
         fatal(
             req,
@@ -1927,7 +1927,7 @@ mod tests {
     //! leak sensor does not see libxml2's allocations, so each test lays
     //! its own count in the document's `psvi`, which nothing else of the
     //! engine's sets on a document, and libxml2's deregistration callback
-    //! adds one as `xmlFreeDoc` frees it (#3842).
+    //! adds one as `xmlFreeDoc` frees it.
 
     use super::*;
 
@@ -1987,8 +1987,8 @@ mod tests {
     }
 
     /// A first reference taken where a settle answered no throw, the
-    /// `NewDoc` dropped on the `?` where it answered one, as #3829's parse
-    /// once dropped it.
+    /// `NewDoc` dropped on the `?` where it answered one, as
+    /// ext/simplexml's parse once dropped it.
     fn settled(made: NewDoc, thrown: Result<(), ()>) -> Result<DocOf<'static>, ()> {
         thrown?;
         Ok(DocOf::first(made))
@@ -2025,7 +2025,7 @@ mod tests {
     }
 
     /// The tree `Parser::fragment` built, freed as it drops where its
-    /// caller is done with it, as ext/dom's `innerHTML` setter is (#3849).
+    /// caller is done with it, as ext/dom's `innerHTML` setter is.
     #[test]
     fn a_parsed_fragment_frees_its_tree_as_it_drops() {
         let Some(context) = Node::new_doc(None) else {

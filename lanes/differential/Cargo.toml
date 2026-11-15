@@ -1,7 +1,7 @@
-# php_lanes_differential: the differential lane's pure part, #4358's
-# generator and the minimiser's loop (#3740, #4489). It depends on no
-# workspace crate; `xtask/src/fuzz` is the adapter that runs, compares and
-# records, and calls this.
+# php_lanes_differential: the differential lane's pure part, the generator
+# and the minimiser's loop. It depends on no workspace crate;
+# `xtask/src/fuzz` is the adapter that runs, compares and records, and
+# calls this.
 [package]
 name = "php_lanes_differential"
 version = "0.0.0"

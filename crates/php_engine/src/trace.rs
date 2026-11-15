@@ -3,7 +3,7 @@
 //! expansion builds where the request was asked to record them, and
 //! appended to the file a host names. In every build, switched on where a
 //! host builds its engine or a test serves a request, so the witness lane
-//! serves a fence through the host's own binary (#2168).
+//! serves a fence through the host's own binary.
 
 use std::path::Path;
 

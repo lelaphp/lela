@@ -1,5 +1,5 @@
-//! The sensor of the manifest rule whose `check` names [`CHECK`] (#4348
-//! ruling 2, ADR-0005): the seal on `EngineState`. The engine's four
+//! The sensor of the manifest rule whose `check` names [`CHECK`] (ruling 2
+//! of 2026-11-09, ADR-0005): the seal on `EngineState`. The engine's four
 //! entries that keep a value engine-wide are bounded by the trait, and
 //! `#[derive(EngineState)]` holds every field of a type to it, so a type
 //! holding a pointer into a request's heap does not compile there; what the
@@ -11,10 +11,10 @@
 //! covers, one fails the crate's reading, naming its line.
 //!
 //! The rule's `allow`, where it carries one, names the modules outside the
-//! homes where a hand-written impl stands (#4633: `php_unit`'s `Frozen<T>`,
-//! which only a constructor that walks every value vouches for, and the
-//! one hand impl the ruling lets stand outside the homes). Each entry is
-//! a module, `crate::path`, decoded by the [`Home`] that reads one of
+//! homes where a hand-written impl stands (ruled 2026-11-13: `php_unit`'s
+//! `Frozen<T>`, which only a constructor that walks every value vouches for,
+//! and the one hand impl the ruling lets stand outside the homes). Each entry
+//! is a module, `crate::path`, decoded by the [`Home`] that reads one of
 //! `unsafe.homes`; a crate or a directory is refused when the manifest is
 //! read ([`admitted`]). Where `unsafe.homes` covers a module's directory
 //! below it too, an entry here covers the module's own file alone,
@@ -69,7 +69,7 @@
 //! The derive's own expansion, in [`DERIVE`], is exempt for every macro
 //! token in it: an impl or a call any `quote!` there writes passes.
 //!
-//! What reading the source cannot hold, #4463 carries: a `build.rs`
+//! What reading the source cannot hold, nothing holds yet: a `build.rs`
 //! that writes the impl without naming the trait (the name spelled in
 //! pieces, or read from a file), an impl a proc macro parses from a
 //! string, a local macro that forwards the trait to a macro outside the
@@ -103,13 +103,13 @@ const DERIVE: &str = "crates/php_macros/src/engine_state.rs";
 /// The modules `rule`'s `allow` names, where a hand-written impl stands
 /// outside the homes; none where it carries no `allow`. An entry that is
 /// not a module, `crate::path`, is refused naming the rule and the entry,
-/// since a crate or a directory would admit an impl anywhere in it (#4633).
+/// since a crate or a directory would admit an impl anywhere in it.
 pub(crate) fn admitted(rule: &Rule) -> Result<Vec<Home>> {
     (rule.predicate.allow.iter().flatten())
         .map(|entry| match Home::parse(entry) {
             Ok(module @ Home::Module { .. }) => Ok(module),
             _ => bail!(
-                "rule \"{}\" admits {entry:?}; an entry of the `allow` beside check = \"{CHECK}\" is one module, crate::path, as unsafe.homes names php_jit::enter, never a crate or a directory (#4633)",
+                "rule \"{}\" admits {entry:?}; an entry of the `allow` beside check = \"{CHECK}\" is one module, crate::path, as unsafe.homes names php_jit::enter, never a crate or a directory",
                 rule.id
             ),
         })
@@ -211,7 +211,7 @@ enum Standing {
 /// Whether `path`, relative to the root, is the own file of the module
 /// `home` names in `krate`: `src/<module>.rs` or `src/<module>/mod.rs`,
 /// and no file of the directory below it, which [`Home::covers`] passes
-/// for `unsafe.homes` (#4647).
+/// for `unsafe.homes`.
 fn own_file(home: &Home, krate: &Crate, path: &str) -> bool {
     let Home::Module {
         krate: name,
@@ -701,7 +701,7 @@ mod tests {
             Some("EngineState")
         );
         assert_eq!(of("impl $t<X> for $x {}").as_deref(), Some("$"));
-        // A path a repetition builds is a metavariable too (#4360).
+        // A path a repetition builds is a metavariable too.
         assert_eq!(of("impl $($p)::+ for $x {}").as_deref(), Some("$"));
         assert_eq!(of("impl #(#p)::* for #x {}").as_deref(), Some("$"));
         assert_eq!(of("impl $($t)* { fn f() {} }"), None);
@@ -709,7 +709,7 @@ mod tests {
 
     /// An entry of the rule's `allow` covers its module's own file, as the
     /// `Home` that reads it decodes the path, and nothing of the directory
-    /// below it, which the same `Home` covers for `unsafe.homes` (#4647).
+    /// below it, which the same `Home` covers for `unsafe.homes`.
     #[test]
     fn an_entry_covers_its_modules_own_file_and_nothing_below_it() {
         let frozen = Home::parse("php_unit::frozen").unwrap();

@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -17,7 +17,7 @@ fn served(src: &str, expected: &str) {
 
 /// `imagecreatefrom*()` gives up the bytes it read from the file, the
 /// string `_php_stream_copy_to_mem` answers, whether the decoder takes
-/// them or refuses them (#2096).
+/// them or refuses them.
 #[test]
 fn an_image_from_a_file_keeps_no_bytes() {
     served(

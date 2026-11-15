@@ -1,7 +1,7 @@
 //! The `workloads` section: `docs/perf/workloads.toml` as measurement
 //! protocol §11's table, one row per declared workload in the
 //! declaration's order and then one per page it declares, so the table is
-//! the declaration and not a second list of it (#4344, #4367).
+//! the declaration and not a second list of it.
 
 use std::path::Path;
 

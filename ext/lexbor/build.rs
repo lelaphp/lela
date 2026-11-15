@@ -1,5 +1,5 @@
 //! lexbor, compiled from the sources vendored at `lexbor/` (design §7.2,
-//! §12's row on vendored C, #731): `php-src/ext/lexbor/lexbor` at the tag
+//! §12's row on vendored C): `php-src/ext/lexbor/lexbor` at the tag
 //! `oracle.toml` pins, byte for byte, with its `LICENSE` and `NOTICE`. The
 //! file list is the one `config.m4` compiles, read off the vendored
 //! `config.m4` itself, so the tree holds files php's build leaves out (the
@@ -16,7 +16,7 @@ fn main() {
     // php compiles C and C++ with -DNDEBUG unless it is built with
     // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
     // two builds that set ZEND_DEBUG, as debug assertions are this build's:
-    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    // assert() is live exactly where Rust's debug_assertions is.
     if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
         build.define("NDEBUG", None);
     }

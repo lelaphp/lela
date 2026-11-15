@@ -1,9 +1,9 @@
 # php's own lines, each run by `xtask witness` under the pinned php
 # (oracle.toml's [oracle]) and then under this crate's, in one directory laid
 # afresh, and held equal: what a fence cannot carry, the process boundary, an
-# ini of the line's own (#1634), files laid before the run, a server's
-# requests (#1975, as #2468 ruled). No byte here is the oracle's; the
-# oracle's run is the expectation. The grammar is
+# ini of the line's own, files laid before the run, a server's requests
+# (harness revision 110, as ruled 2026-10-09). No byte here is the oracle's;
+# the oracle's run is the expectation. The grammar is
 # xtask/src/witness/host.rs's.
 
 # `PHP_CLI_MODE_SHOW_INI_CONFIG`: the loaded path and scan path are quoted,
@@ -32,7 +32,7 @@ args = ["-n", "-c", "{dir}/php.ini", "--ini"]
 # stdout it inherits stands between the request's own writes; what a handler
 # holds has not left the `php_output` layer, so the child's write stands
 # before it; and one pipe under both streams carries them in the order
-# written (#741).
+# written.
 [[line]]
 name = "a-popen-child-writes-between-the-echoes"
 args = ["-n", "-r", '''echo "a\n"; $p = popen('cat', 'w'); fwrite($p, "b\n"); pclose($p); echo "c\n";''']
@@ -50,7 +50,7 @@ streams = "merged"
 # (`php_output_direct`), where a pipe holds it; the CLI's `deactivate`,
 # which `php_module_startup` calls as it ends, flushes it, so a startup
 # warning stands before the body the CLI writes with `write(2)`, where
-# php-cgi's stands after it (#2899).
+# php-cgi's stands after it.
 [[line]]
 name = "a-startup-warning-is-written-before-the-body"
 args = ["-n", "-d", "date.timezone=Foo/Bar", "b.php"]
@@ -62,7 +62,7 @@ args = ["-n", "-d", "date.timezone=Foo/Bar", "-r", 'echo "body\n"; flush(); echo
 # copy the fork made, as php's child calls `php_module_shutdown` over the
 # persistent list it inherited: a `dba_popen` `cdb_make` file is finished
 # there, and again by the parent where the parent ends too; the reader is
-# the next process (#1804).
+# the next process.
 [[line]]
 name = "a-forked-child-s-end-finishes-a-persistent-cdb-make-file"
 args = ["-n", "writer.php", "{dir}/child.cdb", "return", "kill"]
@@ -152,7 +152,7 @@ args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protectio
 # `accel_post_startup` for `opcache.file_cache_only` with no
 # `opcache.file_cache`, and a preload that throws. php ends the process
 # there, before `main` reads its line further, so the file named on the line
-# is never opened and `-i`, `-v` and `-m` never answered (#1943).
+# is never opened and `-i`, `-v` and `-m` never answered.
 # `zend_accel_error` writes the time `asctime` prints and the process's id
 # before its message.
 [[line]]
@@ -167,8 +167,8 @@ args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_cache_only=1", "
 args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_cache_only=1", "-m"]
 
 # `zend_accel_error`'s time and `opcache_get_status()`'s `last_used` are
-# `asctime(localtime())`, the process's local time as `TZ` names it, not UTC
-# (#2397). The zone is Kathmandu's, 5:45 east of UTC, so the hour and the
+# `asctime(localtime())`, the process's local time as `TZ` names it, not UTC.
+# The zone is Kathmandu's, 5:45 east of UTC, so the hour and the
 # minute both move; the masks keep the day and the hour and hide the minute
 # and second the two runs are made in, and the pid.
 [[line]]
@@ -221,8 +221,8 @@ args = ["-n", "-F", "nope.php"]
 # warning, `#name=value` sets an entry, the code of a prompt's backticks is
 # served for its output, and the status is what the request left; php starts
 # its modules once and asks that one startup whether it has a shell, so the
-# line `ini_error` writes for a `-d` that does not read is written once
-# (#1947).
+# line `ini_error` writes for a `-d` that does not read is written once.
+#
 [[line]]
 name = "shell-a-fatal-and-an-uncaught-throwable"
 args = ["-n", "-a"]
@@ -249,11 +249,11 @@ stdin = "echo 1;\n"
 
 # A request whose start fails under the built-in server: session's `rinit`
 # raises under `session.auto_start` over a session file whose `DateTime` does
-# not unserialize (#1775). `php_cli_server_dispatch` is the one host that
+# not unserialize. `php_cli_server_dispatch` is the one host that
 # shuts the request down after the failure and closes the connection
 # (`Z/sapi/cli/php_cli_server.c:2307-2310`): the client is sent the head and
 # what the failure displayed, the program never runs, no response line is
-# logged for it, and the server goes on to serve the next request (#1879).
+# logged for it, and the server goes on to serve the next request.
 # The log's times, the clients' ports and the response's date are masked.
 [[line]]
 name = "the-built-in-server-shuts-a-failed-request-down"
@@ -285,7 +285,7 @@ http = "GET /index.php HTTP/1.0\r\nHost: x\r\n\r\n"
 # A child `pcntl_fork` makes from a request serves on in the loop it was
 # forked from, as php's child does, and ends its engine once that loop stops:
 # a `dba_popen` `cdb_make` file the child opened is finished at its engine
-# end before the parent's `pcntl_waitpid` returns (#1952).
+# end before the parent's `pcntl_waitpid` returns.
 [[line]]
 name = "a-child-forked-from-a-request-ends-its-engine"
 args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
@@ -317,7 +317,7 @@ http = "GET /fast.php HTTP/1.0\r\nHost: x\r\n\r\n"
 # module's at its `MINIT`, then opcache's, a Zend extension's, after them
 # (`Z/main/main.c:2353-2356`). A failing `ffi.preload` is ffi's engine start
 # refusing, so startup ends there and opcache's `zend_post_startup_cb` link
-# never preloads (#1797, #1802).
+# never preloads.
 [[line]]
 name = "a-failing-ffi-preload-refuses-startup-before-opcache-preloads"
 args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.preload={dir}/preload.php", "-d", "ffi.enable=preload", "-d", "ffi.preload={dir}/missing.h", "{dir}/served.php"]
@@ -327,7 +327,7 @@ files = { "preload.php" = "<?php echo \"preloaded\\n\";", "served.php" = "<?php 
 # (ADR-0010): `ffi.preload` naming a header that is not there. php ends the
 # process from `php_error_cb`, `exit(-2)` for the `E_CORE_ERROR` of a failed
 # `MINIT` (`Z/main/main.c:1505-1507`), before the host does anything of its
-# own (#1802). What php raised before the failed start shows ahead of it,
+# own. What php raised before the failed start shows ahead of it,
 # date's warning over the host's `date.timezone`; what it raises only after
 # every extension started, `disable_functions` naming a construct, does not
 # show at all.
@@ -364,7 +364,7 @@ args = ["-n", "-r", "var_dump(ftruncate(STDOUT, 0), fstat(STDOUT)['size']);"]
 streams = "files"
 
 # What a process a request execs holds of the files php opens for the
-# program (#2492), named by inode in the order of their fds: php opens
+# program, named by inode in the order of their fds: php opens
 # `auto_prepend_file` and `auto_append_file` with no `O_CLOEXEC` as each
 # compiles and `php_execute_script_ex` destroys their `zend_file_handle`s
 # only once the append file has run (`Z/main/main.c:2650-2656`), so the
@@ -419,7 +419,7 @@ function listed($at) {
 # (`php_cli_server_dispatch_router`, `Z/sapi/cli/php_cli_server.c:2258-2286`);
 # a program `php_execute_script` serves is entered in its own directory and
 # left once it, `auto_append_file` among it, has been served, so shutdown
-# functions and destructors run where the request started (#2748).
+# functions and destructors run where the request started.
 [[line]]
 name = "the-built-in-server-enters-the-program-directory-and-not-the-routers"
 args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}/www", "router.php"]
@@ -456,7 +456,7 @@ http = "GET /taken HTTP/1.0\r\nHost: x\r\n\r\n"
 # `zend_file_handle`s (`php_cli_server_dispatch_router`,
 # `php_cli_server_dispatch_script`), each opened as it compiles, after the
 # prepend file has run, and destroyed once it and the append file have run,
-# so the router is held while it runs (#2492). The first request compiles
+# so the router is held while it runs. The first request compiles
 # every file; opcache answers each by its name on the second, with
 # `opcache.file_update_protection=0` caching a file written this second,
 # and opens none; a prepend file the router's run compiled is answered the
@@ -513,7 +513,7 @@ http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
 # `php_execute_script_ex` expands into the table (`Z/main/main.c:2610-2619`);
 # the built-in server hands a bare name (`zend_stream_init_filename`), which
 # `zend_execute_script` puts in the table once the program has compiled
-# (`Z/Zend/zend.c:1971-1974`), after the prepend file (#2558). The prepend
+# (`Z/Zend/zend.c:1971-1974`), after the prepend file. The prepend
 # file and the program each print the table's names.
 [[line]]
 name = "the-cli-notes-its-program-before-the-prepend-file"
@@ -524,7 +524,7 @@ files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_
 # (`Z/sapi/cli/php_cli.c:577`), not through the stream layer, so no
 # `open_basedir` check stands on it: a program outside the base directories
 # runs, by a whole path or a relative one, and `-l` reads it; an include
-# from it of a file outside them is refused as any include is (#4351).
+# from it of a file outside them is refused as any include is.
 [[line]]
 name = "the-cli-runs-a-program-outside-open-basedir"
 args = ["-n", "-d", "open_basedir={dir}/base", "-d", "include_path=.", "{dir}/out.php"]
@@ -551,7 +551,7 @@ http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
 # check: a program outside the base directories warns, named for no
 # function, and `ZMSG_FAILED_REQUIRE_FOPEN`'s `zend_throw_error`, with no
 # frame standing, is a fatal error (`Z/main/main.c:1784-1787`,
-# `Z/Zend/zend.c:1842-1850`); the router is opened the same way (#4351). The
+# `Z/Zend/zend.c:1842-1850`); the router is opened the same way. The
 # warning names the path the check resolved, and the fatal the file as the
 # server was handed it, relative or through a link. A program within them
 # runs.
@@ -611,7 +611,7 @@ http = "GET /base/in.php HTTP/1.0\r\nHost: x\r\n\r\n"
 # so the archive is held open, with no `O_CLOEXEC`, until
 # `php_execute_script_ex` destroys the handle once the append file has run,
 # before the shutdown functions; a gzipped archive's stub reads a
-# decompressed copy, and nothing of the archive is held (#2561). The first
+# decompressed copy, and nothing of the archive is held. The first
 # run lays the two archives down.
 [[line]]
 name = "an-archive-phar-auto-file-is-held-while-the-program-runs"
@@ -642,7 +642,7 @@ args = ["-n", "-d", "auto_prepend_file={dir}/gz.phar.tar.gz", "-d", "auto_append
 # 400 of the page php built and never sent; a path past the file it found is
 # that file, sent, and one past a program is its path's info, which
 # `PATH_INFO` keeps whole and `PHP_SELF` reads up to the NUL; and nothing found
-# is 404 (#2695). The text after a 400's ` - ` in the log is masked: it is
+# is 404. The text after a 400's ` - ` in the log is masked: it is
 # `get_last_error()`, `strerror(errno)` (`Z/sapi/cli/php_cli_server.c:286`),
 # and nothing on the request's path fails, so errno is what the server's last
 # failing call left on its thread, no call of the request's. That is
@@ -652,7 +652,7 @@ args = ["-n", "-d", "auto_prepend_file={dir}/gz.phar.tar.gz", "-d", "auto_append
 # and SIGSTOP on macOS and for glibc's own two signals on Linux; or, once a
 # client has closed its end before the server, that connection's
 # `shutdown(2)` (`:2419`), ENOTCONN, so the text follows how an earlier
-# client closed (measured under lldb on the pinned php -S, #2758). The
+# client closed (measured under lldb on the pinned php -S). The
 # engine's server keeps no such stale errno, and a NUL path's 400 says
 # nothing of its own cause either way.
 [[line]]
@@ -681,9 +681,9 @@ http = "HEAD /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 http = "GET /nope%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 
 # The same requests under a router that declines each: the router runs
-# first, and then the file is served or refused as without one (#2695). The
+# first, and then the file is served or refused as without one. The
 # text after a 400's ` - ` is masked for the reason the line above gives: a
-# stale errno no call of the request's set (#2758).
+# stale errno no call of the request's set.
 [[line]]
 name = "the-built-in-server-refuses-a-path-holding-a-nul-after-the-router"
 args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}", "{dir}/router.php"]
@@ -697,7 +697,7 @@ http = "GET /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 [[line.serve.request]]
 http = "GET /a.txt%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 
-# Under opcache with its tier set up, `opcache.jit=off` (#3075), every op
+# Under opcache with its tier set up, `opcache.jit=off`, every op
 # array's runtime cache keeps a slot for `zend_jit_startup`'s op array
 # extension handle, so the program's own cache, which
 # `i_init_code_execute_data` `emalloc`s and its frame frees before the
@@ -717,7 +717,7 @@ args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protectio
 args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "plain.php"]
 
 # Under opcache a held program's runtime cache is what
-# `zend_optimizer_compact_literals` counts (#3211): four calls of one
+# `zend_optimizer_compact_literals` counts: four calls of one
 # function share one slot, and four `new`s of one class one, so the
 # program of four of each, of one length with the program of one of each,
 # lays the same cache; it reads more for its frame's temporaries alone.
@@ -731,7 +731,7 @@ args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protectio
 
 # A program's first line under `opcache.enable_cli` reads php's whether
 # opcache persists the program or compiles it without persisting it, as
-# it does a file written within `opcache.file_update_protection` (#3824):
+# it does a file written within `opcache.file_update_protection`:
 # what the CLI lays before the compile, `cli_seek_file_begin`'s `FILE *`
 # and its name, and `php_execute_script_ex`'s realpath noted in
 # `EG(included_files)`, stands below both. The program is named relative
@@ -753,14 +753,14 @@ args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protectio
 # `php_request_shutdown` sets `EG_FLAGS_IN_SHUTDOWN` before it calls the
 # shutdown functions, under `-r` as for a file, so pcre's `add_offset_pair`
 # makes an unmatched group a pair of its own there where none is cached
-# yet, and hands out the one it cached while the program ran (#3347).
+# yet, and hands out the one it cached while the program ran.
 [[line]]
 name = "a-shutdown-function-under-r-takes-pcre-s-in-shutdown-pair"
 args = ["-n", "-r", '''register_shutdown_function(function () { preg_match("/(a)?(b)?c/", "c", $n, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL); gc_collect_cycles(); unset($n); $f = gc_status()["roots"]; preg_match("/(x)?(y)/", "y", $m, PREG_OFFSET_CAPTURE); gc_collect_cycles(); unset($m); var_dump($f, gc_status()["roots"]); }); preg_match("/(x)?(y)/", "y", $o, PREG_OFFSET_CAPTURE);''']
 
 # What `-r`'s code returns is `zend_eval_stringl`'s local `retval`, given
 # up by `zval_ptr_dtor` once the code has run and its frame is gone, so a
-# returned object's destructor runs from no frame of the program (#4156).
+# returned object's destructor runs from no frame of the program.
 [[line]]
 name = "what-r-returns-is-given-up-after-its-frame"
 args = ["-n", "-r", '''class D { function __destruct() { echo "D: "; debug_print_backtrace(); } } echo "x\n"; return new D;''']
@@ -769,7 +769,8 @@ args = ["-n", "-r", '''class D { function __destruct() { echo "D: "; debug_print
 # (`Z/Zend/zend_alloc.c:519`), before `php_request_shutdown` deactivates
 # the output and sends the head, so the callback `header_register_callback`
 # named never runs. The CLI's head reaches no one, so only the callback's
-# own write tells: the hard limit's line alone, and 137 (#3435).
+# own write tells: the hard limit's line alone, and 137
+# (trace:hard-limit-ends-request).
 [[line]]
 name = "hard-limit-runs-no-header-callback"
 args = ["-n", "-d", "memory_limit=128M", "-r", '''ob_start(); header_register_callback(function () { fwrite(STDERR, "cb\n"); echo "cb\n"; }); echo "body\n"; hash_pbkdf2("md5", "p", "s", 1, PHP_INT_MAX);''']

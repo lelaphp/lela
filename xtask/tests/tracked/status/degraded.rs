@@ -3,7 +3,7 @@
 
 use super::*;
 
-/// A torn line in the log (#56) degrades the `permits` section rather than
+/// A torn line in the log degrades the `permits` section rather than
 /// the session: the section renders the readings around it and names the
 /// line, and `--session` prints the map and the local facts with the note
 /// under this session's block, where before both failed on the line.
@@ -42,7 +42,7 @@ fn a_torn_log_line_is_named_and_the_rest_of_the_section_and_the_session_render()
 }
 
 /// A reading file a crash left empty, or cut short, costs its own row and
-/// no more (#1235): the section renders every other reading, the row of
+/// no more: the section renders every other reading, the row of
 /// the file that is no reading says it has none, the file is named by its
 /// path on stderr, and a section that reads no reading file renders as
 /// it did. Before, the one file failed every section, `divergence`

@@ -111,7 +111,7 @@ fn oracle_json(root: &Path, tree: Option<&Path>, promise: Option<&str>) -> serde
     serde_json::from_str(&json).unwrap()
 }
 
-/// The `oracle` section (#36): the pin as this machine has it, the
+/// The `oracle` section: the pin as this machine has it, the
 /// variables by name and whether set, the pin's path, and where the tree
 /// was found. Here the variable names a tree: found there, ahead of the
 /// pin's path, which is a directory too.
@@ -221,10 +221,10 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
     );
 }
 
-/// The pinned php a runner pours (#2253): its version, keg path and md5
-/// as the pin states them, and each variant's build for this machine a
-/// runner lays (#2298), so the oracle job reads the pin off this section
-/// and never parses `oracle.toml` a second time.
+/// The pinned php a runner pours: its version, keg path and md5 as the pin
+/// states them, and each variant's build for this machine a runner lays,
+/// so the oracle job reads the pin off this section and never parses
+/// `oracle.toml` a second time.
 #[test]
 fn oracle_states_the_pinned_php_a_runner_pours() {
     let root = scratch("oracle-binary");
@@ -235,7 +235,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     assert_eq!(json["binary"]["version"], oracle.version.as_str());
     assert_eq!(json["binary"]["path"], path.as_str());
     assert_eq!(json["binary"]["md5"], oracle.md5.as_str());
-    // The formula the keg is poured from (#4383), which is the keg's name
+    // The formula the keg is poured from, which is the keg's name
     // in the path the section states beside it, and the bottle of it, the
     // directory the keg stands in.
     let formula = json["binary"]["formula"].as_str().unwrap();
@@ -259,7 +259,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
         assert_eq!(laid["closure"], serde_json::json!(closure), "{name}");
     }
     // The record's digest, SHA-256 over each `name=version\n` in name
-    // order (#2935), computed here from the kegs the section names.
+    // order, computed here from the kegs the section names.
     if let Some(kegs) = json["closure"].as_object() {
         use sha2::Digest as _;
         let mut sha = sha2::Sha256::new();
@@ -315,7 +315,7 @@ fn scratch_poured(name: &str, fixture: &str) -> Tree {
 /// a pour goes: a pin, an unpin and a tap listing no tap succeed, the
 /// forced uninstall of `php@8.5` drops the pin of `php`, as brew's
 /// `Uninstall.rm_pin` does while `php@8.5` is homebrew-core's alias of
-/// `php` (#4423), `tap-new` and `--repository` give the tap `@prefix@/tap`,
+/// `php`, `tap-new` and `--repository` give the tap `@prefix@/tap`,
 /// and `install` lays the keg the tap's formula file bottles,
 /// `Cellar/<formula>/<bottle>/bin/php`, as brew lands a bottle where its
 /// formula and its version say, with the receipt brew writes beside it
@@ -443,14 +443,14 @@ fn scratch_kegged(name: &str, fixture: &str) -> Tree {
 
 /// The receipt brew writes in a keg it pours, `INSTALL_RECEIPT.json`,
 /// naming the tap the formula was poured from, which a pin names the
-/// formula by (#4423).
+/// formula by.
 fn receipt(keg: &Path, tap: &str) {
     std::fs::create_dir_all(keg).unwrap();
     let json = serde_json::json!({ "source": { "tap": tap } }).to_string();
     std::fs::write(keg.join("INSTALL_RECEIPT.json"), json).unwrap();
 }
 
-/// What a runner pours php from (#4383): the section names the formula
+/// What a runner pours php from: the section names the formula
 /// beside the keg path, `php` for a pin that names none and `php@8.5` for
 /// one that names it, and the bottle the path names, `8.5.13_1` where the
 /// keg is the formula's first revision and the pin's version says 8.5.13;
@@ -519,13 +519,13 @@ fn oracle_names_the_formula_a_runner_pours_and_the_dry_run_says_it() {
     );
 }
 
-/// php's own keg is `brew pin`ned as each keg of `[closure]` is (#4383),
+/// php's own keg is `brew pin`ned as each keg of `[closure]` is,
 /// on a machine where it is already poured too: the fixture pin's keg
 /// stands under the stand-in prefix at the pin's md5, and the one keg of
 /// its `[closure]` at its record, so `scripts/ci/pinned-php.sh` pours
 /// neither, says so, and asks `brew` for two pins and nothing else, the
 /// closure's keg and then the formula the pin names. Each is named as
-/// brew names the formula its receipt says it was poured from (#4423):
+/// brew names the formula its receipt says it was poured from:
 /// `zstd`, homebrew-core's, bare, and php's by the tap, `dax/pin/php@8.5`,
 /// where it was poured from the tap, so homebrew-core's alias `php@8.5`
 /// of `php` cannot stand in for it; and bare where its receipt names
@@ -566,7 +566,7 @@ fn the_keg_of_the_pinned_php_is_brew_pinned_where_it_is_already_poured() {
     );
 }
 
-/// The pour itself (#4383), which a dry run stops short of: on a machine
+/// The pour itself, which a dry run stops short of: on a machine
 /// where php is not poured, `scripts/ci/pinned-php.sh` asks GitHub for
 /// the commits of the formula the pin names and no other, takes the one
 /// that bottles the keg the pin's path names, an `update` for the revised
@@ -574,8 +574,8 @@ fn the_keg_of_the_pinned_php_is_brew_pinned_where_it_is_already_poured() {
 /// of `line.toml`, writes that formula into the local tap with
 /// homebrew/core's packages as its `root_url`, and unpins, uninstalls,
 /// installs and pins it, in that order. Each call names the keg so that
-/// homebrew-core's alias `php@8.5` of `php` cannot stand in for it
-/// (#4423): the unpin, the install and the pin name the tap's formula,
+/// homebrew-core's alias `php@8.5` of `php` cannot stand in for it:
+/// the unpin, the install and the pin name the tap's formula,
 /// `dax/pin/php@8.5`, and the uninstall, which takes every keg of the
 /// name whichever tap poured it, is asked by the bare name only where a
 /// keg of that name stands, `8.5.13` before the revised bottle, since
@@ -657,7 +657,7 @@ fn the_formula_and_the_bottle_the_pin_names_are_what_a_runner_pours() {
     }
 }
 
-/// The pin's tag and commit as `[source]` states them (#66), beside its
+/// The pin's tag and commit as `[source]` states them, beside its
 /// path: the section names the pin whole, which the corpus section clones
 /// at, so no reader parses `oracle.toml` for either.
 #[test]
@@ -678,11 +678,11 @@ fn oracle_states_the_pins_tag_and_commit() {
     );
 }
 
-/// The corpus CI checks out (#1713): the pin's tag, commit and count of
+/// The corpus CI checks out: the pin's tag, commit and count of
 /// `.phpt` files, the sparse patterns of the corpus's roots, and a cache
 /// key of the commit and a digest of the patterns, the same on every call,
-/// where the targets under the pin are kept (#1733), and the hosts the lane
-/// runs a test through, which CI builds (#1908); the Markdown carries the
+/// where the targets under the pin are kept, and the hosts the lane
+/// runs a test through, which CI builds; the Markdown carries the
 /// same facts, and nothing is written.
 #[test]
 fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
@@ -724,7 +724,7 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
         serde_json::json!(kept),
         "the targets are kept under the pin's tag and each oracle's digest"
     );
-    // The hosts the lane hands a test to (#1908), the binary under test
+    // The hosts the lane hands a test to, the binary under test
     // first: each `sapi/*` crate of the workspace, by the package and the
     // binary its own Cargo.toml names, which CI builds and spells nowhere.
     let hosts: Vec<(String, String, String)> = corpus["hosts"]
@@ -785,7 +785,7 @@ fn a_section_that_has_no_renderer_yet_is_refused() {
 }
 
 /// A Markdown row is what a session scans at start, eight tables under
-/// the engine's cap on one block (#820): its message is one line cut at
+/// the engine's cap on one block: its message is one line cut at
 /// 120 characters and a number at zero is left out. What the row leaves
 /// out is the same section's JSON, the reading whole.
 #[test]
@@ -824,7 +824,7 @@ fn a_row_clips_its_message_and_leaves_zeros_out_and_the_json_has_them() {
     assert_eq!(reading["numbers"]["percent"], 0.0);
 }
 
-/// The week's ticket closes (#1157), from the stores alone: a close is
+/// The week's ticket closes, from the stores alone: a close is
 /// written into the main worktree's store by the merge that lands it, and
 /// a withdrawal into the checkout's where its session ran, so a worktree
 /// counts both. A ready record, a read, a refused close and a close older
@@ -877,7 +877,7 @@ fn tickets_counts_the_weeks_closes_in_the_main_worktrees_store_and_the_checkouts
 
     let md = status(&checkout, &["--section", "tickets"]).ok();
     // The tracker's line follows, unknown where the scratch has no
-    // GitHub to ask (#3619).
+    // GitHub to ask.
     assert_eq!(
         md,
         "the last 7 days: 3 closes, 1 of them withdrawals, opened 3 tickets, 1.00 per close\n\
@@ -910,10 +910,10 @@ fn git_prints_the_log_and_the_status() {
     assert!(md.contains("?? untracked.txt"), "{md}");
 }
 
-/// #822: a working tree with more changed paths than the section prints
-/// keeps twenty of them, `STATUS_LINES` in `status.rs`, below the
-/// branch's line and names how many it left out; the JSON keeps the same
-/// lines with the number beside them.
+/// A working tree with more changed paths than the section prints keeps
+/// twenty of them, `STATUS_LINES` in `status.rs`, below the branch's line
+/// and names how many it left out; the JSON keeps the same lines with the
+/// number beside them.
 #[test]
 fn git_cuts_the_status_at_twenty_paths_and_names_the_rest() {
     let root = scratch("git-cut");
@@ -935,12 +935,12 @@ fn git_cuts_the_status_at_twenty_paths_and_names_the_rest() {
     assert_eq!(value["status_omitted"], 23, "{json}");
 }
 
-/// #787: a track's reading of a subset is the one at its tip or its
-/// nearest ancestor on the track. A branch cut behind the tip, whose
-/// worktree's log `worktree retire` appends into the track's store after
-/// the track's own readings, stands for nothing, and neither does a
-/// reading of an older commit written last; the JSON the dashboard's data
-/// step reads says the same, with the commit each reading was taken at.
+/// A track's reading of a subset is the one at its tip or its nearest
+/// ancestor on the track. A branch cut behind the tip, whose worktree's
+/// log `worktree retire` appends into the track's store after the track's
+/// own readings, stands for nothing, and neither does a reading of an
+/// older commit written last; the JSON the dashboard's data step reads
+/// says the same, with the commit each reading was taken at.
 #[test]
 fn phpt_takes_the_reading_at_the_track_tip_and_never_a_retired_branchs() {
     let root = scratch("chain");
@@ -994,8 +994,8 @@ fn phpt_takes_the_reading_at_the_track_tip_and_never_a_retired_branchs() {
 }
 
 /// `--every --log` renders every phpt reading of a log it is handed, one
-/// versioned line each, in the log's order (harness-design.md §4.6,
-/// #1745): a whole line with a field this build does not know, a lean row
+/// versioned line each, in the log's order (harness-design.md §4.6):
+/// a whole line with a field this build does not know, a lean row
 /// of the published history, a torn line counted on stderr and skipped, a
 /// scope outside the grammar, and the other instruments' lines left out.
 #[test]
@@ -1027,8 +1027,8 @@ fn every_phpt_reading_of_a_log_handed_in_is_one_versioned_line() {
 
 /// `--every --log` renders every budget, api-check (`locks` by its other
 /// name) and witness reading of
-/// a log it is handed as one versioned line each, in the log's order
-/// (#1763), as it does a phpt reading: a whole line, a lean row of the
+/// a log it is handed as one versioned line each, in the log's order,
+/// as it does a phpt reading: a whole line, a lean row of the
 /// published history, a torn line counted on stderr and skipped, and the
 /// other instruments' lines left out. Each fixture's `expected.jsonl` is
 /// what the dashboard's tests read as the rows xtask renders.
@@ -1179,7 +1179,7 @@ fn parity_store(name: &str, pin: &Path) -> Tree {
             phpt("ext/enchant", &held(20, 20)),
             phpt("sapi/cli", &held(99, 99)),
             // A second host's run of tests other suites count: the HTTP-served
-            // lane under its host's name, whose row owns no subset (#2334).
+            // lane under its host's name, whose row owns no subset.
             phpt("sapi/makala", &held(267, 260)),
             phpt("ext/lexbor", &[("tests", 0), ("run", 0)]),
             phpt(
@@ -1251,7 +1251,7 @@ Read CONTEXT.md first.
     );
     assert!(!text.contains("unrendered"), "{text}");
 
-    // As JSON, the two blocks the function hook hands the engine (#64):
+    // As JSON, the two blocks the function hook hands the engine:
     // the map as the file is, the facts with the note that they are
     // unrendered; the Markdown is the two joined.
     std::fs::write(&local, &template).unwrap();
@@ -1289,9 +1289,9 @@ fn rendered(template: &str) -> String {
 /// A clone keeps its local file across sessions, so a template that moved,
 /// a section dropped or added, reached only a clone that had none: the
 /// main checkout carried `mutants` and lacked `port-map` long after both
-/// changed (#3620 D1). `--session` lays the file down again whenever what
-/// was laid differs from the template, and leaves a rendering of the
-/// template as it stands.
+/// changed (harness revision 180). `--session` lays the file down again
+/// whenever what was laid differs from the template, and leaves a rendering
+/// of the template as it stands.
 #[test]
 fn session_lays_the_local_file_down_again_when_the_template_moved() {
     let root = scratch("session-relay");
@@ -1328,10 +1328,10 @@ fn session_lays_the_local_file_down_again_when_the_template_moved() {
 /// permit judges by three rules of its own beside the manifest's, the
 /// region body, a build apart from the tree and a call no candidate
 /// judged, and the section carries a row for each: through the outage of
-/// #16 nothing under `permits` said the judge was down, and a rule with no
-/// row is a rule nothing renders.
+/// harness revision 11 nothing under `permits` said the judge was down, and
+/// a rule with no row is a rule nothing renders.
 ///
-/// The two refusals are counted in two columns (#118). A build that hands
+/// The two refusals are counted in two columns. A build that hands
 /// the call to the candidate that rebuilds is a skip under `handed on`,
 /// since the call was judged; a call that reached the end of the walk
 /// unjudged is a failure under `denials`, since it was not. Counting both
@@ -1352,7 +1352,7 @@ fn permits_separates_the_calls_denied_from_the_calls_handed_to_the_next_candidat
     store.record(std::slice::from_ref(&handed_on)).unwrap();
 
     // A diff judged at pre-commit is that caller's, never an agent's
-    // denial (#3619).
+    // denial.
     let mut at_pre_commit = Reading::new("permit", "pre-commit/computed.region-body");
     at_pre_commit.rule = "computed.region-body".into();
     at_pre_commit.status = Status::Fail;
@@ -1400,10 +1400,10 @@ fn permits_separates_the_calls_denied_from_the_calls_handed_to_the_next_candidat
     assert!(line.contains("next candidate"), "and says so: {line}");
 }
 
-/// The row #33 proposes, `git.pathspec`, appended to the scratch
-/// manifest verbatim: the file parses with it, and `permits` carries the
-/// rule's row, so a denial is visible where the facts are. Once the
-/// tracked manifest carries the row this proves the same of it.
+/// The proposed `git.pathspec` row, appended to the scratch manifest
+/// verbatim: the file parses with it, and `permits` carries the rule's
+/// row, so a denial is visible where the facts are. Once the tracked
+/// manifest carries the row this proves the same of it.
 #[test]
 fn permits_carries_a_row_for_the_proposed_git_pathspec_rule() {
     let root = scratch("permit-pathspec-row");
@@ -1441,7 +1441,7 @@ remedy = "`git add -- <paths>` and `git commit -F <file> -- <paths>`"
 }
 
 /// The bench's reading is a measurement whose exit is not its status
-/// (harness-design.md §4.4, #61), and the section renders it as before:
+/// (harness-design.md §4.4), and the section renders it as before:
 /// a `fail` against the bar is one reading and one failure of `permit`
 /// in the instruments table, and no rule's row, since it judged none.
 #[test]
@@ -1489,7 +1489,7 @@ fn permits_renders_the_bench_reading_as_before() {
 /// log. An instrument read within fourteen days with no failure in them is
 /// a candidate for silent; one whose fixture failed within the window is
 /// not, nor one with no reading in it, nor `usage`, whose reading cannot
-/// fail (#3619).
+/// fail.
 #[test]
 fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let root = scratch("silent");
@@ -1585,7 +1585,7 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     assert_eq!(of("usage")["silent"], serde_json::Value::Null);
 }
 
-/// The weekly bar table is gone (#2934, #2973): `--section week` and
+/// The weekly bar table is gone: `--section week` and
 /// `--week` are refused as unknown, and a manifest's `[[week]]` row as a
 /// key outside the grammar.
 #[test]
@@ -1603,7 +1603,7 @@ fn the_week_section_and_its_row_are_refused() {
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).

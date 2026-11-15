@@ -1,13 +1,14 @@
 //! What makala hands `php_module_startup` beside the bundle, declared over
-//! `php_ext` as an extension declares its own (ADR-0008 as amended by
-//! #1348): php-fpm's natives as #2335 chose them, `fastcgi_finish_request`
-//! and `getallheaders`, which php-fpm declares as the alias of
-//! `apache_request_headers` and so declares here, so a framework that
-//! asks `function_exists()` for any of them finds it as under php-fpm,
-//! and Symfony's `Response::send()` ends the response early; php-fpm's
-//! `fpm_get_status` reads its process manager, which this host has none
-//! of. They are the host's `additional_functions`, which php registers
-//! under `standard`, as `php -S` declares its `getallheaders`
+//! `php_ext` as an extension declares its own (ADR-0008 as amended
+//! 2026-10-01): php-fpm's natives as ruled 2026-10-09,
+//! `fastcgi_finish_request` and `getallheaders`, which php-fpm declares
+//! as the alias of `apache_request_headers` and so declares here, so a
+//! framework that asks `function_exists()` for any of them finds it as
+//! under php-fpm, and Symfony's `Response::send()` ends the response
+//! early; php-fpm's `fpm_get_status` reads its process manager, which
+//! this host has none of. They are the host's `additional_functions`,
+//! which php registers under `standard`, as `php -S` declares its
+//! `getallheaders`
 //! (`server_additional_functions`, `Z/sapi/cli/php_cli_server.c:503-510`).
 //! Each is one call into what the engine holds once for every host that
 //! declares it, `Response::finish_response` and `Variables::request_headers`,

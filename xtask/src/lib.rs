@@ -10,7 +10,7 @@
 //! renderer.
 //!
 //! What the crate exposes is what a caller of an instrument needs and
-//! nothing beside it (#55): [`run`], the binary's body; each instrument's
+//! nothing beside it: [`run`], the binary's body; each instrument's
 //! run function with the arguments it takes and the value it returns; the
 //! data modules, [`manifest`], [`oracle`] with the pin, [`divergence`]
 //! with the registry, [`reading`], and [`carried`], which of the manifest's
@@ -54,7 +54,7 @@ mod git;
 mod glossary;
 pub mod hostile;
 /// What a build of the harness judges by, digested: the seam manifest and
-/// `xtask`'s own sources (harness-design.md §4.4, #16). Shared with
+/// `xtask`'s own sources (harness-design.md §4.4). Shared with
 /// `build.rs`, which includes the file rather than importing it.
 mod inputs;
 pub mod key;
@@ -121,7 +121,7 @@ use sources::Standing;
 /// else from `CARGO_MANIFEST_DIR` as cargo sets it for the process, else
 /// the one it was built in. Cargo reuses one compiled binary for every
 /// checkout sharing a target directory whose sources are no newer than it,
-/// so a path baked in at compile time can name another checkout (#2719).
+/// so a path baked in at compile time can name another checkout.
 /// The working directory comes first, as it does for cargo finding a
 /// workspace, since every process a cargo-run one starts inherits its
 /// `CARGO_MANIFEST_DIR`, a session `track work` spawns and its hooks
@@ -241,7 +241,7 @@ pub(crate) fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
 
 /// `xtask/` as cargo names it for the process running, a test's among
 /// them, else the one in the workspace it runs in: what a test reads its
-/// fixtures under, never a path baked in at compile time (#2719).
+/// fixtures under, never a path baked in at compile time.
 pub fn package_dir() -> &'static Path {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
@@ -274,7 +274,7 @@ pub fn run() -> ExitCode {
 fn command_line() -> Result<()> {
     let cli = Cli::parse();
     // Absolute where the line is read: a program runs in its test's own
-    // directory, where a relative root names nothing (#942).
+    // directory, where a relative root names nothing.
     let root = match cli.root {
         Some(root) => std::path::absolute(&root)
             .with_context(|| format!("resolving --root {}", root.display()))?,
@@ -283,7 +283,7 @@ fn command_line() -> Result<()> {
     // The judge at the tool call reads the manifest itself: a manifest it
     // cannot read is a refusal it records before it exits, and a manifest
     // loaded out here would take that exit before permit saw the call
-    // (#16, harness-design.md §4.4).
+    // (harness-design.md §4.4).
     if let Command::Permit {
         json,
         above_the_command_hook,
@@ -321,7 +321,7 @@ fn command_line() -> Result<()> {
         Command::Permit { .. } => bail!("permit: the judge at the tool call is run above"),
         Command::Done { hook: true, .. } => {
             // A build apart from the tree exits 1 and judges no turn, so
-            // the hook's next candidate does, as permit's walk (#2982).
+            // the hook's next candidate does, as permit's walk.
             built::judges(&root, &root, &built_root())?;
             done::run_hook(&root, &manifest, &Registry::load(&root)?, &store);
             Ok(())
@@ -415,8 +415,8 @@ pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
 }
 
 /// `xtask vocab`: the crates named, or with `--staged` every crate less
-/// those whose reading stands for the commit (#1143), or with `--message`
-/// the commit message alone (#3624).
+/// those whose reading stands for the commit, or with `--message`
+/// the commit message alone.
 fn vocab_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Vocab) -> Result<()> {
     let cli::Vocab {
         crates,
@@ -424,7 +424,7 @@ fn vocab_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Voca
         message,
     } = ask;
     if let Some(file) = message {
-        // A note, never a refusal (#3629): the reading is recorded as a
+        // A note, never a refusal: the reading is recorded as a
         // measurement, whose exit is not its status.
         let reading = vocab::message(root, manifest, &file)?;
         println!("{reading}");
@@ -474,7 +474,7 @@ fn reading_the_tree(root: &Path, manifest: &Manifest, store: &Store, ask: &Comma
 }
 
 /// `measure` over the workspace, or with `staged` over what the index
-/// holds (#4620): where the working tree holds what the commit does not
+/// holds: where the working tree holds what the commit does not
 /// take, over the index laid down apart ([`sources::Laid`]) and the
 /// manifest it carries, so the sources an instrument reads and the closure
 /// it keys a crate's reading over are the commit's. The readings are
@@ -619,7 +619,7 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
     let outcome = recorded(store, &readings)?;
     // `--against` asks whether a test met at the commit fails here, and
     // the exit is that answer; the subsets' own readings are written as
-    // ever and hold what they always held (#664).
+    // ever and hold what they always held.
     if ask.against.is_some() {
         return phpt::against::answer(&readings);
     }
@@ -665,8 +665,8 @@ fn crosscheck_command(
     let registry = Registry::load(root)?;
     let ext = if staged {
         // The carried extensions whose rendering reads a staged file and
-        // no reading stands for (#1159): what `done` holds to its row,
-        // and an engine crate's change reaches every one (#1312).
+        // no reading stands for: what `done` holds to its row,
+        // and an engine crate's change reaches every one.
         let carried = crosscheck::extensions(
             manifest,
             &carried::Carried::binary(root)?,

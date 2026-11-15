@@ -27,18 +27,18 @@ use crate::sources;
 /// Where the store lives, relative to the workspace root.
 pub const DIR: &str = "target/harness";
 /// The log's directory, inside the store: one append-only file per
-/// instrument (revision 83; #2164).
+/// instrument (revision 83).
 pub const LOG: &str = "log";
 /// The file of the log a line that is no reading is kept in, as it was.
 pub const UNREAD: &str = "unread";
 
 /// The version of a reading's shape, written as `v` on every reading
-/// (harness-design.md §4.2): 2 since the scope's key is spelled `key`
-/// (#1719). A reading written before carries no `v` and is version 1,
+/// (harness-design.md §4.2): 2 since the scope's key is spelled `key`.
+/// A reading written before carries no `v` and is version 1,
 /// which spells the key `tree`; the store reads both, and refuses a `v` it
 /// does not know. A field it does not know it ignores, in the store's
 /// files and the log's lines alike, as a handed-in line and a `--format
-/// jsonl` row are read (§4.2, #4404). So a field is added under the same
+/// jsonl` row are read (§4.2). So a field is added under the same
 /// `v` only where a reading without it is never read as fresher than one
 /// with it, since an older harness reads the newer reading as if the field
 /// were absent; a field removed, renamed or retyped, a meaning changed, or
@@ -70,7 +70,7 @@ impl<'de> Deserialize<'de> for Version {
 
 /// `at` as either side keeps it: toml's datetime in the store, or the
 /// text [`Reading::to_json`] writes in the log, whose own `Deserialize`
-/// reads only toml's form (#2164).
+/// reads only toml's form.
 fn either_at<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Datetime, D::Error> {
     struct Either;
     impl<'de> serde::de::Visitor<'de> for Either {
@@ -116,7 +116,7 @@ pub struct Reading {
     pub adr: String,
     /// The scope's key at the time, [`crate::key::Snapshot::key`]: the
     /// hash of the scope's files and of every workspace crate in its
-    /// declared dependency closure (#1318); what `done` holds against the
+    /// declared dependency closure; what `done` holds against the
     /// scope's key now to call the reading fresh (harness-design.md §4.2,
     /// §13 D.18). Spelled `tree` by a reading of the first version, which
     /// is read as this one. Private, and set by the constructors alone: a
@@ -141,15 +141,15 @@ pub struct Reading {
     pub session: String,
     /// A lane's named groups: one count per key, where the keys are the
     /// run's own and not a fixed set `numbers` could name. The phpt
-    /// census is the first, a count per construct the compiler refused
-    /// (#617), and the reason this is not `numbers`: `status` tables
+    /// census is the first, a count per construct the compiler refused,
+    /// and the reason this is not `numbers`: `status` tables
     /// `numbers` as one line of `key=value`, which a fold over an open
     /// set of sentences is not. Empty for every instrument that writes
     /// none, and for a reading written before this field existed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub groups: BTreeMap<String, Number>,
     /// The [`Pin::digest`] of the oracle pin the run was taken under, for
-    /// an instrument of [`UNDER_RECIPE`]; `None` for every other (#1387).
+    /// an instrument of [`UNDER_RECIPE`]; `None` for every other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
 }
@@ -170,7 +170,7 @@ impl std::fmt::Display for Reading {
 }
 
 /// The instruments whose runs are taken under the oracle's recipe: a
-/// reading of one is fresh only under the pin it records (#1387).
+/// reading of one is fresh only under the pin it records.
 pub const UNDER_RECIPE: [&str; 6] = [
     "witness",
     "phpt",
@@ -287,8 +287,8 @@ impl Reading {
 
     /// Whether the reading was taken over the content `hash` names: the
     /// scope's key now ([`crate::key::Snapshot::key`]), `done`'s question, or the
-    /// index's key of it, pre-commit's (#1143); and, for an instrument of
-    /// [`UNDER_RECIPE`], under the pin whose [`Pin::digest`] is `pin` (#1387).
+    /// index's key of it, pre-commit's; and, for an instrument of
+    /// [`UNDER_RECIPE`], under the pin whose [`Pin::digest`] is `pin`.
     /// The one statement of fresh (harness-design.md §4.2, §4.5 condition 1).
     pub fn fresh_for(&self, hash: &str, pin: &str) -> bool {
         self.key == hash
@@ -344,7 +344,7 @@ impl Reading {
 
 impl Reading {
     /// One line of the log back into a reading; the inverse of `to_json`,
-    /// in one pass: `at` is read from the text `to_json` writes (#2164).
+    /// in one pass: `at` is read from the text `to_json` writes.
     /// A field the reading has not is ignored and a `v` this harness does
     /// not know refused, as in the store ([`V`]).
     pub fn from_json(line: &str) -> Result<Reading> {
@@ -386,8 +386,8 @@ enum Kept {
         #[serde(default)]
         recipe: Option<String>,
     },
-    /// The lean row the history kept before it kept readings whole
-    /// (#1747): instrument, scope, status, at, commit and numbers.
+    /// The lean row the history kept before it kept readings whole:
+    /// instrument, scope, status, at, commit and numbers.
     Lean {
         i: String,
         s: String,
@@ -524,7 +524,7 @@ impl std::fmt::Display for Number {
 }
 
 /// The store: a directory of readings, their index and their log
-/// (harness-design.md §4.2, revision 83; #2164).
+/// (harness-design.md §4.2, revision 83).
 ///
 /// - `<instrument>/<scope>.toml`, the last reading of each scope,
 ///   overwritten on each run.
@@ -650,7 +650,7 @@ impl Store {
     /// reading keeps `pass` or `fail` against its bar, so `status` shows
     /// it, and the command exits 0 whatever the reading says, since a
     /// bench number is a claim a person reads with the A/A control
-    /// (AGENTS.md; harness-design.md §4.4; #61). `permit --bench` records
+    /// (AGENTS.md; harness-design.md §4.4). `permit --bench` records
     /// through here, and so does a `bench` instrument when one exists: a
     /// measurement's exit is not its status.
     pub fn record_measurement(&self, readings: &[Reading]) -> Result<()> {
@@ -695,11 +695,11 @@ impl Store {
     /// So a retired worktree's reading is found, by the key it was taken
     /// over, only where main's store is read: by `done`, `status` and
     /// pre-push run in main's checkout, and by `permit`'s `unless`, which
-    /// reads every worktree's store (#1252). `done` in `_merge`, which
+    /// reads every worktree's store. `done` in `_merge`, which
     /// `worktree land` runs before it moves `main`, reads `_merge`'s store
-    /// and does not find it (#4216). The other store's files of each scope stay where they are: each is
-    /// a scope's last run over a tree the store landed in may not have
-    /// (#35). Its log is read whole, the file of each instrument, and each
+    /// and does not find it. The other store's files of each scope stay where they are: each is
+    /// a scope's last run over a tree the store landed in may not have.
+    /// Its log is read whole, the file of each instrument, and each
     /// is emptied once landed, so a retire that refuses after this and the
     /// call that follows cannot land a reading twice. A line lands as it
     /// was written, its session the one it was taken in and never the
@@ -771,7 +771,7 @@ impl Store {
     }
 
     /// The one append to a log, and the rule that a line reaches it whole
-    /// or not at all (#56): `line`, rendered whole with its newline, is
+    /// or not at all: `line`, rendered whole with its newline, is
     /// handed to the file in one `write` on a descriptor opened with
     /// `O_APPEND`, so two instruments appending at once, which pre-commit
     /// and the worktrees do, cannot interleave inside a line. POSIX
@@ -823,13 +823,13 @@ impl Store {
     /// readings are: `worktree retire` lands its log in main's store and
     /// leaves its files with the worktree, so its pass is found here, by
     /// the key it was taken over, only when this is main's store, as it is
-    /// for `done`, `status` and pre-push run in main's checkout (#1252).
+    /// for `done`, `status` and pre-push run in main's checkout.
     /// `done` in `_merge`, which `worktree land` runs before it moves
-    /// `main`, asks `_merge`'s store, and nothing lands a reading there
-    /// (#4216). Where neither stands, the scope's last reading judged
+    /// `main`, asks `_merge`'s store, and nothing lands a reading there.
+    /// Where neither stands, the scope's last reading judged
     /// against the key ([`Freshness::judging`]). A file that is no reading
     /// is no reading over the key, and the index is asked instead, as for
-    /// a stale one (#1235). An empty key names no content and nothing
+    /// a stale one. An empty key names no content and nothing
     /// stands over it. A lookup reads the scope's file and the index, and
     /// no log.
     pub(crate) fn over(
@@ -862,7 +862,7 @@ impl Store {
     /// by the time it was taken: the scope's file or, where a retired
     /// worktree's later one was landed in the index and not the file, the
     /// index's latest entry. None where the store holds neither. A file
-    /// that is no reading is none (#1235).
+    /// that is no reading is none.
     pub(crate) fn last_of(&self, instrument: &str, scope: &str) -> Result<Option<Reading>> {
         let file = self.read(instrument, scope).ok().flatten();
         self.last_after(file, instrument, scope)
@@ -928,7 +928,7 @@ impl Store {
     /// the instrument, where a key the index let go of still stands, a
     /// line of either version ([`V`]). What `permit`'s `unless` reads as
     /// evidence that an instrument measured a commit's content, by the key
-    /// a commit's objects give ([`crate::key::Snapshot::commit`], #1448),
+    /// a commit's objects give ([`crate::key::Snapshot::commit`]),
     /// however long ago. An empty key names no content and is never found.
     pub(crate) fn measured_over(
         &self,
@@ -1039,7 +1039,7 @@ impl Store {
     /// checkout's later one in the index alone, which [`Store::last_of`]
     /// reads (c2.i). A
     /// missing store is empty. A file a crash left empty or cut short,
-    /// which [`replace`] no longer can (#1235), is named and skipped rather
+    /// which [`replace`] no longer can, is named and skipped rather
     /// than failing every rendering of the store, as the log's torn line
     /// is: it costs its own row, and the next run of its instrument writes
     /// it again.
@@ -1082,9 +1082,9 @@ pub(crate) enum Freshness {
 /// What moved since a stale reading was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Moved {
-    /// The scope's key: its files, or its dependency closure's (#1318).
+    /// The scope's key: its files, or its dependency closure's.
     Key,
-    /// The oracle's pin, the reading being over the key now (#1387).
+    /// The oracle's pin, the reading being over the key now.
     Recipe,
 }
 
@@ -1095,7 +1095,7 @@ impl Freshness {
     /// no content, so a reading over it is stale whatever it was taken
     /// over. What a question about one reading asks, where finding a
     /// reading by its key would revive one the question re-asserts by
-    /// reading again, as a ticket's (#31).
+    /// reading again, as a ticket's.
     pub(crate) fn judging(last: Option<Reading>, key: &str, pin: &str) -> Freshness {
         match last {
             None => Freshness::Never,
@@ -1152,7 +1152,7 @@ fn index_key(path: &Path) -> Option<&str> {
 /// `v` and `key` as [`V`] spells them and `at` as TOML's datetime, with
 /// every other field of the line kept beside it, so a field this harness
 /// does not know is kept and not dropped, and the harness that wrote it
-/// finds it in the entry (#4404). The first version's `tree`, which
+/// finds it in the entry. The first version's `tree`, which
 /// `reading` reads as its `key`, is not kept beside it. A line TOML cannot
 /// hold whole, a null or an integer past `i64`, which no writer of this
 /// store writes, is entered as this harness reads it.
@@ -1233,7 +1233,7 @@ impl Files {
 /// written to a file of its own beside `path` and renamed over it, so a
 /// reader at the same moment, another worktree's hook or an instrument
 /// beside it, sees the old file or the new one and never one cut short,
-/// and a disk that fills leaves the old one standing (#1235). The rename is
+/// and a disk that fills leaves the old one standing. The rename is
 /// within one directory, which POSIX makes atomic. The file beside is
 /// hidden and ends in `.tmp`, so no reader of `.toml` or `.json` files
 /// takes it for what it replaces, and it is removed when the write fails.
@@ -1290,7 +1290,7 @@ impl Log {
 
     /// A log handed to a rendering rather than read off its store
     /// (harness-design.md §4.6): a file of another store's log, or the
-    /// published history, whose older rows are lean (#1747). Any line
+    /// published history, whose older rows are lean. Any line
     /// shaped as a reading reads, a whole line with the fields this build
     /// does not know ignored or a lean row `{i,s,t,a,c,n}`; any other is
     /// counted by its number, as a torn line of the store's own is.
@@ -1330,7 +1330,7 @@ fn unreadable(name: &str, noun: &str, at: &[String], after: &str) -> Option<Stri
 /// each with its distance from the tip. A branch merged into it sits on
 /// a second parent and a branch cut behind the tip is off it past the cut,
 /// so the readings their worktrees took, which `worktree retire` appends
-/// into the main checkout's store, are not taken on it (#787).
+/// into the main checkout's store, are not taken on it.
 #[derive(Debug, Clone, Default)]
 pub struct Chain {
     distance: BTreeMap<String, usize>,
@@ -1386,8 +1386,7 @@ impl Chain {
 /// harness-design.md §4.5 states for `done` (exit 1 while anything is
 /// unmet), made every instrument's here, so no instrument maps a status
 /// to an exit on its own. A measurement alone stands outside it: it
-/// records through [`Store::record_measurement`] and owes no exit (§4.4,
-/// #61).
+/// records through [`Store::record_measurement`] and owes no exit (§4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// Every reading passed or was skipped: exit 0.
@@ -1569,7 +1568,7 @@ mod tests {
 
     /// `reading` as a run in another checkout leaves it, landed here by
     /// `worktree retire` or `land`: in the index and the log, and not in
-    /// the scope's file (#1252, #3804).
+    /// the scope's file.
     fn landed(store: &Store, name: &str, reading: &Reading) {
         let other = Tree::new(name).unwrap();
         let other = unnamed(other.path());
@@ -1598,7 +1597,7 @@ mod tests {
         );
 
         // The file moved on to another key, a refused commit's: the pass
-        // over the key now is the index's (#1312).
+        // over the key now is the index's.
         let mut refused = over("test", "a", &key(2), &at(1));
         refused.status = Status::Fail;
         store.record(&[refused]).unwrap();
@@ -1819,7 +1818,7 @@ mod tests {
 
     /// A reading lands in the index under its key, the newest [`KEPT`] of
     /// a scope stay, and the latest reading over a key is found there
-    /// while the scope's file has moved on to another (#2164). A key the
+    /// while the scope's file has moved on to another. A key the
     /// index let go reads as never measured to `done`, and is still found
     /// in the instrument's log by `permit`'s look for evidence.
     #[test]
@@ -1881,7 +1880,7 @@ mod tests {
 
     /// `permit`'s look for evidence reads a key the index let go of from
     /// a line of the log of either version: `key` under `v = 2`, `tree`
-    /// on a line of the first version, which carries no `v` (#1719).
+    /// on a line of the first version, which carries no `v`.
     #[test]
     fn a_key_the_index_let_go_is_found_in_a_line_of_either_version() {
         let dir = Tree::new("store-versions").unwrap();
@@ -1920,7 +1919,7 @@ mod tests {
     /// it; a land indexes such a line, its entry keeping the field, and
     /// keeps nothing of it in `unread`. A reading of a `v` this harness
     /// does not know is refused in either, and a land keeps its line in
-    /// `unread` and indexes nothing (#4404).
+    /// `unread` and indexes nothing.
     #[test]
     fn a_field_it_does_not_know_is_ignored_and_a_v_it_does_not_know_refused() {
         let dir = Tree::new("store-unknown").unwrap();

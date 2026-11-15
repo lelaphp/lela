@@ -1,4 +1,4 @@
-//! The bench's pages, served from the rig (#4364, #4367). The pages and
+//! The bench's pages, served from the rig. The pages and
 //! the recipe they are served by are the declaration's
 //! ([`crate::workloads::Pages`]); the rig, the site that serves them, is
 //! kept off the repository, and where it is on this machine is the

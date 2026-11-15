@@ -4,8 +4,8 @@
 
 use super::*;
 
-/// The oracle's dump of two arrow functions returning `never`
-/// (#1262): `zend_compile_func_decl` wraps neither body in a
+/// The oracle's dump of two arrow functions returning `never`:
+/// `zend_compile_func_decl` wraps neither body in a
 /// `return`, so the `throw` stands as an expression statement and
 /// `42`, a constant, leaves no opline; each ends in the implicit
 /// `VERIFY_NEVER_TYPE`.
@@ -50,7 +50,7 @@ fn an_arrow_function_returning_never_compiles_its_body_as_a_statement() {
 }
 
 /// `zend_compile_func_decl` as the oracle at 8.5.9 dumps it under
-/// `opcache.opt_debug_level=0x10000` (#309): a function and a
+/// `opcache.opt_debug_level=0x10000`: a function and a
 /// class's methods each an op array of its own after the main one,
 /// named `f` and `C::m`, with `RECV` and `RECV_INIT` for the
 /// parameters, the body, and php's implicit `RETURN null` on the
@@ -170,7 +170,7 @@ echo f(1), C::s(), $o->m(1), $o->p;
 /// required `RECV` with no default (`zend_compile_params`,
 /// `Z/Zend/zend_compile.c:7886`), the `Type $x = null` spelling as
 /// much as `?Type $x = null`: the first only skips the deprecation.
-/// The dump is the oracle's under `[regime.dump]` at 8.5.9 (#2684).
+/// The dump is the oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn an_optional_parameter_before_a_required_one_is_a_recv_whatever_its_spelling() {
     expect![[r#"
@@ -204,8 +204,7 @@ fn an_optional_parameter_before_a_required_one_is_a_recv_whatever_its_spelling()
 /// as `zval(type=11)`, while a class's name is none and
 /// `zend_try_compile_const_expr_resolve_class_name` resolves `self::class`
 /// and `parent::class` in a class with a parent, and `Baz::class`, to
-/// their strings. The dump is the oracle's under `[regime.dump]` at 8.5.9
-/// (#2685).
+/// their strings. The dump is the oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn a_class_name_in_a_parameter_default_folds_to_its_string() {
     expect![[r#"
@@ -230,7 +229,7 @@ fn a_class_name_in_a_parameter_default_folds_to_its_string() {
     "#]].assert_eq(&dump_of(b"<?php class P {} class C extends P { function f($a = self::class, $b = parent::class, $c = Baz::class, $d = self::X) {} }"));
 }
 
-/// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION` (#384): a
+/// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`: a
 /// default naming a constant is not folded, so its `RECV_INIT`
 /// carries the `IS_CONSTANT_AST` value the oracle dumps as
 /// `zval(type=11)`, the constant expression beside the op array's
@@ -310,7 +309,7 @@ fn a_parameter_default_naming_a_constant_is_an_unevaluated_constant() {
 
 /// `zend_compile_params` and `zend_compile_return_type` as the
 /// oracle at 8.5.9 dumps them under
-/// `opcache.opt_debug_level=0x10000` (#385): a typed parameter is a
+/// `opcache.opt_debug_level=0x10000`: a typed parameter is a
 /// `RECV` still, one with a default a `RECV_INIT`, and a `...` a
 /// `RECV_VARIADIC` numbered after the rest and left out of `args`;
 /// a declared return type is a `VERIFY_RETURN_TYPE` before each

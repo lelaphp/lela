@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -17,7 +17,7 @@ fn served(src: &str, expected: &str) {
 
 /// `SQLite3::setAuthorizer` on a connection that is not open throws the
 /// one `Error` `SQLITE3_CHECK_INITIALIZED` throws, not a second over the
-/// first (#2075).
+/// first.
 #[test]
 fn set_authorizer_on_a_closed_connection_throws_once() {
     served(
@@ -29,7 +29,7 @@ fn set_authorizer_on_a_closed_connection_throws_once() {
 
 /// What a user function or an aggregate's final returns is handed to
 /// the library as text, `sqlite3_result_text` over the string
-/// `zval_get_string` made, which is given up after (#2099).
+/// `zval_get_string` made, which is given up after.
 #[test]
 fn a_user_function_s_answer_is_given_up() {
     served(
@@ -44,7 +44,7 @@ var_dump($db->querySingle('SELECT twice(a) FROM t'), $db->querySingle('SELECT ca
     );
 }
 
-/// The authorizer a reopen forgets, which php leaks (#2514), is given up
+/// The authorizer a reopen forgets, which php leaks, is given up
 /// by the extension's `rshutdown`, after the store's walk has destructed
 /// what it holds, so the request ends holding none of it.
 #[test]

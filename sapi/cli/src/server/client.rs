@@ -878,7 +878,7 @@ fn is_entity(text: &str) -> bool {
 /// the colour; the whole in its colour where the log is coloured. The
 /// file is the program the request's path named, or one it included, so
 /// each `\r` and `\n` of it is written as two bytes
-/// ([`php_sapi::log_field`], #4355); the error's message is written as
+/// ([`php_sapi::log_field`]); the error's message is written as
 /// it was raised.
 fn log_response(
     site: &Site,

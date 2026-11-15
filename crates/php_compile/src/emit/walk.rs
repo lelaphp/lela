@@ -12,7 +12,7 @@
 //! handed to the emitter in one of the shapes at the foot of this
 //! file, its body and its defaults the tree's own nodes, so every
 //! construct's semantics stays in the one function that has it and
-//! nothing here decides what an opline is (#595).
+//! nothing here decides what an opline is.
 //!
 //! **What is refused.** A construct the tree parses and the emitter
 //! cannot emit yet is refused here, at the node's line, as
@@ -365,7 +365,7 @@ impl Emit<'_> {
     /// range: `zend_ast_decl` writes it where `zend_ast.lineno` stands
     /// (`Z/Zend/zend_ast.c:137-158`), so it is the node's own `line()`,
     /// which the builder puts on the keyword and, in argument position,
-    /// on the token after it (`php_syntax`'s `tree::line`, #601 row 17).
+    /// on the token after it (`php_syntax`'s `tree::line`).
     /// Reading it from the range would name the `static` or the
     /// attribute group written ahead of the keyword instead.
     fn end_line(&self, range: TextRange) -> u32 {
@@ -1400,7 +1400,7 @@ impl Emit<'_> {
 /// node's own line: [`crate::Raise::Unread`] at `Level::Parse`, the one
 /// place the state and its sentence, which the phpt lane counts, are
 /// made. Cold and a call of its own, so the sentence it formats is off
-/// the stack of every recursive compile that may refuse (#3159).
+/// the stack of every recursive compile that may refuse.
 #[cold]
 #[inline(never)]
 pub(super) fn unread(line: u32, what: &str) -> CompileError {
@@ -1475,7 +1475,7 @@ pub(super) fn thrown(line: u32, message: impl Into<Cow<'static, str>>) -> Compil
 // What the walk above reads a class, a function, a closure and the
 // members and parameters under them into, each named after the tree
 // node it stands for and the `zend_ast` kind that node is, with the
-// expressions under it the tree's own nodes (design §4.9, #595).
+// expressions under it the tree's own nodes (design §4.9).
 
 /// One `namespace` statement, php's `ZEND_AST_NAMESPACE`, in the form
 /// `zend_compile_namespace` tells apart by whether `child[1]` stands.

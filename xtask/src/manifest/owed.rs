@@ -1,12 +1,13 @@
 //! `[[owed]]`: the instruments a crate owes a fresh passing reading of
 //! before `done` (harness-design.md §4.5 condition 1), one row per
-//! instrument, as Mitchell ruled on #3184 and #3206 built. Which crates
-//! owe it is the row's: a glob or a list of them and, where the row names
-//! one, a predicate the harness derives in code ([`When`]), the one way a
-//! row narrows (#3278: it fails closed, so a new crate owes the row).
-//! A row carrying `exempt` is refused as any unknown key is. The instrument ([`Instrument`]) and the predicate are
-//! decoded here and nowhere else, and a pattern that names no crate is
-//! refused, so a misspelt row cannot drop an obligation unseen.
+//! instrument, as Mitchell ruled 2026-10-21. Which crates owe it is the
+//! row's: a glob or a list of them and, where the row names one, a
+//! predicate the harness derives in code ([`When`]), the one way a row
+//! narrows (ruled 2026-10-23: it fails closed, so a new crate owes the
+//! row). A row carrying `exempt` is refused as any unknown key is. The
+//! instrument ([`Instrument`]) and the predicate are decoded here and
+//! nowhere else, and a pattern that names no crate is refused, so a
+//! misspelt row cannot drop an obligation unseen.
 
 use anyhow::{Result, bail};
 use serde::Deserialize;
@@ -25,7 +26,7 @@ pub struct Owed {
     /// What else must hold of a crate, derived in code.
     pub when: Option<When>,
     /// Where the row is held, where it is not every checkout's to meet
-    /// (#3618 ruling 2).
+    /// (ruling 2 of 2026-10-30).
     pub held_at: Option<HeldAt>,
 }
 
@@ -101,7 +102,7 @@ pub enum When {
     /// extensions the per-commit lane renders.
     Carried,
     /// The crate is the engine's: every crate but the harness
-    /// ([`of_the_engine`]), as #3278 ruled.
+    /// ([`of_the_engine`]), as ruled 2026-10-23.
     Engine,
 }
 

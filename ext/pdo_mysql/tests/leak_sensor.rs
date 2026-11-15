@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over PDO through this connector: each
+//! The request leak sensor over PDO through this connector: each
 //! request below gives up everything the natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 //! Against the server of `ci/mysql/compose.yaml`; with none listening
@@ -27,7 +27,7 @@ fn armed(body: &str) -> String {
 /// An emulated prepare quotes each bound value into the query as its
 /// string, `zval_try_get_string`, and gives that string up once quoted:
 /// a number bound as a string, converted in place where it is bound,
-/// and a string bound as one (#2117, #2116).
+/// and a string bound as one.
 #[test]
 fn an_emulated_prepare_gives_up_the_strings_it_quotes() {
     MysqlServer::with(|_| {
@@ -41,8 +41,7 @@ $s->execute([16, str_repeat('x', 3)]); echo implode(',', $s->fetch(PDO::FETCH_NU
 }
 
 /// A fetch into a class whose constructor takes no arguments calls it
-/// with none, and the empty array that stood for them is given up
-/// (#2117).
+/// with none, and the empty array that stood for them is given up.
 #[test]
 fn a_constructor_called_without_arguments_keeps_no_array() {
     MysqlServer::with(|_| {
@@ -56,8 +55,7 @@ $o = $db->query('SELECT 1 AS a')->fetchObject('R'); echo $o->a, "\n";
 }
 
 /// `fetchAll` gives up the rows it gathered where a fetch throws
-/// partway, as the VM frees the return value of a native that threw
-/// (#2117).
+/// partway, as the VM frees the return value of a native that threw.
 #[test]
 fn fetch_all_gives_up_its_rows_where_a_fetch_throws() {
     MysqlServer::with(|_| {
@@ -73,7 +71,7 @@ try { $db->query('SELECT 1 UNION SELECT 2')->fetchAll(PDO::FETCH_FUNC, 'f'); } c
 /// `fetchAll` under `FETCH_GROUP` or `FETCH_UNIQUE` reads each row's
 /// group key as a string and gives it up once the row is placed, the key
 /// a decimal names included, and gives up the rows it grouped where a
-/// fetch throws partway (#2117).
+/// fetch throws partway.
 #[test]
 fn a_grouped_fetch_all_keeps_no_key_and_no_row() {
     MysqlServer::with(|_| {

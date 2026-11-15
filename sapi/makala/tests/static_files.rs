@@ -1,6 +1,6 @@
-//! Files served as themselves (#2346) over a real socket against the binary, by
-//! `php -S`'s path rules (`php_proto::vpath`) and the refusals over them
-//! (#2586): a file that is not PHP is served with the type php's table
+//! Files served as themselves over a real socket against the binary, by
+//! `php -S`'s path rules (`php_proto::vpath`) and the refusals over them:
+//! a file that is not PHP is served with the type php's table
 //! gives its extension, a `.php` file is served as a program and never sent as its
 //! source, no path, `..` or encoded, leaves the document root, and a dot
 //! segment or a file of PHP's source is not found.
@@ -138,7 +138,7 @@ fn dot_dot_and_encoded_traversal_never_leave_the_document_root() {
     assert_eq!(String::from_utf8_lossy(&inside.body), "inside");
 }
 
-/// The paths a server facing the internet does not serve (#2586), each
+/// The paths a server facing the internet does not serve, each
 /// with the file it names in the root: a dot segment anywhere, and a file
 /// of PHP's source under another extension than `php`.
 const HIDDEN: [&str; 9] = [
@@ -199,9 +199,9 @@ fn dot_segments_and_php_sources_are_not_found() {
 
 /// `--serve-hidden` serves each of [`HIDDEN`] by `php -S`'s rules: its
 /// bytes; and a static file with a path past it, which `php -S` sends
-/// (`php_cli_server_begin_send_static`) and the default refuses (#2642),
+/// (`php_cli_server_begin_send_static`) and the default refuses,
 /// as the file. A path past it that ends in `.php` is a program's path,
-/// split as the recipe's nginx splits it under either (#2693), and
+/// split as the recipe's nginx splits it under either, and
 /// php-fpm's checks refuse the file it names.
 #[test]
 fn serve_hidden_serves_them_as_php_s_does() {
@@ -224,7 +224,7 @@ fn serve_hidden_serves_them_as_php_s_does() {
 }
 
 /// A path holding a NUL is found as far as the NUL, as `php -S`'s walk
-/// finds it (#2695): under the default it is answered as a path with
+/// finds it: under the default it is answered as a path with
 /// nothing at it; under `--serve-hidden` as `php -S` answers it, a static
 /// file's refused with 400, a write first with 405, and a program's
 /// request started with its program never started, a 200 with no body.
@@ -280,7 +280,7 @@ fn a_symlink_under_the_root_to_a_file_outside_it_is_served() {
 }
 
 /// A static file is sent from the connection side and holds no request
-/// thread while it goes (#2587): with one request thread, a client that
+/// thread while it goes: with one request thread, a client that
 /// starts a large file and stops reading it leaves the thread free, and
 /// a program is answered at once, well inside the 5 s grace of the
 /// minimum response rate that would otherwise free it.

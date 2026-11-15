@@ -1,19 +1,19 @@
-//! What a test holds among every run on the machine, not only its own
-//! (#1313). Upstream's conflict keys name what two tests may not share at
+//! What a test holds among every run on the machine, not only its own.
+//! Upstream's conflict keys name what two tests may not share at
 //! once (run-tests.php:1341-1372), and the run holds them apart within
 //! itself; but most of what they name is the machine's and not the
 //! tree's: `sapi/fpm/tests` names `all` because every `FPM\Tester` takes
 //! the ports from 9008 up (`sapi/fpm/tests/tester.inc:1333-1342`),
 //! `ext/curl/tests` names `all` for its server's port, and `mysql`,
 //! `pgsql` and `server` name a server or a port. Each run stands in a copy
-//! of the tree of its own (#1183), and ports and servers are not in the
+//! of the tree of its own, and ports and servers are not in the
 //! tree, so two runs on one machine, two worktrees or a merge check beside
 //! a builder, met on them: a run read 95 of `sapi/fpm`'s 120 for "Address
 //! already in use" while another held 127.0.0.1:9008.
 //!
 //! So a test holds each of its conflict keys as a lock in the temporary
 //! directory while it runs ([`machine`]; a test of the harness names a
-//! directory of its own, so it meets no real run, #1675), and waits for a key another run holds; the
+//! directory of its own, so it meets no real run), and waits for a key another run holds; the
 //! keys are taken in one order, so two runs never wait on each other. A
 //! key that names a path of the tree costs a wait only where two runs
 //! reach the same test at once. A lock is the operating system's and goes
@@ -21,7 +21,7 @@
 //! subset's reading counts the tests that waited and for how long.
 //!
 //! `all` is not a key beside the others but upstream's "nothing beside"
-//! (run-tests.php:1365-1370), and among runs it means the same (#1559):
+//! (run-tests.php:1365-1370), and among runs it means the same:
 //! every test with a key holds the `all` lock shared before its keys, and
 //! a test naming `all` holds it exclusive, so it runs beside no keyed test
 //! of any run. A test with no key holds nothing, as upstream's `all` test
@@ -152,7 +152,7 @@ mod tests {
 
     /// The directory one test holds its locks in, its own, so neither
     /// another test nor a real run on the machine holding `all` makes it
-    /// wait (#1675).
+    /// wait.
     fn own() -> Tree {
         Tree::new("phpt-across").unwrap()
     }
@@ -170,10 +170,10 @@ mod tests {
         assert!(waited >= Duration::from_millis(100), "{waited:?}");
     }
 
-    /// A test naming `all` and a test of another key never hold at once
-    /// (#1559), whichever came first: a keyed holder waits for an `all`
+    /// A test naming `all` and a test of another key never hold at once,
+    /// whichever came first: a keyed holder waits for an `all`
     /// holder, and an `all` holder for a keyed one. A key held under `all`
-    /// alone, before #1559, waited for neither.
+    /// alone, as it once was, waited for neither.
     #[test]
     fn all_and_another_key_wait_for_each_other_both_ways() {
         let dir = own();
@@ -230,7 +230,7 @@ mod tests {
         assert!(alone.is_ok(), "a test with no key held the all lock");
     }
 
-    /// Locks in two directories are two sets of locks (#1675): an `all`
+    /// Locks in two directories are two sets of locks: an `all`
     /// held alone in one, as a run on the machine holds it in the
     /// temporary directory, makes no holder in the other wait, while a
     /// holder in the same directory does. A `hold` that took its locks in
@@ -261,7 +261,7 @@ mod tests {
     }
 
     /// A run that names no directory meets every other run on the machine
-    /// in the temporary directory, where the locks of #1313 stood.
+    /// in the temporary directory, where these locks first stood.
     #[test]
     fn a_run_naming_no_directory_holds_in_the_temporary_directory() {
         assert_eq!(machine(), std::env::temp_dir());

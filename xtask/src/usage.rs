@@ -1,5 +1,5 @@
 //! What a session spent, per turn from the plugin, joined to the ticket
-//! it landed or left standing (#210; harness-design.md §4.2, §5).
+//! it landed or left standing (harness-design.md §4.2, §5).
 //!
 //! `track work` records what a session came to and nothing of what it
 //! spent: the session is `claude -p …` with its streams the caller's, so
@@ -176,7 +176,7 @@ impl Spent {
     /// holds one, oldest store first: the worktree's own where one still
     /// stands, then the main checkout's, which a retire landed in. Read
     /// off the scope's file and its index ([`Store::last_of`]), and never
-    /// the log (#2164). None where no store has one.
+    /// the log. None where no store has one.
     pub fn last(stores: &[&Store], scope: &str) -> Result<Option<Spent>> {
         for store in stores {
             if let Some(reading) = store.last_of(INSTRUMENT, scope)? {

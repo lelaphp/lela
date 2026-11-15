@@ -275,7 +275,7 @@ impl Request {
     /// that registered it, for code of another extension's that calls
     /// into the value to serve that call as its supplier's
     /// ([`Code::serve_supplied`]), as ext/pdo serves a connector's calls
-    /// as the connector's extension (#2864); a reader that wants the
+    /// as the connector's extension; a reader that wants the
     /// values alone maps the supplier away.
     ///
     /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register

@@ -24,7 +24,7 @@ use crate::options::{Each, Lines, Listing, Program};
 /// `\n` after it (`sapi_cli_log_message`). The request owns it and each
 /// call reaches the fd as it is made, as `sapi_cli_ub_write` writes each
 /// chunk to fd 1, so what a child process the request starts writes to
-/// the stdout it inherits stands where php's would (#741). A stream that
+/// the stdout it inherits stands where php's would. A stream that
 /// refuses a write is left refusing: php's `sapi_cli_single_write` reads
 /// no error either.
 #[derive(Debug, Default)]
@@ -192,7 +192,7 @@ pub fn serve(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 
 }
 
 /// The status `do_cli` ends a request with: where `php_request_startup`
-/// failed, an extension's `rinit` having raised (#1775), `Could not
+/// failed, an extension's `rinit` having raised, `Could not
 /// startup.` written after what the failure rendered, and 1, which `err`
 /// sets (`Z/sapi/cli/php_cli.c:919-922`, `:1188-1191`); otherwise the
 /// request's own.
@@ -663,7 +663,7 @@ mod tests {
     }
 
     /// An extension whose `rinit` throws, as session's does where its data
-    /// does not decode (#1775); the CLI reads no cookie, so no extension
+    /// does not decode; the CLI reads no cookie, so no extension
     /// of the bundle fails a CLI request's start.
     fn failing_start() -> Engine {
         /// Core's `Error`.

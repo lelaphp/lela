@@ -1,4 +1,4 @@
-//! Persistent streams (design §4.10, ledger 51, #1172): php's
+//! Persistent streams (design §4.10, ledger 51): php's
 //! `EG(persistent_list)` as far as `pfsockopen` and
 //! `STREAM_CLIENT_PERSISTENT` reach it (`Z/main/streams/streams.c:68-138`,
 //! `Z/main/streams/transports.c:75-93`), over the engine's [`Pool`].
@@ -14,7 +14,7 @@
 //! `forget_persistent_resource_id_numbers` forgets them; the next request
 //! to ask the key takes it out, checked for liveness first. The pool is
 //! the layer's engine state's ([`LayerState`]), typed by the entry it
-//! keeps (#1962).
+//! keeps.
 //!
 //! [`Pool`]: crate::api::abi::Pool
 
@@ -103,7 +103,7 @@ pub(crate) struct Entry {
 /// with its `transport`'s and crypto layer's state, and
 /// `stream->orig_path`, which php allocates persistent beside it. What
 /// [`keep`] takes out for the extension that opened the stream, as
-/// [`Persisted`], which holds no filter. Engine state by type (#4541):
+/// [`Persisted`], which holds no filter. Engine state by type:
 /// no field of it can hold a request's value.
 ///
 /// [`Persisted`]: crate::api::request::Persisted

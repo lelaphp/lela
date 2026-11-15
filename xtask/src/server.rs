@@ -2,8 +2,8 @@
 //! on a free loopback port, held until it says on its second stream that
 //! it listens there, so a response is this server's and no other
 //! process's, asked over HTTP/1.0, and its log read line by line after.
-//! `crosscheck` renders `cli_server` through it (#1496), and
-//! `dispatch-census` serves the bench pages through it (#4367).
+//! `crosscheck` renders `cli_server` through it, and
+//! `dispatch-census` serves the bench pages through it.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;

@@ -1,11 +1,11 @@
 //! What ICU the build links, and the major it hands to the binding.
 //!
 //! On macOS that is the ICU the pin's `[closure]` names, the one
-//! `icu4c@<major>` keg among the kegs the pinned binaries load (#4406),
+//! `icu4c@<major>` keg among the kegs the pinned binaries load,
 //! and an ICU of another major, or none, is refused naming that keg. On
 //! any other target it is the ICU `pkg-config` finds, at or above php's
 //! own floor, `icu-uc >= 57.1` (`build/php.m4`'s `PHP_SETUP_ICU`), as
-//! php built on that host links it (#4428). Included by `build.rs`, which
+//! php built on that host links it. Included by `build.rs`, which
 //! asks `pkg-config` and reads the pin, and by `tests/pin.rs`, which holds
 //! both readings to fixture pins and made-up versions. Only `[closure]`'s
 //! key names are read, so a key of the pin this does not know is no
@@ -109,7 +109,7 @@ const FLOOR: [u32; 2] = [57, 1];
 
 /// Whether the build for `target_os` (`CARGO_CFG_TARGET_OS`) is held to
 /// the pin's ICU: on macOS, where the pin's `[closure]` names the kegs
-/// the oracle loads, and nowhere else (#4428).
+/// the oracle loads, and nowhere else.
 pub(crate) fn held_to_pin(target_os: &str) -> bool {
     target_os == "macos"
 }

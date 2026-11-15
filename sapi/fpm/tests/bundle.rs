@@ -1,8 +1,8 @@
 //! The binary carries the CLI's extensions: php's configure builds every
-//! extension outside the `cli` class for every host (#1477), and design
+//! extension outside the `cli` class for every host, and design
 //! §7.2 (revision 66) puts `pcntl` and `posix` in every host whose serving
-//! process is single-threaded, as php-fpm's children are (#1494); the host
-//! turns on the bundle's `host` (#3081), and `php-fpm -n -m` lists what it
+//! process is single-threaded, as php-fpm's children are; the host
+//! turns on the bundle's `host`, and `php-fpm -n -m` lists what it
 //! carries.
 
 /// `php-fpm -n -m` lists the extensions a build of this crate alone

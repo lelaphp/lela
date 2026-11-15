@@ -1,4 +1,4 @@
-//! The C side of `FFI`, bound by hand (design §7.2, revision 75; #1573):
+//! The C side of `FFI`, bound by hand (design §7.2, revision 75):
 //! libffi as the platform ships it, which the oracle links as
 //! `/usr/lib/libffi.dylib` and whose declarations are the SDK's `ffi.h`;
 //! the dynamic loader for `FFI::cdef($code, $lib)` and `FFI::load`; and
@@ -648,7 +648,7 @@ impl Drop for Closure {
 /// interrupt check; nothing in it allocates, so a signal handler may
 /// enter it. The second is posted with its arguments where C passed
 /// them and the thread held until the request serves it at its check,
-/// or lends itself, or ends, when C reads zero (#1640): php calls the
+/// or lends itself, or ends, when C reads zero: php calls the
 /// callable on that thread at once, concurrently with the request, and
 /// a call served at the request's next check is one interleaving that
 /// race allows.

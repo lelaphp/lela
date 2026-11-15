@@ -1,4 +1,4 @@
-//! Frames a fatal leaves (#2554): a fiber's stack is closed when the
+//! Frames a fatal leaves: a fiber's stack is closed when the
 //! fiber ends in one, and a serving with nothing executing puts the
 //! frames it set aside back over whatever stands above them. Every
 //! serving pops the frames it pushed on its way out, the fatal's way

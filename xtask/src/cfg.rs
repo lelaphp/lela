@@ -1,5 +1,5 @@
 //! Which `#[cfg(..)]` hold for the target this harness is built for, read
-//! as rustc reads them (#1068).
+//! as rustc reads them.
 //!
 //! The set is the one cargo gave the build: `build.rs` asks rustc for
 //! `--print cfg` over the build's target and flags, as cargo itself does,

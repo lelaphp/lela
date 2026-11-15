@@ -148,7 +148,7 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
 }
 
 /// A rule's `sessions` cell names its newest three sessions and counts
-/// the rest (#1618): the append-only log holds every session a rule ever
+/// the rest: the append-only log holds every session a rule ever
 /// denied, so a cell that listed them all grew with each one for good.
 /// Fifty more sessions move one number of the cell; `--uncut` and the
 /// JSON carry every session.

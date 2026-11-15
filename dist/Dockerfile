@@ -16,13 +16,13 @@
 # The base is the Ubuntu release CI builds and tests the workspace on,
 # whose package names packages.txt gives. ext/intl links the
 # distribution's ICU, at or above the floor ext/intl's build states, as
-# php built on it would (#4428).
+# php built on it would.
 
 ARG UBUNTU=ubuntu:26.04@sha256:19fcd1bf268f02b60aca3bd30bd8a6d9a11759a430e32921833e65f16d87348a
 # Where php's official images keep php.ini, $PHP_INI_DIR, with conf.d in it.
 ARG PHP_INI_DIR=/usr/local/etc/php
 # The hosts' names, `$NAME`, `$NAME-cgi` and `$NAME-fpm`, as ADR-0016 derives
-# them from one constant; php's until #3464 renames them.
+# them from one constant; php's until the hosts carry the product's name.
 ARG NAME=php
 
 # --- distribution inputs, held without another checkout -----------------
@@ -92,7 +92,7 @@ ARG PHP_INI_DIR
 ARG BUILD_PROVIDER
 ARG SOURCE_DATE_EPOCH
 # Thin LTO links each host in one process that a 4 GiB VM holds one of at a
-# time; more jobs link several at once there and the kernel kills one (#3213).
+# time; more jobs link several at once there and the kernel kills one.
 ARG CARGO_BUILD_JOBS=1
 # The cache mounts' ids are `$CACHE-cargo-registry` and `$CACHE-target-<arch>`.
 ARG CACHE=dist
@@ -107,7 +107,7 @@ COPY . .
 # The compiled tier is built in from the hosts' own manifests, each of which
 # turns php_bundle's `jit` on by default, and php-cgi shares the bundle's
 # features with them on this one cargo line; it stays off until opcache.jit
-# asks, as php's does, and tracing is experimental (ADR-0017, #3676).
+# asks, as php's does, and tracing is experimental (ADR-0017).
 RUN --mount=type=cache,id=${CACHE}-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=${CACHE}-target-${TARGETARCH},target=/src/target \
     . /usr/local/share/dax-target.env; \
@@ -158,7 +158,7 @@ ARG PHP_INI_DIR
 # The version php's image sets, which a Dockerfile written for it reads in
 # its own RUN steps: the pinned php's, so a plain build sets it. xtask's
 # tests hold this literal to oracle.toml's version, and the build fails
-# below where the built php says another (#3533).
+# below where the built php says another.
 ARG PHP_VERSION=8.5.12
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ENV PHP_INI_DIR=${PHP_INI_DIR} \
@@ -198,8 +198,8 @@ COPY dist/apache/www.conf /usr/local/etc/php-fpm.d/www.conf
 COPY dist/apache/bin/ /usr/local/bin/
 # A Dockerfile written for php's image runs `php`, and this image's own
 # scripts run `php` and `php-fpm`. Under another NAME, how the image
-# offers those names is #3464's to decide (ADR-0016); until then the
-# check below fails the build.
+# offers those names is not decided yet (ADR-0016); until then the check
+# below fails the build.
 RUN cd /usr/local/bin; \
     ln -s docker-php-ext-install docker-php-ext-enable; \
     for name in pear peardev phpize php-config; do ln -s pecl "$name"; done; \

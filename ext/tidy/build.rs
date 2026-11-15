@@ -1,4 +1,4 @@
-//! libtidy is the keg's tidy-html5 (design §7.2, revision 72; #1540): the
+//! libtidy is the keg's tidy-html5 (design §7.2, revision 72): the
 //! library the oracle links, found through `pkg-config tidy` and never
 //! vendored, its declarations written in `src/ffi/`.
 //!
@@ -6,7 +6,7 @@
 //! the SDK's libxml2 puts `-L /usr/lib` ahead of the keg's directory on
 //! the link line, where `-l tidy` would find it; so the keg's archive is
 //! linked where it has one, `libtidy.a` held inside this crate's rlib,
-//! whatever the order, as `.cargo/config.toml` links sqlite's (#1510).
+//! whatever the order, as `.cargo/config.toml` links sqlite's.
 //! A host whose directory has no archive links the shared library, and a
 //! host `pkg-config` finds no libtidy on fails the build.
 

@@ -481,7 +481,7 @@ mod tests {
     fn held<T: EngineState>() {}
 
     /// An analysis is engine state for every class type `C` that is, each
-    /// field held by the derive where it is declared (#4544): the tier
+    /// field held by the derive where it is declared: the tier
     /// keeps one per op array in the epoch's state.
     fn analysis_of<C: EngineState>() {
         held::<Analysis<C>>();

@@ -6,7 +6,7 @@
 //!
 //! A test that names a locale runs inside [`with_locale`] and, on a host
 //! whose C library lacks it, skips and measures nothing, the skip counted
-//! by `xtask test` (#3180); CI generates every locale these tests and the
+//! by `xtask test`; CI generates every locale these tests and the
 //! witnesses name and promises them (`.github/workflows/harness.yml`), so
 //! there an absent one fails.
 
@@ -102,7 +102,7 @@ fn two_requests_at_once(engine: &Engine) {
 /// `setlocale(LC_ALL, "")` under an environment naming a locale the C
 /// library refuses answers `false` and moves no category, as php built
 /// without libintl does:
-/// the engine's side of `trace:setlocale-libintl-fallback` (#1126), where
+/// the engine's side of `trace:setlocale-libintl-fallback`, where
 /// the pinned oracle's libintl answers `C/UTF-8/C/C/C/C` from its own
 /// fallback and the machine's language settings. A witness cannot hold
 /// it, since a fence is held to the oracle's bytes; the row is the

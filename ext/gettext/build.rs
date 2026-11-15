@@ -1,4 +1,4 @@
-//! libintl is the keg's GNU gettext (design §7.2, revision 72; #1540),
+//! libintl is the keg's GNU gettext (design §7.2, revision 72),
 //! the library the oracle links (`--with-gettext=$(brew --prefix
 //! gettext)`), never vendored; macOS's C library carries none. The keg
 //! ships no `pkg-config` file for libintl, so the directory is found as

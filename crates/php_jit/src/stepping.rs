@@ -1,4 +1,4 @@
-//! The stepping arm of `xtask bench`'s `step` bar (#2946; `jit-design.md`
+//! The stepping arm of `xtask bench`'s `step` bar (`jit-design.md`
 //! §4.1 *What recording costs*, §10): what `step` costs per opline under
 //! recording, measured as the recorder's loop without the record. Reached
 //! only under `cfg(php_jit_stepping)` ([`crate::Jit`]'s `safepoint`), which

@@ -50,7 +50,7 @@ echo strlen($z->getFromName('a.txt')), "\n";
     );
 }
 
-/// #2667: an entry added after `AFL_WANT_TORRENTZIP` is set is written,
+/// An entry added after `AFL_WANT_TORRENTZIP` is set is written,
 /// as libzip 1.11.4 and 1.12.1 write it. `_zip_file_replace` clears the
 /// entry's extra fields through `zip_file_extra_field_delete(za, idx,
 /// ZIP_EXTRA_FIELD_ALL, ZIP_FL_CENTRAL | ZIP_FL_LOCAL)`

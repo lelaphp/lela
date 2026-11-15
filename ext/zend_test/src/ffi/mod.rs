@@ -1,7 +1,7 @@
 //! The acts of `test.c` this crate does in C's terms (`unsafe.homes`'
 //! `ext/*/src/ffi/`). The first is `zend_test_crash`'s end of the process, the
 //! `SIGSEGV` php's `php_printf("%s", (char *) 1)` takes when it reads
-//! the byte at address one (ruled on #2976).
+//! the byte at address one (ruled 2026-10-19).
 //!
 //! No invalid pointer is read here. The process is sent the signal that
 //! read delivers, under the disposition that read meets in php's CLI,

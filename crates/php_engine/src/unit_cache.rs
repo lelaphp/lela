@@ -884,7 +884,7 @@ fn answered_by(held: &Held, filed: Filed) -> Answered {
 /// for the file compiles it again and takes as many again, where php
 /// without the cache takes none. No compile makes such a unit: a unit's
 /// walk refuses no value a compile and `share` leave in it, and passes
-/// its closures' cells over (#4684), so this is the check's answer kept
+/// its closures' cells over, so this is the check's answer kept
 /// for a walk that comes to refuse one.
 fn refused(unit: PublishedUnit) -> Answered {
     (Some(Ok(Compiled::Published(unit))), Filed::Compiled, None)
@@ -1261,7 +1261,7 @@ impl UnitCache {
             // `zend_jit_op_array`, which only the persist after a compile
             // calls (`Z/ext/opcache/zend_file_cache.c:1901-2115`,
             // `Z/ext/opcache/zend_persist.c:771-775`, `:1524-1525`), so
-            // the unit counts nothing and hands nothing off (#3362, #3363).
+            // the unit counts nothing and hands nothing off.
             let unit = match share(unit) {
                 Ok(unit) => unit,
                 Err(unit) => return refused(unit),

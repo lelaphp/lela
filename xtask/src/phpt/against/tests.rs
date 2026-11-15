@@ -70,7 +70,7 @@ fn one_met() -> Tally {
     }
 }
 
-/// A derived subset with no tests holds nothing against a base (#3614).
+/// A derived subset with no tests holds nothing against a base.
 /// Named subsets, real tests and an unresolved corpus still need evidence.
 #[cfg(tracked)]
 #[test]
@@ -178,7 +178,7 @@ fn the_same_run_against_itself_passes() {
 }
 
 /// Neither a test the compiler no longer reads nor one that skips here
-/// meets a test met at the base (#725).
+/// meets a test met at the base.
 #[test]
 fn a_test_the_compiler_no_longer_reads_or_that_skips_is_a_regression() {
     let base = fixture("base.json");
@@ -254,7 +254,7 @@ fn a_kept_run_is_spelled_as_the_fixture_is() {
 }
 
 /// A run kept in a linked worktree at the base, where the skip asks for one
-/// to be taken, is found by the commit from main's checkout (#1869). Before
+/// to be taken, is found by the commit from main's checkout. Before
 /// it is kept, the skip names each worktree it looked in once, the one it
 /// runs in first; from the linked one, main comes after it.
 #[test]
@@ -306,7 +306,7 @@ fn a_run_kept_in_a_linked_worktree_at_the_base_is_found_from_main() {
         Ok(run)
     );
     // Under another pin the run is stale, and the base's call takes it
-    // again (#2725).
+    // again.
     let stale = base
         .run(&looked, &layout(), "ext/fixture", "moved")
         .unwrap();
@@ -326,7 +326,7 @@ fn a_run_kept_in_a_linked_worktree_at_the_base_is_found_from_main() {
 }
 
 /// A carried run takes the place of one standing under another pin that
-/// was kept before it, and of no other (#2725): a base's run `phpt --base`
+/// was kept before it, and of no other: a base's run `phpt --base`
 /// takes again under a moved pin is found fresh in main afterwards.
 #[test]
 fn a_carried_run_replaces_an_older_one_under_another_pin_and_no_other() {
@@ -369,7 +369,7 @@ fn a_carried_run_replaces_an_older_one_under_another_pin_and_no_other() {
 }
 
 /// After each subset, a run whose engine sources nobody writes asks git
-/// nothing, however many subsets it runs (#2972); a source written while
+/// nothing, however many subsets it runs; a source written while
 /// a subset ran is still the comparison's skip that says so, and a file
 /// touched and not written is asked of git once and then stands.
 #[cfg(tracked)]
@@ -502,13 +502,13 @@ fn commit_writing(root: &Path, files: &[&str]) {
     committing(root, &["commit", "-q", "-m", "written"]);
 }
 
-/// A run is kept under what its binary is built from (#3109): the
-/// commits #3082 and #3103 made on 2026-10-20, `seams.toml` text,
-/// `ext/clippy.toml` and a guide, with the compiled tier's crate the
-/// default binary does not link, as `c5c2fb025` wrote, leave the run
-/// standing, so `done` finds it as this tree's and, once that commit is
-/// `origin/main`, as the next branch's base without a `--base` run
-/// (#3110); a commit that writes a source the binary is compiled from
+/// A run is kept under what its binary is built from: the commits made
+/// on 2026-10-20, `seams.toml` text, `ext/clippy.toml` and a guide, with
+/// the compiled tier's crate the default binary does not link, as
+/// `c5c2fb025` wrote, leave the run standing, so `done` finds it as this
+/// tree's and, once that commit is
+/// `origin/main`, as the next branch's base without a `--base` run;
+/// a commit that writes a source the binary is compiled from
 /// moves the key, and the kept run is refused, here and as the base.
 #[cfg(tracked)]
 #[test]
@@ -574,7 +574,7 @@ fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not
     );
 }
 
-/// A run of no test is no evidence about the tree (#3143): the engine's is
+/// A run of no test is no evidence about the tree: the engine's is
 /// never kept, and one a store kept before, as main's kept a scratch
 /// corpus's `ext/ctype` at 37474a3, is read as no run, at the base and
 /// here. So `phpt --base` takes the base's run where only that one stands,

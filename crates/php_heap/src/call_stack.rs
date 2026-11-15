@@ -37,10 +37,10 @@ pub fn call_stack_bounds() -> Option<CallStack> {
 /// php-fpm worker serve a request on, which the shell's `ulimit -s`
 /// sizes, and so the budget php's `EG(stack_limit)` is worked out of
 /// there (design §5.6). A host that serves on a thread of its own size
-/// reads php's budget here (#3142). `None` where the platform's
-/// main-thread arm cannot be asked from another thread or there is none,
-/// Haiku and a platform php has no arm for, and where the rlimit is
-/// `RLIM_INFINITY`, as php's arm answers `false` there.
+/// reads php's budget here. `None` where the platform's main-thread arm
+/// cannot be asked from another thread or there is none, Haiku and a
+/// platform php has no arm for, and where the rlimit is `RLIM_INFINITY`,
+/// as php's arm answers `false` there.
 #[must_use]
 pub fn main_call_stack_size() -> Option<usize> {
     platform::main_call_stack_size()

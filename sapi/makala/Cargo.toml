@@ -1,7 +1,7 @@
 # sapi/makala: the production web server beside `php -S`, one crate under
-# `sapi/` (ADR-0008 as amended by #2332), laid down by `xtask new-sapi`: the
+# `sapi/` (ADR-0008 as amended 2026-10-09), laid down by `xtask new-sapi`: the
 # binary `makala`. A host php does not ship, so it ports nothing of php-src;
-# its design is #2337's. The connection side is hyper's HTTP/1.1 server on
+# its design is its own. The connection side is hyper's HTTP/1.1 server on
 # a one-thread tokio runtime that owns the sockets and never runs PHP; the
 # request side a bounded pool of request threads, each request through its
 # own `Engine::serve`. Edges php_bundle, php_sapi, and php_proto for the CGI
@@ -22,8 +22,8 @@ workspace = true
 # The tests start the `makala` binary, so they are built and run under
 # `release-da`: the debug build's sensors (the freed-block mark, the
 # quarantine, the lend's slot) run in a worker at the optimisation it
-# ships at, across the requests one request thread serves (#4348's
-# ruling 4, #4361).
+# ships at, across the requests one request thread serves (ruled
+# 2026-11-09).
 [package.metadata.xtask.test]
 profile = "release-da"
 
@@ -34,12 +34,12 @@ path = "src/main.rs"
 [features]
 # The compiled tier in every build that keeps the default features, the
 # release build among them, `opcache.jit=disable` its default and tracing
-# experimental, as `sapi/cli`'s says (ADR-0017, #3676).
+# experimental, as `sapi/cli`'s says (ADR-0017).
 default = ["php_bundle/jit"]
 
 [dependencies]
 # The bundle's default set and `host`, the set every host links, whose
-# comment says why each (#3081), without `one_thread`'s `pcntl` and
+# comment says why each, without `one_thread`'s `pcntl` and
 # `posix`, which no host that serves requests on threads carries (design
 # §7.2): a fork of this process would copy its other request threads'
 # state in the middle of their work.
@@ -47,21 +47,21 @@ php_bundle = { path = "../../crates/php_bundle", features = ["host"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its natives are declared with, as an extension declares its
-# own (ADR-0008 as amended by #1348).
+# own (ADR-0008 as amended 2026-10-01).
 php_ext = { path = "../../crates/php_ext" }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 httpdate = { workspace = true }
 # `fs`: a static file read on tokio's blocking pool as the client takes
-# it, so no request thread is held for its transfer (#2587); no package
+# it, so no request thread is held for its transfer; no package
 # is added.
 tokio = { workspace = true, features = ["fs"] }
-# TLS 1.2 and 1.3 with SNI on the TLS listener (#2343), rustls on its
-# aws-lc-rs provider (#2333); the tests' client is the same rustls.
+# TLS 1.2 and 1.3 with SNI on the TLS listener, rustls on its
+# aws-lc-rs provider; the tests' client is the same rustls.
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 # `EACCES` and `ENOENT`, the errno values php-fpm's refusal of a script
-# reads and leaves (#2767); no package is added.
+# reads and leaves; no package is added.
 libc = { workspace = true }
 
 [dev-dependencies]

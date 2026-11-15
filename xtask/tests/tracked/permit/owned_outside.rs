@@ -1,6 +1,6 @@
-//! `checkout.owner` over a file outside the workspace (#4698): the row
+//! `checkout.owner` over a file outside the workspace: the row
 //! has neither a scope nor an `adding`, so it reaches an `Edit` or a
-//! `Write` outside the workspace (#4679) and places it where the file
+//! `Write` outside the workspace and places it where the file
 //! lands, which a checkout's owner record makes another session's or no
 //! session's.
 

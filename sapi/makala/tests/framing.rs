@@ -1,4 +1,4 @@
-//! RFC 9112's framing over a real socket (#2340): each case sent as raw
+//! RFC 9112's framing over a real socket: each case sent as raw
 //! bytes, and held to the responses that come back and to whether the
 //! server closes the connection after them, so that no request can be
 //! smuggled past the one the server framed.
@@ -319,7 +319,7 @@ fn a_clean_request_keeps_the_connection_open() {
 
 /// A TLS handshake sent to the listener that serves HTTP without TLS is
 /// closed unanswered, no 400 sent, and the error log says so; the listener
-/// serves HTTP on (#2343, research/production-server.r2.md M19).
+/// serves HTTP on (research/production-server.r2.md M19).
 #[test]
 fn a_tls_handshake_on_the_clear_port_is_closed_and_logged() {
     let log = echo_root().join("clear-port.log");

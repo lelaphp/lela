@@ -891,7 +891,7 @@ pub(crate) fn accel_log(req: &mut Request, level: Log, message: &str) {
 
 /// `asctime(localtime(&at))` less its line ending: `at` in `zone`, the
 /// request's local zone as `localtime` reads `TZ` ([`Zone::of`]), as
-/// `zend_accel_error` and `accelerator_get_scripts` print it (#2397).
+/// `zend_accel_error` and `accelerator_get_scripts` print it.
 pub(crate) fn asctime(zone: &Zone, at: i64) -> String {
     shape(at.saturating_add(zone.offset(at)))
 }

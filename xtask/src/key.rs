@@ -1,4 +1,4 @@
-//! The key a reading is stamped with and held to (#1318): the hash of the
+//! The key a reading is stamped with and held to: the hash of the
 //! scope's sources and, where the scope is a workspace crate, of every
 //! workspace crate in its dependency closure, as cargo's fingerprint
 //! takes it. A crate stands only while its own tree and the trees it is
@@ -9,7 +9,7 @@
 //!
 //! A key is a lookup on a [`Snapshot`]: each file's blob id, read once
 //! from the working tree, the index or a commit, and asked for the key of
-//! every scope the run stamps or holds (#2163). The stamp, `done`,
+//! every scope the run stamps or holds. The stamp, `done`,
 //! pre-commit's standing readings, `witness --unmeasured` and `permit`'s
 //! `unless` all ask one. From the working tree, a file whose copy git
 //! knows to be the index's takes the index's id, and only the rest are
@@ -37,9 +37,9 @@
 //! compiles it ([`BUILT_UNDER`], one list): the toolchain file, whole; of
 //! `.cargo/config.toml` its rustflags, whose `[target.'cfg(all())']`
 //! passes LLVM's `--cgp-max-address-users-to-scan` to every profile
-//! (design §10 Profiles, #3372), its profiles, and the `[env]` variables
+//! (design §10 Profiles), its profiles, and the `[env]` variables
 //! rustc and every C build read for every crate ([`REKEYED`]: the
-//! deployment target every object and link is made for, #3356); and of
+//! deployment target every object and link is made for); and of
 //! the workspace's `Cargo.toml` its profiles, which the release and the
 //! lanes' builds are made in. A reading taken under another toolchain,
 //! other rustflags, another profile or another deployment target measured
@@ -49,12 +49,12 @@
 //! whose `build.rs` reads it, and neither does the rest of the manifest,
 //! whose members and dependencies reach a key through the crates' own.
 //! Last, it covers the files beyond its directory its tests read
-//! ([`READ_BY_TESTS`], one list, #3646), and those the `build.rs` of each
-//! crate of its closure reads ([`READ_BY_BUILDS`], #3654): whole, or, of
+//! ([`READ_BY_TESTS`], one list), and those the `build.rs` of each
+//! crate of its closure reads ([`READ_BY_BUILDS`]): whole, or, of
 //! a file a `build.rs` reads one table of, that table alone, as of the
 //! files rustc is built under ([`Part`]): `ext/intl`'s reads the pin's
 //! `[closure]`, so an edit of the pin's `[regime.*]` tables moves no key
-//! built on it (#4429).
+//! built on it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -80,14 +80,14 @@ use crate::reading::joined;
 ///   measured; an instrument that writes sources and then stamps them
 ///   takes another after it writes.
 /// - [`Snapshot::index`], what the index holds: what a commit takes,
-///   pre-commit's question (#1143).
+///   pre-commit's question.
 /// - [`Snapshot::commit`], the tracked files as the commit holds them:
-///   what `permit`'s `unless` reads as evidence a commit was measured
-///   (#1448), and what a phpt binary was built from.
+///   what `permit`'s `unless` reads as evidence a commit was measured,
+///   and what a phpt binary was built from.
 ///
 /// Every key is the one the tree hash over the files on disk gave before
-/// #2163, byte for byte: the blob id of each file under the scope and its
-/// closure, then the blob id of the sorted `<id> <path>` listing.
+/// the snapshot, byte for byte: the blob id of each file under the scope
+/// and its closure, then the blob id of the sorted `<id> <path>` listing.
 #[derive(Debug)]
 pub struct Snapshot {
     root: PathBuf,
@@ -209,7 +209,7 @@ impl Snapshot {
     /// clean entry). Every other file is read and hashed: a modified,
     /// untracked or conflicted one, and one whose copy carries line
     /// endings the index's has not, which `core.autocrlf=input` leaves
-    /// unlisted (#2163; the main checkout carried two such files under
+    /// unlisted (the main checkout carried two such files under
     /// `research/` when this was written, a fresh checkout none).
     pub fn disk(root: &Path) -> Result<Snapshot> {
         let commit = git::head_commit(root)?;
@@ -266,7 +266,7 @@ impl Snapshot {
     /// untracked file beside it. A crate's closure is still the graph of
     /// the manifests at `root`, so an instrument that keys the commit where
     /// the working tree differs asks it at the index laid down
-    /// ([`crate::sources::Laid`], #4620).
+    /// ([`crate::sources::Laid`]).
     pub(crate) fn index(root: &Path, index: &Index) -> Result<Snapshot> {
         let files = index.entries().to_vec();
         let commit = git::head_commit(root)?;
@@ -425,7 +425,7 @@ pub(crate) enum Part {
     /// Of the workspace's manifest, `[profile]`.
     Manifest,
     /// Of a TOML file, the one top-level table of this name: the pin's
-    /// `[closure]`, which `ext/intl`'s `build.rs` reads (#4429).
+    /// `[closure]`, which `ext/intl`'s `build.rs` reads.
     Table(&'static str),
 }
 
@@ -438,8 +438,8 @@ pub(crate) struct FilePart {
 }
 
 /// The files outside every crate that decide how rustc compiles each one,
-/// each under every crate's key for its [`Part`] (design §10 Profiles,
-/// #3372): the toolchain, in either spelling rustup reads, the cargo
+/// each under every crate's key for its [`Part`] (design §10 Profiles):
+/// the toolchain, in either spelling rustup reads, the cargo
 /// configuration and the workspace's manifest.
 pub(crate) const BUILT_UNDER: [FilePart; 4] = [
     FilePart::of("rust-toolchain.toml", Part::Whole),
@@ -451,7 +451,7 @@ pub(crate) const BUILT_UNDER: [FilePart; 4] = [
 /// The cargo configuration's `[env]` variables that decide how every
 /// crate is compiled, so a crate's key moves with each: rustc reads
 /// `MACOSX_DEPLOYMENT_TARGET` for every object and link, and cc for every
-/// C build, and `api-check` holds it to the pinned php's (#3356).
+/// C build, and `api-check` holds it to the pinned php's.
 pub(crate) const REKEYED: [&str; 1] = [DEPLOYMENT_TARGET];
 
 /// The variable that names the macOS every object and link is made for.
@@ -460,11 +460,11 @@ pub(crate) const DEPLOYMENT_TARGET: &str = "MACOSX_DEPLOYMENT_TARGET";
 /// The files beyond its own directory a crate's tests read as the tree
 /// holds them, by the crate's: each under that crate's key, so a change
 /// to one stales every reading of the crate, `test` among them, and
-/// touches the crate for `done` and pre-commit ([`read_by_tests`], #3646).
+/// touches the crate for `done` and pre-commit ([`read_by_tests`]).
 /// xtask's tests copy the manifest, pin, registry and glossary into
 /// scratch trees, run the hooks and scripts, and read the workflows, the
 /// plugin's hooks, four crates' files and the apache image's Dockerfile,
-/// whose `PHP_VERSION` they hold to the pin (#3533). Left out: the Markdown regions
+/// whose `PHP_VERSION` they hold to the pin. Left out: the Markdown regions
 /// they hold, which pre-commit renders and `computed check` holds, and
 /// `Cargo.lock`, whose pins reach a crate through `sources::lock_moved`.
 pub(crate) const READ_BY_TESTS: [(&str, &[&str]); 2] = [
@@ -496,14 +496,14 @@ pub(crate) const READ_BY_TESTS: [(&str, &[&str]); 2] = [
 /// The files beyond its own directory a crate's `build.rs` reads, by the
 /// crate's: what the crate is compiled from, so each is under the key of
 /// every crate built from it as the crate's own files are (ADR-0011), and
-/// a change to one touches the crate as [`READ_BY_TESTS`]' do (#3654).
+/// a change to one touches the crate as [`READ_BY_TESTS`]' do.
 /// `php_unit`'s and `php_engine`'s generate the opcode enum and the
 /// dispatch from `ops.toml`, `php_ssa`'s php's table of natives from
 /// `data/func-infos.toml`; `php_engine`'s also digests four crates'
 /// sources, which its closure holds. `ext/intl`'s reads the ICU major
-/// from the pin's `[closure]` on macOS (#4406, #4428), and nothing else of
+/// from the pin's `[closure]` on macOS, and nothing else of
 /// the pin, so an edit of another table of it leaves every key built on
-/// `ext/intl` where it was (#4429); its tests hold that reading to the
+/// `ext/intl` where it was; its tests hold that reading to the
 /// pin's `[closure]` alone.
 pub(crate) const READ_BY_BUILDS: [(&str, &[FilePart]); 4] = [
     ("crates/php_unit", &[FilePart::of("ops.toml", Part::Whole)]),
@@ -887,7 +887,7 @@ struct Dependency {
     path: Option<String>,
 }
 
-/// The fixture of #1318, `xtask/fixtures/closure`, committed once as a
+/// The closure fixture, `xtask/fixtures/closure`, committed once as a
 /// scratch repository of its own: `ext/reflection` and `ext/ctype` built
 /// from `php_ext`, which is built from `php_engine`.
 #[cfg(test)]
@@ -927,7 +927,7 @@ mod tests {
     }
 
     /// Every key a snapshot of the working tree gives is the one the tree
-    /// hash over the files on disk gives, byte for byte (#2163), and its
+    /// hash over the files on disk gives, byte for byte, and its
     /// tracked keys are the tracked hash's, on disk and at the commit:
     /// over a fixture with an untracked file, a modified tracked file, a
     /// deleted tracked file, a file staged and then modified again, and a
@@ -1040,8 +1040,8 @@ mod tests {
     }
 
     /// A crate's key moves with the toolchain, with the codegen tables of
-    /// the cargo configuration, whose rustflags every profile passes
-    /// (#3372), with its deployment target (#3356) and with the manifest's
+    /// the cargo configuration, whose rustflags every profile passes,
+    /// with its deployment target and with the manifest's
     /// profiles, and not with another `[env]` line, the rest of the
     /// manifest or a file rustc never reads; the
     /// index's key agrees with the working tree's, read from git's object.
@@ -1164,7 +1164,7 @@ mod tests {
     }
 
     /// `ext/intl`'s `build.rs` reads the pin's `[closure]` and nothing
-    /// else of it (#4429): an edit of `[oracle]` or `[regime.*]` leaves the
+    /// else of it: an edit of `[oracle]` or `[regime.*]` leaves the
     /// key of `ext/intl` and of `php_bundle`, built from it, where it was,
     /// and an edit of the closure moves both and not `ext/ctype`'s; the
     /// index's key agrees with the working tree's.

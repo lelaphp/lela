@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -17,7 +17,7 @@ fn armed(source: &str) -> String {
 
 /// What a user function or an aggregate's final returns is handed to
 /// the library as text, `sqlite3_result_text` over the string
-/// `zval_get_string` made, which is given up after (#2099).
+/// `zval_get_string` made, which is given up after.
 #[test]
 fn a_user_function_s_answer_is_given_up() {
     let stdout = armed(
@@ -34,7 +34,7 @@ var_dump($db->query('SELECT twice(a) FROM t')->fetchColumn(), $db->query('SELECT
 
 /// What `var_dump` shows of a `PDORow`, `row_get_properties_for`'s
 /// table of the statement's properties and each column fetched, is the
-/// dumper's to give up with every value fetched for it (#2117).
+/// dumper's to give up with every value fetched for it.
 #[test]
 fn a_dumped_lazy_row_s_values_are_given_up() {
     let stdout = armed(
@@ -51,7 +51,7 @@ $r = $db->query("SELECT 'ab' AS id", PDO::FETCH_LAZY); foreach ($r as $v) var_du
 
 /// A column named by a canonical decimal is keyed by the integer,
 /// `zend_symtable_update`, and the string made for its name is given up
-/// (#2117, `ext/pdo/tests/bug_79106.phpt`).
+/// (`ext/pdo/tests/bug_79106.phpt`).
 #[test]
 fn a_numeric_column_name_keeps_no_string() {
     let stdout = armed(
@@ -65,7 +65,7 @@ $row = $db->query('SELECT 0 AS "2007", 1 AS "2020"')->fetch(); echo $row[2007], 
 
 /// A statement class given by `ATTR_STATEMENT_CLASS` without
 /// constructor arguments is constructed with none, and the empty array
-/// that stood for them is given up (#2117, `ext/pdo/tests/pdo_014.phpt`).
+/// that stood for them is given up (`ext/pdo/tests/pdo_014.phpt`).
 #[test]
 fn a_statement_class_constructed_without_arguments_keeps_no_array() {
     let stdout = armed(
@@ -81,8 +81,8 @@ echo get_class($db->query('SELECT 1')), "\n";
 /// `setAuthorizer` on an object with no connection, one whose
 /// constructor never ran the parent's, throws before it
 /// keeps the callback, as `PDO_CONSTRUCT_CHECK` comes before
-/// `zend_fcc_dup` (#2133,
-/// `ext/pdo_sqlite/tests/subclasses/pdosqlite_setauthorizer_trampoline_no_leak.phpt`).
+/// `zend_fcc_dup`
+/// (`ext/pdo_sqlite/tests/subclasses/pdosqlite_setauthorizer_trampoline_no_leak.phpt`).
 #[test]
 fn set_authorizer_with_no_connection_keeps_no_callback() {
     let stdout = armed(

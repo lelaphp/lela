@@ -4,8 +4,7 @@
 //! `goldens/<program>.ssa`, with the types and ranges inference gave
 //! each variable. An op array with a call is compared as php knows it
 //! before inference: php types what a call returns by what it knows of the
-//! callee (`zend_get_func_info`), which the analysis does not read yet
-//! (#3574).
+//! callee (`zend_get_func_info`), which the analysis does not read yet.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -202,7 +201,7 @@ fn each_op_array_a_trace_passes_is_dumped_as_php_dumps_it() -> Result<(), String
 }
 
 /// The seven kernels' op arrays the traces pass through are dumped as php
-/// dumps them under `[regime.jit-ssa]` (#3572), served by the command
+/// dumps them under `[regime.jit-ssa]`, served by the command
 /// line `PHP_SSA_ENGINE` names, built with the tier:
 /// `cargo build -p php_sapi_cli --bin php --features php_bundle/jit`.
 /// A kernel calls the bundle's natives, which a test's engine here does
@@ -384,7 +383,7 @@ fn served_in_turn(files: &[(&str, &str)], mains: &[&str], function: &str) -> Vec
 
 /// A class php's analysis binds by name is the one the build finds, so
 /// an analysis kept from one request is not read in another that bound
-/// another class of the name (#3579): request A binds `f.php`'s `Foo`
+/// another class of the name: request A binds `f.php`'s `Foo`
 /// and its build types `make()`'s `NEW` with it; request B declared
 /// `g.php`'s `Foo` first, which php's analysis of `make()` ignores as
 /// another file's (`zend_optimizer_ignore_class`), so B's dump is the one
@@ -423,7 +422,7 @@ const LATER: [(&str, &str); 4] = [
 ];
 
 /// A class declared after a trace's build through an op array is bound
-/// at the next build (#3579), as php's analysis, rebuilt at every build,
+/// at the next build, as php's analysis, rebuilt at every build,
 /// finds it in the linked table then: the later dump types `NEW Bar` and
 /// the `INSTANCEOF` pi with `Bar`, as an engine that never served the
 /// earlier request writes it.

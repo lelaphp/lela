@@ -1,4 +1,4 @@
-//! Routing (harness-design.md §4.3, #3312): a row naming an oracle
+//! Routing (harness-design.md §4.3): a row naming an oracle
 //! variant holds in its subset, beside its own directories, every test of
 //! the pinned tree whose `--EXTENSIONS--` names an extension the main
 //! oracle does not load and the variant does, each binary's listing read
@@ -8,7 +8,7 @@
 //! feature or a host, is judged [`Judgement::Unbuilt`] on both sides, so
 //! it is named outside the target with that reason. Derived, not
 //! declared: a declared list fails open, and this fails closed, as
-//! Mitchell ruled on #3312.
+//! Mitchell ruled 2026-10-24.
 //!
 //! [`Judgement::Unbuilt`]: super::Judgement::Unbuilt
 

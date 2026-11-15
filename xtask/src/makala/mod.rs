@@ -1,24 +1,24 @@
-//! The production server's two lanes beside its witnesses (#2337), each an
+//! The production server's two lanes beside its witnesses, each an
 //! instrument over `sapi/makala`'s `makala` as `profile::build` builds it,
 //! in the lanes' profile, whose debug assertions arm the request leak
 //! sensor:
 //!
-//! - `fpm-compare` ([`compare`], #2349): each request of the corpus served
+//! - `fpm-compare` ([`compare`]): each request of the corpus served
 //!   by makala over HTTP and by the pinned php-fpm under the pin's
 //!   `[fastcgi]` mapping, the two responses held to each other. It is the
 //!   oracle for what PHP code sees under makala, and runs on request where
 //!   the pinned php-fpm is.
-//! - `soak` ([`soak`], #2350): many clients sending the corpus to one
+//! - `soak` ([`soak`]): many clients sending the corpus to one
 //!   makala for a fixed time, each response held to the same request
 //!   served alone, with the leak sensor's findings and the growth of the
 //!   process's resident memory counted. Its length, its clients and its
-//!   lane are #2336's ruling: ten minutes, 64 clients, nightly on
+//!   lane are as ruled 2026-10-09: ten minutes, 64 clients, nightly on
 //!   `dax-build`, and a 30-second smoke in makala's own tests.
 //!
 //! Both are served one corpus, the HTTP-served subset: the tests of the
-//! phpt lane's served subset (`phpt::http`, #2348) that one file serves
-//! whole, each its `--FILE--`, or the file its `--FILE_EXTERNAL--` names
-//! (#2651), written under the name the phpt lane writes it, the one its
+//! phpt lane's served subset (`phpt::http`) that one file serves
+//! whole, each its `--FILE--`, or the file its `--FILE_EXTERNAL--` names,
+//! written under the name the phpt lane writes it, the one its
 //! request names (`frontcontroller21.php`), and the request its sections
 //! describe as run-tests.php's CGI translation of them ([`cgi::request`])
 //! reads back as HTTP, under its `--INI--`. A test that cleans up after
@@ -29,12 +29,12 @@
 //! which runs no section, leaves it out. The soak adds the workloads
 //! `docs/perf/workloads.toml` declares in a role served on the web, every
 //! role but a native, to run as files with no arguments (measurement
-//! protocol §11, #4366), each a `GET` of its own ([`workloads`]).
+//! protocol §11), each a `GET` of its own ([`workloads`]).
 //!
 //! **What a by-design difference is.** Where makala answers a test
 //! otherwise than php's SAPIs by design, an accepted `makala:` row of the
 //! registry says so, one row per fact for both of the production server's
-//! comparisons, `fpm-compare` and the served phpt lane (#2629, #2639).
+//! comparisons, `fpm-compare` and the served phpt lane.
 //! Each holds a test to the rows through [`held`]: a differing test a row
 //! names reads as accepted, counted apart from the failures and named
 //! ([`Consulted`]). `fpm-compare` also names a row whose test now agrees
@@ -79,7 +79,7 @@ pub(crate) struct Entry {
     pub(crate) skipif: Option<Vec<u8>>,
     pub(crate) http: Http,
     /// With `{PWD}` kept, since each host serves the program from a
-    /// directory of its own: [`Entry::ini_in`] puts it there (#2705).
+    /// directory of its own: [`Entry::ini_in`] puts it there.
     pub(crate) ini: Vec<String>,
 }
 
@@ -165,8 +165,8 @@ fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
 /// The workloads the declaration at `root` gives a served request, each a
 /// `GET` with no ini of its own, in the declaration's order, written under
 /// the recipe's `script_name`, the request the server's bench series has
-/// sent since it began (#2351). A request is a run of a role
-/// [`workloads::Role::served`] serves, every role but a native (#4366),
+/// sent since it began. A request is a run of a role
+/// [`workloads::Role::served`] serves, every role but a native,
 /// that takes no arguments, since a served request has no `$argv`; none
 /// that is served takes any today. A pinned file or declared code is no
 /// file of the directory, which is what a host serves.
@@ -371,7 +371,7 @@ mod tests {
 
     /// An entry whose `--INI--` names `{PWD}` is served under each host's
     /// own directory there, the one the program is written in, and not
-    /// the test's directory in php-src (#2705).
+    /// the test's directory in php-src.
     #[test]
     fn pwd_in_an_entry_s_ini_is_the_directory_each_host_serves() {
         let tree = Tree::new("makala-pwd").unwrap();
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(entry.script, "fc21.php", "the program the list names");
     }
 
-    /// A test whose program is `--FILE_EXTERNAL--` is an entry (#2651):
+    /// A test whose program is `--FILE_EXTERNAL--` is an entry:
     /// its program the external file's bytes, written under the name the
     /// phpt lane writes it, the one its request names.
     #[test]
@@ -422,7 +422,7 @@ mod tests {
     /// the page prints it, under the entry's `session.name` or php's
     /// default; an id a request sent, another cookie of that shape and an
     /// id in the body alone keep their bytes
-    /// (`ext/session/tests/rfc1867_sid_only_cookie_2.phpt`, #2706).
+    /// (`ext/session/tests/rfc1867_sid_only_cookie_2.phpt`).
     #[test]
     fn a_session_id_php_made_reads_as_one_token() {
         let entry = |ini: &[&str]| Entry {

@@ -4,7 +4,7 @@ name = "php_ext_lexbor"
 version = "0.0.0"
 edition.workspace = true
 # The binding is the workspace's; lexbor/ is php-src's vendored copy under
-# its own LICENSE and NOTICE, the Apache License 2.0 (#1173, #1260).
+# its own LICENSE and NOTICE, the Apache License 2.0.
 license = "MIT AND Apache-2.0"
 rust-version.workspace = true
 publish = false
@@ -19,8 +19,8 @@ workspace = true
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 
-# lexbor is php-src's vendored copy, compiled by `build.rs` (design §7.2,
-# #731) and bound in `src/ffi/` alone (`unsafe.homes`).
+# lexbor is php-src's vendored copy, compiled by `build.rs` (design §7.2)
+# and bound in `src/ffi/` alone (`unsafe.homes`).
 [build-dependencies]
 cc = { workspace = true }
 

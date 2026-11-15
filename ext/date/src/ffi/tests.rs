@@ -1,4 +1,4 @@
-//! The request's zones as the parsers' wrapper reads them (#1899).
+//! The request's zones as the parsers' wrapper reads them.
 
 use std::sync::Arc;
 

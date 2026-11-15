@@ -1,4 +1,4 @@
-//! What `computed run` answered, read once (#43; harness-design.md §5).
+//! What `computed run` answered, read once (harness-design.md §5).
 //! Four callers render regions and each read the exit and the lines by
 //! hand: the interpretation is here, as [`Answer`], and the callers take
 //! the value. `new-ext` and `worktree add` call [`render`] in process;
@@ -184,7 +184,7 @@ pub fn command(root: &Path, files: &[String], staged: bool) -> Result<()> {
         if !refused.is_empty() {
             bail!(
                 "a region this commit would carry reads a path whose working copy it does not stage, \
-                 so its render would carry that change (#2236); stage the path with it, or leave the \
+                 so its render would carry that change; stage the path with it, or leave the \
                  path as it is staged:\n{}",
                 refused.join("\n")
             );
@@ -205,7 +205,7 @@ pub fn command(root: &Path, files: &[String], staged: bool) -> Result<()> {
 /// what is untracked and not ignored, a new directory as itself, which is
 /// what a `tree` region lists and an input glob takes in. `computed`
 /// renders from the working tree, so such a region's render would carry a
-/// change the commit does not (#2236).
+/// change the commit does not.
 fn unstaged_reads(root: &Path, files: &[String]) -> Result<Vec<String>> {
     let mut unstaged: Vec<String> = Vec::new();
     for args in [

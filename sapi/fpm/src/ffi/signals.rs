@@ -67,7 +67,7 @@ extern "C" fn soft_quit(_signo: libc::c_int) {
 
 /// A child's listening socket, which it accepts from by number: owned by
 /// the `SIGQUIT` handler, which closes it while a Rust value may still
-/// name it, so no Rust value owns it and nothing drops it (#2400). The
+/// name it, so no Rust value owns it and nothing drops it. The
 /// number it was handed over as, which [`LISTENING`] holds until then.
 pub(crate) struct Listening(RawFd);
 

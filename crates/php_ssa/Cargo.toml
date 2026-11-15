@@ -2,7 +2,7 @@
 # the compiled tier that alone calls it: Zend/Optimizer's CFG, DFG and SSA,
 # run as zend_jit_trace_build_ssa runs them. Reads the unit format and the
 # constants it carries; takes php_macros for #[derive(EngineState)] alone,
-# which links nothing (#4544).
+# which links nothing.
 [package]
 name = "php_ssa"
 version = "0.0.0"

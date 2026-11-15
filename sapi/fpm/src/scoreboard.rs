@@ -7,7 +7,7 @@
 //! slot. A process can be killed holding any of them, so the master never
 //! waits on one without end: it frees a dead child's slot without the
 //! spinlock, as php zeroes it, reads a slot by trying its spinlock once, and
-//! waits a bounded while on the header's, as php does (#2777).
+//! waits a bounded while on the header's, as php does.
 
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -590,7 +590,7 @@ impl Proc {
     /// Zeroed whole, its spinlock with it, as `fpm_scoreboard_proc_free`'s
     /// `memset` zeroes it: the master frees the slot of a child it has
     /// buried, which may have died holding the spinlock, so it never waits for
-    /// it (#2777).
+    /// it.
     fn clear(&self) {
         self.used.store(0, Ordering::Relaxed);
         for cell in [
@@ -785,7 +785,7 @@ mod tests {
     }
 
     /// A child killed while it held its slot's spinlock, as `SIGTERM` finds one
-    /// writing its request's stage (#2777): the master buries it and frees
+    /// writing its request's stage: the master buries it and frees
     /// the slot without the spinlock, as `fpm_scoreboard_proc_free` zeroes it
     /// whole, spinlock and all, so the slot serves the next child.
     #[test]

@@ -1,5 +1,5 @@
 //! `xtask miri` (third-engine-design.md §9's "Miri on `php_heap`'s test
-//! suite per commit"; harness-design.md §7's Miri row, #1916): a crate's
+//! suite per commit"; harness-design.md §7's Miri row): a crate's
 //! library and integration tests run under Miri, as one reading per crate
 //! with what ran, failed and was ignored in its numbers. The crate is
 //! `php_heap` unless `--crate` names others.
@@ -8,13 +8,13 @@
 //! ([`TOOLCHAIN`]) and cargo-nextest ([`NEXTEST`]): each test in a Miri
 //! process of its own, as many at once as the instrument's seat is a share
 //! of the machine's cores ([`crate::seat::jobs`], the reading's `jobs`), so
-//! the lane is not one core for the whole suite (#4117). Miri ends a
+//! the lane is not one core for the whole suite. Miri ends a
 //! process at the first undefined behaviour or unsupported operation it
 //! meets, which now ends only the test that met it; the test is judged by
 //! the error it printed on its own stderr. The doctests are not run.
 //!
 //! **What it runs under, said and never chosen silently.** Tree Borrows
-//! ([`MODEL`]) with permissive provenance, as #2415 ruled: `php_heap`'s
+//! ([`MODEL`]) with permissive provenance, as ruled 2026-10-09: `php_heap`'s
 //! pointers carried through integers (`expose_provenance`,
 //! `with_exposed_provenance_mut`) are allowed with a warning. `MIRIFLAGS`
 //! adds to that, and `-Zmiri-strict-provenance` among them makes each such
@@ -40,22 +40,22 @@ pub(crate) const INSTRUMENT: &str = "miri";
 
 /// The nightly Miri runs on, by rustup's name: one of the workspace's own
 /// Rust (`rust-toolchain.toml`), so it builds every crate as the stable
-/// compiler does, with no feature turned on and no `rust-version` waived
-/// (#2417). CI's job installs the same one with its `miri` component.
+/// compiler does, with no feature turned on and no `rust-version` waived.
+/// CI's job installs the same one with its `miri` component.
 pub const TOOLCHAIN: &str = "nightly-2026-02-20";
 
 /// The cargo-nextest the lane runs each test under Miri with, one Miri
-/// process a test (#4117). CI's job installs this release; on a machine
+/// process a test. CI's job installs this release; on a machine
 /// without one the reading is a skip naming the command that does.
 pub const NEXTEST: &str = "0.9.127";
 
-/// The aliasing model every run stands under, ruled on #2415; on
+/// The aliasing model every run stands under, ruled 2026-10-09; on
 /// [`TOOLCHAIN`] it takes exposed provenance.
 const MODEL: &str = "-Zmiri-tree-borrows";
 
 /// Run every crate of `only`, or where none is named each crate the
 /// manifest's `[[owed]]` rows owe a `miri` reading, as `done` asks it
-/// ([`crate::done::owed`]; design §9's memory model, #3206), under Miri;
+/// ([`crate::done::owed`]; design §9's memory model), under Miri;
 /// one reading each. Rows that owe it of no crate are refused, naming
 /// `--crate`. A crate whose sources do not exist yet writes none; a
 /// machine without the toolchain writes a skip naming the command that
@@ -470,7 +470,7 @@ error: test run failed
 
     /// Each test is its own Miri process, so a read after a free ends
     /// only the test it is in: every line nextest printed is read, the
-    /// failed tests by what each printed of what ended it (#1916, #4117).
+    /// failed tests by what each printed of what ended it.
     #[test]
     fn a_run_reads_the_finished_tests_and_the_one_miri_ended() {
         let run = Run::of(NEXTEST_RUN);

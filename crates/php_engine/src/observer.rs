@@ -36,12 +36,13 @@
 //!
 //! Both homes stand where no tier's type parameter reaches, so a
 //! stepping host's [`crate::tier::step`] and [`crate::tier::unwind`]
-//! raise them as the loop does (#1813).
+//! raise them as the loop does.
 //!
-//! That is the plain test #1808 measured, which #1954 ruled stands: the test
-//! lives in these functions alone, so php's observer-specialised call
-//! and return handlers, the escape design §4.3 names, would change no
-//! item of the seam. Past the word, out of line and cold, a frame's
+//! That is the plain test as G1 was measured with it, which was ruled to
+//! stand on 2026-10-05: the test lives in these functions alone, so php's
+//! observer-specialised call and return handlers, the escape design §4.3
+//! names, would change no item of the seam. Past the word, out of line
+//! and cold, a frame's
 //! function is resolved on its first call into a slot in the runtime
 //! cache of the op array it serves ([`Slot`]), never indexed by the
 //! function's identity number, which is sparse; a native's slot stands in
@@ -107,7 +108,7 @@
 //!
 //! A handler reads the frame it is handed through [`Observed::frame`],
 //! and the user frame below it through [`Observed::caller`], and keeps
-//! one as a [`FrameId`](crate::api::request::FrameId) (#1827).
+//! one as a [`FrameId`](crate::api::request::FrameId).
 //!
 //! [`Extension`]: crate::api::abi::Extension
 //! [`ExtensionBuilder::observer`]: crate::api::abi::ExtensionBuilder::observer

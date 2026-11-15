@@ -1,7 +1,7 @@
 //! `php_getopt` (`Z/main/getopt.c`), which php's CLI, CGI, FPM and
 //! debugging hosts read their command lines with, each over its own
 //! `OPTIONS` table: the engine's one walk, which `getopt()` reads a
-//! program's `argv` with too (#889), and what the hosts share around it,
+//! program's `argv` with too, and what the hosts share around it,
 //! a table's rows written as php writes them and `php_opt_error`'s line.
 
 use std::ffi::OsString;

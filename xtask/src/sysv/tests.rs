@@ -106,7 +106,7 @@ const PROC_SEM: &str = "\
          0      32769     0          3  1000  1000  1000  1000          0 1759282783
 ";
 
-/// Linux's `/proc/sysvipc` read as `ipcs -a` is on macOS (#1643): each
+/// Linux's `/proc/sysvipc` read as `ipcs -a` is on macOS: each
 /// object with its id, the processes the kernel names on it, its attached
 /// count, its key as the `key_t` it is, its creator's uid and its `ctime`
 /// as the instant it prints. A header alone, as a machine with no object
@@ -151,7 +151,7 @@ fn proc_sysvipc_is_read_by_each_files_header() {
 /// The rule for an object naming no process holds over Linux's `ctime`,
 /// an instant and not a time of day, as it does over `ipcs`'s: a private
 /// queue of the runner's uid made while a program ran is removed, and one
-/// made a second before it began, or another uid's, stands (#1643).
+/// made a second before it began, or another uid's, stands.
 #[test]
 fn an_instant_from_proc_is_held_to_the_programs_runs_as_a_time_of_day_is() {
     let q = |id, creator: &str, after: i64| Object {
@@ -254,7 +254,7 @@ fn runner() -> Runner {
     }
 }
 
-/// The rule Mitchell ruled on #1469 (#1482), one counterexample per
+/// The rule Mitchell ruled 2026-10-01, one counterexample per
 /// clause: an object naming no process is the run's only when it is new
 /// since the subset began, the runner's, made under `IPC_PRIVATE`, and
 /// made in a second one of the subset's programs ran in, each program's
@@ -368,7 +368,7 @@ fn the_namespace_is_unshare_around_the_binary() {
 /// does; the one in the runner's own user namespace where only that runs,
 /// as an unprivileged user does where the kernel allows it; and none
 /// where neither does, as a container under the default seccomp profile
-/// refuses both, where the sweep is what removes a test's objects (#1582).
+/// refuses both, where the sweep is what removes a test's objects.
 #[test]
 fn the_first_namespace_unshare_permits_is_the_one_a_subset_runs_in() {
     let [bare, user] = Namespace::tries("/usr/bin/unshare");
@@ -389,7 +389,7 @@ fn the_first_namespace_unshare_permits_is_the_one_a_subset_runs_in() {
 
 /// On Linux, where `unshare` permits one, an object a program makes in the
 /// namespace a System V subset runs in goes with the program: a queue
-/// `ipcmk` makes under it is not on the machine after (#1582). Where it
+/// `ipcmk` makes under it is not on the machine after. Where it
 /// permits neither, the test says so and returns.
 #[cfg(target_os = "linux")]
 #[test]
@@ -426,7 +426,7 @@ fn a_queue_made_in_the_namespace_does_not_outlive_its_program() {
     );
 }
 
-/// A witness run's claim, one counterexample per clause (#2115): an
+/// A witness run's claim, one counterexample per clause: an
 /// object is the run's when it is private, the runner's, attached to
 /// nothing, names no living process, and was made inside the claim's
 /// window, whether it names a process or none.
@@ -470,7 +470,7 @@ fn a_claim_takes_what_is_forsaken_inside_its_window_and_nothing_else() {
 
 /// A private segment of the runner's that nothing attaches and whose
 /// every named process is dead is taken whatever run made it, as the
-/// segments that filled the table on 2026-10-06 were by hand (#2115); one
+/// segments that filled the table on 2026-10-06 were by hand; one
 /// a living process last attached, a queue, and a segment naming nobody
 /// are not.
 #[test]
@@ -525,7 +525,7 @@ fn queues(taken: &[&Object], ids: &[u64]) -> Vec<u64> {
     queues
 }
 
-/// Two runs at once (#2563), each with a claim in one directory, and a
+/// Two runs at once, each with a claim in one directory, and a
 /// private queue of mode 0 nobody sent to standing for each, as php's
 /// `msg_get_queue(0)` leaves one, made in one second: the kernel names no
 /// maker on either, so one run's and the other's look alike. The first
@@ -549,7 +549,11 @@ fn what_is_made_while_another_run_holds_its_claim_is_left_until_both_end() {
     );
     let windows = [window(ours.from, None, &clock)];
     let mut taken = claimed(&standing, &windows, (&runner, &clock), alive);
-    assert_eq!(queues(&taken, &ids), ids, "the rule before #2563");
+    assert_eq!(
+        queues(&taken, &ids),
+        ids,
+        "a run's window alone takes both, as it did before"
+    );
     let held = Claims::read(&dir, Some(ours.path())).held;
     taken.retain(|o| !held.covers(o, &clock));
     let refused = queues(&taken, &ids);
@@ -622,7 +626,7 @@ fn a_process_is_read_by_its_group_and_its_age() {
 
 /// A cut-off run's program is the process under its number that leads a
 /// group of that number and started by its journal's last write, a
-/// second's give (#2522); every counterexample is a process that is not
+/// second's give; every counterexample is a process that is not
 /// the program and is never signalled: one that took the number after the
 /// last write, and one in another process's group, as a reused number
 /// most often is.
@@ -641,7 +645,7 @@ fn a_process_is_a_cut_off_runs_program_only_by_its_number_its_group_and_its_star
 
 /// A claim a System V subset's run never settled, its journal naming three
 /// programs, kills the one that still stands and never ended, with its
-/// group, and writes its end (#2522); a process standing under a number
+/// group, and writes its end; a process standing under a number
 /// whose program ended, as another run's may, and one standing under a
 /// started number that leads no group of its own, as a process that took
 /// the number would, are never signalled, nor is a program still going
@@ -708,8 +712,8 @@ fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
 
 /// A claim a phpt subset's run never settled, its journal naming the
 /// programs it started, is taken with the objects those programs left
-/// whatever their key, as the run's own sweep would have taken them
-/// (#2448): a keyed queue a gone process sent to and its journal names is
+/// whatever their key, as the run's own sweep would have taken them:
+/// a keyed queue a gone process sent to and its journal names is
 /// removed, while the same queue of a process no journal names stands.
 #[test]
 fn a_claim_left_unsettled_takes_what_its_journaled_programs_left() {
@@ -749,7 +753,7 @@ fn a_claim_left_unsettled_takes_what_its_journaled_programs_left() {
 }
 
 /// A held claim's journal keeps every other run's sweep from what its
-/// processes are named on (#2750): a phpt subset's test made a segment
+/// processes are named on: a phpt subset's test made a segment
 /// and ended, and another run's reclaim took it as [`abandoned`] before
 /// the subset's own sweep, which counted two of the three objects. The
 /// subset's claim of its processes alone holds no window, so a segment
@@ -796,7 +800,7 @@ fn what_a_held_claims_processes_are_named_on_is_no_other_runs_to_take() {
 }
 
 /// A run whose claims a test lays apart reads the claims held in the
-/// machine's directory too (#2902): a phpt subset's claim of its processes
+/// machine's directory too: a phpt subset's claim of its processes
 /// alone, held there, keeps a run laid apart from the segment its test's
 /// process left, which such a run's reclaim took as [`abandoned`] between
 /// the test ending and the subset's own sweep. Only this test's claim and

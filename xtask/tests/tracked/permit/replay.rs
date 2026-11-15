@@ -1,9 +1,9 @@
-//! The replay corpus (#3619): every denial the store's log kept from
+//! The replay corpus: every denial the store's log kept from
 //! 2026-10-15 to 2026-10-29 under a rule that places a shell line by the
 //! checkout it runs in, each kept as its call, the directory the call
 //! stood in, where a merge stood, and the decision the rule should have
 //! made, classed by hand once. The calls a merge's owner made in its own
-//! checkout are left to the owner record (#3621), since whose merge it was
+//! checkout are left to the owner record, since whose merge it was
 //! decides them and the line alone does not; every merge the corpus keeps
 //! is laid down owned by another session.
 //!
@@ -138,7 +138,7 @@ fn replay(rule: &str) {
             .iter()
             .map(|at| {
                 let checkout = PathBuf::from(world.at(at));
-                // Every merge the corpus keeps is another hand's (#3621).
+                // Every merge the corpus keeps is another hand's.
                 let merger = xtask::owner::SessionId::new("the-merger").unwrap();
                 xtask::owner::record(&checkout, &merger).unwrap();
                 let git_dir = Repo::at(&checkout).git(&["rev-parse", "--absolute-git-dir"]);
@@ -191,7 +191,7 @@ fn the_window_s_git_operation_denials_replay_as_classed() {
 /// The window's `git.merge-commits-itself` denials, every one a merge in
 /// main's checkout or one a `cd` moves out of it, replayed under
 /// `git.main-ff-only`, which judges main's checkout since that rule moved
-/// to the merge worktree (#3622, #3639): the classes hold, since a merge
+/// to the merge worktree: the classes hold, since a merge
 /// that commits itself in main is no fast-forward either.
 #[test]
 fn the_window_s_merge_commits_itself_denials_replay_under_main_ff_only() {

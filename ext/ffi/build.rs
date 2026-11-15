@@ -1,4 +1,4 @@
-//! libffi is the platform's (design §7.2, revision 75; #1573): the
+//! libffi is the platform's (design §7.2, revision 75): the
 //! oracle links `/usr/lib/libffi.dylib`, whose declarations are the
 //! SDK's `ffi.h`, and `pkg-config libffi` names that library on a Mac,
 //! `-lffi` with no search path of its own, so the linker finds the

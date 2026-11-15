@@ -671,7 +671,7 @@ enum Place {
     Gone,
 }
 
-/// A persistent connection the request gave back to PDO's pool (#4474):
+/// A persistent connection the request gave back to PDO's pool:
 /// out of the request's table, its `pdo_mysql_db_handle` with no number
 /// of a request's, the mysqlnd connection with its socket, which wait in
 /// PDO's pool with it and in no other list until a request takes them up,

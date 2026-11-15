@@ -14,7 +14,7 @@
 //!   trickles bytes does not move it. The first byte is the first the
 //!   socket reads while the connection idles; a head whose start hyper
 //!   read with the request before it, which a pipelining client sends,
-//!   is timed from that request's response's end ([`Boundary`], #2572).
+//!   is timed from that request's response's end ([`Boundary`]).
 //! - **The minimum data rate** of the response, Kestrel's
 //!   `MinResponseDataRate`, on each write the kernel would not take
 //!   ([`WriteClock::wrote`]): past its deadline with a write stalled, the
@@ -32,11 +32,11 @@
 //! the response's end, and what the client still sends is read and
 //! dropped until it closes its side or [`LINGER`] has passed. A socket
 //! let go outside the runtime, or as the runtime is dropped at the
-//! drain's deadline (#2344), closes at once. A lingering socket holds its fd, and its connection's
+//! drain's deadline, closes at once. A lingering socket holds its fd, and its connection's
 //! slot under the cap, for that second beyond its connection. A TLS
 //! connection's write side is shut by its `close_notify` first.
 //!
-//! A socket carries its bytes clear or under TLS ([`Wire`], #2343), and
+//! A socket carries its bytes clear or under TLS ([`Wire`]), and
 //! its clocks and the 408 count on what TLS carries. A clear connection
 //! whose first byte is a TLS record's, `0x16`, a handshake sent to the
 //! clear listener, is refused: its read fails, so hyper drops it unanswered,

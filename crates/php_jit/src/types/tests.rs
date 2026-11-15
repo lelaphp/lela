@@ -135,10 +135,10 @@ fn binary_trees_sends_a_long_by_value_and_keeps_its_type() -> Result<(), String>
 /// direction in both levels it inlines, as php's `exit_1`, at opline
 /// `0003`, serves both: php's stack map is relative to the frame pointer,
 /// so the same guard at the same opline with the same types known is one
-/// exit (`zend_jit_trace_get_exit_point`, #3203). It is numbered 1, behind
+/// exit (`zend_jit_trace_get_exit_point`). It is numbered 1, behind
 /// the `RECV`'s argument count guard, php's `exit_0`, which the trace
 /// numbers though it entered past the prologue, and which its interrupt
-/// test leaves through (`jit-design.md` §4.2, #3269).
+/// test leaves through (`jit-design.md` §4.2).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
@@ -171,7 +171,7 @@ fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
 /// `fib`'s return trace loops by recursive return and takes no interrupt
 /// test, and numbers no exit for one, as php's `zend_jit_trace` sets no
 /// `timeout_exit_addr` for `ZEND_JIT_TRACE_STOP_RECURSIVE_RET`
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:7214-7231`, #3314). The pinned
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:7214-7231`). The pinned
 /// php's `TRACE 3 exit info` under the trace-dump regime lists three
 /// exits, `exit_0: 0008/0000/3/VM`, `exit_1: 0004/0003/1` and
 /// `exit_2: 0012/0004/4`, and no interrupt exit after them: the stack
@@ -305,7 +305,7 @@ fn a_nans_warning_unwinds_before_the_boolean_is_written() -> Result<(), String> 
 /// php's stack map types what an op writes only once the op's exits are
 /// taken; and the `+=` that reads it leaves through exit 4 at `0005`,
 /// as php's trace takes `exit_0` to `exit_2` at `0003`, `exit_3` at
-/// `0007` and `exit_4` at `0005` (#3203).
+/// `0007` and `exit_4` at `0005`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
@@ -349,12 +349,12 @@ fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
 /// with before the op that first reads it, as php's code generator
 /// holds a loop-invariant type at entry only where the trace loops by
 /// its own loop or recursive call (`Z/ext/opcache/jit/zend_jit_trace.c:4237-4272`),
-/// and a side's guard at the read (#3203): the array's layout among
+/// and a side's guard at the read: the array's layout among
 /// them, held where the array is read by a long key, as php's side holds
 /// `MAY_BE_PACKED_GUARD` there; and `$n`, read once. `$i`, which php's
 /// allocator loads into a register as the trace enters, read by the
 /// comparison, the fetch and the increment, is held at entry, as php's
-/// code holds a `ZREG_LOAD` value there (`:4283-4310`, #3270).
+/// code holds a `ZREG_LOAD` value there (`:4283-4310`).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), String> {
@@ -405,7 +405,7 @@ fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), Strin
 /// (its `TRACE 10 Live Ranges` list `#5.CV5($maxFlips) load`), so php
 /// holds its type there: `exit_0` and `exit_1` land at `0049`, the guard
 /// on `$maxFlips` and then the one on `$flips`, which `PRE_INC` reads
-/// once (#3270). The record is the engine's own for that trace.
+/// once. The record is the engine's own for that trace.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_value_phps_allocator_loads_is_held_at_entry() -> Result<(), String> {
@@ -452,8 +452,7 @@ link-at {root} 82\nstop link 6\n"
 /// `$a[$k] = $k` reads `$k` twice, as the key and as the value the
 /// `OP_DATA` takes an owner of, and php's allocator loads it at the entry
 /// of a trace that does not loop where nothing else reads it
-/// (`zend_jit_trace_allocate_registers`, `Z/ext/opcache/jit/zend_jit_trace.c:3290-3300`;
-/// #3270).
+/// (`zend_jit_trace_allocate_registers`, `Z/ext/opcache/jit/zend_jit_trace.c:3290-3300`).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_key_written_as_its_own_value_is_read_twice() -> Result<(), String> {
@@ -484,7 +483,7 @@ fn a_key_written_as_its_own_value_is_read_twice() -> Result<(), String> {
 /// the trace goes on at, the default's first and then each arm's in the
 /// table's order, as php's `zend_jit_switch` takes them: its trace's
 /// `exit_4` at `0005`, the `UnhandledMatchError`, and `exit_5` at `0008`,
-/// the second arm (#3203). Each lands where the jump went.
+/// the second arm. Each lands where the jump went.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_tables_jump_takes_an_exit_per_arm_as_phps_does() -> Result<(), String> {
@@ -536,7 +535,7 @@ fn nbody_advances_in_a_loop() -> Result<(), String> {
 
 /// A native's call in a loop: its `INIT_FCALL` inline, the call pushed
 /// in place as php's `zend_jit_push_call_frame` pushes a native's, its
-/// sends inline, and its `DO_ICALL` served by the handler (#2963).
+/// sends inline, and its `DO_ICALL` served by the handler.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_is_pushed_in_place() -> Result<(), String> {
@@ -555,7 +554,7 @@ fn a_natives_call_is_pushed_in_place() -> Result<(), String> {
 
 /// A frameless call in a loop names the native its opline calls, its
 /// place in the engine's frameless table, so compiled code hands it to
-/// the `frameless` kernel with no opline read (#3560).
+/// the `frameless` kernel with no opline read.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_frameless_call_names_its_native() -> Result<(), String> {
@@ -580,7 +579,7 @@ fn a_frameless_call_names_its_native() -> Result<(), String> {
 /// A loop over strings: `$s === ''` fused to its jump, `$s !== "zz"`
 /// written, `strlen($s)` and `(bool) $i` each inline, as php's code
 /// generator compiles them (`zend_jit_identical`, `zend_jit_strlen`,
-/// `zend_jit_bool_jmpznz`), where each was stepped (#3321).
+/// `zend_jit_bool_jmpznz`), where each was stepped.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn strings_are_compared_and_measured_inline() -> Result<(), String> {
@@ -605,7 +604,7 @@ fn strings_are_compared_and_measured_inline() -> Result<(), String> {
 /// rope piece that is a string, `ROPE_INIT`, `ROPE_ADD` and `ROPE_END`
 /// alike, and `.=` of the line onto the blob, inline, as php's
 /// `zend_jit_concat`, `zend_jit_rope` and `zend_jit_assign_op` compile
-/// them; the piece that is a long is the handler's, as php's is (#3321).
+/// them; the piece that is a long is the handler's, as php's is.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn ropes_and_appends_of_strings_are_inline() -> Result<(), String> {
@@ -639,7 +638,7 @@ fn ropes_and_appends_of_strings_are_inline() -> Result<(), String> {
 /// A callee's `RETURN` over variables that own something, an array its
 /// caller keeps too and a string it built, is left in place and names
 /// both to be freed, as php's trace frees each before
-/// `zend_jit_leave_func` (#3313).
+/// `zend_jit_leave_func`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_leave_over_owning_variables_is_made_in_place() -> Result<(), String> {
@@ -667,7 +666,7 @@ fn a_leave_over_owning_variables_is_made_in_place() -> Result<(), String> {
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:1871-1893`): the array is of
 /// either layout, which the write tests. They take no exit, since php's
 /// code calls its helpers where it cannot write in place, and the handler
-/// serves it here; the handler may throw, so they unwind (#3228).
+/// serves it here; the handler may throw, so they unwind.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_element_write_is_inline_and_takes_no_exit() -> Result<(), String> {
@@ -718,7 +717,7 @@ fn spectralnorm_inlines_its_call() -> Result<(), String> {
 /// copies, as `spectralnorm`'s `$u[$j]` at `0012` takes php's `exit_9`
 /// before `exit_10` and `exit_11` at `0013`; and a layout guard leaves
 /// through an exit of its own, php's `ZEND_JIT_EXIT_PACKED_GUARD`,
-/// which no type guard's place shares (#3203).
+/// which no type guard's place shares.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fetch_takes_its_exits_in_phps_order() -> Result<(), String> {
@@ -758,14 +757,14 @@ fn a_fetch_takes_its_exits_in_phps_order() -> Result<(), String> {
     Ok(())
 }
 
-/// php's stack check (`zend_jit_stack_check`, #3203): a loop whose calls
+/// php's stack check (`zend_jit_stack_check`): a loop whose calls
 /// push frames holds the stack's room for them once, at its entry, its
 /// first exit, back to the interpreter at the loop's first opline, as
 /// php's trace for `$s += g($i)` takes `exit_0` `0009/----/0/VM`; a trace
 /// that does not loop holds it at each `INIT_*` instead, in
 /// `zend_jit_push_call_frame`, an `INIT_FCALL` of a user function taking no
 /// exit of its own, as `zend_jit_init_fcall` holds no guard on such a
-/// callee (`Z/ext/opcache/jit/zend_jit_ir.c:8790-8906`, #3230).
+/// callee (`Z/ext/opcache/jit/zend_jit_ir.c:8790-8906`).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
@@ -842,8 +841,8 @@ fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
 
 /// A side trace enters with the types its parent's exit knew, an array's
 /// without its layout, and holds the layout at its first read by a long
-/// key, as php's holds `MAY_BE_PACKED_GUARD` (#3255's ruling, #3262).
-/// #3196's program: php's `side trace 1/6` takes `exit_0` at `0007`, the
+/// key, as php's holds `MAY_BE_PACKED_GUARD` (ruled 2026-10-23). In
+/// this program php's `side trace 1/6` takes `exit_0` at `0007`, the
 /// fetch's exit to the interpreter, then `exit_1` there, the layout
 /// guard's, then the element's two at `0008`, and holds nothing at entry.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -943,7 +942,7 @@ fn a_side_holds_an_arrays_layout_at_its_first_read() -> Result<(), String> {
 /// TSSA types what a `DO_ICALL` writes by the function its record names
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`): `strcmp()` returns
 /// an `int`, so the `+=` that reads what it wrote holds no guard on it, as
-/// php's holds none (#3264).
+/// php's holds none.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_returns_what_it_declares() -> Result<(), String> {
@@ -978,7 +977,7 @@ fn a_natives_call_returns_what_it_declares() -> Result<(), String> {
 /// reads again, and an opline that reads it holds it as php's does. The
 /// engine with no extension this test serves on has no `substr()`; the
 /// pinned php's trace of `strlen(substr($s, 1))` in a loop holds no guard
-/// on its `string` at the `STRLEN` (#3438).
+/// on its `string` at the `STRLEN`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_frameless_call_returns_what_its_native_declares() -> Result<(), String> {
@@ -1011,7 +1010,7 @@ fn a_frameless_call_returns_what_its_native_declares() -> Result<(), String> {
 /// the variable's guard leaves no type known, so the guard on the value
 /// after it leaves through the same exit: the pinned php's trace of this
 /// loop takes one exit, `exit_2: 0010/----/0`, at `$a[0] = class_exists($c)`
-/// for both, where holding the value first took two (#3438).
+/// for both, where holding the value first took two.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_element_writes_guards_are_held_in_phps_order() -> Result<(), String> {
@@ -1061,7 +1060,7 @@ fn an_element_writes_guards_are_held_in_phps_order() -> Result<(), String> {
 /// `0007/.../CALL` with `X4` copied, at the fetch, where this tier left
 /// for the fetch again through the exit of its array's guard, and
 /// `binary_trees`' `check_tree` takes php's `exit_6` to `exit_9`, two
-/// per level it inlines (#3438).
+/// per level it inlines.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fetched_elements_guard_leaves_past_the_fetch_under_a_call() -> Result<(), String> {
@@ -1105,8 +1104,8 @@ fn a_fetched_elements_guard_leaves_past_the_fetch_under_a_call() -> Result<(), S
 /// (`zend_jit_needs_call_chain`, `Z/ext/opcache/jit/zend_jit.c:259-330`),
 /// and the pinned php's `TRACE 1 exit info` under the trace-dump regime
 /// with bits 19 and 20 lists the guard's exit as `exit_5:
-/// 0008/0016/7/FREE_OP1`, where this tier restored a call there too
-/// (#3438, #3894). A landing that dropped the free would leak the array,
+/// 0008/0016/7/FREE_OP1`, where this tier restored a call there too.
+/// A landing that dropped the free would leak the array,
 /// or call its destructor late, at every such exit.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
@@ -1142,8 +1141,7 @@ fn a_fetched_elements_guard_past_a_linked_call_frees_the_temporary_it_read() -> 
 /// before `zend_jit_fe_fetch`, whose packed guard follows
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:6320-6350`,
 /// `Z/ext/opcache/jit/zend_jit_ir.c:13839-13843`): the pinned php's trace
-/// through this `foreach` takes `exit_8: 0005` before `exit_9: 0002`
-/// (#3438).
+/// through this `foreach` takes `exit_8: 0005` before `exit_9: 0002`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_foreach_leaves_its_loop_before_it_holds_the_arrays_layout() -> Result<(), String> {
@@ -1453,7 +1451,7 @@ fn a_throwing_kernel_reloads_nothing_but_may_leave() -> Result<(), String> {
     Ok(())
 }
 
-/// A recursive return trace (`jit-design.md` §2.2, #3036): rooted at
+/// A recursive return trace (`jit-design.md` §2.2): rooted at
 /// `r`'s landing past its call to itself, it returns past its root into
 /// a caller it escapes from unless it stands at that landing, goes on
 /// there, and
@@ -1497,7 +1495,7 @@ fn a_return_trace_guards_the_caller_it_lands_in() -> Result<(), String> {
 /// `zend_jit_trace_handler` takes an exit point past the handler. Each
 /// exit names no opline, stores nothing and knows no type, and they are numbered as the
 /// pinned php's `TRACE 3 exit info` numbers them, after the stack check
-/// of the call to `h()`: `exit_1` and `exit_2`, `----/----/0` (#3688).
+/// of the call to `h()`: `exit_1` and `exit_2`, `----/----/0`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_stepped_return_past_the_root_holds_its_landing_with_an_exit() -> Result<(), String> {
@@ -1545,7 +1543,7 @@ fn a_stepped_return_past_the_root_holds_its_landing_with_an_exit() -> Result<(),
 /// A recursive return trace whose `RETURN` of a variable's array this tier
 /// steps, which php compiles with `zend_jit_return`: each return past its root
 /// escapes, as `zend_jit_leave_func` takes no exit, and its line holds
-/// no guard of its own (#3688).
+/// no guard of its own.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_stepped_return_php_compiles_in_place_escapes() -> Result<(), String> {
@@ -1592,8 +1590,8 @@ fn a_stepped_return_php_compiles_in_place_escapes() -> Result<(), String> {
 /// fetches it (`zend_jit_fetch_reference`), and read as a reference to
 /// anything everywhere else, as php's trace SSA reads it `IS_UNKNOWN`
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:1819-1833`): the increment, the
-/// comparison and the `ECHO` of `$r` take no guard and are its handlers'
-/// (#3695), and the `ADD` that reads it after them holds it, the one
+/// comparison and the `ECHO` of `$r` take no guard and are its handlers',
+/// and the `ADD` that reads it after them holds it, the one
 /// php's code generator fetches.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
@@ -1662,8 +1660,8 @@ fn a_reference_is_held_only_where_php_fetches_it() -> Result<(), String> {
     Ok(())
 }
 
-/// The table `guard_sites` is, held at the sites the review of #3695
-/// read in php's source: an `ADD` fetches its reference where php's
+/// The table `guard_sites` is, held at the sites a review read in
+/// php's source: an `ADD` fetches its reference where php's
 /// inference, the kinds beside `MAY_BE_REF`, says it may be a number
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:4572-4612`), and not over a
 /// reference to a string; a `COUNT` fetches a reference to an array the
@@ -1762,8 +1760,7 @@ fn a_reference_is_a_guard_site_where_php_fetches_it() {
 /// An `ASSIGN` to a variable recorded through a reference holds the
 /// reference alone, past its value's guard, by an exit of its own unless
 /// an earlier guard held the value one, php's `zend_jit_guard_reference`
-/// with `!guarded_reference` (`Z/ext/opcache/jit/zend_jit_trace.c:5121-5167`,
-/// #3704).
+/// with `!guarded_reference` (`Z/ext/opcache/jit/zend_jit_trace.c:5121-5167`).
 #[test]
 fn an_assign_to_a_reference_holds_it_unless_a_guard_held_it() {
     use super::opcodes::{Hold, Site, guard_sites};
@@ -1807,7 +1804,7 @@ fn an_assign_to_a_reference_holds_it_unless_a_guard_held_it() {
 /// `zend_jit_fetch_reference` and the packed guard after it hold them
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:5845-5890`), and is inline; no
 /// layout is held in place on the slot that holds the reference, whose
-/// flags are the `zend_reference`'s (#3706).
+/// flags are the `zend_reference`'s.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_temporary_recorded_through_a_reference_is_fetched_through_it() -> Result<(), String> {
@@ -1990,7 +1987,7 @@ fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> 
 /// the `ASSIGN_OP`'s, the last's too: the loop's phi of `$s` is guarded
 /// long at entry, and the sum its back edge brings is held long within
 /// the last `+=`, which reruns where it overflows, as php's
-/// `is_checked_guard` moves the phi's guard (#3135), so no guard on `$s`
+/// `is_checked_guard` moves the phi's guard, so no guard on `$s`
 /// stands at the header. `$i * 1` takes none: php's analysis of the op
 /// array knows `$i` long and its range at the loop's header, so no entry
 /// guard holds `$i` and neither `$i * 1` nor `$i++` can overflow. With the
@@ -2048,7 +2045,7 @@ fn a_long_loop_shares_its_exits_as_php_reuses_them() -> Result<(), String> {
 /// beside its guard:
 /// narrowed to the one seen, the register would hold a constant, its
 /// guard would test nothing and the trace would go the recorded way past
-/// the iteration where the comparison turns (#3076).
+/// the iteration where the comparison turns.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_guarded_boolean_keeps_what_its_op_computed() -> Result<(), String> {
@@ -2103,7 +2100,7 @@ fn stepped_trace(program: &str) -> Result<Option<String>, String> {
 /// A product of one variable by itself: the guard on its second operand
 /// narrows the value both read, so the opline sees both as the guard
 /// holds them and is inline, where it saw its first as the loop's phi
-/// stood before the guard and was stepped on every turn (#3073).
+/// stood before the guard and was stepped on every turn.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_operand_read_twice_is_seen_as_its_one_guard_holds_it() -> Result<(), String> {
@@ -2120,7 +2117,7 @@ fn an_operand_read_twice_is_seen_as_its_one_guard_holds_it() -> Result<(), Strin
 /// A division at a loop's header, whose operands php's guard switch
 /// leaves out: guarded as a product's here, it sees the loop's variable `$i`
 /// as the guard holds it and is inline, where it saw the loop's phi as
-/// anything and was stepped on every turn (#3073, #3111).
+/// anything and was stepped on every turn.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_division_at_a_loops_header_is_inline() -> Result<(), String> {
@@ -2162,7 +2159,7 @@ fn repeated(statement: &str, n: usize) -> String {
 /// The exits one more `statement` takes in a loop of the file's own
 /// code, as php's `zend_jit_trace_get_exit_point` takes them: the pinned
 /// php's `TRACE 1 exit info` (`opcache.jit_debug` bit 20) for the loop at
-/// two and three statements under the recipe's hot counters (#3113). A
+/// two and three statements under the recipe's hot counters. A
 /// variable a symbol table reaches is guarded at every opline php's code
 /// generator holds its recorded type at, a cast to string of an int and
 /// a rope part or an element of an array written out take none of their own, a
@@ -2174,7 +2171,7 @@ fn repeated(statement: &str, n: usize) -> String {
 /// `BOOL_NOT` wrote alone, and `$b || $i` its `JMPNZ_EX`'s guard on `$b`
 /// and none for its direction, the pinned php's two and three under
 /// `opcache.optimization_level=0`, so that its op arrays are this
-/// engine's (#3203).
+/// engine's.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
@@ -2213,13 +2210,13 @@ fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
 /// `0017` and `0019`, then each statement's `BOOL_NOT` and `JMPZ` guards
 /// (`0007`, `0008`, `0010`, `0011`, `0013`, `0014`), the increment's at
 /// `0016`, with no exit for a `JMPZ`'s direction
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:5687-5691`, #3203), and tenth
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:5687-5691`), and tenth
 /// its interrupt test's own at `0017`, php's `ZEND_JIT_EXIT_TO_VM`: no
 /// code of the trace's reads the instruction pointer it entered with,
 /// since php compiles every one of its oplines inline, the `BOOL_NOT`s by
 /// `zend_jit_bool_jmpznz` (`:5644-5654`) where this tier steps them, so
 /// `zend_jit_trace_uses_initial_ip` says no and the test takes an exit
-/// (`:7210-7228`, #3277).
+/// (`:7210-7228`).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_jump_its_guard_holds_one_way_takes_phps_exits() -> Result<(), String> {
@@ -2237,7 +2234,7 @@ fn a_jump_its_guard_holds_one_way_takes_phps_exits() -> Result<(), String> {
 /// increment's guard and the interrupt test, which grows no side trace
 /// and leaves through an exit of its own, php's `ZEND_JIT_EXIT_TO_VM`, so
 /// 508 statements build and 509 are refused with `too many side exits`,
-/// as the pinned php refuses them (#3113).
+/// as the pinned php refuses them.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn the_exit_bound_falls_where_phps_does() -> Result<(), String> {
@@ -2345,10 +2342,10 @@ fn a_loops_trace_keeps_a_way_in_at_the_body_its_back_edge_lands_on() -> Result<(
 
 /// A `while (true)`'s trace is rooted at its body, where its back edge
 /// lands, as php's CFG heads the loop once its optimizer folds the
-/// constant condition into a `JMP` (`record::loop_root`, #3317): it keeps
+/// constant condition into a `JMP` (`record::loop_root`): it keeps
 /// no second way in, its back edge landing on its root, and the `JMPNZ`
 /// on `true` that ends its body goes one way and takes no exit, as php's
-/// `JMP` takes none (#3203): no exit goes on past it.
+/// `JMP` takes none: no exit goes on past it.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_loop_on_a_constant_condition_keeps_no_way_in_at_its_body() -> Result<(), String> {
@@ -2381,7 +2378,7 @@ fn a_loop_on_a_constant_condition_keeps_no_way_in_at_its_body() -> Result<(), St
 /// and no register keeps, one whose oplines php serves through their
 /// handlers lists no `/VM` exit, and one served inline does. Each builds
 /// php's exits in total, as the pinned php's `TRACE 1 exit info` for the
-/// same program lists them, once and twice over (#3137).
+/// same program lists them, once and twice over.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn each_loop_builds_phps_exits_and_its_interrupt_test_takes_one_where_phps_does()
@@ -2523,7 +2520,7 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
 /// through the reference and shared with the caller
 /// ([`super::Returned::Shared`]), as `zend_jit_return` copies it
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:11360-11380`): where a trace stops at
-/// the return of a long (#3827), and where a loop's trace returns a
+/// the return of a long, and where a loop's trace returns a
 /// string through it to the loop.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
@@ -2570,12 +2567,11 @@ fn a_return_through_a_reference_is_shared_in_place() -> Result<(), String> {
 /// recorded through a reference calls `zend_is_true` (`:7790-7792`), so
 /// the pinned php's `TRACE 1 exit info` lists five exits and no `/VM` one,
 /// its interrupt test taking the stub; with no reference, seven, the last
-/// the interrupt test's `0006/VM` (under `opcache.optimization_level=0`,
-/// #3277). The `BOOL_NOT` holds the reference by no guard, as php's
-/// does not (#3695), and the `ASSIGN` to it takes `exit_4` at `0006`
+/// the interrupt test's `0006/VM` (under `opcache.optimization_level=0`).
+/// The `BOOL_NOT` holds the reference by no guard, as php's
+/// does not, and the `ASSIGN` to it takes `exit_4` at `0006`
 /// past its value's `exit_3`, php's `zend_jit_guard_reference`, which a
-/// file's own code takes at every `ASSIGN`, its variables all aliased
-/// (#3704).
+/// file's own code takes at every `ASSIGN`, its variables all aliased.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_loop_keeps_the_initial_pointer_where_its_first_opline_may_call_the_runtime()
@@ -2613,7 +2609,7 @@ fn a_loop_keeps_the_initial_pointer_where_its_first_opline_may_call_the_runtime(
 
 /// A `DO_*CALL` the trace follows into a callee its `INIT_*` pushed
 /// through the `push_call` kernel takes no exit, as php's code takes none
-/// for the call (#3203's measurement): what the call's kernel throws
+/// for the call (as measured): what the call's kernel throws
 /// unwinds. A loop calling `g`, declared after it, by name takes the
 /// pinned php's first six exits (`TRACE 1 exit info` under
 /// `opcache.optimization_level=0`): the stack check, three guards at
@@ -2645,7 +2641,7 @@ fn a_call_the_trace_follows_takes_no_exit() -> Result<(), String> {
 }
 
 /// An entered trace of a function with typed parameters numbers php's
-/// `RECV` exits ahead of its own (`jit-design.md` §4.2, #3269): one per
+/// `RECV` exits ahead of its own (`jit-design.md` §4.2): one per
 /// `RECV` that has a type or that no `RECV` follows, as php's
 /// `zend_jit_recv` takes them for a root frame whose argument count the
 /// trace does not know (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10872`),
@@ -2747,7 +2743,7 @@ fn an_entered_trace_numbers_phps_recv_exits_ahead_of_its_own() -> Result<(), Str
 /// `TRACE 1 exit info` under the trace-dump regime: the `RECV`'s
 /// `exit_0`, the direction's `exit_1` for both levels, the subtraction's
 /// overflow, and a stack check per level, `exit_3` and `exit_4`, which
-/// each store their own level's `$d` (#3203, #3290).
+/// each store their own level's `$d`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_callees_exit_stores_none_of_its_callers_registers() -> Result<(), String> {
@@ -2817,7 +2813,7 @@ fn class_guards(ir: &TraceIr) -> usize {
 /// immutable class (`zend_jit_class_guard`, `TRACE_FRAME_SET_THIS_CLASS_CHECKED`);
 /// a typed property's write of a long its type holds is in place, as the
 /// handler's own inline path writes it, and its write of a string its
-/// type must coerce is the handler's (#3337).
+/// type must coerce is the handler's.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn properties_of_a_published_class_are_inline_under_one_class_guard() -> Result<(), String> {
@@ -2856,11 +2852,11 @@ fn properties_of_a_published_class_are_inline_under_one_class_guard() -> Result<
 
 /// A class of the cached file linked over a class the request declared,
 /// `zend_lazy_class_load`'s copy, is the request's own, with an id of
-/// its own (#3322): no class guard assumes it is a published one, and
+/// its own: no class guard assumes it is a published one, and
 /// each of its property oplines is compiled in place on the place the
 /// request's own cache slot holds, which it reads where it runs, as php's
 /// code reads `CACHED_PTR(cache_slot)` for a class that is not immutable
-/// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`, #3346).
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_request_scoped_copy_of_a_class_is_guarded_through_its_cache_slot() -> Result<(), String> {
@@ -2908,7 +2904,7 @@ fn a_request_scoped_copy_of_a_class_is_guarded_through_its_cache_slot() -> Resul
 /// no guard has held, whatever class the recording saw it of: the class a
 /// guard held is carried only across a property opline that writes
 /// through the object, as php's `COPY_SSA_OBJ_TYPE` carries it, so the
-/// second read holds its class again (#3337).
+/// second read holds its class again.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_object_written_over_is_guarded_again() -> Result<(), String> {
@@ -2929,7 +2925,7 @@ fn an_object_written_over_is_guarded_again() -> Result<(), String> {
 }
 
 /// The fixtures of the hash slice and the dimension oplines each holds
-/// inline (#3339).
+/// inline.
 const HASH_DIMS: [(Fixture, &[Opcode]); 13] = [
     (HASH_READ, &[Opcode::FetchDimR]),
     (HASH_IS, &[Opcode::FetchDimIs]),
@@ -3141,7 +3137,7 @@ fn a_hashs_separation_and_a_destructor_reload_nothing() -> Result<(), String> {
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:5078-5096`, `:4749-4770`,
 /// `:5906-5930`); the fetch for writing through the reference leaves a
 /// `VAR` that points at the element, which the write after it follows to
-/// the zval alone (#3410). `Emit::written_array`'s witnesses serve it.
+/// the zval alone. `Emit::written_array`'s witnesses serve it.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_write_through_a_var_that_points_at_a_reference_is_inline() -> Result<(), String> {
@@ -3189,7 +3185,7 @@ fn a_write_through_a_var_that_points_at_a_reference_is_inline() -> Result<(), St
 }
 
 /// The fixtures of the shapes the hash slice left to its handler, and
-/// the oplines each holds inline (#3370).
+/// the oplines each holds inline.
 const NESTED_DIMS: [(Fixture, &[Opcode]); 3] = [
     (
         NESTED_READ,
@@ -3207,8 +3203,8 @@ const NESTED_DIMS: [(Fixture, &[Opcode]); 3] = [
 ];
 
 /// What the hash slice left to the handler, inline as php's code
-/// generator compiles it (#3339's successor, #3370): `isset()`, `??` and a
-/// read over a temporary a fetch made, which each frees after
+/// generator compiles it: `isset()`, `??` and a read over a
+/// temporary a fetch made, which each frees after
 /// (`zend_jit_isset_isempty_dim`'s `jit_FREE_OP`); a write, a compound
 /// write and a fetch for writing through the `VAR` a fetch for writing
 /// left indirect, under a guard on what it points at
@@ -3311,7 +3307,7 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_is_inline() -> Re
 /// A call that sends arrays by reference to typed parameters is made in
 /// place, the two references' `RECV` checks inline, the array and the
 /// float sent by value known to pass theirs, and its `SEND_REF`s inline,
-/// as php's trace compiles `zend_jit_send_ref` and `zend_jit_recv` (#3340).
+/// as php's trace compiles `zend_jit_send_ref` and `zend_jit_recv`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_by_reference_is_made_in_place_with_its_checks() -> Result<(), String> {
@@ -3337,7 +3333,7 @@ fn a_call_by_reference_is_made_in_place_with_its_checks() -> Result<(), String> 
 /// A call passed fewer arguments than its callee has parameters is made
 /// in place, each default copied into its parameter, as php's trace
 /// compiles `zend_jit_recv_init` past the arguments it knows were passed;
-/// one whose default names a constant is the call kernel's (#3340).
+/// one whose default names a constant is the call kernel's.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_passed_fewer_arguments_copies_its_defaults_in_place() -> Result<(), String> {
@@ -3359,7 +3355,7 @@ fn a_call_passed_fewer_arguments_copies_its_defaults_in_place() -> Result<(), St
 }
 
 /// A method's frame is left in place, its receiver given up after its
-/// variables, as php's `zend_jit_leave_func` gives it up (#3343).
+/// variables, as php's `zend_jit_leave_func` gives it up.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_methods_frame_is_left_in_place_with_its_receiver() -> Result<(), String> {
@@ -3392,8 +3388,8 @@ fn line_of(ir: &TraceIr, opcode: Opcode) -> Option<&super::Line> {
 /// A method called on a variable's object of a published class is pushed
 /// in place under the class guard, its send compiled by value and the
 /// call made in place, as php's `zend_jit_init_method_call` pushes it
-/// once its class guard holds (#3343), on a variable's object and on a
-/// temporary's (#3560).
+/// once its class guard holds, on a variable's object and on a
+/// temporary's.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_methods_call_is_pushed_in_place_under_its_class_guard() -> Result<(), String> {
@@ -3433,7 +3429,7 @@ fn pushed_under_its_class_guard(fixture: Fixture) -> Result<(), String> {
 /// holds takes no stack check at its entry: php's recorder writes the
 /// receiver's class after the `INIT_METHOD_CALL`, so
 /// `zend_jit_trace_build_tssa` gives the loop's `used_stack` up
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:2629-2630`, #3905). `k`'s exits
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:2629-2630`). `k`'s exits
 /// up to the call are numbered as php's exit info for its trace numbers
 /// them: `exit_0` and `exit_1` at `0012`, knowing none and `$n` and `$o`,
 /// `exit_2` the loop's way out at `0014`, `exit_3` the receiver's class
@@ -3485,7 +3481,7 @@ fn a_methods_call_on_an_object_takes_no_stack_check_at_entry() -> Result<(), Str
 /// `new`'s constructor is pushed by its handler, and a guard after it
 /// holds the callee the trace recorded, as php's `zend_jit_func_guard`
 /// does; the sends after it are compiled by value and the call made in
-/// place (#3343).
+/// place.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_its_handler_pushes_is_held_to_its_callee() -> Result<(), String> {
@@ -3578,8 +3574,7 @@ fn pushed_under_its_pair(
 /// place under the pair its runtime-cache slot holds, as php's
 /// `zend_jit_init_static_method_call` pushes it: held to the published
 /// class it names, php's constant `ce`, or, through a request-scoped
-/// class's name, to whichever class the pair names, its called scope
-/// (#3557).
+/// class's name, to whichever class the pair names, its called scope.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_static_methods_call_is_pushed_in_place_under_its_slots_pair() -> Result<(), String> {
@@ -3604,7 +3599,7 @@ fn a_static_methods_call_is_pushed_in_place_under_its_slots_pair() -> Result<(),
 /// the calling frame's `$this`, as php's
 /// `zend_jit_push_this_method_call_frame` passes it: the pair's class
 /// held to the published class a name names, and to nothing through
-/// `parent` (#3561).
+/// `parent`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_static_call_to_a_method_with_this_is_pushed_in_place() -> Result<(), String> {
@@ -3623,7 +3618,7 @@ fn a_static_call_to_a_method_with_this_is_pushed_in_place() -> Result<(), String
 /// under the pair the opline's runtime-cache slot holds, its class held
 /// to the receiver's, as php's `zend_jit_init_method_call` compares
 /// `CACHED_PTR(opline->result.num)` with `obj->ce` for a class that is not
-/// immutable, with no class guard (#3558).
+/// immutable, with no class guard.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_request_scoped_classs_method_is_pushed_under_its_slots_pair() -> Result<(), String> {
@@ -3640,7 +3635,7 @@ fn a_request_scoped_classs_method_is_pushed_under_its_slots_pair() -> Result<(),
 /// an enum's case, is pushed in place under the pair its runtime-cache
 /// slot holds, the callee held by its record, as php's
 /// `zend_jit_func_guard` holds a function that is not immutable by its
-/// opcodes (#3561).
+/// opcodes.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_request_scoped_classs_own_method_is_pushed_under_its_slots_pair() -> Result<(), String> {
@@ -3672,7 +3667,7 @@ fn a_request_scoped_classs_own_method_is_pushed_under_its_slots_pair() -> Result
 /// destructor runs (`free_this`): no `call` effect, so the caller's
 /// variables, a reference among them, are read again by nothing, as
 /// php's code keeps every type and register across `OBJ_RELEASE`
-/// (`Emit::free_this`'s witnesses hold such a destructor) (#3343).
+/// (`Emit::free_this`'s witnesses hold such a destructor).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_leave_whose_receiver_is_destroyed_reloads_nothing() -> Result<(), String> {
@@ -3706,8 +3701,7 @@ fn a_leave_whose_receiver_is_destroyed_reloads_nothing() -> Result<(), String> {
 /// The clobber rule at `new`, which has no `call` effect, and whose
 /// constructor, made in place and followed, may throw: nothing is read
 /// again after the `NEW`, a reference's inner type guarded where it is
-/// read as always, and the constructor's call unwinds where it throws
-/// (#3343).
+/// read as always, and the constructor's call unwinds where it throws.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_new_whose_constructor_may_throw_reloads_nothing() -> Result<(), String> {
@@ -3734,8 +3728,7 @@ fn a_new_whose_constructor_may_throw_reloads_nothing() -> Result<(), String> {
 /// The clobber rule at a native that calls back into user code, served
 /// through the native kernel (`Kernel::CallNative`): `trigger_error` runs
 /// the error handler, PHP that writes through a global, so what a
-/// reference holds is read again after it, the trace's own longs kept
-/// (#3340).
+/// reference holds is read again after it, the trace's own longs kept.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_native_that_calls_back_reloads_what_a_reference_holds() -> Result<(), String> {
@@ -3757,8 +3750,7 @@ fn a_native_that_calls_back_reloads_what_a_reference_holds() -> Result<(), Strin
 /// The clobber rule at a call whose `RECV` check fails in place: the
 /// call is made in place, the argument handed to its `RECV`'s handler,
 /// which coerces it, here a string the trace knows to an `int`, or may
-/// throw its `TypeError`, so the made call unwinds and clobbers nothing
-/// (#3340, #3560).
+/// throw its `TypeError`, so the made call unwinds and clobbers nothing.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_whose_check_may_coerce_or_throw_unwinds() -> Result<(), String> {
@@ -3809,7 +3801,7 @@ fn a_call_whose_check_may_coerce_or_throw_unwinds() -> Result<(), String> {
 /// writes the reference with one owner more and runs no user code, its
 /// handler cold where the variable holds no reference, and the write in
 /// the callee that releases the object unwinds where the destructor
-/// throws (#3340).
+/// throws.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_send_by_reference_whose_value_is_destroyed_runs_nothing() -> Result<(), String> {
@@ -3841,10 +3833,10 @@ fn a_send_by_reference_whose_value_is_destroyed_runs_nothing() -> Result<(), Str
 }
 
 /// A trace that calls an `eval`'d function, a function's and a method's,
-/// stops at the call (#3570), and nothing it builds names the request's
+/// stops at the call, and nothing it builds names the request's
 /// op array, whose number another request gives another op array (design
 /// §3.4): its frames and guards name op arrays by `EngineFuncRef`, which a
-/// request's has none of (#4650), and the call it begins names its callee
+/// request's has none of, and the call it begins names its callee
 /// as the request's, by no number and with no published callee.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
@@ -3881,7 +3873,7 @@ fn a_trace_names_no_request_scoped_op_array() -> Result<(), String> {
 /// under the pair its runtime-cache slot holds, the callee held by its
 /// record, with no guard on a callee no number names, and the trace stops
 /// at the call with `Interpreter`, the frame pushed for the interpreter
-/// to make the call (#3561, #3570).
+/// to make the call.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_evaluated_classs_own_method_is_pushed_under_its_slots_pair() -> Result<(), String> {
@@ -3926,8 +3918,7 @@ fn an_evaluated_classs_own_method_is_pushed_under_its_slots_pair() -> Result<(),
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:4775-4810`). So each trace's
 /// exit 3 lands at `0005`, past the step at `0004`, as the pinned php's
 /// `TRACE 1 exit info` under the trace-dump regime lists it: `CV0($x)`
-/// the double, and `X7` the double or the long, known as each is
-/// (#3720).
+/// the double, and `X7` the double or the long, known as each is.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_overflowing_step_leaves_past_itself_as_php_does() -> Result<(), String> {
@@ -4014,15 +4005,15 @@ fn an_overflowing_step_leaves_past_itself_as_php_does() -> Result<(), String> {
 /// where it does not overflow, with `$x` the long it went to and known
 /// one, as php's `zend_jit_inc_dec` takes that exit
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:4824-4856`): exit 7 lands at
-/// `0006`, line 4, where it landed at the step's own `0005` (#3828). The
-/// trace's exits are the pinned php's `TRACE 1 exit info` for #3828's
+/// `0006`, line 4, where it landed at the step's own `0005`. The
+/// trace's exits are the pinned php's `TRACE 1 exit info` for this
 /// program under the trace-dump regime with bits 19 and 20,
 /// exit by exit, its opline, whether it leaves to the VM and what it
 /// knows of each slot: `exit_3: 0006/0002/2 CV0($n):int(x0:1)
 /// CV1($x):float(9.22337e+18)`, the first level's overflow, and `exit_7:
 /// 0006/0013/2 CV0($n):int(x0:1) CV1($x):int(x1)`. php's `exit_10`, the
 /// loop's interrupt test, knows the last caller's slots; this tier's
-/// knows the root's, held apart (#3893).
+/// knows the root's, held apart.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_step_held_a_double_leaves_past_itself_where_it_did_not_overflow() -> Result<(), String> {
@@ -4051,7 +4042,7 @@ fn a_step_held_a_double_leaves_past_itself_where_it_did_not_overflow() -> Result
         (6, 1, false, &[(0, long), (1, long)]),
         (6, 1, true, &[(0, long), (1, double)]),
         (8, 1, false, &[(0, long), (1, double), (4, double)]),
-        // php's knows the last caller's `(0, long), (1, double), (4, long)` (#3893).
+        // php's knows the last caller's `(0, long), (1, double), (4, long)`.
         (2, 0, true, &[(0, long), (1, long)]),
     ];
     let ours: Vec<Exit> = (ir.exits.iter())
@@ -4103,10 +4094,10 @@ fn restoring(ir: &TraceIr) -> Vec<(u32, bool)> {
 /// `INIT_FCALL`, whose `zend_may_throw` is the init's own
 /// (`Z/ext/opcache/jit/zend_jit.c:259-330`), so no exit restores a call
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`). The pinned php's
-/// `TRACE 1 exit info` for #3828's program under the trace-dump regime
+/// `TRACE 1 exit info` for this program under the trace-dump regime
 /// with bits 19 and 20 lists the `SUB`'s overflow exit of each level as
 /// `exit_5: 0008/0006/5` and `exit_9: 0008/0017/5`, and no exit `/CALL`;
-/// this tier's restored a call at both (#3894).
+/// this tier's restored a call at both.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_exit_after_an_init_that_saves_the_chain_restores_no_call() -> Result<(), String> {
@@ -4172,8 +4163,8 @@ fn an_exit_after_an_init_fcall_that_delays_the_chain_restores_the_call() -> Resu
 /// trace-dump regime with bits 19 and 20 lists the exits past the
 /// `INIT_FCALL` as `exit_6: 0007`, `exit_7: 0011`, `exit_8: 0014` and
 /// `exit_9: 0016/VM`, none past the `PRE_INC`; this tier's had one more,
-/// `0016` with `$i` overflowed (#3898). Whether `exit_7` restores the call
-/// is #3897's.
+/// `0016` with `$i` overflowed. Whether `exit_7` restores the call
+/// is open work.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_loop_counter_its_condition_bounds_takes_no_overflow_exit() -> Result<(), String> {

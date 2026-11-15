@@ -21,7 +21,7 @@ use codegen::ungram::{self, DefClass, classify};
 
 /// This crate's directory as cargo sets `CARGO_MANIFEST_DIR` when it runs
 /// the test, never the path `env!` compiled in: cargo reuses a test binary
-/// across two checkouts that share a target directory (#2790).
+/// across two checkouts that share a target directory.
 fn manifest_dir() -> PathBuf {
     std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
@@ -187,7 +187,7 @@ fn the_emitted_tree_is_one_struct_per_node_kind_and_unwraps_nothing() {
     assert!(emitted.contains("\npub struct Nodes<'a> {\n"));
     assert!(emitted.contains("\npub struct Lists<'a> {\n"));
     // A list the schema writes head-and-tail is one field, not a head
-    // beside a tail (#225).
+    // beside a tail.
     for absent in [
         "expect(",
         "unwrap(",

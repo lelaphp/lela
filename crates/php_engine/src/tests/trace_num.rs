@@ -1,4 +1,4 @@
-//! The running execution's trace number (#2738; `jit-design.md` §4.9,
+//! The running execution's trace number (`jit-design.md` §4.9,
 //! revisions 23 and 30; design §5.11, revision 52): php's
 //! `EG(jit_trace_num)`, which the tier reads and writes through
 //! [`tier::trace_num`] and [`tier::set_trace_num`] and the engine keeps

@@ -32,8 +32,8 @@ use crate::{CompileError, Raise};
 /// is one this compiler cannot read yet ([`crate::Raise::Unread`]); or
 /// the compile refused. The first is the common answer, every variable
 /// and call an array expression holds, so it is a state of its own and no
-/// refusal: it allocates nothing, where a [`CompileError`] is a box
-/// (#3208). `why` is the sentence a compile that needed the constant
+/// refusal: it allocates nothing, where a [`CompileError`] is a box.
+/// `why` is the sentence a compile that needed the constant
 /// refuses with ([`Emit::constant_value`]).
 ///
 /// The first two leave the node unfolded, for the compile to meet as it

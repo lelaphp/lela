@@ -266,7 +266,7 @@ fn stream_select(
     let arrays = [&read, &write, &except].map(|each| each.get().copied().flatten());
     // Each array held for the call, so a callback a lent wait serves that
     // assigns over `$read` leaves the walk after the wait reading the
-    // array it was handed (#2664).
+    // array it was handed.
     let held: Vec<Owner<PhpArray>> = arrays
         .iter()
         .flatten()
@@ -343,7 +343,7 @@ fn select_over(
     let [read_set, write_set, except_set] = &sets;
     // The streams held out of their resources for the wait, so a
     // callback's `fclose` of one closes no fd the wait stands on until it
-    // returns (#2664).
+    // returns.
     let waited = req.holding_streams(&streams, |req| {
         req.limits_mut()
             .blocking(|| crate::ffi::select([read_set, write_set, except_set], timeout))

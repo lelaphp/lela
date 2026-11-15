@@ -1,4 +1,4 @@
-//! A value a request supplied, as a line of a log holds it (#4355): each
+//! A value a request supplied, as a line of a log holds it: each
 //! `\r` is written as the two bytes `\r` and each `\n` as `\n`, and every
 //! other byte as its own.
 //!
@@ -13,11 +13,11 @@
 //! the frames' files in its slow log, the path in its two lines refusing
 //! a program (by its extension, or one that did not open) and in makala's
 //! copies of them, and the file in the built-in server's line for a
-//! request that ended in a fatal (#4559).
+//! request that ended in a fatal.
 //!
 //! The text that does not: a diagnostic's message and its stack trace,
 //! the message of an uncaught throwable among them, which are written as
-//! they stand, a request's value they quote included (#4592); the program
+//! they stand, a request's value they quote included; the program
 //! in php-fpm's lines naming a slow request, each byte of it outside
 //! printable ASCII written as `.`; and what a host writes from a value
 //! that cannot hold either byte, a method from a fixed table or a request

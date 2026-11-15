@@ -7,7 +7,7 @@
 //! [`unwind`] dispatch with `Nop` at the safepoints, so a debugger's own
 //! `safepoint` is never asked from inside its stepping, and reach the
 //! same homes through the same handlers; a tier raises no event of its
-//! own (#1799, #1813). What the loop does between the handlers and not
+//! own. What the loop does between the handlers and not
 //! in one, the interrupt check at a pushed frame's activation, `step`
 //! does too, so an interrupt meets a stepped call where it meets the
 //! loop's.

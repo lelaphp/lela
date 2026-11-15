@@ -1,5 +1,5 @@
 //! Encoder recursion is refused at the fiber's floor, inside a child
-//! process so a regression cannot end the test runner (#3467).
+//! process so a regression cannot end the test runner.
 
 mod support;
 

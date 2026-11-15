@@ -88,7 +88,7 @@ fn a_replaced_hook_makes_every_call_it_would_not_see_do_fcall() {
     assert_eq!(calls(both), [DoFcall, DoFcall, DoFcall, DoFcall]);
 }
 
-/// The oracle's dump of the four file constructs (#396), each one
+/// The oracle's dump of the four file constructs, each one
 /// `INCLUDE_OR_EVAL` over its operand with the construct in
 /// `extended_value`, into a `VAR` that `zend_do_free` marks unused
 /// where nothing reads it, as it marks a call's; the operand of
@@ -117,7 +117,7 @@ fn the_four_file_constructs_are_one_include_or_eval_each() {
         ));
 }
 
-/// The oracle's dump of `eval` (#573), the fifth construct of
+/// The oracle's dump of `eval`, the fifth construct of
 /// `zend_compile_include_or_eval`: one `INCLUDE_OR_EVAL (eval)` over
 /// the string, into a `VAR` that `zend_do_free` marks unused where
 /// nothing reads it, as it marks an `include`'s; the operand of the
@@ -143,7 +143,7 @@ fn eval_is_the_fifth_include_or_eval() {
 }
 
 /// The string an `eval` hands over, compiled as `compile_string`
-/// compiles it (#573): code from its first byte, where a file's is
+/// compiles it: code from its first byte, where a file's is
 /// inline HTML, and a main op array that ends in `RETURN null`,
 /// where a file's ends in `RETURN int(1)`.
 #[test]
@@ -174,7 +174,7 @@ fn an_eval_string_begins_in_code_and_returns_null() {
     .assert_eq(&unit.dump(&[]).text());
 }
 
-/// The oracle's dump of `echo nope($a);` (#252), a name php's
+/// The oracle's dump of `echo nope($a);`, a name php's
 /// function table has not: `zend_compile_dynamic_call`'s
 /// `INIT_FCALL_BY_NAME` with the argument count and no used stack,
 /// `SEND_VAR_EX` for the CV and `DO_FCALL_BY_NAME` into the `VAR`.
@@ -341,7 +341,7 @@ fn a_call_a_frameless_entry_serves_is_frameless_icall_with_its_row() {
     );
 }
 
-/// A call of each of the seven natives #2673 found with no entry, at
+/// A call of each of the seven natives once found with no entry, at
 /// each arity php declares for it, is a `FRAMELESS_ICALL_<n>` with
 /// its row of `zend_flf_functions` as `basic_functions.stub.php`
 /// orders them; a call of `join` or `strchr`, aliases php declares
@@ -387,9 +387,9 @@ fn each_arity_php_declares_is_a_frameless_call_with_its_row() {
 /// A third argument rides in an `OP_DATA` after the opline
 /// (`zend_emit_op_data`), and `zend_do_free` steps back over it to
 /// the call that left the value. The oracle's dump prints a live
-/// range for the temporary across the `OP_DATA`, #255's table, and
-/// the dump here is the oracle's under `[regime.dump]`, live ranges
-/// and all.
+/// range for the temporary across the `OP_DATA`,
+/// `zend_calc_live_ranges`'s table, and the dump here is the oracle's
+/// under `[regime.dump]`, live ranges and all.
 #[test]
 fn a_third_argument_is_an_op_data_after_the_frameless_call() {
     let source = b"<?php $a = \"x\"; $s = substr($a, 1, 2); substr($a, 1, 2);";
@@ -559,7 +559,7 @@ fn a_namespace_call_carries_php_s_three_constants() {
     assert_eq!(by_name, ["B\\C\\D\\e", "B\\C\\f"]);
 }
 
-/// #399's program under the oracle's `[regime.dump]`, whose dump of
+/// This program under the oracle's `[regime.dump]`, whose dump of
 /// `try { throw new Exception("x"); } catch (ValueError $e) { echo 1; }
 /// catch (TypeError|Error $e) { echo 2; }` and
 /// `function f() { try { return 1; } finally { echo 2; } }` is:

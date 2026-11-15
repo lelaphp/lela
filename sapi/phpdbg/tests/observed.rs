@@ -1,5 +1,5 @@
 //! The debugging host's own stepping held to the loop's observer events
-//! (design §4.3 rows 8 and 9; #2009): a program served by this crate's
+//! (design §4.3 rows 8 and 9): a program served by this crate's
 //! `phpdbg`, its `Debugger` tier bound and driven by the prompt's
 //! commands, raises the begins, ends and errors the plain loop raises
 //! for the same program, in the same order, with two recording
@@ -200,7 +200,7 @@ fn plain(dir: &Path) -> Vec<Vec<String>> {
 /// The `run`'s request: the first the host served that observed anything,
 /// since the session's own requests before it serve no program. The cycle
 /// after it, held at the `exec` file's first opline until `q`, observes
-/// nothing, as php executes nothing there (#2359).
+/// nothing, as php executes nothing there.
 fn the_run(requests: &[Vec<String>]) -> &[String] {
     requests
         .iter()
@@ -320,7 +320,7 @@ fn a_fatal_raises_the_loop_s_events() {
 
 /// The `exec` file held at the prompt is compiled and not
 /// executed, as php's `phpdbg_compile` leaves it until `run`'s
-/// `zend_execute` (#2359): a session that quits there hands an observer
+/// `zend_execute`: a session that quits there hands an observer
 /// nothing of the main file, nor does the cycle held again after a `run`;
 /// and the `run`'s begin of the main file comes after what the prompt
 /// served before `r`, here an `ev`'s code.

@@ -47,7 +47,7 @@ fn a_persistent_link_and_its_flock_outlive_the_request() {
 /// php gives dba's persistent links back in `shutdown_executor`, after
 /// every extension's `RSHUTDOWN`. The second request, lent the same link
 /// and its flock, prints what the write left, the oracle's bytes for the
-/// same two requests (#1695).
+/// same two requests.
 #[test]
 fn a_session_written_at_the_request_end_still_has_the_persistent_link() {
     let engine = Engine::builder()
@@ -94,7 +94,7 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_link() {
 /// it: php's `zend_shutdown` finishes the file when it destroys the
 /// persistent list, its hash table written past the record and its
 /// bucket heads over the first 2,048 bytes, so the next process reads the
-/// value (#1804).
+/// value.
 fn written_then_read(name: &str, then: &str) -> (String, String) {
     let files = Files::new(&format!("dba-cdb-{name}"), &[]);
     let path = files.path().join("made.cdb");

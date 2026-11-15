@@ -19,12 +19,12 @@ php_ext = { path = "../../crates/php_ext" }
 # parser `xp_ssl.c` reads (design §4.10).
 php_ext_standard = { path = "../standard" }
 # libcrypto is the platform's OpenSSL of the major version the oracle
-# links, 4 since php 8.5.12 (#3381), found by openssl-sys through pkg-config and bound in `src/ffi/`
+# links, 4 since php 8.5.12, found by openssl-sys through pkg-config and bound in `src/ffi/`
 # alone (`unsafe.homes`; design §7.2).
 openssl-sys = { workspace = true }
 
 # `build.rs` reads `OPENSSL_VERSION_TEXT` off the headers openssl-sys
-# found, through the C preprocessor, as php's build compiles it (#1974).
+# found, through the C preprocessor, as php's build compiles it.
 [build-dependencies]
 cc = { workspace = true }
 

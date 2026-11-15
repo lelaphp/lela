@@ -293,7 +293,7 @@ fn extract(
 ///
 /// A row made a reference is held by the array and by the variable, and
 /// by nothing of the walk's, so a destructor its binding serves reads
-/// php's count of it (#2159):
+/// php's count of it:
 ///
 /// ```php
 /// class D { function __destruct() { debug_zval_dump($GLOBALS['arr']); } }

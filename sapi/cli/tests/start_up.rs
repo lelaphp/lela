@@ -3,7 +3,7 @@
 //! and its built-in server starts none before its first client, so no
 //! extension's `rinit` runs and `session.auto_start` opens no session.
 //! `-m` lists the modules in a request of its own (`php_cli.c:643-655`),
-//! whose `rinit` does (#1967).
+//! whose `rinit` does.
 
 mod server;
 
@@ -86,7 +86,7 @@ fn the_server_starts_no_session_before_its_first_client() {
 }
 
 /// A `port` another process holds when php -S binds it is given up for a
-/// fresh one (#2653): php says it is in use and exits, and the server is
+/// fresh one: php says it is in use and exits, and the server is
 /// started again on the next `port` offered.
 #[test]
 fn a_server_whose_port_is_taken_starts_on_a_fresh_one() {

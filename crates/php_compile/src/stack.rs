@@ -52,9 +52,9 @@ use crate::{CompileError, Refused};
 /// main thread has ([`php_heap::main_call_stack_size`]), where the
 /// thread a host serves on is larger: a request is served on a stack
 /// sized for the loop's own re-entry, whose level costs a multiple of
-/// php's (design §5.6, #3043), and a native's own recursion, which
+/// php's (design §5.6), and a native's own recursion, which
 /// costs about what php's C costs, would otherwise go that multiple
-/// deeper than php before it is refused (#3142, ruled on #3158). The
+/// deeper than php before it is refused (ruled 2026-10-21). The
 /// loop's entry is held to the floor instead
 /// ([`entry_overflowed`](Self::entry_overflowed)),
 /// and at each native's call back into PHP the limit moves to php's
@@ -234,7 +234,7 @@ impl StackLimit {
     /// php's budget afresh below each re-entry, so it is refused only at
     /// the floor, where php refuses it at a depth of 5,000: the engine
     /// never refuses a recursion php serves, and this difference is a
-    /// by-design divergence (design §5.6, #3158).
+    /// by-design divergence (design §5.6, ruled 2026-10-21).
     ///
     /// ```php
     /// class S { function __construct(public $n) {} function __serialize(): array { return $this->n ? [serialize(new S($this->n - 1))] : []; } }
@@ -264,7 +264,7 @@ impl StackLimit {
     /// and `room` above its floor, or no known end, and on a fiber's
     /// stack, whose limit is its floor ([`fiber`](Self::fiber)), so a
     /// scope there would spend the fiber's own budget, which php's
-    /// `eval` leaves whole (#3192): the caller serves the frame without
+    /// `eval` leaves whole: the caller serves the frame without
     /// moving it. With no limit there is none to move.
     #[inline]
     pub fn nested(&mut self, charge: usize, room: usize) -> Option<Reentered> {
@@ -310,7 +310,7 @@ impl StackLimit {
     /// ini entry to fix it, so the witness masks the number; the
     /// sentence, the file and the line are pinned, and the engine's own
     /// test pins the number under `zend.max_allowed_stack_size=512K`.
-    /// Two hundred thousand links is #246's measurement, room for a
+    /// Two hundred thousand links is a measured figure, room for a
     /// stack four times the default.
     ///
     /// ```php
@@ -375,7 +375,7 @@ impl StackLimit {
     /// the loop's frame is laid down, so `frame`, what that frame takes,
     /// is counted below the calling one, and the frame never lays itself
     /// past the thread's end, however large an unoptimised build makes
-    /// it (#3830).
+    /// it.
     #[must_use]
     pub fn entry_overflowed(&self, frame: usize) -> bool {
         let at = match self.allowed {
@@ -433,7 +433,7 @@ impl StackLimit {
     /// a frame that stands above the limit and below the floor where the
     /// two are one address (under detect) would be the floor's, by as
     /// much as the second frame is deeper; read once, a frame past them
-    /// is the limit's wherever its frames reach (#4084).
+    /// is the limit's wherever its frames reach.
     #[must_use]
     pub fn passed(&self) -> Option<Passed> {
         let here = position();
@@ -619,7 +619,7 @@ mod tests {
     }
 
     /// On a fiber's stack no scope nests, however much of the stack is
-    /// left (#3192): its limit is its floor, so a scope's frames would
+    /// left: its limit is its floor, so a scope's frames would
     /// be the fiber's budget. Off a fiber the same stack nests one.
     #[test]
     fn a_fibers_stack_nests_no_scope() {
@@ -641,7 +641,7 @@ mod tests {
     /// unoptimised build the tests and the phpt lane use, which lays each
     /// frame's locals side by side; php's own compile spends less than a
     /// tenth of that per nesting. The guard on the frame the compiler
-    /// spends per nesting (#1434).
+    /// spends per nesting.
     #[test]
     fn a_two_thousand_term_sum_compiles_on_an_eight_mib_thread() {
         let sums = [
@@ -689,7 +689,7 @@ mod tests {
     /// re-entry moves the limit to that budget below its frame until it
     /// is left; under a size the ini gave, a re-entry moves nothing. A
     /// platform whose main thread's size cannot be read skips, and fails
-    /// where the machine promised the size (#3180).
+    /// where the machine promised the size.
     #[test]
     fn detect_on_a_thread_past_the_main_threads_size_allows_the_main_threads() {
         match php_heap::main_call_stack_size() {

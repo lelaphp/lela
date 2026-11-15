@@ -33,7 +33,7 @@ fn workspace() -> &'static Path {
 }
 
 /// The tracked pin, when the binary it names is on this machine; a
-/// failure where this machine promised the binary (#38).
+/// failure where this machine promised the binary.
 fn pin() -> Option<Pin> {
     let pin = common::manifest::pin();
     // The path borrows the pin, so the question is asked of the unit and
@@ -46,7 +46,7 @@ fn pin() -> Option<Pin> {
 
 /// A registry of one accepted row, so these tests hold the comparison's
 /// mechanics and not which rows a person keeps in `docs/divergence.toml`:
-/// a row dropped there breaks nothing here (#2142).
+/// a row dropped there breaks nothing here.
 fn registry() -> Registry {
     rows(&[Row::accepted("trace:fixture")
         .reason("A difference a person accepted, for the comparison's tests.")])
@@ -68,7 +68,7 @@ fn a_snippet_runs_as_witness_php_and_its_output_is_normalised() {
     assert_eq!(out.exit, xtask::oracle::Ended::Status(3));
 }
 
-/// The load number (#317): `extension #<digits>` is `extension #<token>`
+/// The load number: `extension #<digits>` is `extension #<token>`
 /// under the pin's `extension_number_token` row, on every occurrence, with
 /// the phrase before no digit left as it stands; a pin without the row
 /// compares the number. Both streams of a run go through the same
@@ -197,9 +197,9 @@ fn argv_echo() -> (Tree, PathBuf) {
     (dir, path)
 }
 
-/// A regime may carry `args` (#1780, #1887): the tracked pin's
-/// `[regime.extended-info]`, the row #1780 ruled, is a block of arguments
-/// alone, and a regime of ini
+/// A regime may carry `args` (harness revision 94): the tracked pin's
+/// `[regime.extended-info]`, the row ruled 2026-10-04, is a block of
+/// arguments alone, and a regime of ini
 /// alone carries none. A regime's arguments stand after the recipe's, as
 /// its ini stands after the recipe's, ahead of every `-d` and of the
 /// lane's flags and the program; a run under no regime, or under one of
@@ -252,8 +252,8 @@ fn a_regimes_args_stand_after_the_recipes_and_ahead_of_every_ini() {
 
 /// A regime's arguments reach php itself: `-e` compiles with extended
 /// info, which no ini setting reaches, so php's op-array dump under it
-/// carries the `EXT_STMT` oplines the dump without it does not (#1780,
-/// #1822). Regimes compose in the order named: the tracked `dump` and
+/// carries the `EXT_STMT` oplines the dump without it does not.
+/// Regimes compose in the order named: the tracked `dump` and
 /// `extended-info` rows, one after the other, are the run of a row that
 /// carries both, which is how `compile-identity --regime extended-info`
 /// dumps without a combined row of its own.
@@ -383,7 +383,7 @@ fn pin_with_path(path: &Path) -> Pin {
 }
 
 /// The tracked pin as the file says it, with no `[source].path` at all:
-/// the tree named by the variable alone (#4260).
+/// the tree named by the variable alone.
 fn pin_without_path() -> Pin {
     let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
     let mut in_source = false;
@@ -527,7 +527,7 @@ fn the_fixture_pins_keep_their_path_and_load() {
     }
 }
 
-/// The formula the pin is poured from (#4383), over the fixtures under
+/// The formula the pin is poured from, over the fixtures under
 /// `xtask/fixtures/oracle/formula/`, since no keg of `php@8.5` stands on a
 /// machine before Homebrew makes that formula. A pin that names `php@8.5`
 /// is accepted with its php and its three hosts under `Cellar/php@8.5/`,
@@ -571,7 +571,7 @@ fn the_pinned_binaries_stand_in_the_keg_of_the_formula_the_pin_names() {
 }
 
 /// `[recipe.env]`'s `TEST_PHP_EXECUTABLE` is a pinned binary as
-/// `[oracle].path` is (#4383): the tracked pin exports php from the keg
+/// `[oracle].path` is: the tracked pin exports php from the keg
 /// it pins and loads with no defect, as the fixture `revised.toml` does;
 /// and the negative control, `exported.toml`, whose bump left the
 /// variable at the keg before, is a defect by that key for the keg, for
@@ -665,9 +665,9 @@ fn a_tree_that_is_no_checkout_states_no_commit_and_is_taken_at_its_word() {
 /// What a runner that sets the variable claims: the tree is there and at
 /// the pin's commit. Held whenever the variable is set, so a runner whose
 /// checkout drifted from `[source].commit` fails here naming both
-/// revisions, and never skips as an absent tree would (#37). A runner
+/// revisions, and never skips as an absent tree would. A runner
 /// that promised the tree and set no variable fails here too, naming
-/// both (#38).
+/// both.
 #[test]
 fn a_tree_the_variable_names_is_at_the_pin() {
     if std::env::var_os(TREE_VARIABLE).is_none_or(|value| value.is_empty()) {
@@ -702,7 +702,7 @@ fn phpt_files_under(dir: &Path) -> u64 {
 
 /// The tree the variable names holds every `.phpt` the pin counts,
 /// `[source].phpt_files`, as `find . -name '*.phpt'` counts them at the
-/// tag (#1713). A checkout narrower than the corpus fails here naming
+/// tag. A checkout narrower than the corpus fails here naming
 /// both numbers, before a lane measures less in silence: the hand-written
 /// list CI checked out by had left 241 tests of `sapi/cgi`, `sapi/fpm`,
 /// `sapi/phpdbg` and `ext/intl/uchar` out, and their subsets read zero
@@ -728,7 +728,7 @@ fn a_tree_the_variable_names_holds_every_test_the_pin_counts() {
 }
 
 /// Every file CI runs, the workflows and the local actions they use
-/// (`.github/actions/<name>/action.yml`), by name and text (#2253).
+/// (`.github/actions/<name>/action.yml`), by name and text.
 fn ci_files() -> Vec<(String, String)> {
     let github = workspace().join(".github");
     let mut paths: Vec<_> = std::fs::read_dir(github.join("workflows"))
@@ -753,11 +753,11 @@ fn ci_files() -> Vec<(String, String)> {
         .collect()
 }
 
-/// No workflow or action holds a directory of the corpus (#1713): a
+/// No workflow or action holds a directory of the corpus: a
 /// checkout of php-src takes its sparse patterns off `status --section
 /// corpus`, on stdin, so no step lists one and none can fall behind a
 /// subset the manifest adds; and one action checks it out, for every job
-/// that reads it (#2253). A token anchored as a pattern under a root's first
+/// that reads it. A token anchored as a pattern under a root's first
 /// directory is one, `/sapi/cli/tests/` as much as `/ext/*/`; a lane's
 /// `--subset Zend/tests` is the lane's composition (harness §7) and no
 /// pattern. Comments are stripped, so prose that cites a pattern does not
@@ -817,11 +817,11 @@ fn no_workflow_holds_a_directory_of_the_corpus() {
     );
 }
 
-/// `oracle.toml` has one reader, the oracle module (#66): no workflow or
+/// `oracle.toml` has one reader, the oracle module: no workflow or
 /// action parses it, and what a job needs of the pin it reads off a
 /// `status` section's JSON with `jq`, the tag the corpus is cloned at and
-/// the key its tree is kept under off the corpus section (#1713), the keg
-/// a runner pours off the oracle section's `binary` (#2253). A line
+/// the key its tree is kept under off the corpus section, the keg
+/// a runner pours off the oracle section's `binary`. A line
 /// outside a comment naming the file is a read of it, an action's
 /// `description:` excepted, which says in prose what the action pours;
 /// so is one spelling a table of the pin, `[source]`, `[oracle]` or a
@@ -859,14 +859,14 @@ fn no_workflow_parses_the_pin_and_the_tag_and_key_are_read_off_the_corpus_sectio
 }
 
 /// The variable's name is stated in one place that both the code and CI
-/// read (#36): `oracle::TREE_VARIABLE`, which `status --section oracle`
+/// read: `oracle::TREE_VARIABLE`, which `status --section oracle`
 /// renders and CI reads off it, setting the tree under that name through
 /// `$GITHUB_ENV`. So no workflow or action spells either name, in an
 /// `env:` block or anywhere outside a comment, and CI does run the
 /// section and read both variables off its JSON, once, in the corpus
-/// action every job that reads the tree uses (#2253); the promise travels the
+/// action every job that reads the tree uses; the promise travels the
 /// same way, since a tree named and not promised skips in silence where
-/// it is absent (#38). The comments are stripped first, so a name cited
+/// it is absent. The comments are stripped first, so a name cited
 /// in prose does not stand in for a setting; the negative control is a
 /// key that looks like one of the two under another spelling, which the
 /// harness would never read.
@@ -933,10 +933,9 @@ fn ci_reads_the_variables_off_the_oracle_section_and_spells_neither() {
     );
 }
 
-/// The promise (#38): what a runner says this machine has, the words the
+/// The promise: what a runner says this machine has, the words the
 /// variable lists. A word outside the three is refused naming them, so a
-/// misspelt promise is never an unmade one: `mysq` promises no server
-/// (#3084).
+/// misspelt promise is never an unmade one: `mysq` promises no server.
 #[test]
 fn a_promise_is_the_words_the_variable_lists_and_an_unknown_word_is_refused() {
     let none = Promised::parse("").unwrap();
@@ -964,7 +963,7 @@ fn a_promise_is_the_words_the_variable_lists_and_an_unknown_word_is_refused() {
 /// The tests of `ext/mysqli`, `ext/pdo_mysql`, `ext/standard` and
 /// `php_compile` cannot depend on xtask, so the skip they share spells
 /// the two variables and the words itself: held here to the ones
-/// [`Promised::parse`] reads and `xtask test` sets (#3084, #3085, #3180).
+/// [`Promised::parse`] reads and `xtask test` sets.
 #[test]
 fn the_tests_beyond_xtask_skip_by_its_own_names_and_words() {
     let support = workspace().join("crates/php_compile/tests/support/skip.rs");
@@ -978,7 +977,7 @@ fn the_tests_beyond_xtask_skip_by_its_own_names_and_words() {
     }
 }
 
-/// The decision every guarded test takes (#38): a fact the pin names
+/// The decision every guarded test takes: a fact the pin names
 /// that this machine has not is a skip, said on stderr, unless the
 /// machine promised it, in which case it is a failure naming what was
 /// looked for and the promise. A fact the machine has is the fact,
@@ -1097,7 +1096,7 @@ fn with_split(params: &str, md5: Option<&str>, split: [Option<&str>; 3]) -> anyh
     Pin::parse(&pin.to_string())
 }
 
-/// `[fastcgi]` (#2334): nginx's `fastcgi_param` lines read as typed
+/// `[fastcgi]`: nginx's `fastcgi_param` lines read as typed
 /// parameters in the order nginx sends them, `SCRIPT_FILENAME` first, a
 /// value's text apart from its variables, blank lines and comments
 /// skipped; the copy held to its md5, and a variable, a directive or a
@@ -1174,7 +1173,7 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
     assert!(err.to_string().contains("[fastcgi]"), "{err}");
 }
 
-/// `[fastcgi]`'s split (#2637) and `PATH_TRANSLATED` (#2650): the
+/// `[fastcgi]`'s split and `PATH_TRANSLATED`: the
 /// pattern's two captures, or the whole path with no path info where it
 /// does not match; a pattern of other than two captures, half the split,
 /// or `path_translated` without it refused; and a pin from before either
@@ -1203,7 +1202,7 @@ fn the_fastcgi_split_reads_both_keys_or_neither() {
         let err = with_split(params, None, split).unwrap_err().to_string();
         assert!(err.contains("split_path_info"), "{split:?}: {err}");
     }
-    // A pin from before PATH_TRANSLATED (#2650) reads, sending none.
+    // A pin from before PATH_TRANSLATED reads, sending none.
     let split_only = [Some(r"^(.+?\.php)(/.*)$"), Some("$fastcgi_path_info"), None];
     let split_only = with_split(params, None, split_only).unwrap();
     let names = split_only
@@ -1227,11 +1226,11 @@ fn the_fastcgi_split_reads_both_keys_or_neither() {
     );
 }
 
-/// The tracked pin's mapping (#2334): nginx's stock `fastcgi_params` at
+/// The tracked pin's mapping: nginx's stock `fastcgi_params` at
 /// the release it names, its source at that release's tag,
 /// `SCRIPT_FILENAME` before them as nginx's `fastcgi.conf` sets it, and
-/// first the documented split's `PATH_INFO` (#2637) and RFC 3875's
-/// `PATH_TRANSLATED` (#2650).
+/// first the documented split's `PATH_INFO` and RFC 3875's
+/// `PATH_TRANSLATED`.
 #[test]
 fn the_tracked_pin_maps_http_to_fastcgi_as_nginx_s_stock_params() {
     let pin = common::manifest::pin();
@@ -1333,7 +1332,7 @@ fn an_open_or_fixed_row_does_not_accept_a_difference() {
     ));
 }
 
-/// The fixture comparison that must fail (ticket #5): the oracle's bytes
+/// The fixture comparison that must fail: the oracle's bytes
 /// beside an engine's that differ, with no row for the id.
 #[test]
 fn the_fixture_comparison_fails() {
@@ -1395,7 +1394,7 @@ fn verdict_is_compare_with_the_callers_match_in_place_of_equal_bytes() {
 
 /// A stand-in for the engine's binary at `target/<profile>/php` under
 /// `root`, stamped `ago` seconds back, so a test says in one line whether
-/// the tree has moved past it (#475). The write time is set rather than
+/// the tree has moved past it. The write time is set rather than
 /// slept for: the question is which of two files is newer, and a sleep
 /// would answer it by wall clock.
 fn built(root: &Path, profile: &str, ago: u64) -> PathBuf {
@@ -1422,7 +1421,7 @@ fn engine_sources(root: &Path) {
 
 /// A release binary built once and never again was the lane's engine for
 /// every run after, however far the tree moved, since `release` is
-/// preferred over `debug` (#475). It is preferred among the binaries the
+/// preferred over `debug`. It is preferred among the binaries the
 /// tree has not moved past, and not over them: `cargo build -p
 /// php_sapi_cli -p php_sapi_cgi` writes the debug one, and that is what
 /// displaces it.
@@ -1455,10 +1454,10 @@ fn a_binary_the_tree_has_moved_past_is_passed_over_for_one_it_has_not() {
 }
 
 /// Every correctness lane runs `release-da` (harness-design.md §7,
-/// revision 82; #1994), so the lane looks for that build first: one the
+/// revision 82), so the lane looks for that build first: one the
 /// tree has not moved past is the engine over a release binary beside it,
 /// and one the tree has moved past is passed over for the release binary,
-/// as #475 passes over a binary of any profile that is behind.
+/// as a lane passes over a binary of any profile that is behind.
 #[test]
 fn the_lanes_build_is_the_engine_before_release_and_passed_over_when_behind() {
     let root = fixture_tree("lanes-build-first");
@@ -1518,7 +1517,7 @@ fn a_php_cgi_the_tree_has_moved_past_holds_back_the_php_beside_it() {
 }
 
 /// A binary cargo leaves standing is the engine, whatever else under the
-/// crate directories was written since (#3109): on 2026-10-20 a commit
+/// crate directories was written since: on 2026-10-20 a commit
 /// that wrote `ext/clippy.toml` alone left `target/release-da/php` fresh
 /// for cargo, and the census skipped every subset, the binary "built
 /// before ext/clippy.toml was last written". It is held to what its
@@ -1563,8 +1562,7 @@ fn a_binary_cargo_leaves_standing_is_the_engine_and_one_it_relinks_is_not() {
 }
 
 /// The engine's binary names itself on the reading that ran it, and a
-/// binary the tree has not moved past is the engine as it was before
-/// (#475).
+/// binary the tree has not moved past is the engine as it was before.
 #[test]
 fn a_binary_the_tree_has_not_moved_past_is_the_engine_and_stamps_its_reading() {
     let root = fixture_tree("fresh-binary");
@@ -1586,7 +1584,7 @@ fn a_binary_the_tree_has_not_moved_past_is_the_engine_and_stamps_its_reading() {
 /// A tree with no engine source in it is not one a binary can have fallen
 /// behind: the harness's own tests lay a workspace down without the
 /// crates, and a stand-in binary there is the lane's engine whatever its
-/// write time (#475).
+/// write time.
 #[test]
 fn a_tree_with_no_engine_source_leaves_every_binary_the_engine() {
     let root = fixture_tree("no-engine-source");
@@ -1601,7 +1599,7 @@ fn a_tree_with_no_engine_source_leaves_every_binary_the_engine() {
 /// A binary named by a path relative to where `xtask` was invoked is the
 /// one its programs are handed by its absolute path: they run in the run's
 /// copy of the tree, where the relative path named nothing, and every test
-/// of the subset skipped for it (#1259). A path that names no file is
+/// of the subset skipped for it. A path that names no file is
 /// refused before anything runs, naming the path.
 #[test]
 fn a_named_binary_is_handed_on_by_its_absolute_path_and_one_not_there_is_refused() {

@@ -1,4 +1,4 @@
-//! `xtask soak` (#2350): the reading that stakes design §5.14 on a
+//! `xtask soak`: the reading that stakes design §5.14 on a
 //! deployment. One makala, at its default request threads, serves the
 //! corpus to many clients at once for a fixed time, and each response is
 //! held to the same request served alone. The design promises one engine
@@ -28,14 +28,15 @@
 //! makala did not answer alone is a bork. An entry with an `--INI--` of its
 //! own is left out, since one process serves every request under one ini.
 //!
-//! **Its length and lane** are #2336's ruling: [`NIGHTLY`] and
+//! **Its length and lane** are as ruled 2026-10-09: [`NIGHTLY`] and
 //! [`CLIENTS`], nightly on `dax-build` (`nightly.yml`'s `soak` job, which
 //! asks for it with `--nightly`, a flag `lanes.nightly-soak` denies outside
 //! CI); a bare call is the smoke's [`SMOKE`], as makala's own test runs it
-//! (#2632). `--seconds` and `--clients` take another run over either. The ruling's "debug
-//! build" is read as a build with debug assertions, since those are what
-//! arm the leak sensor (`cfg(debug_assertions)`): the lanes' `release-da`,
-//! as every binary the harness serves through is built, not `dev`.
+//! (ruled 2026-10-10). `--seconds` and `--clients` take another run over
+//! either. The ruling's "debug build" is read as a build with debug
+//! assertions, since those are what arm the leak sensor
+//! (`cfg(debug_assertions)`): the lanes' `release-da`, as every binary the
+//! harness serves through is built, not `dev`.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -57,14 +58,16 @@ use crate::witness::makala::{Server, from_http};
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "soak";
 
-/// How long the nightly lane's clients send, as #2336 rules: ten minutes.
+/// How long the nightly lane's clients send, as ruled 2026-10-09: ten
+/// minutes.
 pub(crate) const NIGHTLY: u64 = 600;
 
-/// How long a bare call's clients send: the smoke's 30 seconds, as #2336
-/// rules for `sapi/makala/tests/soak.rs` and #2632 for the default.
+/// How long a bare call's clients send: the smoke's 30 seconds, as ruled
+/// 2026-10-09 for `sapi/makala/tests/soak.rs` and 2026-10-10 for the
+/// default.
 pub(crate) const SMOKE: u64 = 30;
 
-/// How many clients send at once, as #2336 rules.
+/// How many clients send at once, as ruled 2026-10-09.
 pub(crate) const CLIENTS: usize = 64;
 
 /// How many mismatches the message names, the rest counted.
@@ -185,7 +188,7 @@ pub(crate) fn run(
 /// `Z/Zend/zend_execute_API.c:1611-1614`), as the engine's is, so under a
 /// shared machine's load a kernel of the bench workloads ran past the
 /// default 30 seconds among 64 clients and its body was php's fatal: a
-/// mismatch made by the load and by no request beside it (#2337). Past
+/// mismatch made by the load and by no request beside it. Past
 /// the client's patience the timer is still armed and disarmed on every
 /// request, and a request slower than that is a failure the client
 /// counts, never a body that differs.
@@ -347,7 +350,7 @@ mod tests {
 
     /// A bare call is the smoke's 30 seconds and `--nightly` the nightly
     /// lane's ten minutes, both with the nightly client count, and
-    /// `--seconds` stands over either (#2632).
+    /// `--seconds` stands over either.
     #[test]
     fn a_bare_call_is_the_smoke_and_nightly_the_nightly_length() {
         use clap::Parser;

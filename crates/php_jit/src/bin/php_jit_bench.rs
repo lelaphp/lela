@@ -1,4 +1,4 @@
-//! The program of `xtask bench`'s `jit-wrapper` bars (#2742, #2879):
+//! The program of `xtask bench`'s `jit-wrapper` bars:
 //! `php_jit_bench <wrapper|wrapper-bare|direct> <calls>` makes that many calls of the
 //! test kernel one way and prints the tally they leave, which is the same
 //! whichever way they went, so the two arms' bytes compare (measurement

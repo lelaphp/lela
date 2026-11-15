@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -15,7 +15,7 @@ fn armed(source: &str) -> String {
 }
 
 /// XXH3's `secret` option is read as its string, `zval_try_get_string`,
-/// and given up once its bytes are copied (#2100).
+/// and given up once its bytes are copied.
 #[test]
 fn an_xxh3_secret_read_is_given_up() {
     let stdout = armed(

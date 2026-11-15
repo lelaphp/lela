@@ -1041,7 +1041,7 @@ impl Mm {
     /// `_efree` as `memory_get_usage()` and the observers see it, the
     /// bytes kept: what a pinned block's destruction does at php's
     /// moment, so the request's counts fall where php's do while a pin
-    /// still names the block (design §4.4, #2230). Its bytes go back
+    /// still names the block (design §4.4). Its bytes go back
     /// with [`Mm::free_retired`]; a block retired already is left as it
     /// stands.
     #[cold]
@@ -1416,7 +1416,7 @@ impl Mm {
     /// where it stands or moved. The real peak moves by that alone while
     /// the machine lets the block grow where it stands, and by one copy
     /// of the block more where it does not, which is the machine's
-    /// mapping at that moment, in php's process as in this one (#1410);
+    /// mapping at that moment, in php's process as in this one;
     /// so the fence holds the peak to that bound and no number:
     ///
     /// ```php
@@ -1453,7 +1453,7 @@ impl Mm {
     /// its count ([`Mm::huge_rounding`]). php rounds here without that
     /// check (`Z/Zend/zend_alloc.c:1757`): its rounding wraps to zero,
     /// `zend_mm_chunk_truncate` unmaps the whole block, and the block is
-    /// returned unmapped (#3602).
+    /// returned unmapped.
     ///
     /// # Safety
     ///
@@ -2746,11 +2746,11 @@ unsafe fn copy_into(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
     unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), to.as_ptr(), len) };
 }
 
-/// The freed slots a debug build holds back per bin (#1991).
+/// The freed slots a debug build holds back per bin.
 #[cfg(debug_assertions)]
 pub(crate) const QUARANTINE_SLOTS: usize = 16;
 
-/// A debug build's quarantine of one bin (#1991): the bin's last
+/// A debug build's quarantine of one bin: the bin's last
 /// [`QUARANTINE_SLOTS`] freed slots, oldest first, held back from the
 /// free list. php's free list is last in, first out, so the slot a block
 /// was just freed from is the next one its bin hands out, and the handing
@@ -2890,7 +2890,7 @@ impl Mm {
 /// A debug build's mark on a block the heap has freed (design §10), so
 /// that a refcount operation on one is found where it is made and not
 /// several allocations later, where a write into a freed bin slot's link
-/// word surfaces (#723, #750). A release build compiles none of it.
+/// word surfaces. A release build compiles none of it.
 ///
 /// The mark is two words, the second and third of the block, laid when a
 /// bin slot or a `run` is given back and cleared when one is handed out,
@@ -2985,7 +2985,7 @@ pub(crate) mod freed {
     /// so the two words are inside it, and no header leaves padding in
     /// them, so a live block's are initialised. `at` is the block's own
     /// pointer, never one derived from a reference to its header, whose
-    /// provenance ends at the header's eight bytes (#2414).
+    /// provenance ends at the header's eight bytes.
     pub(crate) fn is_freed(at: NonNull<u8>) -> bool {
         // A tracked heap's blocks are the system's, which carry no mark
         // and sit in no chunk ([`super::tracked`]).

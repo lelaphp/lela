@@ -183,7 +183,7 @@ fn http_response_code(
 /// body started written through the two references, the line first as
 /// php's `switch` falls through, and the empty string and zero while
 /// nothing is sent. `SEND_REF` is what puts a reference in the two
-/// places (#344); an argument that is no variable never reaches the
+/// places; an argument that is no variable never reaches the
 /// native at all, since the send raises php's `Error` over it first.
 ///
 /// ```php

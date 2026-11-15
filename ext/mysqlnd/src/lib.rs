@@ -1,7 +1,7 @@
 //! The `mysqlnd` extension: `php-src/ext/mysqlnd` as one crate under
 //! `ext/` (ADR-0004), php's `MySQL` native client ported over
-//! `mysql_common`'s scrambles, every byte through the engine's streams
-//! (#1345). It declares no native, as php's declares none: its entry is
+//! `mysql_common`'s scrambles, every byte through the engine's streams.
+//! It declares no native, as php's declares none: its entry is
 //! `extension()`, its `mysqlnd.*` ini entries and its `MINFO`; and it
 //! exports [`client`], the connection, rows and statement the extensions
 //! that include `mysqlnd.h` reach, `pdo_mysql` and `mysqli`.

@@ -251,7 +251,7 @@ fn returning(number: u32) -> PublishedUnit {
 /// frame of this serving to its caller, and raises the return safepoint,
 /// with the number the compiler wrote, in the caller it landed in, as
 /// php's interpreter runs the landing's handler past the return
-/// (`jit-design.md` §2.2, #4056).
+/// (`jit-design.md` §2.2).
 #[test]
 fn a_return_in_no_entry_frame_raises_the_return_safepoint_and_pops() {
     let engine = Engine::cli_builder().tier::<Probe>().build();

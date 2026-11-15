@@ -1,4 +1,4 @@
-//! The leaks the request leak sensor found in the engine (#2057): in
+//! The leaks the request leak sensor found in the engine: in
 //! the constant evaluator, the handlers, the collector's destructor
 //! phase, the symbol tables, `Closure::call` and a frame's release,
 //! each a program served with the sensor armed
@@ -20,7 +20,7 @@ fn armed(source: &str) -> (String, i32) {
 /// the array, whether the element that threw was a key with no room
 /// past the last, a constant nothing defined or a spread, and one that
 /// throws while it evaluates a `new`'s arguments gives up those it
-/// evaluated before (#2060).
+/// evaluated before.
 #[test]
 fn a_constant_array_that_throws_gives_up_the_array() {
     let (stdout, exit) = armed(
@@ -52,7 +52,7 @@ try { g(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 }
 
 /// A constant expression that evaluates cleanly gives up the key it
-/// evaluated once the array holds its own owner of it (#2061).
+/// evaluated once the array holds its own owner of it.
 #[test]
 fn a_constant_array_gives_up_the_keys_it_evaluated() {
     let (stdout, exit) = armed(
@@ -72,7 +72,7 @@ foreach (T as $k => $v) { echo $k, '=', $v, "\n"; }
 /// serves, a dynamic one, one bound to another by reference, one a
 /// `__get` answers by reference and one named by a variable, hands the
 /// stepped value to `write_property` and gives up nothing else; the
-/// variable naming it keeps its string (#2071).
+/// variable naming it keeps its string.
 #[test]
 fn a_compound_assignment_through_the_handlers_hands_on_its_result() {
     let (stdout, exit) = armed(
@@ -93,7 +93,7 @@ $n = 'p' . $q; $o->$n = 'a'; $o->$n .= 'x'; unset($o, $a); echo $n, "\n";
 
 /// The collector's fiber, made again after a destructor suspended the
 /// one before it, is given up when the request's end destroys it, and
-/// the collection at the end frees it (#2073).
+/// the collection at the end frees it.
 #[test]
 fn the_collectors_fiber_is_freed_when_the_request_ends() {
     let (stdout, exit) = armed(
@@ -119,7 +119,7 @@ $f->start();
 /// variable gives the table up when it is closed, so a generator held
 /// only there is collected, and the table follows the frame to wherever
 /// it is resumed; a frame popping at the place another stack's frame
-/// stands frees none of that frame's table (#2073).
+/// stands frees none of that frame's table.
 #[test]
 fn a_frames_symbol_table_is_its_own_wherever_it_stands() {
     let (stdout, exit) = armed(
@@ -147,7 +147,7 @@ $f->resume(); $e->resume();
 
 /// An object whose destructor ran a collection while the store's walk
 /// held it is a possible root again after the destructor, so the
-/// collection at the request's end frees its cycle (#2073).
+/// collection at the request's end frees its cycle.
 #[test]
 fn an_object_served_by_the_walk_is_a_possible_root_again() {
     let (stdout, exit) = armed(
@@ -164,7 +164,7 @@ echo "done\n";
 }
 
 /// `Closure::call` of a closure returning by reference gives up the
-/// cell it handed back for the value the cell holds (#2074).
+/// cell it handed back for the value the cell holds.
 #[test]
 fn closure_call_unwraps_the_reference_it_was_returned() {
     let (stdout, exit) = armed(
@@ -182,7 +182,7 @@ $v = $get->call(new K); echo $v, "\n";
 
 /// An extra argument a frame gives up is a possible root, so a cycle a
 /// collection in the callee found reachable through it is collected at
-/// the request's end (#2074).
+/// the request's end.
 #[test]
 fn an_extra_argument_given_up_is_a_possible_root() {
     let (stdout, exit) = armed(
@@ -201,7 +201,7 @@ echo "ok\n";
 
 /// `+=` through a property the class's handlers serve, whose right
 /// operand's destructor throws as the operand is freed, gives up the
-/// union it wrote back, as `+` and `+=` on a variable do (#2083).
+/// union it wrote back, as `+` and `+=` on a variable do.
 #[test]
 fn an_array_union_written_back_through_the_handlers_is_given_up_when_a_destructor_throws() {
     let (stdout, exit) = armed(

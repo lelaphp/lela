@@ -364,7 +364,7 @@ impl Serializer<'_> {
     /// the same algorithm, php's recursion, refused where the stack has
     /// come down to its limit, as `dom_xml_serialize_check_stack_limit`
     /// refuses it. The nest is deeper than php's budget holds, at php's
-    /// bytes a level and at this engine's (#3159), so both engines refuse
+    /// bytes a level and at this engine's, so both engines refuse
     /// it.
     ///
     /// ```php
@@ -390,8 +390,7 @@ impl Serializer<'_> {
             return Err(Failed::Deep);
         }
         // The frame is read where `node` left it, never moved out of its
-        // answer: a nest keeps one frame's bytes at each level, not two
-        // (#3159).
+        // answer: a nest keeps one frame's bytes at each level, not two.
         let made = self.node(node, map, namespace, indent);
         let frame = match &made {
             Ok(Some(frame)) => frame,
@@ -420,8 +419,7 @@ impl Serializer<'_> {
     /// `dom_xml_serialization_algorithm` for one node: what it writes
     /// before its children, and the frame its children are written from.
     /// A call of its own, so what writing a node takes is off the stack
-    /// of a nest written level by level, which keeps only the frame
-    /// (#3159).
+    /// of a nest written level by level, which keeps only the frame.
     #[inline(never)]
     fn node(
         &mut self,

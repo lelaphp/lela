@@ -5,7 +5,7 @@ use super::*;
 
 /// The edges section is the manifest's `[[edge]]` rows in its order, each
 /// with where it reaches, how the row qualifies it and its ADRs, from the
-/// manifest alone (#2250); in JSON the rows are the manifest's as it
+/// manifest alone; in JSON the rows are the manifest's as it
 /// parses them.
 #[test]
 fn edges_renders_every_edge_row_with_its_qualifiers_and_adrs() {
@@ -52,7 +52,7 @@ fn edges_renders_every_edge_row_with_its_qualifiers_and_adrs() {
 
 /// The crates section counts the manifest's `[[crate]]` rows by the
 /// directory each is laid down in, from the manifest alone, so a region
-/// that renders it is held by `inputs=seams.toml` (#2250); every row, with
+/// that renders it is held by `inputs=seams.toml`; every row, with
 /// whether its directory holds a `Cargo.toml`, is under `--uncut` and in
 /// JSON.
 #[test]
@@ -118,8 +118,8 @@ fn crates_counts_the_manifest_rows_by_directory_and_lists_each_under_uncut() {
 
 /// The modules section is each item lock's lines by the module that
 /// defines them, from the groups of the seam's api-check reading, the
-/// widest first with its share of the lock and the reading's commit
-/// (#1795); a seam whose reading
+/// widest first with its share of the lock and the reading's commit;
+/// a seam whose reading
 /// keeps no groups has no row, and with none at all the section has no
 /// reading.
 #[test]
@@ -158,7 +158,7 @@ fn modules_renders_each_lock_by_its_defining_modules_the_widest_first() {
 
 /// The rules section in Markdown is each rule's id, ADR, predicate and
 /// reading; the text its failure prints is under `--uncut` and in JSON, so
-/// the map carries the rules without it (#1772).
+/// the map carries the rules without it.
 #[test]
 fn rules_prints_each_rule_with_its_adr_and_the_failure_text_under_uncut() {
     let root = tracked_scratch("rules");
@@ -199,8 +199,8 @@ fn rules_prints_each_rule_with_its_adr_and_the_failure_text_under_uncut() {
 }
 
 /// Rows whose reading says the crate is not yet created fold into one row
-/// at the end of the section, "N crates not yet created", naming them
-/// (#64): twenty such rows carry one fact, and the session block has a
+/// at the end of the section, "N crates not yet created", naming them:
+/// twenty such rows carry one fact, and the session block has a
 /// cap. A lone one stays as it is, and a crate that is measured keeps its
 /// row; the fold reads the message alone, as budget, witness and phpt
 /// write it.

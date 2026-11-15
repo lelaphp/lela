@@ -206,7 +206,7 @@ impl Stylesheet {
 /// ([`SheetId::held`]), so a callback's `importStylesheet()` that
 /// replaces it leaves its free to the transformation's end, where php's
 /// `xsltFreeStylesheet` frees the one libxslt is transforming with
-/// (#2319).
+/// (`trace:xsl-stylesheet-replaced-in-callback`).
 pub(crate) struct Sheet(Foreign<Stylesheet>);
 
 /// The name of a [`Sheet`], copied freely.

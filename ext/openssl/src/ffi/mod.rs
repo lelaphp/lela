@@ -1,6 +1,6 @@
 //! The binding to OpenSSL's libcrypto (design §7.2, `unsafe.homes`'
 //! `ext/*/src/ffi/`): the platform's OpenSSL of the major version the
-//! oracle links, 4 since php 8.5.12 (#3381), found by `openssl-sys` through `pkg-config`, and the one
+//! oracle links, 4 since php 8.5.12, found by `openssl-sys` through `pkg-config`, and the one
 //! home of this crate's `unsafe`. What `openssl-sys` does not declare is
 //! declared beside its use from the library's own headers.
 //!

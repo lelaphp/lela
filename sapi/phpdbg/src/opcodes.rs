@@ -1,6 +1,6 @@
 //! The opcodes phpdbg tells apart, by php's names: the native face hands
 //! an opline's opcode out as its `zend_get_opcode_name` name and its
-//! number (#2357), as php's own phpdbg compares `opline->opcode` with
+//! number, as php's own phpdbg compares `opline->opcode` with
 //! `ZEND_RETURN` and its kin. Each set is one list here, and a test holds
 //! every name in it to an opcode the face answers for, so a misspelt name
 //! fails a test rather than never matching.

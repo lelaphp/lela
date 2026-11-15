@@ -5,9 +5,9 @@
 //! `<name>` is at `crates/<name>` and its package is itself; the harness
 //! is `xtask`, a crate of its own at the root. Which directories crates
 //! are laid down in is the manifest's `[[crate]]` rows' and stated nowhere
-//! else ([`Layout`], #3187's ruling, #3207). Every instrument that turns a
-//! name into a path or a package, or a path or a package into a name,
-//! asks here.
+//! else ([`Layout`], ruled 2026-10-21). Every instrument that turns a name
+//! into a path or a package, or a path or a package into a name, asks
+//! here.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ const BARE: &str = "crates";
 
 /// The directories the manifest's crates are laid down in, derived from
 /// its `[[crate]]` rows: `crates`, where a bare name lives, then each
-/// directory a row names before its `/`, sorted (#3207).
+/// directory a row names before its `/`, sorted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     /// The directories a row names before its `/`, sorted.

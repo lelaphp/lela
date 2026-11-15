@@ -1,7 +1,7 @@
 //! timelib, the date library php-src vendors at `ext/date/lib`, as this
 //! crate vendors it at `lib/`: byte for byte at the tag `oracle.toml` pins,
 //! with its `LICENSE.rst` and its bundled timezone database, compiled by
-//! `build.rs` (design §7.2, #711). What follows is its C interface as
+//! `build.rs` (design §7.2). What follows is its C interface as
 //! `lib/timelib.h` and `lib/timelib_private.h` declare it at the tag: the
 //! structs laid out as C lays them out, and the functions. The arithmetic
 //! that touches no memory is declared `safe`; every other function is the

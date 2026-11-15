@@ -1,5 +1,5 @@
 //! `xtask api-check` over the fixtures of `xtask/fixtures/api-check`, judged
-//! by the tracked manifest: locks, edges and bundle order (ticket #4). One
+//! by the tracked manifest: locks, edges and bundle order. One
 //! fixture per rule the instrument evaluates must fail; `clean` must pass.
 #![cfg(tracked)]
 
@@ -111,7 +111,7 @@ fn under(order: &str) -> Manifest {
 }
 
 /// The tracked manifest with `php_bundle`'s edge read as
-/// `order = "registration"`, the value #1778 ruled.
+/// `order = "registration"`, the value ruled 2026-10-04.
 fn under_registration() -> Manifest {
     under("registration")
 }
@@ -151,7 +151,7 @@ fn bundle_reading_with(scratch: &str, enabled: &str, replaced: &[(&str, &str)]) 
     of(&readings, "php_bundle").clone()
 }
 
-/// The rows a person adds for the harness's own lock (#55, harness §11:
+/// The rows a person adds for the harness's own lock (harness §11:
 /// the agent proposes, the person commits), on a manifest that does not
 /// carry them yet: the `harness` seam over `xtask.lock`, the lock on the
 /// `xtask` crate row, and the `xtask.lock-line` rule that notes a new
@@ -184,7 +184,7 @@ fn with_the_harness_rows(mut manifest: Manifest) -> Manifest {
 }
 
 /// The tracked manifest with a seam that is one module of `php_engine`,
-/// `layer`, read by `php_streams` alone (#1959).
+/// `layer`, read by `php_streams` alone.
 fn with_the_layer_seam() -> Manifest {
     let mut manifest = Manifest::load(workspace()).unwrap();
     manifest.seams.retain(|s| s.name != "layer");
@@ -197,7 +197,7 @@ fn with_the_layer_seam() -> Manifest {
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
@@ -249,8 +249,8 @@ mod tracked {
     }
 
     /// A `pub use` of a name a crate holds as a private module and a `pub fn`
-    /// re-exports the function, rustc keeping the two in two namespaces
-    /// (#2791): the `namespace` fixture's `php_ext` re-exports
+    /// re-exports the function, rustc keeping the two in two namespaces:
+    /// the `namespace` fixture's `php_ext` re-exports
     /// `php_macros::marker` with no line for it in `api.lock`, which lists
     /// the private module's item instead, the lock hole the inventory read
     /// before, when it took the name for the module.
@@ -268,7 +268,7 @@ mod tracked {
 
     /// An `ext/*` crate's library dependency on another that no row of
     /// design §4.10's list of surfaces names with both crates fails the
-    /// consumer's reading (#2251): the `surface-edge` fixture's ext/zip links
+    /// consumer's reading: the `surface-edge` fixture's ext/zip links
     /// ext/pcre, which the one row, `pcre` → `spl`, does not name, while
     /// ext/spl's link stands on it and ext/zip's dev-dependency on ext/spl
     /// links nothing and is not held.
@@ -292,7 +292,7 @@ mod tracked {
     }
 
     /// An extension's `pub` items beyond `extension()` are its
-    /// `surface.lock`, diffed as an item lock is (#2251): the `surface-lock`
+    /// `surface.lock`, diffed as an item lock is: the `surface-lock`
     /// fixture's lock lists `Regex` and `Regex::compile` and a line naming
     /// nothing, and not `Regex::study` or `unlisted`.
     #[test]
@@ -308,8 +308,8 @@ mod tracked {
         );
     }
 
-    /// A surface item's `#[mirrors]` is held against the pinned php-src
-    /// (#2353): the `mirrors` fixture's tree stands in for it, and of its three
+    /// A surface item's `#[mirrors]` is held against the pinned php-src:
+    /// the `mirrors` fixture's tree stands in for it, and of its three
     /// markers the one naming `php_random_default_algo`, which the header
     /// declares `PHPAPI`, holds, while the one naming the header's `static
     /// inline` and the one naming a header the tree lacks fail the reading.
@@ -364,7 +364,7 @@ mod tracked {
     }
 
     /// An item lock's reading counts its lines by the module that defines
-    /// each, beside the total (#1795): a re-export by the module it is written
+    /// each, beside the total: a re-export by the module it is written
     /// in, `Severity` by `raising`'s, and a method by its impl block's. The
     /// counts sum to the total, and an import lock and a crate keep none.
     #[test]
@@ -419,7 +419,7 @@ mod tracked {
         assert_eq!(failures(&readings).len(), 1);
     }
 
-    /// A type `include!`d from `OUT_DIR`, as `php_unit::Opcode` is (#2025):
+    /// A type `include!`d from `OUT_DIR`, as `php_unit::Opcode` is:
     /// the instrument reads no generated file, so the type's definition is
     /// out of its sight, and the inherent impl in `kind.rs` is joined to it
     /// by the name the including module re-exports. `Kind::COUNT` has its
@@ -436,7 +436,7 @@ mod tracked {
         assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
     }
 
-    /// One order for a lock's lines (#403): `--write` renders them ascending
+    /// One order for a lock's lines: `--write` renders them ascending
     /// and a check that read the set alone accepted a file it would rewrite,
     /// which is how `crates/php_heap/heap.lock` carried `Arr::live_from`
     /// before `Arr::len` into every commit whose write was taken for another
@@ -466,7 +466,7 @@ mod tracked {
     }
 
     /// `--write` stamps a seam's reading over the lock it wrote, with a
-    /// snapshot taken after the write (#2163): the reading is fresh for the
+    /// snapshot taken after the write: the reading is fresh for the
     /// tree `--write` left, where one stamped with the run's snapshot, taken
     /// before, would be stale for its own rewrite.
     #[test]
@@ -483,7 +483,7 @@ mod tracked {
     }
 
     /// The `ceiling` fixture is one item past `[budget] api_items` whatever the
-    /// tracked manifest carries (#338): the fixture directory holds the
+    /// tracked manifest carries: the fixture directory holds the
     /// crate's `Cargo.toml`, and the items and their lock lines are laid down
     /// here in a scratch workspace from the ceiling the manifest reads, so a
     /// person moving the ceiling moves the fixture with it. The `__private`
@@ -563,7 +563,7 @@ mod tracked {
     }
 
     /// A crate no `[[edge]]` row names may depend on no workspace crate
-    /// (design §4.2): a lane, which depends on none (#3740), linking
+    /// (design §4.2): a lane, which depends on none, linking
     /// `php_bundle` fails naming the missing row; the harness linking it
     /// back in fails naming the one edge it has, to its lanes; and
     /// nothing else in the fixture fails.
@@ -592,12 +592,12 @@ mod tracked {
     }
 
     /// The workspace's lints reach a member only through its own
-    /// `[lints] workspace = true` (#1998, #2111): ext/json, without the line,
+    /// `[lints] workspace = true`: ext/json, without the line,
     /// fails naming itself, and ext/ctype, with it, passes. The tracked
     /// workspace, every member carrying the line, is held by
     /// `the_workspace_today_has_no_failing_reading`.
     /// A raise that names its class by a lookup of the linked table fails
-    /// the reading of the extension that raises and no other (#3656): the
+    /// the reading of the extension that raises and no other: the
     /// scan `php_engine`'s `typed_errors` test ran over the workspace is a
     /// hold of each crate's own reading.
     #[test]
@@ -664,7 +664,7 @@ mod tracked {
     }
 
     /// `order = "registration"`: each extension's feature switches on the
-    /// features of every extension it declares `Required` (#1915). standard's
+    /// features of every extension it declares `Required`. standard's
     /// feature omits random, which ext/standard declares Required in rows a
     /// function returns, and fails; session's switches on standard, declared
     /// Required through a function of its own, and passes; random, which ext/session links
@@ -768,7 +768,7 @@ mod tracked {
     }
 
     /// A crate's link to an extension it declares nowhere requires nothing,
-    /// as `ext/sqlite3`'s to `ext/pdo_sqlite` (#1915): session registered behind
+    /// as `ext/sqlite3`'s to `ext/pdo_sqlite`: session registered behind
     /// a feature that switches standard on and random off passes.
     #[test]
     fn a_link_with_no_declaration_requires_nothing() {
@@ -806,8 +806,8 @@ mod tracked {
     }
 
     /// An order the instrument does not serve is refused, never read as one
-    /// it does: `"topological"`, retired by #1882 and its code gone since
-    /// #2255, among them.
+    /// it does: `"topological"`, retired when `"registration"` came and its
+    /// code gone since, among them.
     #[test]
     fn an_order_api_check_does_not_serve_fails() {
         for order in ["alphabetical", "topological"] {
@@ -825,8 +825,7 @@ mod tracked {
     }
 
     /// The tracked workspace passes under `order = "registration"` as under
-    /// the manifest's own value, so a person's flip of the row fails nothing
-    /// (#1882, #1778).
+    /// the manifest's own value, so a person's flip of the row fails nothing.
     #[test]
     fn the_workspace_today_passes_under_the_registration_order() {
         let readings = api_check::hold(&under_registration(), workspace(), false).unwrap();
@@ -836,7 +835,7 @@ mod tracked {
 
     /// The tracked workspace: every seam whose lock has no home present yet,
     /// or that is generated from a file the harness renders no lock from, is
-    /// a skip, `tier.lock`, diffed per section, among those measured (#1369);
+    /// a skip, `tier.lock`, diffed per section, among those measured;
     /// and the harness itself is within its edges.
     #[test]
     fn the_workspace_today_has_no_failing_reading() {
@@ -871,7 +870,7 @@ mod tracked {
 
     /// A hand-edited line of `ops.lock`: the one lock rendered from a file
     /// rather than from a crate's sources, held by the same instrument as
-    /// the other six (#95). The fixture's `ADD` line has lost its `throw`
+    /// the other six. The fixture's `ADD` line has lost its `throw`
     /// effect, so the rendered line has no line in the lock and the line
     /// names no opcode.
     #[test]
@@ -980,7 +979,7 @@ mod tracked {
         assert!(failed.is_empty(), "{}", failed.join("\n"));
     }
 
-    /// A sectioned lock is measured per section (#1369, #1350's ruling):
+    /// A sectioned lock is measured per section (ruled 2026-10-01):
     /// `tier.lock`'s face holds the `tier::*` items `php_sapi` imports, and
     /// `sapi.lock` does not. The `tier-face` fixture's `php_sapi` imports
     /// `tier::Site`, which neither lock lists, so the `tier` reading fails
@@ -1010,7 +1009,7 @@ mod tracked {
     /// The positive control and the section a consumer does not read: with
     /// `tier::Site` under `[face]` both readings pass; under `[kernels]`, when
     /// the manifest gives that section to `php_jit` alone and a `kernels!` list
-    /// of `php_jit`'s names it (#2957), `php_sapi`'s import of it fails the
+    /// of `php_jit`'s names it, `php_sapi`'s import of it fails the
     /// `tier` reading.
     #[test]
     fn each_section_is_held_against_the_consumers_that_read_it() {
@@ -1074,7 +1073,7 @@ mod tracked {
     }
 
     /// `tier.lock`'s kernels section is generated from `php_jit`'s `kernels!`
-    /// lists (jit-design.md §5.3, #2957), never kept: the `tier-kernels`
+    /// lists (jit-design.md §5.3), never kept: the `tier-kernels`
     /// fixture's list names `ops::sub_slow`, which its `[kernels]` lists, so
     /// that import holds; `ops::add_slow`, which `php_jit` imports and
     /// `[kernels]` lists by hand, is named by no list, so the reading fails
@@ -1095,7 +1094,7 @@ mod tracked {
     }
 
     /// A seam that is one module of its producer is an item lock of that
-    /// module alone, living with the producer (#1959). The `layer-face`
+    /// module alone, living with the producer. The `layer-face`
     /// fixture's `php_engine::layer` defines a sealed trait with one method and
     /// a free function, its lock lists the trait and the method and not the
     /// function, and `php_ext`, which is not the seam's consumer, re-exports the
@@ -1135,14 +1134,15 @@ mod tracked {
     }
 }
 
-/// The seal on `EngineState` (#4348 ruling 2, ADR-0005): the `engine-state`
-/// sensor over its fixture, under the rule the tracked manifest carries or,
-/// before it carries one, the row #4348 settled, laid on its copy.
+/// The seal on `EngineState` (ruled 2026-11-09, ADR-0005): the
+/// `engine-state` sensor over its fixture, under the rule the tracked
+/// manifest carries or, before it carries one, the row that ruling settled,
+/// laid on its copy.
 mod engine_state {
     use super::*;
 
     /// The tracked manifest with the rule whose `check` names the seal,
-    /// carrying a `remedy` where the tracked row has none yet (#4500).
+    /// carrying a `remedy` where the tracked row has none yet.
     fn sealed() -> Manifest {
         let mut manifest = Manifest::load(workspace()).unwrap();
         if manifest.rule_checked_by("engine-state").is_none() {
@@ -1203,7 +1203,7 @@ mod engine_state {
         assert_eq!(json.status, Status::Pass, "{}", json.message);
         assert!(pcre.rule.split(", ").any(|r| r == id), "{}", pcre.rule);
         assert!(!json.rule.split(", ").any(|r| r == id), "{}", json.rule);
-        // Each way around a reading of the text (#4360): a site per crate.
+        // Each way around a reading of the text: a site per crate.
         for (krate, site) in [
             ("ext/ctype", "ext/ctype/src/lib.rs:12: "),
             (
@@ -1262,7 +1262,7 @@ mod engine_state {
             .unwrap_or_default()
     }
 
-    /// `state.engine`'s `allow` (#4633, #4647): under an entry naming
+    /// `state.engine`'s `allow`: under an entry naming
     /// `php_syntax::frozen`, the hand impl in that module passes and the one
     /// in `thawed`, a module no entry names, fails, beside the line in
     /// `frozen` handing the trait to a macro no source holds, which the
@@ -1291,7 +1291,7 @@ mod engine_state {
         }
     }
 
-    /// What an entry does not admit (#4647), each module of `php_proto`
+    /// What an entry does not admit, each module of `php_proto`
     /// named by one: a child module's file and a file under the module's
     /// directory that a `#[path]` makes another module, held as anywhere;
     /// an impl a macro writes, an impl in an inline `mod`, both impls of a
@@ -1330,10 +1330,10 @@ mod engine_state {
     }
 
     /// Each compile-fail fixture beside the sensor's is compiled under a
-    /// `compile_fail,E0277` fence, which `xtask test` holds to the code
-    /// (#2049): by `php_bundle`'s `refusals` where the facade reaches the
-    /// entry, and by `php_engine`'s doctests on `tier::epoch_state` (#4492)
-    /// and `layer::StateHook` (#4475), which the facade does not.
+    /// `compile_fail,E0277` fence, which `xtask test` holds to the code:
+    /// by `php_bundle`'s `refusals` where the facade reaches the
+    /// entry, and by `php_engine`'s doctests on `tier::epoch_state`
+    /// and `layer::StateHook`, which the facade does not.
     #[test]
     fn each_compile_fail_fixture_is_included_under_a_pinned_fence() {
         let includers = [

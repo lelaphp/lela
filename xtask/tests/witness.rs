@@ -7,9 +7,9 @@
 //!
 //! Every snippet here is served by the engine linked into the harness,
 //! which is what the lane serves every witness through and the one thing a
-//! binary in the tree does not change (harness §7, revision 48; #401,
-//! #119). The tests that run one return when the pinned oracle is not on
-//! this machine, unless the machine promised it (#38); the rest, the
+//! binary in the tree does not change (harness §7, revision 48).
+//! The tests that run one return when the pinned oracle is not on
+//! this machine, unless the machine promised it; the rest, the
 //! coverage half and the readings of a run with nothing to run, run
 //! anywhere.
 #![cfg(tracked)]
@@ -60,7 +60,7 @@ fn fixture_at(kind: &str, name: &str) -> PathBuf {
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
-/// this machine promised the binary (#38).
+/// this machine promised the binary.
 fn oracle() -> Option<PathBuf> {
     let pin = pin();
     Promise::Oracle
@@ -71,7 +71,7 @@ fn oracle() -> Option<PathBuf> {
 /// What php writes on the first stream for an uncaught error at line 2,
 /// which the engine writes with it, opted in to the status `--accept`
 /// captures. The path is `%s`, since the oracle runs the snippet in a
-/// scratch directory and the linked engine as `witness.php` (#293).
+/// scratch directory and the linked engine as `witness.php`.
 const FATAL: &str = "/// ```expect exit\n/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2\n/// Stack trace:\n/// #0 {main}\n///   thrown in %s on line 2\n/// ```\n";
 
 /// A block whose snippet prints `1` and whose fences pin what `fences` says.
@@ -176,7 +176,7 @@ fn a_witness_whose_bytes_are_the_oracle_s_passes() {
     assert_eq!(count(&reading, "missing"), 0);
 }
 
-/// Every crate's fences are served on one pool (#2212), and each crate's
+/// Every crate's fences are served on one pool, and each crate's
 /// reading is the one a run over it alone gives: of two crates, one whose
 /// fence the oracle meets and one whose fence it does not, a run over
 /// both reads each as the run over each alone does, in the manifest's
@@ -245,7 +245,7 @@ fn bare(name: &str) -> String {
 }
 
 /// `--file` and `--item` narrow the run and `--accept` to the fences they
-/// name (#1146): of two bare fences, one in each file of the crate, a
+/// name: of two bare fences, one in each file of the crate, a
 /// narrowed accept pins the named one and leaves the other's line as it
 /// stood, and the run judges one witness and counts no coverage. Each
 /// narrowed accept records the verdict it wrote in the crate's accepted
@@ -294,7 +294,7 @@ fn file_and_item_narrow_the_run_and_accept_to_the_named_fences() {
 }
 
 /// A narrowed run covers fewer fences than the crate, so what it judged
-/// is printed and no reading is written (#1146): the command over the
+/// is printed and no reading is written: the command over the
 /// fixture's one item leaves the store without a witness reading of the
 /// crate, and an item no fence stands on is an error naming it.
 #[test]
@@ -348,7 +348,7 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
     );
 
     // An accepted row names one side of a difference between the engine
-    // and the oracle, so it never accepts a fence both runs miss (#783).
+    // and the oracle, so it never accepts a fence both runs miss.
     let accepted = |snippet: &str| rows(&[Row::accepted(&witness_id(snippet))]);
     let reading = run(&root, &accepted("echo 1;"), Accept::Nothing);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
@@ -356,8 +356,8 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
     // A fence the oracle meets and the engine misses: the bundle
     // `php-linked` serves carries zend_test and the oracle does not.
     // `__FILE__` was the difference once, until the engine compiled a
-    // served source under its name expanded, as the oracle does (#1569),
-    // and pcntl after it, until the linked engine was the CLI's (#2166).
+    // served source under its name expanded, as the oracle does,
+    // and pcntl after it, until the linked engine was the CLI's.
     let root = scratch(
         "diverged",
         "/// ```php\n/// var_dump(extension_loaded('zend_test'));\n/// ```\n/// ```expect\n/// bool(false)\n/// ```\npub fn native() {}\n",
@@ -416,8 +416,7 @@ fn a_bare_exit_fails_the_run_and_accept_is_what_writes_it() {
     assert_eq!(written.lines().count(), text.lines().count());
     assert!(written.contains("/// nope();"), "{written}");
     // Stamped over the tree `--accept` left, a snapshot taken after it
-    // wrote, so `done` finds the reading fresh for the line it pinned
-    // (#2163).
+    // wrote, so `done` finds the reading fresh for the line it pinned.
     let now = xtask::key::Snapshot::disk(&root).unwrap();
     assert_eq!(reading.key(), now.key(Path::new("ext/fixture")).unwrap());
 
@@ -458,7 +457,7 @@ fn accept_writes_the_bare_opt_in_alone_and_never_repins_a_status() {
 /// fence marked `capture`, the `expect` fence's body and a `stderr` fence's,
 /// and leaves a fence not marked byte for byte; the blocks of one file are
 /// written whatever their lengths become, and a second run writes nothing
-/// (harness §8, #801).
+/// (harness §8).
 #[test]
 fn accept_streams_writes_the_marked_fences_alone() {
     if oracle().is_none() {
@@ -511,14 +510,14 @@ fn accept_streams_writes_the_marked_fences_alone() {
     assert_eq!(fs::read_to_string(&file).unwrap(), written);
 }
 
-/// The negative control of the capture (harness §4.1, §8; #801): the
+/// The negative control of the capture (harness §4.1, §8): the
 /// fixture's one fence is marked `capture` and prints a length its scratch
 /// directory moves, so the oracle's two runs differ and the capture
 /// writes nothing and leaves the crate failing; the note naming the line
 /// is held beside the judge. The run is bounded: one that waits on a pipe
 /// something outside it holds fails in twenty seconds rather than holding a
 /// hook for good, as it held one for 23 minutes on a pipe a `php-linked`
-/// server had inherited (#2550).
+/// server had inherited.
 #[test]
 fn a_capture_whose_two_runs_differ_writes_nothing_and_fails_the_crate() {
     if oracle().is_none() {
@@ -559,7 +558,7 @@ fn a_capture_whose_two_runs_differ_writes_nothing_and_fails_the_crate() {
 
 /// `--accept --bodies` writes each plain fence the oracle does not meet
 /// from the oracle's two runs, and leaves a fence it meets and a fence
-/// marked `capture` byte for byte (#3455, as #3429 ruled): the authored
+/// marked `capture` byte for byte (ruled 2026-10-25): the authored
 /// `string(%d) "%s"` the oracle's two runs still meet, though they print
 /// two lengths, and the authored stderr line with its wildcards are kept as
 /// written, and the lines the oracle moved are its own, a `%s` it printed
@@ -611,8 +610,8 @@ fn accept_bodies_writes_the_plain_fences_the_oracle_does_not_meet() {
     assert_eq!(fs::read_to_string(&file).unwrap(), written);
 }
 
-/// The two negative controls of `--accept --bodies` (harness §4.1, §8;
-/// #3455), each run over its fixture and holding it to nothing written:
+/// The two negative controls of `--accept --bodies` (harness §4.1, §8),
+/// each run over its fixture and holding it to nothing written:
 /// `xtask/fixtures/witness/bodies-moves`, a plain fence whose oracle runs
 /// print `string(N)` over two scratch paths and whose body has no wildcard
 /// to meet both, fails the crate; and
@@ -716,15 +715,14 @@ fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
     );
 }
 
-/// An anchored crate is counted by its natives and by its kernels (#1264;
-/// design §8): the fixture's engine declares one native on the attributes
+/// An anchored crate is counted by its natives and by its kernels
+/// (design §8): the fixture's engine declares one native on the attributes
 /// and holds two kernels in `ops`, one without a witness. Read with the
 /// oracle away, the native reads `missing` as any fixture's does (no engine
 /// links it), the witnessed kernel is covered by the fence in its own doc
 /// block, and the kernel without one is named. The plain `pub fn` outside `ops` and
-/// the private function inside it are no subjects. The control: before
-/// #1264 the same fixture counted one subject, the native, and named no
-/// kernel.
+/// the private function inside it are no subjects. The control: the same
+/// fixture once counted one subject, the native, and named no kernel.
 #[test]
 fn an_anchored_crate_counts_its_kernels_beside_its_natives() {
     let root = fixture_at("witness", "anchor-kernel");
@@ -801,7 +799,7 @@ fn a_failed_run_and_no_missing_witness(reading: &Reading) {
 
 /// A `request fpm` fence whose oracle server resets the connection is a
 /// failed run of the witness, its bork line printing the transport's
-/// error, and never a native without a witness (#1426): the fixture's one
+/// error, and never a native without a witness: the fixture's one
 /// native carries such a fence, and the pin's php-fpm here is a stand-in
 /// that accepts the request on the socket the configuration names and
 /// drops it unanswered, as a reset leaves it. The control: a runner that
@@ -827,7 +825,7 @@ fn a_request_fence_whose_server_resets_fails_the_run_and_is_not_a_missing_witnes
 }
 
 /// The same for the two ways a server can fail a fence once it has read
-/// the whole request (#1493): the fixture `request-reset-sent`'s stand-in
+/// the whole request: the fixture `request-reset-sent`'s stand-in
 /// ends the connection partway through the first record of its response,
 /// and `request-empty`'s closes it with no response at all. Each fixture
 /// carries its stand-in as `php-fpm` beside its manifest.
@@ -842,8 +840,8 @@ fn a_request_fence_whose_server_fails_after_the_request_is_sent_is_a_failed_run(
     }
 }
 
-/// A native the build that links the engine compiled out is no subject
-/// (#1068): the `#[cfg]` on the `fn`, on its impl, on its inline `mod`,
+/// A native the build that links the engine compiled out is no subject:
+/// the `#[cfg]` on the `fn`, on its impl, on its inline `mod`,
 /// on the `mod name;` of its file or as the file's own `#![cfg]` is read
 /// against the target this harness was built for. The fixture's natives
 /// are linked into no engine, so every subject reads missing, and the
@@ -944,7 +942,7 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_fails_the_crate_and_names_it()
     }
 }
 
-/// The negative control of the oracle's run (harness §4.1, §8; #783): a
+/// The negative control of the oracle's run (harness §4.1, §8): a
 /// workspace whose one fence pins what the linked engine prints and the
 /// oracle does not, which the instrument must fail on, since what a fence
 /// pins is the oracle's bytes.
@@ -975,7 +973,7 @@ fn a_fence_the_oracle_does_not_meet_fails_the_crate() {
 }
 
 /// The negative control of a fence a `trace:` row covers (harness §4.1,
-/// §4.3, §8; #1650): the fixture's two fences end the oracle on a signal,
+/// §4.3, §8): the fixture's two fences end the oracle on a signal,
 /// and the crate fails on the one no row covers; the covered one is met
 /// against the engine alone, counted `covered`, and the reading records
 /// the oracle's signal for it.
@@ -1014,7 +1012,7 @@ fn a_fence_a_trace_row_covers_records_the_oracle_and_the_one_it_does_not_fails_t
 
 /// A witness that cannot run for want of the pinned binary is a snippet
 /// that did not run, never a refusal: coverage is complete, and the reading
-/// is a skip that counts what did not run (#65). Green would be a claim.
+/// is a skip that counts what did not run. Green would be a claim.
 #[test]
 fn a_crate_whose_witnesses_cannot_run_for_want_of_the_oracle_is_a_skip_never_a_pass() {
     let root = scratch("witness-absent", &block("/// ```expect\n/// 1\n/// ```\n"));
@@ -1065,8 +1063,7 @@ fn the_reading_carries_run_failed_and_missing_and_is_scoped_to_the_crate() {
 /// A checkout with no binary on either target path is still a reading of
 /// the engine: the linked engine serves the snippet in this process, the
 /// other adapter of design §8's `ScriptExec` seam, so the reading is a
-/// pass on its own merits and not the skip that said the engine ran none
-/// (#119).
+/// pass on its own merits and not the skip that said the engine ran none.
 #[test]
 fn with_no_binary_built_the_linked_engine_serves_the_witness() {
     if oracle().is_none() {
@@ -1091,8 +1088,8 @@ fn with_no_binary_built_the_linked_engine_serves_the_witness() {
 
 /// And a binary standing at `target/debug/php` is not what serves a
 /// witness: the lane resolves none, so the reading is what the linked
-/// engine wrote whether or not one is built (harness §7, revision 48;
-/// #401). The stand-in writes bytes no fence pins and ends on 7, so a lane
+/// engine wrote whether or not one is built (harness §7, revision 48).
+/// The stand-in writes bytes no fence pins and ends on 7, so a lane
 /// that ran it would read a fail here.
 #[test]
 fn a_binary_in_the_tree_is_not_what_serves_a_witness() {
@@ -1110,7 +1107,7 @@ fn a_binary_in_the_tree_is_not_what_serves_a_witness() {
 }
 
 /// And a fail is a fail there: what the linked engine wrote is held to
-/// what the fences pin, with no binary standing anywhere (#119).
+/// what the fences pin, with no binary standing anywhere.
 #[test]
 fn with_no_binary_built_a_witness_the_linked_engine_misses_fails() {
     if oracle().is_none() {
@@ -1131,8 +1128,8 @@ fn with_no_binary_built_a_witness_the_linked_engine_misses_fails() {
 /// the linked runner as any crate is: the linked engine carries every
 /// extension feature, so a fence that pins what the engine misses reads a
 /// fail on its merits, no `unlinked` number and no skip naming the feature
-/// (harness §7, revision 43; #314). This is the reading #292's skip stood
-/// in place of.
+/// (harness §7, revision 43). This is the reading a skip once stood in
+/// place of.
 #[test]
 fn with_no_binary_built_a_crate_behind_a_feature_is_held_to_its_witnesses() {
     if oracle().is_none() {
@@ -1159,7 +1156,7 @@ fn with_no_binary_built_a_crate_behind_a_feature_is_held_to_its_witnesses() {
 /// And the four extensions outside php's default build are in the linked
 /// engine: the one line each of their crates' witnesses asks,
 /// `extension_loaded('<name>')`, reads `bool(true)` from the engine and
-/// from the oracle, so the reading is a pass and not the fail #292 read.
+/// from the oracle, so the reading is a pass and not the fail it once was.
 #[test]
 fn with_no_binary_built_the_linked_engine_carries_each_feature_extension() {
     if oracle().is_none() {
@@ -1195,9 +1192,9 @@ fn with_no_binary_built_the_linked_engine_carries_each_feature_extension() {
 /// and not the default set (harness §7, revision 43), `pcntl` among them
 /// as the CLI carries it (revision 84); `php-linked`, the binary the lanes
 /// serve a snippet through, is `sapi/cli` built with that set; and `xtask`
-/// links no bundle of its own (revision 84; #2166). `new-ext` writes a new
+/// links no bundle of its own (revision 84). `new-ext` writes a new
 /// crate into `default` and `host`, so an extension a branch adds is
-/// linked at its merge (#1252, #3081). A feature the bundle gains that
+/// linked at its merge. A feature the bundle gains that
 /// none of the four names is this test red.
 #[test]
 fn php_linked_is_the_cli_with_every_extension_feature_and_xtask_links_none() {
@@ -1259,7 +1256,7 @@ fn php_linked_is_the_cli_with_every_extension_feature_and_xtask_links_none() {
 
 /// Nothing to run is complete only with the pinned oracle here to have
 /// run it: green means the oracle agreed, and without the oracle the pass
-/// would be a claim (#60). The engine's absence is another matter: the
+/// would be a claim. The engine's absence is another matter: the
 /// coverage half was measured whatever stands in for it.
 #[test]
 fn a_crate_with_no_witness_and_nothing_that_needs_one_passes_with_the_oracle() {
@@ -1419,7 +1416,7 @@ fn staged_narrows_the_run_to_the_crates_with_a_staged_change() {
 }
 
 /// A witness that ends the process serving it is that witness's failure
-/// and no other's (#1037, #1043, #2166): the fixture's first witness
+/// and no other's: the fixture's first witness
 /// sends `SIGABRT` to `php-linked`, which serves it. The witness borks
 /// naming the signal, the crate's reading fails, and the witness after it
 /// is served by a binary started again and judged; the harness itself
@@ -1466,7 +1463,7 @@ fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
@@ -1476,8 +1473,8 @@ mod tracked {
     /// The negative control of the manifest's coverage rule (harness §4.1, §12
     /// item 4): the fixture named by the rule's id must fail under it, with the
     /// rule's own text at the failure. Coverage is a count over the source and
-    /// needs no php, so the same reading comes with the pinned binary absent
-    /// (#65), where the fixture's one witness is a snippet that did not run.
+    /// needs no php, so the same reading comes with the pinned binary absent,
+    /// where the fixture's one witness is a snippet that did not run.
     #[test]
     fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
         let tracked = tracked_manifest();
@@ -1539,7 +1536,7 @@ mod tracked {
 
     /// A kernel without a witness fails the crate whether or not the oracle
     /// is here: the coverage half is measured without it, and nothing asserts
-    /// a pin whose binary is not at the path (#60, #65).
+    /// a pin whose binary is not at the path.
     #[test]
     fn a_kernel_without_a_witness_fails_whether_or_not_the_oracle_is_here() {
         let root = scratch("uncovered-absent", "pub fn native() {}\n");

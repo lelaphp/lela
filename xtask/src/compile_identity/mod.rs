@@ -15,7 +15,7 @@
 //! build, `PHP_BINARY` and `PHP_BUILD_DATE`, differ by construction and
 //! are no divergence: the lane asks each binary for its own once per run
 //! and puts a placeholder where exactly those values appear in that
-//! binary's dump before comparing (#2692), so a compiler that folds any
+//! binary's dump before comparing, so a compiler that folds any
 //! value but its own still differs ([`dump`]).
 //!
 //! **What takes the dump.** php's side runs under the pin's recipe and
@@ -25,12 +25,12 @@
 //! executed to measure the compiler. A run may name one more regime of
 //! the pin with `--regime`, which both sides stand under after `dump`,
 //! its arguments and its ini each after `dump`'s: `extended-info`, php's
-//! `-e`, is the second regime the per-commit corpus is held under
-//! (#1822), and its reading keeps a scope of its own,
+//! `-e`, is the second regime the per-commit corpus is held under,
+//! and its reading keeps a scope of its own,
 //! `php-src@regime=extended-info`, beside the plain one. The engine's side is the ladder of
 //! [`oracle::Runner`]: the engine's binary where one is named or built,
 //! which honours php's dump flags; the harness links no compiler of its
-//! own (harness §8, revision 84; #2166), so where none is built the lane
+//! own (harness §8, revision 84), so where none is built the lane
 //! dumps nothing and its reading says why. The pinned oracle named as the
 //! binary is the lane's control, which must be identical on every file,
 //! and whose reading is a skip and not a reading of the engine.
@@ -303,8 +303,8 @@ pub(crate) fn reading(
             corpus.root.display()
         )
     };
-    // Which binary dumped it, as `phpt`'s reading names the one that ran
-    // (#475, #506): two readings over one tree under two binaries are
+    // Which binary dumped it, as `phpt`'s reading names the one that ran:
+    // two readings over one tree under two binaries are
     // told apart by it. A rung with no binary of the engine's names none.
     let message = match runner.stamp() {
         Some(engine) => format!("{message}; dumped by {engine}"),
@@ -347,8 +347,8 @@ pub struct Ask {
     #[arg(long, value_name = "PATH")]
     pub engine: Option<PathBuf>,
     /// A `[regime.<name>]` of the pin both sides dump under after `dump`:
-    /// `extended-info`, php's `-e`, is the per-commit corpus's second
-    /// (#1822). The reading's scope carries it, `php-src@regime=<name>`.
+    /// `extended-info`, php's `-e`, is the per-commit corpus's second.
+    /// The reading's scope carries it, `php-src@regime=<name>`.
     #[arg(long, value_name = "NAME")]
     pub regime: Option<String>,
 }
@@ -399,7 +399,7 @@ pub fn run(
     let snapshot = Snapshot::disk(root)?;
     // The engine's binary, built from the tree the reading is stamped
     // with; one the tree has moved past, or none, dumps nothing, and the
-    // lane says why (#475, #2166).
+    // lane says why.
     let runner = Runner::resolve(root, &manifest.layout(), pin, ask.engine.as_deref())?;
     if let Runner::Absent(why) | Runner::Stale(why) = &runner {
         println!("{INSTRUMENT}: {why}");

@@ -1,6 +1,6 @@
 //! `xtask ticket brief <n>`: the brief a spawned builder starts with
-//! (#4263; CONTEXT.md, Brief; Round 1, Q8; Round 3, Q15 (a)). Its fixed
-//! clauses are a skill's file, [`TEMPLATE`], so a clause edit stays a
+//! (CONTEXT.md, Brief; Round 1, Q8; Round 3, Q15 (a)). Its fixed clauses
+//! are a skill's file, [`TEMPLATE`], so a clause edit stays a
 //! skill edit; what differs per ticket is filled here from the ticket,
 //! the branch that records it ([`crate::track`]) and the flags of the
 //! one who dispatches: the scratch folder, what the builder owns and the
@@ -34,7 +34,7 @@ pub const HEADING: &str = "## Brief";
 /// What the one who dispatches says that the tracker and the branch do
 /// not: the scratchpad the builder's files go under, in a folder named
 /// for the ticket, what it owns, and the spec line. Each may be absent,
-/// as from a hook that has the number alone (#4270), and its line is then
+/// as from a hook that has the number alone, and its line is then
 /// left out for the dispatcher's own text to say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {

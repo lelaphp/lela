@@ -1,7 +1,7 @@
 //! php's `phpdbg` host, `php-src/sapi/phpdbg`, as one crate under `sapi/`
 //! (ADR-0008): the binary `phpdbg`, reaching the engine through
 //! `php_sapi` alone. The debugger is a `Tier` too (`jit-design.md` §2.4,
-//! revision 8; #1308): the engine is built with [`debugger::Debugger`]
+//! revision 8): the engine is built with [`debugger::Debugger`]
 //! bound, whose `safepoint` is where it stops and whose loop is `step`, so a
 //! program is served by the one dispatch loop and its kernels, and the prompt,
 //! the breakpoints and the watch list live here.
@@ -173,8 +173,7 @@ pub fn main() -> ExitCode {
 ///
 /// A call of its own, as the CLI's engine is, so the builder, two
 /// kilobytes moved through each step, stands in a frame that is gone
-/// before the first request is served, and not under every frame of it
-/// (#3209).
+/// before the first request is served, and not under every frame of it.
 #[inline(never)]
 fn engine(line: &Line, beside: &[Extension]) -> Engine {
     let mut extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();

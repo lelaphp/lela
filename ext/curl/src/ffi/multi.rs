@@ -302,7 +302,7 @@ impl MultiId {
     }
 
     /// `curl_multi_wait(mh->multi, NULL, 0, timeout, &numfds)`, which
-    /// waits without lending the request (#2595, `ffi`'s *Waits*).
+    /// waits without lending the request (`ffi`'s *Waits*).
     pub(crate) fn wait(self, req: &mut Request, timeout_ms: c_int) -> (i64, i64) {
         self.with(req, (BAD_HANDLE, 0), |multi| {
             let mut numfds: c_int = 0;

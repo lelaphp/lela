@@ -61,7 +61,7 @@ fn a_crate_one_line_over_its_ceiling_fails_with_the_ceiling_and_the_design_text(
     );
 }
 
-/// `scripts/**` against `[budget] scripts` (#34): the hook's three lines
+/// `scripts/**` against `[budget] scripts`: the hook's three lines
 /// are over a ceiling of two, the message says what makes the count up
 /// file by file, and the generator the row names is not in it, so its six
 /// lines would not have rescued or sunk the reading either way.
@@ -97,7 +97,7 @@ fn scripts_over_their_ceiling_fail_naming_each_counted_file_and_the_generator_le
     assert!(!scripts.key().is_empty(), "stamped over scripts/");
 }
 
-/// `docs/perf/workloads/**` against `[budget] workloads` (#4341): the
+/// `docs/perf/workloads/**` against `[budget] workloads`: the
 /// program's three lines are over a row of two, the workspace reading
 /// fails naming the directory, and `docs` no longer counts them.
 #[test]
@@ -136,8 +136,8 @@ fn committed_generated_code_outside_the_declared_exception_fails_the_workspace()
     );
 }
 
-/// A `build.rs` that bakes its crate's directory in fails the workspace
-/// (#2628); a module that happens to be named `build.rs`, with no
+/// A `build.rs` that bakes its crate's directory in fails the workspace;
+/// a module that happens to be named `build.rs`, with no
 /// `Cargo.toml` beside it, is not one cargo runs and is not named.
 #[test]
 fn a_build_rs_baking_its_crate_dir_in_fails_the_workspace() {
@@ -165,8 +165,8 @@ fn an_unsafe_block_outside_the_homes_fails_naming_the_file_and_the_rule() {
     assert_eq!(heap.status, Status::Pass, "a home passes: {heap:#?}");
     // The block, the block whose brace stands on the next line, which the
     // audit sees only while it reads the file whole, and the unsafe
-    // attribute: a site as a block is (#46), in the fixture itself now
-    // that the fixture's own manifest judges an edit to it (#57).
+    // attribute: a site as a block is, in the fixture itself now
+    // that the fixture's own manifest judges an edit to it.
     assert_eq!(heap.numbers["sites"], 3.into());
     let pcre = readings.iter().find(|r| r.scope == "ext/pcre").unwrap();
     assert_eq!(
@@ -215,7 +215,7 @@ fn a_hand_edited_generated_file_fails_under_generated_committed() {
 }
 
 /// What a line counter reads as code is what the `rust` module blanks
-/// around (#47): a character literal holding a quote and a raw string
+/// around: a character literal holding a quote and a raw string
 /// holding a comment marker. The counter `budget` read through before took
 /// the quote in `'"'` for a string's start and the `/*` inside a raw
 /// string for a comment, and counted four of the fixture's six lines.
@@ -250,7 +250,7 @@ fn current_generated_reading(name: &str) -> Reading {
 }
 
 /// Clippy reads the nearest configuration alone and merges nothing, a
-/// `.clippy.toml` before a `clippy.toml` in one directory (#2475): a crate
+/// `.clippy.toml` before a `clippy.toml` in one directory: a crate
 /// carrying either of its own is held to none of the rules the generated
 /// file above it carries, and each such file fails the generated file's
 /// reading, naming itself and every rule it hides.
@@ -275,7 +275,7 @@ fn a_clippy_configuration_nearer_than_a_generated_one_fails_naming_the_file_and_
 
 /// `CLIPPY_CONF_DIR` points clippy at one directory for every crate, past
 /// each generated file, and cargo hands its `[env]` to clippy-driver
-/// whatever the environment says (#2475): a cargo configuration of the
+/// whatever the environment says: a cargo configuration of the
 /// checkout that sets it fails the generated file's reading, naming it.
 #[test]
 fn a_cargo_configuration_setting_clippy_conf_dir_fails_naming_it() {
@@ -291,7 +291,7 @@ fn a_cargo_configuration_setting_clippy_conf_dir_fails_naming_it() {
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).

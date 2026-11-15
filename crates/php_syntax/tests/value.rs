@@ -5,7 +5,8 @@
 //! what the pinned php printed for the same token under
 //! `serialize_precision=-1` or `printf("%.17g")` (probed 8.5.9 on
 //! 2026-09-21); the witnesses in `value.rs` hold the rest through the
-//! engine, the `` `…` `` mark beside `unescape` since #609.
+//! engine, the `` `…` `` mark beside `unescape` since the backtick
+//! operator compiles and runs.
 
 mod support;
 

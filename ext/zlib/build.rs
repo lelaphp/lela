@@ -1,8 +1,8 @@
 //! The two constants php registers from `<zlib.h>`, `ZLIB_VERSION` and
 //! `ZLIB_VERNUM` (`@cvalue` in `Z/ext/zlib/zlib.stub.php`), are the values
-//! of the header a build compiles against, not the zlib it later loads
-//! (#1958, #1974). They are read here, as the C preprocessor expands the
-//! two macros of the `<zlib.h>` a C build finds: under the include
+//! of the header a build compiles against, not the zlib it later loads.
+//! They are read here, as the C preprocessor expands the two
+//! macros of the `<zlib.h>` a C build finds: under the include
 //! directories libz-sys hands a dependent as `DEP_Z_INCLUDE` where it
 //! names any, else the compiler's own, which for the platform's zlib is
 //! the SDK's or the system's header. Both are written to
@@ -32,7 +32,7 @@ fn run() -> Result<(), String> {
     // php compiles C and C++ with -DNDEBUG unless it is built with
     // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
     // two builds that set ZEND_DEBUG, as debug assertions are this build's:
-    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    // assert() is live exactly where Rust's debug_assertions is.
     if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
         build.define("NDEBUG", None);
     }

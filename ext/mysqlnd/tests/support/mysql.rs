@@ -8,9 +8,9 @@
 //! answers on the server's address the body is never called: the test
 //! skips through `php_compile`'s `tests/support/skip.rs`, which says so on
 //! stderr and writes the skip where xtask's `XTASK_SKIPPED` names a file,
-//! so `xtask test` counts it (#3085), unless the machine promised the
+//! so `xtask test` counts it, unless the machine promised the
 //! server, `mysql` among the words of xtask's `XTASK_PROMISED`, and then
-//! it fails naming the address (#3084).
+//! it fails naming the address.
 //!
 //! A test that holds what a client sends the server connects the client
 //! through a [`MysqlRelay`] and reads the bytes back as [`Packets`].

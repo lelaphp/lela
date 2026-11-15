@@ -711,7 +711,7 @@ impl ReflectionClass {
     /// ```
     ///
     /// A user class with a parent and an interface renders the same way,
-    /// with no `getParentClass()` asked for it (#388): the header carries
+    /// with no `getParentClass()` asked for it: the header carries
     /// `extends P implements I`, the class's own constants and properties
     /// come before the ones it inherits, and an interface's constant is in
     /// the table too.
@@ -1961,7 +1961,7 @@ impl ReflectionClass {
     /// `object_init_ex` alone, refused for an internal final class php
     /// gives a `create_object` handler, whose objects only its constructor
     /// may make whole. The object's inherited properties hold no default
-    /// until the linker places them (#419), so a read of one is `null` here
+    /// until the linker places them, so a read of one is `null` here
     /// where php's is the declared default.
     ///
     /// ```php
@@ -2039,7 +2039,7 @@ impl ReflectionClass {
     ///
     /// What is no array is php's `TypeError`, whose tail names the value as
     /// `zend_zval_value_name` does and not as `zend_zval_type_name` does, so
-    /// `true` stands where the type alone would read `bool` (#462):
+    /// `true` stands where the type alone would read `bool`:
     ///
     /// ```php
     /// (new ReflectionClass('JsonException'))->newInstanceArgs(true);
@@ -2847,8 +2847,8 @@ impl ReflectionClass {
     /// `ReflectionExtension`, made as `reflection_extension_factory` makes
     /// it, `object_init_ex` and the name written, no constructor served;
     /// `null` for a user class. A class Zend declares itself is php's
-    /// `Core` `zend_module_entry`, which this engine has no `Extension` value for yet
-    /// (#379), so `Exception` answers `null` here and `Core` there; the
+    /// `Core` `zend_module_entry`, which this engine has no `Extension` value for yet,
+    /// so `Exception` answers `null` here and `Core` there; the
     /// fence stays off that class until the bundle names it.
     ///
     /// ```php

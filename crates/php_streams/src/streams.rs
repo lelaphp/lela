@@ -2883,7 +2883,7 @@ impl Ops for Stdio {
         if let Some(mut child) = self.process.take() {
             use std::os::unix::process::ExitStatusExt;
             // The wait lends the request ([`Limits::blocking`]), as
-            // every wait on a child is (#2401).
+            // every wait on a child is.
             return match req.limits_mut().blocking(|| child.wait()) {
                 Ok(status) => status.code().unwrap_or_else(|| status.into_raw()),
                 Err(_) => -1,
@@ -2979,7 +2979,7 @@ impl Ops for Stdio {
     /// (`Z/main/streams/plain_wrapper.c:774`): `flock(2)`, `LOCK_SH`,
     /// `LOCK_EX` or `LOCK_UN`, without blocking under `LOCK_NB`; a
     /// `flock(2)` that waits for another holder lends the request while
-    /// it waits ([`Limits::blocking`], #2401).
+    /// it waits ([`Limits::blocking`]).
     fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
         let nonblocking = operation & LOCK_NB != 0;
         let file = self.file.as_ref()?;
@@ -4209,7 +4209,7 @@ pub(crate) trait StreamLayer {
 impl StreamLayer for Request {
     /// `url_stream_wrappers_hash`, the wrappers every request starts
     /// with, in the order they were registered: the engine's own where
-    /// `standard` places them, among the extensions' (#920).
+    /// `standard` places them, among the extensions'.
     fn global_wrappers(&self) -> Vec<Registered> {
         match self.streams_ref() {
             Some(state) => state.url_stream_wrappers.clone(),

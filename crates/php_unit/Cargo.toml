@@ -1,6 +1,6 @@
 # php_unit: the unit format (design §4.7, ADR-0001), a leaf below both the
 # compiler and the engine. Depends on php_heap for literal values, and on
-# php_macros for #[derive(EngineState)] alone, which links nothing (#4544).
+# php_macros for #[derive(EngineState)] alone, which links nothing.
 [package]
 name = "php_unit"
 version = "0.0.0"

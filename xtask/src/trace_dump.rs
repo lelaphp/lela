@@ -13,11 +13,11 @@
 //! through [`oracle::compare`] under the divergence key
 //! `trace:dump/<kernel>`, one reading per kernel. A row that accepts a
 //! kernel's difference pins both sides' lines by their [`Digests`], so
-//! one whose lines moved accepts nothing (#3291).
+//! one whose lines moved accepts nothing.
 //!
 //! **The lines held.** What the regime's six bits print, as
 //! `opcache.jit_debug` pins them and with no mask of the instrument's
-//! own (#3155's ruling): a `---- TRACE` line, a root's or a side trace's
+//! own (ruled 2026-10-21): a `---- TRACE` line, a root's or a side trace's
 //! `start`, its `stop` or `abort`, and `compiled` or `blacklisted`, the
 //! lines of `zend_jit_trace_hot_root` and `zend_jit_trace_hot_side`
 //! (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250` at the tag); a
@@ -453,13 +453,13 @@ mod tests {
         judged(registry, id, &oracle.unwrap(), engine).1
     }
 
-    /// #3291's negative control: the fixture's accepted `trace:dump/fib`
-    /// row pins an engine dump one exit line longer than the engine's now,
-    /// so the engine's lines fail naming the engine's side alone, and an
-    /// oracle's moved by a line fails naming the oracle's; against the
-    /// lines it pins, the row accepts the difference. A dump row that pins
-    /// nothing accepts nothing, as an open one, and a pinned one beside it
-    /// accepts its own.
+    /// A pinned row's negative control: the fixture's accepted
+    /// `trace:dump/fib` row pins an engine dump one exit line longer than
+    /// the engine's now, so the engine's lines fail naming the engine's
+    /// side alone, and an oracle's moved by a line fails naming the
+    /// oracle's; against the lines it pins, the row accepts the
+    /// difference. A dump row that pins nothing accepts nothing, as an
+    /// open one, and a pinned one beside it accepts its own.
     #[test]
     fn a_dump_row_accepts_only_the_lines_it_pins_and_names_the_side_that_moved() {
         let fixtures = crate::package_dir().join("fixtures/trace-dump");

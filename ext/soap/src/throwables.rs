@@ -2,7 +2,7 @@
 //! starts, as php's `MINIT` keeps `zend_ce_error`, `zend_ce_type_error`
 //! and `soap_fault_class_entry` (ADR-0005: engine state, immutable): a
 //! raise names its class by the identity, never by a name looked up as it
-//! throws (#3403).
+//! throws.
 
 use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::attr::php_class;

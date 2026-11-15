@@ -1,11 +1,11 @@
-//! What an extension supplies the layer, served as that extension
-//! (#2113): a stream wrapper, a filter factory and the filters it makes,
+//! What an extension supplies the layer, served as that extension:
+//! a stream wrapper, a filter factory and the filters it makes,
 //! and the kind of a stream it opens with [`Request::new_stream`]. Each
 //! is called from wherever the program reaches it, so a debug build
 //! takes who registered or made it ([`Code::supplier`]) and serves
 //! every call into it as that extension ([`Code::serve_supplied`]),
 //! and a leak it leaves names it, as a leak of the extension's natives
-//! does (#1993). A release build keeps nothing and serves each call as
+//! does. A release build keeps nothing and serves each call as
 //! it stands.
 
 use std::ops::Deref;

@@ -1,5 +1,5 @@
 # The pinned oracle's configure line, one argument per line, as `php -n -i`'s
-# "Configure Command" row prints it (#1782). Written by
+# "Configure Command" row prints it. Written by
 # `scripts/oracle-build.py configure-line` and read by its `build`, which drops
 # the install paths, adds a variant's flags, and refuses this file once the
 # pin's [oracle].md5 is not the one it was read from.

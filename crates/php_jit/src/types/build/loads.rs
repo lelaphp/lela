@@ -73,7 +73,7 @@ impl Builder<'_> {
     ///
     /// A loop adding a dynamic property of a local `stdClass` to a sum
     /// takes php's two exits at the fetch, so the `$i > 50` side trace
-    /// grows from php's exit 5 (#3884):
+    /// grows from php's exit 5:
     ///
     /// ```php
     /// function f() { $o = new stdClass; $o->q = 1; $x = 0; $n = 0; for ($i = 0; $i < 100; $i++) { $n += $o->q; if ($i > 50) { $n++; } } return $n + $x; }
@@ -259,10 +259,10 @@ impl Builder<'_> {
     /// copied variable and an assigned one among them, and the variable a
     /// closure's `use` binds, by value as by reference (`:754-760`).
     ///
-    /// A loop whose `+=` a closure captures by value after it, #3721's
-    /// program: the back edge brings the `BIND_LEXICAL`'s `$c`, which
-    /// `is_checked_guard` holds nothing of, so the phi keeps its guard at
-    /// the header, and the `$i > 50` side trace grows from php's exit:
+    /// A loop whose `+=` a closure captures by value after it: the back
+    /// edge brings the `BIND_LEXICAL`'s `$c`, which `is_checked_guard`
+    /// holds nothing of, so the phi keeps its guard at the header, and
+    /// the `$i > 50` side trace grows from php's exit:
     ///
     /// ```php
     /// function f() { $c = 0; $g = null; for ($i = 0; $i < 100; $i++) { $c += 2; $g = function () use ($c) { return $c; }; if ($i > 50) { $c++; } } return $c + $g(); }

@@ -24,7 +24,7 @@ libc = { workspace = true }
 
 # libgmp is the library the pinned keg links, found through pkg-config
 # and never vendored; its calls are declared by hand in `src/ffi/`, no
-# bindgen (design §7.2, revision 72; #1540).
+# bindgen (design §7.2, revision 72).
 [build-dependencies]
 pkg-config = { workspace = true }
 

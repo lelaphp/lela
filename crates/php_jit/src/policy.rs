@@ -617,7 +617,7 @@ impl Policy {
     /// of them, but where the directives set say php's tier never starts,
     /// `opcache.jit=disable`, a setting php refuses or a zero buffer: a
     /// test that says so is a test about having no tier,
-    /// served by the interpreter with no lane's line (#3136's ruling). A
+    /// served by the interpreter with no lane's line (ruled 2026-10-21). A
     /// tier that runs `Off` reads no `opcache.jit_debug` bit
     /// ([`Policy::off`]), so it writes no line, as php writes none
     /// ([`Note`]).
@@ -677,7 +677,7 @@ impl Policy {
         };
         // `opcache.jit=disable` or a setting php refuses, set and not
         // php's default `disable`, says php's tier never starts, which a
-        // lane gives way to (#3136's ruling); a zero buffer is the line
+        // lane gives way to (ruled 2026-10-21); a zero buffer is the line
         // below's. `off` is not one: php may turn it on from a request.
         let disabled = value(ini, "opcache.jit").is_some()
             && matches!(setting, Setting::Disable | Setting::Invalid { .. });
@@ -872,7 +872,7 @@ impl Policy {
     /// `0 - cost <= 0` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:470`), and
     /// starts again at `ZEND_JIT_COUNTER_INIT` as it fires: such a unit's
     /// words are laid [`PRIMED`], so each roots at its first arrival and
-    /// counts php's thresholds after (#3363). The pool's counters are
+    /// counts php's thresholds after. The pool's counters are
     /// php's per process and these words the engine's (ADR-0006), as
     /// the `trace:hot-counter-pool` row of `docs/divergence.toml` says.
     ///
@@ -966,7 +966,7 @@ impl Policy {
     /// a file it includes after the switch is published with counting
     /// words, which raises the request's interrupt, and at the check of
     /// the file's activation `Nop`'s loop hands the frame to the tier's,
-    /// which roots its entry and its loop as php does (#3362):
+    /// which roots its entry and its loop as php does:
     ///
     /// ```php
     /// $dir = realpath(sys_get_temp_dir()) . '/jit-switch-' . getmypid(); mkdir($dir);
@@ -1413,7 +1413,7 @@ pub(crate) fn bump(word: &Word) -> u32 {
 /// Where a claimed word lives (`jit-design.md` §4.7), owned, so a claim
 /// can leave the thread that made it: a root's word by its op array and
 /// safepoint, a return root's by its op array and the landing opline
-/// past the call (§2.2, #3036), an exit's by its trace and exit, each
+/// past the call (§2.2), an exit's by its trace and exit, each
 /// under the epoch it holds, which keeps the word, the op array's row or
 /// the trace table's.
 #[derive(Debug, Clone, EngineState)]
@@ -1458,7 +1458,7 @@ impl Holder {
 }
 
 /// A landing word's state half as a return read it (`jit-design.md`
-/// §2.2, #4105): compared with the sealed word's in the `RETURN*` arms,
+/// §2.2): compared with the sealed word's in the `RETURN*` arms,
 /// and read for what it holds in the visit it asks, so a word is loaded
 /// once a return and decoded only where it asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1495,7 +1495,7 @@ impl Landing {
     }
 }
 
-/// Whether a landing word was armed (`jit-design.md` §2.2, #3036): any
+/// Whether a landing word was armed (`jit-design.md` §2.2): any
 /// word whose state half is neither the sealed word's all ones, which its
 /// op array's landings are laid down as, nor [`HEADED`], php's
 /// `trace_flags` of an opline `zend_jit_trace_setup_ret_counter` set. An
@@ -1509,7 +1509,7 @@ pub(crate) fn armed(word: &Word) -> bool {
 }
 
 /// Lay a landing word [`HEADED`], a loop's trace published where a return
-/// lands (`jit-design.md` §2.2, #4105): sealed made headed, so a return
+/// lands (`jit-design.md` §2.2): sealed made headed, so a return
 /// that lands there visits and enters the loop's trace, and an armed word,
 /// which a return visits already, left. Never armed: php makes no return
 /// root of a loop's header, whose `trace_flags` its arming finds set
@@ -1531,7 +1531,7 @@ pub(crate) fn head(word: &Word) {
 /// the landing a slot of the same pool of counters as a unit's entries
 /// and loops ([`Policy::laid`]), so where the tier is set up and off and
 /// nothing fills that pool, the slot fires at the first return, and the
-/// landing is armed primed as such a unit's words are laid (#3363);
+/// landing is armed primed as such a unit's words are laid;
 /// otherwise its heat starts at zero.
 ///
 /// Under `opcache.jit=off` with a buffer and php's thresholds, a file
@@ -1716,8 +1716,8 @@ pub(crate) fn claim(holder: Holder, policy: &Policy, start: Start) -> Option<Cla
 /// such an exit, for the interpreter to warn of, and the ninth firing
 /// blacklists it, `opcache.jit_hot_side_exit` plus
 /// `opcache.jit_blacklist_side_trace` under the recipe's thresholds; the
-/// thirteen after it write nothing (the exit numbers are #3176's: php's
-/// inference types `$i` and holds no guard on it at entry):
+/// thirteen after it write nothing (the exit numbers wait on php's
+/// inference, which types `$i` and holds no guard on it at entry):
 ///
 /// ```php
 /// function h($a) {

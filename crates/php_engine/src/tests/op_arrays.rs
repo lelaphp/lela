@@ -1,4 +1,4 @@
-//! Op-array reads for extensions (#1829): an observer reads the op
+//! Op-array reads for extensions: an observer reads the op
 //! array of a frame it is handed ([`FrameView::op_array`]) or of a
 //! function ([`Frames::op_array`]), its oplines' opcodes, lines,
 //! operands and jump targets, and the constants they name, as php's

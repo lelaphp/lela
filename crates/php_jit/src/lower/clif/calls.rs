@@ -1,6 +1,6 @@
 //! A known callee's push, the call that makes it its frame and the
 //! callee's leave, written in place over the engine's frame layout
-//! (#3222's ruling, `jit-design.md` §5.3): php's `zend_jit_push_call_frame`,
+//! (ruled 2026-10-22, `jit-design.md` §5.3): php's `zend_jit_push_call_frame`,
 //! `zend_jit_do_fcall` with `i_init_func_execute_data` inline and
 //! `zend_jit_leave_func` (`Z/ext/opcache/jit/zend_jit_ir.c:8466-8650`,
 //! `:10016-10600`, `:11035-11263`). Every offset is
@@ -658,8 +658,7 @@ impl Emit<'_> {
     /// method takes its argument by reference with a default, of a lazy
     /// copy and an enum's case, and its static method through its name: the
     /// trace pushes the first in place and stops at its call, which the
-    /// interpreter makes, under force and where every guard fails once
-    /// (#3570):
+    /// interpreter makes, under force and where every guard fails once:
     ///
     /// ```php
     /// eval('class Evald { public $b = 1; function get($v) { return $this->b + $v; } static function twice($v) { return $v + $v; } }');
@@ -1343,7 +1342,7 @@ impl Emit<'_> {
     /// [`FrameLayout::numbered_from`] is taken away, so a frame the loop's
     /// caller served (`exec::Caller::Loop`) names that caller's place too;
     /// one with no caller (`exec::Caller::Outside`) names no frame's, and a
-    /// leave in place refuses it by `Emit::outside` (#3691). The one
+    /// leave in place refuses it by `Emit::outside`. The one
     /// decoding of the half-word compiled code turns into a place.
     pub(super) fn returns_to(&mut self, line: &Line) -> Result<Option<(Value, Value)>, Abort> {
         if self.stack.is_none() {
@@ -2232,7 +2231,7 @@ impl Emit<'_> {
     /// ```
     ///
     /// A side trace that stops at the return of a variable a reference
-    /// holds compiles it, as php's does (#3827):
+    /// holds compiles it, as php's does:
     ///
     /// ```php
     /// function f() { $x = 5; $r = &$x; for ($i = 0; $i < 100; $i++) {

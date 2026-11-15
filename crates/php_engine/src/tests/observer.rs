@@ -475,7 +475,7 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
 
 /// A fatal in a shutdown function or in a destructor the shutdown calls
 /// ends none of the frames it leaves open, as php ends them only at
-/// `php_request_shutdown`'s first step, which has passed (#2015); a
+/// `php_request_shutdown`'s first step, which has passed; a
 /// fatal in the program before them is ended there, before the
 /// shutdown function runs. php's sequence, read from the oracle's
 /// zend-test variant with `zend_test.observer.observe_all`: the file's
@@ -552,8 +552,7 @@ fn a_fatal_in_the_shutdown_leaves_its_frames_open() {
 
 /// `frameless_probe(string $string): bool`, frameless for one argument:
 /// whether `$string` is empty. Core declares no frameless entry this
-/// engine's compiler emits (#1810's comment on `class_exists`), so the
-/// observer's tests declare their own.
+/// engine's compiler emits, so the observer's tests declare their own.
 #[php_function(frameless(1))]
 fn frameless_probe(string: PhpString) -> bool {
     string.as_bytes().is_empty()
@@ -777,8 +776,8 @@ fn an_observed_frameless_call_takes_a_full_calls_room_and_a_declined_one_none() 
 /// A native's room under a registered observer is php's, its arguments
 /// and the temporary `zend_observer_post_startup` gives every native
 /// (`++zif->T`), so a recursion one slot short of a page's end
-/// that ends in a native call opens the next page where php's does
-/// (#2755); an observer its start does not register adds none, as with
+/// that ends in a native call opens the next page where php's does;
+/// an observer its start does not register adds none, as with
 /// none declared.
 #[test]
 fn a_natives_room_takes_the_observers_temporary_where_one_is_registered() {
@@ -799,8 +798,8 @@ fn a_natives_room_takes_the_observers_temporary_where_one_is_registered() {
 }
 
 /// A user frame under a registered observer takes the temporary php's
-/// `pass_two` reserves for it too (`op_array->T += ZEND_OBSERVER_ENABLED`,
-/// #3065): a recursion opens its next VM stack page at a lesser depth
+/// `pass_two` reserves for it too (`op_array->T += ZEND_OBSERVER_ENABLED`):
+/// a recursion opens its next VM stack page at a lesser depth
 /// than beside an observer its start does not register, which takes no
 /// room, as none declared takes none.
 #[test]
@@ -1092,7 +1091,7 @@ fn a_generator_left_by_a_throwable_is_ended_with_nothing() {
     rec.mark("end");
     let events = rec.events();
     // Up to the main file's end; what renders the throwable after it,
-    // `Exception::__toString`, is the natives' (#1810).
+    // `Exception::__toString`, is the natives'.
     let thrown = observed(&events.between("thrown", "end"));
     let rendered = thrown
         .iter()
@@ -1168,12 +1167,12 @@ fn a_fiber_is_noticed_at_its_creation_each_switch_and_its_destruction() {
     );
 }
 
-/// Each stack's open frames are its own (#1809's note on #1811): a
-/// fiber suspended inside `inner`, its frame open at the same height on
-/// the fiber's stack as `declined`'s on the request's, which the
-/// observer declined and never begins, so `declined`'s return ends
-/// nothing; `inner` is ended inside the fiber with what it returned, and
-/// the `Fiber::suspend` it waits in with what the resume sent.
+/// Each stack's open frames are its own: a fiber suspended inside
+/// `inner`, its frame open at the same height on the fiber's stack as
+/// `declined`'s on the request's, which the observer declined and never
+/// begins, so `declined`'s return ends nothing; `inner` is ended inside
+/// the fiber with what it returned, and the `Fiber::suspend` it waits in
+/// with what the resume sent.
 #[test]
 fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
     let rec = Recording::start();
@@ -1316,7 +1315,7 @@ fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
 /// `zend_fiber_resume_internal` sets to the fiber before the switch into
 /// it and restores only once the switch back has returned
 /// (`Z/Zend/zend_fibers.c:680-696`): the fiber, on each switch into it
-/// and each switch out of it, its last among them (#2014).
+/// and each switch out of it, its last among them.
 #[test]
 fn a_switch_handler_reads_the_fiber_switched_into_and_out_of_as_the_current_one() {
     let (served, events) = observe(

@@ -1,11 +1,11 @@
-//! What a ticket is worth to the frontier, read off the unread census
-//! (#618): the number of refused tests the constructs its title names
+//! What a ticket is worth to the frontier, read off the unread census:
+//! the number of refused tests the constructs its title names
 //! would let through.
 //!
 //! `xtask phpt --census` carries a count per construct on each `phpt`
-//! reading's `groups` (#617). This reads them back from the store and
-//! weighs a ticket by them, so `track next` can hand out the widest work
-//! rather than the oldest.
+//! reading's `groups`. This reads them back from the store and weighs a
+//! ticket by them, so `track next` can hand out the widest work rather
+//! than the oldest.
 //!
 //! **The matching is deliberately coarse and deliberately conservative.**
 //! A census key is a sentence `php_compile` wrote about itself, `a
@@ -21,9 +21,9 @@
 //! finds wrongly would send a track after the wrong work, which is the
 //! failure worth avoiding.
 //!
-//! Two tickets may take one group, as `#555` and `#573` both take the
-//! `eval` group by naming it. That is honest: either of them lets those
-//! tests through, and the census cannot say which. It counts for both.
+//! Two tickets may take one group, as two whose titles both name `eval`
+//! take the `eval` group. That is honest: either of them lets those tests
+//! through, and the census cannot say which. It counts for both.
 
 use std::collections::{BTreeMap, HashSet};
 

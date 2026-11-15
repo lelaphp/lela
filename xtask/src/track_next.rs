@@ -1,26 +1,26 @@
-//! The ticket a track works next (#73; harness-design.md §5, A track's
+//! The ticket a track works next (harness-design.md §5, A track's
 //! plan; CONTEXT.md, Track, Frontier, Ticket): `xtask track next` answers
 //! it from the tracker's open tickets and the repository's branch
 //! records, as text or as one JSON object, and writes no reading. The
 //! frontier is the open tickets labelled `ready-for-agent` that no open
 //! ticket blocks, that are the track's, and that no branch of the
 //! repository records; the next is the widest of them by the census, the
-//! number breaking a tie (#618). An empty frontier is stated, "none", and
+//! number breaking a tie. An empty frontier is stated, "none", and
 //! is not an error, since a track with nothing to work has not failed.
 //!
 //! A track is the tickets that carry its `track:<name>` label, and a
 //! ticket with no `track:` label is `main`'s alone (ADR-0009), so every
 //! ticket is some track's and two runs on different tracks never compete
 //! for an unlabelled one; [`tracks_of`] is the one statement of that.
-//! A ticket closes when its work is on `main` (#2270, #2311), so a
+//! A ticket closes when its work is on `main`, so a
 //! blocker whose branch waits on its merge is open and blocks, and a
 //! ticket is cut only from a `main` that holds what it waited on; what
-//! blocks is [`crate::ticket::BlockedBy::open`] alone (#2326). "No branch yet" is the
+//! blocks is [`crate::ticket::BlockedBy::open`] alone. "No branch yet" is the
 //! repository's own record, `branch.<name>.ticket`, read once per answer
 //! as [`Records`].
 //! The tracker is reached through [`Gh::open`], the ticket module's one
 //! list, and through nothing else here. The same list answers what the
-//! track waits on (#85): its open tickets labelled `for-a-person`, which
+//! track waits on: its open tickets labelled `for-a-person`, which
 //! `track work` prints when the frontier stays empty.
 
 use std::path::Path;
@@ -48,7 +48,7 @@ pub(crate) const TRACK_LABEL: &str = "track:";
 
 /// The ticket a track works next: its number, title and url, and its
 /// labels as the tracker spells them, which `track work` reads the
-/// session's skill from (#81).
+/// session's skill from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Next {
     pub number: u64,
@@ -56,7 +56,7 @@ pub struct Next {
     pub url: String,
     pub labels: Vec<String>,
     /// The refused tests the census says this ticket's constructs would
-    /// let through (#618); zero where the census weighs it at nothing and
+    /// let through; zero where the census weighs it at nothing and
     /// where the store holds no census at all.
     pub weight: u64,
 }
@@ -164,8 +164,8 @@ impl From<Open> for Next {
 /// records and the census the store holds.
 ///
 /// Widest is the census's count of the refused tests the ticket's
-/// constructs would let through (#617, #618), and the tie is the number,
-/// the tracker's order of filing. A frontier the census weighs at nothing
+/// constructs would let through, and the tie is the number, the
+/// tracker's order of filing. A frontier the census weighs at nothing
 /// — because no census has been run, or because none of these tickets
 /// names a construct it counted — is every weight zero and so every tie,
 /// which is the order this had before the census existed.
@@ -268,7 +268,7 @@ mod tests {
     /// and the number breaks the tie: #3 is filed last and worked first
     /// because it names the construct holding the most refused tests,
     /// while #1 and #2 weigh nothing and keep their filing order behind
-    /// it (#618).
+    /// it.
     #[test]
     fn the_frontier_is_the_widest_ticket_and_the_number_breaks_the_tie() {
         let weights = weighing(&[
@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(found.number, 1);
     }
 
-    /// Only an open blocker blocks (#2270, #2326): #9 waits on #1, open,
+    /// Only an open blocker blocks: #9 waits on #1, open,
     /// and not on #2, closed on `t2`, whether or not `main` holds `t2`
     /// yet, since a ticket closes only once its work is on `main`; with
     /// #1 closed too, #9 is the frontier.
@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(found, Some(9));
     }
 
-    /// No `track:` label is `main`'s alone (ADR-0009, #1836); one names
+    /// No `track:` label is `main`'s alone (ADR-0009); one names
     /// its track alone; two name two.
     #[test]
     fn a_track_label_names_the_one_track_working_the_ticket() {

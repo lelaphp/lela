@@ -759,7 +759,7 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
     };
     php_sapi::abort_as_php(&served);
     // `main` returns `FAILURE` where `php_request_startup` failed, an
-    // extension's `rinit` having raised (#1775), and php-cgi ends there
+    // extension's `rinit` having raised, and php-cgi ends there
     // (`Z/sapi/cgi/cgi_main.c:2460-2467`), or where the file did not open.
     if nothing || served.unopened || served.start_failed {
         255
@@ -878,8 +878,7 @@ fn print(text: &str) -> i32 {
 ///
 /// A call of its own, as the CLI's engine is, so the builder, two
 /// kilobytes moved through each step, stands in a frame that is gone
-/// before the first request is served, and not under every frame of it
-/// (#3209).
+/// before the first request is served, and not under every frame of it.
 #[inline(never)]
 fn engine(
     ini: &[(Vec<u8>, Vec<u8>)],

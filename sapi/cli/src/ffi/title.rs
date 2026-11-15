@@ -13,7 +13,7 @@
 //! `.init_array` function `argc`, `argv` and `envp`, as the standard
 //! library's own hook is gated (`library/std/src/sys/args/unix.rs`);
 //! musl calls them with nothing, so a Linux C library other than glibc
-//! leaves no area (#1923).
+//! leaves no area.
 
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 use std::ffi::{CStr, c_char, c_int};

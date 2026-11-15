@@ -46,9 +46,10 @@ pub(crate) struct Kept {
 /// `ZEND_HOOK_EXECUTE_INTERNAL` (`Z/Zend/zend_system_id.c:58-90`), so a
 /// file cache phpdbg wrote is never read by the CLI; and whether units
 /// are compiled with extended info, the host's `-e`, which php's
-/// identity leaves out and #1780 ruled in, a bit of the same byte that
-/// none of php's hooks takes, so a unit compiled without its `EXT_STMT`s
-/// is never read by an engine that serves them; in 32 hex digits.
+/// identity leaves out and the ruling of 2026-10-04 put in, a bit of the
+/// same byte that none of php's hooks takes, so a unit compiled without
+/// its `EXT_STMT`s is never read by an engine that serves them; in 32 hex
+/// digits.
 pub(crate) fn build_identity<'a>(
     hooked: php_compile::Hooked,
     extended_info: bool,
@@ -282,7 +283,7 @@ mod tests {
         };
     }
 
-    /// #1822: a host's `-e` is part of the build's identity, so a unit
+    /// A host's `-e` is part of the build's identity, so a unit
     /// compiled with extended info and one compiled without it are never
     /// read in each other's place.
     #[test]
@@ -296,7 +297,7 @@ mod tests {
         );
     }
 
-    /// #1709: the hooks a tier declares are part of the build's
+    /// The hooks a tier declares are part of the build's
     /// identity, so phpdbg and the CLI never share a file cache's units.
     #[test]
     fn a_tier_that_replaces_a_hook_keeps_its_units_apart() {

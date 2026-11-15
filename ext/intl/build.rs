@@ -1,18 +1,18 @@
-//! ICU is a platform library (design §7.2, revision 75; #1573):
+//! ICU is a platform library (design §7.2, revision 75):
 //! libicuuc, libicui18n and libicuio, found through `pkg-config`
 //! (`icu-uc`, `icu-i18n`, `icu-io`) and linked as the shared libraries
 //! php links, never vendored. Where it lives is the environment's to say,
 //! through `PKG_CONFIG_PATH`, which the Mac runner's environment and the
-//! developer's shell set (Homebrew's `icu4c@<major>` kegs are keg-only;
-//! #2486); the build writes no path of its own.
+//! developer's shell set (Homebrew's `icu4c@<major>` kegs are keg-only);
+//! the build writes no path of its own.
 //!
-//! What it holds is the version, by target (`build/pin.rs`, #4428). On
+//! What it holds is the version, by target (`build/pin.rs`). On
 //! macOS, where the pin's `[closure]` names the kegs the oracle loads,
 //! the major is the one its `icu4c@<major>` keg names, read from
-//! `oracle.toml` when the build runs (#4406), so a bump that re-freezes
+//! `oracle.toml` when the build runs, so a bump that re-freezes
 //! the closure on another ICU moves the build with it; an ICU of another
 //! major fails the build naming the keg the pin asks for, as does no ICU
-//! at all (#2278), and so does a pin that names no one ICU keg. On any
+//! at all, and so does a pin that names no one ICU keg. On any
 //! other target the build links the ICU `pkg-config` finds at or above
 //! php's own floor, 57.1, as php built on that host would, and reads no
 //! pin: no Linux lane holds ext/intl to the oracle.
@@ -46,7 +46,7 @@ fn pkg_config(args: &[&str]) -> Option<String> {
 /// What the build asks of the ICU `pkg-config` finds: on macOS the major
 /// of the keg the pin's `[closure]` names, read from `oracle.toml` when
 /// `build.rs` runs, not when it compiles, since cargo runs one compiled
-/// `build.rs` for every checkout sharing a target directory (#2628);
+/// `build.rs` for every checkout sharing a target directory;
 /// anywhere else php's floor, with no pin read.
 fn asked() -> Result<pin::Asked, String> {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -59,7 +59,7 @@ fn asked() -> Result<pin::Asked, String> {
     let path = Path::new(&dir).join("../../oracle.toml");
     // Cargo watches a file's time, not a table of it: any edit of the
     // pin reruns this, and reruns the shim's compile and every crate
-    // built on this one, though the `[closure]` is all it reads (#4429).
+    // built on this one, though the `[closure]` is all it reads.
     println!("cargo::rerun-if-changed={}", path.display());
     let text =
         std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
@@ -102,7 +102,7 @@ fn main() {
     // php compiles C and C++ with -DNDEBUG unless it is built with
     // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
     // two builds that set ZEND_DEBUG, as debug assertions are this build's:
-    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    // assert() is live exactly where Rust's debug_assertions is.
     if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
         build.define("NDEBUG", None);
     }

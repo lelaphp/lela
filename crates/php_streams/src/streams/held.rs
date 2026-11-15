@@ -1,4 +1,4 @@
-//! How a stream is held (design §4.3 seam 5, #3415). php's `php_stream`
+//! How a stream is held (design §4.3 seam 5). php's `php_stream`
 //! stays where its resource put it for the length of every operation on
 //! it, so PHP code the operation serves, an error handler a warning of
 //! the operation calls, a user filter, a user wrapper's method, a

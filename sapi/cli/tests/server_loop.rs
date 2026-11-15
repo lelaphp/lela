@@ -1,10 +1,10 @@
-//! `php -S` is php's event loop (`Z/sapi/cli/php_cli_server.c:2770`,
-//! #1884 as #1779 ruled): one thread waits on every connection at once,
+//! `php -S` is php's event loop (`Z/sapi/cli/php_cli_server.c:2770`;
+//! design §4.8, revision 122): one thread waits on every connection at once,
 //! reads each request as its bytes arrive, and serves the requests one
 //! after another on that thread. What these hold is the order and the
 //! time the loop serves in, which no comparison of bytes carries; what
 //! the oracle's `php -S` writes for a request is held beside it by
-//! `xtask witness`, from `tests/lines.toml` (#1975).
+//! `xtask witness`, from `tests/lines.toml`.
 
 mod server;
 
@@ -54,7 +54,7 @@ fn a_slow_client_holds_back_no_other() {
 
 /// `pcntl_fork` while another client's request waits to be served forks,
 /// as php's does: that request is not in flight beside the one forking,
-/// so the engine's one home for fork (#1807) has nothing to refuse. The
+/// so the engine's one home for fork has nothing to refuse. The
 /// child ends where it starts.
 #[test]
 fn a_fork_with_another_request_waiting_goes_ahead() {

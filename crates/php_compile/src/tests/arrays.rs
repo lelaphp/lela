@@ -88,8 +88,8 @@ fn what_php_s_compiler_refuses_in_a_foreach_and_an_array_is_refused_in_its_words
     assert_eq!(refused(b"<?php echo [[] => 2, $a];"), None);
 }
 
-/// `zend_compile_array` against the oracle's dump over the programs
-/// of #304: an array expression with a variable in it is `INIT_ARRAY`
+/// `zend_compile_array` against the oracle's dump over these
+/// programs: an array expression with a variable in it is `INIT_ARRAY`
 /// over the first element and `ADD_ARRAY_ELEMENT` over each after,
 /// the temporary numbered after the first element's own and shared
 /// by every opline, the count above `ZEND_ARRAY_SIZE_SHIFT`, and

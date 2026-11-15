@@ -594,7 +594,7 @@ impl Request {
 
     /// `zend_argument_error_variadic`'s message:
     /// `{fn}(): Argument #N ($name) must {tail}`, as bytes, so a class
-    /// name the tail prints stands as it was declared (#3428).
+    /// name the tail prints stands as it was declared.
     pub(crate) fn argument_message(&self, position: u32, tail: &[u8]) -> Vec<u8> {
         bytes!(
             self.active_native(),

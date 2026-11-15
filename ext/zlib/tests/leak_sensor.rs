@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -15,8 +15,7 @@ fn armed(source: &str) -> String {
     served.stdout_text()
 }
 
-/// `gzfile` keeps each line it reads only in the array it returns
-/// (#2086).
+/// `gzfile` keeps each line it reads only in the array it returns.
 #[test]
 fn a_line_gzfile_reads_is_given_up() {
     let stdout = armed(
@@ -31,7 +30,7 @@ echo implode('|', gzfile($f)); unlink($f);
 
 /// An include through `compress.zlib://` keeps nothing of the open, the
 /// name its inner open set among it, whether the file opens or not, and
-/// the included file is named by its real path, as php names it (#2119).
+/// the included file is named by its real path, as php names it.
 #[test]
 fn an_include_through_the_wrapper_gives_up_the_path_it_opened() {
     let stdout = armed(

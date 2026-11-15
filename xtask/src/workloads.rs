@@ -1,16 +1,16 @@
 //! The workload programs (measurement protocol §11): the directory they
 //! live in, named once, and their declaration beside it,
 //! `docs/perf/workloads.toml` ([`file`]), decoded once into a
-//! [`Declaration`] (#4335, #4344). The declaration gives each program its
+//! [`Declaration`]. The declaration gives each program its
 //! [`Role`], the runs it is measured by and the status each ends on, and
 //! `bench`, `dispatch-census` and `trace-dump` reach a program only
 //! through the [`Run`]s it yields, each with its arguments. It also
 //! declares the bench's pages ([`Pages`]), served from a rig kept off the
-//! repository, which `dispatch-census` counts (#4364, #4367). `budget` holds
+//! repository, which `dispatch-census` counts. `budget` holds
 //! the programs under `[budget] workloads` apart from `docs` where that
-//! row stands (#4341), and the declaration under `docs`. makala's bench
+//! row stands, and the declaration under `docs`. makala's bench
 //! and soak serve, each as a request, the runs of every role
-//! [`Role::served`] serves, a native's none (#4366), each run that takes
+//! [`Role::served`] serves, a native's none, each run that takes
 //! no arguments, since a served request has no `$argv`.
 
 use std::collections::BTreeSet;
@@ -34,8 +34,8 @@ pub(crate) fn file(root: &Path) -> PathBuf {
     root.join(format!("{DIR}.toml"))
 }
 
-/// What a workload is measured for, as #4335 ruled the roles; which of
-/// them votes in `IN_THE_LOOP`'s criterion is [`Role::votes`]'s alone.
+/// What a workload is measured for, the roles as ruled 2026-11-09; which
+/// of them votes in `IN_THE_LOOP`'s criterion is [`Role::votes`]'s alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Role {
@@ -64,10 +64,11 @@ impl Role {
     }
 
     /// Whether a run of this role votes in `IN_THE_LOOP`'s criterion, as
-    /// #4364 amended #4335's ruling: a kernel and the bench do; a probe,
-    /// which holds one mechanism by construction and would vote in
-    /// whatever it probes, does not, nor a shape, kept for timing alone,
-    /// nor a native, whose time is spent outside the loop.
+    /// the ruling of 2026-11-09 was amended that day (design revision
+    /// 178): a kernel and the bench do; a probe, which holds one mechanism
+    /// by construction and would vote in whatever it probes, does not, nor
+    /// a shape, kept for timing alone, nor a native, whose time is spent
+    /// outside the loop.
     pub(crate) fn votes(self) -> bool {
         match self {
             Role::Kernel | Role::Bench => true,
@@ -76,7 +77,7 @@ impl Role {
     }
 
     /// Whether a run of this role is served as a request on makala's web
-    /// bars and its soak, as #4366 ruled: a native's is not, its time
+    /// bars and its soak, as ruled 2026-11-09: a native's is not, its time
     /// spent in an extension's natives, and what a served request adds to
     /// it, its startup, its teardown and the response it writes, the
     /// other roles' bars measure already; every other role's is.
@@ -242,7 +243,7 @@ pub(crate) struct Page {
     pub(crate) path: String,
 }
 
-/// The bench's pages (#4364): requests served by the CLI's built-in
+/// The bench's pages: requests served by the CLI's built-in
 /// server from a copy of the rig, each on a server of its own over a
 /// fresh copy of the rig's database, the counted request after `warm`
 /// that are not.
@@ -534,8 +535,8 @@ page = [{ name = "front", path = "/" }, { name = "post", path = "/?p=1" }]
         assert_eq!(served, [("front", "/"), ("post", "/?p=1")]);
     }
 
-    /// Which role votes is decided here alone, as #4364 ruled: a kernel
-    /// and the bench vote, and a shape, a probe and a native do not.
+    /// Which role votes is decided here alone, as ruled 2026-11-09: a
+    /// kernel and the bench vote, and a shape, a probe and a native do not.
     #[test]
     fn a_kernel_and_the_bench_vote_and_no_other_role_does() {
         let roles = [
@@ -549,7 +550,7 @@ page = [{ name = "front", path = "/" }, { name = "post", path = "/?p=1" }]
     }
 
     /// Which role makala serves on its web bars and soak is decided here
-    /// alone, as #4366 ruled: every role but a native.
+    /// alone, as ruled 2026-11-09: every role but a native.
     #[test]
     fn every_role_but_a_native_is_served_on_the_web_bars() {
         let roles = [
@@ -643,11 +644,12 @@ page = [{ name = "front", path = "/" }, { name = "post", path = "/?p=1" }]
     }
 
     /// The workspace's declaration holds every program under the directory
-    /// and no row without one, each in the role #4335 ruled: the three
-    /// programs that take arguments and the six `uri-*` are native, each
-    /// of the three run under the profiles its record ran it with; the
-    /// seven kernels and `bench_quiet` are the workloads that vote, as
-    /// #4364 ruled, and the four bench pages vote beside them.
+    /// and no row without one, each in the role ruled 2026-11-09: the
+    /// three programs that take arguments and the six `uri-*` are native,
+    /// each of the three run under the profiles its record ran it with;
+    /// the seven kernels and `bench_quiet` are the workloads that vote, as
+    /// the ruling was amended that day, and the four bench pages vote
+    /// beside them.
     #[cfg(tracked)]
     #[test]
     fn the_declaration_is_the_directorys_with_the_ruled_roles() {

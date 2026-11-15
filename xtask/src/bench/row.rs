@@ -1,5 +1,5 @@
 //! One bench reading as a row of `status --section bench --format jsonl
-//! --every` (harness-design.md §4.6, #2646): a bar's night, under a shape
+//! --every` (harness-design.md §4.6): a bar's night, under a shape
 //! `v` versions, so a bar's series reads as its readings in the log's
 //! order, over the store's log or the published history (`--log`). A row
 //! says what one reading measured and leaves a number it does not keep
@@ -19,8 +19,8 @@ pub(crate) const V: u32 = 2;
 /// One bar's reading: the unit it measured in, the paired delta, its
 /// spread and its verdict, the distance a series has to go, the reps and
 /// the load beside them, each null where the reading keeps none. The
-/// field order is the line's. Shape 2 names the unit, `ms` or `rps`
-/// (#2660), where shape 1 kept milliseconds in `delta_median_ms` and
+/// field order is the line's. Shape 2 names the unit, `ms` or `rps`,
+/// where shape 1 kept milliseconds in `delta_median_ms` and
 /// `delta_iqr_ms`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct Row {
@@ -40,7 +40,7 @@ pub(crate) struct Row {
     /// How far a series has to go to its bar, %; none for a control.
     to_go_pct: Option<f64>,
     /// The baseline a series with a tolerance is held to, %, and on a
-    /// `<bar>/baseline` row the value it moved to (#2659).
+    /// `<bar>/baseline` row the value it moved to.
     baseline_pct: Option<f64>,
     reps: Option<u64>,
     /// The load average over 1, 5 and 15 minutes as the run began.

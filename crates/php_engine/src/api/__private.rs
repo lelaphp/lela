@@ -498,7 +498,7 @@ pub fn create_object<C: Class>(
 /// the crate, the `#[php_class]` type or `None`, the Rust identifier.
 /// Recorded where the request was served traced, for `xtask witness`'s
 /// coverage (harness §4.5 condition 2, revision 58); elsewhere it is one
-/// branch on a field the request holds as `None` (#2168).
+/// branch on a field the request holds as `None`.
 #[inline]
 pub fn entered(
     req: &mut Request,

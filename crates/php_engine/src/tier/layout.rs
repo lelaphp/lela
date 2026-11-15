@@ -1,4 +1,4 @@
-//! The frame's layout across the tier face, #3222's ruling
+//! The frame's layout across the tier face, as ruled 2026-10-22
 //! (`jit-design.md` §5.3, ADR-0006): [`FRAME`], one value that says
 //! where a frame's header words stand in its room, which of its flags a
 //! plain leave refuses, and where the VM stack keeps its top, its end,
@@ -391,7 +391,7 @@ impl FrameLayout {
 }
 
 /// Where a runtime-cache slot keeps a property's place, as compiled code
-/// reads it in the request's own slot (`jit-design.md` §4.3, #3346), as
+/// reads it in the request's own slot (`jit-design.md` §4.3), as
 /// php's code reads `CACHED_PTR(cache_slot)` and the offset past it for a
 /// class that is not immutable (`zend_jit_fetch_obj`,
 /// `Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`), and a method's call
@@ -645,7 +645,7 @@ enum Serves {
     /// An op array of the request's own, an evaluated class's own
     /// method's: no number names it past the request, so each request
     /// finds it under the call's names, and the call is held to the
-    /// room the recording's took ([`call_image`]; #3570).
+    /// room the recording's took ([`call_image`]).
     Request,
 }
 
@@ -673,9 +673,9 @@ enum Method {
     /// (design §5.14, *Identities*), so named by its name, lowered, and
     /// never by a number; compiled code writes the called scope it reads
     /// in the request it runs in ([`FrameLayout::called_scope`]). The
-    /// method is the published one it inherits (#3558), the same number
-    /// in every request of the epoch, or none where it is the class's own
-    /// (#3561), found in the request that runs the code under the class's
+    /// method is the published one it inherits, the same number
+    /// in every request of the epoch, or none where it is the class's own,
+    /// found in the request that runs the code under the class's
     /// name and the call's own and held there to the op array the call
     /// serves.
     Request {
@@ -884,8 +884,8 @@ impl PlainCall {
 /// published method answered, over a receiver of that class or none,
 /// the class its called scope, as `INIT_METHOD_CALL`,
 /// `INIT_STATIC_METHOD_CALL` and `NEW` push it: a published class, or a
-/// request-scoped one whose method is published (#3558), one it inherits
-/// from a published class, or its own (#3561), the request's, numbered
+/// request-scoped one whose method is published, one it inherits
+/// from a published class, or its own, the request's, numbered
 /// for it alone as php's `zend_lazy_class_load` copies each into the
 /// request (`Method::Request`, with no inherited method); or to a closure over a user function that
 /// reads its function's own cache, whatever its receiver; none for any

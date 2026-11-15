@@ -16,7 +16,7 @@
 //! runs after a native a native called, as `zend_call_function` does;
 //! and [`Timer`], the engine's one timer thread, which serves every
 //! request's [`Deadlines`]: the execution timer `max_execution_time`
-//! arms and every periodic interrupt an extension starts (#1806).
+//! arms and every periodic interrupt an extension starts.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -127,12 +127,12 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
     // A hand-off from `Nop`'s loop that this check cannot take is owed
     // to the next one that can, raised once the hooks are served, so a
     // serving a hook started does not take it in place of the one it
-    // interrupted (#3362).
+    // interrupted.
     crate::tier::owed(req);
     Ok(req.is_pending())
 }
 
-/// The engine's execution timer (design §5.8, §5.14 **Threads**, #2252):
+/// The engine's execution timer (design §5.8, §5.14 **Threads**):
 /// every deadline of every request the engine serves, and the one thread
 /// the engine runs to wait for them and raise each request's interrupt at
 /// its own. A request's deadlines are its [`Deadlines`]: the execution
@@ -140,16 +140,16 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// `max_execution_time` is not zero and again when `set_time_limit()`
 /// moves the entry, and what `zend_unset_timeout` unsets, as
 /// `php_request_shutdown` and `OnUpdateTimeout` unset php's; and every
-/// periodic interrupt an extension starts (#1806). A thread is the only
+/// periodic interrupt an extension starts. A thread is the only
 /// timed wake the standard library has, and one serves every request:
 /// the schedule keeps each request's earliest deadline in one ordered
 /// set and the thread waits for the first, so moving one is a write
 /// under the timer's mutex and, where it comes sooner, a wake, with no
-/// thread spawned (#1924). The thread is started by the change that sets
+/// thread spawned. The thread is started by the change that sets
 /// the engine's first deadline, so an engine that never arms one runs
 /// none, and stays parked in its wait between requests, so a host that
 /// serves them one after another, a php-fpm child or php-cgi, spawns it
-/// once rather than at every request (#2541). It is joined before every
+/// once rather than at every request. It is joined before every
 /// fork, a host's and a request's alike ([`Timers`]), and at the engine's
 /// end, the drop of the last clone. A request takes its deadlines out under
 /// the mutex as it ends, so nothing the thread raises after reaches it,
@@ -174,7 +174,7 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// the first.
 ///
 /// While a handler holds the time limit suspended
-/// ([`Limits::suspend_time_limit`], #1814) the execution timer is no
+/// ([`Limits::suspend_time_limit`]) the execution timer is no
 /// deadline but the time it had left, which neither stage counts down,
 /// and the resume makes it a deadline again that much from then.
 ///
@@ -195,7 +195,7 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// (`JoinHandle::join`, `pthread_join`): so while PHP code runs, the
 /// timer's thread is parked in its wait or raising an interrupt, and a
 /// fork or the engine's end leaves no thread. A fork needs both
-/// halves (#1783). The standard library takes one process-wide mutex as
+/// halves. The standard library takes one process-wide mutex as
 /// a thread starts and again as it ends, its stack overflow handler's
 /// thread table (`std/src/sys/pal/unix/stack_overflow/thread_info.rs`),
 /// and a child forked while a timer's thread stood in either copied it
@@ -204,7 +204,7 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// its deadline, so a join costs a wake and an exit, never the seconds
 /// left. That is what a fork stands on (ADR-0010, Threads): the thread
 /// is one [`crate::fork::spawn_aside`] started, which no fork happens beside,
-/// and the engine's one home for fork (#1807) joins every engine's timer
+/// and the engine's one home for fork joins every engine's timer
 /// thread first ([`Timers::stop`]) and starts each again after in the
 /// parent over the same schedule ([`Stopped::resume`]), whose deadlines
 /// are instants, so a periodic interrupt keeps its grid and the
@@ -246,7 +246,7 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// so neither passes as a child that did not hang. Five seconds from the
 /// batch's last fork, read before the reaping, was once crossed by 73
 /// children of 15000 at a load of 60, and by none of 1,020,000 read
-/// since at loads to 95, the slowest reaped 0.55 s after its fork (#2371).
+/// since at loads to 95, the slowest reaped 0.55 s after its fork.
 ///
 /// ```php
 /// $tally = [];
@@ -461,7 +461,7 @@ impl Control {
     /// the earliest deadline came sooner, or started where it had none
     /// and now has a deadline. A change that leaves no deadline leaves the
     /// thread parked in its wait, so the next request's costs a write and
-    /// a wake rather than a spawn (#2541).
+    /// a wake rather than a spawn.
     fn change(&mut self, f: impl FnOnce(&mut Schedule)) {
         let due = {
             let mut schedule = self.shared.held();
@@ -778,7 +778,7 @@ struct Scheduled {
     next: Option<Instant>,
 }
 
-/// One periodic interrupt a request was asked for (#1806), by the number
+/// One periodic interrupt a request was asked for, by the number
 /// its request's deadlines gave it: what [`Limits::start_periodic`]
 /// answers and the extension that asked keeps, in its request state, to
 /// read its periods with and to stop it by. The number is its request's
@@ -810,7 +810,7 @@ struct Execution {
 }
 
 /// When the execution timer is due: at a deadline the thread waits for,
-/// or, while the time limit is suspended (#1814), never, with the time
+/// or, while the time limit is suspended, never, with the time
 /// it had left kept for the resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Due {
@@ -1208,9 +1208,9 @@ mod tests {
         Arc::clone(&timer.control().shared)
     }
 
-    /// #1783: a deadline set returns with the thread waiting; the last
+    /// A deadline set returns with the thread waiting; the last
     /// one unset, or the request's deadlines dropped, leaves it parked in
-    /// its wait (#2541); and the engine's end, the drop of the timer's last
+    /// its wait; and the engine's end, the drop of the timer's last
     /// clone, returns with the thread's body done and its share of the
     /// schedule released. The end wakes it rather than waiting out the
     /// thirty seconds it was armed for. That the thread has then ended,
@@ -1251,7 +1251,7 @@ mod tests {
         );
     }
 
-    /// #1924: `set_time_limit()` over an armed timer moves its deadline
+    /// `set_time_limit()` over an armed timer moves its deadline
     /// and spawns nothing, so the thread that served the first deadline
     /// serves every one after it.
     #[test]
@@ -1289,10 +1289,10 @@ mod tests {
         assert!(!interrupt.raised().load(Ordering::Relaxed));
     }
 
-    /// #2252: requests served on threads of their own over one engine,
+    /// Requests served on threads of their own over one engine,
     /// each with `max_execution_time` armed, are served by one thread,
     /// which the engine started once and which stays parked once the last
-    /// of them ended (#2541).
+    /// of them ended.
     #[test]
     fn one_thread_serves_every_request_of_an_engine() {
         const REQUESTS: usize = 8;
@@ -1334,7 +1334,7 @@ mod tests {
         assert!(shared(timer).held().requests.is_empty());
     }
 
-    /// #2541: requests served one after another over one engine, each with
+    /// Requests served one after another over one engine, each with
     /// `max_execution_time` armed, as a php-fpm child or php-cgi serves
     /// them, are served by one thread, which stays parked between them
     /// rather than being joined at each request's end and spawned again
@@ -1360,7 +1360,7 @@ mod tests {
         );
     }
 
-    /// #2252: each of the requests one engine's thread serves meets its
+    /// Each of the requests one engine's thread serves meets its
     /// own deadline, the loop stopped at its back-edge with php's fatal.
     #[test]
     fn the_engines_thread_stops_each_requests_loop_at_its_deadline() {
@@ -1421,7 +1421,7 @@ mod tests {
         assert!(!other.raised().load(Ordering::Relaxed));
     }
 
-    /// #1806: a periodic interrupt counts every period elapsed, the ones
+    /// A periodic interrupt counts every period elapsed, the ones
     /// nobody read among them, and hands each count over once; the
     /// periods are laid on the grid `first` began, so a late read loses
     /// none.
@@ -1502,7 +1502,7 @@ mod tests {
         assert!(serving(&timer).is_some(), "the execution timer is left");
     }
 
-    /// #2541: a host's fork after a timed request finds the engine's timer
+    /// A host's fork after a timed request finds the engine's timer
     /// parked, joins it, and in the parent starts it again, as it was:
     /// php-fpm's master forks each child after the startup request armed
     /// `max_execution_time`.
@@ -1587,7 +1587,7 @@ mod tests {
             .map(|execution| execution.due)
     }
 
-    /// #1814: a suspend takes the deadline out of the schedule and keeps
+    /// A suspend takes the deadline out of the schedule and keeps
     /// the time it had left, joining the thread that served nothing else;
     /// guards nest, and the outermost resume puts the deadline back that
     /// far from then, on a thread started again.
@@ -1645,8 +1645,8 @@ mod tests {
         assert!(serving(&timer).is_some());
     }
 
-    /// #1814's notes: with a periodic interrupt scheduled, a suspend and
-    /// a resume are writes to the schedule the same thread serves on.
+    /// With a periodic interrupt scheduled, a suspend and a resume are
+    /// writes to the schedule the same thread serves on.
     #[test]
     fn a_suspend_beside_a_periodic_interrupt_keeps_its_thread() {
         let interrupt = Interrupt::default();

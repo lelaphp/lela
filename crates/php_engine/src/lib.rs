@@ -8,11 +8,10 @@
 //! natives are Lane B and C of design §11. The interrupt the loop tests
 //! at its safepoints, and the execution timer that sets it, are
 //! [`interrupt`] (design §5.8). The one home for `fork`, which pcntl asks
-//! through the request and a host through [`fork()`], is `fork` (#1807).
+//! through the request and a host through [`fork()`], is `fork`.
 //! [`getopt`] is `main/getopt.c`, which every host reads its command line
-//! with and `getopt()` reads a program's `argv` with (#889). [`layer`] is
-//! the face `php_streams` alone reaches, which no extension can name
-//! (#1959).
+//! with and `getopt()` reads a program's `argv` with. [`layer`] is
+//! the face `php_streams` alone reaches, which no extension can name.
 #![forbid(unsafe_code)]
 // Design §5.8: the dispatch threaded by tail calls is measured on nightly.
 #![cfg_attr(
@@ -36,7 +35,7 @@
 
 /// The bytes of each piece in turn, each anything `AsRef<[u8]>`: a
 /// message as php's `%s` prints the names in it, byte for byte, where
-/// `format!` would hold them to UTF-8 (#3428). The pieces are joined by
+/// `format!` would hold them to UTF-8. The pieces are joined by
 /// [`message_bytes`], out of line, so a handler's refusal costs its arm
 /// one call, as `format!` cost it.
 macro_rules! bytes {

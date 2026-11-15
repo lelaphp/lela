@@ -1,5 +1,5 @@
 //! One budget reading as a row of `status --section budget --format jsonl
-//! --every` (harness-design.md §4.6, #1763): what the reading counted,
+//! --every` (harness-design.md §4.6): what the reading counted,
 //! under a shape `v` versions. Which crate a scope is, and which reading
 //! stands for it, depend on the manifest at the ref a reader views, so they
 //! stay the reader's; a count the reading does not keep is null, never 0.

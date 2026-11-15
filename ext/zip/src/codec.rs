@@ -290,8 +290,8 @@ impl Algorithm {
 /// shrink, is stored. Deflate is the platform zlib's ([`crate::ffi`]) at
 /// libzip's memLevel, 9 or torrentzip's 8, so an entry carries php's
 /// bytes at every level, and a stream cut short inflates as far as php's
-/// does (#1651); LZMA and XZ are liblzma's at libzip's extreme preset,
-/// and ZSTD libzstd's at the level as libzip reads it (#3529):
+/// does; LZMA and XZ are liblzma's at libzip's extreme preset,
+/// and ZSTD libzstd's at the level as libzip reads it:
 ///
 /// ```php
 /// $text = ''; for ($i = 0; $i < 20000; $i++) $text .= md5((string) $i);

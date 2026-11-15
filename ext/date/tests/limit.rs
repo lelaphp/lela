@@ -8,8 +8,8 @@ use php_ext::test::{Capture, Engine};
 /// the engine serves the next request as the first. The size the fatal
 /// asks for is the oracle's only from php's start, every extension's
 /// request state laid, so it is pinned by the witness on
-/// `DateTime::__construct` under `[regime.jit-off]` (#2854); this engine
-/// lays ext/date's alone and is held to the site, the limit and the exit.
+/// `DateTime::__construct` under `[regime.jit-off]`; this engine lays
+/// ext/date's alone and is held to the site, the limit and the exit.
 #[test]
 fn tight_limit_fatal_releases_every_date_and_serves_again() {
     let engine = Engine::builder()

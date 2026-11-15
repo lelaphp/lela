@@ -1,5 +1,5 @@
 //! What the debugger reads of a frame, an op array and the linked
-//! tables between the steps it drives (#1911): read through the native
+//! tables between the steps it drives: read through the native
 //! face as an extension reads them, a frame a step handed out turned
 //! into a [`FrameView`] by [`tier::frame`], and copied here into the
 //! shapes phpdbg's `print`, `list`, `info`, its breakpoints and its seeks

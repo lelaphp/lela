@@ -2,17 +2,16 @@
 //! (ADR-0008): the host it lays down has the topology of the CLI and CGI
 //! hosts, passes `budget`, `unsafe-audit`, `api-check` and `clippy`
 //! untouched, the last against the fixture's stand-ins for the facade and
-//! the bundle, which carry the items the template names (#2524), joins
+//! the bundle, which carry the items the template names, joins
 //! the workspace members, and a second run for the same name refuses, as
 //! one for a name without its row does. The fixture is copied to a scratch
 //! directory first; nothing is generated in place, and the workspace's own
 //! `sapi/` gains no crate. The stand-ins are held to the real crates: each
 //! public item of one is a public item or a re-export of the workspace's
-//! crate of that name, read from the sources as a lock is (#2544), and in
+//! crate of that name, read from the sources as a lock is, and in
 //! its shape: each field a `pub` field of the real item, each function as
 //! many parameters as the real one and each written alike where it names
-//! no generic, and each method the real `OutputSink` requires declared
-//! (#2545).
+//! no generic, and each method the real `OutputSink` requires declared.
 #![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
@@ -117,7 +116,7 @@ fn the_host_laid_down_has_the_topology_of_the_cli_and_the_cgi() {
     assert!(lib.contains("#![forbid(unsafe_code)]"), "{lib}");
     let main = read(&root, "sapi/demo/src/main.rs");
     assert!(main.contains("php_sapi_demo::main()"), "{main}");
-    // Both crate roots, the library's and the binary's (#2524).
+    // Both crate roots, the library's and the binary's.
     for lint in manifest
         .rule("lints.no-panic")
         .unwrap()
@@ -406,7 +405,7 @@ fn misshapen(root: &Path, name: &str) -> Vec<String> {
     out
 }
 
-/// The stand-ins hold the shapes the template calls (#2545): every field,
+/// The stand-ins hold the shapes the template calls: every field,
 /// every parameter and every method the real facade requires; and the
 /// three negative controls each fail it, a field the real item lacks, a
 /// parameter more and one written otherwise, and a required method left

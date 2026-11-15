@@ -1,4 +1,4 @@
-//! One cargo run over many crates, read back crate by crate (#2165).
+//! One cargo run over many crates, read back crate by crate.
 //!
 //! `clippy` and `test` once ran one cargo per crate, one after another:
 //! each call resolved the whole graph, scanned every fingerprint and built
@@ -301,7 +301,7 @@ pub(crate) enum Targets {
     Tests,
     /// Every target but `build.rs` under every feature each crate
     /// declares, `--all-targets --all-features`: the set `clippy` lints
-    /// under (#140). A module behind a feature is a target the run must
+    /// under. A module behind a feature is a target the run must
     /// reach as any other: `php_bundle::test`, each extension's line in
     /// the bundle's `enabled()`, `sapi/cli`'s `php-linked`. Every feature,
     /// because no two in the workspace conflict and the lanes already
@@ -315,7 +315,7 @@ pub(crate) enum Targets {
     All,
     /// The library and binaries under every feature, cargo's default
     /// targets, `--lib --bins` without its refusal of a package with no
-    /// library: what the release lint reads (#2392).
+    /// library: what the release lint reads.
     Shipped,
 }
 
@@ -388,7 +388,7 @@ impl Run {
         }
         without_git(&mut command);
         // Set, it points clippy past every generated clippy.toml for every
-        // crate (`generated`'s module, #2475); rustc reads it not at all.
+        // crate (`generated`'s module); rustc reads it not at all.
         command.env_remove(crate::generated::CONF_DIR);
         let mut child = command
             .spawn()
@@ -431,7 +431,7 @@ impl Run {
     }
 }
 
-/// `crates` as the cargo runs that build each as it ships (#2606). Cargo
+/// `crates` as the cargo runs that build each as it ships. Cargo
 /// unifies the features of every package one run selects, so a binary
 /// built beside a crate that turns more of a shared dependency on is not
 /// the binary its own package builds: `sapi/makala`'s, built beside
@@ -476,8 +476,8 @@ pub(crate) struct Group<'c> {
 /// `cargo test`'s own unless it names `release-da`, the release
 /// optimisation with debug assertions on (the workspace's
 /// `[profile.release-da]`), so the debug build's sensors in the binary a
-/// test starts run at the speed it ships at, as #4348's ruling 4 has
-/// `sapi/makala`'s run (#4361). A name it does not know is an error.
+/// test starts run at the speed it ships at, as ruling 4 of 2026-11-09
+/// has `sapi/makala`'s run. A name it does not know is an error.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum TestProfile {
@@ -624,7 +624,7 @@ fn dir_of(package_id: &str) -> Option<PathBuf> {
 
 /// Where [`without_git`] keeps the index git handed a hook, as an absolute
 /// path: the one a commit's tree is written from, which in a commit by
-/// pathspec is a second index and not the checkout's (#2747).
+/// pathspec is a second index and not the checkout's.
 pub(crate) const COMMIT_INDEX: &str = "XTASK_COMMIT_INDEX";
 
 /// `command` with every `GIT_` variable taken out. Pre-commit runs the
@@ -663,8 +663,7 @@ mod tests {
 
     /// A crate's tests are built under `cargo test`'s profile unless its
     /// `[package.metadata.xtask.test]` names `release-da`, and a name the
-    /// harness does not know is an error, never the dev profile in silence
-    /// (#4361).
+    /// harness does not know is an error, never the dev profile in silence.
     #[test]
     fn a_package_names_the_profile_its_tests_are_built_under() {
         let declaring = |table: serde_json::Value| Package {

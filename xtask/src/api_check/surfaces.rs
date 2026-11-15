@@ -1,12 +1,12 @@
-//! Design §4.10's list of surfaces, held at two places, as #2020 ruled:
+//! Design §4.10's list of surfaces, held at two places, as ruled 2026-10-07:
 //! the edge by a row a person writes, the items by a lock the instrument
-//! writes (#2251).
+//! writes.
 //!
 //! **The edge.** Every library dependency of an `ext/*` crate on another
 //! (a `[dependencies]` entry, plain or under a target; a dev- or
 //! build-dependency links nothing) stands on a row of the section's table
 //! whose Surface cell names the producer before its `→` and the consumer
-//! after it: `` | `pcre` → `spl`, `filter` (#716) | ``. The cell is read
+//! after it: `` | `pcre` → `spl`, `filter` | ``. The cell is read
 //! where a person wrote it and nowhere else; a computed region in the
 //! section is skipped, so a row rendered from the tree holds nothing.
 //!
@@ -18,7 +18,7 @@
 //!
 //! **The marker.** An item of the surface may carry `#[mirrors]`, the
 //! php-src declaration it stands for, held against the pinned tree
-//! ([`super::mirrors`], #2353), in a crate with a surface or without one.
+//! ([`super::mirrors`]), in a crate with a surface or without one.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -218,7 +218,7 @@ fn surface(inventory: &mut Inventory<'_>, krate: &Present) -> Result<BTreeSet<St
     Ok(items)
 }
 
-/// `` | `pcre` → `spl`, `zip` (#1520) | items | mirrors | ``: the producer
+/// `` | `pcre` → `spl`, `zip` | items | mirrors | ``: the producer
 /// and the consumers its Surface cell names; the header and the rule
 /// beneath it have no `→`.
 fn row(line: &str) -> Option<(&str, impl Iterator<Item = &str>)> {
@@ -262,7 +262,7 @@ mod tests {
 
 | Surface | Items | Mirrors |
 |---|---|---|
-| `pcre` → `spl`, `zip` (#1520) | `Regex`, with `compile` | `php_pcre.h`'s `php_pcre_split_impl` |
+| `pcre` → `spl`, `zip` | `Regex`, with `compile` | `php_pcre.h`'s `php_pcre_split_impl` |
 | `pdo` → `pdo_mysql`, `pdo_sqlite` | `connector::Connection` | `php_pdo_driver.h` |
 | `libxml` → the other XML extensions | prose | `php_libxml.h` |
 
@@ -311,8 +311,7 @@ mod tests {
     #[test]
     fn only_a_span_that_spells_an_extension_is_one() {
         assert_eq!(
-            spans("`spl`, `php_pcre.h`, `Regex`, `zip` (#1520), `pdo_sqlite`, ``")
-                .collect::<Vec<_>>(),
+            spans("`spl`, `php_pcre.h`, `Regex`, `zip`, `pdo_sqlite`, ``").collect::<Vec<_>>(),
             ["spl", "zip", "pdo_sqlite"]
         );
     }

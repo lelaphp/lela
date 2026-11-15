@@ -27,7 +27,7 @@ import sys
 # The opcodes specialised on their operand kinds, ops.toml's `specialise`, which
 # third-engine-design.md section 5.8 renders. Not a property of php-src: an opcode
 # php's zend_vm_gen.php specialises joins in the commit that measures its run-time
-# operand decoding (section 5.8, #2997). php's own SPEC(...) clause is emitted
+# operand decoding (section 5.8). php's own SPEC(...) clause is emitted
 # beside it in `spec` so the two can be compared.
 HOT_LIST = {
     "ASSIGN", "ADD", "SUB", "MUL", "IS_SMALLER", "IS_EQUAL", "IS_IDENTICAL",

@@ -2,20 +2,20 @@
 //! against their headers.
 //!
 //! liblzma and libzstd are the libraries the oracle's libzip loads
-//! (design §7.2; #3529): found through `pkg-config liblzma` and
+//! (design §7.2): found through `pkg-config liblzma` and
 //! `pkg-config libzstd`, which on an Apple silicon Mac are Homebrew's
 //! `xz` and `zstd` kegs, never vendored. A miss fails the build rather
 //! than falling back to a library the oracle does not load. liblzma is
 //! linked from the keg's archive, held inside this crate's rlib: the SDK
 //! ships a `liblzma.tbd`, and its libxml2 puts `-L /usr/lib` ahead of the
-//! kegs on the link line (#1510), where `-l lzma` would find the SDK's
+//! kegs on the link line, where `-l lzma` would find the SDK's
 //! library. The SDK ships no libzstd, so `-l zstd` finds the keg's
 //! whatever the order. A host whose liblzma has no archive links its
 //! shared library.
 //!
 //! The C is one file: `ZLIB_VERSION` of the `zlib.h` this crate's deflate
 //! compiles against, the string libzip's `deflateInit2` macro hands
-//! `deflateInit2_` (#2426), under the include directories libz-sys hands
+//! `deflateInit2_`, under the include directories libz-sys hands
 //! a dependent as `DEP_Z_INCLUDE` where it names any, else the
 //! compiler's own, which for the platform's zlib is the SDK's or the
 //! system's header; and the sizes of `lzma_stream` and

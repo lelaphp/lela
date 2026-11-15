@@ -3,7 +3,7 @@
 //! track's under the ticket that blocks it, so a session reads the whole
 //! frontier and what waits behind it in one call instead of walking
 //! `blockedBy` ticket by ticket. A ticket blocks as `track next` judges
-//! it, [`crate::ticket::BlockedBy::open`]: while it is open (#2326). A chain starts at a ticket no open ticket
+//! it, [`crate::ticket::BlockedBy::open`]: while it is open. A chain starts at a ticket no open ticket
 //! shown blocks and runs down through what it unblocks; a ticket with two
 //! blockers is written out under the first by number and named under the
 //! others. Tickets that block nothing and wait on nothing follow the
@@ -306,7 +306,7 @@ mod tests {
     /// A chain runs from the blocker down; a ticket with two blockers is
     /// written out under the first and named under the second; a closed
     /// blocker is no wait, whether or not `main` holds the branch
-    /// recording it (#2326); a ticket with no edge stands on its own; a blocker
+    /// recording it; a ticket with no edge stands on its own; a blocker
     /// labelled another track is a wait but not a row.
     #[test]
     fn chains_are_written_from_the_blocker_down() {

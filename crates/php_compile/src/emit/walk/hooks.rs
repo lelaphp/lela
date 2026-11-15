@@ -1,4 +1,4 @@
-//! The walk over a property's hook list (design §4.9, #427): what
+//! The walk over a property's hook list (design §4.9): what
 //! [`Emit`] reads `{ get => …; set(T $v) { … } }` as, php's
 //! `property_hook_list` of `ZEND_AST_PROPERTY_HOOK` declarations, in the
 //! [`Hook`] shape the emitter compiles each one from

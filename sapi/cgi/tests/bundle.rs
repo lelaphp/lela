@@ -1,8 +1,8 @@
 //! The binary carries the CLI's extensions: php's configure builds an
 //! extension of the `cli` class for the CLI, CGI, embed and phpdbg alike
 //! (`EXT_CLI_STATIC`, `Z/build/php.m4`) and every other one for every host,
-//! so the host turns on the bundle's `host`, the set every host links
-//! (#1477, #3081), and `php-cgi -n -m` lists what it carries.
+//! so the host turns on the bundle's `host`, the set every host links,
+//! and `php-cgi -n -m` lists what it carries.
 
 /// `php-cgi -n -m` lists the ten a build of this crate alone lacked while
 /// its features were the CLI's first eight.

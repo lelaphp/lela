@@ -10,7 +10,7 @@
 //! measured does not exist yet: the runner reads the file as an engine,
 //! since its bytes are not the oracle's. They say so on stderr and return
 //! when the pinned binary is not on this machine, unless the machine
-//! promised it (#38); the rest run anywhere.
+//! promised it; the rest run anywhere.
 #![cfg(tracked)]
 
 use std::fs;
@@ -61,7 +61,7 @@ fn manifest_of(rows: impl IntoIterator<Item = Crate>, tree: &Path) -> Manifest {
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
-/// this machine promised the binary (#38).
+/// this machine promised the binary.
 fn oracle() -> Option<PathBuf> {
     let pin = pin();
     Promise::Oracle
@@ -74,7 +74,7 @@ fn oracle() -> Option<PathBuf> {
 /// that sets neither has the corpus nowhere, and the tests that run a
 /// subset of it say so and return, as the ones that spawn the oracle do;
 /// where the runner promised the tree, they fail naming both places
-/// tried (#38).
+/// tried.
 fn source() -> Option<PathBuf> {
     Promise::Tree.or_skip(pin().source.tree()).unwrap()
 }
@@ -92,7 +92,7 @@ struct Scratch {
     engine: PathBuf,
     /// Where its run holds the conflict keys as locks: a directory of its
     /// own, not the machine's temporary directory, so a real run beside it
-    /// holding `all` makes it wait for nothing (#1675).
+    /// holding `all` makes it wait for nothing.
     locks: Tree,
 }
 
@@ -203,7 +203,7 @@ fn a_missed_expectation_fails_with_the_counts_and_the_reading_names_the_file() {
     assert_eq!(count(&reading, "run"), 1);
 }
 
-/// `--unkept` (#1830): the runner's control runs only a subset whose kept
+/// `--unkept`: the runner's control runs only a subset whose kept
 /// target does not stand. With none kept under the pin it runs and keeps
 /// one; run again, the target holds a verdict for each of the subset's
 /// tests and the subset is not run; a test added to the subset is one the
@@ -289,7 +289,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
 /// An extension's derived subset is every `.phpt` under `ext/<name>`, as
 /// run-tests.php walks the directory, so a test in a directory beside
 /// `tests/`, as `ext/intl/uchar/tests` stands beside `ext/intl/tests`, is
-/// the extension's with no `phpt` key in its row (#1590, #1598).
+/// the extension's with no `phpt` key in its row.
 #[test]
 fn a_nested_test_directory_is_held_in_the_extensions_derived_subset() {
     if oracle().is_none() {
@@ -429,7 +429,7 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
         ..Ask::default()
     };
     // The crate the subset is of has no Cargo.toml in the scratch: the
-    // reading says so ahead of the engine's binary (#64).
+    // reading says so ahead of the engine's binary.
     let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
     assert_eq!(readings.len(), 1, "{readings:#?}");
     let reading = &readings[0];
@@ -529,7 +529,7 @@ fn a_run_with_no_subset_runs_the_lane_rather_than_refusing() {
     let tree = fixture_tree();
     let manifest = manifest_of([Crate::named("ext/ctype")], &tree);
     // A scratch workspace, so a run over this corpus is kept in no
-    // checkout's store, as one of none was in main's (#3143).
+    // checkout's store, as one of none was in main's.
     let root = Tree::new("phpt-no-subset").unwrap();
     scratch_workspace(workspace(), &root);
     let readings = phpt::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
@@ -633,7 +633,7 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
     );
 }
 
-/// A relative `--root` reaches the verdicts an absolute one does (#942):
+/// A relative `--root` reaches the verdicts an absolute one does:
 /// the engine is found under the root and run in each test's own
 /// directory, so the root is made absolute where the command line is
 /// read. Before, `--root .` handed every test `./target/debug/php`, its
@@ -696,7 +696,7 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
 /// A binary standing where the engine's would that prints `__FILE__` as
 /// the engine prints it, the path the program was run by, taken as the
 /// first argument ending in `.php`; or, with `bare`, that name alone, the
-/// relative name the lane handed before #331.
+/// relative name the lane handed before it ran a test by its absolute path.
 fn echoing_engine(scratch: &Scratch, bare: bool) -> PathBuf {
     let name = if bare { "bare-name" } else { "as-given" };
     let path = scratch.root.join("engine").join(name);
@@ -716,7 +716,7 @@ fn echoing_engine(scratch: &Scratch, bare: bool) -> PathBuf {
     path
 }
 
-/// The fixture at `xtask/fixtures/phpt/FileName_basic.phpt` (#331): a
+/// The fixture at `xtask/fixtures/phpt/FileName_basic.phpt`: a
 /// `--EXPECTF--` of `%sFileName_basic.php`, where `%s` is one character
 /// or more, as the corpus pins `ReflectionClass::getFileName()` and every
 /// error site. Upstream's runner hands php the program's absolute path,
@@ -767,7 +767,7 @@ fn written_at(path: &Path, at: SystemTime) {
 /// A binary the tree has moved past runs no test at all, and the reading
 /// is a skip held to that cause: before this, whichever binary happened to
 /// stand in `target` was the lane's engine, and one unchanged tree carried
-/// two readings 37 tests apart (#475). It is not the absent binary `done`
+/// two readings 37 tests apart. It is not the absent binary `done`
 /// excuses, so `engine_absent` stays at nought and `engine_stale` is the
 /// number.
 #[test]
@@ -812,7 +812,7 @@ fn a_binary_the_tree_has_moved_past_runs_nothing_and_the_skip_names_it() {
 
 /// A binary the tree has not moved past is the lane's engine as before,
 /// and the reading names it: the path and the md5 of its bytes, so two
-/// readings of one tree can be told apart (#475).
+/// readings of one tree can be told apart.
 #[test]
 fn a_binary_the_tree_has_not_moved_past_writes_an_ordinary_reading_that_names_it() {
     if oracle().is_none() {
@@ -949,7 +949,7 @@ fn ipcs_readable() -> Option<&'static str> {
 }
 
 /// Why the machine's System V tables have no room for what the System V
-/// test makes (#1508), none where they have: two queues, two segments
+/// test makes, none where they have: two queues, two segments
 /// and a set among the test's program and `perl`, against each table's
 /// limit as `ipcs -Q`, `-M` and `-S` print it and the objects `ipcs -a`
 /// lists. A table full of other programs' objects fails `msg_get_queue`
@@ -998,12 +998,12 @@ struct Made {
 /// its objects off the machine, have `perl` make a keyed segment and a
 /// keyed queue, and mark `made` so the program ends. The segment is keyed
 /// since a private one whose creator is gone is any reclaim's on the
-/// machine to take (`sysv::abandoned`, #2115), a System V subset's run
-/// beside this one among them (#2448). The wait for
+/// machine to take (`sysv::abandoned`), a System V subset's run
+/// beside this one among them. The wait for
 /// `started` is the recipe's limit, 60 s, past which the program is gone
 /// anyway: it covers the run's start and the program's, which took 1.4 s
 /// to 3.0 s at a load average of 70 and outgrew the 5 s it had beside the
-/// file's other tests (#2280). The program waits for `made` 30 s, inside
+/// file's other tests. The program waits for `made` 30 s, inside
 /// the same limit.
 fn made_while_it_runs(started: &Path, made: &Path, stood: &[Ipc]) -> Made {
     let mut printed = String::new();
@@ -1042,20 +1042,20 @@ fn made_while_it_runs(started: &Path, made: &Path, stood: &[Ipc]) -> Made {
     }
 }
 
-/// A run removes what its own tests leave of System V IPC (#1412): a
+/// A run removes what its own tests leave of System V IPC: a
 /// shared memory segment, a semaphore set and a message queue a test
 /// creates and leaves are gone after the run, and the reading counts them;
 /// while a segment another process creates while the test runs, `perl`
 /// here, stands, and so does a keyed queue `perl` makes then as the
 /// runner's own user, naming no process either. The subset holds no
 /// claim, so it takes only what its own processes are named on, and its
-/// count is those three whatever another process makes meanwhile (#2563);
-/// an object that names no process is a System V subset's to take (#1482).
+/// count is those three whatever another process makes meanwhile;
+/// an object that names no process is a System V subset's to take.
 /// The test tells its program's objects apart by the pid it printed, which
 /// names the segment and the set and is in the keyed queue's key.
 ///
 /// A machine whose tables have no room for what the test makes skips it
-/// and says so (#1508); a miss names what the program printed in the
+/// and says so; a miss names what the program printed in the
 /// run's `fail` line, which the failure prints.
 #[test]
 fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
@@ -1133,7 +1133,7 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
 /// sends nothing to it, so it names no process, as php's
 /// `msg_get_queue(0)` leaves one, writes its pid and the new private
 /// queues `ipcs -q` lists to `started`, none where its own was refused, so
-/// a queue another session made is never read as its (#3007), and goes on
+/// a queue another session made is never read as its, and goes on
 /// with `then`, its expectation after it.
 fn leaves_a_private_queue(started: &Path, then: &str) -> String {
     format!(
@@ -1162,7 +1162,7 @@ static PRIVATE_QUEUES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// What names the claims directory a run's System V claims are laid
 /// apart in ([`OneTree::claims`]), so the claims a test reads are its
 /// runs' alone; such a run still holds back from what a claim held in the
-/// machine's covers, as a run beside another run does (#2902), and says
+/// machine's covers, as a run beside another run does, and says
 /// it left what it did.
 const CLAIMS: &str = "XTASK_SYSV_CLAIMS";
 
@@ -1171,7 +1171,7 @@ const CLAIMS: &str = "XTASK_SYSV_CLAIMS";
 const STOOD: &str = "no process and stand";
 
 /// What a sweep says where another run held a claim as it settled its own,
-/// which then stands for a later reclaim (#3007).
+/// which then stands for a later reclaim.
 const CLAIM_STANDS: &str = "claim stands for a later reclaim";
 
 /// [`PRIVATE_QUEUES`] held, whatever test panicked holding it before.
@@ -1194,12 +1194,12 @@ fn started_at(pid: &str) -> String {
 
 /// A System V subset's run killed before its sweep leaves its claim, and
 /// the next System V subset's run removes what the killed one's tests
-/// left and names it in its reading (#2448): here a private queue of
+/// left and names it in its reading: here a private queue of
 /// mode 0600 nobody sends to, naming no process, as php's
 /// `msg_get_queue(0)` leaves one, made by a test of `ext/sysvmsg` that
 /// then sleeps past the recipe's limit. The run is killed outright, which
 /// leaves the test's php running, and the next run kills it before it
-/// sweeps (#2522); the same php still running then is killed by this
+/// sweeps; the same php still running then is killed by this
 /// test, which fails. The runs lay their claims apart ([`CLAIMS`]), so
 /// the claims directory is theirs alone and no other run's reclaim takes
 /// the claim first; another run's sweep on the machine may still take the
@@ -1321,9 +1321,9 @@ fn took(reading: &Reading, queue: &str) -> bool {
 
 /// A System V subset's own sweep removes the private queue its test leaves
 /// that nobody sent to, naming no process, and counts it, where no other
-/// run holds a claim in the claims directory it reads (#1482, #2571); and
+/// run holds a claim in the claims directory it reads; and
 /// with a claim held there from before the queue was made, as a run going
-/// beside it holds one (#2563), it leaves the queue standing and its own
+/// beside it holds one, it leaves the queue standing and its own
 /// claim for a later reclaim, says so, and this test removes the queue. The
 /// runs lay their claims apart ([`CLAIMS`]), so the claims they read are
 /// this test's alone but for those held on the machine, which keep the
@@ -1332,7 +1332,7 @@ fn took(reading: &Reading, queue: &str) -> bool {
 /// test's program may still be taken with it, as by any System V subset's
 /// sweep.
 ///
-/// The machine is every session's (#3007): another run's sweep may take the
+/// The machine is every session's: another run's sweep may take the
 /// queue before the first run's does, and a claim another run holds as the
 /// first run settles keeps its claim standing, which the run says. So the
 /// test holds the first run to what it said of its claim, removes the claim
@@ -1443,15 +1443,15 @@ fn a_system_v_subsets_own_sweep_takes_the_private_queue_its_test_leaves_unless_a
 }
 
 /// The queues a test outside the four System V subsets leaves, removed
-/// after it (#2811): `Zend/tests/arginfo_zpp_mismatch.phpt` calls every
+/// after it: `Zend/tests/arginfo_zpp_mismatch.phpt` calls every
 /// function with nulls, and `msg_get_queue(null)`, `msg_get_queue(null,
 /// null)` and `msg_queue_exists(null)` each make a private queue of mode 0
 /// that nobody sends to, naming no process, three per php that runs it,
-/// which filled the machine's 40 on #2808. A test of that name here makes
-/// the three and writes their ids; once the subset's run ends none of them
+/// which once filled the machine's 40. A test of that name here makes the
+/// three and writes their ids; once the subset's run ends none of them
 /// stands, as `ipcs -q` reads them. It reads queues of mode 0 alone, so a
 /// private queue of a mode another session's run made beside it is never
-/// read as the test's, nor removed by this test (#3007).
+/// read as the test's, nor removed by this test.
 #[test]
 fn the_private_queues_the_zend_arginfo_test_leaves_are_removed_after_its_run() {
     if oracle().is_none() {
@@ -1507,14 +1507,14 @@ fn the_private_queues_the_zend_arginfo_test_leaves_are_removed_after_its_run() {
 }
 
 /// On Linux, a run where no private IPC namespace is in play still removes
-/// what its test leaves (#1643): the fixture's subset is no System V
+/// what its test leaves: the fixture's subset is no System V
 /// subset, so its program runs in the machine's own namespace, as every
 /// subset's does where `unshare` is refused, and the keyed queue its test
 /// sends to and leaves, naming the test's process, is gone from
-/// `/proc/sysvipc/msg` after the run. Before #1643 the sweep read
-/// `ipcs -a` by a `T` header util-linux never prints, and the queue stood.
-/// It returns elsewhere, where there is no `/proc/sysvipc`, and where the
-/// oracle has no sysvmsg.
+/// `/proc/sysvipc/msg` after the run. The sweep once read `ipcs -a` by a
+/// `T` header util-linux never prints, and the queue stood. It returns
+/// elsewhere, where there is no `/proc/sysvipc`, and where the oracle has
+/// no sysvmsg.
 #[cfg(target_os = "linux")]
 #[test]
 fn on_linux_a_run_outside_a_namespace_removes_the_queue_its_test_leaves() {
@@ -1559,7 +1559,7 @@ fn on_linux_a_run_outside_a_namespace_removes_the_queue_its_test_leaves() {
 }
 
 /// Two runs on one machine keep apart on what upstream's conflict keys
-/// name (#1313): a subset whose `CONFLICTS` names `all`, as
+/// name: a subset whose `CONFLICTS` names `all`, as
 /// `sapi/fpm/tests` does for `FPM\Tester`'s ports, whose every test binds
 /// one fixed port for a while, run twice at once from two workspaces, and
 /// each run passes every test; the waits are on a reading. The control: a
@@ -1567,7 +1567,7 @@ fn on_linux_a_run_outside_a_namespace_removes_the_queue_its_test_leaves() {
 /// other run's test holds it, and that test misses.
 ///
 /// The port is found free and let go before the tests bind it, so another
-/// process on the machine can take it first (#2773). Then every test of
+/// process on the machine can take it first. Then every test of
 /// both runs misses, which keys held apart never cause, since one test
 /// of each run binds the port; the exchange is run again on a fresh port,
 /// three at most.
@@ -1644,13 +1644,13 @@ fn over_a_fixed_port(port: u16) -> [Reading; 2] {
 }
 
 /// A test naming `all` in one run runs beside no test of another key in a
-/// second run (#1559), as upstream's `all` runs beside nothing
+/// second run, as upstream's `all` runs beside nothing
 /// (run-tests.php:1365-1370): one run's subset names `all` and its one
 /// test sleeps a while, the other's names a key of its own and its three
 /// tests sleep a while each, both run at once from two workspaces, and
 /// every test writes when it started and ended. No keyed test's span
-/// meets the `all` test's. Before #1559 `all` was a lock named `all`
-/// beside the other key's, and the spans met.
+/// meets the `all` test's. `all` was once a lock named `all` beside the
+/// other key's, and the spans met.
 #[test]
 fn a_test_naming_all_runs_beside_no_other_runs_keyed_test() {
     fn borrowed(files: &[(String, String)]) -> Vec<(&str, &str)> {
@@ -1717,13 +1717,13 @@ fn a_test_naming_all_runs_beside_no_other_runs_keyed_test() {
     }
 }
 
-/// `--against <commit>` (#664): the run a checkout of the merge base kept
+/// `--against <commit>`: the run a checkout of the merge base kept
 /// is found by the commit alone, and a test met there that fails here is
 /// named by a reading that fails, while the subset's own reading is
 /// written beside it. The controls: the head against itself passes, a
 /// binary the tree has moved past gives no verdict, and so does a commit
-/// with no run kept, whose subset still runs and keeps its own reading
-/// (#1435): a runner that runs nothing there fails this.
+/// with no run kept, whose subset still runs and keeps its own reading:
+/// a runner that runs nothing there fails this.
 #[test]
 fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
     if oracle().is_none() {
@@ -1815,8 +1815,8 @@ fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
 }
 
 /// A subset run on a pool of four writes the reading and keeps the run a
-/// pool of one does, word for word, whatever order its tests finished in
-/// (#938): the status, every number and the message, and the kept run's
+/// pool of one does, word for word, whatever order its tests finished in:
+/// the status, every number and the message, and the kept run's
 /// bytes, which `--against` reads.
 #[test]
 fn a_pooled_run_writes_the_reading_and_keeps_the_run_a_run_of_one_does() {
@@ -1881,8 +1881,8 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
 /// One tree standing where the pinned php-src would, a stand-in engine
 /// over the pinned oracle, and the checkouts that run `xtask phpt` over
 /// the tree as processes of their own, as two builders' lanes do: what the
-/// tests of runs at once share (#990, #1097), each run in a copy of the
-/// tree of its own (#1183).
+/// tests of runs at once share, each run in a copy of the
+/// tree of its own.
 struct OneTree {
     corpus: Tree,
     engine: PathBuf,
@@ -1966,7 +1966,7 @@ fn kept(root: &Tree, child: std::process::Child) -> serde_json::Value {
 }
 
 /// Two runs over one subset at once, from two checkouts, each a process of
-/// its own over the one tree the variable names (#990): each reads every
+/// its own over the one tree the variable names: each reads every
 /// test as a lone run does, and keeps the lone run's bytes. Each test
 /// writes a file named for its `__FILE__` beside itself, sleeps, and reads
 /// it back, so a run whose test stood beside the other's same test would
@@ -1974,7 +1974,7 @@ fn kept(root: &Tree, child: std::process::Child) -> serde_json::Value {
 /// prints `__FILE__` and `__DIR__` by name and a sibling included by
 /// `__DIR__` and by the include path, which are run-tests.php's. The lone
 /// run first is the control the two are held to, and the tree holds only
-/// what it held before any of them, each run being in a copy (#1183).
+/// what it held before any of them, each run being in a copy.
 #[test]
 fn two_runs_over_one_subset_at_once_each_read_as_a_lone_run_does() {
     if oracle().is_none() {
@@ -2027,13 +2027,13 @@ fn two_runs_over_one_subset_at_once_each_read_as_a_lone_run_does() {
 }
 
 /// Two runs over one directory at once, from two checkouts, each a process
-/// of its own over one tree (#1097). The directory's two tests each make
+/// of its own over one tree. The directory's two tests each make
 /// and remove `relative_temp` relative to the tree's root, where every
 /// program runs, as ext/zlib's `readgzfile_basic.phpt` and
-/// `readgzfile_basic2.phpt` make `readgzfile_temp` (#1091): a run judges the
+/// `readgzfile_basic2.phpt` make `readgzfile_temp`: a run judges the
 /// two in one batch, one after the other, and the one run's first met the
 /// other's second on `mkdir(): File exists` while both ran in the tree
-/// itself. Each run's root is its own copy's (#1183), so both keep the
+/// itself. Each run's root is its own copy's, so both keep the
 /// lone run's verdicts, on twenty runs of twenty. The lone run first is
 /// the control they are held to.
 #[test]
@@ -2073,15 +2073,15 @@ fn two_runs_over_one_directory_at_once_never_meet_in_it() {
     }
 }
 
-/// A run killed mid-subset leaves the pinned tree as it stood (#1183):
+/// A run killed mid-subset leaves the pinned tree as it stood:
 /// its one test, standing in the run's copy, writes beside itself and
 /// sleeps until the run is killed, and the tree holds only what it held
 /// before. The copy it leaves is a dead run's, swept by the next run: that
 /// run passes, and the dead one's copy is gone.
 ///
-/// The copy stands under `/tmp` whatever `TMPDIR` says (#2626), where the
+/// The copy stands under `/tmp` whatever `TMPDIR` says, where the
 /// first scratch tree any process on the machine lays there sweeps a dead
-/// run's (#1473): another session's instrument, a test binary starting.
+/// run's: another session's instrument, a test binary starting.
 /// So whether the copy still stands between the kill and the next run is
 /// the machine's, not the test's; another process's run goes between them,
 /// so the sweep in the window is made, not met by chance, and the copy is
@@ -2089,7 +2089,7 @@ fn two_runs_over_one_directory_at_once_never_meet_in_it() {
 /// recipe's limit, outlives the killed run, and that other run, in a
 /// `TMPDIR` of its own, stops it as it starts where no other process's
 /// run has stopped it first: the dead copy's lock came, and in the one
-/// directory every session shares the lock is the only guard (#2663); a
+/// directory every session shares the lock is the only guard; a
 /// copy whose lock a live run holds is left alone, which `scratch`'s own
 /// test holds. A php still running after the next run is killed by this
 /// test, which fails.
@@ -2129,9 +2129,9 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
         }
     };
     // Read while the run lives and holds its copy's lock, which no sweep
-    // passes: once it is killed, any process's run may stop its php (#2942).
+    // passes: once it is killed, any process's run may stop its php.
     // The file stands empty between php's open and its write, which a read
-    // under load met (#3007), so the pid is what is waited for.
+    // under load met, so the pid is what is waited for.
     let pid = printed(&held);
     assert!(!pid.is_empty(), "the killed run's test never started");
     assert!(
@@ -2200,8 +2200,8 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
 }
 
 /// A process a test started that leaves its program's group, as a
-/// php-fpm master a test starts with `$daemonize = true` calls `setsid()`
-/// (#2663), is stopped as its subset ends: the test's `perl` forks, its
+/// php-fpm master a test starts with `$daemonize = true` calls `setsid()`,
+/// is stopped as its subset ends: the test's `perl` forks, its
 /// parent exits, and the child takes a session of its own, writes its pid
 /// and sleeps past the recipe's limit with the test's directory, in the
 /// run's copy of the pinned tree, on its command line, as the fpm master's
@@ -2272,7 +2272,7 @@ fn listing(dir: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
     out
 }
 
-/// The fixture at `xtask/fixtures/phpt/writes` (#1183), run over a pinned
+/// The fixture at `xtask/fixtures/phpt/writes`, run over a pinned
 /// tree that is a checkout of its own with the fixture committed and an
 /// untracked `stray.php` standing where `stray.phpt`'s program goes, as a
 /// killed run's program stood in the pinned tree. Every test passes, the
@@ -2333,7 +2333,7 @@ fn fixture_tests(dir: &str) -> Vec<(String, String)> {
     tests
 }
 
-/// The fixture at `xtask/fixtures/phpt/environment` (#1186): a test's
+/// The fixture at `xtask/fixtures/phpt/environment`: a test's
 /// programs get run-tests.php's environment and pipes for their streams,
 /// so under the pinned php every one of its tests passes, the `SKIPIF`
 /// that skips on anything but a pipe included. Run again through a binary
@@ -2378,11 +2378,11 @@ fn a_test_gets_run_tests_environment_and_pipes_for_its_streams() {
     }
 }
 
-/// The target (#1184): the runner's control keeps the oracle's verdict on
+/// The target: the runner's control keeps the oracle's verdict on
 /// every test under the pin's key, and an engine's reading of the subset
 /// then carries met-of-target. The oracle misses `oracle-miss.phpt`, whose
 /// expectation no php meets, and skips `oracle-skip.phpt`, so both are
-/// outside the target, each named with why the oracle left it out (#2033),
+/// outside the target, each named with why the oracle left it out,
 /// and the engine's fail on the miss is counted there and not against the
 /// target; the engine meets the one test the oracle meets. Before the
 /// control has run, the engine's reading says how to take a target and
@@ -2460,7 +2460,7 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
@@ -2470,7 +2470,7 @@ mod tracked {
     #[test]
     fn the_full_corpus_is_a_flag_the_manifest_denies_at_the_tool_call() {
         // The rule's fixture is the negative control; this asserts the flag the
-        // rule names, among the instrument's argv (#1860), is the flag the
+        // rule names, among the instrument's argv, is the flag the
         // runner has.
         let ask = Ask {
             full: true,

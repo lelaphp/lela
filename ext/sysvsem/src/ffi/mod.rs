@@ -1,6 +1,6 @@
 //! System V semaphores, `<sys/sem.h>` from the C library (design §7.2;
-//! `unsafe.homes`' `ext/*/src/ffi/`), since nix binds no System V IPC
-//! (#1323): `semget`, `semop` and `semctl` behind safe functions. The one
+//! `unsafe.homes`' `ext/*/src/ffi/`), since nix binds no System V IPC:
+//! `semget`, `semop` and `semctl` behind safe functions. The one
 //! home of this crate's `unsafe`.
 #![allow(unsafe_code)]
 #![deny(
@@ -24,8 +24,8 @@ union Semun {
 #[cfg(not(target_env = "musl"))]
 use libc::semid_ds as SemidDs;
 
-/// musl's `struct semid_ds`, which the libc crate does not declare
-/// (#2308). Nothing here reads a member: it is the buffer `IPC_STAT`
+/// musl's `struct semid_ds`, which the libc crate does not declare.
+/// Nothing here reads a member: it is the buffer `IPC_STAT`
 /// fills, so its size and alignment are what count, and 128 bytes holds
 /// every architecture's in musl's `bits/sem.h` (`x86_64`'s is 104).
 #[cfg(target_env = "musl")]

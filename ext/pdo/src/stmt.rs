@@ -2154,7 +2154,7 @@ impl PDOStatement {
     ///
     /// php tests for the connector's `next_rowset` before it touches the
     /// statement, so where `pdo_sqlite` has none, the columns and the rows
-    /// stand as they were (#3391):
+    /// stand as they were:
     ///
     /// ```php
     /// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);

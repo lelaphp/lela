@@ -218,7 +218,7 @@ fn exceeds_int(n: i64) -> bool {
 /// tree made past a throw (a program's entity loader's, as libxml loaded
 /// a DTD through it) is still returned to the caller, which hands it to
 /// an object as it would any other: the object counts it and frees it
-/// with itself, so a throw drops no tree uncounted (#3829).
+/// with itself, so a throw drops no tree uncounted.
 fn parse(
     req: &mut Request,
     source: Source<'_>,

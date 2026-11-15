@@ -3,7 +3,7 @@
 //! on its own account, the stack a serving's entry slot stands on, and
 //! the uncaught throwable kept for a host that renders it. What a frame,
 //! an op array or a linked table holds, a tier reads through the native
-//! face (#1911).
+//! face.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt as _;

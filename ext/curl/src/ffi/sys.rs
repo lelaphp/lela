@@ -1,5 +1,5 @@
 //! libcurl's C surface as the extension calls it: `curl-sys`'s
-//! declarations (design §7.2, #1332), and beside them the few of
+//! declarations (design §7.2), and beside them the few of
 //! `curl/curl.h`, `multi.h` and `options.h` that curl-sys 0.4 does not
 //! declare, written in its shape to the libcurl the oracle links (8.21 at
 //! `oracle.toml`'s pin): what the library only points at is an empty

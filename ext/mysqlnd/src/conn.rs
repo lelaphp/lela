@@ -265,7 +265,7 @@ struct Held {
 /// then: every field in what a persistent connection holds, `malloc`'s
 /// lengths and bytes, the socket the connection alone owns ([`IdleNet`]),
 /// and no field of a request's, so neither the request's last message
-/// nor the rows the last query left are here to wait (#4474).
+/// nor the rows the last query left are here to wait.
 /// [`ConnData::idle`] makes one as the request gives the connection back
 /// and [`ConnData::take_up`] makes the connection again.
 #[derive(php_ext::abi::EngineState)]

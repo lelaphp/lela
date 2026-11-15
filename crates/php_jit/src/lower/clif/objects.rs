@@ -308,7 +308,7 @@ impl Emit<'_> {
     /// ```
     ///
     /// A typed property read through `$this` in a method the loop's trace
-    /// calls (#3665): php's analysis types the read by the declaration
+    /// calls: php's analysis types the read by the declaration
     /// (`zend_fetch_prop_info` on the method's scope), so the read holds
     /// no guard and its value is kept in a register, which the read
     /// defines from the slot as `zend_jit_zval_copy_deref_reg` does

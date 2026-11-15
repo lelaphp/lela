@@ -1,5 +1,5 @@
 //! A debug build's handler tables served as the extension that declared
-//! them (#2113). #1993 tags each allocation with the extension whose
+//! them. A debug build tags each allocation with the extension whose
 //! native or lifecycle hook is served; an extension's object handlers
 //! are called from every site that reaches an object's table, so what
 //! one allocates carried the origin of whatever was served, `Core`

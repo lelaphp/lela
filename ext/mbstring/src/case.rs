@@ -372,7 +372,7 @@ fn mb_convert_case(
 /// The conversion's buffer is the request's and grows fallibly since 8.5.12,
 /// so a conversion past the memory limit is refused its growth and the
 /// limit's fatal is raised as the call returns. The case crosses the limit
-/// where a new chunk is asked for, whose figure holds in any layout (#3442):
+/// where a new chunk is asked for, whose figure holds in any layout:
 ///
 /// ```php
 /// ini_set('memory_limit', '2M');

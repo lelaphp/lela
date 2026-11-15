@@ -411,8 +411,8 @@ impl Request {
     /// variables' names php's compile makes for it
     /// ([`Request::hold_preload_strings`]), held to
     /// the preload's end, and not a persisted file's bytes, which php
-    /// lays only for a file. php preloading one class with one method
-    /// (#4696), from a file whose path is one length in any temporary
+    /// lays only for a file. php preloading one class with one method,
+    /// from a file whose path is one length in any temporary
     /// directory, since the name of the `eval`'s code carries it:
     ///
     /// ```php
@@ -975,7 +975,7 @@ impl Request {
     /// the internal error that ends the preload where the class is not
     /// published, as php's preload refuses no such class: every unit a
     /// cell of its composed declaration names is one the preload froze,
-    /// so a refusal is the engine's own mistake, made loud (#4699).
+    /// so a refusal is the engine's own mistake, made loud.
     ///
     /// A class that uses a trait and holds a first-class callable in a
     /// constant, preloaded, is published with the preload: a request that
@@ -1003,7 +1003,7 @@ impl Request {
     /// ```
     ///
     /// The same class declared by an `eval` the preload serves, whose
-    /// unit the preload froze (#4696):
+    /// unit the preload froze:
     ///
     /// ```php
     /// $d = realpath('/tmp');
@@ -1460,7 +1460,7 @@ mod tests {
     /// internal error, and nothing is left out of its tables: here a
     /// trait and the class that uses it, of an `eval`'s unit the preload
     /// is made to hold as its own, as one `Shared::publish_compiled`
-    /// refused would be (#4699).
+    /// refused would be.
     #[test]
     fn a_class_the_preload_cannot_publish_ends_it_with_the_internal_error() {
         let engine = Engine::builder().build();

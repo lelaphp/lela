@@ -17,7 +17,7 @@ php_ext = { path = "../../crates/php_ext" }
 # `opcache.preload_user`'s account through `nix` (the user database and,
 # on Linux, its group list), and `libc` in `src/ffi/` alone for the
 # per-thread credential calls `nix` wraps only as the per-process ones
-# (#1258, as ext/posix binds what `nix` lacks, design §7.2).
+# (as ext/posix binds what `nix` lacks, design §7.2).
 nix = { workspace = true, features = ["user"] }
 libc = { workspace = true }
 
@@ -30,6 +30,6 @@ php_ext = { path = "../../crates/php_ext", features = ["test"] }
 php_ext_standard = { path = "../standard" }
 # What the extensions of the test engines require, transitively, as
 # `zend_startup_module_ex` refuses an extension whose required one is not
-# started (#1925).
+# started.
 php_ext_lexbor = { path = "../lexbor" }
 php_ext_uri = { path = "../uri" }

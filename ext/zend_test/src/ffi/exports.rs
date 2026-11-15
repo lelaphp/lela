@@ -5,9 +5,10 @@
 //! this crate, as it resolves php's in the binary that carries php's,
 //! where the platform's linker exports an executable's global symbols: macOS's
 //! does, and Linux's only under `-rdynamic`, which the hosts' link does
-//! not pass yet (#3549).
+//! not pass yet.
 //! They are `zend_test`'s own C, a fixture of its tests, and not php's
-//! internals, which the engine does not export (#1613).
+//! internals, which the engine does not export
+//! (`phpt:ffi-php-own-symbols`).
 //!
 //! The variables are C's: written and read by the C that FFI calls and by
 //! FFI itself, through their addresses, and never by Rust but where a
@@ -19,7 +20,7 @@
 //! makes a test of; `copy_file_range`, which php defines only where the
 //! platform has the call; and the `bug_gh9090_*` set, whose functions
 //! print through `php_printf`, which C with no request in hand cannot
-//! reach here (#3547).
+//! reach here.
 
 use std::ffi::{c_char, c_int, c_short, c_void};
 

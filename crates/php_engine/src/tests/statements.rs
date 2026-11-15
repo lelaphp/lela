@@ -1,4 +1,4 @@
-//! Statement events as `TestExt` records them (#1823): a Zend
+//! Statement events as `TestExt` records them: a Zend
 //! extension's `statement_handler`, told at each `EXT_STMT` a compile
 //! with extended info leaves, in the order a stepping debugger would
 //! read them ([`crate::statement`]).
@@ -7,7 +7,7 @@
 //! what the oracle's `phpdbg -n -e '-p*'` prints of `main.php` and
 //! `inc.php` (`L0006 0000 EXT_STMT`, …), and the compile-identity lane
 //! holds the engine's oplines to the oracle's dump under the
-//! extended-info regime (#1822). The order they are reached in is what the
+//! extended-info regime. The order they are reached in is what the
 //! zend-test oracle prints of `main.php` under `-e` with
 //! `zend_test.observer.show_opcode_in_user_handler=ZEND_EXT_STMT`, one
 //! line per `EXT_STMT` it reaches, with the frames it reaches them in.

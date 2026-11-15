@@ -3,7 +3,7 @@
 //! here, each token spelled through the table its kind selects. The lines
 //! were read from the pinned php at 8.5.9 once and are carried here as
 //! `PINNED`; the witness in `php_names` holds one token per table each
-//! time the instrument reads it, through `ext/tokenizer`'s `token_get_all` (#224). `#[`
+//! time the instrument reads it, through `ext/tokenizer`'s `token_get_all`. `#[`
 //! stands first in the operators row because `-> #[` is a comment to php:
 //! `ST_LOOKING_FOR_PROPERTY` reads the `#`.
 

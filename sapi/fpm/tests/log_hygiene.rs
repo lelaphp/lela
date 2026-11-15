@@ -1,5 +1,5 @@
-//! What a request can write into php-fpm's logs, and who may read them
-//! (#4355): each log the master makes is its owner's alone, `0600`
+//! What a request can write into php-fpm's logs, and who may read them:
+//! each log the master makes is its owner's alone, `0600`
 //! whatever the umask, the slow log among them where the trace finds it
 //! gone, as a rotation leaves it; and a `\r` or `\n` in a field the
 //! request supplies is written as two bytes, in the access log's `%e`,
@@ -383,7 +383,7 @@ fn a_timed_out_request_s_line_breaks_are_escaped() {
 
 /// A program the pool refuses, by its extension or because it did not
 /// open, is named in the error log's line for it with each `\r` and `\n`
-/// of its path written as two bytes (#4559), one line for each refusal;
+/// of its path written as two bytes, one line for each refusal;
 /// the second refusal is held only where this user cannot open a file
 /// whose permissions are `0o000`.
 #[test]

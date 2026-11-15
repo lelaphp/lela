@@ -1,6 +1,6 @@
 //! Where the bytes a connection's socket has handed hyper stand against the
-//! requests they carry: in a head, in a body, or past the request in hand
-//! (#2572). hyper reads ahead of the request it serves, so a pipelining
+//! requests they carry: in a head, in a body, or past the request in hand.
+//! hyper reads ahead of the request it serves, so a pipelining
 //! client's next head can wait in hyper's buffer, read with the request
 //! before it, and the socket reads nothing more for it; the response's
 //! end asks [`Boundary::ahead`] whether any byte of a next request has
@@ -16,7 +16,7 @@
 //! refuses ends the connection, so no clock is asked of it. Where hyper
 //! begins a request this reading has not seen end, the two have parted,
 //! and the reading stops: nothing is ahead from then, the keep-alive clock
-//! as before #2572.
+//! as before this reading was kept.
 
 /// How long a request's body is, as hyper frames it from its head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

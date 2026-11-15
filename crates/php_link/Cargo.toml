@@ -1,6 +1,6 @@
 # php_link: the linker and the linked class record (design §6.2, ADR-0012),
 # between the unit format it reads and the compiler and the engine that call it;
-# takes php_macros for #[derive(EngineState)] alone, which links nothing (#4632).
+# takes php_macros for #[derive(EngineState)] alone, which links nothing.
 [package]
 name = "php_link"
 version = "0.0.0"

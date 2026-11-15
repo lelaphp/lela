@@ -596,7 +596,7 @@ impl Request {
     /// loop's ([`crate::tier`]): where nothing else holds it, its runtime
     /// caches' numbers handed out again and its room kept for the next
     /// unit the request compiles, as php's `destroy_op_array` frees an
-    /// `eval`'s op array to the request's heap (#3028); else the share
+    /// `eval`'s op array to the request's heap; else the share
     /// dropped. The next unit then stands where this one stood, its main
     /// op array's oplines too, so nothing may know a unit by its address
     /// past its last share: the loop's held units and the op arrays it
@@ -2281,12 +2281,13 @@ impl Request {
     /// table and its slot base and count: nine instructions at every
     /// handler entry, and then each operand's own bounds check, a
     /// compare and a branch, where php indexes off `execute_data` in a
-    /// register. Single-stepped over an iteration of #2892's
-    /// assign.php, 470 instructions and eight handler entries, the
-    /// lookups are 72 (15.3%) and the operands' bounds checks 32
-    /// (6.8%). A frame cursor the loop keeps valid across handlers
-    /// would be an `unsafe` contract across the heap seam, which #2540
-    /// ruled out for this term.
+    /// register. Single-stepped over an iteration of a loop of one
+    /// `ADD`, five `ASSIGN`s, `PRE_INC`, `IS_SMALLER` and `JMPNZ`, 470
+    /// instructions and eight handler entries, the lookups are 72
+    /// (15.3%) and the operands' bounds checks 32 (6.8%). A frame cursor
+    /// the loop keeps valid across handlers would be an `unsafe` contract
+    /// across the heap seam, which was ruled out for this term on
+    /// 2026-10-10.
     pub(crate) fn slots_mut(&mut self, frame: FrameRef) -> &mut [Zval] {
         self.vm
             .stack
@@ -2322,7 +2323,7 @@ impl Request {
     /// opline. The frame is the one below the top, compared as the loop
     /// holds its number, 32 bits: indexed by it as `usize`, the loop kept
     /// the widened number in memory across every arm, and `DO_UCALL`
-    /// single-stepped 103 to 108 instructions (#4099).
+    /// single-stepped 103 to 108 instructions.
     ///
     /// The sends into a call built inside another's arguments are the
     /// handler's, and the outer call is taken up again by the first send
@@ -2384,7 +2385,7 @@ impl Request {
     /// written over: the handler that reads one frees it or moves it out.
     /// Here the write hands the old value back to be released, so a `TMP`
     /// whose owner a handler moved without emptying the slot is released
-    /// a second time by the next write (#723). A debug build stops that
+    /// a second time by the next write. A debug build stops that
     /// write: the `TMP` the opline the frame stands at writes, found
     /// holding an owner, is recorded for the loop's next sensing point
     /// ([`Request::sense_dirty_temporary`]). A scalar left there is no owner and no second release, and
@@ -2860,7 +2861,8 @@ impl Request {
     /// ```
     ///
     /// The same where a trace serves the calls, every guard failing once
-    /// or none, the sizes under opcache's optimizer aside (#3223):
+    /// or none, the sizes under opcache's optimizer aside (the row
+    /// `witness:db0e46b504…`):
     ///
     /// ```php
     /// function g($o) { return $o->a . $o->b . $o->c . $o->d; }

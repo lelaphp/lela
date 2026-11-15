@@ -1,5 +1,5 @@
-//! libgmp, the library the pinned php links (design §7.2, revision 72;
-//! #1540): the few dozen `mpz_*` and `gmp_rand*` calls `gmp.c` makes,
+//! libgmp, the library the pinned php links (design §7.2, revision 72):
+//! the few dozen `mpz_*` and `gmp_rand*` calls `gmp.c` makes,
 //! declared by hand under the `__gmpz_*` and `__gmp_*` names `gmp.h`'s
 //! macros map them to, behind [`Mpz`], which owns one `mpz_t` from
 //! `mpz_init` to `mpz_clear`, and [`RandState`], which owns one
@@ -612,7 +612,7 @@ pub(crate) fn entropy() -> Option<u64> {
 }
 
 // `getentropy(3)`, which macOS, glibc and musl each give in `unistd.h`;
-// declared here because the libc crate leaves it out for musl (#2308).
+// declared here because the libc crate leaves it out for musl.
 unsafe extern "C" {
     fn getentropy(buffer: *mut c_void, length: libc::size_t) -> c_int;
 }

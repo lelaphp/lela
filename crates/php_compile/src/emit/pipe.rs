@@ -56,7 +56,7 @@ impl Emit<'_> {
     /// ```
     ///
     /// A call of its own, so what it takes is off the stack of a
-    /// left-nested chain of the other operators (#3159).
+    /// left-nested chain of the other operators.
     #[inline(never)]
     pub(super) fn pipe(
         &mut self,

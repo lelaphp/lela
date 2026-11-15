@@ -1,6 +1,6 @@
 //! `xtask test --target <triple>`: a crate's tests built for a target that
 //! is not the host's and run on this machine, as a reading over
-//! `<crate>/<triple>` (#4462). The scope is a second reading of one crate,
+//! `<crate>/<triple>`. The scope is a second reading of one crate,
 //! as `clippy`'s `<crate>/release` is, keyed over the crate's closure as
 //! every reading is (harness-design.md §4.2, §4.5 condition 1, ADR-0011):
 //! the key holds no target, since the closure cargo metadata declares
@@ -160,7 +160,7 @@ mod tests {
     }
 
     /// A translated run's reading names Rosetta 2 and claims no Intel
-    /// hardware (#4462).
+    /// hardware.
     #[test]
     fn a_translated_reading_says_rosetta_and_claims_no_intel_hardware() {
         let target = |runs| Target {

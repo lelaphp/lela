@@ -20,7 +20,7 @@
 //! the recording ran past the jump (`tier::resumed`), so a loop in
 //! `$main` that no call activates is a root of its own, as php's
 //! `opcache.jit_hot_loop` makes it. A return root is php's, the caller's
-//! landing past the call (`jit-design.md` §2.2, #3036): a return's site
+//! landing past the call (`jit-design.md` §2.2): a return's site
 //! visits the word of the opline its caller lands on, which a compiled
 //! trace arms where it hands a caller with no trace of its own on to the
 //! interpreter ([`record::landings`], php's
@@ -53,7 +53,7 @@ use crate::{Lines, Shared};
 #[cfg(test)]
 mod tests;
 
-/// The tier's state on a request (`jit-design.md` §2.2, §4; #3144), as
+/// The tier's state on a request (`jit-design.md` §2.2, §4), as
 /// php's tracing tier keeps `JIT_G`: the engine's `Shared` and where its
 /// recordings compile, resolved once as the request is laid, so a visit
 /// reads the `Policy`, and a recording that compiles submits, with no
@@ -204,7 +204,7 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Fl
 }
 
 /// A return that popped to `caller`, the tier's inlined test of it
-/// (`jit-design.md` §2.2, #4105): the caller's landing word read off its
+/// (`jit-design.md` §2.2): the caller's landing word read off its
 /// op array, and the frame the request owes a count to ([`owes`]), which
 /// no thread else may read in a word. A sealed word and no count owed ask
 /// nothing, no visit acting on either, as php's interpreter runs the
@@ -254,8 +254,8 @@ fn return_site(req: &mut Request, caller: FrameRef, site: Site, held: Held<'_>) 
 /// What a return's site does where a landing asked ([`return_site`]),
 /// read with nothing else looked up, as php's interpreter runs the
 /// handler a landing holds: a trace compiled there is entered in the
-/// caller the return popped to, which the `RETURN` made before it asked
-/// (#4056), and an armed word given up on, or one a recording holds, is
+/// caller the return popped to, which the `RETURN` made before it asked,
+/// and an armed word given up on, or one a recording holds, is
 /// left alone.
 #[derive(Debug, Clone, Copy)]
 enum Returning {
@@ -400,7 +400,7 @@ enum Goes {
     /// a call (`record::landings`): a return root's.
     Landing(OplineIdx),
     /// The word of the loop rooted at the opline: php's handler there is
-    /// the loop's, its heat or the trace that replaced it (#3318).
+    /// the loop's, its heat or the trace that replaced it.
     Header,
 }
 
@@ -467,7 +467,7 @@ impl Goes {
 /// A `while` whose condition php keeps is headed there, and `f`'s
 /// return lands on it: the loop's trace, which links to `f`'s, is
 /// entered there, so the interrupt the timer raises is met inside `f`
-/// and its fatal is raised at `f`'s line each time, as php's (#3318):
+/// and its fatal is raised at `f`'s line each time, as php's:
 ///
 /// ```php
 /// set_time_limit(1);
@@ -594,7 +594,7 @@ fn landing(req: &Request, caller: FrameRef) -> Option<OplineIdx> {
 }
 
 /// A return, asked in the caller it popped its frame to and standing at
-/// the landing past the call (`Site::Return`, #4056): php's interpreter
+/// the landing past the call (`Site::Return`): php's interpreter
 /// has returned before the landing's handler runs, so the return trace
 /// is entered, or recorded from, there, with nothing of the `RETURN`
 /// left to serve. A landing whose word asked nothing pays what a
@@ -686,7 +686,7 @@ fn looped(
 ///
 /// The three meanings of "not compiled" have three answers. At the root,
 /// a word that reads compiled whose slot is empty, the window §3.2 names
-/// or a table that keeps no code (#2943), entered nothing: `Continue`.
+/// or a table that keeps no code, entered nothing: `Continue`.
 /// After an exit a trace has done its work, so a link or a side whose
 /// slot is empty, and an exit word that reads cold, recording or
 /// blacklisted, are a `Resume` of the landed frame; so is a throwable a
@@ -822,7 +822,8 @@ fn run_at(req: &mut Request, lent: Lent<'_>, frame: FrameRef, id: TraceId, at: A
 /// handler of the opline the return left the frame at, the landing's
 /// trace where one is compiled there ([`visit_landing`]). So fib's
 /// recursive return, landing past its second call, writes no exit line,
-/// as php writes none (the exit numbers are #1220's):
+/// as php writes none (php's optimizer numbers the exits otherwise,
+/// design §6.1):
 ///
 /// ```php
 /// function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
@@ -995,7 +996,7 @@ enum Came {
 /// (`zend_jit_trace_setup_ret_counter` arms a landing by setting its
 /// handler, `Z/ext/opcache/jit/zend_jit_trace.c:3418-3430`), so a trace
 /// that leaves a frame there hands it straight back to the loop, with no
-/// call into [`visit_landing`] (#4100). False where the request keeps no
+/// call into [`visit_landing`]. False where the request keeps no
 /// words for the opline: the visit looks them up.
 #[inline(always)] // once an exit, where the trace left for the interpreter
 #[allow(clippy::inline_always)]
@@ -1018,8 +1019,8 @@ fn unarmed(req: &Request, lending: Lent<'_>, frame: FrameRef) -> bool {
 /// goes on at (`zend_jit_trace_exit_stub`, `zend_jit_trace_return`), the
 /// word [`goes_on`] names: a trace compiled there is entered, and an
 /// armed landing's word bumped and claimed at `opcache.jit_hot_return`
-/// (`jit-design.md` §2.2, #3036), and a loop root's compiled trace
-/// entered (#3318). Nothing while the request records, nor, but at an
+/// (`jit-design.md` §2.2), and a loop root's compiled trace
+/// entered. Nothing while the request records, nor, but at an
 /// escape, while the interrupt is raised, nor where the trace left the
 /// frame where it was entered; a frame at an opline with a sealed word is
 /// left as it is.
@@ -1043,7 +1044,7 @@ fn unarmed(req: &Request, lending: Lent<'_>, frame: FrameRef) -> bool {
 /// alone: each takes the trace's end with the frame untouched, so a return
 /// root and its sides all come back to the opline they opened at having
 /// done nothing, and asking the word again enters the root again, and the
-/// interpreter never makes the return (#4148).
+/// interpreter never makes the return.
 /// So the rule kept is about progress rather than about roots: any trace,
 /// root or side, whose call of [`enter::enter`] found the frame where it
 /// left it goes to the opline's own handler. It reads the place and the
@@ -1198,7 +1199,7 @@ fn visit_landing(req: &Request, lending: Lent<'_>, frame: FrameRef, came: Came) 
 /// the default's and then each arm's, as php's `zend_jit_switch` takes
 /// them. The second arm's key leaves through that arm's own exit, 5, and
 /// the side trace grows from it, so the exit's line is written once, as
-/// php's, and not at every key (#3203):
+/// php's, and not at every key:
 ///
 /// ```php
 /// function f($keys) { $s = 0; foreach ($keys as $k) { $s += match ($k) { 'a' => 1, 'b' => 2 }; } return $s; }
@@ -1304,11 +1305,11 @@ fn sided(
 ///
 /// ```
 ///
-/// #2999's program: the fiber `body()` runs inside `$main`'s recording,
+/// A fiber's program: the fiber `body()` runs inside `$main`'s recording,
 /// so its loop records nothing, and `work()`'s loop is a root at its
 /// header, recorded again at once where `$main`'s recording stops at it,
 /// whose exit grows a side trace at the line past the loop; php's
-/// optimizer numbers that exit otherwise (#1220):
+/// optimizer numbers that exit otherwise (design §6.1):
 ///
 /// ```php
 /// function body() { $s = 0; for ($i = 0; $i < 3; $i++) { if ($i == 1) { Fiber::suspend(1); } $s += $i; } echo "never\n"; }
@@ -1542,7 +1543,7 @@ fn paid(req: &Request, state: &JitRequest, frame: FrameRef) {
 /// loop's own recording aborts at the inner loop compiled already; `f`
 /// returns, and the arrival at `$main`'s header counts, the last one
 /// where the condition leaves the loop and the recording stops at
-/// `$main`'s return (#3586):
+/// `$main`'s return:
 ///
 /// ```php
 /// function a(int $i, int $j): float { $ij = $i + $j; return 1.0 / ($ij * ($ij + 1) / 2 + $i + 1); }
@@ -1686,7 +1687,7 @@ enum Counted {
 /// `ZEND_JIT_TRACE_MAX_FUNCS` lets a trace's build analyse
 /// (`analysis::MAX_FUNCS`), aborts at each compile; the interpreter goes
 /// on at the header after each, and the sixth visit, where the condition
-/// leaves the loop, records the loop's exit to `$main`'s return (#3576):
+/// leaves the loop, records the loop's exit to `$main`'s return:
 ///
 /// ```php
 /// function f0($x) { return $x + 0; } function f1($x) { return $x + 1; } function f2($x) { return $x + 2; } function f3($x) { return $x + 3; } function f4($x) { return $x + 4; } function f5($x) { return $x + 5; } function f6($x) { return $x + 6; } function f7($x) { return $x + 7; }
@@ -2022,7 +2023,7 @@ fn settled(req: &mut Request, shared: &Shared, job: Job, goes_on: GoesOn) -> Opt
 }
 
 /// A trace the request submitted to the worker (`jit-design.md` §4.8,
-/// revision 55, as built until a person rules on #3191) and has
+/// revision 55, kept as built, ruled 2026-10-21) and has
 /// not reached yet, while which the request claims no word, as while it
 /// records (revision 30). php compiles where it records and its
 /// interpreter goes on at the opline the recording stopped at, whose

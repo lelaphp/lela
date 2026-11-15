@@ -1,8 +1,7 @@
 //! The classes this extension raises, each resolved once as the engine
 //! starts, as php's `MINIT` keeps `zend_ce_error` and `date_ce_*_error`
 //! and `date_ce_*_exception` (ADR-0005: engine state, immutable): a raise
-//! names its class by the identity, never by a name looked up as it throws
-//! (#3403).
+//! names its class by the identity, never by a name looked up as it throws.
 
 use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::raising::{self, Thrown};

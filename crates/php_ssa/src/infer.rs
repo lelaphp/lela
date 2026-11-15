@@ -194,7 +194,7 @@ pub(crate) struct Infer<'a, T: LinkedTable> {
 /// ```
 ///
 /// Where a loop's variables each hold one type, php's trace guards fewer
-/// of them than the tier's yet does (#3575), so the numbers of the exits
+/// of them than the tier's yet does, so the numbers of the exits
 /// differ; these witnesses ask for the SSA dump alone
 /// (`ZEND_JIT_DEBUG_SSA`), which each trace's build writes. A loop over
 /// a declared `int` that shifts it down: the pi of `$n > 0` bounds it

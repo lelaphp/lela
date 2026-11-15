@@ -3,7 +3,7 @@
 # `cgi-fcgi` after it, the request the server describes in the environment.
 # Four edges, php_bundle, php_sapi, php_proto for the CGI environment's
 # codec, and php_ext for the natives its own extension declares (ADR-0008
-# as amended by #1348); the engine is named through the facade alone.
+# as amended 2026-10-01); the engine is named through the facade alone.
 [package]
 name = "php_sapi_cgi"
 version = "0.0.0"
@@ -22,12 +22,12 @@ path = "src/main.rs"
 
 [dependencies]
 # The bundle's default set and `one_thread`, the set a host serving on
-# one thread links, whose comment and `host`'s say why each (#1477, #3081).
+# one thread links, whose comment and `host`'s say why each.
 php_bundle = { path = "../../crates/php_bundle", features = ["one_thread"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face `cgi_module_entry`'s natives are declared with, as an extension
-# declares its own (ADR-0008, #1348).
+# declares its own (ADR-0008).
 php_ext = { path = "../../crates/php_ext" }
 # `-b`'s `FastCGI` server: its socket, the children it forks and waits
 # for, and the stop signals its parent ends them on, safe where `nix` wraps
@@ -38,5 +38,5 @@ libc = { workspace = true }
 
 [dev-dependencies]
 # The peak resident set of the php-cgi a test ran, `getrusage(RUSAGE_CHILDREN)`
-# (tests/content_length.rs, #3457).
+# (tests/content_length.rs).
 nix = { workspace = true, features = ["resource"] }

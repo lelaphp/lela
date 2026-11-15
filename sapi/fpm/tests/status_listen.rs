@@ -1,5 +1,5 @@
 //! The shared pool `pm.status_listen` makes serves its socket under
-//! `security.limit_extensions` as every pool does (#4352), each request
+//! `security.limit_extensions` as every pool does, each request
 //! held to the bytes the pinned php-fpm 8.5.12 (md5
 //! f7b17a549250f398e137eef2bd917f1c) wrote on 2026-11-11 for the same
 //! configuration, the directory written `{dir}`.

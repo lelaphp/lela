@@ -1,6 +1,6 @@
 //! The `pdo_mysql` extension: `php-src/ext/pdo_mysql` as one crate under
 //! `ext/` (ADR-0004), the `MySQL` connector behind `ext/pdo`'s connector face
-//! over `ext/mysqlnd`'s client (#1345). Its dependencies are the facade,
+//! over `ext/mysqlnd`'s client. Its dependencies are the facade,
 //! `pdo` and `mysqlnd`, as `ZEND_MOD_REQUIRED("pdo")` and
 //! `ZEND_MOD_REQUIRED("mysqlnd")` have it; its one entry is `extension()`.
 //! The phpt subset is `php-src/ext/pdo_mysql/tests`, through

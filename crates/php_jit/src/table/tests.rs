@@ -94,7 +94,7 @@ fn side(parent: u32) -> Start {
 }
 
 /// A trace's publish lays its entrance, its body and its number, in the
-/// table's row an escape reads it at (`lower::Escapes`, #4108's ruling),
+/// table's row an escape reads it at (`lower::Escapes`, ruled 2026-11-04),
 /// and writes its number where its answers read it (`lower::Numbered`).
 /// Nothing of it is written in the trace it grew from: a side is reached
 /// through the request's door of the exit (`jit-design.md` §4.4).
@@ -124,7 +124,7 @@ fn a_publish_lays_the_traces_entrance_and_no_word_of_its_parent() -> Result<(), 
 
 /// A trace's entrance is named at its number once it is published, the
 /// one write an escape to a landing whose word names the trace reads
-/// (`lower::Escapes`, #3299's ruling): null before, one per number below
+/// (`lower::Escapes`, ruled 2026-10-24): null before, one per number below
 /// `opcache.jit_max_root_traces`, and the escapes a trace compiled for the
 /// table reads name the epoch's landing index and these.
 #[test]
@@ -209,8 +209,8 @@ fn a_published_trace_is_got_by_its_id_with_its_exits() -> Result<(), String> {
     Ok(())
 }
 
-/// What the traces published take is counted as each is published
-/// (#2961), the one count the G4 bar's line and php's `JIT memory usage`
+/// What the traces published take is counted as each is published,
+/// the one count the G4 bar's line and php's `JIT memory usage`
 /// line read: their code's bytes, one opline a mark, and how many there
 /// are; a trace refused counts nothing.
 #[test]
@@ -368,7 +368,7 @@ fn the_epochs_exits_are_bounded() {
 
 /// An arena with no room for a body is `Full::Code`, php's
 /// `COMPILER_ERROR`, an attempt the word recovers from, and the table is
-/// not full: the next id stands, and nothing stops (#3015's ruling).
+/// not full: the next id stands, and nothing stops (ruled 2026-10-19).
 #[test]
 fn a_full_arena_is_a_compiler_error_and_stops_nothing() {
     let table = table(&[]);
@@ -385,7 +385,7 @@ fn a_full_arena_is_a_compiler_error_and_stops_nothing() {
 }
 
 /// Under `opcache.jit_buffer_size=16K` the arena holds php's buffer,
-/// 16K rounded up to the page, and no more (#3112's ruling): half of it
+/// 16K rounded up to the page, and no more (ruled 2026-10-21): half of it
 /// is published, and a body past the other half is `Full::Code`, where,
 /// on a target whose page is below a chunk, an arena of one whole chunk
 /// would have taken it.
@@ -429,8 +429,8 @@ fn a_table_with_no_arena_numbers_and_keeps_no_code() {
 /// A fork's child whose second mapping, the write view's, was refused
 /// goes on: its executable view stands on the copy, so it enters every
 /// trace published before the fork at the address it was published at,
-/// and publishes no more code (`jit-design.md` §4.4, #4501's ruling). The
-/// process that asked lets its hold go and keeps its arena.
+/// and publishes no more code (`jit-design.md` §4.4, ruled 2026-11-11).
+/// The process that asked lets its hold go and keeps its arena.
 #[test]
 fn a_child_whose_second_mapping_was_refused_enters_what_was_published_before() -> Result<(), String>
 {
@@ -868,7 +868,7 @@ mod epoch {
         }
     }
 
-    /// A spent arena stops nothing (#3015's ruling): the hot root after
+    /// A spent arena stops nothing (ruled 2026-10-19): the hot root after
     /// it is recorded, not refused with `too many traces`, and aborts as
     /// php's `COMPILER_ERROR`, `TRACE 2 abort (JIT compilation error)`,
     /// one attempt counted; the next request's visit records it again,

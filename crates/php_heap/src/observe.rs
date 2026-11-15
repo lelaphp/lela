@@ -1,5 +1,5 @@
-//! Allocation observation (design §7.1, as #1780 ruled): what stands in
-//! the place of php's `zend_mm_set_custom_handlers`, which no extension
+//! Allocation observation (design §7.1, as ruled 2026-10-04): what stands
+//! in the place of php's `zend_mm_set_custom_handlers`, which no extension
 //! is given. A profiler is told of each allocation, reallocation and
 //! free the heap serves, and of what `gc_mem_caches()` gave back, after
 //! the heap served it; it is never asked to serve one. The heap that

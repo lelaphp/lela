@@ -1,4 +1,4 @@
-//! Copying a table as php copies it (design §5.3, #2005): the one rule
+//! Copying a table as php copies it (design §5.3): the one rule
 //! beside [`Heap::array_dup`] for what an element becomes in a copy, and
 //! php's two conversions between an array's table and an object's,
 //! which share the table where its keys allow it.
@@ -28,8 +28,7 @@
 //! are each copied by [`Heap::dup_value`]. php writes the same unwrap
 //! inline in algorithms that copy no table (an array spread, a
 //! closure's debug statics, the array natives), and those keep php's
-//! inline form; `ext/mysqli`'s `fetch_object` conversion moves here
-//! with #2110.
+//! inline form; `ext/mysqli`'s `fetch_object` conversion moves here.
 
 use crate::array::{Arr, DeclaredRows, Key, canonical_int};
 use crate::hooks::{Fatal, HeapHooks};

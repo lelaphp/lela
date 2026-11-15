@@ -3,7 +3,7 @@
 
 use super::*;
 
-/// With the pinned tree present (#1847), the section names as not built
+/// With the pinned tree present, the section names as not built
 /// every `ext/*` and `sapi/*` suite of the tree that holds a `.phpt` and
 /// that no row owns or `[parity] out` rules out, whether or not a reading
 /// measured it; a suite a row owns, `sapi/embed`'s among them though its
@@ -97,14 +97,14 @@ fn parity_renders_as_markdown_for_a_session() {
     );
 }
 
-/// The `parity` section (design §1, #1761): each suite parity counts with
+/// The `parity` section (design §1): each suite parity counts with
 /// met-of-target off the phpt reading that stands for it, the total over
 /// the suites held to a target, and the suites outside parity with the
 /// ruling that put them there or as not built; a control, a lane, a
 /// comparison and a narrower run are no suite's own, and a reading held to
 /// no target is in no total. A host's reading whose row owns no subset,
 /// `sapi/makala`'s run of the CGI-shaped tests over HTTP, is no suite and
-/// none outside, so a test met through two hosts counts once (#2334).
+/// none outside, so a test met through two hosts counts once.
 #[test]
 fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outside() {
     let root = parity_store("parity", Path::new(NO_TREE));

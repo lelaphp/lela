@@ -1,6 +1,6 @@
 //! The negative control of `php_engine`'s refusal of a release-like build
-//! without the LLVM option every profile passes (design §10 Profiles,
-//! #3372): `xtask/fixtures/rustflags`, a crate whose `build.rs` is the
+//! without the LLVM option every profile passes (design §10 Profiles):
+//! `xtask/fixtures/rustflags`, a crate whose `build.rs` is the
 //! engine's rule, built from inside the workspace, so under its cargo
 //! configuration, with flags that replace the workspace's rustflags table
 //! as a `RUSTFLAGS` variable would. Each build is its own cargo run in a

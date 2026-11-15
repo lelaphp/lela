@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -16,7 +16,7 @@ fn armed(source: &str) -> String {
 }
 
 /// `SplFileObject`'s current line, read by `fgets`, by `current` and by
-/// iteration, and its CSV rows keep nothing past the request (#2086).
+/// iteration, and its CSV rows keep nothing past the request.
 #[test]
 fn a_line_an_spl_file_object_reads_is_given_up() {
     let stdout = armed(
@@ -32,7 +32,7 @@ $t->rewind(); echo implode('|', $t->fgetcsv(',', '"', '')), "\n", implode('|', $
 
 /// The names `DirectoryIterator`, `FilesystemIterator`,
 /// `RecursiveDirectoryIterator` and `GlobIterator` read from a directory
-/// as they step are kept only as each entry's own (#2087).
+/// as they step are kept only as each entry's own.
 #[test]
 fn the_names_a_directory_iterator_reads_are_given_up() {
     let stdout = armed(
@@ -52,7 +52,7 @@ unlink("$d/sub/b.txt"); unlink("$d/a.txt"); rmdir("$d/sub"); rmdir($d);
 /// `spl_autoload_register()` with no callable registers `spl_autoload`
 /// under its name, which the stack keeps its own owner of, so the name
 /// made to resolve it is given up, once registered and once found
-/// registered already (#2075); the leak sensor is armed (#1992).
+/// registered already; the leak sensor is armed.
 #[test]
 fn the_default_autoloader_keeps_no_name() {
     let stdout = armed(
@@ -64,8 +64,7 @@ fn the_default_autoloader_keeps_no_name() {
 /// `RecursiveTreeIterator` renders an entry from its string,
 /// `spl_recursive_tree_iterator_get_entry`'s `zval_try_get_string`, and
 /// gives up the string and its copy of the element, whether the
-/// conversion answers or throws (#2117, `ext/pdo/tests/pdo_031.phpt`;
-/// #2130).
+/// conversion answers or throws (`ext/pdo/tests/pdo_031.phpt`).
 #[test]
 fn a_tree_iterator_s_entries_are_given_up() {
     let stdout = armed(
@@ -81,7 +80,7 @@ try { foreach (new RecursiveTreeIterator(new RecursiveArrayIterator($a, Recursiv
 /// An `ArrayObject` over an object takes one owner of the value
 /// `$ao[] = ...` hands it and gives that owner to the object's table,
 /// where it once kept an owner unwritten and unreleased: its append is a
-/// sink taking an owner (#1997).
+/// sink taking an owner.
 #[test]
 fn an_append_to_an_object_s_table_keeps_nothing() {
     let stdout = armed(
@@ -91,7 +90,7 @@ fn an_append_to_an_object_s_table_keeps_nothing() {
 }
 
 /// `$ao[] = $v` over an object appends to the object's property table,
-/// which keeps the value as its own (#2175), and `var_dump` prints the
+/// which keeps the value as its own, and `var_dump` prints the
 /// row under its integer key.
 #[test]
 fn a_value_appended_to_an_object_s_table_is_the_table_s() {
@@ -110,7 +109,7 @@ var_dump($c, count($ao));
 
 /// An `unserialize()` whose next class's autoloader throws makes none
 /// of the `__wakeup()` calls it queued, so the throwing `__wakeup()`
-/// queued before it makes no second throwable to drop: #2231's snippet,
+/// queued before it makes no second throwable to drop: the snippet of
 /// `ext/standard/tests/serialize/bug64354_2.phpt`, armed here because
 /// `spl_autoload_register` is this extension's and ext/standard's tests
 /// cannot reach it.
@@ -131,7 +130,7 @@ try { var_dump(unserialize('a:2:{i:0;O:1:"A":0:{}i:1;O:1:"B":0:{}}')); } catch (
 /// makes none of the `__wakeup()` calls queued before it, as php's
 /// `zend_call_function` refuses each at `EG(exception)`, so the
 /// throwing `__wakeup()` makes no second throwable to drop, whether the
-/// read throws on a typed property or in an autoloader (#2235).
+/// read throws on a typed property or in an autoloader.
 #[test]
 fn a_read_that_throws_in_an_spl_unserialize_makes_no_delayed_call() {
     let stdout = armed(

@@ -122,8 +122,8 @@ fn refused(req: &mut Request) -> Option<String> {
 /// a child that took that user's ids; this engine's process serves
 /// requests on threads, which share its ids, so the preload is served on
 /// a thread of its own that takes the user's ids for itself alone
-/// first ([`Account::take`]), and the process keeps its own (#1258's
-/// ruling, 2026-09-30).
+/// first ([`Account::take`]), and the process keeps its own (ruled
+/// 2026-09-30).
 fn preload(req: &mut Request, file_cache_only: bool) -> PostStartup {
     let script = value(req, "opcache.preload").to_vec();
     if script.is_empty() {
@@ -208,8 +208,8 @@ fn unforked(req: &mut Request) -> i32 {
 /// A platform where no thread can take another user's ids for itself
 /// alone: the engine refuses to start rather than serve a file the
 /// operator declared unprivileged as root, where php would preload as
-/// the user (`trace:preload-user-no-thread-credentials`, as #1258's
-/// ruling of 2026-10-01 accepts it).
+/// the user (`trace:preload-user-no-thread-credentials`, as the ruling
+/// of 2026-10-01 accepts it).
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn as_user(req: &mut Request, _: Vec<u8>, _: Account) -> PostStartup {
     accel_log(

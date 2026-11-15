@@ -1,4 +1,4 @@
-//! ICU4C, the keg the oracle links (design §7.2, revision 75; #1573):
+//! ICU4C, the keg the oracle links (design §7.2, revision 75):
 //! the C API php's intl calls, declared by hand under ICU's versioned
 //! names, and php's own C++ over ICU's classes, reached through the
 //! `extern "C"` shim in `shim/` that `build.rs` compiles. The one home of
@@ -151,8 +151,10 @@ impl Code {
     /// the code is no failure. ICU answers some objects half built beside
     /// a failure (`umsg_open` on `U_PATTERN_SYNTAX_ERROR`), and php stores
     /// that object before it checks the code and formats with it later,
-    /// which reads what ICU never set (#2566). Here the object is closed by
-    /// its owner's drop and never handed on, so a constructor finds none.
+    /// which reads what ICU never set
+    /// (`trace:intl-msgfmt-constructor-refused-pattern`). Here the object is
+    /// closed by its owner's drop and never handed on, so a constructor
+    /// finds none.
     pub(crate) fn built<T>(self, made: Option<T>) -> Option<T> {
         made.filter(|_| !self.is_failure())
     }

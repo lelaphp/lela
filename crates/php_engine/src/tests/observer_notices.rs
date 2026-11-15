@@ -49,7 +49,8 @@ fn begin(name: &str) -> Event {
 }
 
 /// The notices and the frames' order: what `observer_declarations_01.phpt`
-/// prints, less its `time()`, whose native call is #1810's.
+/// prints, less its `time()`, a native call, which the observer's tests
+/// of native calls hold.
 fn declaring() -> [Phase; 5] {
     [
         Declared(String::new()),
@@ -194,7 +195,7 @@ fn a_cached_unit_replays_declared_and_linked_in_opcache_order() {
 }
 
 /// A load that ends in a redeclaration tells what php declared before
-/// it (#2012). Without opcache, php's compiler tells each declaration
+/// it. Without opcache, php's compiler tells each declaration
 /// as it finishes it and meets the redeclared function where it is
 /// written, so the function and the class above it are told and those
 /// below are not, as the oracle's zend-test variant prints with
@@ -258,7 +259,7 @@ fn a_load_that_ends_in_a_redeclaration_tells_what_was_declared_before_it() {
 
 /// A function and a class written on one line are told in the order
 /// they were written, as php's compiler finishes them, which no line
-/// tells apart (#2012).
+/// tells apart.
 #[test]
 fn declarations_on_one_line_are_told_in_the_order_written() {
     let rec = Recording::start();
@@ -307,7 +308,7 @@ fn fatal_while_thrown(req: &mut Request) -> Result<(), Thrown> {
 /// (`Z/Zend/zend.c:1514`) through `zend_error_va`
 /// (`Z/Zend/zend_exceptions.c:921-930`): told to the observers with
 /// `E_DONT_BAIL`, uncaught, and served by `zend_error_cb` alone, the
-/// user's handler never asked (#2012).
+/// user's handler never asked.
 #[test]
 fn a_throwable_pending_at_a_fatal_is_told_uncaught_and_served_without_the_handler() {
     let rec = Recording::start();
@@ -750,7 +751,7 @@ fn linked_in_fiber(
 }
 
 /// A fiber runs on a stack of its own and its chain of open frames is
-/// its own (#1811), but a function's slot is the function's: a begin
+/// its own, but a function's slot is the function's: a begin
 /// handler added inside a fiber begins the function's calls on the
 /// request's own stack and in the fiber alike, and a file the fiber
 /// includes is told as any load is.

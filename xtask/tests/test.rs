@@ -1,4 +1,4 @@
-//! `xtask test` (harness-design.md §4.5 condition 1, #191): the crate's
+//! `xtask test` (harness-design.md §4.5 condition 1): the crate's
 //! own tests as a reading. The negative control is the fixture at
 //! `xtask/fixtures/test/failing`, one crate with two tests of which one
 //! fails; it is run through the instrument's library entry, through the
@@ -65,7 +65,7 @@ fn the_failing_reading(readings: &[Reading]) -> &Reading {
         reading.message
     );
     // What the panic said is kept where the log keeps the reading, so a
-    // failure under the pre-commit hook says itself there (#976).
+    // failure under the pre-commit hook says itself there.
     assert!(
         reading
             .message
@@ -114,7 +114,7 @@ fn a_crate_the_manifest_does_not_name_is_refused() {
 /// The fixture copied into a scratch tree of its own, with the tracked
 /// pin and a registry with no row beside its manifest, so two tests running at once
 /// build in two `target/` directories and neither removes the other's
-/// mid-run; the tree takes itself away (#194). The instrument reads a
+/// mid-run; the tree takes itself away. The instrument reads a
 /// crate's files through `git ls-files`, so a test runs it over
 /// [`repository`], never over the tracked fixture.
 fn scratch(name: &str) -> Tree {
@@ -139,7 +139,7 @@ fn scratch(name: &str) -> Tree {
     }
     // The fixture's pin is by a path relative to the fixture; here the
     // pin stands beside the manifest, and what `done` asks of a crate is
-    // the workspace's `[[owed]]` rows (#3206), those whose every pattern
+    // the workspace's `[[owed]]` rows, those whose every pattern
     // names `php_heap`, the one crate here, as the manifest's reader holds.
     let text = std::fs::read_to_string(workspace().join("seams.toml")).unwrap();
     let rows = text.parse::<toml::Table>().unwrap()["owed"].clone();
@@ -213,7 +213,7 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
     );
 
     // The test is fixed; the readings are stale until measured again, the
-    // test's saying its last reading failed (#3494), and measured again
+    // test's saying its last reading failed, and measured again
     // the crate is done.
     let text = std::fs::read_to_string(&lib).unwrap();
     std::fs::write(
@@ -284,9 +284,8 @@ mod tests {
 /// A crate whose `[package.metadata.xtask.test]` names `profile =
 /// "release-da"` has its tests built and run under that profile, its
 /// doctests among them, so the debug build's sensors run at release
-/// optimisation (#4348's ruling 4, #4361); the same crate without the
-/// declaration is built under `cargo test`'s profile and fails, the
-/// negative control.
+/// optimisation (ruled 2026-11-09); the same crate without the declaration
+/// is built under `cargo test`'s profile and fails, the negative control.
 #[test]
 fn a_crate_that_names_release_da_has_its_tests_built_under_it() {
     let root = scratch("test-release-da");
@@ -352,7 +351,7 @@ mod tests {
 
 /// A reading counts the tests that skipped for a fact the machine did
 /// not promise, each once, says how many in its message, and `done`
-/// notes the number beside the passing reading (#3085).
+/// notes the number beside the passing reading.
 #[test]
 fn a_reading_counts_the_tests_that_skipped_and_done_notes_them() {
     let root = scratch("test-skipped");
@@ -445,7 +444,7 @@ fn overlap((a_from, a_to): (u128, u128), (b_from, b_to): (u128, u128)) -> bool {
 /// says they share nothing; then they run side by side, but for those
 /// that hold one key apart, which never overlap. The reading is stamped
 /// once the last has ended, `ms` says how long they ran, and a group per
-/// executable how long each did (#2869).
+/// executable how long each did.
 #[test]
 fn executables_run_side_by_side_where_declared_and_apart_where_they_share_a_key() {
     let declared = "\n[package.metadata.xtask.test]\nexecutables = \"side-by-side\"\n\
@@ -480,7 +479,7 @@ fn executables_run_side_by_side_where_declared_and_apart_where_they_share_a_key(
 
 /// Under `--staged` an executable the crate names in `own` runs only
 /// where a path of its own is staged, and a pass with one left out is not
-/// recorded, since `done` asks the whole crate's run (#2982); staged, it
+/// recorded, since `done` asks the whole crate's run; staged, it
 /// runs, and the reading is the whole crate's.
 #[test]
 fn staged_leaves_out_an_executable_whose_own_paths_are_not_staged() {

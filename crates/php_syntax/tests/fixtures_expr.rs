@@ -377,7 +377,7 @@ fn not_with_instanceof() {
 #[test]
 fn instanceof_static() {
     // php's `class_name_reference` takes `T_STATIC`: the late static
-    // binding stands on the right as the name `static` (#262).
+    // binding stands on the right as the name `static`.
     check(
         "<?php $x instanceof static;",
         expect![[r#"

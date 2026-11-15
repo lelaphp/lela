@@ -8,9 +8,9 @@ here is the part that binds a run, and §10 says what was left behind and why.
 `xtask bench` is the one instrument that runs it.
 
 Version `3`: the ancestor's `1`, a request-shaped arm under the same
-paired rule (§3, §5; #2351), which made `2`, and that arm's concurrent
-form, whose rep is a rate (§3, §4.2; #2660). A change to §3, §4 or §5
-bumps it; adding a statement or a recorded field does not.
+paired rule (§3, §5), which made `2`, and that arm's concurrent
+form, whose rep is a rate (§3, §4.2). A change to §3, §4 or §5 bumps it;
+adding a statement or a recorded field does not.
 
 ## 1. What it refuses
 
@@ -47,7 +47,7 @@ for no reason about once a run in seventeen, which is why `bench` records
 the verdict and exits 0 (`harness-design.md` §4.2).
 
 **An A/A control over a set** of programs (§10) is held to a count, as
-Mitchell ruled on #3127. It fails when at least k of its n rows resolve,
+Mitchell ruled 2026-10-21. It fails when at least k of its n rows resolve,
 k the smallest count whose chance of being reached, each row resolving
 at the rate above, one in seventeen, is at most 1%: the binomial's upper
 tail. For n = 8, P(≥ 2) ≈ 7.7% and P(≥ 3) ≈ 0.9%, so k = 3; a set of one
@@ -79,12 +79,12 @@ A request-shaped arm times a request as its client pays for it: the
 connection, the request and the response read to its end, against a server
 the bar starts before its first rep and ends after its last, the server's
 binary pinned as a program is (§6). It is how the production server is
-measured against php-fpm (#2351); the two arms reach their hosts as each is
+measured against php-fpm; the two arms reach their hosts as each is
 reached, so the bar states its clients, and a server's own A/A control
 stands beside it.
 
 Its concurrent form measures throughput where the one request measures
-latency (#2660, `third-engine-design.md` §9.2's "8 threads, one process ≥
+latency (`third-engine-design.md` §9.2's "8 threads, one process ≥
 php-fpm with 8 workers"). Each arm's rep is 8 clients at once, each
 sending the request again as soon as it is answered, one connection a
 request as the one-request arm sends it (HTTP/1.0 over loopback TCP to
@@ -176,8 +176,8 @@ every rendering of a number prints the load beside it. A number taken under
 load is not void and not automatically valid; the load is recorded, not
 controlled.
 
-A machine held for the bench is controlled, as Mitchell ruled on
-#3767 for dax-build: `xtask bench --machine dedicated` takes every seat
+A machine held for the bench is controlled, as Mitchell ruled 2026-10-31
+for dax-build: `xtask bench --machine dedicated` takes every seat
 before it builds, so no other instrument builds there while it measures,
 and starts a bar's reps only once the 1-minute load is below 2. Above it
 the run waits, looking again every 15 s, and the reading names how long it
@@ -210,7 +210,7 @@ standing a person gives a run, and moves no baseline.
 The verdict is wall time alone. A makala bar also states what each arm's
 server retired per request, instructions, cycles, CPU and runnable time,
 read with `proc_pid_rusage`, as evidence beside the rate and never as the
-verdict (#3062). A code-layout confound of the kind Mytkowicz described would not be
+verdict. A code-layout confound of the kind Mytkowicz described would not be
 caught here. The `NOISE-SWAMPED` rule is a quartile rule and not a
 hypothesis test: it has no confidence level, no *p* and no power analysis.
 That two arms are comparable at all is asserted by whoever declared the bar
@@ -229,12 +229,12 @@ ratcheted baseline replaces; and the ancestor's request-shaped
 kind, whose per-arm latency percentiles are descriptive and never signed.
 Each returns here when the engine has the thing it measures, as the
 request-shaped arm has, paired under §2 to §5 rather than as percentiles
-(§3, #2351), and as a geomean over workloads has (#2948): a bar over a
+(§3), and as a geomean over workloads has: a bar over a
 set of programs pairs each program under §2 to §5, states each one's
 ratio as `1 + paired_pct / 100`, and their geometric mean, which inherits
 the floor — one `NOISE-SWAMPED` constituent and the aggregate is
 published unsigned. A geomean has a sign only when every row resolves
-the same way, as Mitchell ruled on #3127: one whose rows resolve in
+the same way, as Mitchell ruled 2026-10-21: one whose rows resolve in
 opposite directions is published unsigned as `mixed`, with the count
 each way, since +20% on one program and −17% on another make a geomean
 near 1.00, and signing it would claim no change while hiding a
@@ -248,27 +248,27 @@ row is never a regression (§1.2) and holds nothing. The geomean, signed,
 
 A bench workload a ticket names is committed under `docs/perf/workloads/`,
 beside this document, and a ticket that asks for a reading against a named
-workload cites its committed path (#2491). A bar file stays on the machine
+workload cites its committed path. A bar file stays on the machine
 that ran it, since its arms name that machine's binaries. A workload kept
-out of the repository is lost: #1808's `calls.php` was.
+out of the repository is lost: the first `calls.php` was.
 
 Each workload is byte-identical to the copy its first reading ran over, so
 a header comment the file did not carry then is not added now. What a file
 cannot say of itself is declared once in `docs/perf/workloads.toml`, beside
 the directory: its role, the arguments of each of its runs, the status they
-end on and the ticket that first read it (#4335, #4344). `xtask bench`,
+end on and the ticket that first read it. `xtask bench`,
 `xtask dispatch-census`, `xtask trace-dump` and makala's bars and soak
 reach a program only through that declaration, a program under the
 directory with no row is refused, and the table below is rendered from it.
-makala's bars and soak serve the files of every role but native, as #4366
-ruled: a native's time is spent in an extension's natives, and what a
+makala's bars and soak serve the files of every role but native, as ruled
+2026-11-09: a native's time is spent in an extension's natives, and what a
 served request adds the other bars measure already. A served request has
 no command line, so they serve only a run that takes no arguments. A
 program the dispatch census counts that lives elsewhere, php-src's `Zend/micro_bench.php` or a counting loop
 given whole, is declared there too, and so are the four WordPress bench
 pages the census counts, each served from a copy of a rig kept off the
-repository, which `XTASK_RIG` describes on the machine that has one
-(#4364, #4367). A role is a person's to give; a kernel's and the bench's
+repository, which `XTASK_RIG` describes on the machine that has one.
+ A role is a person's to give; a kernel's and the bench's
 counts vote, and a shape's, a probe's and a native's do not.
 
 <!-- computed exec cmd="cargo xtask status --section workloads --tracked" inputs=workloads.toml,workloads/*.php,../../xtask/src/workloads.rs,../../xtask/src/status/workloads.rs name=workloads | do not edit; run computed -->
@@ -283,16 +283,16 @@ counts vote, and a shape's, a probe's and a native's do not.
 | `fannkuch.php` | kernel | none | status 0 | #2740 | one of the seven kernels, Mahout's `benchmarks/src/fannkuch.php` with `$N` at §9.2's size |
 | `string_munge.php` | kernel | none | status 0 | #2740 | one of the seven kernels, Mahout's `benchmarks/src/string_munge.php` with `$N` at §9.2's size |
 | `bench_quiet.php` | bench | none | status 0 | #1808 | php-src's `Zend/bench.php` with `end_test` and `total` printing names only, so its bytes are deterministic |
-| `wordpress_shapes.php` | shape | none | status 0 | #4329 | original code, written from the opline counts, its side panels' sizes and sort orders following WordPress's widget defaults, with the mix a counting build of the loop met over the four WordPress bench pages; #4329's last comment sets their top twenty variants side by side |
-| `calls.php` | probe | none | status 0 | #2011 | #1808's `calls.php` rebuilt from #1808's comment, not #1809's file, so its medians are not comparable to #1809's rows |
-| `frame_chain.php` | probe | none | status 0 | #1301 | recursive user calls, then a loop of native calls: the bar #1384 holds the readable frame header to |
-| `natives.php` | probe | none | status 0 | #2209 | a loop of native calls, each return kind #2209 names |
+| `wordpress_shapes.php` | shape | none | status 0 | #4329 | original code, written from the opline counts, its side panels' sizes and sort orders following WordPress's widget defaults, with the mix a counting build of the loop met over the four WordPress bench pages |
+| `calls.php` | probe | none | status 0 | #2011 | the first G1 reading's `calls.php` rebuilt from the comment that describes it, not the file the observer's user-call rows ran over, so its medians are not comparable to those rows |
+| `frame_chain.php` | probe | none | status 0 | #1301 | recursive user calls, then a loop of native calls: the bar the readable frame header is held to |
+| `natives.php` | probe | none | status 0 | #2209 | a loop of native calls, each return kind the native-return bar names |
 | `ucall.php` | probe | none | status 0 | #1901 | micro.php's `ucall` kernel with nothing timed in the bytes |
 | `Zend/micro_bench.php` of the pinned php-src | probe | none | status 0 | #3285 | php-src's `Zend/micro_bench.php` at the pin, run whole |
-| `loop-empty`, its code in the declaration | probe | none | status 0 | #3273 | #3273's counting loop, a million rounds of an empty body |
-| `loop-add`, its code in the declaration | probe | none | status 0 | #3273 | #3273's counting loop, a million rounds of `$s = $i + 1;` |
-| `loop-add-assign`, its code in the declaration | probe | none | status 0 | #3273 | #3273's counting loop, a million rounds of `$s += $i;` |
-| `loop-mul`, its code in the declaration | probe | none | status 0 | #3273 | #3273's counting loop, a million rounds of `$s = $s * 1.0000001;` |
+| `loop-empty`, its code in the declaration | probe | none | status 0 | #3273 | the bare counting loop, a million rounds of an empty body |
+| `loop-add`, its code in the declaration | probe | none | status 0 | #3273 | the bare counting loop, a million rounds of `$s = $i + 1;` |
+| `loop-add-assign`, its code in the declaration | probe | none | status 0 | #3273 | the bare counting loop, a million rounds of `$s += $i;` |
+| `loop-mul`, its code in the declaration | probe | none | status 0 | #3273 | the bare counting loop, a million rounds of `$s = $s * 1.0000001;` |
 | `compression.php` | native | `small 1`, `large 1`, `incompressible 1`, `incremental 1`, `gzip 1`, `zip 1`, `mysql 1` | status 0 | #2826 | zlib's raw deflate, incremental deflate, gzip, zip and mysql payload over generated text and bytes, the mode and an iteration count its arguments |
 | `fileinfo.php` | native | `buffer`, `file`, `wrapper`, `cold` | status 0 | #2827 | `finfo` over a buffer, a file, a stream wrapper and a cold database, 256 times each, the profile its one argument |
 | `mbstring_profiles_2831.php` | native | `convert small`, `convert large`, `mime small`, `mime large`, `cut small`, `cut large`, `http small`, `http large` | status 0 | #2831 | mbstring's conversion, MIME header encoding, `mb_strcut` and output handler over a small and a large input, the mode and the size its arguments |
@@ -302,18 +302,18 @@ counts vote, and a shape's, a probe's and a native's do not.
 | `uri-whatwg-read-update.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` ordered reads, immutable updates and a relative base |
 | `uri-whatwg-unicode.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` host mapping, NFC and deviation inputs at the pin, not modern IDNA |
 | `uri-whatwg-validation.php` | native | none | status 0 | #2832 | `Uri\WhatWg\Url` special, opaque, file, IP and malformed inputs |
-| page `/` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them |
-| page `/?p=1` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them |
-| page `/?s=hello` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them |
-| page `/wp-login.php` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as #4329 served them |
+| page `/` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as the count behind `wordpress_shapes.php` served them |
+| page `/?p=1` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as the count behind `wordpress_shapes.php` served them |
+| page `/?s=hello` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as the count behind `wordpress_shapes.php` served them |
+| page `/wp-login.php` of the rig | bench | served after 3 warm-up requests | answers 200 | #4329 | the four pages of the WordPress bench, each served by the counting build from a copy of the rig as the count behind `wordpress_shapes.php` served them |
 
-<!-- /computed in=8aff696063de8249780291430694d58df653b8367d1881a6311b79b63ce275b0 out=2036378befcd468e9639c1641482dcd656e0a14b924c32b149e155a4575da81a -->
+<!-- /computed in=fa3c0ffd12914dd2c09a580298126534c46f133dda0af9cbc54bed3c132c8962 out=64ae0aa9fd02bd280fe1df36b76129b3f6795c924553cfd139c5ebe994f6ba33 -->
 
 ## 12. The tolerance a nightly bar is held to
 
-The rule every perf bar is held by, as Mitchell ruled on #1902 and #2336
-(#2659). It replaces a bound a person writes for each bar: the numbers come
-from the bar's own series by this rule, and no person sets them one by one.
+The rule every perf bar is held by, as Mitchell ruled 2026-10-11. It
+replaces a bound a person writes for each bar: the numbers come from the
+bar's own series by this rule, and no person sets them one by one.
 A night is one reading of the bar: its paired delta's median, Q1 and Q3
 (§4.2) as a share of the second arm's median, in percent.
 
@@ -335,7 +335,7 @@ A night is one reading of the bar: its paired delta's median, Q1 and Q3
    `[[bench]]` row per bar, through `xtask steer`. A bar without a row is a
    series and fails nothing. Until the bar's A/A control has its two
    weeks of nights, the row carries the 2% floor alone and names no
-   nights, as Mitchell ruled for G1 on #3130. A bar held to a bound and
+   nights, as Mitchell ruled for G1 2026-10-21. A bar held to a bound and
    not a baseline, G1, whose door should cost nothing, is held to one
    plus its row's tolerance: each row's ratio at most 1.02 at the
    floor. The row is the one place that bound is written.
@@ -350,4 +350,4 @@ A night is one reading of the bar: its paired delta's median, Q1 and Q3
    a bar's earlier nights and its baseline from the published history.
 5. **The distance to go gates nothing.** §9.2's absolute targets (1.5×,
    1.2×, at least php-fpm) stay in each reading as the distance to go, as
-   #1902 ruled.
+   ruled 2026-10-07.

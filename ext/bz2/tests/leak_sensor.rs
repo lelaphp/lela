@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's wrapper: each
+//! The request leak sensor over this extension's wrapper: each
 //! request below gives up everything its opens took, so an armed engine
 //! ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -22,8 +22,7 @@ fn armed(source: &str) -> String {
 
 /// An include through `compress.bzip2://` keeps nothing of the open,
 /// the name it set among it, whether the file opens or not, and the
-/// included file is named by the path as written, as php names it
-/// (#2119).
+/// included file is named by the path as written, as php names it.
 #[test]
 fn an_include_through_the_wrapper_gives_up_the_path_it_opened() {
     let stdout = armed(
@@ -40,7 +39,7 @@ unlink($f);
 }
 
 /// The bzip2 filters give back to the request's heap everything they
-/// took of it, the library's state among it (#2620): removed by hand,
+/// took of it, the library's state among it: removed by hand,
 /// ended at their stream's end, or still attached as the request ends,
 /// a decompressor mid-stream included.
 #[test]

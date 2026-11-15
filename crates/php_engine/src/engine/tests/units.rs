@@ -9,7 +9,7 @@ use super::*;
 /// caches of the request's own and no map-pointer offset of the
 /// engine's, so `CG(map_ptr_last)` moves only for what the engine
 /// publishes, as php's moves only for what opcache persists, and a
-/// request that evaluates in a loop grows it by nothing (#528).
+/// request that evaluates in a loop grows it by nothing.
 #[test]
 fn a_unit_compiled_for_one_request_moves_the_engine_s_map_pointer_count_by_nothing() {
     let engine = Engine::cli_builder().build();
@@ -28,7 +28,7 @@ fn a_unit_compiled_for_one_request_moves_the_engine_s_map_pointer_count_by_nothi
 /// and holds nowhere is the request's alone, as php keeps a file it
 /// does not persist in process memory: requests that include it move
 /// the engine's map-pointer count by nothing, where each moved it by
-/// its op arrays (GH-8646, #2624). The same file held moves it once,
+/// its op arrays (GH-8646). The same file held moves it once,
 /// at the request that held it.
 #[test]
 fn a_file_the_cache_holds_nowhere_moves_the_engine_s_map_pointer_count_by_nothing() {
@@ -79,7 +79,7 @@ fn a_file_the_cache_holds_nowhere_moves_the_engine_s_map_pointer_count_by_nothin
 /// runs after the unit took its map-pointer offsets of the engine's, so
 /// each of those compiles moves the count by as much as the first did.
 /// No compile's unit is refused, since a unit's walk passes its
-/// closures' cells over (#4684); the refusal is driven here by the
+/// closures' cells over; the refusal is driven here by the
 /// `share` the cache is handed.
 #[test]
 fn a_unit_the_check_refuses_is_held_nowhere_and_every_ask_compiles_it_again() {
@@ -190,7 +190,7 @@ fn served_held(program: &str) -> (Vec<String>, Vec<u32>) {
 
 /// A class that uses a trait and holds a closure and a first-class
 /// callable in its composed declaration is published at its first link,
-/// as the same class holding neither is (#4699): the check admits each
+/// as the same class holding neither is: the check admits each
 /// cell against the frozen units the class was composed from, its own
 /// and its trait's (`Request::publish`). The file is compiled once and
 /// held, every later request is served the held unit with no compile,
@@ -434,7 +434,7 @@ fn words_laid(epoch: &crate::arena::Arena, unit: &PublishedUnit) -> Vec<bool> {
 }
 
 /// A preload's `eval` is the preload's as a file it preloads is (design
-/// §5.14, #4696): the epoch laid after the preload holds a row of words
+/// §5.14): the epoch laid after the preload holds a row of words
 /// for the op arrays of the function and the method the `eval` declared,
 /// as it holds one for the preloaded file's own function, and the
 /// request reaches all three.
@@ -475,7 +475,7 @@ fn a_preload_evals_function_and_method_have_their_words_laid_as_a_preloaded_file
 }
 
 /// Only a preload's `eval` with a declaration the preload keeps outlives
-/// the preload (#4696): of an `eval` that declares nothing, one that
+/// the preload: of an `eval` that declares nothing, one that
 /// declares a function, one that declares and calls a closure alone and
 /// one that declares a function holding a closure, the preload holds the
 /// second's and the fourth's units, since no table names a closure, and
@@ -597,7 +597,7 @@ fn a_kept_unit_is_read_back_by_the_next_engine_and_another_builds_is_not() {
 /// at the compiler's line, before the op array writes anything, the
 /// second request as the first. Under opcache with
 /// `opcache.record_warnings` off a hit raises none of it, which
-/// `note_compiled`'s witness holds (#3123). `error_reporting` set from
+/// `note_compiled`'s witness holds. `error_reporting` set from
 /// the ini masks it as it masks a runtime warning, since the path
 /// is one.
 #[test]

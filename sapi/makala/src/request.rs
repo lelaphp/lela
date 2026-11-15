@@ -1,19 +1,20 @@
-//! The request side (#2337): a bounded pool of request threads, each
+//! The request side: a bounded pool of request threads, each
 //! taking programs' whole requests off one bounded queue, as the
 //! connection side routed them, and serving each through its own
 //! `Engine::serve` on the one engine they share (design §5.14).
 //! A request is described from its HTTP request as a web server describes
 //! one to php-fpm, in the CGI environment, and read through what php-cgi
 //! and php-fpm share (`php_sapi::cgi`); its body is a reader over the
-//! channel its connection feeds, pulled as the request reads it (#2338);
+//! channel its connection feeds, pulled as the request reads it;
 //! and its sink writes onto the channel its connection's response reads.
 //!
-//! The environment is the mapping the oracle holds (#2334, #2347): the
+//! The environment is the mapping the oracle holds: the
 //! stock `fastcgi_params` of the nginx release `oracle.toml`'s
 //! `[fastcgi]` names, as it records it, with `SCRIPT_FILENAME` first and
-//! the header fields after, and `SERVER_SOFTWARE` the host's own (#2335),
-//! registered in php-fpm's order. The witnesses of `request makala` fences hold it to the pinned
-//! php-fpm handed the same request under that recipe.
+//! the header fields after, and `SERVER_SOFTWARE` the host's own,
+//! registered in php-fpm's order. The witnesses of `request makala` fences
+//! hold it to the pinned php-fpm handed the same request under that
+//! recipe.
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -67,7 +68,7 @@ pub(crate) struct Head {
     pub(crate) scheme: Scheme,
 }
 
-/// Whether a request came clear or under TLS (#2343).
+/// Whether a request came clear or under TLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scheme {
     /// Clear, on the `--listen` address.
@@ -160,8 +161,8 @@ impl Pool {
 }
 
 /// A request thread: the queue's next request served, until the queue is
-/// closed. A panic is contained at the request's edge (design §5.14,
-/// #2337's M9): the request is dropped whole, its connection answers a
+/// closed. A panic is contained at the request's edge (design §5.14):
+/// the request is dropped whole, its connection answers a
 /// head never sent with a 500 and cuts a response under way, and the
 /// thread serves the next.
 fn serve_each(jobs: &Mutex<mpsc::Receiver<Job>>, serve: &impl Fn(Job)) {
@@ -212,7 +213,7 @@ pub(crate) fn serving(engine: &Engine, root: &Arc<[u8]>) -> impl Fn(Job) + Clone
 
 /// One program's request, through its own `Engine::serve`. It starts in
 /// `started_in`, the process's working directory, as php-fpm's request
-/// starts in its pool's (#2610): what request startup resolves, a
+/// starts in its pool's: what request startup resolves, a
 /// relative `upload_tmp_dir` among it, is resolved there, and the program
 /// is served in its own directory, as `php_execute_script` enters it
 /// ([`Chdir::IntoProgramDir`]), without moving the process's, which every
@@ -284,7 +285,7 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
     };
     // A program whose path holds a NUL is never run, as
     // `php_cli_server_dispatch_script` refuses it: the request ends with
-    // the head it has (`vpath::holds_nul`, #2695).
+    // the head it has (`vpath::holds_nul`).
     let (observed, sink) = engine.serve(description, Box::new(sink), |_| {
         if php_proto::vpath::holds_nul(&program.path_translated) {
             return HostServes::Nothing;
@@ -309,7 +310,7 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
 /// answered with php-fpm's page and logged with the line its `zlog`
 /// beside the refusal writes, which `sapi_cgi_log_fastcgi` hands the web
 /// server on `FCGI_STDERR` whatever its level, and which makala, the
-/// server, writes in its error log (#2767).
+/// server, writes in its error log.
 #[derive(Debug)]
 enum Refusal<'a> {
     /// The path names no program: no `path_translated`.
@@ -354,7 +355,7 @@ impl Refusal<'_> {
     /// The line php-fpm logs for it, worded as its `zlog` words it, the
     /// path's bytes as they came but for a line break, which the request's
     /// path can carry decoded and which is written as two bytes
-    /// ([`php_sapi::log_field`], #4355), and cut as `zlog_external` cuts a line
+    /// ([`php_sapi::log_field`]), and cut as `zlog_external` cuts a line
     /// its buffer of [`ZLOG_BUFFER`] bytes does not hold: the bytes before
     /// the last three it has room for, then `...`.
     fn logged(&self) -> Vec<u8> {
@@ -428,7 +429,7 @@ fn refusal(info: &RequestInfo) -> Option<Refusal<'_>> {
 
 /// The CGI environment a web server hands php-fpm for `head`, after
 /// nginx's stock `fastcgi_params` with its documented split of the path
-/// past the program (`oracle.toml`'s `[fastcgi]`, #2637): the path's info
+/// past the program (`oracle.toml`'s `[fastcgi]`): the path's info
 /// first, the program the request found under the root, the request's
 /// own variables, and each header field as an `HTTP_` variable. The
 /// split is the route's ([`Translated`]), at the first segment that ends
@@ -438,7 +439,7 @@ fn refusal(info: &RequestInfo) -> Option<Refusal<'_>> {
 /// `PATH_INFO` the rest, empty where there is none, as nginx sends
 /// `$fastcgi_path_info`; `PATH_TRANSLATED` the document root and
 /// `PATH_INFO`, where that is not empty, as RFC 3875 §4.1.6 has it and the
-/// recipe hands it (#2650), which php-fpm passes on for a program found as
+/// recipe hands it, which php-fpm passes on for a program found as
 /// named; and `DOCUMENT_URI` the two, nginx's `$uri` after the internal
 /// redirect its `index` makes of a directory.
 ///
@@ -448,7 +449,7 @@ fn refusal(info: &RequestInfo) -> Option<Refusal<'_>> {
 /// HTTP has none of, and `USER` and `HOME`, which `fpm_env_init_child`
 /// puts in a child's emptied environment; the ports, which are this process's
 /// own, and `SERVER_SOFTWARE`, nginx's in the recipe and
-/// `makala/<version>` here (#2335), masked.
+/// `makala/<version>` here, masked.
 ///
 /// ```php
 /// foreach ($_SERVER as $name => $value) {
@@ -539,7 +540,7 @@ fn environment(head: &Head, root: &[u8], program: &Translated, query: &[u8]) -> 
     let mut filename = root.to_vec();
     filename.extend_from_slice(&program.vpath);
     let mut env = vec![(b"PATH_INFO".to_vec(), path_info.clone())];
-    // RFC 3875 §4.1.6, as the recipe hands it (#2650): the root and the
+    // RFC 3875 §4.1.6, as the recipe hands it: the root and the
     // path's info, and none where the path has no info.
     if !path_info.is_empty() {
         env.push((b"PATH_TRANSLATED".to_vec(), [root, &path_info].concat()));
@@ -961,7 +962,7 @@ mod tests {
 
     /// A program that does not open is denied for `EACCES` alone, as
     /// php-fpm denies it: `EPERM`, which macOS answers under a directory
-    /// the process may not read, is no input file (#2876, #2909).
+    /// the process may not read, is no input file.
     #[test]
     fn a_program_that_does_not_open_is_denied_for_eacces_alone() {
         let page = |errno: i32| {

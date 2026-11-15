@@ -55,7 +55,7 @@ const ELF_MACHINE: u32 = if cfg!(target_arch = "aarch64") {
 
 /// What a table's `PERF` lines or `PERF_DUMP` records are written to: a
 /// file the engine opened, or a test's buffer, either engine state, as
-/// the table that holds it is (`tier::epoch_state`, #4492).
+/// the table that holds it is (`tier::epoch_state`).
 pub(crate) trait PerfWriter: Write + EngineState {}
 
 impl<W: Write + EngineState> PerfWriter for W {}
@@ -70,7 +70,7 @@ pub(crate) struct Perf {
 }
 
 /// What the traces published into one epoch's table take, counted as
-/// each is published (#2961): the bytes of their code in the epoch's
+/// each is published: the bytes of their code in the epoch's
 /// arena, the oplines they compiled, one [`crate::lower::Mark`] each, and
 /// how many traces there are. Each epoch's table counts its own, as php's
 /// restart empties its one buffer (`zend_jit_restart`), so what php's

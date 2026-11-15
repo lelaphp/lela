@@ -35,7 +35,7 @@ fn a_step_over_an_element_or_a_property_is_the_fetch_under_rw() {
 }
 
 /// `zend_delayed_compile_dim` over `$this` as the oracle at 8.5.9
-/// dumps it (#2574): the container is `zend_compile_simple_var`'s
+/// dumps it: the container is `zend_compile_simple_var`'s
 /// `FETCH_THIS` into a temporary, in a method and in the main op
 /// array alike, and never the `UNUSED` receiver a property fetch
 /// takes, which `ISSET_ISEMPTY_DIM_OBJ` and `FETCH_DIM_IS` do not
@@ -85,8 +85,8 @@ fn this_under_a_silent_dimension_is_fetched_into_a_temporary() {
         ));
 }
 
-/// `zend_delayed_compile_var` as the base of a chain of dimensions
-/// (#451), the oracle's dump under `[regime.dump]` at 8.5.9: a
+/// `zend_delayed_compile_var` as the base of a chain of dimensions,
+/// the oracle's dump under `[regime.dump]` at 8.5.9: a
 /// property is the one fetch php holds back, so its `FETCH_OBJ_R`
 /// stands after the oplines of whatever the dimension compiled to,
 /// which is what puts `f`'s call before the fetch of `p` in
@@ -96,8 +96,7 @@ fn this_under_a_silent_dimension_is_fetched_into_a_temporary() {
 /// it stands and takes `SEPARATE` over its own `VAR` under a write
 /// (`zend_separate_if_call_and_write`), which the dump prints into
 /// the same `VAR` it reads; `$g()` is php's `ZEND_AST_CALL` the
-/// same as `f()` is, so `zend_is_call` separates it the same way
-/// (#336).
+/// same as `f()` is, so `zend_is_call` separates it the same way.
 #[test]
 fn the_base_of_a_chain_of_dimensions_is_the_oracle_s_delayed_fetch() {
     let source: &[u8] = b"<?php $o = new stdClass; $x = $o->p[0]; $o->p[1] = 2; \
@@ -159,10 +158,10 @@ fn the_base_of_a_chain_of_dimensions_is_the_oracle_s_delayed_fetch() {
 /// The bases php refuses under a write, `zend_compile_var`'s
 /// default arm and `zend_separate_if_call_and_write`: a temporary
 /// expression and a call php answered in one, each php's own
-/// compile error, under a dimension and under a property alike
-/// (#336); and the one this compiler has not, a `static`
-/// property under a write, whose fetch is `FETCH_STATIC_PROP_W`
-/// (#507). `new C` is no call however its `VAR` is written, since
+/// compile error, under a dimension and under a property alike;
+/// and the one this compiler has not, a `static`
+/// property under a write, whose fetch is `FETCH_STATIC_PROP_W`.
+/// `new C` is no call however its `VAR` is written, since
 /// `zend_is_call` reads the shape of the expression and not where
 /// its value landed.
 #[test]
@@ -209,7 +208,7 @@ fn a_base_no_write_can_stand_on_is_php_s_compile_error() {
 }
 
 /// `zend_compile_compound_assign`, the `ZEND_AST_DIM` and
-/// `ZEND_AST_PROP` arms (#498): the chain's last delayed opline and
+/// `ZEND_AST_PROP` arms: the chain's last delayed opline and
 /// the delayed property fetch, each with its opcode set to
 /// `ASSIGN_DIM_OP` or `ASSIGN_OBJ_OP`, the operator where the
 /// dimension has no cache slot and where the property's slot stood,
@@ -247,7 +246,7 @@ fn a_compound_assignment_to_a_dimension_and_to_a_property_are_the_oracle_s_oplin
     ));
 }
 
-/// `zend_adjust_for_fetch_type` under `BP_VAR_RW` (#504): every
+/// `zend_adjust_for_fetch_type` under `BP_VAR_RW`: every
 /// link of a compound assignment's target but the last is
 /// `FETCH_DIM_RW` or `FETCH_OBJ_RW`, the `_W` opcode plus one, into
 /// a `VAR` the link over it stands on. The dump is the oracle's
@@ -273,8 +272,8 @@ fn the_links_under_a_compound_assignment_s_last_are_the_oracle_s_rw_fetches() {
     .assert_eq(&dump_of(b"<?php $a = [[1]]; $a[0][1] *= 2; $o->p->q += 1;"));
 }
 
-/// `zend_delayed_compile_var`'s last two bases under a write
-/// (#507): a `static` property is `FETCH_STATIC_PROP_W` carrying
+/// `zend_delayed_compile_var`'s last two bases under a write:
+/// a `static` property is `FETCH_STATIC_PROP_W` carrying
 /// `ZEND_FETCH_DIM_WRITE`, the bit the dump prints as `(dim write)`,
 /// and `$this` is `FETCH_THIS` into the `VAR` the dimension stands
 /// on, never the `UNUSED` receiver a property fetch takes. The dump
@@ -504,7 +503,7 @@ fn a_constant_numeric_dimension_keeps_the_written_string_after_the_long() {
     );
 }
 
-/// php's `dereferenceable_scalar` under a read (#482): a string
+/// php's `dereferenceable_scalar` under a read: a string
 /// written out, an array written out, a chain over one, a
 /// parenthesised expression and the `BP_VAR_IS` chain a `??` puts
 /// over one. Nothing is folded -- `"ab"[0]` is the `FETCH_DIM_R`
@@ -548,7 +547,7 @@ fn a_dimension_behind_a_literal_is_the_oracle_s_oplines() {
 /// one. `$this` and a `static` property under a write, a compound
 /// assignment and a `++` (`FETCH_STATIC_PROP_RW`), a property and a
 /// call under a write, and every base php compiles where it stands
-/// under a read, compile since #451, #507 and #667.
+/// under a read, now compile.
 #[test]
 fn a_dimension_this_compiler_cannot_read_yet_is_refused() {
     for source in [

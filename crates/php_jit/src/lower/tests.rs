@@ -287,7 +287,7 @@ fn spectralnorm_lowers_its_inlined_call_with_the_interrupt_test() -> Result<(), 
 
 /// `binary_trees`' two recursions, `check_tree` entered and `make_tree`
 /// from its call's landing, lowered with what php's code generator
-/// compiles inline of them (#2963).
+/// compiles inline of them.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn binary_trees_lowers_its_two_recursions() -> Result<(), String> {
@@ -300,7 +300,7 @@ fn binary_trees_lowers_its_two_recursions() -> Result<(), String> {
 /// `array_write`'s and `sieve`'s element writes, inline: written in
 /// place, or through `step` where the array is not the variable's own,
 /// not packed, or the element is past `nNumUsed`, a hole or counted,
-/// taking no exit (#3228).
+/// taking no exit.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_element_write_lowers_inline_and_steps_where_it_cannot() -> Result<(), String> {
@@ -313,8 +313,7 @@ fn an_element_write_lowers_inline_and_steps_where_it_cannot() -> Result<(), Stri
 /// A native's call pushed in place and its `DO_ICALL` made from
 /// compiled code: the call made the one served, the native served
 /// through [`Kernel::CallNative`], the interrupt tested, the call popped
-/// in place and the throw tested, the `Stood` written past it (#2963,
-/// #3560).
+/// in place and the throw tested, the `Stood` written past it.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_lowers_in_place() -> Result<(), String> {
@@ -325,7 +324,7 @@ fn a_natives_call_lowers_in_place() -> Result<(), String> {
 /// [`Kernel::Frameless`], which reads no opline and no frame, then the
 /// temporaries freed and the interrupt tested; a variable that may be
 /// unset or hold a reference tested first, its handler's through
-/// [`Kernel::Handle`] where it is (#3560, #4107).
+/// [`Kernel::Handle`] where it is.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_frameless_call_lowers_in_place() -> Result<(), String> {
@@ -334,7 +333,7 @@ fn a_frameless_call_lowers_in_place() -> Result<(), String> {
 
 /// Strings compared, measured and cast inline: the comparison of two
 /// strings by their pointers, then their lengths, then the `identical`
-/// kernel; a length read at `ZSTR_LEN` (#3321).
+/// kernel; a length read at `ZSTR_LEN`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn strings_lower_inline() -> Result<(), String> {
@@ -354,7 +353,7 @@ fn strings_lower_inline() -> Result<(), String> {
 /// A blob built in a loop: the path's two concatenations through
 /// `concat`, each string piece of the rope through the rope's kernels,
 /// the long one through `handle`, and the line appended through
-/// `assign_concat` (#3321).
+/// `assign_concat`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn ropes_and_appends_lower_through_their_kernels() -> Result<(), String> {
@@ -376,7 +375,7 @@ fn ropes_and_appends_lower_through_their_kernels() -> Result<(), String> {
 
 /// A leave over owning variables, each freed in place: its type tested,
 /// a `GC_DELREF` inline where another owner stands and the collector holds
-/// or never takes the value, and the `free_cv` kernel otherwise (#3313).
+/// or never takes the value, and the `free_cv` kernel otherwise.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_leave_over_owning_variables_lowers_its_frees() -> Result<(), String> {
@@ -538,7 +537,7 @@ fn a_link_answers_its_last_exit() -> Result<(), String> {
 /// A native's call is pushed in place, its sends of constants stepped,
 /// the operands they read stored first, and its `DO_ICALL` made in
 /// place, the native alone served through [`Kernel::CallNative`], with
-/// no opline read and no dispatch (#2963, #3340, #3560).
+/// no opline read and no dispatch.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {
@@ -562,7 +561,7 @@ fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {
 /// where `$i < 100` was true, leaves where it turns false, so each counts
 /// the hundred iterations php counts rather than going the recorded way
 /// to the end, its loop compiled rather than aborted on a guard the
-/// lowering does not serve (#3076).
+/// lowering does not serve.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_guarded_boolean_is_tested_where_the_trace_runs() {
@@ -863,7 +862,7 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
 }
 
 /// A link the trace was compiled against is a jump in its own bytes
-/// (#3229's ruling): its stores, the words of its door in the request,
+/// (ruled 2026-10-22): its stores, the words of its door in the request,
 /// and a tail call to the body the door names with the entry in registers,
 /// with php's interrupt test before it where the trace is a side linking
 /// to its own looping root; with none to link to, its last exit as before.
@@ -936,7 +935,7 @@ fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
 /// calls: php's analysis types the read by the declaration, so it holds no
 /// guard and its value is kept in a register, which the read defines as
 /// it reads the slot; a register read before anything defined it would
-/// be refused as `COMPILER_ERROR`, never read as zero (#3665).
+/// be refused as `COMPILER_ERROR`, never read as zero.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_typed_property_read_through_this_defines_its_register() -> Result<(), String> {
@@ -972,7 +971,7 @@ fn a_typed_property_read_through_this_defines_its_register() -> Result<(), Strin
 /// held before the step, as a `RETURN`'s is, and goes on to call `h()` in
 /// place, whose header takes that place as its caller. A frame's place
 /// read before anything defined it would be refused as `COMPILER_ERROR`,
-/// never read as zero, the stack's first frame (#3685).
+/// never read as zero, the stack's first frame.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_return_by_reference_names_the_frame_it_lands_in() -> Result<(), String> {
@@ -1006,7 +1005,7 @@ fn a_return_by_reference_names_the_frame_it_lands_in() -> Result<(), String> {
 /// array's element as what the array holds or `null`, so the one scalar
 /// such a fetch's types can be is `null`, and a long, a double or a
 /// boolean in a register is always held by a guard within the fetch,
-/// which defines it (#3674). An array of `null`s read by a long key, by
+/// which defines it. An array of `null`s read by a long key, by
 /// a string and through `??`, and an empty one through `??`, reach the
 /// first; arrays of longs, doubles and booleans, and one a parameter
 /// holds, the second. Each trace compiles, where `Emit::copied_element`
@@ -1065,7 +1064,7 @@ fn an_element_fetch_no_guard_holds_keeps_no_value_in_a_register() -> Result<(), 
 /// guard compares the object's class at `Obj::CLASS_AT`, each untyped
 /// slot is read and written at `Obj::SLOTS_AT`, and the typed property's
 /// write and every slot the inline form does not serve go through the
-/// `handle` kernel (#3337).
+/// `handle` kernel.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn properties_lower_in_place_under_their_class_guard() -> Result<(), String> {
@@ -1087,7 +1086,7 @@ fn properties_lower_in_place_under_their_class_guard() -> Result<(), String> {
 /// entered by every request: on the next request an object of a class
 /// that request declared, whose slots stand elsewhere, fails its class
 /// guard and the interpreter serves it, while the published class's
-/// objects go on in place (#3337).
+/// objects go on in place.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_class_the_next_request_declares_fails_the_class_guard() {
@@ -1123,7 +1122,7 @@ fn a_class_the_next_request_declares_fails_the_class_guard() {
 /// calls `zend_jit_find_func_helper`, and goes on in the trace where it
 /// answers the function recorded; a request whose name answers another
 /// function, by reference, leaves at the opline's exit and is served as
-/// the interpreter serves it (#4086).
+/// the interpreter serves it.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_by_name_is_held_to_what_each_request_finds() {
@@ -1158,8 +1157,8 @@ fn a_call_by_name_is_held_to_what_each_request_finds() {
 /// the touch finds that function's cache not laid down, as php lays it at
 /// the call's `INIT_*` and no sooner, so the read leaves for the
 /// interpreter, the call lays the cache, and the next entry touches the
-/// slot and reads its place in place on every turn after (#3421, #3346,
-/// #2957's note).
+/// slot and reads its place in place on every turn after
+/// (`jit-design.md` §4.6, revision 32's note).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_entered_before_its_callee_ran_reads_the_slot_its_call_laid() {
@@ -1188,7 +1187,7 @@ fn a_trace_entered_before_its_callee_ran_reads_the_slot_its_call_laid() {
 /// the class it placed the name on last, and in place once the slot names
 /// the object's own: the write is the handler's, and the read leaves for
 /// the interpreter, as php's code goes to its slow path where
-/// `CACHED_PTR(cache_slot)` is not `obj->ce` (#3346).
+/// `CACHED_PTR(cache_slot)` is not `obj->ce`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_cache_slot_that_names_another_class_sends_the_opline_to_its_handler() {
@@ -1207,8 +1206,8 @@ fn a_cache_slot_that_names_another_class_sends_the_opline_to_its_handler() {
 
 /// A slot of `true` alone, met through a request-scoped class's cache
 /// slot after an untyped one, takes `true` and sends `false` to the
-/// handler's `TypeError`, at the fourth pass as php's interpreter raises it
-/// (#3346). php 8.5.12's own compiled tier raises it on the first pass
+/// handler's `TypeError`, at the fourth pass as php's interpreter raises it.
+/// php 8.5.12's own compiled tier raises it on the first pass
 /// here under the oracle's hot counters, so the interpreter's answer is
 /// held, not the oracle's, and the program is no witness.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -1233,7 +1232,7 @@ fn a_slot_of_true_alone_refuses_false_to_its_handler() {
 /// through the kernel php's code calls the table's lookup through: the
 /// `find` kernel for a read, a test and a compound write, the `lookup`
 /// kernel for a write and a fetch for writing, and `.=` onto the element
-/// through `assign_concat` (#3339).
+/// through `assign_concat`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_hashs_dimension_oplines_lower_through_the_lookup_kernels() -> Result<(), String> {
@@ -1268,8 +1267,8 @@ fn a_hashs_dimension_oplines_lower_through_the_lookup_kernels() -> Result<(), St
     Ok(())
 }
 
-/// The shapes the hash slice left to the handler lowered in place
-/// (#3370): `isset()`, `??` and a read over a fetch's temporary through
+/// The shapes the hash slice left to the handler lowered in place:
+/// `isset()`, `??` and a read over a fetch's temporary through
 /// the `find` kernel, the temporary freed after; a write, a compound write
 /// and a fetch for writing through the `VAR` a fetch for writing left
 /// indirect, and a write to the array a reference holds, through the
@@ -1303,8 +1302,8 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
             REF_WRITE,
             &[(Kernel::Lookup, 2), (Kernel::Handle, 2), (Kernel::Step, 0)],
         ),
-        // #3410: through a `VAR` that points at a reference, as through
-        // one that points at the array.
+        // Through a `VAR` that points at a reference, as through one
+        // that points at the array.
         (INDIRECT_REF_WRITE, &[(Kernel::Step, 0)]),
     ];
     for (fixture, calls) in kernels {
@@ -1326,9 +1325,9 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
 /// A call that sends arrays by reference is made in place: its
 /// `SEND_REF`s copy the references with an owner more, the reference
 /// made in place where the variable holds none, its handler cold where
-/// the memory limit refuses it (#3560), and the call's two checks
-/// read each reference's value as the frame is activated (#3340), the
-/// `RECV`'s handler cold where one fails (#3560).
+/// the memory limit refuses it, and the call's two checks
+/// read each reference's value as the frame is activated, the
+/// `RECV`'s handler cold where one fails.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_by_reference_lowers_its_sends_and_checks() -> Result<(), String> {
@@ -1342,7 +1341,7 @@ fn a_call_by_reference_lowers_its_sends_and_checks() -> Result<(), String> {
             .count()
     };
     // Each `SEND_REF`'s reference made in place, its refused arm, each
-    // check's `RECV` handed to its handler where it fails (#3560), and
+    // check's `RECV` handed to its handler where it fails, and
     // each `ASSIGN_DIM_OP`'s of the callee.
     assert_eq!(calls(Kernel::MakeRef), 2, "{clif}");
     assert_eq!(calls(Kernel::Handle), 6, "{clif}");
@@ -1356,7 +1355,7 @@ fn a_call_by_reference_lowers_its_sends_and_checks() -> Result<(), String> {
 
 /// A method's leave in place gives its receiver up after its variables:
 /// one owner fewer in place, and [`Kernel::FreeThis`] cold where that is
-/// the last or the collector may take the object as a root (#3343).
+/// the last or the collector may take the object as a root.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_methods_leave_gives_its_receiver_up() -> Result<(), String> {
@@ -1375,7 +1374,7 @@ fn a_methods_leave_gives_its_receiver_up() -> Result<(), String> {
 /// The calls `k`, `s`, `n` and `t` make: `k`'s and `t`'s methods pushed in place with
 /// their receivers, and `s`'s and `n`'s held to their callee after the
 /// handler pushed them, each made in place with no send stepped, the
-/// call kernel cold (#3343).
+/// call kernel cold.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn method_calls_lower_their_push_call_and_leave() -> Result<(), String> {
@@ -1398,7 +1397,7 @@ fn method_calls_lower_their_push_call_and_leave() -> Result<(), String> {
 /// The calls pushed in place under the pair their runtime-cache slot
 /// holds lower to the guard on the slot, read past the trace's headers,
 /// and one cold arm where the handler pushes the call, which no other
-/// kernel serves (#3557, #3558).
+/// kernel serves.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_pushed_under_its_slots_pair_lowers_one_handler_arm() -> Result<(), String> {
@@ -1442,7 +1441,7 @@ fn a_call_pushed_under_its_slots_pair_lowers_one_handler_arm() -> Result<(), Str
 /// and the method up as php's `zend_jit_find_static_method_helper` does,
 /// the callee is held after it, and every pass after, the slot primed,
 /// pushes it in place; the call's `static` is the class the request
-/// resolved the name to (#3557).
+/// resolved the name to.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_empty_slot_sends_a_static_call_to_its_handler() {
@@ -1477,7 +1476,7 @@ fn an_empty_slot_sends_a_static_call_to_its_handler() {
 /// through the handler where the slot names the class it resolved the
 /// name on last, and in place once it names the object's own; the callee,
 /// the one method both inherit, holds, and each call's `static` is its
-/// receiver's class (#3558).
+/// receiver's class.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_slot_that_names_another_class_sends_a_methods_call_to_its_handler() {
@@ -1498,7 +1497,7 @@ fn a_slot_that_names_another_class_sends_a_methods_call_to_its_handler() {
 /// An evaluated class's own method's call pushed in place under its
 /// slot's pair lowers to the guard on the slot and one cold arm where the
 /// handler pushes it, and makes no call: the trace stops at the call,
-/// which the interpreter makes (#3561, #3570).
+/// which the interpreter makes.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_evaluated_classs_call_lowers_its_push_and_no_call() -> Result<(), String> {
@@ -1527,7 +1526,7 @@ fn an_evaluated_classs_call_lowers_its_push_and_no_call() -> Result<(), String> 
 
 /// A call passed fewer arguments than its callee has parameters lowers
 /// to its activation in place, each default copied from the op array's
-/// constants, the call kernel cold where the call is refused (#3340).
+/// constants, the call kernel cold where the call is refused.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_passed_fewer_arguments_lowers_its_defaults() -> Result<(), String> {
@@ -1551,7 +1550,7 @@ fn a_call_passed_fewer_arguments_lowers_its_defaults() -> Result<(), String> {
 /// reference and with another arity: the trace left at the call the
 /// first time, so the second request's call is its own handler's, and
 /// each request writes what the interpreter writes, under force and
-/// where every guard fails once (#3570).
+/// where every guard fails once.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_through_an_evaled_call_serves_another_requests_function() {
@@ -1596,7 +1595,7 @@ fn a_trace_through_an_evaled_call_serves_another_requests_function() {
 /// refuses, so the handler pushes it; and by reference with the same
 /// room, pushed in place and its argument sent by its handler. Each
 /// request writes what the interpreter writes, under force and where every
-/// guard fails once (#3561, #3570).
+/// guard fails once.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_push_of_an_evaluated_classs_method_serves_another_requests_class() {
@@ -1665,7 +1664,7 @@ echo f(100), \"\\n\";",
 
 /// A `while (true)` under `opcache.optimization_level=0` is rooted at its
 /// `while`, the condition php's optimizer leaves unfolded, where at the
-/// default level it is rooted at its body (`record::Folds`, #3578).
+/// default level it is rooted at its body (`record::Folds`).
 #[test]
 fn a_while_true_is_rooted_where_the_optimization_level_leaves_its_condition() {
     let program = "function f() {
@@ -1704,9 +1703,9 @@ echo f(), \"\\n\";";
 /// A child's `get` hook calling its parent's, read in a loop, under
 /// `opcache.optimization_level=0`: the hook's trace stops at the call into
 /// the parent's with `property hook call`, and the parent's and the
-/// return trace past the call are php's, as the pinned php writes them
-/// (#3577). The loop's exit numbers wait on the analysis's guards (#3575),
-/// so the lines past the fourth trace are not held here.
+/// return trace past the call are php's, as the pinned php writes them.
+/// The loop's exit numbers wait on the analysis's guards, so the lines
+/// past the fourth trace are not held here.
 #[test]
 fn a_parent_property_hooks_call_stops_the_trace_that_reaches_it() {
     let served = testing::serve::<Lane>(
@@ -1767,8 +1766,7 @@ echo f(new C), \"\\n\";",
 /// whose outermost `p` is the entry of the serving `trigger_error` began:
 /// the `RETURN` stepped there ends that serving and the trace halts, as
 /// php's `jit_stub_trace_halt` (`Emit::halts`), where it raised
-/// `InternalError: a kernel's step ended the serving a trace runs in`
-/// (#3689).
+/// `InternalError: a kernel's step ended the serving a trace runs in`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_return_trace_past_a_servings_entry_halts() {
@@ -1799,7 +1797,7 @@ echo \"done\\n\";",
 /// as `exec::CallerAt::caller` reads it, [`FrameLayout::caller_loop`]
 /// masked off before [`FrameLayout::numbered_from`] is taken away, so a
 /// frame an error handler's serving began, whose caller is the loop's,
-/// names no place 2^31 records away (#3691). The trace is the return
+/// names no place 2^31 records away. The trace is the return
 /// trace `a_return_trace_past_a_servings_entry_halts` serves under the
 /// handler: each half-word it loads becomes a place only through the mask.
 ///

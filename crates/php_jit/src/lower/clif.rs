@@ -261,7 +261,7 @@ pub(super) fn prologue(config: TargetFrontendConfig) -> Function {
     func
 }
 
-/// What a body joins besides its exits (#3229's ruling): the address of
+/// What a body joins besides its exits (ruled 2026-10-22): the address of
 /// its number, which its answers write at [`TRACE_AT`], where its escape
 /// reads the trace compiled at the landing, and the trace its link jumps
 /// to, where it links to one with code.
@@ -1480,7 +1480,7 @@ impl<'a> Emit<'a> {
 
     /// A guard held at entry or before an op: what it holds read from the
     /// value's slot, or from its register where a boolean is held to the
-    /// one the recording saw (#3076), or at entry where the frame stands,
+    /// one the recording saw, or at entry where the frame stands,
     /// leaving through its exit where it does not hold.
     fn guard(&mut self, guard: Guard) -> Result<(), Abort> {
         match guard.check {
@@ -1935,8 +1935,8 @@ impl<'a> Emit<'a> {
     /// `ExitCtx`'s pointer names is loaded, and where it is not zero, or
     /// under exit-fuzz on the test's first pass, the code goes where
     /// `raised` says. The bench's untested build alone emits no test,
-    /// the header's nor the link's, to measure what it costs (#2960,
-    /// §10).
+    /// the header's nor the link's, to measure what it costs
+    /// (§10).
     fn interrupt_test(&mut self, raised: Raised) -> Result<(), Abort> {
         if cfg!(php_jit_untested_loops) {
             return Ok(());
@@ -5518,8 +5518,8 @@ impl<'a> Emit<'a> {
     /// only after the entry, the frame's `Op::Enter` or the `Op::Back`
     /// that lands in it defined it, the ops lowered in trace order: a
     /// read before is a lowering that named no place for the frame,
-    /// which Cranelift would answer with zero, the stack's first frame
-    /// (#3685), so it is php's `COMPILER_ERROR` instead, as a register
+    /// which Cranelift would answer with zero, the stack's first frame,
+    /// so it is php's `COMPILER_ERROR` instead, as a register
     /// read before its definition is ([`Emit::register`]).
     fn frame_ref(&mut self, frame: Frame) -> Result<Value, Abort> {
         let var = (self.refs.get(usize::from(frame.0)).copied())
@@ -5559,7 +5559,7 @@ impl<'a> Emit<'a> {
     /// What a value the trace keeps in a register holds. A register of a
     /// kind that carries a value is read only after the op that writes
     /// it defined it: a read before is a lowering that wrote the value's
-    /// slot alone, which Cranelift would answer with zero (#3665), so it
+    /// slot alone, which Cranelift would answer with zero, so it
     /// is php's `COMPILER_ERROR` instead. The order held is the order the
     /// ops are lowered in, not dominance: a definition on one arm of a
     /// branch and a read on the other is not caught here.

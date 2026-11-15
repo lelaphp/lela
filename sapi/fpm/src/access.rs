@@ -7,7 +7,7 @@
 //! Each field the request supplies, `%e`, `%f`, `%m`, `%o`, `%q`, `%r`
 //! and `%u`, has a `\r` or `\n` in it written as two bytes
 //! ([`php_sapi::log_field`]), so no request writes a line of its own;
-//! every other byte, and every other token, is php's (#4355).
+//! every other byte, and every other token, is php's.
 
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt as _;

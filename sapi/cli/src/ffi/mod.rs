@@ -158,7 +158,7 @@ pub(crate) fn poll(fds: &mut [Polled], millis: i32) -> std::io::Result<usize> {
 
 /// Every fd above 2 the process was started holding, closed, as
 /// a server that outlives its caller's other children does before it
-/// serves (#2550). On macOS the standard library opens a pipe with
+/// serves. On macOS the standard library opens a pipe with
 /// `pipe(2)` and marks it close-on-exec after, so a process another
 /// thread spawns in between inherits that pipe, and holding it keeps the
 /// pipe from reaching its end for whoever reads it. `/dev/fd` lists what

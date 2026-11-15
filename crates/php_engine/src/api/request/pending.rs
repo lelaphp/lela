@@ -390,7 +390,7 @@ impl Request {
     /// like any other, and the throwable is given up. At every severity
     /// `EG(last_fatal_error_backtrace)` is cleared first
     /// (`Z/Zend/zend_exceptions.c:944`), so the shell's warning after an
-    /// earlier fatal carries the throwable's trace alone (#2641).
+    /// earlier fatal carries the throwable's trace alone.
     pub(crate) fn exception_error(&mut self, severity: Level) -> Result<(), Leaving> {
         let Some(throwable) = self.take_pending_view() else {
             // `zend_exception_error` on either exit: "We successfully
@@ -749,8 +749,9 @@ impl Request {
     /// second time. This engine's slot is the one owner of what stands
     /// in it and nothing releases that while it stands, so the state is
     /// unreachable here for its own reason as well. The unit test beside
-    /// this builds what the release cannot, and #458 is the question
-    /// that leaves for a person.
+    /// this builds what the release cannot, and the question that leaves
+    /// is a person's: whether a copied branch php itself cannot reach
+    /// stands on a unit test (harness revision 50).
     pub(super) fn save_pending(&mut self, object: PhpObject) -> Saved {
         match self.raised {
             Some(Raised::Throwable(pending)) if pending.index() == object.index() => {

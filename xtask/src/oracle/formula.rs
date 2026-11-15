@@ -1,4 +1,4 @@
-//! `[oracle] formula` (#4383, ruled on #4373): the Homebrew formula the
+//! `[oracle] formula` (ruled 2026-11-10): the Homebrew formula the
 //! pinned php is poured from. Homebrew's `php` is its newest line, and a
 //! line it has moved past lives in `php@<major>.<minor>`, poured into the
 //! keg of that name, `Cellar/php@8.5/<version>/`. So the pin names the
@@ -27,7 +27,7 @@
 //! ([`super::Binary::bottle`]).
 //!
 //! **The formula is digested**, as every key of the pin is but a build's
-//! [`super::Provenance`] (#2969): [`super::Pin::digest`] moves when a pin
+//! [`super::Provenance`]: [`super::Pin::digest`] moves when a pin
 //! first names its formula, and with the paths and the md5 when the
 //! formula changes.
 
@@ -82,7 +82,7 @@ impl Formula {
         let mut defects = Vec::new();
         if !self.pours(version) {
             defects.push(format!(
-                "[oracle].{} is {self}, the formula of another line than [oracle].version, {version} (#4383); the pin moves only by a person's hand",
+                "[oracle].{} is {self}, the formula of another line than [oracle].version, {version}; the pin moves only by a person's hand",
                 Formula::KEY
             ));
         }
@@ -94,14 +94,14 @@ impl Formula {
             kegs.insert(format!("{keg}/{bottle}"));
             if keg != self.to_string() {
                 defects.push(format!(
-                    "{key} {} stands in the keg {keg}, and the pin is poured from the formula {self}, into the keg of that name: [oracle].{} names the formula, `php` where the pin names none (#4383); the pin moves only by a person's hand",
+                    "{key} {} stands in the keg {keg}, and the pin is poured from the formula {self}, into the keg of that name: [oracle].{} names the formula, `php` where the pin names none; the pin moves only by a person's hand",
                     path.display(),
                     Formula::KEY
                 ));
             }
             if !bottles(version, &bottle) {
                 defects.push(format!(
-                    "{key} {} stands in the keg {keg} at {bottle}, which is no bottle of [oracle].version, {version}: a keg stands at php's version, with the formula's revision after `_` where Homebrew bottled the version again, and `scripts/ci/pinned-php.sh` pours the bottle the path names (#4383); the pin moves only by a person's hand",
+                    "{key} {} stands in the keg {keg} at {bottle}, which is no bottle of [oracle].version, {version}: a keg stands at php's version, with the formula's revision after `_` where Homebrew bottled the version again, and `scripts/ci/pinned-php.sh` pours the bottle the path names; the pin moves only by a person's hand",
                     path.display()
                 ));
             }
@@ -109,7 +109,7 @@ impl Formula {
         if kegs.len() > 1 {
             let kegs: Vec<String> = kegs.into_iter().collect();
             defects.push(format!(
-                "the pinned binaries stand in {} kegs, {}, and `scripts/ci/pinned-php.sh` pours one, the bottle [oracle].path names (#4383); the pin moves only by a person's hand",
+                "the pinned binaries stand in {} kegs, {}, and `scripts/ci/pinned-php.sh` pours one, the bottle [oracle].path names; the pin moves only by a person's hand",
                 kegs.len(),
                 kegs.join(" and ")
             ));
@@ -318,7 +318,7 @@ mod tests {
     }
 
     /// The bottle a runner pours is the keg the path names, the formula's
-    /// revision with it (#4383): `[oracle].version` says php's version and
+    /// revision with it: `[oracle].version` says php's version and
     /// no revision, and Homebrew bottles a version again under
     /// `<version>_<revision>`, in a commit whose message names it so,
     /// `php: update 8.5.2_1 bottle.`
@@ -400,7 +400,7 @@ mod tests {
     }
 
     /// The formula is a value of the pin as any other, and no provenance
-    /// of a build (#2969): a pin that names it has another digest than
+    /// of a build: a pin that names it has another digest than
     /// one that leaves it to the default, so a reading and a kept run
     /// under the recipe are stale across the key's first writing.
     #[test]

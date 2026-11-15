@@ -1,5 +1,5 @@
 //! The frontier until it empties, one ticket at a time from start to
-//! retire without a person (#77, #78; harness-design.md §4.4, §4.5, §5):
+//! retire without a person (harness-design.md §4.4, §4.5, §5):
 //! `xtask track work`. From main's checkout it asks
 //! [`track_next::next`] for the ticket of the track `--track` names, a
 //! `track:<name>` label and `main` by default (ADR-0009), lays the
@@ -7,14 +7,14 @@
 //! recording the ticket, as `worktree add --ticket` does, and starts a
 //! headless Claude Code session in the worktree on the model `--model`
 //! names, with a prompt that names the ticket and runs the skill its
-//! label chooses (#81): `/research <n>` for a ticket labelled
+//! label chooses: `/research <n>` for a ticket labelled
 //! `frontier:research`, `/grill-design <n>` for `frontier:decision`, and
 //! `/build <n>` for any other, as [`Skill::of`] says; a ticket carrying
 //! both `frontier:` labels names no one skill and is refused before any
 //! worktree is laid down, named.
 //! The skill's line is the one thing the label changes: under it every
-//! prompt names the exit condition this run reads back (#115), that the
-//! session ends by running `cargo xtask ticket ready <n>` (#2311) and,
+//! prompt names the exit condition this run reads back, that the
+//! session ends by running `cargo xtask ticket ready <n>` and,
 //! when something outside the ticket blocks that record, files the
 //! blocker as a ticket and names it in its reply, so the contract travels
 //! with the job rather than resting on a skill file elsewhere in the
@@ -25,8 +25,8 @@
 //! session ends with the branch's ready record written, the worktree is
 //! retired, which appends its readings into the checkout's store, and the
 //! branch `t<n>` is left with its records for the /specs coordinator to
-//! merge through its merge check (#1749, ADR-0009), whose merge commit
-//! closes the ticket (#2270, #2311): the loop never moves `main` and
+//! merge through its merge check (ADR-0009), whose merge commit
+//! closes the ticket: the loop never moves `main` and
 //! pushes nothing, and a ticket the ready one blocks stays blocked until
 //! the merge closes it. The ready record is the one signal, beside a
 //! ticket withdrawn at the tracker with nothing committed, which is
@@ -35,17 +35,17 @@
 //! the line says so; the console shows the worktree. Whatever it ends
 //! with, its owner record is taken away once the session has ended: the
 //! run wrote it before the session started, so it names no process to
-//! lapse with (#3755), and a worktree left standing is no session's, the
-//! next session to write there admitted (#3782). A worktree laid down
+//! lapse with, and a worktree left standing is no session's, the
+//! next session to write there admitted. A worktree laid down
 //! not ready stops the run before its session starts, and its record
-//! goes the same way (#3789). A worktree left
+//! goes the same way. A worktree left
 //! standing is not the loop's again, whatever becomes of its ticket: a
 //! run lays down, and retires, only the worktree its own session ran in,
 //! and a standing one is retired by /specs or a person with `xtask
-//! worktree retire` once its branch is merged or waits to be (#1755).
+//! worktree retire` once its branch is merged or waits to be.
 //!
-//! Without `--one` the step repeats while `track next` names a ticket
-//! (#78): a ticket the session left open is the session's failure and
+//! Without `--one` the step repeats while `track next` names a ticket:
+//! a ticket the session left open is the session's failure and
 //! does not stop the run, since its branch records it and the frontier
 //! names it no more, and the run ends at "none" with one line per ticket
 //! and, once any was worked, a closing line naming each with its outcome.
@@ -55,7 +55,7 @@
 //! is named the same way in the error. `--one` runs the step once and
 //! exits 1 when the ticket is left to a person.
 //!
-//! With `--fill` the run fills its own frontier (#85): when the frontier
+//! With `--fill` the run fills its own frontier: when the frontier
 //! is empty, a session is started on the prompt
 //! `/frontier` in the checkout itself, not a worktree, on the same model,
 //! permission mode and effort as a ticket's, and `next` is asked again
@@ -78,9 +78,9 @@
 //! for it, the environment variable [`SUBAGENT_VARIABLE`], and the
 //! permission mode and the effort, whose defaults are [`PERMISSION_MODE`]
 //! and [`EFFORT`]. No trust line is waited on: `computed` covers a
-//! worktree by the grant over the worktrees' directory (#74).
+//! worktree by the grant over the worktrees' directory.
 //!
-//! What a run leaves behind is not stdout alone (#117). Every step is
+//! What a run leaves behind is not stdout alone. Every step is
 //! held by [`hold`]: its verdict, [`Landed`], joins the run's [`Tally`]
 //! and its own reading is written to the checkout's store, scoped to the
 //! ticket as a `ticket` reading is, a pass on a ticket landed and a fail
@@ -94,7 +94,7 @@
 //! readings still come in by the retire, as they did; these are the
 //! run's, and their status is never the run's exit, which says whether
 //! the harness stood and not whether a session landed its ticket. What
-//! the session spent joins the step's reading (#210): the plugin records
+//! the session spent joins the step's reading: the plugin records
 //! a `usage` reading once a turn, under the ticket, and `hold` puts the
 //! last one's `usd`, `tokens` and `turn` beside the commit, the run's
 //! reading summing the `usd`; a ticket whose session recorded none, a
@@ -118,7 +118,7 @@ use crate::worktree::{self, NotReady, say};
 /// The prefix of every line printed, so a person reads whose line it is.
 const WORK: &str = "track work";
 /// The instrument's name, the `instrument` field of every reading a run
-/// writes (#117).
+/// writes.
 pub(crate) const INSTRUMENT: &str = "track-work";
 /// The scope of the run's own reading; every other is a ticket's number,
 /// the scope a `ticket` reading is written under.
@@ -194,7 +194,7 @@ fn harnessed(root: &Path, bare: bool) -> Result<()> {
         ))),
     }
 }
-/// The prompt of the session that fills the frontier (#85).
+/// The prompt of the session that fills the frontier.
 const FRONTIER_PROMPT: &str = "/frontier";
 /// The prefix of the label that says which side of the frontier a
 /// ticket is on; the rest of the label is the side.
@@ -279,7 +279,7 @@ impl Session {
     /// reads back, the same for every skill, since the one signal is the
     /// branch's ready record, or the ticket withdrawn at the tracker, and a
     /// session that ends with neither leaves the worktree standing however
-    /// finished its work is (#2311).
+    /// finished its work is.
     pub fn prompt(skill: Skill, ticket: Ticket) -> String {
         let n = ticket.number();
         format!(
@@ -287,7 +287,7 @@ impl Session {
              The session ends by running `cargo xtask ticket ready {n}`. That record is the one \
              signal this run reads back: a branch with no ready record leaves the worktree \
              standing for a person, however finished the work is, and the merge into main \
-             closes the ticket (#2270). The record holds the ticket to its acceptance criteria, \
+             closes the ticket. The record holds the ticket to its acceptance criteria, \
              so tick each box the work meets first, and it takes `--opens <m>` for every ticket \
              this work filed, or `--opens-nothing`. A ticket that describes nothing in the tree \
              is withdrawn instead, `cargo xtask ticket close {n} --withdrawn <reason>`.\n\n\
@@ -300,7 +300,7 @@ impl Session {
     /// The arguments after the program, in the order they are passed,
     /// ending in `prompt`: a ticket's, [`Session::prompt`], or the
     /// frontier's, [`FRONTIER_PROMPT`]; with `id`, the session's own,
-    /// which its worktree's owner record names (#3621).
+    /// which its worktree's owner record names.
     pub fn arguments(&self, prompt: &str, id: Option<&SessionId>) -> Vec<String> {
         let id = id
             .into_iter()
@@ -364,7 +364,7 @@ pub struct Run {
     pub track: String,
     #[command(flatten)]
     pub session: Session,
-    /// Start a `/frontier` session when the frontier is empty (#85).
+    /// Start a `/frontier` session when the frontier is empty.
     #[arg(long)]
     pub fill: bool,
 }
@@ -374,13 +374,13 @@ pub struct Run {
 pub enum Worked {
     /// The frontier of the track is empty; nothing was laid down.
     Nothing { track: String },
-    /// The frontier is still empty after a `/frontier` session (#85);
+    /// The frontier is still empty after a `/frontier` session;
     /// nothing was laid down, and `waits_on` is the track's open
     /// `for-a-person` tickets.
     StillEmpty { track: String, waits_on: Vec<Next> },
     /// The ticket ready to merge, or withdrawn: the worktree on `branch`
-    /// retired, and `branch`, at `commit`, left for /specs to merge
-    /// (#1749), whose merge closes a ready ticket (#2311).
+    /// retired, and `branch`, at `commit`, left for /specs to merge,
+    /// whose merge closes a ready ticket.
     Closed {
         ticket: Ticket,
         branch: String,
@@ -426,7 +426,7 @@ impl Worked {
 
     /// What the line says after the prefix: the ticket, the commit and
     /// the outcome, in one sentence, which is also the message of the
-    /// step's reading (#117), so the terminal and the store say the same
+    /// step's reading, so the terminal and the store say the same
     /// thing in the same words.
     fn said(&self) -> String {
         match self {
@@ -497,7 +497,7 @@ impl Worked {
 
 /// One step as [`hold`] reads it: the verdict, and the worktree that
 /// stands when the ticket was left standing, whose own store still holds
-/// what its session spent (#210); a retired worktree's readings are in
+/// what its session spent; a retired worktree's readings are in
 /// the checkout's log already.
 struct Step {
     judged: Judged<Landed>,
@@ -506,7 +506,7 @@ struct Step {
 
 /// What one step of a run came to, the two outcomes a ticket has: the
 /// judgement the run's [`Tally`] holds and the step's reading takes its
-/// status from (#117).
+/// status from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Landed {
     /// The ticket closed, its worktree retired and its branch left for
@@ -564,11 +564,11 @@ fn outcomes(tally: &Tally<Landed>, how: &str) -> String {
     }
 }
 
-/// One step held (#117): its verdict kept for the run's closing reading,
+/// One step held: its verdict kept for the run's closing reading,
 /// and its own reading written under the ticket's number, a pass on a
 /// ticket landed and a fail on a worktree left standing,
 /// carrying the commit its branch is at, the reason, and what the
-/// session spent (#210): the `usd`, `tokens` and `turn` of the last
+/// session spent: the `usd`, `tokens` and `turn` of the last
 /// `usage` reading under the ticket's scope, read from the standing
 /// worktree's store where one stands and from the checkout's log otherwise,
 /// which is where a retire put it; a ticket with none carries none. The
@@ -675,9 +675,9 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
     // The session is started under an id of its own, recorded as the
     // worktree's owner before it starts, so its writes there are its own.
     // The record names no process, since none ran when it was written, so
-    // it would never lapse (#3755): once the session has ended, or never
-    // started, the record goes, and the worktree is no session's (#3782);
-    // a worktree laid down not ready stops the run before it starts (#3789).
+    // it would never lapse: once the session has ended, or never
+    // started, the record goes, and the worktree is no session's;
+    // a worktree laid down not ready stops the run before it starts.
     let id = SessionId::fresh()?;
     let added = worktree::add(root, &branch, Some(ticket), Some(&id));
     if let Err(err) = &added
@@ -725,7 +725,7 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
 }
 
 /// The frontier of `track` filled by a `/frontier` session in the
-/// checkout (#85), and the frontier as it is read once the session ends;
+/// checkout, and the frontier as it is read once the session ends;
 /// the session's exit is said, not judged, as a ticket's is.
 fn fill(root: &Path, gh: &Gh, session: &Session, track: &str) -> Result<Option<Next>> {
     say!(WORK, "the frontier of {track} is empty");
@@ -746,7 +746,7 @@ struct Ended {
 /// `xtask track work`: the tracker on `PATH`, the frontier worked until
 /// it empties and the closing line printed, or with `one` a single step whose
 /// ticket left open is the exit 1. Every step's reading and the run's own
-/// are written whatever the run came to (#117), and the run's error, where
+/// are written whatever the run came to, and the run's error, where
 /// it has one, is the error it ends on. A session the `harness` plugin
 /// would not load in is refused first, nothing laid down ([`harnessed`]).
 pub fn command(root: &Path, run: &Run, one: bool) -> Result<()> {

@@ -10,7 +10,7 @@ use super::*;
 /// `ZEND_ACC_ABSTRACT`: `get` prints `VERIFY_RETURN_TYPE` where the
 /// property is typed and `RETURN null`, `set` its `RECV` and
 /// `RETURN null`, and the abstract method prints nothing. The dump
-/// is the oracle's under `[regime.dump]` at 8.5.9 (#2674).
+/// is the oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn an_abstract_hook_is_dumped_and_an_abstract_method_is_not() {
     expect![[r#"
@@ -56,7 +56,7 @@ fn an_abstract_hook_is_dumped_and_an_abstract_method_is_not() {
 /// `CG(class_table)` holds an anonymous class written in a hook ahead
 /// of the class around it, and the dump prints the anonymous class's
 /// hook and method before the hook it stands in. The dump is the
-/// oracle's under `[regime.dump]` at 8.5.9 (#2690).
+/// oracle's under `[regime.dump]` at 8.5.9.
 #[test]
 fn a_class_declared_in_a_hook_is_dumped_before_the_hook_s_class() {
     expect![[r#"
@@ -105,15 +105,15 @@ fn a_class_declared_in_a_hook_is_dumped_before_the_hook_s_class() {
 /// `zend_compile_class_decl` names a class `zend_prefix_with_ns` over
 /// the written name, so `class M` under `namespace A;` declares
 /// `A\M`, the name `zend_resolve_class_name` gives `new M` and `M::K`
-/// in the same namespace (#322). The dump is the oracle's under
+/// in the same namespace. The dump is the oracle's under
 /// `[regime.dump]` at 8.5.9 of this program, `NEW 0 string("A\M")`
-/// with its `DO_FCALL` and `FREE` (#322's own `echo M::K` stands
-/// aside here and is the class constant test's in properties.rs); a
-/// file written under `opcache.file_update_protection`'s two seconds
-/// before the oracle reads it prints no dump at all, which is the
-/// empty dump #322 measured, and not the class. `__CLASS__` in the
-/// body folds to the prefixed name, and a fatal names it as php's
-/// does.
+/// with its `DO_FCALL` and `FREE` (the `echo M::K` it was first
+/// measured with stands aside here and is the class constant test's in
+/// properties.rs); a file written under
+/// `opcache.file_update_protection`'s two seconds before the oracle
+/// reads it prints no dump at all, which is the empty dump once
+/// measured for it, and not the class. `__CLASS__` in the body folds
+/// to the prefixed name, and a fatal names it as php's does.
 #[test]
 fn a_class_declared_in_a_namespace_takes_the_namespace_on_its_name() {
     let source: &[u8] = b"<?php namespace A; class M {} new M;";
@@ -166,7 +166,7 @@ fn a_class_declared_in_a_namespace_takes_the_namespace_on_its_name() {
 }
 
 /// `zend_compile_class_decl` for the class the doc-comment witness
-/// of `php_syntax` declares (#257): bound at compile time with no
+/// of `php_syntax` declares: bound at compile time with no
 /// opline, so the main op array is the oracle's `ECHO` and `RETURN`
 /// alone; the declaration among the unit's classes with each
 /// declarator's doc comment as `backup_doc_comment` took it (probed
@@ -422,7 +422,7 @@ fn what_php_s_compiler_refuses_in_a_property_group_is_refused_in_its_words() {
     );
 }
 
-/// `zend_enum_register_funcs` runs as the enum links (#2678): an
+/// `zend_enum_register_funcs` runs as the enum links: an
 /// enum declaring its own `cases()`, or a backed one its own
 /// `from()`, compiles, its `DECLARE_CLASS` and its method dumped as
 /// `Zend/tests/enum/no-cases.phpt` and `no-from.phpt` dump them, and
@@ -490,8 +490,8 @@ enum Foo: int {
     ));
 }
 
-/// `zend_compile_class_decl` compiles the body in the order written
-/// (#2797), so a property hook sees in `CG(active_class_entry)`'s
+/// `zend_compile_class_decl` compiles the body in the order written,
+/// so a property hook sees in `CG(active_class_entry)`'s
 /// `function_table` the methods declared above its property and
 /// none below: `$this->p()` to a private method above is php's
 /// `DO_UCALL`, with its argument sent by the parameter, and
@@ -734,7 +734,7 @@ if (true) {
     ));
 }
 
-/// `zend_try_early_bind` while the file compiles (#2689): the class
+/// `zend_try_early_bind` while the file compiles: the class
 /// being bound is in no table yet, so a type its parent's method
 /// writes naming it finds nothing, `zend_can_early_bind` comes to
 /// `INHERITANCE_UNRESOLVED`, and the class keeps its
@@ -790,8 +790,8 @@ class D extends A { public function m(A|string $a): D|string {} }
     ));
 }
 
-/// `zend_compile_property_hooks`' `num_hooked_prop_variance_checks`
-/// (#2688): a `set` hook whose parameter's type names a class not
+/// `zend_compile_property_hooks`' `num_hooked_prop_variance_checks`:
+/// a `set` hook whose parameter's type names a class not
 /// declared yet keeps the class from the early bind and from
 /// opcache's delayed one, so its opline is `DECLARE_CLASS` with no
 /// parent operand, as

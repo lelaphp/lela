@@ -1,4 +1,4 @@
-//! A host's link held to the macOS the pinned php is linked for (#3356):
+//! A host's link held to the macOS the pinned php is linked for:
 //! the `[env]`'s `MACOSX_DEPLOYMENT_TARGET`, whose `.cargo/config.toml`
 //! entry says why it is named, is the `minos` the pinned php's load
 //! commands carry, so a pin linked for another macOS fails each host's
@@ -98,10 +98,10 @@ impl Target {
                 config,
                 value,
             } => held.problems.push(format!(
-                "{config}'s {VARIABLE} is {value}, and the pinned php is linked for macOS {minos}: the target moves with the oracle (#3356)"
+                "{config}'s {VARIABLE} is {value}, and the pinned php is linked for macOS {minos}: the target moves with the oracle"
             )),
             Target::Unnamed(minos) => held.problems.push(format!(
-                "{name} is a host, and no cargo configuration's [env] names {VARIABLE}, so rustc links it for its own default where the pinned php is linked for macOS {minos} (#3356)"
+                "{name} is a host, and no cargo configuration's [env] names {VARIABLE}, so rustc links it for its own default where the pinned php is linked for macOS {minos}"
             )),
         }
         held
@@ -133,7 +133,7 @@ mod tests {
             target(Some("11.0")).hold("sapi/fpm").problems,
             [
                 ".cargo/config.toml's MACOSX_DEPLOYMENT_TARGET is 11.0, and the pinned php is \
-                 linked for macOS 15.0: the target moves with the oracle (#3356)"
+                 linked for macOS 15.0: the target moves with the oracle"
             ]
         );
         let unnamed = target(None).hold("sapi/makala").problems;

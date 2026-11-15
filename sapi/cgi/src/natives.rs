@@ -1,6 +1,6 @@
 //! What php-cgi hands `php_module_startup` beside the bundle, declared
 //! here over `php_ext` as an extension declares its own (ADR-0008 as
-//! amended by #1348): `cgi_module_entry` (`Z/sapi/cgi/cgi_main.c:1564-1712`),
+//! amended 2026-10-01): `cgi_module_entry` (`Z/sapi/cgi/cgi_main.c:1564-1712`),
 //! the extension named `cgi-fcgi` it loads after every internal one, with
 //! its `cgi.*` and `fastcgi.*` entries and the four natives of
 //! `cgi_main.stub.php`; and, where a shell started it, its

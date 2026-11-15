@@ -2,7 +2,7 @@
 //! `ext/` (ADR-0004), as php's default `./configure` builds it.
 //! `fileinfo.c` ported over php-src's vendored libmagic, which `build.rs`
 //! compiles with its compiled-in database and [`ffi`] binds (design
-//! §7.2, #1451). One dependency beside the facade, libpcre2-8, which
+//! §7.2). One dependency beside the facade, libpcre2-8, which
 //! libmagic's `regex` entries are matched with as php's ext/pcre matches
 //! them; one entry, `extension()`; no state (ADR-0005). The phpt subset is
 //! `php-src/ext/fileinfo/tests`, through `xtask phpt --subset`.

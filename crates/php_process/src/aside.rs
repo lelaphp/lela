@@ -1,5 +1,5 @@
 //! The thread a host's `main` started on, once another thread does the
-//! process's work (design §5.6, #3067): out of every signal's way, so a
+//! process's work (design §5.6): out of every signal's way, so a
 //! signal reaches the thread that stands for it under that thread's own
 //! mask, and one that thread blocks waits for it, as it waited for the
 //! main thread when the main thread did the work.
@@ -47,7 +47,7 @@ pub fn stand_aside() -> ! {
 /// or unwinds: a thread `start` creates inherits the mask
 /// (`pthread_create(3)`), so it is out of every signal's way from its
 /// first instruction, and a signal sent to the process is delivered to a
-/// thread that does not block it, as php's one thread takes each (#3861).
+/// thread that does not block it, as php's one thread takes each.
 /// One sent meanwhile waits until the mask is given back, pending on the
 /// process (Linux) or on the oldest thread (XNU, see [`stand_aside`]).
 pub fn started_aside<T>(start: impl FnOnce() -> T) -> T {
@@ -142,7 +142,7 @@ mod tests {
 
     /// A thread started aside blocks every signal a process is sent to
     /// stop or to call a handler, and the thread that started it blocks
-    /// none of them again once the start returns (#3861).
+    /// none of them again once the start returns.
     #[test]
     #[cfg_attr(miri, ignore = "Miri does not model a thread's signal mask")]
     fn a_thread_started_aside_blocks_every_signal_and_its_starter_none() {

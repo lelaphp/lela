@@ -4009,7 +4009,7 @@ fn passing(prologue: &[Opline], frame: &HeapFrame) -> u32 {
 /// the observers of a declared opcode told of each as `told` says: the
 /// loop's own choice where the loop serves the push, so an engine where
 /// no extension declared an opcode tests nothing here either (design
-/// §5.8, #2287).
+/// §5.8).
 #[inline(never)]
 pub(crate) fn prologue<D: crate::observer::Telling>(
     req: &mut Request,

@@ -166,7 +166,7 @@ fn json_is_the_same_facts_as_one_object() {
     assert_eq!(value["ticket"], serde_json::Value::Null);
 }
 
-/// The runner every integration test runs the binary through (#3090): a
+/// The runner every integration test runs the binary through: a
 /// run held to an end it did not reach fails the test with its command
 /// line, how it ended and both streams, all a reader of the failure has.
 #[test]
@@ -208,7 +208,7 @@ fn track_lays_no_track_down() {
     assert!(!out.contains("\n  sync "), "{out}");
 }
 
-/// The ticket is a record on the branch, read by name (#30): a branch
+/// The ticket is a record on the branch, read by name: a branch
 /// with none says so, and nothing is guessed from a branch name that
 /// carries a number.
 #[test]
@@ -234,11 +234,11 @@ fn a_branch_names_its_ticket_by_record_and_never_by_its_name() {
     assert!(format!("{err:#}").contains("thirty"), "{err:#}");
 }
 
-/// #2719: with no `--root`, the binary measures the workspace it runs in,
-/// the nearest `Cargo.toml` holding `[workspace]` from its working
-/// directory up, else from `CARGO_MANIFEST_DIR` as cargo sets it; never
-/// the one it was compiled in, which a shared target directory can make
-/// another checkout's.
+/// With no `--root`, the binary measures the workspace it runs in, the
+/// nearest `Cargo.toml` holding `[workspace]` from its working directory
+/// up, else from `CARGO_MANIFEST_DIR` as cargo sets it; never the one it
+/// was compiled in, which a shared target directory can make another
+/// checkout's.
 #[test]
 fn with_no_root_the_binary_measures_the_workspace_it_runs_in() {
     let root = scratch("runs-in");

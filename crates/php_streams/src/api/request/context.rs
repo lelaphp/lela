@@ -1,7 +1,7 @@
 //! The stream `context`, php's `php_stream_context` with its notifier
 //! (`Z/main/streams/php_stream_context.h`, the `context` functions of
 //! `Z/main/streams/streams.c`), owned by the stream layer beside
-//! [`Stream`] as #1777 ruled: a `stream-context` resource holding the
+//! [`Stream`] as ruled 2026-10-04: a `stream-context` resource holding the
 //! options array and, where `notification` was set, the callable it
 //! calls. `FG(default_context)` is a resource the request's list owns,
 //! as php's is, named by an id in the layer's request state, since where

@@ -2,7 +2,7 @@
 //! starts, as php's `MINIT` keeps `phar_ce_PharException` and
 //! the `spl_ce_*` it includes (ADR-0005: engine state, immutable):
 //! a raise names its class by the identity, never by a name looked up as
-//! it throws (#3403).
+//! it throws.
 
 use php_ext::abi::{EngineState, Refusal, Start};
 use php_ext::attr::php_class;

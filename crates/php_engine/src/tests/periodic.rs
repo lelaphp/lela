@@ -1,4 +1,4 @@
-//! A periodic interrupt as an extension sees it (#1806; ADR-0010,
+//! A periodic interrupt as an extension sees it (ADR-0010,
 //! Threads): a sampling profiler's extension asks the request for an
 //! interrupt every period, its interrupt hook is served at the loop's
 //! next check and reads the periods elapsed, and nothing the engine ran
@@ -114,7 +114,7 @@ fn an_extension_is_interrupted_at_the_period_it_asked_for() {
 /// request's interrupt, leaving the request, its deadlines, its heap,
 /// which raises it at a delayed OOM, and the sampler's own clone; once the request is gone the sampler's clone is
 /// the only one left, and the engine's timer thread waits parked for the
-/// next request with nothing scheduled (#2541), joined only before a
+/// next request with nothing scheduled, joined only before a
 /// fork and at the engine's end.
 #[test]
 fn nothing_of_a_periodic_outlives_the_request_that_asked() {

@@ -1,7 +1,7 @@
 //! zlib's deflate, the platform's library linked through the `libz-sys`
 //! ext/zlib binds. php's archives carry libzip's deflate bytes, which
 //! follow the linked zlib's algorithm at the memLevel libzip passes to
-//! `deflateInit2`, `MAX_MEM_LEVEL`, 9 (#1657, #1651).
+//! `deflateInit2`, `MAX_MEM_LEVEL`, 9.
 
 use std::ffi::{c_char, c_int, c_uint, c_void};
 

@@ -948,7 +948,7 @@ pub(crate) fn html_in_html_document(node: Node) -> bool {
 }
 
 /// Private data laid over the data a document holds gives the old data
-/// up with the request at hand (#2132): served armed, a native that lays
+/// up with the request at hand: served armed, a native that lays
 /// a fresh `Private` over a modern document's leaves no block of the
 /// first standing, where a replace that dropped it left its 96-byte
 /// `php_dom_private_data`.

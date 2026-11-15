@@ -14,7 +14,7 @@
 //! §5.13).
 //!
 //! **Ownership, as design §5.1 decides it, in the words Mitchell settled
-//! for it on #1980: a native gives up exactly the owners it took and did
+//! for it 2026-10-05: a native gives up exactly the owners it took and did
 //! not hand on.** The kinds here are views:
 //! each is `Copy` and has no `Drop`, and copying a `Value` is php's
 //! `ZVAL_COPY_VALUE`, a bitwise copy that touches no refcount and
@@ -1363,7 +1363,7 @@ pub struct HeldProperties {
     thrown: Option<Thrown>,
     count: usize,
     /// What a walk reads the `IS_PTR` rows of a hooked table by, boxed
-    /// as the rare half of what a dumper keeps at every level (#3159).
+    /// as the rare half of what a dumper keeps at every level.
     pub(crate) hooked: Option<Box<crate::api::request::HookedRows>>,
 }
 
@@ -2671,7 +2671,7 @@ impl PhpRef {
     /// A sink: the value is an owner, the cell's from here, and a view is
     /// refused, so a value the caller holds no owner of never reaches the
     /// cell. The pinned code is documentation on the pinned stable rustdoc,
-    /// which checks only that the block fails (#2049); it fails with
+    /// which checks only that the block fails; it fails with
     /// `E0308`, an `Owner<Value>` expected and a `Value` found.
     ///
     /// ```compile_fail,E0308
@@ -2798,8 +2798,8 @@ pub use php_heap::zend_sort;
 
 /// The engine's one hash of a name as a `BuildHasher`, for a native's
 /// own `HashMap` keyed by a name compared byte for byte, as ext/date's
-/// `DATEG(tzcache)` is: every table by name hashes a name this way
-/// (#2157), and the face hands it on so an extension needs no hash crate
+/// `DATEG(tzcache)` is: every table by name hashes a name this way,
+/// and the face hands it on so an extension needs no hash crate
 /// of its own, which would be a package for a person to admit.
 pub use php_link::NameHasher;
 

@@ -1,10 +1,10 @@
-//! `permit --after`, the `PostToolUse` sensor over `harness.self`'s files
-//! (#625, #1516): `permit` takes their blobs before a `Bash` call, and
+//! `permit --after`, the `PostToolUse` sensor over `harness.self`'s files:
+//! `permit` takes their blobs before a `Bash` call, and
 //! `--after` puts back any the call's line can write and denies the call
 //! there: a shell redirection, `sed -i`, a program an interpreter runs from
 //! a file that names the path. A file that moved while the call ran and
 //! that its line cannot write, a person's edit or a binary that hides the
-//! path, is kept and named (#1895). Every test runs in a scratch
+//! path, is kept and named. Every test runs in a scratch
 //! repository holding copies of the harness's files; none writes this
 //! checkout's.
 #![cfg(tracked)]
@@ -58,10 +58,10 @@ fn permit(root: &Path, input: &str, args: &[&str]) -> Ran {
 }
 
 /// The call itself, as the `Bash` tool runs it, in `root`: by bash, not
-/// `sh`, which on Linux is dash and has no `pushd` (#3615). A commit the
-/// call makes takes its identity from the environment, so the command's
-/// words stay the call's and a runner with no global git identity (CI)
-/// commits as any other host does.
+/// `sh`, which on Linux is dash and has no `pushd`. A commit the call makes
+/// takes its identity from the environment, so the command's words stay
+/// the call's and a runner with no global git identity (CI) commits as any
+/// other host does.
 fn shell(root: &Path, command: &str) {
     let out = Command::new("bash")
         .args(["-c", command])
@@ -146,7 +146,7 @@ fn assert_denied(root: &Path, out: &str, path: &str, written: &str) {
     assert_eq!(reading.session, SESSION);
     assert!(reading.message.contains(path), "{}", reading.message);
     // Stamped over the file as it was put back: a snapshot taken after
-    // the put-back, not one from before the call ran (#2163).
+    // the put-back, not one from before the call ran.
     let now = xtask::key::Snapshot::disk(root).unwrap();
     assert_eq!(reading.key(), now.key(Path::new(path)).unwrap());
     let kept = reason
@@ -213,7 +213,7 @@ fn a_shell_redirection_into_the_pin_is_put_back_and_denied() {
 }
 
 /// A `Bash` call that exits non-zero gets `PostToolUseFailure` in place
-/// of `PostToolUse` (#2762): its record is spent and its write to a
+/// of `PostToolUse`: its record is spent and its write to a
 /// harness file put back all the same, and the answer names the event it
 /// answers, with what was put back as context and no `decision`.
 #[test]
@@ -261,8 +261,8 @@ fn a_call_that_exits_non_zero_is_settled_on_the_failure_event() {
 }
 
 /// The note `--after` prints and the reading it keeps for a file that
-/// changed while the call ran and that the call's line cannot write
-/// (#1895): kept as it stands, the call not denied, the path named.
+/// changed while the call ran and that the call's line cannot write:
+/// kept as it stands, the call not denied, the path named.
 fn assert_kept(root: &Path, out: &str, path: &str) {
     let hook: serde_json::Value = serde_json::from_str(out.trim()).unwrap_or_else(|e| {
         panic!("{e}: {out}");
@@ -296,9 +296,10 @@ fn a_persons_rows(root: &Path) -> String {
         .text()
 }
 
-/// #1895: a person pastes rows into the manifest while another session's
-/// call runs. The call's line names no harness file, so the change is not
-/// the call's to answer for: it stands, and the reading says it moved.
+/// Harness revision 97: a person pastes rows into the manifest while
+/// another session's call runs. The call's line names no harness file, so
+/// the change is not the call's to answer for: it stands, and the reading
+/// says it moved.
 #[test]
 fn a_persons_edit_made_while_the_call_runs_is_kept_and_named() {
     let root = scratch("person");
@@ -328,9 +329,9 @@ fn unmet(root: &Path) -> Vec<String> {
     .messages()
 }
 
-/// #1972: a change `--after` kept is one of `done`'s unmet conditions,
-/// naming the file, the blob it was before and the call it moved under,
-/// until a person commits it or restores it to `HEAD` (#1931). Once
+/// A change `--after` kept is one of `done`'s unmet conditions, naming the
+/// file, the blob it was before and the call it moved under, until a
+/// person commits it or restores it to `HEAD` (ruled 2026-10-05). Once
 /// settled its record is spent, so a later edit of the file is not read
 /// as the change.
 #[test]
@@ -368,8 +369,8 @@ fn a_kept_change_is_unmet_in_done_until_a_person_commits_or_restores_it() {
     assert_eq!(unmet(&root), Vec::<String>::new(), "the record is spent");
 }
 
-/// #2995: a kept file the call left at `HEAD`'s blob, as a `git switch`
-/// leaves one, is no record, so its note says `done` lists nothing.
+/// A kept file the call left at `HEAD`'s blob, as a `git switch` leaves
+/// one, is no record, so its note says `done` lists nothing.
 #[test]
 fn a_kept_change_back_at_head_says_done_lists_nothing() {
     let root = scratch("kept-at-head");
@@ -423,7 +424,7 @@ fn a_sed_in_place_on_the_pin_is_put_back_and_denied() {
 
 /// A built binary, its path held inside it where no word of the line and
 /// no file the line names spells it: the sensor cannot tell the binary's
-/// write from a person's, so it keeps the change and says so (#1895),
+/// write from a person's, so it keeps the change and says so,
 /// `done`'s condition 6 being what holds the manifest at the push.
 #[test]
 fn a_binary_whose_line_names_no_harness_file_is_kept_and_named() {
@@ -493,7 +494,7 @@ fn a_steer_call_that_adds_a_row_stands() {
 /// A steer that is one simple command among several on its line, the line
 /// run from main's checkout into a worktree by its leading `cd`, and the
 /// proposal named through a variable the line assigns, stands as the same
-/// steer alone does (#3631): the shape that was put back on t3632.
+/// steer alone does: the shape that was put back on t3632.
 #[test]
 fn a_steer_among_other_commands_on_its_line_stands() {
     let root = scratch("steer-among");
@@ -540,7 +541,7 @@ fn a_write_beside_steer_in_the_same_call_is_put_back() {
     assert_denied(&root, &out, "oracle.toml", "# beside");
 }
 
-/// `.claude/skills/**` is an ordinary file (#626): a program writing a
+/// `.claude/skills/**` is an ordinary file: a program writing a
 /// skill and the settings beside it in one call leaves the skill as it
 /// wrote it, and the settings, which the rule still scopes, are put back.
 #[test]
@@ -655,11 +656,11 @@ fn a_file_is_put_back_to_its_unstaged_edit_and_an_untracked_one_is_left() {
     assert!(!out.contains("scheduled_tasks"), "{out}");
 }
 
-/// #2247: a `Bash` write the person approved in the session, the change
-/// their `AskUserQuestion` answer carries as a diff (the `admit` case of
-/// `xtask/fixtures/approval/`), stands; one that writes anything else is
-/// put back as before. `--after` reads the transcript the hook names. The
-/// same line with no approval is denied before it runs (#625).
+/// Harness revision 91: a `Bash` write the person approved in the session,
+/// the change their `AskUserQuestion` answer carries as a diff (the `admit`
+/// case of `xtask/fixtures/approval/`), stands; one that writes anything
+/// else is put back as before. `--after` reads the transcript the hook
+/// names. The same line with no approval is denied before it runs.
 #[test]
 fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
     let approval = xtask::package_dir().join("fixtures/approval");
@@ -713,7 +714,7 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
             "{before}"
         );
         // An approval pending for a line is no change yet, so no audit
-        // entry is written before it runs (#2281).
+        // entry is written before it runs.
         let approvals = root.join("target/harness/permit/approvals");
         let entries = || -> Vec<serde_json::Value> {
             std::fs::read_dir(&approvals).map_or_else(
@@ -751,7 +752,7 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
                 .expect("the approved write is a permit reading");
             assert_eq!(reading.status, Status::Pass, "{}", reading.message);
             // What stands as approved is one entry of permit's audit
-            // record, written after the line ran (#2281).
+            // record, written after the line ran.
             let entries = entries();
             assert_eq!(entries.len(), 1, "{entries:?}");
             assert_eq!(entries[0]["file"], "docs/divergence.toml");
@@ -800,9 +801,9 @@ fn merging_with(root: &Path, path: &str, content: &str) {
     Repo::at(root).git(&["add", "--", path]);
 }
 
-/// #2597: a builder's call runs in its worktree, its shell starting in
-/// the main checkout and moved there by a leading `cd`, while another
-/// session's merge in the main checkout stages a person's approved
+/// Harness revision 130: a builder's call runs in its worktree, its shell
+/// starting in the main checkout and moved there by a leading `cd`, while
+/// another session's merge in the main checkout stages a person's approved
 /// registry. `--after` holds only the checkout the call ran in, so the
 /// main checkout's working tree is the merge's, byte for byte, whatever
 /// the line's words name.
@@ -834,8 +835,8 @@ fn a_call_in_a_worktree_leaves_the_main_checkout_s_merge_as_it_stands() {
     );
 }
 
-/// #2597: a call in the checkout where a merge stands, whose line can
-/// write the registry the merge staged, does not put it back: the
+/// Harness revision 130: a call in the checkout where a merge stands, whose
+/// line can write the registry the merge staged, does not put it back: the
 /// operation's commit carries it, and the change is kept and named.
 #[test]
 fn a_harness_file_a_merge_staged_is_not_put_back() {
@@ -881,11 +882,11 @@ fn merge_committing(root: &Path, path: &str, content: &str) {
     Repo::at(root).git(&["merge", "-q", "--no-ff", "-m", "Merge t1", "t1"]);
 }
 
-/// #3220, the fixture: another session's merge commit lands a row in the
-/// registry while a call whose line can write it runs in that checkout.
-/// History carries the change, so the file stands at `HEAD`'s blob, the
-/// call is not denied, and nothing is recorded: no reading, nothing
-/// `done` lists.
+/// Harness revision 164, the fixture: another session's merge commit lands
+/// a row in the registry while a call whose line can write it runs in that
+/// checkout. History carries the change, so the file stands at `HEAD`'s
+/// blob, the call is not denied, and nothing is recorded: no reading,
+/// nothing `done` lists.
 #[test]
 fn the_fixture_a_harness_file_a_merge_commit_lands_during_the_call_stands_at_head() {
     let root = scratch("landed");
@@ -929,9 +930,10 @@ fn the_fixture_a_harness_file_a_merge_commit_lands_during_the_call_stands_at_hea
     assert_eq!(unmet(&root), Vec::<String>::new());
 }
 
-/// #3220's other side: `HEAD` moves during the call for another file, and
-/// the call's line writes the pin back to `HEAD`'s blob over a person's
-/// edit. History never carried that change, so it is put back and denied.
+/// Harness revision 164, the other side: `HEAD` moves during the call for
+/// another file, and the call's line writes the pin back to `HEAD`'s blob
+/// over a person's edit. History never carried that change, so it is put
+/// back and denied.
 #[test]
 fn a_write_back_to_head_is_put_back_though_head_moved_for_another_file() {
     let root = scratch("restored");
@@ -946,9 +948,9 @@ fn a_write_back_to_head_is_put_back_though_head_moved_for_another_file() {
     assert_denied(&root, &out, pin, "");
 }
 
-/// #3220's third side: a call whose line writes the pin and commits it
-/// moves `HEAD` itself, so the history is the call's own and credits it
-/// with nothing: the write is put back and denied as before.
+/// Harness revision 164, the third side: a call whose line writes the pin
+/// and commits it moves `HEAD` itself, so the history is the call's own and
+/// credits it with nothing: the write is put back and denied as before.
 #[test]
 fn a_write_the_call_commits_itself_is_put_back_and_denied() {
     let root = scratch("self-commit");
@@ -960,9 +962,10 @@ fn a_write_the_call_commits_itself_is_put_back_and_denied() {
     assert_denied(&root, &out, pin, "# committed");
 }
 
-/// #2597: a call that writes a harness file in its own worktree, its
-/// shell moved there by a leading `cd`, is put back and denied there, in
-/// that checkout's store, and the main checkout is not touched.
+/// Harness revision 130: a call that writes a harness file in its own
+/// worktree, its shell moved there by a leading `cd`, is put back and
+/// denied there, in that checkout's store, and the main checkout is not
+/// touched.
 #[test]
 fn a_call_that_writes_its_own_worktree_s_pin_is_put_back_there() {
     let root = scratch("linked-write");
@@ -984,9 +987,9 @@ fn a_call_that_writes_its_own_worktree_s_pin_is_put_back_there() {
     assert_eq!(reading.status, Status::Fail, "{}", reading.message);
 }
 
-/// #2597: a record an older build took holds the hook's own checkout
-/// beside the one the call ran in; `--after` compares the call's alone,
-/// so the main checkout's registry, moved since that record, stands.
+/// Harness revision 130: a record an older build took holds the hook's own
+/// checkout beside the one the call ran in; `--after` compares the call's
+/// alone, so the main checkout's registry, moved since that record, stands.
 #[test]
 fn a_record_an_older_build_took_of_the_hook_s_checkout_is_not_compared() {
     let root = scratch("linked-older");
@@ -1117,12 +1120,12 @@ fn a_record_whose_checkout_has_gone_is_dropped() {
     assert!(!file.exists(), "the record is dropped");
 }
 
-/// #2607: a call that works in its worktree by a shape other than a plain
-/// leading `cd`, while a person edits the main checkout's registry. The
-/// line's words can name the main checkout's file where they are read
-/// there, so held in the main checkout the person's edit would be put
-/// back or named; held in the worktree the line works in, the main
-/// checkout is neither compared nor touched.
+/// Harness revision 132: a call that works in its worktree by a shape
+/// other than a plain leading `cd`, while a person edits the main
+/// checkout's registry. The line's words can name the main checkout's file
+/// where they are read there, so held in the main checkout the person's
+/// edit would be put back or named; held in the worktree the line works
+/// in, the main checkout is neither compared nor touched.
 fn a_call_in_its_worktree_leaves_the_main_checkout_alone(
     name: &str,
     shape: impl Fn(&str) -> String,
@@ -1169,13 +1172,13 @@ fn a_call_by_pushd_into_its_worktree_leaves_the_main_checkout_alone() {
     });
 }
 
-/// #2880, the coordinator's sequence through both hooks: a merge whose
-/// sides each append a row to the registry stops on the conflict, git's
-/// union of the three blobs is the proposal, `steer` writes it, and the
-/// merge is staged and committed. No call is denied, steer's write is
-/// steer's and stands, and the merge commits the union. The sequence runs
-/// in the merge worktree, the linked one on `staging`, where the merge
-/// queue makes every merge (#3622); main's checkout takes none.
+/// The coordinator's sequence through both hooks: a merge whose sides each
+/// append a row to the registry stops on the conflict, git's union of the
+/// three blobs is the proposal, `steer` writes it, and the merge is staged
+/// and committed. No call is denied, steer's write is steer's and stands,
+/// and the merge commits the union. The sequence runs in the merge
+/// worktree, the linked one on `staging`, where the merge queue makes
+/// every merge; main's checkout takes none.
 #[test]
 fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
     let root = scratch("steer-union");
@@ -1267,9 +1270,9 @@ fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
     );
 }
 
-/// #2880: a merge's conflicted registry is guarded as any file is. A line
-/// that writes the resolution itself, not through steer, has it put back
-/// to the conflict's markers, and the call is denied there.
+/// A merge's conflicted registry is guarded as any file is. A line that
+/// writes the resolution itself, not through steer, has it put back to the
+/// conflict's markers, and the call is denied there.
 #[test]
 fn a_conflicted_registry_written_beside_steer_is_put_back_to_its_markers() {
     let root = scratch("conflict-written");
@@ -1314,7 +1317,7 @@ fn steer_or_write(at: &Path) -> String {
 
 /// Where the checkout a steer ran in commits a manifest this build cannot
 /// read, and it is the checkout this build is asked about, `--after` says
-/// it could not judge and puts nothing back (#3631): the change is kept,
+/// it could not judge and puts nothing back: the change is kept,
 /// named, as one the sensor cannot tell.
 #[test]
 fn a_steer_this_build_cannot_judge_is_kept_and_said() {
@@ -1343,7 +1346,7 @@ fn a_steer_this_build_cannot_judge_is_kept_and_said() {
 
 /// Where a worktree the call ran in commits a manifest this build cannot
 /// read, `--after` hands the call to that worktree's own build, with the
-/// record it took, and prints what that build decides (#3631): here a
+/// record it took, and prints what that build decides: here a
 /// build that puts nothing back, and the steer's write stands.
 #[test]
 fn a_steer_in_a_worktree_this_build_cannot_read_is_handed_to_its_build() {
@@ -1392,7 +1395,7 @@ fn a_steer_in_a_worktree_this_build_cannot_read_is_handed_to_its_build() {
 
 /// Where this build is stale against the sources the checkout a steer ran
 /// in carries, `--after` refuses, exiting non-zero so the hook's next build
-/// judges, and leaves the record for it (#3631): main's release judge after
+/// judges, and leaves the record for it: main's release judge after
 /// a land moved main's sources past it, which put back a sanctioned steer.
 #[test]
 fn a_stale_build_leaves_a_steer_to_the_next_build() {
@@ -1426,7 +1429,7 @@ fn a_stale_build_leaves_a_steer_to_the_next_build() {
 // ------------------------------------- a linked worktree the session owns
 
 /// A linked worktree of `root` on `branch` that the test's session owns,
-/// as `xtask worktree add` or `own` records one (#3621); the tree that
+/// as `xtask worktree add` or `own` records one; the tree that
 /// holds it, and its path.
 fn owned_worktree(root: &Path, branch: &str) -> (Tree, std::path::PathBuf) {
     let base = Tree::new(&format!("permit-after-owned-{branch}")).unwrap();
@@ -1452,10 +1455,10 @@ fn heredoc(at: &Path) -> String {
     command
 }
 
-/// #3644 ruling 1, must-fail: in a linked worktree the session owns, a
-/// heredoc whose line names no harness file writes the manifest. It is put
-/// back, the call denied, and the denial names the blob the write is kept
-/// as.
+/// Harness revision 185, ruling 1, must-fail: in a linked worktree the
+/// session owns, a heredoc whose line names no harness file writes the
+/// manifest. It is put back, the call denied, and the denial names the blob
+/// the write is kept as.
 #[test]
 fn a_heredoc_write_in_a_worktree_the_session_owns_is_put_back_and_denied() {
     let root = scratch("owned-heredoc");
@@ -1466,9 +1469,10 @@ fn a_heredoc_write_in_a_worktree_the_session_owns_is_put_back_and_denied() {
     assert_denied(&wt, &out, "seams.toml", "# by a heredoc");
 }
 
-/// #3644 ruling 1, must-pass: the same write in main's checkout, though
-/// the session owns it, in a linked worktree no session owns, and in one
-/// another session owns, is kept as it stands and named, as before.
+/// Harness revision 185, ruling 1, must-pass: the same write in main's
+/// checkout, though the session owns it, in a linked worktree no session
+/// owns, and in one another session owns, is kept as it stands and named,
+/// as before.
 #[test]
 fn the_same_write_in_main_s_checkout_or_one_the_session_does_not_own_is_kept() {
     let root = scratch("owned-elsewhere");
@@ -1497,10 +1501,11 @@ fn the_same_write_in_main_s_checkout_or_one_the_session_does_not_own_is_kept() {
     }
 }
 
-/// #3644 ruling 4: a write that lands in a worktree the session owns while
-/// one of its calls runs, a call whose line cannot write it, is put back
-/// in that call, whichever call made it, and the denial names the call it
-/// was caught in and says the write may have come from a background call.
+/// Harness revision 185, ruling 4: a write that lands in a worktree the
+/// session owns while one of its calls runs, a call whose line cannot write
+/// it, is put back in that call, whichever call made it, and the denial
+/// names the call it was caught in and says the write may have come from a
+/// background call.
 #[test]
 fn a_write_caught_in_another_call_of_the_session_is_put_back_naming_a_background_call() {
     let root = scratch("owned-background");
@@ -1522,9 +1527,9 @@ fn a_write_caught_in_another_call_of_the_session_is_put_back_naming_a_background
     );
 }
 
-/// #3644 ruling 1 and #3622: a sanctioned steer in a linked worktree the
-/// session owns stands, as the coordinator's steer of a merge's union does
-/// in the merge worktree on `staging`.
+/// Harness revisions 183 and 185 (ruling 1): a sanctioned steer in a linked
+/// worktree the session owns stands, as the coordinator's steer of a
+/// merge's union does in the merge worktree on `staging`.
 #[test]
 fn a_steer_in_a_worktree_the_session_owns_stands() {
     let root = scratch("owned-steer");

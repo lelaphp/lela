@@ -6,7 +6,7 @@
 //! A property's hooks are its declaration's with what it inherits, as
 //! `ce->properties_info` holds them once linked, which the engine
 //! resolves ([`php_ext::call::property_hook`]); a hook is reflected as a
-//! `ReflectionMethod` named `$name::get` or `$name::set` (#427).
+//! `ReflectionMethod` named `$name::get` or `$name::set`.
 
 use php_ext::abi::{Instance, OrFalse, Passed, PropertyRead, PropertyTest, This, Union};
 use php_ext::attr::php_class;
@@ -607,8 +607,8 @@ impl ReflectionProperty {
     /// nothing holds the name, and whatever a class's handler serves in
     /// place of a slot, a DOM node's `@virtual` properties among them. A
     /// slot holds the declared default, which `object_properties_init` put
-    /// there when the object was made, an inherited property's included
-    /// (#419); a typed property with no default holds nothing and is php's
+    /// there when the object was made, an inherited property's included;
+    /// a typed property with no default holds nothing and is php's
     /// `Error` for a read before initialization. A `static` property is
     /// `zend_read_static_property_ex` over the class the reflector was
     /// asked about (`intern->ce`), whose fake scope is that class, and the
@@ -1904,7 +1904,7 @@ impl ReflectionClassConstant {
     /// ```
     ///
     /// A parent's private constant is not in the child's table, so the
-    /// child is not where it is found (#257, #388):
+    /// child is not where it is found:
     ///
     /// ```php
     /// class P { private const R = 2; }
@@ -2148,7 +2148,7 @@ impl ReflectionClassConstant {
     /// ```
     ///
     /// An inherited constant is the parent's declaration, so the comment is
-    /// the parent's and `$class` is the parent (#257, #388):
+    /// the parent's and `$class` is the parent:
     ///
     /// ```php
     /// class P { /** R */ protected const R = 2; }
@@ -2527,7 +2527,7 @@ impl ReflectionConstant {
     /// every class. `E_STRICT` is the one constant carrying an attribute
     /// here, as it is the one carrying one in php; a constant a program
     /// defined carries none until the compiler reads the `#[...]` written
-    /// on a `const` (#465).
+    /// on a `const`.
     ///
     /// ```php
     /// var_dump((new ReflectionConstant('E_STRICT'))->getAttributes());

@@ -901,7 +901,7 @@ pub(crate) fn must_not_be_empty(req: &mut Request, arg: u32) -> Thrown {
 /// Since 8.5.12 a conversion's buffer grows fallibly, so a needle whose UTF-8
 /// is past the memory limit is refused its growth, and the limit's fatal is
 /// raised as the call returns. The case crosses the limit where a new chunk
-/// is asked for, whose figure holds in any layout (#3442):
+/// is asked for, whose figure holds in any layout:
 ///
 /// ```php
 /// ini_set('memory_limit', '2M');

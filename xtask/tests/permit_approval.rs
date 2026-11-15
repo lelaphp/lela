@@ -1,4 +1,4 @@
-//! The person's approval at `permit` (#2247): a `harness.self` write the
+//! The person's approval at `permit`: a `harness.self` write the
 //! person approved through `AskUserQuestion` in the session is admitted,
 //! and every answer the model could have written is not. The cases are
 //! the directories under `xtask/fixtures/approval/`, each the hook's
@@ -156,7 +156,7 @@ fn entries(root: &Path) -> Vec<Value> {
 /// Each adapter reads its own evidence: the command hook the transcript,
 /// the function hook the records it read from the engine, `asked`. The
 /// change an approval admitted is one entry of the audit record `permit`
-/// writes (#2281), the approval whole, though both adapters judge the
+/// writes, the approval whole, though both adapters judge the
 /// call; a call denied writes none, and the hook's stdout stays in
 /// Claude Code's shape.
 #[test]

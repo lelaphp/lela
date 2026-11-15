@@ -1,4 +1,4 @@
-//! What a binary of the engine is built from (#3109): the paths cargo's
+//! What a binary of the engine is built from: the paths cargo's
 //! dep-info beside it names, `<binary>.d`, which is the list cargo decides
 //! a relink by. Two questions read it, and nothing else answers either:
 //!
@@ -14,9 +14,9 @@
 //!
 //! A binary with no dep-info of its own, none beside it or one naming
 //! another binary (a target directory copied from another checkout), is
-//! keyed over every crate directory, as every binary was before #3109,
-//! and held to every file under them. The crate directories are the
-//! manifest's ([`Layout`], #3207).
+//! keyed over every crate directory, as every binary was before harness
+//! revision 158, and held to every file under them. The crate directories
+//! are the manifest's ([`Layout`]).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -35,8 +35,8 @@ fn workspace() -> impl Iterator<Item = &'static str> {
 }
 
 /// What a binary with no dep-info is keyed over beside the crate
-/// directories: the key every run had before #3109, so a run kept then is
-/// found by it still.
+/// directories: the key every run had before harness revision 158, so a
+/// run kept then is found by it still.
 const UNLISTED: [&str; 3] = ["Cargo.toml", "Cargo.lock", "ops.toml"];
 
 /// What a binary is built from: the paths its dep-info names, or every

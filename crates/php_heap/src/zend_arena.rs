@@ -5,8 +5,7 @@
 //! `shutdown_compiler`. The runtime caches of functions and of real
 //! closures are carved from it (`init_func_run_time_cache_i`,
 //! `zend_create_closure_ex`), which is why its blocks, and only its
-//! blocks, are what `memory_get_usage()` sees of them (design §5.13,
-//! #2863).
+//! blocks, are what `memory_get_usage()` sees of them (design §5.13).
 //!
 //! It is not the compile's arena: `php_syntax::Arena` holds a compile's
 //! syntax tree and temporaries on the system allocator, the recorded

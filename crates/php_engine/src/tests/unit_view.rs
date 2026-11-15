@@ -1,5 +1,5 @@
-//! The tier's reads of what a request's epoch holds (#2950;
-//! `jit-design.md` §3.2, §4.1 *The owned view*, §5.3): the safepoint
+//! The tier's reads of what a request's epoch holds
+//! (`jit-design.md` §3.2, §4.1 *The owned view*, §5.3): the safepoint
 //! words of a held unit's op arrays, zero and shared by every request of
 //! the epoch, the sealed word of an op array no epoch holds, and
 //! [`UnitView`], which accepts what the epoch keeps, refuses what the

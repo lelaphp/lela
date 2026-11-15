@@ -6,7 +6,7 @@
 //! the add is an instrument and not a bare `git worktree add`:
 //!
 //! * `computed` trust is a person's grant (§11), and a grant covers every
-//!   repository under the granted path (#74, revision 18). The worktrees
+//!   repository under the granted path (revision 18). The worktrees
 //!   are laid down beside the clone ([`homes`], revision 56), so the grant
 //!   that covers them is the one over that directory, made once; the
 //!   local file is rendered here where it is, and where `computed`
@@ -27,12 +27,12 @@
 //!   clone-on-write copy where the volume supports one, so the registry
 //!   dependencies are blocks the two directories share and cargo compiles
 //!   the workspace's own crates alone, since a fresh checkout's files are
-//!   newer than the seeded fingerprints (§5, "Worktrees"; #245).
+//!   newer than the seeded fingerprints (§5, "Worktrees").
 //!   What it must not do is give two worktrees one `CARGO_TARGET_DIR`:
 //!   cargo keys a workspace member's artifact by its path under the
 //!   workspace root and judges the slot fresh by mtime, so a checkout
 //!   whose files predate another worktree's build would run that
-//!   worktree's binary (#251), where `built_root`, `built::judges` and
+//!   worktree's binary, where `built_root`, `built::judges` and
 //!   `permit` each rest on a binary that belongs to one checkout. So no
 //!   variable is set and no `.cargo/config.toml` is written; the seeding
 //!   is best-effort and a `cp -c` that cannot is one line and a cold start.
@@ -45,7 +45,7 @@
 //! no reading is written: the readings are the worktree's own, once an
 //! agent is in it.
 //!
-//! The session that lays the worktree down owns it (#3618 M1, #3621):
+//! The session that lays the worktree down owns it (harness revision 179):
 //! the add records it ([`crate::owner`]), so pre-commit and `permit`
 //! refuse another session's writes there. `xtask worktree own` records
 //! the owner of a checkout no add laid down, main's and the merge
@@ -53,7 +53,7 @@
 //! checkout is and refuses another session, which is what pre-commit and
 //! pre-merge-commit ask before anything else runs.
 //!
-//! The ticket the branch's work is for is the add's to record (#30):
+//! The ticket the branch's work is for is the add's to record:
 //! `--ticket` writes it on the branch, where the track module reads it by
 //! name, so a reader that asks whether the work of a branch is done need
 //! not be told the number. A branch laid down with none records none,
@@ -68,17 +68,17 @@
 //! removed, which keeps a merged agent's denials in the `permits` section
 //! the console reads (§4.2). The log alone, each reading into the store's
 //! log and index through the store's own append and rename, one line per
-//! write, so a retire during a run tears no line of either log (#56,
-//! #2164). The scope's files beside it stay with the worktree, each being a scope's latest run over a tree the main
+//! write, so a retire during a run tears no line of either log.
+//! The scope's files beside it stay with the worktree, each being a scope's latest run over a tree the main
 //! checkout does not have, and copying one in would hand `done` a reading
-//! that is fresh for nothing (§5, "Worktrees"; #35). What the log
+//! that is fresh for nothing (§5, "Worktrees"). What the log
 //! carries is found at the branch's merge in the index, by the tree each
 //! reading was taken over, so a pass over what the merge stages is not run again
-//! there (`Store::over`, #1252). The worktree's kept phpt runs
+//! there (`Store::over`). The worktree's kept phpt runs
 //! are carried into the main worktree's beside the log, each one main
 //! keeps none of: a run is keyed by the engine's tree and not by the
 //! checkout, so it is the same run wherever it was taken, and one main
-//! keeps already stays (#1268). A
+//! keeps already stays. A
 //! worktree with uncommitted work is a refusal after the append, since
 //! the worktree's copy is emptied once appended and the call that follows
 //! cannot count the same readings twice. The branch is kept, and the
@@ -346,7 +346,7 @@ pub fn whose(root: &Path, caller: Option<&SessionId>) -> Result<()> {
     if let Some(other) = owner::another(&checkout, caller)? {
         let caller = caller.map(SessionId::as_str).unwrap_or_default();
         bail!(
-            "{at} is session {other}'s and this is session {caller}: one session writes in a checkout, its owner (#3618 M1). Instead: work in your own worktree (`xtask worktree add`), or have {other} let it go with `xtask worktree own --release`"
+            "{at} is session {other}'s and this is session {caller}: one session writes in a checkout, its owner. Instead: work in your own worktree (`xtask worktree add`), or have {other} let it go with `xtask worktree own --release`"
         );
     }
     match (owner::of(&checkout)?, caller) {
@@ -430,7 +430,7 @@ fn append_log(dir: &Path, root: &Path) -> Result<bool> {
 /// The worktree's kept phpt runs carried into the main worktree's, which
 /// outlives it: `phpt --against` looks for a base's run in every worktree
 /// that stands ([`against::carry`]), so a run left here would go with the
-/// worktree (#1268). Each one main keeps none of is copied, and one it
+/// worktree. Each one main keeps none of is copied, and one it
 /// keeps already stays as it stood. What it did is said under `whose`.
 pub(crate) fn carry_runs(dir: &Path, whose: &str) -> Result<()> {
     let main = track::main_worktree(dir)?;
@@ -457,7 +457,7 @@ pub(crate) fn carry_runs(dir: &Path, whose: &str) -> Result<()> {
 /// Each of `builds`, `target/<build>` of the worktree, seeded from the
 /// clone's at `root` ([`seed_build`]), so the build that follows compiles
 /// the workspace's own crates and no dependency (harness-design.md §5,
-/// "Worktrees"; #245). Nothing beside them is copied: the worktree's
+/// "Worktrees"). Nothing beside them is copied: the worktree's
 /// `target/harness/` is its own from its first instrument. Best-effort: a
 /// clone with no such build, and a `cp -c` that fails, are one line and a
 /// cold start. Each seeded `xtask` binary is taken away too, so the one
@@ -498,7 +498,7 @@ fn seed(dir: &Path, root: &Path, whose: &str, builds: &[&str]) {
 /// command line as the link, so a `target/<build>` that is one, to a
 /// build directory on another volume say, would seed a link to the same
 /// directory: the worktree's build would relink `root`'s binaries, and
-/// `seed`'s removal of the seeded `xtask` would remove `root`'s (#4589). The source is `<from>/.`, which the path's resolution follows
+/// `seed`'s removal of the seeded `xtask` would remove `root`'s. The source is `<from>/.`, which the path's resolution follows
 /// through such a link, so the worktree's `target/<build>` is a directory
 /// of its own whatever `root`'s is. Across volumes clonefile refuses, and
 /// the worktree starts cold. The add, the phpt lane's base worktree and

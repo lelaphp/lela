@@ -1,5 +1,5 @@
 //! Every place the request's heap can refuse an allocation, driven to the
-//! refusal (#3199, out of #3162's reading of CVE-2026-109618). php leaves
+//! refusal (out of a reading of CVE-2026-109618). php leaves
 //! an allocation the memory limit refuses by a jump, and its request end
 //! then reads memory the refused path had published and not finished.
 //! Here the refusal is an `Err` passed up, so the question is the one the

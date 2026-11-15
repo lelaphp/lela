@@ -79,7 +79,7 @@ pub(crate) const INTERNED: u32 = gc::IMMUTABLE;
 /// What a string a [`Pending`] set lays carries beside it:
 /// `IS_STR_PERSISTENT`, allocated by `pemalloc`, and not yet
 /// `IS_STR_PERMANENT`, which [`Strings::publish`] sets as the set enters
-/// the table (#4656).
+/// the table.
 const PENDING: u32 = INTERNED | gc::PERSISTENT;
 
 /// What a string of a table carries: [`PENDING`]'s bits and
@@ -270,7 +270,7 @@ impl Str {
     /// so `substr` moves `memory_get_usage()` by that rounded up to its
     /// bin, a `run` of whole pages past 3072 bytes, and by nothing
     /// for a span of one byte, the interned character, or one that is the
-    /// whole string, which is the argument's own (#2661). A constant
+    /// whole string, which is the argument's own. A constant
     /// string is interned and its copy one more name for it, so neither
     /// moves it; a string a native makes, `strtoupper`'s or an integer's,
     /// is the request's. The program writes its first line
@@ -573,7 +573,7 @@ impl Str {
     /// is what lets one op array's constants be read by every request
     /// thread at once. What the interpreter does with a constant string
     /// on every `ECHO`, the same op array's constant read on every pass of
-    /// php's own loop, the one the bench of #156 runs; the pattern admits
+    /// php's own loop, the one the echo-loop bench runs; the pattern admits
     /// the one string of a thousand `dax` and nothing else:
     ///
     /// ```php
@@ -630,7 +630,7 @@ impl Str {
     /// the line that asked, as a refcount move on a freed block is
     /// ([`crate::gc::refuses_freed`]), and answers zero, so a stale read
     /// ends the request at the engine's next sensing point rather than
-    /// building a slice of the mark's length (#2051).
+    /// building a slice of the mark's length.
     #[must_use]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn len(&self) -> usize {
@@ -1230,7 +1230,7 @@ impl Strings {
     ///
     /// Each string and constant array of the set, a shadow among them,
     /// takes `IS_STR_PERMANENT`'s bit as it enters, the bit that says a
-    /// value is the table's ([`crate::FrozenZval::of`], #4656): laid
+    /// value is the table's ([`crate::FrozenZval::of`]): laid
     /// without it, a set's value is refused until it is published.
     pub fn publish(&mut self, mut pending: Pending) {
         for PendingString { s, class_cache, .. } in pending.take_strings() {
@@ -1447,7 +1447,7 @@ fn held_by_a_table(entries: &[(Key, Zval)], own: impl Fn(Zval) -> bool) -> Resul
 /// refused compile made never reach it. Each string is the system
 /// allocator's, laid down as the table would lay it but for
 /// `IS_STR_PERMANENT`, which it and each constant array take only as the
-/// set is published (#4656), and given back
+/// set is published, and given back
 /// once its last claim is and nothing kept it, or with the set where
 /// it is dropped unpublished.
 #[derive(Default)]
@@ -2172,8 +2172,8 @@ mod tests {
     }
 
     /// Each maker of a constant array a table keeps refuses a request's
-    /// string as a key and as an element, and lays nothing for it
-    /// (#4655): the table refuses a set's string until the set is
+    /// string as a key and as an element, and lays nothing for it:
+    /// the table refuses a set's string until the set is
     /// published, and a set refuses another set's string and array while
     /// it lays its own and the table's.
     #[test]

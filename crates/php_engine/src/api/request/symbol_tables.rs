@@ -970,7 +970,7 @@ impl Request {
     /// so this frees and serves nothing.
     pub(crate) fn destroy_symbol_table(&mut self) {
         // php's fast shutdown frees none of it, so no chunk it empties
-        // leaves the heap php's child keeps (#2940).
+        // leaves the heap php's child keeps.
         self.heap.fast_shutdown();
         if let Some(arr) = self.table_mut(TableId::GLOBAL) {
             for at in (0..arr.num_used()).rev() {

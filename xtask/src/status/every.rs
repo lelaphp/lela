@@ -1,4 +1,4 @@
-//! `--every` and `--log` (harness-design.md §4.6, #1745): a section that
+//! `--every` and `--log` (harness-design.md §4.6): a section that
 //! keeps one reading per scope renders every reading instead, in the log's
 //! order, picking none; from the store's log, or from a log it is handed,
 //! another store's or the published history. Under `--format jsonl` a row
@@ -95,7 +95,7 @@ pub(crate) struct Head {
     /// it records none.
     commit: Option<String>,
     /// The digest of the oracle pin the run was taken under, where the
-    /// reading records one (#1387).
+    /// reading records one.
     #[serde(skip_serializing_if = "Option::is_none")]
     recipe: Option<String>,
 }

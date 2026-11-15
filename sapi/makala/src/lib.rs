@@ -1,5 +1,5 @@
-//! makala, the production web server beside `php -S` (#2337), one crate
-//! under `sapi/` (ADR-0008 as amended by #2332): a host php does not ship,
+//! makala, the production web server beside `php -S`, one crate
+//! under `sapi/` (ADR-0008 as amended 2026-10-09): a host php does not ship,
 //! named for the caves where the Trill symbionts live between hosts, as
 //! the engine's compiled units live in one process while requests come
 //! and go.
@@ -12,7 +12,7 @@
 //! `Engine::serve`, one engine shared by every thread (design §5.14).
 //! Between them a bounded queue carries whole requests, and bounded
 //! channels carry each request's body, which the request reads as it runs
-//! (`Body::Stream`, #2338), and its response, which the host's sink writes
+//! (`Body::Stream`), and its response, which the host's sink writes
 //! as the request writes it. Nothing stays booted across requests: each
 //! starts fresh, as under php-fpm.
 #![forbid(unsafe_code)]
@@ -47,10 +47,11 @@ use php_sapi::Engine;
 
 use crate::options::Options;
 
-/// `sapi_module.name`: what `php_sapi_name()` answers (#2335).
+/// `sapi_module.name`: what `php_sapi_name()` answers (design §4.8,
+/// revision 131).
 pub const NAME: &str = "makala";
 
-/// `SERVER_SOFTWARE`, `makala/<version>` (#2335).
+/// `SERVER_SOFTWARE`, `makala/<version>`.
 pub const SERVER_SOFTWARE: &str = concat!("makala/", env!("CARGO_PKG_VERSION"));
 
 /// The host's `main`: the line read into its [`Options`], the TLS
@@ -58,7 +59,7 @@ pub const SERVER_SOFTWARE: &str = concat!("makala/", env!("CARGO_PKG_VERSION"));
 /// enabled set started, the listening sockets bound, the
 /// request threads started, and the connection side driven on this thread
 /// for as long as the process serves, until the drain SIGTERM begins
-/// has ended (#2344). The engine is the last to end, once the request
+/// has ended. The engine is the last to end, once the request
 /// threads have: where one is still in a request at the drain's
 /// deadline, the process ends around it, the engine's end never reached, as a
 /// php-fpm child killed at its master's timeout ends.
@@ -173,7 +174,7 @@ pub fn main() -> ExitCode {
 /// php-fpm: `include_path` is the build's `PHP_INCLUDE_PATH`, which
 /// `DEFAULT_INCLUDE_PATH` says, the engine's `.:` where no layout was
 /// named at its build and the pinned php-fpm's keg's PEAR directory there
-/// (#1371, #2704).
+/// (design §4.1, revision 60).
 ///
 /// ```php
 /// var_dump(get_include_path() === DEFAULT_INCLUDE_PATH, ini_get('include_path') === DEFAULT_INCLUDE_PATH);

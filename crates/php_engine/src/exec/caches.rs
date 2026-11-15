@@ -443,7 +443,7 @@ impl RuntimeCaches {
     /// The numbers of a unit that is gone handed out again, their caches
     /// emptied, as php frees a heap cache with its op array. In line in
     /// its two callers: an `eval` in a loop hands one number back each
-    /// time (#3051).
+    /// time.
     #[inline(always)]
     fn hand_back(&mut self, mut numbers: Vec<u32>) {
         // One push a number: an `eval`'s unit has one or a few, which a

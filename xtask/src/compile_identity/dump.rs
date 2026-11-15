@@ -8,13 +8,13 @@
 //! **Which compiler dumps.** A binary, one process per program under the
 //! same recipe as php: the engine's own, which honours php's dump flags,
 //! or the pinned oracle standing in as the lane's control. The harness
-//! links no compiler of its own (harness §8, revision 84; #2166).
+//! links no compiler of its own (harness §8, revision 84).
 //!
 //! **Why one program under one name.** php prints the name it was given
 //! into each block of the dump, so two programs under two names would
 //! differ there before an opline was compared. One program, under one
 //! name, the absolute path the process adapter runs a file by
-//! ([`oracle::run_by`], #331), in one directory, under one recipe: what
+//! ([`oracle::run_by`]), in one directory, under one recipe: what
 //! is left between the two dumps is the compiler.
 //!
 //! **What each binary folds from its own build.** Both compilers fold
@@ -28,7 +28,7 @@
 //! exactly that binary's own value appears in a string literal of its
 //! dump: the whole literal, `string("<PHP_BINARY>")`, or the part a
 //! folded concatenation took from it, `string("<PHP_BINARY> -S …")`
-//! ([`Folded`], as #2692 ruled). A registry row would accept the whole
+//! ([`Folded`], as ruled 2026-10-11). A registry row would accept the whole
 //! file, since the registry is looked up per file, and hide any later
 //! difference in it; the placeholder hides the value and nothing else, so
 //! a compiler that folds a value other than its own, or folds where php
@@ -132,7 +132,7 @@ impl<'a> Dumps<'a> {
 /// The engine's side of one file: its dump, or, where it finished none,
 /// the file's verdict, and never the lane's end (design §8). A dump past
 /// the recipe's limit, or one a signal ended, is the compiler's failure on
-/// the file as a wrong dump is, named (#699, #1069), and a binary that
+/// the file as a wrong dump is, named, and a binary that
 /// would not run at all is the file's bork; the rest of the corpus is
 /// judged either way.
 pub(super) fn engine_side(run: Result<Observation>) -> Result<Dumped, (Judgement, String)> {
@@ -259,7 +259,7 @@ const ASK: &str = r#"echo PHP_BINARY, "\0", PHP_BUILD_DATE;"#;
 
 /// The two values one binary folds from its own build where a program
 /// names `PHP_BINARY` or `PHP_BUILD_DATE`, as the binary itself says them:
-/// never computed or guessed by the lane (#2692, #2697).
+/// never computed or guessed by the lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Folded {
     /// `PHP_BINARY`: the path the binary runs from.

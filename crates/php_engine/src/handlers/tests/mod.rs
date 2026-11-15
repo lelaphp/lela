@@ -32,7 +32,7 @@ mod safepoints;
 mod writes;
 
 /// A `RETURN`, which a fixture's op array ends on so that no opline goes
-/// on past the last, as publication holds it to (#3998).
+/// on past the last, as publication holds it to.
 fn back() -> Opline {
     Opline {
         opcode: Opcode::Return,

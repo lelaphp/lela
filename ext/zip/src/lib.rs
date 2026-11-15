@@ -10,7 +10,7 @@
 //! read as its stream is read through libzip's layers ([`read`]), and
 //! written through them ([`codec`]), over pure-Rust ciphers and bzip2,
 //! and over the platform's libraries libzip links for deflate, LZMA, XZ
-//! and ZSTD ([`ffi`], the crate's one home of `unsafe`; #1657, #3529),
+//! and ZSTD ([`ffi`], the crate's one home of `unsafe`),
 //! driven as `zip_algorithm_xz.c` ([`xz`]) and `zip_algorithm_zstd.c`
 //! ([`zstd`]) drive them. The phpt subset is `php-src/ext/zip/tests`,
 //! through `xtask phpt --subset`.

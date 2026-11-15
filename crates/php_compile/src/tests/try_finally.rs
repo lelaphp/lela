@@ -82,7 +82,7 @@ fn a_return_inside_a_try_with_a_finally_calls_the_block_before_the_return() {
     .assert_eq(&unit.dump(&[]).text());
 }
 
-/// #421's programs under the oracle's `[regime.dump]`: a `break`
+/// These programs under the oracle's `[regime.dump]`: a `break`
 /// out of a `try` with a `finally` is the block's `FAST_CALL` before
 /// the `JMP`, and a `break 2` out of two is both blocks' `FAST_CALL`s
 /// innermost first, then the inner `foreach`'s `FE_FREE` flagged

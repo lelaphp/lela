@@ -1,4 +1,4 @@
-# The Linux oracle builds (#1782, #1889, #1891), laid by
+# The Linux oracle builds, laid by
 # `scripts/oracle-build.py build linux-<arch> <variant>`, which passes every
 # argument below and the context: the pinned tag as `git archive` writes it,
 # the configure line it read off the pinned oracle, and CI's package list.
@@ -13,8 +13,8 @@
 # `build` lays the tree at the path every platform builds at (the recipe's
 # BUILD, /tmp/dax-php-oracle, spelled here as there) and installs
 # `php` and `php-fpm` at the variant's prefix, where a runner takes them out
-# of the image (#1948; php-fpm for the bench's baseline, #3385, #3774),
-# with runtime.txt, the packages that ship the libraries they link (#3825).
+# of the image (php-fpm for the bench's baseline), with runtime.txt, the
+# packages that ship the libraries they link.
 ARG BASE
 FROM ${BASE} AS deps
 ARG SNAPSHOT
@@ -71,7 +71,7 @@ RUN set -eu; \
     "$@" make install-fpm
 # The runtime packages the build links, one per line beside the tree: the
 # package that ships each library `ldd` resolves for php and php-fpm, which
-# a host running them outside the image installs (the bench job, #3825).
+# a host running them outside the image installs (the bench job).
 # Taken from the binaries, not typed beside the list above, so a flag that
 # links another library names its package with no second list to drift. A
 # library `ldd` cannot find fails the build. Where ldd's path is not the one

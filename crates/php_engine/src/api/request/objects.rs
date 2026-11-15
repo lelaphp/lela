@@ -1051,7 +1051,7 @@ impl Request {
     /// answers a function (`dtor_obj`, `clone_obj`, `current_place`,
     /// `unserialize`) serves when the function is called, which a debug
     /// build tags as that extension's as [`crate::served`] tags the slots
-    /// that serve code (#2113). A release build serves it as it stands.
+    /// that serve code. A release build serves it as it stands.
     pub(crate) fn serve_as_table<T>(
         &mut self,
         class: ClassId,
@@ -1670,7 +1670,7 @@ impl Request {
     /// The two objects' property tables as `rebuild_object_properties`
     /// lays them down, the left one's first; the fatal where the heap
     /// cannot. A call of its own, so a fatal's handling is off the stack
-    /// of a nest of objects compared level by level (#3159).
+    /// of a nest of objects compared level by level.
     #[inline(never)]
     fn property_tables(
         &mut self,

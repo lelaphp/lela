@@ -77,9 +77,9 @@ enum Key<'a> {
 ///
 /// The count is over the compiler's oplines, so a site a pass before
 /// pass 11 drops or merges keeps its slot here, eight bytes more of a
-/// bound closure's cache than php's: a by-design divergence (#3223,
-/// landed by #3232). The CFG pass drops the calls after a `return`, in
-/// the third closure; the engine reads `400 416 408 400`:
+/// bound closure's cache than php's: a by-design divergence (the row
+/// `witness:db0e46b504…`). The CFG pass drops the calls after a `return`,
+/// in the third closure; the engine reads `400 416 408 400`:
 ///
 /// ```php
 /// $src = '<?php return [function () { new stdClass; }, function () { new stdClass; abs(-1); floor(1.5); ceil(1.5); }, function () { new stdClass; return 1; foo(); bar(); }, function () { new stdClass; strlen("abc"); }];';

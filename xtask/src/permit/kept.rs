@@ -1,5 +1,5 @@
 //! The changes to `harness.self`'s files that `permit --after` kept, and
-//! `done`'s backstop over them (#1931, #1972). A file that moved while a
+//! `done`'s backstop over them. A file that moved while a
 //! `Bash` call ran, and that the call's line cannot be read to write, is
 //! kept as it stands, since a person's edit made while a call runs is lost
 //! by putting it back ([`super::after`]). That leaves a change no one
@@ -37,7 +37,7 @@ pub(crate) struct Kept {
 
 impl Kept {
     /// The file, relative to its checkout: the scope `done`'s typed list
-    /// gives the item (#3494).
+    /// gives the item.
     pub(crate) fn path(&self) -> &str {
         &self.path
     }
@@ -52,7 +52,7 @@ impl std::fmt::Display for Kept {
             f,
             "harness.self: {path} changed while `{}` ran and was kept, its line not being one \
              that writes it; {}; a person commits it or restores it to HEAD \
-             (`git checkout HEAD -- {path}`) (harness §4.4, #1931)",
+             (`git checkout HEAD -- {path}`) (harness §4.4)",
             self.call,
             before_the_call(self.was.as_deref())
         )

@@ -4,7 +4,7 @@
 //! `internal_functions.c`'s order, each native's arities in its
 //! `frameless_function_infos_<name>` order, and none for an alias. A
 //! `FRAMELESS_ICALL_*` carries its row in `extended_value`, so a row out
-//! of php's place is a unit whose oplines are not php's (#2673).
+//! of php's place is a unit whose oplines are not php's.
 
 use php_ext::test::Engine;
 

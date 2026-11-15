@@ -16,7 +16,7 @@ fn the_extension_is_loaded() {
 /// `current()`, `key()` and the movers over an element read the table
 /// the `(array)` cast builds of its children, as php reads the one
 /// `sxe_get_properties` keeps on the object, and give it up once read:
-/// armed, the request ends with no block of its heap held (#2081).
+/// armed, the request ends with no block of its heap held.
 #[cfg(debug_assertions)]
 #[test]
 fn the_pointer_natives_over_an_element_give_up_the_table_they_read() {
@@ -34,7 +34,7 @@ echo @current($x), @key($x), @next($x), @reset($x), @end($x), @prev($x), "\n";"#
 /// php's is: the object counts it and frees it with itself, so no tree
 /// is left uncounted. `simplexml_load_string` gives its object up with
 /// the throw pending, the destructor reading the tree's root, and a
-/// constructor called again stands for the new tree (#3829). The
+/// constructor called again stands for the new tree. The
 /// request leak sensor does not see libxml2's allocations; the
 /// destructor's read and the name are what count the tree.
 #[test]

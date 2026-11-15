@@ -1,6 +1,6 @@
 //! `--REDIRECTTEST--`: a test of one subset whose section names another
 //! directory's tests and the environment they run in, as each PDO driver's
-//! `common.phpt` runs `ext/pdo/tests` under its own DSN (#814). Read as
+//! `common.phpt` runs `ext/pdo/tests` under its own DSN. Read as
 //! run-tests.php reads it (run-tests.php:2202-2238): the section is PHP
 //! that returns `ENV` and `TESTS`, evaluated where `__DIR__` is the root of
 //! the tree the subset stands in, as it is run-tests.php's own; each test of
@@ -39,7 +39,7 @@ const VIA: &str = " via ";
 
 /// Whether `keys`, the verdicts a target kept, hold every test of the set
 /// the redirecting test keyed `by` ran, as the set stands in `subset`'s
-/// tree now (#1830): the tests kept through it, each keyed `<test> via
+/// tree now: the tests kept through it, each keyed `<test> via
 /// <by>` ([`Redirect::id`]), name the set's directory as the deepest one
 /// they share, and each `.phpt` there ([`set_files`]) is one of them. A set
 /// whose tests all stand in one directory of a deeper one is read as that

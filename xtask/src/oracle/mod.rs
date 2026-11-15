@@ -16,8 +16,8 @@
 //! the tests that resolve a subset ask and never read off the pin
 //! themselves; [`Promise`] is what a
 //! runner says this machine has of the pin, so a test that would skip for
-//! a fact the machine has not fails instead where the fact was promised
-//! (#38); and [`expect`] is how an expectation that is a pattern rather
+//! a fact the machine has not fails instead where the fact was promised;
+//! and [`expect`] is how an expectation that is a pattern rather
 //! than bytes is met, which `verdict` takes as the caller's match.
 //!
 //! The version, the digest and the path are values of the pin and appear in
@@ -68,21 +68,21 @@ use crate::reading::joined;
 use crate::scratch::{self, Tree};
 
 /// The environment variable that names the pinned php-src tree on this
-/// machine, consulted ahead of the pin's `[source].path` (#36). The name
+/// machine, consulted ahead of the pin's `[source].path`. The name
 /// is upstream's own, what `run-tests.php:179` at the tag reads for the
 /// same tree, and it is stated here and nowhere else: the messages print
 /// it from here, a test hands its value to [`Pin::on_this_machine`], and
-/// a runner that provisions the tree sets it (#37). The location, alone
+/// a runner that provisions the tree sets it. The location, alone
 /// among the pin's facts, is machine-local; the tag, the commit and the
 /// file count are the file's.
 pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
 
 /// The environment variable a runner sets to say what of the pin this
-/// machine has (#38): a whitespace-separated list of the words
+/// machine has: a whitespace-separated list of the words
 /// [`Promise::word`] gives, `tree` for the pinned php-src, `oracle` for
 /// the pinned php, `mysql` for the `MySQL` server of
-/// `ci/mysql/compose.yaml` (#3084), `locale` for the locales the tests
-/// name and `main-stack` for a main thread whose size reads (#3180). A
+/// `ci/mysql/compose.yaml`, `locale` for the locales the tests
+/// name and `main-stack` for a main thread whose size reads. A
 /// test that would skip for a fact the machine has not, saying so on
 /// stderr, fails instead where the fact was promised, naming what it
 /// looked for; so a runner whose provisioning broke turns red rather
@@ -90,11 +90,11 @@ pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
 /// tests that cannot depend on xtask, in
 /// `crates/php_compile/tests/support/skip.rs`; the workflow reads it,
 /// beside [`TREE_VARIABLE`], off `xtask status --section oracle` and sets
-/// it under that name (#36).
+/// it under that name.
 pub const PROMISE_VARIABLE: &str = "XTASK_PROMISED";
 
 /// The environment variable `xtask test` sets for each test executable it
-/// runs, to a file of that executable's own (#3085): a test that skips
+/// runs, to a file of that executable's own: a test that skips
 /// for a fact this machine did not promise appends `<test>\t<word>` to
 /// it, the test named after the thread libtest runs it on, so the reading
 /// counts the tests that skipped. Unset, as under a bare `cargo test`,
@@ -115,7 +115,7 @@ pub enum Promise {
     Oracle,
     /// The `MySQL` server of `ci/mysql/compose.yaml` on `127.0.0.1:3306`,
     /// which the tests of `ext/mysqli` and `ext/pdo_mysql` run against
-    /// through `MysqlServer::with` (#3084).
+    /// through `MysqlServer::with`.
     Mysql,
     /// Every locale `ext/standard`'s tests name, which CI generates.
     Locale,
@@ -144,7 +144,7 @@ impl Promise {
         }
     }
 
-    /// What every guarded test asks (#38): `found` when it is, and
+    /// What every guarded test asks: `found` when it is, and
     /// otherwise `None` after saying so on stderr, as the tests skip
     /// today, unless this machine promised the fact through
     /// [`PROMISE_VARIABLE`], in which case the error names what was
@@ -249,19 +249,19 @@ pub struct Pin {
     #[serde(default)]
     pub regime: BTreeMap<String, Regime>,
     /// `[sapi]`: the oracle's other hosts beside `php`, pinned from the
-    /// same keg (design §1, #1161); absent until a person writes the row.
+    /// same keg (design §1); absent until a person writes the row.
     #[serde(default)]
     pub sapi: Sapi,
     /// `[variant.<name>]`: the oracle's builds with flags of their own,
     /// each pinned per platform, which a `[[crate]]` row names to run its
-    /// lanes under (#1782); absent until a person writes one.
+    /// lanes under; absent until a person writes one.
     #[serde(default)]
     pub variant: BTreeMap<String, Variant>,
     /// `[fastcgi]`: the HTTP-to-FastCGI mapping `[sapi] fpm` is driven
-    /// under for a host php does not ship (#2334); [`Pin::fastcgi`].
+    /// under for a host php does not ship; [`Pin::fastcgi`].
     fastcgi: Option<Mapping>,
     /// `[closure]`: the Homebrew kegs the pinned binaries load, each at
-    /// its version (#2657), held beside the digest. While the pin records
+    /// its version, held beside the digest. While the pin records
     /// none, nothing the binaries load is held.
     pub(crate) closure: Option<closure::Closure>,
     /// How many times the digest was asserted through this pin; not a
@@ -273,12 +273,12 @@ pub struct Pin {
     digest: String,
     /// What parses but does not validate across the file's tables, each
     /// refusal's text: set by [`Pin::parse`], and what [`Pin::defects`]
-    /// says (#3618 ruling 4).
+    /// says (ruling 4 of 2026-10-30).
     #[serde(skip)]
     defects: Vec<String>,
     /// The command every program's binary is run under, before it and its
     /// arguments: none from the file, and `unshare` for a System V subset
-    /// on Linux (#1482), set by [`Pin::wrapped`].
+    /// on Linux, set by [`Pin::wrapped`].
     #[serde(skip)]
     wrapper: Vec<String>,
 }
@@ -301,7 +301,7 @@ fn digest(text: &str) -> Result<String> {
 /// `sapi/cgi`, `sapi/fpm` and `sapi/phpdbg` (`get_binary`, run-tests.php at
 /// the tag; php-fpm by `FPM\Tester::findExecutable`), each by path and
 /// digest as `[oracle]` pins `php`. What asserts them before a run that
-/// hosts a test through them is #1184's.
+/// hosts a test through them is `Oracle::host_asserted`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sapi {
@@ -380,7 +380,7 @@ impl Clone for Asserted {
 pub struct Binary {
     pub version: String,
     /// The Homebrew formula the binary's keg is poured from, `php` where
-    /// the pin names none (#4383): what `scripts/ci/pinned-php.sh` pours,
+    /// the pin names none: what `scripts/ci/pinned-php.sh` pours,
     /// and the keg [`Pin::defects`] holds the pinned paths to. A
     /// variant's binary is built and not poured, and keeps the main
     /// oracle's.
@@ -421,7 +421,7 @@ impl Binary {
 
     /// Why no program can run under this binary on this machine, none where
     /// one can: what a lane's skip says for want of the oracle, the path it
-    /// looked at, or the platform a variant pins no build for (#1890).
+    /// looked at, or the platform a variant pins no build for.
     pub fn absent(&self) -> Option<String> {
         if let Some(why) = &self.unpinned {
             return Some(why.clone());
@@ -441,7 +441,7 @@ impl Binary {
     }
 
     /// What a reading taken under this binary adds to its message: the
-    /// variant it was read under, nothing for the main oracle (#1890).
+    /// variant it was read under, nothing for the main oracle.
     pub(crate) fn read_under(&self) -> Option<String> {
         self.variant
             .as_ref()
@@ -467,7 +467,7 @@ pub struct Source {
     /// Where the file says the tree is on the maintainer's machine, where
     /// it says so at all: the place [`Source::tree`] tries after
     /// [`TREE_VARIABLE`], so a pin without it loads and names the tree by
-    /// the variable alone (#4260); stated by [`Source::path`] for the
+    /// the variable alone; stated by [`Source::path`] for the
     /// renderer.
     path: Option<PathBuf>,
     pub phpt_files: u64,
@@ -504,15 +504,15 @@ impl Source {
     /// [`TREE_VARIABLE`] names when it is one, else the pin's path when the
     /// pin states one and it is one, held to the pin's commit. The one
     /// answer the phpt runner and the tests that resolve a subset take, so
-    /// the location, alone among the pin's facts, is machine-local (#36).
+    /// the location, alone among the pin's facts, is machine-local.
     /// The variable's value is read as written, but for a leading `~/` or
     /// `$HOME/`, which is the home directory: Claude Code passes a
     /// setting's `env` value with no shell between, and nothing else in
-    /// it is expanded (#4260). An absent tree is an error naming every
+    /// it is expanded. An absent tree is an error naming every
     /// place tried, so a runner's failure reads as an unset variable and
     /// not as a path that could never have existed there. A tree that is
     /// a checkout at another commit is refused naming both revisions and
-    /// is never passed over for the other place (#37): a corpus at the
+    /// is never passed over for the other place: a corpus at the
     /// wrong revision measures the wrong thing, more quietly than no
     /// corpus at all. A tree that is no checkout, a tarball unpacked at
     /// the tag, states no commit and is taken at its word.
@@ -561,7 +561,7 @@ impl Source {
 
 /// `value` with a leading `~/` or `$HOME/` read as this process's home
 /// directory, as [`expanded`] reads it: how a variable that names a place
-/// on this machine is read, [`TREE_VARIABLE`] and the rig's (#4367).
+/// on this machine is read, [`TREE_VARIABLE`] and the rig's.
 pub(crate) fn at_home(value: &Path) -> PathBuf {
     let home = std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
@@ -572,7 +572,7 @@ pub(crate) fn at_home(value: &Path) -> PathBuf {
 /// `value` with a leading `~/` or `$HOME/` read as `home`, and taken as
 /// written otherwise: `x~/y`, `$HOMEX/y`, a bare `~` and any value where
 /// `home` is unknown are literal, as no shell stands between a setting
-/// and the variable to expand anything else (#4260).
+/// and the variable to expand anything else.
 fn expanded(value: &Path, home: Option<&Path>) -> PathBuf {
     let bytes = value.as_os_str().as_encoded_bytes();
     let lead = ["~", "$HOME"].into_iter().find(|lead| {
@@ -635,8 +635,8 @@ impl Source {
 
     /// The files the pinned tree at `tree` holds, relative to it, as the
     /// tree is held to the pin: in a checkout, the files git tracks there,
-    /// so what a run or a person left standing in it is not the pin's
-    /// (#1183); in a tree that is no checkout, every file, taken at its
+    /// so what a run or a person left standing in it is not the pin's;
+    /// in a tree that is no checkout, every file, taken at its
     /// word as its commit is.
     pub(crate) fn files(tree: &Path) -> Result<Vec<PathBuf>> {
         if checkout(tree) {
@@ -696,7 +696,7 @@ impl Recipe {
     /// the run's own directory ([`run_dir`]), and the directory such a
     /// value names is laid down the first time it is named, with an empty
     /// `.php_history` in the one `HOME` names, so no program reaches the
-    /// user's own home or temporary directory (#1705, #1730).
+    /// user's own home or temporary directory.
     pub(crate) fn environment(&self) -> Result<BTreeMap<String, String>> {
         let mut env = self.env.clone();
         for (name, value) in &mut env {
@@ -720,7 +720,7 @@ impl Recipe {
 }
 
 /// What a value of `[recipe.env]` names the run's own directory by, as a
-/// test's `--ENV--` names the scratch one `{TMP}` (#1730).
+/// test's `--ENV--` names the scratch one `{TMP}`.
 pub(crate) const RUN: &str = "{RUN}";
 
 /// The run's own directory, one per harness process: a scratch tree made
@@ -766,7 +766,7 @@ pub struct Normalise {
     pub scratch_token: String,
     /// The token that stands where the digits of `extension #<digits>`
     /// stood, the module's load number in `php --re`'s first line, which
-    /// is the oracle's build order and never the bundle's (#317). Absent
+    /// is the oracle's build order and never the bundle's. Absent
     /// from the pin, the number is compared as any other byte.
     pub extension_number_token: Option<String>,
 }
@@ -774,7 +774,7 @@ pub struct Normalise {
 /// `[regime.<name>]`: what a run under the regime is handed beyond the
 /// recipe, each after the recipe's own: `ini`, as `-d` after the recipe's
 /// ini, and `args`, after the recipe's args, for what no ini setting
-/// reaches, as php's `-e` reaches `ZEND_COMPILE_EXTENDED_INFO` (#1780). A
+/// reaches, as php's `-e` reaches `ZEND_COMPILE_EXTENDED_INFO`. A
 /// regime names either or both, and one that names neither is the recipe.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -785,7 +785,7 @@ pub struct Regime {
     pub args: Vec<String>,
 }
 
-/// What a regime's line names the workspace root by (#1634): a file of
+/// What a regime's line names the workspace root by: a file of
 /// the workspace a regime hands a host, as `[regime.ffi-preload]` hands
 /// `opcache.preload` one, stands in the pin as `{workspace}/<path>`, and
 /// [`Pin::load`] writes the root in, so the oracle's run and the engine's
@@ -819,7 +819,7 @@ impl Regime {
 
 /// The one argument of php's command line an engine linked into the
 /// harness takes, as every host reads it: `-e`, which a host hands its
-/// engine's builder as extended info (#1780, #1822).
+/// engine's builder as extended info.
 pub(crate) const EXTENDED_INFO: &str = "-e";
 
 /// One or more regimes as an adapter with no command line takes them,
@@ -829,7 +829,8 @@ pub(crate) const EXTENDED_INFO: &str = "-e";
 /// [`EXTENDED_INFO`] and nothing else. Any other argument is refused,
 /// since it reaches a binary's command line and no linked engine, and
 /// dropping it from one side of a comparison alone is the flag
-/// swallowed silently #1780 rejects. The caller names the regime.
+/// swallowed silently that the ruling of 2026-10-04 rejects. The caller
+/// names the regime.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Linked {
     pub(crate) ini: Vec<String>,
@@ -907,7 +908,7 @@ impl Pin {
     /// `[recipe.env]` exports it to the programs it runs, as
     /// run-tests.php exports the binary under test. No digest is asserted
     /// at that one, so a bump that left it behind, as the last left the
-    /// hosts (#3374), would run the keg before it, which stays installed.
+    /// hosts, would run the keg before it, which stays installed.
     fn binaries(&self) -> Vec<(&'static str, &Path)> {
         let hosts = [
             ("[sapi].cgi.path", &self.sapi.cgi),
@@ -927,16 +928,16 @@ impl Pin {
 
     /// What parses in the pin but does not validate, a cross-file check's
     /// refusal each: the instruments that read the pin refuse with it, and
-    /// the rest judge by what loaded (#3618 ruling 4).
+    /// the rest judge by what loaded (ruling 4 of 2026-10-30).
     pub fn defects(&self) -> &[String] {
         &self.defects
     }
 
     /// The digest of the pin's values, every section's and none of its
-    /// comments, leaving out each build's [`Provenance`] and nothing else
-    /// (#2969): what a reading taken under the oracle's recipe records, so
+    /// comments, leaving out each build's [`Provenance`] and nothing else:
+    /// what a reading taken under the oracle's recipe records, so
     /// a change to the recipe, its environment or a binary stales it as a
-    /// change to its crate's tree does (#1387), and a record of what a
+    /// change to its crate's tree does, and a record of what a
     /// binary was made from does not. Computed by [`digest`] and nowhere
     /// else.
     pub fn digest(&self) -> &str {
@@ -954,7 +955,7 @@ impl Pin {
 
     /// The pin with every program run under `wrapper`, a command that ends
     /// in the binary and its arguments, as `unshare --ipc --` runs one in a
-    /// namespace of its own (#1482). The digest is the file's still: what
+    /// namespace of its own. The digest is the file's still: what
     /// the reading records is the recipe, and the wrapper is the run's.
     #[must_use]
     pub(crate) fn wrapped(mut self, wrapper: Vec<String>) -> Pin {
@@ -966,7 +967,7 @@ impl Pin {
     pub fn fastcgi(&self) -> Result<&Mapping> {
         self.fastcgi
             .as_ref()
-            .context("the pin carries no [fastcgi] mapping (#2334)")
+            .context("the pin carries no [fastcgi] mapping")
     }
 
     /// The regime by name; an unknown name is refused beside the known ones.
@@ -980,7 +981,7 @@ impl Pin {
     }
 
     /// The pin a crate's lanes run under where its row names the oracle
-    /// variant `name` (#1782): this pin with the variant's build for this
+    /// variant `name`: this pin with the variant's build for this
     /// machine's [`Platform`] standing in for `[oracle]`'s binary, so every
     /// lane, adapter and digest assertion reads it as it reads the main
     /// oracle. The recipe is the main oracle's, as the variant's configure
@@ -1097,7 +1098,7 @@ impl Pin {
 /// What `run` executes: a snippet, written to the recipe's `script_name` with its
 /// preamble and run by that name, or a file that already is a program, run
 /// from its directory by its absolute path, as upstream's runner hands a
-/// test's program to php (#331).
+/// test's program to php.
 #[derive(Debug, Clone, Copy)]
 pub enum Program<'a> {
     Snippet(&'a str),
@@ -1106,7 +1107,7 @@ pub enum Program<'a> {
     /// `CLEAN`: run as a file is, and what it wrote left with the test's
     /// directory as it printed it, since run-tests.php matches a test's
     /// expectation against the raw bytes and an `EXPECTF` asks for text
-    /// inside that directory, `%s%etests` (#1089). A snippet's directory
+    /// inside that directory, `%s%etests`. A snippet's directory
     /// and a file's are the pin's token; a test's is not.
     Beside(&'a Path),
     /// No program: an empty word where its path goes, as run-tests.php
@@ -1127,8 +1128,8 @@ pub struct Observation {
 }
 
 /// How a process ended: the status it exited with, or the signal that
-/// ended it, which a lane names where a binary died (#1069), and a phpt
-/// run keeps where its program died (#4130), as `{"signal":11}` or
+/// ended it, which a lane names where a binary died, and a phpt
+/// run keeps where its program died, as `{"signal":11}` or
 /// `{"status":139}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1164,7 +1165,7 @@ impl fmt::Display for Ended {
 /// returns it as its error, so a caller that has a verdict for it reads it
 /// with `downcast_ref` and every other caller's run ends as before: the phpt
 /// lane's is that test's `fail`, since a hang is the engine's failure on the
-/// test as a wrong answer is (#691), and the lane goes on to the next.
+/// test as a wrong answer is, and the lane goes on to the next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PastLimit {
     pub(crate) binary: PathBuf,
@@ -1235,7 +1236,7 @@ impl Running<'_> {
 /// program, and what the run carries over the recipe. Each field past the
 /// program ends its rustdoc in one of harness-design.md §4.3's two groups,
 /// what a `.phpt` section adds or what no section gives, and §4.3 renders
-/// them from here (`status --section invocation`, #1319). Every field past
+/// them from here (`status --section invocation`). Every field past
 /// the program is empty for a witness, which is why `run` takes none of
 /// them.
 #[derive(Debug, Clone)]
@@ -1248,7 +1249,7 @@ pub struct Invocation<'a> {
     /// Each one's args come after the recipe's and the regimes' before it,
     /// and each one's ini after the recipe's and the regimes' before it,
     /// so a lane composes the rows a person wrote rather than a row of its
-    /// own (`compile-identity` dumps under `dump` and one more, #1822).
+    /// own (`compile-identity` dumps under `dump` and one more).
     ///
     /// No section gives it.
     pub regimes: &'a [&'a str],
@@ -1275,7 +1276,7 @@ pub struct Invocation<'a> {
     /// the name out of the environment, the recipe's included, as php's
     /// `proc_open` leaves an empty value out of the environment it hands a
     /// program (`php_array_to_envp`, `ext/standard/proc_open.c:174`), and
-    /// run-tests.php hands every program through it (#1186).
+    /// run-tests.php hands every program through it.
     ///
     /// A `.phpt` section adds it.
     pub env: &'a [(String, OsString)],
@@ -1292,7 +1293,7 @@ pub struct Invocation<'a> {
     pub streams: Streams,
     /// The working directory: the program's own where `None`, which is
     /// a witness's; php-src's root for a phpt test and the sections run
-    /// beside it, as run-tests.php runs them (#952).
+    /// beside it, as run-tests.php runs them.
     ///
     /// No section gives it.
     pub cwd: Option<&'a Path>,
@@ -1336,7 +1337,7 @@ pub enum Stdin<'a> {
     /// run-tests.php hands every program of a test, its `--STDIN--` or
     /// nothing, the `SKIPIF` and `CLEAN` beside it too
     /// (`system_with_timeout`, run-tests.php:1163-1182), so `fseek(STDIN)`
-    /// and `fsync(STDIN)` fail as they fail on a pipe (#1186).
+    /// and `fsync(STDIN)` fail as they fail on a pipe.
     Pipe(&'a [u8]),
     /// A file holding these bytes: a CGI-shaped test's body, which
     /// run-tests.php saves and redirects in with `<`
@@ -1357,7 +1358,7 @@ pub enum Streams {
     /// stderr in it where `merged`, upstream's `2>&1` for a test that
     /// captures both (run-tests.php:1885-1889), and in a pipe of its own
     /// otherwise, as a `SKIPIF`'s is. So `php://stdout` does not seek and a
-    /// descriptor sent over a socket is a pipe's, as under upstream (#1186).
+    /// descriptor sent over a socket is a pipe's, as under upstream.
     Pipes { merged: bool },
 }
 
@@ -1474,7 +1475,7 @@ impl Drained {
 
 /// The process group a program leads, which it was spawned into
 /// (`process_group(0)`) so that whatever it starts is in the group too: a
-/// server a test forks, a `php -S`, a worker it leaves running (#1211). The
+/// server a test forks, a `php -S`, a worker it leaves running. The
 /// group is killed whole when this value drops, past the limit, once the
 /// program has exited and its pipes have reached their end, and on every
 /// error between, so nothing a program started outlives its run, as
@@ -1483,7 +1484,7 @@ impl Drained {
 ///
 /// A run killed outright drops nothing, so its programs stand past the
 /// limit; the next run that reads its journal takes their groups as
-/// [`Group::standing`] finds them, and drops them (#2522).
+/// [`Group::standing`] finds them, and drops them.
 pub(crate) struct Group(nix::unistd::Pid);
 
 impl Group {
@@ -1577,7 +1578,7 @@ pub struct Oracle<'a> {
 /// a directory whose path differs from the first's in its length as well
 /// as its name, so a number the path moves, a `string(92)` or a memory
 /// count over `$_SERVER`, differs between the two runs and is refused
-/// rather than written (#801).
+/// rather than written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Place {
     Named,
@@ -1598,13 +1599,13 @@ impl Place {
 /// The processes the programs of one run were spawned as, each the leader
 /// of its group, kept until a lane takes them: the one record of which
 /// processes are the run's, which is how what they left of System V IPC
-/// is told from what any other process on the machine holds (#1412), and
+/// is told from what any other process on the machine holds, and
 /// of when each ran, from spawn to exit, which is how an object the
-/// kernel names no process on is told as made during one of them (#1482).
+/// kernel names no process on is told as made during one of them.
 ///
 /// Where a lane holds a System V claim, each program's start and end is
 /// written to the claim's file as well, so its last write bounds the
-/// window a run cut off left behind it (`sysv::Claim`, #2448).
+/// window a run cut off left behind it (`sysv::Claim`).
 #[derive(Debug, Default)]
 pub(crate) struct Spawned {
     programs: Mutex<Programs>,
@@ -1744,7 +1745,7 @@ impl<'a> Oracle<'a> {
     }
 
     /// Each program's start and end written to `journal` from now, a
-    /// System V claim's file, or to none (#2448).
+    /// System V claim's file, or to none.
     pub(crate) fn journal(&self, journal: Option<File>) {
         *crate::locked(&self.spawned.journal) = journal;
     }
@@ -1838,7 +1839,7 @@ impl<'a> Oracle<'a> {
     /// taken as `how` says and `stdin` on its stdin, and `during` called
     /// with the program [`Running`] once it has started, before the wait:
     /// what every program of the run goes through, [`Oracle::run_under`]'s
-    /// and a host's own line's (`witness`'s host lines, #1975). A program
+    /// and a host's own line's (`witness`'s host lines). A program
     /// still running at `limit` is killed with its group and reaped, and
     /// comes back with no exit and nothing read.
     pub(crate) fn to_end<T>(
@@ -1901,7 +1902,7 @@ impl<'a> Oracle<'a> {
         // with it, as upstream's `system_with_timeout` reads until `feof`
         // within its timeout: a child sharing the program's stdout writes
         // there after the program exits, as gh20582.phpt's `proc_open`ed
-        // `php -r` does (#1491), and killing it first drops what it had
+        // `php -r` does, and killing it first drops what it had
         // still to write. A process that holds the pipe open past the
         // limit leaves what came by then, and the kill then reaches it.
         let (stdout, stderr) = taken.read(started + limit)?;
@@ -2012,7 +2013,7 @@ pub enum Runner {
     /// engine this tree no longer describes while the reading is stamped
     /// with the tree. Nothing runs under it and the reading is a skip held
     /// to that cause, as `permit` refuses to judge on a build whose digest
-    /// is not the tree's (harness-design.md §4.4, #475).
+    /// is not the tree's (harness-design.md §4.4).
     Stale(String),
     /// Nothing to run, and why.
     Absent(String),
@@ -2030,7 +2031,7 @@ impl Runner {
     /// binaries that are the tree's and not over them: before this, a
     /// release binary built once and never again was the lane's engine for
     /// every run after, however far the tree moved, and a debug build could
-    /// not displace it (#475). Where every binary found is behind the tree,
+    /// not displace it. Where every binary found is behind the tree,
     /// the first is the one the skip names.
     pub fn resolve(
         root: &Path,
@@ -2093,7 +2094,7 @@ impl Runner {
 
     /// What a reading names the engine it ran by: the binary's path and
     /// the md5 of its bytes, so two readings stamped with one tree can be
-    /// told apart when the binary under them is not the same (#475).
+    /// told apart when the binary under them is not the same.
     ///
     /// A rung that is not the engine's own binary has none: the pinned
     /// oracle standing in for it is a control and the lane's words name it
@@ -2119,7 +2120,7 @@ impl Runner {
 /// relative one is made absolute against the directory `xtask` was invoked
 /// from, since a lane's programs run in a tree of their own where the
 /// relative path names nothing and every test of the subset skipped for
-/// it (#1259).
+/// it.
 fn named_binary(path: &Path) -> Result<PathBuf> {
     if !path.is_file() {
         bail!("no binary at {}", path.display());
@@ -2140,7 +2141,7 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
 /// built from, the paths cargo's dep-info beside it names
 /// ([`BuiltFrom::newest`]), which is what cargo decides a relink by: a
 /// binary cargo leaves standing as fresh is fresh here, whatever else
-/// under the crate directories was written since (#3109). A binary whose
+/// under the crate directories was written since. A binary whose
 /// write time cannot be read, and a tree with no engine source in it, are
 /// left as the engine: this says a binary is behind the tree only where it
 /// measured that it is.
@@ -2334,8 +2335,8 @@ fn dir_of(path: &Path) -> PathBuf {
 /// name. `__FILE__`, `ReflectionClass::getFileName()`, the name php's
 /// dump prints into each block and every error site print the path a
 /// program was run by, so a `%s<name>.php` expectation, whose `%s` is one
-/// character or more, is met only by a name with its directory before it
-/// (#331). The fresh-process adapter runs a file by this path and the
+/// character or more, is met only by a name with its directory before it.
+/// The fresh-process adapter runs a file by this path and the
 /// linked compiler is handed the same one, so the two sides of a dump
 /// carry one name; [`normalise_in`] puts the token where the directory
 /// was, so what is compared carries no machine's path.
@@ -2389,7 +2390,7 @@ pub enum Verdict {
     /// The bytes differ and the registry accepts it under this row.
     Diverged(Divergence),
     /// The bytes differ, and the row that accepted the difference pins
-    /// lines of a side that are not these (#3291).
+    /// lines of a side that are not these.
     Moved(Moved),
     /// The bytes differ and nothing accepts it: the line diff, expected as
     /// `-`, actual as `+`.
@@ -2399,7 +2400,7 @@ pub enum Verdict {
 /// Compare the oracle's bytes with the engine's for the divergence key `id`.
 /// Equal bytes are `Same` whatever the registry says; a difference is
 /// `Diverged` under an accepted row for `id`, `Moved` where the row's
-/// digests are not the lines' (#3291), and `Differs` otherwise. An
+/// digests are not the lines', and `Differs` otherwise. An
 /// `open` or `fixed` row accepts nothing, and nor does a `trace:dump/`
 /// row that names no digests, which `divergence-reason` refuses. Proposing a row for a `Differs`
 /// is the caller's, through `Registry::propose`.
@@ -2481,7 +2482,7 @@ const ALIGNED_CELLS: usize = 1 << 22;
 /// says whether expected line `i` stands for actual line `j`: the longest
 /// common subsequence, with an actual line ahead of an expected one where
 /// either would do. `diff` aligns by equality; phpt's miss aligns by what
-/// one line of an `--EXPECTF--` matches (#1185). The lines the two share
+/// one line of an `--EXPECTF--` matches. The lines the two share
 /// at either end are taken first, so the table is the middle's alone.
 pub(crate) fn align(
     expected: usize,

@@ -1,4 +1,4 @@
-//! The binding to the vendored lexbor (design §7.2, #731;
+//! The binding to the vendored lexbor (design §7.2;
 //! `unsafe.homes`' `ext/*/src/ffi/`): the one home of this crate's
 //! `unsafe`, over what `build.rs` compiles. `php_lexbor.h` declares
 //! nothing `PHPAPI`; php's dom includes lexbor's own headers, so what this

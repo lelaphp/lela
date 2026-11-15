@@ -6,7 +6,7 @@
 //! engine's one worker under `thread`.
 //!
 //! A published trace is in the table and its word reads `compiled`; what
-//! enters it is `dispatch::run` (#2959), so until then every reader takes
+//! enters it is `dispatch::run`, so until then every reader takes
 //! the interpreter's path as before.
 //!
 //! **The worker** (`jit-design.md` §4.8, ADR-0010's Threads) is the
@@ -126,7 +126,7 @@ impl Compiler {
 /// Where a request's recordings compile (`jit-design.md` §4.8): on the
 /// engine's worker, through its queue, under `jit.compile=thread`;
 /// otherwise on the request. A request holds its own, laid with it, so
-/// a recording that compiles reads no engine state (#3227).
+/// a recording that compiles reads no engine state.
 #[derive(Debug, Clone, EngineState)]
 pub(crate) struct Submitter(Option<Threaded>);
 
@@ -381,7 +381,7 @@ fn concluded(
 /// them once the trace's code is generated, where
 /// `opcache.jit_hot_return` is not zero
 /// (`zend_jit_trace_setup_ret_counter`, `Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`;
-/// `jit-design.md` §2.2, #3036).
+/// `jit-design.md` §2.2).
 fn arm_landings(recorded: &Recorded, epoch: &Epoch, policy: &Policy) {
     for (func, at) in record::landings(&recorded.record, &recorded.view, policy.folds()) {
         if let Some(word) = epoch.lay_landing(func, at) {
@@ -433,7 +433,7 @@ fn no_backend() -> Abort {
 
 /// An attempt failed with `stop`: one counted toward the word's
 /// blacklist where php recovers from it, a full arena's `COMPILER_ERROR`
-/// among them (#3015's ruling), and the word blacklisted where it does
+/// among them (ruled 2026-10-19), and the word blacklisted where it does
 /// not.
 fn failed(stop: Stop) -> Outcome {
     if stop.recovers() {

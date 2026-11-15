@@ -4,7 +4,7 @@ name = "php_ext_uri"
 version = "0.0.0"
 edition.workspace = true
 # The port of php's uri extension is the workspace's; uriparser/ is
-# php-src's vendored copy under its COPYING.BSD-3-Clause (#1173, #1260).
+# php-src's vendored copy under its COPYING.BSD-3-Clause.
 license = "MIT AND BSD-3-Clause"
 rust-version.workspace = true
 publish = false
@@ -22,8 +22,8 @@ php_ext = { path = "../../crates/php_ext" }
 # `lexbor/url` (`ZEND_MOD_REQUIRED("lexbor")`, design §4.10).
 php_ext_lexbor = { path = "../lexbor" }
 
-# uriparser is php-src's vendored copy, compiled by `build.rs` (design §7.2,
-# #1163) and bound in `src/ffi/` alone (`unsafe.homes`).
+# uriparser is php-src's vendored copy, compiled by `build.rs` (design §7.2)
+# and bound in `src/ffi/` alone (`unsafe.homes`).
 [build-dependencies]
 cc = { workspace = true }
 

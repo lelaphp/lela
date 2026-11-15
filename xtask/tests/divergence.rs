@@ -53,7 +53,7 @@ fn scratch(name: &str) -> Tree {
 }
 
 /// The registry a scratch starts from, in place of the tracked one, whose
-/// rows a person keeps (#3091): prose above the rows, as the tracked file
+/// rows a person keeps: prose above the rows, as the tracked file
 /// carries, an accepted debt row and an accepted row of another cause,
 /// each reasoned as the guard holds them, and no open row.
 const REGISTRY: &str = r#"# The divergence registry of a scratch workspace (fixture).
@@ -165,7 +165,7 @@ owner = "me"
     );
 
     // A row pins both sides' lines or neither, each a digest as the file
-    // spells one (#3291), and its digests serialise back as they were read.
+    // spells one, and its digests serialise back as they were read.
     let oracle = format!("oracle = \"{}\"\n", Sha256::of(b"php"));
     let engine = format!("engine = \"{}\"\n", Sha256::of(b"engine"));
     let pinned = Registry::parse(&format!("{text}{oracle}{engine}")).unwrap();
@@ -287,7 +287,7 @@ fn assert_counts(registry: &Registry, text: &str) {
 
 /// `--uncut` renders every row with its reason whole, which is where an
 /// accepted row's reason is read, beside the counts by kind and status,
-/// and names no command for the rest (#821).
+/// and names no command for the rest.
 #[test]
 fn the_uncut_section_renders_every_row_with_its_reason_whole() {
     let (registry, md) = rendered("status-uncut", &["--uncut"]);
@@ -310,7 +310,7 @@ fn the_uncut_section_renders_every_row_with_its_reason_whole() {
 
 /// Without `--uncut` the section is what the local facts carry: the
 /// counts and the `open` rows alone, naming the command that reads every
-/// reason (#821).
+/// reason.
 #[test]
 fn the_cut_section_lists_the_open_rows_alone_and_names_the_uncut_command() {
     let (registry, cut) = rendered("status-cut", &[]);
@@ -398,7 +398,7 @@ fn one_more_accepted_row_changes_the_cut_section_s_counts_alone() {
     assert!(whole.contains(&line), "{whole}");
 }
 
-/// The `crosscheck` kind (#318): `parse` accepts a row keyed by an
+/// The `crosscheck` kind: `parse` accepts a row keyed by an
 /// extension's name under `crosscheck:`, holds the id to that prefix, and
 /// `status --section divergence` renders the kind's row of counts with the
 /// rest.
@@ -435,7 +435,7 @@ since = "2026-09-18"
     );
 
     // The fixture's row is the registry's one row, whatever rows the
-    // workspace's own registry carries (#1252).
+    // workspace's own registry carries.
     let root = scratch("crosscheck");
     std::fs::write(root.join(divergence::FILE), row).unwrap();
     let registry = Registry::load(&root).unwrap();
@@ -459,7 +459,7 @@ since = "2026-09-18"
     assert_eq!(value["counts"]["crosscheck"]["accepted"], 1);
 }
 
-/// The `wire` kind (#2334): a difference on the wire, held to the RFCs
+/// The `wire` kind: a difference on the wire, held to the RFCs
 /// through a conformance suite rather than to the oracle, keyed by the
 /// suite and the case, `wire:<suite>/<case>`, the case free to carry
 /// slashes of its own as h2spec's `http2/6.5.3/1` does. An id without a
@@ -498,7 +498,7 @@ since = "2026-10-10"
     assert!(md.contains("| wire | 0 | 1 | 0 | 1 |"), "{md}");
 }
 
-/// The `makala` kind (#2629, #2639): one test where the production server
+/// The `makala` kind: one test where the production server
 /// differs from php's SAPIs by design, keyed by its path in php-src, which
 /// the php-fpm comparison and the served phpt lane both consult through
 /// [`Registry::makala`]; a row of a kind the registry does not name is
@@ -542,9 +542,9 @@ covers = ["makala:ext/filter/tests/007.phpt"]
     );
 }
 
-/// A row's `cause` (#2460, #2462): `debt` where the file writes none, and
-/// the cause it names otherwise, each of the four by its spelling; a
-/// cause outside them is refused by name.
+/// A row's `cause` (design revision 124): `debt` where the file writes
+/// none, and the cause it names otherwise, each of the four by its
+/// spelling; a cause outside them is refused by name.
 #[test]
 fn a_row_without_a_cause_is_debt_and_a_row_with_one_reads_it() {
     let row = |cause: &str| {
@@ -568,8 +568,8 @@ fn a_row_without_a_cause_is_debt_and_a_row_with_one_reads_it() {
     assert!(err.contains("taste"), "{err}");
 }
 
-/// #2510: the kind #2220 gave a row of php's undefined behaviour, which
-/// #2460 made a cause and #2463's migration moved off the registry, is
+/// The kind a row of php's undefined behaviour once had, `php-ub`, which
+/// became a cause and which the migration moved off the registry, is
 /// refused as any unknown kind is, naming the kind and the row; the same
 /// row as the migration spelt it, `trace:` with the cause written,
 /// decodes.
@@ -595,8 +595,8 @@ covers = ["php-ub:ext/standard/tests/walks.rs::fixture_walk_ends"]
     assert_eq!((row.kind, row.cause), (Kind::Trace, Cause::PhpUb));
 }
 
-/// `retires` (Mitchell, 2026-10-09, on #2462) is one of four values, and
-/// any other spelling is refused when the registry decodes.
+/// `retires` (Mitchell, 2026-10-09) is one of four values, and any other
+/// spelling is refused when the registry decodes.
 #[test]
 fn retires_decodes_as_one_of_four_values_and_an_unknown_one_is_refused() {
     let row = |retires: &str| {
@@ -622,7 +622,7 @@ fn retires_decodes_as_one_of_four_values_and_an_unknown_one_is_refused() {
 /// One row of each cause, a scratch workspace's registry: `status
 /// --section divergence` counts the debt row above the total, holds the
 /// total to the manifest's `[divergence] target`, and counts each other
-/// cause on a line of its own after it (#2462).
+/// cause on a line of its own after it.
 const ONE_OF_EACH: &str = r#"
 [[divergence]]
 id = "trace:fixture-debt"
@@ -739,7 +739,7 @@ fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_o
     assert!(md.contains("| total | 0 | 1 | 0 | 1 |"), "{md}");
 }
 
-/// `fixed_in` (#4373's ruling, point 5) is a php release spelt
+/// `fixed_in` (ruled 2026-11-10) is a php release spelt
 /// `<major>.<minor>.<patch>`, ordered by its numbers; any other spelling
 /// is refused when the registry decodes, and a row writes it back as it
 /// was read.
@@ -786,7 +786,7 @@ fn reasoned_and_pinned() -> Manifest {
     manifest
 }
 
-/// The guard's refusals beyond a missing reason (#2462, #3291, #4373),
+/// The guard's refusals beyond a missing reason,
 /// each with a fixture under the rule's own that must fail: an accepted
 /// `by-design` row whose reason cites no design section or ADR, an
 /// accepted `oracle-build` row with no `retires`, an unpinned trace dump
@@ -903,8 +903,8 @@ since = "2026-10-09"
     assert_eq!(reading.numbers["reached"], 0.into());
 }
 
-/// A bump that lands exactly on the release a row names is the ruling's
-/// main case (#4373, point 5): a `fixed_in` equal to the pin's own
+/// A bump that lands exactly on the release a row names is the main case
+/// of the ruling of 2026-11-10: a `fixed_in` equal to the pin's own
 /// version, read from the pin at run time since no source states it, is
 /// reached and refused, and the row beside it, ahead of the pin, is not.
 #[test]
@@ -1165,7 +1165,7 @@ fn status_and_the_reason_instrument_count_a_covering_row_once() {
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
@@ -1175,7 +1175,7 @@ mod tracked {
     #[test]
     fn the_tracked_registry_loads_and_every_row_answers_for_itself() {
         // What holds of any registry a person keeps, and nothing about which
-        // rows it keeps: a row dropped or added breaks no test here (#2142).
+        // rows it keeps: a row dropped or added breaks no test here.
         let registry = Registry::load(workspace()).unwrap();
         for row in registry.rows() {
             let id = row.id.as_str();
@@ -1275,7 +1275,7 @@ mod tracked {
     /// has now is `computed check`'s to hold, which pre-commit runs after
     /// `xtask regions` has rendered it and CI runs over the tree; held here, a
     /// merge that brings rows from both sides fails before the hook renders
-    /// them (#1252).
+    /// them.
     #[test]
     fn docs_divergence_md_is_the_status_section_as_a_computed_region() {
         let page = std::fs::read_to_string(workspace().join("docs/divergence.md")).unwrap();

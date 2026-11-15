@@ -1,4 +1,4 @@
-//! The stream layer's face of the engine (design §4.3 seam 5; #1959):
+//! The stream layer's face of the engine (design §4.3 seam 5):
 //! what `php_streams`, php's `main/streams/` and `main/network.c` above
 //! the engine, reaches beside the native face, and no extension does.
 //! `php_ext` re-exports nothing here, so an extension cannot name it, and
@@ -11,8 +11,8 @@
 //! [`StreamHooks`], what the engine asks of the layer in turn, its
 //! engine state among it ([`StateHook`]); and
 //! the system calls `main/network.c` and the plain files kind make over
-//! the fds a stream holds, `php_process`'s bindings in its `unsafe` home
-//! (#1935), which the layer has no edge of its own to (#1874).
+//! the fds a stream holds, `php_process`'s bindings in its `unsafe` home,
+//! which the layer has no edge of its own to.
 
 use std::any::Any;
 use std::os::fd::BorrowedFd;
@@ -48,7 +48,7 @@ pub use php_process::{
 /// `fopen()` or the CLI's stdin. So what it allocates is tagged with the
 /// code that asked, as a stream php opens is charged to that request's
 /// operation, and the wrappers, filters and kinds an extension supplies
-/// to the layer are served as theirs (#2113, #2864).
+/// to the layer are served as theirs.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamHooks {
     /// `zend_stream_open` for an include,
@@ -132,7 +132,7 @@ pub struct StreamHooks {
     /// The layer's engine state, built once as the engine is
     /// ([`Face::layer_state`]): what streams keep across requests, php's
     /// `EG(persistent_list)` as `zend_startup`'s `zend_init_rsrc_plist`
-    /// sets it up (#1962). The engine holds it and cannot name its type;
+    /// sets it up. The engine holds it and cannot name its type;
     /// the layer reads it back as the type it is. Engine state by its
     /// type, as the four entries' is ([`StateHook::of`]).
     pub state: StateHook,
@@ -298,7 +298,7 @@ pub trait Face: sealed::Sealed {
     /// to the request's end: the list's close serves its destructor
     /// (`zend_close_rsrc_list`) and its destruction frees it, what php
     /// does with a resource it names by pointer alone,
-    /// `FG(default_context)` (#2246). The id answered names the resource
+    /// `FG(default_context)`. The id answered names the resource
     /// with no owner, read back with [`Memory::resource`].
     fn keep_in_list(&self, resource: Owner<Resource>) -> i64;
 }

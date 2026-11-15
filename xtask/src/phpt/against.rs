@@ -1,5 +1,5 @@
 //! `xtask phpt --against <commit>`: a subset's run held test by test to
-//! the stored run at a commit, the merge base as a rule (#663, #664). A
+//! the stored run at a commit, the merge base as a rule. A
 //! test that met its expectation there and fails here is a regression,
 //! and the comparison's reading fails while any is, naming them.
 //!
@@ -8,9 +8,9 @@
 //! verdicts, one per test, at
 //! `target/harness/phpt-runs/<tree>/<scope>.json`, in the reading store,
 //! so CI's upload of the store carries them and a run CI took can serve
-//! as a base (harness §4.2, #725). The key is the tree the
+//! as a base (harness §4.2). The key is the tree the
 //! engine's binary is built from, the tracked files under the paths its
-//! dep-info names ([`BuiltFrom::keyed`], #3109), and not the tree the
+//! dep-info names ([`BuiltFrom::keyed`]), and not the tree the
 //! subset's reading is stamped with: that one is the crate's own, which
 //! does not move when `php_engine` does, while the verdicts do. A commit
 //! that writes no source of the binary, `seams.toml`, `ext/clippy.toml`,
@@ -25,11 +25,11 @@
 //!
 //! **What a miss keeps.** Beside its verdict, each test that missed keeps
 //! its first differing lines and its signature under `misses`, by the same
-//! key (#1185), and how its program died where a signal ended it (#4130),
+//! key, and how its program died where a signal ended it,
 //! so a run says why a test missed without being run again.
 //! A run kept before the field was is read with none. Each test that
 //! skipped keeps the reason it was given under `skips`, so a target says
-//! why the oracle left a test out of it (#2033).
+//! why the oracle left a test out of it.
 //!
 //! **What gives no verdict.** A comparison is made or it is a skip that
 //! says why, and never a pass: no run stored at the commit, a run at the
@@ -38,10 +38,10 @@
 //! engine's sources written during the run, the two runs over other
 //! corpora or other tests, or no test met at the commit, which leaves
 //! nothing to hold. A test past the recipe's limit is its own fail where
-//! the adapter judges it so (#691), and a regression like any other.
+//! the adapter judges it so, and a regression like any other.
 //!
 //! **What the target leaves out.** Where the subset's target is kept
-//! (the `target` module, #1184), a test outside it, one the oracle itself
+//! (the `target` module), a test outside it, one the oracle itself
 //! skips or misses, is neither held nor a regression nor a fix: its
 //! verdict under the engine may flip between a row's `diverged` and a fail
 //! past the recipe's limit from one run to the next, as
@@ -57,14 +57,14 @@
 //! keeps, and only the comparison reads `skip`, its message carrying the
 //! subset's own counts: a merge held against a commit nobody ran still
 //! measures the head, and `done` finds every touched subset's reading
-//! fresh (#1435). The skip names how to fetch the runs CI's dashboard
-//! keeps on `main` ([`fetch`], #2362) before how to take one.
+//! fresh. The skip names how to fetch the runs CI's dashboard
+//! keeps on `main` ([`fetch`]) before how to take one.
 //!
 //! **What `done` reads of it.** The kept runs and nothing else: condition 1
 //! holds a touched crate's subset to no regression against the merge base
 //! by diffing the run kept at the base's engine tree with the one kept at
 //! this tree's itself ([`regressed`]), and never reads the `@against`
-//! reading (harness §4.5, #725).
+//! reading (harness §4.5).
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -96,7 +96,7 @@ use crate::track;
 /// [`Runs::after`] asks after each subset before it asks git anything, as
 /// git's index takes a file whose stat data is the one it recorded as
 /// unchanged, so a run of many subsets over sources nobody writes asks
-/// git nothing after any of them (#2972).
+/// git nothing after any of them.
 struct Stood {
     /// Each tracked file, then the index.
     files: Vec<PathBuf>,
@@ -154,7 +154,7 @@ impl Stood {
 }
 
 /// Where a workspace keeps its runs, relative to its root: in the reading
-/// store, [`crate::reading::DIR`] (harness §4.2, #725).
+/// store, [`crate::reading::DIR`] (harness §4.2).
 pub(crate) const RUNS: &str = "target/harness/phpt-runs";
 
 /// One subset's run as it is kept: every test's verdict by its divergence
@@ -168,8 +168,8 @@ pub(crate) struct Run {
     /// The engine that ran: the binary's path and md5, or the linked one.
     pub engine: String,
     /// The [`Pin::digest`] of the pin the run was taken under: under
-    /// another, the run is stale, as a reading of [`UNDER_RECIPE`] is
-    /// (#2725). A run kept before the field was reads empty, which no
+    /// another, the run is stale, as a reading of [`UNDER_RECIPE`] is.
+    /// A run kept before the field was reads empty, which no
     /// digest is.
     ///
     /// [`UNDER_RECIPE`]: crate::reading::UNDER_RECIPE
@@ -191,7 +191,7 @@ pub(crate) struct Run {
     pub misses: BTreeMap<String, Miss>,
     /// Why each test that skipped skipped, by the same key: the reason its
     /// `SKIPIF` or the runner gave, so the target names it beside each
-    /// test the oracle left out (#2033). A run kept before the field was
+    /// test the oracle left out. A run kept before the field was
     /// is read with none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub skips: BTreeMap<String, String>,
@@ -199,7 +199,7 @@ pub(crate) struct Run {
 
 impl Run {
     /// Whether the run holds a test, as a run of the engine must to be
-    /// kept or read (#3143). A run of none is no evidence about the tree:
+    /// kept or read. A run of none is no evidence about the tree:
     /// `xtask`'s own tests took one of `ext/ctype` over a scratch corpus
     /// into the store of the checkout they ran in, and it stood as the
     /// base's run, the 49 tests of the head's not the same as its none, and
@@ -284,8 +284,8 @@ impl Runs {
 
     /// The target of the subset `scope` names after its run, and whether
     /// this run kept it: where the runner's control judged every test,
-    /// outside a tier lane, the oracle's verdicts kept under the pin
-    /// (#1184); otherwise the one kept under the pin in the first of
+    /// outside a tier lane, the oracle's verdicts kept under the pin;
+    /// otherwise the one kept under the pin in the first of
     /// [`roots`] that keeps one, if any does.
     pub(crate) fn target_of(
         &self,
@@ -338,7 +338,7 @@ impl Runs {
         }
         // A base with no run kept is a comparison that gives no verdict and
         // never a subset left unrun: the subset's own reading stands beside
-        // it, and the skip says so with its counts (#1435).
+        // it, and the skip says so with its counts.
         let was = base.run(&self.roots, &self.layout, scope, &self.recipe)?;
         let diff = match (was, run) {
             (Err(why), _) => Err(format!(
@@ -398,7 +398,7 @@ impl Runs {
     /// Where the engine's run of `scope` is kept after it, relative to the
     /// workspace's root, where it will be: [`Runs::run_of`] is one. What a
     /// reading held to a target points to for the met tests it does not
-    /// name (#2033); `after` keeps it there unless the sources moved while
+    /// name; `after` keeps it there unless the sources moved while
     /// it ran.
     pub(crate) fn run_kept_at(
         &self,
@@ -482,12 +482,12 @@ impl Base {
 }
 
 /// The name the dashboard's oracle job stashes [`RUNS`] under: every run
-/// its runner keeps, each under its engine's tree (#2362), kept in the
-/// stash as `latest/<name>.tar.gz` (scripts/ci/stash.sh, #3554).
+/// its runner keeps, each under its engine's tree, kept in the
+/// stash as `latest/<name>.tar.gz` (scripts/ci/stash.sh).
 pub(crate) const UPLOAD: &str = "phpt-runs";
 
 /// The line that lays the runs CI kept into the workspace at `root`,
-/// where [`roots`] looks first (#2362): the latest [`UPLOAD`] fetched over
+/// where [`roots`] looks first: the latest [`UPLOAD`] fetched over
 /// rsync from the stash `DAX_STASH` names, `<user>@<host>` as the
 /// repository's variable does, and unpacked apart, and every run and every
 /// set of sources one was kept over ([`KEYED`]) copied in where the
@@ -523,7 +523,7 @@ const STALE: &str = "oracle.toml changed since it was taken";
 /// that took it ([`Runs::after`]), keyed by the tree its engine is built
 /// from ([`keys`]), so a run taken in a worktree at a base, as the skip of
 /// [`Base::run`] asks, is found by the commit from every other worktree
-/// while that one stands (#1869). The main worktree outlives the others,
+/// while that one stands. The main worktree outlives the others,
 /// so `worktree retire` carries a branch worktree's runs into it
 /// ([`carry`]) before removing it.
 fn roots(root: &Path) -> Vec<PathBuf> {
@@ -543,7 +543,7 @@ fn path(root: &Path, tree: &str, scope: &str) -> PathBuf {
 /// Where a workspace keeps each set of paths a run was kept under
 /// ([`BuiltFrom::keyed`]), under [`RUNS`]: one file per set, named by its
 /// id, beside the runs, so `worktree retire` carries it with them
-/// and CI's upload holds it (#3109).
+/// and CI's upload holds it.
 const KEYED: &str = "built-from";
 
 /// Keep `paths`, the set a run at `root` is kept under, among the sets
@@ -695,11 +695,11 @@ pub(crate) enum Against {
     Unmet(String),
 }
 
-/// Condition 1's `phpt` (harness §4.5, #725): every test met in the run of
+/// Condition 1's `phpt` (harness §4.5): every test met in the run of
 /// `scope` kept at `base`'s engine tree is met in the one kept at
 /// `snapshot`'s, a skip meeting none ([`diff`]), over the target kept under
-/// `pin` where there is one; a run kept under another pin is stale
-/// (#2725). A binary with no dep-info's runs are keyed over the crate
+/// `pin` where there is one; a run kept under another pin is stale.
+/// A binary with no dep-info's runs are keyed over the crate
 /// directories of `layout`.
 pub(crate) fn regressed(
     snapshot: &Snapshot,
@@ -772,7 +772,7 @@ pub(crate) struct Carried {
 /// same run, and the one standing is as good as the one carried. What
 /// `worktree retire` keeps of a worktree before removing it, so a run
 /// taken there is still found, from the main worktree among [`roots`],
-/// once the worktree is gone (#1268).
+/// once the worktree is gone.
 pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
     let runs = from.join(RUNS);
     let mut files = Vec::new();
@@ -799,9 +799,9 @@ pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
 
 /// Whether the run kept at `file` takes the place of the one standing at
 /// `to`: taken after it and under another pin, so the one standing is
-/// stale once the carried one is fresh (#2725), as a run `phpt --base`
-/// takes again under a moved pin is. A run of no test is read as no run
-/// (#3143): one holding a test replaces it, and it replaces none that does.
+/// stale once the carried one is fresh, as a run `phpt --base`
+/// takes again under a moved pin is. A run of no test is read as no run:
+/// one holding a test replaces it, and it replaces none that does.
 fn supersedes(file: &Path, to: &Path) -> bool {
     let (carried, standing) = (read(file).ok().flatten(), read(to).ok().flatten());
     let tested = |run: &Option<Run>| run.as_ref().is_some_and(Run::holds_a_test);
@@ -843,7 +843,7 @@ pub(crate) fn diff(was: &Run, run: &Run, target: Option<&Target>) -> Result<Diff
             diff.held += 1;
             // The compiler refusing a test it read there is a loss as a
             // failure is, and so is a skip or a build missing its host:
-            // none meets a test (#725, #3763).
+            // none meets a test.
             let unmet = matches!(
                 now,
                 Judgement::Unread | Judgement::Skip | Judgement::Unbuilt

@@ -326,7 +326,7 @@ pub(crate) enum Callee {
     /// or an uncached include's, which a record never names: its number
     /// is this request's alone, and another request numbers another op
     /// array the same, so nothing a trace compiles may read it (design
-    /// §3.4, #3570). php's record names `func` here, which its traces may
+    /// §3.4). php's record names `func` here, which its traces may
     /// embed since they belong to one process.
     Request,
 }
@@ -439,7 +439,7 @@ pub(crate) struct Recorded {
 /// A recording is engine state by the derive, held at every field: it
 /// names a class by [`RecordClass`] and reads a declaration through
 /// [`ClassFacts`](tier::ClassFacts), so a job that waits on the worker
-/// holds nothing of its request (#4660, #4718).
+/// holds nothing of its request.
 const _: fn() = || {
     fn held<T: EngineState>() {}
     held::<Recorded>();
@@ -492,7 +492,7 @@ const HEAD: u32 = 2;
 /// at the `eval`, whose code is no root, so the fiber's `body()` roots;
 /// while it stands suspended the request records, and the resumer's hot
 /// `work()` roots nothing; destroying the fiber unwinds its recording,
-/// and the next `work()` roots (#2999's ruling).
+/// and the next `work()` roots (ruled 2026-10-19).
 ///
 /// ```php
 /// function body() { Fiber::suspend(1); echo "never\n"; }
@@ -586,7 +586,7 @@ pub(crate) fn held_root(req: &Request, frame: FrameRef) -> Option<(UnitView, Eng
 /// op array the view holds ([`held_root`]), on the word `claimed` holds: a loop header for
 /// `Loop`, the first opline past the prologue for `Enter`, the caller's
 /// landing past the call a return landed from for `Return`
-/// (`jit-design.md` §2.2, #3036), an exit's landing for a side. `Ok`
+/// (`jit-design.md` §2.2), an exit's landing for a side. `Ok`
 /// with the record and where the program stands; `Err` where the request
 /// bailed out under it, the recording thrown away.
 pub(crate) fn run(
@@ -746,7 +746,7 @@ pub(crate) fn closure(view: &UnitView, func: EngineFuncRef) -> bool {
         .is_some_and(|function| function.name.0.starts_with(b"{closure:"))
 }
 
-/// The landings a compiled trace arms (`jit-design.md` §2.2, #3036),
+/// The landings a compiled trace arms (`jit-design.md` §2.2),
 /// where php's code generator calls `zend_jit_trace_setup_ret_counter`
 /// once the trace's code is generated
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:7322-7368`): for a recursive
@@ -841,8 +841,8 @@ pub(crate) fn root_landing(
 /// read then and writes nothing a later opline reads, it is written down
 /// as served, its jump taken back to the body, and the recording goes
 /// on at the body, with nothing stepped (`jit-design.md` §4.1, revision
-/// 54, as built until a person rules on #3178). None for any other
-/// loop, which [`headed`] steps on to its header.
+/// 54, kept as built, ruled 2026-10-21). None for any other loop, which
+/// [`headed`] steps on to its header.
 ///
 /// A loop the back edge first meets after one turn records that turn as
 /// php's does, from its condition, where stepping on to the condition
@@ -1408,8 +1408,8 @@ impl<'p> Recorder<'p> {
     /// and neither does this: the next record stops it. A return trace
     /// rooted inside an argument of an outer call so knows the call its
     /// send writes and its `DO_ICALL` makes, and compiles where php's
-    /// does (the number of the exit the side trace grows from is
-    /// #3203's):
+    /// does (the number of the exit the side trace grows from is not
+    /// held here):
     ///
     /// ```php
     /// function c($x) { $s = 0; for ($i = 0; $i < 3; $i++) { $s += $x; } return $s; }
@@ -1547,7 +1547,7 @@ impl<'p> Recorder<'p> {
     /// `zend_jit_trace_execute` stops at a frame whose op array keeps no
     /// `jit_extension` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`):
     /// the trace leaves at the `DO_*CALL`, whose handler activates the
-    /// callee, and arms the landing past it ([`landings`]; #3570). The
+    /// callee, and arms the landing past it ([`landings`]). The
     /// loop's trace compiles and stops at the call, and the return trace
     /// rooted at the landing past it links back to the loop's:
     ///
@@ -1582,7 +1582,7 @@ impl<'p> Recorder<'p> {
     ///
     /// A call into a property hook's body stops with `PropHookCall`, as
     /// php's recorder stops at a callee whose op array has `prop_info`
-    /// (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1129-1132`; #3577): the
+    /// (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1129-1132`): the
     /// child's hook's trace stops at its call to its parent's, and the
     /// return trace past the call starts in the child's:
     ///
@@ -1798,8 +1798,7 @@ impl<'p> Recorder<'p> {
     /// recursion counted; the stop where it may not. A return into a
     /// request-scoped op array stops with `Return`, on php's branch for a
     /// frame whose op array keeps no `jit_extension`, its caller not the
-    /// frame it left (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`;
-    /// #3570).
+    /// frame it left (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1097-1109`).
     fn followed_return(
         &mut self,
         req: &Request,
@@ -2417,7 +2416,7 @@ fn reachable(code: &OpArray) -> Vec<bool> {
 /// (`Z/Zend/Optimizer/zend_optimizer.c:1072-1107`), as
 /// `opcache.optimization_level` asks for each. With neither, php's CFG
 /// heads a `while (true)` at its condition, the `while`'s line, as it
-/// heads a `for`'s (#3578):
+/// heads a `for`'s:
 ///
 /// ```php
 /// function f() {
@@ -2587,7 +2586,7 @@ impl Folds {
 /// other loop is entered where its back edge lands.
 ///
 /// php's CFG is built over the op array its optimizer left, which this
-/// engine runs none of (design §6.1, #1220), so where
+/// engine runs none of (design §6.1), so where
 /// `opcache.optimization_level` runs the passes that fold it ([`Folds`]),
 /// a condition pass 1 folds as it is written, a jump on a constant
 /// operand, is read as folded: a `while (true)` or a `for (;;)`, whose
@@ -2596,9 +2595,9 @@ impl Folds {
 /// and its condition is no header. The opline past a call that ends the
 /// body is then a landing a compiled trace arms ([`landings`]), as php's
 /// `zend_jit_trace_setup_ret_counter` arms the folded `JMP`, so a return
-/// trace is rooted there and links to the loop's (#3317). At level 0, the
+/// trace is rooted there and links to the loop's. At level 0, the
 /// regime below, nothing folds: the loop is headed at its condition, and
-/// no return trace is rooted past the call (#3578):
+/// no return trace is rooted past the call:
 ///
 /// ```php
 /// set_time_limit(1);

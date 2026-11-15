@@ -34,10 +34,10 @@ use common::tracker::{Tracker, issue};
 /// What condition 1 asks of `ext/pcre`, the crate most of these tests
 /// change: the manifest's `[[owed]]` instruments less `port-map`, which is
 /// asked of the crate
-/// `api.lock` lives with and of no other (§4.5 condition 1, #148), less
-/// `miri`, asked of `php_heap` alone (#2416), and
-/// with `crosscheck`, asked of a default extension (#269) at both its
-/// scopes, the crate's name and `ext/<name>/ri` (#361). That this is
+/// `api.lock` lives with and of no other (§4.5 condition 1), less
+/// `miri`, asked of `php_heap` alone, and
+/// with `crosscheck`, asked of a default extension at both its
+/// scopes, the crate's name and `ext/<name>/ri`. That this is
 /// the rows less those two is asserted in
 /// `the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is`.
 const ASKED: [&str; 8] = [
@@ -104,7 +104,7 @@ fn repository(name: &str, registry: &Path) -> Tree {
         write(&root, &format!("ext/pcre/{file}"), &text);
     }
     // The crate `api.lock` lives with, with the lock in its tree: the one
-    // crate condition 1 asks for a `port-map` reading (§4.5, #148).
+    // crate condition 1 asks for a `port-map` reading (§4.5).
     for file in ["Cargo.toml", "src/lib.rs", "api.lock"] {
         let text = std::fs::read_to_string(fixture.join("crates/php_ext").join(file)).unwrap();
         write(&root, &format!("crates/php_ext/{file}"), &text);
@@ -134,7 +134,7 @@ fn judge_since(root: &Path, base: Option<&str>) -> Verdict {
 
 /// `done --hook` over `root` with `event` on stdin, as the Stop hook runs
 /// it, the stopping session and agent having written in `root` as permit
-/// records it (#3619).
+/// records it.
 fn hook(root: &Path, event: &str) -> Ran {
     if let Ok(stop) = serde_json::from_str::<serde_json::Value>(event) {
         let session = stop["session_id"].as_str().unwrap_or_default();
@@ -173,7 +173,7 @@ fn fresh(root: &Path, instrument: &str, scope: &str) -> Reading {
     let mut reading = match beside {
         // The `--ri` column's scope and the release lint's map to no
         // crate; each is stamped over the crate's tree as `crosscheck`
-        // and `clippy` stamp it (#361, #2392).
+        // and `clippy` stamp it.
         Some(name) => {
             let krate = manifest.crate_named(name).unwrap();
             Reading::stamped_over(
@@ -203,7 +203,7 @@ fn fresh(root: &Path, instrument: &str, scope: &str) -> Reading {
 
 /// What condition 1 reads for `name` at `root`, instrument by scope:
 /// every row of [`ASKED`] at the crate's name, and `crosscheck` at
-/// `ext/<name>/ri` too (`done::scopes_of`, ledger 46, #361).
+/// `ext/<name>/ri` too (`done::scopes_of`, ledger 46).
 fn asked_of(root: &Path, name: &str) -> Vec<(&'static str, String)> {
     let manifest = Manifest::load(root).unwrap();
     let krate = manifest.crate_named(name).unwrap();
@@ -227,7 +227,7 @@ fn record_asked(store: &Store, root: &Path, name: &str) {
 
 /// What meets one row of [`asked_of`]: a fresh passing reading, or for
 /// `phpt` a passing run kept at the base, `HEAD`, and one at the tree now,
-/// which condition 1 diffs in place of a reading (#725).
+/// which condition 1 diffs in place of a reading.
 fn met(store: &Store, root: &Path, instrument: &str, scope: &str) {
     if instrument == "phpt" {
         keep_run(root, Some("HEAD"), scope, "pass");
@@ -239,7 +239,7 @@ fn met(store: &Store, root: &Path, instrument: &str, scope: &str) {
 
 /// No reading of `instrument` over `scope` left in `store`: its file and
 /// its index's entries, the files named for a key, since condition 1 finds
-/// a reading over the key now in either (#3804). Another scope's file
+/// a reading over the key now in either. Another scope's file
 /// beside them, the `--ri` column's `ri.toml`, stays.
 fn forget(store: &Store, instrument: &str, scope: &str) {
     let file = store.path(instrument, scope).unwrap();
@@ -301,7 +301,7 @@ fn keep_run(root: &Path, at: Option<&str>, scope: &str, verdict: &str) {
 /// Over a diff in xtask, the harness's own sources, witness and phpt are
 /// not on the list, and the five that are pass when fresh; which five is
 /// `done`'s own unit test. `test` is among them: the harness has tests
-/// as every crate has (#191).
+/// as every crate has.
 #[test]
 fn the_harness_crate_is_asked_for_clippy_test_api_check_budget_and_unsafe_audit_only() {
     let root = scratch("harness");
@@ -329,7 +329,7 @@ fn the_harness_crate_is_asked_for_clippy_test_api_check_budget_and_unsafe_audit_
 }
 
 /// A commit that changes `seams.toml` alone touches xtask, whose tests
-/// copy the manifest (`key::READ_BY_TESTS`, #3646): its `test` reading,
+/// copy the manifest (`key::READ_BY_TESTS`): its `test` reading,
 /// taken before, no longer stands, and `done` names the file.
 #[test]
 fn a_change_to_the_manifest_alone_stales_the_harness_test_reading() {
@@ -359,7 +359,7 @@ fn a_change_to_the_manifest_alone_stales_the_harness_test_reading() {
 }
 
 /// A change to `ops.toml` alone, which `php_engine`'s `build.rs` reads
-/// (`key::READ_BY_BUILDS`, #3654), touches `php_engine` and stales its
+/// (`key::READ_BY_BUILDS`), touches `php_engine` and stales its
 /// reading, naming the file, and stales the reading of `ext/reflection`,
 /// built from it, though nothing under either crate changed.
 #[test]
@@ -450,7 +450,7 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
 
 /// `port-map` writes exactly one reading, at the crate `api.lock` lives
 /// with, so condition 1 asks that crate for one and asks no other crate
-/// for a reading nothing would ever write (§4.5 condition 1, #148). The
+/// for a reading nothing would ever write (§4.5 condition 1). The
 /// lock is in that crate's tree, which is what makes the ask sharp: an
 /// edit of `api.lock` alone stales the reading and the condition says so.
 #[test]
@@ -511,8 +511,8 @@ fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_cr
     );
 }
 
-/// A reading is keyed on its crate and the crates it is built from
-/// (#1318): over `xtask/fixtures/closure`, a pass over `ext/reflection`
+/// A reading is keyed on its crate and the crates it is built from:
+/// over `xtask/fixtures/closure`, a pass over `ext/reflection`
 /// taken after its own change stands, and a change to `php_engine`, which
 /// it is built from through `php_ext`, reports it stale and names both.
 #[test]
@@ -557,7 +557,7 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
     assert!(verdict.messages().contains(&named), "{verdict:#?}");
 }
 
-/// Condition 10 (#3372): a diff that changes `.cargo/config.toml` asks for
+/// Condition 10: a diff that changes `.cargo/config.toml` asks for
 /// a fresh passing `fold` reading of `sapi/cli`, and one taken before the
 /// file changed is stale, since `sapi/cli`'s key covers the files rustc is
 /// built under; a failing one is unmet with its message, a skip, a host
@@ -611,7 +611,7 @@ fn a_change_to_what_rustc_is_built_under_asks_for_a_fold_reading() {
 
     // The manifest's profiles stale the reading, and a table of it that
     // decides no codegen does not; the configuration's deployment target
-    // stales it as its rustflags do (#3356).
+    // stales it as its rustflags do.
     let unread = "[workspace.metadata]\nnote = 1\n";
     write(&root, "Cargo.toml", unread);
     assert_eq!(asked(&judge(&root)), Vec::<String>::new());
@@ -654,7 +654,7 @@ fn on_a_ticket_branch(name: &str) -> (Tree, String) {
     (root, cut)
 }
 
-/// A row held at the merge (#3618 ruling 2) is the merge check's: a
+/// A row held at the merge (ruled 2026-10-30) is the merge check's: a
 /// ticketed checkout renders it as delegated, and main's holds it.
 #[test]
 fn a_row_held_at_the_merge_is_delegated_in_a_ticketed_checkout_and_held_in_mains() {
@@ -819,8 +819,8 @@ fn the_stop_hook_holds_a_turn_against_mains_base() {
     );
 }
 
-/// The Stop hook walks the built binaries before cargo, as permit's does
-/// (#2982), so a build apart from the manifest in front of it judges no
+/// The Stop hook walks the built binaries before cargo, as permit's does,
+/// so a build apart from the manifest in front of it judges no
 /// turn: it exits 1, prints no verdict and names the manifest, and the
 /// walk's next candidate holds the turn.
 #[test]
@@ -880,7 +880,7 @@ fn fresh_passing_readings_for_the_touched_crate_pass_and_an_edit_after_them_is_s
 /// A refused merge commit measures the tree it would have taken and
 /// leaves its readings in the scope's files; once that tree is gone, the
 /// passes over the tree now, still in the log, stand and are not shadowed
-/// by the later readings over the tree that never landed (#1312).
+/// by the later readings over the tree that never landed.
 #[test]
 fn a_refused_commits_readings_over_another_tree_do_not_shadow_the_pass_over_the_tree_now() {
     let root = scratch("shadowed");
@@ -904,7 +904,7 @@ fn a_refused_commits_readings_over_another_tree_do_not_shadow_the_pass_over_the_
 }
 
 /// What `worktree land` carries is the reading condition 1 reads for a
-/// scope main's store has no file of (#3804): `_merge`'s passes over a
+/// scope main's store has no file of: `_merge`'s passes over a
 /// crate main never measured reach main's store as lines of the log and
 /// entries of the index, and no file. Before the land each is missing;
 /// after it the crate is met, with nothing taken again in main.
@@ -931,8 +931,8 @@ fn a_pass_worktree_land_carried_for_a_scope_main_has_no_file_of_is_met_in_main()
 /// byte under that scope makes every one of them stale (harness-design.md
 /// §4.5 condition 1, §13 D.18). The crate's readings go through
 /// `for_crate`; the `--ri` column's and the release lint's through
-/// `stamped_over`. The subset is held by its kept runs and not a reading
-/// (#725), and the byte moves the engine's tree they are kept at.
+/// `stamped_over`. The subset is held by its kept runs and not a reading,
+/// and the byte moves the engine's tree they are kept at.
 #[test]
 fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_byte() {
     let root = scratch("one-byte");
@@ -998,7 +998,7 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
 /// The touched crate's readings and kept runs met, then the pin rewritten
 /// by `edit`: what `done` calls stale for it naming the pin as what
 /// changed is the crate's instruments of [`UNDER_RECIPE`], its kept phpt
-/// run among them (#2725), where `stales`, and nothing where not.
+/// run among them, where `stales`, and nothing where not.
 fn after_the_pin_moves(name: &str, edit: impl Fn(&str) -> String, stales: bool) -> Tree {
     let root = scratch(name);
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
@@ -1034,10 +1034,10 @@ fn after_the_pin_moves(name: &str, edit: impl Fn(&str) -> String, stales: bool) 
 }
 
 /// A reading taken under the oracle's recipe is stale once the pin's values
-/// move, as one taken over a crate is once its tree does (#1387): an entry
+/// move, as one taken over a crate is once its tree does: an entry
 /// laid under `oracle.toml`'s `[recipe.env]` stales the touched crate's
 /// `witness` and `crosscheck` readings and its kept phpt run, which
-/// carries the pin's digest (#2725), and nothing else, each naming the pin
+/// carries the pin's digest, and nothing else, each naming the pin
 /// as what changed. Before the change all are fresh; after it, a run taken
 /// again here leaves the base's stale, naming the call that takes it.
 #[test]
@@ -1048,7 +1048,7 @@ fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
 
     // The run here taken again under the new recipe, and the base's still
     // under the old: the base's is stale and names the call that takes it
-    // again (#2725).
+    // again.
     keep_run(&root, None, "ext/pcre", "pass");
     let base = Repo::at(&root).git(&["rev-parse", "HEAD"]);
     let base = xtask::track::short(&base);
@@ -1072,7 +1072,7 @@ fn a_failing_or_skipped_reading_is_unmet_with_its_message() {
     reading.status = Status::Fail;
     reading.message = "ext/pcre: 7000 lines over the ceiling of 6000".into();
     store.record(std::slice::from_ref(&reading)).unwrap();
-    // The subset's own reading is the port's meter, never read (#725).
+    // The subset's own reading is the port's meter, never read.
     let mut reading = fresh(&root, "phpt", "ext/pcre");
     reading.status = Status::Fail;
     store.record(std::slice::from_ref(&reading)).unwrap();
@@ -1084,8 +1084,8 @@ fn a_failing_or_skipped_reading_is_unmet_with_its_message() {
     );
 }
 
-/// The pin's digest leaves out a build's provenance and nothing else
-/// (#2969): a Linux build's `image` changed keeps the touched crate's
+/// The pin's digest leaves out a build's provenance and nothing else:
+/// a Linux build's `image` changed keeps the touched crate's
 /// readings under the recipe and its kept run fresh.
 #[test]
 fn changing_a_builds_image_keeps_the_runs_under_the_recipe_fresh() {
@@ -1094,7 +1094,7 @@ fn changing_a_builds_image_keeps_the_runs_under_the_recipe_fresh() {
 }
 
 /// A variant build's `md5` is its binary's identity, not its provenance:
-/// changing it stales every run under the recipe (#2969).
+/// changing it stales every run under the recipe.
 #[test]
 fn changing_a_variant_builds_md5_stales_every_run_under_the_recipe() {
     let md5 = |text: &str| {
@@ -1109,7 +1109,7 @@ fn changing_a_variant_builds_md5_stales_every_run_under_the_recipe() {
 
 /// `[oracle]`'s `md5`, a `[closure]` keg and a `[recipe]` ini line are
 /// values of the pin, each digested: changing one stales every run under
-/// the recipe (#2969). The keg's move re-pins the macOS build against the
+/// the recipe. The keg's move re-pins the macOS build against the
 /// moved record, as a person re-pins it, and that is its provenance.
 #[test]
 fn changing_the_oracles_md5_a_closure_keg_or_a_recipe_ini_stales_every_run() {
@@ -1129,7 +1129,7 @@ fn changing_the_oracles_md5_a_closure_keg_or_a_recipe_ini_stales_every_run() {
 }
 
 /// A touched crate's subset is held to no regression against the base
-/// (harness §4.5 condition 1, #725), from the run kept at the base's
+/// (harness §4.5 condition 1), from the run kept at the base's
 /// engine tree and the one kept at this tree's, which `done` diffs itself:
 /// a test met at the base and failed or skipped here is unmet, one met
 /// nowhere at the base is held to nothing, and a base with no run kept
@@ -1172,7 +1172,7 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
             && verdict.messages()[0].contains("cargo xtask phpt --base "),
         "{verdict:#?}"
     );
-    // A run of none is no run (#3143), here as at the base.
+    // A run of none is no run, here as at the base.
     keep_run(&root, None, "ext/pcre", "");
     keep_run(&root, Some("HEAD"), "ext/pcre", "");
     let verdict = judge(&root);
@@ -1183,8 +1183,8 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
 }
 
 /// An extension with no tests of its own in the pinned tree, as
-/// `ext/lexbor`, keeps no run (#3143), and condition 1 holds it to nothing
-/// with none kept, as it held the run of none kept before (#725).
+/// `ext/lexbor`, keeps no run, and condition 1 holds it to nothing
+/// with none kept, as it held the run of none kept before.
 #[test]
 fn an_extension_with_no_tests_of_its_own_is_met_with_no_run_kept() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -1207,11 +1207,12 @@ fn an_extension_with_no_tests_of_its_own_is_met_with_no_run_kept() {
 
 /// A crate the manifest marks `porting = true` has its `crosscheck`
 /// readings read as the port's meter and not as a condition of done
-/// (harness §4.5 condition 1, ledger 47; #383): a touched extension with
+/// (harness §4.5 condition 1, ledger 47): a touched extension with
 /// both columns red is met, and the key excuses those readings alone — a
 /// red `budget` of the marked crate is unmet, and so is a regression of
-/// its subset, the key's `phpt` half having gone with #725. The readings
-/// are still asked for: one missing is unmet whatever the key says.
+/// its subset, the key's `phpt` half having gone with harness revision
+/// 136. The readings are still asked for: one missing is unmet whatever the
+/// key says.
 #[test]
 fn a_porting_crates_crosscheck_readings_are_the_ports_meter() {
     let root = scratch("porting");
@@ -1264,7 +1265,7 @@ fn a_porting_crates_crosscheck_readings_are_the_ports_meter() {
     );
 }
 
-/// What `worktree land` carries is what the porting note reads (#3804):
+/// What `worktree land` carries is what the porting note reads:
 /// `_merge`'s two passing `crosscheck` columns over a `porting = true`
 /// extension reach main's index and no file, and the note that the key
 /// excuses nothing is said from them.
@@ -1383,7 +1384,7 @@ fn a_lock_that_differs_must_be_in_the_diff_and_a_lock_in_the_diff_needs_its_read
     );
 }
 
-/// What `worktree land` carries is the reading condition 3 reads (#3802):
+/// What `worktree land` carries is the reading condition 3 reads:
 /// `_merge`'s `api-check` pass over a lock in the diff reaches main's
 /// store as a line of the log and an entry of the index, while main's file
 /// of the seam stays the pass main took over the lock before. Before the
@@ -1554,7 +1555,7 @@ fn permit_over_the_diff_judges_a_binary_file_by_its_path_alone() {
 
 /// A changed `Cargo.lock` whose file is a link to a file outside the
 /// workspace is judged by `done` as the diff's path it is, as `permit
-/// --diff` judges a staged one (#4679): the lock it leads to gained a
+/// --diff` judges a staged one: the lock it leads to gained a
 /// registry package against the base, and `pipeline.lock` holds it, a
 /// `deny = true` row's denial, which `done` gives as condition 6's note.
 /// The lock's lines are built from parts, so none starts a line here.
@@ -1587,7 +1588,7 @@ fn permit_over_the_diff_holds_a_lock_that_gained_a_package_through_a_link_outsid
     );
 }
 
-/// The `unless` qualifier over the diff (#105): a crate whose only `exit=`
+/// The `unless` qualifier over the diff: a crate whose only `exit=`
 /// is the one `xtask witness --accept` wrote is done, and the same tree
 /// with no witness reading behind it is denied with the rule id. The
 /// reading is written by hand, as every reading here is; that `--accept`
@@ -1613,7 +1614,7 @@ fn a_crate_whose_only_exit_is_one_accept_wrote_is_done() {
     assert!(verdict.met(), "{verdict:#?}");
 
     // No witness reading at all: the scope's file, its index and the log,
-    // since a reading over the tree in any of them is evidence (#3802).
+    // since a reading over the tree in any of them is evidence.
     std::fs::remove_dir_all(store.root().join("witness")).unwrap();
     std::fs::remove_file(store.root().join("log/witness.jsonl")).unwrap();
     let verdict = judge(&root);
@@ -1672,9 +1673,9 @@ fn the_hook_prints_nothing_when_done_is_met() {
     assert_eq!(out, "");
 }
 
-/// The Stop holds what the session wrote and nothing else (#3618 ruling
-/// 1): a change in the checkout that no call of the stopping session wrote
-/// passes it, whoever made the change.
+/// The Stop holds what the session wrote and nothing else (ruled
+/// 2026-10-30): a change in the checkout that no call of the stopping
+/// session wrote passes it, whoever made the change.
 #[test]
 fn a_session_that_wrote_in_no_checkout_passes_the_stop() {
     let root = scratch("hook-wrote-nothing");
@@ -1704,7 +1705,7 @@ fn a_session_that_wrote_in_no_checkout_passes_the_stop() {
     );
 }
 
-/// A subagent's writes are its own (#3619): they hold its own Stop and
+/// A subagent's writes are its own: they hold its own Stop and
 /// never its parent's, whose Stop with no write of its own passes.
 #[test]
 fn a_subagents_writes_hold_its_own_stop_and_not_its_parents() {
@@ -1734,7 +1735,7 @@ fn a_subagents_writes_hold_its_own_stop_and_not_its_parents() {
 
 /// A checkout the session wrote in other than the one the hook stands in
 /// is judged by that checkout's own build, and a checkout with none that
-/// judges holds the turn naming it, never a silent pass (#3619).
+/// judges holds the turn naming it, never a silent pass.
 #[test]
 fn a_checkout_written_elsewhere_is_handed_to_its_own_build() {
     let root = scratch("hook-elsewhere");
@@ -1903,7 +1904,7 @@ fn a_checkout_handed_over_hands_back_its_kinds() {
 }
 
 /// The second Stop releases a held turn and records that it did, with the
-/// count the block had (#3618 M4).
+/// count the block had (ruled 2026-10-30).
 #[test]
 fn a_block_the_second_stop_released_is_a_reading_with_its_count() {
     let root = scratch("hook-released");
@@ -2109,14 +2110,13 @@ fn typed_list(root: &Path) -> serde_json::Value {
     serde_json::from_str(&ran.stdout).unwrap()
 }
 
-/// `done --format json` (#3494, Round 1, Q11 (a)): one object, `v` its
-/// shape's version, with the base, the changed files and crates, the
-/// counts by kind, and each unmet condition as `{ kind, instrument, scope,
-/// message, command }`. A reading never taken is `missing` with the
-/// command that takes it, one over another tree whose last run failed is
-/// `stale` with the clause that says so (c2.f), one failing over the tree
-/// now is `failing`, and an open divergence is `refused` with no
-/// instrument, scope or command.
+/// `done --format json`: one object, `v` its shape's version, with the
+/// base, the changed files and crates, the counts by kind, and each unmet
+/// condition as `{ kind, instrument, scope, message, command }`. A reading
+/// never taken is `missing` with the command that takes it, one over
+/// another tree whose last run failed is `stale` with the clause that says
+/// so (c2.f), one failing over the tree now is `failing`, and an open
+/// divergence is `refused` with no instrument, scope or command.
 #[test]
 fn the_list_as_json_types_each_unmet_condition() {
     let root = unmet_four_ways("json");
@@ -2249,7 +2249,7 @@ fn store_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-/// `done --peek` (#3494, Round 1, Q12, c2.h): judged and printed, under
+/// `done --peek` (Round 1, Q12, c2.h): judged and printed, under
 /// either format, and nothing written: the store is byte for byte as it
 /// was, a spent kept-change record included, and the exit is the
 /// verdict's. `done` and its Stop hook settle the record after they judge,
@@ -2292,7 +2292,7 @@ fn done_peek_writes_nothing_and_done_and_its_hook_settle_a_spent_kept_change() {
     assert!(!root.join(spent).exists(), "the hook settled the record");
 }
 
-/// Each reading names its caller (#3619): pre-push says so on the command
+/// Each reading names its caller: pre-push says so on the command
 /// line, and a run that names none is a hand's outside CI. Land is
 /// `worktree land`'s alone, which no command line offers (c11.b).
 #[test]
@@ -2409,9 +2409,9 @@ fn ci_runs_the_tests_and_typechecks_no_module_whose_declarations_it_lacks() {
 /// CI per commit (harness-design.md §7): the same instruments over the
 /// workspace; the reading store is the only thing the run keeps; what it
 /// renders is the permits section. The instruments run on two runners,
-/// the build runner's and the oracle runner's (#2253), and each job
-/// stashes its own store for the store job, which joins them and stashes
-/// the one store the run keeps, `harness` (#3554).
+/// the build runner's and the oracle runner's, and each job stashes its
+/// own store for the store job, which joins them and stashes the one store
+/// the run keeps, `harness`.
 #[test]
 fn ci_per_commit_runs_the_instruments_and_uploads_only_the_store() {
     let text = read(".github/workflows/harness.yml");
@@ -2434,11 +2434,11 @@ fn ci_per_commit_runs_the_instruments_and_uploads_only_the_store() {
         last = at;
     }
     // Every put to the stash is a store and nothing else, less what a job
-    // excludes of it (the phpt runs a job that takes none would carry,
-    // #2299), and one of them is the run's, `harness`; a ticket is closed by
-    // the session that worked it, so no job closes one on a push (#290).
+    // excludes of it (the phpt runs a job that takes none would carry), and
+    // one of them is the run's, `harness`; a ticket is closed by the session
+    // that worked it, so no job closes one on a push.
     // The stash, not a GitHub artifact, which counts against the account's
-    // storage (#3554).
+    // storage.
     assert!(
         !text.contains("upload-artifact") && !text.contains("download-artifact"),
         "the hand-offs are the stash's: {text}"
@@ -2479,10 +2479,10 @@ fn ci_per_commit_runs_the_instruments_and_uploads_only_the_store() {
 }
 
 /// CI per commit runs on a push to `main` alone, and runs no `done`, as
-/// Mitchell ruled on #4348 (ruling 5; #4372): a ticket's branch is judged
-/// at pre-push and by `land`, whose judges are main's tip's, and a pull
-/// request runs nothing, so neither the trigger nor the `done` step that
-/// went with it stands (harness-design.md §4.5, §7).
+/// Mitchell ruled 2026-11-09: a ticket's branch is judged at pre-push and
+/// by `land`, whose judges are main's tip's, and a pull request runs
+/// nothing, so neither the trigger nor the `done` step that went with it
+/// stands (harness-design.md §4.5, §7).
 #[test]
 fn ci_runs_on_a_push_to_main_alone_and_runs_no_done() {
     let text = read(".github/workflows/harness.yml");
@@ -2510,10 +2510,10 @@ fn ci_runs_on_a_push_to_main_alone_and_runs_no_done() {
 }
 
 /// The secret that reaches the stash is set on each step that stashes
-/// and on no other, never in a workflow's or a job's `env` (#4348 ruling
-/// 5; #4372), in every workflow: each `uses: ./.github/actions/stash` step
-/// carries it in its own `env`, and the secret is named nowhere else in
-/// the file. A step is the lines after its `uses:` indented under it, so
+/// and on no other, never in a workflow's or a job's `env` (ruled
+/// 2026-11-09), in every workflow: each `uses: ./.github/actions/stash`
+/// step carries it in its own `env`, and the secret is named nowhere else
+/// in the file. A step is the lines after its `uses:` indented under it, so
 /// a job's last step does not reach into the next job.
 #[test]
 fn the_stash_key_is_set_on_the_stash_steps_alone() {
@@ -2579,9 +2579,9 @@ fn a_red_main_carries_no_done_lines() {
     }
 }
 
-/// #18's other half: the row is what asks, so a crate that is no
-/// extension and carries one is unmet without its reading, the way
-/// `ext/pcre` is.
+/// The other half of a subset's home being its crate's row: the row is
+/// what asks, so a crate that is no extension and carries one is unmet
+/// without its reading, the way `ext/pcre` is.
 #[test]
 fn a_crate_with_a_row_and_no_reading_is_unmet_the_way_an_extension_is() {
     let root = scratch("row");
@@ -2603,7 +2603,7 @@ fn a_crate_with_a_row_and_no_reading_is_unmet_the_way_an_extension_is() {
     );
 }
 
-// ---------------------------------------------------------------- 7 (#31)
+// ---------------------------------------------------------------- 7
 
 /// The ticket `number` at a [`Tracker`] with the fixture body named, so
 /// the `ticket` reading `done` reads is the one the instrument writes,
@@ -2738,7 +2738,7 @@ fn a_branch_that_records_no_ticket_is_not_asked_and_says_nothing_about_tickets()
 /// in the index included: an unticked read in the file gives way to the
 /// ticked one another checkout took after it over the same tree. A tree
 /// that returns to an earlier state does not revive the box state read
-/// over it, which a lookup by the key would (#31).
+/// over it, which a lookup by the key would.
 #[test]
 fn the_ticket_is_held_to_its_last_reading_and_never_one_found_by_the_key() {
     let root = scratch("ticket-last");
@@ -2849,7 +2849,7 @@ fn a_refused_close_with_every_box_ticked_is_met_and_a_ticket_with_no_box_is_not(
     );
 }
 
-/// A withdrawal of the branch's own ticket meets condition 7 (#221): the
+/// A withdrawal of the branch's own ticket meets condition 7: the
 /// reading `xtask ticket close --withdrawn` writes passes with every box
 /// unticked and `withdrawn` set, the instrument having settled the ticket,
 /// and `done` reads `withdrawn` before the boxes. It would be held under
@@ -2928,10 +2928,10 @@ fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
     assert!(!verdict.met(), "{verdict:#?}");
 }
 
-/// A withdrawal is renewed past the commits after it (#3476): a bundle
+/// A withdrawal is renewed past the commits after it: a bundle
 /// branch withdraws its recorded ticket first and then lands its other
-/// tickets' commits, as t3459 withdrew #3459 at e61851ebe and landed
-/// #3440's and #3449's after it. The first commit stales the withdrawal's
+/// tickets' commits, as t3459 withdrew its own at e61851ebe and landed
+/// two others' after it. The first commit stales the withdrawal's
 /// reading, and the `ticket read` `done` names reads the ticket the
 /// tracker now holds closed and the store's reading of the close, so it
 /// writes a passing reading that carries the withdrawal and the condition
@@ -3025,14 +3025,14 @@ fn a_withdrawal_is_renewed_by_a_read_past_a_later_commit_and_a_refused_one_is_no
 
 /// The phpt skip the missing engine binary causes is met, and `done`
 /// reaches green for a crate that owns a subset on a checkout with no
-/// engine built (#132): with no run kept here, a fresh such skip is the
-/// one excuse the comparison takes (#725).
+/// engine built: with no run kept here, a fresh such skip is the
+/// one excuse the comparison takes.
 ///
 /// The causes the decision did not excuse are held as before, so the
 /// excuse does not spread: a phpt skip of a crate not yet created or one
 /// whose every test skipped writes `engine_absent` zero, and a witness
 /// skip is held to its status whatever its numbers say, the linked engine
-/// having served every snippet there was one for (#119).
+/// having served every snippet there was one for.
 #[test]
 fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not() {
     let root = scratch("no-binary");
@@ -3115,7 +3115,7 @@ fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not(
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
@@ -3123,7 +3123,7 @@ mod tracked {
     use super::*;
 
     /// The `--ri` column is a condition of done as the `--re` one is (harness
-    /// §4.5 condition 1, ledger 46; #361): a default extension with a red
+    /// §4.5 condition 1, ledger 46): a default extension with a red
     /// `ext/<name>/ri` reading is unmet naming that scope, one with both
     /// columns green is met, and a crate outside `ext/` is asked for no such
     /// scope.
@@ -3171,7 +3171,7 @@ mod tracked {
 
     /// A crate whose library sources name `debug_assertions` is asked for a
     /// second `clippy` reading, the release profile's at `<name>/release`, and
-    /// is unmet without it (#2392); a mention in a comment or a string asks
+    /// is unmet without it; a mention in a comment or a string asks
     /// nothing. `php_heap` and `php_engine` carry the split in the tree.
     #[test]
     fn a_crate_whose_sources_name_debug_assertions_is_asked_for_a_release_clippy_reading() {

@@ -79,7 +79,7 @@ impl Tracker {
 
     /// `issue view <number>` answers `answered` times, then fails `fails`
     /// times as `gh` does when the machine has run out of ports for a
-    /// moment, then answers again (#2804).
+    /// moment, then answers again.
     pub fn flaky(&self, number: u64, answered: u32, fails: u32) -> &Tracker {
         self.write(
             &format!("issues/{number}.flaky"),

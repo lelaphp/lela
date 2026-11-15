@@ -2,32 +2,32 @@
 //! one row per accepted difference from the oracle, keyed by a witness hash,
 //! a phpt path, a compile-identity path, an extension's name, a trace site,
 //! for a difference on the wire, which the RFCs judge through a
-//! conformance suite rather than the oracle, a suite's case (#2334), or a
-//! test the production server answers otherwise by design (#2629). A
+//! conformance suite rather than the oracle, a suite's case, or a
+//! test the production server answers otherwise by design. A
 //! row's `kind` says which lane reads it and its `cause` whether it is
 //! parity debt, counted against the manifest's day-30 target, or a
-//! difference that does not count (#2460, #2462). A row whose one reason
-//! holds for many ids of its kind names them in `covers`, and
+//! difference that does not count. A row whose one reason holds for
+//! many ids of its kind names them in `covers`, and
 //! [`Registry::row`] answers each of them with the row as it answers the
 //! row's own id; the row counts once (revision 62). A `trace:` row's
 //! `covers` may also name `witness:` ids, the fences that pin the engine's
 //! side of the row: such a fence is held to its pinned `expect` against
 //! the engine alone, so the row accepts no difference for it
-//! ([`Registry::pinning`]; harness §4.3, #1650). A row may name the
+//! ([`Registry::pinning`]; harness §4.3). A row may name the
 //! [`Digests`] of both sides' lines it was ruled on, and accepts its
-//! difference only while both stand; a `trace:dump/` row must (#3291's
-//! ruling). A row may name the oracle regime that proves its cause,
+//! difference only while both stand; a `trace:dump/` row must (ruled
+//! 2026-10-23). A row may name the oracle regime that proves its cause,
 //! `proven_at`, and the witness lane runs each fence it holds again under
 //! the oracle in that regime, failing the fence where the oracle's run is
-//! still not the engine's (#3365's ruling, #3369). A person
+//! still not the engine's (ruled 2026-10-24). A person
 //! writes a row and its reason; `compare`'s caller or the fuzzer may propose
 //! one with status `open` and an empty reason; the `divergence-reason`
 //! instrument fails an accepted row without a reason, a `by-design` row
 //! whose reason cites no design section or ADR, and an `oracle-build` row
 //! that names nothing it retires at, an accepted `trace:dump/` row
 //! that names no digests, and an accepted row whose `fixed_in`, the php
-//! release that carries its fix, the pin has reached (#4373's ruling,
-//! point 5). The TOML is the truth;
+//! release that carries its fix, the pin has reached (ruling 5 of
+//! 2026-11-10). The TOML is the truth;
 //! `status --section divergence` is the rendering.
 
 use std::borrow::Borrow;
@@ -51,11 +51,11 @@ pub const FILE: &str = "docs/divergence.toml";
 /// reading's `instrument`, and what the manifest's `check` predicate names.
 pub const INSTRUMENT: &str = "divergence-reason";
 /// What a trace dump's id starts with, `trace:dump/<kernel>`, a `trace:`
-/// id: a row holding one must name its [`Digests`] (#3291's ruling).
+/// id: a row holding one must name its [`Digests`] (ruled 2026-10-23).
 pub(crate) const DUMP_PREFIX: &str = "trace:dump/";
 /// What a hostile program's id starts with, `hostile:<id>`: no kind of its
-/// own, an id a `trace:` row covers, as Round 4's Q33 ruled (#4265), so a
-/// hostile difference is accepted by a reason a person wrote on a row.
+/// own, an id a `trace:` row covers, as Round 4's Q33 ruled, so a hostile
+/// difference is accepted by a reason a person wrote on a row.
 pub(crate) const HOSTILE_PREFIX: &str = "hostile:";
 
 /// One divergence key: `witness:<hash>`, `phpt:<path>`, `compile:<path>`,
@@ -86,9 +86,9 @@ impl Id {
 
     /// `text` as an id a row of `kind` covers: one of the row's own, as
     /// [`Id::of`] holds it, or under a `trace:` row a `witness:` id, a
-    /// fence that pins the engine's side of the row (harness §4.3, #1650),
+    /// fence that pins the engine's side of the row (harness §4.3),
     /// or a `hostile:` id, a program of the hostile corpus whose
-    /// difference the row accepts (#4265).
+    /// difference the row accepts.
     fn covered(kind: Kind, text: &str) -> Result<Id> {
         let beside = [Kind::Witness.prefix(), HOSTILE_PREFIX];
         if kind == Kind::Trace && beside.iter().any(|prefix| text.starts_with(prefix)) {
@@ -133,7 +133,7 @@ pub struct Divergence {
     /// The php release that carries the fix of what the row records,
     /// where one is known: once the pin has reached it,
     /// `divergence-reason` refuses the row while it stands accepted
-    /// (#4373's ruling, point 5).
+    /// (ruling 5 of 2026-11-10).
     pub fixed_in: Option<Release>,
     /// Written by a person; empty on a proposed row.
     pub reason: String,
@@ -145,12 +145,12 @@ pub struct Divergence {
     /// on a row that holds for its own id alone.
     pub covers: BTreeSet<Id>,
     /// Both sides' lines as the row was ruled on, where it names them:
-    /// the difference it accepts is that one alone (#3291).
+    /// the difference it accepts is that one alone.
     pub digests: Option<Digests>,
     /// The oracle regime its cause is proven at, an `oracle.toml`
     /// `[regime.<name>]`, where it names one: each fence the row holds is
     /// run again under the oracle in it beside the fence's own, and fails
-    /// where that run is not the engine's (#3365, #3369).
+    /// where that run is not the engine's.
     pub proven_at: Option<String>,
 }
 
@@ -177,7 +177,7 @@ impl Side {
 /// The digests of both sides' lines, the oracle's and the engine's: what
 /// an accepted row pins of the difference it was ruled on, so a pin bump
 /// that moves php's lines or a change that moves the engine's is a
-/// difference nobody ruled on (#3291). A re-pin is a changed value, a
+/// difference nobody ruled on. A re-pin is a changed value, a
 /// person's hand edit, as a new acceptance is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Digests {
@@ -219,7 +219,7 @@ impl fmt::Display for Digests {
 }
 
 /// An accepted row whose digests the lines held no longer match: the
-/// difference it accepted is not the one compared now (#3291).
+/// difference it accepted is not the one compared now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Moved {
     /// The row's id.
@@ -257,7 +257,7 @@ impl fmt::Display for Moved {
         }
         write!(
             f,
-            "; a re-pin is a new acceptance, a person's edit of the row (#3291)"
+            "; a re-pin is a new acceptance, a person's edit of the row"
         )
     }
 }
@@ -270,7 +270,7 @@ impl Divergence {
 
     /// Whether `id`, an id the row holds, is a fence pinning the engine's
     /// side of the row rather than a difference the row accepts: a
-    /// `witness:` id a `trace:` row covers (#1650).
+    /// `witness:` id a `trace:` row covers.
     fn pins(&self, id: &str) -> bool {
         self.kind == Kind::Trace && id.starts_with(Kind::Witness.prefix())
     }
@@ -278,7 +278,7 @@ impl Divergence {
 
 /// One row as the file spells it, before its kind and ids are decoded: a
 /// kind [`Kind`] does not name is refused with the row's id, `php-ub`
-/// among them since #2460 made it a cause (#2510).
+/// among them since it became a cause.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Row {
@@ -325,7 +325,7 @@ impl TryFrom<Row> for Divergence {
             (Some(oracle), Some(engine)) => Some(Digests { oracle, engine }),
             (None, None) => None,
             _ => bail!(
-                "the row {id} names one side's digest and not the other's; a row pins both, `oracle` and `engine`, or neither (#3291)"
+                "the row {id} names one side's digest and not the other's; a row pins both, `oracle` and `engine`, or neither"
             ),
         };
         // The witness lane is the one that runs an id again under a
@@ -339,7 +339,7 @@ impl TryFrom<Row> for Divergence {
         };
         if row.proven_at.is_some() && !fences {
             bail!(
-                "the row {id} names `proven_at`, and an id it holds is no fence; the witness lane runs a fence again under a regime, and no lane runs another id so (#3369)"
+                "the row {id} names `proven_at`, and an id it holds is no fence; the witness lane runs a fence again under a regime, and no lane runs another id so"
             );
         }
         Ok(Divergence {
@@ -392,13 +392,13 @@ pub enum Kind {
     Trace,
     /// A `wire:<suite>/<case>` id: one case of a conformance suite the
     /// production server's wire is held to, which the RFCs judge and php
-    /// does not, since php ships no such server (#2334). The case may
+    /// does not, since php ships no such server. The case may
     /// carry slashes of its own, as h2spec's `http2/6.5.3/1` does.
     Wire,
     /// A `makala:<test path>` id, the path relative to php-src: one test
     /// where the production server differs from php's SAPIs by design,
     /// which `fpm-compare` and the served phpt lane consult
-    /// ([`Registry::makala`], #2629, #2639).
+    /// ([`Registry::makala`]).
     Makala,
 }
 
@@ -459,9 +459,9 @@ impl std::str::FromStr for Kind {
     }
 }
 
-/// Why a row differs from the oracle, apart from which lane reads it
-/// (#2460): parity debt, counted against the manifest's day-30 target, or
-/// one of the causes counted on lines of their own.
+/// Why a row differs from the oracle, apart from which lane reads it:
+/// parity debt, counted against the manifest's day-30 target, or one of
+/// the causes counted on lines of their own.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -502,7 +502,7 @@ impl Cause {
 }
 
 /// What a row stops being needed at, so an oracle bump can list the rows
-/// it should retire (Mitchell, 2026-10-09, on #2462): the guard reads this
+/// it should retire (Mitchell, 2026-10-09): the guard reads this
 /// and never the reason's words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -510,7 +510,7 @@ pub enum Retires {
     /// The oracle rebuilt under the pin it has, linking what the engine does.
     OracleRebuild,
     /// The pin moved to a php that carries the fix upstream; the row's
-    /// `fixed_in` names that release where one is known (#4373).
+    /// `fixed_in` names that release where one is known.
     Pin,
     /// The fixture the row names changed.
     Fixture,
@@ -531,10 +531,10 @@ impl Retires {
 
 /// A php release, `<major>.<minor>.<patch>` as `oracle.toml`'s `[oracle]
 /// version` and a row's `fixed_in` spell it, ordered by its numbers, so
-/// 8.4.9 is below 8.4.10: what a row's `fixed_in` is held to the pin by
-/// (#4373). A pre-release, `8.4.0RC1`, is no release and is refused. No
-/// example here is of the 8.5 line, since no source states the pin's
-/// version (`tests/manifest.rs`).
+/// 8.4.9 is below 8.4.10: what a row's `fixed_in` is held to the pin by.
+/// A pre-release, `8.4.0RC1`, is no release and is refused. No example
+/// here is of the 8.5 line, since no source states the pin's version
+/// (`tests/manifest.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Release {
@@ -633,7 +633,7 @@ struct FileShape {
 
 /// The ids a registry's text names, each row's own and those it covers,
 /// read without holding the rows to today's shape: `done`'s base is any
-/// older commit, and a kind or field since removed (`php-ub`, #2510) must
+/// older commit, and a kind or field since removed (`php-ub`) must
 /// still answer which rows the diff added.
 pub(crate) fn named_ids(text: &str) -> Result<BTreeSet<String>> {
     #[derive(Deserialize)]
@@ -660,7 +660,7 @@ mod tests {
     use super::named_ids;
 
     /// A workspace with no registry, a repository that runs no php, has no
-    /// row, so `done` and `status` read it rather than stop (#3181).
+    /// row, so `done` and `status` read it rather than stop.
     #[test]
     fn a_workspace_without_the_registry_has_no_row() {
         let root = crate::scratch::Tree::new("divergence-none").unwrap();
@@ -685,7 +685,7 @@ covers = ["php-ub:other-site"]
         assert!(super::Registry::parse(old).is_err());
     }
 
-    /// Round 4's Q33 (#4265): a `trace:` row covers a `hostile:` id and
+    /// Round 4's Q33: a `trace:` row covers a `hostile:` id and
     /// accepts it as its own; a row of another kind covering one is
     /// refused, naming it.
     #[test]
@@ -774,8 +774,8 @@ impl Registry {
 
     /// The accepted `makala:` row that holds `test`, a path in php-src, as
     /// its own id or one it covers: the one lookup both of the production
-    /// server's comparisons make, `fpm-compare` and the served phpt lane
-    /// (#2629, #2639), through [`crate::makala::Consulted`].
+    /// server's comparisons make, `fpm-compare` and the served phpt lane,
+    /// through [`crate::makala::Consulted`].
     pub fn makala(&self, test: &str) -> Option<&Divergence> {
         self.accepted(&format!("{}{test}", Kind::Makala.prefix()))
     }
@@ -783,7 +783,7 @@ impl Registry {
     /// The accepted `trace:` row that covers `id`, a `witness:` id: the
     /// fence pins the engine's side of the row, so it is held to its
     /// pinned `expect` against the engine alone, and the oracle's run is
-    /// recorded and not judged (harness §4.3, §8; #1650). An `open` row
+    /// recorded and not judged (harness §4.3, §8). An `open` row
     /// pins nothing, as it accepts nothing.
     pub(crate) fn pinning(&self, id: &str) -> Option<&Divergence> {
         self.row(id)
@@ -870,11 +870,10 @@ pub(crate) enum Lack {
     Citation,
     /// An `oracle-build` row that names nothing it retires at.
     Retires,
-    /// A `trace:dump/` row that names no digests (#3291).
+    /// A `trace:dump/` row that names no digests.
     Digests,
     /// A row whose `fixed_in` the pin has reached: it lacks a release
-    /// still ahead of the oracle, so what it accepts php no longer does
-    /// (#4373).
+    /// still ahead of the oracle, so what it accepts php no longer does.
     Reached,
 }
 
@@ -908,9 +907,7 @@ impl Lack {
             Lack::Digests => {
                 "of a trace dump that pins neither side's lines, its `oracle` and `engine` digests"
             }
-            Lack::Reached => {
-                "whose `fixed_in` the pin has reached, the release that retires it (#4373)"
-            }
+            Lack::Reached => "whose `fixed_in` the pin has reached, the release that retires it",
         }
     }
 }
@@ -918,8 +915,8 @@ impl Lack {
 impl Divergence {
     /// Whether the row accepts its difference only as its [`Digests`]
     /// pin it: a row holding a `trace:dump/` id, its own or one it covers,
-    /// as #3291 ruled. Which other kinds must is a later ruling; a row of
-    /// any kind that names digests is held to them.
+    /// as ruled 2026-10-23. Which other kinds must is a later ruling; a row
+    /// of any kind that names digests is held to them.
     pub(crate) fn must_pin(&self) -> bool {
         self.ids().any(|id| id.as_str().starts_with(DUMP_PREFIX))
     }
@@ -1029,10 +1026,10 @@ impl Counts {
 /// when an accepted row lacks what the guard asks ([`Lack`]): a reason,
 /// a design citation on a `by-design` row, a `retires` on an
 /// `oracle-build` row, the digests of a `trace:dump/` row, a `fixed_in`
-/// the manifest's pin has not reached (#4373). It names each such row, how many ids it covers
-/// where it covers any, and prints the text of the manifest rule whose
-/// `check` predicate names this instrument. A covering row is held to the
-/// rule once, as one reason. The counts are the numbers.
+/// the manifest's pin has not reached. It names each such row, how many
+/// ids it covers where it covers any, and prints the text of the manifest
+/// rule whose `check` predicate names this instrument. A covering row is
+/// held to the rule once, as one reason. The counts are the numbers.
 pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<Reading> {
     let pin = (manifest.pin.as_ref())
         .map(|pin| pin.oracle.version.parse::<Release>())

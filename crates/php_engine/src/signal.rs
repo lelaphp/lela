@@ -1,5 +1,5 @@
-//! The process's signal record and the rules over it (design §5.8, revision 38;
-//! #1062): what the engine keeps of the signals an extension's handler
+//! The process's signal record and the rules over it (design §5.8, revision 38):
+//! what the engine keeps of the signals an extension's handler
 //! posts, which of them a request takes, and how a request's interrupt
 //! is raised by one. The mechanism is `php_process::post`'s, which knows no
 //! signal; the handler that writes is the extension's, in its `src/ffi/`,
@@ -16,8 +16,8 @@
 //! record is here, engine-owned.
 //!
 //! Beside the record is [`Reentry`], one per request whose FFI made a
-//! callback: how a function C calls back reaches the request (#1638,
-//! #1640). What a signal handler may reach of it, taking the lent
+//! callback: how a function C calls back reaches the request (design
+//! revision 112). What a signal handler may reach of it, taking the lent
 //! request and a deferral, is atomic operations and `php_process::post`'s,
 //! so ext/ffi's `zend_ffi_callback_trampoline` may make them there; what
 //! it defers, and what another thread waits on, runs at the interrupt
@@ -138,7 +138,7 @@ pub struct Deferred {
 }
 
 /// How a function C calls back reaches its request, which is
-/// `zend_ffi_callback_trampoline`'s `EG()` made sound (#1638, #1640):
+/// `zend_ffi_callback_trampoline`'s `EG()` made sound:
 /// while the request waits in a call into C or blocks in an engine
 /// native ([`crate::api::request::Limits::blocking`]) it is lent here,
 /// as an address one callback at a time takes and gives back; at any
@@ -385,7 +385,7 @@ impl Reentry {
     }
 
     /// `call`, made by a thread that is not the request's, posted and
-    /// that thread held until it is served (#1640): by the request's
+    /// that thread held until it is served: by the request's
     /// thread at its next interrupt check ([`Reentry::serve_waiting`]),
     /// or by this thread through `lent` with the request's address,
     /// where the request lends itself first, so the request never waits

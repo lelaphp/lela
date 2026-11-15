@@ -1,6 +1,6 @@
 //! The census: every test a run missed, grouped by the signature its miss
-//! kept (#1185), and among them the tests `php_compile` refused, grouped
-//! by the construct it refused them for (#617).
+//! kept, and among them the tests `php_compile` refused, grouped
+//! by the construct it refused them for.
 //!
 //! A test that fails, borks or is [`Judgement::Unread`] keeps a
 //! [`Miss`] on its verdict, decoded once where the adapter reached it
@@ -12,7 +12,7 @@
 //! **Why it is worth a rendering.** Which cause holds the most tests is
 //! the sharpest thing the corpus can say about what to build next. Until
 //! the unread census it was counted by eye, one subset at a time, into the
-//! body of each ticket that named a construct (#580, #581, #582, #583);
+//! body of each ticket that named a construct;
 //! until the signatures were kept, the rest was re-run and read off a
 //! printed run by `.claude/skills/specs/first-failures.awk`.
 //!

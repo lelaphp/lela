@@ -1,4 +1,4 @@
-//! A fence with a `request fpm` (#1291): the snippet served as a request
+//! A fence with a `request fpm`: the snippet served as a request
 //! of the web by a php-fpm, php-fpm's pin in `[sapi]` for the oracle and
 //! `sapi/fpm`'s `php-fpm` for the engine. The master runs in the
 //! foreground over a pool of one child listening on a Unix socket in the
@@ -226,7 +226,7 @@ impl Pool {
     ) -> Result<Pool> {
         let recipe = &oracle.pin().recipe;
         // The address is a path in the fence's own tree, so no other process
-        // can listen there before the master does (#1474): a loopback port
+        // can listen there before the master does: a loopback port
         // found free and then let go was free for anyone between the letting
         // go and the master's bind, and a request sent there reached whatever
         // took it, another run's php-fpm among them.
@@ -313,7 +313,7 @@ fn exchange(
 /// `stdin` as its `FCGI_STDIN`, and what php-fpm writes back on
 /// `FCGI_STDOUT` and `FCGI_STDERR` until `FCGI_END_REQUEST`, or [`Closed`]
 /// where it ends the connection first: a fence's request, and a host
-/// line's by its parts (`super::host`, #1975).
+/// line's by its parts (`super::host`).
 pub(super) fn round<'a>(
     mut stream: impl Read + Write,
     pairs: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
@@ -417,7 +417,7 @@ pub(super) fn sent(written: std::io::Result<()>) -> Result<()> {
 /// record (`Z/main/fastcgi.c:1401-1405`). It holds what the server wrote on
 /// `FCGI_STDOUT` and `FCGI_STDERR` in whole records until then, and the
 /// read that met the end, whose error a `request fpm` fence fails with; a
-/// host line holds it as the request's answer (`super::host`, #4397).
+/// host line holds it as the request's answer (`super::host`).
 #[derive(Debug)]
 pub(super) struct Closed {
     pub(super) stdout: Vec<u8>,
@@ -441,7 +441,7 @@ impl std::error::Error for Closed {}
 #[cfg(tracked)]
 mod tests {
     /// A pool is `pm = static` with the children asked for: one for a
-    /// fence, eight for the throughput bar (#2660).
+    /// fence, eight for the throughput bar.
     #[test]
     fn a_pool_is_static_with_the_children_asked_for() {
         let at = |children| super::conf("l".as_ref(), "s".as_ref(), (true, children));
@@ -462,8 +462,8 @@ mod tests {
 
     /// A master that ends before it listens fails the fence with its exit
     /// and its log's last lines as soon as it has ended, not at the end of
-    /// the patience and not over a connection to whatever else listens
-    /// (#1474). The stand-in writes what php-fpm writes when its address
+    /// the patience and not over a connection to whatever else listens.
+    /// The stand-in writes what php-fpm writes when its address
     /// is taken, on the stderr `-O` keeps its log on, and exits as php-fpm
     /// then does.
     #[test]
@@ -497,7 +497,7 @@ mod tests {
     }
 
     /// A server that fails the request once it has read all of it fails
-    /// the fence in the transport's words (#1493): the stand-ins of the
+    /// the fence in the transport's words: the stand-ins of the
     /// fixtures `request-reset-sent`, which ends the connection partway
     /// through its first record, and `request-empty`, which sends nothing,
     /// each say where the response broke off.
@@ -522,7 +522,7 @@ mod tests {
     }
 
     /// A connection the server ends before `FCGI_END_REQUEST` is
-    /// [`super::Closed`] however the client meets the end (#4397), an end
+    /// [`super::Closed`] however the client meets the end, an end
     /// of file or a reset, at a record's edge or inside one, and holds the
     /// records that came whole; a read past its time is the client's own
     /// trouble and no end. A write the server refused is left to the read

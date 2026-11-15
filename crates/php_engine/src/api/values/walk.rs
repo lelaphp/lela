@@ -1,4 +1,4 @@
-//! The walks over a table (#1980 candidate 3), each porting one of php's
+//! The walks over a table (design revision 92), each porting one of php's
 //! iteration modes once. A native walks a table in one of four ways:
 //!
 //! - [`rows`], the rows walk, an iterator that borrows the request, so a
@@ -609,7 +609,7 @@ pub fn properties<B>(
 /// first, in its order, each lent with its hook. A call of its own, so
 /// the iterator over the declared rows is off the stack of a walk over
 /// any other table, which a dumper's recursion through its body pays
-/// for at every level (#3159).
+/// for at every level.
 #[inline(never)]
 fn hooked_steps<B>(
     req: &mut Request,
@@ -1027,11 +1027,12 @@ impl Lent {
 
 /// A walk's pin over a row's key or value, kept for its step where
 /// nothing else the walk holds keeps the row and php's native takes no
-/// owner of it (design §4.4, #2159, #2230): no count, so the count the
+/// owner of it (design §4.4): no count, so the count the
 /// program reads is php's, and where the row's last owner goes during
 /// the step the row is destroyed there, as php destroys it, and only its
 /// bytes wait for the pin to be let go ([`php_heap::Heap::pin_block`]),
-/// so the walk reads it destroyed and never freed. Taken from a view and let go
+/// so the walk reads it destroyed and never freed (the row
+/// `trace:pinned-block-destroyed`). Taken from a view and let go
 /// by the walk on every way out, never by a `Drop` (design §5.1). Never a
 /// way to own: nothing reads it as a count, and the body hands a sink an
 /// owner it takes of the value, never the pin.
@@ -1044,7 +1045,7 @@ struct Pin<T: View> {
 impl<T: View> Pin<T> {
     /// A pin over what `view` names, one of its pins however many stand,
     /// so a walk's pin and a walk's pin in a fiber suspended inside it
-    /// are let go in either order (#2291).
+    /// are let go in either order.
     fn take(req: &mut Request, view: T) -> Pin<T> {
         req.heap_mut().pin_block(view.counted().to_zval());
         Pin { view }
@@ -1137,7 +1138,7 @@ pub struct Row {
     /// The `IS_PTR` row of a hooked table the row stands for, unread
     /// ([`Row::read`]). Boxed, as the type's text is, since a walk that
     /// recurses through its body keeps its row on the stack at every
-    /// level and these two are a row's rarest (#3159).
+    /// level and these two are a row's rarest.
     hook: Option<Box<(PhpObject, HookedDeclared, HookedBuild)>>,
 }
 

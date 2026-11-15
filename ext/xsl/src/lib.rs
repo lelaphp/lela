@@ -509,7 +509,7 @@ fn apply<R>(
 /// counts nothing over it and libxslt makes no document of it, so no
 /// transformation runs, and the given document is never counted under a
 /// first reference, which would free its tree under the object that
-/// counts it (#3819).
+/// counts it.
 fn main_document(
     given: Node,
     counted: Option<DocOf<'_>>,
@@ -633,7 +633,7 @@ fn compatible(req: &Request, class: ClassId, of: ClassId) -> bool {
 
 /// Where `this` keeps its callbacks, which a transformation reaches at
 /// each call it serves, so a callback's own registration on the
-/// processor is the one the rest of the transformation sees (#2319).
+/// processor is the one the rest of the transformation sees.
 fn at(this: PhpObject) -> CallbacksAt {
     CallbacksAt {
         object: this,
@@ -968,7 +968,7 @@ impl XSLTProcessor {
         };
         let Some(class) = class else {
             // The object counts the result's first reference, `DocOf::under`
-            // finding no object counting it (#3541); where none is made,
+            // finding no object counting it; where none is made,
             // the tree is freed as `result` drops.
             let made = php_ext_dom::create_object(req, result.node(), None)?;
             result.taken_by_object();
@@ -1055,8 +1055,7 @@ impl XSLTProcessor {
     ///
     /// The stylesheet and the callbacks stay on the processor while it
     /// transforms, so a callback transforms with it again, and what it
-    /// registers holds for the rest of the transformation and after
-    /// (#2319).
+    /// registers holds for the rest of the transformation and after.
     ///
     /// ```php
     /// $xsl = new DOMDocument;
@@ -1407,7 +1406,7 @@ mod tests {
     /// The copy `has_keys` asks for failing, as `xmlCopyDoc` can where
     /// libxml2's allocation fails, which the oracle cannot be made to
     /// show: nothing is counted and no transformation runs, where the
-    /// given document was counted under a first reference (#3819).
+    /// given document was counted under a first reference.
     #[test]
     fn a_failed_copy_counts_no_document() {
         let Some(given) = Node::new_doc(None) else {

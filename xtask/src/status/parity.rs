@@ -1,4 +1,4 @@
-//! The `parity` section (design §1, §12; #1761): met-of-target per suite
+//! The `parity` section (design §1, §12): met-of-target per suite
 //! and in total, as design §1 says `xtask status` states it. A suite is a
 //! subset parity counts, by the scope its reading is taken under:
 //! `Zend/tests` and `tests`, the core's, and every `[[crate]]` row that
@@ -11,8 +11,8 @@
 //! other states it is in. The suites outside parity are named apart: those
 //! `[parity] out` rules out, with the ruling, and those no row owns, which
 //! the pinned php does not build: every `ext/*` and `sapi/*` suite of the
-//! pinned tree that holds a test where the tree is on this machine
-//! (#1847), and every suite a reading measured, which is all a machine
+//! pinned tree that holds a test where the tree is on this machine,
+//! and every suite a reading measured, which is all a machine
 //! without the tree can name and the section says so. The section writes
 //! no reading.
 
@@ -70,7 +70,7 @@ struct Suite {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
 enum State {
-    /// Its reading was held to the subset's target (#1184).
+    /// Its reading was held to the subset's target.
     Held { target: Target },
     /// Its reading ran and was held to no target: none is kept under the
     /// pin for the subset.
@@ -265,7 +265,7 @@ fn inside(manifest: &Manifest) -> BTreeSet<PathBuf> {
 
 /// The suites outside parity: every one `[parity] out` names, under its
 /// one ruling (`Parity::hold` refuses a suite ruled twice or inside
-/// another, #1930), whether a reading measured it or not; then the suite of each
+/// another), whether a reading measured it or not; then the suite of each
 /// place nothing owns, a run a reading measured or a subset of the pinned
 /// tree's corpus, by the suite its first two segments name under `ext/` or
 /// `sapi/`, as not built.
@@ -309,7 +309,7 @@ fn outside<'a>(
 /// place a row owns is never one it does not build. The dashboard's
 /// `whyOut` (dashboard/collect/parity.ts) is the same rule, a place inside
 /// or around a row's name or subset, and re-judges this section's list by
-/// it (#1865).
+/// it.
 fn owned(manifest: &Manifest, inside: &BTreeSet<PathBuf>, place: &Path) -> bool {
     inside.iter().any(|suite| overlaps(place, suite))
         || manifest.crates.iter().any(|krate| {

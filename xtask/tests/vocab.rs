@@ -142,7 +142,7 @@ fn prose_using_an_avoided_word_fails_and_the_same_word_as_a_type_name_passes() {
     );
 }
 
-/// The glossary's Ticket entry (#27), and its Found work entry since: the
+/// The glossary's Ticket entry, and its Found work entry since: the
 /// two words that hide whether a thing found and not done was filed,
 /// `leftover` and `follow-up`, fire in a public name and in prose, and the
 /// finding names both terms that avoid them. A hyphen
@@ -212,7 +212,7 @@ fn a_crate_that_does_not_exist_yet_gets_no_reading() {
 /// A copy of the fixture at `from` in a scratch directory, whole, with the
 /// tracked pin beside it where the fixture's manifest points, and one
 /// commit: a fixture that carries its own `seams.toml` is a workspace of
-/// its own (#57), and the pin it names by path is the real one.
+/// its own, and the pin it names by path is the real one.
 fn scratch_workspace(name: &str, from: &Path) -> (Tree, PathBuf) {
     let base = Tree::new(&format!("vocab-{name}")).unwrap();
     let dir = base.join("a/b/c/d");
@@ -244,7 +244,7 @@ fn fixture_readings(name: &str, dir: &Path) -> Vec<Reading> {
 }
 
 /// A rule whose `avoid_from` names a section holds its scope to the terms
-/// under that heading alone (#63): over the `vocab.harness` fixture, whose
+/// under that heading alone: over the `vocab.harness` fixture, whose
 /// glossary has an Engine section and a Harness section, the Harness
 /// words fire in prose and in a name, the Engine words (`run`, `registry`)
 /// do not, `Result` is the code spelling the section's own entry marks,
@@ -280,7 +280,7 @@ fn a_section_holds_its_scope_to_that_sections_terms_and_a_fixture_under_the_crat
 }
 
 /// A manifest without an `avoid_from` rule has no glossary to read: each
-/// crate's reading is a skip that says so, and the run is met (#3182).
+/// crate's reading is a skip that says so, and the run is met.
 #[test]
 fn a_manifest_without_an_avoid_from_rule_is_a_skip_per_crate() {
     let dir = Tree::new("vocab-no-rule").unwrap();
@@ -402,8 +402,8 @@ fn stage_heap_beside_unstaged_ext(repo: &Repo, depends: bool) {
     );
 }
 
-/// The fixture of #4620: a commit stages `php_heap` alone, while the
-/// working tree also makes `php_ext` depend on it in an unstaged
+/// The fixture of harness revision 205: a commit stages `php_heap` alone,
+/// while the working tree also makes `php_ext` depend on it in an unstaged
 /// `Cargo.toml` and uses an avoided word in its rustdoc. `vocab --staged`
 /// takes `php_ext`'s closure from the index's `Cargo.toml`, which names no
 /// dependency, so its pass over the commit before stands, and the word the
@@ -436,7 +436,7 @@ fn an_unstaged_dependency_and_word_beside_a_staged_crate_are_not_judged() {
 
 /// A crate no reading stands for is measured under `--staged` as the
 /// index holds it: the word the commit does not take is not found, and
-/// the reading passes (#4620).
+/// the reading passes.
 #[test]
 fn a_crate_measured_under_staged_is_read_as_the_index_holds_it() {
     let (root, repo) = two_crates("unstaged-word");
@@ -451,8 +451,8 @@ fn a_crate_measured_under_staged_is_read_as_the_index_holds_it() {
 
 /// A `.rs` file git ignores under a crate is in no commit and moves no
 /// key, so its avoided word is not read, under `--staged` where nothing
-/// differs from the index and in a run over the working tree alike
-/// (#4620); before, vocab walked the directory and refused it.
+/// differs from the index and in a run over the working tree alike;
+/// before, vocab walked the directory and refused it.
 #[test]
 fn an_ignored_source_under_a_crate_is_not_read() {
     let (root, repo) = two_crates("ignored");
@@ -465,8 +465,8 @@ fn an_ignored_source_under_a_crate_is_not_read() {
 
 /// The same ignored file in a linked worktree, measured under the
 /// `GIT_DIR` and `GIT_INDEX_FILE` its hook exports, where the tree is the
-/// index and nothing is laid down: neither vocab nor api-check reads it
-/// (#4620). The file uses an avoided word, and a path across a module
+/// index and nothing is laid down: neither vocab nor api-check reads it.
+/// The file uses an avoided word, and a path across a module
 /// edge the manifest denies; the crates take the workspace's lints, so
 /// api-check has nothing else to say. Before, both listed a crate's files with git
 /// run in the crate's directory, which under that `GIT_DIR` git takes for
@@ -501,7 +501,7 @@ fn an_ignored_source_in_a_linked_worktree_is_not_read_under_its_hook() {
     assert!(!said.contains("laid down"), "{said}");
 }
 
-/// The tracked manifest with the row a person adds (#63): a second
+/// The tracked manifest with the row a person adds: a second
 /// `avoid_from` rule over `xtask` that reads the glossary's Harness section
 /// alone, built through the constructors while no tracked rule covers the
 /// harness. Once one does this adds nothing.
@@ -526,7 +526,7 @@ fn with_the_harness_rule(mut manifest: Manifest) -> Manifest {
 
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
-/// workspace, so a person's edit there is what may turn one red (#3091).
+/// workspace, so a person's edit there is what may turn one red.
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
@@ -536,7 +536,7 @@ mod tracked {
     /// Every rule `vocab` evaluates (the manifest's `avoid_from` rules, harness
     /// §4.1) has a negative-control fixture under `fixtures/rules/<id>/` that
     /// must fail under the instrument: judged by the manifest the fixture
-    /// carries when it carries one (#57), and standing as `crates/php_ext`
+    /// carries when it carries one, and standing as `crates/php_ext`
     /// under the tracked manifest otherwise. The rules of the other
     /// instruments are theirs to control.
     #[test]
@@ -578,7 +578,7 @@ mod tracked {
         }
     }
 
-    /// The harness held to the glossary's Harness section alone (#63): under
+    /// The harness held to the glossary's Harness section alone: under
     /// the row `with_the_harness_rule` builds, `vocab` over `xtask` is one
     /// passing reading of rule `vocab.harness`, its rustdoc prose read and
     /// clean, and its public items clean, the names that are a grammar's

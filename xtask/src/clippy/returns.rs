@@ -1,5 +1,5 @@
 //! The sensor of the manifest rule whose `check` names [`CHECK`],
-//! `tests.no-silent-return` (#3079): a test that returns early passes
+//! `tests.no-silent-return`: a test that returns early passes
 //! without asserting, so a `return` at a `#[test]` fn's own level fails
 //! the crate's reading, naming the site, unless it is `return Err(..)`.
 //! A return inside a closure, an async block or an item nested in the

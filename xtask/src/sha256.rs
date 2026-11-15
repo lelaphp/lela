@@ -1,9 +1,9 @@
 //! A SHA-256 digest as the harness's own files spell one, `sha256:<hex>`:
-//! the `[closure]` a variant's macOS build was made against (#2935) and the
-//! two sides' lines an accepted `trace:dump/` row was ruled on (#3291).
-//! [`Sha256::of`] is the one place bytes become one, and a file's spelling
-//! is decoded here and nowhere else, so a digest in hand is 32 bytes and
-//! never a string that might not be one.
+//! the `[closure]` a variant's macOS build was made against (ruled
+//! 2026-10-18) and the two sides' lines an accepted `trace:dump/` row was
+//! ruled on (harness revision 168). [`Sha256::of`] is the one place bytes
+//! become one, and a file's spelling is decoded here and nowhere else, so
+//! a digest in hand is 32 bytes and never a string that might not be one.
 
 use std::fmt;
 use std::str::FromStr;

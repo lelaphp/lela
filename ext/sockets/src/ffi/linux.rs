@@ -1,4 +1,4 @@
-//! The calls php makes under Linux's `#ifdef`s (#1096): `accept4(2)`
+//! The calls php makes under Linux's `#ifdef`s: `accept4(2)`
 //! (`HAVE_ACCEPT4`), an `AF_PACKET` socket's `sockaddr_ll`, the classic
 //! BPF program `SO_ATTACH_REUSEPORT_CBPF` attaches, and RFC 3678's
 //! `group_req` and `group_source_req`, which the `libc` crate does not

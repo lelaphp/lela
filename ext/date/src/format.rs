@@ -1019,7 +1019,7 @@ fn strftime(
 /// deprecated since 8.1. `%z` is the C library's: glibc reads the
 /// `tm_gmtoff` php sets to 0, and macOS's the process's `TZ`, whatever
 /// the time's zone, in php as here; the recipe's `TZ` is `UTC` on both
-/// sides of a witness (#1130).
+/// sides of a witness.
 ///
 /// ```php
 /// date_default_timezone_set('Europe/Amsterdam');

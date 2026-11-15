@@ -1,4 +1,4 @@
-//! One owner of a value as a type (design §5.1, #1980): [`Owner`]
+//! One owner of a value as a type (design §5.1): [`Owner`]
 //! beside the views it owns.
 
 use php_unit::decl::Type;
@@ -48,7 +48,7 @@ mod sealed {
         /// What an owner keeps beside its view to name the value its
         /// count stands on: nothing for a sealed view, which is that
         /// value, and the resource for a typed view of one, the open door,
-        /// which could answer another resource later (#2209).
+        /// which could answer another resource later.
         type Kept: Copy + std::fmt::Debug;
         /// What an owner made of the view keeps.
         fn kept(&self) -> Self::Kept;
@@ -172,7 +172,7 @@ impl View for Callable {}
 /// next sensing point. The line is kept beside the block the owner
 /// stands on, in its heap's table ([`php_heap::owners`]), not in the
 /// owner, so an owner is its view in every build and a payload held to
-/// php's size holds one as php holds the `zval` (#2246); an owner of
+/// php's size holds one as php holds the `zval`; an owner of
 /// what no count owns, which leaks nothing, is recorded nowhere. A
 /// release build gives it no `Drop`, so no drop glue runs (design §5.1),
 /// and what such an owner kept is freed with the request's memory at
@@ -836,7 +836,7 @@ impl Left {
     }
 }
 
-// An owner of a value is the value (#2209), in every build (#2246): what
+// An owner of a value is the value, in every build: what
 // it keeps beside a sealed view is nothing, and a debug build's line is
 // kept beside the block it stands on. Held at every build, so no lane can
 // skip it.

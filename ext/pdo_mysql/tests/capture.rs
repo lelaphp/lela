@@ -4,7 +4,7 @@
 //! has and pdo requires: without it `PDOException` has no
 //! `RuntimeException` to extend, and a connect failure writes `message`,
 //! `file`, `line` and `trace` as dynamic properties, four deprecations
-//! before anything the request prints (#1867).
+//! before anything the request prints.
 
 #[path = "../../mysqlnd/tests/support/mysql.rs"]
 mod mysql;
@@ -64,7 +64,7 @@ fn a_persistent_connection_serves_the_next_request_and_a_dead_one_is_replaced() 
 /// that connection: php gives pdo's persistent connections back in
 /// `shutdown_executor`, after every extension's `RSHUTDOWN`. The second
 /// request prints what the write left, the oracle's bytes for the same
-/// two requests (#1695). Against the server of `ci/mysql/compose.yaml`;
+/// two requests. Against the server of `ci/mysql/compose.yaml`;
 /// with none listening the test says so and passes.
 #[test]
 fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
@@ -184,7 +184,7 @@ impl Connection for Filled {
 
 /// A persistent connection past the bound of PDO's pool is closed with the
 /// request that gives it back, not dropped with its socket still open
-/// (ADR-0010's amendment of ADR-0005, #1798): 1024 persistent connections
+/// (ADR-0010's amendment of ADR-0005): 1024 persistent connections
 /// of a connector of the test's own fill the pool first, so the one the
 /// request opened last, to the server, is the one past the bound, and the
 /// server's process list, read in the next request, no longer lists its
@@ -230,7 +230,7 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed() {
 
 /// A persistent connection waits between requests in one list, PDO's,
 /// with its socket, as php's `pdo_dbh_t` in `EG(persistent_list)` holds the
-/// `MYSQLND` and mysqlnd deletes its stream from that list (#1805): the
+/// `MYSQLND` and mysqlnd deletes its stream from that list: the
 /// first request fills the engine's pool of persistent streams to its
 /// bound of 1024 with `pfsockopen` sockets before it connects, and the next
 /// request still takes up the same server thread, where a connection whose
@@ -263,8 +263,8 @@ fn a_persistent_connection_keeps_its_socket_however_full_the_stream_pool_is() {
 /// A persistent connection waiting in PDO's pool as the engine ends is
 /// closed on the shutdown request through `mysql_handle_closer`, which
 /// sends the server its `COM_QUIT`, as php's `zend_shutdown` destroys
-/// `EG(persistent_list)` and `php_pdo_pdbh_dtor` reaches `dbh_free`
-/// (#1961), where a dropped socket sends the server nothing. The
+/// `EG(persistent_list)` and `php_pdo_pdbh_dtor` reaches `dbh_free`,
+/// where a dropped socket sends the server nothing. The
 /// connection reaches the server through a relay of the test's own, which
 /// reads each packet the server is sent: none after the connect while the
 /// engine lives, the `COM_QUIT` last once its last clone is dropped.

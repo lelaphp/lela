@@ -6,7 +6,7 @@
 //!   the function's static entry, its declaration as data beside its
 //!   entry, which `ExtensionBuilder::functions` takes in a list and the
 //!   engine builds the declaration model from as it registers it, as php
-//!   registers a `zend_function_entry` array (#3355).
+//!   registers a `zend_function_entry` array.
 //! - `#[php_class]` on a `struct` or an `enum` declares a class header,
 //!   `Header::HEADER`, and on an `impl` the class's members,
 //!   `Members::CONSTANTS`, `PROPERTIES` and `METHODS`, registered together
@@ -15,11 +15,11 @@
 //!   hold them. A Rust `enum` is a PHP enum.
 //! - `#[php_const]` on a `const` or an inline `mod` declares constants.
 //! - `#[derive(EngineState)]` on a `struct` or an `enum` makes it engine
-//!   state, each field held to the bound (ADR-0005, #4348).
+//!   state, each field held to the bound (ADR-0005).
 //!
 //! Beside them, `#[mirrors]` on an item of an extension's surface names
 //! the php-src declaration it stands for and expands to the item as
-//! written; `xtask api-check` holds what it names (design §4.10, #2020).
+//! written; `xtask api-check` holds what it names (design §4.10).
 //!
 //! What a Rust type cannot say is written in the inert `#[php(..)]`, which
 //! these three read and strip. A parameter's PHP type, by-reference bit,
@@ -34,8 +34,7 @@
 //! reach the engine directly, and `crate::api` while `php_engine` is
 //! compiled, so Core's natives take the same attributes (ADR-0007).
 //! `#[derive(EngineState)]` names `::php_heap::EngineState` in `php_unit`,
-//! `php_ssa` and `php_link`, which stand below the engine and the facade
-//! (#4544, #4632).
+//! `php_ssa` and `php_link`, which stand below the engine and the facade.
 //!
 //! What fails the build is held by `compile_fail` blocks in
 //! `php_bundle`'s `refusals`, and the parity extension that holds
@@ -108,8 +107,7 @@ pub fn mirrors(attribute: TokenStream, item: TokenStream) -> TokenStream {
 /// derive engine state there, and the facade everywhere else (ADR-0007).
 /// The derive's trait starts apart from this root in `php_unit`,
 /// `php_ssa` and `php_link`, at `::php_heap::EngineState`, since none of
-/// them reaches the engine or the facade (`engine_state::state_trait_for`,
-/// #4544, #4632).
+/// them reaches the engine or the facade (`engine_state::state_trait_for`).
 fn root() -> Tokens {
     root_for(std::env::var("CARGO_CRATE_NAME").ok().as_deref())
 }

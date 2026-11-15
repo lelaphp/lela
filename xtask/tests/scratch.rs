@@ -1,4 +1,4 @@
-//! The scratch tree from outside (#194): what a test's directory is worth
+//! The scratch tree from outside: what a test's directory is worth
 //! is what happens to it on the run that fails, so the two that matter are
 //! held through a child process of this same binary.
 //!
@@ -193,7 +193,7 @@ fn wait_for_tree(record: &Path) -> PathBuf {
     panic!("the child never wrote down a tree that was there");
 }
 
-/// The ending `Drop` does not have (#194). A killed process unwinds
+/// The ending `Drop` does not have. A killed process unwinds
 /// nothing and runs no destructor, so its tree stands — which this asserts
 /// first, because a test that only watched the sweep would pass just as
 /// well if `Drop` had quietly been doing the work all along. Then any

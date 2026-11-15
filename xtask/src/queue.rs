@@ -1,5 +1,5 @@
-//! The merge queue (#3618 M2, #3622): merges into `main` are made in a
-//! worktree of their own, `_merge` on the branch `staging`, and `main`
+//! The merge queue (harness revision 183): merges into `main` are made in
+//! a worktree of their own, `_merge` on the branch `staging`, and `main`
 //! moves only by a fast-forward to a commit `done` was met at there.
 //! main's checkout then has one writer that never merges, and a red merge
 //! check is a `git reset --keep` in `_merge` with `main` where it stood.
@@ -12,7 +12,7 @@
 //! it, refused where another session owns it. `xtask worktree land`
 //! ([`land`]) is the one step that moves `main`, run in main's checkout:
 //! it has an xtask built at main's tip judge `_merge` since that tip
-//! ([`judge`], #4372), and on a pass lands `_merge`'s readings in main's
+//! ([`judge`]), and on a pass lands `_merge`'s readings in main's
 //! store, as a retire does, then fast-forwards `main` to the commit
 //! judged. The worktree stays, since the queue is persistent, and its
 //! per-key files stay with it, so `done` there still finds them.

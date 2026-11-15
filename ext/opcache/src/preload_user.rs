@@ -2,8 +2,8 @@
 //! (`Z/ext/opcache/ZendAccelerator.c:4979-5045`): the user's account as
 //! `getpwnam` answers it, resolved once as the engine finishes starting
 //! up, and the thread the preload is served on taking its ids before it
-//! serves any PHP, where php forks a child that takes them (#1258's
-//! ruling, 2026-09-30). Everything the preload does, the files it opens
+//! serves any PHP, where php forks a child that takes them (ruled
+//! 2026-09-30). Everything the preload does, the files it opens
 //! and the processes it starts among it, it does with the user's
 //! rights; the process's other threads keep the process's ids.
 

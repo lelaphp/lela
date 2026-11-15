@@ -150,7 +150,7 @@ pub enum Primary {
 /// The `zend_file_handle` a host hands `php_execute_script` for the
 /// program it names, as the request holds it: open, and inherited by a
 /// process the request execs, while the program is served, since php
-/// opens it with no `O_CLOEXEC` (#2458). A program the host has in hand,
+/// opens it with no `O_CLOEXEC`. A program the host has in hand,
 /// `-r` or stdin, has no file, and a bare one is closed before it is
 /// served, as `phpdbg_compile` closes it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -563,7 +563,7 @@ pub struct Aborted {
 /// the request makes it, the body as it leaves the `php_output` layer,
 /// the head at the commit, the log and the error stream as written,
 /// php's `sapi_module` timing, which a child process writing to the
-/// host's stdout is ordered against (#741, #946). A host that wants its
+/// host's stdout is ordered against. A host that wants its
 /// own type back has it from the [`Any`] the sink is.
 pub trait OutputSink: Any {
     /// Body bytes, and whether the host could write them: [`Aborted`]
@@ -601,7 +601,7 @@ pub trait OutputSink: Any {
     /// Where the host's log goes is the host's: php's CLI puts it on this
     /// same stream, and an `error_log` file parts the two, so a
     /// diagnostic is logged and displayed in that order on one stream
-    /// and in no order across two (#216).
+    /// and in no order across two.
     fn write_stderr(&mut self, bytes: &[u8]);
     /// Whether the host's `flush` sends the head first, as php-fpm's
     /// `sapi_cgibin_flush` calls `sapi_send_headers`. No, by default.
@@ -727,7 +727,7 @@ pub struct Observables {
     /// ([`Primary::Bare`]).
     pub uncaught: Option<Uncaught>,
     /// `php_request_startup` returned `FAILURE`: an extension's `rinit`
-    /// raised, which is php's fatal inside `RINIT` (#1775). What it
+    /// raised, which is php's fatal inside `RINIT`. What it
     /// raised was rendered as the uncaught fatal with no frame standing,
     /// no later `rinit` and no program ran, and the host ends as its php
     /// counterpart ends after the failure: the CLI prints `Could not
@@ -806,7 +806,7 @@ pub(crate) struct Shared {
     pub(crate) replaced: Replaced,
     /// The extension whose interception serves each row of `functions`,
     /// the last to intercept it, as which the native's call is served;
-    /// none for a native nothing intercepts (#2627). Read where a debug
+    /// none for a native nothing intercepts. Read where a debug
     /// build tags what a call allocates.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub(crate) intercepted_by: Vec<Option<ExtensionId>>,
@@ -979,7 +979,7 @@ pub(crate) struct Shared {
     /// at the engine's build and read at every call and return home
     /// ([`crate::observer`]); zero while none is declared.
     pub(crate) observers: u32,
-    /// The opcodes the bundle observes (design §7.1, #1780), declared as
+    /// The opcodes the bundle observes (design §7.1), declared as
     /// the engine starts and fixed after it, which choose the loop the
     /// engine binds as it starts; empty while none is declared.
     pub(crate) opcodes: crate::observer::ObservedOpcodes,
@@ -1008,7 +1008,7 @@ pub(crate) struct Shared {
     /// The stream layer's engine state, which the engine builds at its
     /// start from [`StreamHooks::state`](crate::layer::StreamHooks::state)
     /// and cannot name: the layer's own types, its persistent pool among
-    /// them, php's `EG(persistent_list)` (design §4.10, #1172, #1962). The
+    /// them, php's `EG(persistent_list)` (design §4.10). The
     /// layer reads it as [`Face::layer_state`](crate::layer::Face::layer_state);
     /// `None` with no stream layer supplied.
     pub(crate) layer: Option<Arc<dyn Any + Send + Sync>>,
@@ -1020,13 +1020,12 @@ pub(crate) struct Shared {
     /// What `zend_mm_shutdown(full=0)` leaves of each ended heap, which
     /// the next request's heap starts from (design §5.13, §5.14): what a
     /// php-fpm child keeps of its heap from one request to the next, kept
-    /// by the engine because a heap is its request's and dropped with it
-    /// (#2940).
+    /// by the engine because a heap is its request's and dropped with it.
     pub(crate) chunks: Arc<php_heap::ChunkCache>,
     /// `CWDG(realpath_cache)` (design §5.14): the process's in php's
     /// non-ZTS build, so every request of the engine reads what earlier
     /// ones entered until an entry's `realpath_cache_ttl` expires, as
-    /// every request of one php-fpm child does (#2941).
+    /// every request of one php-fpm child does.
     pub(crate) realpath_cache: crate::virtual_cwd::RealpathCache,
     /// The engine's interned strings (design §5.2, §5.14), the permanent
     /// names and the table a unit's constant strings enter as it is
@@ -1257,8 +1256,8 @@ fn link_classes(declarations: &mut [Declarations]) -> LinkedClasses {
                     flags,
                 });
             });
-            // A debug build serves an extension's table as the extension
-            // (#2113); Core's runs as whatever called it, as it always
+            // A debug build serves an extension's table as the extension;
+            // Core's runs as whatever called it, as it always
             // has, and keeps the identity its own tests compare.
             #[cfg(debug_assertions)]
             let table = match at {
@@ -2026,7 +2025,7 @@ impl Shared {
     /// the unit published all the same, for the asker alone, which binds
     /// what it declares as its own; it took its map-pointer offsets. No
     /// compile's unit is refused, since a unit's walk passes its
-    /// closures' cells over (#4684).
+    /// closures' cells over.
     ///
     /// A class whose constants hold a closure and a first-class callable,
     /// and a class that extends it, are served as php serves them, with
@@ -2035,7 +2034,7 @@ impl Shared {
     /// default, whose composed declaration the check admits against the
     /// units it was composed from where its link is published
     /// (`Request::publish`), so that with the cache it is published at its
-    /// first link and shared by every request after it (#4699), which
+    /// first link and shared by every request after it, which
     /// what the fence below prints, one request a process, cannot tell
     /// from a class bound per request: the test
     /// `a_trait_using_class_holding_a_closure_is_published_at_its_first_link`
@@ -3708,7 +3707,7 @@ pub struct EngineBuilder {
     sense_leaks: LeakSensor,
 }
 
-/// A debug build's request leak sensor (#1992, #1993), as a host sets it
+/// A debug build's request leak sensor, as a host sets it
 /// for every request of its engine ([`EngineBuilder::sense_leaks`]):
 /// armed unless the engine is built with it off, as a debug php reports
 /// its leaks unless told not to.
@@ -3868,7 +3867,7 @@ impl EngineBuilder {
     /// natives, constants and ini entries, started after the bundle's as
     /// `zend_sort_modules` leaves them, its name last in
     /// `get_loaded_extensions()`, for a host that declares natives of its
-    /// own (ADR-0008, #1348).
+    /// own (ADR-0008, ruled 2026-10-01).
     #[must_use]
     pub fn additional_extension(mut self, extension: Extension) -> EngineBuilder {
         self.additional_extension = Some(extension);
@@ -5721,7 +5720,7 @@ impl Engine {
     /// The one request transaction (design §5.14): compile, seed, serve,
     /// commit, shut down, observe. The request owns `sink` while it runs,
     /// each call reaching it as the request makes it, and hands it back
-    /// with what it observed (#946). What the request serves is `look`'s
+    /// with what it observed. What the request serves is `look`'s
     /// answer, asked once `php_request_startup` returns, every extension's
     /// `rinit` among it, as php-fpm's loop looks at its request
     /// (`Z/sapi/fpm/fpm/fpm_main.c:1838-1903`); a host that serves the
@@ -6091,13 +6090,12 @@ impl Engine {
     /// CLI and phpdbg end it: what the host's `php_request_startup` left
     /// written reaches the host, and the request's states drop with it,
     /// with no request-end phase served, since each goes from the failure
-    /// to `php_module_shutdown` without `php_request_shutdown` (#1775).
+    /// to `php_module_shutdown` without `php_request_shutdown`.
     /// What a buffer of the `php_output` layer still holds is never
     /// flushed, and the head is sent only where something written sent
     /// it. The host is handed the failure ([`Observables::start_failed`]),
     /// and each host's tests hold its ending, since a fence carries
-    /// neither the ini nor the session file a failing `rinit` needs
-    /// (#1634).
+    /// neither the ini nor the session file a failing `rinit` needs.
     fn start_failed(mut req: Box<Request>) -> (Observables, Lent) {
         #[cfg(debug_assertions)]
         req.end_in_sensed();
@@ -6616,7 +6614,8 @@ impl Engine {
         // layer's deactivation makes if nothing had; one it refused, for
         // the memory limit, is handed over now. A request ended at the
         // hard memory limit hands none: php's process `_exit`ed there,
-        // and a one-request host writes no head after it (#3435).
+        // and a one-request host writes no head after it (the row
+        // `trace:hard-limit-ends-request`).
         if !req.output().headers_sent() && !req.terminated() {
             req.send_header_block().ok();
         }
@@ -6871,8 +6870,8 @@ struct Laid<'a> {
 /// `opcache.record_warnings` is off, its default, since the compile that
 /// put it there raised them and opcache kept none; with the entry on,
 /// every hit raises them again, and without opcache, the CLI's default,
-/// every compile raises them (#3123, as #3234's rule takes it): one file
-/// included twice under each.
+/// every compile raises them (the recommended option, taken ahead of a
+/// person's ruling): one file included twice under each.
 ///
 /// ```php
 /// $dir = sys_get_temp_dir() . '/w3123-' . getmypid();
@@ -7214,7 +7213,7 @@ fn serve_declared(req: &mut Request, unit: &PublishedUnit, retval: ScriptRetval)
 /// bundle started in php's order ([`sort_modules`]); the first that
 /// raises ends the walk, as the
 /// `zend_bailout` of php's fatal inside `RINIT` leaves
-/// `zend_activate_modules` (#1775), and what it raised is handed back.
+/// `zend_activate_modules`, and what it raised is handed back.
 /// The pinned build has `zip`, which the bundle has not:
 ///
 /// ```php

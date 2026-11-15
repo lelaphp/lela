@@ -25,8 +25,8 @@ pub struct Server {
 }
 
 /// How many `port` numbers a server is offered: one found free can be taken by
-/// another process before php binds it, which php then says and exits
-/// (#2653). php -S cannot be handed a socket already bound.
+/// another process before php binds it, which php then says and exits.
+/// php -S cannot be handed a socket already bound.
 const ATTEMPTS: usize = 3;
 
 /// What php -S says, and exits on, where another process holds its `port`.

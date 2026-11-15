@@ -1,5 +1,5 @@
 //! `#[mirrors("ext/x/php_x.h", "sym")]`: the php-src declaration a
-//! surface item stands for (design §4.10, #2020). The item is emitted as
+//! surface item stands for (design §4.10). The item is emitted as
 //! written; what the marker says is held by `xtask api-check`, which reads
 //! it from the sources against the pinned php-src. Here only its shape is
 //! refused: two non-empty string literals, the header and the symbol.

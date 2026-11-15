@@ -1,11 +1,11 @@
 //! The `intl` extension: `php-src/ext/intl` as one crate under `ext/`
 //! (ADR-0004), behind the `intl` feature as php builds it `--enable-intl`,
 //! over ICU4C, found through `pkg-config`: on macOS the pinned keg
-//! (`icu4c@<major>`, the major the pin's `[closure]` names; #4406), and on
-//! any other target the platform's, at or above php's floor, 57.1
-//! (#4428). It is bound in [`ffi`], never vendored; php's intl C++ over
+//! (`icu4c@<major>`, the major the pin's `[closure]` names), and on
+//! any other target the platform's, at or above php's floor, 57.1.
+//! It is bound in [`ffi`], never vendored; php's intl C++ over
 //! ICU's C++ classes is reached through the `extern "C"` shim in
-//! `src/ffi/shim/` (design §7.2, revision 75; #1573). Its state on the
+//! `src/ffi/shim/` (design §7.2, revision 75). Its state on the
 //! value (ADR-0005). The phpt subset is `php-src/ext/intl/tests`, through
 //! `xtask phpt --subset`.
 //!
@@ -30,7 +30,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 // The error state and the binding's base are what every area calls; the
-// areas land one at a time over them (#1574).
+// areas land one at a time over them.
 mod breakiterator;
 mod calendar;
 mod collator;

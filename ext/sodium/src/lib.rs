@@ -1,7 +1,7 @@
 //! The `sodium` extension: `php-src/ext/sodium` as one crate under `ext/`
 //! (ADR-0004), `libsodium.c` and `sodium_pwhash.c` ported over the
 //! libsodium the pinned php links, found through `pkg-config` and bound
-//! in [`ffi`], never vendored (design §7.2, revision 72; #1540). This
+//! in [`ffi`], never vendored (design §7.2, revision 72). This
 //! file is the extension value, the constants, `SodiumException`, the
 //! argument reading every native shares and the helpers over strings
 //! (`sodium_add` to `sodium_base642bin`); [`aead`] is the six AEAD

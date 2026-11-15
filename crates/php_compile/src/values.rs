@@ -65,8 +65,8 @@ pub fn declared_values(unit: &Unit) -> Vec<(Zval, Holder)> {
 /// expression one keeps, or in a declaration ([`declared_values`]). A
 /// unit the cache keeps holds none (design §3.4). The engine asks it
 /// before its compile's strings are published, where a cache-bound
-/// compile's strings do not yet carry the bit `FrozenZval::of` reads
-/// (#4656), so it asks each value whether it is counted, which no string
+/// compile's strings do not yet carry the bit `FrozenZval::of` reads,
+/// so it asks each value whether it is counted, which no string
 /// or constant array of such a compile is.
 pub fn holds_counted_value(unit: &Unit) -> bool {
     let mut counted = false;

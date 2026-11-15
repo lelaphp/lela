@@ -1,7 +1,7 @@
-//! What the expansion relies on rustc for, pinned by name (#947 story
-//! 58): a body-less `fn` and a `const` with no value in an `impl` reach
-//! the attribute as tokens and are not refused by the parser first. The
-//! workspace pins its toolchain; a bump that changes this fails here.
+//! What the expansion relies on rustc for, pinned by name: a body-less
+//! `fn` and a `const` with no value in an `impl` reach the attribute as
+//! tokens and are not refused by the parser first. The workspace pins its
+//! toolchain; a bump that changes this fails here.
 
 use php_ext::abi::{Members, This};
 use php_ext::attr::php_class;

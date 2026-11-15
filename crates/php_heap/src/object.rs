@@ -593,7 +593,7 @@ impl std::fmt::Debug for Obj {
 /// set in its low bit, the next free id shifted up one
 /// (`SET_OBJ_BUCKET_NUMBER`), exactly as php packs it; bucket zero is
 /// never given, so an id is never false. The word is a pointer, as
-/// php's is (#2529): a live bucket is the object's pointer with its
+/// php's is: a live bucket is the object's pointer with its
 /// provenance, an invalidated one the same pointer tagged in place
 /// (`map_addr`), and a free-list entry an address with no provenance
 /// at all, so nothing is exposed and nothing is read back from an

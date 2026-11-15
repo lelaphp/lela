@@ -1,4 +1,4 @@
-//! The request leak sensor (#1992) over this extension's natives: each
+//! The request leak sensor over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
 #![cfg(debug_assertions)]
@@ -15,8 +15,7 @@ fn armed(source: &str) -> String {
 }
 
 /// `DateInterval::__unserialize` reads `days` as `DATE_A64I` reads it,
-/// `strtoll` over the value's string, and gives the string up after
-/// (#2100).
+/// `strtoll` over the value's string, and gives the string up after.
 #[test]
 fn the_string_days_is_read_through_is_given_up() {
     let stdout = armed(
@@ -65,8 +64,8 @@ var_dump(DateInterval::createFromDateString('3 days')->d, (array) $d === (array)
 }
 
 /// An interval's and a period's `timelib_rel_time` and an interval's
-/// date string are freed on every path that replaces or drops them
-/// (#2855): a constructor called again, a clone whose `__clone` throws, an
+/// date string are freed on every path that replaces or drops them: a
+/// constructor called again, a clone whose `__clone` throws, an
 /// `__unserialize` whose error handler throws mid-read, of a date string
 /// over another and of fields over a date string, a refused date
 /// string, `__wakeup`, `__set_state`, and a period's clone, reads and

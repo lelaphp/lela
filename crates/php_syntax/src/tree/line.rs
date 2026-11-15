@@ -1,5 +1,5 @@
 //! php's line for a node, `zend_ast.lineno`, as the builder records it at
-//! `Finish` (design §4.9, ledger 27; #599, #601, #603). php's parser
+//! `Finish` (design §4.9, ledger 27). php's parser
 //! produces the line before its compiler runs, and this file copies the
 //! two rules it uses at 8.5.9, where `ZEND_AST_SPEC` is 1:
 //!
@@ -19,7 +19,7 @@
 //!    reduction**, `CG(zend_lineno)` (`zend_ast_create_0`, the `else` arms
 //!    of the constructors above, `zend_ast_create_zval*`). Which token
 //!    the scanner had last returned then is a fact of the grammar's
-//!    state, measured on #601 for every kind: the last token shifted, P,
+//!    state, measured for every kind: the last token shifted, P,
 //!    where the state reduces by default, and the lookahead after it, N,
 //!    where the state reads one. The line is that token's last byte's,
 //!    so the `;` that `?>` and a newline spell is on the `?>`'s line.
@@ -31,8 +31,8 @@
 //! once it holds it, the resets of `CG(zend_lineno)` in `zend_compile.c`,
 //! is `emit`'s and not here.
 //!
-//! **What is not carried.** Two rows of #601's table are read but not
-//! applied, both unobservable on an opline: a type keyword (`array`,
+//! **What is not carried.** Two rows of that measurement are read but
+//! not applied, both unobservable on an opline: a type keyword (`array`,
 //! `callable`, `static`) directly after a class `const` takes the next
 //! token's line, and the constant that follows it takes the same line
 //! from its name, so the group's line does not move; and `static` as a
@@ -84,7 +84,7 @@ impl Site<'_> {
 
     /// The next significant token after the one at `index`: the
     /// lookahead php's parser has read where the state at that token
-    /// reads one, #601's N. Whitespace and comments are passed over, as
+    /// reads one, rule 2's N. Whitespace and comments are passed over, as
     /// the scanner passes over them on its way to the next token, and
     /// they count under `end_line(N)` for that reason.
     fn after(&self, index: usize) -> Option<usize> {
@@ -115,12 +115,12 @@ impl Site<'_> {
     /// Is the node the first thing after the `(` or a `,` of an argument
     /// list? There a keyword may also be a named argument's label, so
     /// php's parser reads the token after it before it reduces the
-    /// keyword (#601: states 443, 444, 452, 446, 438, 441).
+    /// keyword (states 443, 444, 452, 446, 438, 441).
     ///
     /// `__LINE__` is `ast->lineno` read back by
     /// `zend_try_ct_eval_magic_const`, so what it prints is the line this
     /// answers for: its own as a statement, the `)`'s as an argument
-    /// (#601 pin 13, `2` then `8`):
+    /// (`2` then `8`):
     ///
     /// ```php
     /// echo __LINE__ /*
@@ -227,7 +227,7 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 ///
 /// An empty statement list is the scanner's line where its rule reduced,
 /// the `:` of a `default` here, which `zend_compile_switch` reads for the
-/// clause it refuses (#601 pin 2):
+/// clause it refuses:
 ///
 /// ```php
 /// switch (1) { default: default:
@@ -241,8 +241,7 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 ///
 /// The same line through the deprecation `zend_compile_switch` raises
 /// for the `;` spelling, the `;` being where the arm's empty statement
-/// list reduced and the comments on either side of it uncounted (#601
-/// pin 3):
+/// list reduced and the comments on either side of it uncounted:
 ///
 /// ```php
 /// switch (1) { default /*
@@ -256,7 +255,7 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 /// ```
 ///
 /// An empty array is its `]`'s line, the lookahead its rule reduced on,
-/// and the `ECHO` that converts it is emitted there (#601 pin 4):
+/// and the `ECHO` that converts it is emitted there:
 ///
 /// ```php
 /// echo [ /*
@@ -269,7 +268,7 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 /// ```
 ///
 /// The same line through `zend_compile_args`, which raises after the
-/// argument's `zend_compile_expr` (#601 pin 5):
+/// argument's `zend_compile_expr`:
 ///
 /// ```php
 /// function f(&$x) {}
@@ -285,7 +284,7 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 /// ```
 ///
 /// A bare `return` is its `;`'s line and not its keyword's, the comment
-/// after the `;` uncounted (#601 pin 6):
+/// after the `;` uncounted:
 ///
 /// ```php
 /// function f(): int { return
@@ -298,7 +297,7 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 /// ```
 ///
 /// The `;` that `?>` and a newline spell is on the `?>`'s line, since the
-/// newline is counted at the next `zendlex` (#601 pin 7):
+/// newline is counted at the next `zendlex`:
 ///
 /// ```php
 /// function f(): int { return ?>
@@ -308,7 +307,7 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 /// Fatal error: A function with return type must return a value in %s on line 2
 /// ```
 ///
-/// A bare `break` is its `;`'s line the same way (#601 pin 8):
+/// A bare `break` is its `;`'s line the same way:
 ///
 /// ```php
 /// break /*
@@ -322,7 +321,7 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 /// ```
 ///
 /// `exit`'s name zval is made when `T_EXIT ctor_arguments` reduces, after
-/// the `)`, so the call is the `)`'s line (#601 pin 10):
+/// the `)`, so the call is the `)`'s line:
 ///
 /// ```php
 /// exit(
@@ -337,12 +336,13 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 ///   thrown in %s on line 4
 /// ```
 ///
-/// What is left of #601's pins is held to what the oracle printed in
-/// `tests/line.rs`, each for a reason written beside it there: the two
-/// programs that read a line through `declare(ticks=1)`, the `yield` and
-/// the `static` the compiler refuses, and the `case ;` deprecation it
-/// does not raise. The line a `for` loop's jump back is left at is a
-/// witness beside `php_compile`'s `for`, where the mechanism is.
+/// What is left of the measurement's programs is held to what the oracle
+/// printed in `tests/line.rs`, each for a reason written beside it there:
+/// the two programs that read a line through `declare(ticks=1)`, the
+/// `yield` and the `static` the compiler refuses, and the `case ;`
+/// deprecation it does not raise. The line a `for` loop's jump back is
+/// left at is a witness beside `php_compile`'s `for`, where the mechanism
+/// is.
 pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32 {
     use SyntaxKind as K;
     let by_rule_1 = || first_child(children, site);
@@ -353,13 +353,12 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
         // `inner_statement_list: %empty`, `class_statement_list: %empty`
         // and `property_hook_list: %empty` reduce directly after the `{`
         // by default, and the list keeps that line however many
-        // statements are added (#601 rows 1 and 2).
+        // statements are added.
         K::BLOCK | K::CLASS_BODY | K::PROPERTY_HOOK_LIST => {
             site.end_line(first_token(children, site).map(|(i, _)| i).or(site.last))
         }
         // The same list after the `:` of an alternative-syntax body or a
-        // `case`, or the `;` a `default ;` is written with (#601 row 1,
-        // pins 2 and 3).
+        // `case`, or the `;` a `default ;` is written with.
         K::STMT_LIST => site.end_line(site.before),
         K::FUNCTION_DECL
         | K::METHOD_DECL
@@ -377,9 +376,9 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
         }
         // `ZEND_AST_ARRAY_ELEM` is `(value, key)` (`:1646-1647`), and an
         // elided element is `NULL`, whose list takes the lookahead's line
-        // (`possible_array_pair: %empty`, #601 row for the empty array);
+        // (`possible_array_pair: %empty`, as the empty array's does);
         // `ZEND_AST_YIELD` is `(value, key)` too (`:1380`), and a bare
-        // `yield` reduces on the lookahead (#601 row 9).
+        // `yield` reduces on the lookahead.
         K::ARRAY_ELEMENT => value_before_key(children, K::ARRAY_KEY, site),
         K::YIELD_EXPR => value_before_key(children, K::YIELD_KEY, site),
         // `ZEND_AST_CLASS_CONST_GROUP` is `(list, attrs, type)` (`:992`):
@@ -400,18 +399,17 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
             site.end_line(site.next())
         }
         // A named argument's label that is a keyword is reduced after the
-        // `:` in argument position (#601: `identifier: semi_reserved`).
+        // `:` in argument position (`identifier: semi_reserved`).
         K::NAMED_ARG if first_token(children, site).is_some_and(|(_, kind)| kind.is_keyword()) => {
             site.end_line(first_token(children, site).and_then(|(at, _)| site.after(at)))
         }
         // `zend_ast_create_ex(ZEND_AST_MAGIC_CONST, …)` has no child: its
-        // own line, or the lookahead's in argument position (#601 row
-        // 13, pin 13).
+        // own line, or the lookahead's in argument position.
         K::MAGIC_CONST_EXPR if site.in_argument_position() => site.end_line(site.next()),
         // `exit`'s and `clone`'s name zval is made when `T_EXIT
         // ctor_arguments` or `T_CLONE clone_argument_list` reduces, after
         // the `)`, and for the bare and the operand forms after the
-        // lookahead (`:1370`, `:1259-1268`; #601 row 10, pin 10).
+        // lookahead (`:1370`, `:1259-1268`).
         K::EXIT_EXPR | K::CLONE_EXPR => {
             if node_of(children, K::ARG_LIST).is_some() {
                 site.end_line(site.last)
@@ -426,7 +424,7 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
         // Rule 1, and the last token the scanner returned where php's
         // node has no child: `argument_list: '(' ')'`, the empty
         // `parameter_list`, array and heredoc, `return;`, `break;`, an
-        // empty statement (#601 rows 4 to 8 and 12; pins 4 to 8, 12).
+        // empty statement.
         _ => by_rule_1().unwrap_or_else(|| site.end_line(site.last)),
     }
 }
@@ -436,8 +434,8 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
 /// { $<num>$ = CG(zend_lineno); }` and the interface, trait, enum and
 /// anonymous-class rules alike, handed to `zend_ast_create_decl` as
 /// `start_lineno`). In argument position a closure's keyword is reduced
-/// after the lookahead (#601 row 17, pin 17), which is what Reflection
-/// reads back as the closure's start line, `2`, `9` and `11` here:
+/// after the lookahead, which is what Reflection reads back as the
+/// closure's start line, `2`, `9` and `11` here:
 ///
 /// ```php
 /// $c = function /*
@@ -527,13 +525,12 @@ fn value_before_key(children: &[Element], key_kind: SyntaxKind, site: &Site<'_>)
 }
 
 /// `ZEND_AST_CALL` over a name takes the name's line; over a
-/// `callable_expr` it takes `CG(zend_lineno)` at the `(` (`:1457`, #601
-/// row 16, pin 16); a method call or a `::` call takes its receiver's,
-/// as rule 1 gives it; `readonly(…)`'s name zval is made after the `)`
-/// (`:1449`, #601 row 11).
+/// `callable_expr` it takes `CG(zend_lineno)` at the `(` (`:1457`); a
+/// method call or a `::` call takes its receiver's, as rule 1 gives it;
+/// `readonly(…)`'s name zval is made after the `)` (`:1449`).
 ///
 /// The call through a variable, whose line the `ArgumentCountError`
-/// names (#601 pin 16):
+/// names:
 ///
 /// ```php
 /// function g($x) {}
@@ -551,8 +548,7 @@ fn value_before_key(children: &[Element], key_kind: SyntaxKind, site: &Site<'_>)
 ///   thrown in %s on line 2
 /// ```
 ///
-/// `readonly` as a function name, whose zval is made after the `)` (#601
-/// pin 11):
+/// `readonly` as a function name, whose zval is made after the `)`:
 ///
 /// ```php
 /// function readonly($x) {}
@@ -589,10 +585,10 @@ fn call(children: &[Element], site: &Site<'_>) -> u32 {
 }
 
 /// `class_name: T_STATIC` makes its zval at the reduction: before the
-/// lookahead where only a class reference can stand (`new static`, #601
-/// row 14, pin 14), after it where a statement or an expression may
-/// begin, so the `::`'s line (pin 15), and in a trait adaptation, where
-/// `static` may also be a method's name. Any other class name is rule 1.
+/// lookahead where only a class reference can stand (`new static`),
+/// after it where a statement or an expression may begin, so the `::`'s
+/// line, and in a trait adaptation, where `static` may also be a
+/// method's name. Any other class name is rule 1.
 fn class_name(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32 {
     use SyntaxKind as K;
     match children.first() {
@@ -606,7 +602,7 @@ fn class_name(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32 {
     }
 }
 
-/// Is `static` here reduced before the lookahead (#601: state 151)? After
+/// Is `static` here reduced before the lookahead (state 151)? After
 /// `new`, `instanceof`, `++` and `--`, and where only a variable can
 /// follow: a `foreach` target, an `unset` operand, and a reference taken
 /// by `&` outside a binary expression.

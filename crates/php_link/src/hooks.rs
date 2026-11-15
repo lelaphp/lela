@@ -1,4 +1,4 @@
-//! Property hooks at the link (#427): `zend_inheritance.c`'s arms of
+//! Property hooks at the link: `zend_inheritance.c`'s arms of
 //! `do_inherit_property` over a hooked property (`inherit_property_hook`,
 //! `prop_get_variance`, the `set` hook's type against an abstract
 //! parent's), `zend_verify_hooked_property` once the class's own

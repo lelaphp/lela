@@ -1,4 +1,4 @@
-//! The parse arena (#4020's ruling, signed off on #4064): a compile's
+//! The parse arena (ruled and signed off 2026-11-03): a compile's
 //! syntax tree and temporaries bumped into chunks the machine maps
 //! whole, and the chunks a compile grew given back to the machine when
 //! it is reset, rather than to the system allocator, which keeps the

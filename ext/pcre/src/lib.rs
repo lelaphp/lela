@@ -31,7 +31,7 @@
 mod ffi;
 /// `PCRE2_MAJOR` and `PCRE2_MINOR` of the `pcre2.h` this build compiled
 /// against, which `build.rs` reads as the C preprocessor expands them, as
-/// php's `@cvalue` reads the macros at its build (#1978).
+/// php's `@cvalue` reads the macros at its build.
 mod header {
     include!(concat!(env!("OUT_DIR"), "/header.rs"));
 }

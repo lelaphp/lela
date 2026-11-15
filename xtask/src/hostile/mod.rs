@@ -1,4 +1,4 @@
-//! `xtask hostile`, the hostile lane (harness row H15, #4265): a fixed
+//! `xtask hostile`, the hostile lane (harness row H15): a fixed
 //! corpus of PHP programs whose error handler disturbs the opline that
 //! raised the diagnostic, mid-step, each held to the oracle. The corpus is
 //! `data/hostile.toml` ([`corpus`]); each program runs under the oracle's
@@ -18,7 +18,7 @@
 //!
 //! **The compiled tier** (Round 3, Q24 (a)). The second pass runs the
 //! engine's `php`, which carries the tier in every build that keeps its
-//! default features (ADR-0017, #3676), under `[regime.jit-force]`, and
+//! default features (ADR-0017), under `[regime.jit-force]`, and
 //! judges faults alone: a byte verdict against the interpreter is what
 //! design §3.2 forbids, and one against the oracle would double the kept
 //! runs for a pass that differs nowhere the interpreter does not.

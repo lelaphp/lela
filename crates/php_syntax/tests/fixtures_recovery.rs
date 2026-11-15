@@ -557,7 +557,7 @@ fn left_nested_chains_are_not_grammar_depth() {
 /// between. The time is the thread's CPU time, best of three: a wall
 /// clock on a loaded machine charges the parse for the time it waited
 /// to be scheduled, which a 40,000-link parse waits more often than a
-/// 5,000-link one fits in between (#2205).
+/// 5,000-link one fits in between.
 #[test]
 fn a_left_nested_chain_parses_in_linear_time() {
     use nix::time::{ClockId, clock_gettime};

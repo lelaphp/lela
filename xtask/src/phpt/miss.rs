@@ -1,6 +1,6 @@
 //! What a miss keeps: for each test that counts against its subset or
 //! that the compiler refused, the first line where what ran and what the
-//! test expects part, and a [`Signature`] that names the cause (#1185).
+//! test expects part, and a [`Signature`] that names the cause.
 //! Both are decoded once, where the adapter reaches the verdict, carried
 //! on the verdict and kept on the run, so learning why a test missed never
 //! means running it again, and the census groups by the signature the run
@@ -27,7 +27,7 @@
 //! it exited 129 to 159 as a shell's child a signal ended does, the miss
 //! keeps that ending and the last of what it wrote on stderr ([`Died`]),
 //! which upstream's `Termsig=` line among the lines does not tell apart
-//! and which no rerun is sure to show again (#4130).
+//! and which no rerun is sure to show again.
 
 use std::fmt;
 use std::sync::LazyLock;
@@ -67,7 +67,7 @@ pub(crate) struct Miss {
 }
 
 /// How a test's program died, which upstream's `Termsig=` line says too
-/// little of to tell what ended it (#4130): whether a signal ended it or
+/// little of to tell what ended it: whether a signal ended it or
 /// it exited with a status a shell gives a child a signal ended, and the
 /// last of what it wrote on stderr.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,7 +136,7 @@ impl fmt::Display for Died {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Signature {
-    /// The compiler refused the program, in its own sentence (#617).
+    /// The compiler refused the program, in its own sentence.
     Unread(String),
     /// The engine's first line of its own names what it lacks.
     Undefined(Symbol),
@@ -149,7 +149,7 @@ pub(crate) enum Signature {
     /// diagnostic php wrote and the engine did not, masked, or none where
     /// what php alone wrote holds no diagnostic.
     PhpOnly(Option<String>),
-    /// The program ran past the recipe's limit (#691).
+    /// The program ran past the recipe's limit.
     PastLimit,
     /// The runner could not read the test, masked.
     Bork(String),

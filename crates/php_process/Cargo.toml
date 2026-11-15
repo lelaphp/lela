@@ -1,6 +1,6 @@
 # php_process: the process-wide mechanisms, `fork`, the signal pool, the
 # process's `LC_CTYPE`, its identity and its file descriptors, an `unsafe`
-# home of its own below `php_engine` (design §4.1, #1779, #1935; seams.toml
+# home of its own below `php_engine` (design §4.1; seams.toml
 # crate row, the `process` seam, `unsafe.homes` and `fork.home`). Depends
 # on nothing in the workspace; `libc` is the platform's own headers, which
 # `fork(2)`, `setlocale(3)`, `getuid(2)` and the fd calls are declared in.

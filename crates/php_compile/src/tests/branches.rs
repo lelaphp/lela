@@ -39,7 +39,7 @@ fn a_goto_s_label_slot_is_nulled_and_no_slot_is_shared() {
     assert_eq!(unit.main.literals[3].as_long(), Some(1));
 }
 
-/// #256's program under the oracle's `[regime.dump]`: a `switch` of
+/// This program under the oracle's `[regime.dump]`: a `switch` of
 /// fewer cases than `should_use_jumptable` asks for is the
 /// `IS_EQUAL` and `JMPNZ` chain into one shared temporary, each
 /// case's `break` a `JMP` to the switch's end, and a `match` of two
@@ -91,7 +91,7 @@ fn a_switch_of_few_cases_is_the_is_equal_chain_and_a_match_is_its_jump_table() {
     assert_eq!(table.map(|table| table.len()), Some(2));
 }
 
-/// #395's program under the oracle's `[regime.dump]`:
+/// This program under the oracle's `[regime.dump]`:
 /// `zend_compile_conditional` is `JMPZ` past the true arm, both arms
 /// writing the one temporary, and a `JMP` over the false arm;
 /// `zend_compile_shorthand_conditional` is `JMP_SET` over the left

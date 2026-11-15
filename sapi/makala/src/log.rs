@@ -1,4 +1,4 @@
-//! The server's two logs (#2345): the access log, a line for each
+//! The server's two logs: the access log, a line for each
 //! response as it ends, and the error log, what failed, a request's panic
 //! among it, and the entries php logs where `error_log` names no file.
 //!
@@ -13,7 +13,7 @@
 //!
 //! An error line is the time it was written for and the entry, whole.
 //!
-//! No request writes a line of its own into either log (#4355). The
+//! No request writes a line of its own into either log. The
 //! request line cannot hold a `\r` or `\n`: the parser refuses a head
 //! with one before its line is begun, and `Method` and `Uri` hold
 //! neither, so a `%0D%0A` is written as the client sent it. An entry
@@ -272,7 +272,7 @@ impl Log {
 /// `to` opened for appending, or refused, said on stderr, where it will
 /// not open. A file it makes is its owner's alone, `0600` whatever the
 /// umask, since a line names a client's address and the path and query
-/// it asked for (#4355); a file that stands already keeps its permissions.
+/// it asked for; a file that stands already keeps its permissions.
 fn open(to: &Destination) -> Out {
     match to {
         Destination::Stderr => Out::Open(Box::new(io::stderr())),

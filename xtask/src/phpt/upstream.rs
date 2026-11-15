@@ -1,7 +1,7 @@
 //! `xtask phpt --upstream`: php-src's own `run-tests.php` beside this
 //! runner, over named tests of one subset, so a miss of the runner's
-//! control can be told apart from a miss of php's own runner (#1973, as
-//! #1929 ruled it). Each runner runs the named tests in a copy of the
+//! control can be told apart from a miss of php's own runner (as ruled
+//! 2026-10-07). Each runner runs the named tests in a copy of the
 //! pinned tree of its own, under the pinned oracle and the recipe's
 //! environment, the subset's own database on the server laid over it as a
 //! lane's run lays it (the `server` module) and the tests' conflict keys

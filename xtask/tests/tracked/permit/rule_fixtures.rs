@@ -24,7 +24,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     // records a ticket, which the tree the tests run in need not be.
     let ticketed = checkout("fixtures-ticketed", Some(1));
     // One scoped to `where = "operating"` in a checkout `the-owner` owns
-    // with a merge standing (#2476, #3621), one scoped to `where =
+    // with a merge standing, one scoped to `where =
     // "owned"` in one it owns with none, and every other `Bash` rule in a
     // checkout where none stands, since the tests' own checkout holds a
     // merge while its merge commit's hook runs them; a write is judged
@@ -46,7 +46,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             Where::Staging => merge.as_path(),
         };
         // Every control of the rule's directory: each `deny*.json` (or
-        // `note*.json`) must fire, each `allow*.json` must not (#625).
+        // `note*.json`) must fire, each `allow*.json` must not.
         let named = |prefix: &str| -> Vec<PathBuf> {
             let mut all: Vec<PathBuf> = std::fs::read_dir(&dir)
                 .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
@@ -98,7 +98,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
         }
         // `allow-main.json` is a neighbour in main's checkout, where a
         // ticketed rule does not judge, and an `allow-excused*.json` one
-        // under an `unless_argv` a person has yet to paste (#3068): each
+        // under an `unless_argv` a person has yet to paste: each
         // one's own test holds it.
         let neighbours = named("allow").into_iter().filter(|p| {
             let name = p.file_name().unwrap().to_string_lossy();
@@ -117,7 +117,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     }
 }
 
-/// A `Monitor` is judged as the `Bash` call it runs (#3781): a shell
+/// A `Monitor` is judged as the `Bash` call it runs: a shell
 /// rule's control that runs a command, handed over under the `Monitor`'s
 /// own name, fires as the `Bash` call does, except under a foreground
 /// rule, which never judges a `Monitor`.
@@ -164,9 +164,9 @@ fn every_rule_with_a_tool_or_a_scope_is_judged_or_is_an_after_the_write_sensor()
     }
 }
 
-/// The fixture of the `xtask.lock-line` rule #55 proposes, judged under
-/// the rule as its row would read, before a person commits it: the note
-/// fires on a new `pub` item under `xtask/src` and not on its neighbour.
+/// The fixture of the proposed `xtask.lock-line` rule, judged under the
+/// rule as its row would read, before a person commits it: the note fires
+/// on a new `pub` item under `xtask/src` and not on its neighbour.
 /// Once the tracked manifest carries the row, the walk above holds it and
 /// this adds nothing.
 #[test]
@@ -197,7 +197,7 @@ fn the_proposed_xtask_lock_line_rule_notes_its_fixture_and_not_its_neighbour() {
     );
 }
 
-/// The rule #33 proposes, `git.pathspec`, built through the constructors
+/// The proposed rule, `git.pathspec`, built through the constructors
 /// as its row would read, so the predicate is proven before a person
 /// commits the row: `require_argv = "--"` with `with = ["git add", "git
 /// commit"]` denies a `git add` over the whole tree and a `git commit`
@@ -268,8 +268,8 @@ fn a_rule_without_a_fixture_fails() {
 }
 
 /// The fixture is the quiet kind of stale and not the loud kind: it parses,
-/// and the lane it lets through is the one the manifest on disk denies
-/// (#15, #16). Nothing in the exit says so.
+/// and the lane it lets through is the one the manifest on disk denies.
+/// Nothing in the exit says so.
 #[test]
 fn the_stale_fixture_parses_and_lets_through_what_the_manifest_on_disk_denies() {
     let stale = Manifest::parse(&stale_manifest()).unwrap();
@@ -293,7 +293,7 @@ fn the_stale_fixture_parses_and_lets_through_what_the_manifest_on_disk_denies() 
     );
 }
 
-/// The two rows #28 proposes for a person to add: a ticket closes through
+/// The two rows proposed for a person to add: a ticket closes through
 /// `xtask ticket close` and by nothing else, so `gh issue close` and `gh
 /// issue reopen` are denied by `deny_argv` with `with`, the shape
 /// `git.no-verify` has, and the same act through `gh api` with a closing
@@ -304,7 +304,7 @@ fn the_proposed_ticket_close_rules_fire_on_their_fixtures_and_not_on_their_neigh
     let manifest = with_the_ticket_close_rules(Manifest::load(workspace()).unwrap());
     // A checkout no session owns: the workspace the tests run in is the
     // committing session's, where `checkout.owner` refuses the calls'
-    // `another-session` a write such as `xtask ticket close` (#3621).
+    // `another-session` a write such as `xtask ticket close`.
     let quiet = checkout("ticket-close-quiet", None);
     for rule in ["ticket.close", "ticket.close-api"] {
         let dir = fixtures().join("rules").join(rule);
@@ -332,7 +332,7 @@ fn the_proposed_ticket_close_rules_fire_on_their_fixtures_and_not_on_their_neigh
         );
     }
     // The neighbours carry no session, as `allow.json` does: this
-    // workspace may be a worktree a session owns (#3621), whose
+    // workspace may be a worktree a session owns, whose
     // `checkout.owner` row would deny another session's `xtask` line.
     for line in [
         "gh pr close 3",
@@ -344,7 +344,7 @@ fn the_proposed_ticket_close_rules_fire_on_their_fixtures_and_not_on_their_neigh
     }
 }
 
-/// The whole-file case (#134, #510): the shape the ticket named, a `Write`
+/// The whole-file case: the shape the ticket named, a `Write`
 /// of a whole file with a status `--accept` captured in it, as one fixture
 /// beside the `Edit` calls the directory carries. The fixture is judged
 /// twice: over this workspace, where the file at that path carries no such
@@ -392,8 +392,8 @@ fn the_whole_file_fixture_is_denied_here_and_permitted_where_the_file_carries_it
     assert!(denied.contains(EXIT_AUTHORED), "{denied}");
 }
 
-/// Every `Bash` rule judged at the call holds to each of its fixtures
-/// (#1832, #1860): every `deny*.json` is denied by the rule and every
+/// Every `Bash` rule judged at the call holds to each of its fixtures:
+/// every `deny*.json` is denied by the rule and every
 /// `allow*.json` let through, whether the rule reads the line as a
 /// `deny_pattern` or the command's argv as `deny_argv` or `require_argv`.
 /// A rule scoped `where = "ticketed"` is judged in a checkout whose branch
@@ -419,7 +419,7 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
         .collect();
     // `git.no-verify`, `ticket.close-api`, `lanes.nightly`,
     // `lanes.nightly-flags`, `lanes.builder-subset` and `computed.force`
-    // at #1877: a filter that finds fewer reads nothing.
+    // when this was written: a filter that finds fewer reads nothing.
     assert!(
         rules.len() >= 6,
         "{:?}",

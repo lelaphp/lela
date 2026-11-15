@@ -174,7 +174,7 @@ fn a_function_called_twice_reads_on_its_second_call_what_its_first_primed() {
 /// arrays take caches of the request's own and none of the engine's
 /// map-pointer offsets, php's heap caches (`ZEND_ACC_HEAP_RT_CACHE`):
 /// the function's second call still reads what its first primed, and
-/// the engine's count has not moved (#528).
+/// the engine's count has not moved.
 #[test]
 fn a_request_only_unit_s_function_called_twice_reads_what_its_first_call_primed() {
     let engine = Engine::cli_builder().build();

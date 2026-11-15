@@ -10,16 +10,16 @@
 //! move the engine's own ini table so a witness can reach what an entry
 //! decides and what it kept, `set_time_limit`, which moves the one
 //! entry the execution timer is armed from, `error_reporting`, which
-//! reads and writes the word `BEGIN_SILENCE` masks (#354), `strlen` and `defined`,
+//! reads and writes the word `BEGIN_SILENCE` masks, `strlen` and `defined`,
 //! the two of `zend_builtin_functions.c` whose calls php's compiler
-//! serves itself (#219): the compiler emits `ZEND_STRLEN` and
+//! serves itself: the compiler emits `ZEND_STRLEN` and
 //! `ZEND_DEFINED` over their kernels where it reads the name, and reads
 //! it only where the bundle declares the native; `class_exists` and
-//! `get_class`, which read the linked table (#259); and
+//! `get_class`, which read the linked table; and
 //! `register_shutdown_function`, whose entries the request holds and
 //! [`call_shutdown_functions`] serves at `php_request_shutdown`'s first
-//! step (#404); and `exit`, with `die` its second name, which throws
-//! the unwind exit the unwinder tells apart (#423). Each is declared
+//! step; and `exit`, with `die` its second name, which throws
+//! the unwind exit the unwinder tells apart. Each is declared
 //! and paired with its entry exactly as an
 //! extension's are, so there is one shape for a native and not two.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
@@ -1325,11 +1325,11 @@ fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> 
 ///
 /// A property's name is printed through `zend_unmangle_property_name`
 /// whatever table it came from, so a dynamic property carrying a
-/// mangled name, which `(object)` over `(array)` of an object makes
-/// (#294), is rendered with the visibility the prefix spells and
+/// mangled name, which `(object)` over `(array)` of an object makes,
+/// is rendered with the visibility the prefix spells and
 /// never as its bytes. A name that opens with `\0` and cannot be
 /// unmangled is a notice where its row is, and then the bytes as they
-/// are (#347).
+/// are.
 ///
 /// ```php
 /// class A { public $a = 1; protected $b = 2; private $c = 3; }
@@ -1539,7 +1539,7 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
 
 /// [`dump`] over a value that holds no other, a call of its own, so its
 /// texts are off the stack of a nest of objects or arrays dumped level
-/// by level (#3159). A float is `%.*H` at `serialize_precision`, which
+/// by level. A float is `%.*H` at `serialize_precision`, which
 /// writes a non-finite one whole however short the precision:
 ///
 /// ```php
@@ -1604,8 +1604,7 @@ fn dump_scalar(req: &mut Request, common: &str, value: &Value) {
 /// written, as php asks it, so a marked array writes `*RECURSION*` alone.
 ///
 /// A call of its own, so the walk it keeps is off the stack of a nest of
-/// objects dumped level by level, as [`dump_object`]'s is off an array's
-/// (#3159).
+/// objects dumped level by level, as [`dump_object`]'s is off an array's.
 #[inline(never)]
 fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
     if array.is_recursive() {
@@ -1795,8 +1794,7 @@ fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize)
     // (`Z/ext/standard/var.c:196`) over the table held until
     // `zend_release_properties`: the walk takes no owner of its own.
     // What a row writes before its value is a call of its own, so a
-    // nest of objects keeps at each level only the walk and the table
-    // (#3159).
+    // nest of objects keeps at each level only the walk and the table.
     let walked = walk::properties(req, &held, Unwritten::Shown, |req, row| -> walk::Step {
         if dump_property_head(req, level, row) {
             dump(req, row.value(), level + 2);
@@ -2076,7 +2074,7 @@ pub(crate) fn unmangle_property_name(name: &[u8]) -> Unmangled<'_> {
 ///
 /// What one allocation moves both numbers by is a number both engines
 /// answer, since every string a native builds is the request's heap's
-/// (design §5.13, #174, #211). A string past 2 MiB is a huge block,
+/// (design §5.13). A string past 2 MiB is a huge block,
 /// rounded to the page the machine reports, sixteen KiB where the
 /// oracle is pinned, and `zend_mm_add_huge_block` takes the block's list
 /// node from the 24-byte bin of the same heap before the block is
@@ -2103,7 +2101,7 @@ fn memory_get_usage(req: &mut Request, #[php(default = false)] real_usage: bool)
 /// `zend_mm_realloc_heap` that the usage never sees, so the witness
 /// resets the peak and takes both numbers as a delta: the base each
 /// engine starts from differs by design §5.13's approximation, and what
-/// one growth moves does not (#174, #278).
+/// one growth moves does not.
 ///
 /// A packed table of `n` slots is `HT_HASH_SIZE(HT_MIN_MASK)` beside
 /// `n` zvals, 8 + 16n, and the 56-byte `zend_array` is an allocation of
@@ -2124,7 +2122,7 @@ fn memory_get_usage(req: &mut Request, #[php(default = false)] real_usage: bool)
 /// laid down after it takes the two pages that follow, and the growth
 /// to 1024 slots cannot stay: it moves, and the peak is again what the
 /// slow arm restores, 20480 + 8192 + 56, never the old `run` beside the
-/// new one (#278).
+/// new one.
 ///
 /// ```php
 /// $bin = []; memory_reset_peak_usage(); $b = memory_get_usage();
@@ -2540,11 +2538,10 @@ fn register_shutdown_function(
 /// table [`Request::detach_symbol_table`] left behind, and
 /// [`Request::shutdown_destructors`] has not walked it yet. So a
 /// shutdown function reads what the top level wrote and
-/// `memory_get_usage()` still counts what those variables own, which is
-/// the half of #280 that waited on this one: a three-megabyte string a
-/// top-level variable holds is still out at the walk, where a request
-/// that had released that variable with the frame would read the
-/// baseline back.
+/// `memory_get_usage()` still counts what those variables own: a
+/// three-megabyte string a top-level variable holds is still out at the
+/// walk, where a request that had released that variable with the frame
+/// would read the baseline back.
 ///
 /// ```php
 /// function show($b) { var_dump(memory_get_usage() - $b > 2900000); }

@@ -159,7 +159,7 @@ fn visit_as_a_table_over_state_and_start() {
 /// root, is entered where compiled and otherwise neither bumped nor
 /// claimed, however hot: the loop's back edge counts its heat once a
 /// turn, as php's header counts each arrival once, so a body that ends in
-/// a call is not counted twice a turn (#3318).
+/// a call is not counted twice a turn.
 #[test]
 fn a_loop_roots_word_is_entered_from_a_landing_and_never_counted_there() {
     let tracing = testing::policy(&[("opcache.jit", "tracing"), ("opcache.jit_hot_loop", "2")]);
@@ -181,7 +181,7 @@ fn a_loop_roots_word_is_entered_from_a_landing_and_never_counted_there() {
 /// A loop whose body ends in a call counts its heat once a turn, as one
 /// whose body does not: under `opcache.jit_hot_loop=8` neither roots in
 /// seven turns and each roots in eight, where a return landing on the
-/// condition that counted too rooted the first in four (#3318's review).
+/// condition that counted too rooted the first in four.
 /// php counts the `JMP` into the loop as an arrival as well and roots both
 /// in seven, which this engine, with no site at the condition (revision
 /// 70), does not see.
@@ -285,7 +285,7 @@ fn lines(served: &php_engine::test::Served) -> Vec<String> {
 /// A destructor that runs a hot loop inside a recording: the loop is
 /// bumped and not recorded, so one `TRACE start` is written, the root's;
 /// the next request enters that root, which makes its call to `f` with no
-/// exit, as php's `INIT_FCALL` of a user function takes none (#3230), and
+/// exit, as php's `INIT_FCALL` of a user function takes none, and
 /// the destructor's loop, hot where nothing records, roots a trace of its
 /// own, whose exit past the loop grows a side trace to the destructor's
 /// return, as php's `zend_jit_trace_hot_side` records one.
@@ -336,7 +336,7 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
 /// `zend_jit_stop_counter_handlers` stops the rest. Before it, `a`'s
 /// compiled loop leaves through php's `exit 3`, the trace started at the
 /// loop's condition, holding the three variables' types at entry and
-/// meeting the jump's direction before the body (#3134), and the hot exit
+/// meeting the jump's direction before the body, and the hot exit
 /// starts a side trace that the full table refuses before it records, as
 /// php's `zend_jit_trace_hot_side` does, blacklisting the exit. The pinned
 /// php under the recipe's hot counters with the same bound writes these
@@ -468,7 +468,7 @@ impl Tier for RequestRooted {
 /// refusal at a full table: after the banner, each attempt is written and
 /// settled as a root that failed, `start` and `abort (root in a
 /// request-scoped op array)`, with no record, since a record roots in an
-/// op array the engine numbered (#4650, #4668). The refusal may recover,
+/// op array the engine numbered. The refusal may recover,
 /// so the word is cold again after the first and blacklisted at
 /// `opcache.jit_blacklist_root_trace`, here the second, and the third
 /// call claims nothing and writes no line. Unlike a full table's, this
@@ -761,7 +761,7 @@ impl Tier for Counted {
     }
 }
 
-/// A tier that is `Off` is never asked (#3133): the engine binds `Nop`'s
+/// A tier that is `Off` is never asked: the engine binds `Nop`'s
 /// loop, so no loop's back edge reads its word or bumps its heat, and
 /// no call or return asks either, under a zero buffer, G1's setting, as
 /// under `opcache.jit=disable` and on the command line without
@@ -801,13 +801,13 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
 }
 
 /// php gives an op array its counters as it persists it while its tier
-/// is on (#3139), and the loop that serves it follows (#3362). Set up
+/// is on, and the loop that serves it follows. Set up
 /// and off, a request starts in `Nop`'s loop, which asks the tier at no
 /// site; one that turns the tier on and includes a file publishes it
 /// with counting words, and its loop hands the included frame to the
 /// tier's at the activation's check, where the file's entry and loop
 /// are asked, its primed words claimed at their first arrivals however
-/// high the threshold (#3363). On from the start, a unit's words
+/// high the threshold. On from the start, a unit's words
 /// count from cold, each back edge bumping its heat, and a unit
 /// published after a request turns the tier off is sealed, asked at
 /// every back edge and never written.
@@ -890,7 +890,7 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
 
 /// A return root is the caller's landing past the call, armed where a
 /// compiled trace hands on to the interpreter at that call (`jit-design.md`
-/// §2.2, #3036): the entry's trace stops at the `eval`, which arms
+/// §2.2): the entry's trace stops at the `eval`, which arms
 /// `$main`'s landing past it, as php's `zend_jit_trace_setup_ret_counter`
 /// does, and the `eval`'d code's return lands there and roots `TRACE 2
 /// start (return) $main() …:3`, whose recording aborts at the loop php
@@ -934,13 +934,13 @@ fn a_return_roots_at_the_landing_past_the_eval_its_trace_stopped_at() {
 /// php's stack map does; the interrupt test through its own, numbered
 /// last and growing no side trace, php's `ZEND_JIT_EXIT_TO_VM`; the
 /// `+=`'s overflow guard through its own, where php holds the guards of
-/// the loop's phis (#3135), and the increment none, since php's
+/// the loop's phis, and the increment none, since php's
 /// `zend_may_overflow` reads `$i` below the bound the loop's `$i < $n`
-/// leaves it as the increment is compiled (#3898), as php's exit info
+/// leaves it as the increment is compiled, as php's exit info
 /// lists `exit_5` for the interrupt test and none past the `PRE_INC`;
 /// then the loop runs compiled to its end, through php's `exit 3`, the trace starting at the
-/// loop's condition and meeting the jump's direction before the body
-/// (#3134). Each exit but the interrupt test's, taken once, grows a side
+/// loop's condition and meeting the jump's direction before the body.
+/// Each exit but the interrupt test's, taken once, grows a side
 /// trace, as php's does at its first exit under the recipe's
 /// `opcache.jit_hot_side_exit=1`, so under `force` the loop's end is
 /// written once and the second call's trace, linking into the loop,
@@ -1298,7 +1298,7 @@ mod ran {
 /// so the loop took the frame up again where the push had put it, served
 /// `echo "a"` and the call's `INIT_DYNAMIC_CALL` a second time, and left
 /// a call being built on the stack; `gh22443.phpt` died past the end of
-/// an op array (#3077).
+/// an op array.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_the_tier_moved_at_its_activation_goes_on_where_the_tier_left_it() {
@@ -1478,7 +1478,7 @@ fn escape_doors(req: &mut Request, elsewhere: bool) -> Vec<(usize, bool)> {
 /// compiled at that landing, and that trace is first entered from the
 /// interpreter's return, not from an escape: the entry through `enter`
 /// that follows the escape's opens the escape's door, which names the
-/// landing that trace was compiled at (#4108's ruling, `jit-design.md`
+/// landing that trace was compiled at (ruled 2026-11-04, `jit-design.md`
 /// §4.9), so from there on the escape enters it through the door. Nothing
 /// opens a door to a landing no escape reached.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -1521,7 +1521,7 @@ fn an_escape_that_found_its_landing_compiled_has_its_door_opened() {
 
 /// A door that names another landing is not a way out: the escape reads
 /// the landing's word, and a trace compiled there is entered in code,
-/// never answered `ESCAPED` (#4108's ruling, `jit-design.md` §4.9), so the
+/// never answered `ESCAPED` (ruled 2026-11-04, `jit-design.md` §4.9), so the
 /// crossing goes on from no more escapes than where the door leads there.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
@@ -1540,7 +1540,7 @@ fn an_escape_whose_door_names_another_landing_reads_the_landings_word() {
 
 /// Where a trace escapes to a landing whose word reads compiled, its own
 /// code reads the word and goes on into the trace compiled there, as
-/// php's escape stub runs that opline's handler (#3299's ruling,
+/// php's escape stub runs that opline's handler (ruled 2026-10-24,
 /// `jit-design.md` §4.9): fib's side traces escape at every return that
 /// lands past a call no trace goes on at, thousands of times in fib(20),
 /// and the crossing goes on into the landing's trace only where the code
@@ -1567,7 +1567,7 @@ fn an_escape_enters_the_trace_compiled_at_its_landing_in_code() {
 /// An escape to a landing no trace armed, fib's past its second call,
 /// where php's interpreter goes on through the opline's own handler,
 /// is handed back to the loop with no visit of the landing
-/// ([`super::unarmed`], #4100): of the thousands of escapes there in
+/// ([`super::unarmed`]): of the thousands of escapes there in
 /// fib(20), only those before the request kept the landing's words
 /// visit it. With [`super::unarmed`] fib(20) visits 8, without it 41;
 /// the bound of 16 is twice the 8, room for the order the traces are
@@ -1639,7 +1639,7 @@ impl Tier for Testing {
 }
 
 /// An interpreted `RETURN` to a landing no trace armed makes no call into
-/// `dispatch` (#4105's ruling, `jit-design.md` §2.2): `f`'s return lands
+/// `dispatch` (ruled 2026-11-04, `jit-design.md` §2.2): `f`'s return lands
 /// fifty times in a loop too cold to count, and the visits [`Testing`]
 /// keeps stay none, where a tier with no test visits one a return.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -1675,7 +1675,7 @@ fn a_return_to_an_armed_landing_visits_its_site() {
 }
 
 /// [`an_escape_enters_the_trace_compiled_at_its_landing_in_code`] with
-/// fib preloaded (#3568): a preloaded op array has its words and its
+/// fib preloaded: a preloaded op array has its words and its
 /// landings in every epoch (`php_engine::arena::Base`), and the epoch's
 /// landing index names them as it names the ones its cache holds, so an
 /// escape to a landing compiled in fib enters its trace in code, as php's
@@ -1770,7 +1770,7 @@ impl Tier for Landing {
     }
 }
 
-/// A return reads a landing only past a call (#4156): php arms a
+/// A return reads a landing only past a call: php arms a
 /// landing at the opline past a `DO_*CALL`, a `YIELD*` or an
 /// `INCLUDE_OR_EVAL` (`zend_jit_trace_setup_ret_counter`), so a
 /// destructor or a `__toString` returning from inside a

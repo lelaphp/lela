@@ -1,6 +1,6 @@
 //! The process's identity, its real and effective user and group and its
-//! supplementary groups (design §4.1, §4.4, revision 41; `unsafe.homes`;
-//! #1132): `getuid(2)`, `geteuid(2)`, `getgid(2)`, `getegid(2)` and
+//! supplementary groups (design §4.1, §4.4, revision 41; `unsafe.homes`):
+//! `getuid(2)`, `geteuid(2)`, `getgid(2)`, `getegid(2)` and
 //! `getgroups(2)`, bound once for the engine and read by every extension
 //! through `api::process`. php calls them from `<unistd.h>` wherever it
 //! asks, `php_stat`'s and `phar_fancy_stat`'s permission masks,
@@ -48,7 +48,7 @@ pub fn egid() -> u32 {
 /// effective group, as the platform answers.
 ///
 /// On macOS the call is the C library's `getgroups$DARWIN_EXTSN`, which
-/// php gets by building with `_DARWIN_C_SOURCE` (#2772): the user's
+/// php gets by building with `_DARWIN_C_SOURCE`: the user's
 /// group access list from Open Directory, `getgrouplist` of
 /// `getpwuid(getuid())`, uncapped and blind to a `setgroups(2)`, and
 /// `EINVAL` where Open Directory cannot be reached; not the

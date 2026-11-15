@@ -295,7 +295,7 @@ fn a_record_that_builds_nothing_settles_before_the_backend() -> Result<(), Strin
     Ok(())
 }
 
-/// A spent arena's root: `COMPILER_ERROR`, one attempt (#3015's ruling).
+/// A spent arena's root: `COMPILER_ERROR`, one attempt (ruled 2026-10-19).
 fn spent_arena() -> Result<(), String> {
     let (spent, holder) = job(&[])?;
     let table = table::of_epoch(holder.epoch());
@@ -309,7 +309,7 @@ fn spent_arena() -> Result<(), String> {
 }
 
 /// The table's bounds: a spent arena is `COMPILER_ERROR`, one attempt
-/// (#3015's ruling); a table at `opcache.jit_max_root_traces` blacklists.
+/// (ruled 2026-10-19); a table at `opcache.jit_max_root_traces` blacklists.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn the_tables_bounds_settle_as_php_settles_them() -> Result<(), String> {

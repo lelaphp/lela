@@ -51,7 +51,7 @@ fn scratch(name: &str) -> Tree {
 
 /// The committed census's rows of one status, read off its `status`
 /// lines, so a row a commit marks gone moves the counts the tests expect
-/// and not the tests (#2504).
+/// and not the tests.
 fn marked(status: &str) -> i64 {
     let seed = std::fs::read_to_string(workspace().join(port_map::SEED)).unwrap();
     let line = format!("status = \"{status}\"");

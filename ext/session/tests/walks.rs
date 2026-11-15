@@ -1,5 +1,5 @@
 //! The session's natives that walk the session's array while code of
-//! the program runs (#2004), on an armed engine, so a block read or
+//! the program runs, on an armed engine, so a block read or
 //! released after its free fails the test as the `InternalError` it is.
 #![cfg(debug_assertions)]
 

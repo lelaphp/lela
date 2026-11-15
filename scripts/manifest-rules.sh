@@ -5,7 +5,7 @@
 # comments included. An id seams.toml carries no row for fails the
 # render, naming the id, and prints nothing, so a rule deleted from the
 # manifest cannot drop out of an excerpt unseen. harness-design.md §4.1's
-# excerpt runs it (#2472).
+# excerpt runs it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out=""

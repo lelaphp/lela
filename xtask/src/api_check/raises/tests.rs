@@ -1,4 +1,4 @@
-//! The raises hold over sources written here (#3656), as
+//! The raises hold over sources written here, as
 //! `crates/php_engine/src/tests/typed_errors.rs` held the workspace before
 //! the scan moved into each crate's `api-check` reading.
 

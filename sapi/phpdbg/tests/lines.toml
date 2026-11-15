@@ -1,15 +1,15 @@
 # phpdbg's own lines, each run by `xtask witness` under the pinned phpdbg
 # (oracle.toml's [sapi]) and then under this crate's, in one directory laid
 # afresh, and held equal: a startup that ends the process under an ini of the
-# line's own, which a fence cannot carry (#1634; #1975, as #2468 ruled). No
-# byte here is the oracle's; the oracle's run is the expectation. The grammar
-# is xtask/src/witness/host.rs's.
+# line's own, which a fence cannot carry (harness revision 110, as ruled
+# 2026-10-09). No byte here is the oracle's; the oracle's run is the
+# expectation. The grammar is xtask/src/witness/host.rs's.
 
 # A refusal answered after every extension started, at `zend_post_startup`
 # inside `php_module_startup`: opcache's `ACCEL_LOG_FATAL` in
 # `accel_post_startup` for `opcache.file_cache_only` with no
 # `opcache.file_cache`. php ends the process there, before phpdbg reads its
-# line further, so the file named on the line is never run (#1943).
+# line further, so the file named on the line is never run.
 # `zend_accel_error` writes the time `asctime` prints and the process's id
 # before its message.
 [[line]]
@@ -21,7 +21,7 @@ mask = [['(?m)^.{24} \(\d+\): ', '<asctime> (<pid>): ']]
 # (ADR-0010): `ffi.preload` naming a header that is not there. php ends the
 # process from `php_error_cb`, `exit(-2)` for the `E_CORE_ERROR` of a failed
 # `MINIT` (`Z/main/main.c:1505-1507`), before the host does anything of its
-# own (#1802). phpdbg displays nothing under its `display_errors` and logs
+# own. phpdbg displays nothing under its `display_errors` and logs
 # each diagnostic as its log function does before it is booted, a line on
 # stdout; under `display_errors=1` each is logged, then displayed, before the
 # next, in the order `php_error_cb` writes them; under
@@ -43,14 +43,14 @@ args = ["-qrr", "-n", "-d", "display_errors=stderr", "-d", "fatal_error_backtrac
 # `-e` compiles with extended info (`Z/sapi/phpdbg/phpdbg.c:1250`, `:1498`):
 # the main op array of `f(1)`'s echo is eight oplines with its `EXT_STMT`,
 # `EXT_FCALL_BEGIN` and `EXT_FCALL_END`, and five without; the listing goes to
-# the second stream (#1822).
+# the second stream.
 [[line]]
 name = "extended-info-compiles-php-s-oplines-into-the-listing"
 args = ["-qIb", "-n", "-e", "{dir}/t.php"]
 files = { "t.php" = "<?php\nfunction f($a) { return $a; }\necho f(1);\n" }
 stdin = "print exec\nq\n"
 
-# The same listing without `-e` (#1822).
+# The same listing without `-e`.
 [[line]]
 name = "without-extended-info-the-listing-is-five-oplines"
 args = ["-qIb", "-n", "{dir}/t.php"]
@@ -67,7 +67,7 @@ files = { "t.php" = "<?php echo \"x\\n\";\n" }
 # What php logs while it starts, before phpdbg is booted, goes to C's
 # `stdout`, an `fprintf` (`php_sapi_phpdbg_log_message`), where a pipe holds
 # it to the exit, while the program's output goes out past it with
-# `write(2)`: so a startup warning's log line stands after the body (#2899).
+# `write(2)`: so a startup warning's log line stands after the body.
 [[line]]
 name = "a-startup-log-line-is-held-behind-the-body"
 args = ["-qrr", "-n", "-d", "date.timezone=Foo/Bar", "{dir}/t.php"]
@@ -244,7 +244,7 @@ stdin = "ev $x\nprint exec\nc\nr\nq\n"
 # though the engine compiles it as its request starts: what that compile
 # displays is held until the init files have run, and where they leave an
 # exit pending, `php_stream_open_for_zend_ex` refuses the file, so nothing
-# compiles and nothing is displayed but `Could not open file` (#3450).
+# compiles and nothing is displayed but `Could not open file`.
 [[line]]
 name = "a-context-that-compiles-is-compiled-after-an-init-file-s-exit"
 args = ["-qb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -252,7 +252,7 @@ files = { "t.php" = "<?php\nfunction f(int $a = null) {}\necho \"hi\\n\";\n", "i
 stdin = "ev 5\nev 6\nq\n"
 
 # The same under `-r`: the auto compile's `Could not open file` is written
-# nowhere under `PHPDBG_DISCARD_OUTPUT`, and the run asks to restart (#3450).
+# nowhere under `PHPDBG_DISCARD_OUTPUT`, and the run asks to restart.
 [[line]]
 name = "under-r-a-context-that-compiles-is-compiled-after-an-init-file-s-exit"
 args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -260,7 +260,7 @@ files = { "t.php" = "<?php\nfunction f(int $a = null) {}\necho \"hi\\n\";\n", "i
 stdin = "ev 5\nev 6\nq\n"
 
 # An init file whose `ev` meets the memory limit leaves the unwind exit
-# pending alike, and the context that compiles is not opened (#3450).
+# pending alike, and the context that compiles is not opened.
 [[line]]
 name = "a-context-that-compiles-is-compiled-after-an-init-file-at-the-memory-limit"
 args = ["-qb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -269,7 +269,7 @@ stdin = "ev 5\nq\n"
 
 # Where the init files leave nothing pending, the compile's deprecation, its
 # log and its display, comes after what they wrote and before the compile's
-# notice (#3450).
+# notice.
 [[line]]
 name = "a-context-that-compiles-displays-after-the-init-files"
 args = ["-qb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -278,7 +278,7 @@ stdin = "ev 5\nr\nq\n"
 
 # Under `-r`, the startup run's compile after the init files and every later
 # cycle's come under `PHPDBG_DISCARD_OUTPUT`: the deprecation is displayed
-# and its log is written nowhere (#3450).
+# and its log is written nowhere.
 [[line]]
 name = "under-r-a-context-that-compiles-displays-after-the-init-files-unlogged"
 args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -290,8 +290,8 @@ stdin = "ev 5\nq\n"
 # refuses every call (`Z/Zend/zend_execute_API.c:838`), and
 # `zend_call_known_function` answers the refusal with `E_CORE_ERROR`
 # `Couldn't execute method` where nothing is pending
-# (`Z/Zend/zend_execute_API.c:1136-1143`): `var_dump`'s `__debugInfo`
-# (#3452).
+# (`Z/Zend/zend_execute_API.c:1136-1143`): `var_dump`'s `__debugInfo`.
+#
 [[line]]
 name = "a-known-function-call-refused-at-the-memory-limit-is-a-core-fatal"
 args = ["-qb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -303,7 +303,7 @@ stdin = "ev 0\nev (function(){ class A { function __debugInfo() { return [\"d\"=
 # `Closure::__invoke`'s `zend_call_known_fcc`, and a function `register`
 # named, which `phpdbg_call_register` calls so. A call compiled as
 # `INIT_USER_CALL`, `call_user_func` over a native, makes no
-# `zend_call_function` and is served (#3452).
+# `zend_call_function` and is served.
 [[line]]
 name = "the-known-function-calls-refused-at-the-memory-limit-are-core-fatals"
 args = ["-qb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -366,7 +366,7 @@ args = ["-qrb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
 # The same past a compile error, which bails out of `zend_compile` past
 # `compile_file`'s `zend_emit_recorded_errors`, so `EG(record_errors)` stands
 # on with the fatal held: `ev`'s warning is held too, logged nowhere and
-# displayed nowhere (#2901), and the next compile emits the record, its
+# displayed nowhere, and the next compile emits the record, its
 # fatal bailing out ahead of its own.
 [[line]]
 name = "a-compile-error-s-record-holds-back-an-ev-warning"
@@ -392,7 +392,7 @@ files = { "t.php" = "<?php\nfunction (\n" }
 stdin = "r\nev 1\nc\nr\nev $x\nr\nq\n"
 
 # A context the compiler warns about twice before it refuses it, logged and
-# displayed, the streams merged (#2776): `php_error_cb` logs each diagnostic,
+# displayed, the streams merged: `php_error_cb` logs each diagnostic,
 # then displays it, before the next, and `php_sapi_phpdbg_log_message` lists
 # the code after the fatal's entry, inside its log, so the fatal's display
 # comes after the listing (`Z/main/main.c:1411-1495`,
@@ -462,7 +462,7 @@ streams = "merged"
 
 # A context that declares functions before its refusal: php declares each as
 # its compile finishes it and the fatal's jump takes none back, so they stand in
-# the request (#2900). The second compile, `print exec`'s, records its own
+# the request. The second compile, `print exec`'s, records its own
 # deprecation behind the first's record, still standing, and meets `f` as
 # `Cannot redeclare`, whose fatal emits that record first: the first's
 # fatal bails out ahead of it, inside the log, and its prompt's `print exec`
@@ -490,7 +490,7 @@ streams = "merged"
 # top-level class with no parent, interfaces or traits as it compiles it
 # (`zend_compile_class_decl`), and the fatal's jump takes none back, so each
 # stands beside the functions declared around it; one its opline binds does
-# not (#3029).
+# not.
 [[line]]
 name = "a-refused-context-leaves-its-early-bound-classes-standing"
 args = ["-qb", "-n", "-d", "display_errors=1", "{dir}/t.php"]
@@ -524,7 +524,7 @@ stdin = "y\nq\n"
 streams = "merged"
 
 # The restarted cycle's startup run is not `run` but the line the cycle
-# before parsed last, `first_command`, here the init file's `ev` (#2912). The
+# before parsed last, `first_command`, here the init file's `ev`. The
 # unwind exit its init file left pending bails the resubmitted `ev` out as it
 # begins, writing nothing; `ev 1` after it prints, `c` writes nothing, and
 # nothing asks to restart again.
@@ -892,7 +892,7 @@ stdin = "b foo#0\nb foo#0\nb baz#0\nb baz#0\nb A::b#0\nb A::b#0\ni b\nq\n"
 mask = [['#\d{10,}', '#N']]
 
 # A breakpoint stops a run between two handlers, `ev` evaluates in the frame
-# stopped in, and `c` runs on to the end (#2507).
+# stopped in, and `c` runs on to the end.
 [[line]]
 name = "a-run-stops-at-a-breakpoint-and-evaluates-in-the-frame"
 args = ["-qIb", "-n", "{dir}/t.php"]
@@ -900,7 +900,7 @@ files = { "t.php" = "<?php\n$i = 1;\necho PHP_SAPI, $i++, \"\\n\";\necho $i, \"\
 stdin = "b 4\nr\nev $i * 10\nc\nq\n"
 
 # A step from a function's breakpoint stops at the next line, and the end of
-# stdin quits (#2507).
+# stdin quits.
 [[line]]
 name = "a-step-stops-at-the-next-line-and-the-end-of-input-quits"
 args = ["-qIb", "-n", "{dir}/t.php"]
@@ -910,7 +910,7 @@ stdin = "b f\nr\ns\n"
 # A watchpoint's report writes the values through the program's output, so
 # its first byte sends the headers and the header callback runs under the
 # debugger, which stops in it on the same change before the report goes on
-# (`sapi/phpdbg/tests/gh15210_002.phpt`'s shape, #2507).
+# (`sapi/phpdbg/tests/gh15210_002.phpt`'s shape).
 [[line]]
 name = "a-watch-report-sends-the-headers-and-the-callback-is-debugged"
 args = ["-qIb", "-n", "{dir}/t.php"]
@@ -918,8 +918,8 @@ files = { "t.php" = "<?php\nheader_register_callback(function() { echo \"sent\";
 stdin = "b 4\nr\nw $a[0]\nc\nc\nq\n"
 
 # `phpdbg_prompt()` and `phpdbg_break_function()`, natives the prompt serves
-# through `register` and `ev`, read and write the session they are called in
-# (#2507).
+# through `register` and `ev`, read and write the session they are called in.
+#
 [[line]]
 name = "a-native-the-prompt-serves-reads-the-session"
 args = ["-qIb", "-n", "{dir}/t.php"]
@@ -932,7 +932,7 @@ stdin = "register phpdbg_prompt\nphpdbg_prompt y>\nev phpdbg_break_function(\"f\
 # base directories warns, named for the request's startup while phpdbg is
 # not fully started and for no function after, and `Could not open file`;
 # the run that compiles it answers `Failed to compile`, and the status is
-# 255 (#4351). A program within them runs.
+# 255. A program within them runs.
 [[line]]
 name = "a-program-outside-open-basedir-is-not-opened"
 args = ["-qIbrr", "-n", "-d", "open_basedir={dir}/base", "{dir}/out.php"]

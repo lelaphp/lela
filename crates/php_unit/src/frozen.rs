@@ -1,11 +1,11 @@
 //! A unit or a declaration the engine published for every request, as a
-//! type only a check makes (#4633): [`Frozen`], and the one walk over the
+//! type only a check makes: [`Frozen`], and the one walk over the
 //! values a unit holds ([`unit_values`]). The check reads through it, and
 //! so do `php_compile`'s `declared_values` and `holds_counted_value`, the
 //! compiler's reuse of an attribute's arguments, and the engine's walks
 //! over a constant expression's values and a constant's attributes. One
 //! reader does not yet: `php_engine`'s `main_constants` reads an op array's
-//! constants and bound variables itself (#4682).
+//! constants and bound variables itself.
 //!
 //! A [`PublishedUnit`] cannot tell the engine's unit from a request's:
 //! the engine's (`publish_compiled`), a request's own (`compile_for`) and
@@ -77,7 +77,7 @@ pub enum Slot {
     View,
 }
 
-/// What [`unit_values`] refuses of a unit apart from its values (#4656):
+/// What [`unit_values`] refuses of a unit apart from its values:
 /// an index past the table it names, a constant no publisher is shown to
 /// write, and an op array a request numbered; and what
 /// [`Frozen::composed`] refuses of a declaration apart from its values, a
@@ -95,7 +95,7 @@ pub enum Stray {
     Request(u32),
     /// A closure's cell in a declaration that is not the empty one and
     /// names none of the units the declaration was composed from: shared
-    /// and not yet bound, or bound to any other unit (#4684, #4690). Never
+    /// and not yet bound, or bound to any other unit. Never
     /// [`unit_values`]': in a unit, the cell names the unit walked.
     Cell,
 }
@@ -104,7 +104,7 @@ pub enum Stray {
 /// its [`Slot`]: the main op array's, then each function's declaration
 /// and op array, each dynamic definition's, each class's, each `const`'s,
 /// and each method's and hook's op array. An op array's constant that is
-/// an index is decided here and never handed on (#4656): an
+/// an index is decided here and never handed on (ruled 2026-11-13): an
 /// `IS_CONSTANT_AST` against that op array's `const_exprs` and an `IS_PTR`
 /// against the unit's `constants`, each by its bound, and an `UNDEF`
 /// refused.
@@ -734,8 +734,8 @@ impl<T: Values> Deref for Frozen<T> {
     }
 }
 
-/// The one hand impl `state.engine` admits outside the homes (#4633,
-/// ADR-0005). A [`Frozen`] is made by [`Frozen::new`] or
+/// The one hand impl `state.engine` admits outside the homes
+/// (ADR-0005). A [`Frozen`] is made by [`Frozen::new`] or
 /// [`Frozen::composed`] alone, each of which has
 /// read every value the unit or declaration holds through the walk above,
 /// which names every field and variant of the unit format, and admitted
@@ -745,7 +745,7 @@ impl<T: Values> Deref for Frozen<T> {
 /// constants that is an index names an entry of its own tables, an
 /// `IS_CONSTANT_AST` of its op array's `const_exprs` and an `IS_PTR` of
 /// the unit's `constants`; no other index the unit holds, an opline's or
-/// a table's, is checked, since none reaches a request's heap (#4684).
+/// a table's, is checked, since none reaches a request's heap.
 /// Each op array is numbered by the engine's map-pointer space, not a
 /// request's.
 /// It is read and never written, so what the check read stands while it

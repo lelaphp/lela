@@ -143,7 +143,7 @@ impl AsRef<Path> for Repo {
 /// `permit` refuse one their build was not compiled against (`built.rs`);
 /// a test that judges by rows of its own writes them over it with
 /// `common::manifest::Tracked`. The registry is not the tracked one,
-/// whose rows a person keeps (#3091).
+/// whose rows a person keeps.
 pub fn scratch_workspace(root: &Path, dir: &Path) -> Repo {
     fs::remove_dir_all(dir).ok();
     let manifest = Manifest::load(root).unwrap();

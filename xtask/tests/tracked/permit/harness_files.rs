@@ -37,7 +37,7 @@ fn the_harness_files_are_denied_by_their_absolute_path() {
 }
 
 /// `harness.self`'s scope narrows to leave `.claude/skills/**` an ordinary
-/// file (#626), and what it leaves a person's is still denied: every
+/// file, and what it leaves a person's is still denied: every
 /// `deny*.json` under its fixtures is denied by the rule, the `Edit` and
 /// the `Write` of `.claude/settings.json` among them, and every
 /// `allow*.json` is let through, the `Edit` of a skill among them.
@@ -106,13 +106,13 @@ fn the_hook_modules_are_a_persons_files_under_the_widened_rows() {
     }
 }
 
-/// `harness.self-shell` under `where = "checkout"`, as #2887 ruled and
-/// #2915 built: a shell write to `docs/divergence.toml` is refused in a
-/// checkout, the main one or a linked worktree, however the line reaches
-/// it, and let through in a scratch repository outside every checkout,
-/// by either spelling of a linked temporary directory, past a `cd` there
-/// that cannot fail whatever joins it (#3257); a place `permit` cannot
-/// follow is read as a checkout.
+/// `harness.self-shell` under `where = "checkout"`, as ruled 2026-10-18: a
+/// shell write to `docs/divergence.toml` is refused in a checkout, the
+/// main one or a linked worktree, however the line reaches it, and let
+/// through in a scratch repository outside every checkout, by either
+/// spelling of a linked temporary directory, past a `cd` there that cannot
+/// fail whatever joins it; a place `permit` cannot follow is read as a
+/// checkout.
 #[test]
 fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
     let mut manifest = Manifest::load(workspace()).unwrap();
@@ -133,7 +133,7 @@ fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
             .is_some_and(|f| f.rule == "harness.self-shell")
     };
     let write = "echo '[[divergence]]' >> docs/divergence.toml";
-    // The negative control #2887 names, in each checkout.
+    // The negative control, in each checkout.
     assert!(refused(main, write));
     assert!(refused(&linked, write));
     let (scratch, worktree) = (outside.path().display(), linked.display());
@@ -191,8 +191,8 @@ fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
     }
 }
 
-/// #3625: a shell write past a `cd` to a variable the line did not assign
-/// is denied saying permit could not place it, naming the command and the
+/// A shell write past a `cd` to a variable the line did not assign is
+/// denied saying permit could not place it, naming the command and the
 /// change it lost the line at, and is never judged where the shell started;
 /// the same write past a variable the line assigns from another it assigned
 /// is placed where the value names.

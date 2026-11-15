@@ -1,5 +1,5 @@
 //! What the debugger keeps of a value it reads between steps, and the
-//! rows its `info` and `back` commands print (#1799): each value the
+//! rows its `info` and `back` commands print: each value the
 //! native face hands out is a view of what the request holds, copied here
 //! into a [`Shown`] before the request runs code again, so the watch
 //! list can compare it from one step to the next and `info vars` can

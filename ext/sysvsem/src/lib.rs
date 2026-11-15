@@ -1,7 +1,7 @@
 //! The `sysvsem` extension: `php-src/ext/sysvsem` as one crate under
 //! `ext/` (ADR-0004). One workspace dependency, the facade; System V
 //! semaphores through `libc` in [`ffi`] alone, since nix binds none of
-//! them (design §7.2, #1323); one entry, `extension()`. The phpt subset
+//! them (design §7.2); one entry, `extension()`. The phpt subset
 //! is `php-src/ext/sysvsem/tests`, through `xtask phpt --subset`.
 //!
 //! Every native is `sysvsem.c`'s at the tag, in `sysvsem.stub.php`'s

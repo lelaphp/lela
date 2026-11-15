@@ -192,7 +192,7 @@ pub(crate) struct Socket {
 /// `None` for php's `tv_sec == -1`; `timeout_event`; whether the stream
 /// is a server's ([`Role`]), which only this kind reads; and a registered
 /// `transport`'s crypto layer, dropped before the socket closes. Engine
-/// state by type (#4541): a persistent stream's connection stands in the
+/// state by type: a persistent stream's connection stands in the
 /// engine's persistent list, or in the extension that kept it, between
 /// requests ([`persistent::Entry`]), and no field of it can hold a
 /// request's value.
@@ -813,7 +813,7 @@ impl Ops for Socket {
     fn xport(&mut self, req: &mut Request, op: XportOp<'_>) -> Option<Xported> {
         if let XportOp::Accept { timeout, want_peer } = op {
             // `stream_socket_accept`'s wait for a client lends the
-            // request ([`Limits::blocking`], #2401).
+            // request ([`Limits::blocking`]).
             let accepted = req
                 .limits_mut()
                 .blocking(|| self.accept(timeout, want_peer));
@@ -873,7 +873,7 @@ impl Socket {
     /// the connection arrive, since the check waits for nothing and the
     /// kernel hands a close or a connection to the other end when it
     /// does: read without the wait, a loaded machine answers `false` there
-    /// now and then, under the oracle and this engine alike (#975). Each
+    /// now and then, under the oracle and this engine alike. Each
     /// `false` holds whether or not anything has arrived yet.
     ///
     /// ```php

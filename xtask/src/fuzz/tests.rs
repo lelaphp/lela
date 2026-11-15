@@ -284,7 +284,7 @@ mod stood_in {
 /// in main's checkout and in a ticketed one, as `done`'s own test asks of
 /// every landed `[[owed]]` row; a rule that keeps the lane off a local
 /// machine would deny it, and the row and the rule are one person's
-/// choice (#4487).
+/// choice.
 #[cfg(tracked)]
 #[test]
 fn permit_allows_the_command_done_names_for_the_lane() {

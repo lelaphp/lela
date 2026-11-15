@@ -377,7 +377,7 @@ impl Input {
     /// the body, reading the next `FCGI_STDIN` record where the last is
     /// used up; fewer where the stream ends, or an empty record ends the
     /// body, and nothing past that record. php's `fcgi_read` would read the
-    /// next record's header there, where no length bounds the body (#3457);
+    /// next record's header there, where no length bounds the body;
     /// the end is the end.
     ///
     /// # Errors

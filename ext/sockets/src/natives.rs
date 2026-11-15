@@ -256,7 +256,7 @@ fn socket_select(
         }
     });
     // The sockets of the three arrays in one list for the wait, which
-    // holds each out of reach of a callback served in it (#2601), and the
+    // holds each out of reach of a callback served in it, and the
     // arrays held for the walk after it, whatever the callback assigns to
     // the variables.
     let [r_len, w_len, _] = sets.each_ref().map(|set| set.as_ref().map_or(0, Vec::len));

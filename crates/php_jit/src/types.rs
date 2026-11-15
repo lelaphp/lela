@@ -58,7 +58,7 @@
 //!   typed parameters numbers the exits php's `zend_jit_recv` takes in
 //!   its prologue ahead of its own, though the prologue ran before
 //!   `Site::Entry` and no code tests them, so every later exit carries
-//!   php's number (#3269).
+//!   php's number.
 //! - **No exit for a throw.** A kernel that leaves a throwable pending,
 //!   bails out or panics leaves through an [`Unwind`], which stores the
 //!   registers and is numbered apart from the exits, as php's compiled
@@ -122,8 +122,8 @@ pub(crate) struct TraceIr {
 }
 
 /// The second way into a trace rooted at a loop's condition, php's header
-/// (`jit-design.md` §4.1, revision 53, as built until a person rules
-/// on #3178), whether it closes the loop or leaves it: at the opline the
+/// (`jit-design.md` §4.1, revision 53, kept as built, ruled
+/// 2026-10-21), whether it closes the loop or leaves it: at the opline the
 /// loop's back edge lands on, the body of a `for` or a `while`. The engine's
 /// back edge stands the frame there, past the condition the interpreter
 /// just served; entering at the body takes the trace's ops from `at` on
@@ -1042,7 +1042,7 @@ pub(crate) enum Interrupt {
     /// entered trace whose first `RECV` takes an exit, and where the test
     /// stores no register, it is that `RECV`'s, exit 0, landing at the
     /// entry's opline, as php's test reuses the exit at opline zero
-    /// (`jit-design.md` §4.2, #3269).
+    /// (`jit-design.md` §4.2).
     Exit(ExitId),
     /// Through php's interrupt stub, `jit_stub_interrupt_handler`, which
     /// takes no exit: the interrupt is handled and the trace entered again
@@ -1064,7 +1064,7 @@ pub(crate) enum Interrupt {
     ///
     /// A recursion with no end that a trace by recursive return serves
     /// meets the timeout all the same: the recursive call's loop tests
-    /// it, through the `RECV` exit its test reuses (#3269), and each
+    /// it, through the `RECV` exit its test reuses, and each
     /// trace the recursion leaves hands the interpreter its interrupt
     /// check, where the timeout's fatal is raised:
     ///

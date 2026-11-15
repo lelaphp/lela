@@ -1,16 +1,16 @@
 //! `[fastcgi]` of the pin: the HTTP-to-FastCGI mapping a request is handed
-//! to the pinned php-fpm under, for a host php does not ship (#2334,
-//! research/production-server.r2.md §5.4). Under FPM the web server, not
+//! to the pinned php-fpm under, for a host php does not ship
+//! (research/production-server.r2.md §5.4). Under FPM the web server, not
 //! php, fills the CGI variables (RFC 3875 §4.1), so the pinned php-fpm is
 //! the oracle for what PHP code sees only under a mapping written down
 //! once. Mitchell ruled it nginx's stock `conf/fastcgi_params`, copied
 //! verbatim at a named release and held to its md5 here, with
 //! `SCRIPT_FILENAME` as nginx sets it. [`Mapping`] is that file read as
-//! one typed value, so the production server's `$_SERVER` (#2347) and the
-//! php-fpm comparison (#2349) read the same parameters in the same order.
-//! #2637 added nginx's documented split of the path past the program,
+//! one typed value, so the production server's `$_SERVER` and the
+//! php-fpm comparison read the same parameters in the same order. Added
+//! to it since: nginx's documented split of the path past the program,
 //! `fastcgi_split_path_info` with `PATH_INFO` sent first, as Debian's
-//! `snippets/fastcgi-php.conf` sends it ahead of `fastcgi.conf`, and #2650
+//! `snippets/fastcgi-php.conf` sends it ahead of `fastcgi.conf`, and
 //! `PATH_TRANSLATED` after it, sent only with a path past the program.
 
 use anyhow::{Result, anyhow, bail};
@@ -37,7 +37,7 @@ pub struct Mapping {
     pub nginx: String,
     /// Where the file was copied from, at that release's tag.
     pub source: String,
-    /// `fastcgi_split_path_info` (#2637); none in a pin from before it,
+    /// `fastcgi_split_path_info`; none in a pin from before it,
     /// whose mapping splits nothing.
     pub split_path_info: Option<Split>,
     pub params: Vec<Param>,
@@ -105,7 +105,7 @@ pub enum Sent {
     /// `HTTPS` out on a plain connection).
     IfNotEmpty,
     /// Where `$fastcgi_path_info` is not empty: `PATH_TRANSLATED`, which
-    /// RFC 3875 §4.1.6 sets only for a path past the program (#2650), and
+    /// RFC 3875 §4.1.6 sets only for a path past the program, and
     /// which nginx's one-line `fastcgi_param` cannot say.
     WithPathInfo,
 }

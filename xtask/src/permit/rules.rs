@@ -66,7 +66,7 @@ pub struct Finding {
 
 /// Where permit judged a call it denies: the checkout it asked, or a line
 /// whose command it could not place, which it says rather than guess a
-/// checkout (#3619).
+/// checkout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Placement {
     In(PathBuf),
@@ -119,7 +119,7 @@ impl Finding {
     }
 
     /// The text, then what to do instead and where a denial judged the
-    /// call (#3618 ruling 3).
+    /// call (ruled 2026-10-30).
     pub(crate) fn said(&self) -> String {
         let said = crate::manifest::instead(&self.text, self.remedy.as_deref());
         match &self.placement {
@@ -134,11 +134,11 @@ impl Finding {
 pub struct Judgement {
     pub findings: Vec<Finding>,
     /// The rules that judged the call, whether or not they found: the
-    /// denominator a rule's denials are read against (#3619).
+    /// denominator a rule's denials are read against.
     pub judged: Vec<String>,
     /// What the person's files carry that does not validate, which the
-    /// decision notes beside itself while it judges by what loaded (#3618
-    /// ruling 4).
+    /// decision notes beside itself while it judges by what loaded (ruling
+    /// 4 of harness revision 184).
     pub(crate) defects: Vec<String>,
 }
 
@@ -233,12 +233,12 @@ fn applies(rule: &Rule, call: &Call, touched: &Touched) -> bool {
 
 /// Whether what the call touches is within the row's reach: a row without
 /// a scope reaches a call without a file and every file of the workspace,
-/// a row with one the files it covers (#23), and a row's `adding` every
-/// file of the workspace past its scope (#4363). A file outside the
+/// a row with one the files it covers, and a row's `adding` every
+/// file of the workspace past its scope. A file outside the
 /// workspace is reached by a row with neither scope nor `adding` alone,
 /// so no `adding` judges a call's write outside the workspace, of which
 /// [`Call::rewrite`] would read the standing text, with no path, as empty
-/// and count every hit as added (#4679). A diff's call that carries what
+/// and count every hit as added. A diff's call that carries what
 /// it displaces, whose file a link leads outside, is reached as a call
 /// without a file is: its `adding` is asked of what the diff displaces,
 /// and git names the path in the checkout.
@@ -294,14 +294,14 @@ fn evaluate(
         // A shell line is what it would run, so the pattern is asked of
         // its commands ([`Line::subject`]): less the heredoc bodies it
         // carries as text, and no hit starting in a quote, since what a
-        // command quotes is not what it runs (#1771, #1832, #3635). A write is a
+        // command quotes is not what it runs. A write is a
         // change to a file, so the pattern is asked of what the change
-        // adds and not of what the file already carries (#510): a write
+        // adds and not of what the file already carries: a write
         // that leaves every hit where it stood adds none and fires on
         // nothing. It is asked of the file the write leaves, never of the
         // text the call types alone, since an edit can finish a hit its
         // own text does not hold, and a pattern over a block is never
-        // whole in an edit inside it (#2413).
+        // whole in an edit inside it.
         match line {
             Some(line) => unexcused(line.subject(), line.hits(&regex)) && !excused(line.subject()),
             None => call.rewrite(root, path).is_some_and(|(before, after)| {
@@ -312,7 +312,7 @@ fn evaluate(
     } else if p.deny == Some(true) {
         // The scope whole; past it, with `adding`, a write that adds a hit
         // of its pattern to the file it leaves, as a `deny_pattern` over a
-        // write is read (#510, #4363).
+        // write is read.
         let added = |pattern: &str| -> Result<bool> {
             let regex = Regex::new(pattern)
                 .with_context(|| format!("rule \"{}\": adding is not a regex", rule.id))?;
@@ -326,8 +326,7 @@ fn evaluate(
         }
     } else if p.writes == Some(true) {
         // A write: an edit's or a write's file, or a shell line that
-        // lands a write somewhere, by a command or a redirection (#3621,
-        // #4250).
+        // lands a write somewhere, by a command or a redirection.
         match line {
             Some(_) => !writes::of(walk).is_empty(),
             None => call.tool_input.file_path.is_some(),
@@ -400,7 +399,7 @@ enum Standing {
     /// Inside them, a row without `where` among them.
     Judged,
     /// In a checkout another session owns, an operation standing there
-    /// where the rule asks for one, which the denial names (#3621).
+    /// where the rule asks for one, which the denial names.
     Foreign(Owned),
     /// Past a change the line does not say where it goes, where the rule
     /// would judge: the denial says so, and guesses no checkout.
@@ -409,8 +408,8 @@ enum Standing {
 
 /// Where the call stands for the rule's `where`: asked where a command it
 /// fires on runs ([`Walk::fired_in`]), whose branch records a ticket, which is
-/// the main checkout (#2751), which is the merge worktree (#3622), or
-/// whose checkout it is, and whether an operation stands there ([`owned`], #3621). An owner record that does
+/// the main checkout, which is the merge worktree, or
+/// whose checkout it is, and whether an operation stands there ([`owned`]). An owner record that does
 /// not read is an error, so the call is judged by no build.
 fn judges_where(root: &Path, rule: &Rule, walk: &Walk, call: &Call) -> Result<Standing> {
     let judged = |inside: bool| {
@@ -427,7 +426,7 @@ fn judges_where(root: &Path, rule: &Rule, walk: &Walk, call: &Call) -> Result<St
     let lost = walk.unplaced(|argv| fires(rule, argv));
     Ok(match (rule.within, lost) {
         (Where::Anywhere, _) => Standing::Judged,
-        // Where each write lands is the owner record's to judge (#3621).
+        // Where each write lands is the owner record's to judge.
         (Where::Owned, _) => return owned(Scope::Owned),
         (Where::Operating, Some(lost)) if operating_elsewhere(root, call)? => {
             Standing::Unplaced(lost)
@@ -443,7 +442,7 @@ fn judges_where(root: &Path, rule: &Rule, walk: &Walk, call: &Call) -> Result<St
 }
 
 /// Whether an operation stands in a checkout of `root`'s repository that
-/// another session than the caller's owns (#3621), or the repository
+/// another session than the caller's owns, or the repository
 /// cannot be listed: what makes an unplaced command one `where =
 /// "operating"` must refuse. A call that names no session is judged by no
 /// owner record, so it is none.
@@ -478,7 +477,7 @@ fn judged_in(rule: &Rule, walk: &Walk) -> PathBuf {
 /// repository ([`crate::track::checkouts`]): where it stands
 /// ([`Walk::runs_in`]) or where [`Walk::placed`] puts any of its commands, each by its
 /// canonical path, so a scratch repository's `docs/divergence.toml` is not
-/// this repository's (#2887), and a relative path the line names that
+/// this repository's, and a relative path the line names that
 /// resolves into one, through a link, is in one. It fails safe, reading
 /// as inside one: a line that changes directory, or moves a program,
 /// where it does not say ([`Walk::lost`]), or spells a change it did not
@@ -525,9 +524,9 @@ fn ticketed(rule: &Rule, walk: &Walk) -> bool {
 
 /// Whether a command the rule fires on runs in the repository's main
 /// checkout rather than a linked worktree ([`linked`]), read where
-/// [`ticketed`] reads (#2751). A directory under no `.git` is in no
+/// [`ticketed`] reads. A directory under no `.git` is in no
 /// checkout at all, such as a scratch repository the line has yet to
-/// make, and not in main's (#3619).
+/// make, and not in main's.
 fn in_main(rule: &Rule, walk: &Walk) -> bool {
     scoped_in(rule, walk)
         .iter()
@@ -535,8 +534,7 @@ fn in_main(rule: &Rule, walk: &Walk) -> bool {
 }
 
 /// Whether a command the rule fires on runs in the merge worktree, the
-/// checkout on [`crate::queue::STAGING`], read where [`ticketed`] reads
-/// (#3622).
+/// checkout on [`crate::queue::STAGING`], read where [`ticketed`] reads.
 fn on_staging(rule: &Rule, walk: &Walk) -> bool {
     scoped_in(rule, walk)
         .iter()
@@ -568,7 +566,7 @@ fn linked(dir: &Path) -> Option<bool> {
 /// `deny_argv` or `require_argv` under its `with`, fires on; a
 /// `deny_pattern` fires on a command whose words it matches and its
 /// `unless_pattern` does not, so a `where` rule asks where the hit runs
-/// and not where its neighbours do (#2751); a rule judging by another
+/// and not where its neighbours do; a rule judging by another
 /// predicate fires on the line whole, and `writes` on a command that
 /// changes a checkout ([`changes`]).
 fn fires(rule: &Rule, argv: &Argv) -> bool {
@@ -581,7 +579,7 @@ fn fires(rule: &Rule, argv: &Argv) -> bool {
         (None, Some(separator), _) => argv.unbounded(separator, &p.with),
         (None, None, Some(pattern)) => {
             // A separator among a command's words is one a quote held, and
-            // no command position (#3635).
+            // no command position.
             let words = argv.words().join(" ").replace([';', '&', '|', '\n'], " ");
             let matches = |pattern: &str| Regex::new(pattern).map(|r| r.is_match(&words));
             matches(pattern).unwrap_or(true)
@@ -638,9 +636,9 @@ fn is_rust_source(path: &Path) -> bool {
 
 /// Whether `after` carries any hit of `regex` more often than any text of
 /// `before` does: what a change adds, as a `deny_pattern` over a write
-/// reads it (#510). The count and not the presence, so one more copy of a
+/// reads it. The count and not the presence, so one more copy of a
 /// line the file already carries is an addition and a line moved is not.
-/// A merge displaces both parents (#1312, #2783): a hit stands as often as
+/// A merge displaces both parents: a hit stands as often as
 /// the parent carrying it most, never as often as the two together, so a
 /// copy of a line both inherit is still one the merge adds.
 pub(super) fn adds(regex: &Regex, after: &str, before: &[String]) -> bool {
@@ -669,11 +667,11 @@ pub(super) fn adds(regex: &Regex, after: &str, before: &[String]) -> bool {
 /// Whether a write adds a use of a `deny_types` type or an invocation of
 /// a `deny_macros` macro: more hits of one in the code `after` leaves than
 /// in the code `before` held, as a `deny_pattern` over a write is read
-/// ([`adds`], #510), so a use the file already carries is clippy's to
+/// ([`adds`]), so a use the file already carries is clippy's to
 /// hold and not this call's. A use is what clippy's `disallowed-types` and
 /// `disallowed-macros`, which the rule renders to, count: a path in code,
 /// so the word in a comment, in rustdoc prose or inside a string literal
-/// is none (#2026), as an unsafe site is not
+/// is none, as an unsafe site is not
 /// ([`rust::without_comments_or_literals`]).
 fn adds_a_denied_use(after: &str, before: &[String], types: &[String], macros: &[String]) -> bool {
     let after = rust::without_comments_or_literals(after);
@@ -786,7 +784,7 @@ mod tests {
         assert!(!m("ext/*/src/ffi/", "ext/curl/src/lib.rs"));
     }
 
-    /// A `deny = true` row with `adding` (#4363): every write into its
+    /// A `deny = true` row with `adding`: every write into its
     /// scope is refused, and past the scope a write that adds a hit of the
     /// pattern to the file it leaves, while one that leaves each hit as it
     /// stood, or adds none, is no finding of the row's; a row without
@@ -888,7 +886,7 @@ mod tests {
 
     /// A use is what clippy's `disallowed-types` and `disallowed-macros`
     /// count, a path in code: the word in a comment, in rustdoc prose or
-    /// inside a string literal is none (#2026); and a write is judged by
+    /// inside a string literal is none; and a write is judged by
     /// the uses it adds, so one the file already carries is not the call's.
     #[test]
     fn a_type_or_macro_named_in_prose_or_a_literal_is_no_use() {

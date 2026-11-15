@@ -2,7 +2,7 @@
 //! `php --re sockets` prints them there, in its order, the same on
 //! `x86_64` and `aarch64`: the oracle of record is macOS's, so the Linux
 //! rows are held at compile time by `cargo check --tests` for a Linux
-//! target (#1096).
+//! target.
 
 use crate::constants as c;
 
