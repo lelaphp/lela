@@ -13,3 +13,6 @@ target/
 
 # macOS Finder metadata.
 .DS_Store
+
+# A person's local override of .claude/settings.json, theirs alone.
+/.claude/settings.local.json
