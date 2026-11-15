@@ -539,7 +539,7 @@ deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::
               "std::rc::Rc"]
 deny_macros = ["std::thread_local"]
 adr = "0005"
-text = "Extension state is request-scoped, immutable engine-scoped or process-scoped (ADR-0005, ADR-0010); no lock, cell, once, Rc or thread-local in ext/*. Cross-request caching is api::Cache; a library's object a call into PHP code must outlive is the request's, held by Memory::holding (ADR-0013); a C variable exported from src/ffi/ under php's name is C ABI, not state (#3551)."
+text = "Extension state is request-scoped, immutable engine-scoped or process-scoped (ADR-0005, ADR-0010); no lock, cell, once, Rc or thread-local in ext/*. Cross-request caching is api::Cache; a library's object a call into PHP code must outlive is the request's, held by Memory::holding (ADR-0013); a C variable exported from src/ffi/ under php's name is C ABI, not state."
 # Renders to the generated, committed `ext/clippy.toml` (`disallowed-types`);
 # a stale copy is a `budget` failure. The wildcard is expanded from Cargo.lock.
 
@@ -555,7 +555,7 @@ text = "No engine, tier, host or test state is thread-local (design §5.14 Threa
 id = "unsafe.homes"
 allow = ["php_heap", "php_process", "ext/*/src/ffi/", "sapi/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter", "xtask::bench::spent::read"]
 adr = "0006"
-text = "unsafe is permitted only in the homes this rule names; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, xtask (its bench reader, #3062), and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
+text = "unsafe is permitted only in the homes this rule names; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, xtask (its bench reader), and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
 
 [[rule]]
 id = "unsafe.one-op"
@@ -568,7 +568,14 @@ id = "fork.home"
 scope = ["crates/**/*.rs", "ext/**/*.rs", "sapi/**/*.rs"]
 exempt = ["crates/php_process/**"]
 deny_pattern = '\b(unistd|libc)::v?fork\b'
-text = "fork has one home, php_process, and php_engine's fork policy is its only caller (#1779)."
+text = "fork has one home, php_process, and php_engine's fork policy is its only caller."
+
+[[rule]]
+id = "comments.no-ticket"
+scope = ["crates/**/*.rs", "ext/**/*.rs", "sapi/**/*.rs", "xtask/src/**/*.rs", "xtask/tests/**/*.rs"]
+deny_pattern = '''(?m)^\s*//[/!]?.*(\(#[0-9]{2,5}[,;)]|[,;] #[0-9]{2,5}\)|#[0-9]{2,5}'s\b)'''
+text = "A ticket number is the tracker's, and code outlives it: say the reason, or cite the design."
+remedy = "state what the number pointed at, or cite a section or revision"
 
 [[rule]]
 id = "fork.threads"
@@ -576,7 +583,7 @@ scope = ["crates/*", "ext/*", "sapi/*"]
 deny_methods = ["php_process::fork::fork", "std::thread::spawn", "std::thread::Builder::spawn", "std::thread::scope",
                 "libc::fork", "libc::vfork", "nix::unistd::fork", "nix::unistd::daemon"]   # grammar: deny_methods, #1950
 adr = "0010"
-text = "A process forks through php_engine's one home, fork::Alone, the one caller of php_process::fork, itself the one caller of fork(2); every thread of the engine's process starts through fork::spawn, so it is counted and a fork waits for it, and an extension owns none (#1807, #1950). The home's call carries #[expect(clippy::disallowed_methods)], a test its allow."
+text = "A process forks through php_engine's one home, fork::Alone, the one caller of php_process::fork, itself the one caller of fork(2); every thread of the engine's process starts through fork::spawn, so it is counted and a fork waits for it, and an extension owns none. The home's call carries #[expect(clippy::disallowed_methods)], a test its allow."
 # Renders to the generated, committed `crates/clippy.toml`, `ext/clippy.toml`
 # and `sapi/clippy.toml` (`disallowed-methods`); a path of libc or nix is
 # `allow-invalid`, since each is declared for some targets and features only.
@@ -593,7 +600,7 @@ text = "Internal invariant failures are InternalError fatals with a message, not
 id = "tests.no-silent-return"
 scope = ["crates/*", "ext/*", "sapi/*"]   # src test modules and tests/ alike; xtask's Promise::or_skip is its honest skip, counted by #3085
 check = "silent-return"   # the clippy instrument's sensor of a return at a #[test] fn's own level (#3105)
-text = "A test that returns early passes without asserting: its setup fails with .expect(\"<step>\") (#3078), and a return at a #[test] fn's own level is refused unless it is return Err(..) (#3079)."
+text = "A test that returns early passes without asserting: its setup fails with .expect(\"<step>\"), and a return at a #[test] fn's own level is refused unless it is return Err(..)."
 
 [[rule]]
 id = "ext.no-private"
@@ -616,7 +623,7 @@ text = "A new pub item in xtask needs its xtask.lock line in the same commit."
 id = "ext.pub-beyond-extension"
 scope = "ext/*"
 on = "pub"
-text = "api-check fails an ext crate's library dependency on another ext crate that no row of design §4.10's list of surfaces names with both crates, and diffs its pub items beyond extension() against its ext/<name>/surface.lock, which `api-check --write` rewrites and lands in the same commit (#2020, #2251)."
+text = "api-check fails an ext crate's library dependency on another ext crate that no row of design §4.10's list of surfaces names with both crates, and diffs its pub items beyond extension() against its ext/<name>/surface.lock, which `api-check --write` rewrites and lands in the same commit."
 
 [[rule]]
 id = "witness.exit-authored"
@@ -645,7 +652,7 @@ scope = ["crates/*", "ext/*", "sapi/*"]
 check = "engine-state"   # the sensor: xtask/src/api_check/engine_state.rs (#4500)
 allow = ["php_unit::frozen", "php_engine::fork::thread"]   # Frozen<T>'s one impl, which only its checked constructor vouches for (#4633); Thread<T>'s, which only fork::spawn vouches for, catching each body's panic (#4719)
 adr = "0005"
-text = "No handle into a request's heap enters engine-wide shared state: engine_state, process_state, register and constants_with take an EngineState, which #[derive(EngineState)] holds at every field, and an impl written by hand stands only where unsafe may (#4348 ruling 2), or in a module `allow` names, whose one impl only the constructor beside it vouches for (#4633, #4719)."
+text = "No handle into a request's heap enters engine-wide shared state: engine_state, process_state, register and constants_with take an EngineState, which #[derive(EngineState)] holds at every field, and an impl written by hand stands only where unsafe may, or in a module `allow` names, whose one impl only the constructor beside it vouches for."
 remedy = "#[derive(EngineState)] on the type, or the impl in the crate's own src/ffi/ for a C library's object; where the sensor cannot read, write the trait's path, the file's path or the impl where it reads them"
 
 [[rule]]
@@ -688,7 +695,7 @@ tool = "Bash"
 where = "staging"   # grammar: where, the merge worktree on `staging`, where the merge queue's merges are made (#3618 M2, #3622)
 deny_pattern = '(?m)(\A|[|;&(\n]\s*)git(\s+-[cC]\s+\S+|\s+--?[\w.-]+(=\S+)?)*\s+merge(\s|$)'   # git merge where it is run (first in the call, after a separator or a newline), never where it is cited
 unless_pattern = '\s--(no-commit|squash|ff-only|abort|continue|quit|help)\b|\s-h\b'   # a merge that leaves its commit to git commit, commits nothing, or ends one
-text = "A merge in the merge worktree is finished by git commit, so pre-commit renders, tests and checks what it commits (#2744, #2751, #3622)."
+text = "A merge in the merge worktree is finished by git commit, so pre-commit renders, tests and checks what it commits."
 remedy = "`git merge --no-commit <branch>`, then `git commit -F <file> -- <paths>`"                 # #3627, #3639
 
 [[rule]]
@@ -696,7 +703,7 @@ id = "git.no-amend"
 tool = "Bash"
 deny_argv = ["--amend"]
 with = "git commit"
-text = "A commit is never rewritten: make a new one. An amend of a pushed commit forks main from origin (#2267)."
+text = "A commit is never rewritten: make a new one. An amend of a pushed commit forks main from origin."
 remedy = "`git commit -F <file> -- <paths>` with a new commit"                 # #3627
 
 [[rule]]
@@ -705,7 +712,7 @@ tool = "Bash"
 where = "operating"   # grammar: where, a checkout another session owns by its owner record, with a merge, cherry-pick, revert, rebase or am standing in it (#2476, #3621)
 deny_argv = ["add", "stage", "commit", "rm", "mv", "restore", "reset", "apply", "merge", "cherry-pick", "revert", "rebase", "am"]
 with = "git"
-text = "A merge, cherry-pick, revert or rebase in progress commits the whole index, so what you stage or step there lands in its commit, and it is the checkout's owner's to end (#2476, #3618 M1)."
+text = "A merge, cherry-pick, revert or rebase in progress commits the whole index, so what you stage or step there lands in its commit, and it is the checkout's owner's to end."
 remedy = "work in your own worktree, or wait for its owner to end it"                 # #3627
 
 [[rule]]
@@ -721,7 +728,7 @@ remedy = "`cargo xtask ticket close <n>`"                 # #3627
 id = "ticket.close-api"
 tool = "Bash"
 deny_pattern = '''gh\s+api\b(?:[^|;&]*issues/\d+(?:['"\s]|$)[^|;&]*(?:[\s'"]state=(?:closed|open)\b|"state"\s*:\s*"(?:closed|open)"|--input\b|=@-|=["']?\$\()|[^|;&]*(?:[\s'"]state=(?:closed|open)\b|"state"\s*:\s*"(?:closed|open)"|--input\b|=@-|=["']?\$\()[^|;&]*issues/\d+(?:['"\s]|$)|[^|;&]*\bgraphql\b[^|;&]*(?:(?:close|reopen)Issue\(|--input\b|=@-|=["']?\$\()|[^|;&]*(?:(?:close|reopen)Issue\(|--input\b|=@-|=["']?\$\()[^|;&]*\bgraphql\b)'''
-text = "The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. A write to an issue's comments, labels or other sub-resources sets no state and is not this rule's (#2390)."
+text = "The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. A write to an issue's comments, labels or other sub-resources sets no state and is not this rule's."
 remedy = "`cargo xtask ticket close <n>`"                 # #3618 ruling 3
 
 [[rule]]
@@ -737,7 +744,7 @@ tool = "Bash"
 deny_argv = ["--full", "--jit"]
 unless_argv = { "--jit" = "xtask phpt --subset" }   # grammar: unless_argv, a denied element let through where the phrase runs bounded by the option, as require_argv reads one: the tier's one-subset reading (#3052, #3068)
 with = ["xtask phpt", "xtask bench"]   # xtask however it is run: the cargo alias, cargo run -p xtask, a path, a variable the line assigns (#1860)
-text = "Nightly lanes run in CI only; run the per-crate subset, and the tier's `--jit` lane on one subset named by `--subset` (#3052)."
+text = "Nightly lanes run in CI only; run the per-crate subset, and the tier's `--jit` lane on one subset named by `--subset`."
 remedy = "`cargo xtask phpt --subset <crate>`, with `--jit` on one subset"                 # #3627
 
 [[rule]]
@@ -844,7 +851,7 @@ id = "checkout.owner"
 tool = ["Edit", "Write", "Bash"]
 where = "owned"   # grammar: where, a checkout another session owns by its owner record, judged where each write lands (#3618 M1, #3621)
 writes = true   # grammar: writes, an Edit, a Write, or a Bash line with a command that can change a checkout or a redirection into a file (#3621)
-text = "One session writes in a checkout: its owner, recorded by `xtask worktree add` or `xtask worktree own` (#3618 M1)."
+text = "One session writes in a checkout: its owner, recorded by `xtask worktree add` or `xtask worktree own`."
 remedy = "work in your own worktree (`xtask worktree add`), or have its owner let it go with `xtask worktree own --release`"                 # #3627
 
 [[rule]]
@@ -857,7 +864,7 @@ runs = "foreground"   # grammar: runs, a call the runtime runs in the foreground
 # measurement of 821 builder waits (265 coordinator, 14 lock and 92 seat
 # loops fire; no single sleep and no settle of 2 s or less does).
 deny_pattern = '''(?s)(?:\A|[;&|({\n]|\b(?:then|do|else))\s*(?:until|while|for)\s.*?[;\n]\s*do\b(?:.*?(?:[;&|({\n]|\b(?:then|do|else)))?\s*sleep\s+0*(?:[3-9]|[1-9][0-9]+)(?:\.[0-9]+)?[smh]?\b.*?\bdone\b'''
-text = "A foreground poll loop holds the turn, and the coordinator, seat or lock it waits on with it (#3624)."
+text = "A foreground poll loop holds the turn, and the coordinator, seat or lock it waits on with it."
 remedy = "run what it waits for with run_in_background, whose end the runtime notifies, or wait on the condition with Monitor and an until-loop"                 # #3627
 
 [[rule]]
@@ -866,7 +873,7 @@ tool = "Bash"
 where = "main"   # grammar: where, the repository's main checkout and never a linked worktree (#2751)
 deny_pattern = '(?m)(\A|[|;&(\n]\s*)git(\s+-[cC]\s+\S+|\s+--?[\w.-]+(=\S+)?)*\s+merge(\s|$)'   # git merge where it is run, as git.merge-commits-itself reads it
 unless_pattern = '\s--(abort|continue|quit|help)\b|\s-h\b'   # the end of a merge that stands, its owner's (#3621); a fast-forward is `worktree land`'s alone (Round 5, Q6 (a))
-text = "main moves only by a fast-forward to a commit the merge queue judged (#3618 M2, #3622)."
+text = "main moves only by a fast-forward to a commit the merge queue judged."
 remedy = "merge in the merge worktree on staging, then `xtask worktree land`"                 # #3627
 
 [[rule]]
@@ -874,7 +881,7 @@ id = "upstream.private"
 tool = ["Edit", "Write"]
 scope = "upstream/**"   # the folder left the tree at f9c488392 (#4380, ruled 2026-11-10); a file staged under it refuses an agent's commit as a harness.self file does (#3644 ruling 3)
 deny = true
-text = "Nothing is written under upstream/ in this repository: a defect in php-src, or in a library it links, goes in the private upstream project, and nothing here states it until Mitchell has reported it (#4380)."
+text = "Nothing is written under upstream/ in this repository: a defect in php-src, or in a library it links, goes in the private upstream project, and nothing here states it until Mitchell has reported it."
 remedy = "write it in the private upstream project, as AGENTS.md says of a defect in php-src"                 # #4414
 
 [[rule]]
@@ -883,7 +890,7 @@ tool = ["Edit", "Write"]
 deny = true
 adding = '''(?i:upstream)(?:/|\\/|%2[Ff]|&#47;)(?:(?:[^\s\"'`<>();|\\*\[\]{},]|\\/)*[*\[\]{},](?:[^\s\"'`<>();|\\]|\\/)*?[^\s\"'`<>();|\\*\[\]{},.:/?](?:(?:[^\s\"'`<>();|\\]|\\/)*[^\s\"'`<>();|\\*\[\]{},.:])?|(?:[^\s\"'`<>();|\\*\[\]{},]|\\/)*[^\s\"'`<>();|\\*\[\]{},.:])'''   # scripts/export/cutlib.py's UPSTREAM byte for byte, the export's bar, which reads the same in regex_lite's dialect; xtask/tests/tracked/permit/upstream_named.rs and scripts/export/test_export.py hold the two to xtask/fixtures/rules/upstream.named/forms.tsv (#4598, #4617)
 exempt = ["xtask/fixtures/rules/upstream.private/**", "xtask/tests/tracked/permit/upstream.rs", "xtask/fixtures/rules/upstream.named/**", "scripts/export/**"]   # the two rules' fixtures and upstream.private's test carry the names they judge, and the export's tool reads and maps them (#4594, #4595)
-text = "No line added to a file here names a file or folder under upstream/: the export carries no such name, and each is a line it would have to map before the move. `upstream.private` judges a write under the folder; this row judges text naming one (#4594, #4595, #4676)."
+text = "No line added to a file here names a file or folder under upstream/: the export carries no such name, and each is a line it would have to map before the move. `upstream.private` judges a write under the folder; this row judges text naming one."
 remedy = "describe the thing without its path: the private upstream project, a defect in php-src, or the folder upstream/ by its own name"
 
 [[rule]]
@@ -900,7 +907,7 @@ where = "checkout"   # as git.no-verify: a scratch repository outside every chec
 # the subcommands later gits spell them (#4363).
 deny_argv = ["--no-verify", "-c core.hooksPath", "--config-env core.hooksPath", "core.hooksPath", "--remove-section", "--rename-section", "remove-section", "rename-section"]
 with = ["git push", "git config"]
-text = "A push runs the pre-push hook, which runs `done`, and the hooks run from where core.hooksPath points them; --no-verify on a push, core.hooksPath, and removing or renaming a configuration section are not available to agents (#4348 ruling 3)."
+text = "A push runs the pre-push hook, which runs `done`, and the hooks run from where core.hooksPath points them; --no-verify on a push, core.hooksPath, and removing or renaming a configuration section are not available to agents."
 remedy = "push as it is, and fix what pre-push names; core.hooksPath is the session hook's to set"
 
 [[rule]]
@@ -910,7 +917,7 @@ where = "checkout"
 scope = [".github/**", "scripts/hooks/**", "scripts/ci/**", "Cargo.toml", "deny.toml", ".cargo/config.toml", "rust-toolchain.toml", "**/computed.toml"]
 deny = true
 adding = '<!--\s*computed\s+(?:exec|transcript)\b[^\n]*'
-text = "What main executes, or is read for when it judges, builds or runs CI, is a person's to change: the workflows, the git hooks, the CI scripts, the workspace's Cargo.toml, deny.toml, .cargo/config.toml, rust-toolchain.toml and a computed.toml, and an added `computed exec` or `computed transcript` opener line in any file (#4348 ruling 3, #4458, #4482)."
+text = "What main executes, or is read for when it judges, builds or runs CI, is a person's to change: the workflows, the git hooks, the CI scripts, the workspace's Cargo.toml, deny.toml, .cargo/config.toml, rust-toolchain.toml and a computed.toml, and an added `computed exec` or `computed transcript` opener line in any file."
 remedy = "propose the change on a `for-a-person` ticket with its diff, and a person commits it; a crate's own Cargo.toml and a build.rs stay yours, and so does a `computed use` of a recipe a person wrote"
 
 [[rule]]
@@ -919,7 +926,7 @@ tool = ["Edit", "Write"]
 where = "checkout"
 deny = true
 adding = '(?m)^(?:checksum = "[0-9a-f]{64}"|source = "git\+[^"\n]*")$'
-text = "A third-party package added to a Cargo.lock is a person's to add: the lock is what main builds, and a new package is new code in it. A lock that moves among the packages it already holds is yours (#4458)."
+text = "A third-party package added to a Cargo.lock is a person's to add: the lock is what main builds, and a new package is new code in it. A lock that moves among the packages it already holds is yours."
 remedy = "propose the dependency on a `for-a-person` ticket with the lock's diff, and a person commits the lock; an edge to a package the lock already holds needs no one"
 
 [[rule]]
@@ -954,7 +961,7 @@ deny_pattern = '''(?x)
   (?:cp|ln|install|rsync)\s(?:[^|;&\n]*[\s'"])?
     (?:[^\s'"|;&)<>=]*/)?scripts/hooks(?:/[^\s'"|;&)<>]*)?['"]?(?:\s+(?:-\S*|[0-9]*>&?\S*))*\s*(?:$|[|;&\n)])
 '''
-text = "The git hooks under scripts/hooks judge every checkout's commits, merges and pushes, and a shell line does not write them (#4363)."
+text = "The git hooks under scripts/hooks judge every checkout's commits, merges and pushes, and a shell line does not write them."
 remedy = "propose the hook's change on a `for-a-person` ticket with its diff, and a person commits it; a scratch repository's hooks go in a folder of another name"
 
 # ---------------------------------------------------------------- owed
