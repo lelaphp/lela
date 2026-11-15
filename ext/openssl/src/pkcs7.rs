@@ -337,9 +337,13 @@ fn openssl_pkcs7_encrypt(
 /// certificates and CRLs of a PEM `PKCS7`, as PEM.
 ///
 /// ```php
-/// $p7 = file_get_contents('~/Projects/php-src-8.5.9/ext/openssl/tests/cert.p7b');
+/// $k = openssl_pkey_new(['private_key_bits' => 1024]);
+/// $x = openssl_csr_sign(openssl_csr_new(['commonName' => 'a'], $k), null, $k, 1);
+/// $d = __DIR__; file_put_contents("$d/in.txt", "hello\n"); openssl_pkcs7_sign("$d/in.txt", "$d/out.txt", $x, $k, [], 0);
+/// $p7 = "-----BEGIN PKCS7-----\n" . trim(explode("\n\n", file_get_contents("$d/out.txt"), 2)[1]) . "\n-----END PKCS7-----\n";
 /// var_dump(openssl_pkcs7_read($p7, $certs), count($certs), substr($certs[0], 0, 27));
 /// var_dump(openssl_pkcs7_read('', $certs), openssl_pkcs7_read('nope', $certs));
+/// foreach (['in.txt', 'out.txt'] as $f) unlink("$d/$f");
 /// ```
 /// ```expect
 /// bool(true)
