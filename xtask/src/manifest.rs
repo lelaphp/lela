@@ -218,13 +218,28 @@ pub(crate) struct Parity {
 }
 
 /// One entry of `[parity] out`: suites of the pinned corpus, relative to
-/// it, and the ticket whose ruling took them out, an issue's number and
-/// never its prose.
+/// it, and the ruling that took them out, as it is cited: `design §12`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RuledOut {
     pub suites: Vec<PathBuf>,
-    pub ruling: Ticket,
+    #[serde(deserialize_with = "cited")]
+    pub ruling: String,
+}
+
+/// A ruling as the table gives it: the citation itself, a string kept as
+/// typed, or an issue's bare number, read as the issue is cited, `#30`.
+fn cited<'de, D: serde::Deserializer<'de>>(given: D) -> std::result::Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Given {
+        Cited(String),
+        Numbered(Ticket),
+    }
+    Ok(match Given::deserialize(given)? {
+        Given::Cited(ruling) => ruling,
+        Given::Numbered(ticket) => ticket.to_string(),
+    })
 }
 
 impl Parity {
@@ -236,10 +251,14 @@ impl Parity {
     /// inside a row's subset is the row's, and so is a subset inside a
     /// suite.
     fn hold(&self, crates: &[Crate]) -> Result<()> {
-        let ruled: Vec<(&Path, Ticket)> = self
+        let ruled: Vec<(&Path, &str)> = self
             .out
             .iter()
-            .flat_map(|out| out.suites.iter().map(|suite| (suite.as_path(), out.ruling)))
+            .flat_map(|out| {
+                out.suites
+                    .iter()
+                    .map(|suite| (suite.as_path(), out.ruling.as_str()))
+            })
             .collect();
         for (at, &(suite, ruling)) in ruled.iter().enumerate() {
             if let Some((other, under)) =

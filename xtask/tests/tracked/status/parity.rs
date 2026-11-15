@@ -52,7 +52,7 @@ fn parity_names_every_unbuilt_suite_of_the_pinned_tree() {
     );
     assert!(
         parity["outside"].as_array().unwrap().contains(
-            &serde_json::json!({ "suite": "ext/pgsql", "why": "ruling", "ruling": 1167 })
+            &serde_json::json!({ "suite": "ext/pgsql", "why": "ruling", "ruling": "design §12" })
         ),
         "a suite ruled out stays under its ruling: {json}"
     );
@@ -86,7 +86,9 @@ fn parity_renders_as_markdown_for_a_session() {
     );
     assert!(md.contains("236 of 247 target tests met"), "{md}");
     assert!(
-        md.contains("#1167") && md.contains("not built by the pinned php: ext/enchant"),
+        md.contains(
+            "Outside parity under design §12: ext/ldap, ext/odbc, ext/pdo_dblib, ext/pdo_odbc, ext/pdo_pgsql, ext/pgsql, ext/snmp."
+        ) && md.contains("not built by the pinned php: ext/enchant"),
         "{md}"
     );
     assert!(
@@ -165,13 +167,14 @@ fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outsi
     let outside = parity["outside"].as_array().unwrap();
     assert!(
         outside.contains(
-            &serde_json::json!({ "suite": "ext/pgsql", "why": "ruling", "ruling": 1167 })
+            &serde_json::json!({ "suite": "ext/pgsql", "why": "ruling", "ruling": "design §12" })
         ),
         "{json}"
     );
     assert!(
-        outside
-            .contains(&serde_json::json!({ "suite": "ext/ldap", "why": "ruling", "ruling": 1167 })),
+        outside.contains(
+            &serde_json::json!({ "suite": "ext/ldap", "why": "ruling", "ruling": "design §12" })
+        ),
         "a suite ruled out is named whether or not a reading measured it: {json}"
     );
     assert!(
@@ -181,7 +184,7 @@ fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outsi
     assert_eq!(
         outside.len(),
         8,
-        "the seven under #1167 and ext/enchant: {json}"
+        "the seven under design §12 and ext/enchant: {json}"
     );
     assert_eq!(
         parity["unbuilt_from"], "readings",

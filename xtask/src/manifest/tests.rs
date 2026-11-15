@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use super::{Manifest, RuledOut};
-use crate::track::Ticket;
 
 const MINIMAL: &str = r#"
 [oracle]
@@ -17,14 +16,23 @@ api_items = 1
 bindings = 1
 "#;
 
-/// A manifest without the table rules nothing out, and a ruling is an
-/// issue's number: `"#1167"` is refused, as #1739 ruled.
+/// A manifest without the table rules nothing out, and a ruling is the
+/// citation as the table types it. An issue's bare number is read as the
+/// issue is cited, and no other value is a ruling.
 #[test]
-fn the_parity_table_is_optional_and_its_ruling_a_number() {
+fn the_parity_table_is_optional_and_its_ruling_a_citation() {
     assert!(Manifest::parse(MINIMAL).unwrap().parity.out.is_empty());
-    let text =
-        format!("{MINIMAL}[parity]\nout = [{{ suites = [\"ext/ldap\"], ruling = \"#1167\" }}]\n");
-    assert!(Manifest::parse(&text).is_err());
+    let ruled = |ruling: &str| {
+        let text = format!(
+            "{MINIMAL}[parity]\nout = [{{ suites = [\"ext/ldap\"], ruling = {ruling} }}]\n"
+        );
+        Manifest::parse(&text).map(|manifest| manifest.parity.out[0].ruling.clone())
+    };
+    assert_eq!(ruled("\"design §12\"").unwrap(), "design §12");
+    assert_eq!(ruled("1167").unwrap(), "#1167");
+    for refused in ["true", "-1", "1.5", "[\"design §12\"]"] {
+        assert!(ruled(refused).is_err(), "{refused}");
+    }
 }
 
 /// A suite ruled out of parity and owned by a `[[crate]]` row's subsets is
@@ -52,10 +60,10 @@ fn a_ruled_out_suite_a_crate_owns_is_refused_naming_both() {
     ];
     for (suite, row, owner) in cases {
         let text = format!(
-            "{MINIMAL}[parity]\nout = [{{ suites = [\"ext/ldap\", \"{suite}\"], ruling = 1167 }}]\n{row}"
+            "{MINIMAL}[parity]\nout = [{{ suites = [\"ext/ldap\", \"{suite}\"], ruling = \"design §12\" }}]\n{row}"
         );
         let refused = format!("{:#}", Manifest::parse(&text).unwrap_err());
-        for named in [suite, "#1167", owner] {
+        for named in [suite, "design §12", owner] {
             assert!(refused.contains(named), "{suite}: {named} in {refused}");
         }
     }
@@ -64,7 +72,7 @@ fn a_ruled_out_suite_a_crate_owns_is_refused_naming_both() {
 /// The tracked manifest's `[parity] out` is the seven server-bound suites
 /// under the ruling that put them there, read as typed data (#1739, #1759).
 #[test]
-fn the_tracked_parity_table_is_the_seven_suites_under_1167() {
+fn the_tracked_parity_table_is_the_seven_suites_under_design_12() {
     let manifest = Manifest::load(&crate::built_root()).unwrap();
     let suites = [
         "ext/pgsql",
@@ -79,7 +87,7 @@ fn the_tracked_parity_table_is_the_seven_suites_under_1167() {
         manifest.parity.out,
         [RuledOut {
             suites: suites.iter().map(PathBuf::from).collect(),
-            ruling: Ticket::new(1167),
+            ruling: "design §12".to_owned(),
         }]
     );
 }
@@ -91,20 +99,20 @@ fn the_tracked_parity_table_is_the_seven_suites_under_1167() {
 fn a_suite_ruled_out_twice_or_inside_another_is_refused_naming_both() {
     let cases = [
         (
-            "{ suites = [\"ext/ldap\"], ruling = 1167 }, { suites = [\"ext/ldap\"], ruling = 1168 }",
-            "rules ext/ldap out under #1167, and ext/ldap under #1168",
+            "{ suites = [\"ext/ldap\"], ruling = \"design §12\" }, { suites = [\"ext/ldap\"], ruling = \"design §3\" }",
+            "rules ext/ldap out under design §12, and ext/ldap under design §3",
         ),
         (
-            "{ suites = [\"ext/ldap\", \"ext/snmp\", \"ext/ldap\"], ruling = 1167 }",
-            "rules ext/ldap out under #1167, and ext/ldap under #1167",
+            "{ suites = [\"ext/ldap\", \"ext/snmp\", \"ext/ldap\"], ruling = \"design §12\" }",
+            "rules ext/ldap out under design §12, and ext/ldap under design §12",
         ),
         (
-            "{ suites = [\"ext/x\"], ruling = 1167 }, { suites = [\"ext/x/tests\"], ruling = 1168 }",
-            "rules ext/x out under #1167, and ext/x/tests under #1168",
+            "{ suites = [\"ext/x\"], ruling = \"design §12\" }, { suites = [\"ext/x/tests\"], ruling = \"design §3\" }",
+            "rules ext/x out under design §12, and ext/x/tests under design §3",
         ),
         (
-            "{ suites = [\"ext/x/tests\"], ruling = 1168 }, { suites = [\"ext/x\"], ruling = 1167 }",
-            "rules ext/x/tests out under #1168, and ext/x under #1167",
+            "{ suites = [\"ext/x/tests\"], ruling = \"design §3\" }, { suites = [\"ext/x\"], ruling = \"design §12\" }",
+            "rules ext/x/tests out under design §3, and ext/x under design §12",
         ),
     ];
     for (out, named) in cases {
@@ -113,7 +121,7 @@ fn a_suite_ruled_out_twice_or_inside_another_is_refused_naming_both() {
         assert!(refused.contains(named), "{out}: {named} in {refused}");
     }
     let apart = format!(
-        "{MINIMAL}[parity]\nout = [{{ suites = [\"ext/x\"], ruling = 1167 }}, {{ suites = [\"ext/xy\"], ruling = 1168 }}]\n"
+        "{MINIMAL}[parity]\nout = [{{ suites = [\"ext/x\"], ruling = \"design §12\" }}, {{ suites = [\"ext/xy\"], ruling = \"design §3\" }}]\n"
     );
     assert!(Manifest::parse(&apart).is_ok());
 }

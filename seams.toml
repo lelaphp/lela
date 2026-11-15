@@ -43,7 +43,7 @@ target = 10                                # harness §4.3: the day-30 target, d
 # Suites php builds and parity does not count, each with the ruling that put it there.
 out = [
   { suites = ["ext/pgsql", "ext/pdo_pgsql", "ext/ldap", "ext/snmp",
-              "ext/odbc", "ext/pdo_odbc", "ext/pdo_dblib"], ruling = 1167 },
+              "ext/odbc", "ext/pdo_odbc", "ext/pdo_dblib"], ruling = "design §12" },
 ]
 
 # ---------------------------------------------------------------- crates/

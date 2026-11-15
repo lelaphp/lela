@@ -159,11 +159,12 @@ struct Outside {
 }
 
 /// Why a suite is outside parity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "why", rename_all = "lowercase")]
 enum Why {
-    /// `[parity] out` names it under this ticket's ruling (design §12).
-    Ruling { ruling: u64 },
+    /// `[parity] out` names it under this ruling, as the table cites it:
+    /// `design §12`.
+    Ruling { ruling: String },
     /// A reading measured it and no `[[crate]]` row owns it: the pinned
     /// php does not build it.
     Unbuilt,
@@ -279,9 +280,11 @@ fn outside<'a>(
         .iter()
         .flat_map(|out| {
             let why = Why::Ruling {
-                ruling: out.ruling.number(),
+                ruling: out.ruling.clone(),
             };
-            out.suites.iter().map(move |suite| (suite.clone(), why))
+            out.suites
+                .iter()
+                .map(move |suite| (suite.clone(), why.clone()))
         })
         .collect();
     for place in places {
@@ -360,10 +363,10 @@ fn markdown(parity: &Parity) -> String {
         total.suites,
         total.suites - total.held
     ).ok();
-    let mut rulings: BTreeMap<u64, Vec<&str>> = BTreeMap::new();
+    let mut rulings: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut unbuilt = Vec::new();
     for o in &parity.outside {
-        match o.why {
+        match &o.why {
             Why::Ruling { ruling } => rulings.entry(ruling).or_default().push(&o.suite),
             Why::Unbuilt => unbuilt.push(o.suite.as_str()),
         }
@@ -371,7 +374,7 @@ fn markdown(parity: &Parity) -> String {
     for (ruling, suites) in rulings {
         writeln!(
             out,
-            "\nOutside parity by the ruling on #{ruling}: {}.",
+            "\nOutside parity under {ruling}: {}.",
             suites.join(", ")
         )
         .ok();
