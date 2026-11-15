@@ -170,6 +170,29 @@ pub fn pin() -> Pin {
     Pin::load(&workspace().join("oracle.toml")).unwrap()
 }
 
+/// A pin's text with its `[source]` stating `path`: one line added under
+/// the table's header, in place of the line the text states where it
+/// states one. The tracked pin states none, its tree named by the
+/// variable alone, so a test of the pin's path as the place tried after
+/// the variable has a pin of its own that states one.
+pub fn with_source_path(pin: &str, path: &Path) -> String {
+    let stated = format!("path = {:?}", path.display().to_string());
+    let mut in_source = false;
+    let mut lines = Vec::new();
+    for line in pin.lines() {
+        if line.starts_with('[') {
+            in_source = line.trim() == "[source]";
+            lines.push(line.to_owned());
+            if in_source {
+                lines.push(stated.clone());
+            }
+        } else if !(in_source && line.starts_with("path = ")) {
+            lines.push(line.to_owned());
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }

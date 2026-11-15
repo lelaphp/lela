@@ -14,7 +14,7 @@ mod common {
     pub mod repo;
     pub mod run;
 }
-use common::manifest::{Tracked, pin};
+use common::manifest::{Tracked, pin, with_source_path};
 use common::repo::Repo;
 use common::run::{Ran, Run};
 
@@ -84,27 +84,13 @@ fn status_with_pin(root: &Path, args: &[&str], tree: Option<&Path>, promise: Opt
 }
 
 /// A scratch workspace whose pin's `[source].path` is `path`: the tracked
-/// `oracle.toml` with that one line rewritten in the copy, the tracked
-/// file untouched.
+/// `oracle.toml`, which states none, with that one line stated in the
+/// copy, the tracked file untouched.
 fn scratch_with_pin_path(name: &str, path: &Path) -> Tree {
     let root = scratch(name);
     let pin = root.join("oracle.toml");
-    let mut in_source = false;
-    let text: Vec<String> = std::fs::read_to_string(&pin)
-        .unwrap()
-        .lines()
-        .map(|line| {
-            if line.starts_with('[') {
-                in_source = line.trim() == "[source]";
-            }
-            if in_source && line.starts_with("path = ") {
-                format!("path = {:?}", path.display().to_string())
-            } else {
-                line.to_owned()
-            }
-        })
-        .collect();
-    std::fs::write(&pin, text.join("\n") + "\n").unwrap();
+    let text = std::fs::read_to_string(&pin).unwrap();
+    std::fs::write(&pin, with_source_path(&text, path)).unwrap();
     root
 }
 

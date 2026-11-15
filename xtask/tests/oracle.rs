@@ -374,25 +374,12 @@ fn a_program_past_the_timeout_is_refused() {
     assert!(err.contains("1 s"), "the limit is named: {err}");
 }
 
-/// The tracked pin as the file says it, its `[source].path` at `path`,
-/// blind to this machine: what `parse` gives, the variable unread.
+/// The tracked pin as the file says it, with a `[source].path` of the
+/// test's own at `path`, which the tracked file does not state, and blind
+/// to this machine: what `parse` gives, the variable unread.
 fn pin_with_path(path: &Path) -> Pin {
     let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
-    let mut in_source = false;
-    let text: Vec<String> = text
-        .lines()
-        .map(|line| {
-            if line.starts_with('[') {
-                in_source = line.trim() == "[source]";
-            }
-            if in_source && line.starts_with("path = ") {
-                format!("path = {:?}", path.display().to_string())
-            } else {
-                line.to_owned()
-            }
-        })
-        .collect();
-    Pin::parse(&text.join("\n")).unwrap()
+    Pin::parse(&common::manifest::with_source_path(&text, path)).unwrap()
 }
 
 /// The tracked pin as the file says it, with no `[source].path` at all:

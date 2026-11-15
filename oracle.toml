@@ -89,7 +89,6 @@ zstd = "1.5.7_1"
 # from this revision on. Design revisions before 8 cite 8.5.7 line numbers.
 tag = "php-8.5.12"
 commit = "136e049a"
-path = "~/Projects/php-src-8.5.12"
 phpt_files = 22280    # `find . -name '*.phpt' | wc -l` at the tag
 
 [recipe]

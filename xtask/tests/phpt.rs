@@ -32,7 +32,7 @@ mod common {
     pub mod repo;
     pub mod run;
 }
-use common::manifest::{of_rows, pin};
+use common::manifest::{of_rows, pin, with_source_path};
 use common::phpt_tree::fixture_tree;
 use common::registry::{Row, registry, rows};
 use common::repo::{Repo, scratch_workspace};
@@ -603,26 +603,12 @@ fn a_corpus_directory_no_crate_owns_is_stamped_over_the_workspace() {
 fn the_variable_names_the_tree_to_a_run_of_the_binary() {
     let root = Tree::new("phpt-variable").unwrap();
     scratch_workspace(workspace(), &root);
-    // The scratch clone's pin, its `[source].path` pointed nowhere, so the
-    // fallback is absent whichever machine this runs on.
+    // The scratch clone's pin, given a `[source].path` that points nowhere,
+    // so the fallback is stated and absent whichever machine this runs on.
     let pinned = root.join("nowhere-pinned");
     let pin = root.join("oracle.toml");
-    let mut in_source = false;
-    let text: Vec<String> = fs::read_to_string(&pin)
-        .unwrap()
-        .lines()
-        .map(|line| {
-            if line.starts_with('[') {
-                in_source = line.trim() == "[source]";
-            }
-            if in_source && line.starts_with("path = ") {
-                format!("path = {:?}", pinned.display().to_string())
-            } else {
-                line.to_owned()
-            }
-        })
-        .collect();
-    fs::write(&pin, text.join("\n")).unwrap();
+    let text = fs::read_to_string(&pin).unwrap();
+    fs::write(&pin, with_source_path(&text, &pinned)).unwrap();
     let tree = fixture_tree();
     let ran = Run::at(&root)
         .args(["phpt", "--subset", "Zend/tests"])
