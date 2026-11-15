@@ -20,6 +20,8 @@ This is the design of record for the harness. It is one living document: every s
 
 Each entry is numbered as the revision that made it and names the check that would show it wrong.
 
+`#n` in entries 1 to 208 of this ledger names a ticket of the private tracker `mitchellvanw/dax-php`; from entry 209 on it names this repository's.
+
 **1. Revision 1 (2026-09-05).** Read HE and its neighbours; found that the design never says "harness" but that nineteen of its mechanisms are guides or sensors, almost all computational, the guides structural (types, crate visibility, locks); found no agent map, no local wiring of sensors into the edit loop, and no rule for repeated agent failures. Proposed a four-layer harness (context, constraint, feedback, maintenance) in the crate map, with every check an `xtask` subcommand and hooks as thin wires. Check: §3's table maps to the design's own sections; a mechanism it lists that the design does not have is a mistake in the table.
 
 **2. Revision 2 (2026-09-05).** Read `computed` and Function Hooks from primary sources. Made the map's facts computed regions, added a gitignored local region file, moved the session ritual into a `prompt.context` function hook, folded the two shell hooks into one `tool.call` function hook with the rules in TypeScript, added steering-loop capture, and listed the fail-open hazard as the largest new gap. Check: a gitignored region file renders when named (verified by a scratch run recorded in `research/harness-research.r2.md` A2.1); the installed binary exposes the events used (verified against the declaration file it writes).

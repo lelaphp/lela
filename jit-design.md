@@ -10,6 +10,8 @@ This is the design of record for the compiled tier. It is one living document: e
 
 Each entry is numbered as the revision that made it and names the check that would show it wrong.
 
+`#n` in entries 1 to 155 of this ledger names a ticket of the private tracker `mitchellvanw/dax-php`; from entry 156 on it names this repository's.
+
 **1. Revision 1 (2026-09-06).** Took `research/jit-research.r1.md §E` and placed its seams: `Tier` on `execute` with `Nop` and `Jit`, an engine-level word on `Func` replacing `Func.code`, `TraceIr` as a value seam with two consumers, the kernel face in `php_jit` by one `kernels!` list, code lifetime by `Arc` strong count under one lock, bytes final at publication. Check: G1 within the drift bound; G2 and G3 against a variant that keeps `Func.code`.
 
 **2. Revision 2 (2026-09-06).** One hook instead of two; the recorder is a loop over `step`; `table` owns every published trace; `policy` is pure and `compile` is the pipeline; an exit embeds a `Word`; `Tier::extension()` declares the tier's state; `exits` folded into `enter`; a self-settling `Claim`. Check: G7 for `step`'s cost under recording; a panic inside a fixture recording leaves the word `cold`.

@@ -10,6 +10,8 @@ Goals as given, non-negotiable: insane performance, full parity with PHP 8.5.x, 
 
 Each entry is numbered as the revision that made it and names the check that would show it wrong.
 
+`#n` in entries 1 to 190 of this ledger names a ticket of the private tracker `mitchellvanw/dax-php`; from entry 191 on it names this repository's.
+
 **1. Revision 1 (2026-09-05).** Zend's execution model in Rust, once, with nothing beside it: Zend's layouts and algorithms, one executor, the library rule, witnesses and phpt per commit, nine crates, 260k lines. Check: the day-30 bars of §9.
 
 **2. Revision 2 (2026-09-05).** Named every module's interface, measured it and locked it: `php_engine::api` sized from a census of what Mahout's extensions call, op-array identity against php's own dump, interface locks, `HeapHooks`, map pointers, the 25-slot object-handler table, frames in `php_heap`, handler bodies monomorphised over operand kinds. Check: `compile-identity` byte-identical on the per-commit corpus; `port-map` unresolved rows reaching zero.
