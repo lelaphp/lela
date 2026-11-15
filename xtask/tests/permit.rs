@@ -2378,10 +2378,7 @@ fn the_owner_s_commit_and_abort_of_the_merge_in_its_checkout_pass() {
                 "~/Projects/dax-php-worktrees/t2794",
                 &worktree.display().to_string(),
             )
-            .replace(
-                "~/Projects/dax-php",
-                &main.path().display().to_string(),
-            );
+            .replace("~/Projects/dax-php", &main.path().display().to_string());
         replayed.tool_input.command = Some(line);
         let session = xtask::owner::SessionId::new(&replayed.session_id).unwrap();
         xtask::owner::record(checkout, &session).unwrap();
