@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT AND TCL
+// A port of scanf as php-src carries it, an altered version: see THIRD-PARTY.md.
+
 //! `Z/ext/standard/scanf.c`: `php_sscanf_internal`, the Tcl-derived
 //! scanner behind `sscanf` (and `fscanf` once `file.c`'s half lands),
 //! with `ValidateFormat` read over the whole format first and

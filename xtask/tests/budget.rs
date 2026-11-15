@@ -63,6 +63,76 @@ fn workspace_reading(readings: &[xtask::reading::Reading]) -> &xtask::reading::R
     readings.iter().find(|r| r.scope == "workspace").unwrap()
 }
 
+/// A Rust file derived from php-src says what licences it is under where
+/// it begins: one that cites a php-src source, or that `THIRD-PARTY.md`
+/// names by its path, fails the workspace until an SPDX line stands
+/// among its first lines, and one whose line names an LGPL licence fails
+/// it until a dated change notice stands there too. A file that cites
+/// none and is not named is held to nothing, and so is a negative
+/// control under `xtask/fixtures`.
+#[test]
+fn a_file_derived_from_php_src_without_its_licence_line_fails_the_workspace() {
+    let root = scratch("licence-line");
+    let repo = common::repo::scratch_workspace(workspace(), &root);
+    Tracked::minimal().write(&root);
+    std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    // The citation is put together here, so this file cites no source.
+    let cited = format!("//! `{}/Zend/zend_hash.c:1150`: the table grows.\n", 'Z');
+    let licence = "// SPDX-License-Identifier: MIT AND BSD-3-Clause\n\n";
+    let lgpl = "// SPDX-License-Identifier: MIT AND LGPL-2.1-or-later\n";
+    repo.write("crates/php_heap/src/array.rs", &cited);
+    repo.write(
+        "crates/php_heap/src/own.rs",
+        "//! A-Z/a-z, and no source.\n",
+    );
+    repo.write("crates/php_heap/src/sort.rs", "//! The sort, ported.\n");
+    repo.write(
+        "crates/php_heap/src/num.rs",
+        format!("{lgpl}// Changed from the C sources, some day.\n"),
+    );
+    repo.write("xtask/fixtures/budget/x/crates/a/src/lib.rs", &cited);
+    repo.write(
+        "THIRD-PARTY.md",
+        "| std::sort | `crates/php_heap/src/sort.rs` |\n",
+    );
+    let manifest = Manifest::load(&root).unwrap();
+    let readings = budget::run(&root, &manifest).unwrap();
+    let reading = workspace_reading(&readings);
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    let message = &reading.message;
+    assert!(
+        message.contains("crates/php_heap/src/array.rs cites a php-src source"),
+        "{message}"
+    );
+    assert!(
+        message.contains("crates/php_heap/src/sort.rs cites a php-src source"),
+        "a file the list names is held without a citation: {message}"
+    );
+    assert!(
+        message.contains("crates/php_heap/src/num.rs states an LGPL licence"),
+        "a notice with no date is no dated notice: {message}"
+    );
+    assert!(!message.contains("own.rs"), "{message}");
+    assert!(!message.contains("xtask/fixtures"), "{message}");
+
+    repo.write("crates/php_heap/src/array.rs", format!("{licence}{cited}"));
+    repo.write(
+        "crates/php_heap/src/sort.rs",
+        "// SPDX-License-Identifier: MIT\n//! The sort, ported.\n",
+    );
+    repo.write(
+        "crates/php_heap/src/num.rs",
+        format!("{lgpl}// Changed from the C sources, from 2026-09-28 on.\n"),
+    );
+    let readings = budget::run(&root, &manifest).unwrap();
+    let reading = workspace_reading(&readings);
+    assert!(
+        !reading.message.contains("php-src source") && !reading.message.contains("LGPL"),
+        "{}",
+        reading.message
+    );
+}
+
 /// A manifest without the `[budget] scripts` row, which a person writes:
 /// the reading is a skip that still says what the tree measures, file by
 /// file, so the number the row needs is read off it.

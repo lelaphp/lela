@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT AND LGPL-2.1-or-later
+// A port of libbcmath as php-src carries it, an altered version: see THIRD-PARTY.md.
+// Changed from libbcmath's C sources by translation into Rust, from 2026-09-28
+// on; the repository's history dates each change since.
+
 //! `libbcmath`, php's copy of GNU bc's number package, in Rust: the one
 //! arithmetic core the `bc*` natives and `BcMath\Number` share. A number
 //! is laid out as php lays out a `bc_struct`, `n_len` digits before the

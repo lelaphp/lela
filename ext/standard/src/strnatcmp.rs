@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT AND Zlib
+// A port of strnatcmp as php-src carries it, an altered version: see THIRD-PARTY.md.
+
 //! `Z/ext/standard/strnatcmp.c`: Martin Pool's natural-order
 //! comparison as php carries it, `strnatcmp_ex` with `compare_left`
 //! for digits that start with a zero and `compare_right` for one that

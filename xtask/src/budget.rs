@@ -226,8 +226,10 @@ fn crate_reading(snapshot: &Snapshot, krate: &Crate) -> Result<(Reading, Count)>
 }
 
 /// The workspace against `[budget]`: the pooled counts, every crate
-/// declared, no committed generated code outside the exceptions, and no
-/// `build.rs` that bakes its crate's directory in.
+/// declared, no committed generated code outside the exceptions, no
+/// `build.rs` that bakes its crate's directory in, and no file derived
+/// from php-src without its licence line or, translated from LGPL C,
+/// without its dated change notice.
 fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> Result<Reading> {
     let root = snapshot.root();
     let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, snapshot)?;
@@ -313,6 +315,17 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
     for path in build_rs_baking_their_dir(root, &layout)? {
         failures.push(format!(
             "{path} reads {MANIFEST_DIR_AT_COMPILE} when it compiles; a build.rs reads std::env::var_os(\"CARGO_MANIFEST_DIR\") when it runs, since cargo runs one compiled build.rs for every checkout sharing a target directory"
+        ));
+    }
+    let (unlicensed, undated) = derived_without_their_lines(root, &layout)?;
+    for path in unlicensed {
+        failures.push(format!(
+            "{path} cites a php-src source as `Z/<path>`, or {THIRD_PARTY} names it, and none of its first {LICENCE_WITHIN} lines is a `{LICENCE_LINE}` line; a file derived from php-src states the licences it is under where it begins"
+        ));
+    }
+    for path in undated {
+        failures.push(format!(
+            "{path} states an LGPL licence, and none of its first {LICENCE_WITHIN} lines is a `{CHANGE_NOTICE}` line with a date; a file translated from LGPL C says that it was changed and when"
         ));
     }
     if failures.is_empty() {
@@ -506,6 +519,61 @@ fn build_rs_baking_their_dir(root: &Path, layout: &Layout) -> Result<Vec<String>
             })
     });
     Ok(out)
+}
+
+/// The file that lists what this tree takes from others, by path.
+const THIRD_PARTY: &str = "THIRD-PARTY.md";
+
+/// How a Rust file states the licences it is under, and how far from its
+/// first line the statement may stand.
+const LICENCE_LINE: &str = "// SPDX-License-Identifier: ";
+const LICENCE_WITHIN: usize = 5;
+
+/// How a file translated from LGPL C says that it was changed, which
+/// LGPL-2.1 section 2 asks of a changed file beside the date.
+const CHANGE_NOTICE: &str = "// Changed from ";
+
+/// A php-src source as a comment cites it, `Z/` and a directory of the
+/// tree or its `configure.ac`.
+const CITES_PHP_SRC: &str = r"(^|[^A-Za-z0-9_])Z/(Zend|ext|main|sapi|build|configure\.ac)\b";
+
+/// The Rust files under the crate trees and the harness that are derived
+/// from php-src and do not say so where they begin, in two lists. The
+/// first is the files that cite a php-src source, or that [`THIRD_PARTY`]
+/// names by path, with no [`LICENCE_LINE`] among their first lines. The
+/// second is the files whose licence line names an LGPL licence with no
+/// dated [`CHANGE_NOTICE`] there. Which licences the line names is the
+/// file's to state, as [`THIRD_PARTY`] lists them; that the lines stand
+/// is what is held.
+fn derived_without_their_lines(root: &Path, layout: &Layout) -> Result<(Vec<String>, Vec<String>)> {
+    let cites = regex_lite::Regex::new(CITES_PHP_SRC)?;
+    let dated = regex_lite::Regex::new(r"\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b")?;
+    let named = std::fs::read_to_string(root.join(THIRD_PARTY)).unwrap_or_default();
+    let (mut unlicensed, mut undated) = (Vec::new(), Vec::new());
+    for path in crate_tree_files(root, layout)? {
+        if Path::new(&path).extension() != Some(std::ffi::OsStr::new("rs")) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(root.join(&path)) else {
+            continue;
+        };
+        let head: Vec<&str> = text.lines().take(LICENCE_WITHIN).collect();
+        let licence = head.iter().find(|line| line.starts_with(LICENCE_LINE));
+        match licence {
+            None if cites.is_match(&text) || named.contains(&format!("`{path}`")) => {
+                unlicensed.push(path);
+            }
+            Some(line)
+                if line.contains("LGPL-")
+                    && !(head.iter())
+                        .any(|l| l.starts_with(CHANGE_NOTICE) && dated.is_match(l)) =>
+            {
+                undated.push(path);
+            }
+            _ => {}
+        }
+    }
+    Ok((unlicensed, undated))
 }
 
 /// Committed generated files under the crate trees: a `generated` path

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT AND Beerware
+// A port of md5crypt as php-src carries it, an altered version: see THIRD-PARTY.md.
+
 //! The `$1$` hash, php's MD5-based crypt (`Z/ext/standard/php_crypt_r.c:101`).
 
 use crate::md5::Md5;
