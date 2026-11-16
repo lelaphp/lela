@@ -72,8 +72,8 @@ test('a harness.self denial is asked again with the answers, and lifted', async 
   const out = await $.tool.call({ tool: 'Edit', file_path: '/work/seams.toml', old_string: 'a', new_string: 'b' });
   expect(out.deny).toBe(undefined);
   expect(stdins.length).toBe(2);
-  expect(stdins[0].asked).toBe(undefined);
-  expect(stdins[1].asked).toEqual([{ tool_use_id: 'toolu_ask', input: { q: 1 }, result: { answers: {} } }]);
+  expect(stdins[0]!.asked).toBe(undefined);
+  expect(stdins[1]!.asked).toEqual([{ tool_use_id: 'toolu_ask', input: { q: 1 }, result: { answers: {} } }]);
 });
 
 test("prompt.context hands over the facts alone, the map being CLAUDE.md's load", async ($, on) => {
