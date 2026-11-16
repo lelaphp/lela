@@ -8,7 +8,9 @@ use anyhow::bail;
 use super::*;
 use crate::scratch::{Tree, UNHOOKED};
 
-/// A manifest of one crate and the rule, over `crates/`.
+/// A manifest of one crate and the rule, over `crates/`, whose list names
+/// `num.rs`; [`UNLISTED`] is the same manifest with a list that names no
+/// file.
 const MANIFEST: &str = r#"
 [budget]
 total = 1
@@ -25,8 +27,12 @@ budget = 1
 id = "licence.header"
 scope = ["crates/**"]
 check = "licence-header"
+allow = ["crates/php_unit/src/num.rs"]
 text = "t"
 "#;
+
+const LISTED: &str = "allow = [\"crates/php_unit/src/num.rs\"]";
+const UNLISTED: &str = "allow = []";
 
 const FOUR: &str = "// Copyright (c) Them.\n// Copyright (c) Others.\n// Derived in part from php-src, used under BSD-3-Clause: see NOTICE.\n";
 
@@ -79,7 +85,16 @@ fn workspace(name: &str, licence: &str) -> Tree {
 }
 
 fn surveyed(tree: &Tree, pinned: Option<&Path>, today: Option<&str>) -> Survey {
-    let manifest = Manifest::parse(MANIFEST).unwrap();
+    surveyed_under(MANIFEST, tree, pinned, today)
+}
+
+fn surveyed_under(
+    manifest: &str,
+    tree: &Tree,
+    pinned: Option<&Path>,
+    today: Option<&str>,
+) -> Survey {
+    let manifest = Manifest::parse(manifest).unwrap();
     let rule = manifest.rule_checked_by(CHECK).unwrap();
     let today = || match today {
         Some(day) => Ok(day.to_owned()),
@@ -122,11 +137,8 @@ fn an_lgpl_file_names_each_day_it_changed_and_today_where_it_differs_from_head()
     assert_eq!((first.files, first.components), (1, 1));
 
     // A second day in history, which the lines do not name.
-    tree.write(
-        "crates/php_unit/src/other.rs",
-        format!("{SPDX}{BASE}\n{FOUR}"),
-    )
-    .unwrap();
+    tree.write("crates/php_unit/src/other.rs", "//! Another file.\n")
+        .unwrap();
     on(" ");
     commit("2026-10-01");
     let unnamed = clauses(&surveyed(&tree, None, None));
@@ -207,6 +219,63 @@ fn a_notice_under_licenses_is_held_to_the_pinned_tree_where_it_is_laid() {
     );
 }
 
+/// A file the rule's list does not name states no licence where it begins:
+/// the header on it fails, a component's as any other's. Without it the
+/// file passes, its row's licence is still one its crate's `license`
+/// covers, and its notice under `LICENSES/` is still held to the pinned
+/// tree, which no file need carry for the record to be held.
+#[test]
+fn a_file_the_list_does_not_name_states_no_licence_and_its_notice_is_still_the_records() {
+    let tree = workspace("licence-unlisted", "Zlib");
+    let unlisted = MANIFEST.replace(LISTED, UNLISTED);
+    assert_ne!(unlisted, MANIFEST);
+    let expression = format!("{BASE} AND Zlib");
+    let pinned = tree.path().join("php-src");
+
+    tree.write("crates/php_unit/src/num.rs", num(&expression, ""))
+        .unwrap();
+    assert_eq!(
+        clauses(&surveyed_under(&unlisted, &tree, Some(&pinned), None)),
+        "crates/php_unit/src/num.rs states \"MIT AND BSD-3-Clause AND Zlib\" where it begins and the rule's allow does not name it; a file carries the header only where that list names its path"
+    );
+
+    tree.write("crates/php_unit/src/num.rs", "//! The numbers.\n")
+        .unwrap();
+    let bare = surveyed_under(&unlisted, &tree, Some(&pinned), None);
+    assert_eq!(clauses(&bare), "");
+    assert_eq!((bare.files, bare.components, bare.headed), (1, 1, 0));
+    assert_eq!(bare.recorded, ["LICENSES/n.txt"]);
+    // The list names it again: the file that states nothing fails.
+    let listed = clauses(&surveyed(&tree, Some(&pinned), None));
+    assert!(
+        listed.starts_with("crates/php_unit/src/num.rs's line 1 is \"//! The numbers.\""),
+        "{listed}"
+    );
+
+    // The crate's license is held to the row though no file states it.
+    tree.write(
+        "crates/php_unit/Cargo.toml",
+        format!("[package]\nname = \"php_unit\"\nlicense = \"{BASE}\"\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        clauses(&surveyed_under(&unlisted, &tree, Some(&pinned), None)),
+        "crates/php_unit/Cargo.toml says license = \"MIT AND BSD-3-Clause\" and its files are under Zlib"
+    );
+
+    // And the record to the pinned tree: one line more above the notice.
+    tree.write(
+        "php-src/ext/x.c",
+        "#include <x.h>\n\n/* One line,\n   and another. */\nint x;\n",
+    )
+    .unwrap();
+    let moved = clauses(&surveyed_under(&unlisted, &tree, Some(&pinned), None));
+    assert!(
+        moved.contains("LICENSES/n.txt is not lines 2-3 of ext/x.c in the pinned php-src"),
+        "{moved}"
+    );
+}
+
 /// The day is the author's own: the seconds an identity ends with, or the
 /// ones git hands a hook after an `@`, moved by the zone after them.
 #[test]
@@ -228,8 +297,8 @@ fn the_day_of_a_commit_is_read_in_its_authors_zone() {
 
 /// The row as it is proposed for the manifest, for a workspace whose
 /// manifest does not carry it yet: the three trees, less the vendored
-/// copies `THIRD-PARTY.md` lists and the files php-src generates, and a
-/// list that starts empty.
+/// copies `THIRD-PARTY.md` lists and the files php-src generates, and the
+/// list of the four files whose licence asks for a notice in the file.
 #[cfg(tracked)]
 fn proposed() -> Rule {
     let owned = |items: &[&str]| items.iter().map(|item| (*item).to_owned()).collect();
@@ -247,22 +316,28 @@ fn proposed() -> Rule {
     ]);
     rule.predicate = crate::manifest::Predicates {
         check: Some(CHECK.to_owned()),
-        allow: Some(Vec::new()),
+        allow: Some(owned(&[
+            "ext/bcmath/src/num.rs",
+            "ext/standard/src/crypt/md5_crypt.rs",
+            "ext/standard/src/scanf.rs",
+            "ext/standard/src/strnatcmp.rs",
+        ])),
         ..Default::default()
     };
     rule
 }
 
-/// The workspace itself, the positive control: every file the rule covers
-/// begins with its header, each component's file carries its notices as
-/// `LICENSES/` holds them, each of those is the pinned php-src's lines
-/// where that tree is laid, and each crate's `license` covers what its
-/// files state. The rule is the manifest's, or the proposed row where the
+/// The workspace itself, the positive control: each file the rule's list
+/// names begins with its header and carries its notices as `LICENSES/`
+/// holds them, no other file the rule covers states a licence where it
+/// begins, each notice under `LICENSES/` is the pinned php-src's lines
+/// where that tree is laid, and each crate's `license` covers its files'
+/// licences. The rule is the manifest's, or the proposed row where the
 /// manifest does not carry one yet. Every failure is printed, none
 /// counted.
 #[cfg(tracked)]
 #[test]
-fn the_workspace_begins_every_file_with_its_header() {
+fn the_workspace_carries_the_header_where_the_list_names_a_file_and_nowhere_else() {
     let root = crate::package_dir().parent().unwrap();
     let manifest = Manifest::load(root).unwrap();
     let proposed = proposed();
@@ -275,7 +350,10 @@ fn the_workspace_begins_every_file_with_its_header() {
         survey.unmet.len() + survey.wider.len(),
         clauses(&survey)
     );
-    assert!(survey.files > 0 && survey.components > 0, "{survey:?}");
+    assert!(
+        survey.files > survey.headed && survey.headed > 0 && survey.components > 0,
+        "{survey:?}"
+    );
     if pinned.is_some() {
         assert!(survey.unrecorded.is_empty(), "{survey:?}");
     }

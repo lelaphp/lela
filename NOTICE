@@ -9,8 +9,8 @@ DERIVED FROM PHP-SRC
 Parts of this project are derived from php-src (https://github.com/php/php-src) at tag
 php-8.5.12 (136e049a): data extracted from it (ops.toml), tables transcribed
 from it, and modules translated or written from its C source. Each source
-file under crates/, ext/ and sapi/ says so where it begins, with php-src's
-copyright lines. These parts are used under the Modified
+file under crates/, ext/ and sapi/ is derived in part from it, and this
+notice says so once for all of them. These parts are used under the Modified
 BSD License (BSD-3-Clause), published by the PHP Group as the PHP License,
 version 4, and by Zend Technologies Ltd. as the Zend Engine License, version
 3.0. Code released under the PHP License 3.01 and the Zend Engine License 2.00

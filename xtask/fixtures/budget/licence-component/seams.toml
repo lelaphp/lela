@@ -23,4 +23,5 @@ budget = 1000
 id = "licence.header"
 scope = ["crates/**", "ext/**", "sapi/**"]
 check = "licence-header"
-text = "A file THIRD-PARTY.md's ports name says whose it is under the four lines and carries each notice its row names, byte for byte as LICENSES/ holds it."
+allow = ["crates/php_unit/src/altered.rs", "crates/php_unit/src/claims.rs", "crates/php_unit/src/free.rs", "crates/php_unit/src/held.rs", "crates/php_unit/src/lib.rs", "crates/php_unit/src/open.rs", "crates/php_unit/src/unsaid.rs"]
+text = "A file the rule's allow and THIRD-PARTY.md's ports both name says whose it is under the four lines and carries each notice its row names, byte for byte as LICENSES/ holds it; a crate's license covers each licence a row lists for a file of the crate."

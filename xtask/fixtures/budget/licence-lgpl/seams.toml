@@ -20,4 +20,5 @@ budget = 1000
 id = "licence.header"
 scope = ["crates/**", "ext/**", "sapi/**"]
 check = "licence-header"
+allow = ["crates/php_unit/src/num.rs"]
 text = "A file translated from LGPL C names the day it was first changed and each day it changed since."

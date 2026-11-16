@@ -66,24 +66,21 @@ pub struct Laid {
 
 impl Laid {
     /// `files` written at their paths under `dir`, the crate `row` of the
-    /// workspace at `root`, and the crate made one of its members. A Rust
-    /// file is written under the licence header `budget` holds every
-    /// source file of an extension and a host to ([`crate::licence`]), so
-    /// a crate passes that reading the day it is laid down.
+    /// workspace at `root`, and the crate made one of its members. A file
+    /// is written as it is given, with no licence line over it: `NOTICE`
+    /// says once what an extension's and a host's sources are derived
+    /// from, and `budget` holds a file to stating no licence of its own
+    /// ([`crate::licence`]).
     pub(crate) fn files<const N: usize>(
         root: &Path,
         dir: PathBuf,
         row: &str,
         files: [(&str, String); N],
     ) -> Result<Laid> {
-        let header = crate::licence::plain(root)?;
         let mut written = Vec::new();
-        for (rel, mut text) in files {
+        for (rel, text) in files {
             let path = dir.join(rel);
             crate::make_parent(&path)?;
-            if path.extension().is_some_and(|extension| extension == "rs") {
-                text.insert_str(0, &header);
-            }
             crate::write(&path, text)?;
             written.push(format!("{row}/{rel}"));
         }

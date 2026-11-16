@@ -50,4 +50,4 @@ text = "Internal invariant failures are InternalError fatals with a message, not
 id = "licence.header"
 scope = ["sapi/**"]
 check = "licence-header"
-text = "A Rust, C or C++ file under sapi/ begins with the four lines of the licence header and an empty one."
+text = "A Rust, C or C++ file under sapi/ states no licence where it begins."

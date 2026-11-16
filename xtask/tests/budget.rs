@@ -63,18 +63,19 @@ fn workspace_reading(readings: &[xtask::reading::Reading]) -> &xtask::reading::R
     readings.iter().find(|r| r.scope == "workspace").unwrap()
 }
 
-/// A file the licence rule's `allow` names says `MIT` alone, and no line
-/// of the header: over a copy of the fixture whose rule lists three paths,
-/// the file that says `MIT` alone passes where the fixture alone fails it,
-/// the listed file that carries the four lines fails, and so does a
-/// listed path no file stands at. A file no list names is held as before.
+/// The licence rule's `allow` is what says a file carries the header: over
+/// a copy of the fixture whose rule lists two other paths, the file that
+/// carries the four lines and passed while the list named it fails now
+/// that it does not, as the other unlisted file that states an expression
+/// does, and so does a listed path no file stands at. The file still
+/// listed is held to its expression as before, and the crate root, which
+/// states no licence, is not named.
 #[test]
-fn a_listed_file_says_mit_alone_and_a_listed_path_is_a_file() {
+fn the_list_is_what_says_a_file_carries_the_header_and_a_listed_path_is_a_file() {
     let root = scratch("licence-listed");
     let fixture = xtask::package_dir().join("fixtures/budget/licence-expression");
     xtask::scratch::repository(&fixture, &root, &["."]).unwrap();
-    let listed =
-        ["alone.rs", "listed.rs", "gone.rs"].map(|file| format!("crates/php_unit/src/{file}"));
+    let listed = ["alone.rs", "gone.rs"].map(|file| format!("crates/php_unit/src/{file}"));
     let manifest = Tracked::of(&root)
         .with_the_workspace_pin()
         .with_rule("licence.header", |row| {
@@ -86,16 +87,17 @@ fn a_listed_file_says_mit_alone_and_a_listed_path_is_a_file() {
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     let message = &reading.message;
     for clause in [
-        "crates/php_unit/src/listed.rs's line 1 is \"// SPDX-License-Identifier: MIT AND BSD-3-Clause\" and the header's is \"// SPDX-License-Identifier: MIT\", since the rule's allow names the file, which says MIT alone",
+        "crates/php_unit/src/listed.rs states \"MIT AND BSD-3-Clause\" where it begins and the rule's allow does not name it; a file carries the header only where that list names its path",
         "the rule's allow names crates/php_unit/src/gone.rs, which is no file the rule covers",
-        "crates/php_unit/src/wide.rs states \"MIT AND BSD-3-Clause AND Zlib\"",
+        "crates/php_unit/src/wide.rs states \"MIT AND BSD-3-Clause AND Zlib\" where it begins and the rule's allow does not name it",
+        "crates/php_unit/src/alone.rs states \"MIT\" and its expression is \"MIT AND BSD-3-Clause\"",
     ] {
         assert!(message.contains(clause), "{clause}: {message}");
     }
-    assert!(!message.contains("alone.rs"), "{message}");
+    assert!(!message.contains("lib.rs"), "{message}");
     assert_eq!(
-        reading.numbers["alone"],
-        2.into(),
+        reading.numbers["headed"],
+        1.into(),
         "the listed paths that are files: {reading:#?}"
     );
 }

@@ -318,52 +318,59 @@ fn licence_reading(kind: &str, name: &str, named: &[&str], unnamed: &[&str]) -> 
     reading.clone()
 }
 
-/// The rule's own fixture: a file that begins with its rustdoc, one with
-/// the expression and no copyright line under it, and a C file that begins
-/// with a block comment each fail naming the line that differs and the
-/// header's. The file that begins with the four lines and the vendored one
-/// the rule's `exempt` names are not named, and the rule's text and remedy
-/// close the message.
+/// The rule's own fixture: a file that carries the four lines and that
+/// the rule's list does not name fails saying so, and of the files the
+/// list names, one with the expression and no copyright line under it and
+/// a C file that begins with a block comment each fail naming the line
+/// that differs and the header's. The listed file that begins with the
+/// four lines, the crate root that states no licence and the vendored
+/// file the rule's `exempt` names are not named, and the rule's text and
+/// remedy close the message.
 #[test]
-fn a_file_that_does_not_begin_with_the_four_lines_fails_under_the_licence_rule() {
+fn a_file_states_no_licence_unless_the_list_names_it_and_then_it_begins_with_the_four_lines() {
     let reading = licence_reading(
         "rules",
         "licence.header",
         &[
-            "crates/php_unit/src/lib.rs's line 1 is \"//! A crate root that begins with its rustdoc and no licence header.\" and the header's is \"// SPDX-License-Identifier: MIT AND BSD-3-Clause\"",
+            "crates/php_unit/src/unlisted.rs states \"MIT AND BSD-3-Clause\" where it begins and the rule's allow does not name it; a file carries the header only where that list names its path",
             "crates/php_unit/src/two_lines.rs's line 2 is \"// Derived in part from php-src, used under BSD-3-Clause: see NOTICE.\" and the header's is \"// Copyright © The PHP Group and Contributors.\"",
             "crates/php_unit/src/shim.c's line 1 is",
-            "(seams.toml rule licence.header: A Rust, C or C++ file under crates/, ext/ or sapi/ begins with the four lines of the licence header and an empty one. Instead: begin the file with the four lines as the file beside it has them.)",
+            "(seams.toml rule licence.header: A Rust, C or C++ file under crates/, ext/ or sapi/ states no licence where it begins, and one the rule's allow names begins with the four lines of the licence header and an empty one. Instead: take the licence lines off a file the list does not name, and begin one it names with the four lines.)",
         ],
-        &["held.rs", "vendored"],
+        &["held.rs", "lib.rs", "vendored"],
     );
-    assert_eq!(reading.numbers["files"], 4.into(), "{reading:#?}");
+    assert_eq!(reading.numbers["files"], 5.into(), "{reading:#?}");
+    assert_eq!(reading.numbers["headed"], 3.into(), "{reading:#?}");
 }
 
-/// A file's expression is `MIT AND BSD-3-Clause` and what its row adds: one
-/// that says `MIT` alone with no list naming it fails, saying how a file
-/// comes to say so, and one that adds a licence no row gives it fails
-/// naming both expressions.
+/// The expression of a file the rule's list names is
+/// `MIT AND BSD-3-Clause` and what its row adds: one that says `MIT` alone
+/// fails, and one that adds a licence no row gives it fails, each naming
+/// both expressions. The listed file that carries the four lines and the
+/// crate root, which no list names and which states none, are not named.
 #[test]
 fn an_expression_that_is_not_the_files_fails_naming_both() {
     licence_reading(
         "budget",
         "licence-expression",
         &[
-            "crates/php_unit/src/alone.rs states \"MIT\" and its expression is \"MIT AND BSD-3-Clause\"; a file says MIT alone only where the rule's allow names its path",
+            "crates/php_unit/src/alone.rs states \"MIT\" and its expression is \"MIT AND BSD-3-Clause\"",
             "crates/php_unit/src/wide.rs states \"MIT AND BSD-3-Clause AND Zlib\" and its expression is \"MIT AND BSD-3-Clause\"",
         ],
         &["listed.rs", "lib.rs"],
     );
 }
 
-/// A file a row of `THIRD-PARTY.md`'s ports names is held to the row: the
-/// line that says whose it is, each notice the row names, byte for byte as
-/// `LICENSES/` holds it, and the line under it that names that file. A
-/// file that says it is a port under no row fails, and so does a row
-/// whose file is not there. The licensed component's file and the
-/// public-domain one's, which begin as their rows ask, are not named, and
-/// neither is the file a row of the next table names.
+/// A file the rule's list and a row of `THIRD-PARTY.md`'s ports both name
+/// is held to the row: the line that says whose it is, each notice the
+/// row names, byte for byte as `LICENSES/` holds it, and the line under it
+/// that names that file. A file that says it is a port under no row
+/// fails, and so does a row whose file is not there. The licensed
+/// component's file and the public-domain one's, which begin as their
+/// rows ask, are not named, and neither is the file a row of the next
+/// table names. A component's file the list does not name carries none of
+/// it and is not named either, and its row's licence is still one its
+/// crate's `license` covers: the crate's that lacks it fails.
 #[test]
 fn a_components_file_is_held_to_its_row_and_its_notice_to_licenses() {
     licence_reading(
@@ -375,8 +382,9 @@ fn a_components_file_is_held_to_its_row_and_its_notice_to_licenses() {
             "crates/php_unit/src/altered.rs's line 9 is \"//      Released into the public domain by Ulrich Drepper <drepper@redhat.com>.  */\" and the header's is \"//      Released into the Public Domain by Ulrich Drepper <drepper@redhat.com>.  */\"",
             "crates/php_unit/src/claims.rs says it is a port and no row of THIRD-PARTY.md's ports names it",
             "THIRD-PARTY.md's ports name crates/php_unit/src/absent.rs, which is no file the rule covers",
+            "crates/php_unit/Cargo.toml says license = \"MIT AND BSD-3-Clause AND Zlib\" and its files are under TCL",
         ],
-        &["held.rs", "free.rs", "lib.rs"],
+        &["held.rs", "free.rs", "lib.rs", "bare.rs"],
     );
 }
 
@@ -395,19 +403,20 @@ fn an_lgpl_file_whose_change_lines_name_no_day_fails() {
     );
 }
 
-/// A crate's `license` covers what its files state, read through the
-/// workspace's where the crate inherits it: one that says `MIT` over a
-/// file that states BSD-3-Clause fails, and so does a crate with no file
-/// under the header that inherits a `license` wider than `MIT`. The crate
-/// that inherits what its file states is not named.
+/// A crate's `license` covers the licences of its files the rule covers,
+/// read through the workspace's where the crate inherits it, though no
+/// file states them: one that says `MIT` over a file under BSD-3-Clause
+/// fails, and so does a crate with no file the rule covers that inherits
+/// a `license` wider than `MIT`. The crate that inherits what its file is
+/// under is not named.
 #[test]
-fn a_crates_license_covers_what_its_files_state() {
+fn a_crates_license_covers_the_licences_of_its_files() {
     licence_reading(
         "budget",
         "licence-manifest",
         &[
-            "crates/php_unit/Cargo.toml says license = \"MIT\" and its files state BSD-3-Clause",
-            "lanes/a/Cargo.toml inherits the workspace's license = \"MIT AND BSD-3-Clause\" and no file of the crate is under the header; such a crate says license = \"MIT\" itself",
+            "crates/php_unit/Cargo.toml says license = \"MIT\" and its files are under BSD-3-Clause",
+            "lanes/a/Cargo.toml inherits the workspace's license = \"MIT AND BSD-3-Clause\" and the rule covers no file of the crate; such a crate says license = \"MIT\" itself",
         ],
         &["php_heap"],
     );

@@ -1,22 +1,27 @@
 //! The licence header as `budget` holds it, under the manifest rule whose
 //! `check` names this sensor ([`CHECK`]): one reading, scope `licence`.
 //!
-//! Every Rust, C and C++ file the rule's `scope` covers and its `exempt`
-//! does not begins with four lines and an empty one: the SPDX expression,
-//! the two copyright lines [`COPYRIGHT`] begins with, and [`DERIVED`]. A
-//! file the rule's `allow` names says `MIT` alone instead. A file a row of
-//! [`THIRD_PARTY`]'s table of ports names adds the row's licence to the
-//! expression, says whose it is on its fifth line, and carries each
-//! notice the row names, byte for byte as its file under `LICENSES/` holds
-//! it; a file under an LGPL licence names each day it changed. Each
-//! crate's `license` covers what its files state.
+//! A Rust, C or C++ file the rule's `scope` covers and its `exempt` does
+//! not states no licence where it begins: `NOTICE` says once what those
+//! trees are derived from. Only a file the rule's `allow` names carries
+//! the header, a file whose licence asks for a notice in the file itself:
+//! four lines and an empty one, the SPDX expression, the two copyright
+//! lines [`COPYRIGHT`] begins with, and [`DERIVED`]. Where a row of
+//! [`THIRD_PARTY`]'s table of ports names such a file, it adds the row's
+//! licence to the expression, says whose it is on its fifth line, and
+//! carries each notice the row names, byte for byte as its file under
+//! `LICENSES/` holds it; a file under an LGPL licence names each day it
+//! changed. Each crate's `license` covers the expression of every file of
+//! its own the rule covers, the header's and what a row adds, whether the
+//! file carries the header or not.
 //!
 //! `LICENSES/` is the record: a file's notice is held to it with the
 //! repository alone, always, and each notice there to the lines its row
-//! names in the pinned php-src where that tree is laid. Where it is not,
-//! the reading names the notices it did not compare. No source file names
-//! a line of php-src, so a move of the pin changes [`THIRD_PARTY`] and
-//! `LICENSES/` and no header.
+//! names in the pinned php-src where that tree is laid, whether a file
+//! carries the notice or not. Where the tree is not laid, the reading
+//! names the notices it did not compare. No source file names a line of
+//! php-src, so a move of the pin changes [`THIRD_PARTY`] and `LICENSES/`
+//! and no header.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -37,10 +42,10 @@ const SCOPE: &str = "licence";
 /// How a file's first line begins, the expression after it.
 const SPDX: &str = "// SPDX-License-Identifier: ";
 
-/// The expression of a file no row and no list names.
+/// The expression of a file no row names.
 const BASE: &str = "MIT AND BSD-3-Clause";
 
-/// The expression of a file the rule's `allow` names.
+/// The `license` of a crate with no file the rule covers.
 const ALONE: &str = "MIT";
 
 /// The fourth line.
@@ -66,9 +71,9 @@ const HELD: [&str; 8] = ["rs", "c", "h", "cc", "cpp", "cxx", "hh", "hpp"];
 /// prints one screen.
 const WORDED: usize = 8;
 
-/// The files `rule`'s `allow` names, each by its path: the ones that say
-/// `MIT` alone, a list a person keeps. An entry that is a pattern or a
-/// directory is refused naming the rule and the entry, since it would
+/// The files `rule`'s `allow` names, each by its path: the ones that
+/// carry the header, a list a person keeps. An entry that is a pattern or
+/// a directory is refused naming the rule and the entry, since it would
 /// list files nobody named.
 pub(crate) fn listed(rule: &Rule) -> Result<BTreeSet<&str>> {
     (rule.predicate.allow.iter().flatten())
@@ -92,13 +97,6 @@ fn four(root: &Path, expression: &str) -> Result<Vec<String>> {
     lines.extend(text.lines().take(2).map(|line| format!("// {line}")));
     lines.push(DERIVED.to_owned());
     Ok(lines)
-}
-
-/// What a new source file of the workspace at `root` begins with: the
-/// four lines and the empty one under them, as `new-ext` and `new-sapi`
-/// lay them.
-pub(crate) fn plain(root: &Path) -> Result<String> {
-    Ok(four(root, BASE)?.join("\n") + "\n\n")
 }
 
 /// A notice a component's file carries: its file under `LICENSES/`, and
@@ -240,26 +238,22 @@ impl<'a> Head<'a> {
 /// What the sensor read once, and holds each file to.
 struct Held<'a> {
     root: &'a Path,
-    alone: BTreeSet<&'a str>,
+    /// The files the rule's `allow` names: the ones that carry the header.
+    headed: BTreeSet<&'a str>,
     components: BTreeMap<String, Component>,
-    /// The four lines over [`BASE`]; the last three are every file's.
+    /// The four lines over [`BASE`]; the last three are every header's.
     four: Vec<String>,
 }
 
 impl Held<'_> {
-    /// `path`'s header against what the file is held to, `days` being the
-    /// days a file under an LGPL licence names: the expression the file
-    /// states, or the clause that says what it fails by.
+    /// `path` against what the file is held to, `days` being the days a
+    /// file under an LGPL licence names: the file's expression, the
+    /// header's and what its row adds, or the clause that says what it
+    /// fails by. A file the list does not name states no licence where it
+    /// begins; one it names carries the header whole.
     fn file(&self, path: &str, bytes: &[u8], days: &BTreeSet<String>) -> Result<String, String> {
         let mut head = Head::of(path, bytes);
         let component = self.components.get(path);
-        if self.alone.contains(path) {
-            let said = head.is(format!("{SPDX}{ALONE}")).and_then(|()| head.is(""));
-            let why = "since the rule's allow names the file, which says MIT alone";
-            return said
-                .map(|()| ALONE.to_owned())
-                .map_err(|said| format!("{said}, {why}"));
-        }
         let want = match component.and_then(|component| component.adds.as_ref()) {
             Some(adds) => format!("{BASE} AND {adds}"),
             None => BASE.to_owned(),
@@ -268,16 +262,20 @@ impl Held<'_> {
             .lines
             .first()
             .and_then(|line| line.strip_prefix(SPDX.as_bytes()));
+        if !self.headed.contains(path) {
+            return match stated {
+                Some(stated) => Err(format!(
+                    "{path} states {:?} where it begins and the rule's allow does not name it; a file carries the header only where that list names its path",
+                    String::from_utf8_lossy(stated)
+                )),
+                None => Ok(want),
+            };
+        }
         match stated {
             Some(stated) if stated != want.as_bytes() => {
                 let stated = String::from_utf8_lossy(stated);
-                let alone = if stated == ALONE {
-                    "; a file says MIT alone only where the rule's allow names its path"
-                } else {
-                    ""
-                };
                 return Err(format!(
-                    "{path} states {stated:?} and its expression is {want:?}{alone}"
+                    "{path} states {stated:?} and its expression is {want:?}"
                 ));
             }
             _ => head.is(format!("{SPDX}{want}"))?,
@@ -408,10 +406,10 @@ fn license(path: &Path, at: &[&str]) -> Result<Option<String>> {
     })
 }
 
-/// Each crate under `crates` whose `license` does not cover what its
-/// files state, `stated` by the crate's directory, read through the
+/// Each crate under `crates` whose `license` does not cover its files'
+/// expressions, `stated` by the crate's directory, read through the
 /// workspace's where the crate inherits it; and each crate with no file
-/// under the header that inherits a `license` wider than [`ALONE`], as
+/// the rule covers that inherits a `license` wider than [`ALONE`], as
 /// the harness and a lane would.
 fn uncovered(
     root: &Path,
@@ -448,11 +446,11 @@ fn uncovered(
         if !lacks.is_empty() {
             let lacks = lacks.join(", ");
             out.push(format!(
-                "{at} says license = {license:?}{whose} and its files state {lacks}"
+                "{at} says license = {license:?}{whose} and its files are under {lacks}"
             ));
         } else if !whose.is_empty() && license != ALONE && !stated.contains_key(dir) {
             out.push(format!(
-                "{at} inherits the workspace's license = {license:?} and no file of the crate is under the header; such a crate says license = {ALONE:?} itself"
+                "{at} inherits the workspace's license = {license:?} and the rule covers no file of the crate; such a crate says license = {ALONE:?} itself"
             ));
         }
     }
@@ -462,10 +460,11 @@ fn uncovered(
 /// What the sensor found over one workspace.
 #[derive(Debug, Default)]
 struct Survey {
-    /// The files held, and of them the components' and the listed ones.
+    /// The files held, and of them the components' and the ones the
+    /// rule's `allow` names, which carry the header.
     files: usize,
     components: usize,
-    alone: usize,
+    headed: usize,
     /// Each file's failure, in the order of the paths, and each failure
     /// wider than one file: a list, a row, a crate, a notice's record.
     unmet: Vec<String>,
@@ -487,7 +486,7 @@ fn survey(
 ) -> Result<Survey> {
     let held = Held {
         root,
-        alone: listed(rule)?,
+        headed: listed(rule)?,
         components: components(root)?,
         four: four(root, BASE)?,
     };
@@ -505,8 +504,9 @@ fn survey(
     for file in &files {
         let bytes = std::fs::read(root.join(file)).with_context(|| format!("reading {file}"))?;
         let component = held.components.get(file);
+        let headed = held.headed.contains(file.as_str());
         let lgpl = component.and_then(|component| component.adds.as_ref());
-        let days = if lgpl.is_some_and(|adds| adds.contains("LGPL-")) {
+        let days = if headed && lgpl.is_some_and(|adds| adds.contains("LGPL-")) {
             held.days(file, &bytes, today)?
         } else {
             BTreeSet::new()
@@ -522,11 +522,11 @@ fn survey(
             Err(said) => survey.unmet.push(said),
         }
         survey.components += usize::from(component.is_some());
-        survey.alone += usize::from(held.alone.contains(file.as_str()));
+        survey.headed += usize::from(headed);
     }
     survey.files = files.len();
     let absent = |path: &str| !files.iter().any(|file| file == path);
-    for path in held.alone.iter().filter(|path| absent(path)) {
+    for path in held.headed.iter().filter(|path| absent(path)) {
         let said = format!("the rule's allow names {path}, which is no file the rule covers");
         survey.wider.push(said);
     }
@@ -603,7 +603,7 @@ pub(crate) fn reading(snapshot: &Snapshot, manifest: &Manifest) -> Result<Option
     let counted = [
         ("files", survey.files),
         ("components", survey.components),
-        ("alone", survey.alone),
+        ("headed", survey.headed),
         ("recorded", survey.recorded.len()),
     ];
     for (key, n) in counted {
@@ -619,8 +619,8 @@ pub(crate) fn reading(snapshot: &Snapshot, manifest: &Manifest) -> Result<Option
             ),
         };
         reading.message = format!(
-            "licence: the header stands on {} files, {} of them a component's with its notice, and {} say {ALONE} alone; {record}",
-            survey.files, survey.components, survey.alone
+            "licence: {} files, the header on the {} the rule's allow names and no licence line on the others; {} are a component's; {record}",
+            survey.files, survey.headed, survey.components
         );
     } else {
         reading.status = Status::Fail;

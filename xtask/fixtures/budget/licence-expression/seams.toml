@@ -16,9 +16,11 @@ bindings = 1000
 name = "php_unit"
 budget = 1000
 
-# No `allow` here: the test that lists files adds it to a copy.
+# The three files that state an expression are listed; the test that lists
+# other paths writes its own list into a copy.
 [[rule]]
 id = "licence.header"
 scope = ["crates/**", "ext/**", "sapi/**"]
 check = "licence-header"
-text = "A file's expression is MIT AND BSD-3-Clause, and MIT alone only where the rule's allow names its path."
+allow = ["crates/php_unit/src/alone.rs", "crates/php_unit/src/listed.rs", "crates/php_unit/src/wide.rs"]
+text = "The expression of a file the rule's allow names is MIT AND BSD-3-Clause and what its row of THIRD-PARTY.md adds."

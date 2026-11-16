@@ -72,4 +72,4 @@ text = "ext/clippy.toml is generated from the manifest and committed; a stale co
 id = "licence.header"
 scope = ["ext/**"]
 check = "licence-header"
-text = "A Rust, C or C++ file under ext/ begins with the four lines of the licence header and an empty one."
+text = "A Rust, C or C++ file under ext/ states no licence where it begins."

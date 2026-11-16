@@ -28,4 +28,4 @@ budget = 1000
 id = "licence.header"
 scope = ["crates/**", "ext/**", "sapi/**"]
 check = "licence-header"
-text = "A crate's license covers every licence its files state, and a crate with no file under the header says MIT itself."
+text = "A crate's license covers the licences of the files of its own the rule covers, and a crate with no such file says MIT itself."

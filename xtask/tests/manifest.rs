@@ -643,9 +643,9 @@ fn allow_qualifies_the_engine_state_check_with_modules_and_no_other_check() {
     assert!(rule.predicate.describes_a_call());
 }
 
-/// Beside `check = "licence-header"`, `allow` is the files that say `MIT`
-/// alone, each by its path: the rule carries one predicate, `check`, and
-/// an empty list is the grammar's, as the list starts. A pattern, a
+/// Beside `check = "licence-header"`, `allow` is the files that carry the
+/// header, each by its path: the rule carries one predicate, `check`, and
+/// an empty list is the grammar's, under which no file carries it. A pattern, a
 /// directory and an empty entry are refused naming the rule and the
 /// entry, since each would list files nobody named; a path no file stands
 /// at is the sensor's to say, which reads the tree.

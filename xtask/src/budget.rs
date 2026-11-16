@@ -228,10 +228,8 @@ fn crate_reading(snapshot: &Snapshot, krate: &Crate) -> Result<(Reading, Count)>
 }
 
 /// The workspace against `[budget]`: the pooled counts, every crate
-/// declared, no committed generated code outside the exceptions, no
-/// `build.rs` that bakes its crate's directory in, and no file derived
-/// from php-src without its licence line or, translated from LGPL C,
-/// without its dated change notice.
+/// declared, no committed generated code outside the exceptions, and no
+/// `build.rs` that bakes its crate's directory in.
 fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> Result<Reading> {
     let root = snapshot.root();
     let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, snapshot)?;

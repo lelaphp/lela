@@ -176,8 +176,9 @@ fn the_host_laid_down_passes_the_four_instruments_untouched() {
     let readings = budget::run(&root, &manifest).unwrap();
     assert!(failed(&readings).is_empty(), "{:?}", failed(&readings));
     assert_eq!(of(&readings, "sapi/demo").status, Status::Pass);
-    // The three Rust files begin with the licence header, and the crate
-    // inherits a `license` that covers what they state.
+    // None of the three Rust files states a licence, as no file the
+    // rule's list does not name does, and the crate inherits a `license`
+    // that covers them.
     let licence = of(&readings, "licence");
     assert_eq!(licence.status, Status::Pass, "{}", licence.message);
     assert_eq!(licence.numbers["files"], 3.into(), "{}", licence.message);

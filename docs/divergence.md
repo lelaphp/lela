@@ -148,6 +148,6 @@ The total is the debt rows, held to the day-30 target of under 10 (`[divergence]
 
 A row of another cause is counted on its own line after the total: `php-ub` records php's undefined behaviour or crash, `by-design` a difference the design or an ADR chose, `oracle-build` one of the oracle's build until what its `retires` names.
 
-Over the last 7 days: 0 rows fixed, and 0 rows moved out of the debt to another cause, which lowers the total without fixing it.
+Over the last 7 days: the registry then could not be read.
 
-<!-- /computed in=3b707010036ced434071fef3e6348cb3fc550d8a8edd40cc1d4507856ce4db0e out=1e65aae207db7086151543f27c780094d14cdc846e4b909a11ff176973887c18 -->
+<!-- /computed in=8894cf39b18442d21dee32f7085ad71d764feac014af3e6ccd4efad28479631d out=c9e629b1e24d0cf8d852ce1dd8350d241f9b4bd252c62b1e5a55502a88b0e2aa -->
