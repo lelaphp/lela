@@ -1,5 +1,26 @@
-// SPDX-License-Identifier: MIT AND Beerware
+// SPDX-License-Identifier: MIT AND BSD-3-Clause AND Beerware
+// Copyright © The PHP Group and Contributors.
+// Copyright © Zend Technologies Ltd., a subsidiary company of Perforce Software, Inc.
+// Derived in part from php-src, used under BSD-3-Clause: see NOTICE.
 // A port of md5crypt as php-src carries it, an altered version: see THIRD-PARTY.md.
+//
+// md5crypt's notice, as php-src carries it:
+//   /*
+//    * License for the Unix md5crypt implementation (md5_crypt):
+//    *
+//    * ----------------------------------------------------------------------------
+//    * "THE BEER-WARE LICENSE" (Revision 42):
+//    * <phk@login.dknet.dk> wrote this file.  As long as you retain this notice you
+//    * can do whatever you want with this stuff. If we meet some day, and you think
+//    * this stuff is worth it, you can buy me a beer in return.   Poul-Henning Kamp
+//    * ----------------------------------------------------------------------------
+//    *
+//    * from FreeBSD: crypt.c,v 1.5 1996/10/14 08:34:02 phk Exp
+//    * via OpenBSD: md5crypt.c,v 1.9 1997/07/23 20:58:27 kstailey Exp
+//    * via NetBSD: md5crypt.c,v 1.4.2.1 2002/01/22 19:31:59 he Exp
+//    *
+//    */
+// It stands, byte for byte, in LICENSES/md5crypt.txt.
 
 //! The `$1$` hash, php's MD5-based crypt (`Z/ext/standard/php_crypt_r.c:101`).
 

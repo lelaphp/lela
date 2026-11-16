@@ -7,7 +7,7 @@ edition.workspace = true
 # php-src's vendored copy of file(1)'s libmagic and its compiled database,
 # under libmagic/LICENSE, a two-clause BSD licence, Ian Darwin's variant
 # (SPDX BSD-2-Clause-Darwin: the notice kept at the beginning of the file).
-license = "MIT AND BSD-2-Clause-Darwin"
+license = "MIT AND BSD-3-Clause AND BSD-2-Clause-Darwin"
 rust-version.workspace = true
 publish = false
 description = "The fileinfo extension, php-src/ext/fileinfo"

@@ -1,11 +1,10 @@
 //! The objects of a foreign library the request keeps for an extension
-//! (#2277, #2313, ADR-0013): a C library's converter, connection or
-//! parser that an object's payload names and a call into the library
-//! may need past PHP code freeing it. The request owns the object, the
-//! payload owns a [`Foreign`] naming it, and [`Memory::holding`] defers
-//! its drop to the end of the call that holds it. The request's end
-//! drops whatever remains. The table is this file's and no other file
-//! reads its fields.
+//! (ADR-0013): a C library's converter, connection or parser that an
+//! object's payload names and a call into the library may need past PHP
+//! code freeing it. The request owns the object, the payload owns a
+//! [`Foreign`] naming it, and [`Memory::holding`] defers its drop to the
+//! end of the call that holds it. The request's end drops whatever
+//! remains. The table is this file's and no other file reads its fields.
 
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;

@@ -6,7 +6,7 @@ edition.workspace = true
 # The port of php's mbstring.c, php_unicode.c, mb_gpc.c and php_mbregex.c
 # is the workspace's; libmbfl/ is vendored under its own LICENSE, the
 # LGPL-2.1, and compiled in (design §7.2, §12, revision 47).
-license = "MIT AND LGPL-2.1-only"
+license = "MIT AND BSD-3-Clause AND LGPL-2.1-only"
 rust-version.workspace = true
 publish = false
 description = "The mbstring extension, php-src/ext/mbstring"

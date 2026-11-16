@@ -1,0 +1,7 @@
+/*-----------------------------------------------------------------------------
+ * MurmurHash3 was written by Austin Appleby, and is placed in the public
+ * domain.
+ *
+ * This is a c++ implementation of MurmurHash3_128 with support for progressive
+ * processing based on PMurHash implementation written by Shane Day.
+ */

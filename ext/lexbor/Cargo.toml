@@ -5,7 +5,7 @@ version = "0.0.0"
 edition.workspace = true
 # The binding is the workspace's; lexbor/ is php-src's vendored copy under
 # its own LICENSE and NOTICE, the Apache License 2.0.
-license = "MIT AND Apache-2.0"
+license = "MIT AND BSD-3-Clause AND Apache-2.0"
 rust-version.workspace = true
 publish = false
 description = "The lexbor extension, php-src/ext/lexbor"

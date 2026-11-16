@@ -59,6 +59,7 @@ pub mod hostile;
 mod inputs;
 pub mod key;
 mod layout;
+mod licence;
 mod lines;
 mod lock;
 mod makala;

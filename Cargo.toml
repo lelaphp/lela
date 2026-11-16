@@ -65,7 +65,7 @@ codegen-units = 16
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "MIT AND BSD-3-Clause"
 rust-version = "1.95"
 
 # Design §10: pedantic on with a short, reasoned allow list; the no-panic

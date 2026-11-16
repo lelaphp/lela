@@ -111,9 +111,11 @@ fn remedied(rule: &Rule) -> Result<()> {
 }
 
 /// Refuse a qualifier beside no predicate it qualifies, `predicate` being
-/// the one `rule` carries, and `allow` beside a check other than the
-/// engine-state sensor's, which reads it as a list of modules
-/// ([`Predicates`]), its entries decoded where the sensor decodes them.
+/// the one `rule` carries, and `allow` beside a check other than the two
+/// sensors' that read one: engine-state's, a list of modules
+/// ([`Predicates`]), and licence-header's, a list of files
+/// ([`crate::licence::listed`]). The entries are decoded where each sensor
+/// decodes them.
 fn qualified(rule: &Rule, predicate: &str) -> Result<()> {
     if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
         bail!(
@@ -121,10 +123,11 @@ fn qualified(rule: &Rule, predicate: &str) -> Result<()> {
             rule.id
         );
     }
-    let sealed = crate::api_check::engine_state::CHECK;
+    let (sealed, headed) = (crate::api_check::engine_state::CHECK, crate::licence::CHECK);
     match &rule.predicate.check {
+        Some(check) if check == headed => crate::licence::listed(rule).map(drop),
         Some(check) if rule.predicate.allow.is_some() && check != sealed => bail!(
-            "rule \"{}\" has `allow` beside check = \"{check}\"; beside a check, `allow` qualifies check = \"{sealed}\" alone, the one sensor that reads it",
+            "rule \"{}\" has `allow` beside check = \"{check}\"; beside a check, `allow` qualifies check = \"{sealed}\" and check = \"{headed}\" alone, the two sensors that read it",
             rule.id
         ),
         Some(_) => crate::api_check::engine_state::admitted(rule).map(drop),

@@ -681,6 +681,15 @@ generated = ["crates/clippy.toml", "ext/clippy.toml", "sapi/clippy.toml"] # gram
 text = "Each clippy.toml the row names is generated from the manifest and committed; a stale copy fails budget."
 
 [[rule]]
+id = "licence.header"
+scope = ["crates/**", "ext/**", "sapi/**"]   # ruled 16 November 2026: every Rust, C and C++ file of the three trees, the language read off the extension; crates/php_syntax/php.ungram and crates/php_jit/src/analysis/capture.sh are neither, and are out of scope
+exempt = ["ext/lexbor/lexbor/**", "crates/timelib_sys/lib/**", "ext/mbstring/libmbfl/**", "ext/uri/uriparser/**", "ext/fileinfo/libmagic/**", "ext/fileinfo/data_file.c", "ext/mbstring/rare_cp_bitvec.h", "ext/mbstring/unicode_data.h"]   # THIRD-PARTY.md §2's vendored copies, which keep the headers they came with, and §1's two headers copied whole from php-src
+check = "licence-header"   # the sensor: xtask/src/licence.rs, which `budget` runs; one reading, scope `licence`
+allow = []   # the files that say `MIT` alone, each by its path and never a pattern; a person's list, which the ruling starts empty
+text = "A Rust, C or C++ file under crates/, ext/ or sapi/ begins with the licence header: the SPDX line, the two copyright lines LICENSES/php-src.txt begins with and the line that names NOTICE, then an empty line. A file a row of THIRD-PARTY.md §3 names adds the row's licence to the expression where the expression lacks it, says whose port it is on its fifth line and carries each notice the row names, byte for byte as its file under LICENSES/ holds it; a file under an LGPL licence names each day it changed. LICENSES/ is the record: each notice there is the lines its row names in the pinned php-src, held where that tree is laid, and no source file names a line of php-src. A file says MIT alone only where this row's allow names its path, and a crate's license covers every licence its files state."
+remedy = "begin the file with the four lines as the file beside it has them; for a file §3 names, add the fifth line and the notice as its row and LICENSES/ give them; a path that is to say MIT alone is a person's to add to allow"
+
+[[rule]]
 id = "git.no-verify"
 tool = "Bash"
 where = "checkout"   # a scratch repository outside every checkout has no hooks for the flag to skip (#3186, ruled 2026-10-21)

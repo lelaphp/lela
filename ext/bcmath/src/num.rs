@@ -1,7 +1,33 @@
-// SPDX-License-Identifier: MIT AND LGPL-2.1-or-later
+// SPDX-License-Identifier: MIT AND BSD-3-Clause AND LGPL-2.1-or-later
+// Copyright © The PHP Group and Contributors.
+// Copyright © Zend Technologies Ltd., a subsidiary company of Perforce Software, Inc.
+// Derived in part from php-src, used under BSD-3-Clause: see NOTICE.
 // A port of libbcmath as php-src carries it, an altered version: see THIRD-PARTY.md.
-// Changed from libbcmath's C sources by translation into Rust, from 2026-09-28
-// on; the repository's history dates each change since.
+// Changed from libbcmath's C sources on 2026-09-28 by this project's contributors,
+// by translation into Rust; changed again on 2026-10-01, 2026-10-18,
+// 2026-10-25, 2026-10-26 and 2026-11-16.
+//
+// libbcmath's notice, as its files carry it:
+//       Copyright (C) 1991, 1992, 1993, 1994, 1997 Free Software Foundation, Inc.
+//       Copyright (C) 2000 Philip A. Nelson
+//
+//       This library is free software; you can redistribute it and/or
+//       modify it under the terms of the GNU Lesser General Public
+//       License as published by the Free Software Foundation; either
+//       version 2 of the License, or (at your option) any later version.
+//
+//       This library is distributed in the hope that it will be useful,
+//       but WITHOUT ANY WARRANTY; without even the implied warranty of
+//       MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+//       Lesser General Public License for more details.  (LICENSE)
+//
+//       You should have received a copy of the GNU Lesser General Public
+//       License along with this library; if not, write to:
+//
+//         The Free Software Foundation, Inc.
+//         59 Temple Place, Suite 330
+//         Boston, MA 02111-1307 USA.
+// It stands, byte for byte, in LICENSES/libbcmath-notice.txt.
 
 //! `libbcmath`, php's copy of GNU bc's number package, in Rust: the one
 //! arithmetic core the `bc*` natives and `BcMath\Number` share. A number

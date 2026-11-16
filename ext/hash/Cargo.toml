@@ -5,7 +5,7 @@ version = "0.0.0"
 edition.workspace = true
 # The workspace's, but for xxhash.rs, a port of xxHash under its
 # BSD-2-Clause notice; murmur.rs follows public-domain code (THIRD-PARTY.md).
-license = "MIT AND BSD-2-Clause"
+license = "MIT AND BSD-3-Clause AND BSD-2-Clause"
 rust-version.workspace = true
 publish = false
 description = "The hash extension, php-src/ext/hash"

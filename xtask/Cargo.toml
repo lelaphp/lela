@@ -2,7 +2,7 @@
 name = "xtask"
 version = "0.0.0"
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 rust-version.workspace = true
 publish = false
 description = "The harness: instruments, readings and the one renderer (harness-design.md §4)"

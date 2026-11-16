@@ -6,7 +6,7 @@ edition.workspace = true
 # The port of php's bcmath.c is the workspace's; src/num.rs translates
 # php-src's libbcmath, LGPL-2.1 or any later version as its headers grant,
 # whose licence stands beside it as LICENSE-libbcmath.
-license = "MIT AND LGPL-2.1-or-later"
+license = "MIT AND BSD-3-Clause AND LGPL-2.1-or-later"
 rust-version.workspace = true
 publish = false
 description = "The bcmath extension, php-src/ext/bcmath"

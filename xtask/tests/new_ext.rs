@@ -175,6 +175,11 @@ fn the_crate_laid_down_passes_the_three_instruments_untouched() {
     assert!(failed(&readings).is_empty(), "{:?}", failed(&readings));
     assert_eq!(of(&readings, "ext/demo").status, Status::Pass);
     assert_eq!(of(&readings, "ext/clippy.toml").status, Status::Pass);
+    // Both Rust files begin with the licence header, and the crate
+    // inherits a `license` that covers what they state.
+    let licence = of(&readings, "licence");
+    assert_eq!(licence.status, Status::Pass, "{}", licence.message);
+    assert_eq!(licence.numbers["files"], 2.into(), "{}", licence.message);
 
     let readings = unsafe_audit::run(&root, &manifest).unwrap();
     assert!(failed(&readings).is_empty(), "{:?}", failed(&readings));

@@ -43,3 +43,11 @@ scope = ["crates/php_sapi", "sapi/*"]
 exempt = ["tests", "xtask"]
 deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
 text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."
+
+# Over the tree the crate is laid down in, and not over the stand-ins
+# under crates/, which state no license.
+[[rule]]
+id = "licence.header"
+scope = ["sapi/**"]
+check = "licence-header"
+text = "A Rust, C or C++ file under sapi/ begins with the four lines of the licence header and an empty one."

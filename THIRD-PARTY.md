@@ -2,13 +2,13 @@
 
 How to read this: component | where in this project | origin | licence | notice text (verbatim).
 
-Where the last column names a file in `LICENSES/`, that file is the notice text, copied byte for byte from the source named beside it: the component's own licence file, an item of php-src's `README.REDIST.BINS`, or the comment that carries the notice in php-src's source, all at php-src's tag php-8.5.12 except in §7, whose notice is nginx's at the release `oracle.toml`'s `[fastcgi]` pins. Where it names "the first comment" of a php-src file, the notice is a public-domain dedication that stays in that file, and `LICENSES/` holds no copy. php-src's own row names `LICENSES/php-src.txt`, which is not taken at that tag: it is the PHP License, version 4, copied byte for byte from php.net's `https://www.php.net/license/4_0.txt`. Paths under "origin" are php-src's, except in §7, where they are nginx's. `NOTICE` says how the code derived from php-src itself is used.
+Where the last column names a file in `LICENSES/`, that file is the notice text, copied byte for byte from the source named beside it: the component's own licence file, an item of php-src's `README.REDIST.BINS`, or the comment that carries the notice in php-src's source, all at php-src's tag php-8.5.12 except in §7, whose notice is nginx's at the release `oracle.toml`'s `[fastcgi]` pins. In §3 the source is named with its lines at that tag, as `<file>:<first>-<last>`: the file in `LICENSES/` is those lines, and the file named under "where in this project" carries them under its licence header, byte for byte. A line of php-src is named for a notice here and nowhere else, so a move of the tag changes this document and `LICENSES/`, and no source file. php-src's own row names `LICENSES/php-src.txt`, which is not taken at that tag: it is the PHP License, version 4, copied byte for byte from php.net's `https://www.php.net/license/4_0.txt`. Paths under "origin" are php-src's, except in §7, where they are nginx's. `NOTICE` says how the code derived from php-src itself is used.
 
 ## 1. php-src (derived)
 
 | component | where in this project | origin | licence | notice text |
 |---|---|---|---|---|
-| php-src | `ops.toml`; every file that cites a php-src source as `Z/<path>`; `crates/php_heap/src/iterators.rs`, `object.rs` and `resource.rs`, `crates/php_syntax/src/grammar/expr.rs`, `ext/standard/src/html/tables.rs` and `sapi/cli/src/server/client.rs` (`php_cli_server_css`), which copy or transcribe it; `ext/lexbor/config.m4`, `ext/uri/config.m4`, `ext/mbstring/rare_cp_bitvec.h` and `ext/mbstring/unicode_data.h`, which are copies | php-src | BSD-3-Clause (PHP License 4 / Zend Engine License 3.0) | `NOTICE`; `LICENSES/php-src.txt` |
+| php-src | `ops.toml`; every Rust file, and every C and C++ file of this project's own, under `crates/`, `ext/` and `sapi/`, each of which says so where it begins, less the files the `licence.header` rule of `seams.toml` lists in its `allow`; `crates/php_heap/src/iterators.rs`, `object.rs` and `resource.rs`, `crates/php_syntax/src/grammar/expr.rs`, `ext/standard/src/html/tables.rs` and `sapi/cli/src/server/client.rs` (`php_cli_server_css`), which copy or transcribe it; `ext/lexbor/config.m4`, `ext/uri/config.m4`, `ext/mbstring/rare_cp_bitvec.h` and `ext/mbstring/unicode_data.h`, which are copies | php-src | BSD-3-Clause (PHP License 4 / Zend Engine License 3.0) | `NOTICE`; `LICENSES/php-src.txt` |
 
 ## 2. Vendored C, copies of php-src's
 
@@ -26,25 +26,25 @@ Where the last column names a file in `LICENSES/`, that file is the notice text,
 
 | component | where in this project | origin | licence | notice text |
 |---|---|---|---|---|
-| strnatcmp, Martin Pool | `ext/standard/src/strnatcmp.rs`, an altered version | `ext/standard/strnatcmp.c` | Zlib | `LICENSES/strnatcmp.txt` (`README.REDIST.BINS` item 8) |
-| scanf, from Tcl 8.3.0 | `ext/standard/src/scanf.rs` | `ext/standard/scanf.c` | TCL | `LICENSES/scanf.txt` (item 7) |
-| FreeSec, David Burren | `ext/standard/src/crypt/freesec.rs` | `ext/standard/crypt_freesec.c` | BSD-3-Clause | `LICENSES/crypt-freesec.txt` (item 4) |
-| crypt_blowfish, Solar Designer | `ext/standard/src/crypt/blowfish.rs` | `ext/standard/crypt_blowfish.c` | public domain, with a permissive licence in case that is void | `LICENSES/crypt-blowfish.txt` (item 5) |
-| md5crypt, Poul-Henning Kamp | `ext/standard/src/crypt/md5_crypt.rs` | `ext/standard/php_crypt_r.c` (`php_md5_crypt_r`) | Beerware | `LICENSES/md5crypt.txt` (`php_crypt_r.c:17-31`) |
-| SHA-crypt, Ulrich Drepper | `ext/standard/src/crypt/sha_crypt.rs` | `ext/standard/crypt_sha256.c`, `crypt_sha512.c` | public domain | the first comment of each file |
-| MD5, Solar Designer | `ext/standard/src/md5.rs` | `ext/standard/md5.c`, `md5.h` | public domain | `md5.h`'s first comment |
-| Mersenne Twister, Matsumoto, Nishimura and Wagner | `ext/random/src/engine_mt19937.rs` | `ext/random/engine_mt19937.c` | BSD-3-Clause | `LICENSES/mt19937.txt` (item 6) |
-| uuencode, University of California, Berkeley | `ext/standard/src/uuencode.rs` | `ext/standard/uuencode.c` | BSD-4-Clause-UC | `LICENSES/uuencode.txt` (item 9) |
-| xxHash, Yann Collet | `ext/hash/src/xxhash.rs` (XXH32 and XXH64) | `ext/hash/xxhash/xxhash.h` | BSD-2-Clause | `LICENSES/xxhash.txt` (item 19) |
-| libavifinfo, Alliance for Open Media | `ext/standard/src/image/avif.rs` | `ext/standard/libavifinfo` | BSD-2-Clause | `LICENSES/libavifinfo.txt`, and the Alliance for Open Media Patent License 1.0 in `LICENSES/libavifinfo-PATENTS.txt` (`ext/standard/libavifinfo/LICENSE` and `PATENTS`) |
-| MurmurHash3 (PMurHash), Austin Appleby and Shane Day | `ext/hash/src/murmur.rs` | `ext/hash/murmur/PMurHash.c`, `PMurHash128.c` | public domain | the first comment of each file |
-| tar, Tim Kientzle (libarchive) | `ext/phar/src/tar.rs` (`phar_tar_octal`) | `ext/phar/tar.c` | BSD-2-Clause | `LICENSES/phar-tar.txt` (item 14) |
-| libbcmath, GNU bc's number package | `ext/bcmath/src/num.rs` | `ext/bcmath/libbcmath` | LGPL-2.1-or-later | `LICENSES/libbcmath.txt` (`ext/bcmath/libbcmath/LICENSE`) |
-| dtoa, David M. Gay | `crates/php_heap/src/numeric/dtoa.rs` | `Zend/zend_strtod.c` (`zend_dtoa`) | dtoa | `LICENSES/dtoa.txt` (`zend_strtod.c:1-18`) |
-| std::sort, LLVM libc++ | `crates/php_heap/src/sort.rs` | `Zend/zend_sort.c` (`zend_sort`) | NCSA OR MIT | `LICENSES/libcxx-sort.txt` (`zend_sort.c:165-247`) |
-| glob(3), University of California, Berkeley, by way of OpenBSD | `ext/standard/src/dir/php_glob.rs` | `main/php_glob.c` | BSD-3-Clause | `LICENSES/php-glob.txt` (`php_glob.c:1-31`) |
-| http_parser, Ryan Dahl | `crates/php_proto/src/http.rs` (the request half) | `sapi/cli/php_http_parser.c` | MIT | `LICENSES/http-parser.txt` (`php_http_parser.c:1-20`) |
-| ps_status, PostgreSQL | `sapi/cli/src/ffi/title.rs` | `sapi/cli/ps_title.c` | PostgreSQL | `LICENSES/ps-title.txt` (`ps_title.c:1-29`) |
+| strnatcmp, Martin Pool | `ext/standard/src/strnatcmp.rs`, an altered version | `ext/standard/strnatcmp.c` | Zlib | `LICENSES/strnatcmp.txt` (`README.REDIST.BINS:302-321`, item 8) |
+| scanf, from Tcl 8.3.0 | `ext/standard/src/scanf.rs` | `ext/standard/scanf.c` | TCL | `LICENSES/scanf.txt` (`README.REDIST.BINS:254-299`, item 7) |
+| FreeSec, David Burren | `ext/standard/src/crypt/freesec.rs` | `ext/standard/crypt_freesec.c` | BSD-3-Clause | `LICENSES/crypt-freesec.txt` (`README.REDIST.BINS:122-151`, item 4) |
+| crypt_blowfish, Solar Designer | `ext/standard/src/crypt/blowfish.rs` | `ext/standard/crypt_blowfish.c` | public domain, with a permissive licence in case that is void | `LICENSES/crypt-blowfish.txt` (`README.REDIST.BINS:154-197`, item 5) |
+| md5crypt, Poul-Henning Kamp | `ext/standard/src/crypt/md5_crypt.rs` | `ext/standard/php_crypt_r.c` (`php_md5_crypt_r`) | Beerware | `LICENSES/md5crypt.txt` (`ext/standard/php_crypt_r.c:17-31`) |
+| SHA-crypt, Ulrich Drepper | `ext/standard/src/crypt/sha_crypt.rs` | `ext/standard/crypt_sha256.c`, `crypt_sha512.c` | public domain | `LICENSES/sha-crypt-256.txt` (`ext/standard/crypt_sha256.c:1-2`) and `LICENSES/sha-crypt-512.txt` (`ext/standard/crypt_sha512.c:1-2`) |
+| MD5, Solar Designer | `ext/standard/src/md5.rs` | `ext/standard/md5.c`, `md5.h` | public domain | `LICENSES/md5.txt` (`ext/standard/md5.h:24-32`) |
+| Mersenne Twister, Matsumoto, Nishimura and Wagner | `ext/random/src/engine_mt19937.rs` | `ext/random/engine_mt19937.c` | BSD-3-Clause | `LICENSES/mt19937.txt` (`README.REDIST.BINS:200-251`, item 6) |
+| uuencode, University of California, Berkeley | `ext/standard/src/uuencode.rs` | `ext/standard/uuencode.c` | BSD-4-Clause-UC | `LICENSES/uuencode.txt` (`README.REDIST.BINS:324-358`, item 9) |
+| xxHash, Yann Collet | `ext/hash/src/xxhash.rs` (XXH32 and XXH64) | `ext/hash/xxhash/xxhash.h` | BSD-2-Clause | `LICENSES/xxhash.txt` (`README.REDIST.BINS:649-682`, item 19) |
+| libavifinfo, Alliance for Open Media | `ext/standard/src/image/avif.rs` | `ext/standard/libavifinfo` | BSD-2-Clause | `LICENSES/libavifinfo.txt` (`ext/standard/libavifinfo/LICENSE:1-26`), and the Alliance for Open Media Patent License 1.0 in `LICENSES/libavifinfo-PATENTS.txt` (`ext/standard/libavifinfo/PATENTS`) |
+| MurmurHash3 (PMurHash), Austin Appleby and Shane Day | `ext/hash/src/murmur.rs` | `ext/hash/murmur/PMurHash.c`, `PMurHash128.c` | public domain | `LICENSES/murmur.txt` (`ext/hash/murmur/PMurHash.c:1-9`) and `LICENSES/murmur-128.txt` (`ext/hash/murmur/PMurHash128.c:1-7`) |
+| tar, Tim Kientzle (libarchive) | `ext/phar/src/tar.rs` (`phar_tar_octal`) | `ext/phar/tar.c` | BSD-2-Clause | `LICENSES/phar-tar.txt` (`README.REDIST.BINS:535-561`, item 14) |
+| libbcmath, GNU bc's number package | `ext/bcmath/src/num.rs` | `ext/bcmath/libbcmath` | LGPL-2.1-or-later | `LICENSES/libbcmath-notice.txt` (`ext/bcmath/libbcmath/src/add.c:3-21`), the notice its files carry, and the licence itself in `LICENSES/libbcmath.txt` (`ext/bcmath/libbcmath/LICENSE`) |
+| dtoa, David M. Gay | `crates/php_heap/src/numeric/dtoa.rs` | `Zend/zend_strtod.c` (`zend_dtoa`) | dtoa | `LICENSES/dtoa.txt` (`Zend/zend_strtod.c:1-18`) |
+| std::sort, LLVM libc++ | `crates/php_heap/src/sort.rs` | `Zend/zend_sort.c` (`zend_sort`) | MIT OR NCSA | `LICENSES/libcxx-sort.txt` (`Zend/zend_sort.c:165-247`) |
+| glob(3), University of California, Berkeley, by way of OpenBSD | `ext/standard/src/dir/php_glob.rs` | `main/php_glob.c` | BSD-3-Clause | `LICENSES/php-glob.txt` (`main/php_glob.c:1-31`) |
+| http_parser, Ryan Dahl | `crates/php_proto/src/http.rs` (the request half) | `sapi/cli/php_http_parser.c` | MIT | `LICENSES/http-parser.txt` (`sapi/cli/php_http_parser.c:1-20`) |
+| ps_status, PostgreSQL | `sapi/cli/src/ffi/title.rs` | `sapi/cli/ps_title.c` | PostgreSQL | `LICENSES/ps-title.txt` (`sapi/cli/ps_title.c:1-29`) |
 
 ## 4. Followed, derivation not checked file by file
 

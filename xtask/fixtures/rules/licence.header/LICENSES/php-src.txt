@@ -1,0 +1,2 @@
+Copyright © The PHP Group and Contributors.
+Copyright © Zend Technologies Ltd., a subsidiary company of Perforce Software, Inc.

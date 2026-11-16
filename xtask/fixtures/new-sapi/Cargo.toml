@@ -6,7 +6,7 @@ members = ["crates/php_sapi", "crates/php_bundle"]
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "MIT AND BSD-3-Clause"
 rust-version = "1.95"
 
 [workspace.lints.clippy]

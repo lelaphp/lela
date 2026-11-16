@@ -1,0 +1,7 @@
+# The fixture workspace: what a crate that inherits its `license` takes.
+[workspace]
+resolver = "3"
+members = ["crates/php_unit", "crates/php_heap", "lanes/a"]
+
+[workspace.package]
+license = "MIT AND BSD-3-Clause"

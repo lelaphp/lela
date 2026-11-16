@@ -643,6 +643,37 @@ fn allow_qualifies_the_engine_state_check_with_modules_and_no_other_check() {
     assert!(rule.predicate.describes_a_call());
 }
 
+/// Beside `check = "licence-header"`, `allow` is the files that say `MIT`
+/// alone, each by its path: the rule carries one predicate, `check`, and
+/// an empty list is the grammar's, as the list starts. A pattern, a
+/// directory and an empty entry are refused naming the rule and the
+/// entry, since each would list files nobody named; a path no file stands
+/// at is the sensor's to say, which reads the tree.
+#[test]
+fn allow_qualifies_the_licence_header_check_with_files_by_their_paths() {
+    let row = |allow: &str| {
+        format!(
+            "{MINIMAL}[[rule]]\nid = \"x.header\"\nscope = [\"crates/**\"]\ncheck = \"licence-header\"\nallow = [{allow}]\ntext = \"t\"\n"
+        )
+    };
+    for allow in ["", "\"crates/php_unit/src/lib.rs\", \"crates/a/b.c\""] {
+        let manifest = Manifest::parse(&row(allow)).unwrap();
+        let rule = manifest.rule("x.header").unwrap();
+        assert_eq!(rule.predicate.named(), ["check"], "{allow}");
+        assert!(!rule.predicate.describes_a_call(), "{allow}");
+    }
+    for entry in ["crates/*/src/lib.rs", "crates/php_unit/", "crates/**", ""] {
+        let err = format!(
+            "{:#}",
+            Manifest::parse(&row(&format!("{entry:?}"))).unwrap_err()
+        );
+        assert!(
+            err.contains(&format!("rule \"x.header\" lists {entry:?}")),
+            "{entry}: {err}"
+        );
+    }
+}
+
 /// A `[[crate]]` row serialises and parses back as itself, a row with no
 /// `lock` among them: the key is left out where it is empty, as
 /// the file writes such a row, since `OneOrMany::None` is no TOML value.

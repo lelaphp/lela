@@ -65,3 +65,11 @@ text = "Internal invariant failures are InternalError fatals with a message, not
 id = "generated.committed"
 generated = ["ext/clippy.toml"]
 text = "ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget."
+
+# Over the tree the crate is laid down in, and not over the stand-ins
+# under crates/, which state no license.
+[[rule]]
+id = "licence.header"
+scope = ["ext/**"]
+check = "licence-header"
+text = "A Rust, C or C++ file under ext/ begins with the four lines of the licence header and an empty one."
