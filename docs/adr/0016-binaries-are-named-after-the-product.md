@@ -6,7 +6,7 @@ supersedes: docs/adr/0008 decision "Each owns its binary (`php`, `php-cgi`, `php
 
 # The binaries are named after the product from one constant, with `php` an opt-in symlink
 
-ADR-0008 gave each host its own binary and kept php-src's names for them: `php`, `php-cgi`, `php-fpm` and `phpdbg`. Those names put the PHP mark on the product itself. The legal findings of 24 Oct (the launch repository, `legal/findings-2026-10.md`, B2) read that as the use with the weakest cover under *Audi v GQ* (C-334/22). Mitchell settled it on #3404 on 2026-10-25: the binaries carry the product's name, and `php` stays available to the scripts that call it. The name itself is #3404's to decide, and this record does not decide it. Mitchell ruled the form and scope on #3465.
+ADR-0008 gave each host its own binary and kept php-src's names for them: `php`, `php-cgi`, `php-fpm` and `phpdbg`. Those names put the PHP mark on the product itself. The legal findings of 24 Oct read that as the use with the weakest cover under *Audi v GQ* (C-334/22). Mitchell settled it on #3404 on 2026-10-25: the binaries carry the product's name, and `php` stays available to the scripts that call it. The name itself is #3404's to decide, and this record does not decide it. Mitchell ruled the form and scope on #3465.
 
 ## Decision
 
