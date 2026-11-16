@@ -114,7 +114,7 @@ third-engine-design.md
 - ADR-0016 (accepted, 2026-10-25): The binaries are named after the product from one constant, with `php` an opt-in symlink
 - ADR-0017 (accepted, 2026-10-31): The compiled tier is refused as the default on G3: tracing stays opt-in, and Cranelift stands
 
-<!-- /computed in=833c957384159a9ea4587bdbeedb9674b3eebb4ccf187d3b277808034ed36c57 out=505c842c422e5cf0dbefccae4eb1489aed874733945edcc8cac26bedb9aee9d3 -->
+<!-- /computed in=de9630361dae434446173e61bbc5c5802b565f8e00a71971da7d3fed224e614c out=505c842c422e5cf0dbefccae4eb1489aed874733945edcc8cac26bedb9aee9d3 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling |
