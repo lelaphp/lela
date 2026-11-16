@@ -279,7 +279,7 @@ test('a ruling is posted only from ui.input, with the words verbatim, a notice, 
   expect(world.posts()).toEqual([
     {
       argv: ['gh', 'issue', 'comment', '3765', '--body-file', '-'],
-      stdin: 'Ruled 2026-10-31 (Mitchell, desk, a session): `sapi/cgi` declares the default the other hosts do\n\nphp-cgi carries the tier, as the other three do.',
+      stdin: 'Ruled 2026-10-31 (Mitchell, desk, session 5e55100a): `sapi/cgi` declares the default the other hosts do\n\nphp-cgi carries the tier, as the other three do.',
     },
   ]);
   // The "A person rules" box alone is ticked, its text unchanged.
@@ -338,7 +338,7 @@ test('a pick is kept by its label: options reordered at the tracker after it pos
   expect((await ui.find({ key: 'words-3765' }))?.props.value).toBe('As picked.');
   await ui.select({ key: 'option-3765', value: picked!.value });
   await ui.input({ key: 'words-3765', text: 'As picked.' });
-  expect(world.posts().map((p) => p.stdin)).toEqual([`Ruled 2026-10-31 (Mitchell, desk, a session): ${picked!.label}\n\nAs picked.`]);
+  expect(world.posts().map((p) => p.stdin)).toEqual([`Ruled 2026-10-31 (Mitchell, desk, session 5e55100a): ${picked!.label}\n\nAs picked.`]);
   await ui.unmount();
 });
 
@@ -353,13 +353,13 @@ test("a counsel turn that ends while the person types keeps their words; the cou
   await $.turn.complete(answered('counsel-1', 'On reflection.\nDraft ruling: php-cgi does not carry the tier.', 't2'));
   expect((await ui.find({ key: 'words-3765' }))?.props.value).toBe('php-cgi carries it, as');
   await ui.input({ key: 'words-3765', text: 'php-cgi carries it, as the others do.' });
-  expect(world.posts().map((p) => p.stdin)).toEqual(['Ruled 2026-10-31 (Mitchell, desk, a session): php-cgi carries it, as the others do.']);
+  expect(world.posts().map((p) => p.stdin)).toEqual(['Ruled 2026-10-31 (Mitchell, desk, session 5e55100a): php-cgi carries it, as the others do.']);
   // The draft frozen at Rule is the Input's, and posted as it stands it says whose words they are.
   await ui.press({ key: 'discuss-3752' });
   await $.turn.complete(answered('counsel-2', 'Draft ruling: widen it.', 't3'));
   await ui.press({ key: 'rule-3752' });
   await ui.input({ key: 'words-3752', text: 'widen it.' });
-  expect(world.posts().at(-1)?.stdin).toBe("Ruled 2026-10-31 (Mitchell, desk, a session; the counsel's draft, unedited): widen it.");
+  expect(world.posts().at(-1)?.stdin).toBe("Ruled 2026-10-31 (Mitchell, desk, session 5e55100a; the counsel's draft, unedited): widen it.");
   await ui.unmount();
 });
 
@@ -388,7 +388,7 @@ test('a ruling that lands a harness file closes nothing, and a later #2247 quest
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' });
   await ui.press({ key: 'rule-3752' });
   await ui.input({ key: 'words-3752', text: 'Widen it.' });
-  expect(world.posts().map((p) => p.stdin)).toEqual(['Ruled 2026-10-31 (Mitchell, desk, a session): Widen it.']);
+  expect(world.posts().map((p) => p.stdin)).toEqual(['Ruled 2026-10-31 (Mitchell, desk, session 5e55100a): Widen it.']);
   expect(world.runs.some((r) => r.argv.includes('close'))).toBe(false);
   expect(await ui.find({ key: 'opens-3752' })).toBe(undefined);
   expect(world.session.appended().map((r) => r.message.type)).toEqual(['system']);
