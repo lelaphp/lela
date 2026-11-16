@@ -1385,17 +1385,15 @@ const NO_SESSION: &str = "data_accept: failed to retrieve the existing SSL sessi
 /// issued the control connection, which `layer` answers as
 /// [`Crypto::resumable`], and php's refusal otherwise.
 ///
-/// The oracle shows the refusal only against a server that issues no
-/// session, which no php server is: `xp_ssl.c` gives every TLS 1.2
-/// handshake a session id and leaves TLS 1.3's `num_tickets` at OpenSSL's two.
-/// So the refusal is held by this file's unit test over a layer that
-/// answers no, and the witness below pins the transfer over a session a
-/// php server issued:
+/// The refusal is held by this file's unit test over a layer that
+/// answers no. The witness below pins the transfer over a session a php
+/// server issued, one that asks its client for no certificate
+/// (`verify_peer` off):
 ///
 /// ```php
 /// $k = openssl_pkey_new(['private_key_bits' => 2048]); $x = openssl_csr_sign(openssl_csr_new(['commonName' => 'localhost'], $k), null, $k, 1);
 /// openssl_x509_export($x, $pem); openssl_pkey_export($k, $key); file_put_contents($cert = __DIR__ . '/ftps.pem', $pem . $key);
-/// $ctx = stream_context_create(['ssl' => ['local_cert' => $cert]]);
+/// $ctx = stream_context_create(['ssl' => ['local_cert' => $cert, 'verify_peer' => false]]);
 /// $srv = stream_socket_server('tcp://127.0.0.1:0', $e, $m, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $ctx); $port = (int) explode(':', stream_socket_get_name($srv, false))[1];
 /// if (!pcntl_fork()) {
 ///     $s = stream_socket_accept($srv); fwrite($s, "220 hi\r\n"); fgets($s); fwrite($s, "234 tls\r\n"); stream_socket_enable_crypto($s, true, STREAM_CRYPTO_METHOD_SSLv23_SERVER);
