@@ -10,7 +10,7 @@ The user has asked for a **retrospective**. You are suggesting improvements to t
 
 1. Call the Skill tool with `writing-for-agents` for the writing style guide.
 
-2. Read the primary sources for the session the user specifies: its transcript under `~/.claude/projects/-Users-somebody-Projects-dax-php/`, read only, and what the harness recorded with `cargo xtask status`. If the user doesn't specify a session, default to the current one.
+2. Read the primary sources for the session the user specifies: its transcript under `~/.claude/projects/`, in the folder named after this checkout's path with each `/` written `-`, read only, and what the harness recorded with `cargo xtask status`. If the user doesn't specify a session, default to the current one.
 
 3. Look for candidates for improvement in these categories.
 
