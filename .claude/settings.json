@@ -7,8 +7,7 @@
   "permissions": {
     "allow": [
       "Bash(gh issue edit:*)",
-      "Bash(gh issue comment:*)",
-      "Bash(~/Projects/dax-php/target/release/xtask ticket close:*)"
+      "Bash(gh issue comment:*)"
     ],
     "deny": [
       "Edit(~/.claude.json)",
