@@ -1383,7 +1383,7 @@ fn intltz_get_windows_id(req: &mut Request, timezoneId: PhpString) -> Answer<Own
 /// ```
 /// ```expect
 /// string(19) "America/Los_Angeles"
-/// string(17) "America/Vancouver"
+/// string(19) "America/Los_Angeles"
 /// bool(false)
 /// ```
 #[php_function]

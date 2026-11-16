@@ -200,7 +200,7 @@ pub(crate) struct State {
 /// echo $m - $moves, "\n";
 /// ```
 /// ```expect regime=jit-off capture
-/// 423544
+/// 423528
 /// ```
 pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     match lexbor::lent(req, lxb::Parser::new)? {

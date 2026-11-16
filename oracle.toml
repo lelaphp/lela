@@ -19,8 +19,8 @@ formula = "php"
 # package manager re-points on upgrade (Dax's oracle.toml records it moving
 # 8.5.9 → 8.5.10 mid-run on 2026-09-01). The digest is the identity; the path is
 # where to find it on this machine.
-path = "/opt/homebrew/Cellar/php/8.5.12/bin/php"
-md5 = "18e167fbb0e7a514e962a4e6b3d85804"
+path = "/opt/homebrew/Cellar/php/8.5.12_1/bin/php"
+md5 = "e68f73bdb7e8b06932559d9c0fd5c26e"
 # opcache is compiled into this build (`php -n -m` lists it; no `zend_extension`
 # line is needed or accepted). The tier regimes below rely on that.
 
@@ -30,36 +30,36 @@ md5 = "18e167fbb0e7a514e962a4e6b3d85804"
 # (Mitchell on #2654, 2026-10-11). Every keg `php`, `php-cgi`, `php-fpm` and
 # `phpdbg` load, walked through their load commands, and the receipt's other
 # runtime kegs, `ca-certificates` among them for the trust store curl and
-# OpenSSL read; frozen as the Cellar stood on 2026-10-24, each `brew pin`ned.
+# OpenSSL read; frozen as the Cellar stood on 2026-11-15, each `brew pin`ned.
 # `xtask` refuses a run whose binaries load a keg at another version or one
 # this table does not name (#2657); `scripts/ci/pinned-php.sh` pours and pins
 # each on a runner.
-aom = "3.15.2"
+aom = "3.15.3"
 apr = "1.7.6"
-apr-util = "1.6.5_1"
+apr-util = "1.6.6"
 argon2 = "20190702_1"
 autoconf = "2.73"
 brotli = "1.2.1"
-ca-certificates = "2026-10-20"
+ca-certificates = "2026-11-05"
 curl = "8.23.0"
 dav1d = "1.5.4"
 fontconfig = "2.18.3"
-freetds = "1.5.19_1"
+freetds = "1.5.21"
 freetype = "2.15.0"
 gd = "2.3.3_6"
 gettext = "1.0"
 giflib = "6.1.3"
 gmp = "6.3.0"
-"icu4c@78" = "78.3"
-jpeg-turbo = "3.2.0"
+"icu4c@79" = "79.1"
+jpeg-turbo = "3.2.1"
 json-c = "0.19"
-krb5 = "1.22.2_2"
+krb5 = "1.22.3"
 libavif = "1.4.2"
-libnghttp2 = "1.70.0"
-libnghttp3 = "1.18.0"
-libngtcp2 = "1.25.0_1"
+libnghttp2 = "1.71.0"
+libnghttp3 = "1.19.0"
+libngtcp2 = "1.26.0"
 libpng = "1.6.59"
-libpq = "18.6_1"
+libpq = "18.7"
 libpsl = "0.23.3"
 libsodium = "1.0.22"
 libssh2 = "1.11.1_7"
@@ -68,12 +68,12 @@ libtool = "2.6.2"
 libunistring = "1.5"
 libvmaf = "3.2.1"
 libzip = "1.12.1"
-lz4 = "1.10.0"
+lz4 = "1.11.1"
 m4 = "1.4.21"
 net-snmp = "5.9.5.2_2"
 oniguruma = "6.9.10"
-openldap = "2.7.1_1"
-"openssl@4" = "4.0.3"
+openldap = "2.7.2"
+"openssl@4" = "4.1.0"
 pcre2 = "10.49"
 readline = "8.3.6"
 sqlite = "3.54.1"
@@ -147,7 +147,7 @@ ini = [
 # path; the CGI-only variables it sets are the CGI adapter's, not the recipe's.
 env_clear = true
 [recipe.env]
-TEST_PHP_EXECUTABLE = "/opt/homebrew/Cellar/php/8.5.12/bin/php"
+TEST_PHP_EXECUTABLE = "/opt/homebrew/Cellar/php/8.5.12_1/bin/php"
 TZ = "UTC"
 LANG = "C"
 LC_ALL = "C"
@@ -302,7 +302,7 @@ ini = ["cgi.fix_pathinfo=0"]
 # image's manifest digest the Linux build reproduces from (#1948); closure is the
 # digest of the [closure] the macOS build was made against (#2935)
 flags = ["--enable-zend-test"]
-darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e2419777e6eac85467d80117397de3c0", closure = "sha256:4fa13a5acc5b9216210f44238a5d1be1a5fe5b874a154211a8c5013db9dd50c1" }
+darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "8bf43b8ab6c2e19e23e845d3cf9cc491", closure = "sha256:b0b0b17ba38b0f465dd9bfa37e693fe7f2df30592acbc10c57bfc2f816a175f4" }
 linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "12f5bd0b1ea2f2f3555640f974e8429a", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
 linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e02dd6c14fc0d045384be0b477b78a5d", image = "sha256:3ad1c71aa6b7e477f7aa91445a5442fbb163742849393b511661a88081c3d7a2" }
 
@@ -313,9 +313,9 @@ linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e02dd6c
 # (get_binary, run-tests.php:1003-1019; php-fpm by FPM\Tester::findExecutable,
 # sapi/fpm/tests/tester.inc:226-257, at the tag). Each is asserted by its digest
 # as `php` is, before the first program that runs it.
-cgi = { path = "/opt/homebrew/Cellar/php/8.5.12/bin/php-cgi", md5 = "f4f783bf54d2bfa24a558693f7c12188" }
-fpm = { path = "/opt/homebrew/Cellar/php/8.5.12/sbin/php-fpm", md5 = "f7b17a549250f398e137eef2bd917f1c" }
-phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.12/bin/phpdbg", md5 = "51f2a186e3b1154552a44b0c9ad69790" }
+cgi = { path = "/opt/homebrew/Cellar/php/8.5.12_1/bin/php-cgi", md5 = "947ff470d102fd1237cecfcd0cf36abd" }
+fpm = { path = "/opt/homebrew/Cellar/php/8.5.12_1/sbin/php-fpm", md5 = "35cc9608f3d316dd75e2705446d2ab1e" }
+phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.12_1/bin/phpdbg", md5 = "bb005316f2cd8dc5b992d745b96fcb79" }
 
 [fastcgi]
 # The HTTP-to-FastCGI mapping `[sapi] fpm` is driven under, so the pinned
