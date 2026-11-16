@@ -1,0 +1,18 @@
+# The negative control of `bench` (harness-design.md §12 item 4): an A/A
+# control whose two arms are not one arm. The bar of an A/A control is the
+# measurement protocol's own verdict, that the rig cannot tell the arm from
+# itself (docs/perf/measurement-protocol.md §2, §4.3). Arm `b` sleeps 500 ms
+# longer than arm `a`, more than the spread a loaded machine adds to every
+# process start, so each paired delta comes out negative, the sign resolves,
+# and this fixture must read `fail` with a median delta under -10 ms.
+# It is the only fixture whose arms are meant to differ,
+# and the amount is the knob: shrink it under the noise floor and the
+# control stops failing, which is the thing this fixture is here to catch.
+#
+# Both arms write nothing, so the run is also where the vacuous value of
+# §5 is met: nothing was compared, the timings stand, and the agreement
+# between two empty streams proves nothing.
+id = "aa-differs"
+about = "an A/A control whose second arm sleeps 500 ms longer than its first"
+a = { name = "sleep-10ms", program = "sleep", args = ["0.01"] }
+b = { name = "sleep-510ms", program = "sleep", args = ["0.51"] }

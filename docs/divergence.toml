@@ -1,0 +1,1618 @@
+# The divergence registry (harness-design.md §4.3). One row per accepted
+# difference from the oracle, keyed by a witness hash, a phpt path, a
+# compile-identity path, an extension's name or a trace site. The oracle
+# module's `compare` consults it on every comparison; a person writes the
+# reason; `compare` and the fuzzer may add a row with status `open` and an
+# empty reason, and `done` fails while an open row touches the scope. A row's
+# kind is the lane that reads it and its cause whether it is parity debt: the
+# day-30 target, seams.toml's `[divergence] target`, counts the rows whose cause
+# is debt, and each other cause is counted on its own line (#2460). A by-design
+# row's reason cites the design section or ADR that chose it, and an
+# oracle-build row names in `retires` what it retires at (`divergence-reason`).
+# The Markdown rendering is `xtask status --section divergence`.
+#
+# kind: witness | phpt | runner | compile | crosscheck | trace
+# cause: debt (where absent) | php-ub | by-design | oracle-build
+# retires: oracle-rebuild | pin | fixture | platform
+# status: open | accepted | fixed
+
+[[divergence]]
+id = "trace:entry-counter-typed-recv"
+kind = "trace"
+cause = "by-design"
+reason = "php's entry counter sits on opline zero for a function with typed parameters, before the RECV that may throw (zend_jit_setup_hot_trace_counters, zend_jit_trace.c:8983-9001 at 8.5.9), so php counts a call whose RECV throws; Site::Entry is raised after the prologue ran without raising, so a throwing RECV is never inside a recording, and such a call is not a root here (third-engine-design.md §5.6, ledger 9)."
+status = "accepted"
+since = "2026-09-07"
+
+[[divergence]]
+id = "witness:cf4528199e0939351d4a51853e4aa2ab27c7b12e"
+kind = "witness"
+reason = "memory_get_usage() at a request's first line is held to opcache's regime, the model the unit cache copies (§5.13, §6.3): what php allocates there whatever it compiles is on mm at php's sizes, the compiler's arena and the run-time caches it carves among it (#2863), and the main script's compile, like an include's, costs what opcache's lookup allocates. Under the recipe's php -n php compiles them into the request's heap, so a witness under it reads php's usage and peak short by that compile, and a memory_limit fatal falls on another allocation at another requested size (#2854). gc_mem_caches() at a program's first line gives back fewer pages by the same cause: the runs php frees there held the compile's temporaries, which this engine keeps off mm. What is held meanwhile is the delta a single allocation makes, which both engines answer the same way (#174)."
+status = "accepted"
+since = "2026-09-13"
+
+[[divergence]]
+id = "trace:heap-openbsd-stack-base"
+kind = "trace"
+cause = "php-ub"
+reason = "On OpenBSD php raises no stack-limit Error; this engine raises php's Error at the limit, as php does on its other platforms. Site: php_heap::call_stack::platform::pthread_bounds on OpenBSD (#299, #343)."
+status = "accepted"
+since = "2026-09-18"
+
+[[divergence]]
+id = "compile:file-update-protection"
+kind = "compile"
+cause = "by-design"
+status = "accepted"
+since = "2026-09-18"
+reason = "php's opcache does not cache a file modified within opcache.file_update_protection (2s by default). This engine honours the window for every request through opcache's admission (Admission::Held { protection }, #1228; bug65559.phpt meets it), but the dump site compiles through the cache with no request and so no window, and dumps; the recipe pins the entry to zero, so no lane reads the difference (#374, #402; compile identity, third-engine-design.md §6.1). Site: php_engine::engine::dump_before_optimizer."
+
+[[divergence]]
+id = "trace:rope-storage"
+kind = "trace"
+status = "fixed"
+since = "2026-09-18"
+reason = "ROPE_INIT/ROPE_ADD keep the pieces as one packed array in the reserved stretch's first slot where php packs two zend_string pointers per zval (zend_vm_def.h ROPE_* at 8.5.9), so memory_get_usage() read from a piece's __toString while the rope is open differs from php's by the array's allocation; the rope's result and every other observable are php's (#355, #368). Site: php_engine::handlers::rope_init."
+covers = ["witness:4ae80a483111455490751b442ce7da2fb3f0714b", "witness:f0bd64581431518fee86bd089efc85b44484a22e", "witness:ff76c1b529a9aa7700c48cbaad6cceea8e383356"]
+
+[[divergence]]
+id = "trace:dl-no-loader"
+kind = "trace"
+cause = "by-design"
+status = "accepted"
+since = "2026-09-26"
+reason = "This engine links its extensions at build and has no loader, by design (third-engine-design.md §7.1: no dl() and no zend_module_entry ABI). So dl() for a bare name under enable_dl=1 answers as php built without HAVE_LIBDL does, in php's own wording for that build: \"Cannot dynamically load %s - dynamic modules are not supported\". The oracle tries extension_dir/name and name.so through dlopen and warns with both paths and the host's dlerror text. Both return false, and nothing there is a behaviour a program could rely on: the oracle's text is host dyld output. Ruled by Mitchell on #890 (2026-09-26). Site: php_engine::api::request::Extensions::dl, which sapi/cli and sapi/cgi name in their additional_functions (#1348, #1495)."
+
+[[divergence]]
+id = "trace:immutable-literal-arrays"
+kind = "trace"
+cause = "by-design"
+status = "accepted"
+since = "2026-09-26"
+reason = "This engine's unit literals are immutable and shared, opcache's model: its literal arrays, settled by Mitchell on #917 (2026-10-01), and the strings its declarations hold, an attribute's argument, a backed enum case's value and a static initialiser, on #1472 (2026-10-02; §5.2, revision 64), which ends the interim #770 set (2026-09-26; third-engine-design.md §5.3, revision 62). Under the recipe (php -n) php refcounts its literals per request, so every observable of a literal's refcount differs from it and agrees with the oracle under opcache: among them a copy released leaving a GC root there and none here (gc_status()['roots'], gc_collect_cycles counts), debug_zval_dump refcounts (interned against refcount(N)), memory_get_usage over a copied literal, phpdbg's watch report of a literal's old value (Old value: the literal here, Old value inaccessible or destroyed under the recipe; #1454), and memory_get_usage() over a string held only in a constant array that a native interns at run time (zend_string_init_interned, mysqlnd's column names), which publication interned as opcache's persist does and php -n does not (#2443), and memory_get_usage() over a class constant's or an enum case's first read, whose constant expression php -n frees as it evaluates it and a published unit keeps (#2495; opcache also separates an immutable class's constant table at that first update, zend_separate_class_constants_table, which a class of a published unit does not). Production php runs opcache, under which the two agree but for that separation. A witness that pins those names [regime.immutable-literals] and agrees exactly; the phpt tests that observe it are phpt:immutable-literals' covers (#1158, #1485). Site: php_heap immutable arrays, php_unit literal tables."
+
+[[divergence]]
+id = "phpt:immutable-literals"
+kind = "phpt"
+cause = "by-design"
+reason = "The phpt tests whose only difference from php -n is a unit literal's refcount: this engine's unit literals are immutable and shared, opcache's model (#917, #1472), and php under the recipe refcounts them per request. The cause and its observables are trace:immutable-literal-arrays' (third-engine-design.md §5.2, §5.3); a test joins this row when its expectation pins the refcount php -n gives, or the one php gives with opcache.enable=0 in its --INI-- (#770). Ruled by Mitchell on #1485 (2026-10-02); phpt:immutable-literal-arrays' two tests joined it on #2142 (2026-10-06)."
+status = "accepted"
+since = "2026-10-02"
+covers = [
+    "phpt:php-src/ext/standard/tests/general_functions/debug_zval_dump_b.phpt",
+    "phpt:php-src/ext/standard/tests/general_functions/debug_zval_dump_b_64bit.phpt",
+    "phpt:php-src/ext/standard/tests/general_functions/debug_zval_dump_o.phpt",
+]
+
+[[divergence]]
+id = "trace:string-offset-shared-mid-write"
+kind = "trace"
+reason = "php separates the string once, before the offset's warnings, and writes through whatever owners it has after the handler ran, so a variable the handler assigned from it changes too. This engine separates again after the handlers, keeping every shared string immutable (principle 3). No pinned phpt observes it. Accepted by Mitchell on #1009 (2026-09-27)."
+status = "accepted"
+since = "2026-09-27"
+
+[[divergence]]
+id = "trace:string-offset-write-to-an-entry"
+kind = "trace"
+cause = "php-ub"
+reason = "A string-offset write whose warning's handler gives up the table the string is an entry of: php's output is not held; this engine lands the write nowhere and answers null. Accepted by Mitchell on #1020 (2026-09-27)."
+status = "accepted"
+since = "2026-09-27"
+
+[[divergence]]
+id = "trace:stack-floor-refusal"
+kind = "trace"
+cause = "php-ub"
+reason = "php faults with SIGSEGV when a walk nests past the thread's end without asking a stack limit: a walk php leaves unguarded (print_r, var_export, array_merge_recursive, unserialize, define()'s constant arrays, filter's and mbstring's walks over arrays among them), and any walk under zend.max_allowed_stack_size=-1, which sets none. This engine serves requests on threads of one process (principle 3), where a fault ends every request in it, so such a walk also asks the floor, the thread's end less zend.reserved_stack_size, and raises zend_call_stack_size_error's Error there; call_stack_end's and call_stack_refuses's callers are the sites. A nest php takes whole is taken whole here; only the one php cannot survive differs. Accepted by Mitchell on #1217 (2026-09-28); restated on #3433 (2026-10-25) for php 8.5.12, which guards zend_hash_compare, var_dump's and debug_zval_dump's rows, count_recursive, array_walk_recursive, array_replace_recursive and compact; amended on #4097 (2026-11-04) to name call_stack_refuses, debug_zval_dump's row guard since #4084."
+status = "accepted"
+since = "2026-09-28"
+
+[[divergence]]
+id = "phpt:php-src/ext/opcache/tests/gh9164.phpt"
+kind = "phpt"
+cause = "by-design"
+reason = "php's opcache keeps what it compiles in one segment mapped MAP_SHARED before any fork (shared_alloc_mmap.c:126, ZCSG at ZendAccelerator.h:301, both at 8.5.9), so a file a pcntl_fork child compiles is in the parent's opcache_get_status()['scripts']. This engine's unit cache is the process's own memory, shared by the requests on its threads and by no other process (third-engine-design.md §5.14, §6.3, principle 4); fork(2) gives the child a copy, so what the child compiles after the fork stays the child's, and the parent prints the test's \"File not cached\" and compiles the file itself. What the parent held before the fork the child holds too, as in php. php with the cache off prints the same two lines. pcntl is built for the php binary alone, one request per process (revision 35), so no server host reaches the difference. Site: php_engine::unit_cache::UnitCache."
+status = "accepted"
+since = "2026-09-28"
+
+[[divergence]]
+id = "phpt:zend-optimizer"
+kind = "phpt"
+cause = "by-design"
+reason = "php's opcache runs Zend/Optimizer over what it compiles, and these tests pin what it leaves: 60 print the op arrays after the optimizer or its DFA pass, under opcache.opt_debug_level 0x20000, 0x200000 or 0x400000, and optimize_static_002.phpt shows getStaticVariables() without the reference php's DCE elides, and ignored_opcodes.phpt shows no observer call for a function whose body returns a literal, which php's zend_try_inline_call replaces with the literal (Z/Zend/Optimizer/optimize_func_calls.c:79). This engine runs no optimizer on an executed op array (third-engine-design.md §6.1, §12, revision 44): what executes is what the compiler emits and compile-identity holds, php's op arrays before zend_optimize_script, so 0x10000 is the one dump bit that prints anything, and optimize_static_002 prints &int(42) as php does with its optimizer off. An optimizer, if one is ever built, is a port of Zend/Optimizer held to php's 0x20000 dump on its own. Ruled by Mitchell on #1220 (2026-09-28)."
+status = "accepted"
+since = "2026-09-28"
+covers = [
+    "phpt:php-src/ext/opcache/tests/ct_eval_frameless_001.phpt",
+    "phpt:php-src/ext/opcache/tests/ct_eval_frameless_002.phpt",
+    "phpt:php-src/ext/opcache/tests/dump_property_hooks.phpt",
+    "phpt:php-src/ext/opcache/tests/gh18050.phpt",
+    "phpt:php-src/ext/opcache/tests/jit/ignored_opcodes.phpt",
+    "phpt:php-src/ext/opcache/tests/match/001.phpt",
+    "phpt:php-src/ext/opcache/tests/match/002.phpt",
+    "phpt:php-src/ext/opcache/tests/match/003.phpt",
+    "phpt:php-src/ext/opcache/tests/match/004.phpt",
+    "phpt:php-src/ext/opcache/tests/match/005.phpt",
+    "phpt:php-src/ext/opcache/tests/nodiscard_001.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/block_pass_007.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/coalesce.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/dce_001.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/dce_002.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/dce_003.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/dce_004.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/dce_005.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/dce_006.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/dce_007.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/dce_008.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/dce_009.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/gh11170.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/gh11245_1.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/gh11245_2.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/gh14873.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/gh18107_1.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/gh18107_2.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/inference_frameless.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/jmp_001.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/nullsafe_001.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/nullsafe_002.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/prop_types.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_001.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_002.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_003.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_004.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_005.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_006.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_007.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_008.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_009.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_010.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_011.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_012.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_016.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_017.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_019.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_022.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_024.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_026.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_031.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/sccp_032.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/type_inference_class_consts1.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/type_inference_class_consts2.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/type_inference_class_consts3.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/type_inference_class_consts4.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/type_inference_final_class.phpt",
+    "phpt:php-src/ext/opcache/tests/opt/verify_return_type.phpt",
+    "phpt:php-src/ext/opcache/tests/optimize_static_002.phpt",
+    "phpt:php-src/ext/opcache/tests/pipe_optimizations.phpt",
+    "phpt:php-src/ext/opcache/tests/preload_optimizer.phpt",
+]
+
+[[divergence]]
+id = "crosscheck:openssl"
+kind = "crosscheck"
+cause = "oracle-build"
+retires = "oracle-rebuild"
+reason = "OPENSSL_VERSION_TEXT and OPENSSL_VERSION_NUMBER are the headers a build was compiled against: the oracle's are OpenSSL 4.0.3's, the headers Homebrew built the 8.5.12_1 bottle against, and this engine's are 4.1.0's, the libcrypto both processes load. Every class, function and other constant of the rendering is the oracle's. The two agree again when the oracle is rebuilt against the installed library. Accepted by Mitchell (2026-11-16)."
+status = "accepted"
+since = "2026-11-16"
+
+[[divergence]]
+id = "crosscheck:openssl/ri"
+kind = "crosscheck"
+cause = "oracle-build"
+retires = "oracle-rebuild"
+reason = "The \"OpenSSL Header Version\" row of php --ri openssl is the headers a build was compiled against: 4.0.3 for the oracle, 4.1.0 for this engine, both running Homebrew's 4.1.0 libcrypto. Every other row is the oracle's. The two agree again when the oracle is rebuilt against the installed library. Accepted by Mitchell (2026-11-16)."
+status = "accepted"
+since = "2026-11-16"
+
+[[divergence]]
+id = "crosscheck:pcre"
+kind = "crosscheck"
+cause = "oracle-build"
+retires = "oracle-rebuild"
+reason = "PCRE_VERSION_MAJOR and PCRE_VERSION_MINOR are @cvalue PCRE2_MAJOR and PCRE2_MINOR, the pcre2.h a build was compiled against: the oracle was built against pcre2 10.47 and the keg has moved on, so the oracle's minor is 47 and this engine's, read at build from the keg's pcre2.h, is 48; both processes load the keg's 10.48 library, and PCRE_VERSION, the library's, agrees. Every class, function and other constant of the rendering is the oracle's. The two agree again when the oracle is rebuilt against the installed library (#2254). Accepted by Mitchell on #1978 (2026-10-07), option 1: the same rule as #1958 and #1974 for the other header macros; keeping the oracle's values was rejected, as it states a fact about another binary and goes silently wrong on an oracle bump."
+status = "fixed"
+since = "2026-10-07"
+
+[[divergence]]
+id = "crosscheck:pdo"
+kind = "crosscheck"
+cause = "by-design"
+reason = "pdo_dblib, pdo_odbc and pdo_pgsql are outside parity by Mitchell's ruling on #1167, and their MINITs are what add PDO's 18 DBLIB_*, ODBC_* and PGSQL_* class constants in the oracle's build; this engine's bundle carries none of the three, so its PDO lists 97 constants where the oracle's lists 115. Registering the constants without the drivers would be wrong, as php adds them only with the driver. Every other line of the rendering is the oracle's. Accepted by Mitchell on #2266 (2026-10-09). By design since #2981 (Mitchell, 2026-10-23): it follows from third-engine-design.md §12, whose [parity] out puts the three drivers outside parity (#1167), and the engine can retire it only by carrying them."
+status = "accepted"
+since = "2026-10-09"
+
+[[divergence]]
+id = "crosscheck:pdo/ri"
+kind = "crosscheck"
+cause = "by-design"
+reason = "The \"PDO drivers\" row of php --ri pdo lists the drivers in the build: the oracle's carries dblib, odbc and pgsql, outside parity by #1167, so this engine prints mysql, sqlite. Every other row is the oracle's. Accepted by Mitchell on #2266 (2026-10-09). By design since #2981 (Mitchell, 2026-10-23): it follows from third-engine-design.md §12, whose [parity] out puts the three drivers outside parity (#1167), and the engine can retire it only by carrying them."
+status = "accepted"
+since = "2026-10-09"
+
+[[divergence]]
+id = "crosscheck:pdo_mysql"
+kind = "crosscheck"
+cause = "by-design"
+reason = "Pdo\\Mysql extends PDO, so its rendering lists PDO's constants, 18 fewer than the oracle's for the reason of crosscheck:pdo. Every other line is the oracle's. Accepted by Mitchell on #2266 (2026-10-09). By design since #2981 (Mitchell, 2026-10-23): it follows from third-engine-design.md §12, whose [parity] out puts the three drivers outside parity (#1167), and the engine can retire it only by carrying them."
+status = "accepted"
+since = "2026-10-09"
+
+[[divergence]]
+id = "crosscheck:pdo_sqlite"
+kind = "crosscheck"
+cause = "by-design"
+reason = "Pdo\\Sqlite extends PDO, so its rendering lists PDO's constants, 18 fewer than the oracle's for the reason of crosscheck:pdo. Every other line is the oracle's. Accepted by Mitchell on #2266 (2026-10-09). By design since #2981 (Mitchell, 2026-10-23): it follows from third-engine-design.md §12, whose [parity] out puts the three drivers outside parity (#1167), and the engine can retire it only by carrying them."
+status = "accepted"
+since = "2026-10-09"
+
+[[divergence]]
+id = "crosscheck:standard/ri"
+kind = "crosscheck"
+cause = "by-design"
+reason = "The \"Dynamic Library Support\" row of php --ri standard says whether a build can dl() a shared module: the oracle is built with HAVE_LIBDL and prints enabled, and this engine's extensions are crates linked into the binary at build (ADR-0004), so its dl() is php's without HAVE_LIBDL and the row prints unavailable, as ext/standard/dl.c does for such a build. Every other row is the oracle's. Accepted by Mitchell on #1288 (2026-09-30)."
+status = "accepted"
+since = "2026-09-30"
+
+[[divergence]]
+id = "phpt:ruled-out-extensions"
+kind = "phpt"
+cause = "by-design"
+reason = "php builds these extensions and runs some or all of their tests; this engine's bundle carries none of them. pgsql, pdo_pgsql, ldap, snmp, odbc, pdo_odbc and pdo_dblib are outside parity by Mitchell's ruling on #1167, the suites that need a server the recipe does not start, whose server-free tests leave with their extensions. intl, gd and ffi, ruled back in on #1573, left this row as each crate landed (#1577). The engine skips each of these tests on its --EXTENSIONS-- or SKIPIF where the oracle runs it. An extension ruled back in takes its ids out of this row in the commit that adds its crate (third-engine-design.md §1, §12; #1577)."
+status = "accepted"
+since = "2026-09-29"
+covers = [
+    "phpt:php-src/ext/ldap/tests/GHSA-g665-fm4p-vhff-1.phpt",
+    "phpt:php-src/ext/ldap/tests/GHSA-g665-fm4p-vhff-2.phpt",
+    "phpt:php-src/ext/ldap/tests/bug48441.phpt",
+    "phpt:php-src/ext/ldap/tests/bug72021.phpt",
+    "phpt:php-src/ext/ldap/tests/bug73933.phpt",
+    "phpt:php-src/ext/ldap/tests/bug77958.phpt",
+    "phpt:php-src/ext/ldap/tests/gh16032-1.phpt",
+    "phpt:php-src/ext/ldap/tests/gh16032-2.phpt",
+    "phpt:php-src/ext/ldap/tests/gh16101.phpt",
+    "phpt:php-src/ext/ldap/tests/gh16132-1.phpt",
+    "phpt:php-src/ext/ldap/tests/gh16132-2.phpt",
+    "phpt:php-src/ext/ldap/tests/gh16136.phpt",
+    "phpt:php-src/ext/ldap/tests/gh16389.phpt",
+    "phpt:php-src/ext/ldap/tests/gh17280.phpt",
+    "phpt:php-src/ext/ldap/tests/gh17704.phpt",
+    "phpt:php-src/ext/ldap/tests/gh18902.phpt",
+    "phpt:php-src/ext/ldap/tests/gh21262.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_add_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_add_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_add_ext.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_add_modify_delete_programming_errors.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_add_modify_delete_references_programming_errors.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_bind_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_bind_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_bind_ext.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_bind_variation.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_compare_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_compare_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_connect_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_connect_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_connect_ldap_conf.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_connect_port_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_connect_variation.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_constructor.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_controls.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_count_entries_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_count_references_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_delete_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_delete_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_delete_ext.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_deprectate_connect_with_two_parameters.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_dn2ufn.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_err2str_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_errno_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_error_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_escape_all.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_escape_both.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_escape_dn.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_escape_filter.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_escape_ignore.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_exop.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_exop_passwd.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_exop_passwd_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_exop_refresh.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_exop_whoami.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_explode_dn.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_first_attribute_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_first_attribute_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_first_entry_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_first_reference_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_free_result_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_attributes_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_dn_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_entries_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_entries_variation.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_option_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_option_controls.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_option_package_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_option_variation.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_set_invalid_option_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_values_len_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_get_values_len_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_list_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_list_read_search_parallel_programming_errors.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_list_read_search_parallel_references.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_list_read_search_programming_errors.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_mod_add_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_mod_add_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_mod_del_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_mod_del_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_mod_ext.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_mod_replace_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_mod_replace_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_modify_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_modify_batch_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_modify_batch_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_modify_batch_modifications_with_references.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_modify_batch_programming_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_modify_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_next_attribute_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_next_attribute_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_next_entry_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_next_reference_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_option_reqcert_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_option_reqcert_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_parse_reference_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_parse_result_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_parse_result_controls.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_read_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_read_variation1.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_rename_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_rename_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_rename_ext.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_sasl_bind_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_sasl_bind_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_overrides.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_paged_result_controls.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_sort_controls.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_variation1.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_variation2.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_variation3.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_variation4.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_variation5.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_search_variation6.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_cafiles_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_ciphersuite_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_crlcheck_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_crlcheck_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_keepalive_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_leak_attrvalue_context.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_reqcert_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_reqcert_error.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_tls_protocol_max_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_tls_protocol_max_basic_tls13.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_tls_protocol_min_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_tls_protocol_min_basic_tls13.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_option_variation.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_rebind_proc_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_set_rebind_proc_trampoline.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_sort_control_missing_attr.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_start_tls_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_start_tls_basic2.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_start_tls_rc_max_version.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_unbind_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldap_unbind_variation.phpt",
+    "phpt:php-src/ext/ldap/tests/ldaps_basic.phpt",
+    "phpt:php-src/ext/ldap/tests/ldaps_basic2.phpt",
+    "phpt:php-src/ext/odbc/tests/bug44618.phpt",
+    "phpt:php-src/ext/odbc/tests/bug46050.phpt",
+    "phpt:php-src/ext/odbc/tests/bug47803.phpt",
+    "phpt:php-src/ext/odbc/tests/bug60616.phpt",
+    "phpt:php-src/ext/odbc/tests/bug68087.phpt",
+    "phpt:php-src/ext/odbc/tests/bug69354.phpt",
+    "phpt:php-src/ext/odbc/tests/bug69975.phpt",
+    "phpt:php-src/ext/odbc/tests/bug71171.phpt",
+    "phpt:php-src/ext/odbc/tests/bug73448.phpt",
+    "phpt:php-src/ext/odbc/tests/bug73725.phpt",
+    "phpt:php-src/ext/odbc/tests/bug78470.phpt",
+    "phpt:php-src/ext/odbc/tests/bug78473.phpt",
+    "phpt:php-src/ext/odbc/tests/bug80147.phpt",
+    "phpt:php-src/ext/odbc/tests/bug80152.phpt",
+    "phpt:php-src/ext/odbc/tests/bug80592.phpt",
+    "phpt:php-src/ext/odbc/tests/gh22668.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_autocommit_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_close_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_close_all_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_columnprivileges_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_columns_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_commit_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_connect_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_cursor_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_data_source_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_exec_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_exec_002.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_fetch_array_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_fetch_into_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_fetch_object_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_fetch_row_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_field_len_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_field_name_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_field_num_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_field_precision_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_field_scale_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_field_type_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_free_result_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_gettypeinfo_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_longreadlen_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_non_persistent_connection_reuse.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_num_fields_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_num_rows_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_persistent_close.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_persistent_close_all.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_primarykeys_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_rollback_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_setoption_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_setoption_002.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_tables_001.phpt",
+    "phpt:php-src/ext/odbc/tests/odbc_utils.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/GHSA-5hqh-c84r-qjcv.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/batch_stmt_ins_exec.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/batch_stmt_ins_sel_up_del.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/batch_stmt_ins_up.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/batch_stmt_rowcount.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/batch_stmt_transaction.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/batch_stmt_try.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_38955.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_45876.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_47588.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_50755.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_54648.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_67130.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_68957.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_69592.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_69757.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_71667.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/bug_73396.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/common.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/datetime2.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/datetime_convert.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/dbtds.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/dbversion.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/pdo_dblib_param_str_natl.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/pdo_dblib_quote.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/pdodblib_001.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/pdodblib_002.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/php_8.5_deprecations.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/stringify_uniqueidentifier.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/timeout.phpt",
+    "phpt:php-src/ext/pdo_dblib/tests/types.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/autocommit.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/autocommit_change_mode.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/basic_connection.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/bug44643.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/bug67465.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/bug80783.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/bug80783a.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/common.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/get_attribute_server.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/gh16450.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/gh22349.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/gh22665.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/gh22666.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/gh22667.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/gh9372.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/long_columns.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/max_columns.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/pdoodbc_001.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/pdoodbc_002.phpt",
+    "phpt:php-src/ext/pdo_odbc/tests/php_8.5_deprecations.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug36727.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug43925.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug46274.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug46274_2.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug48764.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug61267.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug62479.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug62498-32bit.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug62498.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug62593.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug64953.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug66584.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug67462.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug68199.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug68371.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug69344.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug69362.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug69752.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug70313.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug70861.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug71573.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug71885.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug71885_2.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug72294.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug72570.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug72633.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug73959.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug75402.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug81343.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug_14244.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug_33876.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug_49985.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/bug_64705.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/common.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/copy_from.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/copy_from_array_non_stringable.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/copy_from_generator.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/copy_from_iterator.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/copy_to.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/disable_prepares.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/float.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/getnotify.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/gh12423.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/gh15287.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/gh16314.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/gh21683.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/gh7723.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/gh9411.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/ghsa-8xr5-qppj-gvwj.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/ghsa-hrwm-9436-5mv3.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/is_in_transaction.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/issue78621.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/issue78621_closure.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/issue78621_method.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/large_objects.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/pdo_pgsql_parser.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/pdopgsql_001.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/pdopgsql_002.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/pdopgsql_003.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/pdopgsql_setNoticeCallback.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/pdopgsql_setNoticeCallback_trampoline_no_leak.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/pg_debug_emulated_prepares.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/php_8.5_deprecations.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/result_memory_size.phpt",
+    "phpt:php-src/ext/pdo_pgsql/tests/transations_deprecations.phpt",
+    "phpt:php-src/ext/pgsql/tests/00version.phpt",
+    "phpt:php-src/ext/pgsql/tests/01createdb.phpt",
+    "phpt:php-src/ext/pgsql/tests/02connection.phpt",
+    "phpt:php-src/ext/pgsql/tests/03sync_query.phpt",
+    "phpt:php-src/ext/pgsql/tests/04async_query.phpt",
+    "phpt:php-src/ext/pgsql/tests/05large_object.phpt",
+    "phpt:php-src/ext/pgsql/tests/06_bug73498.phpt",
+    "phpt:php-src/ext/pgsql/tests/06copy.phpt",
+    "phpt:php-src/ext/pgsql/tests/06copy_2.phpt",
+    "phpt:php-src/ext/pgsql/tests/07optional.phpt",
+    "phpt:php-src/ext/pgsql/tests/08escape.phpt",
+    "phpt:php-src/ext/pgsql/tests/09notice.phpt",
+    "phpt:php-src/ext/pgsql/tests/10pg_convert.phpt",
+    "phpt:php-src/ext/pgsql/tests/10pg_convert_9.phpt",
+    "phpt:php-src/ext/pgsql/tests/10pg_convert_json_array.phpt",
+    "phpt:php-src/ext/pgsql/tests/11pg_meta_data.phpt",
+    "phpt:php-src/ext/pgsql/tests/12pg_insert.phpt",
+    "phpt:php-src/ext/pgsql/tests/12pg_insert_9.phpt",
+    "phpt:php-src/ext/pgsql/tests/13pg_select.phpt",
+    "phpt:php-src/ext/pgsql/tests/13pg_select_9.phpt",
+    "phpt:php-src/ext/pgsql/tests/14pg_update.phpt",
+    "phpt:php-src/ext/pgsql/tests/14pg_update_9.phpt",
+    "phpt:php-src/ext/pgsql/tests/15pg_delete.phpt",
+    "phpt:php-src/ext/pgsql/tests/16pg_result_status.phpt",
+    "phpt:php-src/ext/pgsql/tests/17result.phpt",
+    "phpt:php-src/ext/pgsql/tests/18pg_escape_bytea_before.phpt",
+    "phpt:php-src/ext/pgsql/tests/18pg_escape_bytea_esc.phpt",
+    "phpt:php-src/ext/pgsql/tests/18pg_escape_bytea_hex.phpt",
+    "phpt:php-src/ext/pgsql/tests/19pg_ping.phpt",
+    "phpt:php-src/ext/pgsql/tests/20pg_get_pid.phpt",
+    "phpt:php-src/ext/pgsql/tests/21pg_get_notify.phpt",
+    "phpt:php-src/ext/pgsql/tests/22pg_fetch_object.phpt",
+    "phpt:php-src/ext/pgsql/tests/23sync_query_params.phpt",
+    "phpt:php-src/ext/pgsql/tests/24sync_query_prepared.phpt",
+    "phpt:php-src/ext/pgsql/tests/25async_query_params.phpt",
+    "phpt:php-src/ext/pgsql/tests/26async_query_prepared.phpt",
+    "phpt:php-src/ext/pgsql/tests/27large_object_oid.phpt",
+    "phpt:php-src/ext/pgsql/tests/28large_object_import_oid.phpt",
+    "phpt:php-src/ext/pgsql/tests/29nb_async_connect.phpt",
+    "phpt:php-src/ext/pgsql/tests/30nb_async_query_params.phpt",
+    "phpt:php-src/ext/pgsql/tests/31nb_async_query_prepared.phpt",
+    "phpt:php-src/ext/pgsql/tests/32nb_async_query.phpt",
+    "phpt:php-src/ext/pgsql/tests/80_bug14383.phpt",
+    "phpt:php-src/ext/pgsql/tests/80_bug24499.phpt",
+    "phpt:php-src/ext/pgsql/tests/80_bug27597.phpt",
+    "phpt:php-src/ext/pgsql/tests/80_bug32223.phpt",
+    "phpt:php-src/ext/pgsql/tests/80_bug32223b.phpt",
+    "phpt:php-src/ext/pgsql/tests/80_bug36625.phpt",
+    "phpt:php-src/ext/pgsql/tests/80_bug39971.phpt",
+    "phpt:php-src/ext/pgsql/tests/80_bug42783.phpt",
+    "phpt:php-src/ext/pgsql/tests/98old_api.phpt",
+    "phpt:php-src/ext/pgsql/tests/9999dropdb.phpt",
+    "phpt:php-src/ext/pgsql/tests/GHSA-7qpv-r5mr-78m4.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug37100.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug37100_9.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug46408.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug47199.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug60244.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug64609.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug65119.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug68638.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug71062.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug71998.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug72028.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug72195.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug72197.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug75419.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug76548.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug77047.phpt",
+    "phpt:php-src/ext/pgsql/tests/bug81720.phpt",
+    "phpt:php-src/ext/pgsql/tests/changepassword.phpt",
+    "phpt:php-src/ext/pgsql/tests/close_default_link.phpt",
+    "phpt:php-src/ext/pgsql/tests/connect_after_close.phpt",
+    "phpt:php-src/ext/pgsql/tests/connection_reuse.phpt",
+    "phpt:php-src/ext/pgsql/tests/deprecated_implicit_default_link.phpt",
+    "phpt:php-src/ext/pgsql/tests/gh10672.phpt",
+    "phpt:php-src/ext/pgsql/tests/gh12763.phpt",
+    "phpt:php-src/ext/pgsql/tests/gh13354.phpt",
+    "phpt:php-src/ext/pgsql/tests/gh13519.phpt",
+    "phpt:php-src/ext/pgsql/tests/gh17158.phpt",
+    "phpt:php-src/ext/pgsql/tests/gh17165.phpt",
+    "phpt:php-src/ext/pgsql/tests/gh18148.phpt",
+    "phpt:php-src/ext/pgsql/tests/gh21162.phpt",
+    "phpt:php-src/ext/pgsql/tests/gh8253.phpt",
+    "phpt:php-src/ext/pgsql/tests/ghsa-hrwm-9436-5mv3.phpt",
+    "phpt:php-src/ext/pgsql/tests/no_link_open.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_close_stmt.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_copy_from_iterable.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_delete_001.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_fetch_object_with_abstract_class.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_insert_001.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_insert_002.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_jit.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_meta_data_001.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_put_copy.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_result_memory_size.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_select_001.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_service.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_set_chunked_rows_size.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_socket_poll.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_trace.phpt",
+    "phpt:php-src/ext/pgsql/tests/pg_update_001.phpt",
+    "phpt:php-src/ext/snmp/tests/bug60749.phpt",
+    "phpt:php-src/ext/snmp/tests/bug64124.phpt",
+    "phpt:php-src/ext/snmp/tests/bug64159.phpt",
+    "phpt:php-src/ext/snmp/tests/bug72479.phpt",
+    "phpt:php-src/ext/snmp/tests/generic_timeout_error.phpt",
+    "phpt:php-src/ext/snmp/tests/gh16959.phpt",
+    "phpt:php-src/ext/snmp/tests/gh17330.phpt",
+    "phpt:php-src/ext/snmp/tests/gh18304.phpt",
+    "phpt:php-src/ext/snmp/tests/gh21336.phpt",
+    "phpt:php-src/ext/snmp/tests/ipv6.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp-object-errno-errstr.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp-object-error.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp-object-properties-error.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp-object-properties.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp-object-setSecurity_error.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp-object.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp2_get.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp2_getnext.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp2_real_walk.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp2_set-nomib.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp2_set.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp2_walk.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp3-error.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp3.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp_get_quick_print.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp_get_valueretrieval.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp_getvalue.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp_read_mib.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp_resolve_fail_leak.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp_session_error.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp_set_enum_print.phpt",
+    "phpt:php-src/ext/snmp/tests/snmp_set_oid_output_format.phpt",
+    "phpt:php-src/ext/snmp/tests/snmpget.phpt",
+    "phpt:php-src/ext/snmp/tests/snmpgetnext.phpt",
+    "phpt:php-src/ext/snmp/tests/snmprealwalk.phpt",
+    "phpt:php-src/ext/snmp/tests/snmpset-nomib.phpt",
+    "phpt:php-src/ext/snmp/tests/snmpset.phpt",
+    "phpt:php-src/ext/snmp/tests/snmpwalk.phpt",
+    "phpt:php-src/ext/snmp/tests/wrong_hostname.phpt",
+]
+
+[[divergence]]
+id = "phpt:platform"
+kind = "phpt"
+cause = "oracle-build"
+retires = "platform"
+reason = "On this machine the pinned oracle misses each of these tests and the engine prints the oracle's bytes: what the expectation holds is another platform's, and not the engine's to meet. The six of ext/iconv pin glibc's iconv, where php and this engine both link macOS's /usr/lib/libiconv.2.dylib (ICONV_IMPL libiconv, ICONV_VERSION 1.11), as principle 3 binds the engine to. mcast_ipv6_send sets IPV6_MULTICAST_IF to interface 0, which Darwin refuses with EINVAL where Linux takes it as the default interface (ext/sockets/multicast.c:350-360 passes the index through). A test leaves this row when the pin or the platform moves and the oracle meets it again; the runner's control reads the oracle's verdict on each at every run."
+status = "accepted"
+since = "2026-09-29"
+covers = [
+    "phpt:php-src/ext/iconv/tests/bug52211.phpt",
+    "phpt:php-src/ext/iconv/tests/iconv_mime_encode.phpt",
+    "phpt:php-src/ext/iconv/tests/iconv_strpos.phpt",
+    "phpt:php-src/ext/iconv/tests/iconv_strrpos.phpt",
+    "phpt:php-src/ext/iconv/tests/iconv_substr.phpt",
+    "phpt:php-src/ext/iconv/tests/translit-utf8.phpt",
+    "phpt:php-src/ext/sockets/tests/mcast_ipv6_send.phpt",
+]
+
+[[divergence]]
+id = "phpt:keg-libgd"
+kind = "phpt"
+cause = "oracle-build"
+retires = "platform"
+reason = "On this machine the pinned oracle misses each of these tests and the engine prints the oracle's bytes: their expectations are php's bundled libgd's, where php and this engine both link the keg's libgd 2.3.3 over FreeType 2.15.0, as #1573 ruled ext/gd onto. Six pin text boxes the bundled libgd computes otherwise (imageftbbox and imagettftext corners: bug43073, bug48732, bug48732-mb, bug48801, bug48801-mb, bug53504). Four pin the bundled libgd's interpolation and rotation: libgd 2.3.3's gdImageSetInterpolationMethod refuses IMG_BICUBIC and IMG_BICUBIC_FIXED, so imagegetinterpolation answers the old method and imagescale under IMG_BICUBIC answers false (imageinterpolation_basic, imagescale_preserve_ratio, bug79676), and imagerotate sizes its result by 2.3.3's rule (bug73272, 137x137 for 135x136). bug65148 is not met by the oracle under the keg's libgd, and the engine prints 2.3.3's 42x24 for 40x23. One pins the bundled libgd's GD2 reader (createfromstring-overflow), which the keg's libgd, built without GD2, refuses with its own warning before it reads a chunk. A test leaves this row when the keg's libgd meets it; the runner's control reads the oracle's verdict on each at every run."
+status = "accepted"
+since = "2026-10-12"
+covers = [
+    "phpt:php-src/ext/gd/tests/bug43073.phpt",
+    "phpt:php-src/ext/gd/tests/bug48732-mb.phpt",
+    "phpt:php-src/ext/gd/tests/bug48732.phpt",
+    "phpt:php-src/ext/gd/tests/bug48801-mb.phpt",
+    "phpt:php-src/ext/gd/tests/bug48801.phpt",
+    "phpt:php-src/ext/gd/tests/bug53504.phpt",
+    "phpt:php-src/ext/gd/tests/bug65148.phpt",
+    "phpt:php-src/ext/gd/tests/bug73272.phpt",
+    "phpt:php-src/ext/gd/tests/bug79676.phpt",
+    "phpt:php-src/ext/gd/tests/createfromstring-overflow.phpt",
+    "phpt:php-src/ext/gd/tests/imageinterpolation_basic.phpt",
+    "phpt:php-src/ext/gd/tests/imagescale_preserve_ratio.phpt",
+]
+
+[[divergence]]
+id = "phpt:icu-79.1-test-expectations"
+kind = "phpt"
+cause = "oracle-build"
+retires = "pin"
+reason = "On this machine the pinned oracle misses each of these tests and the engine prints the oracle's bytes: php-src 8.5.12 expects what ICU before 79.1 prints, and php and this engine both link the keg's ICU 79.1, the pin's [closure]. php-src 47d959923c, in 8.5.13RC1, skips each of the three at ICU 79.1 and holds a variant that expects what both print. The row leaves when the pin reaches the release that carries that commit, and takes its fixed_in once the release is out."
+status = "accepted"
+since = "2026-11-16"
+covers = [
+    "phpt:php-src/ext/intl/tests/dateformat_formatObject_calendar_variant_icu72-1.phpt",
+    "phpt:php-src/ext/intl/tests/dateformat_formatObject_datetime_variant_icu72-1.phpt",
+    "phpt:php-src/ext/intl/tests/timezone_IDforWindowsID_basic_icu76_1.phpt",
+]
+
+[[divergence]]
+id = "phpt:php-src/ext/standard/tests/file/realpath_bug77484.phpt"
+kind = "phpt"
+cause = "by-design"
+reason = "This engine keeps a request's working directory as php's ZTS build does, a virtual cwd per request (VIRTUAL_DIR, Zend/zend_virtual_cwd.h:53, :271-282), since requests share one process's threads (principle 4, design §5.14). After the test removes the directory it changed into, getcwd() answers the virtual path and realpath('.') false, as virtual_getcwd and virtual_realpath do; the NTS oracle asks the kernel (zend_virtual_cwd.h:330, :341) and answers false and \".\". php skips the test on every ZTS build for this difference (realpath_bug77484.phpt:8-11, \"TODO eliminate difference in TS build\"). Site: php_engine::virtual_cwd."
+status = "accepted"
+since = "2026-09-29"
+
+[[divergence]]
+id = "trace:opcache-use-cwd"
+kind = "trace"
+reason = "opcache.use_cwd=0 (PHP_INI_SYSTEM) has php key a relative include by the path as written alone, so two directories' config.php share one cached script, the collision php's documentation warns of. This engine always keys a relative path with the working directory, the include_path and the including file's directory, as php's default use_cwd=1 does: the key is made before the one question the cache asks opcache. No test in php-src sets use_cwd. Site: php_engine::api::request::unit_cache::Request::written_key."
+status = "accepted"
+since = "2026-09-30"
+
+[[divergence]]
+id = "phpt:php-src/sapi/phpdbg/tests/watch_006.phpt"
+kind = "phpt"
+cause = "by-design"
+reason = "php's watchpoints are per address and checked per protected page (phpdbg_watch.c's mprotect over each watched zval's page): a write to any slot sharing a page with a watched slot makes phpdbg compare that watch's backup, so watch_006 expects a break on $b at `$c = [1];`, a line that writes neither $b nor what it references. The report depends on memory layout, and php-src marks the test xfail for flaws in its watchpoints. This engine compares watches between steps with no page protection (#1308, jit-design.md §2.4, as trace:phpdbg-watch-page-fault cites), so it reports a watch only where the watched value changes. Site: sapi/phpdbg's watch list."
+status = "accepted"
+since = "2026-10-01"
+
+[[divergence]]
+id = "phpt:php-src/sapi/phpdbg/tests/phpdbg_oplog_001.phpt"
+kind = "phpt"
+reason = "php runs a function's RECV* prologue from its executor loop, starting at opline zero unless every argument was passed and no parameter is typed (i_init_func_execute_data, Zend/zend_execute.c:4426-4437), so phpdbg's oplog counts A::b's RECV_INIT on line 4 for $a->b() and not for $a->b('ha'). This engine runs the prologue inside the call's activation, before Site::Entry (third-engine-design.md §5.6), so that a RECV that throws is never inside a recording (jit-design.md §4.1, trace:entry-counter-typed-recv); no tier, a debugging tier included, is ever at a RECV* opline. Only an oplog or a step over oplines sees it: the expectation's `[4] => int(1)` is absent here, and every other count is php's once the comparison handlers branch as ZEND_VM_SMART_BRANCH does (§5.8). Ruled by Mitchell on #1385 (2026-10-01). Site: php_engine::exec::parameter_prologue."
+status = "accepted"
+since = "2026-10-01"
+
+[[divergence]]
+id = "trace:ini-extension-no-loader"
+kind = "trace"
+cause = "by-design"
+reason = "An extension= or zend_extension= line runs php's path building for its kind after startup, where php runs it (main/main.c:2352; php_load_extension, ext/standard/dl.c:110-170; php_load_zend_extension_cb), and warns php's \"Unable to load dynamic library '%s' (tried: %s (%s), %s (%s))\" naming the paths it built. This engine links its extensions at build and has no loader (third-engine-design.md §7.1, trace:dl-no-loader), so every load fails, a bundled extension's name included, as php's does for a static module with no shared object, and each path's parenthesis reads \"dynamic modules are not supported\" where the oracle carries the host's dlerror text, which is host dyld output. Ruled by Mitchell on #1176 (2026-10-01). Site: php_engine's startup, where the collected lines are loaded."
+status = "accepted"
+since = "2026-10-01"
+
+[[divergence]]
+id = "trace:oracle-extensions-not-carried"
+kind = "trace"
+cause = "by-design"
+reason = "php's pinned build carries extensions this engine's bundle does not, so whatever reads the loaded set answers with fewer: phpdbg's clean counts of classes, functions and constants, php -m, get_loaded_extensions() and extension_loaded(). Seven are outside parity by Mitchell's ruling on #1167 (third-engine-design.md §1, §12, as phpt:ruled-out-extensions cites): pgsql, pdo_pgsql, ldap, snmp, odbc, pdo_odbc and pdo_dblib. Ruled by Mitchell on #1451 (2026-10-01), its lists kept by #1577. Site: php_bundle, the enabled set."
+status = "accepted"
+since = "2026-10-01"
+
+
+[[divergence]]
+id = "trace:phpdbg-watch-page-fault"
+kind = "trace"
+cause = "by-design"
+reason = "php's phpdbg compares a watch when a write faults the page its zval shares (phpdbg_watch.c's mprotect handler), so a write to another variable on that page can report a watch whose value nothing wrote: [Breaking on watchpoint $a], Old value inaccessible or destroyed, and the value unchanged. This host compares watches between steps (#1308, jit-design.md §2.4) and reports only values that changed. watch_006.phpt is accepted for the same cause. Ruled by Mitchell on #1475 (2026-10-02). Site: sapi/phpdbg's watch list."
+status = "accepted"
+since = "2026-10-02"
+
+
+[[divergence]]
+id = "trace:phpdbg-watch-recursive-teardown"
+kind = "trace"
+reason = "At a run's end php's phpdbg reports some removals of recursive array watches and drops others (3 of 26 measured sequences): phpdbg_watch.c dissociates a recursive root and mutates hti->watches while it walks it, so which removals reach the report depends on that walk. This host reports every watch removed, in the order php's teardown frees what each stands on (#1453). Ruled by Mitchell on #1476 (2026-10-02); retire with a pin that reports every removal. Site: sapi/phpdbg's watch list."
+status = "accepted"
+since = "2026-10-02"
+
+
+[[divergence]]
+id = "trace:dba-ndbm-null-handle"
+kind = "trace"
+cause = "php-ub"
+reason = "php's dba_open_ndbm stores the null DBM* dbm_open answers when it refuses, and reports the open as a success (ext/dba/dba_ndbm.c), so dba_open() answers a Dba\\Connection and the next operation, or the close at shutdown, calls the library on null and segfaults. This engine answers the same Connection, holds the null as no handle, answers false from every operation on it and closes nothing: php's output up to its crash, without the crash. Ruled by Mitchell on #1524 (2026-10-02). Site: ext/dba's ndbm handler."
+status = "accepted"
+since = "2026-10-02"
+
+
+[[divergence]]
+id = "trace:phpdbg-packed-breakpoint-tables"
+kind = "trace"
+reason = "Under php, info break prints no list after a file breakpoint on a line below 8, a function, method or file opline breakpoint at an odd opline below 8 is never resolved or listed, and r after b foo#1 prints nothing more. This engine lists, resolves and stops at every breakpoint it was given. Ruled by Mitchell on #1554 (2026-10-02) and on #2149 (2026-10-06). Site: sapi/phpdbg's Breakpoints."
+status = "accepted"
+since = "2026-10-02"
+
+
+[[divergence]]
+id = "trace:phpdbg-init-empty-code-block"
+kind = "trace"
+cause = "php-ub"
+reason = "At an empty init code block php reads no further; this engine evaluates nothing and reads on. Ruled by Mitchell on #1578 (2026-10-02). Site: sapi/phpdbg's init::lines."
+status = "accepted"
+since = "2026-10-02"
+
+
+[[divergence]]
+id = "trace:phpdbg-init-second-code-block"
+kind = "trace"
+cause = "php-ub"
+reason = "At a second code block in one init file php's answer is not held; this engine evaluates each block on its own. Ruled by Mitchell on #1578 (2026-10-02). Site: sapi/phpdbg's init::lines."
+status = "accepted"
+since = "2026-10-02"
+
+
+[[divergence]]
+id = "trace:phpdbg-next-after-init-bailout"
+kind = "trace"
+cause = "php-ub"
+reason = "On next at the prompt after an init code block bailed out of the loop (a fatal or an exit in it), php prints nothing more; this engine writes [Not executing]. Ruled by Mitchell on #1578 (2026-10-02). Site: sapi/phpdbg's next."
+status = "accepted"
+since = "2026-10-02"
+
+
+[[divergence]]
+id = "trace:soap-typemap-ptr"
+kind = "trace"
+reason = "php's SoapClient keeps its typemap as IS_PTR zvals in the private typemap array, which var_dump prints as UNKNOWN:0; ext/soap holds the typemap on the object's payload and writes the array with the same keys and null values, so the dump shows NULL there. No phpt reads it. Ruled by Mitchell on #1594 (2026-10-02). Site: ext/soap's SoapClient constructor."
+status = "accepted"
+since = "2026-10-02"
+
+
+[[divergence]]
+id = "trace:assign-obj-entry-container-under-a-handler"
+kind = "trace"
+cause = "php-ub"
+reason = "php does not finish the script of the witness this row covers; this engine lands the assignment on the object and runs its destructor after it. Ruled by Mitchell on #1511 (2026-10-02). Site: php_engine's ASSIGN_OBJ over a VAR container."
+status = "accepted"
+since = "2026-10-02"
+covers = ["witness:b6e8714bfddcb7bb21e9c8030602eb6b05b9665a"]
+
+
+[[divergence]]
+id = "trace:fsockopen-timeout-bound"
+kind = "trace"
+cause = "php-ub"
+retires = "pin"
+fixed_in = "8.5.11"
+reason = "php's php_fsockopen_stream formats the upper bound of fsockopen()'s argument #6 with ZEND_ULONG_FMT but passes a double (Z/ext/standard/fsock.c:110), so it prints the double's bytes read as an unsigned integer, not a value php defines: its IEEE-754 bits on arm64 Darwin, 4805559569259818381 at the oracle, and whatever the integer register holds on x86-64; upstream's gh14780.phpt masks it. This engine prints the bound the format names, PHP_TIMEOUT_ULL_MAX / 1000000 as an unsigned integer. php-src fixed it in dfdae429ca (GH-23338), which casts the bound and names the argument #5 ($timeout), first released in php-8.5.11. Ruled by Mitchell on #1553 (2026-10-02); retire at the pin that carries dfdae429ca, where the engine's message moves to argument #5 with it (fsockopen_timeout_out_of_range.phpt holds both). Site: ext/standard's fsockopen and pfsockopen."
+status = "fixed"
+since = "2026-10-02"
+
+
+[[divergence]]
+id = "trace:phpdbg-delete-clears-flags"
+kind = "trace"
+cause = "php-ub"
+retires = "pin"
+reason = "After the only opline breakpoint of a function, method or file is deleted, no breakpoint stops again under php until set breaks on, and nothing prints coloured; this engine keeps the session's other settings, so its breakpoints still stop. Ruled by Mitchell on #2149 (2026-10-06); php-ub since #2981 (Mitchell, 2026-10-23). Site: sapi/phpdbg's Breakpoints::delete."
+status = "accepted"
+since = "2026-10-06"
+
+
+[[divergence]]
+id = "trace:phpdbg-hit-location-unresolved"
+kind = "trace"
+cause = "php-ub"
+reason = "A function, method or file opline breakpoint the run never resolves again prints [Breakpoint #0 at (null):0, hits: 1] at its hit under the oracle; this engine prints the breakpoint's own location. Ruled by Mitchell on #2149 (2026-10-06). Site: sapi/phpdbg's Breakpoints."
+status = "accepted"
+since = "2026-10-06"
+
+[[divergence]]
+id = "phpt:ffi-php-own-symbols"
+kind = "phpt"
+cause = "by-design"
+reason = "These tests declare and call C symbols the php binary exports from its own C (get_zend_version, zend_printf, zend_write, zend_hash_func, zend_str_tolower), resolved through dlsym(RTLD_DEFAULT). This engine has no Zend C ABI (third-engine-design.md §7.1), so its hosts export none, each test's SKIPIF fails to resolve the symbol, and the engine skips the test where the oracle runs it. FFI reaches every library the oracle's FFI does; php's own internals are not one. Ruled by Mitchell on #1613 (2026-10-02)."
+status = "accepted"
+since = "2026-10-02"
+covers = [
+    "phpt:php-src/ext/ffi/tests/100.phpt",
+    "phpt:php-src/ext/ffi/tests/101.phpt",
+    "phpt:php-src/ext/ffi/tests/200.phpt",
+    "phpt:php-src/ext/ffi/tests/bug77632b.phpt",
+    "phpt:php-src/ext/ffi/tests/bug78714.phpt",
+]
+
+[[divergence]]
+id = "trace:intl-converter-replaced-in-callback"
+kind = "trace"
+cause = "php-ub"
+reason = "php does not finish the conversion of the witness this row covers; here the conversion finishes with the old converter and the next uses the new (ADR-0013). The site is ext/intl's convert (#2277, #2313)."
+status = "accepted"
+since = "2026-10-08"
+covers = ["witness:fe3a1700c07daab04a56a3fe2f3ee3b319049d7d"]
+
+[[divergence]]
+id = "trace:pinned-block-destroyed"
+kind = "trace"
+cause = "php-ub"
+reason = "print_r over an object whose __debugInfo assigns over the property that holds the walked array: php 8.5.9 writes nothing; this engine ends the walk there and prints an object with no members or a table with no rows. A pin keeps only a block's bytes, as ruled on #2230; the site is api::values::walk's pin (#2230, #2292)."
+status = "accepted"
+since = "2026-10-08"
+
+[[divergence]]
+id = "trace:setlocale-libintl-fallback"
+kind = "trace"
+cause = "oracle-build"
+retires = "oracle-rebuild"
+reason = "The pinned oracle links Homebrew gettext, whose `libintl_setlocale` replaces the C library's `setlocale`: where the environment names a locale the C library refuses, it falls back category by category, partly from the macOS user's language settings, so `setlocale(LC_ALL, \"\")` under `LANG=xx_XX` answers `C/UTF-8/C/C/C/C` there and `false` here, as php built without libintl answers. That is the oracle's build and the machine's user settings, not php's algorithm. Accepted for now, to be revisited when the plan is fully implemented. The two agree again when the pinned oracle links no libintl that replaces setlocale."
+status = "accepted"
+since = "2026-09-28"
+
+[[divergence]]
+id = "trace:phpinfo-variables-walk-end"
+kind = "trace"
+cause = "php-ub"
+reason = "On the phpinfo test this row covers php's output is not held; the engine ends the walk where the superglobal's table ends, as #2106 ruled. Ruled by Mitchell on #2220 (2026-10-07)."
+status = "accepted"
+since = "2026-10-07"
+covers = ["trace:ext/standard/tests/walks.rs::phpinfo_ends_its_walk_where_the_superglobal_is_freed"]
+
+[[divergence]]
+id = "trace:send-array-walk-end"
+kind = "trace"
+cause = "php-ub"
+reason = "On the call_user_func_array test this row covers php does not finish the script; the engine ends the walk where the array ends, as #2106 ruled. Ruled by Mitchell on #2220 (2026-10-07)."
+status = "accepted"
+since = "2026-10-07"
+covers = ["trace:ext/standard/tests/walks.rs::send_array_ends_where_a_warning_frees_the_array"]
+
+[[divergence]]
+id = "trace:mysqli-persistent-counts-per-request"
+kind = "trace"
+cause = "by-design"
+reason = "num_active_persistent and num_links are per request. php keeps them per process in MyG, never reset at RINIT, and counts a reused p: link up twice and down once (mysqli_nonapi.c:188, :296-298), so under php-fpm its active count drifts across a worker's requests and mysqli.max_persistent refuses sooner. The state is per engine (ADR-0005, third-engine-design.md §5.14), and the engine's threads share one engine, so no per-engine counter reproduces a per-worker drift. Ruled by Mitchell on #1676 (2026-10-03)."
+status = "accepted"
+since = "2026-10-03"
+
+[[divergence]]
+id = "trace:fork-map-jit-write-protect"
+kind = "trace"
+cause = "php-ub"
+reason = "On Apple silicon php's forked child ends without its output about once in 1,000 runs of ext/pcre/tests/bug78272.phpt; this engine's child runs on. The difference is the platform's, not php's algorithm. Site: php_process::fork (#2446). Ruled by Mitchell on #2471 (2026-10-09)."
+status = "accepted"
+since = "2026-10-09"
+
+[[divergence]]
+id = "trace:intl-msgfmt-pattern-replaced-in-argument"
+kind = "trace"
+cause = "php-ub"
+reason = "On the test this row covers php 8.5.9 answers false, `Found unsupported argument type`; this engine formats with the pattern set, and a constructor that opened nothing throws `Found unconstructed MessageFormatter`. The site is ext/intl's `format_helper` (#1620)."
+status = "accepted"
+since = "2026-10-09"
+covers = ["trace:ext/intl/tests/msgformat.rs::an_argument_that_replaces_the_pattern_is_formatted_with_the_new_one"]
+
+[[divergence]]
+id = "trace:makala-lowercase-header-names"
+kind = "trace"
+cause = "by-design"
+reason = "sapi/makala writes response header names lowercase (content-type, x-powered-by) where php's SAPIs pass php's case through (Content-type, X-Powered-By): hyper's HTTP/1.1 encoder writes names lowercase and keeps its per-response case map crate-private. Names are case-insensitive on the wire (RFC 9110 §5.1), and lowercase is the only form HTTP/2 and HTTP/3 allow, so the server keeps one form across its protocols (third-engine-design.md §4.8). The php-fpm comparison (#2349) folds a name's case and holds order and value. Site: sapi/makala's response head."
+status = "accepted"
+since = "2026-10-10"
+covers = ["trace:sapi/makala/tests/serve.rs::a_response_s_header_names_go_out_lowercase_in_php_s_order"]
+
+[[divergence]]
+id = "trace:makala-grouped-header-names"
+kind = "trace"
+cause = "by-design"
+reason = "sapi/makala writes every value of a repeated header name together, at the name's first position, as hyper's HeaderMap keeps them, where php's SAPIs write php's header list in the order it was set (Vary: Cookie, Content-Encoding: gzip, Vary: Accept-Encoding). RFC 9110 §5.3 makes the order of lines of differing names insignificant and keeps the order within one name, which hyper keeps, so the response means the same. The php-fpm comparison and the served phpt lane hold the order within a name and fold it across names (third-engine-design.md §4.8, The production server's head is hyper's). Site: sapi/makala's response head."
+status = "accepted"
+since = "2026-10-11"
+
+[[divergence]]
+id = "makala:ext/standard/tests/versioning/php_sapi_name_variation001.phpt"
+kind = "makala"
+cause = "by-design"
+reason = "php_sapi_name() answers makala under sapi/makala where php-fpm answers fpm-fcgi and php-cgi cgi-fcgi: each SAPI answers its own name, and makala is a host of its own (#2335; third-engine-design.md §4.8, The production server names itself)."
+status = "accepted"
+since = "2026-10-11"
+
+[[divergence]]
+id = "makala:ext/zlib/tests/bug60761.phpt"
+kind = "makala"
+cause = "by-design"
+reason = "The test prints the length of phpinfo()'s page, which renders the binary serving it: the engine's build under makala, the keg's under php-fpm. They differ by what each binary is, not by an algorithm of php's (third-engine-design.md §4.8)."
+status = "accepted"
+since = "2026-10-11"
+covers = [
+    "makala:ext/standard/tests/general_functions/phpinfo-header-anchors.phpt",
+    "makala:ext/standard/tests/general_functions/phpinfo2.phpt",
+]
+
+[[divergence]]
+id = "makala:ext/filter/tests/004.phpt"
+kind = "makala"
+cause = "by-design"
+reason = "The query holds <, >, \" or a byte of 0x80 and above unencoded, which RFC 3986 allows in no request-target. makala takes the head as hyper parses it and refuses it 400 before PHP runs; nginx passes the bytes on to php-fpm. Browsers percent-encode them, and makala is the edge (third-engine-design.md §4.8, #2609, #2638)."
+status = "accepted"
+since = "2026-10-11"
+covers = ["makala:ext/filter/tests/007.phpt", "makala:ext/filter/tests/011.phpt", "makala:ext/mbstring/tests/mb_http_input.phpt", "makala:ext/mbstring/tests/mb_http_input_pass.phpt"]
+
+[[divergence]]
+id = "trace:intl-msgfmt-constructor-refused-pattern"
+kind = "trace"
+cause = "php-ub"
+reason = "A MessageFormatter constructed again with a pattern ICU refuses: php's format() answer is not held (\"{}\" at one time under 8.5.9); this engine's format() throws `Found unconstructed MessageFormatter`, as on an object no constructor opened. The site is ext/intl's msgformat construct (#2566)."
+status = "accepted"
+since = "2026-10-10"
+covers = ["trace:ext/intl/tests/msgformat.rs::a_constructor_whose_pattern_icu_refuses_keeps_no_formatter"]
+
+[[divergence]]
+id = "trace:xsl-stylesheet-replaced-in-callback"
+kind = "trace"
+cause = "php-ub"
+reason = "XSLTProcessor::importStylesheet() inside a php:function callback of a transform frees the stylesheet libxslt is transforming with (xsltFreeStylesheet in php's importStylesheet), and php 8.5.9 dies on SIGSEGV (exit 139) after the nested transform's output. The engine keeps the stylesheet in the request and the transform holds it (ADR-0013): the transform and its save finish with the old stylesheet, and the next transform uses the new one. Site: ext/xsl's apply; pinned by ext/xsl/tests/leak_sensor.rs::a_stylesheet_replaced_in_its_own_callback_transforms_to_its_end (#2319)."
+status = "fixed"
+since = "2026-10-10"
+covers = ["trace:ext/xsl/tests/leak_sensor.rs::a_stylesheet_replaced_in_its_own_callback_transforms_to_its_end"]
+
+[[divergence]]
+id = "trace:dom-xpath-constructed-in-callback"
+kind = "trace"
+cause = "php-ub"
+reason = "DOMXPath::__construct() inside a php:function callback of its own evaluation frees the xmlXPathContext libxml is evaluating with (xmlXPathFreeContext(oldctx), Z/ext/dom/xpath.c:160), and php goes on reading it: concat(php:function(\"inner\", //a), count(//b)) warns 'xmlXPathCompOpEval: function count not found' and answers false. The engine holds the old evaluator to the evaluation's end and answers string(2) \"v2\"; the object evaluates on the new one after. Site: ext/dom's eval; pinned by ext/dom/tests/leak_sensor.rs::an_evaluator_constructed_anew_in_its_own_callback_evaluates_to_its_end (#2318)."
+status = "fixed"
+since = "2026-10-10"
+
+[[divergence]]
+id = "trace:macos-main-thread-guard-page"
+kind = "trace"
+cause = "by-design"
+reason = "On macOS's main thread the Rust runtime maps the stack's lowest page PROT_NONE before main (std's install_main_guard_default), so php_heap::call_stack_bounds ends the thread's stack one page above where php's zend_call_stack_get_macos ends it, so a stack-limit Error raised on that thread names a size one page smaller than php's (8323072 bytes against 8339456 on 16 KiB pages). Since #3067 no host serves a request on the process's main thread (the CLI and php-linked serve on fork::main_thread, a thread of php_sapi::REQUEST_STACK), so no host shows the difference today; a host that serves on its caller's thread, as sapi/embed will, shows it again. The engine reports the stack the thread has, as third-engine-design.md §5.6 asks of call_stack_bounds; counting the guarded page would fault in it instead of raising the Error. Every phpt that prints the sentence masks the number, so no lane reads the difference today. Site: php_heap::call_stack_bounds."
+status = "accepted"
+since = "2026-10-10"
+covers = ["trace:crates/php_heap/tests/main_thread_stack.rs::the_main_threads_end_is_one_page_above_phps"]
+
+[[divergence]]
+id = "trace:fast-ret-frame-opline"
+kind = "trace"
+cause = "php-ub"
+status = "accepted"
+reason = "After a finally block takes an uncaught throwable up again, an end observer under php reads the opcode of the block's last statement (zend_test's observer.show_opcode prints ZEND_ECHO where the block ends in an echo), and a backtrace taken in a destructor run there reads that statement's line; the engine reports the FAST_RET and its line. Site: php_engine::handlers::unwind_from, FrameView::opcode."
+since = "2026-10-09"
+covers = ["trace:crates/php_engine/src/tests/frames.rs::a_backtrace_the_unwind_past_a_finally_calls_reads_its_fast_ret_line", "trace:crates/php_engine/src/tests/frames.rs::an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op"]
+
+[[divergence]]
+id = "trace:fiber-gc-shared-symbol-table"
+kind = "trace"
+cause = "php-ub"
+reason = "A collection while a fiber is suspended inside a file its function included: php 8.5.9 runs, inside gc_collect_cycles(), the destructors of values the fiber still holds; the engine frees nothing there and the destructors run at the request's end. Site: php_engine::fiber, Fiber::get_gc."
+status = "accepted"
+since = "2026-10-10"
+covers = ["trace:crates/php_engine/src/fiber.rs::a_collection_frees_nothing_a_table_two_suspended_frames_share_holds"]
+
+[[divergence]]
+id = "trace:curl-multi-closed-in-callback"
+kind = "trace"
+cause = "php-ub"
+reason = "curl_multi_close() inside a callback of a transfer its multi is running: php 8.5.9 ends with 'Allowed memory size exhausted'; this engine refuses the call with curl_close()'s Error, 'curl_multi_close(): Attempt to close cURL handle from a callback', and the transfer goes on. Site: ext/curl's multi close (#2647)."
+status = "accepted"
+since = "2026-10-11"
+covers = ["trace:ext/curl/tests/leak_sensor.rs::a_multi_closed_by_its_own_write_callback_is_refused_and_the_transfer_runs_to_its_end"]
+
+[[divergence]]
+id = "trace:ffi-relative-library-resolved"
+kind = "trace"
+cause = "by-design"
+reason = "A relative FFI library, FFI::cdef's $lib or a header's FFI_LIB, is opened against the request's working directory, where php's dlopen opens it against its process's, which chdir() moved there (#2666). Requests share one process and none may move its directory (§5.14), so the engine hands dlopen the path joined to the request's. Where the library does not open there, two things follow. The dlerror() text inside `Failed loading '<lib>' (…)` names the joined path where php's names it as given. And on macOS dyld retries a relative path under each run-path of the binary that loads it, php's being every keg's lib/, the SDK and /usr/lib, and an absolute path under none, so a library php finds there does not open here; glibc searches no further for a path with a slash, so on Linux only the text differs. ZTS php, the build that runs on threads, opens the path against the process's directory whatever chdir() did (VIRTUAL_DIR, ext/ffi's bare DL_LOAD). Site: ext_ffi::preload::library_path (#2859)."
+status = "accepted"
+since = "2026-10-18"
+
+[[divergence]]
+id = "makala:ext/phar/tests/frontcontroller22.phpt"
+kind = "makala"
+cause = "by-design"
+reason = "include_path's default is the build's PHP_INCLUDE_PATH under both hosts. This engine's build names no installed layout (#1371; third-engine-design.md §4.1), so makala's default, like the CLI's, is .:, what php's configure computes with no option. The pinned php-fpm's configure line names a PEAR directory under its own install prefix (--with-pear=<directory>, which php -i prints), so its default is .: and that directory, a fact of how the oracle is configured and not of where it is installed: the directory's path moves with the pin and with what builds the oracle, and the difference stands while the line names one. The test prints include_path in an include warning. Ruled by Mitchell on #2749 (2026-10-12), citing #1371; the keg's path made version-free on #3671 (2026-10-30) and left out on #4422 (2026-11-10)."
+status = "accepted"
+since = "2026-10-12"
+covers = ["makala:ext/phar/tests/cache_list/frontcontroller22.phpt"]
+
+[[divergence]]
+id = "trace:fpm-dead-child-pipe-double-close"
+kind = "trace"
+cause = "php-ub"
+reason = "Where a worker dies leaving a descendant that holds its stdout or stderr, the pipe reads no end of file, and php's fpm_child_close (Z/sapi/fpm/fpm/fpm_children.c:82-110) closes it without fpm_event_del and leaves the child's fd set. A second later fpm_postponed_child_free deletes the closed descriptor's event, logging `kevent: unable to delete event` (`epoll: unable to remove fd` on Linux), and closes the number again, by when the master has respawned the worker and may have handed the number to the new child's pipe. A second close of a number that may be reused is not a behaviour to copy. The engine takes the event out of the loop before its one close and logs nothing. Site: sapi/fpm's stdio::close_pipes (#2777, #2870)."
+status = "accepted"
+since = "2026-10-18"
+
+[[divergence]]
+id = "trace:fpm-get-status-refused-copy"
+kind = "trace"
+cause = "php-ub"
+reason = "fpm_get_status() copies the scoreboard under a lock it does not wait for, and fpm_scoreboard_copy answers NULL where a writer holds it past FPM_SCOREBOARD_SPINLOCK_MAX_RETRIES (Z/sapi/fpm/fpm/fpm_scoreboard.c:355-360), after logging `scoreboard: failed to lock (already locked)`. php's fpm_status_export_to_zval (Z/sapi/fpm/fpm/fpm_status.c:58) reads the copy with no NULL check, and the child dies on SIGSEGV. The engine logs the same line and answers false, which PHP_FUNCTION(fpm_get_status) answers where the export fails (Z/sapi/fpm/fpm/fpm_main.c:1537). Site: sapi/fpm's scoreboard copy (#2793, #2870)."
+status = "accepted"
+since = "2026-10-18"
+
+[[divergence]]
+id = "phpt:libzip-1.12-torrentzip-add"
+kind = "phpt"
+cause = "oracle-build"
+retires = "oracle-rebuild"
+reason = "libzip 1.12, the keg the oracle's closure loads (oracle.toml [closure] libzip = \"1.12_1\"; #2654), refuses zip_file_extra_field_delete while torrentzip is wanted (lib/zip_extra_field_api.c:61), and _zip_file_replace calls it to clear each added entry's extra fields (lib/zip_file_replace.c:89). So under AFL_WANT_TORRENTZIP every zip_file_add fails with ZIP_ER_NOT_ALLOWED and leaves a named entry without data, and zip_close fails on that entry with ZIP_ER_INTERNAL where it stats its unchanged data (lib/zip_close.c:236, lib/zip_source_zip_new.c:90): php's addFile answers false, its close warns 'ZipArchive::close(): Internal error' and nothing is written. libzip 1.11.4 makes no such check in zip_file_extra_field_delete, and 1.12.1 lets that call through (e3f6db9, 'Fix adding and replacing files in torrentzip archives', libzip issue #617); this engine re-derives 1.11.4 and writes the archive the test expects. Copying 1.12's refusal would copy a defect libzip's next release withdraws, so the row stands until the oracle's closure loads libzip 1.12.1 or later, which the pour at the next rebuild may not yet carry (Homebrew's stable was 1.12 on 2026-10-18). Site: ext/zip's Archive::file_replace (ext/zip/src/archive.rs)."
+status = "fixed"
+since = "2026-10-18"
+covers = ["phpt:php-src/ext/zip/tests/oo_torrentzip.phpt"]
+
+[[divergence]]
+id = "trace:fiber-view-under-pass-through-suspend"
+kind = "trace"
+cause = "php-ub"
+reason = "ReflectionFiber::getExecutingLine() and getTrace() on a fiber resumed since its own suspend and now waiting under a pass-through suspend, which only ext/zend_test's _ZendTestFiber makes: php's answer is not held; this engine reads the innermost frame. Accepted by Mitchell on #2768 (2026-10-12). Site: php_engine::fiber::view."
+status = "accepted"
+since = "2026-10-12"
+covers = ["trace:ext/zend_test/tests/popped_frame.rs::a_fiber_resumed_since_its_own_suspend_is_read_at_its_innermost_frame"]
+
+[[divergence]]
+id = "trace:preload-user-no-thread-credentials"
+kind = "trace"
+cause = "by-design"
+reason = "Under uid 0 with opcache.preload_user naming another user, php forks and runs the preload file in a child that has taken that user's gid, supplementary groups and uid (accel_finish_startup_preload_subprocess, ext/opcache/ZendAccelerator.c:5047-5110). This engine serves on threads of one process and runs the preload on one thread that takes those credentials alone: the raw setresgid, setgroups and setresuid syscalls on Linux, pthread_setugid_np on macOS. On a platform with neither, it refuses to start with a fatal of its own rather than run a file the operator declared unprivileged as root, where php would preload as the user. Ruled by Mitchell on #1258 (2026-09-30, 2026-10-01), as third-engine-design.md §6.3 states (#2910). Site: ext/opcache's preload startup."
+status = "accepted"
+since = "2026-10-18"
+
+[[divergence]]
+id = "trace:date-interval-reconstruct-memory"
+kind = "trace"
+cause = "php-ub"
+reason = "Constructing a DateInterval a second time reads 112 bytes more in memory_get_usage() under php and none here; a thousand calls read 112000 and 0. Site: ext/date's DateInterval::__construct (ext/date/src/interval.rs; #2855, #2888)."
+status = "accepted"
+since = "2026-10-18"
+
+[[divergence]]
+id = "trace:date-interval-unserialize-date-string-memory"
+kind = "trace"
+cause = "php-ub"
+reason = "DateInterval::__unserialize() with a date_string, on an interval that already holds one of 350 bytes, reads 0 in memory_get_usage() under php and -384 here. Site: ext/date's interval from_hash (ext/date/src/interval.rs; #2855, #2888)."
+status = "accepted"
+since = "2026-10-18"
+
+[[divergence]]
+id = "trace:fpm-slowlog-fiber-bottom"
+kind = "trace"
+cause = "php-ub"
+reason = "A slow log entry for a child stopped inside a fiber: the oracle writes the fiber's bottom as an [INCLUDE_OR_EVAL] frame and walks on to the resumer; the engine writes the resumer's frames with no line for the bottom, where no PHP runs. Site: sapi/fpm's slowlog::frames over a fiber's chain (#2897, #2916)."
+status = "accepted"
+since = "2026-10-18"
+
+[[divergence]]
+id = "trace:zend-delref-no-decrement"
+kind = "trace"
+cause = "by-design"
+reason = "php's zend_delref takes one count off its argument with Z_TRY_DELREF_P and frees nothing (Z/ext/zend_test/test.c:213-224), so a later release frees a value something still names. This engine exposes no unsound refcount decrement: a native gives up exactly the owners it took (third-engine-design.md §5.1, owners and views), so its zend_delref takes the argument and returns null. php's own tests reach the function only with null or the wrong argument count (Zend/tests/arginfo_zpp_mismatch.phpt), where Z_TRY_DELREF_P does nothing, so the function list, arginfo and zpp errors are php's. Ruled by Mitchell on #3016 (2026-10-20), reversing #2976 and #3014. Site: php_ext_zend_test::internals::zend_delref."
+status = "accepted"
+since = "2026-10-20"
+
+[[divergence]]
+id = "witness:675ff4b453963a1fa62a2d5327c4fd1a8ff41efb"
+kind = "witness"
+cause = "by-design"
+reason = "Under detect, a recursion that alternates between a native and its callback meets php's budget afresh below each re-entry and is refused at the floor, where php refuses at a depth of 5,000 (Maximum call stack size of 8339456 bytes); the engine never refuses a recursion php serves (§5.6, #3142). Ruled by Mitchell on #3158 (2026-10-21)."
+status = "accepted"
+since = "2026-10-21"
+
+[[divergence]]
+id = "witness:ddb0161408ea3b2e5b20363665b2ca5bc0be583a"
+kind = "witness"
+cause = "by-design"
+reason = "Without opcache php compiles into the request's heap: an include's op arrays and declarations are pass_two's blocks on mm, kept to the request's end, and an eval's strings, a class's runtime definition key among them, are interned into CG(interned_strings) for the rest of the request (zend_new_interned_string_request). This engine compiles as opcache does in every regime (design §5.2 revision 150, #2924; §6.3, #1483): a held file costs what opcache's lookup allocates, and a request-only unit's strings are plain strings its op arrays own. So under the recipe's php -n, memory_get_usage() across an include or an eval reads other than php's: less by the blocks and the interned strings php keeps, more where php's interning shares one string between two literals. Charging a file the cache serves as php's fresh compile would report memory nothing allocated. Ruled by Mitchell on #3224 (2026-10-22)."
+status = "accepted"
+since = "2026-10-22"
+covers = [
+    "witness:43d17d47175f4bb72f3015fa8f201bb39b7fe35c",
+    "witness:e5159e591602204fb71ccd8b76dbb639a0973d0f",
+    "witness:a4c604776b9b00576cefdfcef7e714795dbe93bc",
+]
+
+[[divergence]]
+id = "witness:db0e46b5045ca3f9d1724ce4cdf1e9d64e1b6f26"
+kind = "witness"
+cause = "by-design"
+reason = "Under opcache php sizes an op array's runtime cache after Zend/Optimizer's passes, and those before compact_literals (pass 11) drop or merge sites: the CFG pass drops the blocks it finds unreachable, so a call after a return takes no slot, and pass 4 turns an INIT_NS_FCALL_BY_NAME of a function the script declares into an INIT_FCALL of its lowered name, so \\N\\f() and f() share one. This engine runs no optimizer on an executed op array (#1220, design §6.1) and counts the compiler's sites as pass 11 alone would (#3211), so memory_get_usage() across a bind of such a closure reads 8 bytes more per site dropped or merged. Counting what a pass would drop without running it is a second model of that pass; an optimizer, if one is built, is a port held to php's dump and retires this row. Ruled by Mitchell on #3223 (2026-10-22)."
+status = "accepted"
+since = "2026-10-22"
+covers = [
+    "witness:8b115e6b873bca600a023fbf8961fda4b7984125",
+    "witness:503a9024400c61d407303e7d4d4a18412ef25bc5",
+]
+
+[[divergence]]
+id = "trace:return-landing-jump"
+kind = "trace"
+cause = "by-design"
+reason = "A jump that lands on an armed return landing counts toward php's return counter, which sits on the landing's handler (zend_jit_trace.c:3404-3418), and is no safepoint here, where a landing's word is read only where a RETURN, a trace or a recording leaves its frame there (ADR-0006). So under opcache.jit_hot_return a program whose first arrivals at a landing are jumps writes its 'start (return)' line later than php, or never. The engine site that would retire it is a jump handler resolved at publication for a target past a call, an amendment of ADR-0006's three sites. Ruled by Mitchell on #3202 (2026-10-21)."
+status = "accepted"
+since = "2026-10-21"
+
+[[divergence]]
+id = "trace:return-landing-resume"
+kind = "trace"
+cause = "by-design"
+reason = "A generator resumed past the YIELD or YIELD_FROM whose landing a trace armed, and a DO_FCALL or DO_FCALL_BY_NAME whose native callee returns to a landing php armed where a trace stopped at that call, count toward php's return counter, which sits on the landing's handler (zend_jit_trace_setup_ret_counter, zend_jit_trace.c:3417-3431 at 8.5.12), and are no safepoint here, where a landing's word is read only where a RETURN, a trace or a recording leaves its frame there (ADR-0006, jit-design.md §2.2). So under opcache.jit_hot_return a program whose first arrivals at a landing are such resumes or returns writes its 'start (return)' line later than php, or never. The cause is trace:return-landing-jump's; the sites that would retire it are the generator's resume and the call handler's return from a native, each an amendment of ADR-0006's three sites that a jump handler resolved at publication does not touch. Ruled by Mitchell on #3265 (2026-10-23)."
+status = "accepted"
+since = "2026-10-23"
+
+[[divergence]]
+id = "trace:loop-entry-uncounted"
+kind = "trace"
+cause = "by-design"
+reason = "php's loop counter is the header opline's handler (zend_jit_setup_hot_trace_counters, zend_jit_trace.c:8963-8977 at 8.5.9), so it counts every arrival at the header: the JMP zend_compile_while and zend_compile_for emit, the fall-through into a do-while body or FE_FETCH, and every re-entry from an outer loop or a call. Site::Loop counts only the back edge (ADR-0006), and revision 70 keeps no site at the header (#3178). A loop's heat here is therefore php's minus one per entry. Under opcache.jit_hot_loop h, a loop of M turns entered repeatedly roots after ceil(h/M) entries where php roots after ceil(h/(M+1)), and at h=1 a loop that never turns roots in php and not here. The header's own site would retire it. Ruled by Mitchell on #3326."
+status = "accepted"
+since = "2026-10-24"
+
+[[divergence]]
+id = "trace:hot-counter-pool"
+kind = "trace"
+cause = "by-design"
+reason = "php keeps its hot counters in a pool of 128 per process (zend_jit_hot_counters, Z/ext/opcache/jit/zend_jit.c:78), handed to sites round-robin (zend_jit_setup_hot_counters_ex and zend_jit_setup_hot_trace_counters, zend_jit_trace.c:8971-8973 at 8.5.9) and refilled at every request start where the tier is on (zend_jit_activate, zend_jit.c:3906-3912), so two sites can share one counter's heat and no heat outlives a request. This tier keeps one engine-level word per site, shared by every request for the engine's life (ADR-0006, jit-design.md §2.2), so two sites never share heat and a site's heat carries across requests. Under thresholds above one, a site roots here at a different arrival than php's, and its TRACE lines move with it. Only a reversal of ADR-0006's engine-level word would retire it. Ruled by Mitchell on #3364."
+status = "accepted"
+since = "2026-10-24"
+
+[[divergence]]
+id = "trace:hard-limit-ends-request"
+kind = "trace"
+cause = "by-design"
+reason = "php's zend_mm_hard_limit_error writes its line and _exit(137)s the process (Z/Zend/zend_alloc.c:519); a php-fpm or FastCGI worker dies with it, its master respawns one and the web server answers 502. This engine serves many requests in one process (third-engine-design.md §3.4), so it ends the request alone (Ending::Terminated): php's line, status 137, no shutdown function, destructor, output-buffer flush or RSHUTDOWN, and the process serves on. A host that is one request's process, the CLI and plain CGI, ends on the status as php's does (#3435). Site: php_engine::api::request::ending, Ending::Terminated at the hard limit."
+status = "accepted"
+since = "2026-10-25"
+
+[[divergence]]
+id = "trace:delayed-oom-forward-jump"
+kind = "trace"
+cause = "by-design"
+reason = "A delayed OOM is the interrupt and is raised at the same sites: php's interpreter raises it at the next ZEND_VM_SET_OPCODE, a taken forward jump included, where php's compiled tier tests only at loop headers and after internal calls (Z/ext/opcache/jit/zend_jit.c:1583, zend_jit_ir.c:17467, :10591), so straight-line code between the allocation and the next site runs here and not under php's interpreter, and the line named is where the engine stands (third-engine-design.md §5.8, revision 28; #614, #3451). Site: php_engine::handlers::jumped."
+status = "accepted"
+since = "2026-10-25"
+
+[[divergence]]
+id = "trace:runtime-interning"
+kind = "trace"
+cause = "by-design"
+reason = "A string a native interns at run time (zend_string_init_interned after startup) is made as opcache's accel_init_interned_string_for_php makes it (Z/ext/opcache/ZendAccelerator.c:609-626): the engine's string where its startup or a published unit holds the bytes, else a request string at zend_string_finit's size, freed with its holder (PhpString::existing_interned). Under the recipe opcache does not start in the CLI (ZendAccelerator.c:3226), so php's zend_string_init_interned_request (Z/Zend/zend_string.c:315-339) makes it at zend_string_init's size and keeps it in CG(interned_strings) to the request's end, found again at the next ask. memory_get_usage() over such a name differs, mysqlnd's column name made from a bound value or from the query's text among them (#3412), and agrees with the oracle under opcache.enable_cli=1; a witness that pins it names [regime.immutable-literals] (third-engine-design.md §5.2, §5.13; #3425)."
+status = "accepted"
+since = "2026-10-25"
+
+[[divergence]]
+id = "trace:get-object-vars-hook-value-thrown"
+kind = "trace"
+cause = "php-ub"
+reason = "Where a property hook throws after returning under get_object_vars(), php 8.5.12 runs the destructor of the hook's value after the script; this engine runs it before the catch (#1593, #3427). Site: php_engine natives::classes get_object_vars."
+status = "accepted"
+since = "2026-10-25"
+covers = ["trace:crates/php_engine/src/tests/leak_sensor.rs::get_object_vars_gives_up_a_hooks_value_that_returned_and_then_threw"]
+
+[[divergence]]
+id = "trace:sccp-folded-roots"
+kind = "trace"
+cause = "by-design"
+reason = "Under opcache php's SCCP pass evaluates calls whose arguments are constant (str_repeat, dirname, the @compile-time-eval functions; Z/Zend/Optimizer/sccp.c:761) and folds their results into immutable literals, so the operations over them offer no possible root. This engine runs no optimizer on an executed op array (#1220, design §6.1): it executes php's op arrays before zend_optimize_script, so gc_status()['roots'] counts what php's counts with opcache.optimization_level=0, and the collector's timing and later object handles follow from that. Folding at compile time would break compile-identity; skipping the root at runtime would be a second model of SCCP. Each covered id agrees with the oracle at optimization_level=0. A port of Zend/Optimizer retires this row. Ruled by Mitchell on #3334."
+status = "accepted"
+since = "2026-10-26"
+covers = ["witness:9b32b9257e9241bec51f2a1b48ca43f842306439"]
+
+[[divergence]]
+id = "trace:dump/optimizer-folds/mandelbrot"
+kind = "trace"
+cause = "by-design"
+reason = "php's tracing JIT records op arrays after Zend/Optimizer has run; this engine executes what its compiler emits, php's op arrays before zend_optimize_script (third-engine-design.md §6.1, #1220). Where the optimizer folds a jump chain (BOOL_NOT then JMPZ into one JMPNZ; JMPZ_EX, BOOL and JMPZ into one JMPZ) or threads a JMP, the engine's trace takes a direction exit php's does not, so its later exits and the side traces grown from them are numbered past php's, and a threaded exit lands on the unthreaded line: mandelbrot's TRACE 2 from exit 3 on, string_munge's TRACE 5 exit 22 and TRACE 6 exit 11. Program output is unchanged. The tier reads no optimizer fold that changes a guard (#3480); the row retires only with a port of Zend/Optimizer at publication, held to php's own dump."
+status = "fixed"
+since = "2026-10-26"
+covers = ["trace:dump/mandelbrot"]
+oracle = "sha256:384407aab04fcd209518e6c9119b6106723b4f9f28ad17d5ac42d1ea62c71168"
+engine = "sha256:0ca582146d5ed36621c448ca9b312b75f88845d5a5ffc7181e3b2e624f34de35"
+
+[[divergence]]
+id = "trace:dump/optimizer-folds/string_munge"
+kind = "trace"
+cause = "by-design"
+reason = "php's tracing JIT records op arrays after Zend/Optimizer has run; this engine executes what its compiler emits, php's op arrays before zend_optimize_script (third-engine-design.md §6.1, #1220). Where the optimizer folds a jump chain (BOOL_NOT then JMPZ into one JMPNZ; JMPZ_EX, BOOL and JMPZ into one JMPZ) or threads a JMP, the engine's trace takes a direction exit php's does not, so its later exits and the side traces grown from them are numbered past php's, and a threaded exit lands on the unthreaded line: mandelbrot's TRACE 2 from exit 3 on, string_munge's TRACE 5 exit 22 and TRACE 6 exit 11. Program output is unchanged. The tier reads no optimizer fold that changes a guard (#3480); the row retires only with a port of Zend/Optimizer at publication, held to php's own dump."
+status = "fixed"
+since = "2026-10-26"
+covers = ["trace:dump/string_munge"]
+oracle = "sha256:96fedd4ec79439223744c1e1b1d65e1e7414594f36e1a1ff34b17f19110bae8c"
+engine = "sha256:8e27a7263fb5f87eae1dbb10af7d6c019e7850cca0c456e27dd2ebe8c504be54"
+
+[[divergence]]
+id = "trace:jit-buffer-free-engine-code"
+kind = "trace"
+cause = "by-design"
+reason = "opcache_get_status()['jit']['buffer_free'] is php's dasm_end - *dasm_ptr (zend_jit_status, zend_jit.c:839-841 at 8.5.12), the buffer less the code written into it. php writes its stubs, and on AArch64 and Windows their handler table, before any trace (zend_jit_startup, zend_jit.c:3863-3884), so its buffer_free starts below buffer_size by the size its IR emits for the build and target. This tier writes no code at startup (jit-design.md §4.4: the arena is php's buffer's size, and code enters it only when a trace is published), so buffer_free is buffer_size until a trace is published, and after one it is buffer_size less the tier's own code, whose size is its code generator's, not IR's (jit-design.md §4.3). buffer_size is php's (#3150). A trace whose code fits the engine's room and not php's compiles here where php aborts with a JIT compilation error."
+status = "accepted"
+since = "2026-10-26"
+covers = ["witness:fa68a03fedcbe958ea953c9037ea1adca9dd2f4f"]
+
+[[divergence]]
+id = "trace:tier-standing-serving-stays"
+kind = "trace"
+cause = "by-design"
+reason = "Under Bound::Runtime, php counts a published op array's activations and back-edges in every execute_ex frame from the switch on. Here the request's loop is handed to the tier at the serving that takes the check, and a serving already standing below it, suspended in a native or engine call (the caller of the callback or autoloader that included the file), serves on in Nop's loop to its end: its calls into the unit are not counted for this request, and opcache.jit_debug and opcache_get_status() report fewer traces there than php's. It reaches only requests in flight at the engine's first counting publication; every later request starts in the tier's loop (jit-design.md §4, #3301, #3510). Program output is unchanged. Site: php_engine::tier::interrupted_at."
+status = "accepted"
+since = "2026-10-26"
+
+[[divergence]]
+id = "phpt:ffi-gh9090-php-printf"
+kind = "phpt"
+cause = "by-design"
+reason = "The three functions php's zend_test exports for this test print through php_printf, which reaches the request through php's per-thread globals. This engine has no Zend C ABI (§7.1, as ruled on #1613), and C that FFI calls with no user data has no request; ADR-0014's per-thread lend carries the heap for one call and nothing else. The functions and their five pointer variables are not exported."
+status = "accepted"
+since = "2026-10-26"
+covers = ["phpt:php-src/ext/ffi/tests/bug_gh9090.phpt"]
+
+[[divergence]]
+id = "trace:ffi-callback-thread-stack-limit"
+kind = "trace"
+cause = "php-ub"
+reason = "A callback C calls from a thread of its own: on Linux php refuses every such callback with the stack-limit Error before the callable runs, and \"Throwing from FFI callbacks is not allowed\" follows; on macOS php holds it to no limit. This engine holds the callback to the limit of the thread it runs on, so it is served on both and refused at that thread's own depth. Site: php_engine's lend over StackLimit (#1640, #2401). Ruled by Mitchell on #3697 (2026-10-31)."
+status = "accepted"
+since = "2026-10-31"
+covers = ["trace:ext/ffi/tests/threads.rs::a_callback_from_a_thread_below_the_request_s_stack_is_served_at_that_thread_s_limit", "trace:ext/ffi/tests/threads.rs::a_deep_recursion_in_a_callback_on_a_library_s_thread_is_refused_at_that_thread_s_depth"]
+
+[[divergence]]
+id = "trace:curl-push-denied-handle-kept"
+kind = "trace"
+cause = "php-ub"
+retires = "pin"
+reason = "php's _php_server_push_callback (Z/ext/curl/multi.c:420-444 at 8.5.12) sets ch->cp = NULL on CURL_PUSH_DENY and never releases the pushed CurlHandle's zval, so the handle, the parent's handlers _php_setup_easy_copy_handlers copied into it, and its share of the parent's to_free live to the request's shutdown, where curl_free_obj returns at !ch->cp (Z/ext/curl/interface.c:2819) without giving back the (*ch->clone)++ it took: a later CURLOPT_POSTFIELDS array on the parent keeps the old MIME trees beside the new one, the parent's free frees none of them, a CURLFile's stream closes after the script's last line, and a handler's object is destroyed there too. This engine gives the denied handle up at the deny, its share and handlers with it, so the parent's next set and its free let go of the trees as with no push, since an owner left to the request's end is the leak sensor's failure, and a leak in php is not a behaviour to copy (#1593). Measured against a local HTTP/2 push on #3796; no witness can serve a push. Site: ext/curl's multi push (ext/curl/src/multi.rs). php-src's fix is php/php-src#23850, open and unmerged on 2026-11-02; retire at the pin that carries it (#3910)."
+status = "accepted"
+since = "2026-11-01"
+
+[[divergence]]
+id = "trace:ext/dom/tests/capture.rs::each_node_counts_its_own_document_after_an_autoloader_constructs_the_evaluator_anew"
+kind = "trace"
+cause = "php-ub"
+reason = "After an autoloader constructs the evaluator anew while a node set's objects are made, the class of a node's parent prints `MyEl` in the engine and `DOMElement` under php 8.5.12, where php finishes the script. The engine makes each node's object counting its own node's document. Site: ext/dom's `instantiate`, reached from xpath.rs's `node_objects` and `made_over` (ext/dom/src/lib.rs)."
+status = "accepted"
+since = "2026-11-01"
+
+[[divergence]]
+id = "trace:curl-multi-exec-in-a-collection"
+kind = "trace"
+cause = "php-ub"
+reason = "php does not finish the script of the witness this row covers; the engine passes over a CurlHandle whose free is under way, and the perform is refused from inside the callback."
+status = "accepted"
+since = "2026-11-02"
+covers = ["witness:db47c5159e5088ae1717f607dbb7b8b6af3c4171"]
+
+[[divergence]]
+id = "trace:spl-getchildren-abstract-child"
+kind = "trace"
+cause = "php-ub"
+retires = "pin"
+reason = "RecursiveArrayIterator::getChildren() where the child's class is abstract: the oracle does not finish the script; the engine throws the Error \"Cannot instantiate abstract class RI\" and calls no constructor. Ruled by Mitchell on #3872 (2026-11-01). Site: ext/spl's RecursiveArrayIterator::getChildren, reached through ArrayObject::getIterator."
+status = "accepted"
+since = "2026-11-02"
+covers = ["witness:eeb08bd25de90228b0f1a3b464c78ec746905a51", "trace:ext/spl/tests/capture.rs::an_abstract_child_class_is_refused_with_the_error_and_the_request_goes_on"]
+
+[[divergence]]
+id = "trace:curl-handle-kept-past-collection"
+kind = "trace"
+cause = "php-ub"
+reason = "A CurlHandle its own debug callable keeps past the collection that destroys it: what php prints from it next is not held (bool(false) from curl_getinfo under php -n); here the object is destroyed (its id free, its free counted in memory_get_usage(), its payload gone) and a native served on it ends the request with the InternalError fatal of a method served on an object without its payload, as on every destroyed object (#2230). Ruled by Mitchell on #3877 (2026-11-01). Site: ext/curl's CurlHandle free_obj (#3857)."
+status = "accepted"
+since = "2026-11-02"
+covers = ["witness:dc24adbc1a1bad243a581a521243348be43da2f1", "trace:ext/curl/tests/capture.rs::a_curl_object_its_debug_callable_keeps_past_a_collection_is_destroyed"]
+
+[[divergence]]
+id = "trace:owner-across-a-diagnostic"
+kind = "trace"
+reason = "Across a diagnostic where php holds nothing, the engine holds an owner so a handler cannot free what it is using. A handler then reads a refcount one higher, and its in-place write separates: on a nested or property root the statement's own write is lost, and a boolean step writes into the held table. A destructor the step would have run in the handler runs after the step. Known cure: a hold that takes no owner (#4173). Sites: php_engine's ops::array_held under read_offset, handlers::entry_past, handlers::StepHold and step_hold, exec::frameless_operand and ops::string_offset. Ruled by Mitchell on #4140, #4155 and #4158 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+covers = ["trace:crates/php_engine/src/tests/given_up.rs::a_throw_over_a_compound_step_is_the_previous_of_the_destructor_it_serves", "trace:crates/php_engine/src/tests/given_up.rs::a_cycle_a_collection_read_past_under_a_step_stays_a_possible_root", "trace:crates/php_engine/src/tests/given_up.rs::a_collection_under_a_step_that_left_the_count_as_it_stood_keeps_the_cycle_a_possible_root"]
+
+[[divergence]]
+id = "trace:property-compound-step-over-a-cv"
+kind = "trace"
+cause = "php-ub"
+reason = "php 8.5.12 does not finish the script of the compound-step test this row covers; the engine writes nothing there. The defined differences of the hold are trace:owner-across-a-diagnostic's. Site: php_engine's handlers::StepHold, taken by assign_obj_op. Ruled by Mitchell on #4158 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+covers = ["trace:crates/php_engine/src/tests/given_up.rs::an_object_a_handler_gave_up_goes_past_its_compound_step"]
+
+[[divergence]]
+id = "trace:property-name-under-a-handler"
+kind = "trace"
+cause = "php-ub"
+reason = "In a compound assignment to a property named by a string, over `__get` and `__set`, `debug_zval_dump` of the name in a handler reads refcount(3) here where php reads refcount(2), and `memory_get_usage` reads higher here after a handler replaces the name. Site: php_engine's exec::Member. Ruled by Mitchell on #4158 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+
+[[divergence]]
+id = "trace:frameless-reference-string-operand"
+kind = "trace"
+cause = "php-ub"
+reason = "A frameless native over a by-reference string that an argument's `__toString` writes over: php's answer is not held; the engine answers from the string the call was given. Its sibling with nothing replaced is trace:owner-across-a-diagnostic's. Site: php_engine's exec::frameless_operand, and php_jit's frameless_operand in compiled code. Ruled by Mitchell on #4155 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+
+[[divergence]]
+id = "trace:frameless-backtrace-row-in-an-operand-destructor"
+kind = "trace"
+cause = "php-ub"
+reason = "A frameless call's backtrace row, taken in a destructor of one of its operands: php prints a row that holds the operand being destroyed and the operands after it, or does not finish the script; the engine shows only an object in its own destructor, so those calls read no row and the operands after are freed at once. Site: php_engine's handlers::free_operands over Request::destruct_in_place, and tier::crossing::destruct in compiled code. Ruled by Mitchell on #4155 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+
+[[divergence]]
+id = "trace:property-step-under-a-handler"
+kind = "trace"
+cause = "php-ub"
+reason = "On the property-step test this row covers php's output is not held; the engine lands the step in the object it held. Site: php_engine's handlers::stepped_obj under StepHold. Ruled by Mitchell on #4140 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+covers = ["trace:crates/php_engine/src/tests/given_up.rs::a_property_step_stands_past_the_object_a_handler_gave_up"]
+
+[[divergence]]
+id = "trace:reference-assign-under-a-handler"
+kind = "trace"
+cause = "php-ub"
+reason = "On the two returned-value tests of given_up.rs php's output is not held; the engine lands the value in the table it held or found again. Ruled by Mitchell on #4140 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+covers = ["trace:crates/php_engine/src/tests/given_up.rs::a_returned_value_lands_in_the_table_the_notice_grew", "trace:crates/php_engine/src/tests/given_up.rs::a_returned_value_goes_with_the_object_the_notice_gave_up"]
+
+[[divergence]]
+id = "trace:typed-reference-bind-under-a-conversion"
+kind = "trace"
+cause = "php-ub"
+reason = "php does not finish the script on the two bind tests of given_up.rs; the engine binds. Site: php_engine's handlers::bind_property_ref and bind_static_ref. Ruled by Mitchell on #4140 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+covers = ["trace:crates/php_engine/src/tests/given_up.rs::a_cell_whose_names_a_conversion_gave_up_is_bound", "trace:crates/php_engine/src/tests/given_up.rs::an_object_a_conversion_gave_up_stands_past_the_bind"]
+
+[[divergence]]
+id = "trace:string-float-offset-test-over-no-string"
+kind = "trace"
+cause = "php-ub"
+reason = "php does not finish the script on the float-offset test of given_up.rs; the engine answers as for no string. Site: php_engine's ops::isset_dim. Ruled by Mitchell on #4140 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+covers = ["trace:crates/php_engine/src/tests/given_up.rs::a_string_a_float_offset_gave_up_answers_as_no_string"]
+
+[[divergence]]
+id = "trace:array-test-undefined-key-under-a-handler"
+kind = "trace"
+cause = "php-ub"
+reason = "php 8.5.12 does not return on the undefined-key test of given_up.rs; the engine holds the table and finds nothing. Site: php_engine's ops::isset_dim through read_offset and array_held. Ruled by Mitchell on #4140 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+covers = ["trace:crates/php_engine/src/tests/given_up.rs::a_test_past_the_table_a_handler_gave_up_finds_nothing"]
+
+[[divergence]]
+id = "trace:array-unset-under-a-handler"
+kind = "trace"
+cause = "php-ub"
+reason = "php 8.5.12 does not print the `1` the engine prints on either unset test of given_up.rs; the engine holds the table and deletes nothing. Site: php_engine's ops::unset_dim under handlers::unset_dim. Ruled by Mitchell on #4280 (2026-11-08)."
+status = "accepted"
+since = "2026-11-10"
+covers = ["trace:crates/php_engine/src/tests/given_up.rs::an_unset_past_the_table_a_handler_gave_up_deletes_nothing", "trace:crates/php_engine/src/tests/given_up.rs::an_unset_under_a_table_a_handler_gave_up_reads_no_entry_of_it"]
+
+[[divergence]]
+id = "trace:array-test-resource-key-under-a-handler"
+kind = "trace"
+cause = "php-ub"
+reason = "isset and empty over a resource key, where trace:array-test-undefined-key-under-a-handler has an undefined one: php's answer is not held; the engine holds the table and answers from it. Ruled by Mitchell on #4280 (2026-11-08, words 2026-11-10)."
+status = "accepted"
+since = "2026-11-10"
+
+[[divergence]]
+id = "trace:array-write-under-a-handler"
+kind = "trace"
+cause = "php-ub"
+reason = "On the three write tests of given_up.rs php loses the write or does not finish the script; here a table the handler gave up takes no write, a grown one takes it in its own entry, and a table the handler put in its place takes it where it holds the key. Site: php_engine's handlers::entry_past. Ruled by Mitchell on #4140 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+covers = ["trace:crates/php_engine/src/tests/given_up.rs::a_write_goes_with_the_table_a_handler_gave_up", "trace:crates/php_engine/src/tests/given_up.rs::a_write_finds_its_entry_past_a_destructor_of_the_table_it_held", "trace:crates/php_engine/src/tests/given_up.rs::a_write_finds_no_entry_by_a_key_a_handler_gave_up"]
+
+[[divergence]]
+id = "trace:string-offset-freed-string"
+kind = "trace"
+cause = "php-ub"
+reason = "`$s[\"1x\"]` under a handler that frees $s: php reads the block it freed; the engine answers the byte read before the warning. php's leading-numeric arm takes no owner of the string (Zend/zend_execute.c:3080-3094 at 8.5.12); its sibling with nothing freed is trace:owner-across-a-diagnostic's. Site: php_engine's ops::string_offset. Ruled by Mitchell on #4140 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+
+[[divergence]]
+id = "trace:kernel-operands-as-they-stood"
+kind = "trace"
+cause = "by-design"
+reason = "php reads each operand through its zval, so a handler that a conversion reaches and that writes a variable operand changes what php's operation sees, the type its TypeError names and whether it warns: `$GLOBALS[\"v\"] = 0` from the handler of `\"1x\" + $v` reads int(1) in php and int(78) here, and a handler that unsets $v makes php's `+` the TypeError `Unsupported operand types: string + null` where the engine reads 78. Concat is of this class too: `$a = [1]; $b = str_repeat(\"b\", 3); $a = $a . $b;` under a handler that unsets both reads `Array` in php and `Arraybbb` here. A kernel takes its operands as copied views and does not re-read their places, so one kernel serves the dispatch loop, `api`'s natives and the tier alike (third-engine-design.md §5.8); re-reading the place takes a signature change on every kernel or a hidden channel on the request. Since 9cf7e47cf, `operands` and `concat_operands` hold the right operand across the left's conversion, so a handler reads its refcount one higher than php's, and the destructor of a right operand the handler gives up runs once the operation is done, where php's runs in the handler. Site: php_engine's ops::operands and ops::concat_operands. Ruled by Mitchell on #4158 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+covers = ["trace:crates/php_engine/src/ops/mod.rs::tests::a_right_operand_reads_one_more_owner_in_the_handler_and_is_destroyed_past_the_operation", "trace:crates/php_engine/src/tests/given_up.rs::a_right_operand_a_handler_gave_up_is_read_past_the_left"]
+
+[[divergence]]
+id = "trace:posix-spawnp-relative-path-under-cwd"
+kind = "trace"
+cause = "oracle-build"
+retires = "platform"
+reason = "Darwin's posix_spawnp reports failure after starting a child found through a relative PATH entry under a `$cwd`; the engine returns the process. With `PATH=:/nowhere` and the parent in `/`, `proc_open(['x'], [1 => ['pipe', 'w']], $pipes, $dir)` for an executable `x` in `$dir` warns `posix_spawn() failed: No such file or directory` and returns false on the pinned oracle, the child already running; php 8.5.12 on Linux (the official php:8.5.12-cli image, glibc 2.41), whose proc_open takes the same posix_spawnp arm (Z/ext/standard/proc_open.c:1420), starts it and returns the process, as the engine does (#4177). The difference exists because on_path searches itself, so the row never retires on a Darwin pin; copying Darwin would return false over a live child. Site: ext/standard's proc_open, on_path (ext/standard/src/proc_open.rs). Ruled by Mitchell on #4140 (2026-11-05)."
+status = "accepted"
+since = "2026-11-07"
+
+[[divergence]]
+id = "trace:ext/dom/tests/capture.rs::a_registered_class_whose_default_cannot_be_evaluated_throws"
+kind = "trace"
+cause = "php-ub"
+retires = "pin"
+reason = "Where the class registerNodeClass() maps a node to has a default property that cannot be evaluated, php does not finish the script; the engine throws the Error or TypeError the evaluation raised and goes on. Ruled by Mitchell on #3912 (2026-11-02). Site: ext/dom's instantiate (ext/dom/src/lib.rs)."
+status = "accepted"
+since = "2026-11-08"
+
+[[divergence]]
+id = "trace:ext/xsl/tests/capture.rs::a_return_class_that_cannot_be_instantiated_throws"
+kind = "trace"
+cause = "php-ub"
+retires = "pin"
+reason = "XSLTProcessor::transformToDoc() with a $returnClass that cannot be instantiated (an abstract class, Dom\\Document among them, or one whose default property cannot be evaluated): php does not finish the script; the engine throws the Error the instantiation raised and goes on. Ruled by Mitchell on #3912 (2026-11-02). Site: ext/xsl's transformToDoc (ext/xsl/src/lib.rs)."
+status = "accepted"
+since = "2026-11-08"
+
+[[divergence]]
+id = "trace:ext/xsl/tests/capture.rs::a_non_document_return_class_reads_empty"
+kind = "trace"
+cause = "php-ub"
+retires = "pin"
+reason = "XSLTProcessor::transformToDoc() with a $returnClass that is a DOM node class other than a document's: php accepts it, does not finish the script on a read of the result's tagName, name, target, a modern prefix or notations, and reads the document's version as a publicId or systemId; the engine accepts the class as php does, prints php's bytes up to that read, then reads an empty string, NULL or an empty map. Ruled by Mitchell on #3918 (2026-11-02). Site: ext/xsl's transformToDoc (ext/xsl/src/lib.rs)."
+status = "accepted"
+since = "2026-11-08"
+
+[[divergence]]
+id = "trace:curl-multi-get-handles-lists-collected-handle"
+kind = "trace"
+cause = "php-ub"
+reason = "curl_multi_get_handles() from a sibling's debug callable during a collection lists a CurlHandle the collection has destroyed, here as under php; curl_getinfo() on it prints bool(false) under php, and here ends the request with the InternalError fatal of a method served on an object without its payload, as trace:curl-handle-kept-past-collection does. Ruled by Mitchell on #3926 (2026-11-02). Site: ext/curl's curl_multi_get_handles (ext/curl/src/multi.rs)."
+status = "accepted"
+since = "2026-11-08"
+covers = ["trace:ext/curl/tests/capture.rs::a_curl_object_the_collection_destroyed_listed_to_a_sibling_ends_the_request"]
+
+[[divergence]]
+id = "trace:ext/dom/tests/capture.rs::c14nfile_puts_a_modern_tree_back"
+kind = "trace"
+cause = "php-ub"
+retires = "pin"
+reason = "After Dom\\XMLDocument::C14NFile() php 8.5.12 leaves the document's namespace declarations out of their elements' lists and a built element in no namespace (php-src GH-25434, fixed after 8.5.12); the engine puts the tree back before it writes the file, so it reads int(3) where php reads int(1), and ownerElement reads NULL. Ruled by Mitchell on #3959 (2026-11-02); retire at the pin that carries GH-25434's fix. Sites: ext/dom's canonicalization and NsLinks (ext/dom/src/node.rs), ext/libxml's Save::c14n_file."
+status = "accepted"
+since = "2026-11-08"
+covers = ["trace:ext/dom/tests/capture.rs::a_c14nfile_wrapper_sees_the_restored_tree", "trace:ext/dom/tests/capture.rs::a_c14nfile_wrapper_frees_the_root_in_stream_write_and_throws", "trace:ext/dom/tests/capture.rs::a_c14nfile_wrapper_frees_the_root_in_stream_write_and_writes_nothing"]
+
+[[divergence]]
+id = "trace:intl-convert-second-pass-one-byte-longer"
+kind = "trace"
+cause = "php-ub"
+reason = "UConverter::convert() with a fromUCallback that answers one byte more on its second pass than on its first: the engine returns the bytes php returns, and memory_get_usage() can read a bin larger here (40 against 32). Ruled by Mitchell on #3953 (2026-11-02). Site: ext/intl's encoded (ext/intl/src/converter.rs)."
+status = "accepted"
+since = "2026-11-08"
+covers = ["trace:ext/intl/tests/capture.rs::a_callback_one_byte_past_the_preflight_grows_the_string"]
+
+[[divergence]]
+id = "trace:fpm-request-ini-ends-with-request"
+kind = "trace"
+cause = "by-design"
+status = "accepted"
+since = "2026-11-11"
+reason = "A request that carries PHP_VALUE or PHP_ADMIN_VALUE sets the named ini values for that request alone: on one child, after request A sends precision=7 under either parameter, requests B and C that send neither read the pool's precision here and 7 under the pinned php-fpm, which keeps a carried value on the child (php bug #53611). The engine ends a carried value with its request (third-engine-design.md §4.8; #4353). Ruled by Mitchell on #4445 (2026-11-11). Held by a sapi/fpm test. Site: php_sapi_fpm::worker."
