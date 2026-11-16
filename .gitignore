@@ -8,7 +8,12 @@ target/
 # worktree laid here stands, and goes once the last is retired.
 /.claude/worktrees/
 
-# Where the function-hook declarations were written before #62; they are tracked at harness-plugins/types now, and a stale copy here does no harm.
+# The function-hook declarations, Claude Code's file and not this project's:
+# pre-commit writes them here on the committer's machine whenever a path
+# under harness-plugins/ is staged, and no commit carries them
+# (harness-design.md §4.4).
+/harness-plugins/types/
+# Where they were written at first; a stale copy here does no harm.
 .claude/types/
 
 # macOS Finder metadata.

@@ -43,18 +43,19 @@
 # read; a region refusal ends before clippy and test (#3611). Once the
 # regions pass, clippy and test both run and either can refuse the commit.
 # When a path under harness-plugins/ is staged, the function-hook declarations are rewritten
-# first (#62): harness-plugins/types is a tracked generated file, written
-# by the committer's own Claude Code as `declarations` below says, and
-# staged; `tsc` then holds every plugin's modules and tests to it (#3831),
+# first (#62): harness-plugins/types is a generated file, written by the
+# committer's own Claude Code as `declarations` below says. It is Claude
+# Code's and not this project's, so the repository does not carry it:
+# .gitignore names it, nothing of it is staged here, and a commit that
+# stages it is refused with nothing else of this step run. `tsc` then
+# holds every plugin's modules and tests to it (#3831),
 # and for each plugin under harness-plugins/ (the harness and the desk,
 # #3490) `plugin validate --strict` reads the manifest, hooks.json and the
 # module and `plugin test` runs its tests (#2247).
 # Without `claude` on PATH that step is skipped by name and the commit
-# goes on: CI holds the module to the committed file. A `claude` that is
-# not logged in, or whose run extracts no declarations, is named the same
-# way, and `tsc`, validate and test still run against the committed file;
-# only a commit that stages harness-plugins/types itself is refused then,
-# since no Claude Code here wrote what it carries (#1736). Installed per
+# goes on. A `claude` that is not logged in, or whose run extracts no
+# declarations, is named the same way, and `tsc`, validate and test still
+# run against the file that stands there (#1736). Installed per
 # clone by the SessionStart hook, or by hand: `git config core.hooksPath
 # scripts/hooks`.
 set -u
@@ -229,24 +230,21 @@ declarations() {
     rm -rf "$outside"
     return "$exit"
 }
-# Declarations this commit could not have rewritten: said by name, and a
-# refusal only when the commit stages harness-plugins/types itself.
+# Declarations this commit could not have rewritten, said by name: the
+# commit goes on, and `tsc` holds the modules to the file that stands
+# there.
 unwritten() {
-    if git diff --cached --quiet -- harness-plugins/types; then
-        echo "pre-commit: $1; harness-plugins/types was not rewritten, and tsc holds the module to the committed file" >&2
-    else
-        echo "pre-commit: $1; the staged harness-plugins/types was written by no Claude Code here, so the commit is refused" >&2
-        status=1
-    fi
+    echo "pre-commit: $1; harness-plugins/types was not rewritten, and tsc holds the modules to the file that stands there" >&2
 }
 if ! git diff --cached --quiet -- harness-plugins; then
-    if command -v claude >/dev/null 2>&1; then
+    if ! git diff --cached --quiet -- harness-plugins/types; then
+        echo "pre-commit: harness-plugins/types is staged; the declarations are Claude Code's file and the repository does not carry them, so the commit is refused" >&2
+        status=1
+    elif command -v claude >/dev/null 2>&1; then
         if ! claude auth status >/dev/null 2>&1; then
             # shellcheck disable=SC2016 # the backticks are the message's
             unwritten 'claude is not logged in (`claude auth status`)'
-        elif declarations; then
-            stage harness-plugins/types
-        else
+        elif ! declarations; then
             unwritten 'claude wrote no declarations'
         fi
         step buffered npx -y -p typescript@5.9.3 tsc -p harness-plugins

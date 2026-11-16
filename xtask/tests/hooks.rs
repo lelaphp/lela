@@ -508,7 +508,7 @@ fn fields(call: &str) -> std::collections::BTreeMap<&str, &str> {
 
 /// The declarations step: with a path under
 /// `harness-plugins/` staged, the committer's own Claude Code rewrites the
-/// tracked declaration file. `claude auth status` first, then one `-p`
+/// declaration file. `claude auth status` first, then one `-p`
 /// that invokes the plugin-authoring skill, whose files the build extracts
 /// under `CLAUDE_CODE_TMPDIR`, and its `types/claude-code.d.ts` is what is
 /// copied in. It runs from a directory outside the clone under the
@@ -516,17 +516,26 @@ fn fields(call: &str) -> std::collections::BTreeMap<&str, &str> {
 /// loads none of their settings sources, MCP servers or tools, nor the
 /// hooks a launcher would add, with the variable that gates function
 /// hooks; then `tsc` through the pinned `npx`, then `plugin validate
-/// --strict`, then `plugin test`; what was written is re-staged,
-/// so the commit, by pathspec, carries the file whose header names the
-/// version.
+/// --strict`, then `plugin test`. What was written stands in the clone,
+/// its header naming the version, and the commit carries nothing of it:
+/// the file is Claude Code's, and the repository's own ignore rules name
+/// its directory.
 #[test]
 fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
     let scratch = scratch("declarations", &Computed::Rendered);
+    // The clone ignores what the repository does: its own `.gitignore`,
+    // laid where git reads it without a commit.
+    let rules = fs::read_to_string(workspace().join(".gitignore")).unwrap();
+    write(&scratch.root, ".git/info/exclude", &rules);
     let before = scratch.head();
     let (code, out) = scratch.stage_plugin_and_commit();
     assert_eq!(code, 0, "{out}");
     assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
     assert!(!out.contains("pre-commit: claude"), "{out}");
+    assert!(
+        !out.contains("ignored by one of your"),
+        "the hook stages nothing of what it wrote: {out}"
+    );
 
     let root = scratch.root.display().to_string();
     let calls = scratch.calls("plugin");
@@ -591,24 +600,18 @@ fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
     files.sort_unstable();
     assert_eq!(
         files,
-        [
-            "AGENTS.md",
-            "harness-plugins/harness/hooks/harness.ts",
-            "harness-plugins/types/claude-code.d.ts"
-        ]
+        ["AGENTS.md", "harness-plugins/harness/hooks/harness.ts"],
+        "the commit carries nothing of what claude wrote"
     );
-    let header = scratch.git(
-        &["show", "HEAD:harness-plugins/types/claude-code.d.ts"],
-        false,
-    );
+    let written = scratch.root.join("harness-plugins/types/claude-code.d.ts");
+    let header = fs::read_to_string(&written).unwrap();
     assert_eq!(header, "// Written by Claude Code 9.9.9.\n");
     let status = scratch.git(&["status", "--porcelain"], false);
-    assert_eq!(status, "", "what claude wrote is in the commit");
+    assert_eq!(status, "", "what claude wrote is ignored");
 }
 
 /// Without `claude` on `PATH` the declarations step is skipped by name,
-/// nothing else of it runs, and the commit is allowed: CI holds the
-/// module to the committed file.
+/// nothing else of it runs, and the commit is allowed.
 #[test]
 fn pre_commit_without_claude_skips_the_declarations_by_name_and_allows_the_commit() {
     let mut scratch = scratch("no-claude", &Computed::Rendered);
@@ -630,7 +633,7 @@ fn pre_commit_without_claude_skips_the_declarations_by_name_and_allows_the_commi
 /// A `claude` that is not logged in writes no declarations, and says so
 /// by name: no `-p` runs, the commit stages no declaration, so it
 /// is allowed, and `tsc`, `plugin validate` and `plugin test` still hold
-/// the module to the committed file.
+/// the module to the file that stands there.
 #[test]
 fn pre_commit_not_logged_in_skips_the_declarations_by_name_and_allows_the_commit() {
     let scratch = scratch("logged-out", &Computed::Rendered);
@@ -672,31 +675,34 @@ fn pre_commit_not_logged_in_skips_the_declarations_by_name_and_allows_the_commit
     assert!(!committed.contains("harness-plugins/types"), "{committed}");
 }
 
-/// A commit that stages a declaration file of its own is refused while
-/// `claude` is not logged in: no Claude Code here wrote what it carries,
-/// and the hook names why.
+/// A commit that stages a declaration file is refused, whoever wrote the
+/// file and whether or not `claude` is logged in: it is Claude Code's, the
+/// repository does not carry it, and the hook names why. Nothing else of
+/// the step runs, so no `claude` is called for a commit that cannot land.
 #[test]
-fn pre_commit_not_logged_in_refuses_a_commit_that_stages_the_declarations() {
-    let scratch = scratch("logged-out-types", &Computed::Rendered);
-    scratch.log_out();
-    let before = scratch.head();
-    let (code, out) = scratch.stage_declarations_and_commit();
-    assert_eq!(code, 1, "{out}");
-    assert_eq!(scratch.head(), before, "the commit was refused: {out}");
-    assert!(
-        out.contains("pre-commit: claude is not logged in (`claude auth status`)"),
-        "{out}"
-    );
-    assert!(
-        out.contains("the staged harness-plugins/types was written by no Claude Code here"),
-        "{out}"
-    );
+fn pre_commit_refuses_a_commit_that_stages_the_declarations() {
+    for (name, logged_in) in [("staged-types", true), ("staged-types-logged-out", false)] {
+        let scratch = scratch(name, &Computed::Rendered);
+        if !logged_in {
+            scratch.log_out();
+        }
+        let before = scratch.head();
+        let (code, out) = scratch.stage_declarations_and_commit();
+        assert_eq!(code, 1, "{out}");
+        assert_eq!(scratch.head(), before, "the commit was refused: {out}");
+        assert!(
+            out.contains("pre-commit: harness-plugins/types is staged"),
+            "{out}"
+        );
+        assert!(out.contains("the repository does not carry them"), "{out}");
+        assert_eq!(scratch.calls("plugin"), Vec::<String>::new(), "{out}");
+    }
 }
 
 /// A build whose `-p` exits 0 and extracts no declarations, as one without
 /// the plugin-authoring skill's files would, is named as such, and the
-/// commit that stages no declaration goes on, held by `tsc` to the
-/// committed file: an exit alone is never read as the file written.
+/// commit that stages no declaration goes on, held by `tsc` to the file
+/// that stands there: an exit alone is never read as the file written.
 #[test]
 fn pre_commit_names_a_build_that_writes_no_declarations_and_allows_the_commit() {
     let scratch = scratch("no-declarations", &Computed::Rendered);
