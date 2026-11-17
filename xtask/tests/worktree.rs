@@ -960,7 +960,9 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
 /// here a run of `ext/pcre` under the tree the skip named, and a stand-in
 /// `ssh` answers as the server's `rrsync` does, running rsync's far side in
 /// the stash; the line run as it is printed lays it in the checkout, and
-/// the comparison finds it there.
+/// the comparison finds it there. The stand-in reads past the options
+/// rsync hands `ssh` to the host: macOS's rsync names it `<user>@<host>`,
+/// and GNU rsync `-l <user> <host>`.
 #[test]
 fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
     if Promise::Tree
@@ -1011,7 +1013,7 @@ fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
         &bin,
         "ssh",
         &format!(
-            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done\nshift\ncd '{}' && exec sh -c \"$*\"\n",
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -l) shift 2 ;; -*) shift ;; *) break ;; esac; done\nshift\ncd '{}' && exec sh -c \"$*\"\n",
             stash.display()
         ),
     );
