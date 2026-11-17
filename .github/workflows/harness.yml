@@ -80,6 +80,20 @@ jobs:
         with:
           clean: false
           fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      # A hosted runner's image comes nearly full: GitHub's had 14 GiB free
+      # in the trial of 2026-11-17, and this job's target/ grows to 20, so
+      # the tests alone stopped there at 1 GiB. Where under 40 are free on
+      # such an image, the toolchains it carries and no step here uses are
+      # taken away, which left 49. The image is known by its tool cache, so
+      # a machine of our own keeps what was installed on it.
+      - name: room for target/ on a hosted image
+        run: |
+          free=$(df --output=avail -BG "$GITHUB_WORKSPACE" | tail -n 1 | tr -dc 0-9)
+          echo "$free GiB free"
+          if [ "$free" -lt 40 ] && [ -d /opt/hostedtoolcache ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell /usr/lib/jvm /usr/local/share/chromium /opt/microsoft /opt/google /usr/lib/google-cloud-sdk /opt/az
+            df -h "$GITHUB_WORKSPACE"
+          fi
       - uses: ./.github/actions/workspace
       # The platform libraries the workspace links, from the one list the
       # action reads (design §7.2; #1300).
