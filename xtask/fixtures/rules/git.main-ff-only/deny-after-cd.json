@@ -1,1 +1,1 @@
-{"tool_name":"Bash","tool_input":{"command":"cd ~/Projects/dax-php && git merge --no-ff --no-commit t1234","description":"Merge a branch into main after a cd"}}
+{"tool_name":"Bash","tool_input":{"command":"cd . && git merge --no-ff --no-commit t1234","description":"Merge a branch into main after a cd that stays in its checkout"}}
