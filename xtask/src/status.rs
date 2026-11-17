@@ -243,7 +243,7 @@ pub fn render(
         Section::Modules => return modules(manifest, &readings, format),
         Section::Git => return git_section(root, format),
         Section::Oracle => return oracle_section(manifest.pin()?, format),
-        Section::Corpus => return corpus_section(manifest.pin()?, format),
+        Section::Corpus => return corpus_section(root, manifest.pin()?, format),
         Section::Invocation => return invocation::render(root, format),
         Section::Conditions => return conditions::render(root, format),
         Section::Workloads => return workloads::render(root, format),
@@ -1592,20 +1592,28 @@ fn oracle_row(out: &mut String, fact: &str, variable: &str, value: &str, state: 
 }
 
 /// The `corpus` section: what CI checks out of the pinned php-src,
-/// from the pin and [`phpt::ROOTS`] alone. The tag and the commit to clone
-/// at, the `.phpt` files the pin counts in the whole tree, which a
-/// checkout holding fewer has narrowed, git's sparse patterns for the
-/// roots, and the cache key, the commit and a digest of the patterns, so a
-/// change to the roots never restores a checkout made by the old ones.
+/// from the pin, [`phpt::ROOTS`] and the table of ports at `root`. The tag
+/// and the commit to clone at, the `.phpt` files the pin counts in the
+/// whole tree, which a checkout holding fewer has narrowed, git's sparse
+/// patterns, the roots and after them each file a notice under `LICENSES/`
+/// is held to ([`crate::licence::sources`]), which the licence check reads
+/// in the same checkout, and the cache key, the commit and a digest of the
+/// patterns, so a change to either never restores a checkout made by the
+/// old ones.
 /// Beside the checkout, `targets`: where a workspace keeps the targets
 /// under the pin, the main oracle's and each variant's this machine pins,
 /// relative to its root, which CI keeps between runs so an engine's
 /// reading is held to its subset's target and a bound on `target/` keeps
 /// alone; and `hosts`, each host the lane hands a test to by its crate,
 /// package and binary ([`HOSTS`]), which CI builds.
-fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
+fn corpus_section(root: &Path, pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
-    let patterns: Vec<String> = phpt::ROOTS.iter().map(|root| root.pattern()).collect();
+    let mut patterns: Vec<String> = phpt::ROOTS.iter().map(|root| root.pattern()).collect();
+    patterns.extend(
+        crate::licence::sources(root)?
+            .iter()
+            .map(|file| format!("/{file}")),
+    );
     let mut digest = sha1_smol::Sha1::new();
     digest.update(patterns.join("\n").as_bytes());
     let digest = digest.digest().to_string();

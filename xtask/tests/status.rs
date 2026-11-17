@@ -777,6 +777,42 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     );
 }
 
+/// A php-src file a notice under `LICENSES/` is held to is a pattern of
+/// the corpus after the roots, so the sparse checkout CI makes holds the
+/// lines the licence check compares; the key moves with the patterns, and
+/// this workspace's own table names files no root holds.
+#[test]
+fn corpus_takes_the_files_the_notices_under_licenses_are_held_to() {
+    let root = scratch("corpus-notices");
+    let corpus = |root: &Path| -> serde_json::Value {
+        let json = status(root, &["--section", "corpus", "--format", "json"]).ok();
+        serde_json::from_str(&json).unwrap()
+    };
+    let holds = |corpus: &serde_json::Value, pattern: &str| {
+        let patterns = corpus["patterns"].as_array().unwrap();
+        patterns.iter().any(|p| p.as_str() == Some(pattern))
+    };
+    let before = corpus(&root);
+    assert!(!holds(&before, "/Zend/zend_strtod.c"), "{before}");
+    let ports = "## 3. Ports\n\n\
+        | component | where in this project | origin | licence | notice text |\n\
+        |---|---|---|---|---|\n\
+        | dtoa | `crates/a/src/strtod.rs` | `Zend/zend_strtod.c` | MIT | `LICENSES/dtoa.txt` (`Zend/zend_strtod.c:1-18`) |\n";
+    std::fs::write(root.join("THIRD-PARTY.md"), ports).unwrap();
+    let after = corpus(&root);
+    assert!(holds(&after, "/Zend/zend_strtod.c"), "{after}");
+    assert_eq!(
+        after["patterns"].as_array().unwrap().last(),
+        Some(&serde_json::json!("/Zend/zend_strtod.c")),
+        "after the roots: {after}"
+    );
+    assert_ne!(before["key"], after["key"], "the key is the patterns'");
+    let own = corpus(workspace());
+    for pattern in ["/README.REDIST.BINS", "/main/php_glob.c"] {
+        assert!(holds(&own, pattern), "{pattern}: {own}");
+    }
+}
+
 #[test]
 fn a_section_that_has_no_renderer_yet_is_refused() {
     let root = scratch("unknown");

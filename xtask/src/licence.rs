@@ -369,6 +369,14 @@ impl Held<'_> {
 /// an LGPL licence differs from `HEAD`'s.
 type Today<'a> = dyn Fn() -> Result<String> + 'a;
 
+/// The php-src files the notices under `LICENSES/` are held to, by their
+/// place in that tree: what a checkout of the pinned php-src holds beside
+/// the corpus's roots, so a sparse one is compared as a whole one is.
+pub(crate) fn sources(root: &Path) -> Result<BTreeSet<String>> {
+    let notices = (components(root)?.into_values()).flat_map(|component| component.notices);
+    Ok(notices.map(|notice| notice.source).collect())
+}
+
 /// A notice's file under `LICENSES/` against the lines its row names in
 /// the pinned tree at `tree`: the clause that says it is not them. A file
 /// that is not there is the failure of the file that carries it.
