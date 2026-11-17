@@ -129,7 +129,9 @@ linked() {
     basename "$target"
 }
 
-while read -r keg at; do
+# The list is on a descriptor of its own, so nothing a pour runs can read a
+# keg's line off standard input and end the loop before the kegs after it.
+while read -r keg at <&3; do
     [ -n "$keg" ] || continue
     now=$(linked "$keg")
     if [ "$now" = "$at" ]; then
@@ -143,7 +145,7 @@ while read -r keg at; do
         [ "$now" = "$at" ] || { echo "::error::$keg is ${now:-not installed}; the record is $at"; exit 1; }
     fi
     [ -n "$dry" ] || brew pin "$(named "$prefix/opt/$keg" "$keg")"
-done <<<"$kegs"
+done 3<<<"$kegs"
 
 if [ -f "$path" ] && [ "$(md5 -q "$path")" = "$md5" ]; then
     echo "$path: md5 $md5, the pin's; already poured"
