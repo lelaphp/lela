@@ -32,7 +32,7 @@
 # `dax-build`, the Linux server, and `dax-oracle`, the Mac mini, so no hosted
 # macOS minute is spent. Each checkout is `clean: false` and the workspace
 # action cleans all but target/, which the runner keeps as the warm build.
-# The Linux jobs take their runner from DAX_BUILD_RUNNER as harness.yml's
+# The Linux jobs take their runner from LELA_BUILD_RUNNER as harness.yml's
 # do (#2477): unset, `dax-build`; set, a GitHub-hosted image while the
 # self-hosted pair is not online, with the Mac's jobs skipped
 # (scripts/ci/README.md).
@@ -67,9 +67,9 @@ env:
 jobs:
   oracle:
     name: phpt and witnesses under the pinned oracle
-    # Skipped while DAX_BUILD_RUNNER is set: the Mac is not online, and a
+    # Skipped while LELA_BUILD_RUNNER is set: the Mac is not online, and a
     # job queued for it would wait GitHub's 24 hours for a runner (#2477).
-    if: ${{ !vars.DAX_BUILD_RUNNER }}
+    if: ${{ !vars.LELA_BUILD_RUNNER }}
     runs-on: [self-hosted, macos, dax-oracle]
     timeout-minutes: 150
     # Every correctness lane of this job runs `release-da`, release's
@@ -251,12 +251,12 @@ jobs:
     # harness builds makala in the lanes' profile, release-da. It reads the
     # pinned tree and never the oracle, so it is a Linux job, and its
     # reading counts defects rather than timing anything, so while
-    # DAX_BUILD_RUNNER is set the hosted image runs it as it runs the other
+    # LELA_BUILD_RUNNER is set the hosted image runs it as it runs the other
     # Linux jobs (#2477). A failing reading fails the job; its store is
     # stashed either way, and a red soak is read on the tracker, where
     # `red-nightly` files it.
     if: ${{ github.event_name == 'schedule' || inputs.full }}
-    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -293,7 +293,7 @@ jobs:
     # oracle job. A failing subset fails the job once every subset has run,
     # and `red-nightly` files a red nightly of it on the tracker.
     needs: oracle
-    if: ${{ !cancelled() && !vars.DAX_BUILD_RUNNER && (github.event_name == 'schedule' || inputs.full) }}
+    if: ${{ !cancelled() && !vars.LELA_BUILD_RUNNER && (github.event_name == 'schedule' || inputs.full) }}
     runs-on: [self-hosted, macos, dax-oracle]
     timeout-minutes: 90
     env:
@@ -346,10 +346,10 @@ jobs:
     # here, which `xtask/src/queue/judge.rs`'s `DENY` names and its test
     # holds this line to: an older one cannot read the database's CVSS 4.0
     # scores. It reads neither the oracle nor the corpus, so while
-    # DAX_BUILD_RUNNER is set the hosted image runs it as it runs the other
+    # LELA_BUILD_RUNNER is set the hosted image runs it as it runs the other
     # Linux jobs (#2477).
     if: ${{ github.event_name == 'schedule' || inputs.full }}
-    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -366,7 +366,7 @@ jobs:
   # file one `ci:red-<job>` ticket; a third comments on it; a green one
   # comments that the job is green again and leaves the ticket for its
   # builder to close through `xtask ticket close`. A run in which the job
-  # was skipped (`tailcall` while DAX_BUILD_RUNNER is set) files nothing and
+  # was skipped (`tailcall` while LELA_BUILD_RUNNER is set) files nothing and
   # is passed over as the nightly before, and a run by hand off another
   # branch is not main's and files nothing. scripts/ci/red.sh says how, and
   # `DRY_RUN=1` prints what it would write. The checkout is this run's own
@@ -375,7 +375,7 @@ jobs:
     name: a red nightly, filed
     needs: [soak, tailcall, deny]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || inputs.full) }}
-    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     permissions:
       actions: read
       contents: read

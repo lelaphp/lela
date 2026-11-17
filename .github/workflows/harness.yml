@@ -27,7 +27,7 @@
 #
 # Until `dax-build` is online (#2296), the Linux jobs run on a GitHub-hosted
 # image, as Mitchell ruled on 2026-10-09 (#2218, #2477): each takes its
-# runner from the repository variable DAX_BUILD_RUNNER, a JSON list of
+# runner from the repository variable LELA_BUILD_RUNNER, a JSON list of
 # labels, and with the variable unset that is `[self-hosted, linux,
 # dax-build]`, so nothing here is reverted when the server comes. Set, the
 # self-hosted pair is not online: the `oracle` job, which only the Mac can
@@ -59,7 +59,7 @@ env:
 jobs:
   regions:
     name: computed check
-    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,10 +71,10 @@ jobs:
   per-commit:
     name: the instruments
     # Ubuntu 26.04 for libtidy 5.8, the oracle's (#1724); runner.sh refuses
-    # another release, and the hosted image DAX_BUILD_RUNNER names is
+    # another release, and the hosted image LELA_BUILD_RUNNER names is
     # `ubuntu-26.04` for the same reason, where packages.txt installs as it
     # does on the server (scripts/ci/README.md).
-    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -196,7 +196,7 @@ jobs:
     # `xtask/tests/miri.rs` holds both lines to the constants. The
     # negative control runs here too, since the build job has no nightly
     # and its copy of the test returns on the skip.
-    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -231,7 +231,7 @@ jobs:
     # ships; this keeps the threaded variant compiling. It writes no
     # reading, so its failure is the run's and red-main's, and in no store.
     # php_engine links no platform library, so none is installed.
-    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -242,9 +242,9 @@ jobs:
 
   oracle:
     name: the witnesses, the crosscheck and the oracle's tests
-    # Skipped while DAX_BUILD_RUNNER is set: the Mac is not online, and a
+    # Skipped while LELA_BUILD_RUNNER is set: the Mac is not online, and a
     # job queued for it would hold the store job for GitHub's 24 hours (#2477).
-    if: ${{ !vars.DAX_BUILD_RUNNER }}
+    if: ${{ !vars.LELA_BUILD_RUNNER }}
     runs-on: [self-hosted, macos, dax-oracle]
     # The dashboard's oracle job runs every lane in 150; this one runs the
     # witnesses, the crosscheck and xtask's tests. Its wall time from a run
@@ -310,7 +310,7 @@ jobs:
     # trigger (#4348 ruling 5; #4372), and a push runs no `done`.
     needs: [per-commit, miri, oracle]
     if: ${{ !cancelled() }}
-    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -357,7 +357,7 @@ jobs:
     name: a red main, filed
     needs: [regions, per-commit, miri, tailcall, oracle, store]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     permissions:
       actions: read
       contents: read

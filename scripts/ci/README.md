@@ -11,12 +11,12 @@ What CI's runners are made of, as Mitchell ruled on 2026-10-07 (#2218, #2253): t
 - `red.sh` files a red job once, under one rule: two reds in a row file one ticket, a third comments on it, and the first green after them comments that it is green again and closes nothing. `red.sh main` is harness.yml's `red-main` job, which files a red `main` under `ci:red-main` (#1156). `red.sh nightly <job>` is nightly.yml's `red-nightly` job, run for `soak`, `tailcall` and `deny`, which fail no per-commit run: each files its red nightly under `ci:red-soak`, `ci:red-tailcall` or `ci:red-deny`, and a nightly in which the job was skipped is passed over (#2980). `DRY_RUN=1` prints what it would write.
 - `tailcall.sh` is the lane that holds the threaded dispatch, `cfg(dispatch = "tailcall")` (#2905), on a dated nightly, as Mitchell ruled on #2970 (harness-design.md §7). `check` is harness.yml's per-commit `cargo +<nightly> check -p php_engine` under the cfg; `phpt <corpus> <tree>` is nightly.yml's nightly, the hosts built under the cfg in `release-da` and `Zend/tests` and each directory of `tests/` run with `--engine` on that build, the runs `phpt` keeps set aside before the subsets and put back after, which `restore` does where a killed run left them set aside. The nightly is `tailcall.sh`'s `TOOLCHAIN` line, the one place it is named, so moving it is that line; a nightly that breaks the check is moved past, not followed. It installs the nightly where the runner has not yet, and builds in `target/tailcall`, so the shipped build stays warm.
 
-## `DAX_BUILD_RUNNER`: the Linux jobs on a hosted image
+## `LELA_BUILD_RUNNER`: the Linux jobs on a hosted image
 
 Until `dax-build` is online (#2296), the Linux jobs run on GitHub-hosted Linux, as Mitchell ruled on 2026-10-09 (#2218, #2477). One repository variable is the switch. Every job that would run on `dax-build` takes its runner from it:
 
 ```yaml
-runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
 ```
 
 That is `regions`, `per-commit`, `miri`, `tailcall`, `store` and `red-main` in `harness.yml`, and `soak`, `deny` and `red-nightly` in `nightly.yml`.
@@ -25,11 +25,11 @@ That is `regions`, `per-commit`, `miri`, `tailcall`, `store` and `red-main` in `
 - **Set**, its value is a JSON list of runner labels. The value to set is the hosted Ubuntu 26.04 image, the release `packages.txt` names (#1724):
 
   ```sh
-  gh variable set DAX_BUILD_RUNNER --body '["ubuntu-26.04"]'
+  gh variable set LELA_BUILD_RUNNER --body '["ubuntu-26.04"]'
   ```
 
   A set variable also says the self-hosted pair is not online. So the jobs only the Mac can run, both `oracle` jobs and nightly.yml's `tailcall`, are skipped. Queued instead, each would wait the 24 hours GitHub holds a job no runner takes, and harness.yml's `store` job, which needs its `oracle` job, would wait with it.
-- **Deleted** once both runners are registered. The wizard's last stage does this: `gh variable delete DAX_BUILD_RUNNER`. Nothing in the workflows is reverted.
+- **Deleted** once both runners are registered. The wizard's last stage does this: `gh variable delete LELA_BUILD_RUNNER`. Nothing in the workflows is reverted.
 
 ### What a skipped oracle job means
 

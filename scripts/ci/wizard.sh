@@ -193,7 +193,7 @@ finish() {
 # person can take (ordering each machine, the SSH key, the registration
 # token, auto-login, the stash, billing) and runs
 # scripts/ci/runner.sh on each machine over SSH for the rest. Its last stage
-# deletes DAX_BUILD_RUNNER, the variable that held the Linux jobs on a
+# deletes LELA_BUILD_RUNNER, the variable that held the Linux jobs on a
 # GitHub-hosted image until the server was online (#2477,
 # scripts/ci/README.md), and starts the first run on both runners.
 #
@@ -401,12 +401,12 @@ say "the account's billing failed (#2218)."
 open_url "https://github.com/settings/billing"
 step "Clear the failed payment, or the budget that stops Actions, so jobs start again."
 step "Hosted macOS minutes are no longer used; a budget of 0 for them is safe."
-step "Hosted Linux minutes stop once the next stage deletes DAX_BUILD_RUNNER."
+step "Hosted Linux minutes stop once the next stage deletes LELA_BUILD_RUNNER."
 pause "Press Enter once billing is settled"
 
 # ── 11 ────────────────────────────────────────────────────────────────────
-stage "The Linux jobs come home: DAX_BUILD_RUNNER deleted, then the first run"
-say "While DAX_BUILD_RUNNER is set, the Linux jobs run on a GitHub-hosted image and"
+stage "The Linux jobs come home: LELA_BUILD_RUNNER deleted, then the first run"
+say "While LELA_BUILD_RUNNER is set, the Linux jobs run on a GitHub-hosted image and"
 say "both oracle jobs are skipped (scripts/ci/README.md). With both runners online"
 say "(stage 8), deleting it puts every job on dax-build and dax-oracle again; nothing"
 say "in the workflows changes."
@@ -414,15 +414,15 @@ if [[ "${DRY_RUN:-}" == 1 ]]; then
   note "dry run, not read: gh variable list --repo $REPO"
   held=yes
 else
-  held=$(gh variable list --repo "$REPO" --json name --jq '.[] | select(.name == "DAX_BUILD_RUNNER") | "yes"')
+  held=$(gh variable list --repo "$REPO" --json name --jq '.[] | select(.name == "LELA_BUILD_RUNNER") | "yes"')
 fi
 if [[ "$held" != yes ]]; then
-  printf '  %s✓%s DAX_BUILD_RUNNER is not set; every job is on the self-hosted pair\n' "$GREEN" "$RESET"
-elif confirm "Delete DAX_BUILD_RUNNER, so the jobs wait for dax-build and dax-oracle?"; then
-  act gh variable delete DAX_BUILD_RUNNER --repo "$REPO"
+  printf '  %s✓%s LELA_BUILD_RUNNER is not set; every job is on the self-hosted pair\n' "$GREEN" "$RESET"
+elif confirm "Delete LELA_BUILD_RUNNER, so the jobs wait for dax-build and dax-oracle?"; then
+  act gh variable delete LELA_BUILD_RUNNER --repo "$REPO"
 else
-  warn "DAX_BUILD_RUNNER is still set: the Linux jobs stay hosted and the oracle jobs skipped."
-  SKIPPED+=("delete the variable: gh variable delete DAX_BUILD_RUNNER --repo $REPO")
+  warn "LELA_BUILD_RUNNER is still set: the Linux jobs stay hosted and the oracle jobs skipped."
+  SKIPPED+=("delete the variable: gh variable delete LELA_BUILD_RUNNER --repo $REPO")
 fi
 if confirm "Run the nightly workflow on main now (its Mac oracle job)?"; then
   act gh workflow run nightly.yml --repo "$REPO" --ref main

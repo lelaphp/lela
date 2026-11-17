@@ -27,7 +27,7 @@
 #   load, how long it waited and the machine (processor, cores, kernel).
 #   A bar file kept on dax-build (protocol §11) is measured with `from`.
 #
-# Both jobs take the literal label and never DAX_BUILD_RUNNER: a hosted
+# Both jobs take the literal label and never LELA_BUILD_RUNNER: a hosted
 # reading is noise, and `xtask bench` refuses a GitHub-hosted runner
 # whatever job runs it (#2477). One runner runs one job at a time, so
 # nothing of harness.yml or nightly.yml runs beside them. A bench number
