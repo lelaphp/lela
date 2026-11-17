@@ -5,22 +5,24 @@
 //! build's alone, and a test binary's global allocator where it is one.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The thread whose allocations are counted, `pthread_self()` as a
 /// word; zero, no thread, until one is watched. A word beside the count
 /// rather than a slot per thread, as the manifest's
 /// `state.no-thread-local` holds a test's state to.
-static WATCHED: AtomicUsize = AtomicUsize::new(0);
+static WATCHED: AtomicU64 = AtomicU64::new(0);
 
 /// The allocations served to the watched thread since it was watched.
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
-/// The calling thread, `pthread_self()` as a word.
-fn this_thread() -> usize {
+/// The calling thread, `pthread_self()` as a word: 64 bits, which hold
+/// the pointer-sized word macOS hands out and Linux's `unsigned long`
+/// alike, so one cast widens or keeps on both and narrows on neither.
+fn this_thread() -> u64 {
     // SAFETY: `pthread_self` has no precondition and touches no memory.
     let thread = unsafe { libc::pthread_self() };
-    thread as usize
+    thread as u64
 }
 
 /// [`System`], each allocation it serves to the watched thread counted,
