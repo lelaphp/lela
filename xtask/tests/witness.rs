@@ -104,11 +104,7 @@ fn a_binary_where_the_engine_s_would_be(root: &Path) {
     fs::create_dir_all(&dir).unwrap();
     let file = dir.join("php");
     fs::write(&file, "#!/bin/sh\necho 'not the engine'\nexit 7\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(&file).unwrap();
 }
 
 /// The manifest a run over the scratch workspace reads: one crate row for
@@ -816,11 +812,7 @@ fn a_request_fence_whose_server_resets_fails_the_run_and_is_not_a_missing_witnes
         "#!/usr/bin/perl\nuse Socket;\nmy ($conf, $path);\nfor my $i (0 .. $#ARGV) { $conf = $ARGV[$i + 1] if $ARGV[$i] eq '-y'; }\nopen(my $f, '<', $conf) or die;\nwhile (<$f>) { $path = $1 if /^listen = (\\S+)/; }\nsocket(my $s, PF_UNIX, SOCK_STREAM, 0) or die;\nbind($s, sockaddr_un($path)) or die;\nlisten($s, 5) or die;\nwhile (accept(my $c, $s)) { my $b; sysread($c, $b, 8); close($c); }\n",
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(&host).unwrap();
     a_failed_run_and_no_missing_witness(&served_by_a_stand_in("request-reset", host));
 }
 

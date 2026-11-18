@@ -1364,11 +1364,7 @@ fn a_steer_in_a_worktree_this_build_cannot_read_is_handed_to_its_build() {
         "#!/bin/sh\ncat > \"$(dirname \"$0\")/asked.json\"\n",
     )
     .unwrap();
-    Command::new("chmod")
-        .arg("+x")
-        .arg(&build)
-        .status()
-        .unwrap();
+    xtask::scratch::executable(&build).unwrap();
     let id = "toolu_handed";
     let command = steer_or_write(&wt);
     permit(&root, &stdin("PreToolUse", SESSION, id, &wt, &command), &[]);

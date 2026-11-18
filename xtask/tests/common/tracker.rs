@@ -14,7 +14,6 @@
 )]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use xtask::scratch::Tree;
@@ -38,7 +37,7 @@ impl Tracker {
         fs::create_dir_all(dir.join("issues")).unwrap();
         let gh = dir.join("gh");
         fs::copy(xtask::package_dir().join("fixtures/stand-ins/gh"), &gh).unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        xtask::scratch::executable(&gh).unwrap();
         Tracker { dir }
     }
 

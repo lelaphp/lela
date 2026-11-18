@@ -1234,7 +1234,6 @@ enum Build {
 /// measured beside which candidate ran.
 #[cfg(unix)]
 fn build(root: &Path, path: &str, who: &str, how: Build) {
-    use std::os::unix::fs::PermissionsExt;
     let text = match how {
         Build::Judges => format!("#!/bin/sh\nin=$(cat)\nprintf 'JUDGED={who} SAW=%s' \"$in\"\n"),
         Build::DidNotJudge => {
@@ -1242,7 +1241,7 @@ fn build(root: &Path, path: &str, who: &str, how: Build) {
         }
     };
     write(root, path, &text);
-    std::fs::set_permissions(root.join(path), std::fs::Permissions::from_mode(0o755)).unwrap();
+    xtask::scratch::executable(&root.join(path)).unwrap();
 }
 
 /// Run the declared command as the hook does: the call on stdin, the

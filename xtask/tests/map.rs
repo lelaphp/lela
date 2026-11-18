@@ -846,6 +846,7 @@ fn manifest_rules(manifest: &str, ids: &[&str]) -> std::process::Output {
         root.join("scripts/manifest-rules.sh"),
     )
     .unwrap();
+    xtask::scratch::executable(&root.join("scripts/manifest-rules.sh")).unwrap();
     std::fs::write(root.join("seams.toml"), manifest).unwrap();
     Command::new(root.join("scripts/manifest-rules.sh"))
         .args(ids)

@@ -171,11 +171,7 @@ impl Scratch {
         let path = self.root.join("engine").join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        xtask::scratch::executable(&path).unwrap();
         path
     }
 

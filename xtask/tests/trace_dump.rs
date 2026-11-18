@@ -11,7 +11,6 @@
 #![cfg(tracked)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use xtask::divergence::{Digests, Registry, Side};
@@ -81,7 +80,7 @@ impl Scratch {
         let lines = fixtures().join(lines);
         let body = format!("#!/bin/sh\necho 4950\ncat '{}' >&2\n", lines.display());
         fs::write(&path, body).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        xtask::scratch::executable(&path).unwrap();
         path
     }
 

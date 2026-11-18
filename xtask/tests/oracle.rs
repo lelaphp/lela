@@ -185,7 +185,6 @@ fn a_regime_adds_its_ini_after_the_recipe() {
 /// A file standing where a binary would that writes each argument it was
 /// handed on a line of its own, and the tree that holds it.
 fn argv_echo() -> (Tree, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let dir = Tree::new("oracle-argv").unwrap();
     let path = dir.join("argv");
     std::fs::write(
@@ -193,7 +192,7 @@ fn argv_echo() -> (Tree, PathBuf) {
         "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n",
     )
     .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    xtask::scratch::executable(&path).unwrap();
     (dir, path)
 }
 

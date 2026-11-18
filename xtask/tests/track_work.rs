@@ -11,7 +11,6 @@
 #![cfg(tracked)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -151,7 +150,7 @@ impl Scratch {
             &claude,
         )
         .unwrap();
-        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+        xtask::scratch::executable(&claude).unwrap();
         self.plugins(true);
         scratch::cargo(
             &self.dir.join("bin"),
@@ -683,7 +682,7 @@ fn a_worktree_that_is_not_ready_stops_the_run_and_is_no_sessions() {
         built.display()
     );
     fs::write(&cargo, failing).unwrap();
-    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    xtask::scratch::executable(&cargo).unwrap();
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 3, "{out}");
     assert!(out.contains("not ready to be worked in"), "{out}");

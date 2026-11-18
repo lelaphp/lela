@@ -122,11 +122,7 @@ impl Scratch {
             ),
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        xtask::scratch::executable(&engine).unwrap();
         let mut manifest = Manifest::named("ext/fixture");
         manifest.pin = Some(pin_over(&corpus));
         Scratch {
@@ -663,11 +659,7 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
         format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", oracle.display()),
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(&engine).unwrap();
     let run = |given: &Path| {
         let stdout = Run::at(given)
             .args(["phpt", "--subset", "ext/ctype", "--jobs", "1"])
@@ -708,11 +700,7 @@ fn echoing_engine(scratch: &Scratch, bare: bool) -> PathBuf {
         ),
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(&path).unwrap();
     path
 }
 
@@ -862,11 +850,7 @@ fn planting_engine(scratch: &Scratch) -> PathBuf {
         ),
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(&path).unwrap();
     path
 }
 
@@ -1902,10 +1886,7 @@ impl OneTree {
             ),
         )
         .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        xtask::scratch::executable(&engine).unwrap();
         written_at(&engine, SystemTime::now() + Duration::from_mins(1));
         OneTree {
             corpus,
@@ -2365,11 +2346,7 @@ fn a_test_gets_run_tests_environment_and_pipes_for_its_streams() {
         ),
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&nulled, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(&nulled).unwrap();
     let reading = scratch.run(&registry(""), &nulled);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert_eq!(count(&reading, "failed"), 3, "{reading:#?}");

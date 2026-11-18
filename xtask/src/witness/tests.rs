@@ -1106,7 +1106,6 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
 /// stand-in prints its own name.
 #[test]
 fn a_process_fence_is_served_by_a_php_carrying_its_crate_s_feature() {
-    use std::os::unix::fs::PermissionsExt;
     let root = workspace().join("xtask/fixtures/witness/process-feature");
     let manifest = Manifest::load(&root).unwrap();
     let hosts = Tree::new("process-feature").unwrap();
@@ -1114,7 +1113,7 @@ fn a_process_fence_is_served_by_a_php_carrying_its_crate_s_feature() {
         let path = hosts
             .write(name, format!("#!/bin/sh\necho {name}\n"))
             .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::scratch::executable(&path).unwrap();
         path
     };
     let binary = Binary::standing(&root, crate::oracle::hosts::CLI, stand_in("default"))
@@ -1587,14 +1586,12 @@ fn a_crate_outside_ext_with_no_native_counts_its_kernels_alone() {
 /// php-cgi is not at its path it fails too, and is never a skip.
 #[test]
 fn the_fixture_whose_line_the_engine_s_host_answers_otherwise_fails() {
-    use std::os::unix::fs::PermissionsExt;
-
     use crate::reading::Status;
     let root = workspace().join("xtask/fixtures/witness/host-line-unmet");
     let mut fixture = Manifest::load(&root).unwrap();
     let hosts = Tree::new("host-line-unmet").unwrap();
     let engine = hosts.write("php-cgi", "#!/bin/sh\necho 2\n").unwrap();
-    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::scratch::executable(&engine).unwrap();
     let binary = Binary::standing(&root, crate::oracle::hosts::CGI, engine);
     let ask = Ask {
         crates: vec!["sapi/cgi".to_owned()],

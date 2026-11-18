@@ -140,7 +140,6 @@ fn the_owed_row_the_lane_waits_on_decodes_and_covers_the_crates_that_owe_it() {
 #[cfg(tracked)]
 mod stood_in {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
@@ -162,7 +161,7 @@ mod stood_in {
     fn binary(tree: &Tree, name: &str, body: &str) -> PathBuf {
         let text = format!("#!/bin/sh\nfor word; do program=$word; done\n{body}\n");
         let path = tree.write(name, text).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::scratch::executable(&path).unwrap();
         path
     }
 

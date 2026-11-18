@@ -386,7 +386,6 @@ exit 1
 /// a keg of this machine, and what it asked of `brew` and `curl`
 /// outside a dry run is `<root>/brew/calls`.
 fn pinned_php(root: &Path, dry: bool) -> (serde_json::Value, String, String) {
-    use std::os::unix::fs::PermissionsExt;
     let section = ["--section", "oracle", "--format", "json"];
     let rendered = status_with_pin(root, &section, None, None).ok();
     let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
@@ -398,8 +397,7 @@ fn pinned_php(root: &Path, dry: bool) -> (serde_json::Value, String, String) {
     let prefix = root.join("brew").display().to_string();
     for (name, body) in [("brew", BREW), ("curl", CURL), ("md5", MD5)] {
         std::fs::write(bin.join(name), body.replace("@prefix@", &prefix)).unwrap();
-        let mode = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(bin.join(name), mode).unwrap();
+        xtask::scratch::executable(&bin.join(name)).unwrap();
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
     let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)));

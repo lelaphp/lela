@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -47,7 +47,7 @@ fn keg(dir: &Path, version: &str, configured: &str, loads: &[&Path], named: &[(&
         "#!/bin/sh\necho 'PHP Version => {version}'\ncat <<'EOF'\nConfigure Command =>  {configured}\nEOF\n"
     );
     fs::write(&php, script).unwrap();
-    fs::set_permissions(&php, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::scratch::executable(&php).unwrap();
     let loads: Vec<&str> = loads.iter().map(|p| p.to_str().unwrap()).collect();
     for host in ["bin/php-cgi", "sbin/php-fpm"] {
         fs::write(dir.join(host), macho(&loads)).unwrap();

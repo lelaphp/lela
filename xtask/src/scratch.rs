@@ -333,8 +333,6 @@ fn stand_in(
     named: Option<std::ffi::OsString>,
     path: &std::ffi::OsStr,
 ) -> Result<std::ffi::OsString> {
-    use std::os::unix::fs::PermissionsExt;
-
     let cargo = absolute_cargo(named, path).context("no cargo to hand other calls on to")?;
     if cargo == dir.join("cargo") {
         anyhow::bail!("{} would hand other calls on to itself", cargo.display());
@@ -367,7 +365,7 @@ fn stand_in(
     let file = dir.join("cargo");
     std::fs::write(&file, body)
         .with_context(|| format!("writing the cargo stand-in {}", file.display()))?;
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+    executable(&file)
         .with_context(|| format!("marking the cargo stand-in {} executable", file.display()))?;
     let mut paths = vec![dir.to_path_buf()];
     paths.extend(std::env::split_paths(path));
@@ -463,6 +461,28 @@ impl Binary {
 /// own. `cp` opens the copy in a process nothing is forked from, and has
 /// closed it by the time it is waited for. A `from` that names nothing is
 /// `NotFound`, as [`std::fs::copy`] says it.
+/// What stands at `path`, made a program that can be run at once: its
+/// bytes in a file this process never opened for writing, at mode 755.
+///
+/// Linux runs no file a process holds open for writing, and a file a test
+/// writes is held so for longer than its own write: a child another thread
+/// starts in that moment carries the descriptor until its own program
+/// replaces it. So a stand-in run as soon as its `write` returned met
+/// "Text file busy" (os error 26), in one run of the suite out of three on
+/// an eight-core Linux runner, and written and run this way under seven
+/// threads starting children, in 736 of 20,000 runs. The file left at
+/// `path` is [`copied`], a child's work, and moved over the written one,
+/// whose descriptor a child may still carry and nothing runs any more.
+pub fn executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut beside = path.as_os_str().to_owned();
+    beside.push(".copied");
+    let beside = PathBuf::from(beside);
+    copied(path, &beside)?;
+    std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::rename(&beside, path)
+}
+
 fn copied(from: &Path, to: &Path) -> std::io::Result<()> {
     if !from.try_exists()? {
         return Err(std::io::ErrorKind::NotFound.into());
@@ -1038,12 +1058,11 @@ mod tests {
     /// what runs.
     #[test]
     fn a_held_program_runs_after_its_path_is_removed_and_replaced() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = Tree::new("binary-source").unwrap();
         let bin = dir.join("program");
         let lay = |text: &str| {
             std::fs::write(&bin, format!("#!/bin/sh\necho {text}\n")).unwrap();
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            super::executable(&bin).unwrap();
         };
         let run = |held: &Binary| {
             let out = std::process::Command::new(held.path()).output().unwrap();
@@ -1062,18 +1081,41 @@ mod tests {
         );
     }
 
+    /// The program left at the path is another file than the one written
+    /// there, with its bytes and mode 755, and nothing is left beside it.
+    #[test]
+    fn a_written_file_made_executable_is_another_file_that_runs() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = Tree::new("executable").unwrap();
+        let path = dir.join("program");
+        std::fs::write(&path, "#!/bin/sh\necho ran\n").unwrap();
+        let written = std::fs::metadata(&path).unwrap().ino();
+        super::executable(&path).unwrap();
+        let laid = std::fs::metadata(&path).unwrap();
+        assert_ne!(laid.ino(), written);
+        assert_eq!(laid.permissions().mode() & 0o777, 0o755);
+        let out = std::process::Command::new(&path).output().unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "ran\n");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["program"]);
+        let missing = super::executable(&dir.join("none")).unwrap_err();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    }
+
     /// The whole copy a child makes is the program, runs as one, and a
     /// source that names nothing is `NotFound`, which [`Binary::hold`]
     /// waits out.
     #[test]
     fn a_program_copied_by_a_child_runs_and_a_missing_one_is_not_found() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = Tree::new("binary-copied").unwrap();
         let (from, to) = (dir.join("program"), dir.join("copy"));
         let missing = super::copied(&from, &to).unwrap_err();
         assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
         std::fs::write(&from, "#!/bin/sh\necho copied\n").unwrap();
-        std::fs::set_permissions(&from, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::executable(&from).unwrap();
         super::copied(&from, &to).unwrap();
         let out = std::process::Command::new(&to).output().unwrap();
         assert_eq!(String::from_utf8(out.stdout).unwrap(), "copied\n");
@@ -1128,7 +1170,6 @@ mod tests {
     /// test removed the tree under it, and the tree stood half removed.
     #[test]
     fn a_fast_forward_of_a_harness_change_in_a_scratch_repository_starts_no_build() {
-        use std::os::unix::fs::PermissionsExt;
         use std::time::{Duration, Instant};
         let tree = Tree::new("rebuild").unwrap();
         let repo = tree.join("repo");
@@ -1139,7 +1180,7 @@ mod tests {
             let file = tree.join(name);
             let body = format!("#!/bin/sh\necho \"$*\" >> '{}'\n", record.display());
             std::fs::write(&file, body).unwrap();
-            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            super::executable(&file).unwrap();
             file
         };
         let cargo = script("cargo-behind", &handed);

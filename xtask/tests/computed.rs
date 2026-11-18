@@ -33,11 +33,7 @@ fn stand_in(name: &str, said: &str, code: i32) -> Tree {
     );
     let path = bin.join("computed");
     fs::write(&path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(&path).unwrap();
     dir
 }
 
@@ -261,11 +257,7 @@ fn a_pathspec_commit_carries_no_region_of_an_unstaged_lock() {
         ),
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(&hook).unwrap();
     Repo::at(&dir).git(&["config", "core.hooksPath", hooks.to_str().unwrap()]);
     let head = || Repo::at(&dir).git(&["rev-parse", "HEAD"]);
     let before = head();

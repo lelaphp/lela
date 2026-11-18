@@ -119,11 +119,7 @@ fn write(root: &Path, path: &str, text: &str) {
 
 fn executable(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(path).unwrap();
 }
 
 /// The scratch repository: the workspace's manifest and pin, the seven

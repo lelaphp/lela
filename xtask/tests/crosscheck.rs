@@ -490,10 +490,7 @@ fn a_php_linked_that_dies_on_a_signal_fails_that_extension_and_the_next_still_re
         ),
     )
     .unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(&server).unwrap();
     let readings = scratch.run(&Ask {
         ext: vec!["ctype".to_owned(), "json".to_owned()],
         linked: Some(server),

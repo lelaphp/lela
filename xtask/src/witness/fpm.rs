@@ -454,7 +454,6 @@ mod tests {
     }
 
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
 
     use crate::oracle::Pin;
@@ -479,7 +478,7 @@ mod tests {
              echo 'ERROR: FPM initialization failed' >&2\nexit 78\n",
         )
         .unwrap();
-        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::scratch::executable(&host).unwrap();
         let started = Instant::now();
         let failed =
             super::served_as_fpm(&pin.oracle(), &host, "echo 1;", "--GET--\nq=1", &[]).unwrap_err();
@@ -609,7 +608,7 @@ mod tests {
              while (accept(my $next, $s)) { answer($next); }\n",
         )
         .unwrap();
-        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::scratch::executable(&host).unwrap();
         let appended = hosts.join("appended");
         let env = [(
             "WITNESS_FPM_APPENDED".to_owned(),

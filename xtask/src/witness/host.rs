@@ -871,7 +871,6 @@ fn fastcgi_round<S: Read + Write>(
 #[cfg(tracked)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{Duration, Instant};
@@ -918,7 +917,7 @@ mod tests {
     /// A stand-in host: `body` as a shell program in `hosts`.
     fn host(hosts: &Tree, name: &str, body: &str) -> PathBuf {
         let path = hosts.write(name, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::scratch::executable(&path).unwrap();
         path
     }
 
@@ -1290,7 +1289,7 @@ mod tests {
              while (1) {{ accept(my $c, $s) or next; {each}; close($c); }}\n"
         );
         let path = hosts.write(name, program).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::scratch::executable(&path).unwrap();
         path
     }
 

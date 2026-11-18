@@ -76,11 +76,7 @@ fn variant_table(name: &str, key: &str, path: &Path, md5: &str) -> String {
 fn shell(path: &Path, body: &str) -> String {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    xtask::scratch::executable(path).unwrap();
     format!("{:x}", md5::compute(fs::read(path).unwrap()))
 }
 

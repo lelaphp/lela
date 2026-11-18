@@ -367,6 +367,7 @@ scratch::Tree::new
 scratch::Tree::path
 scratch::UNHOOKED
 scratch::cargo
+scratch::executable
 scratch::repository
 scratch::xtask
 sha256::Sha256

@@ -1055,8 +1055,7 @@ fn engine_tree(root: &Path) -> String {
 }
 
 fn executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    xtask::scratch::executable(path).unwrap();
 }
 
 /// A binary at `path` that hands every call to the pinned php `oracle`:
@@ -1300,11 +1299,10 @@ fn the_queue_lays_the_merge_worktree_on_staging_owned_and_seeded_from_mains() {
 /// shell file at `target/judge/<tip>/xtask` with `body` after its first
 /// line, so the land builds nothing; the tip.
 fn judge_kept(root: &Path, body: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
     let tip = sh(root, &["git", "rev-parse", "main"]).trim().to_owned();
     let path = format!("target/judge/{tip}/xtask");
     write(root, &path, &format!("#!/bin/sh\n{body}"));
-    fs::set_permissions(root.join(&path), fs::Permissions::from_mode(0o755)).unwrap();
+    xtask::scratch::executable(&root.join(&path)).unwrap();
     tip
 }
 
@@ -1674,11 +1672,10 @@ fn a_merge_that_changes_only_a_file_the_harnesss_tests_read_is_told_neither_text
 /// `land` from main's checkout with a `cargo-deny` on `PATH` whose body
 /// is `body`, ahead of the build's stand-in.
 fn land_with_deny(root: &Path, body: &str) -> (i32, String) {
-    use std::os::unix::fs::PermissionsExt;
     let (_bin, path) = stand_in();
     let deny = Tree::new("worktree-deny").unwrap();
     write(&deny, "cargo-deny", &format!("#!/bin/sh\n{body}"));
-    fs::set_permissions(deny.join("cargo-deny"), fs::Permissions::from_mode(0o755)).unwrap();
+    xtask::scratch::executable(&deny.join("cargo-deny")).unwrap();
     let mut on = OsString::from(deny.as_os_str());
     on.push(":");
     on.push(&path);
