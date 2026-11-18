@@ -408,7 +408,8 @@ pub(crate) fn absolute_cargo(
 /// is an APFS clone, which costs no space and is not touched by a later
 /// write to the original; elsewhere it is a hard link to the build's file,
 /// which the relink unlinks and leaves standing, and a whole copy only
-/// where no link can be made.
+/// where no link can be made, as where the temporary directory is a
+/// volume of its own ([`copied`]).
 pub(crate) struct Binary {
     _tree: Tree,
     path: PathBuf,
@@ -425,10 +426,10 @@ impl Binary {
         let tree = Tree::new("binary")?;
         let path = tree.join(name);
         let take = || {
-            if !cfg!(target_os = "macos") && std::fs::hard_link(bin, &path).is_ok() {
-                return Ok(());
+            if cfg!(target_os = "macos") {
+                return std::fs::copy(bin, &path).map(drop);
             }
-            std::fs::copy(bin, &path).map(drop)
+            std::fs::hard_link(bin, &path).or_else(|_| copied(bin, &path))
         };
         let mut waited = 0;
         loop {
@@ -449,6 +450,32 @@ impl Binary {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// `from` copied whole to `to` by `cp`, a child, and never by this process.
+///
+/// A file this process copies is open for writing in it while the copy
+/// runs, and a child another thread forks then carries that descriptor
+/// until its own `exec`. Linux refuses to run a program any process holds
+/// open for writing, so the copy, run the moment it was whole, failed
+/// `Text file busy` whenever such a child had yet to reach its `exec`: two
+/// tests of one binary did on a runner whose `/tmp` is a volume of its
+/// own. `cp` opens the copy in a process nothing is forked from, and has
+/// closed it by the time it is waited for. A `from` that names nothing is
+/// `NotFound`, as [`std::fs::copy`] says it.
+fn copied(from: &Path, to: &Path) -> std::io::Result<()> {
+    if !from.try_exists()? {
+        return Err(std::io::ErrorKind::NotFound.into());
+    }
+    let out = std::process::Command::new("cp")
+        .arg("--")
+        .args([from, to])
+        .output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&out.stderr);
+    Err(std::io::Error::other(format!("cp: {}", said.trim())))
 }
 
 /// The binary under test, `env!("CARGO_BIN_EXE_xtask")`, held once for the
@@ -1033,6 +1060,25 @@ mod tests {
             "first\n",
             "the path replaced between two spawns"
         );
+    }
+
+    /// The whole copy a child makes is the program, runs as one, and a
+    /// source that names nothing is `NotFound`, which [`Binary::hold`]
+    /// waits out.
+    #[test]
+    fn a_program_copied_by_a_child_runs_and_a_missing_one_is_not_found() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Tree::new("binary-copied").unwrap();
+        let (from, to) = (dir.join("program"), dir.join("copy"));
+        let missing = super::copied(&from, &to).unwrap_err();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        std::fs::write(&from, "#!/bin/sh\necho copied\n").unwrap();
+        std::fs::set_permissions(&from, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::copied(&from, &to).unwrap();
+        let out = std::process::Command::new(&to).output().unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "copied\n");
+        let refused = super::copied(&from, &dir.join("no/such/directory/copy")).unwrap_err();
+        assert!(refused.to_string().starts_with("cp: "), "{refused}");
     }
 
     /// The stand-in never names itself: built with `CARGO=cargo`
