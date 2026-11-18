@@ -163,7 +163,13 @@ impl Files {
     }
 
     /// `contents` written to `file` in the tree, a file there replaced,
-    /// and the directories its path names made.
+    /// and the directories its path names made. The file is written
+    /// beside its place and moved into it, as an editor or a deploy lays
+    /// one down, so what replaces a file is another file. Written in
+    /// place, a file of the same length as the one a request just compiled
+    /// kept its inode and, within the grain of the clock Linux stamps
+    /// files by, its times, and the next request was served the unit
+    /// compiled from the file before it.
     ///
     /// # Panics
     ///
@@ -175,7 +181,10 @@ impl Files {
             let made = std::fs::create_dir_all(parent);
             assert!(made.is_ok(), "{} is made: {made:?}", parent.display());
         }
-        let written = std::fs::write(&path, contents);
+        let mut beside = path.clone().into_os_string();
+        beside.push(".written");
+        let written =
+            std::fs::write(&beside, contents).and_then(|()| std::fs::rename(&beside, &path));
         assert!(
             written.is_ok(),
             "{} is written: {written:?}",
