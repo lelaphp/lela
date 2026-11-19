@@ -176,8 +176,8 @@ every rendering of a number prints the load beside it. A number taken under
 load is not void and not automatically valid; the load is recorded, not
 controlled.
 
-A machine held for the bench is controlled, as Mitchell ruled 2026-10-31
-for dax-build: `xtask bench --machine dedicated` takes every seat
+A machine held for the bench is controlled, as Mitchell ruled 2026-10-31:
+`xtask bench --machine dedicated` takes every seat
 before it builds, so no other instrument builds there while it measures,
 and starts a bar's reps only once the 1-minute load is below 2. Above it
 the run waits, looking again every 15 s, and the reading names how long it
@@ -185,6 +185,20 @@ waited and the highest load it waited out; a load still at 2 or above after
 15 minutes leaves the bar unmeasured, a skip that names the load. Every
 rendering and reading also names the machine: its processor, its cores and
 its kernel.
+
+A hosted runner's machine is held the same way and is not controlled by
+it. It is the job's alone, so every seat is taken and a bar waits for the
+load; but its host carries other guests, who move every arm and show in no
+load average the guest reads. In the trial of 2026-11-18 one build read
+against itself there ran up to 5% apart in a row's median, and its median
+for one program moved by 7 to 35% within 22 minutes. So, as Mitchell ruled
+2026-11-19, `xtask bench --machine hosted` offers its numbers as `SMOKE`
+or `PROVISIONAL` and refuses any other label (§8), and it measures each
+bar between two runs of its A/A control, the declared control named
+`<bar>-aa`, which say what the machine did meanwhile; a bar with no such
+control is measured alone. A bound such as G1's is read there as it is
+anywhere, and a provisional reading of it decides nothing: a number a gate
+rests on is taken on a machine held for the bench.
 
 ## 8. Status labels
 

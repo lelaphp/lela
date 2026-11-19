@@ -640,9 +640,11 @@ fn generate_command(root: &Path, manifest: &Manifest) -> Result<()> {
 
 /// `xtask bench`: the bars asked for, each measured under the protocol and
 /// each written; the exit is 0 whatever a reading says. A GitHub-hosted
-/// runner is refused before anything is measured.
+/// runner asked as anything but a hosted machine is refused before
+/// anything is measured.
 fn bench_command(root: &Path, store: &Store, ask: &cli::Bench) -> Result<()> {
-    bench::refuse_a_hosted_runner(std::env::var(bench::RUNNER_ENVIRONMENT).ok().as_deref())?;
+    let environment = std::env::var(bench::RUNNER_ENVIRONMENT).ok();
+    bench::refuse_a_hosted_runner(environment.as_deref(), ask.machine)?;
     bench::run(
         root,
         store,

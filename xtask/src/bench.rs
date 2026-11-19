@@ -152,10 +152,18 @@ pub enum Machine {
     /// it is found and not controlled (§7).
     #[default]
     Shared,
-    /// Held for the bench while it runs, as dax-build is: every seat
-    /// taken ([`crate::seat`]), and each bar measured only once the
-    /// 1-minute load is below [`QUIET`], waited for.
+    /// Held for the bench while it runs: every seat taken
+    /// ([`crate::seat`]), and each bar measured only once the 1-minute
+    /// load is below [`QUIET`], waited for.
     Dedicated,
+    /// A hosted runner's machine, the job's alone for as long as it runs
+    /// and held as a dedicated one is, on a host whose other guests move
+    /// every arm and show in no load average. Its numbers are offered as
+    /// `smoke` or `provisional` and no more ([`Machine::offers`]), and each
+    /// bar is measured between two runs of its A/A control
+    /// ([`between_controls`]), which say what the machine did meanwhile
+    /// (§7; ruled by Mitchell 2026-11-19).
+    Hosted,
 }
 
 /// The 1-minute load below which a dedicated machine measures a bar.
@@ -194,8 +202,23 @@ impl Conditions {
 }
 
 impl Machine {
+    /// Whether this machine's numbers may be offered under `label`: a
+    /// hosted one's as `smoke` or `provisional` alone, since a reading of
+    /// its control says how far the same build ran from itself there and
+    /// nothing says it of the next run's machine (§7, §8).
+    fn offers(self, label: Label) -> Result<()> {
+        if self == Machine::Hosted && !matches!(label, Label::Smoke | Label::Provisional) {
+            bail!(
+                "--machine hosted offers its numbers as --label smoke or --label provisional and no more, \
+                 and {} was asked: a hosted runner shares its host ({PROTOCOL} §7)",
+                label.spelled().to_lowercase()
+            );
+        }
+        Ok(())
+    }
+
     /// The conditions a bar starts under on this machine, its load as
-    /// `read` finds it: on a dedicated machine only below [`QUIET`],
+    /// `read` finds it: on a dedicated or hosted machine only below [`QUIET`],
     /// looked for again after each `sleep` of [`LOOK`] until [`PATIENCE`]
     /// has passed, and otherwise why the bar is not measured.
     fn settle(
@@ -231,7 +254,7 @@ impl Machine {
             highest = Some(highest.map_or(load[0], |h| h.max(load[0])));
             if took >= PATIENCE {
                 return Err(format!(
-                    "the 1-minute load stayed at {QUIET} or above for {}s, at most {:.2} and last {}, so the dedicated machine measures nothing",
+                    "the 1-minute load stayed at {QUIET} or above for {}s, at most {:.2} and last {}, so the machine held for the bench measures nothing",
                     took.as_secs(),
                     highest.unwrap_or(load[0]),
                     load_text(Some(load))
@@ -1148,25 +1171,71 @@ impl Side for Counted {
 }
 
 /// The variable GitHub sets on every runner: `github-hosted` on its own
-/// fleet's, `self-hosted` on a machine of ours.
+/// fleet's, `self-hosted` on any other, another provider's hosted ones
+/// among them.
 pub(crate) const RUNNER_ENVIRONMENT: &str = "RUNNER_ENVIRONMENT";
 
-/// A bench number needs the quiet machine (protocol §7): a GitHub-hosted
-/// runner is a shared VM whose neighbours move every arm, and its reading
-/// would be noise a person could mistake for a measurement. So the command
-/// refuses one before it measures, whatever workflow asked it to, and
-/// writes nothing. The library entry is not held to it:
-/// the negative control under `xtask/tests/bench.rs` tests the rig, and
-/// runs wherever `xtask`'s tests run.
-pub(crate) fn refuse_a_hosted_runner(environment: Option<&str>) -> Result<()> {
-    if environment == Some("github-hosted") {
+/// A GitHub-hosted runner is a shared VM whose neighbours move every arm
+/// (protocol §7), and a reading taken there as a shared or a dedicated
+/// machine's would be noise a person could mistake for a measurement. So
+/// the command refuses one asked as anything but [`Machine::Hosted`]
+/// before it measures, whatever workflow asked it to, and writes nothing.
+/// The library entry is not held to it: the negative control under
+/// `xtask/tests/bench.rs` tests the rig, and runs wherever `xtask`'s tests
+/// run.
+pub(crate) fn refuse_a_hosted_runner(environment: Option<&str>, machine: Machine) -> Result<()> {
+    if environment == Some("github-hosted") && machine != Machine::Hosted {
         bail!(
-            "bench measures on the quiet self-hosted machine and never on a GitHub-hosted runner \
-             ({RUNNER_ENVIRONMENT}=github-hosted): a shared VM's numbers are noise a person could \
-             read as a measurement"
+            "bench measures on a GitHub-hosted runner ({RUNNER_ENVIRONMENT}=github-hosted) as \
+             --machine hosted alone: a shared VM's numbers are noise a person could read as a \
+             measurement, so they are offered as provisional, each bar between two runs of its \
+             A/A control"
         );
     }
     Ok(())
+}
+
+/// The order a hosted machine measures `bars` in: each bar that has an
+/// A/A control, the declared control named `<bar>-aa`, between two runs of
+/// it, and every other bar where it stood. A control measured around its
+/// bar is not measured again on its own. `before` and `after` are the
+/// declared set twice more, which a control's two runs are taken from,
+/// since a bar's arms start once.
+fn between_controls(
+    bars: Vec<Declared>,
+    [mut before, mut after]: [Vec<Declared>; 2],
+) -> Vec<Declared> {
+    fn taken(from: &mut Vec<Declared>, id: &str, turn: &str, bar: &str) -> Option<Declared> {
+        let at = (from.iter()).position(|c| c.id == id && c.held == Held::Control)?;
+        let mut control = from.swap_remove(at);
+        control.about = format!("{}; {turn} {bar}, on a hosted machine", control.about);
+        Some(control)
+    }
+    let control_of = |bar: &Declared| format!("{}-aa", bar.id);
+    let stands =
+        |set: &[Declared], id: &str| (set.iter()).any(|c| c.id == id && c.held == Held::Control);
+    let around: Vec<String> = (bars.iter())
+        .filter(|bar| bar.held != Held::Control)
+        .map(control_of)
+        .filter(|id| stands(&before, id) && stands(&after, id))
+        .collect();
+    let mut ordered = Vec::new();
+    for bar in bars {
+        let id = control_of(&bar);
+        if bar.held == Held::Control {
+            if !around.contains(&bar.id) {
+                ordered.push(bar);
+            }
+        } else if around.contains(&id) {
+            ordered.extend(taken(&mut before, &id, "before", &bar.id));
+            let last = taken(&mut after, &id, "after", &bar.id);
+            ordered.push(bar);
+            ordered.extend(last);
+        } else {
+            ordered.push(bar);
+        }
+    }
+    ordered
 }
 
 /// `xtask bench`: each bar measured under the protocol, printed with the
@@ -1179,7 +1248,9 @@ pub(crate) fn refuse_a_hosted_runner(environment: Option<&str>) -> Result<()> {
 /// A bar held to a tolerance reads its earlier nights and its baseline
 /// from `log` where one is handed, the published history, since each
 /// nightly job starts from an empty store; and from the store's own
-/// otherwise. On a dedicated `machine` each bar waits for a quiet load.
+/// otherwise. On a dedicated or a hosted `machine` each bar waits for a
+/// quiet load, and on a hosted one it is measured between two runs of its
+/// A/A control.
 pub fn run(
     root: &Path,
     store: &Store,
@@ -1189,6 +1260,7 @@ pub fn run(
     (label, note): (Label, &str),
     log: Option<&Path>,
 ) -> Result<()> {
+    machine.offers(label)?;
     if label.needs_note() && note.trim().is_empty() {
         bail!(
             "--label {} owes a written reservation; a standing with none is a word and not a label ({PROTOCOL} §8)",
@@ -1207,6 +1279,9 @@ pub fn run(
         if bars.is_empty() {
             bail!("no bar is named {name:?}");
         }
+    }
+    if machine == Machine::Hosted && from.is_none() {
+        bars = between_controls(bars, [declared(root)?, declared(root)?]);
     }
     let snapshot = Snapshot::disk(root)?;
     let tolerances = crate::manifest::Manifest::load(root)?.tolerances;
@@ -1258,7 +1333,8 @@ fn measure_bars(
         // run refused (§1) is a failing reading that names why; either way
         // the next bar runs, and a refusal is the command's error once all
         // have run, so a refused run never reads as a measurement. A
-        // dedicated machine too loud to measure on is a skip that says so.
+        // machine held for the bench and too loud to measure on is a skip
+        // that says so.
         let measured =
             start().and_then(
                 |sides| match sides.and_then(|arms| settle().map(|c| (arms, c))) {
@@ -1966,17 +2042,97 @@ mod tests {
         );
     }
 
-    /// A GitHub-hosted runner is refused, and a machine of ours or one
-    /// outside CI is not.
+    /// A GitHub-hosted runner is refused as a shared or a dedicated
+    /// machine and measured as a hosted one; another runner, or a machine
+    /// outside CI, is refused nothing.
     #[test]
-    fn a_github_hosted_runner_is_refused_and_no_other_machine_is() {
-        let refused = refuse_a_hosted_runner(Some("github-hosted")).unwrap_err();
-        assert!(
-            format!("{refused}").contains("quiet self-hosted machine"),
-            "{refused}"
+    fn a_github_hosted_runner_measures_as_a_hosted_machine_alone() {
+        use super::Machine::{Dedicated, Hosted, Shared};
+        for machine in [Shared, Dedicated] {
+            let refused = refuse_a_hosted_runner(Some("github-hosted"), machine).unwrap_err();
+            assert!(
+                format!("{refused}").contains("--machine hosted alone"),
+                "{refused}"
+            );
+            assert!(refuse_a_hosted_runner(Some("self-hosted"), machine).is_ok());
+            assert!(refuse_a_hosted_runner(None, machine).is_ok());
+        }
+        assert!(refuse_a_hosted_runner(Some("github-hosted"), Hosted).is_ok());
+    }
+
+    /// A hosted machine offers its numbers as smoke or provisional and
+    /// under no other label; a machine of another kind offers any.
+    #[test]
+    fn a_hosted_machine_offers_its_numbers_as_smoke_or_provisional_alone() {
+        use super::Label::{BaselineOfRecord, Provisional, Smoke, Unlabelled};
+        use super::Machine::{Dedicated, Hosted, Shared};
+        for label in [Smoke, Provisional] {
+            assert!(Hosted.offers(label).is_ok(), "{label:?}");
+        }
+        for label in [Unlabelled, BaselineOfRecord] {
+            let refused = Hosted.offers(label).unwrap_err();
+            assert!(
+                format!("{refused}").contains("smoke or --label provisional"),
+                "{refused}"
+            );
+            assert!(Shared.offers(label).is_ok() && Dedicated.offers(label).is_ok());
+        }
+    }
+
+    /// On a hosted machine a bar is measured between two runs of the
+    /// declared control named for it, each saying which run it is; the
+    /// control is not measured again where it stood, and a bar with no
+    /// such control, or a control that is no bar's, stays where it was.
+    #[test]
+    fn a_hosted_machine_measures_each_bar_between_two_runs_of_its_control() {
+        let same: [Stubbed; 2] = [("a", |_| 10.0), ("b", |_| 10.0)];
+        let declared = || {
+            vec![
+                stubbed("lone-aa", Held::Control, same),
+                stubbed("door", Held::Bound, same),
+                stubbed("door-aa", Held::Control, same),
+                stubbed("code", Held::Series, same),
+            ]
+        };
+        let order = |bars: Vec<super::Declared>| -> Vec<String> {
+            super::between_controls(bars, [declared(), declared()])
+                .iter()
+                .map(|bar| match bar.about.split_once("; ") {
+                    Some((_, turn)) => format!("{} ({turn})", bar.id),
+                    None => bar.id.clone(),
+                })
+                .collect()
+        };
+        let around = [
+            "door-aa (before door, on a hosted machine)",
+            "door",
+            "door-aa (after door, on a hosted machine)",
+        ];
+        assert_eq!(
+            order(declared()),
+            [&["lone-aa"][..], &around[..], &["code"][..]].concat()
         );
-        assert!(refuse_a_hosted_runner(Some("self-hosted")).is_ok());
-        assert!(refuse_a_hosted_runner(None).is_ok());
+        // One bar asked for by name brings its control with it; the
+        // control asked for alone is measured once.
+        let only = |id: &str| declared().into_iter().filter(|b| b.id == id).collect();
+        assert_eq!(order(only("door")), around);
+        assert_eq!(order(only("door-aa")), ["door-aa"]);
+        assert_eq!(order(only("code")), ["code"]);
+        // Through the run: both runs of the control are measured and the
+        // reading kept is the later one's, which says so.
+        let (_tree, store, snapshot) = scratch("bench-between");
+        let bars = super::between_controls(only("door"), [declared(), declared()]);
+        let mut quiet = || super::Machine::Hosted.settle("hw", || Some([0.5; 3]), |_| {});
+        let ask = (super::Label::Provisional, "a hosted runner");
+        super::measure_bars(&store, &snapshot, bars, &[], &[], (6, &mut quiet), ask).unwrap();
+        let control = store.read("bench", "door-aa").unwrap().unwrap();
+        assert!(
+            control.message.contains("after door, on a hosted machine")
+                && control.message.contains("PROVISIONAL"),
+            "{}",
+            control.message
+        );
+        assert!(store.read("bench", "door").unwrap().is_some());
     }
 
     /// A shared machine's conditions, at a load a loaded machine reads.

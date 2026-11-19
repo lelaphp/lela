@@ -1,39 +1,43 @@
-# The bench on dax-build, by hand (#3774), as Mitchell ruled on #3767: G4's
-# bars, the fpm bars (#2714), makala against php-fpm at 8 clients (#2660)
-# and the server memory bar (#3386), run on the Linux server, held for the
-# bench while they run, and never on this Mac, whose load read 6 to 44 with
-# sessions sharing it.
+# The bench on a hosted runner, by hand, as Mitchell ruled on 2026-11-19:
+# G4's bars, the engine's and the tier's, and makala's where the machine
+# has a php-fpm to set it against, measured on the runner the repository
+# variable LELA_BUILD_RUNNER names and offered as provisional, never as a
+# number a gate rests on. A hosted runner shares its host: in the trial of
+# 2026-11-18 one build read against itself ran up to 5% apart in a row's
+# median, and its median for one program moved by 7 to 35% within 22
+# minutes, against G1's bound of 2% a row. So `xtask bench --machine
+# hosted` measures each bar between two runs of its A/A control, which say
+# what the machine did meanwhile, and refuses any label but smoke and
+# provisional (docs/perf/measurement-protocol.md §7, §8). A number that
+# decides a gate is taken on a machine held for the bench.
 #
-# - `baseline` builds php 8.5.12 and its php-fpm on dax-build from the
+# One job, since a hosted runner hands nothing to the next:
+# - With `baseline` on it first builds php 8.5.12 and its php-fpm from the
 #   pinned tag, with the main oracle's configure line, through
-#   scripts/oracle-build.py and ci/oracle/Dockerfile: the build #3385 pins
-#   and #3741's capture-only Linux variant needs, so it is built once. It is
-#   a performance baseline and not an oracle: the one-oracle rule (#2253,
-#   #3741) is unchanged. The job's summary is both binaries' md5 and the
-#   tables the pin would carry, which it stashes; landing them in the pin
-#   is #3385's, through `xtask steer`.
-# - The hand-off is target/: the runner keeps it between the two jobs, and
-#   the recipe lands the build at target/oracle/linux-x86_64/main/, `php`
-#   beside `pin.toml`, its table, and `runtime.txt`, the packages whose
-#   libraries it links, which `bench` installs and holds with `ldd` before
-#   a bar runs (#3825). On Linux `g4-code`, `oracle-jit` and
-#   `oracle-jit-aa` take that `php` as the pinned one, held to the md5 its
-#   `pin.toml` records, and refuse, naming the path and the md5, where it
-#   is absent or another (#3799). A run with `baseline` off measures the
-#   build an earlier run left there.
-# - `bench` runs `xtask bench --machine dedicated`: every seat held, so no
-#   other instrument builds there while it measures, and each bar measured
-#   only below a 1-minute load of 2, waited for, its reading naming the
-#   load, how long it waited and the machine (processor, cores, kernel).
-#   A bar file kept on dax-build (protocol §11) is measured with `from`.
+#   scripts/oracle-build.py and ci/oracle/Dockerfile. It is a performance
+#   baseline and not an oracle: the one-oracle rule is unchanged. The
+#   build lands at target/oracle/linux-x86_64/main/, `php` beside
+#   `pin.toml`, its table, and `runtime.txt`, the packages whose libraries
+#   it links, which the job installs and holds with `ldd` before a bar
+#   runs. `g4-code`, `oracle-jit` and `oracle-jit-aa` take that `php` as
+#   the pinned one, held to the md5 its `pin.toml` records, and refuse,
+#   naming the path and the md5, where it is absent or another. The job's
+#   summary carries both binaries' md5 and the tables the pin would carry,
+#   which it also keeps; landing them in the pin is a person's, through
+#   `xtask steer`.
+# - With `baseline` off nothing is built from the tag, and the bars that
+#   run the pinned php refuse: the way to measure one bar that needs none
+#   of it, named with `bar`.
+# - Then, with `bench` on, `xtask bench --machine hosted --label provisional`: every seat
+#   held, each bar measured only below a 1-minute load of 2, waited for,
+#   its reading naming the load, how long it waited, the machine
+#   (processor, cores, kernel) and the reservation `note` gives. A bar
+#   file in the repository is measured with `from`, alone and with no
+#   control around it.
 #
-# Both jobs take the literal label and never LELA_BUILD_RUNNER: a hosted
-# reading is noise, and `xtask bench` refuses a GitHub-hosted runner
-# whatever job runs it (#2477). One runner runs one job at a time, so
-# nothing of harness.yml or nightly.yml runs beside them. A bench number
-# is a claim a person signs off beside its A/A control (harness §4.2,
-# §11): the job states the measurement, and fails only where a bar refused
-# the run (protocol §1).
+# A bench number is a claim a person signs off beside its A/A control
+# (harness §4.2, §11): the job states the measurement, and fails only
+# where a bar refused the run (protocol §1).
 name: bench
 on:
   workflow_dispatch:
@@ -47,14 +51,17 @@ on:
         type: boolean
         default: true
       bar:
-        description: Only this bar, by name; empty runs every declared bar
+        description: Only this bar, by name, between two runs of its A/A control; empty runs every declared bar
         default: ""
       from:
-        description: A bar file on dax-build, by its absolute path, in place of the declared bars
+        description: A bar file in the repository, by its path, in place of the declared bars
         default: ""
       reps:
         description: Measured reps per arm, after the protocol's discarded warm-up
         default: "12"
+      note:
+        description: The written reservation the provisional label owes
+        default: "measured on a hosted runner, which shares its host; each bar stands between two runs of its A/A control"
 concurrency:
   group: bench
   cancel-in-progress: false
@@ -64,49 +71,69 @@ defaults:
     shell: bash
 # The stash's two variables are every job's; the secret, the key that
 # reaches the stash, is set on each step that stashes and on no other
-# (.github/actions/stash; #4348 ruling 5; #4372).
+# (.github/actions/stash).
 env:
   DAX_STASH: ${{ vars.DAX_STASH }}
   DAX_STASH_HOST_KEY: ${{ vars.DAX_STASH_HOST_KEY }}
 jobs:
-  baseline:
-    name: php 8.5.12 and its php-fpm, built on dax-build from the pinned tag
-    if: ${{ inputs.baseline }}
-    runs-on: [self-hosted, linux, dax-build]
-    timeout-minutes: 120
+  bench:
+    name: the bench, each bar between two runs of its A/A control
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
+    timeout-minutes: 360
     permissions:
       contents: read
+    env:
+      XTASK: cargo run --release --quiet --package xtask --
+      BAR: ${{ inputs.bar }}
+      FROM: ${{ inputs.from }}
+      REPS: ${{ inputs.reps }}
+      NOTE: ${{ inputs.note }}
     steps:
       - uses: actions/checkout@v4
         with:
           clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
+      # As harness.yml's instruments' job: a hosted image comes nearly
+      # full, and the arms' builds each take a target directory of their
+      # own.
+      - name: room for target/ on a hosted image
+        run: |
+          free=$(df --output=avail -BG "$GITHUB_WORKSPACE" | tail -n 1 | tr -dc 0-9)
+          echo "$free GiB free"
+          if [ "$free" -lt 40 ] && [ -d /opt/hostedtoolcache ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell /usr/lib/jvm /usr/local/share/chromium /opt/microsoft /opt/google /usr/lib/google-cloud-sdk /opt/az
+            df -h "$GITHUB_WORKSPACE"
+          fi
       - uses: ./.github/actions/workspace
+      # The platform libraries the arms' builds link, from the one list
+      # the action reads (design §7.2).
+      - uses: ./.github/actions/platform-libraries
       # The pinned php-src, checked out at the tag the harness names; the
       # recipe archives the pinned commit out of it, whatever is sparse.
       - uses: ./.github/actions/corpus
+        if: ${{ inputs.baseline }}
         id: corpus
         with:
           promise: tree
-      # The build's whole output is the log's: what it printed was 1405k in
-      # run 41242977836, and GitHub refuses a step summary over 1024k.
+      # The build's whole output is the log's: it printed 1405k in one
+      # run, and GitHub refuses a step summary over 1024k.
       - name: php 8.5.12 and its php-fpm, from the pinned tag
+        if: ${{ inputs.baseline }}
         id: build
         env:
           TREE: ${{ steps.corpus.outputs.tree }}
         run: |
           python3 scripts/oracle-build.py --tree "$TREE" build linux-x86_64 main --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/baseline.txt"
-      # The summary is the two md5 lines and the tables the build wrote, read
-      # from its files only where this run's build passed, since the runner
-      # keeps target/ between runs; a failed build's is its last lines, cut.
+      # The summary is the two md5 lines and the tables the build wrote; a
+      # failed build's is its last lines, cut.
       - name: the md5s and the tables, as the job's summary
-        if: always() && steps.build.outcome != 'skipped'
+        if: ${{ always() && inputs.baseline && steps.build.outcome != 'skipped' }}
         env:
           BUILT: ${{ steps.build.outcome }}
         run: |
           out=target/oracle/linux-x86_64/main
           {
-            echo "### php 8.5.12 and its php-fpm, built on dax-build from the pinned tag"
+            echo "### php 8.5.12 and its php-fpm, built from the pinned tag"
             echo
             echo '```'
             if [ "$BUILT" = success ]; then
@@ -119,18 +146,18 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: the tables the pin would carry, gathered for the stash
+        if: ${{ inputs.baseline }}
         run: |
           mkdir -p "$RUNNER_TEMP/baseline"
           cp target/oracle/linux-x86_64/main/pin.toml \
             target/oracle/linux-x86_64/main/sapi.toml \
             target/oracle/linux-x86_64/main/installed.txt \
             "$RUNNER_TEMP/baseline/"
-      # Kept on dax-build, as every hand-off is (#3554), not as a GitHub
-      # artifact, which the account's storage quota refuses. Until a person
-      # sets DAX_STASH (#3696) the action falls back to that artifact, so a
-      # refused hand-off fails no job: the md5s and the tables are in the
-      # log and the summary either way, and no later job reads this one.
+      # Kept for a person to read, and no later job reads it: the md5s and
+      # the tables are in the log and the summary either way, so a refused
+      # hand-off fails no job while DAX_STASH is unset.
       - uses: ./.github/actions/stash
+        if: ${{ inputs.baseline }}
         continue-on-error: ${{ env.DAX_STASH == '' }}
         env:
           DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
@@ -138,29 +165,6 @@ jobs:
           put: baseline
           path: ${{ runner.temp }}/baseline/
           retention-days: "90"
-
-  bench:
-    name: the bench, every seat held and each bar below a load of 2
-    needs: baseline
-    if: ${{ !cancelled() && inputs.bench && needs.baseline.result != 'failure' }}
-    runs-on: [self-hosted, linux, dax-build]
-    timeout-minutes: 600
-    permissions:
-      contents: read
-    env:
-      XTASK: cargo run --release --quiet --package xtask --
-      BAR: ${{ inputs.bar }}
-      FROM: ${{ inputs.from }}
-      REPS: ${{ inputs.reps }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: false
-          fetch-depth: 0
-      - uses: ./.github/actions/workspace
-      # The platform libraries the arms' builds link, from the one list
-      # the action reads (design §7.2; #1300).
-      - uses: ./.github/actions/platform-libraries
       # What the bench takes as the pinned php, said before it runs; the
       # bench holds it to the md5 and refuses the bars that run it where
       # it is absent or another, so this step fails nothing.
@@ -170,12 +174,12 @@ jobs:
           md5sum "$out/php" 2>&1 || true
           cat "$out/pin.toml" 2>&1 || true
       # The libraries that php and its php-fpm link, from the packages the
-      # image that built them names, runtime.txt beside them (#3825): the
-      # image is this host's release, so its names are the host's. The
-      # baseline is built in that image and run here, and packages.txt
-      # lists only what the workspace links. A library `ldd` still cannot
-      # find fails the job here, before a bar runs php and refuses on it.
-      # Where no php stands, the bars that run it refuse, naming the path.
+      # image that built them names, runtime.txt beside them: the image is
+      # this runner's release, so its names are the runner's. The baseline
+      # is built in that image and run here, and packages.txt lists only
+      # what the workspace links. A library `ldd` still cannot find fails
+      # the job here, before a bar runs php and refuses on it. Where no
+      # php stands, the bars that run it refuse, naming the path.
       - name: the libraries the php built from the pinned tag links
         run: |
           out=target/oracle/linux-x86_64/main
@@ -184,7 +188,7 @@ jobs:
             exit 0
           fi
           if [ ! -s "$out/runtime.txt" ]; then
-            echo "::error::$out/runtime.txt is absent: the php there was built before its image named its runtime packages (#3825); run with baseline on"
+            echo "::error::$out/runtime.txt is absent: the php there was built by a recipe that did not name its runtime packages"
             exit 1
           fi
           mapfile -t packages < <(sed -e '/^$/d' "$out/runtime.txt")
@@ -192,24 +196,25 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends "${packages[@]}"
           ldd "$out/php" "$out/php-fpm" | tee "$RUNNER_TEMP/ldd.txt"
           if grep -F 'not found' "$RUNNER_TEMP/ldd.txt"; then
-            echo "::error::a library php or php-fpm links is not found on this host after runtime.txt's packages; the bars that run it would refuse"
+            echo "::error::a library php or php-fpm links is not found on this runner after runtime.txt's packages; the bars that run it would refuse"
             exit 1
           fi
-      - name: the bench, on the dedicated machine
+      - name: the bench, on the hosted machine
+        if: ${{ inputs.bench }}
         run: |
-          ask=(--machine dedicated --reps "$REPS")
+          ask=(--machine hosted --label provisional --note "$NOTE" --reps "$REPS")
           [ -z "$BAR" ] || ask+=(--bar "$BAR")
           [ -z "$FROM" ] || ask+=(--from "$FROM")
           $XTASK bench "${ask[@]}" | tee "$RUNNER_TEMP/bench.txt"
       - name: the readings, as the job's summary
-        if: always()
+        if: ${{ always() && inputs.bench }}
         run: |
           # The readings alone, which `xtask bench` prints on stdout, cut at
           # 512 KiB so the summary stays under GitHub's 1024k.
           readings=$RUNNER_TEMP/bench.txt
           limit=524288
           {
-            echo "### xtask bench on dax-build, every seat held, each bar below a 1-minute load of 2"
+            echo "### xtask bench on a hosted runner, provisional: each bar between two runs of its A/A control, below a 1-minute load of 2"
             echo
             echo '```'
             if [ -s "$readings" ]; then
@@ -224,9 +229,9 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       # As the baseline's: no job fails on a refused artifact while
-      # DAX_STASH is unset (#3696), and no later job reads this one.
+      # DAX_STASH is unset, and no later job reads this one.
       - uses: ./.github/actions/stash
-        if: always()
+        if: ${{ always() && inputs.bench }}
         continue-on-error: ${{ env.DAX_STASH == '' }}
         env:
           DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}

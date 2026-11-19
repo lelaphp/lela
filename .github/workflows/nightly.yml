@@ -18,8 +18,8 @@
 # - `red-nightly`: a red `soak`, `tailcall` or `deny` filed on the tracker
 #   after two nightlies in a row (#2980).
 #
-# No bench runs here: every declared bar runs on dax-build, by hand, in
-# bench.yml, as Mitchell ruled on #3767 (#4479).
+# No bench runs here: every declared bar runs by hand in bench.yml, on a
+# hosted runner and as provisional, as Mitchell ruled on 2026-11-19.
 #
 # This workflow was the dashboard's, whose three other jobs built its site
 # from these jobs' stores and put it on Cloudflare. Mitchell ruled the site

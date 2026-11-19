@@ -569,7 +569,9 @@ pub(crate) struct Bench {
     pub reps: usize,
     /// What the run may assume of the machine: `dedicated` holds every
     /// seat and measures each bar only below a 1-minute load of 2,
-    /// waiting for it, as dax-build is held for the bench.
+    /// waiting for it; `hosted` is a hosted runner's, held the same way,
+    /// each bar between two runs of its A/A control and its numbers
+    /// offered as smoke or provisional alone.
     #[arg(long, value_enum, default_value = "shared")]
     pub machine: crate::bench::Machine,
     /// The standing the numbers are offered with (protocol §8).

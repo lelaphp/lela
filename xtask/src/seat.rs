@@ -199,11 +199,11 @@ impl Seats {
 /// The seat `command` builds in, taken before it runs: every building
 /// instrument's but `clippy`'s and `test`'s, which take theirs once they
 /// know they have a crate to build; and every seat for a bench on a
-/// dedicated machine.
+/// dedicated or a hosted machine.
 pub(crate) fn of_command(command: &crate::cli::Command) -> Option<Seat> {
     use crate::cli::Command;
     if let Command::Bench(ask) = command
-        && ask.machine == crate::bench::Machine::Dedicated
+        && ask.machine != crate::bench::Machine::Shared
     {
         return Some(Seats::of_env().take_every("bench"));
     }

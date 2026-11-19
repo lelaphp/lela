@@ -33,11 +33,12 @@
 # self-hosted pair is not online: the `oracle` job, which only the Mac can
 # run, is skipped rather than queued for the 24 hours GitHub holds a job no
 # runner takes (scripts/ci/README.md).
-# `bench` and the nightly series (#2259) are no job here, and when they are
-# one they take the self-hosted label and not the variable: their numbers
-# need the quiet machine, and a hosted reading is noise a person could
-# mistake for a measurement, which is why `xtask bench` refuses a
-# GitHub-hosted runner whatever job runs it.
+# `bench` is no job here: it is run by hand in bench.yml, on the runner the
+# variable names, as a hosted machine's and so as provisional, each bar
+# between two runs of its A/A control, as Mitchell ruled on 2026-11-19. A
+# hosted reading taken any other way is noise a person could mistake for a
+# measurement, which is why `xtask bench` refuses a GitHub-hosted runner
+# asked as anything but `--machine hosted`, whatever job runs it.
 name: harness
 on:
   push:

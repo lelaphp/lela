@@ -53,9 +53,9 @@ Two things differ, and neither needs a step:
 - The image preinstalls MySQL 8.4 with its service disabled, so port 3306 is free for the compose server.
 - A hosted runner starts empty. It has no warm `target/`, so each job builds from scratch.
 
-### What never runs on a hosted image
+### What a hosted image measures as provisional
 
-`bench` and the nightly series (#2259). Their numbers need the quiet machine. A hosted VM shares its host, and its reading would be noise a person could mistake for a measurement. Neither is a job yet. When one is, it takes the literal self-hosted label, not this variable. Whatever job runs it, `xtask bench` refuses a runner whose `RUNNER_ENVIRONMENT` is `github-hosted` and measures nothing.
+The bench, which `bench.yml` runs by hand on the runner this variable names, as Mitchell ruled on 2026-11-19. A hosted VM shares its host, so a reading taken there is offered as provisional and never as a number a gate rests on: `xtask bench --machine hosted` measures each bar between two runs of its A/A control and refuses any label but smoke and provisional (`docs/perf/measurement-protocol.md` §7). Whatever job runs it, `xtask bench` asked as a shared or a dedicated machine refuses a runner whose `RUNNER_ENVIRONMENT` is `github-hosted` and measures nothing.
 
 ## The stash: configured once, in the repository
 
