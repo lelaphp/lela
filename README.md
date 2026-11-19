@@ -24,6 +24,72 @@ After its source changes, `cargo build --release` rebuilds every binary that lin
 
 The oracle's pin is `oracle.toml`, and `cargo xtask status --section oracle` prints the pin as this machine has it. The harness is described in `harness-design.md`, and `cargo xtask --help` lists its instruments. Building the binaries runs neither the oracle nor the harness.
 
+## The images
+
+CI publishes three variants to `ghcr.io/lelaphp/lela`, each shaped as php's official image of that name is, and each for `linux/amd64` and `linux/arm64` under one reference (`dist/README.md`). Every reference names its variant. `<version>` is a release's version, and its tags never move; the bare variant is the newest release that is not a pre-release; `edge-` is the last merge to `main`; and a `sha-` tag, with the full commit, is one merge to `main`, kept 30 days.
+
+`cli`, the CLI and CGI hosts, running `php -a`:
+
+```
+ghcr.io/lelaphp/lela:cli
+```
+
+```
+ghcr.io/lelaphp/lela:<version>-cli
+```
+
+```
+ghcr.io/lelaphp/lela:edge-cli
+```
+
+```
+ghcr.io/lelaphp/lela:sha-<commit>-cli
+```
+
+`fpm`, those and the FPM, listening on port 9000:
+
+```
+ghcr.io/lelaphp/lela:fpm
+```
+
+```
+ghcr.io/lelaphp/lela:<version>-fpm
+```
+
+```
+ghcr.io/lelaphp/lela:edge-fpm
+```
+
+```
+ghcr.io/lelaphp/lela:sha-<commit>-fpm
+```
+
+`apache`, those and Apache in front of the FPM, serving port 80:
+
+```
+ghcr.io/lelaphp/lela:apache
+```
+
+```
+ghcr.io/lelaphp/lela:<version>-apache
+```
+
+```
+ghcr.io/lelaphp/lela:edge-apache
+```
+
+```
+ghcr.io/lelaphp/lela:sha-<commit>-apache
+```
+
+Once the hosts carry Lela's names (ADR-0016), the names other tools call, `php`, `php-cgi` and `php-fpm`, are symlinks to them in `/opt/lela/compat`, which no image puts on `PATH`. One line in a Dockerfile built on an image opts in:
+
+```dockerfile
+ENV PATH=/opt/lela/compat:$PATH
+```
+
+Until then the hosts are named `php`, `php-cgi` and `php-fpm` already, and the directory is empty.
+
 ## The repository
 
 `AGENTS.md` is the map an agent reads first, fed to it by the `SessionStart` hook as `xtask status --session` with the local facts of `.claude/harness.local.md` (harness §5); its regions are computed, `computed run` renders them and `computed check` holds them in CI. Read `CONTEXT.md` first. The design of record is `third-engine-design.md`; `jit-design.md` for the compiled tier; `harness-design.md` for the harness. Each is one living document with a ledger on top. Reversed decisions are in `docs/adr/`.

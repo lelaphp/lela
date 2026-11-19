@@ -23,6 +23,18 @@ WHEN = "2026-11-19T12:34:56Z"
 EPOCH = "1795091696"
 
 
+class Readme(unittest.TestCase):
+    def test_the_root_readme_gives_every_reference_a_block_of_its_own(self):
+        text = (ROOT / "README.md").read_text()
+        blocks = [block.split("\n", 1) for block in text.split("```")[1::2]]
+        bodies = {body.strip() for _, body in blocks if body.strip()}
+        for variant in VARIANTS:
+            for tag in (variant, f"<version>-{variant}", f"edge-{variant}", f"sha-<commit>-{variant}"):
+                with self.subTest(tag=tag):
+                    self.assertIn(f"{IMAGE}:{tag}", bodies)
+        self.assertIn("ENV PATH=/opt/lela/compat:$PATH", bodies)
+
+
 class Repository(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
