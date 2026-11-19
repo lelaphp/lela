@@ -70,6 +70,7 @@ it sits outside every supported combination (ADR-0017). A host built with
 ## Verify and refresh
 
 `dist/inputs.toml` holds the full php-src commit, both ini SHA-256 values, the
+SHA-256 of the two FPM configuration templates the `fpm` image renders, the
 versioned rustup installer SHA-256 for each build architecture, and the SHA-256
 of `rust-toolchain.toml`. `dist/inputs.py` compares the source identity and
 toolchain file before downloading, then verifies each download before use.
@@ -84,13 +85,16 @@ python3 dist/inputs.py check
 ```
 
 The tests exercise byte rejection, incomplete downloads, oracle commit/tag/version
-drift, toolchain channel/component drift, and both installer architectures.
-They do not build or run platform binaries.
+drift, toolchain channel/component drift, both installer architectures, and the
+FPM templates rendered as the official fpm image's `configure` renders them;
+with the pinned php-src tree at `TEST_PHP_SRCDIR`, they also hold the real
+templates to their pins. They do not build or run platform binaries.
 
 To exercise real downloads without installing anything:
 
 ```sh
 python3 dist/inputs.py ini /tmp/dist-inputs/ini
+python3 dist/inputs.py fpm /tmp/dist-inputs/fpm
 python3 dist/inputs.py rustup amd64 /tmp/dist-inputs/amd64/rustup-init
 python3 dist/inputs.py rustup arm64 /tmp/dist-inputs/arm64/rustup-init
 docker buildx build -f dist/Dockerfile --target ini .
@@ -99,8 +103,9 @@ docker buildx build -f dist/Dockerfile --target ini .
 When a person moves the oracle, resolve its source tag to the full commit in a
 trusted php-src checkout (`git rev-parse '<tag>^{commit}'`). Confirm that commit
 extends `oracle.toml`'s abbreviated commit and that the tag matches the oracle
-version. Hash each ini file at that commit with SHA-256 and review the bytes.
-Update the tag, full commit and ini hashes together in `dist/inputs.toml`.
+version. Hash each ini file and each FPM template at that commit with SHA-256
+and review the bytes. Update the tag, full commit, ini and FPM hashes together
+in `dist/inputs.toml`.
 The verifier compares all three source/version fields, so a tag-only move
 also refuses stale pins. It does not contact a mutable remote tag at build time;
 the reviewed tag-to-commit relationship is recorded in the pin file.

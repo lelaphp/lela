@@ -12,7 +12,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
-spec = importlib.util.spec_from_file_location("inputs", ROOT / "dist/inputs.py")
+# The pinned php-src tree, where this machine has one.
+TREE = Path(os.path.expanduser(os.environ.get("TEST_PHP_SRCDIR", "~/php-src/missing")))
+spec =importlib.util.spec_from_file_location("inputs", ROOT / "dist/inputs.py")
 inputs = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(inputs)
 
@@ -50,6 +52,81 @@ class DistributionInputs(unittest.TestCase):
         for _, url, digest in inputs.ini(pins):
             self.assertIn("/" + pins["php"]["commit"] + "/", url)
             self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            [(source, installed) for source, _, _, installed in inputs.fpm(pins)],
+            [
+                ("sapi/fpm/php-fpm.conf.in", "php-fpm.conf.default"),
+                ("sapi/fpm/www.conf.in", "php-fpm.d/www.conf.default"),
+            ],
+        )
+        for source, url, digest, _ in inputs.fpm(pins):
+            self.assertTrue(url.endswith("/" + pins["php"]["commit"] + "/" + source), url)
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_fpm_templates_render_as_the_official_fpm_image_configures_php(self):
+        # docker-library/php configures php with its default prefix,
+        # --sysconfdir=/usr/local/etc and --with-fpm-user/group=www-data;
+        # configure.ac and sapi/fpm/config.m4 derive the rest from those.
+        template = (
+            "include=@php_fpm_sysconfdir@/php-fpm.d/*.conf\n"
+            "; prefix (@prefix@), @php_fpm_prefix@, @EXPANDED_LOCALSTATEDIR@\n"
+            "; @EXPANDED_DATADIR@/fpm/status.html\n"
+            "user = @php_fpm_user@\ngroup = @php_fpm_group@\n"
+        )
+        self.assertEqual(
+            inputs.render(template),
+            "include=/usr/local/etc/php-fpm.d/*.conf\n"
+            "; prefix (/usr/local), NONE, /usr/local/var\n"
+            "; /usr/local/share/php/fpm/status.html\n"
+            "user = www-data\ngroup = www-data\n",
+        )
+
+    def test_a_placeholder_configure_would_not_fill_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "@EXPANDED_BINDIR@"):
+            inputs.render("; @EXPANDED_BINDIR@/php\n")
+
+    @unittest.skipUnless(
+        (TREE / "sapi/fpm/www.conf.in").is_file(),
+        "the pinned php-src tree is not on this machine (TEST_PHP_SRCDIR)",
+    )
+    def test_the_pinned_tree_s_fpm_templates_match_their_pins_and_render_whole(self):
+        pins = inputs.check(self.root)
+        for source, _, digest, _ in inputs.fpm(pins):
+            with self.subTest(source=source):
+                data = (TREE / source).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
+                rendered = inputs.render(data.decode())
+                self.assertNotRegex(rendered, r"@[A-Za-z_]+@")
+        conf = inputs.render((TREE / "sapi/fpm/php-fpm.conf.in").read_text())
+        self.assertIn("\ninclude=/usr/local/etc/php-fpm.d/*.conf\n", conf)
+        pool = inputs.render((TREE / "sapi/fpm/www.conf.in").read_text())
+        for line in ("user = www-data", "group = www-data", "listen = 127.0.0.1:9000"):
+            self.assertIn("\n" + line + "\n", pool)
+
+    def test_fpm_installs_each_rendered_template_where_make_install_puts_it(self):
+        payloads = {
+            "sapi/fpm/php-fpm.conf.in": b"include=@php_fpm_sysconfdir@/php-fpm.d/*.conf\n",
+            "sapi/fpm/www.conf.in": b"user = @php_fpm_user@\n",
+        }
+        pins = inputs.check(self.root)
+        pins["php"]["fpm"] = {name: hashlib.sha256(data).hexdigest() for name, data in payloads.items()}
+
+        def curl(arguments, check):
+            url = arguments[-1]
+            source = next(name for name in payloads if url.endswith("/" + name))
+            Path(arguments[arguments.index("--output") + 1]).write_bytes(payloads[source])
+
+        out = self.root / "fpm"
+        with patch.object(inputs.subprocess, "run", side_effect=curl):
+            inputs.install_fpm(pins, out)
+        self.assertEqual(
+            (out / "php-fpm.conf.default").read_text(), "include=/usr/local/etc/php-fpm.d/*.conf\n"
+        )
+        self.assertEqual((out / "php-fpm.d/www.conf.default").read_text(), "user = www-data\n")
+        self.assertEqual(
+            sorted(str(path.relative_to(out)) for path in out.rglob("*")),
+            ["php-fpm.conf.default", "php-fpm.d", "php-fpm.d/www.conf.default"],
+        )
 
     def test_external_docker_images_are_digest_pinned(self):
         dockerfile = (ROOT / "dist/Dockerfile").read_text()
@@ -160,6 +237,7 @@ class DistributionInputs(unittest.TestCase):
         pins = inputs.check(self.root)
         downloads = [(name, url, digest) for name, url, digest in inputs.ini(pins)]
         downloads += [(arch, *inputs.rustup(pins, arch)) for arch in ("amd64", "arm64")]
+        downloads += [(Path(source).name, url, digest) for source, url, digest, _ in inputs.fpm(pins)]
         for name, url, _ in downloads:
             with self.subTest(input=name):
                 payload = b"original bytes\n"

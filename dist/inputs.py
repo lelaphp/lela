@@ -11,6 +11,28 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# What php's configure writes for each placeholder of the FPM templates as
+# docker-library/php configures php: the default prefix, --sysconfdir at
+# /usr/local/etc and --with-fpm-user and --with-fpm-group of www-data, the
+# rest derived from those by configure.ac and sapi/fpm/config.m4. config.m4
+# evaluates $prefix before autoconf fills in its default, so the image's
+# www.conf.default says NONE where it names php_fpm_prefix.
+CONFIGURE = {
+    "prefix": "/usr/local",
+    "php_fpm_prefix": "NONE",
+    "php_fpm_sysconfdir": "/usr/local/etc",
+    "EXPANDED_LOCALSTATEDIR": "/usr/local/var",
+    "EXPANDED_DATADIR": "/usr/local/share/php",
+    "php_fpm_user": "www-data",
+    "php_fpm_group": "www-data",
+}
+
+# Each FPM template and where `make install` puts it, under the sysconfdir.
+FPM = {
+    "sapi/fpm/php-fpm.conf.in": "php-fpm.conf.default",
+    "sapi/fpm/www.conf.in": "php-fpm.d/www.conf.default",
+}
+
 
 def read_toml(path):
     return tomllib.loads(path.read_text())
@@ -59,6 +81,41 @@ def ini(pins):
     ]
 
 
+def fpm(pins):
+    return [
+        (
+            source,
+            "https://raw.githubusercontent.com/php/php-src/" + pins["php"]["commit"] + "/" + source,
+            pins["php"]["fpm"][source],
+            installed,
+        )
+        for source, installed in FPM.items()
+    ]
+
+
+def render(template):
+    """A template as configure renders it, refusing a placeholder it would not fill."""
+    def value(match):
+        name = match.group(1)
+        if name not in CONFIGURE:
+            raise ValueError(f"FPM template placeholder @{name}@ has no configured value")
+        return CONFIGURE[name]
+
+    return re.sub(r"@([A-Za-z_]+)@", value, template)
+
+
+def install_fpm(pins, directory):
+    for source, url, digest, installed in fpm(pins):
+        destination = directory / installed
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=destination.parent) as scratch:
+            template = Path(scratch) / Path(source).name
+            download(url, digest, template)
+            rendered = template.with_suffix("")
+            rendered.write_text(render(template.read_text()))
+            rendered.replace(destination)
+
+
 def download(url, digest, destination):
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError(f"invalid SHA-256 pin for {url}")
@@ -91,6 +148,8 @@ def main():
     installer.add_argument("destination", type=Path)
     templates = commands.add_parser("ini")
     templates.add_argument("directory", type=Path)
+    pool = commands.add_parser("fpm")
+    pool.add_argument("directory", type=Path)
     args = parser.parse_args()
     try:
         pins = check(args.root)
@@ -100,6 +159,8 @@ def main():
         elif args.command == "ini":
             for name, url, digest in ini(pins):
                 download(url, digest, args.directory / name)
+        elif args.command == "fpm":
+            install_fpm(pins, args.directory)
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as error:
         print(f"dist inputs: {error}", file=sys.stderr)
         return 1
