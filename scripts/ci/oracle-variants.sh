@@ -48,8 +48,11 @@ while read -r name platform md5 path; do
     tree=$(jq -er .found.path "$pin") ||
         { echo "::error::no pinned php-src to build $name from: $(jq -r .found.error "$pin")"; exit 1; }
     dir=$(dirname "$path")
-    { mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; } || {
-        echo "::error::$dir is not $(id -un)'s to write; scripts/ci/runner.sh mac lays it, as \`sudo install -d -o $(id -un) $dir\` does"
+    # A hosted runner's user is given `sudo` with no password, and a
+    # machine whose user is not is laid the directory once, by hand.
+    { mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; } ||
+        sudo -n install -d -o "$(id -un)" "$dir" 2>/dev/null || {
+        echo "::error::$dir is not $(id -un)'s to write, and \`sudo\` asks a password here; \`sudo install -d -o $(id -un) $dir\` lays it"
         exit 1
     }
     refused=$dir/.refused-$md5

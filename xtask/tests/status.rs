@@ -310,7 +310,8 @@ fn scratch_poured(name: &str, fixture: &str) -> Tree {
 }
 
 /// The stand-in `brew` of [`pinned_php`], `@prefix@` its Homebrew prefix.
-/// It answers `--prefix`, and under `DRY_RUN=1` nothing else. Outside a
+/// It answers `--prefix` and `--cache`, `@prefix@/cache`, and under
+/// `DRY_RUN=1` nothing else. Outside a
 /// dry run it writes each call to `@prefix@/calls` and answers as far as
 /// a pour goes: a pin, an unpin and a tap listing no tap succeed, the
 /// forced uninstall of `php@8.5` drops the pin of `php`, as brew's
@@ -322,6 +323,7 @@ fn scratch_poured(name: &str, fixture: &str) -> Tree {
 /// naming the tap it was poured from. Any other call fails.
 const BREW: &str = r#"#!/bin/sh
 [ "$*" = --prefix ] && echo "@prefix@" && exit 0
+[ "$*" = --cache ] && echo "@prefix@/cache" && exit 0
 if [ -z "$DRY_RUN" ]; then
     echo "brew $*" >>"@prefix@/calls"
     case "$*" in
@@ -362,7 +364,7 @@ if [ -z "$DRY_RUN" ]; then
     "https://raw.githubusercontent.com/Homebrew/homebrew-core/"*)
         sha=${url#https://raw.githubusercontent.com/Homebrew/homebrew-core/}
         [ "$2" = -o ] &&
-            printf '# %s\nclass Php < Formula\n  bottle do\n  end\nend\n' "${sha%%/*}" >"$3" &&
+            printf '# %s\nclass Php < Formula\n  no_autobump! because: :requires_manual_review\n  bottle do\n  end\nend\n' "${sha%%/*}" >"$3" &&
             exit 0
         ;;
     esac
@@ -583,7 +585,12 @@ fn the_keg_of_the_pinned_php_is_brew_pinned_where_it_is_already_poured() {
 /// is put back by its bare name. The stand-in `brew` lands the keg where
 /// the formula and the commit it was handed say ([`BREW`]), so a pour
 /// of another formula or another bottle misses the pin's path and the
-/// md5 that follows the pour stops it. The pour is macOS's, `sed -i ''` in it, so
+/// md5 that follows the pour stops it. Before the install the pour drops
+/// Homebrew's cached choice of curl, `<cache>/tool-selection/curl`, which
+/// a keg the uninstall took can leave naming a curl that cannot start.
+/// The formula the tap holds drops homebrew-core's `no_autobump!`, which
+/// Homebrew refuses in any other tap.
+/// The pour is macOS's, `sed -i ''` in it, so
 /// this runs where the oracle runner's `cargo test -p xtask` does.
 #[cfg(target_os = "macos")]
 #[test]
@@ -618,12 +625,19 @@ fn the_formula_and_the_bottle_the_pin_names_are_what_a_runner_pours() {
         let php = prefix.join(format!("Cellar/php@8.5/{bottle}/bin/php"));
         let php = php.display();
         let calls = prefix.join("calls");
+        let chosen = prefix.join("cache/tool-selection/curl");
+        std::fs::create_dir_all(chosen.parent().unwrap()).unwrap();
+        std::fs::write(&chosen, "brewed").unwrap();
         let (_, stdout, stderr) = pinned_php(&root, true);
         let would = format!(
             "zstd 1.5.7_1: the record's; already poured\nphp@8.5: would pour {bottle} at {php}\n"
         );
         assert_eq!((stdout.as_str(), stderr.as_str()), (would.as_str(), ""));
         assert!(!calls.exists(), "{fixture}: the dry run asked for more");
+        assert!(
+            chosen.exists(),
+            "{fixture}: the dry run dropped the choice of curl"
+        );
         let (_, stdout, stderr) = pinned_php(&root, false);
         let poured = format!(
             "zstd 1.5.7_1: the record's; already poured\n\
@@ -647,11 +661,16 @@ fn the_formula_and_the_bottle_the_pin_names_are_what_a_runner_pours() {
             file.display()
         );
         assert_eq!(std::fs::read_to_string(&calls).unwrap(), asked, "{fixture}");
+        assert!(
+            !chosen.exists(),
+            "{fixture}: brew's choice of curl outlived the pour"
+        );
         let formula = std::fs::read_to_string(&file).unwrap();
         assert!(
             formula.contains("  bottle do\n    root_url \"https://ghcr.io/v2/homebrew/core\"\n"),
             "{fixture}: {formula}"
         );
+        assert!(!formula.contains("no_autobump!"), "{fixture}: {formula}");
     }
 }
 

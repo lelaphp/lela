@@ -64,6 +64,7 @@ dry=${DRY_RUN:-}
 export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
 export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_ANALYTICS=1
 prefix=$(brew --prefix)
+cache=$(brew --cache)
 
 auth=()
 [ -z "${GH_TOKEN:-}" ] || auth=(-H "Authorization: Bearer $GH_TOKEN")
@@ -88,6 +89,10 @@ pour() {
     curl -sSfL -o "$file" "https://raw.githubusercontent.com/Homebrew/homebrew-core/$sha/Formula/$shard/$name.rb"
     # A tap's bottles are the tap's own packages by default; these are homebrew/core's.
     sed -i '' 's|^  bottle do$|  bottle do\n    root_url "https://ghcr.io/v2/homebrew/core"|' "$file"
+    # `no_autobump!` keeps a formula off homebrew-core's list of version
+    # bumps, and Homebrew 7 refuses it in any tap but its own (readline's
+    # since 8.3.6). It says nothing of the bottle, so the tap's copy drops it.
+    sed -i '' '/^  no_autobump! /d' "$file"
     brew unpin "dax/pin/$name" >/dev/null 2>&1 || true
     if [ -d "$prefix/Cellar/$name" ]; then
         # Once the rack is gone, the uninstall unpins the formula the bare
@@ -103,6 +108,15 @@ pour() {
                 echo "::warning::brew dropped the pin of $other with $name, and pinning it again failed"
         done
     fi
+    # Homebrew downloads with the newest curl that answers `--version`, its
+    # own keg-only curl where one is poured, and keeps that choice in a cache
+    # keyed on the binary alone (`select_tool`, utils/tool.sh). The uninstall
+    # above can take a library that curl links, as brotli on Blacksmith's
+    # image of 2026-07-30, which carried 1.2.0 where the pin holds 1.2.1;
+    # the cached choice then names a curl that cannot start, and every
+    # download fails. The choice is dropped, so brew asks again and takes
+    # the system's curl while its own is broken.
+    rm -f "$cache/tool-selection/curl"
     # Every keg php loads is poured here at its record, so none is brew's to
     # resolve: --ignore-dependencies keeps brew from upgrading one to its
     # newest, and from refusing a pour over a pinned one it would call old.

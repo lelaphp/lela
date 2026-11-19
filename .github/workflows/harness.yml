@@ -12,14 +12,18 @@
 # that reads its acceptance criteria; CI closes none (#290; CONTEXT.md,
 # Ticket). A red main is filed, once, by the last job (#1156).
 #
-# Every job runs on one of two self-hosted runners, as Mitchell ruled on
+# Every job but one runs on a self-hosted runner, as Mitchell ruled on
 # 2026-10-07 (#2218, #2253), set up by scripts/ci/runner.sh and registered
 # through scripts/ci/wizard.sh: `dax-build`, a Hetzner Linux server, for the
-# build, clippy, the tests and the rest of the instruments; and
-# `dax-oracle`, a Mac mini, which has the pinned php, a macOS keg
-# (oracle.toml), for the witnesses, the crosscheck and the tests that spawn
-# the oracle (#678, #2200). The stores meet in the `store` job, handed to it
-# through the stash on `dax-build` rather than as GitHub artifacts, which
+# build, clippy, the tests and the rest of the instruments. The `oracle`
+# job runs on a macOS 15 image (Blacksmith's 12-core
+# `blacksmith-12vcpu-macos-15` while the repository is private, GitHub's
+# `macos-15` once it is public), as Mitchell ruled on 2026-11-19:
+# the witnesses, the crosscheck and the tests that spawn the oracle need
+# the pinned php, a macOS keg (oracle.toml), which the job pours on a
+# machine that is fresh each run, after .github/actions/oracle-runner has
+# laid what such a machine lacks. The stores meet in the `store` job,
+# handed to it through the stash on `dax-build` rather than as GitHub artifacts, which
 # count against the account's storage (.github/actions/stash, #3554); the
 # stash is the repository's to configure, in the `env` below. A runner keeps its
 # work directory between jobs, so each checkout is `clean: false` and the
@@ -29,10 +33,8 @@
 # image, as Mitchell ruled on 2026-10-09 (#2218, #2477): each takes its
 # runner from the repository variable LELA_BUILD_RUNNER, a JSON list of
 # labels, and with the variable unset that is `[self-hosted, linux,
-# dax-build]`, so nothing here is reverted when the server comes. Set, the
-# self-hosted pair is not online: the `oracle` job, which only the Mac can
-# run, is skipped rather than queued for the 24 hours GitHub holds a job no
-# runner takes (scripts/ci/README.md).
+# dax-build]`, so nothing here is reverted when the server comes
+# (scripts/ci/README.md). The `oracle` job reads no variable.
 # `bench` is no job here: it is run by hand in bench.yml, on the runner the
 # variable names, as a hosted machine's and so as provisional, each bar
 # between two runs of its A/A control, as Mitchell ruled on 2026-11-19. A
@@ -243,21 +245,34 @@ jobs:
 
   oracle:
     name: the witnesses, the crosscheck and the oracle's tests
-    # Skipped while LELA_BUILD_RUNNER is set: the Mac is not online, and a
-    # job queued for it would hold the store job for GitHub's 24 hours (#2477).
-    if: ${{ !vars.LELA_BUILD_RUNNER }}
-    runs-on: [self-hosted, macos, dax-oracle]
-    # The dashboard's oracle job runs every lane in 150; this one runs the
-    # witnesses, the crosscheck and xtask's tests. Its wall time from a run
-    # is #2200's to state.
-    timeout-minutes: 60
+    # Not run while the repository is private, as Mitchell ruled on
+    # 2026-11-19: a push's Mac minutes are billed then (with nightly.yml's
+    # oracle job, 259 on GitHub's 3-core Mac that day), and the witnesses
+    # and the crosscheck are held before each land by the merge check. A
+    # public repository's minutes on GitHub's `macos-15` are not billed,
+    # and from then this job runs there on every push with no edit here;
+    # nightly.yml's Mac jobs run on Blacksmith's 12-core M4 while private.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ${{ github.event.repository.private && 'blacksmith-12vcpu-macos-15' || 'macos-15' }}
+    # On the hosted Mac of the trial of 2026-11-17 the witnesses took 94
+    # minutes with the build they start from nothing, and the crosscheck
+    # and xtask's tests 2 more, after the pour, the server and the variant.
+    timeout-minutes: 180
+    # One instrument runs at a time here, so it is given the whole machine:
+    # unless XTASK_SEATS is set, xtask divides the cores among three seats
+    # (xtask/src/seat.rs), which left the witness and phpt pools a third
+    # of the runner.
+    env:
+      XTASK_SEATS: 1
     steps:
       - uses: actions/checkout@v4
         with:
           clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       - uses: ./.github/actions/workspace
-      # The pin's one install, shared with the dashboard's oracle job (#2200).
+      - uses: ./.github/actions/oracle-runner
+      # The pin's one install, which nightly.yml's oracle job runs too: a
+      # hosted runner keeps no keg, so each job pours the closure afresh.
       - uses: ./.github/actions/pinned-php
       - uses: ./.github/actions/mysql
       # The tree and the binary both promised: a test of the harness that
@@ -287,8 +302,13 @@ jobs:
       # The harness's tests that spawn the oracle, which skip on the build
       # runner. Plain `cargo test`, which writes no reading: the `test`
       # reading is the build runner's, and the two stores keep one
-      # instrument each so they meet in the run's store whole.
-      - run: cargo test -p xtask
+      # instrument each so they meet in the run's store whole. Some of the
+      # tests run `computed`, which a fresh runner lacks, so it is installed
+      # first, as the instruments' job installs it. `--no-fail-fast` runs
+      # every test binary whatever an earlier one found, so one run of this
+      # job names every failure.
+      - run: cargo install computed --locked
+      - run: cargo test -p xtask --no-fail-fast
       - name: this job's readings
         if: always()
         uses: ./.github/actions/stash
@@ -320,7 +340,7 @@ jobs:
       - uses: ./.github/actions/workspace
       # The three jobs' stores, one store again: each instrument keeps its
       # own files, and no instrument ran on both runners. A job that kept
-      # none, the oracle job while it is skipped, is passed over.
+      # none is passed over.
       - name: the three jobs' readings, one store
         uses: ./.github/actions/stash
         env:

@@ -1,0 +1,51 @@
+# What the pinned php's lanes need of a macOS runner before the first cargo
+# step. The lanes run on a macOS 15 image (Blacksmith's 12-core
+# `blacksmith-12vcpu-macos-15` while the repository is private, GitHub's
+# `macos-15` once it is public), as Mitchell ruled on
+# 2026-11-19, and a hosted runner is a fresh machine each job, so every job
+# of theirs runs this after the workspace action:
+# - the tools the pour and an oracle variant's build run: pkgconf and jq,
+#   which the image carries, and bison and re2c, which it does not;
+# - Homebrew itself brought up to date once, since an image can carry one
+#   older than the homebrew-core formulae the pin pours: Blacksmith's of
+#   2026-07-30 could not read November's (`undefined method 'new' for an
+#   instance of Symbol`). The pour is still held to the pin's md5, so
+#   which Homebrew read the formula changes no byte of the oracle;
+# - Homebrew then told to update, clean up and report nothing, for every
+#   later step of the job;
+# - `PKG_CONFIG_PATH` naming the ICU keg the pin's closure holds, which is
+#   keg-only and which ext/intl's build finds its ICU through. The keg's
+#   name is read off `xtask status --section oracle`, as every fact of the
+#   pin is, so this file spells no version; the harness links no extension
+#   and builds before the path is set.
+# The keg itself is the pinned-php action's to pour, after this one and
+# before the first build that links ICU.
+name: oracle runner
+description: Lay the tools and the environment the pinned php's lanes need on a fresh macOS runner
+inputs:
+  xtask:
+    description: The command the job runs the harness by
+    default: cargo xtask
+runs:
+  using: composite
+  steps:
+    - name: Homebrew's tools and the pin's ICU, for every later step
+      shell: bash
+      env:
+        XTASK: ${{ inputs.xtask }}
+      run: |
+        export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+        {
+          echo HOMEBREW_NO_AUTO_UPDATE=1
+          echo HOMEBREW_NO_ANALYTICS=1
+          echo HOMEBREW_NO_INSTALL_CLEANUP=1
+        } >> "$GITHUB_ENV"
+        brew update --quiet
+        brew --version | head -n 1
+        brew install pkgconf jq bison re2c
+        icu=$($XTASK status --section oracle --format json | jq -r '.closure // {} | keys[] | select(startswith("icu4c@"))')
+        if [ "$(wc -w <<<"$icu")" -ne 1 ]; then
+          echo "::error::the pin's closure names no one icu4c keg: '$icu'"
+          exit 1
+        fi
+        echo "PKG_CONFIG_PATH=$(brew --prefix)/opt/$icu/lib/pkgconfig" | tee -a "$GITHUB_ENV"

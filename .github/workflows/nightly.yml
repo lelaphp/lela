@@ -2,17 +2,20 @@
 # `oracle` job runs beside every harness run of a push to main, nightly and
 # by hand; `soak`, `tailcall`, `deny` and `red-nightly` run nightly
 # and by hand with `full`. Every job measures main.
-# - `oracle`, on the Mac mini: the phpt lane and the witnesses need the
-#   pinned php, a macOS keg (oracle.toml), which that runner keeps as poured
-#   byte for byte from homebrew-core's bottle of the pinned version, beside
+# - `oracle`, on a macOS 15 image (Blacksmith's 12-core
+#   `blacksmith-12vcpu-macos-15` while the repository is private,
+#   GitHub's `macos-15` once it is public), after a push only once the
+#   repository is public: the phpt lane and the witnesses
+#   need the pinned php, a macOS keg (oracle.toml), poured each job byte
+#   for byte from homebrew-core's bottle of the pinned version, beside
 #   the MySQL server of ci/mysql/compose.yaml, started from Homebrew since
 #   the Mac has no Docker. After a push it runs the per-commit lane and
 #   `Zend/tests`; nightly, the whole corpus (`--full`, the nightly lane,
 #   which is CI's). It stashes the runs it keeps, which `xtask phpt
 #   --against` fetches (#2362);
 # - `soak`, on the Linux server: makala under many clients (#2350);
-# - `tailcall`, on the Mac after the oracle job: the threaded dispatch's
-#   corpus (#2970);
+# - `tailcall`, on a Mac of its own after the oracle job, whose kept
+#   targets it is handed: the threaded dispatch's corpus (#2970);
 # - `deny`, on the Linux server: `cargo deny` over the dependency graph,
 #   the advisories and crates.io as the only source (#4372);
 # - `red-nightly`: a red `soak`, `tailcall` or `deny` filed on the tracker
@@ -28,14 +31,18 @@
 # a Cloudflare secret, and a store stashed below is read by no later job of
 # this workflow.
 #
-# Every job runs on one of harness.yml's two self-hosted runners (#2253):
-# `dax-build`, the Linux server, and `dax-oracle`, the Mac mini, so no hosted
-# macOS minute is spent. Each checkout is `clean: false` and the workspace
-# action cleans all but target/, which the runner keeps as the warm build.
-# The Linux jobs take their runner from LELA_BUILD_RUNNER as harness.yml's
-# do (#2477): unset, `dax-build`; set, a GitHub-hosted image while the
-# self-hosted pair is not online, with the Mac's jobs skipped
-# (scripts/ci/README.md).
+# The Linux jobs run on harness.yml's self-hosted runner (#2253),
+# `dax-build`, the Linux server, and take it from LELA_BUILD_RUNNER as
+# harness.yml's do (#2477): unset, `dax-build`; set, the labels it lists
+# (scripts/ci/README.md). The Mac's jobs, `oracle` and `tailcall`, run on
+# a macOS 15 image (Blacksmith's 12-core `blacksmith-12vcpu-macos-15` while
+# the repository is private, GitHub's `macos-15` once it is public), as
+# Mitchell ruled on 2026-11-19, and read no
+# variable: each is a fresh machine, which .github/actions/oracle-runner
+# lays the tools on and the pinned-php action pours the keg on, and
+# nothing one job leaves is the next one's but what it stashes. Each
+# checkout is `clean: false` and the workspace action cleans all but
+# target/, which a runner that outlives its job keeps as the warm build.
 name: nightly
 on:
   workflow_run:
@@ -67,11 +74,18 @@ env:
 jobs:
   oracle:
     name: phpt and witnesses under the pinned oracle
-    # Skipped while LELA_BUILD_RUNNER is set: the Mac is not online, and a
-    # job queued for it would wait GitHub's 24 hours for a runner (#2477).
-    if: ${{ !vars.LELA_BUILD_RUNNER }}
-    runs-on: [self-hosted, macos, dax-oracle]
-    timeout-minutes: 150
+    # After a push, not run while the repository is private, as harness.yml's
+    # oracle job is not (Mitchell, 2026-11-19): nightly and by hand it runs
+    # either way, since the whole corpus and `tailcall` after it run in CI
+    # alone.
+    if: ${{ github.event_name != 'workflow_run' || !github.event.repository.private }}
+    runs-on: ${{ github.event.repository.private && 'blacksmith-12vcpu-macos-15' || 'macos-15' }}
+    # GitHub ends a hosted job at 360 minutes. After a push the trial of
+    # 2026-11-17 measured this job's lanes at about 170 on the hosted Mac:
+    # the witnesses 94 with the build they start, the control 31, the
+    # per-commit lane 27, `Zend/tests` 6 and `tests/` 3. The whole corpus
+    # of a night has not run there yet.
+    timeout-minutes: 360
     # Every correctness lane of this job runs `release-da`, release's
     # optimisation with debug assertions and overflow checks, without thin
     # LTO or a single codegen unit (harness-design.md §7, revision 82;
@@ -94,8 +108,13 @@ jobs:
     # the two builds share the third-party crates and each compiles the
     # engine's: 2 min 0 s for the hosts and 2 min 12 s for xtask after
     # them at `-j 4`, where release built the hosts in 3 min 31 s.
+    # One instrument runs at a time here, so it is given the whole machine:
+    # unless XTASK_SEATS is set, xtask divides the cores among three seats
+    # (xtask/src/seat.rs), which left the witness and phpt pools a third
+    # of the runner.
     env:
       XTASK: cargo run --profile release-da --quiet --package xtask --
+      XTASK_SEATS: 1
     # A push's run supersedes the push before it, and only that: the
     # nightly and a run by hand keep a group of their own, since the whole
     # corpus and the control are read nowhere else, and a push in the
@@ -108,11 +127,13 @@ jobs:
         with:
           ref: main
           clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       - uses: ./.github/actions/workspace
-      # The pinned php, the install harness.yml's oracle job runs too: the
-      # keg the runner keeps, held to the pin's md5, and poured afresh from
-      # homebrew-core's bottle only where it is not (#2200, #2253).
+      - uses: ./.github/actions/oracle-runner
+        with:
+          xtask: ${{ env.XTASK }}
+      # The pinned php, the install harness.yml's oracle job runs too:
+      # poured from homebrew-core's bottle and held to the pin's md5.
       - uses: ./.github/actions/pinned-php
         with:
           xtask: ${{ env.XTASK }}
@@ -178,8 +199,9 @@ jobs:
       # corpus` names as `targets`, under target/, and an engine's reading
       # of a subset carries `target`, `met` and `outside` only where one is
       # kept there. A kept target stands until the pin moves
-      # (xtask/src/phpt/target.rs), and the runner keeps target/ between
-      # runs, so the targets stand from one run to the next with no cache.
+      # (xtask/src/phpt/target.rs), and a hosted runner starts with no
+      # target/, so each run's control keeps them afresh before the engine
+      # is held to them.
       - run: $XTASK witness || true
       # The lane's subsets under the pinned php itself, before the engine's
       # lane so that its readings are held to the targets this keeps. Each
@@ -233,9 +255,9 @@ jobs:
       # from the store, so a run CI took on main serves a
       # checkout as its merge base's (#2362): `phpt --against`'s skip names
       # the line that fetches the stash's `latest/phpt-runs` and lays it
-      # where the comparison looks. The runner keeps target/ between runs,
-      # so this holds every tree it has run, and the latest is the one to
-      # fetch.
+      # where the comparison looks. A hosted runner starts with no
+      # target/, so this holds the trees this run measured, beside the
+      # targets its control kept, which the `tailcall` job lays down.
       - uses: ./.github/actions/stash
         env:
           DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
@@ -285,26 +307,36 @@ jobs:
     # §5.8): the hosts built under the cfg in release-da on the dated
     # nightly scripts/ci/tailcall.sh pins, in a target directory of their
     # own, and `Zend/tests` and each directory of `tests/` with `--engine`
-    # on that build, held to the targets the oracle job keeps on this
-    # runner. The match loop is what ships; so the store is stashed apart
-    # as `tailcall`, and a reading of the threaded build is never one of
-    # the shipped engine's.
-    # It runs on the Mac, where the shipped engine's subsets run, after the
+    # on that build, held to the targets the oracle job kept, which it
+    # stashes with its runs and this job lays down. The match loop is what
+    # ships; so the store is stashed apart as `tailcall`, and a reading of
+    # the threaded build is never one of the shipped engine's.
+    # It runs on a Mac, as the shipped engine's subsets do, after the
     # oracle job. A failing subset fails the job once every subset has run,
-    # and `red-nightly` files a red nightly of it on the tracker.
+    # and `red-nightly` files a red nightly of it on the tracker. The
+    # hosted Mac builds the harness and the threaded hosts from nothing,
+    # which the bounds below leave room for.
     needs: oracle
-    if: ${{ !cancelled() && !vars.LELA_BUILD_RUNNER && (github.event_name == 'schedule' || inputs.full) }}
-    runs-on: [self-hosted, macos, dax-oracle]
-    timeout-minutes: 90
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.full) }}
+    runs-on: ${{ github.event.repository.private && 'blacksmith-12vcpu-macos-15' || 'macos-15' }}
+    timeout-minutes: 150
+    # One instrument runs at a time here, so it is given the whole machine:
+    # unless XTASK_SEATS is set, xtask divides the cores among three seats
+    # (xtask/src/seat.rs), which left the witness and phpt pools a third
+    # of the runner.
     env:
       XTASK: cargo run --profile release-da --quiet --package xtask --
+      XTASK_SEATS: 1
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       - uses: ./.github/actions/workspace
+      - uses: ./.github/actions/oracle-runner
+        with:
+          xtask: ${{ env.XTASK }}
       - uses: ./.github/actions/pinned-php
         with:
           xtask: ${{ env.XTASK }}
@@ -314,10 +346,21 @@ jobs:
         with:
           xtask: ${{ env.XTASK }}
           promise: tree oracle
+      # The targets the oracle job's control kept under the pin, with the
+      # runs beside them: this job's machine is another one, so they are
+      # handed to it. Without them every subset below reads that no target
+      # is kept.
+      - name: the targets the oracle job kept
+        uses: ./.github/actions/stash
+        env:
+          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
+        with:
+          get: phpt-runs
+          path: target/harness/phpt-runs/
       # The step's own timeout is under the job's, so the step after it
       # runs whatever ended the subsets.
       - name: the threaded build's subsets
-        timeout-minutes: 80
+        timeout-minutes: 130
         env:
           CORPUS: ${{ steps.corpus.outputs.corpus }}
           TREE: ${{ steps.corpus.outputs.tree }}
