@@ -11,10 +11,10 @@
 # before #1713: the shallow clone 9.6 s and the sparse checkout 2.4 s; with
 # `--filter=blob:none` 1.0 s and 13.3 s, so the plain shallow clone is taken.
 #
-# The runner keeps the tree in its tool cache, one directory per key, made
-# once and reset to its commit before each job (a lane that wrote into it
-# leaves nothing behind); a tree of another key is removed when a new one is
-# made. Two tests hold it to the pin: `Source::tree()` refuses a checkout at
+# The tree stands in the runner's tool cache, one directory per key. A
+# hosted runner starts with none, so each job makes it; a tree a machine
+# already holds is reset to its commit, and one of another key removed.
+# Two tests hold it to the pin: `Source::tree()` refuses a checkout at
 # another commit, and the tree must hold every `.phpt` `[source].phpt_files`
 # counts.
 #

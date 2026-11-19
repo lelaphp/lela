@@ -12,18 +12,18 @@
 # `variants` name each build this machine's platform pins, by path and md5,
 # and `found.path` the tree to build from. oracle.toml is read by xtask and
 # the recipe alone, and this script spells none of it. A binary already at
-# the path with the pin's md5 is said and left, so the oracle runner builds
-# once and every job after it checks. A build whose md5 is not the pin's is
+# the path with the pin's md5 is said and left, so a machine that keeps
+# one builds once. A build whose md5 is not the pin's is
 # laid nowhere and exits 1: this machine's libraries or tools are not the
 # ones the pin was built with, and which side is right is a person's to
 # settle. The refusal is kept beside the path, `.refused-<pin md5>`, so the
 # jobs after it say it again without building again until the pin moves or
-# a person removes the file. The path's directory is the runner user's,
-# laid by `runner.sh mac`, so nothing here runs as root.
+# a person removes the file. The path's directory is made the runner
+# user's with `sudo` where it is not, and nothing else here runs as root.
 #
 # DRY_RUN=1 says what it would build and builds nothing. ORACLE_BUILD names
 # the recipe, `python3 scripts/oracle-build.py` where unset (Python 3.11 or
-# later, for tomllib; `runner.sh mac` installs it with the build's tools).
+# later, for tomllib, which the hosted macOS image carries).
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

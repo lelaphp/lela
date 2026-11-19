@@ -12,29 +12,20 @@
 # that reads its acceptance criteria; CI closes none (#290; CONTEXT.md,
 # Ticket). A red main is filed, once, by the last job (#1156).
 #
-# Every job but one runs on a self-hosted runner, as Mitchell ruled on
-# 2026-10-07 (#2218, #2253), set up by scripts/ci/runner.sh and registered
-# through scripts/ci/wizard.sh: `dax-build`, a Hetzner Linux server, for the
-# build, clippy, the tests and the rest of the instruments. The `oracle`
+# Every job runs on a hosted runner, a fresh machine each job, as Mitchell
+# ruled on 2026-11-17 and 2026-11-19: no machine of the project's own runs
+# a job. The Linux jobs, the build, clippy, the tests and the rest of the
+# instruments, take their runner from the repository variable
+# LELA_BUILD_RUNNER, a JSON list of labels, and with the variable unset
+# that is GitHub's `ubuntu-26.04` (scripts/ci/README.md). The `oracle`
 # job runs on a macOS 15 image (Blacksmith's 12-core
 # `blacksmith-12vcpu-macos-15` while the repository is private, GitHub's
-# `macos-15` once it is public), as Mitchell ruled on 2026-11-19:
-# the witnesses, the crosscheck and the tests that spawn the oracle need
-# the pinned php, a macOS keg (oracle.toml), which the job pours on a
-# machine that is fresh each run, after .github/actions/oracle-runner has
-# laid what such a machine lacks. The stores meet in the `store` job,
-# handed to it through the stash on `dax-build` rather than as GitHub artifacts, which
-# count against the account's storage (.github/actions/stash, #3554); the
-# stash is the repository's to configure, in the `env` below. A runner keeps its
-# work directory between jobs, so each checkout is `clean: false` and the
-# workspace action cleans all but target/, the warm build.
-#
-# Until `dax-build` is online (#2296), the Linux jobs run on a GitHub-hosted
-# image, as Mitchell ruled on 2026-10-09 (#2218, #2477): each takes its
-# runner from the repository variable LELA_BUILD_RUNNER, a JSON list of
-# labels, and with the variable unset that is `[self-hosted, linux,
-# dax-build]`, so nothing here is reverted when the server comes
-# (scripts/ci/README.md). The `oracle` job reads no variable.
+# `macos-15` once it is public) and reads no variable: the
+# witnesses, the crosscheck and the tests that spawn the oracle need the
+# pinned php, a macOS keg (oracle.toml), which the job pours after
+# .github/actions/oracle-runner has laid what a fresh Mac lacks. The
+# stores meet in the `store` job, handed to it as artifacts of the run
+# through .github/actions/stash.
 # `bench` is no job here: it is run by hand in bench.yml, on the runner the
 # variable names, as a hosted machine's and so as provisional, each bar
 # between two runs of its A/A control, as Mitchell ruled on 2026-11-19. A
@@ -50,45 +41,33 @@ on:
 concurrency:
   group: harness-${{ github.ref }}
   cancel-in-progress: false
-# The stash every hand-off between jobs goes through (.github/actions/stash,
-# #3554): the repository's to configure once, for every runner, and unset
-# on a fork, where the hand-off is a GitHub artifact. The two variables are
-# every job's; the secret, the key that reaches the stash, is set on each
-# step that stashes and on no other, so no other step's process holds it
-# (#4348 ruling 5; #4372).
-env:
-  DAX_STASH: ${{ vars.DAX_STASH }}
-  DAX_STASH_HOST_KEY: ${{ vars.DAX_STASH_HOST_KEY }}
 jobs:
   regions:
     name: computed check
-    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
-          clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       - uses: ./.github/actions/workspace
       - run: cargo install computed --locked
       - run: computed check AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md docs/perf/measurement-protocol.md harness-design.md third-engine-design.md
   per-commit:
     name: the instruments
-    # Ubuntu 26.04 for libtidy 5.8, the oracle's (#1724); runner.sh refuses
-    # another release, and the hosted image LELA_BUILD_RUNNER names is
-    # `ubuntu-26.04` for the same reason, where packages.txt installs as it
-    # does on the server (scripts/ci/README.md).
-    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    # Ubuntu 26.04 for libtidy 5.8, the oracle's (#1724): the release
+    # packages.txt names, and so the one a runner LELA_BUILD_RUNNER names
+    # carries (scripts/ci/README.md).
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
-          clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       # A hosted runner's image comes nearly full: GitHub's had 14 GiB free
       # in the trial of 2026-11-17, and this job's target/ grows to 20, so
       # the tests alone stopped there at 1 GiB. Where under 40 are free on
       # such an image, the toolchains it carries and no step here uses are
-      # taken away, which left 49. The image is known by its tool cache, so
-      # a machine of our own keeps what was installed on it.
+      # taken away, which left 49. GitHub's image is known by its tool
+      # cache, so another provider's image is left as it comes.
       - name: room for target/ on a hosted image
         run: |
           free=$(df --output=avail -BG "$GITHUB_WORKSPACE" | tail -n 1 | tr -dc 0-9)
@@ -106,7 +85,7 @@ jobs:
       # two-request test, and the names the witnesses under ext/ pin, so a
       # test that reads one finds it here as the witnesses do on the oracle
       # runner, whose macOS carries every one. Ubuntu 26.04 generates none
-      # of them; runner.sh lets the runner's user run these two commands as
+      # of them, and a hosted runner's user runs these two commands as
       # root. `locale-gen` builds the ones glibc lists as supported, the
       # ISO-8859 ones under their bare names, from the `locales` package
       # the image carries, with no download (3 s for the seven and
@@ -181,8 +160,6 @@ jobs:
       - name: this job's readings
         if: always()
         uses: ./.github/actions/stash
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: store-build
           path: target/harness
@@ -199,12 +176,11 @@ jobs:
     # `xtask/tests/miri.rs` holds both lines to the constants. The
     # negative control runs here too, since the build job has no nightly
     # and its copy of the test returns on the skip.
-    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
-          clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       - uses: ./.github/actions/workspace
       - run: rustup toolchain install nightly-2026-02-20 --profile minimal --component miri,rust-src
       - run: cargo install --locked cargo-nextest@0.9.127
@@ -213,8 +189,6 @@ jobs:
       - name: this job's readings
         if: always()
         uses: ./.github/actions/stash
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: store-miri
           path: target/harness
@@ -234,12 +208,11 @@ jobs:
     # ships; this keeps the threaded variant compiling. It writes no
     # reading, so its failure is the run's and red-main's, and in no store.
     # php_engine links no platform library, so none is installed.
-    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
-          clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       - uses: ./.github/actions/workspace
       - run: scripts/ci/tailcall.sh check
 
@@ -256,7 +229,7 @@ jobs:
     runs-on: ${{ github.event.repository.private && 'blacksmith-12vcpu-macos-15' || 'macos-15' }}
     # On the hosted Mac of the trial of 2026-11-17 the witnesses took 94
     # minutes with the build they start from nothing, and the crosscheck
-    # and xtask's tests 2 more, after the pour, the server and the variant.
+    # and xtask's tests 2 more, after the pour, MySQL and the variant.
     timeout-minutes: 180
     # One instrument runs at a time here, so it is given the whole machine:
     # unless XTASK_SEATS is set, xtask divides the cores among three seats
@@ -267,7 +240,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          clean: false
           fetch-depth: 0
       - uses: ./.github/actions/workspace
       - uses: ./.github/actions/oracle-runner
@@ -312,8 +284,6 @@ jobs:
       - name: this job's readings
         if: always()
         uses: ./.github/actions/stash
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: store-oracle
           path: target/harness
@@ -331,20 +301,17 @@ jobs:
     # trigger (#4348 ruling 5; #4372), and a push runs no `done`.
     needs: [per-commit, miri, oracle]
     if: ${{ !cancelled() }}
-    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
-          clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       - uses: ./.github/actions/workspace
       # The three jobs' stores, one store again: each instrument keeps its
       # own files, and no instrument ran on both runners. A job that kept
       # none is passed over.
       - name: the three jobs' readings, one store
         uses: ./.github/actions/stash
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           get: store-build store-miri store-oracle
           merge: true
@@ -359,8 +326,6 @@ jobs:
       - name: the reading store, the only one the run keeps
         if: always()
         uses: ./.github/actions/stash
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: harness
           path: target/harness
@@ -378,7 +343,7 @@ jobs:
     name: a red main, filed
     needs: [regions, per-commit, miri, tailcall, oracle, store]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     permissions:
       actions: read
       contents: read
@@ -386,8 +351,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       # A filing that fails is the step's warning and never the run's
       # failure: the next run reads this run's verdict, and a red here would
       # count a green main as the first of two reds.

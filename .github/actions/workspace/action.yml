@@ -1,32 +1,19 @@
-# The workspace on a self-hosted runner (#2253). The runner keeps its work
-# directory between jobs, so every job here checks out with `clean: false`
-# and runs this before its first cargo step: everything git does not track is
-# removed except target/, which stays as the warm build a hosted runner had
-# to restore from a cache; the reading store under it is emptied, so a run's
-# readings are its own (harness §4.2), all but the phpt runs and the
-# targets under the pin kept beside it, which the oracle job holds an
-# engine's reading to from one run to the next; and, unless a job builds no
-# Rust, the toolchain rust-toolchain.toml names is installed where rustup
-# has not yet (rustup 1.28 or later, as scripts/ci/runner.sh lays it down),
-# and target/ is held under the bound runner.sh states: past it, or once
-# the toolchain has moved, it is emptied of all but the targets under the
-# pin (scripts/ci/bound-target.sh, #2299).
+# The workspace of a job, before its first cargo step. Every job runs on a
+# hosted runner, a fresh machine whose checkout is clean and whose target/
+# is empty, so nothing is cleaned here and no earlier run's reading is in
+# the store: what is left to lay is the toolchain rust-toolchain.toml
+# names, installed where rustup has not yet (rustup 1.28 or later), unless
+# the job builds no Rust.
 name: workspace
-description: Clean the checkout but target/, empty the store, install the pinned toolchain, bound target/
+description: Install the pinned toolchain
 inputs:
   toolchain:
-    description: Whether the job builds Rust, and so installs the pinned toolchain and bounds target/
+    description: Whether the job builds Rust, and so installs the pinned toolchain
     default: "true"
 runs:
   using: composite
   steps:
-    - name: the checkout clean but target/, a fresh store, the pinned toolchain, target/ bounded
+    - name: the pinned toolchain
+      if: inputs.toolchain == 'true'
       shell: bash
-      env:
-        TOOLCHAIN: ${{ inputs.toolchain }}
-      run: |
-        git clean -ffdxq -e /target/
-        [ ! -d target/harness ] || find target/harness -mindepth 1 -maxdepth 1 ! -name phpt-runs -exec rm -rf {} +
-        [ "$TOOLCHAIN" = true ] || exit 0
-        rustup toolchain install
-        scripts/ci/bound-target.sh
+      run: rustup toolchain install

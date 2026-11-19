@@ -2437,8 +2437,8 @@ fn ci_per_commit_runs_the_instruments_and_uploads_only_the_store() {
     // excludes of it (the phpt runs a job that takes none would carry), and
     // one of them is the run's, `harness`; a ticket is closed by the session
     // that worked it, so no job closes one on a push.
-    // The stash, not a GitHub artifact, which counts against the account's
-    // storage.
+    // Through the stash action, the one place the artifact actions are
+    // named.
     assert!(
         !text.contains("upload-artifact") && !text.contains("download-artifact"),
         "the hand-offs are the stash's: {text}"
@@ -2509,15 +2509,13 @@ fn ci_runs_on_a_push_to_main_alone_and_runs_no_done() {
     }
 }
 
-/// The secret that reaches the stash is set on each step that stashes
-/// and on no other, never in a workflow's or a job's `env` (ruled
-/// 2026-11-09), in every workflow: each `uses: ./.github/actions/stash`
-/// step carries it in its own `env`, and the secret is named nowhere else
-/// in the file. A step is the lines after its `uses:` indented under it, so
-/// a job's last step does not reach into the next job.
+/// A hand-off between jobs is an artifact of its run, and every workflow
+/// reaches the artifact actions through `.github/actions/stash` alone, so
+/// each hand-off is named, kept and laid down one way: no workflow names
+/// `upload-artifact` or `download-artifact` itself, and the workflows
+/// stash.
 #[test]
-fn the_stash_key_is_set_on_the_stash_steps_alone() {
-    let secret = "DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}";
+fn every_hand_off_goes_through_the_stash_action() {
     let dir = workspace().join(".github/workflows");
     let mut workflows: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
@@ -2529,29 +2527,11 @@ fn the_stash_key_is_set_on_the_stash_steps_alone() {
     let mut stashing = 0;
     for name in &workflows {
         let text = read(&format!(".github/workflows/{name}"));
-        let steps: Vec<String> = text
-            .match_indices("uses: ./.github/actions/stash")
-            .map(|(at, _)| {
-                text[at..]
-                    .lines()
-                    .skip(1)
-                    .take_while(|l| l.is_empty() || l.starts_with("        "))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .collect();
-        stashing += steps.len();
-        for step in &steps {
-            assert!(
-                step.contains(&format!("        env:\n          {secret}")),
-                "{name}: the step sets the secret itself: {step}"
-            );
-        }
-        assert_eq!(
-            text.matches("secrets.DAX_STASH_KEY").count(),
-            steps.len(),
-            "{name}: the secret is set on the stash steps and nowhere else: {text}"
+        assert!(
+            !text.contains("upload-artifact") && !text.contains("download-artifact"),
+            "{name}: a hand-off goes through the stash action: {text}"
         );
+        stashing += text.matches("uses: ./.github/actions/stash").count();
     }
     assert!(stashing > 0, "the workflows stash: {workflows:?}");
 }

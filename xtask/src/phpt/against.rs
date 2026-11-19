@@ -481,20 +481,20 @@ impl Base {
     }
 }
 
-/// The name the dashboard's oracle job stashes [`RUNS`] under: every run
-/// its runner keeps, each under its engine's tree, kept in the
-/// stash as `latest/<name>.tar.gz` (scripts/ci/stash.sh).
+/// The name the nightly's oracle job stashes [`RUNS`] under: every run
+/// its runner keeps, each under its engine's tree, kept as an artifact of
+/// the run that put it (.github/actions/stash).
 pub(crate) const UPLOAD: &str = "phpt-runs";
 
 /// The line that lays the runs CI kept into the workspace at `root`,
-/// where [`roots`] looks first: the latest [`UPLOAD`] fetched over
-/// rsync from the stash `DAX_STASH` names, `<user>@<host>` as the
-/// repository's variable does, and unpacked apart, and every run and every
-/// set of sources one was kept over ([`KEYED`]) copied in where the
-/// workspace keeps none, as [`carry`] copies a worktree's.
+/// where [`roots`] looks first: the newest [`UPLOAD`] artifact the
+/// repository still keeps, downloaded with `gh` from the run that put it
+/// and laid apart, and every run and every set of sources one was kept
+/// over ([`KEYED`]) copied in where the workspace keeps none, as [`carry`]
+/// copies a worktree's.
 pub(crate) fn fetch(root: &Path) -> String {
     format!(
-        "d=$(mktemp -d) && rsync -L \"${{DAX_STASH:?names the stash on the server, as scripts/ci/README.md says}}:latest/{UPLOAD}.tar.gz\" \"$d/\" && mkdir \"$d/runs\" && tar -xzf \"$d/{UPLOAD}.tar.gz\" -C \"$d/runs\" && rsync -a --ignore-existing \"$d/runs/\" '{}/'",
+        "d=$(mktemp -d) && gh run download \"$(gh api 'repos/{{owner}}/{{repo}}/actions/artifacts?name={UPLOAD}&per_page=100' --jq '[.artifacts[] | select(.expired | not)] | max_by(.created_at).workflow_run.id')\" --name {UPLOAD} --dir \"$d/runs\" && rsync -a --ignore-existing \"$d/runs/\" '{}/'",
         root.join(RUNS).display()
     )
 }

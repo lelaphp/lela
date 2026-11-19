@@ -1,16 +1,11 @@
-# What one job of a run hands a later one (#3554): a store, main's xtask,
-# the parity section, the built site. It is kept on `dax-build` by
-# scripts/ci/stash.sh, which says where and for how long, since GitHub
-# counts artifact storage against the account and a run that hit the quota
-# failed at its first upload. The stash is the repository's to configure,
-# once, for every runner: the variables DAX_STASH (`<user>@<host>`) and
-# DAX_STASH_HOST_KEY (the server's known_hosts line) and the secret
-# DAX_STASH_KEY, a key the server holds to `rrsync` over the stash alone,
-# which each workflow hands its jobs as environment of the same names and
-# this action lays down for the one step that reads it (scripts/ci/README.md,
-# the wizard's stash stage). Where DAX_STASH is unset, as on a fork, the
-# hand-off is a GitHub artifact as before. A step names `put` or `get`,
-# never both.
+# What one job of a run hands a later one: a store, the parity section, the
+# phpt runs a job kept. A hand-off is an artifact of the run, put under a
+# name by one job and laid down by a later one, and this action is the one
+# place a workflow reaches the artifact actions through, so every hand-off
+# is named, kept and laid down the same way. GitHub counts artifact storage
+# against the account over its billing month, which is why each `put` says
+# how long it is kept and none is kept longer than its reader needs. A step
+# names `put` or `get`, never both.
 name: stash
 description: Keep a file or directory for a later job of this run, or lay down what an earlier job kept
 inputs:
@@ -38,54 +33,16 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: the stash on dax-build
-      if: env.DAX_STASH != ''
-      shell: bash
-      env:
-        PUT: ${{ inputs.put }}
-        GET: ${{ inputs.get }}
-        STASHED: ${{ inputs.path }}
-        EXCLUDE: ${{ inputs.exclude }}
-        DAYS: ${{ inputs.retention-days }}
-        MERGE: ${{ inputs.merge }}
-        OPTIONAL: ${{ inputs.optional }}
-      run: |
-        [ -n "${DAX_STASH_KEY:-}" ] || { echo "::error::DAX_STASH is set and the secret DAX_STASH_KEY is not (scripts/ci/README.md)"; exit 1; }
-        [ -n "${DAX_STASH_HOST_KEY:-}" ] || { echo "::error::DAX_STASH is set and the variable DAX_STASH_HOST_KEY is not (scripts/ci/README.md)"; exit 1; }
-        # The key and the host key, for this step alone.
-        ssh=$(mktemp -d "$RUNNER_TEMP/dax-stash.XXXXXX")
-        trap 'rm -rf "$ssh"' EXIT
-        printf '%s\n' "$DAX_STASH_KEY" > "$ssh/key"
-        chmod 600 "$ssh/key"
-        printf '%s\n' "$DAX_STASH_HOST_KEY" > "$ssh/known_hosts"
-        export RSYNC_RSH="ssh -i $ssh/key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ssh/known_hosts"
-        unset DAX_STASH_KEY
-        stash=$GITHUB_WORKSPACE/scripts/ci/stash.sh
-        if [ -n "$PUT" ]; then
-          set -- --days "$DAYS"
-          while IFS= read -r line; do [ -z "$line" ] || set -- "$@" --exclude "$line"; done <<<"$EXCLUDE"
-          "$stash" put "$PUT" "$STASHED" "$@"
-        else
-          set --
-          [ "$MERGE" != true ] || set -- --merge
-          [ "$OPTIONAL" != true ] || set -- "$@" --optional
-          # shellcheck disable=SC2086 # GET is the names, split on spaces
-          "$stash" get "$STASHED" $GET "$@"
-        fi
-
-    # With no stash configured, the hand-off as upload-artifact and
-    # download-artifact took it before #3554: each name its own artifact,
-    # the excluded paths `!` lines, several names one pattern.
+    # Each name its own artifact, the excluded paths `!` lines, several
+    # names one pattern.
     - name: the artifact's paths and pattern
       id: artifact
-      if: env.DAX_STASH == ''
       shell: bash
       env:
         GET: ${{ inputs.get }}
         STASHED: ${{ inputs.path }}
         EXCLUDE: ${{ inputs.exclude }}
       run: |
-        echo "::warning title=no stash::DAX_STASH is unset, so this hand-off is a GitHub artifact, which counts against the account's storage"
         {
           echo 'paths<<PATHS'
           echo "$STASHED"
@@ -98,7 +55,7 @@ runs:
             echo "pattern=${names[0]:-}"
           fi
         } >> "$GITHUB_OUTPUT"
-    - if: env.DAX_STASH == '' && inputs.put != ''
+    - if: inputs.put != ''
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.put }}
@@ -107,12 +64,12 @@ runs:
         retention-days: ${{ inputs.retention-days }}
     # A pattern downloads nothing where it matches nothing, so `optional`
     # is a pattern even for one name; one name otherwise must be there.
-    - if: env.DAX_STASH == '' && inputs.get != '' && inputs.optional != 'true' && !contains(inputs.get, ' ')
+    - if: inputs.get != '' && inputs.optional != 'true' && !contains(inputs.get, ' ')
       uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.get }}
         path: ${{ inputs.path }}
-    - if: env.DAX_STASH == '' && inputs.get != '' && (inputs.optional == 'true' || contains(inputs.get, ' '))
+    - if: inputs.get != '' && (inputs.optional == 'true' || contains(inputs.get, ' '))
       uses: actions/download-artifact@v4
       with:
         pattern: ${{ steps.artifact.outputs.pattern }}

@@ -5,7 +5,8 @@
 # oracle.toml's, read by xtask alone (`status --section oracle`'s `binary`),
 # so this file spells none of them; so are the kegs php
 # loads and their versions (`closure`, #2657), each poured and pinned first.
-# The runner keeps the kegs between jobs: a keg already at the pin's md5 or
+# A hosted runner keeps no keg between jobs, so each job pours: a keg the
+# image carries already at the pin's md5 or
 # the recorded version is checked, pinned and left, php's own among them
 # (#4383), and a pour that lands elsewhere stops the job before any lane.
 name: pinned php

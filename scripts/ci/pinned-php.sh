@@ -48,8 +48,8 @@
 # keg and php by its formula and its bottle, and pours, pins and fetches
 # nothing.
 #
-# Used by .github/actions/pinned-php in CI and by scripts/ci/runner.sh when
-# the Mac is set up. GH_TOKEN, where set, raises GitHub's API rate limit for
+# Used by .github/actions/pinned-php in CI, and by a person on a Mac of
+# their own. GH_TOKEN, where set, raises GitHub's API rate limit for
 # the queries that find the bottling commits.
 set -euo pipefail
 

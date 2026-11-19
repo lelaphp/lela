@@ -1,16 +1,16 @@
 # The MySQL server the mysqli and pdo_mysql suites, their tests and the
 # witnesses marked `mysql` run against, as ci/mysql/compose.yaml sets it up
 # (#1345): 8.4, on 127.0.0.1:3306, root with an empty password from any host,
-# and a `test` database. A run gets a fresh server, since the runner outlives
-# it: where nothing answers, `xtask phpt` and the witnesses refuse rather than
+# and a `test` database. Each job starts its own server: where nothing
+# answers, `xtask phpt` and the witnesses refuse rather than
 # skip (#1366), and the tests of mysqli and pdo_mysql fail in a job whose
 # promise lists `mysql` (#3084).
 #
-# On Linux, the compose file itself, recreated with a fresh data volume; the
-# runner's user is in the `docker` group (scripts/ci/runner.sh). On the Mac,
-# which has no Docker, Homebrew's mysql@8.4 on a data directory of the job's
-# own, after the pinned php, so that no keg php links is replaced; a server
-# an earlier job left is shut down first.
+# On Linux, the compose file itself, recreated with a fresh data volume,
+# in the Docker a hosted image carries. On the Mac, whose image has no
+# Docker, Homebrew's mysql@8.4 on a data directory of the job's own, after
+# the pinned php, so that no keg php links is replaced; a server already
+# answering is shut down first.
 name: mysql
 description: Start the MySQL server of ci/mysql/compose.yaml for this job
 runs:

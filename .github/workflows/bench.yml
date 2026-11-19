@@ -69,12 +69,6 @@ concurrency:
 defaults:
   run:
     shell: bash
-# The stash's two variables are every job's; the secret, the key that
-# reaches the stash, is set on each step that stashes and on no other
-# (.github/actions/stash).
-env:
-  DAX_STASH: ${{ vars.DAX_STASH }}
-  DAX_STASH_HOST_KEY: ${{ vars.DAX_STASH_HOST_KEY }}
 jobs:
   bench:
     name: the bench, each bar between two runs of its A/A control
@@ -91,7 +85,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          clean: false
           fetch-depth: 0
       # As harness.yml's instruments' job: a hosted image comes nearly
       # full, and the arms' builds each take a target directory of their
@@ -155,12 +148,10 @@ jobs:
             "$RUNNER_TEMP/baseline/"
       # Kept for a person to read, and no later job reads it: the md5s and
       # the tables are in the log and the summary either way, so a refused
-      # hand-off fails no job while DAX_STASH is unset.
+      # hand-off fails no job.
       - uses: ./.github/actions/stash
         if: ${{ inputs.baseline }}
-        continue-on-error: ${{ env.DAX_STASH == '' }}
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
+        continue-on-error: true
         with:
           put: baseline
           path: ${{ runner.temp }}/baseline/
@@ -228,13 +219,11 @@ jobs:
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      # As the baseline's: no job fails on a refused artifact while
-      # DAX_STASH is unset, and no later job reads this one.
+      # As the baseline's: no job fails on a refused artifact, and no
+      # later job reads this one.
       - uses: ./.github/actions/stash
         if: ${{ always() && inputs.bench }}
-        continue-on-error: ${{ env.DAX_STASH == '' }}
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
+        continue-on-error: true
         with:
           put: bench
           path: target/harness/log/

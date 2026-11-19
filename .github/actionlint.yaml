@@ -1,8 +1,6 @@
-# actionlint's configuration: the custom labels of the two self-hosted
-# runners every job runs on (#2253), which actionlint cannot know.
-# `self-hosted`, `linux` and `macos` are its own. scripts/ci/runner.sh gives
-# each machine its label and scripts/ci/wizard.sh registers it.
+# actionlint's configuration. Every job runs on a hosted runner. GitHub's
+# own labels actionlint knows, and the Linux jobs' label is the repository
+# variable LELA_BUILD_RUNNER's to name (scripts/ci/README.md), so no
+# workflow spells a label of another provider and none is listed here.
 self-hosted-runner:
-  labels:
-    - dax-build # the Hetzner Linux server: build, clippy, tests, the bench
-    - dax-oracle # the Mac mini: the pinned php's lanes
+  labels: []

@@ -955,14 +955,12 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
 /// A run CI's dashboard kept at a `main` commit, fetched by the line the
 /// comparison's skip names, is found as that commit's base run.
 /// The skip names the fetch before the call that takes a run; a stand-in
-/// stash holds the upload as scripts/ci/stash.sh keeps it, the
-/// kept runs each under its engine's tree in `latest/phpt-runs.tar.gz`,
-/// here a run of `ext/pcre` under the tree the skip named, and a stand-in
-/// `ssh` answers as the server's `rrsync` does, running rsync's far side in
-/// the stash; the line run as it is printed lays it in the checkout, and
-/// the comparison finds it there. The stand-in reads past the options
-/// rsync hands `ssh` to the host: macOS's rsync names it `<user>@<host>`,
-/// and GNU rsync `-l <user> <host>`.
+/// `gh` holds the upload as a run's artifact, the kept runs each under
+/// its engine's tree, here a run of `ext/pcre` under the tree the skip
+/// named: asked for the repository's artifacts it names the run that put
+/// the upload, and asked to download `phpt-runs` from that run it lays
+/// the upload in the directory named. The line run as it is printed lays
+/// it in the checkout, and the comparison finds it there.
 #[test]
 fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
     if Promise::Tree
@@ -991,40 +989,22 @@ fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
             Manifest::load(&root).unwrap().pin().unwrap().digest()
         ),
     );
-    let stash = Tree::new("worktree-ci-runs-stash").unwrap();
-    fs::create_dir_all(stash.join("runs/1")).unwrap();
-    fs::create_dir_all(stash.join("latest")).unwrap();
-    let packed = Command::new("tar")
-        .arg("-C")
-        .arg(&*upload)
-        .arg("-czf")
-        .arg(stash.join("runs/1/phpt-runs.tar.gz"))
-        .arg(".")
-        .status()
-        .unwrap();
-    assert!(packed.success(), "tar of {}", upload.display());
-    std::os::unix::fs::symlink(
-        "../runs/1/phpt-runs.tar.gz",
-        stash.join("latest/phpt-runs.tar.gz"),
-    )
-    .unwrap();
-    let bin = Tree::new("worktree-ci-runs-ssh").unwrap();
+    let bin = Tree::new("worktree-ci-runs-gh").unwrap();
     write(
         &bin,
-        "ssh",
+        "gh",
         &format!(
-            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -l) shift 2 ;; -*) shift ;; *) break ;; esac; done\nshift\ncd '{}' && exec sh -c \"$*\"\n",
-            stash.display()
+            "#!/bin/sh\ncase \"$1 $2\" in\n\"api \"*) echo 7 ;;\n\"run download\")\n  [ \"$3\" = 7 ] || exit 1\n  shift 3\n  while [ $# -gt 0 ]; do case $1 in --name) name=$2; shift 2 ;; --dir) dir=$2; shift 2 ;; *) shift ;; esac; done\n  [ \"$name\" = phpt-runs ] && mkdir -p \"$dir\" && cp -R '{}/.' \"$dir/\" ;;\n*) exit 2 ;;\nesac\n",
+            upload.display()
         ),
     );
-    executable(&bin.join("ssh"));
+    executable(&bin.join("gh"));
     let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
     ))
     .unwrap();
     let fetched = Command::new("sh")
         .args(["-c", fetch])
-        .env("DAX_STASH", "runner@stash")
         .env("PATH", path)
         .env_remove("RSYNC_RSH")
         .output()

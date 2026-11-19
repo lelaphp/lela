@@ -13,10 +13,10 @@
 #   `Zend/tests`; nightly, the whole corpus (`--full`, the nightly lane,
 #   which is CI's). It stashes the runs it keeps, which `xtask phpt
 #   --against` fetches (#2362);
-# - `soak`, on the Linux server: makala under many clients (#2350);
+# - `soak`, on the Linux runner: makala under many clients (#2350);
 # - `tailcall`, on a Mac of its own after the oracle job, whose kept
 #   targets it is handed: the threaded dispatch's corpus (#2970);
-# - `deny`, on the Linux server: `cargo deny` over the dependency graph,
+# - `deny`, on the Linux runner: `cargo deny` over the dependency graph,
 #   the advisories and crates.io as the only source (#4372);
 # - `red-nightly`: a red `soak`, `tailcall` or `deny` filed on the tracker
 #   after two nightlies in a row (#2980).
@@ -31,18 +31,16 @@
 # a Cloudflare secret, and a store stashed below is read by no later job of
 # this workflow.
 #
-# The Linux jobs run on harness.yml's self-hosted runner (#2253),
-# `dax-build`, the Linux server, and take it from LELA_BUILD_RUNNER as
-# harness.yml's do (#2477): unset, `dax-build`; set, the labels it lists
+# Every job runs on a hosted runner, a fresh machine each job, as
+# harness.yml's do. The Linux jobs take theirs from LELA_BUILD_RUNNER:
+# unset, GitHub's `ubuntu-26.04`; set, the labels it lists
 # (scripts/ci/README.md). The Mac's jobs, `oracle` and `tailcall`, run on
 # a macOS 15 image (Blacksmith's 12-core `blacksmith-12vcpu-macos-15` while
 # the repository is private, GitHub's `macos-15` once it is public), as
 # Mitchell ruled on 2026-11-19, and read no
-# variable: each is a fresh machine, which .github/actions/oracle-runner
-# lays the tools on and the pinned-php action pours the keg on, and
-# nothing one job leaves is the next one's but what it stashes. Each
-# checkout is `clean: false` and the workspace action cleans all but
-# target/, which a runner that outlives its job keeps as the warm build.
+# variable: .github/actions/oracle-runner lays the tools on each and the
+# pinned-php action pours the keg, and nothing one job leaves is the next
+# one's but what it stashes.
 name: nightly
 on:
   workflow_run:
@@ -62,15 +60,6 @@ on:
 permissions:
   contents: read
 
-# The stash every hand-off between jobs goes through (.github/actions/stash,
-# #3554): the repository's to configure once, for every runner, and unset
-# on a fork, where the hand-off is a GitHub artifact. The two variables are
-# every job's; the secret, the key that reaches the stash, is set on each
-# step that stashes and on no other, so no other step's process holds it
-# (#4348 ruling 5; #4372).
-env:
-  DAX_STASH: ${{ vars.DAX_STASH }}
-  DAX_STASH_HOST_KEY: ${{ vars.DAX_STASH_HOST_KEY }}
 jobs:
   oracle:
     name: phpt and witnesses under the pinned oracle
@@ -126,7 +115,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
-          clean: false
           fetch-depth: 0
       - uses: ./.github/actions/workspace
       - uses: ./.github/actions/oracle-runner
@@ -170,8 +158,6 @@ jobs:
           $XTASK status --section parity --format json > "$RUNNER_TEMP/parity/rendering"
           mv "$RUNNER_TEMP/parity/rendering" "$RUNNER_TEMP/parity/parity.json"
       - uses: ./.github/actions/stash
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: parity
           path: ${{ runner.temp }}/parity/parity.json
@@ -245,8 +231,6 @@ jobs:
         if: github.event_name == 'schedule' || inputs.full
         run: $XTASK phpt --full || true
       - uses: ./.github/actions/stash
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: oracle
           path: target/harness/log/
@@ -254,16 +238,18 @@ jobs:
       # engine is built from (xtask/src/phpt/against.rs), stashed apart
       # from the store, so a run CI took on main serves a
       # checkout as its merge base's (#2362): `phpt --against`'s skip names
-      # the line that fetches the stash's `latest/phpt-runs` and lays it
+      # the line that downloads the newest `phpt-runs` and lays it
       # where the comparison looks. A hosted runner starts with no
       # target/, so this holds the trees this run measured, beside the
       # targets its control kept, which the `tailcall` job lays down.
+      # Kept a month, where a hand-off is kept a week: the fetch line reads
+      # the newest one from outside the run, and a quiet week is no reason
+      # for it to find none.
       - uses: ./.github/actions/stash
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: phpt-runs
           path: target/harness/phpt-runs/
+          retention-days: 30
 
   soak:
     name: the concurrency soak
@@ -278,14 +264,13 @@ jobs:
     # stashed either way, and a red soak is read on the tracker, where
     # `red-nightly` files it.
     if: ${{ github.event_name == 'schedule' || inputs.full }}
-    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
-          clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       - uses: ./.github/actions/workspace
       - uses: ./.github/actions/platform-libraries
       - uses: ./.github/actions/corpus
@@ -294,8 +279,6 @@ jobs:
       - run: cargo xtask soak --nightly
       - uses: ./.github/actions/stash
         if: always()
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: soak
           path: target/harness/log/
@@ -331,7 +314,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
-          clean: false
           fetch-depth: 0
       - uses: ./.github/actions/workspace
       - uses: ./.github/actions/oracle-runner
@@ -352,8 +334,6 @@ jobs:
       # is kept.
       - name: the targets the oracle job kept
         uses: ./.github/actions/stash
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           get: phpt-runs
           path: target/harness/phpt-runs/
@@ -373,8 +353,6 @@ jobs:
         run: scripts/ci/tailcall.sh restore
       - uses: ./.github/actions/stash
         if: always()
-        env:
-          DAX_STASH_KEY: ${{ secrets.DAX_STASH_KEY }}
         with:
           put: tailcall
           path: target/harness/log/
@@ -392,14 +370,13 @@ jobs:
     # LELA_BUILD_RUNNER is set the hosted image runs it as it runs the other
     # Linux jobs (#2477).
     if: ${{ github.event_name == 'schedule' || inputs.full }}
-    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
-          clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       - run: cargo install --locked cargo-deny@0.20.2
       - run: cargo deny check advisories sources
 
@@ -418,7 +395,7 @@ jobs:
     name: a red nightly, filed
     needs: [soak, tailcall, deny]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || inputs.full) }}
-    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     permissions:
       actions: read
       contents: read
@@ -430,8 +407,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          clean: false
-          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+          fetch-depth: 0
       # A filing that fails is the step's warning and never the run's
       # failure, as red-main's is. The job's own result is red where it
       # failed or was cancelled: this job does not run in a cancelled run,

@@ -13,7 +13,7 @@
 //!   served alone, with the leak sensor's findings and the growth of the
 //!   process's resident memory counted. Its length, its clients and its
 //!   lane are as ruled 2026-10-09: ten minutes, 64 clients, nightly on
-//!   `dax-build`, and a 30-second smoke in makala's own tests.
+//!   CI's Linux runner, and a 30-second smoke in makala's own tests.
 //!
 //! Both are served one corpus, the HTTP-served subset: the tests of the
 //! phpt lane's served subset (`phpt::http`) that one file serves

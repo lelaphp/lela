@@ -20,7 +20,7 @@ and `--tree DIR` builds from another checkout of the pinned tag than
       platform's table for the pin. On Linux php-fpm lands beside it, and
       for `main` its `[sapi.<platform>]` table is printed before that line
       and written to sapi.toml: the php-fpm the bench's tables take as
-      their baseline on dax-build. On macOS a person lays
+      their baseline on CI's Linux runner. On macOS a person lays
       it at the table's path, the prefix, which is root's (`sudo mkdir -p`
       and `cp`). On Linux runtime.txt lands beside the binary too: the
       packages that ship the libraries php and php-fpm link, which a host

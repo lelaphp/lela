@@ -2747,7 +2747,7 @@ fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
     let text = fs::read_to_string(workspace().join(".github/workflows/nightly.yml")).unwrap();
     assert!(
         !text.contains("upload-artifact") && !text.contains("download-artifact"),
-        "the hand-offs are the stash's, not GitHub artifacts"
+        "the hand-offs go through the stash action"
     );
     let job = |name: &str| -> String {
         let key = |line: &str| {

@@ -1,7 +1,7 @@
 //! The pinned php a bar measures on this machine: on macOS the
 //! keg `[oracle]` names, asserted as every lane asserts it; on Linux, php
 //! built from the pinned tag by `scripts/oracle-build.py build <platform>
-//! main`, which bench.yml's `baseline` job runs on dax-build. That build
+//! main`, which bench.yml's job runs before its bars. That build
 //! is a performance baseline and not an oracle: it is held to the md5 the
 //! recipe recorded beside it, its `pin.toml`, and a bar is refused, naming
 //! the path and the md5 it expected, wherever the binary is absent or
@@ -18,9 +18,8 @@ use crate::oracle::{Build, Pin, Platform};
 /// Where the recipe lands a build, `<platform>/<variant>/` under the
 /// checkout (`out_dir`, `scripts/oracle-build.py`): the binary as `php`
 /// and its table as `pin.toml`. The table's `path` is the install prefix
-/// a runner would lay it at; nothing lays it there on dax-build, so the
-/// bench takes it where the recipe lands it, and the runner keeps
-/// `target/` from the `baseline` job to the `bench` job.
+/// a runner would lay it at; nothing lays it there in CI, so the bench
+/// takes it where the recipe lands it, in the job that built it.
 const LANDED: &str = "target/oracle";
 
 /// The pinned php for a bar on this machine, or why it has none, the
