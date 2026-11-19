@@ -11,6 +11,45 @@ Run those builds sequentially on small builders. The default Cargo job count is
 one. The installer runs on BUILDARCH; the compiled hosts and their libraries
 follow TARGETARCH. Product naming remains governed by ADR-0016.
 
+## The images
+
+Three targets stand in for the variants of php's official image, each
+shaped as docker-library/php's templates shape it: the same
+`docker-php-entrypoint`, working directory and `$PHP_INI_DIR`
+(`/usr/local/etc/php`, with `conf.d` in it).
+
+| target | holds | default command | working directory |
+|---|---|---|---|
+| `cli` | the CLI and CGI hosts | `php -a` | `/` |
+| `fpm` | those and the FPM, listening on port 9000 | `php-fpm` | `/var/www/html` |
+| `apache` | those, and Apache's prefork MPM in front of the FPM over a unix socket | `apache2-foreground` | `/var/www/html` |
+
+```sh
+docker buildx build -f dist/Dockerfile --platform linux/arm64 --target cli -t lela:cli --load .
+docker buildx build -f dist/Dockerfile --platform linux/arm64 --target fpm -t lela:fpm --load .
+docker buildx build -f dist/Dockerfile --platform linux/arm64 --target apache -t lela:apache --load .
+```
+
+All three are built on one `base` stage from one `build` stage: the hosts
+compile once per platform, and the second and third target find that
+compile cached. They share the Ubuntu packages the build stage reads from
+the hosts' ELF files, and the compat directory, `/opt/lela/compat`, which
+no image puts on `PATH`. Once the hosts carry Lela's names (ADR-0016) it
+holds `php`, `php-cgi` and `php-fpm` as symlinks to them, and one line in a
+Dockerfile built on the image opts in:
+
+```dockerfile
+ENV PATH=/opt/lela/compat:$PATH
+```
+
+Until then the hosts are named `php`, `php-cgi` and `php-fpm` already, and
+the directory is laid down empty.
+
+The `fpm` image's `php-fpm.conf` and `php-fpm.d/www.conf` start from
+php-src's templates at the pinned commit, rendered as the official image's
+`configure` renders them (`dist/inputs.py fpm`), and its `docker.conf`,
+`zz-docker.conf` and `docker-fpm.ini` are the template's.
+
 ## A release by hand
 
 Until CD builds the release, a person builds it on an Apple silicon Mac
