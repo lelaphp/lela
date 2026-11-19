@@ -17,8 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "ghcr.io/lelaphp/lela"
 VARIANTS = ("cli", "fpm", "apache")
-# The commit's time, which the `created` label and the build's
-# SOURCE_DATE_EPOCH are.
+# The commit's time, which the build's SOURCE_DATE_EPOCH is.
 WHEN = "2026-11-19T12:34:56Z"
 EPOCH = "1795091696"
 
@@ -87,8 +86,6 @@ class DryRun(Repository):
             f"org.opencontainers.image.version={version}",
             "org.opencontainers.image.licenses=MIT AND BSD-3-Clause",
             "org.opencontainers.image.description=Lela",
-            "org.opencontainers.image.title=Lela",
-            f"org.opencontainers.image.created={WHEN}",
         ]
 
     def test_a_commit_on_main_is_labelled_edge(self):

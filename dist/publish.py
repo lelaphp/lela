@@ -25,10 +25,12 @@ images under one manifest list, tagged with every tag of the variant:
 It prints `manifest <variant> <digest>`, the lines --manifests writes.
 
 The labels, on each image and as annotations on each manifest list, are
-the standard OCI ones: source, revision, version (`edge` from main),
-licenses from the workspace manifest, and description and title, which
-name Lela alone, since the Ubuntu base's name Canonical's image, and
-created, the commit's time, which the build's SOURCE_DATE_EPOCH is too.
+the standard OCI ones spec #9 names: source, revision, version (`edge`
+from main) and licenses, read from the workspace manifest, and the
+description, `Lela`, which replaces the Ubuntu base's. The base's other
+labels, its title and creation time among them, the image inherits. The
+build's SOURCE_DATE_EPOCH is the commit's time, so the image loaded and
+the one pushed from the cache have one config.
 
 --dry-run prints the platform, the labels, the tags and the digests it
 would join, and builds, smokes and pushes nothing; without --platform it
@@ -52,7 +54,6 @@ import sys
 import tempfile
 import tomllib
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 REPOSITORY = "lelaphp/lela"
@@ -136,10 +137,6 @@ class Commit:
         sha, epoch = git("show", "-s", "--format=%H %ct", "HEAD").split()
         return Commit(sha, int(epoch))
 
-    @property
-    def created(self):
-        return datetime.fromtimestamp(self.epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
 
 def licenses():
     with (ROOT / "Cargo.toml").open("rb") as manifest:
@@ -154,8 +151,6 @@ def labels(ref, commit):
         (prefix + "version", ref.label),
         (prefix + "licenses", licenses()),
         (prefix + "description", "Lela"),
-        (prefix + "title", "Lela"),
-        (prefix + "created", commit.created),
     ]
 
 

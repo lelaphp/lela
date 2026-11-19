@@ -95,11 +95,10 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
 
 Each image is labelled, and each list annotated, with standard OCI keys
 alone: `source`, `revision`, `version` (`edge` from `main`) and
-`licenses`, read from the workspace manifest's package table; and
-`description` and `title`, both `Lela`, and `created`, the commit's time,
-which replace the Ubuntu base's own. `--dry-run` prints the platform, the
-labels, the tags and the digests each step would push, and pushes
-nothing:
+`licenses`, read from the workspace manifest's package table, and
+`description`, `Lela`, which replaces the Ubuntu base's. `--dry-run`
+prints the platform, the labels, the tags and the digests each step would
+push, and pushes nothing:
 
 ```sh
 dist/publish.py build v0.1.0 --platform linux/amd64 --dry-run
