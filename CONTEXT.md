@@ -156,6 +156,17 @@ _Avoid_: lock, lease, ticket
 What one step of the interpreter reports it did to the frame chain: the same frame, a callee pushed, the frame popped to its caller, the frame moved to the heap, an exception left pending, or the entry frame of the enclosing execute popped. The recorder reads the edge; it never infers it from frame pointers.
 _Avoid_: transition, continuation, `Next` (the handler's return inside the loop)
 
+### Distribution
+
+**Platform**:
+An operating system, architecture and C library a release is built and smoke-tested for. Cargo's triple is a target, and a host is the program that serves requests.
+
+**Release**:
+A version of Lela named by a tag: its tarballs and its images, built from that commit.
+
+**Image**:
+The container image a release publishes, one per platform under one name. A container is an image running.
+
 ### Harness
 
 **Instrument**:
