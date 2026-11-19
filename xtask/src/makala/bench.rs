@@ -523,8 +523,12 @@ mod tests {
 
     /// The clients' requests a second are those answered over the time the
     /// last client took: 4 clients each answered every 10 ms for 50 ms
-    /// read about 400 a second, the body the one they all carried; an
-    /// answer of another body refuses the rep.
+    /// are answered once each at the least and 21 times at the most, and
+    /// read those answers over no less than the 50 ms asked, so at most
+    /// 420 a second and on a quiet machine about 400; a loaded one reads
+    /// fewer over longer, as a hosted macOS runner's 87.8 was (2026-11-17).
+    /// The body is the one they all carried; an answer of another body
+    /// refuses the rep.
     #[test]
     fn the_clients_read_the_requests_a_second_they_were_answered_at() {
         let slow = || {
@@ -532,9 +536,14 @@ mod tests {
             Ok(b"body".to_vec())
         };
         let (sample, answered) = clients(&slow, 4, Duration::from_millis(50)).unwrap();
-        assert!((8..=21).contains(&answered), "{answered}");
+        assert!((4..=21).contains(&answered), "{answered}");
         assert_eq!(sample.wrote, b"body");
-        assert!((150.0..=420.0).contains(&sample.value), "{}", sample.value);
+        let over_the_time_asked = f64::from(answered) / 0.05;
+        assert!(
+            sample.value > 0.0 && sample.value <= over_the_time_asked,
+            "{} a second of {answered} answered",
+            sample.value
+        );
         let asked = std::sync::atomic::AtomicU32::new(0);
         let moving = || {
             let n = asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
