@@ -169,7 +169,10 @@ mod tests {
     /// whole time, so its process's CPU and runnable time grow by about
     /// that much: at least half of it, where ticks taken for nanoseconds
     /// would be a fortieth on Apple silicon. Its instructions and cycles
-    /// grow, and a pid no process has reads none.
+    /// grow where the machine counts them: a virtual machine's host hands
+    /// its guest no counter, and both read zero there, as a hosted macOS
+    /// runner's did (`[0, 0, 159071291, 173011292]`, 2026-11-17). A pid no
+    /// process has reads none.
     #[test]
     fn a_spinning_thread_s_time_is_read_in_nanoseconds() {
         let pid = std::process::id();
@@ -182,7 +185,15 @@ mod tests {
         let grew: Vec<u64> = (after.iter().zip(before))
             .map(|(a, b)| a.saturating_sub(b))
             .collect();
-        assert!(grew[0] > 0 && grew[1] > 0, "{grew:?}");
+        let guest = std::process::Command::new("sysctl")
+            .args(["-n", "kern.hv_vmm_present"])
+            .output()
+            .is_ok_and(|said| said.stdout.trim_ascii() == b"1");
+        let counted = grew[0] > 0 && grew[1] > 0;
+        assert!(
+            counted || (guest && grew[0] == 0 && grew[1] == 0),
+            "{grew:?}"
+        );
         assert!(grew[2] + grew[3] >= 50_000_000, "{grew:?}");
         assert_eq!(super::totals(u32::MAX >> 1), None);
     }
