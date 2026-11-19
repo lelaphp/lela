@@ -677,7 +677,8 @@ fn oracle_states_the_pins_tag_and_commit() {
 }
 
 /// The corpus CI checks out: the pin's tag, commit and count of
-/// `.phpt` files, the sparse patterns of the corpus's roots, and a cache
+/// `.phpt` files, the sparse patterns of the corpus's roots and of php-src's
+/// own runner, which `phpt --upstream` runs out of that checkout, and a cache
 /// key of the commit and a digest of the patterns, the same on every call,
 /// where the targets under the pin are kept, and the hosts the lane
 /// runs a test through, which CI builds; the Markdown carries the
@@ -697,7 +698,8 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
         .iter()
         .map(|p| p.as_str().unwrap())
         .collect();
-    for pattern in ["/Zend/tests/", "/tests/", "/ext/*/", "/sapi/*/tests/"] {
+    let roots = ["/Zend/tests/", "/tests/", "/ext/*/", "/sapi/*/tests/"];
+    for pattern in roots.into_iter().chain(["/run-tests.php"]) {
         assert!(patterns.contains(&pattern), "{pattern}: {patterns:?}");
     }
     let key = corpus["key"].as_str().unwrap();

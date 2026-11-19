@@ -137,6 +137,10 @@ pub(super) fn named(source: &Path, subset: &Subset, files: &[PathBuf]) -> Result
         .collect()
 }
 
+/// php-src's own runner, by its path in the tree: what the corpus CI
+/// checks out carries beside the roots (`status --section corpus`).
+pub(crate) const RUNNER: &str = "run-tests.php";
+
 /// `run-tests.php` of the copy `tree` over `tests`, under the oracle of
 /// `pin` and the recipe's environment, what it wrote printed and returned.
 pub(super) fn upstream(pin: &Pin, tree: &Path, tests: &[PathBuf]) -> Result<String> {
@@ -146,7 +150,7 @@ pub(super) fn upstream(pin: &Pin, tree: &Path, tests: &[PathBuf]) -> Result<Stri
         .environ(&mut runner)?
         .current_dir(tree)
         .args(&pin.recipe.args)
-        .arg("run-tests.php")
+        .arg(RUNNER)
         .args(FLAGS)
         .arg("-p")
         .arg(php)

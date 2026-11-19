@@ -1595,9 +1595,11 @@ fn oracle_row(out: &mut String, fact: &str, variable: &str, value: &str, state: 
 /// from the pin, [`phpt::ROOTS`] and the table of ports at `root`. The tag
 /// and the commit to clone at, the `.phpt` files the pin counts in the
 /// whole tree, which a checkout holding fewer has narrowed, git's sparse
-/// patterns, the roots and after them each file a notice under `LICENSES/`
+/// patterns, the roots, after them php-src's own runner
+/// ([`phpt::upstream::RUNNER`]), which `phpt --upstream` runs out of the
+/// same checkout, and each file a notice under `LICENSES/`
 /// is held to ([`crate::licence::sources`]), which the licence check reads
-/// in the same checkout, and the cache key, the commit and a digest of the
+/// there too, and the cache key, the commit and a digest of the
 /// patterns, so a change to either never restores a checkout made by the
 /// old ones.
 /// Beside the checkout, `targets`: where a workspace keeps the targets
@@ -1609,6 +1611,7 @@ fn oracle_row(out: &mut String, fact: &str, variable: &str, value: &str, state: 
 fn corpus_section(root: &Path, pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let mut patterns: Vec<String> = phpt::ROOTS.iter().map(|root| root.pattern()).collect();
+    patterns.push(format!("/{}", phpt::upstream::RUNNER));
     patterns.extend(
         crate::licence::sources(root)?
             .iter()

@@ -658,7 +658,7 @@ fn an_xfail_test_that_passes_is_warned_alike_by_both_runners() {
     let test = "--TEST--\nKnown\n--XFAIL--\nknown\n--FILE--\n<?php echo 'ok';\n--EXPECT--\nok\n";
     let (tree, subset) = subset("xpass", &[("xpass.phpt", test)]);
     let ours = only(&run(&subset, &registry(""))).0;
-    fs::copy(source.join("run-tests.php"), tree.join("run-tests.php")).unwrap();
+    fs::copy(source.join(upstream::RUNNER), tree.join(upstream::RUNNER)).unwrap();
     let pin = manifest().pin.unwrap();
     let said = upstream::upstream(pin.oracle().pin(), &tree, &["xpass.phpt".into()]).unwrap();
     let theirs = upstream::verdict(&said, Path::new("xpass.phpt"));
