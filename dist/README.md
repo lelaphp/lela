@@ -106,7 +106,14 @@ dist/publish.py build v0.1.0 --platform linux/amd64 --dry-run
 dist/publish.py join v0.1.0 --dry-run
 ```
 
-CI runs the script; a person runs it with docker logged in to `ghcr.io`.
+`dist/prune.py` deletes the versions no tag is pulled by: one last updated
+more than 30 days ago whose tags are all `sha-` tags, or which has none,
+unless a kept manifest list names it or it is a referrer of a kept one. A
+version tag, a bare variant, an `edge-` tag and a tag of any other kind
+are never deleted. `dist/prune.py --dry-run` names each version it would
+delete, and deletes none. CI runs both scripts; a person runs them with
+`gh` authorised for the organisation's packages and docker logged in to
+`ghcr.io`.
 
 ## A release by hand
 
@@ -188,8 +195,9 @@ with the pinned php-src tree at `TEST_PHP_SRCDIR`, they also hold the real
 templates to their pins. `test_smoke.py` holds the smoke's refusal of
 arguments it does not take. `test_publish.py` holds the publish script's
 dry run for a commit on `main`, a release and a pre-release, and its two
-steps against a docker that records what it is asked. They do not build
-or run platform binaries.
+steps against a docker that records what it is asked; `test_prune.py`
+holds the deletion script's dry run over the listing in `fixtures/`.
+They do not build or run platform binaries.
 
 To exercise real downloads without installing anything:
 

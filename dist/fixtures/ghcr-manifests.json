@@ -1,0 +1,237 @@
+{
+ "sha256:0000000000000000000000000000000000000000000000000000000000000001": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+   {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+    "size": 1000,
+    "platform": {
+     "architecture": "amd64",
+     "os": "linux"
+    }
+   },
+   {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000003",
+    "size": 1000,
+    "platform": {
+     "architecture": "arm64",
+     "os": "linux"
+    }
+   },
+   {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000004",
+    "size": 800,
+    "platform": {
+     "architecture": "unknown",
+     "os": "unknown"
+    },
+    "annotations": {
+     "vnd.docker.reference.digest": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+     "vnd.docker.reference.type": "attestation-manifest"
+    }
+   }
+  ]
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000002": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003ea",
+   "size": 100
+  },
+  "layers": []
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000003": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003eb",
+   "size": 100
+  },
+  "layers": []
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000004": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003ec",
+   "size": 100
+  },
+  "layers": []
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000005": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+   {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000006",
+    "size": 1000,
+    "platform": {
+     "architecture": "amd64",
+     "os": "linux"
+    }
+   },
+   {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000007",
+    "size": 1000,
+    "platform": {
+     "architecture": "arm64",
+     "os": "linux"
+    }
+   }
+  ]
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000006": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003ee",
+   "size": 100
+  },
+  "layers": []
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000007": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003ef",
+   "size": 100
+  },
+  "layers": []
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000008": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+   {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000009",
+    "size": 1000,
+    "platform": {
+     "architecture": "amd64",
+     "os": "linux"
+    }
+   },
+   {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+    "size": 1000,
+    "platform": {
+     "architecture": "arm64",
+     "os": "linux"
+    }
+   }
+  ]
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000009": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003f1",
+   "size": 100
+  },
+  "layers": []
+ },
+ "sha256:000000000000000000000000000000000000000000000000000000000000000a": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003f2",
+   "size": 100
+  },
+  "layers": []
+ },
+ "sha256:000000000000000000000000000000000000000000000000000000000000000b": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003f3",
+   "size": 100
+  },
+  "layers": [],
+  "subject": {
+   "mediaType": "application/vnd.oci.image.index.v1+json",
+   "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000008",
+   "size": 1
+  }
+ },
+ "sha256:000000000000000000000000000000000000000000000000000000000000000c": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": []
+ },
+ "sha256:000000000000000000000000000000000000000000000000000000000000000d": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003f5",
+   "size": 100
+  },
+  "layers": []
+ },
+ "sha256:000000000000000000000000000000000000000000000000000000000000000e": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003f6",
+   "size": 100
+  },
+  "layers": []
+ },
+ "sha256:000000000000000000000000000000000000000000000000000000000000000f": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": []
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000010": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": []
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000011": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003f9",
+   "size": 100
+  },
+  "layers": [],
+  "subject": {
+   "mediaType": "application/vnd.oci.image.index.v1+json",
+   "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+   "size": 1
+  }
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000012": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+   "mediaType": "application/vnd.oci.image.config.v1+json",
+   "digest": "sha256:00000000000000000000000000000000000000000000000000000000000003fa",
+   "size": 100
+  },
+  "layers": []
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000013": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": []
+ }
+}
