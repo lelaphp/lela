@@ -28,12 +28,80 @@ class SmokeArguments(unittest.TestCase):
                 self.assertIn("--image <image> cli|fpm|apache", run.stderr)
 
     def test_no_directory_or_two_are_refused(self):
-        for arguments in ((), ("a", "b"), ("--unknown",), ("--machos",), ("--machos", "a", "b")):
+        for arguments in ((), ("a", "b"), ("--unknown",), ("--machos",), ("--machos", "a", "b"),
+                          ("--https",), ("--https", "a", "b")):
             with self.subTest(arguments=arguments):
                 run = self.smoke(*arguments)
                 self.assertEqual(run.returncode, 2, run.stderr)
                 self.assertIn("usage:", run.stderr)
 
+
+class Https(unittest.TestCase):
+    """The https requests, `--https <dir>`, run over a directory whose
+    `bin/lela` answers each URL as the test says, beside a `curl` that
+    reaches each host or none, with no brew on PATH, so no sandbox."""
+
+    TRUSTED = "https://www.php.net/"
+    EXPIRED = "https://expired.badssl.com/"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.scratch = Path(temporary.name).resolve()
+        (self.scratch / "tarball/bin").mkdir(parents=True)
+        (self.scratch / "path").mkdir()
+
+    def requests(self, curl_exit, answers):
+        """The requests, curl exiting `curl_exit` and the host reading each
+        URL of `answers` and refusing any other; and the host's environment
+        and arguments, one line per request."""
+        seen = self.scratch / "seen"
+        cases = "".join(f'  *"{url}"*) echo {answer} ;;\n' for url, answer in answers.items())
+        host = self.scratch / "tarball/bin/lela"
+        host.write_text(
+            f'#!/bin/sh\necho "SSL_CERT_FILE=${{SSL_CERT_FILE-unset}} $*" >> {seen}\n'
+            f'case "$*" in\n{cases}  *) echo refused ;;\nesac\n'
+        )
+        curl = self.scratch / "path/curl"
+        curl.write_text(f"#!/bin/sh\nexit {curl_exit}\n")
+        for program in (host, curl):
+            program.chmod(0o755)
+        run = subprocess.run(
+            [shutil.which("bash"), str(ROOT / "dist/smoke.sh"), "--https", str(self.scratch / "tarball")],
+            env={**os.environ, "NAME": "lela", "SSL_CERT_FILE": "/elsewhere.pem",
+                 "PATH": os.pathsep.join([str(self.scratch / "path"), "/usr/bin", "/bin"])},
+            capture_output=True, text=True,
+        )
+        return run, seen.read_text().splitlines() if seen.exists() else []
+
+    def test_the_trusted_host_is_read_and_the_expired_one_refused(self):
+        run, seen = self.requests(0, {self.TRUSTED: "read"})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("https, a trusted certificate: read", run.stdout)
+        self.assertIn("https, an expired certificate: refused", run.stdout)
+        self.assertEqual(len(seen), 2)
+        for line in seen:
+            with self.subTest(line=line):
+                self.assertTrue(line.startswith("SSL_CERT_FILE=unset -n "), line)
+
+    def test_a_stream_that_reads_the_expired_host_fails(self):
+        run, _ = self.requests(0, {self.TRUSTED: "read", self.EXPIRED: "read"})
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("https, an expired certificate: wanted refused", run.stderr)
+
+    def test_a_stream_that_refuses_the_trusted_host_fails(self):
+        run, _ = self.requests(0, {})
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("https, a trusted certificate: wanted read", run.stderr)
+
+    def test_with_no_network_no_stream_is_tried_and_the_line_says_so(self):
+        run, seen = self.requests(7, {})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(seen, [])
+        for url in (self.TRUSTED, self.EXPIRED):
+            with self.subTest(url=url):
+                self.assertIn(f"curl reaches nothing at {url} from this machine, so the stream is not tried",
+                              run.stdout)
 
 
 class Compat(unittest.TestCase):
