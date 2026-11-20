@@ -554,6 +554,7 @@ text = "No engine, tier, host or test state is thread-local (design §5.14 Threa
 [[rule]]
 id = "unsafe.homes"
 allow = ["php_heap", "php_process", "ext/*/src/ffi/", "sapi/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter", "xtask::bench::spent::read"]
+group = { php_heap = "engine", php_process = "engine", "ext/*/src/ffi/" = "foreign", "sapi/*/src/ffi/" = "foreign", timelib_sys = "foreign", "php_jit::table::code" = "engine", "php_jit::enter" = "engine", "xtask::bench::spent::read" = "engine" }   # grammar: group, the share of Rust per home group that unsafe-audit reports
 adr = "0006"
 text = "unsafe is permitted only in the homes this rule names; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, xtask (its bench reader), and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
 
