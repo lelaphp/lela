@@ -302,6 +302,54 @@ The program to put on `PATH` is `bin/lela` of the unpacked directory, by a
 link to it: a copy of `bin/lela` alone finds no `../lib`. dyld resolves
 `@loader_path` from the real file the link names, so the link runs.
 
+### The paths the bundled libraries compile in
+
+The rewrite reaches load commands, install names and run paths, so a path a
+library compiles in stays the build machine's: three libraries under `lib/`
+name Homebrew's prefix (#36). What each does on a Mac without it was probed
+on a laid tarball tree with `sandbox-exec -p '(version 1)(allow
+default)(deny file-read* (subpath "/opt/homebrew"))'`, beside the same tree
+unsandboxed and the oracle:
+
+- `libcrypto.4.dylib` compiles in OPENSSLDIR `/opt/homebrew/etc/openssl@4`,
+  where its `cert.pem` and `openssl.cnf` are, and MODULESDIR, where the
+  provider modules are. An https stream that verifies its peer, given no CA
+  by `openssl.cafile`, `openssl.capath`, its `cafile` or `capath` option,
+  `SSL_CERT_FILE` or `SSL_CERT_DIR`, trusts macOS's `/etc/ssl/cert.pem`
+  where the compiled-in `cert.pem` cannot be read, as #35 ruled: ext/openssl
+  does it on macOS, so an unpacked tarball needs no installer, ini or
+  environment for it, and no CA bundle is shipped. Where the file can be
+  read nothing changes. `dist/smoke.sh` holds it under the sandbox: a
+  stream to `https://www.php.net/` reads and one to
+  `https://expired.badssl.com/` is refused, each tried only where curl,
+  outside the sandbox, reaches the host, and its line says so where it does
+  not. The functions that verify outside a stream,
+  `openssl_x509_checkpurpose`, `openssl_pkcs7_verify` and
+  `openssl_cms_verify`, still read only the compiled-in defaults, which
+  #47 asks a person about, and `openssl_get_cert_locations()` names
+  Homebrew's paths, as php's does. With no `openssl.cnf` to read,
+  `openssl_pkey_new()` and `openssl_csr_new()` without a `config` option
+  return false, as the oracle's do with `OPENSSL_CONF` naming no file;
+  `OPENSSL_CONF=/etc/ssl/openssl.cnf` makes them succeed, and #46 asks a
+  person which file the tarball reads. The cipher list is the same in and
+  out of the sandbox, since the default provider is built into the library.
+- `libfontconfig.1.dylib` compiles in `/opt/homebrew/etc/fonts`,
+  `/opt/homebrew/var/cache/fontconfig` and the keg's `conf.avail`, and no
+  host's output depends on them: php never asks libgd to look a font up
+  through fontconfig, and libgd finds a font by name in `GDFONTPATH`, else
+  `/usr/share/fonts/truetype:/System/Library/Fonts:/Library/Fonts`.
+  `imagettftext()` and `imagettfbbox()` with a font's path, with `Geneva`,
+  `Arial` and a name of no font, and `gd_info()`, give the same answers in
+  and out of the sandbox and on the oracle, and `FC_DEBUG=1031`, which
+  makes fontconfig print the files it loads, prints nothing during them.
+- `libintl.8.dylib` compiles in `/opt/homebrew/Cellar/gettext/1.0/share/locale`
+  as the directory of a domain nothing has bound, which gettext's keg does
+  not install, so it is absent with Homebrew present too.
+  `bindtextdomain($domain, null)` answers that path, in and out of the
+  sandbox, as the oracle does, and `gettext()`, `dgettext()` and
+  `dngettext()` under `de_DE.UTF-8` find no catalog there in any of the
+  three.
+
 ### The installer
 
 Each release carries `install.sh`, which installs that release for the
