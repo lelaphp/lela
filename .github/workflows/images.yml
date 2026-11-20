@@ -69,13 +69,20 @@ jobs:
             sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell /usr/lib/jvm /usr/local/share/chromium /opt/microsoft /opt/google /usr/lib/google-cloud-sdk /opt/az
             df -h "$GITHUB_WORKSPACE"
           fi
-      - name: a BuildKit builder, logged in to ghcr.io
+      # The buildx and the BuildKit the scripts were probed with, pinned as
+      # Mitchell ruled on #30 on 2026-11-20: a runner image brings its own
+      # buildx (v0.23.0 on the day of the ruling), and a difference between
+      # it and a laptop's stopped the first four publishes.
+      - uses: docker/setup-buildx-action@v4
+        with:
+          version: v0.38.1
+          driver: docker-container
+          driver-opts: image=moby/buildkit:v0.35.1
+      - name: logged in to ghcr.io
         env:
           TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
-        run: |
-          docker buildx create --use --driver docker-container
-          printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
       - id: build
         env:
           REF: ${{ github.ref_name }}
@@ -110,13 +117,16 @@ jobs:
             sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell /usr/lib/jvm /usr/local/share/chromium /opt/microsoft /opt/google /usr/lib/google-cloud-sdk /opt/az
             df -h "$GITHUB_WORKSPACE"
           fi
-      - name: a BuildKit builder, logged in to ghcr.io
+      - uses: docker/setup-buildx-action@v4 # the pin, as in `amd64`
+        with:
+          version: v0.38.1
+          driver: docker-container
+          driver-opts: image=moby/buildkit:v0.35.1
+      - name: logged in to ghcr.io
         env:
           TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
-        run: |
-          docker buildx create --use --driver docker-container
-          printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
       - id: build
         env:
           REF: ${{ github.ref_name }}
@@ -143,6 +153,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: docker/setup-buildx-action@v4 # the pin, as in `amd64`
+        with:
+          version: v0.38.1
+          driver: docker-container
+          driver-opts: image=moby/buildkit:v0.35.1
       - name: logged in to ghcr.io
         env:
           TOKEN: ${{ github.token }}
@@ -220,6 +235,11 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4 # the pin, as in `amd64`
+        with:
+          version: v0.38.1
+          driver: docker-container
+          driver-opts: image=moby/buildkit:v0.35.1
       - name: logged in to ghcr.io
         env:
           TOKEN: ${{ github.token }}
