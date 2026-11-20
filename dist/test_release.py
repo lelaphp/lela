@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 import testlib
+from test_apt import runs_apt_bare
 from testlib import IMAGE, ROOT, VARIANTS, manifest
 
 
@@ -18,7 +19,7 @@ class Repository(testlib.Repository):
     version = "1.2.0"
     files = (
         ".gitignore", "dist/release.py", "dist/bundle.py", "dist/publish.py", "dist/Dockerfile",
-        "dist/install.sh", "scripts/dist-sums.sh",
+        "dist/install.sh", "dist/apt.sh", "scripts/dist-sums.sh",
     )
 
     def release(self, *arguments, env=None):
@@ -369,8 +370,7 @@ class Build(Recorded):
         # The smoke, then the installer as a user runs it, curl coming only
         # after the smoke.
         lines = smoke[-1].splitlines()
-        self.assertLess(lines.index('/dist/smoke.sh "$d"'), lines.index(
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl >/dev/null"))
+        self.assertLess(lines.index('/dist/smoke.sh "$d"'), lines.index("sh /dist/apt.sh install curl >/dev/null"))
         self.assertEqual(lines[-1], "su installer -c 'LELA_INSTALL_FROM=file:///tmp/assets sh /installer/install.sh'")
         listing = subprocess.run(
             ["tar", "-tvzf", str(self.out() / "lela-1.2.0-linux-x86_64.tar.gz")],
@@ -381,6 +381,26 @@ class Build(Recorded):
             with self.subTest(entry=entry):
                 self.assertRegex(entry, r"\broot\s+root\b")
         self.assertEqual(self.lines(run, "built"), [str(self.out() / "lela-1.2.0-linux-x86_64.tar.gz")])
+
+    def test_the_smoke_runs_apt_through_apt_sh_alone(self):
+        self.git("tag", "v1.2.0")
+        run = self.run_step("build", "v1.2.0", "linux-x86_64", str(self.out()))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        smoke = self.calls()[-1]
+        lines = smoke[-1].splitlines()
+        self.assertEqual([line for line in lines if runs_apt_bare(line)], [])
+        # Its three apt steps, in order: the index, the runtime packages
+        # before the smoke, and curl after it.
+        self.assertEqual([line for line in lines if "apt.sh" in line], [
+            "sh /dist/apt.sh update",
+            'xargs -a "$d/runtime-packages.txt" sh /dist/apt.sh install >/dev/null',
+            "sh /dist/apt.sh install curl >/dev/null",
+        ])
+        self.assertLess(lines.index('xargs -a "$d/runtime-packages.txt" sh /dist/apt.sh install >/dev/null'),
+                        lines.index('/dist/smoke.sh "$d"'))
+        # The script is the checkout's, in the directory mounted at /dist.
+        mount = smoke[smoke.index(f"{self.root / 'dist'}:/dist:ro")]
+        self.assertTrue((Path(mount.removesuffix(":/dist:ro")) / "apt.sh").is_file())
 
     def test_a_failed_smoke_fails_the_build(self):
         self.git("tag", "v1.2.0")
