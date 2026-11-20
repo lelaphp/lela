@@ -49,7 +49,7 @@ pub use php_engine::{
     EngineBuilder, FileHandles, Forked, HostPage, HostPath, HostServes, HostThread, HostValue,
     IniEvent, IniFile, IniFiles, IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink,
     PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR,
-    PHP_VERSION, Pid, Primary, ProcessEnd, ProcessTitle, ProgramFile, ProgramServed,
+    PHP_VERSION, PRODUCT_NAME, Pid, Primary, ProcessEnd, ProcessTitle, ProgramFile, ProgramServed,
     RequestDescription, ResponseHead, Routed, Uncaught, WebRequest, fork, host_thread, log_field,
     main_thread,
 };
@@ -232,7 +232,7 @@ fn leak_sensor(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<LeakS
 /// ends as a release one does; the sensor is armed without it. Read once,
 /// as the host builds its engine, and never per request. It is the
 /// unarmed side of a census, the same debug binary measured unarmed to
-/// tell a leak from a regression, `PHP_SENSE_LEAKS=0 target/debug/php`,
+/// tell a leak from a regression, `PHP_SENSE_LEAKS=0 target/debug/lela`,
 /// behind a wrapper given as `cargo xtask phpt --engine`, since the
 /// recipe clears the environment; a release build reads nothing.
 #[cfg(debug_assertions)]
@@ -246,7 +246,7 @@ const SENSE_LEAKS: &str = "PHP_SENSE_LEAKS";
 /// alone in a `release-da` one. Read once, as [`SENSE_LEAKS`] is, and
 /// for digging locally only, since every allocation pays a backtrace's
 /// capture, which costs many times the allocation:
-/// `PHP_SENSE_LEAKS_BACKTRACE=1 target/debug/php leaking.php`.
+/// `PHP_SENSE_LEAKS_BACKTRACE=1 target/debug/lela leaking.php`.
 #[cfg(debug_assertions)]
 const SENSE_LEAKS_BACKTRACE: &str = "PHP_SENSE_LEAKS_BACKTRACE";
 

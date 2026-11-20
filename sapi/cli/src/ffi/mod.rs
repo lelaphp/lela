@@ -3,7 +3,7 @@
 //! process's own fds 0, 1 and 2, which `do_cli` registers its standard
 //! streams over, the area `ps` shows its title from ([`title`]), the
 //! local time the built-in server's log writes, the `SIGINT` and the
-//! wait its loop serves between, and the fds above 2 `php-linked` closes
+//! wait its loop serves between, and the fds above 2 `lela-linked` closes
 //! before it serves (`close_inherited_fds`).
 //! Each `unsafe` block is one operation with its `SAFETY` comment.
 #![deny(

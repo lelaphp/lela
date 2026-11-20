@@ -150,4 +150,4 @@ A row of another cause is counted on its own line after the total: `php-ub` reco
 
 Over the last 7 days: the registry then could not be read.
 
-<!-- /computed in=54c3429c5b4d2aa75435d665c81cc26d12c33c837bcfa426b8838cf016d8bd47 out=c9e629b1e24d0cf8d852ce1dd8350d241f9b4bd252c62b1e5a55502a88b0e2aa -->
+<!-- /computed in=26300eb3e572ae937e1aceaa9e8e1b8f7e4a4e16d63be8b422d49a17e96314b2 out=c9e629b1e24d0cf8d852ce1dd8350d241f9b4bd252c62b1e5a55502a88b0e2aa -->

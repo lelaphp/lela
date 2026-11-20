@@ -33,7 +33,7 @@ fn sessions(dir: &Path) -> Vec<String> {
 
 /// `php -n` under `session.auto_start` saving to `dir`, then `args`.
 fn php(dir: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_php"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lela"));
     command
         .arg("-n")
         .args(["-d", "session.auto_start=1", "-d"])

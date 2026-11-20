@@ -20,8 +20,8 @@ shaped as docker-library/php's templates shape it: the same
 
 | target | holds | default command | working directory |
 |---|---|---|---|
-| `cli` | the CLI and CGI hosts | `php -a` | `/` |
-| `fpm` | those and the FPM, listening on port 9000 | `php-fpm` | `/var/www/html` |
+| `cli` | the CLI and CGI hosts | `lela -a` | `/` |
+| `fpm` | those and the FPM, listening on port 9000 | `lela-fpm` | `/var/www/html` |
 | `apache` | those, and Apache's prefork MPM in front of the FPM over a unix socket | `apache2-foreground` | `/var/www/html` |
 
 ```sh
@@ -34,16 +34,16 @@ All three are built on one `base` stage from one `build` stage: the hosts
 compile once per platform, and the second and third target find that
 compile cached. They share the Ubuntu packages the build stage reads from
 the hosts' ELF files, and the compat directory, `/opt/lela/compat`, which
-no image puts on `PATH`. Once the hosts carry Lela's names (ADR-0016) it
-holds `php`, `php-cgi` and `php-fpm` as symlinks to them, and one line in a
-Dockerfile built on the image opts in:
+no image puts on `PATH`. The hosts carry Lela's names (ADR-0016), `lela`,
+`lela-cgi` and `lela-fpm`, which the images' own scripts and default
+commands run, and no `php` is on an image's `PATH`. The compat directory
+holds `php`, `php-cgi` and `php-fpm`, each a symlink to the host the image
+holds under Lela's name, and one line in a Dockerfile built on the image
+opts in:
 
 ```dockerfile
 ENV PATH=/opt/lela/compat:$PATH
 ```
-
-Until then the hosts are named `php`, `php-cgi` and `php-fpm` already, and
-the directory is laid down empty.
 
 The `fpm` image's `php-fpm.conf` and `php-fpm.d/www.conf` start from
 php-src's templates at the pinned commit, rendered as the official image's
@@ -54,14 +54,13 @@ php-src's templates at the pinned commit, rendered as the official image's
 
 `dist/smoke.sh --image <image> <variant>` runs the tarball's checks inside
 the image, on the image's own platform, over the hosts in `/usr/local`
-(`php-fpm -t` where the variant holds the FPM). It checks the ini
-directory, and that the compat directory is there and off `PATH`, and
-that each entry of it is what its name finds once the directory is first
-on `PATH`, and runs: that makes putting it first the only step the usual
-names need. Once the hosts carry Lela's names, each usual name the
-variant holds must be an entry; until then the directory is empty, and
-passes. Then it checks what a user
-of the variant sees: `cli` passes an option to `php` through the
+(`lela-fpm -t` where the variant holds the FPM). It checks the ini
+directory; that no `php`, `php-cgi` or `php-fpm` is on `PATH`; that the
+compat directory is there, off `PATH`, and holds each usual name the
+variant has a host for; and that each entry of it is what its name finds
+once the directory is first on `PATH`, and runs: that makes putting it
+first the only step the usual names need. Then it checks what a user
+of the variant sees: `cli` passes an option to `lela` through the
 entrypoint; `fpm` answers a FastCGI request on port 9000, and `apache`
 serves a page on port 80, each to a second container of the image on a
 network of the smoke's own. It prints the platform it ran on, saying when
@@ -203,7 +202,7 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
   `linux-aarch64` and `linux-x86_64` from the `binaries` target above on a
   daemon of that architecture. It then smokes the tarball itself, unpacked:
   `dist/smoke.sh` runs `-v`, `-r`, a file with arguments, code on stdin,
-  `php-cgi` on a file and `php-fpm -t`, a Linux tarball in the Ubuntu image
+  `lela-cgi` on a file and `lela-fpm -t`, a Linux tarball in the Ubuntu image
   the Dockerfile builds on with its `runtime-packages.txt` installed. The
   macOS hosts keep the linker's ad-hoc signature, which `build` reads
   before the smoke, with no Developer ID and no notarization.
@@ -231,8 +230,15 @@ The sums read back in the directory they are written in:
 ```
 
 Docker Desktop's default VM (about 4 GiB) links one host at a time, so
-`CARGO_BUILD_JOBS` stays at its default of one. NAME (default `php`) is the
-hosts' name (ADR-0016).
+`CARGO_BUILD_JOBS` stays at its default of one.
+
+The hosts' name is the Dockerfile's `ARG NAME`, `lela` (ADR-0016), which
+xtask's tests hold to `php_engine::PRODUCT_NAME`, the constant the
+`[[bin]]` names of the hosts are spelled from; no caller sets it. A
+tarball, `lela-<version>-<platform>.tar.gz`, holds one directory of that
+name with `bin/lela`, `bin/lela-cgi`, `sbin/lela-fpm`,
+`etc/php.ini-development` and `etc/php.ini-production`, and a Linux one
+`runtime-packages.txt` beside them. No tarball holds a `php`.
 
 ## The compiled tier
 
@@ -326,7 +332,7 @@ Cargo uses `--locked` and the lockfile's registry checksums. These checks do
 not make the whole build hermetic or guarantee byte-identical binaries.
 
 Successful input tests do not supply the release's binary smoke evidence.
-Both `binaries` targets must still be built and their `bin/php -v` run with
+Both `binaries` targets must still be built and their `bin/lela -v` run with
 the matching runtime libraries on the release runners. An image's validation
 also requires building its target and running the smoke's image mode over
 it.

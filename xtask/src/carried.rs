@@ -18,7 +18,7 @@
 //! row it carries, and of every row naming an oracle variant on the engine
 //! built with the row's feature, `done` asks a touched crate of
 //! either for a `phpt` reading, and `crosscheck` renders every extension
-//! it carries (§4.5 condition 1). `php-linked`, the engine the lanes serve a snippet
+//! it carries (§4.5 condition 1). `lela-linked`, the engine the lanes serve a snippet
 //! through, is the other: [`BINARY`]'s crate with the bundle's `linked` set
 //! on top (revision 84). `crosscheck` serves an extension through
 //! it where it carries the extension and through the binary where it does
@@ -40,7 +40,7 @@ pub const BINARY: &str = "sapi/cli";
 /// The package every build turns its extension features on through.
 pub(crate) const BUNDLE: &str = "php_bundle";
 
-/// The bundle's feature `php-linked` is built with on top of [`BINARY`]'s.
+/// The bundle's feature `lela-linked` is built with on top of [`BINARY`]'s.
 const LINKED: &str = "linked";
 
 /// The `php_bundle` features one build turns on.
@@ -61,7 +61,7 @@ impl Carried {
         Carried::binary_over(root, &bundle_features(root)?)
     }
 
-    /// What `php-linked` carries, the engine the witness and crosscheck
+    /// What `lela-linked` carries, the engine the witness and crosscheck
     /// lanes serve a snippet through (harness §8, revision 84): it is
     /// [`BINARY`]'s crate built with the bundle's `linked` set, so what
     /// that crate declares and every member of the set, read from
@@ -226,7 +226,7 @@ mod tests {
     /// A set the binary names is read as its members, a set inside it the
     /// same way, and an extension's feature as itself whatever it requires:
     /// the binary turning `host` on carries `pdo_mysql` and not `mysqlnd`,
-    /// `php-linked` what `linked` adds to it, and an empty feature is itself.
+    /// `lela-linked` what `linked` adds to it, and an empty feature is itself.
     #[test]
     fn a_set_the_build_names_is_read_as_its_members() {
         let root = crate::scratch::Tree::new("carried-sets").unwrap();

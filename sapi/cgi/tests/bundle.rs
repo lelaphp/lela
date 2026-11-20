@@ -8,7 +8,7 @@
 /// its features were the CLI's first eight.
 #[test]
 fn the_cli_class_and_the_rest_are_loaded() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .env_clear()
         .args(["-n", "-m"])
         .output()

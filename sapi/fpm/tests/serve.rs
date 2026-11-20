@@ -22,7 +22,7 @@ use php_proto::fcgi::{self, Header, Kind};
 /// refuses a pool with no `user` directive unless `--allow-to-run-as-root`
 /// lets it, as the oracle's does, and a container's tests go as root.
 fn php_fpm() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_php-fpm"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lela-fpm"));
     command.arg("-R");
     command
 }
@@ -686,13 +686,13 @@ echo listed();
 /// pinned php-fpm's; elsewhere the binary itself, whose master attaches
 /// to its own child with `ptrace`.
 fn readable_php_fpm(dir: &Path) -> Command {
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_php-fpm"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_lela-fpm"));
     if !cfg!(target_os = "macos") {
         let mut command = Command::new(binary);
         command.arg("-R");
         return command;
     }
-    let copy = dir.join("php-fpm");
+    let copy = dir.join("lela-fpm");
     std::fs::copy(&binary, &copy).expect("the binary is copied to be signed");
     let entitlements = dir.join("readable.plist");
     std::fs::write(

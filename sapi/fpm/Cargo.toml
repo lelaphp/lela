@@ -1,5 +1,5 @@
 # sapi/fpm: php's FastCGI process manager, `php-src/sapi/fpm`, one crate
-# under `sapi/` (ADR-0008), the binary `php-fpm`: a master that reads
+# under `sapi/` (ADR-0008), the binary `lela-fpm` (ADR-0016): a master that reads
 # php-fpm.conf and forks its pools' children, each serving FastCGI
 # requests on an engine of the bundle's enabled set with `cgi-fcgi` after
 # it. Four edges, php_bundle, php_sapi, php_proto for the FastCGI and
@@ -13,13 +13,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "php's FastCGI process manager, the binary php-fpm"
+description = "php's FastCGI process manager, the binary lela-fpm"
 
 [lints]
 workspace = true
 
 [[bin]]
-name = "php-fpm"
+name = "lela-fpm"
 path = "src/main.rs"
 
 [features]

@@ -1,5 +1,5 @@
 //! php's CLI, `php-src/sapi/cli`, as one crate under `sapi/` (ADR-0008):
-//! the binary `php`, reaching the engine through `php_sapi` alone. The
+//! the binary `lela` (ADR-0016), reaching the engine through `php_sapi` alone. The
 //! host is `sapi/cli/php_cli.c`: the command line read as `main` and
 //! `do_cli` read it through `php_getopt` ([`options`]), one request
 //! description built from it, the sink on the process's two streams, and
@@ -68,12 +68,12 @@ use php_sapi::{Engine, EngineBuilder, OutputSink};
 
 use crate::natives::ProcessTitle;
 
-/// What `php-linked --serve` does first, so a pool's server holds only
+/// What `lela-linked --serve` does first, so a pool's server holds only
 /// its own pipes.
 #[cfg(feature = "linked")]
 pub use ffi::close_inherited_fds;
 pub use options::{
-    Ask, Each, Lines, Listing, Options, Program, Refused, Server, Startup, usage_text,
+    Ask, Each, Lines, Listing, Options, Program, Refused, Server, Startup, program, usage_text,
 };
 pub use request::Process;
 
@@ -128,34 +128,39 @@ pub fn main() -> ! {
     // The host's own copy of its arguments, taken before `save_ps_args`:
     // on Linux the standard library reads them from the C runtime's
     // `argv`, whose `argv[1..]` the area's set-up points at its last NUL.
-    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let mut words = std::env::args_os();
+    let invoked = words.next().unwrap_or_default();
+    let argv: Vec<OsString> = words.collect();
     // `save_ps_args`, which php's `main` calls before anything else reads
     // `argv` (`php_cli.c:1224-1228`).
     TITLE.set(ffi::save_ps_args().map(ProcessTitle::new)).ok();
-    php_sapi::main_on_request_stack(move || served(&argv))
+    php_sapi::main_on_request_stack(move || served(&invoked, &argv))
 }
 
 /// What [`main`] serves, the command line read and served, and the
 /// status it ends the process with, C's `stdout` flushed before the
 /// engine ends, as `php_sapi::exit_code` flushed it when `main` returned.
-fn served(argv: &[OsString]) -> i32 {
+/// The usage names the program by `invoked`, `argv[0]`, as
+/// `php_cli_usage` does.
+fn served(invoked: &OsString, argv: &[OsString]) -> i32 {
+    let prog = program(invoked.as_encoded_bytes());
     let started = OnceCell::new();
     let cli = |startup: &Startup| started.get_or_init(|| engine(startup));
-    let options = match Options::parse(argv, &|startup| cli(startup).has_shell()) {
+    let options = match Options::parse(prog, argv, &|startup| cli(startup).has_shell()) {
         Ok(options) => options,
         Err(refused) => {
             std::io::stderr().lock().write_all(&refused.stderr).ok();
-            std::io::stdout()
-                .lock()
-                .write_all(refused.stdout.as_bytes())
-                .ok();
+            std::io::stdout().lock().write_all(&refused.stdout).ok();
             php_sapi::stdio::flush();
             return refused.exit_code;
         }
     };
     let startup = &options.startup;
     let status = match &options.ask {
-        Ask::Usage => print(&usage_text()),
+        Ask::Usage => {
+            std::io::stdout().lock().write_all(&usage_text(prog)).ok();
+            0
+        }
         Ask::Version => print(&version(cli(startup))),
         Ask::Info => request::info(cli(startup)),
         Ask::Extensions => listed(cli(startup)),

@@ -28,7 +28,7 @@ fn a_peer_the_list_does_not_allow_is_dropped_and_said_with_php_s_bytes() {
         .local_addr()
         .unwrap()
         .port();
-    let host = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let host = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .args(["-n", "-b", &format!("127.0.0.1:{port}")])
         .env("FCGI_WEB_SERVER_ADDRS", "bogus,192.0.2.1")
         .stdout(std::process::Stdio::piped())
@@ -73,7 +73,7 @@ fn a_list_set_but_empty_is_said_with_php_s_bytes() {
         .local_addr()
         .unwrap()
         .port();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .args(["-n", "-b", &format!("127.0.0.1:{port}")])
         .env_clear()
         .env("FCGI_WEB_SERVER_ADDRS", "")

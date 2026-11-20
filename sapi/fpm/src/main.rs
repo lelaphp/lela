@@ -1,4 +1,4 @@
-//! `php-fpm`, the binary (design §4.1; ADR-0008): [`php_sapi_fpm::main`].
+//! `lela-fpm`, the binary (design §4.1; ADR-0008, ADR-0016): [`php_sapi_fpm::main`].
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(

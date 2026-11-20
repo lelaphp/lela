@@ -39,8 +39,8 @@ use crate::reading::listed;
 /// The facade every host depends on (ADR-0008), relative to the root.
 const FACADE: &str = "crates/php_sapi";
 
-/// Lay `sapi/<name>` down with its binary `binary`, `php-<name>` where the
-/// line names none, or refuse and write nothing.
+/// Lay `sapi/<name>` down with its binary `binary`, `lela-<name>` where the
+/// line names none, the product's name before it (ADR-0016), or refuse and write nothing.
 pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -> Result<Laid> {
     if name.is_empty()
         || !name.starts_with(|c: char| c.is_ascii_lowercase())
@@ -50,7 +50,10 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -
     {
         bail!("{name}: a host's name is lowercase ascii letters and digits, as php-src spells it");
     }
-    let bin = binary.map_or_else(|| format!("php-{name}"), str::to_owned);
+    let bin = binary.map_or_else(
+        || format!("{}-{name}", crate::oracle::hosts::PRODUCT),
+        str::to_owned,
+    );
     if bin.is_empty()
         || !bin
             .chars()

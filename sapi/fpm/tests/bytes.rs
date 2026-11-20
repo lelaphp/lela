@@ -135,7 +135,7 @@ fn a_word_of_listen_allowed_clients_is_logged_with_its_own_bytes() {
         ]
         .concat(),
     );
-    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let mut master = Command::new(env!("CARGO_BIN_EXE_lela-fpm"))
         .args(["-R", "-n", "-F", "-y"])
         .arg(&path)
         .stdin(Stdio::null())
@@ -176,7 +176,7 @@ fn a_configuration_dump_writes_each_word_with_its_own_bytes() {
         &dir,
         b"[global]\nerror_log = {dir}/fpm.log\ninclude = {dir}/no\xff*.conf\n[w\xffw]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\nenv[k\xff] = v\xff\nphp_value[x\xff] = \xff\n",
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let out = Command::new(env!("CARGO_BIN_EXE_lela-fpm"))
         .args(["-R", "-n", "-tt", "-y"])
         .arg(&path)
         .output()
@@ -201,7 +201,7 @@ fn an_unknown_entry_is_named_with_its_own_bytes() {
         &dir,
         b"[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\nx\xffx = 1\n",
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let out = Command::new(env!("CARGO_BIN_EXE_lela-fpm"))
         .args(["-R", "-n", "-t", "-y"])
         .arg(&path)
         .output()
@@ -282,7 +282,7 @@ fn an_env_value_naming_a_variable_finds_it_by_its_bytes() {
     );
     let script = dir.join("index.php");
     std::fs::write(&script, "<?php var_dump(getenv(\"A\"));").expect("the script is written");
-    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let mut master = Command::new(env!("CARGO_BIN_EXE_lela-fpm"))
         .args(["-R", "-n", "-F", "-y"])
         .arg(&path)
         .env(std::ffi::OsStr::from_bytes(b"B\xff"), "val")
@@ -334,7 +334,7 @@ fn a_body_file_that_does_not_open_is_warned_of_with_its_own_bytes() {
     std::fs::write(&script, "<?php var_dump($_POST);").expect("the script is written");
     let at = dir.as_os_str().as_encoded_bytes();
     let file = [at, b"/no\xff"].concat();
-    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let mut master = Command::new(env!("CARGO_BIN_EXE_lela-fpm"))
         .args(["-R", "-n", "-F", "-y"])
         .arg(&path)
         .stdin(Stdio::null())
@@ -380,7 +380,7 @@ fn the_usage_names_the_program_with_argv0s_own_bytes() {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::process::CommandExt;
     let first = |argv0: &[u8]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+        let out = Command::new(env!("CARGO_BIN_EXE_lela-fpm"))
             .arg0(OsStr::from_bytes(argv0))
             .args(["-n", "-h"])
             .output()

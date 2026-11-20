@@ -10,7 +10,7 @@ The toolchain is the Rust release `rust-toolchain.toml` pins, with rustfmt and c
 cargo build --release
 ```
 
-builds every crate of the workspace. Each host under `sapi/` is one crate (ADR-0008), and the `[[bin]]` tables of its `Cargo.toml` name its binaries (ADR-0016). The build writes them to `target/release/`, all but a binary whose table has a `required-features` line, which is built when `--features` names the feature. `cargo build --release -p php_sapi_cli` builds the command-line host alone, and its binary, run with `-v`, prints php's version line.
+builds every crate of the workspace. Each host under `sapi/` is one crate (ADR-0008), and the `[[bin]]` tables of its `Cargo.toml` name its binaries (ADR-0016). The build writes them to `target/release/`, all but a binary whose table has a `required-features` line, which is built when `--features` names the feature. `cargo build --release -p php_sapi_cli` builds the command-line host alone, and its binary, `target/release/lela`, run with `-v`, prints php's version line.
 
 The C the build needs is a `build.rs`'s to compile or to find. A C library that is vendored is php-src's copy, byte for byte at the tag `oracle.toml` pins, beside the `build.rs` that compiles it. Any other is the system's, found by the `build.rs` of the crate that binds it or of the `-sys` crate it uses, most through `pkg-config`. On macOS some are bound to the ones the oracle loads, the kegs `oracle.toml`'s `[closure]` names: `.cargo/config.toml` points at their directories and says which it links statically, and `ext/intl/build.rs` refuses an ICU whose major version is not the pin's, finding it through `PKG_CONFIG_PATH`.
 
@@ -28,7 +28,7 @@ The oracle's pin is `oracle.toml`, and `cargo xtask status --section oracle` pri
 
 CI publishes three variants to `ghcr.io/lelaphp/lela`, each shaped as php's official image of that name is, and each for `linux/amd64` and `linux/arm64` under one reference (`dist/README.md`). Every reference names its variant. `<version>` is a release's version, and its tags never move; the bare variant is the newest release that is not a pre-release; `edge-` is the last merge to `main`; and a `sha-` tag, with the full commit, is one merge to `main`, kept 30 days.
 
-`cli`, the CLI and CGI hosts, running `php -a`:
+`cli`, the CLI and CGI hosts, running `lela -a`:
 
 ```
 ghcr.io/lelaphp/lela:cli
@@ -82,13 +82,11 @@ ghcr.io/lelaphp/lela:edge-apache
 ghcr.io/lelaphp/lela:sha-<commit>-apache
 ```
 
-Once the hosts carry Lela's names (ADR-0016), the names other tools call, `php`, `php-cgi` and `php-fpm`, are symlinks to them in `/opt/lela/compat`, which no image puts on `PATH`. One line in a Dockerfile built on an image opts in:
+The hosts carry Lela's names (ADR-0016), `lela`, `lela-cgi` and `lela-fpm`, and no `php` is on an image's `PATH`. The names other tools call, `php`, `php-cgi` and `php-fpm`, are symlinks to the hosts in `/opt/lela/compat`, which no image puts on `PATH`. One line in a Dockerfile built on an image opts in:
 
 ```dockerfile
 ENV PATH=/opt/lela/compat:$PATH
 ```
-
-Until then the hosts are named `php`, `php-cgi` and `php-fpm` already, and the directory is empty.
 
 ## The repository
 

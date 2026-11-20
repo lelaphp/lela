@@ -77,7 +77,7 @@ impl Master {
             ),
         )
         .expect("the configuration is written");
-        let child = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+        let child = Command::new(env!("CARGO_BIN_EXE_lela-fpm"))
             .args(["-R", "-n", "-d", "cgi.fix_pathinfo=0"])
             .args(defines.iter().flat_map(|define| ["-d", define]))
             .args(["-F", "-y"])

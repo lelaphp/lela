@@ -1,10 +1,10 @@
-//! `php-linked`, the engine the witness and crosscheck lanes serve a
+//! `lela-linked`, the engine the witness and crosscheck lanes serve a
 //! snippet through (harness-design.md §8, revision 84). The harness
 //! once linked this engine into itself, so every edit under `crates/` or
 //! `ext/` relinked the binary every hook runs; now it starts this binary
 //! and hands it snippets.
 //!
-//! `php-linked --serve` reads one directory per line on stdin. Each holds
+//! `lela-linked --serve` reads one directory per line on stdin. Each holds
 //! a request as files: `script_name`, the program's file, which the
 //! harness has written in `cwd`, the directory it is served in, and
 //! which is served as `php <script_name>` serves it there, compiled as a
@@ -42,7 +42,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().map(String::as_str).ne(["--serve"]) {
         eprintln!(
-            "php-linked: serves the harness; run as `php-linked --serve`, a request directory per line on stdin"
+            "lela-linked: serves the harness; run as `lela-linked --serve`, a request directory per line on stdin"
         );
         return ExitCode::from(2);
     }

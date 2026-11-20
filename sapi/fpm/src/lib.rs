@@ -1,5 +1,5 @@
 //! php's `FastCGI` process manager, `php-src/sapi/fpm`, as one crate under
-//! `sapi/` (ADR-0008): the binary `php-fpm`, reaching the engine through
+//! `sapi/` (ADR-0008): the binary `lela-fpm` (ADR-0016), reaching the engine through
 //! `php_sapi` alone. `main` reads the command line as `fpm_main.c`'s
 //! `main` reads it through `php_getopt`, starts php, and hands the rest to
 //! the process manager: the master reads `php-fpm.conf` ([`conf`]), opens

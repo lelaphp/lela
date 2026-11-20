@@ -2696,7 +2696,8 @@ fn a_target_test_no_host_of_ours_stands_beside_the_engine_for_fails_the_reading(
     );
     let said = &reading.message;
     assert!(
-        said.contains("php-cgi") && said.contains("phpdbg"),
+        said.contains(crate::oracle::hosts::CGI.binary)
+            && said.contains(crate::oracle::hosts::PHPDBG.binary),
         "{said}"
     );
 

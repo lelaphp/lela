@@ -19,7 +19,7 @@ fn a_content_length_opening_with_0xa0_is_read_past_it() {
         "<?php echo strlen(file_get_contents('php://input')), \"\\n\";\n",
     )
     .unwrap();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .env_clear()
         .env("GATEWAY_INTERFACE", "CGI/1.1")
         .env("REDIRECT_STATUS", "200")
@@ -61,7 +61,7 @@ fn a_negative_content_length_is_read_no_further_than_the_request_pulls() {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("t.php");
     std::fs::write(&file, "<?php echo $_POST === [] ? 0 : 1, \"\\n\";\n").unwrap();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .env_clear()
         .env("GATEWAY_INTERFACE", "CGI/1.1")
         .env("REDIRECT_STATUS", "200")

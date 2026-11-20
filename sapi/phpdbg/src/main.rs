@@ -1,4 +1,4 @@
-//! `phpdbg`, the binary (design §4.1; ADR-0008): [`php_sapi_phpdbg::main`].
+//! `lela-dbg`, the binary (design §4.1; ADR-0008, ADR-0016): [`php_sapi_phpdbg::main`].
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(

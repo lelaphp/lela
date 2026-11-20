@@ -1,5 +1,5 @@
 //! php's `phpdbg` host, `php-src/sapi/phpdbg`, as one crate under `sapi/`
-//! (ADR-0008): the binary `phpdbg`, reaching the engine through
+//! (ADR-0008): the binary `lela-dbg` (ADR-0016), reaching the engine through
 //! `php_sapi` alone. The debugger is a `Tier` too (`jit-design.md` §2.4,
 //! revision 8): the engine is built with [`debugger::Debugger`]
 //! bound, whose `safepoint` is where it stops and whose loop is `step`, so a

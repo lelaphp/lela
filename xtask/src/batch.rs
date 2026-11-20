@@ -288,7 +288,7 @@ struct Target {
     #[serde(default)]
     doctest: bool,
     /// The features the target is built only with, which a run that
-    /// turns on none never builds: `sapi/cli`'s `php-linked`.
+    /// turns on none never builds: `sapi/cli`'s `lela-linked`.
     #[serde(default, rename = "required-features")]
     required_features: Vec<String>,
 }
@@ -303,10 +303,10 @@ pub(crate) enum Targets {
     /// declares, `--all-targets --all-features`: the set `clippy` lints
     /// under. A module behind a feature is a target the run must
     /// reach as any other: `php_bundle::test`, each extension's line in
-    /// the bundle's `enabled()`, `sapi/cli`'s `php-linked`. Every feature,
+    /// the bundle's `enabled()`, `sapi/cli`'s `lela-linked`. Every feature,
     /// because no two in the workspace conflict and the lanes already
     /// build each but one: the `php` binary turns on the bundle's
-    /// extensions, and `php-linked` its `linked` and `test`. The one is
+    /// extensions, and `lela-linked` its `linked` and `test`. The one is
     /// `php_bundle`'s `jit`, in the set on purpose: it links `php_jit` on
     /// the four targets, so the tier is linted with the rest.
     /// A selected crate's features no longer depend on what else the run

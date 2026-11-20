@@ -60,9 +60,9 @@ release tags, so it holds them all: a shallow checkout, which may hold
 its own tag alone, is refused, dry run or real, saying what to fetch. The
 caller is logged in to ghcr.io with a token that may write packages.
 
-NAME (default php) is the hosts' name (ADR-0016), CARGO_BUILD_JOBS
-(default 1) reaches the build, and SMOKE (default dist/smoke.sh) is the
-smoke the build step runs.
+CARGO_BUILD_JOBS (default 1) reaches the build, and SMOKE (default
+dist/smoke.sh) is the smoke the build step runs. The hosts' name is
+dist/Dockerfile's `ARG NAME` (ADR-0016), which no caller sets.
 """
 
 import argparse
@@ -94,10 +94,10 @@ VERSION = re.compile(
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 
-# What the caller's environment sets, or its default: NAME is the hosts'
-# name (ADR-0016), CARGO_BUILD_JOBS reaches the build, and SMOKE is the
-# smoke a build runs. dist/release.py reads them here too.
-DEFAULTS = {"NAME": "php", "CARGO_BUILD_JOBS": "1", "SMOKE": str(ROOT / "dist/smoke.sh")}
+# What the caller's environment sets, or its default: CARGO_BUILD_JOBS
+# reaches the build, and SMOKE is the smoke a build runs. dist/release.py
+# reads them here too.
+DEFAULTS = {"CARGO_BUILD_JOBS": "1", "SMOKE": str(ROOT / "dist/smoke.sh")}
 
 
 def setting(key):
@@ -354,7 +354,6 @@ def build(ref, commit, arguments):
         answering()
     common = [
         "buildx", "build", "-f", str(ROOT / "dist/Dockerfile"), "--platform", platform,
-        "--build-arg", f"NAME={setting('NAME')}",
         "--build-arg", f"CARGO_BUILD_JOBS={setting('CARGO_BUILD_JOBS')}",
         "--build-arg", f"SOURCE_DATE_EPOCH={commit.epoch}",
     ]

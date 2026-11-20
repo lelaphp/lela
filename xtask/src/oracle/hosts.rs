@@ -13,6 +13,20 @@ use std::path::{Path, PathBuf};
 use super::Pin;
 use crate::layout;
 
+/// The product's name, a copy of `php_engine::PRODUCT_NAME`, which every
+/// host but makala is named from (ADR-0016): xtask links no workspace
+/// crate, so it spells the name once here and every binary below is
+/// built from it.
+macro_rules! product {
+    () => {
+        "lela"
+    };
+}
+
+/// [`product!`] as a value: the CLI's binary, and the word every other
+/// host's binary starts with.
+pub(crate) const PRODUCT: &str = product!();
+
 /// One host: the crate under `sapi/` that builds it, and its binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EngineHost {
@@ -69,26 +83,30 @@ impl Whose {
 /// php's CLI, the binary under test itself (`crate::carried::BINARY`).
 pub(crate) const CLI: EngineHost = EngineHost {
     krate: crate::carried::BINARY,
-    binary: "php",
+    binary: product!(),
 };
 
 /// The CGI host, which a CGI-shaped test is run through.
 pub(crate) const CGI: EngineHost = EngineHost {
     krate: "sapi/cgi",
-    binary: "php-cgi",
+    binary: concat!(product!(), "-cgi"),
 };
 
 /// The `FastCGI` process manager, which `sapi/fpm/tests` start.
 pub(crate) const FPM: EngineHost = EngineHost {
     krate: "sapi/fpm",
-    binary: "php-fpm",
+    binary: concat!(product!(), "-fpm"),
 };
 
 /// The debugger host, which a `--PHPDBG--` test is run through.
 pub(crate) const PHPDBG: EngineHost = EngineHost {
     krate: "sapi/phpdbg",
-    binary: "phpdbg",
+    binary: concat!(product!(), "-dbg"),
 };
+
+/// The CLI built with the bundle's `linked` set, the engine the witness
+/// and crosscheck lanes serve a snippet through (`oracle::linked`).
+pub(crate) const LINKED: &str = concat!(product!(), "-linked");
 
 /// The production server, which a `request makala` fence is served by
 /// and the phpt lane's served subset is served to over HTTP
@@ -155,5 +173,42 @@ mod tests {
                 .collect();
             assert!(bins.contains(&host.binary), "{}: {bins:?}", host.krate);
         }
+    }
+
+    /// The copy is the engine's constant, and every spelling of the name
+    /// that cannot read it is built from the copy: each host's binary but
+    /// makala's, the CLI's linked build, and the name `dist/Dockerfile`
+    /// builds and installs the hosts under (ADR-0016).
+    #[cfg(tracked)]
+    #[test]
+    fn every_spelling_of_the_product_s_name_is_the_engine_s_constant() {
+        let root = crate::package_dir().join("..");
+        let read = |path: &str| {
+            std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
+        };
+        let line = format!("pub const PRODUCT_NAME: &str = \"{PRODUCT}\";");
+        assert!(
+            read("crates/php_engine/src/lib.rs")
+                .lines()
+                .any(|l| l == line),
+            "crates/php_engine/src/lib.rs states no `{line}`"
+        );
+        for host in HOSTS {
+            assert!(
+                host.binary == PRODUCT || host.binary.starts_with(&format!("{PRODUCT}-")),
+                "{}: {}",
+                host.krate,
+                host.binary
+            );
+        }
+        let cli: toml::Table = toml::from_str(&read("sapi/cli/Cargo.toml")).unwrap();
+        let bins: Vec<&str> = (cli["bin"].as_array().into_iter().flatten())
+            .filter_map(|bin| bin.get("name").and_then(toml::Value::as_str))
+            .collect();
+        assert!(bins.contains(&LINKED), "sapi/cli: {bins:?}");
+        let named: Vec<String> = (read("dist/Dockerfile").lines())
+            .filter_map(|l| l.trim().strip_prefix("ARG NAME=").map(str::to_owned))
+            .collect();
+        assert_eq!(named, [PRODUCT], "dist/Dockerfile's `ARG NAME=` lines");
     }
 }

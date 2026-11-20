@@ -1,8 +1,8 @@
 #!/bin/bash
-# php's official apache2-foreground, with php-fpm started beside Apache:
+# php's official apache2-foreground, with lela-fpm started beside Apache:
 # the container lives while both do, and stops both when either exits or
 # when it is stopped (SIGWINCH, the image's STOPSIGNAL, is Apache's
-# graceful stop and becomes php-fpm's SIGQUIT).
+# graceful stop and becomes lela-fpm's SIGQUIT).
 set -e
 
 : "${APACHE_CONFDIR:=/etc/apache2}"
@@ -40,7 +40,7 @@ for e in "${!APACHE_@}"; do
 done
 
 mkdir -p /run/php
-php-fpm --nodaemonize &
+lela-fpm --nodaemonize &
 fpm=$!
 apache2 -DFOREGROUND "$@" &
 apache=$!
@@ -58,7 +58,7 @@ trap 'stop TERM' TERM INT
 status=0
 wait -n "$fpm" "$apache" || status=$?
 if [ -z "$stopping" ]; then
-	echo "apache2-foreground: $( kill -0 "$fpm" 2>/dev/null && echo apache2 || echo php-fpm ) exited ($status); stopping" >&2
+	echo "apache2-foreground: $( kill -0 "$fpm" 2>/dev/null && echo apache2 || echo lela-fpm ) exited ($status); stopping" >&2
 	stop TERM
 	# Exiting unasked is a failure, whatever status it exited with, so
 	# a restart policy of on-failure restarts the container.

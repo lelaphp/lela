@@ -1391,13 +1391,13 @@ fn verdict_is_compare_with_the_callers_match_in_place_of_equal_bytes() {
     }
 }
 
-/// A stand-in for the engine's binary at `target/<profile>/php` under
+/// A stand-in for the engine's binary at `target/<profile>/lela` under
 /// `root`, stamped `ago` seconds back, so a test says in one line whether
 /// the tree has moved past it. The write time is set rather than
 /// slept for: the question is which of two files is newer, and a sleep
 /// would answer it by wall clock.
 fn built(root: &Path, profile: &str, ago: u64) -> PathBuf {
-    let path = root.join("target").join(profile).join("php");
+    let path = root.join("target").join(profile).join("lela");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, format!("the {profile} engine")).unwrap();
     let at = SystemTime::now() - Duration::from_secs(ago);
@@ -1437,7 +1437,7 @@ fn a_binary_the_tree_has_moved_past_is_passed_over_for_one_it_has_not() {
         "the debug binary the tree has not moved past is the lane's engine"
     );
     // And the release binary alone is the skip, not a silent engine.
-    std::fs::remove_file(root.path().join("target/debug/php")).unwrap();
+    std::fs::remove_file(root.path().join("target/debug/lela")).unwrap();
     let behind = Runner::resolve(root.path(), &layout(), &pin, None).unwrap();
     let Runner::Stale(why) = &behind else {
         panic!("{behind:?}")
@@ -1485,7 +1485,7 @@ fn the_lanes_build_is_the_engine_before_release_and_passed_over_when_behind() {
 #[test]
 fn a_php_cgi_the_tree_has_moved_past_holds_back_the_php_beside_it() {
     let root = fixture_tree("stale-cgi-beside");
-    let cgi = root.path().join("target/debug/php-cgi");
+    let cgi = root.path().join("target/debug/lela-cgi");
     std::fs::create_dir_all(cgi.parent().unwrap()).unwrap();
     std::fs::write(&cgi, "the cgi").unwrap();
     std::fs::File::options()
@@ -1517,7 +1517,7 @@ fn a_php_cgi_the_tree_has_moved_past_holds_back_the_php_beside_it() {
 
 /// A binary cargo leaves standing is the engine, whatever else under the
 /// crate directories was written since: on 2026-10-20 a commit
-/// that wrote `ext/clippy.toml` alone left `target/release-da/php` fresh
+/// that wrote `ext/clippy.toml` alone left `target/release-da/lela` fresh
 /// for cargo, and the census skipped every subset, the binary "built
 /// before ext/clippy.toml was last written". It is held to what its
 /// dep-info names, as cargo is, and a source named there written since is

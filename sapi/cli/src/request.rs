@@ -485,7 +485,7 @@ mod tests {
 
     fn parse(words: &[&str]) -> Result<Options, Refused> {
         let argv: Vec<OsString> = words.iter().map(OsString::from).collect();
-        Options::parse(&argv, &|_| false)
+        Options::parse(b"php", &argv, &|_| false)
     }
 
     /// One sink over both streams, in the order the request wrote them.

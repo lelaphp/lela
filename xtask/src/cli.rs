@@ -519,7 +519,7 @@ pub(crate) enum Command {
     NewSapi {
         /// The host's name as php-src spells its directory, with a `[[crate]]` row.
         name: String,
-        /// The binary's name; `php-<name>` where none is given.
+        /// The binary's name; `lela-<name>`, the product's name before it (ADR-0016), where none is given.
         #[arg(long = "bin", value_name = "NAME")]
         binary: Option<String>,
     },

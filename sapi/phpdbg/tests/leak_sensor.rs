@@ -13,7 +13,7 @@ fn armed(name: &str, source: &str) -> String {
     std::fs::create_dir_all(&dir).ok();
     let file = dir.join("t.php");
     std::fs::write(&file, source).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_phpdbg"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lela-dbg"))
         .env_remove("PHP_SENSE_LEAKS")
         .args(["-qIb", "-n"])
         .arg(&file)

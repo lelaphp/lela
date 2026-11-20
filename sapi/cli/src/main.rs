@@ -1,4 +1,4 @@
-//! `php`, the binary (design §4.1, §4.10; ADR-0008): php's CLI host,
+//! `lela`, the binary (design §4.1, §4.10; ADR-0008, ADR-0016): php's CLI host,
 //! [`php_sapi_cli::main`].
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).

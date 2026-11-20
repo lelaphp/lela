@@ -70,7 +70,7 @@ fn shown(bytes: &[u8]) -> String {
 
 #[test]
 fn a_bind_host_that_is_not_utf8_is_said_with_its_own_bytes() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .arg("-n")
         .arg("-b")
         .arg(OsStr::from_bytes(b"caf\xe9:29701"))
@@ -86,7 +86,7 @@ fn a_bind_host_that_is_not_utf8_is_said_with_its_own_bytes() {
 
 #[test]
 fn the_usage_names_a_program_that_is_not_utf8_with_its_own_bytes() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .arg0(OsStr::from_bytes(b"/x/p\xe9"))
         .arg("-n")
         .arg("-h")
@@ -102,7 +102,7 @@ fn the_usage_names_a_program_that_is_not_utf8_with_its_own_bytes() {
 
 #[test]
 fn a_switch_that_is_not_utf8_is_named_with_its_own_byte() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .arg("-n")
         .arg(OsStr::from_bytes(b"-\xe9"))
         .env_clear()

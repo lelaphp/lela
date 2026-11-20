@@ -1,5 +1,5 @@
 # sapi/cgi: php's CGI, `php-src/sapi/cgi`, one crate under `sapi/` (ADR-0008),
-# the binary `php-cgi`: the bundle's enabled set on one engine with
+# the binary `lela-cgi` (ADR-0016): the bundle's enabled set on one engine with
 # `cgi-fcgi` after it, the request the server describes in the environment.
 # Four edges, php_bundle, php_sapi, php_proto for the CGI environment's
 # codec, and php_ext for the natives its own extension declares (ADR-0008
@@ -11,13 +11,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "php's CGI host, the binary php-cgi"
+description = "php's CGI host, the binary lela-cgi"
 
 [lints]
 workspace = true
 
 [[bin]]
-name = "php-cgi"
+name = "lela-cgi"
 path = "src/main.rs"
 
 [dependencies]

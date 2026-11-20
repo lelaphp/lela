@@ -86,7 +86,7 @@ echo listed();
     .unwrap();
     let inode = |path: &Path| std::fs::metadata(path).map_or(0, |m| m.ino());
     let ours = inherited();
-    let out = Command::new(env!("CARGO_BIN_EXE_php"))
+    let out = Command::new(env!("CARGO_BIN_EXE_lela"))
         .arg("-n")
         .arg(&script)
         .stdin(Stdio::null())

@@ -34,7 +34,7 @@ fn shown(bytes: &[u8]) -> String {
 
 #[test]
 fn a_switch_that_is_not_utf8_is_named_with_its_own_byte() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_php"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lela"))
         .arg("-n")
         .arg(OsStr::from_bytes(b"-\xe9"))
         .env_clear()

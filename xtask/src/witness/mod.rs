@@ -14,7 +14,7 @@
 //! The seam `phpt` names (design §8's `ScriptExec`) has two
 //! adapters and this lane stands on one of them by decision: the linked
 //! engine carries every extension feature (revision 43) where
-//! `target/*/php` is php's default build, so under a lane that resolved a
+//! `target/*/lela` is the CLI's default build, so under a lane that resolved a
 //! binary the same fence beside `ext/curl` read pass or fail by which rung
 //! happened to run, which is a reading that says nothing. A witness is a
 //! snippet served in this process beside the code it exercises; the

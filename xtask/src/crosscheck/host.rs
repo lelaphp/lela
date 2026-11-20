@@ -97,6 +97,18 @@ impl Host {
             Host::Server => "php -S",
         }
     }
+
+    /// The engine's own host of this kind, by the name ADR-0016 gives
+    /// it, as a refusal of the engine's side names it.
+    pub(crate) fn engine_invocation(self) -> String {
+        use crate::oracle::hosts;
+        match self {
+            Host::Cli => hosts::CLI.binary.to_owned(),
+            Host::Cgi => hosts::CGI.binary.to_owned(),
+            Host::Fpm => hosts::FPM.binary.to_owned(),
+            Host::Server => format!("{} -S", hosts::CLI.binary),
+        }
+    }
 }
 
 /// The rendering of `module` through `host`, which is not the CLI: by the

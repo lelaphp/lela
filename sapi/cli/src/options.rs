@@ -169,7 +169,7 @@ pub struct Options {
 /// `php_cli_usage` on stdout, and the exit code `main` ends with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refused {
-    pub stdout: String,
+    pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: i32,
 }
@@ -262,8 +262,9 @@ impl Options {
     /// unless one was named already. Where `do_cli` reads the line, php's
     /// modules have started: `start` starts them under the line's
     /// [`Startup`] before the second loop, once, and its answer is what
-    /// `-a` asks.
-    pub fn parse(argv: &[OsString], start: &Start<'_>) -> Result<Options, Refused> {
+    /// `-a` asks. `prog` is what [`program`] made of `argv[0]`, which a
+    /// refusal's usage names.
+    pub fn parse(prog: &[u8], argv: &[OsString], start: &Start<'_>) -> Result<Options, Refused> {
         let argv: Vec<Vec<u8>> = argv
             .iter()
             .map(|word| word.as_encoded_bytes().to_vec())
@@ -274,7 +275,7 @@ impl Options {
             interactive: false,
             ask: Ask::Serve(Program::Stdin, Vec::new()),
         };
-        match options.main_pass(&argv)? {
+        match options.main_pass(prog, &argv)? {
             Host::Early(ask) => {
                 options.ask = ask;
                 return Ok(options);
@@ -287,7 +288,7 @@ impl Options {
         }
         let settled = mode_pass(&argv, start(&options.startup));
         if settled.usage {
-            return Err(usage(1));
+            return Err(usage(prog, 1));
         }
         options.repeat = settled.repeat;
         options.interactive = settled.interactive && settled.param_error.is_none();
@@ -304,7 +305,7 @@ impl Options {
             };
             if programs.is_empty() {
                 return Err(Refused {
-                    stdout: error.to_owned(),
+                    stdout: error.into(),
                     stderr: Vec::new(),
                     exit_code: 1,
                 });
@@ -369,7 +370,7 @@ impl Options {
     /// set: the ini switches onto `self`, `-S` choosing the server's
     /// `sapi_module`, and what ends it early; `-i`, `-v` and `-m` are the CLI's
     /// whatever came before them.
-    fn main_pass(&mut self, argv: &[Vec<u8>]) -> Result<Host, Refused> {
+    fn main_pass(&mut self, prog: &[u8], argv: &[Vec<u8>]) -> Result<Host, Refused> {
         let mut getopt = Getopt::new(OPTIONS, 0);
         let mut server = false;
         loop {
@@ -380,7 +381,7 @@ impl Options {
                 Err((argument, at, error)) => {
                     return Err(Refused {
                         stderr: getopt_line(argv, argument, at, error),
-                        ..usage(1)
+                        ..usage(prog, 1)
                     });
                 }
                 Ok(Taken::Switch { code, value, .. }) => match code {
@@ -584,19 +585,49 @@ fn bare_words(rest: &mut std::slice::Iter<'_, Vec<u8>>) -> Vec<Program> {
         .collect()
 }
 
-/// `php_cli_usage` (`Z/sapi/cli/php_cli.c:457-515`) with `php` for the
-/// program's name, on stdout.
+/// The program's name as `php_cli_usage` writes it
+/// (`Z/sapi/cli/php_cli.c:470-474`): what follows the last `/` of
+/// `argv[0]`, and `php` where there is none, so the binary started by a
+/// path is named by its file, `lela` or a `php` link to it (ADR-0016),
+/// and one found on `PATH` reads `php` whatever its file is called.
 #[must_use]
-pub fn usage_text() -> String {
-    String::from(
-        "Usage: php [options] [-f] <file> [--] [args...]\n\
-         \x20  php [options] -r <code> [--] [args...]\n\
-         \x20  php [options] [-B <begin_code>] -R <code> [-E <end_code>] [--] [args...]\n\
-         \x20  php [options] [-B <begin_code>] -F <file> [-E <end_code>] [--] [args...]\n\
-         \x20  php [options] -S <addr>:<port> [-t docroot] [router]\n\
-         \x20  php [options] -- [args...]\n\
-         \x20  php [options] -a\n\
-         \n\
+pub fn program(argv0: &[u8]) -> &[u8] {
+    match argv0.iter().rposition(|b| *b == b'/') {
+        Some(at) => &argv0[at + 1..],
+        None => b"php",
+    }
+}
+
+/// `php_cli_usage` (`Z/sapi/cli/php_cli.c:457-515`) with `prog`, what
+/// [`program`] made of `argv[0]`, written as its bytes, on stdout.
+#[must_use]
+pub fn usage_text(prog: &[u8]) -> Vec<u8> {
+    let mut text = Vec::new();
+    for (lead, rest) in [
+        ("Usage: ", " [options] [-f] <file> [--] [args...]\n"),
+        ("   ", " [options] -r <code> [--] [args...]\n"),
+        (
+            "   ",
+            " [options] [-B <begin_code>] -R <code> [-E <end_code>] [--] [args...]\n",
+        ),
+        (
+            "   ",
+            " [options] [-B <begin_code>] -F <file> [-E <end_code>] [--] [args...]\n",
+        ),
+        ("   ", " [options] -S <addr>:<port> [-t docroot] [router]\n"),
+        ("   ", " [options] -- [args...]\n"),
+        ("   ", " [options] -a\n"),
+    ] {
+        text.extend_from_slice(lead.as_bytes());
+        text.extend_from_slice(prog);
+        text.extend_from_slice(rest.as_bytes());
+    }
+    text.extend_from_slice(USAGE_SWITCHES.as_bytes());
+    text
+}
+
+/// `php_cli_usage`'s text after the lines that name the program.
+const USAGE_SWITCHES: &str = "\n\
          \x20 -a               Run as interactive shell (requires readline extension)\n\
          \x20 -c <path>|<file> Look for php.ini file in this directory\n\
          \x20 -n               No configuration (ini) files will be used\n\
@@ -633,15 +664,13 @@ pub fn usage_text() -> String {
          \n\
          \x20 --repeat <count> Repeat script execution <count> times.\n\
          \x20                  For internal purposes only.\n\
-         \n",
-    )
-}
+         \n";
 
 /// `php_cli_usage` on stdout with the exit code given: 1 for a switch
 /// php does not know (`PHP_GETOPT_INVALID_ARG`).
-fn usage(exit_code: i32) -> Refused {
+fn usage(prog: &[u8], exit_code: i32) -> Refused {
     Refused {
-        stdout: usage_text(),
+        stdout: usage_text(prog),
         stderr: Vec::new(),
         exit_code,
     }
@@ -653,15 +682,41 @@ mod tests {
 
     fn parse(words: &[&str]) -> Result<Options, Refused> {
         let argv: Vec<OsString> = words.iter().map(OsString::from).collect();
-        Options::parse(&argv, &|_| false)
+        Options::parse(b"php", &argv, &|_| false)
+    }
+
+    /// A refusal's stdout as text, which every refusal these tests make is.
+    fn text(stdout: &[u8]) -> String {
+        String::from_utf8_lossy(stdout).into_owned()
     }
 
     /// What the line asks of a binary whose engine has a shell.
     fn ask_shell(words: &[&str]) -> Result<(bool, Ask), (String, Vec<u8>, i32)> {
         let argv: Vec<OsString> = words.iter().map(OsString::from).collect();
-        Options::parse(&argv, &|_| true)
+        Options::parse(b"php", &argv, &|_| true)
             .map(|o| (o.interactive, o.ask))
-            .map_err(|r| (r.stdout, r.stderr, r.exit_code))
+            .map_err(|r| (text(&r.stdout), r.stderr, r.exit_code))
+    }
+
+    /// `php_cli_usage`'s name: the file of a path, `php` for a bare
+    /// word, and every line of the usage that names the program naming
+    /// it, as `php -h` started as `/x/lela` and as `lela`
+    /// prints.
+    #[test]
+    fn the_usage_names_the_program_as_php_cli_usage_does() {
+        assert_eq!(program(b"/usr/local/bin/lela"), b"lela");
+        assert_eq!(program(b"./php"), b"php");
+        assert_eq!(program(b"lela"), b"php");
+        let usage = text(&usage_text(program(b"/x/lela")));
+        let named: Vec<&str> = usage.lines().take(7).collect();
+        assert!(named[0].starts_with("Usage: lela [options] [-f] <file>"));
+        assert!(
+            named[1..]
+                .iter()
+                .all(|line| line.starts_with("   lela [options] "))
+        );
+        assert!(!usage.contains("php [options]"), "{usage}");
+        assert!(text(&usage_text(b"php")).starts_with("Usage: php [options]"));
     }
 
     #[test]
@@ -707,14 +762,14 @@ mod tests {
     fn ask(words: &[&str]) -> Result<Ask, (String, Vec<u8>, i32)> {
         parse(words)
             .map(|o| o.ask)
-            .map_err(|r| (r.stdout, r.stderr, r.exit_code))
+            .map_err(|r| (text(&r.stdout), r.stderr, r.exit_code))
     }
 
     /// Whether the refusal is the usage on stdout, its stderr and its exit.
     fn refused(words: &[&str]) -> (bool, Vec<u8>, i32) {
         match parse(words) {
             Ok(options) => (false, format!("{:?}", options.ask).into_bytes(), 0),
-            Err(r) => (r.stdout == usage_text(), r.stderr, r.exit_code),
+            Err(r) => (r.stdout == usage_text(b"php"), r.stderr, r.exit_code),
         }
     }
 
@@ -763,7 +818,7 @@ mod tests {
         assert_eq!(
             parse(&["-r", "echo 1;", "-f", "a.php"]),
             Err(Refused {
-                stdout: CONFLICT.to_owned(),
+                stdout: CONFLICT.into(),
                 stderr: Vec::new(),
                 exit_code: 1
             })
