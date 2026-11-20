@@ -1,8 +1,8 @@
 # scripts/ci
 
-What CI's jobs run on, as Mitchell ruled on 2026-11-17 and 2026-11-19: hosted runners alone, a fresh machine each job, and no machine of the project's own. The Linux jobs take their runner from the repository variable `LELA_BUILD_RUNNER`. The Mac's jobs, both `oracle` jobs and nightly.yml's `tailcall`, run on a macOS 15 image, where `.github/actions/oracle-runner` lays the tools a fresh Mac lacks. While the repository is private they run nightly and by hand alone, since a push's Mac minutes are billed then (the two `oracle` jobs took 259 minutes on GitHub's 3-core Mac, measured 2026-11-19) and a public repository's on GitHub's `macos-15` are not; neither `oracle` job runs after a push until it is public. The label follows the same switch: Blacksmith's 12-core `blacksmith-12vcpu-macos-15`, GitHub's macos-15 image on an M4, while the repository is private, and GitHub's `macos-15` once it is public. Each Mac job sets `XTASK_SEATS=1`, so the one instrument it runs at a time has every core.
+What CI's jobs run on, as Mitchell ruled on 2026-11-17 and 2026-11-19: hosted runners alone, a fresh machine each job, and no machine of the project's own. The Linux jobs take their runner from the repository variable `LELA_BUILD_RUNNER`. The Mac's jobs, both `oracle` jobs, nightly.yml's `tailcall` and release.yml's `darwin`, run on a macOS 15 image, where `.github/actions/oracle-runner` lays the tools a fresh Mac lacks. While the repository is private they run nightly and by hand alone, since a push's Mac minutes are billed then (the two `oracle` jobs took 259 minutes on GitHub's 3-core Mac, measured 2026-11-19) and a public repository's on GitHub's `macos-15` are not; neither `oracle` job runs after a push until it is public. The label follows the same switch: Blacksmith's 12-core `blacksmith-12vcpu-macos-15`, GitHub's macos-15 image on an M4, while the repository is private, and GitHub's `macos-15` once it is public. Each Mac job that runs an instrument sets `XTASK_SEATS=1`, so the one instrument it runs at a time has every core. release.yml's `darwin` runs on a tag's push alone, and builds a release's macOS tarball.
 
-- `pinned-php.sh` pours the keg `oracle.toml` pins, from the Homebrew formula the pin names, `php` or `php@8.5`, at the bottle its path names, `8.5.13_1` for a keg Homebrew bottled again (#4383), holds it to the pin's md5 and `brew pin`s its keg, after pouring and `brew pin`ning each keg of its `[closure]` at the recorded version (#2657). Both `oracle` jobs and nightly.yml's `tailcall` run it. `DRY_RUN=1` says what it would pour and pours nothing.
+- `pinned-php.sh` pours the keg `oracle.toml` pins, from the Homebrew formula the pin names, `php` or `php@8.5`, at the bottle its path names, `8.5.13_1` for a keg Homebrew bottled again (#4383), holds it to the pin's md5 and `brew pin`s its keg, after pouring and `brew pin`ning each keg of its `[closure]` at the recorded version (#2657). Both `oracle` jobs, nightly.yml's `tailcall` and release.yml's `darwin` run it. `DRY_RUN=1` says what it would pour and pours nothing.
 - `oracle-variants.sh` lays each oracle variant the pin names for this machine at its path, held to its md5: a binary already there with the pin's md5 is left, and an absent or other one is built with `scripts/oracle-build.py` from the pinned tree the corpus action checked out (#2298). A build that does not reproduce the md5 is laid nowhere, kept beside the path as a refusal the later jobs repeat without building again, and fails its step, which both jobs run with `continue-on-error`, so the lanes under the variant read the binary as absent or not the pin's and every other lane runs; the difference is a person's to settle. Both `oracle` jobs run it after the corpus action, and it makes each variant's directory the runner's with `sudo`, which a hosted runner's user is given with no password. `DRY_RUN=1` says what it would build and builds nothing.
 - `red.sh` files a red job once, under one rule: two reds in a row file one ticket, a third comments on it, and the first green after them comments that it is green again and closes nothing. `red.sh main` is harness.yml's `red-main` job, which files a red `main` under `ci:red-main` (#1156). `red.sh nightly <job>` is nightly.yml's `red-nightly` job, run for `soak`, `tailcall` and `deny`, which fail no per-commit run: each files its red nightly under `ci:red-soak`, `ci:red-tailcall` or `ci:red-deny`, and a nightly in which the job was skipped is passed over (#2980). `DRY_RUN=1` prints what it would write.
 - `tailcall.sh` is the lane that holds the threaded dispatch, `cfg(dispatch = "tailcall")` (#2905), on a dated nightly, as Mitchell ruled on #2970 (harness-design.md §7). `check` is harness.yml's per-commit `cargo +<nightly> check -p php_engine` under the cfg; `phpt <corpus> <tree>` is nightly.yml's nightly, the hosts built under the cfg in `release-da` and `Zend/tests` and each directory of `tests/` run with `--engine` on that build, the runs `phpt` keeps set aside before the subsets and put back after, which `restore` does where a killed run left them set aside. The nightly is `tailcall.sh`'s `TOOLCHAIN` line, the one place it is named, so moving it is that line; a nightly that breaks the check is moved past, not followed. It installs the nightly and builds in `target/tailcall`, apart from the shipped build.
@@ -15,7 +15,7 @@ One repository variable names the runner of every Linux job:
 runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
 ```
 
-That is `regions`, `per-commit`, `miri`, `tailcall`, `store` and `red-main` in `harness.yml`, `soak`, `deny` and `red-nightly` in `nightly.yml`, `bench` in `bench.yml`, and `amd64`, `join` and `prune` in `images.yml`.
+That is `regions`, `per-commit`, `miri`, `tailcall`, `store` and `red-main` in `harness.yml`, `soak`, `deny` and `red-nightly` in `nightly.yml`, `bench` in `bench.yml`, `amd64`, `join` and `prune` in `images.yml`, and `check`, `linux`'s `linux-x86_64` tarball and `release` in `release.yml`.
 
 - **Unset** (or empty), each runs on GitHub's `ubuntu-26.04`, the release `packages.txt` names (#1724).
 - **Set**, its value is a JSON list of runner labels, as another provider's hosted runner of the same release is named:
@@ -24,7 +24,7 @@ That is `regions`, `per-commit`, `miri`, `tailcall`, `store` and `red-main` in `
   gh variable set LELA_BUILD_RUNNER --body '["<label>"]'
   ```
 
-  The variable decides nothing for the Mac's jobs, both `oracle` jobs and nightly.yml's `tailcall`: they run on a macOS 15 image whatever it holds.
+  The variable decides nothing for the Mac's jobs, both `oracle` jobs, nightly.yml's `tailcall` and release.yml's `darwin`: they run on a macOS 15 image whatever it holds.
 
 ### `LELA_BUILD_RUNNER_ARM64`: the arm64 image build's runner
 
@@ -40,7 +40,7 @@ As Mitchell ruled on 2026-11-19 (#5), it is Blacksmith's arm64 runner, the size 
 gh variable set LELA_BUILD_RUNNER_ARM64 --body '["blacksmith-8vcpu-ubuntu-2604-arm"]'
 ```
 
-Unset, the job asks for GitHub's `ubuntu-26.04-arm`. No other job reads it.
+Unset, the job asks for GitHub's `ubuntu-26.04-arm`. The one other job that reads it is `release.yml`'s `linux`, for the `linux-aarch64` tarball, which it builds and smokes there for the same reason.
 
 ### What the jobs need of a hosted Linux image
 

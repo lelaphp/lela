@@ -9,7 +9,7 @@
 # is named through the facade alone.
 [package]
 name = "php_sapi_makala"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

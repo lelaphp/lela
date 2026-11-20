@@ -1,0 +1,163 @@
+# A release (spec #9): a person pushes the tag `v<version>` on the commit
+# whose workspace manifest carries that version, and this workflow builds
+# the release from that commit. The logic is dist/release.py's
+# (dist/README.md); this workflow chooses the runners, grants the
+# permissions and calls it.
+# - `check` holds the tag to the version line of Cargo.toml's
+#   `[workspace.package]`, and nothing else runs where it refuses.
+# - `linux` and `darwin` each build one platform's tarball on a runner of
+#   that platform and smoke the tarball there: linux-x86_64 on
+#   LELA_BUILD_RUNNER's runner, linux-aarch64 on LELA_BUILD_RUNNER_ARM64's,
+#   as images.yml's two builds run, and darwin-arm64 on the macOS 15 image
+#   the Mac's other jobs run on, with what .github/actions/oracle-runner
+#   and pinned-php lay for a build of the hosts there.
+# - `images` calls images.yml, the path a commit on `main` publishes by,
+#   once every tarball has passed: `github.ref_name` is the tag there, so
+#   dist/publish.py pushes `<version>-<variant>`, and the bare variant only
+#   for the newest release that is not a pre-release.
+# - `release` creates the GitHub Release of the tag with the three
+#   tarballs and SHA256SUMS, a pre-release when the version is one.
+# By hand (`workflow_dispatch`, from any branch), it is a dry run of the
+# tag its input names: each step prints what it would make, `release` the
+# release's fields and the image tags dist/publish.py would push, and
+# nothing is built, pushed or created; `images` does not run. No stored
+# secret is read: the token is the run's.
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag to dry-run, v<version>; nothing is built, pushed or created
+        type: string
+        required: true
+permissions: {}
+# One run of a tag at a time.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && '--dry-run' || '' }}
+jobs:
+  check:
+    name: the tag against the manifest's version
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: dist/release.py check "$TAG"
+  linux:
+    name: the ${{ matrix.platform }} tarball
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ${{ vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]' }}
+          - platform: linux-aarch64
+            runner: ${{ vars.LELA_BUILD_RUNNER_ARM64 || '["ubuntu-26.04-arm"]' }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # As images.yml's builds do: GitHub's image comes nearly full, and
+      # the build's layers need room, so on such an image the toolchains
+      # no step here uses are taken away.
+      - name: room for the build on a hosted image
+        if: ${{ !env.DRY_RUN }}
+        run: |
+          free=$(df --output=avail -BG "$GITHUB_WORKSPACE" | tail -n 1 | tr -dc 0-9)
+          echo "$free GiB free"
+          if [ "$free" -lt 40 ] && [ -d /opt/hostedtoolcache ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell /usr/lib/jvm /usr/local/share/chromium /opt/microsoft /opt/google /usr/lib/google-cloud-sdk /opt/az
+            df -h "$GITHUB_WORKSPACE"
+          fi
+      - name: built and smoked
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          # shellcheck disable=SC2086 # DRY_RUN is a flag or nothing
+          dist/release.py build "$TAG" "$PLATFORM" "$RUNNER_TEMP/release" $DRY_RUN
+      - name: the tarball, for the release job
+        if: ${{ !env.DRY_RUN }}
+        uses: ./.github/actions/stash
+        with:
+          put: tarball-${{ matrix.platform }}
+          path: ${{ runner.temp }}/release/*.tar.gz
+          retention-days: 1
+  darwin:
+    name: the darwin-arm64 tarball
+    needs: check
+    runs-on: ${{ github.event.repository.private && 'blacksmith-12vcpu-macos-15' || 'macos-15' }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The toolchain, the tools and the libraries the hosts' build links
+      # on a fresh Mac, as the Mac's other jobs lay them before they build.
+      - uses: ./.github/actions/workspace
+        if: ${{ !env.DRY_RUN }}
+      - uses: ./.github/actions/oracle-runner
+        if: ${{ !env.DRY_RUN }}
+      - uses: ./.github/actions/pinned-php
+        if: ${{ !env.DRY_RUN }}
+      - name: built and smoked
+        run: |
+          # shellcheck disable=SC2086 # DRY_RUN is a flag or nothing
+          dist/release.py build "$TAG" darwin-arm64 "$RUNNER_TEMP/release" $DRY_RUN
+      - name: the tarball, for the release job
+        if: ${{ !env.DRY_RUN }}
+        uses: ./.github/actions/stash
+        with:
+          put: tarball-darwin-arm64
+          path: ${{ runner.temp }}/release/*.tar.gz
+          retention-days: 1
+  images:
+    name: the images
+    needs: [linux, darwin]
+    if: ${{ github.event_name == 'push' }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/images.yml
+  release:
+    name: the GitHub Release
+    needs: [linux, darwin, images]
+    # A dry run has no images job; a real run has one that passed.
+    if: ${{ !cancelled() && needs.linux.result == 'success' && needs.darwin.result == 'success' && (needs.images.result == 'success' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # Every tag: the release is the latest only when no release tag names
+      # a newer version.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: the three tarballs
+        if: ${{ !env.DRY_RUN }}
+        uses: ./.github/actions/stash
+        with:
+          get: tarball-linux-x86_64 tarball-linux-aarch64 tarball-darwin-arm64
+          merge: "true"
+          path: ${{ runner.temp }}/release
+      - name: created
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # shellcheck disable=SC2086 # DRY_RUN is a flag or nothing
+          dist/release.py publish "$TAG" "$RUNNER_TEMP/release" $DRY_RUN

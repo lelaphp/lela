@@ -49,7 +49,11 @@ fn a_get_is_answered_with_php_s_status_headers_and_body() {
     assert!(response.header("Date").is_some(), "{response:?}");
     assert_eq!(
         String::from_utf8_lossy(&response.body),
-        "makala 1 makala/0.0.0 GET /index.php false array (\n  0 => false,\n  1 => false,\n  2 => 'makala',\n)"
+        concat!(
+            "makala 1 makala/",
+            env!("CARGO_PKG_VERSION"),
+            " GET /index.php false array (\n  0 => false,\n  1 => false,\n  2 => 'makala',\n)"
+        )
     );
 }
 

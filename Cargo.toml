@@ -63,7 +63,12 @@ overflow-checks = true
 lto = false
 codegen-units = 16
 
+# Lela's version (spec #9): the one line a release bumps, and the version
+# its tag `v<version>` must name (dist/release.py). The host crates under
+# `sapi/` inherit it, and no other crate does: every other crate stays at
+# 0.0.0, so a release moves the hosts' versions alone.
 [workspace.package]
+version = "0.1.0-alpha.1"
 edition = "2024"
 license = "MIT AND BSD-3-Clause"
 rust-version = "1.95"
