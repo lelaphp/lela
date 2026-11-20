@@ -7,7 +7,9 @@
 //! the masks the line names, never one by default. Each line runs under the
 //! pinned host of its kind, `[oracle]`'s php for `sapi/cli` and `[sapi]`'s
 //! for the others, its digest asserted first, and then under the engine's
-//! own host in the same directory laid again; what the two wrote, how
+//! own host in the same directory laid again, started through a link of
+//! the pinned host's file name, so what php makes of `argv[0]`, a usage
+//! line, is made of the same name (ADR-0016); what the two wrote, how
 //! they ended, what each request was answered and the directory's files
 //! after are held equal, through the registry as a witness is. No byte of
 //! the oracle's is kept in the file, so an oracle bump moves the
@@ -318,13 +320,16 @@ impl Line {
 /// The line under `pinned` and under `engine`, each in the same directory
 /// laid afresh and on the same port, rendered and masked: the oracle's
 /// rendering and the engine's, and whether the engine's host ended only on
-/// its stop sent again ([`stopped`]).
+/// its stop sent again ([`stopped`]). The engine's host is started by a
+/// link of `pinned`'s file name ([`named_as`]).
 fn both(
     oracle: &Oracle<'_>,
     pinned: &Path,
     engine: &Path,
     line: &Line,
 ) -> Result<(String, String, bool)> {
+    let named = Tree::new("line-host")?;
+    let engine = &named_as(named.path(), pinned, engine)?;
     let dir = Tree::new("line")?;
     let masks = line.masks()?;
     let masked = |text: String| {
@@ -350,6 +355,22 @@ fn both(
         line.name,
         taken.join(", ")
     )
+}
+
+/// `engine` linked in `dir`, outside the line's own directory, under
+/// `pinned`'s file name: the engine's hosts carry Lela's names
+/// (ADR-0016), and php builds a usage line from what follows the last
+/// `/` of `argv[0]` (`php_cgi_usage`, `fpm_main.c`'s `php_cgi_usage`), so
+/// started by its own path the CGI says `lela-cgi` where the pinned one
+/// says `php-cgi`. Through the link both make their text of one name, and
+/// `PHP_BINARY`, php's realpath of `argv[0]`, is the engine's binary still.
+fn named_as(dir: &Path, pinned: &Path, engine: &Path) -> Result<PathBuf> {
+    let name =
+        (pinned.file_name()).with_context(|| format!("{} names no file", pinned.display()))?;
+    let link = dir.join(name);
+    std::os::unix::fs::symlink(engine, &link)
+        .with_context(|| format!("linking {} to {}", link.display(), engine.display()))?;
+    Ok(link)
 }
 
 /// How many ports a server is offered, a server's line here and the
@@ -973,6 +994,24 @@ mod tests {
             assert_eq!(judgement, Judgement::Fail, "{name}: {note}");
             assert!(note.contains(differs), "{name}: {note}");
         }
+    }
+
+    /// The engine's host is started by the pinned host's file name, so a
+    /// host that writes what follows the last `/` of `argv[0]`, as php's
+    /// usage lines do, writes the same under both though the engine's file
+    /// is `lela-cgi`; and the engine's binary is what that name links to.
+    #[test]
+    fn the_engine_s_host_is_started_by_the_pinned_host_s_file_name() {
+        if !oracle() {
+            return;
+        }
+        let hosts = Tree::new("host-line-names").unwrap();
+        let own = "echo \"${0##*/}\"; [ -L \"$0\" ] && echo linked";
+        let pinned = host(&hosts, "php-cgi", "echo php-cgi; echo linked");
+        let pin = pin(&pinned, None);
+        let engine = host(&hosts, hosts::CGI.binary, own);
+        let (judgement, note) = judged(LINE, &pin, &engine);
+        assert_eq!(judgement, Judgement::Pass, "{note}");
     }
 
     /// A mask the line names stands for what it matches in both runs, and
