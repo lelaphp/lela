@@ -110,6 +110,9 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
   the whole history and every tag (`git fetch --unshallow --tags`,
   actions/checkout's `fetch-depth: 0`). A real `join` refuses a tree with
   changes and a release whose tag is not HEAD, as a real `build` does.
+  It writes one `<variant> <digest>` line per list, the digest read from
+  the descriptor in the metadata `imagetools create` writes, which names
+  no `containerimage.digest`; a descriptor with no digest is refused.
 
 Each image is labelled, and each list annotated, with standard OCI keys
 alone: `source`, `revision`, `version` (`edge` from `main`) and
