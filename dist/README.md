@@ -124,7 +124,9 @@ more than 30 days ago whose tags are all `sha-` tags, or which has none,
 unless a kept manifest list names it or it is a referrer of a kept one. A
 version tag, a bare variant, an `edge-` tag and a tag of any other kind
 are never deleted. `dist/prune.py --dry-run` names each version it would
-delete, and deletes none. CI runs both scripts; a person runs them with
+delete, and deletes none. A listing gh cannot give deletes nothing, and a
+deletion that fails stops the run, naming the versions deleted before it
+and those not. CI runs both scripts; a person runs them with
 `gh` authorised for the organisation's packages and docker logged in to
 `ghcr.io`.
 

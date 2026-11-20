@@ -226,6 +226,24 @@ class Publish(Recorded):
         self.assertEqual(self.calls(), [])
         self.assertFalse((out / "SHA256SUMS").exists())
 
+    def test_what_the_sums_script_says_of_a_failure_reaches_the_caller(self):
+        (self.root / "scripts/dist-sums.sh").write_text("#!/bin/sh\necho 'the sums: disk full' >&2\nexit 3\n")
+        self.git("commit", "-q", "-am", "a sums script that fails")
+        self.git("tag", "v0.1.0-alpha.1")
+        run = self.run_step("publish", "v0.1.0-alpha.1", str(self.tarballs()))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("the sums: disk full", run.stderr)
+        self.assertIn("scripts/dist-sums.sh", run.stderr)
+        self.assertIn("exit 3", run.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_gh_not_on_path_is_said_and_no_traceback(self):
+        (self.bin / "gh").unlink()
+        self.git("tag", "v0.1.0-alpha.1")
+        run = self.run_step("publish", "v0.1.0-alpha.1", str(self.tarballs()))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertEqual(run.stderr, "dist/release.py: gh: not found\n")
+
     def test_a_release_is_published_at_its_tag_alone(self):
         out = self.tarballs()
         run = self.run_step("publish", "v0.1.0-alpha.1", str(out))

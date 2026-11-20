@@ -319,6 +319,19 @@ class Build(Recorded):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual({self.flag(c, "--platform") for c in self.pushes()}, {"linux/arm64"})
 
+    def test_a_docker_not_on_path_is_said_and_no_traceback(self):
+        (self.bin / "docker").unlink()
+        run = self.run_step("build", "main")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertEqual(run.stderr, "dist/publish.py: docker: not found\n")
+
+    def test_a_failed_command_is_said_with_what_it_wrote(self):
+        (self.bin / "docker").write_text("#!/bin/sh\necho 'Cannot connect to the Docker daemon' >&2\nexit 1\n")
+        run = self.run_step("build", "main")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("docker version --format {{.Server.Os}}/{{.Server.Arch}}: exit 1", run.stderr)
+        self.assertIn("Cannot connect to the Docker daemon", run.stderr)
+
     def test_a_tree_with_changes_is_refused(self):
         (self.root / "Cargo.toml").write_text("changed")
         run = self.run_step("build", "main")

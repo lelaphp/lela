@@ -17,7 +17,9 @@ it runs where gh holds a token with `delete:packages` and docker is logged
 in to ghcr.io. --listing reads the versions from a file of the API's
 answer instead, and --manifests the manifests from a file mapping each
 digest to its manifest; --now fixes the time the age is counted from.
-A manifest it cannot read deletes nothing. --dry-run names each version
+A manifest it cannot read, or a listing gh cannot give, deletes nothing,
+and a deletion that fails stops the run, naming the versions deleted
+before it and those not. --dry-run names each version
 it would delete, `delete <id> <digest> <tags> <updated>`, and deletes none.
 """
 
@@ -40,6 +42,17 @@ OURS = "sha-"
 
 class Refusal(Exception):
     pass
+
+
+def why(failed):
+    """A refusal, a command that failed with what it wrote to stderr, or a
+    program not on PATH, as one message."""
+    if isinstance(failed, subprocess.CalledProcessError):
+        said = (failed.stderr or "").strip()
+        return f"{' '.join(failed.cmd)}: exit {failed.returncode}" + (f": {said}" if said else "")
+    if isinstance(failed, FileNotFoundError):
+        return f"{failed.filename}: not found"
+    return str(failed)
 
 
 def when(text):
@@ -115,8 +128,8 @@ def main(argv):
         else:
             manifest = served
         deleting = doomed(versions, manifest, arguments.now)
-    except Refusal as refusal:
-        print(f"dist/prune.py: {refusal}; nothing is deleted", file=sys.stderr)
+    except (Refusal, subprocess.CalledProcessError, FileNotFoundError) as failed:
+        print(f"dist/prune.py: {why(failed)}; nothing is deleted", file=sys.stderr)
         return 1
     print(f"now {arguments.now.strftime('%Y-%m-%dT%H:%M:%SZ')}, older than {(arguments.now - AGE).strftime('%Y-%m-%dT%H:%M:%SZ')}")
     for version in deleting:
@@ -126,8 +139,22 @@ def main(argv):
     if arguments.dry_run:
         print("dry run: nothing is deleted")
         return 0
-    for version in deleting:
-        subprocess.run(["gh", "api", "--method", "DELETE", f"{VERSIONS}/{version['id']}"], check=True)
+    for done, version in enumerate(deleting):
+        try:
+            subprocess.run(
+                ["gh", "api", "--method", "DELETE", f"{VERSIONS}/{version['id']}"],
+                check=True, capture_output=True, text=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as failed:
+            gone = " ".join(str(v["id"]) for v in deleting[:done]) or "none"
+            left = " ".join(str(v["id"]) for v in deleting[done:])
+            print(
+                f"dist/prune.py: {why(failed)}; {done} of {len(deleting)} versions deleted ({gone}), "
+                f"and these not: {left}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"deleted {version['id']} {version['name']}")
     return 0
 
 

@@ -228,18 +228,34 @@ def main(argv):
     arguments = parser.parse_args(argv)
     # Each line before the commands that follow it.
     sys.stdout.reconfigure(line_buffering=True)
-    try:
+
+    def step():
         ref = Ref.parse(arguments.ref)
         commit = Commit.head()
         if arguments.step == "build":
             build(ref, commit, arguments)
         else:
             join(ref, commit, arguments)
+
+    return refusing("dist/publish.py", step)
+
+
+def refusing(prog, step):
+    """Run `step`, saying a refusal, a command that failed with what it
+    wrote to stderr, or a program not on PATH in one message on stderr,
+    with exit 1; dist/release.py's steps run under it too."""
+    try:
+        step()
     except Refusal as refusal:
-        print(f"dist/publish.py: {refusal}", file=sys.stderr)
+        print(f"{prog}: {refusal}", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as failed:
-        print(f"dist/publish.py: {' '.join(failed.cmd)}: exit {failed.returncode}", file=sys.stderr)
+        said = failed.stderr.decode() if isinstance(failed.stderr, bytes) else failed.stderr or ""
+        said = f"\n{said.strip()}" if said.strip() else ""
+        print(f"{prog}: {' '.join(map(str, failed.cmd))}: exit {failed.returncode}{said}", file=sys.stderr)
+        return 1
+    except FileNotFoundError as missing:
+        print(f"{prog}: {missing.filename}: not found", file=sys.stderr)
         return 1
     return 0
 

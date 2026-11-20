@@ -242,7 +242,9 @@ def publish_release(ref, commit, arguments):
     if arguments.dry_run:
         print("dry run: nothing is uploaded or created")
         return
-    subprocess.run([str(ROOT / "scripts/dist-sums.sh"), str(arguments.dir)], check=True, capture_output=True)
+    # The sums go to the file and its notes; what the script says of a
+    # failure reaches the caller.
+    subprocess.run([str(ROOT / "scripts/dist-sums.sh"), str(arguments.dir)], check=True, stdout=subprocess.DEVNULL)
     sums = arguments.dir / "SHA256SUMS"
     notes = "".join([
         f"The tarballs of {ref.name}, built from {commit.sha}, and their SHA-256 sums:\n\n",
@@ -277,7 +279,8 @@ def main(argv):
     publish_step.add_argument("--dry-run", action="store_true")
     arguments = parser.parse_args(argv)
     sys.stdout.reconfigure(line_buffering=True)
-    try:
+
+    def step():
         ref = release(arguments.tag)
         commit = publish.Commit.head()
         print(f"version {ref.version}")
@@ -285,13 +288,8 @@ def main(argv):
             build_tarball(ref, commit, arguments)
         elif arguments.step == "publish":
             publish_release(ref, commit, arguments)
-    except Refusal as refusal:
-        print(f"dist/release.py: {refusal}", file=sys.stderr)
-        return 1
-    except subprocess.CalledProcessError as failed:
-        print(f"dist/release.py: {' '.join(map(str, failed.cmd))}: exit {failed.returncode}", file=sys.stderr)
-        return 1
-    return 0
+
+    return publish.refusing("dist/release.py", step)
 
 
 if __name__ == "__main__":
