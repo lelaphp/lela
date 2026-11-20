@@ -88,6 +88,8 @@ The hosts carry Lela's names (ADR-0016), `lela`, `lela-cgi` and `lela-fpm`, and 
 ENV PATH=/opt/lela/compat:$PATH
 ```
 
+An image's `org.opencontainers.image.licenses` label is the union of the `license` lines of this workspace's crates the hosts link, which `dist/publish.py` reads from their manifests (`dist/README.md`). The licences of the third-party crates and the system's libraries in an image are in the SBOM it carries.
+
 ## The repository
 
 `AGENTS.md` is the map an agent reads first, fed to it by the `SessionStart` hook as `xtask status --session` with the local facts of `.claude/harness.local.md` (harness §5); its regions are computed, `computed run` renders them and `computed check` holds them in CI. Read `CONTEXT.md` first. The design of record is `third-engine-design.md`; `jit-design.md` for the compiled tier; `harness-design.md` for the harness. Each is one living document with a ledger on top. Reversed decisions are in `docs/adr/`.

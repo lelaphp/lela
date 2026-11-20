@@ -44,7 +44,8 @@ oldest they serve (dist/README.md).
 
 The labels, on each image and as annotations on each manifest list, are
 the standard OCI ones spec #9 names: source, revision, version (`edge`
-from main) and licenses, read from the workspace manifest; and three
+from main) and licenses, the union of the licences of the workspace's
+crates the hosts link, read from their manifests (`licenses()`); and three
 that replace the Ubuntu base's: description and title, `Lela`, and
 created, the commit's time in RFC 3339, UTC. The build's
 SOURCE_DATE_EPOCH is that same time, so the image loaded and the one
@@ -55,7 +56,9 @@ would join, and builds, smokes and pushes nothing; without --platform it
 asks docker for the daemon's platform and nothing else. A real `build`
 refuses a tree with changes, and a release whose tag is not HEAD; a real
 `join` refuses those too, and a variant without a digest for each
-platform. Whether a release is the newest is read from this checkout's
+platform. A crate the hosts link, or a workspace manifest, with no
+license line is refused by name, dry run or real, before anything runs.
+Whether a release is the newest is read from this checkout's
 release tags, so it holds them all: a shallow checkout, which may hold
 its own tag alone, is refused, dry run or real, saying what to fetch. The
 caller is logged in to ghcr.io with a token that may write packages.
@@ -208,17 +211,356 @@ class Commit:
         return datetime.fromtimestamp(self.epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def workspace_package():
-    """Cargo.toml's `[workspace.package]` table."""
+def read_manifest(root, path):
+    """The TOML at `path`, relative to `root`, or a refusal naming it."""
     try:
-        with (ROOT / "Cargo.toml").open("rb") as manifest:
-            return tomllib.load(manifest).get("workspace", {}).get("package", {})
+        with (root / path).open("rb") as manifest:
+            return tomllib.load(manifest)
+    except FileNotFoundError:
+        raise Refusal(f"{path} is not there") from None
     except tomllib.TOMLDecodeError as error:
-        raise Refusal(f"Cargo.toml is not a manifest TOML reads: {error}") from None
+        raise Refusal(f"{path} is not a manifest TOML reads: {error}") from None
 
 
-def licenses():
-    return workspace_package()["license"]
+def workspace_package(root=ROOT):
+    """Cargo.toml's `[workspace.package]` table."""
+    return read_manifest(root, "Cargo.toml").get("workspace", {}).get("package", {})
+
+
+# The licenses label (ruled on #14): the union of the licences of the
+# workspace's own crates the hosts link, read from their manifests with
+# tomllib alone: the images workflow's jobs install no Rust toolchain, so
+# no cargo is known to be on the runners that publish, and a test holds
+# this reading to `cargo metadata` wherever cargo is. Third parties' crates
+# and the system's C libraries are the SBOM's.
+#
+# The hosts are the crates dist/Dockerfile's cargo line builds, with their
+# default features, for each platform of the images; a test holds HOSTS to
+# that line. A crate counts where a normal dependency reaches it: dev- and
+# build-dependencies link nothing into a host. An optional dependency
+# counts where a feature the build turns on names it, as cargo's resolver
+# turns it on: `dep:<name>`, `<name>/<feature>`, or the implicit feature of
+# its own name; a weak `<name>?/<feature>` turns on no dependency. A target
+# table counts where its `cfg` holds for linux/amd64 or linux/arm64, whose
+# Rust targets' `cfg` (rustc --print cfg --target) TARGETS names in the keys
+# a table here may test; a table testing any other is refused, not guessed.
+HOSTS = ("php_sapi_cli", "php_sapi_cgi", "php_sapi_fpm")
+LINUX = {
+    "target_os": "linux", "target_family": "unix", "target_env": "gnu", "target_vendor": "unknown",
+    "target_endian": "little", "target_pointer_width": "64", "unix": None,
+}
+TARGETS = {
+    "linux/amd64": ("x86_64-unknown-linux-gnu", {**LINUX, "target_arch": "x86_64"}),
+    "linux/arm64": ("aarch64-unknown-linux-gnu", {**LINUX, "target_arch": "aarch64"}),
+}
+CFG_KEYS = {key for _, cfg in TARGETS.values() for key in cfg} | {"windows"}
+# The identifiers of the SPDX License List, version 3.29.0
+# (https://spdx.org/licenses/), that a crate here names; `dtoa` is the
+# list's own, David M. Gay's licence, LICENSES/dtoa.txt. A term the list
+# holds and this set does not is added here from the list; one it does not
+# hold is written `LicenseRef-<name>`. Any other is refused.
+SPDX = frozenset({
+    "Apache-2.0", "BSD-2-Clause", "BSD-2-Clause-Darwin", "BSD-3-Clause", "BSD-4-Clause-UC", "Beerware",
+    "LGPL-2.1-only", "LGPL-2.1-or-later", "MIT", "NCSA", "PostgreSQL", "TCL", "Zlib", "dtoa",
+})
+LICENSE_REF = re.compile(r"LicenseRef-[0-9A-Za-z.-]+")
+
+
+@dataclass(frozen=True)
+class Crate:
+    """One crate of the workspace the hosts link: its directory, relative
+    to the root, its name and its `license` line."""
+
+    path: str
+    name: str
+    license: str
+
+
+@dataclass(frozen=True)
+class Dependency:
+    """One normal dependency of a crate on one platform: the crate's
+    directory where it is a path dependency, else None."""
+
+    path: str | None
+    features: tuple
+    default: bool
+    optional: bool
+
+
+class License:
+    """An SPDX license expression, parsed into the terms its top-level AND
+    joins: an identifier, or a choice, an OR, which stays one term. An AND
+    in parentheses is flattened, which says no more than it did."""
+
+    def __init__(self, text, where):
+        self.where = where
+        self.tokens = re.findall(r"\(|\)|[^\s()]+", text)
+        self.at = 0
+        tree = self.disjunction()
+        if self.at != len(self.tokens):
+            raise Refusal(f"{where}: {text!r} is not a license expression")
+        self.terms = [self.render(term) for term in self.conjuncts(tree)]
+
+    def peek(self):
+        return self.tokens[self.at] if self.at < len(self.tokens) else None
+
+    def disjunction(self):
+        alternatives = [self.conjunction()]
+        while self.peek() == "OR":
+            self.at += 1
+            alternatives.append(self.conjunction())
+        return ("OR", alternatives) if len(alternatives) > 1 else alternatives[0]
+
+    def conjunction(self):
+        terms = [self.atom()]
+        while self.peek() == "AND":
+            self.at += 1
+            terms.append(self.atom())
+        return ("AND", terms) if len(terms) > 1 else terms[0]
+
+    def atom(self):
+        token = self.peek()
+        self.at += 1
+        if token == "(":
+            tree = self.disjunction()
+            if self.peek() != ")":
+                raise Refusal(f"{self.where}: an unclosed parenthesis in {' '.join(self.tokens)!r}")
+            self.at += 1
+            return tree
+        if token is None or token in ("AND", "OR", ")"):
+            raise Refusal(f"{self.where}: {' '.join(self.tokens)!r} is not a license expression")
+        if token not in SPDX and not LICENSE_REF.fullmatch(token):
+            raise Refusal(
+                f"{self.where} names {token}, which is neither an identifier of the SPDX License List "
+                "publish.py names nor a LicenseRef-"
+            )
+        return token
+
+    def conjuncts(self, tree):
+        if isinstance(tree, tuple) and tree[0] == "AND":
+            return [term for each in tree[1] for term in self.conjuncts(each)]
+        return [tree]
+
+    def render(self, tree, inner=False):
+        if isinstance(tree, str):
+            return tree
+        operator, parts = tree
+        text = f" {operator} ".join(self.render(part, True) for part in parts)
+        return f"({text})" if operator == "OR" or inner else text
+
+
+def union(lead, lines):
+    """One SPDX expression of the terms of `lead`, the workspace's line, in
+    its order, and then every other term of `lines`, each once: the
+    identifiers by name, ignoring case, and then the choices, so that the
+    order is not the order the lines were read in."""
+    first = License(lead, "Cargo.toml's [workspace.package] license").terms
+    rest = {term for line in lines for term in License(line, "a license line").terms} - set(first)
+    ordered = sorted(rest, key=lambda term: (term.startswith("("), term.casefold(), term))
+    return " AND ".join(dict.fromkeys(first + ordered))
+
+
+def holds(target, platform):
+    """Whether a `[target.<target>]` table applies on `platform`, one of
+    TARGETS: a `cfg(...)` predicate, or a target's name."""
+    name, cfg = TARGETS[platform]
+    if not target.startswith("cfg("):
+        return target == name
+    tokens = re.findall(r'"[^"]*"|[A-Za-z_][A-Za-z0-9_]*|[(),=]', target)
+    at = 0
+
+    def peek():
+        return tokens[at] if at < len(tokens) else None
+
+    def take(expected=None):
+        nonlocal at
+        token = peek()
+        if expected is not None and token != expected:
+            raise Refusal(f"[target.'{target}'] is not a cfg publish.py reads")
+        at += 1
+        return token
+
+    def predicate():
+        name = take()
+        if name in ("all", "any", "not"):
+            take("(")
+            found = []
+            while peek() not in (")", None):
+                found.append(predicate())
+                if peek() == ",":
+                    take(",")
+            take(")")
+            if name == "not":
+                if len(found) != 1:
+                    raise Refusal(f"[target.'{target}'] is not a cfg publish.py reads")
+                return not found[0]
+            return all(found) if name == "all" else any(found)
+        if name not in CFG_KEYS:
+            raise Refusal(
+                f"[target.'{target}'] tests {name}, which publish.py does not model for the images' platforms"
+            )
+        if peek() == "=":
+            take("=")
+            value = take() or ""
+            if not value.startswith('"'):
+                raise Refusal(f"[target.'{target}'] is not a cfg publish.py reads")
+            return name in cfg and cfg[name] == value[1:-1]
+        return name in cfg and cfg[name] is None
+
+    take("cfg")
+    take("(")
+    found = predicate()
+    take(")")
+    if at != len(tokens):
+        raise Refusal(f"[target.'{target}'] is not a cfg publish.py reads")
+    return found
+
+
+def dependencies(path, manifest, workspace, platform):
+    """The normal dependencies of the crate at `path` on `platform`, by the
+    name its manifest gives each."""
+    tables = [manifest.get("dependencies", {})]
+    try:
+        tables += [
+            table.get("dependencies", {}) for target, table in manifest.get("target", {}).items()
+            if holds(target, platform)
+        ]
+    except Refusal as refusal:
+        raise Refusal(f"{path}/Cargo.toml: {refusal}") from None
+    found = {}
+    for table in tables:
+        for name, spec in table.items():
+            spec = {"version": spec} if isinstance(spec, str) else spec
+            features = tuple(spec.get("features", ()))
+            base, default = path, spec.get("default-features", True)
+            if spec.get("workspace"):
+                inherited = workspace.get("dependencies", {}).get(name)
+                if inherited is None:
+                    raise Refusal(f"{path}/Cargo.toml: {name} is no dependency of Cargo.toml's [workspace.dependencies]")
+                inherited = {"version": inherited} if isinstance(inherited, str) else inherited
+                features = tuple(inherited.get("features", ())) + features
+                base, default = ".", inherited.get("default-features", True)
+                spec = {**inherited, "optional": spec.get("optional", False)}
+            target = os.path.normpath(os.path.join(base, spec["path"])) if "path" in spec else None
+            found.setdefault(name, []).append(
+                Dependency(target, features, default, spec.get("optional", False))
+            )
+    return found
+
+
+def linked(root=ROOT):
+    """The crates of the workspace the hosts link on any platform of the
+    images, read from their manifests."""
+    top = read_manifest(root, "Cargo.toml")
+    workspace = top.get("workspace", {})
+    members = {}
+    for pattern in workspace.get("members", ()):
+        for directory in sorted(root.glob(pattern)):
+            if (directory / "Cargo.toml").is_file():
+                path = directory.relative_to(root).as_posix()
+                members[read_manifest(root, f"{path}/Cargo.toml").get("package", {}).get("name")] = path
+    for host in HOSTS:
+        if host not in members:
+            raise Refusal(f"no crate of the workspace is {host}, a host dist/Dockerfile builds")
+    found = {}
+    for platform in TARGETS:
+        for crate in resolved(root, workspace, [members[host] for host in HOSTS], platform):
+            found[crate.path] = crate
+    return sorted(found.values(), key=lambda crate: crate.path)
+
+
+def resolved(root, workspace, hosts, platform):
+    """The crates `hosts` link on `platform`, with the hosts' default
+    features, the features unified across them as one cargo line
+    builds them."""
+    manifests, features, deps, enabled, weak = {}, {}, {}, {}, {}
+    work = [(host, "default") for host in hosts]
+
+    def use(path, name):
+        """The dependency `name` of `path` turned on, and what it turns on."""
+        enabled[path].add(name)
+        for dependency in deps[path].get(name, ()):
+            reach(dependency)
+        for feature in weak[path].pop(name, ()):
+            for dependency in deps[path].get(name, ()):
+                if dependency.path:
+                    work.append((dependency.path, feature))
+
+    def reach(dependency):
+        if dependency.path is None:
+            return
+        work.append((dependency.path, None))
+        work.extend((dependency.path, feature) for feature in dependency.features)
+        if dependency.default:
+            work.append((dependency.path, "default"))
+
+    while work:
+        path, feature = work.pop()
+        if path not in manifests:
+            manifest = read_manifest(root, f"{path}/Cargo.toml")
+            manifests[path], features[path], enabled[path], weak[path] = manifest, set(), set(), {}
+            deps[path] = dependencies(path, manifest, workspace, platform)
+            for name, each in deps[path].items():
+                for dependency in each:
+                    if not dependency.optional:
+                        enabled[path].add(name)
+                        reach(dependency)
+        if feature is None or feature in features[path]:
+            continue
+        features[path].add(feature)
+        table = manifests[path].get("features", {})
+        explicit = {entry[4:] for entries in table.values() for entry in entries if entry.startswith("dep:")}
+        if feature in table:
+            entries = table[feature]
+        elif feature in deps[path] and feature not in explicit and any(d.optional for d in deps[path][feature]):
+            entries = [f"dep:{feature}"]
+        elif feature == "default":
+            entries = []
+        else:
+            raise Refusal(f"{path}/Cargo.toml: no feature {feature} of the crate, which a dependent turns on")
+        for entry in entries:
+            if entry.startswith("dep:"):
+                use(path, entry[4:])
+            elif "?/" in entry:
+                name, wanted = entry.split("?/", 1)
+                if name in enabled[path]:
+                    work.extend((d.path, wanted) for d in deps[path].get(name, ()) if d.path)
+                else:
+                    weak[path].setdefault(name, set()).add(wanted)
+            elif "/" in entry:
+                name, wanted = entry.split("/", 1)
+                if name not in deps[path]:
+                    raise Refusal(f"{path}/Cargo.toml: the feature {feature} names {name}, no dependency of the crate")
+                use(path, name)
+                work.extend((d.path, wanted) for d in deps[path][name] if d.path)
+            else:
+                work.append((path, entry))
+    crates = []
+    for path, manifest in manifests.items():
+        package = manifest.get("package", {})
+        name = package.get("name", path)
+        line = package.get("license")
+        if isinstance(line, dict) and line.get("workspace"):
+            line = workspace.get("package", {}).get("license")
+            if line is None:
+                raise Refusal(f"{path}/Cargo.toml: {name} takes the workspace's license line, and it has none")
+        if not isinstance(line, str):
+            raise Refusal(
+                f"{path}/Cargo.toml: {name}, which the hosts link, has no license line, and the images' "
+                "licenses label is the union of every such crate's"
+            )
+        License(line, f"{path}/Cargo.toml: the license line of {name}")
+        crates.append(Crate(path, name, line))
+    return crates
+
+
+def licenses(root=ROOT):
+    """The images' licenses label: the workspace's own line, and then the
+    union of the lines of the crates the hosts link (see HOSTS)."""
+    lead = workspace_package(root).get("license")
+    if not isinstance(lead, str):
+        raise Refusal("Cargo.toml's [workspace.package] has no license line, which the images' licenses label leads with")
+    return union(lead, [crate.license for crate in linked(root)])
 
 
 def labels(ref, commit):
@@ -254,10 +596,13 @@ def main(argv):
     def step():
         ref = Ref.parse(arguments.ref)
         commit = Commit.head()
+        # Read before anything is run, so a tree the labels refuse builds,
+        # smokes and pushes nothing.
+        labelled = labels(ref, commit)
         if arguments.step == "build":
-            build(ref, commit, arguments)
+            build(ref, commit, labelled, arguments)
         else:
-            join(ref, commit, arguments)
+            join(ref, commit, labelled, arguments)
 
     return refusing("dist/publish.py", step)
 
@@ -337,7 +682,7 @@ def built_from(ref, commit):
         raise Refusal(f"{ref.name} is not HEAD: it names {tagged}, and HEAD is {commit.sha}")
 
 
-def build(ref, commit, arguments):
+def build(ref, commit, labelled, arguments):
     if not arguments.dry_run:
         built_from(ref, commit)
     platform = arguments.platform or daemon()
@@ -348,7 +693,7 @@ def build(ref, commit, arguments):
     print(f"ref {ref.name}")
     print(f"commit {commit.sha}")
     print(f"platform {platform}")
-    for key, value in labels(ref, commit):
+    for key, value in labelled:
         print(f"label {key}={value}")
     if not arguments.dry_run:
         answering()
@@ -357,7 +702,7 @@ def build(ref, commit, arguments):
         "--build-arg", f"CARGO_BUILD_JOBS={setting('CARGO_BUILD_JOBS')}",
         "--build-arg", f"SOURCE_DATE_EPOCH={commit.epoch}",
     ]
-    for key, value in labels(ref, commit):
+    for key, value in labelled:
         common += ["--label", f"{key}={value}"]
     with tempfile.TemporaryDirectory() as scratch:
         scratch = Path(scratch)
@@ -529,13 +874,13 @@ def read_digests(paths):
     return found
 
 
-def join(ref, commit, arguments):
+def join(ref, commit, labelled, arguments):
     if not arguments.dry_run:
         built_from(ref, commit)
     found = read_digests(arguments.digests) if arguments.digests or not arguments.dry_run else None
     print(f"ref {ref.name}")
     print(f"commit {commit.sha}")
-    annotations = [f"index:{key}={value}" for key, value in labels(ref, commit)]
+    annotations = [f"index:{key}={value}" for key, value in labelled]
     for annotation in annotations:
         print(f"annotation {annotation}")
     if not arguments.dry_run:

@@ -143,11 +143,24 @@ workflow pass is one buildx v0.14.0 knows, the oldest they serve:
 
 Each image is labelled, and each list annotated, with standard OCI keys
 alone: `source`, `revision`, `version` (`edge` from `main`) and
-`licenses`, read from the workspace manifest's package table, and three
-that replace the Ubuntu base's, since a build can replace a label and
-cannot remove one: `description` and `title`, `Lela`, and `created`, the
+`licenses`, and three that replace the Ubuntu base's, since a build can
+replace a label and cannot remove one: `description` and `title`, `Lela`, and `created`, the
 commit's time in RFC 3339, UTC, the instant the build's
-`SOURCE_DATE_EPOCH` names. A release's
+`SOURCE_DATE_EPOCH` names. `licenses` is one SPDX expression, the
+union of the `license` lines of the workspace's own crates the three hosts
+link, as Mitchell ruled on #14 on 2026-11-20: the workspace manifest's
+line first, then each other term once, an identifier by name and a choice
+in parentheses, such as `(MIT OR NCSA)`, kept whole. The crates are read
+from the manifests with `tomllib`, since the images workflow installs no
+Rust toolchain: from each host `dist/Dockerfile` builds, with its default
+features, over its normal dependencies on the workspace's crates, an
+optional one where a feature turned on names it, and a target table
+where its `cfg` holds for `linux/amd64` or `linux/arm64`. A test holds
+that reading to `cargo metadata` where cargo is. Every term is an
+identifier of the SPDX License List the script names, or a
+`LicenseRef-`; a crate or a workspace manifest with no `license` line, or
+a term that is neither, is refused by name, and nothing runs. Third
+parties' crates and the system's C libraries are the SBOM's. A release's
 tag is held to the workspace manifest's version by both steps, dry or
 real, through the hold `dist/release.py` uses: a tag that names another
 version is refused, and so is a manifest with no version line, as this
