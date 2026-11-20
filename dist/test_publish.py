@@ -1,6 +1,7 @@
 """The publish script, held by its dry run and by a docker that records,
 each test in a repository of its own (testlib.py)."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -188,10 +189,17 @@ class DryRun(Publish):
 
 
 # A docker that records each call as one JSON line and answers as BuildKit
-# would: a build's metadata file carries the image's config digest, which
-# depends on the target alone, and its manifest's digest, which depends on
-# the output too; imagetools writes the list's digest over its sources.
-# DRIFT names a variant whose pushed config is not the one loaded.
+# would. A loaded build's metadata file names the image's config, which
+# depends on the target alone, and its manifest. A pushed build is
+# attested, as `--sbom=true` and the default provenance make it: what it
+# pushes, into REGISTRY, one file per blob named by its digest, is an index
+# of the platform's manifest and an attestation manifest of
+# `unknown/unknown`, and its metadata names the index alone and no config.
+# `imagetools inspect --raw` answers from REGISTRY; imagetools writes the
+# list's digest over its sources. DRIFT names a variant whose pushed config
+# is not the one loaded; INDEX=attestation-first lists the attestation
+# manifest first, INDEX=attestation-only leaves the platform's out, and
+# INDEX=none pushes the platform's manifest alone, as no attested build does.
 DOCKER = r'''#!/usr/bin/env python3
 import hashlib, json, os, sys
 arguments = sys.argv[1:]
@@ -201,16 +209,61 @@ def digest(*parts):
     return "sha256:" + hashlib.sha256(" ".join(parts).encode()).hexdigest()
 def value(flag):
     return arguments[arguments.index(flag) + 1]
+MANIFEST_TYPE = "application/vnd.oci.image.manifest.v1+json"
+INDEX_TYPE = "application/vnd.oci.image.index.v1+json"
+def pushed(blob, **descriptor):
+    data = json.dumps(blob).encode()
+    named = "sha256:" + hashlib.sha256(data).hexdigest()
+    with open(os.path.join(os.environ["REGISTRY"], named), "wb") as file:
+        file.write(data)
+    return {"mediaType": blob["mediaType"], "digest": named, "size": len(data), **descriptor}
+def manifest(config, layer):
+    return {
+        "schemaVersion": 2, "mediaType": MANIFEST_TYPE,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config, "size": 1},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": layer, "size": 1}],
+    }
 if arguments[:1] == ["version"]:
     print(os.environ.get("DAEMON", "linux/amd64"))
 elif arguments[:2] == ["buildx", "build"]:
-    target = value("--target")
+    target, platform = value("--target"), value("--platform")
     config = digest("config", target, "drift" if os.environ.get("DRIFT") == target and "--load" not in arguments else "")
+    if "--load" in arguments:
+        descriptor = {
+            "mediaType": MANIFEST_TYPE, "digest": digest("manifest", target, platform), "size": 1,
+            "platform": dict(zip(("os", "architecture"), platform.split("/"))),
+        }
+        result = {"containerimage.config.digest": config, "containerimage.descriptor": descriptor}
+    else:
+        os_, architecture = platform.split("/")
+        image = pushed(manifest(config, digest("layer", target, platform)),
+                       platform={"architecture": architecture, "os": os_})
+        attestation = pushed(
+            manifest(digest("attestation config", target), digest("in-toto", target, platform)),
+            annotations={
+                "vnd.docker.reference.digest": image["digest"],
+                "vnd.docker.reference.type": "attestation-manifest",
+            },
+            platform={"architecture": "unknown", "os": "unknown"},
+        )
+        entries = {
+            "attestation-first": [attestation, image], "attestation-only": [attestation],
+        }.get(os.environ.get("INDEX"), [image, attestation])
+        if os.environ.get("INDEX") == "none":
+            descriptor = image
+        else:
+            descriptor = pushed({"schemaVersion": 2, "mediaType": INDEX_TYPE, "manifests": entries})
+        result = {"containerimage.descriptor": descriptor}
+    result["containerimage.digest"] = descriptor["digest"]
     with open(value("--metadata-file"), "w") as metadata:
-        json.dump({
-            "containerimage.config.digest": config,
-            "containerimage.digest": digest("manifest", target, value("--platform"), str("--load" in arguments)),
-        }, metadata)
+        json.dump(result, metadata)
+elif arguments[:3] == ["buildx", "imagetools", "inspect"] and arguments[4:] == ["--raw"]:
+    name, _, named = arguments[3].partition("@")
+    path = os.path.join(os.environ["REGISTRY"], named)
+    if name != os.environ["IMAGE"] or not os.path.exists(path):
+        sys.exit("ERROR: " + arguments[3] + ": not found")
+    with open(path) as file:
+        sys.stdout.write(file.read())
 elif arguments[:3] == ["buildx", "imagetools", "create"]:
     sources = [a for a in arguments if a.startswith(os.environ["IMAGE"] + "@")]
     with open(value("--metadata-file"), "w") as metadata:
@@ -235,8 +288,11 @@ class Recorded(Publish):
         self.tool("smoke", SMOKE)
 
     def run_step(self, *arguments, **env):
+        registry = self.scratch / "registry"
+        registry.mkdir(exist_ok=True)
         return self.publish(*arguments, env={
-            "CALLS": str(self.log), "IMAGE": IMAGE, "SMOKE": str(self.bin / "smoke"), **env,
+            "CALLS": str(self.log), "IMAGE": IMAGE, "SMOKE": str(self.bin / "smoke"),
+            "REGISTRY": str(registry), **env,
         })
 
     def calls(self):
@@ -293,11 +349,71 @@ class Build(Recorded):
                 self.assertEqual(self.pushes(), [])
                 self.assertNotIn("digest ", run.stdout)
 
+    def blob(self, named):
+        return json.loads((self.scratch / "registry" / named).read_text())
+
+    def inspected(self):
+        return [
+            c[4] for c in self.calls()
+            if c[:4] == ["docker", "buildx", "imagetools", "inspect"] and c[5:] == ["--raw"]
+        ]
+
+    def test_the_pushed_config_is_read_from_the_platforms_manifest_in_the_pushed_index(self):
+        run = self.run_step("build", "main")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        indexes = [line.split()[2] for line in self.lines(run, "digest")]
+        images = []
+        for index in indexes:
+            entries = self.blob(index)["manifests"]
+            self.assertEqual(entries[1]["platform"], {"architecture": "unknown", "os": "unknown"})
+            images.append(entries[0]["digest"])
+        # Each push's index, then the manifest of the platform it names.
+        self.assertEqual(self.inspected(), [
+            f"{IMAGE}@{named}" for pair in zip(indexes, images) for named in pair
+        ])
+
+    def test_the_attestation_manifest_is_never_taken_for_the_image(self):
+        run = self.run_step("build", "main", INDEX="attestation-first")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        attestations = [
+            self.blob(line.split()[2])["manifests"][0]["digest"] for line in self.lines(run, "digest")
+        ]
+        self.assertEqual(len(self.inspected()), 6)
+        for attestation in attestations:
+            self.assertNotIn(f"{IMAGE}@{attestation}", self.inspected())
+
+    def test_an_index_with_no_manifest_of_the_platform_names_no_digest(self):
+        digests = self.scratch / "digests"
+        run = self.run_step("build", "main", "--digests", str(digests), INDEX="attestation-only")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "the push of cli names 0 manifests of linux/amd64 beside its attestations, and one is its image",
+            run.stderr,
+        )
+        self.assertNotIn("digest ", run.stdout)
+        self.assertFalse(digests.exists())
+
+    def test_a_push_that_is_no_index_names_no_digest(self):
+        run = self.run_step("build", "main", INDEX="none")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "the push of cli is an application/vnd.oci.image.manifest.v1+json, "
+            "and an attested build pushes an image index",
+            run.stderr,
+        )
+        self.assertNotIn("digest ", run.stdout)
+
     def test_a_pushed_image_whose_config_is_not_the_smoked_one_names_no_digest(self):
         digests = self.scratch / "digests"
         run = self.run_step("build", "main", "--digests", str(digests), DRIFT="fpm")
         self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertIn("fpm's pushed config", run.stderr)
+        smoked = "sha256:" + hashlib.sha256(b"config fpm ").hexdigest()
+        pushed = "sha256:" + hashlib.sha256(b"config fpm drift").hexdigest()
+        self.assertIn(
+            f"fpm's pushed config is {pushed}, and the one smoked {smoked}; its digest is named nowhere",
+            run.stderr,
+        )
+        self.assertNotIn("digest ", run.stdout)
         self.assertFalse(digests.exists())
 
     def test_the_daemons_platform_is_built_where_none_is_named(self):
