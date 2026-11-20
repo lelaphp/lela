@@ -114,51 +114,67 @@ delete, and deletes none. CI runs both scripts; a person runs them with
 `gh` authorised for the organisation's packages and docker logged in to
 `ghcr.io`.
 
-## A release by hand
+## A release
 
-Until CD builds the release, a person builds it on an Apple silicon Mac
-with Docker, from a clean checkout of the tagged commit (ruled
-2026-10-31): `darwin-arm64` with cargo, and `linux-aarch64` and
-`linux-x86_64` from the `binaries` target above. Each platform is one
-tarball, `<name>-<version>-<platform>.tar.gz`, holding one directory of
-that name, and `SHA256SUMS` is written over them by `scripts/dist-sums.sh`:
+CI builds the release, from its tag, and nothing of it is built by hand. A
+person's acts are two:
+
+1. **The version bump.** The version is one line in the workspace
+   manifest's package table, `version = "<version>"` under
+   `[workspace.package]` in `Cargo.toml`, which the host crates inherit
+   and no other crate does. The bump is a commit of that line.
+2. **The tag.** `v<version>` on that commit, pushed.
+
+The tag's workflow then runs `dist/release.py`, whose every step first
+holds the tag to the manifest's version: a tag that names another version
+is refused, and so is a manifest with no version line, saying the line it
+lacks. It builds each platform's tarball on a runner of that platform, and
+the images through `dist/publish.py`'s release path, the one a commit on
+`main` takes, before it creates the GitHub Release:
 
 ```sh
-dist/release.sh 0.1.0-beta.1 /tmp/release
+dist/release.py check v0.1.0-alpha.1
+dist/release.py build v0.1.0-alpha.1 linux-x86_64 /tmp/release
+dist/release.py publish v0.1.0-alpha.1 /tmp/release
+```
+
+- `check` says the version, and refuses as each step does.
+- `build` builds one platform's tarball, `<name>-<version>-<platform>.tar.gz`
+  holding one directory of that name, on a machine of that platform
+  alone: `darwin-arm64` with cargo on an Apple silicon Mac, and
+  `linux-aarch64` and `linux-x86_64` from the `binaries` target above on a
+  daemon of that architecture. It then smokes the tarball itself, unpacked:
+  `dist/smoke.sh` runs `-v`, `-r`, a file with arguments, code on stdin,
+  `php-cgi` on a file and `php-fpm -t`, a Linux tarball in the Ubuntu image
+  the Dockerfile builds on with its `runtime-packages.txt` installed. The
+  macOS hosts keep the linker's ad-hoc signature, which `build` reads
+  before the smoke, with no Developer ID and no notarization.
+- `publish` takes the three tarballs from the directory, refusing a
+  missing one or one of another version, writes `SHA256SUMS` over them
+  with `scripts/dist-sums.sh`, and creates the GitHub Release of the tag
+  with the four attached. The release is marked a pre-release when the
+  version is one, and the latest when its images move the bare variant
+  tags.
+
+A real `build` or `publish` refuses a tree with changes, and a tag that is
+not HEAD. `--dry-run` prints what the step would make and makes nothing:
+`build` the platform, the commit, the tarball and its smoke; `publish` the
+artifacts, the release's fields and the image tags `dist/publish.py` would
+push, which a pre-release's are without a bare variant:
+
+```sh
+dist/release.py publish v0.1.0-alpha.1 --dry-run
+```
+
+The sums read back in the directory they are written in:
+
+```sh
 (cd /tmp/release && shasum -a 256 -c SHA256SUMS)
 ```
 
-The script refuses a tree with changes and prints the commit it built.
-Name platforms after `<out>` to build only those. Docker
-Desktop's default VM (about 4 GiB) links one host at a time, so
-`CARGO_BUILD_JOBS` stays at its default of one.
-
-Smoke each tarball on its platform before publishing it: `dist/smoke.sh`
-runs `-v`, `-r`, a file with arguments, code on stdin, `php-cgi` on a file
-and `php-fpm -t`, and exits nonzero at the first wrong answer. On the Mac:
-
-```sh
-mkdir -p /tmp/smoke
-tar -xzf /tmp/release/php-0.1.0-beta.1-darwin-arm64.tar.gz -C /tmp/smoke
-dist/smoke.sh /tmp/smoke/php-0.1.0-beta.1-darwin-arm64
-```
-
-A Linux tarball runs in the Ubuntu image the Dockerfile builds on, with its
-`runtime-packages.txt` installed; `linux/amd64` runs under emulation on an
-arm64 Mac:
-
-```sh
-ubuntu=$(sed -n 's/^ARG UBUNTU=//p' dist/Dockerfile)
-docker run --rm --platform linux/arm64 -v /tmp/release:/release:ro -v "$PWD/dist:/dist:ro" "$ubuntu" bash -c '
-    tar -xzf /release/php-0.1.0-beta.1-linux-aarch64.tar.gz -C /tmp
-    d=/tmp/php-0.1.0-beta.1-linux-aarch64
-    apt-get update -qq && xargs -a "$d/runtime-packages.txt" apt-get install -y -qq --no-install-recommends >/dev/null
-    /dist/smoke.sh "$d"'
-```
-
-The macOS binaries carry the linker's ad-hoc signature, with no Developer
-ID and no notarization. Nothing in this section tags, pushes or
-publishes; that is a person's.
+Docker Desktop's default VM (about 4 GiB) links one host at a time, so
+`CARGO_BUILD_JOBS` stays at its default of one. NAME (default `php`) is the
+hosts' name (ADR-0016).
 
 ## The compiled tier
 
@@ -196,6 +212,10 @@ arguments it does not take. `test_publish.py` holds the publish script's
 dry run for a commit on `main`, a release and a pre-release, and its two
 steps against a docker that records what it is asked; `test_prune.py`
 holds the deletion script's dry run over the listing in `fixtures/`.
+`test_release.py` holds the release script's refusal of a tag the
+manifest does not name, its dry run for a release and a pre-release, and
+its steps against a docker, a cargo and a gh that record what they are
+asked.
 They do not build or run platform binaries.
 
 To exercise real downloads without installing anything:
