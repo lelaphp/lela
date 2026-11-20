@@ -16,8 +16,11 @@ variants of dist/Dockerfile with the labels below and loads each, runs
 `dist/smoke.sh --image` over each, and only once all three have passed
 pushes each by digest, with BuildKit's SBOM attached.
 A smoke that fails pushes nothing. Each pushed image's config must be the
-config of the image smoked. It prints `digest <platform> <variant>
-<digest>` per variant, the lines --digests writes too.
+config of the image smoked, and is read from the registry: an attested
+push is an index, whose metadata names no config, so the config is the
+one its manifest for the platform names, never its attestation
+manifest's. It prints `digest <platform> <variant> <digest>` per
+variant, the lines --digests writes too.
 
 `join` reads those lines for both platforms and puts each variant's two
 images under one manifest list, tagged with every tag of the variant:
@@ -350,13 +353,14 @@ def build(ref, commit, arguments):
                 "--output", f"type=image,name={IMAGE},push-by-digest=true,name-canonical=true,push=true",
                 str(ROOT),
             )
-            result = metadata(result)
-            if config(result, variant) != smoked[variant]:
+            named = digest(metadata(result), variant)
+            found = pushed_config(named, platform, variant)
+            if found != smoked[variant]:
                 raise Refusal(
-                    f"{variant}'s pushed config is {config(result, variant)}, and the one smoked "
+                    f"{variant}'s pushed config is {found}, and the one smoked "
                     f"{smoked[variant]}; its digest is named nowhere"
                 )
-            pushed.append(f"{platform} {variant} {digest(result, variant)}")
+            pushed.append(f"{platform} {variant} {named}")
     if arguments.dry_run:
         print("dry run: nothing is built, smoked or pushed")
         return
@@ -369,7 +373,53 @@ def build(ref, commit, arguments):
 def config(result, variant):
     found = result.get("containerimage.config.digest", "")
     if not DIGEST.fullmatch(found):
-        raise Refusal(f"the build of {variant} named no config digest")
+        raise Refusal(f"the loaded build of {variant} named no config digest")
+    return found
+
+
+INDEXES = ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json")
+ATTESTATION = "attestation-manifest"
+
+
+def inspect(reference):
+    """The manifest or index the registry holds at `reference`, as pushed."""
+    raw = subprocess.run(
+        ["docker", "buildx", "imagetools", "inspect", reference, "--raw"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise Refusal(f"{reference} is not a manifest JSON reads") from None
+
+
+def pushed_config(named, platform, variant):
+    """The config of the image of `platform` that the push of `variant`
+    put at `named`, read from what the registry holds. An attested build's
+    metadata names no config: what it pushes is an index of the platform's
+    manifest and an attestation manifest of `unknown/unknown`, so the
+    platform's entry is the one manifest of the platform that is no
+    attestation, and its config is read from that manifest."""
+    index = inspect(f"{IMAGE}@{named}")
+    if index.get("mediaType") not in INDEXES:
+        raise Refusal(
+            f"the push of {variant} is an {index.get('mediaType')}, and an attested build pushes an image index"
+        )
+    system, architecture = platform.split("/")
+    images = [
+        entry for entry in index.get("manifests", [])
+        if (entry.get("annotations") or {}).get("vnd.docker.reference.type") != ATTESTATION
+        and (entry.get("platform") or {}).get("os") == system
+        and (entry.get("platform") or {}).get("architecture") == architecture
+    ]
+    if len(images) != 1:
+        raise Refusal(
+            f"the push of {variant} names {len(images)} manifests of {platform} beside its attestations, "
+            "and one is its image"
+        )
+    found = (inspect(f"{IMAGE}@{images[0].get('digest')}").get("config") or {}).get("digest", "")
+    if not DIGEST.fullmatch(found):
+        raise Refusal(f"the manifest of {variant} for {platform} names no config digest")
     return found
 
 
