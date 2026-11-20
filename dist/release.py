@@ -90,21 +90,8 @@ def tarball(ref, platform):
     return f"{name()}-{ref.version}-{platform}.tar.gz"
 
 
-def at_tag(ref, commit):
-    """Refuse a tree a real run would mislabel: one with changes, or one
-    whose HEAD is not the release's tag."""
-    if publish.git("status", "--porcelain"):
-        raise Refusal("the tree has changes; a release is built from a commit")
-    try:
-        tagged = publish.git("rev-parse", "--verify", "--quiet", f"refs/tags/{ref.name}^{{commit}}")
-    except subprocess.CalledProcessError:
-        raise Refusal(f"no tag {ref.name} here; a release is built at its tag") from None
-    if tagged != commit.sha:
-        raise Refusal(f"{ref.name} is not HEAD: it names {tagged}, and HEAD is {commit.sha}")
-
-
 def name():
-    return os.environ.get("NAME") or "php"
+    return publish.setting("NAME")
 
 
 # Each Linux platform's tarball is dist/Dockerfile's binaries target, built
@@ -147,7 +134,7 @@ def stage_linux(stage, platform):
     Ubuntu packages the hosts load, in runtime-packages.txt."""
     subprocess.run([
         "docker", "buildx", "build", "-f", str(ROOT / "dist/Dockerfile"), "--platform", LINUX[platform],
-        "--target", "binaries", "--build-arg", f"CARGO_BUILD_JOBS={os.environ.get('CARGO_BUILD_JOBS') or '1'}",
+        "--target", "binaries", "--build-arg", f"CARGO_BUILD_JOBS={publish.setting('CARGO_BUILD_JOBS')}",
         "--build-arg", f"NAME={name()}", "--output", f"type=local,dest={stage}", str(ROOT),
     ], check=True)
 
@@ -167,7 +154,7 @@ def pack(stage, path):
         archive.add(stage, arcname=stage.name, filter=owned)
 
 
-def smoke(ref, platform, path):
+def smoke(platform, path):
     """dist/smoke.sh over the tarball itself, unpacked on its platform: a
     Linux one in the Ubuntu image the Dockerfile builds on, with its
     runtime-packages.txt installed; the macOS hosts after their ad-hoc
@@ -202,7 +189,7 @@ def smoke(ref, platform, path):
             signed = subprocess.run(["codesign", "-dv", str(unpacked / host)], capture_output=True, text=True)
             if "Signature=adhoc" not in signed.stderr.splitlines():
                 raise Refusal(f"{path.name}'s {host} carries no ad-hoc signature")
-        if subprocess.run([os.environ.get("SMOKE") or str(ROOT / "dist/smoke.sh"), str(unpacked)]).returncode != 0:
+        if subprocess.run([publish.setting("SMOKE"), str(unpacked)]).returncode != 0:
             raise Refusal(f"the smoke of {path.name} on {platform} failed")
 
 
@@ -212,7 +199,7 @@ def build_tarball(ref, commit, arguments):
     if platform not in PLATFORMS:
         raise Refusal(f"no platform {platform}; a release's are {', '.join(PLATFORMS)}")
     if not arguments.dry_run:
-        at_tag(ref, commit)
+        publish.built_from(ref, commit)
         native(platform)
     artifact = tarball(ref, platform)
     print(f"platform {platform}")
@@ -233,7 +220,7 @@ def build_tarball(ref, commit, arguments):
     else:
         stage_darwin(stage)
     pack(stage, path)
-    smoke(ref, platform, path)
+    smoke(platform, path)
     print(f"built {path}")
 
 
@@ -254,7 +241,7 @@ def tarballs(ref, directory):
 def publish_release(ref, commit, arguments):
     """The GitHub Release of the tag, with the tarballs and their sums."""
     if not arguments.dry_run:
-        at_tag(ref, commit)
+        publish.built_from(ref, commit)
         paths = tarballs(ref, arguments.dir)
     artifacts = [tarball(ref, platform) for platform in PLATFORMS]
     for artifact in [*artifacts, "SHA256SUMS"]:

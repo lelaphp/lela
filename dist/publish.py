@@ -72,6 +72,16 @@ VERSION = re.compile(
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 
+# What the caller's environment sets, or its default: NAME is the hosts'
+# name (ADR-0016), CARGO_BUILD_JOBS reaches the build, and SMOKE is the
+# smoke a build runs. dist/release.py reads them here too.
+DEFAULTS = {"NAME": "php", "CARGO_BUILD_JOBS": "1", "SMOKE": str(ROOT / "dist/smoke.sh")}
+
+
+def setting(key):
+    return os.environ.get(key) or DEFAULTS[key]
+
+
 class Refusal(Exception):
     pass
 
@@ -204,9 +214,10 @@ def daemon():
 
 def built_from(ref, commit):
     """Refuse a tree a real run would mislabel: one with changes, or a
-    release whose tag is not HEAD."""
+    release whose tag is not HEAD. dist/release.py holds its steps to it
+    too."""
     if git("status", "--porcelain"):
-        raise Refusal("the tree has changes; an image is built from a commit")
+        raise Refusal("the tree has changes; what is published is built from a commit")
     if ref.version is None:
         return
     try:
@@ -228,11 +239,10 @@ def build(ref, commit, arguments):
     print(f"platform {platform}")
     for key, value in labels(ref, commit):
         print(f"label {key}={value}")
-    smoke = os.environ.get("SMOKE") or str(ROOT / "dist/smoke.sh")
     common = [
         "buildx", "build", "-f", str(ROOT / "dist/Dockerfile"), "--platform", platform,
-        "--build-arg", f"NAME={os.environ.get('NAME') or 'php'}",
-        "--build-arg", f"CARGO_BUILD_JOBS={os.environ.get('CARGO_BUILD_JOBS') or '1'}",
+        "--build-arg", f"NAME={setting('NAME')}",
+        "--build-arg", f"CARGO_BUILD_JOBS={setting('CARGO_BUILD_JOBS')}",
         "--build-arg", f"SOURCE_DATE_EPOCH={commit.epoch}",
     ]
     for key, value in labels(ref, commit):
@@ -249,7 +259,7 @@ def build(ref, commit, arguments):
             loaded = scratch / f"load-{variant}.json"
             docker(*common, "--target", variant, "--metadata-file", str(loaded), "--tag", local, "--load", str(ROOT))
             smoked[variant] = config(metadata(loaded), variant)
-            if subprocess.run([smoke, "--image", local, variant]).returncode != 0:
+            if subprocess.run([setting("SMOKE"), "--image", local, variant]).returncode != 0:
                 raise Refusal(f"the smoke of {variant} failed; nothing is pushed")
         pushed = []
         for variant in VARIANTS:
@@ -306,10 +316,10 @@ def read_digests(paths):
                 or not DIGEST.fullmatch(fields[2])
             ):
                 raise Refusal(f"{path}: {line!r} is not a digest line, <platform> <variant> <digest>")
-            platform, variant, digest = fields
+            platform, variant, named = fields
             if (variant, platform) in found:
                 raise Refusal(f"{path}: a second digest of {variant} for {platform}")
-            found[variant, platform] = digest
+            found[variant, platform] = named
     for variant in VARIANTS:
         for platform in PLATFORMS:
             if (variant, platform) not in found:
