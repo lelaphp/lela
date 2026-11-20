@@ -210,12 +210,14 @@ def smoke(ref, platform, path):
             "set -euo pipefail",
             f"tar -xzf /release/{path.name} -C /tmp",
             f"d=/tmp/{base}",
-            "apt-get update -qq",
-            'xargs -a "$d/runtime-packages.txt" apt-get install -y -qq --no-install-recommends >/dev/null',
+            # apt through dist/apt.sh, which rides out a mirror's passing 5xx
+            # as the Dockerfile's steps do.
+            "sh /dist/apt.sh update",
+            'xargs -a "$d/runtime-packages.txt" sh /dist/apt.sh install >/dev/null',
             '/dist/smoke.sh "$d"',
             # curl only once the smoke has passed, so that no library it
             # brings stands in for one runtime-packages.txt lacks.
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl >/dev/null",
+            "sh /dist/apt.sh install curl >/dev/null",
             f"mkdir /tmp/assets && cp /release/{path.name} /tmp/assets/",
             "(cd /tmp/assets && sha256sum -- *.tar.gz > SHA256SUMS)",
             "useradd -m installer",

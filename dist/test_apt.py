@@ -1,6 +1,8 @@
-"""dist/apt.sh, the one way dist/Dockerfile runs apt, held offline: each
-step it retries, how often and how long it waits, what it passes apt, and
-that every apt step of the Dockerfile goes through it.
+"""dist/apt.sh, the one way dist/Dockerfile and dist/release.py's Linux
+smoke run apt, held offline: each step it retries, how often and how long
+it waits, what it passes apt, and that every apt step of the Dockerfile
+goes through it; test_release.py holds the smoke's to it with
+runs_apt_bare.
 
 The script runs with a PATH of one directory, the test's, where an
 `apt-get` that exits as the test says and a `sleep` that returns at once
@@ -24,6 +26,12 @@ INSTALL = ["install", "-y", "-qq", "--no-install-recommends"]
 FAILURE = "E: Failed to fetch http://ports.ubuntu.com/ubuntu-ports/dists/resolute/InRelease  502  Bad Gateway"
 
 
+def runs_apt_bare(shell):
+    """Whether shell text runs apt or apt-get as a command word, not a
+    path such as /var/lib/apt or the script's own /dist/apt.sh."""
+    return re.search(r"(?<![\w/.-])apt(-get)?(?=\s)", shell) is not None
+
+
 def unguarded(text):
     """Each RUN of a Dockerfile that runs apt other than through
     /tmp/apt.sh, or runs /tmp/apt.sh without mounting dist/apt.sh there,
@@ -33,9 +41,7 @@ def unguarded(text):
         for keyword, rest in stage["instructions"]:
             if keyword != "RUN":
                 continue
-            # apt or apt-get as a command word, not a path such as /var/lib/apt.
-            bare = re.search(r"(?<![\w/.-])apt(-get)?(?=\s)", rest)
-            if bare or ("/tmp/apt.sh" in rest and MOUNT not in rest.split()):
+            if runs_apt_bare(rest) or ("/tmp/apt.sh" in rest and MOUNT not in rest.split()):
                 found.append((name, rest))
     return found
 
@@ -62,6 +68,23 @@ class DockerfileSteps(unittest.TestCase):
             with self.subTest(run=run):
                 self.assertEqual(len(unguarded(f"FROM ubuntu AS one\n{run}\n")), 1)
         self.assertEqual(unguarded(f"FROM ubuntu AS one\nRUN {MOUNT} sh /tmp/apt.sh update\n"), [])
+
+    def test_a_bare_step_of_the_smoke_is_found_and_one_through_the_script_is_not(self):
+        for line in (
+            "apt-get update -qq",
+            'xargs -a "$d/runtime-packages.txt" apt-get install -y -qq --no-install-recommends >/dev/null',
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl >/dev/null",
+            "apt install curl",
+        ):
+            with self.subTest(line=line):
+                self.assertTrue(runs_apt_bare(line))
+        for line in (
+            "sh /dist/apt.sh update",
+            'xargs -a "$d/runtime-packages.txt" sh /dist/apt.sh install >/dev/null',
+            "rm -rf /var/lib/apt/lists/*",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(runs_apt_bare(line))
 
 
 class Script(unittest.TestCase):

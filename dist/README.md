@@ -407,11 +407,12 @@ captured in `fixtures/otool/`. No test builds or runs a host; on an Apple
 silicon Mac the darwin tests link programs and libraries of a few lines
 with `cc`, in the forms Homebrew's kegs take, bundle them with the real
 `otool`, `install_name_tool` and `codesign`, and run them with their keg
-removed. `test_apt.py` holds `apt.sh`, the one way the Dockerfile runs
-apt, against an `apt-get` that fails as the test says: which steps it
-tries again, how often and after what wait, and the status a mirror that
-stays down leaves; and that no `RUN` of the Dockerfile runs apt except
-through it.
+removed. `test_apt.py` holds `apt.sh`, the one way the Dockerfile and
+the Linux smoke run apt, against an `apt-get` that fails as the test
+says: which steps it tries again, how often and after what wait, and the
+status a mirror that stays down leaves; and that no `RUN` of the
+Dockerfile runs apt except through it. `test_release.py` holds the
+smoke's container script to it the same way.
 
 To exercise real downloads without installing anything:
 
@@ -453,8 +454,9 @@ SHA-256 values before use. HTTPS is required across redirects. Docker verifies
 the frontend and base image content through their index digests.
 
 Apt verifies signed repository metadata and package SHA-256 values. Package
-versions and repository snapshots are not frozen here. Each apt step runs
-through `dist/apt.sh`, which tries a failed `update` or package download
+versions and repository snapshots are not frozen here. Each apt step, of
+the Dockerfile and of a Linux tarball's smoke, runs through
+`dist/apt.sh`, which tries a failed `update` or package download
 again a bounded number of times, since a mirror's passing 502 with no body
 is a failure apt's own `Acquire::Retries` does not retry; a mirror that
 stays down still fails the build with apt's message. Rustup verifies component

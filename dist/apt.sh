@@ -5,6 +5,9 @@
 #   sh /tmp/apt.sh update
 #   sh /tmp/apt.sh install <package>...
 #
+# and of dist/release.py's Linux smoke, whose container mounts dist/ at
+# /dist and runs it as /dist/apt.sh.
+#
 # A package mirror answers 5xx for a moment now and then. apt retries a
 # fetch itself (Acquire::Retries) only when it reads the failure as
 # transient: a 408, 429, 500, 502, 503, 504 or 599 that carries a body, a
