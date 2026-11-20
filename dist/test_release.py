@@ -362,9 +362,16 @@ class Build(Recorded):
             "docker", "run", "--rm", "--platform", "linux/amd64",
             "-v", f"{self.out()}:/release:ro", "-v",
         ])
-        self.assertEqual(smoke[8:11], [f"{self.root / 'dist'}:/dist:ro", UBUNTU, "bash"])
+        self.assertEqual(smoke[8:10], [f"{self.root / 'dist'}:/dist:ro", "-v"])
+        self.assertTrue(smoke[10].endswith(":/installer:ro"), smoke[10])
+        self.assertEqual(smoke[11:13], [UBUNTU, "bash"])
         self.assertIn("/release/lela-1.2.0-linux-x86_64.tar.gz", smoke[-1])
-        self.assertIn('/dist/smoke.sh "$d"', smoke[-1])
+        # The smoke, then the installer as a user runs it, curl coming only
+        # after the smoke.
+        lines = smoke[-1].splitlines()
+        self.assertLess(lines.index('/dist/smoke.sh "$d"'), lines.index(
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl >/dev/null"))
+        self.assertEqual(lines[-1], "su installer -c 'LELA_INSTALL_FROM=file:///tmp/assets sh /installer/install.sh'")
         listing = subprocess.run(
             ["tar", "-tvzf", str(self.out() / "lela-1.2.0-linux-x86_64.tar.gz")],
             check=True, capture_output=True, text=True,
@@ -480,6 +487,8 @@ class BuildDarwin(Recorded):
             "etc/php.ini-production", "sbin/lela-fpm",
         ]])
         self.assertRegex("\n".join(self.lines(run, "bundle")), r"^macos \d+\.\d+$")
+        # The release's installer over the tarball, into a home of its own.
+        self.assertRegex(run.stdout, r"\ninstall.sh: installed lela 1.2.0 in /\S+/home/.local/share/lela/1.2.0, ")
         self.assertEqual(self.lines(run, "built"), [str(self.out / "lela-1.2.0-darwin-arm64.tar.gz")])
 
     def test_the_libraries_the_hosts_load_are_bundled_and_run_with_their_keg_gone(self):

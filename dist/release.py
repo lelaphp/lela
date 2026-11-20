@@ -24,7 +24,9 @@ the libraries its hosts load outside the system's under lib/, each name
 rewritten relative to the file that carries it and each rewritten file
 signed again ad hoc, with the kegs' licences and the list of them, which
 dist/bundle.py lays; its dry run names the libraries the hosts built here
-load, where they are built.
+load, where they are built. Last, the release's install.sh installs the
+tarball there into a home of its own, as a user runs it, and runs
+`lela -v` through its link.
 
 `publish` takes the three tarballs from <dir>, and no other, writes
 SHA256SUMS over them with scripts/dist-sums.sh, stages install.sh beside
@@ -52,6 +54,7 @@ macOS tarball is given.
 """
 
 import argparse
+import hashlib
 import os
 import platform as pyplatform
 import re
@@ -193,11 +196,13 @@ def pack(stage, path):
         archive.add(stage, arcname=stage.name, filter=owned)
 
 
-def smoke(platform, path):
+def smoke(ref, platform, path):
     """dist/smoke.sh over the tarball itself, unpacked on its platform: a
     Linux one in the Ubuntu image the Dockerfile builds on, with its
     runtime-packages.txt installed; the macOS hosts after their ad-hoc
-    signature is read on every Mach-O in it."""
+    signature is read on every Mach-O in it. Then the release's
+    install.sh over the tarball there, as a user runs it, which ends with
+    `lela -v` run through the link it makes."""
     base = path.name.removesuffix(".tar.gz")
     if platform in LINUX:
         ubuntu = arg("UBUNTU")
@@ -208,14 +213,24 @@ def smoke(platform, path):
             "apt-get update -qq",
             'xargs -a "$d/runtime-packages.txt" apt-get install -y -qq --no-install-recommends >/dev/null',
             '/dist/smoke.sh "$d"',
+            # curl only once the smoke has passed, so that no library it
+            # brings stands in for one runtime-packages.txt lacks.
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl >/dev/null",
+            f"mkdir /tmp/assets && cp /release/{path.name} /tmp/assets/",
+            "(cd /tmp/assets && sha256sum -- *.tar.gz > SHA256SUMS)",
+            "useradd -m installer",
+            f"su installer -c 'LELA_INSTALL_FROM=file:///tmp/assets sh /installer/{INSTALLER}'",
         ])
-        command = [
-            "docker", "run", "--rm", "--platform", LINUX[platform],
-            "-v", f"{path.parent}:/release:ro", "-v", f"{ROOT / 'dist'}:/dist:ro",
-            ubuntu, "bash", "-c", script,
-        ]
-        if subprocess.run(command).returncode != 0:
-            raise Refusal(f"the smoke of {path.name} on {platform} failed")
+        with tempfile.TemporaryDirectory() as installer_dir:
+            (Path(installer_dir) / INSTALLER).write_text(installer(ref))
+            command = [
+                "docker", "run", "--rm", "--platform", LINUX[platform],
+                "-v", f"{path.parent}:/release:ro", "-v", f"{ROOT / 'dist'}:/dist:ro",
+                "-v", f"{installer_dir}:/installer:ro",
+                ubuntu, "bash", "-c", script,
+            ]
+            if subprocess.run(command).returncode != 0:
+                raise Refusal(f"the smoke of {path.name} on {platform} failed")
         return
     with tempfile.TemporaryDirectory() as scratch:
         with tarfile.open(path) as archive:
@@ -227,6 +242,28 @@ def smoke(platform, path):
                 raise Refusal(f"{path.name}'s {macho.relative_to(unpacked)} carries no ad-hoc signature")
         if subprocess.run([publish.setting("SMOKE"), str(unpacked)]).returncode != 0:
             raise Refusal(f"the smoke of {path.name} on {platform} failed")
+        install_darwin(ref, path, Path(scratch))
+
+
+# The PATH the macOS install runs on: the system's directories alone, as a
+# Mac without Homebrew has them.
+SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def install_darwin(ref, path, scratch):
+    """The release's install.sh over the tarball, from a directory of it
+    and its sum, into a home of its own."""
+    assets, home = scratch / "assets", scratch / "home"
+    assets.mkdir()
+    home.mkdir()
+    (assets / path.name).symlink_to(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    (assets / "SHA256SUMS").write_text(f"{digest}  {path.name}\n")
+    script = scratch / INSTALLER
+    script.write_text(installer(ref))
+    env = {"HOME": str(home), "PATH": SYSTEM_PATH, "LELA_INSTALL_FROM": assets.as_uri()}
+    if subprocess.run(["/bin/sh", str(script)], env=env, cwd=scratch).returncode != 0:
+        raise Refusal(f"the install of {path.name} by {INSTALLER} on darwin-arm64 failed")
 
 
 def build_tarball(ref, commit, arguments):
@@ -258,7 +295,7 @@ def build_tarball(ref, commit, arguments):
     else:
         stage_darwin(stage)
     pack(stage, path)
-    smoke(platform, path)
+    smoke(ref, platform, path)
     print(f"built {path}")
 
 

@@ -203,7 +203,11 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
   daemon of that architecture. It then smokes the tarball itself, unpacked:
   `dist/smoke.sh` runs `-v`, `-r`, a file with arguments, code on stdin,
   `lela-cgi` on a file and `lela-fpm -t`, a Linux tarball in the Ubuntu image
-  the Dockerfile builds on with its `runtime-packages.txt` installed. A
+  the Dockerfile builds on with its `runtime-packages.txt` installed. Then
+  the release's `install.sh` installs the tarball there as a user runs it,
+  ending with `lela -v` through its link: in that image as a user of its
+  own, curl installed once the smoke has passed, and on the Mac into a
+  home of its own on the system's `PATH` alone. A
   macOS tarball carries its libraries, below, and each Mach-O in it an
   ad-hoc signature, which `build` reads before the smoke, with no
   Developer ID and no notarization.
