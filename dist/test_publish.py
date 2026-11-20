@@ -1,15 +1,17 @@
 """The publish script, held by its dry run and by a docker that records,
 each test in a repository of its own (testlib.py)."""
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
-from testlib import EPOCH, IMAGE, ROOT, VARIANTS, Repository
+from testlib import EPOCH, IMAGE, ROOT, VARIANTS, WHEN, Repository
 
 
 class Readme(unittest.TestCase):
@@ -56,6 +58,8 @@ class DryRun(Publish):
             f"org.opencontainers.image.version={version}",
             "org.opencontainers.image.licenses=MIT AND BSD-3-Clause",
             "org.opencontainers.image.description=Lela",
+            "org.opencontainers.image.title=Lela",
+            f"org.opencontainers.image.created={WHEN}",
         ]
 
     def test_a_commit_on_main_is_labelled_edge(self):
@@ -188,10 +192,27 @@ class DryRun(Publish):
 
 
 # A docker that records each call as one JSON line and answers as BuildKit
-# would: a build's metadata file carries the image's config digest, which
-# depends on the target alone, and its manifest's digest, which depends on
-# the output too; imagetools writes the list's digest over its sources.
-# DRIFT names a variant whose pushed config is not the one loaded.
+# would. The image of a target and platform is one manifest, of a config
+# that depends on the target alone and of one layer. A loaded build's
+# metadata file names that manifest, by its descriptor and by
+# `containerimage.digest`, and its config, as the CI runners' daemon's did;
+# LOAD=containerd names no config, as a load into this Mac's containerd
+# store under a docker-container builder does not, and LOAD=index names an
+# index instead, as the docker driver's load into a containerd store does,
+# its provenance beside the image. A pushed build is attested, as
+# `--sbom=true` and the default provenance make it: what it pushes, into
+# REGISTRY, one file per blob named by its digest, is an index of the
+# platform's manifest and an attestation manifest of `unknown/unknown`, and
+# its metadata names the index alone and no config. `imagetools inspect
+# --raw` answers from REGISTRY. `imagetools create`'s metadata file names
+# the list's descriptor, its digest one over its sources, and the image's
+# name, and nothing else, as buildx v0.38.1's does: no
+# `containerimage.digest`. DRIFT names a variant whose pushed layer is not
+# the one loaded, as a recompression's is, its config the same;
+# INDEX=attestation-first lists the attestation manifest first,
+# INDEX=attestation-only leaves the platform's out, and INDEX=none pushes
+# the platform's manifest alone, as no attested build does;
+# LIST=undigested leaves the digest out of each list's descriptor.
 DOCKER = r'''#!/usr/bin/env python3
 import hashlib, json, os, sys
 arguments = sys.argv[1:]
@@ -201,20 +222,74 @@ def digest(*parts):
     return "sha256:" + hashlib.sha256(" ".join(parts).encode()).hexdigest()
 def value(flag):
     return arguments[arguments.index(flag) + 1]
+MANIFEST_TYPE = "application/vnd.oci.image.manifest.v1+json"
+INDEX_TYPE = "application/vnd.oci.image.index.v1+json"
+def described(blob, **descriptor):
+    data = json.dumps(blob).encode()
+    named = "sha256:" + hashlib.sha256(data).hexdigest()
+    return data, {"mediaType": blob["mediaType"], "digest": named, "size": len(data), **descriptor}
+def pushed(blob, **descriptor):
+    data, descriptor = described(blob, **descriptor)
+    with open(os.path.join(os.environ["REGISTRY"], descriptor["digest"]), "wb") as file:
+        file.write(data)
+    return descriptor
+def manifest(config, layer):
+    return {
+        "schemaVersion": 2, "mediaType": MANIFEST_TYPE,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config, "size": 1},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": layer, "size": 1}],
+    }
 if arguments[:1] == ["version"]:
     print(os.environ.get("DAEMON", "linux/amd64"))
 elif arguments[:2] == ["buildx", "build"]:
-    target = value("--target")
-    config = digest("config", target, "drift" if os.environ.get("DRIFT") == target and "--load" not in arguments else "")
+    target, platform = value("--target"), value("--platform")
+    os_, architecture = platform.split("/")
+    config = digest("config", target)
+    drift = os.environ.get("DRIFT") == target and "--load" not in arguments
+    layer = digest("layer", target, platform, *(["recompressed"] if drift else []))
+    if "--load" in arguments:
+        _, descriptor = described(manifest(config, layer), platform={"architecture": architecture, "os": os_})
+        result = {"containerimage.config.digest": config, "containerimage.descriptor": descriptor}
+        if os.environ.get("LOAD") == "containerd":
+            del result["containerimage.config.digest"]
+        elif os.environ.get("LOAD") == "index":
+            _, descriptor = described({"schemaVersion": 2, "mediaType": INDEX_TYPE, "manifests": [descriptor]})
+            result = {"containerimage.descriptor": descriptor}
+    else:
+        image = pushed(manifest(config, layer), platform={"architecture": architecture, "os": os_})
+        attestation = pushed(
+            manifest(digest("attestation config", target), digest("in-toto", target, platform)),
+            annotations={
+                "vnd.docker.reference.digest": image["digest"],
+                "vnd.docker.reference.type": "attestation-manifest",
+            },
+            platform={"architecture": "unknown", "os": "unknown"},
+        )
+        entries = {
+            "attestation-first": [attestation, image], "attestation-only": [attestation],
+        }.get(os.environ.get("INDEX"), [image, attestation])
+        if os.environ.get("INDEX") == "none":
+            descriptor = image
+        else:
+            descriptor = pushed({"schemaVersion": 2, "mediaType": INDEX_TYPE, "manifests": entries})
+        result = {"containerimage.descriptor": descriptor}
+    result["containerimage.digest"] = descriptor["digest"]
     with open(value("--metadata-file"), "w") as metadata:
-        json.dump({
-            "containerimage.config.digest": config,
-            "containerimage.digest": digest("manifest", target, value("--platform"), str("--load" in arguments)),
-        }, metadata)
+        json.dump(result, metadata)
+elif arguments[:3] == ["buildx", "imagetools", "inspect"] and arguments[4:] == ["--raw"]:
+    name, _, named = arguments[3].partition("@")
+    path = os.path.join(os.environ["REGISTRY"], named)
+    if name != os.environ["IMAGE"] or not os.path.exists(path):
+        sys.exit("ERROR: " + arguments[3] + ": not found")
+    with open(path) as file:
+        sys.stdout.write(file.read())
 elif arguments[:3] == ["buildx", "imagetools", "create"]:
     sources = [a for a in arguments if a.startswith(os.environ["IMAGE"] + "@")]
+    descriptor = {"mediaType": INDEX_TYPE, "digest": digest("list", *sources), "size": 1}
+    if os.environ.get("LIST") == "undigested":
+        del descriptor["digest"]
     with open(value("--metadata-file"), "w") as metadata:
-        json.dump({"containerimage.digest": digest("list", *sources)}, metadata)
+        json.dump({"containerimage.descriptor": descriptor, "image.name": os.environ["IMAGE"]}, metadata)
 else:
     sys.exit("the recording docker has no answer for " + " ".join(arguments))
 '''
@@ -235,8 +310,11 @@ class Recorded(Publish):
         self.tool("smoke", SMOKE)
 
     def run_step(self, *arguments, **env):
+        registry = self.scratch / "registry"
+        registry.mkdir(exist_ok=True)
         return self.publish(*arguments, env={
-            "CALLS": str(self.log), "IMAGE": IMAGE, "SMOKE": str(self.bin / "smoke"), **env,
+            "CALLS": str(self.log), "IMAGE": IMAGE, "SMOKE": str(self.bin / "smoke"),
+            "REGISTRY": str(registry), **env,
         })
 
     def calls(self):
@@ -293,12 +371,117 @@ class Build(Recorded):
                 self.assertEqual(self.pushes(), [])
                 self.assertNotIn("digest ", run.stdout)
 
-    def test_a_pushed_image_whose_config_is_not_the_smoked_one_names_no_digest(self):
+    def test_every_build_replaces_the_bases_title_and_created(self):
+        run = self.run_step("build", "main")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        # The commit's time in RFC 3339, UTC, is the instant the build's
+        # SOURCE_DATE_EPOCH names.
+        created = datetime.fromtimestamp(int(EPOCH), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.assertEqual(created, WHEN)
+        builds = [c for c in self.calls() if c[:3] == ["docker", "buildx", "build"]]
+        self.assertEqual(len(builds), 2 * len(VARIANTS))
+        for call in builds:
+            with self.subTest(target=self.flag(call, "--target"), load="--load" in call):
+                self.assertIn(f"SOURCE_DATE_EPOCH={EPOCH}", call)
+                self.assertIn("org.opencontainers.image.title=Lela", call)
+                self.assertIn(f"org.opencontainers.image.created={created}", call)
+
+    def blob(self, named):
+        return json.loads((self.scratch / "registry" / named).read_text())
+
+    def inspected(self):
+        return [
+            c[4] for c in self.calls()
+            if c[:4] == ["docker", "buildx", "imagetools", "inspect"] and c[5:] == ["--raw"]
+        ]
+
+    def test_the_smoked_manifest_is_the_pushed_indexs_manifest_for_the_platform(self):
+        run = self.run_step("build", "main")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        indexes = [line.split()[2] for line in self.lines(run, "digest")]
+        for index in indexes:
+            entries = self.blob(index)["manifests"]
+            self.assertEqual(entries[0]["platform"], {"architecture": "amd64", "os": "linux"})
+            self.assertEqual(entries[1]["platform"], {"architecture": "unknown", "os": "unknown"})
+        # Each push's index alone: the manifest is held by its digest, so
+        # nothing reads the manifest itself or its config.
+        self.assertEqual(self.inspected(), [f"{IMAGE}@{index}" for index in indexes])
+
+    def test_a_load_that_names_no_config_is_smoked_and_pushed(self):
+        # As a load into a containerd store names none.
+        digests = self.scratch / "digests"
+        run = self.run_step("build", "main", "--digests", str(digests), LOAD="containerd")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual([c[-1] for c in self.calls() if c[0] == "smoke"], list(VARIANTS))
+        self.assertEqual([self.flag(c, "--target") for c in self.pushes()], list(VARIANTS))
+        self.assertEqual(self.lines(run, "digest"), digests.read_text().splitlines())
+        self.assertEqual(len(self.lines(run, "digest")), 3)
+
+    def test_a_load_that_is_an_index_is_refused_before_its_smoke(self):
+        # As the docker driver's load into a containerd store is.
+        run = self.run_step("build", "main", LOAD="index")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "the loaded build of cli is an application/vnd.oci.image.index.v1+json, and what is smoked "
+            "is one image's manifest, as a docker-container builder loads it "
+            "(`docker buildx create --use --driver docker-container`)",
+            run.stderr,
+        )
+        self.assertEqual([c for c in self.calls() if c[0] == "smoke"], [])
+        self.assertEqual(self.pushes(), [])
+        self.assertNotIn("digest ", run.stdout)
+
+    def test_the_attestation_manifest_is_never_taken_for_the_image(self):
+        run = self.run_step("build", "main", INDEX="attestation-first")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        indexes = [line.split()[2] for line in self.lines(run, "digest")]
+        for index in indexes:
+            self.assertEqual(self.blob(index)["manifests"][0]["platform"], {"architecture": "unknown", "os": "unknown"})
+        self.assertEqual(self.inspected(), [f"{IMAGE}@{index}" for index in indexes])
+
+    def test_an_index_with_no_manifest_of_the_platform_names_no_digest(self):
+        digests = self.scratch / "digests"
+        run = self.run_step("build", "main", "--digests", str(digests), INDEX="attestation-only")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "the push of cli names 0 manifests of linux/amd64 beside its attestations, and one is its image",
+            run.stderr,
+        )
+        self.assertNotIn("digest ", run.stdout)
+        self.assertFalse(digests.exists())
+
+    def test_a_push_that_is_no_index_names_no_digest(self):
+        run = self.run_step("build", "main", INDEX="none")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "the push of cli is an application/vnd.oci.image.manifest.v1+json, "
+            "and an attested build pushes an image index",
+            run.stderr,
+        )
+        self.assertNotIn("digest ", run.stdout)
+
+    def test_a_pushed_manifest_that_is_not_the_smoked_one_names_no_digest(self):
         digests = self.scratch / "digests"
         run = self.run_step("build", "main", "--digests", str(digests), DRIFT="fpm")
         self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertIn("fpm's pushed config", run.stderr)
+        sha = lambda text: "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+        # fpm's pushed manifest, whose layer was recompressed and whose
+        # config is the smoked one's: a hold of the config would pass it.
+        [image] = [
+            path.read_text() for path in (self.scratch / "registry").iterdir()
+            if sha("layer fpm linux/amd64 recompressed") in path.read_text()
+        ]
+        self.assertEqual(json.loads(image)["config"]["digest"], sha("config fpm"))
+        smoked = image.replace(sha("layer fpm linux/amd64 recompressed"), sha("layer fpm linux/amd64"))
+        self.assertIn(
+            f"fpm's pushed manifest for linux/amd64 is {sha(image)}, and the one smoked {sha(smoked)}; "
+            "its digest is named nowhere",
+            run.stderr,
+        )
+        self.assertNotIn("digest ", run.stdout)
         self.assertFalse(digests.exists())
+        # cli was pushed and held before fpm was refused; apache never was.
+        self.assertEqual([self.flag(c, "--target") for c in self.pushes()], ["cli", "fpm"])
 
     def test_the_daemons_platform_is_built_where_none_is_named(self):
         run = self.run_step("build", "main", DAEMON="linux/arm64")
@@ -386,9 +569,28 @@ class Join(Recorded):
                     self.source(variant, "linux/amd64"), self.source(variant, "linux/arm64"),
                 ])
                 self.assertIn("index:org.opencontainers.image.description=Lela", create)
+                self.assertIn("index:org.opencontainers.image.title=Lela", create)
+                self.assertIn(f"index:org.opencontainers.image.created={WHEN}", create)
         written = manifests.read_text().splitlines()
-        self.assertEqual([line.split()[0] for line in written], list(VARIANTS))
+        # Each list's digest is the one its descriptor names.
+        self.assertEqual(written, [f"{variant} {self.list_digest(variant)}" for variant in VARIANTS])
         self.assertEqual(self.lines(run, "manifest"), written)
+
+    def list_digest(self, variant):
+        sources = " ".join(("list", self.source(variant, "linux/amd64"), self.source(variant, "linux/arm64")))
+        return "sha256:" + hashlib.sha256(sources.encode()).hexdigest()
+
+    def test_a_list_whose_descriptor_names_no_digest_is_refused(self):
+        manifests = self.scratch / "manifests"
+        run = self.run_step("join", "main", *self.digests(), "--manifests", str(manifests), LIST="undigested")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "the list of cli named no digest: its metadata's containerimage.descriptor has none", run.stderr,
+        )
+        self.assertNotIn("manifest ", run.stdout)
+        self.assertFalse(manifests.exists())
+        creates = [c for c in self.calls() if c[:4] == ["docker", "buildx", "imagetools", "create"]]
+        self.assertEqual(len(creates), 1)
 
     def test_blank_lines_between_digests_are_passed_over(self):
         files = self.digests()

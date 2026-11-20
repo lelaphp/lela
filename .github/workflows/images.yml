@@ -10,10 +10,12 @@
 #   as every Linux job's is, and the arm64 runner LELA_BUILD_RUNNER_ARM64's,
 #   each a JSON list of labels, as Mitchell ruled on #5 on 2026-11-19.
 # - `join` runs `publish.py join` over the two jobs' digests, one manifest
-#   list per variant under every tag of it, and attests each list's build
-#   provenance with the workflow's own token. Each image carries the SBOM
-#   BuildKit attached at its push, which the job reads back for both
-#   platforms.
+#   list per variant under every tag of it. Each image carries the SBOM
+#   and the provenance BuildKit attached at its push, which the job reads
+#   back for both platforms. Once the repository is public it also attests
+#   each list's build provenance with the workflow's own token, signed,
+#   which GitHub refuses a private repository below Enterprise Cloud, as
+#   Mitchell ruled on #26 on 2026-11-20.
 # - `prune` runs `prune.py` on the schedule, and by hand with `prune`.
 # By hand, `dry_run` (the default there) prints what either would push or
 # delete, and pushes and deletes nothing. A tag's workflow calls this one
@@ -172,22 +174,37 @@ jobs:
             docker buildx imagetools inspect "ghcr.io/lelaphp/lela@$digest" --format '{{json .SBOM}}' |
               jq -e '[.["linux/amd64"], .["linux/arm64"]] | all(.SPDX.packages | length > 0)'
           done
-      - name: provenance of cli
+      # BuildKit's own provenance, which every push carries and no one
+      # signs. The signed attestation below is GitHub's, and GitHub writes
+      # one for a private repository on the Enterprise Cloud plan alone, so
+      # its three steps wait until the repository is public.
+      - name: BuildKit's provenance of each list, for both platforms
         if: ${{ steps.join.outputs.cli }}
+        env:
+          CLI: ${{ steps.join.outputs.cli }}
+          FPM: ${{ steps.join.outputs.fpm }}
+          APACHE: ${{ steps.join.outputs.apache }}
+        run: |
+          for digest in "$CLI" "$FPM" "$APACHE"; do
+            docker buildx imagetools inspect "ghcr.io/lelaphp/lela@$digest" --format '{{json .Provenance}}' |
+              jq -e '[.["linux/amd64"], .["linux/arm64"]] | all(.SLSA != null)'
+          done
+      - name: provenance of cli
+        if: ${{ steps.join.outputs.cli && !github.event.repository.private }}
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ghcr.io/lelaphp/lela
           subject-digest: ${{ steps.join.outputs.cli }}
           push-to-registry: true
       - name: provenance of fpm
-        if: ${{ steps.join.outputs.fpm }}
+        if: ${{ steps.join.outputs.fpm && !github.event.repository.private }}
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ghcr.io/lelaphp/lela
           subject-digest: ${{ steps.join.outputs.fpm }}
           push-to-registry: true
       - name: provenance of apache
-        if: ${{ steps.join.outputs.apache }}
+        if: ${{ steps.join.outputs.apache && !github.event.repository.private }}
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ghcr.io/lelaphp/lela

@@ -15,9 +15,14 @@ that no image smoked under emulation is pushed. It builds the three
 variants of dist/Dockerfile with the labels below and loads each, runs
 `dist/smoke.sh --image` over each, and only once all three have passed
 pushes each by digest, with BuildKit's SBOM attached.
-A smoke that fails pushes nothing. Each pushed image's config must be the
-config of the image smoked. It prints `digest <platform> <variant>
-<digest>` per variant, the lines --digests writes too.
+A smoke that fails pushes nothing. Each pushed image's manifest must be
+the manifest of the image smoked, which the loaded build's metadata
+names: an attested push is an index, read from the registry, and the
+image's manifest is its entry for the platform, never its attestation
+manifest. A load that is an index, as the docker driver's into a
+containerd store is, is refused before its smoke. It prints
+`digest <platform> <variant> <digest>` per variant, the lines --digests
+writes too.
 
 `join` reads those lines for both platforms and puts each variant's two
 images under one manifest list, tagged with every tag of the variant:
@@ -32,11 +37,11 @@ It prints `manifest <variant> <digest>`, the lines --manifests writes.
 
 The labels, on each image and as annotations on each manifest list, are
 the standard OCI ones spec #9 names: source, revision, version (`edge`
-from main) and licenses, read from the workspace manifest, and the
-description, `Lela`, which replaces the Ubuntu base's. The base's other
-labels, its title and creation time among them, the image inherits. The
-build's SOURCE_DATE_EPOCH is the commit's time, so the image loaded and
-the one pushed from the cache have one config.
+from main) and licenses, read from the workspace manifest; and three
+that replace the Ubuntu base's: description and title, `Lela`, and
+created, the commit's time in RFC 3339, UTC. The build's
+SOURCE_DATE_EPOCH is that same time, so the image loaded and the one
+pushed from the cache have one config.
 
 --dry-run prints the platform, the labels, the tags and the digests it
 would join, and builds, smokes and pushes nothing; without --platform it
@@ -62,6 +67,7 @@ import sys
 import tempfile
 import tomllib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPOSITORY = "lelaphp/lela"
@@ -187,6 +193,12 @@ class Commit:
         sha, epoch = git("show", "-s", "--format=%H %ct", "HEAD").split()
         return Commit(sha, int(epoch))
 
+    @property
+    def created(self):
+        """The commit's time in RFC 3339, UTC: the instant the build's
+        SOURCE_DATE_EPOCH names."""
+        return datetime.fromtimestamp(self.epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 def workspace_package():
     """Cargo.toml's `[workspace.package]` table."""
@@ -209,6 +221,8 @@ def labels(ref, commit):
         (prefix + "version", ref.label),
         (prefix + "licenses", licenses()),
         (prefix + "description", "Lela"),
+        (prefix + "title", "Lela"),
+        (prefix + "created", commit.created),
     ]
 
 
@@ -336,7 +350,7 @@ def build(ref, commit, arguments):
                 continue
             loaded = scratch / f"load-{variant}.json"
             docker(*common, "--target", variant, "--metadata-file", str(loaded), "--tag", local, "--load", str(ROOT))
-            smoked[variant] = config(metadata(loaded), variant)
+            smoked[variant] = loaded_manifest(metadata(loaded), variant)
             if subprocess.run([setting("SMOKE"), "--image", local, variant]).returncode != 0:
                 raise Refusal(f"the smoke of {variant} failed; nothing is pushed")
         pushed = []
@@ -350,13 +364,14 @@ def build(ref, commit, arguments):
                 "--output", f"type=image,name={IMAGE},push-by-digest=true,name-canonical=true,push=true",
                 str(ROOT),
             )
-            result = metadata(result)
-            if config(result, variant) != smoked[variant]:
+            named = digest(metadata(result), f"the push of {variant}")
+            found = pushed_manifest(named, platform, variant)
+            if found != smoked[variant]:
                 raise Refusal(
-                    f"{variant}'s pushed config is {config(result, variant)}, and the one smoked "
+                    f"{variant}'s pushed manifest for {platform} is {found}, and the one smoked "
                     f"{smoked[variant]}; its digest is named nowhere"
                 )
-            pushed.append(f"{platform} {variant} {digest(result, variant)}")
+            pushed.append(f"{platform} {variant} {named}")
     if arguments.dry_run:
         print("dry run: nothing is built, smoked or pushed")
         return
@@ -366,17 +381,80 @@ def build(ref, commit, arguments):
         arguments.digests.write_text("".join(line + "\n" for line in pushed))
 
 
-def config(result, variant):
-    found = result.get("containerimage.config.digest", "")
-    if not DIGEST.fullmatch(found):
-        raise Refusal(f"the build of {variant} named no config digest")
+MANIFESTS = ("application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json")
+INDEXES = ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json")
+ATTESTATION = "attestation-manifest"
+
+
+def loaded_manifest(result, variant):
+    """The digest of the manifest of the image the build of `variant`
+    loaded, the image smoked: its metadata's descriptor, whose digest is
+    the `containerimage.digest` beside it. The image is held by its
+    manifest, which covers the config, the layers as compressed and the
+    annotations, and which every load names: a load into a containerd
+    store may name no config.
+    The docker driver's load into a containerd store is an index, the
+    build's provenance beside the image, and is refused: a docker-container
+    builder loads the image's manifest alone."""
+    found = digest(result, f"the loaded build of {variant}")
+    kind = result["containerimage.descriptor"].get("mediaType")
+    if kind not in MANIFESTS:
+        raise Refusal(
+            f"the loaded build of {variant} is an {kind}, and what is smoked is one image's manifest, "
+            "as a docker-container builder loads it (`docker buildx create --use --driver docker-container`)"
+        )
     return found
 
 
-def digest(result, variant):
-    found = result.get("containerimage.digest", "")
+def inspect(reference):
+    """The manifest or index the registry holds at `reference`, as pushed."""
+    raw = subprocess.run(
+        ["docker", "buildx", "imagetools", "inspect", reference, "--raw"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise Refusal(f"{reference} is not a manifest JSON reads") from None
+
+
+def pushed_manifest(named, platform, variant):
+    """The digest of the manifest of the image of `platform` that the push
+    of `variant` put at `named`, read from the index the registry holds.
+    An attested build pushes an index of the platform's manifest and an
+    attestation manifest of `unknown/unknown`, so the image's is the one
+    entry of the platform that is no attestation."""
+    index = inspect(f"{IMAGE}@{named}")
+    if index.get("mediaType") not in INDEXES:
+        raise Refusal(
+            f"the push of {variant} is an {index.get('mediaType')}, and an attested build pushes an image index"
+        )
+    system, architecture = platform.split("/")
+    images = [
+        entry for entry in index.get("manifests", [])
+        if (entry.get("annotations") or {}).get("vnd.docker.reference.type") != ATTESTATION
+        and (entry.get("platform") or {}).get("os") == system
+        and (entry.get("platform") or {}).get("architecture") == architecture
+    ]
+    if len(images) != 1:
+        raise Refusal(
+            f"the push of {variant} names {len(images)} manifests of {platform} beside its attestations, "
+            "and one is its image"
+        )
+    found = images[0].get("digest") or ""
     if not DIGEST.fullmatch(found):
-        raise Refusal(f"the push of {variant} named no digest")
+        raise Refusal(f"the push of {variant} names its manifest of {platform} with no digest")
+    return found
+
+
+def digest(result, made):
+    """The digest of what `made`, a push or a list, put in the registry,
+    read from its metadata file's `containerimage.descriptor`: the one key
+    both `buildx build` and `imagetools create` write, the second writing
+    no `containerimage.digest`."""
+    found = (result.get("containerimage.descriptor") or {}).get("digest", "")
+    if not DIGEST.fullmatch(found):
+        raise Refusal(f"{made} named no digest: its metadata's containerimage.descriptor has none")
     return found
 
 
@@ -433,7 +511,7 @@ def join(ref, commit, arguments):
             for tag in named:
                 create += ["--tag", tag]
             docker(*create, *sources)
-            manifests.append(f"{variant} {digest(metadata(result), variant)}")
+            manifests.append(f"{variant} {digest(metadata(result), f'the list of {variant}')}")
     if arguments.dry_run:
         print("dry run: nothing is pushed")
         return

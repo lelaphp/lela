@@ -87,7 +87,19 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
 - `build` builds the three variants for the daemon's platform, which
   `--platform` may name, and loads each; runs the smoke's image mode over
   each; and only once all three have passed, pushes each by digest with
-  BuildKit's SBOM attached. A failed smoke pushes nothing. A real build
+  BuildKit's SBOM attached. A failed smoke pushes nothing. Each pushed
+  image is held to the image smoked by its manifest digest, which covers
+  the config, the layers as compressed and the manifest's annotations:
+  the smoked one is the digest the loaded build's metadata names, its
+  `containerimage.descriptor` and `containerimage.digest`, which a load
+  into a containerd store names too, where it names no config. Each push
+  is an image index, so the pushed one is read from the index the
+  registry holds, its manifest for the platform and never its
+  attestation manifest, and a push whose manifest is not the smoked one
+  is refused, its digest named nowhere. A load that is an index, as the
+  docker driver's into a containerd store is, its provenance beside the
+  image, is refused before its smoke; a docker-container builder, the
+  one the workflow creates, loads the image's manifest alone. A real build
   refuses a platform the daemon does not run as its own, as
   `dist/release.py build` does, so no image smoked under emulation is
   pushed; the smoke alone still runs one. It writes one
@@ -106,11 +118,17 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
   the whole history and every tag (`git fetch --unshallow --tags`,
   actions/checkout's `fetch-depth: 0`). A real `join` refuses a tree with
   changes and a release whose tag is not HEAD, as a real `build` does.
+  It writes one `<variant> <digest>` line per list, the digest read from
+  the descriptor in the metadata `imagetools create` writes, which names
+  no `containerimage.digest`; a descriptor with no digest is refused.
 
 Each image is labelled, and each list annotated, with standard OCI keys
 alone: `source`, `revision`, `version` (`edge` from `main`) and
-`licenses`, read from the workspace manifest's package table, and
-`description`, `Lela`, which replaces the Ubuntu base's. A release's
+`licenses`, read from the workspace manifest's package table, and three
+that replace the Ubuntu base's, since a build can replace a label and
+cannot remove one: `description` and `title`, `Lela`, and `created`, the
+commit's time in RFC 3339, UTC, the instant the build's
+`SOURCE_DATE_EPOCH` names. A release's
 tag is held to the workspace manifest's version by both steps, dry or
 real, through the hold `dist/release.py` uses: a tag that names another
 version is refused, and so is a manifest with no version line, as this
