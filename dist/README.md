@@ -116,8 +116,11 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
 
 Each image is labelled, and each list annotated, with standard OCI keys
 alone: `source`, `revision`, `version` (`edge` from `main`) and
-`licenses`, read from the workspace manifest's package table, and
-`description`, `Lela`, which replaces the Ubuntu base's. A release's
+`licenses`, read from the workspace manifest's package table, and three
+that replace the Ubuntu base's, since a build can replace a label and
+cannot remove one: `description` and `title`, `Lela`, and `created`, the
+commit's time in RFC 3339, UTC, the instant the build's
+`SOURCE_DATE_EPOCH` names. A release's
 tag is held to the workspace manifest's version by both steps, dry or
 real, through the hold `dist/release.py` uses: a tag that names another
 version is refused, and so is a manifest with no version line, as this

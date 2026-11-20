@@ -8,9 +8,10 @@ import shutil
 import subprocess
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
-from testlib import EPOCH, IMAGE, ROOT, VARIANTS, Repository
+from testlib import EPOCH, IMAGE, ROOT, VARIANTS, WHEN, Repository
 
 
 class Readme(unittest.TestCase):
@@ -57,6 +58,8 @@ class DryRun(Publish):
             f"org.opencontainers.image.version={version}",
             "org.opencontainers.image.licenses=MIT AND BSD-3-Clause",
             "org.opencontainers.image.description=Lela",
+            "org.opencontainers.image.title=Lela",
+            f"org.opencontainers.image.created={WHEN}",
         ]
 
     def test_a_commit_on_main_is_labelled_edge(self):
@@ -355,6 +358,21 @@ class Build(Recorded):
                 self.assertEqual(self.pushes(), [])
                 self.assertNotIn("digest ", run.stdout)
 
+    def test_every_build_replaces_the_bases_title_and_created(self):
+        run = self.run_step("build", "main")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        # The commit's time in RFC 3339, UTC, is the instant the build's
+        # SOURCE_DATE_EPOCH names.
+        created = datetime.fromtimestamp(int(EPOCH), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.assertEqual(created, WHEN)
+        builds = [c for c in self.calls() if c[:3] == ["docker", "buildx", "build"]]
+        self.assertEqual(len(builds), 2 * len(VARIANTS))
+        for call in builds:
+            with self.subTest(target=self.flag(call, "--target"), load="--load" in call):
+                self.assertIn(f"SOURCE_DATE_EPOCH={EPOCH}", call)
+                self.assertIn("org.opencontainers.image.title=Lela", call)
+                self.assertIn(f"org.opencontainers.image.created={created}", call)
+
     def blob(self, named):
         return json.loads((self.scratch / "registry" / named).read_text())
 
@@ -508,6 +526,8 @@ class Join(Recorded):
                     self.source(variant, "linux/amd64"), self.source(variant, "linux/arm64"),
                 ])
                 self.assertIn("index:org.opencontainers.image.description=Lela", create)
+                self.assertIn("index:org.opencontainers.image.title=Lela", create)
+                self.assertIn(f"index:org.opencontainers.image.created={WHEN}", create)
         written = manifests.read_text().splitlines()
         # Each list's digest is the one its descriptor names.
         self.assertEqual(written, [f"{variant} {self.list_digest(variant)}" for variant in VARIANTS])
