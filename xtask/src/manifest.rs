@@ -119,7 +119,7 @@ fn remedied(rule: &Rule) -> Result<()> {
 fn qualified(rule: &Rule, predicate: &str) -> Result<()> {
     if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
         bail!(
-            "rule \"{}\" has `{qualifier}` beside `{predicate}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv, `unless_argv` qualifies deny_argv, `deny_macros` qualifies deny_types, `allow_in_tests` qualifies deny_lints and `adding` qualifies deny = true",
+            "rule \"{}\" has `{qualifier}` beside `{predicate}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv, `unless_argv` qualifies deny_argv, `deny_macros` qualifies deny_types, `allow_in_tests` qualifies deny_lints, `adding` qualifies deny = true and `group` qualifies a lone allow",
             rule.id
         );
     }
@@ -738,7 +738,8 @@ pub enum Runs {
 /// `require_argv`, one phrase or a list of them, a word or a command and
 /// its subcommand (`"git add"`); `unless_argv` qualifies `deny_argv`;
 /// `deny_macros` qualifies `deny_types`; `allow_in_tests` qualifies
-/// `deny_lints`; `adding` qualifies `deny = true`; each is refused beside
+/// `deny_lints`; `adding` qualifies `deny = true`; `group` qualifies a
+/// lone `allow`; each is refused beside
 /// any other predicate. `allow` is a predicate alone, the homes
 /// `unsafe.homes` names, and beside `check = "engine-state"` it qualifies
 /// the check and is none of its own: the modules where a hand-written impl
@@ -763,6 +764,12 @@ pub struct Predicates {
     /// site the rule allows carries `#[expect(clippy::disallowed_methods)]`.
     pub deny_methods: Option<Vec<String>>,
     pub allow: Option<Vec<String>>,
+    /// The group of each home a lone `allow` names, keyed by the home as
+    /// `allow` spells it: whether the home is the engine's own or one that
+    /// calls a C library, which `unsafe-audit` counts the shares of Rust
+    /// by. A home absent from it, or a key no home spells, fails the
+    /// instrument and not the grammar, since the instrument is what reads it.
+    pub group: Option<BTreeMap<String, HomeGroup>>,
     pub deny_pattern: Option<String>,
     pub unless: Option<String>,
     /// A hit of `deny_pattern` whose command, the text between the shell
@@ -806,6 +813,26 @@ pub struct Predicates {
     pub check: Option<String>,
     pub avoid_from: Option<AvoidFrom>,
     pub generated: Option<Generated>,
+}
+
+/// The two groups an `unsafe` home is in, which `group` assigns: the
+/// engine's own (the memory model, the process, the compiled tier, the
+/// harness's reader) and the bindings that call a C library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HomeGroup {
+    Engine,
+    Foreign,
+}
+
+impl HomeGroup {
+    /// The group as `group` spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            HomeGroup::Engine => "engine",
+            HomeGroup::Foreign => "foreign",
+        }
+    }
 }
 
 /// `generated`: the files the manifest renders, each from every rule whose
@@ -940,7 +967,8 @@ impl Predicates {
     /// A qualifier that has no predicate to qualify: `unless` without
     /// `deny_pattern`, `with` without `deny_argv` or `require_argv`,
     /// `unless_argv` without `deny_argv`, `deny_macros` without
-    /// `deny_types`, `allow_in_tests` without `deny_lints`.
+    /// `deny_types`, `allow_in_tests` without `deny_lints`, `group` without
+    /// a lone `allow`.
     pub fn orphaned_qualifier(&self) -> Option<&'static str> {
         if self.unless.is_some() && self.deny_pattern.is_none() {
             Some("unless")
@@ -956,6 +984,8 @@ impl Predicates {
             Some("allow_in_tests")
         } else if self.adding.is_some() && self.deny != Some(true) {
             Some("adding")
+        } else if self.group.is_some() && (self.allow.is_none() || self.check.is_some()) {
+            Some("group")
         } else {
             None
         }

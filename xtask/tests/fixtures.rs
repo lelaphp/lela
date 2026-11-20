@@ -196,6 +196,17 @@ fn an_unsafe_block_outside_the_homes_fails_naming_the_file_and_the_rule() {
         "the rule text and its ADR: {}",
         unit.message
     );
+    // The rule's `group` puts php_heap in the engine's homes and the
+    // bindings in none, so the shares are not counted and the run fails.
+    let shares = readings.iter().find(|r| r.scope == "workspace").unwrap();
+    assert_eq!(shares.status, Status::Fail, "{shares:#?}");
+    assert!(
+        shares
+            .message
+            .contains("the home ext/*/src/ffi/ is in no group"),
+        "{}",
+        shares.message
+    );
 }
 
 #[test]

@@ -25,5 +25,6 @@ budget = 1000
 [[rule]]
 id = "unsafe.homes"
 allow = ["php_heap", "ext/*/src/ffi/"]
+group = { php_heap = "engine" }            # ext/*/src/ffi/ is in no group
 adr = "0006"
 text = "unsafe is permitted in the homes alone (fixture)."

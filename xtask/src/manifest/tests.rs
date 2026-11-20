@@ -176,3 +176,34 @@ fn adding_stands_beside_deny_and_nowhere_else() {
         );
     }
 }
+
+/// `group` qualifies a lone `allow`, the homes of `unsafe.homes`: beside
+/// it each home's group is read as typed data and the row carries one
+/// predicate; beside a `check`, or with no `allow`, it is an orphaned
+/// qualifier; a group neither `engine` nor `foreign` is refused.
+#[test]
+fn group_stands_beside_a_lone_allow_and_names_engine_or_foreign() {
+    let row = |predicate: &str, group: &str| {
+        format!("{MINIMAL}[[rule]]\nid = \"x.homes\"\n{predicate}\ngroup = {group}\ntext = \"t\"\n")
+    };
+    let homes = "{ php_heap = \"engine\", \"ext/*/src/ffi/\" = \"foreign\" }";
+    let manifest = Manifest::parse(&row("allow = [\"php_heap\", \"ext/*/src/ffi/\"]", homes))
+        .expect("beside allow");
+    let rule = manifest.rule("x.homes").unwrap();
+    assert_eq!(rule.predicate.named(), ["allow"]);
+    let group = rule.predicate.group.as_ref().unwrap();
+    assert_eq!(group["php_heap"], super::HomeGroup::Engine);
+    assert_eq!(group["ext/*/src/ffi/"], super::HomeGroup::Foreign);
+    for predicate in [
+        "deny = true",
+        "allow = [\"x::y\"]\ncheck = \"engine-state\"\nscope = \"crates/**\"",
+    ] {
+        let refused = format!("{:#}", Manifest::parse(&row(predicate, homes)).unwrap_err());
+        assert!(
+            refused.contains("x.homes") && refused.contains("`group` beside"),
+            "{predicate}: {refused}"
+        );
+    }
+    let odd = row("allow = [\"php_heap\"]", "{ php_heap = \"kernel\" }");
+    assert!(Manifest::parse(&odd).is_err(), "kernel is no group");
+}

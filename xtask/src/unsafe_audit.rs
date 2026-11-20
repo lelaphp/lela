@@ -4,13 +4,23 @@
 //! root; a crate whose home is one module is `#![deny(unsafe_code)]` with
 //! the allowance on that module alone. One reading per crate; a skip
 //! naming the rule for each where the manifest has none.
+//!
+//! And one reading of the workspace, the shares of its Rust: the lines
+//! outside every home, in the engine's own homes and in the homes that
+//! call C libraries, the `unsafe` blocks of each home group, and the
+//! line total, tests and harness included. The rule's `group` puts each
+//! home in one group; a home it leaves out fails the reading, and a rule
+//! with no `group` at all measures no shares.
 
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+use crate::git;
 use crate::key::Snapshot;
-use crate::manifest::{Crate, Manifest};
+use crate::manifest::{Crate, HomeGroup, Manifest, Rule};
 use crate::reading::{Reading, Status, Store};
 use crate::rust;
 use crate::sources::{self, Standing};
@@ -89,7 +99,118 @@ fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Rea
         }
         readings.push(reading);
     }
+    if let Some(rule) = rule {
+        readings.push(shares(root, manifest, rule, &homes, &snapshot)?);
+    }
     Ok(readings)
+}
+
+/// The scope of the shares' reading, the whole tree.
+const WORKSPACE: &str = "workspace";
+
+/// A crate's directory the compiler never builds: the harness's
+/// negative controls, texts its tests read.
+const FIXTURES: &str = "fixtures";
+
+/// The lines of Rust in one group of homes, and their `unsafe` blocks.
+#[derive(Debug, Default)]
+struct Share {
+    lines: u64,
+    blocks: u64,
+}
+
+/// The workspace's reading of the shares of its Rust. Every `.rs` file of
+/// a created crate is counted once, under the deepest crate holding it,
+/// as `budget` counts a code line, tests included and fixtures left out;
+/// a file in a home is that home's group's, and every other is outside
+/// the homes, where the compiler forbids `unsafe`.
+fn shares(
+    root: &Path,
+    manifest: &Manifest,
+    rule: &Rule,
+    homes: &[Home],
+    snapshot: &Snapshot,
+) -> Result<Reading> {
+    let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, snapshot)?;
+    RULE.clone_into(&mut reading.rule);
+    reading.adr = rule.adr.adr_field();
+    let Some(group) = &rule.predicate.group else {
+        reading.message = format!(
+            "{WORKSPACE}: the rule {RULE} has no `group`, so no home is in a group and the shares of safe and unsafe Rust are not measured"
+        );
+        return Ok(reading);
+    };
+    let named: Vec<&String> = rule.predicate.allow.iter().flatten().collect();
+    let mut wrong: Vec<String> = (named.iter())
+        .filter(|home| !group.contains_key(home.as_str()))
+        .map(|home| format!("the home {home} is in no group"))
+        .collect();
+    wrong.extend(
+        (group.keys())
+            .filter(|home| !named.contains(home))
+            .map(|home| format!("the group names {home}, which {RULE} does not allow")),
+    );
+    if !wrong.is_empty() {
+        reading.status = Status::Fail;
+        reading.message = format!(
+            "{}; each home {RULE} allows is in exactly one group, {} or {}. {} {}",
+            wrong.join("; "),
+            HomeGroup::Engine.name(),
+            HomeGroup::Foreign.name(),
+            rule.text,
+            rule.adr.adr_cited()
+        );
+        return Ok(reading);
+    }
+    let mut safe = 0;
+    let mut shares: BTreeMap<HomeGroup, Share> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut crates: Vec<&Crate> = (manifest.crates.iter())
+        .filter(|krate| sources::exists(root, krate))
+        .collect();
+    crates.sort_by_key(|krate| Reverse(krate.path().components().count()));
+    for krate in crates {
+        let base = krate.path();
+        for path in git::files(root, &base)? {
+            let file = Path::new(&path);
+            let rel = file.strip_prefix(&base).unwrap_or(file);
+            let rust = file.extension().is_some_and(|e| e == "rs");
+            if !rust || rel.starts_with(FIXTURES) || !seen.insert(path.clone()) {
+                continue;
+            }
+            let text = std::fs::read_to_string(root.join(&path))
+                .with_context(|| format!("reading {path}"))?;
+            let lines = u64::try_from(rust::code_lines(&text, false).len())?;
+            let home = named
+                .iter()
+                .zip(homes)
+                .find(|(_, h)| h.covers(krate, &path));
+            match home.and_then(|(name, _)| group.get(name.as_str())) {
+                None => safe += lines,
+                Some(group) => {
+                    let share = shares.entry(*group).or_default();
+                    share.lines += lines;
+                    share.blocks += u64::try_from(rust::unsafe_blocks(&text))?;
+                }
+            }
+        }
+    }
+    let of = |group: HomeGroup| shares.get(&group).map_or((0, 0), |s| (s.lines, s.blocks));
+    let (engine, engine_blocks) = of(HomeGroup::Engine);
+    let (foreign, foreign_blocks) = of(HomeGroup::Foreign);
+    let total = safe + engine + foreign;
+    reading.count("safe_lines", safe)?;
+    for group in [HomeGroup::Engine, HomeGroup::Foreign] {
+        let (lines, blocks) = of(group);
+        reading.count(&format!("{}_lines", group.name()), lines)?;
+        reading.count(&format!("{}_blocks", group.name()), blocks)?;
+    }
+    reading.count("total_lines", total)?;
+    reading.status = Status::Pass;
+    reading.message = format!(
+        "{WORKSPACE}: {total} lines of Rust, tests and harness included: {safe} outside the homes, where the compiler forbids unsafe; {engine} in the engine's own homes, with {engine_blocks} unsafe blocks; {foreign} in the homes that call C libraries, with {foreign_blocks}"
+    );
+    Ok(reading)
 }
 
 /// What the audit found in one crate.

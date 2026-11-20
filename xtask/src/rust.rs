@@ -39,6 +39,28 @@ use anyhow::{Context, Result};
 /// string or a comment; the text is read through
 /// [`without_comments_or_literals`] first.
 pub fn unsafe_sites(text: &str) -> Vec<usize> {
+    sites(text).into_iter().map(|(at, _)| at).collect()
+}
+
+/// How many of `text`'s [`unsafe_sites`] are blocks, the keyword before
+/// `{`: what `unsafe-audit` counts per group of homes.
+pub fn unsafe_blocks(text: &str) -> usize {
+    let sites = sites(text).into_iter();
+    sites.filter(|(_, site)| *site == Site::Block).count()
+}
+
+/// What an unsafe site is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Site {
+    /// The keyword before `{`.
+    Block,
+    /// The keyword before an item, `fn`, `impl`, `trait` or `extern`, or
+    /// the unsafe attribute: a contract stated and no block.
+    Contract,
+}
+
+/// Each unsafe site's character offset and what it is.
+fn sites(text: &str) -> Vec<(usize, Site)> {
     let code = without_comments_or_literals(text);
     let bytes = code.as_bytes();
     let word = |i: usize| {
@@ -58,16 +80,20 @@ pub fn unsafe_sites(text: &str) -> Vec<usize> {
         // Where the token after the keyword starts.
         let token = code.len() - code[end..].trim_start().len();
         let rest = &code[token..];
-        let asserts = rest.starts_with('{')
-            || rest.starts_with('(')
+        let site = if rest.starts_with('{') {
+            Site::Block
+        } else if rest.starts_with('(')
             || ["fn", "impl", "trait", "extern"]
                 .iter()
-                .any(|item| rest.starts_with(item) && !word(token + item.len()));
-        if asserts {
-            // The blanked text is the text character for character, and a
-            // blanked character may have been more than one byte.
-            sites.push(code[..start].chars().count());
-        }
+                .any(|item| rest.starts_with(item) && !word(token + item.len()))
+        {
+            Site::Contract
+        } else {
+            continue;
+        };
+        // The blanked text is the text character for character, and a
+        // blanked character may have been more than one byte.
+        sites.push((code[..start].chars().count(), site));
     }
     sites
 }
@@ -331,7 +357,7 @@ pub(crate) fn parsed(text: &str, file: &Path) -> Result<syn::File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{code_lines, unsafe_sites, without_comments_or_literals as code};
+    use super::{code_lines, unsafe_blocks, unsafe_sites, without_comments_or_literals as code};
 
     /// How many lines a budget counts.
     fn counted(text: &str) -> usize {
@@ -358,6 +384,19 @@ mod tests {
             vec![2]
         );
         assert_eq!(unsafe_sites("#![unsafe(export_name = \"f\")]"), vec![3]);
+    }
+
+    /// Of the sites, a block is the keyword before a brace, on its line or
+    /// a later one; an item and the attribute are contracts and no block.
+    #[test]
+    fn a_block_is_a_site_before_a_brace_and_no_other() {
+        let text = "unsafe { a(); }\nunsafe fn b() { unsafe\n{ c() } }\n#[unsafe(no_mangle)]\nunsafe impl S for T {}";
+        assert_eq!(unsafe_sites(text).len(), 5);
+        assert_eq!(unsafe_blocks(text), 2);
+        assert_eq!(
+            unsafe_blocks("// unsafe { a(); }\nlet s = \"unsafe {}\";"),
+            0
+        );
     }
 
     #[test]

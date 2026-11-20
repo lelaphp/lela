@@ -112,6 +112,8 @@ manifest::FILE
 manifest::Generated
 manifest::Generated::files
 manifest::HeldAt
+manifest::HomeGroup
+manifest::HomeGroup::name
 manifest::Instrument
 manifest::Instrument::name
 manifest::Layout
