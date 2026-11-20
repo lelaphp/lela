@@ -246,6 +246,20 @@ class Build(Recorded):
         self.assertEqual(self.lines(run, "platform"), ["linux/arm64"])
         self.assertEqual({self.flag(c, "--platform") for c in self.pushes()}, {"linux/arm64"})
 
+    def test_a_platform_the_daemon_does_not_run_as_its_own_is_refused_before_a_build(self):
+        run = self.run_step("build", "main", "--platform", "linux/arm64")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "an image of linux/arm64 is built on a machine of its own platform, linux/arm64, "
+            "and the daemon's is linux/amd64",
+            run.stderr,
+        )
+        self.assertEqual([c[:2] for c in self.calls()], [["docker", "version"]])
+        self.log.unlink()
+        run = self.run_step("build", "main", "--platform", "linux/arm64", DAEMON="linux/arm64")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual({self.flag(c, "--platform") for c in self.pushes()}, {"linux/arm64"})
+
     def test_a_tree_with_changes_is_refused(self):
         (self.root / "Cargo.toml").write_text("changed")
         run = self.run_step("build", "main")

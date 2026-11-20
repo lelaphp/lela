@@ -80,10 +80,12 @@ dist/publish.py build main --digests /tmp/digests-arm64
 dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
 ```
 
-- `build` builds the three variants for the daemon's platform, or the one
-  `--platform` names, and loads each; runs the smoke's image mode over
+- `build` builds the three variants for the daemon's platform, which
+  `--platform` may name, and loads each; runs the smoke's image mode over
   each; and only once all three have passed, pushes each by digest with
-  BuildKit's SBOM attached. A failed smoke pushes nothing. It writes one
+  BuildKit's SBOM attached. A real build refuses a platform the daemon
+  does not run as its own, as `dist/release.py build` does, so no image
+  smoked under emulation is pushed; the smoke alone still runs one. A failed smoke pushes nothing. It writes one
   `<platform> <variant> <digest>` line per variant.
 - `join` reads both platforms' lines and puts each variant's two images
   under one manifest list, carrying every tag of the variant:

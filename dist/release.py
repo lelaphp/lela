@@ -107,12 +107,7 @@ def native(platform):
         if here != "Darwin arm64":
             raise Refusal(f"darwin-arm64 is built on an Apple silicon Mac, and this machine is {here}")
         return
-    daemon = publish.daemon()
-    if daemon != LINUX[platform]:
-        raise Refusal(
-            f"{platform} is built on a machine of its own platform, {LINUX[platform]}, "
-            f"and the daemon's is {daemon}"
-        )
+    publish.native(LINUX[platform], platform)
 
 
 def stage_darwin(stage):

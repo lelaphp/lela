@@ -6,10 +6,12 @@
 
 <ref> is `main` or a release's tag, `v<version>`.
 
-`build` runs on one platform, the daemon's own unless --platform names
-another: it builds the three variants of dist/Dockerfile with the labels
-below and loads each, runs `dist/smoke.sh --image` over each, and only once
-all three have passed pushes each by digest, with BuildKit's SBOM attached.
+`build` runs on one platform, the daemon's own, which --platform may name;
+a real build refuses a platform the daemon does not run as its own, so
+that no image smoked under emulation is pushed. It builds the three
+variants of dist/Dockerfile with the labels below and loads each, runs
+`dist/smoke.sh --image` over each, and only once all three have passed
+pushes each by digest, with BuildKit's SBOM attached.
 A smoke that fails pushes nothing. Each pushed image's config must be the
 config of the image smoked. It prints `digest <platform> <variant>
 <digest>` per variant, the lines --digests writes too.
@@ -212,6 +214,16 @@ def daemon():
     ).stdout.strip()
 
 
+def native(platform, made):
+    """Refuse a platform the daemon does not run as its own, so that what
+    is made for it is built and smoked where it is meant to run, and no
+    emulation's answers are pushed or released. dist/release.py holds its
+    Linux tarballs to it too."""
+    here = daemon()
+    if here != platform:
+        raise Refusal(f"{made} is built on a machine of its own platform, {platform}, and the daemon's is {here}")
+
+
 def built_from(ref, commit):
     """Refuse a tree a real run would mislabel: one with changes, or a
     release whose tag is not HEAD. dist/release.py holds its steps to it
@@ -234,6 +246,8 @@ def build(ref, commit, arguments):
     platform = arguments.platform or daemon()
     if platform not in PLATFORMS:
         raise Refusal(f"the daemon's platform is {platform}, and the images are {', '.join(PLATFORMS)}")
+    if not arguments.dry_run:
+        native(platform, f"an image of {platform}")
     print(f"ref {ref.name}")
     print(f"commit {commit.sha}")
     print(f"platform {platform}")
