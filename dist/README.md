@@ -87,11 +87,19 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
 - `build` builds the three variants for the daemon's platform, which
   `--platform` may name, and loads each; runs the smoke's image mode over
   each; and only once all three have passed, pushes each by digest with
-  BuildKit's SBOM attached. A failed smoke pushes nothing. Each push is
-  an image index, whose metadata names no config, so the pushed image's
-  config is read from the registry, from the index's manifest for the
-  platform and never its attestation manifest, and is refused unless it
-  is the config of the image smoked. A real build
+  BuildKit's SBOM attached. A failed smoke pushes nothing. Each pushed
+  image is held to the image smoked by its manifest digest, which covers
+  the config, the layers as compressed and the manifest's annotations:
+  the smoked one is the digest the loaded build's metadata names, its
+  `containerimage.descriptor` and `containerimage.digest`, which a load
+  into a containerd store names too, where it names no config. Each push
+  is an image index, so the pushed one is read from the index the
+  registry holds, its manifest for the platform and never its
+  attestation manifest, and a push whose manifest is not the smoked one
+  is refused, its digest named nowhere. A load that is an index, as the
+  docker driver's into a containerd store is, its provenance beside the
+  image, is refused before its smoke; a docker-container builder, the
+  one the workflow creates, loads the image's manifest alone. A real build
   refuses a platform the daemon does not run as its own, as
   `dist/release.py build` does, so no image smoked under emulation is
   pushed; the smoke alone still runs one. It writes one
