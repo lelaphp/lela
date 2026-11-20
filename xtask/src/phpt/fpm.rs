@@ -5,21 +5,25 @@
 //! `sapi/fpm/php-fpm`. The pinned php finds the keg's php-fpm, which is
 //! the one `[sapi]` pins, by the first; the engine's binary stands in
 //! `target`, where neither is, so the runner puts the engine's own
-//! `php-fpm`, `sapi/fpm`'s binary (ADR-0008), where the third looks: a
-//! link beside the subset's copy of the tests. Where none was built, or
-//! the pin names none, nothing is linked and the tests skip in upstream's
-//! words, `php-fpm binary not found`.
+//! `lela-fpm`, `sapi/fpm`'s binary (ADR-0008, ADR-0016), where the third
+//! looks: a link named `php-fpm`, the name upstream's tester looks for,
+//! beside the subset's copy of the tests. Where none was built, or the pin
+//! names none, nothing is linked and the tests skip in upstream's words,
+//! `php-fpm binary not found`.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
 use super::Subset;
-use crate::oracle::hosts::FPM;
 
 /// Where the tests stand in the tree, the directory `FPM\Tester` looks
 /// beside.
 pub(super) const TESTS: &str = "sapi/fpm/tests";
+
+/// The file `FPM\Tester::findExecutable` looks for beside the tests,
+/// php-src's own name for the FPM's binary, whatever the host is called.
+const UPSTREAM: &str = "php-fpm";
 
 /// `host` linked as `php-fpm` beside each directory of `subset` that is
 /// `sapi/fpm/tests`, where `FPM\Tester::findExecutable` looks last; a link
@@ -34,7 +38,7 @@ pub(crate) fn place(subset: &Subset, host: Option<&Path>) -> Result<()> {
         let Some(parent) = place.path.parent() else {
             continue;
         };
-        let link = parent.join(FPM.binary);
+        let link = parent.join(UPSTREAM);
         crate::remove(&link)?;
         if let Some(host) = host {
             std::os::unix::fs::symlink(host, &link)

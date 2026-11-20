@@ -81,7 +81,7 @@ fn a_stop_while_a_request_runs_ends_the_process_after_it_with_its_socket_listeni
         .local_addr()
         .unwrap()
         .port();
-    let mut host = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let mut host = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .args(["-n", "-b", &format!("127.0.0.1:{port}")])
         .current_dir(&dir)
         .stdout(std::process::Stdio::piped())

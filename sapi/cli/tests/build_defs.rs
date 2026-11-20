@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 
 /// What `php -n <args>` writes to stdout.
 fn php(args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_php"))
+    let out = Command::new(env!("CARGO_BIN_EXE_lela"))
         .arg("-n")
         .args(args)
         .stdin(Stdio::null())

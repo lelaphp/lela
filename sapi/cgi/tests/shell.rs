@@ -16,7 +16,7 @@ fn served(env: &[(&str, &str)]) -> String {
         "<?php var_dump(function_exists('dl'), (new ReflectionFunction('dl'))->getExtensionName());\n",
     )
     .unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .env_clear()
         .envs(env.iter().copied())
         .args(["-n", "-q"])

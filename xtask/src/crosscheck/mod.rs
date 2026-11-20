@@ -173,7 +173,7 @@ pub struct Ask {
     /// control; a column whose file is absent rendered nothing;
     /// without it the engine's side is the linked engine's own rendering.
     pub renderings: Option<PathBuf>,
-    /// A binary standing for `php-linked`, which serves the linked
+    /// A binary standing for `lela-linked`, which serves the linked
     /// engine's side: what a test hands the lane to hold a rendering
     /// served through one that dies; without it, the one built
     /// from the workspace.
@@ -482,7 +482,7 @@ struct Engines {
     linked: Carried,
     /// The binary, built at the first extension that asks for it.
     binary: Binary,
-    /// What stands for `php-linked`, where the run was handed one.
+    /// What stands for `lela-linked`, where the run was handed one.
     server: Option<PathBuf>,
 }
 
@@ -511,7 +511,7 @@ fn rendering(
             host::side(oracle, Some(&engines.binary), host, name, column).map_err(|trouble| {
                 format!(
                     "the engine's {} did not serve it: {trouble:#}",
-                    host.invocation()
+                    host.engine_invocation()
                 )
             })
         } else if linked {
@@ -528,7 +528,12 @@ fn rendering(
                 .binary
                 .serve(oracle, &program, None, &[])
                 .map(|(served, _)| served)
-                .map_err(|trouble| format!("the php binary did not serve it: {trouble:#}"))
+                .map_err(|trouble| {
+                    format!(
+                        "the {} binary did not serve it: {trouble:#}",
+                        crate::oracle::hosts::CLI.binary
+                    )
+                })
         };
         return Ok(match served {
             Err(why) => Rendering::Absent(why),

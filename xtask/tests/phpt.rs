@@ -652,7 +652,7 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
         "--TEST--\nnamed\n--EXTENSIONS--\nctype\n--FILE--\n<?php var_dump(ctype_digit('1'));\n--EXPECT--\nbool(true)\n",
     )
     .unwrap();
-    let engine = root.join("target/debug/php");
+    let engine = root.join("target/debug/lela");
     fs::create_dir_all(engine.parent().unwrap()).unwrap();
     fs::write(
         &engine,

@@ -25,8 +25,10 @@ ARG UBUNTU=ubuntu:26.04@sha256:19fcd1bf268f02b60aca3bd30bd8a6d9a11759a430e329218
 # Where php's official images keep php.ini, $PHP_INI_DIR, with conf.d in it.
 ARG PHP_INI_DIR=/usr/local/etc/php
 # The hosts' names, `$NAME`, `$NAME-cgi` and `$NAME-fpm`, as ADR-0016 derives
-# them from one constant; php's until the hosts carry the product's name.
-ARG NAME=php
+# them from one constant, php_engine's PRODUCT_NAME, which xtask's tests hold
+# this line to. dist/release.py and dist/smoke.sh read it here, and the
+# images' own scripts and the CMD lines below spell it.
+ARG NAME=lela
 # The compat directory, under Lela's own prefix and on no image's PATH: the
 # usual names, each a symlink to the host of Lela's name, which one
 # `ENV PATH=<dir>:$PATH` line puts first (dist/image/compat.sh).
@@ -197,22 +199,22 @@ RUN mkdir -p "$PHP_INI_DIR/conf.d"; \
 COPY --from=build /out/usr/local/bin/ /usr/local/bin/
 COPY --from=ini /ini/ ${PHP_INI_DIR}/
 COPY dist/image/bin/ /usr/local/bin/
-# A Dockerfile written for php's image runs `php`, and the images' own
-# scripts run `php` and `php-fpm`: until the hosts carry Lela's names
-# (ADR-0016), `php -v` below fails the build under another NAME.
+# The images' own scripts run the hosts by Lela's names (ADR-0016), and a
+# Dockerfile written for php's image that runs `php` finds it once the
+# compat directory is first on its PATH.
 RUN --mount=type=bind,source=dist/image/compat.sh,target=/tmp/compat.sh \
     sh /tmp/compat.sh; \
     cd /usr/local/bin; \
     ln -s docker-php-ext-install docker-php-ext-enable; \
     for name in pear peardev phpize php-config; do ln -s pecl "$name"; done; \
-    php -v; \
-    built="$(php -r 'echo PHP_VERSION;')"; \
-    [ "$built" = "$PHP_VERSION" ] || { echo "PHP_VERSION is $PHP_VERSION, and the built php says $built" >&2; exit 1; }
+    "$NAME" -v; \
+    built="$("$NAME" -r 'echo PHP_VERSION;')"; \
+    [ "$built" = "$PHP_VERSION" ] || { echo "PHP_VERSION is $PHP_VERSION, and the built $NAME says $built" >&2; exit 1; }
 ENTRYPOINT ["docker-php-entrypoint"]
 
 # --- the drop-in for php's cli image ---------------------------------------
 FROM base AS cli
-CMD ["php", "-a"]
+CMD ["lela", "-a"]
 
 # --- the drop-in for php's fpm image ---------------------------------------
 FROM base AS fpm
@@ -222,10 +224,10 @@ COPY --from=build /out/usr/local/sbin/ /usr/local/sbin/
 COPY --from=fpm-config /fpm/ /usr/local/etc/
 RUN --mount=type=bind,source=dist/image/compat.sh,target=/tmp/compat.sh \
     sh /tmp/compat.sh; \
-    sed -i -e 's! php ! php-fpm !g' /usr/local/bin/docker-php-entrypoint
+    sed -i -e "s! $NAME ! $NAME-fpm !g" /usr/local/bin/docker-php-entrypoint
 WORKDIR /var/www/html
 # From here to the end of the stage, the template as written, with
-# `php-fpm -t` after it.
+# `$NAME-fpm -t` after it.
 RUN set -eux; \
     cd "${PHP_INI_DIR%/php}"; \
     cp -v php-fpm.conf.default php-fpm.conf; \
@@ -264,10 +266,10 @@ RUN set -eux; \
         echo '; https://github.com/docker-library/php/issues/878#issuecomment-938595965'; \
         echo 'fastcgi.logging = Off'; \
     } > "$PHP_INI_DIR/conf.d/docker-fpm.ini"; \
-    php-fpm -t
+    "$NAME-fpm" -t
 STOPSIGNAL SIGQUIT
 EXPOSE 9000
-CMD ["php-fpm"]
+CMD ["lela-fpm"]
 
 # --- the drop-in for php's apache image -----------------------------------
 # Apache's prefork MPM in front of php-fpm over a unix socket, where php's
@@ -304,8 +306,8 @@ COPY dist/apache/www.conf /usr/local/etc/php-fpm.d/www.conf
 COPY dist/apache/bin/ /usr/local/bin/
 RUN --mount=type=bind,source=dist/image/compat.sh,target=/tmp/compat.sh \
     sh /tmp/compat.sh; \
-    sed -i -e 's! php ! apache2-foreground !g' /usr/local/bin/docker-php-entrypoint; \
-    php-fpm -t; apache2ctl -t
+    sed -i -e "s! $NAME ! apache2-foreground !g" /usr/local/bin/docker-php-entrypoint; \
+    "$NAME-fpm" -t; apache2ctl -t
 STOPSIGNAL SIGWINCH
 WORKDIR /var/www/html
 EXPOSE 80

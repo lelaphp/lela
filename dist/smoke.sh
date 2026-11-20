@@ -6,17 +6,19 @@
 #   dist/smoke.sh <dir>
 #   dist/smoke.sh --image <image> cli|fpm|apache
 #
-# Over one unpacked tarball: `php -v`, `php -r`, a file with its arguments,
-# code on stdin, `php-cgi` on a file and `php-fpm -t` over a one-pool
-# configuration. A Linux tarball's libraries are the Ubuntu packages its
+# Over one unpacked tarball: `lela -v`, `lela -r`, a file with its
+# arguments, code on stdin, `lela-cgi` on a file and `lela-fpm -t` over a
+# one-pool configuration, each host by the name ADR-0016 gives it, the
+# default of the `ARG NAME` of the Dockerfile beside this script. A Linux tarball's libraries are the Ubuntu packages its
 # runtime-packages.txt lists, installed first: dist/README.md runs it in
 # the Ubuntu image dist/Dockerfile builds on.
 #
 # Over an image of one variant, on the image's own platform: the same
-# checks inside it over the hosts in /usr/local, `php-fpm -t` where the
-# variant holds the FPM; the ini directory php's image names; the compat
-# directory off PATH, and each entry of it what its name finds and runs
-# once the directory is put first;
+# checks inside it over the hosts in /usr/local, `lela-fpm -t` where the
+# variant holds the FPM; the ini directory php's image names; no `php`,
+# `php-cgi` or `php-fpm` on PATH, the compat directory off it, holding each
+# usual name the variant has a host for, and each entry of it what its
+# name finds and runs once the directory is put first;
 # then what a user of the variant sees: the entrypoint passing an option to
 # the variant's command, `fpm` answering a FastCGI request on port 9000 and
 # `apache` serving a page, each to a second container of the image.
@@ -28,7 +30,16 @@ usage() {
 	exit 2
 }
 
-NAME=${NAME:-php}
+# The hosts' name: NAME where the caller gives it, as the image mode gives
+# it to the copy of this script it runs in a container, and otherwise the
+# default of the `ARG NAME` of the Dockerfile beside this script.
+named() {
+	[ -z "${NAME:-}" ] || return 0
+	local dockerfile
+	dockerfile="$(dirname "${BASH_SOURCE[0]}")/Dockerfile"
+	NAME=$(sed -n 's/^ARG NAME=//p' "$dockerfile")
+	[ -n "$NAME" ] || { echo "no ARG NAME= in $dockerfile" >&2; exit 1; }
+}
 
 # One check: its label, the answer wanted, and the command.
 check() {
@@ -78,12 +89,11 @@ in_image() {
 	compat "${COMPAT:?the compat directory}" "$variant"
 }
 
-# The compat directory of a variant's image: a directory, off PATH, each
-# entry of which is what its name finds once the directory is first on
-# PATH, and runs. That makes putting it first the only step the usual
-# names need. Where the hosts carry Lela's names (ADR-0016) each usual name
-# the variant holds is an entry; while they carry php's, the directory is
-# empty, and an empty one passes.
+# The compat directory of a variant's image: a directory, off PATH, that
+# holds each usual name the variant has a host for, while no usual name is
+# on PATH (ADR-0016), and each entry of which is what its name finds once
+# the directory is first on PATH, and runs. That makes putting it first
+# the only step the usual names need.
 compat() {
 	local compat=$1 variant=$2 usual entry found
 	local usuals=(php php-cgi)
@@ -93,12 +103,17 @@ compat() {
 		*":$compat:"*) echo "compat: $compat is on PATH, $PATH" >&2; exit 1 ;;
 	esac
 	echo "compat: $compat, not on PATH ($PATH)"
-	if [ "$NAME" != php ]; then
-		for usual in "${usuals[@]}"; do
-			[ -e "$compat/$usual" ] || [ -L "$compat/$usual" ] ||
-				{ echo "compat: $compat holds no $usual, and the hosts are named $NAME" >&2; exit 1; }
-		done
-	fi
+	for usual in php php-cgi php-fpm; do
+		if found=$(command -v "$usual"); then
+			echo "compat: $usual is $found on PATH, where no usual name is until $compat is put first" >&2
+			exit 1
+		fi
+	done
+	echo "compat: no php, php-cgi or php-fpm on PATH"
+	for usual in "${usuals[@]}"; do
+		[ -e "$compat/$usual" ] || [ -L "$compat/$usual" ] ||
+			{ echo "compat: $compat holds no $usual" >&2; exit 1; }
+	done
 	for entry in "$compat"/*; do
 		# An empty directory's glob is itself.
 		[ -e "$entry" ] || [ -L "$entry" ] || continue
@@ -181,6 +196,7 @@ image() {
 	platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}{{with .Variant}}/{{.}}{{end}}' "$image")
 	daemon=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
 	compat=$(sed -n 's/^ARG COMPAT=//p' "$here/Dockerfile")
+	named
 	if [ "$platform" = "$daemon" ]; then
 		echo "platform: $platform, the daemon's own"
 	else
@@ -232,5 +248,6 @@ case "${1:-}" in
 	-*|"") usage ;;
 	*)
 		[ "$#" -eq 1 ] || usage
+		named
 		hosts "$(cd "$1" && pwd)" fpm ;;
 esac

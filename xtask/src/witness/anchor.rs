@@ -43,7 +43,7 @@ use crate::cfg;
 use crate::rust;
 
 /// One native a fence's run entered, as the binary that served it wrote
-/// it, `php-linked` beside what the run printed and a host's binary to
+/// it, `lela-linked` beside what the run printed and a host's binary to
 /// the file the lane named (`Entered::line`, harness §8, revisions 61 and
 /// 84): the crate's package, the `#[php_class]` type or none, the
 /// identifier.

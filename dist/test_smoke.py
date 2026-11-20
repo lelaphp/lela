@@ -38,9 +38,11 @@ class SmokeArguments(unittest.TestCase):
 
 class Compat(unittest.TestCase):
     """The compat check of the image mode, `--compat <dir> <variant>`, run
-    here over a directory of the test's own: `other/` stands in for the
-    image's /usr/local/bin, a php, php-cgi and php-fpm on PATH that say
-    they are not the compat directory's."""
+    here over a directory of the test's own: `lela/` stands in for the
+    image's /usr/local/bin, its hosts under Lela's names, and `other/` for
+    a php, php-cgi and php-fpm that are not the compat directory's."""
+
+    USUAL = ("php", "php-cgi", "php-fpm")
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -50,68 +52,89 @@ class Compat(unittest.TestCase):
         self.compat.mkdir()
         self.other = self.scratch / "other"
         self.lela = self.scratch / "lela"
-        for directory in (self.other, self.lela):
+        for directory, hosts in ((self.other, self.USUAL), (self.lela, ("lela", "lela-cgi", "lela-fpm"))):
             directory.mkdir()
-            for host in ("php", "php-cgi", "php-fpm"):
+            for host in hosts:
                 program = directory / host
                 program.write_text(f"#!/bin/sh\necho {directory.name} {host}\n")
                 program.chmod(0o755)
 
-    def check(self, *path, name="php", variant="fpm"):
+    def link(self, *usual):
+        for host in usual:
+            (self.compat / host).symlink_to(self.lela / ("lela" + host.removeprefix("php")))
+
+    def check(self, *path, variant="fpm"):
         return subprocess.run(
             [shutil.which("bash"), str(ROOT / "dist/smoke.sh"), "--compat", str(self.compat), variant],
-            env={**os.environ, "NAME": name, "PATH": os.pathsep.join(map(str, [*path, self.other]))},
+            env={**os.environ, "PATH": os.pathsep.join(map(str, [*path, self.lela]))},
             capture_output=True, text=True,
         )
 
-    def test_an_empty_directory_off_path_passes_while_the_hosts_carry_phps_names(self):
+    def test_each_entry_is_what_its_name_finds_once_the_directory_is_first(self):
+        self.link(*self.USUAL)
         run = self.check()
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn(f"compat: {self.compat}, not on PATH", run.stdout)
+        self.assertIn("compat: no php, php-cgi or php-fpm on PATH", run.stdout)
+        for host in self.USUAL:
+            with self.subTest(host=host):
+                self.assertIn(f"compat: {host} is {self.compat / host} with {self.compat} first on PATH", run.stdout)
 
     def test_a_directory_on_path_or_none_fails(self):
+        self.link(*self.USUAL)
         run = self.check(self.compat)
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn(f"compat: {self.compat} is on PATH", run.stderr)
+        for host in self.USUAL:
+            (self.compat / host).unlink()
         self.compat.rmdir()
         run = self.check()
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn(f"compat: {self.compat} is not a directory", run.stderr)
 
-    def test_each_entry_is_what_its_name_finds_once_the_directory_is_first(self):
-        for host in ("php", "php-cgi", "php-fpm"):
-            (self.compat / host).symlink_to(self.lela / host)
-        run = self.check(name="lela")
-        self.assertEqual(run.returncode, 0, run.stderr)
-        for host in ("php", "php-cgi", "php-fpm"):
-            with self.subTest(host=host):
-                self.assertIn(f"compat: {host} is {self.compat / host} with {self.compat} first on PATH", run.stdout)
-
-    def test_an_entry_its_name_does_not_find_fails_though_the_name_runs(self):
-        # Not executable, so the shell passes over it to other/'s php: the
-        # usual name runs, and not through the compat directory.
-        (self.compat / "php").write_text("#!/bin/sh\necho compat php\n")
-        run = self.check()
+    def test_a_usual_name_on_path_fails(self):
+        self.link(*self.USUAL)
+        run = self.check(self.other)
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn(
-            f"compat: php is {self.other / 'php'} with {self.compat} first on PATH, and not {self.compat / 'php'}",
+            f"compat: php is {self.other / 'php'} on PATH, where no usual name is until {self.compat} is put first",
             run.stderr,
         )
 
+    def test_an_empty_directory_fails(self):
+        run = self.check(variant="cli")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"compat: {self.compat} holds no php", run.stderr)
+
+    def test_an_entry_that_is_not_executable_fails(self):
+        self.link("php-cgi", "php-fpm")
+        (self.compat / "php").write_text("#!/bin/sh\necho compat php\n")
+        run = self.check()
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"compat: {self.compat / 'php'} does not run", run.stderr)
+
+    def test_an_entry_its_name_does_not_find_fails(self):
+        # A directory, which the shell does not take for the name it finds.
+        self.link("php", "php-fpm")
+        (self.compat / "php-cgi").mkdir()
+        run = self.check()
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"compat: php-cgi is nothing with {self.compat} first on PATH", run.stderr)
+
     def test_an_entry_that_does_not_run_fails(self):
+        self.link("php-cgi", "php-fpm")
         (self.compat / "php").symlink_to(self.scratch / "gone")
         run = self.check()
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("compat:", run.stderr)
 
-    def test_a_usual_name_missing_once_the_hosts_carry_lelas_names_fails(self):
-        (self.compat / "php").symlink_to(self.lela / "php")
-        (self.compat / "php-cgi").symlink_to(self.lela / "php-cgi")
-        run = self.check(name="lela", variant="cli")
+    def test_a_usual_name_the_variant_has_a_host_for_is_an_entry(self):
+        self.link("php", "php-cgi")
+        run = self.check(variant="cli")
         self.assertEqual(run.returncode, 0, run.stderr)
-        run = self.check(name="lela", variant="fpm")
+        run = self.check(variant="fpm")
         self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertIn(f"compat: {self.compat} holds no php-fpm, and the hosts are named lela", run.stderr)
+        self.assertIn(f"compat: {self.compat} holds no php-fpm", run.stderr)
 
 
 if __name__ == "__main__":

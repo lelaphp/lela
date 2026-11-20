@@ -1,5 +1,5 @@
 //! php's CGI, `php-src/sapi/cgi`, as one crate under `sapi/` (ADR-0008):
-//! the binary `php-cgi`, reaching the engine through `php_sapi` alone. The
+//! the binary `lela-cgi` (ADR-0016), reaching the engine through `php_sapi` alone. The
 //! host is `sapi/cgi/cgi_main.c`: the command
 //! line read as `main` reads it through `php_getopt`, the request of the
 //! web the server describes in the environment read as `init_request_info`

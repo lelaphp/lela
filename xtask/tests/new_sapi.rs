@@ -103,7 +103,7 @@ fn the_host_laid_down_has_the_topology_of_the_cli_and_the_cgi() {
     );
     let bins = cargo["bin"].as_array().unwrap();
     assert_eq!(bins.len(), 1, "{bins:?}");
-    assert_eq!(bins[0]["name"].as_str(), Some("php-demo"));
+    assert_eq!(bins[0]["name"].as_str(), Some("lela-demo"));
     assert_eq!(cargo["lints"]["workspace"].as_bool(), Some(true));
 
     // `main`, the host's name, the facade alone, the lints the manifest
@@ -137,7 +137,7 @@ fn the_host_laid_down_has_the_topology_of_the_cli_and_the_cgi() {
     assert!(!root.join("sapi/demo/build.rs").exists());
     assert!(lib.contains(".configure(php_bundle::CONFIGURE)"), "{lib}");
     let test = read(&root, "sapi/demo/tests/serve.rs");
-    assert!(test.contains("CARGO_BIN_EXE_php-demo"), "{test}");
+    assert!(test.contains("CARGO_BIN_EXE_lela-demo"), "{test}");
 
     // The workspace member, where the root lists them one by one.
     let members: toml::Table = toml::from_str(&read(&root, "Cargo.toml")).unwrap();

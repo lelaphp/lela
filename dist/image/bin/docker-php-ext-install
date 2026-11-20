@@ -1,6 +1,6 @@
 #!/bin/sh
 # docker-php-ext-install and docker-php-ext-enable for dax-php, whose
-# extensions are compiled into php, php-cgi and php-fpm and cannot be
+# extensions are compiled into lela, lela-cgi and lela-fpm and cannot be
 # loaded later. Each name given is checked to be built in: a built-in one
 # succeeds with nothing to do, any other fails the build, so a Dockerfile
 # written for php's image learns here what this image cannot give it.
@@ -20,8 +20,8 @@ done
 
 if [ -z "$names" ]; then
 	echo "usage: $cmd ext-name [ext-name ...]"
-	echo "dax-php builds these in (php -m):"
-	php -m | sed -n 's/^\([A-Za-z]\)/  \1/p'
+	echo "dax-php builds these in (lela -m):"
+	lela -m | sed -n 's/^\([A-Za-z]\)/  \1/p'
 	exit 1
 fi
 
@@ -33,7 +33,7 @@ for name in $names; do
 		*) check="$name" ;;
 	esac
 	# shellcheck disable=SC2016 # php's $argv, not the shell's
-	if php -r 'exit(extension_loaded($argv[1]) ? 0 : 1);' "$check"; then
+	if lela -r 'exit(extension_loaded($argv[1]) ? 0 : 1);' "$check"; then
 		echo "$cmd: $name is built into dax-php; nothing to do"
 	else
 		missing="$missing $name"
@@ -42,6 +42,6 @@ done
 
 if [ -n "$missing" ]; then
 	echo "$cmd: not built into dax-php:$missing" >&2
-	echo "$cmd: dax-php cannot compile or load extensions; 'php -m' lists the ones it has" >&2
+	echo "$cmd: dax-php cannot compile or load extensions; 'lela -m' lists the ones it has" >&2
 	exit 1
 fi

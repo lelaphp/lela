@@ -32,7 +32,7 @@ sha1_smol.workspace = true          # the digest of seams.toml this build is com
 
 [dependencies]
 # No engine crate (harness §8, revision 84): the witness and
-# crosscheck lanes serve a snippet through `php-linked`, `sapi/cli` built
+# crosscheck lanes serve a snippet through `lela-linked`, `sapi/cli` built
 # with the bundle's `linked` set, which this harness builds and starts as a
 # process; so an edit under `crates/` or `ext/` rebuilds that binary and
 # never this one, which every hook runs.

@@ -13,7 +13,7 @@ fn debugged(name: &str, source: &str, commands: &str) -> String {
     let file = dir.join("t.php");
     std::fs::write(&file, source).unwrap();
     let file = std::fs::canonicalize(&file).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_phpdbg"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lela-dbg"))
         .args(["-qIb", "-n"])
         .arg(&file)
         .stdin(Stdio::piped())

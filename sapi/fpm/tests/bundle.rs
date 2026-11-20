@@ -9,7 +9,7 @@
 /// lacked, `pcntl` and `posix` among them.
 #[test]
 fn the_cli_class_and_the_rest_are_loaded() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lela-fpm"))
         .args(["-n", "-m"])
         .output()
         .unwrap();

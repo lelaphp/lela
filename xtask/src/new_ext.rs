@@ -488,7 +488,7 @@ fn table_end(text: &str, table: &str) -> Option<usize> {
 /// build a person prunes a non-default extension from when porting it
 /// (design §4.10), and `host`, the set every host links, which
 /// `one_thread` and `linked` are built of, so a branch that adds an
-/// extension links it into the hosts and `php-linked` in the same commit,
+/// extension links it into the hosts and `lela-linked` in the same commit,
 /// its merge breaks no harness test, and the pruning leaves it
 /// linked.
 const LISTS: [&str; 2] = ["default", "host"];

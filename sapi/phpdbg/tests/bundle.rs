@@ -15,7 +15,7 @@ fn the_cli_class_extensions_are_loaded() {
         "<?php echo implode(\",\", get_loaded_extensions()), \"\\n\";\n",
     )
     .unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_phpdbg"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lela-dbg"))
         .args(["-qrr", "-n"])
         .arg(&file)
         .output()

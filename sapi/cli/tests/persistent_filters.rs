@@ -16,7 +16,7 @@ stream_filter_append($a, 'bzip2.decompress', STREAM_FILTER_WRITE);
 fwrite($a, 'x');
 echo 'end', PHP_EOL;
 ";
-    let out = Command::new(env!("CARGO_BIN_EXE_php"))
+    let out = Command::new(env!("CARGO_BIN_EXE_lela"))
         .args(["-n", "-r", program])
         .stdin(Stdio::null())
         .stderr(Stdio::null())

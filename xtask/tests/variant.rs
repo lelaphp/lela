@@ -805,7 +805,7 @@ fn phpt_refuses_a_subset_whose_row_names_a_variant_the_pin_lacks() {
 /// `xtask phpt --subset ext/fixture` with no `--engine`, in a workspace
 /// whose row names the stand-in variant and the feature `fixture`, which
 /// no binary under test turns on there: cargo is the shell file
-/// `build` writes, and `target/release-da/php`, the default build, is a
+/// `build` writes, and `target/release-da/lela`, the default build, is a
 /// decoy that misses the test's expectation. The subset's reading.
 fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
     let root = scratch(name, "");
@@ -833,7 +833,7 @@ fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
             row.oracle = Some("stand-in".to_owned());
         })
         .write(&root);
-    shell(&root.join("target/release-da/php"), "printf default");
+    shell(&root.join("target/release-da/lela"), "printf default");
     let cargo = root.join("bin/cargo");
     shell(&cargo, build);
     let temp = root.join("tmp");
@@ -856,13 +856,13 @@ fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
 /// build is left where it stands.
 #[test]
 fn phpt_runs_a_variants_subset_on_the_engine_built_with_its_rows_feature() {
-    let build = "while [ $# -gt 0 ]; do\n  case \"$1\" in\n    --target-dir) dir=$2; shift ;;\n    --features) features=$2; shift ;;\n  esac\n  shift\ndone\n[ \"$features\" = php_bundle/fixture ] || exit 3\nmkdir -p \"$dir/release-da\" && printf '#!/bin/sh\\nprintf variant\\n' > \"$dir/release-da/php\" && chmod +x \"$dir/release-da/php\"";
+    let build = "while [ $# -gt 0 ]; do\n  case \"$1\" in\n    --target-dir) dir=$2; shift ;;\n    --features) features=$2; shift ;;\n  esac\n  shift\ndone\n[ \"$features\" = php_bundle/fixture ] || exit 3\nmkdir -p \"$dir/release-da\" && printf '#!/bin/sh\\nprintf variant\\n' > \"$dir/release-da/lela\" && chmod +x \"$dir/release-da/lela\"";
     let Some((root, reading)) = phpt_featured("phpt-featured", build) else {
         return;
     };
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "passed"), 1, "{reading:#?}");
-    let engine = root.join("target/featured/fixture/release-da/php");
+    let engine = root.join("target/featured/fixture/release-da/lela");
     assert!(
         reading
             .message

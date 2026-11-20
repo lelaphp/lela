@@ -75,7 +75,7 @@ A session stops where `permit` denies an edit, and at an act harness §11 gives 
 - A bare `#n` or `t<n>` in a ledger entry its ledger's first sentence places under the cut-off, in an ADR, in a fixture, or in `seams.toml`, `oracle.toml` and `docs/divergence.toml` is a ticket of the private tracker this repository came from: read it with `gh issue view n -R mitchellvanw/dax-php`, never bare. Everywhere else `#n` is this tracker's. Write an old number as `mitchellvanw/dax-php#n` in a ticket, and never in code or in a merge subject, which name this tracker's numbers only.
 - Design documents carry no numbers of their own; budgets and interfaces live in `seams.toml`, the oracle in `oracle.toml`. A fact that changes is a region, rendered by `computed run` and held by `computed check`. No tickets, plans or agent scratch files in the repository; keep working material in your scratchpad.
 - `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and the stacks, and `php_process` the process and its file descriptors (`fork`, the signal pool, `LC_CTYPE`, the process identity, the fd calls), each an `unsafe` home the `unsafe.homes` rule names; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto` is the codecs and `php_sapi` the facade every host depends on.
-- `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `sapi/<name>` is one crate per host, each its binary (`sapi/cli` builds `php`, `sapi/cgi` `php-cgi`; ADR-0008). `xtask` is the harness and `xtask/fixtures/` its negative controls. `lanes/<name>` is one crate per harness lane, the lane's logic under a ceiling of its own: it depends on no workspace crate, and an adapter in `xtask/src` calls it. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
+- `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `sapi/<name>` is one crate per host, each its binary (`sapi/cli` builds `lela`, `sapi/cgi` `lela-cgi`; ADR-0008, ADR-0016). `xtask` is the harness and `xtask/fixtures/` its negative controls. `lanes/<name>` is one crate per harness lane, the lane's logic under a ceiling of its own: it depends on no workspace crate, and an adapter in `xtask/src` calls it. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
 - Finding code: a Rust name you know, or who calls it, is `cq`'s: `cq find <name>`, then `cq body <handle>` to read it and `cq refs <handle>` for its callers, and `cq area <path>` for what is around a path. Text, strings, docs, TOML and php-src's C are grep's, since cq matches names and not bodies. A brief to a subagent carries this line.
 
 ## Taste
@@ -93,7 +93,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=8c2cba17c5ac74baf26e2c5b8580c2e1fcd11aa39d3d4ce28ae85f1dadf926dd out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=a91b51c9e132469a087b87b6a474d7962864c85ef22a2c14e0b1c76193788117 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -125,13 +125,13 @@ third-engine-design.md
 | link | link.lock | 70 |  |
 | ops | ops.lock | 209 |  |
 | api | api.lock | 1558 | 1700 |
-| sapi | sapi.lock | 62 |  |
+| sapi | sapi.lock | 63 |  |
 | tier | tier.lock | 259 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 43 |  |
 | harness | xtask.lock | 502 |  |
 
-<!-- /computed in=93f3e05a136fa210e77a0e621ed6f4ad4289a601fd093ddaea931f598353d419 out=58637032e39d2182e49fb63ed50780520e6ed3332386f48ff37acbbad4a40d88 -->
+<!-- /computed in=1228982957c8ba4292a446676868bdeda7cfaa5e46df359dbdeba2fd94a36415 out=05dffb851f3e2d8a0c23156c07b4d5230cf500d244dddc26cc40daa3761d94f8 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -179,7 +179,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=c29dfd09e5b025619317752d0297d9a811d9cdfa46f1a64f0fffb3d093def3c1 out=a3273ba5a2d830e67a0f4c59d3e77d374ad4b8f77d61639592996b9933301eb2 -->
+<!-- /computed in=10eeaa36c40e0d1e164bdc0dd915401ac52c66cbd08cdd5d6e7e89de7da8d394 out=a3273ba5a2d830e67a0f4c59d3e77d374ad4b8f77d61639592996b9933301eb2 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

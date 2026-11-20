@@ -134,11 +134,11 @@ impl Drop for Master {
 /// `dir` signed ad hoc with `com.apple.security.get-task-allow`, and
 /// elsewhere the binary itself.
 fn readable(dir: &Path) -> PathBuf {
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_php-fpm"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_lela-fpm"));
     if !cfg!(target_os = "macos") {
         return binary;
     }
-    let copy = dir.join("php-fpm");
+    let copy = dir.join("lela-fpm");
     std::fs::copy(&binary, &copy).expect("the binary is copied to be signed");
     let entitlements = dir.join("readable.plist");
     std::fs::write(

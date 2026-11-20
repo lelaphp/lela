@@ -316,7 +316,15 @@ class ImageTargets(unittest.TestCase):
     }
 
     def setUp(self):
-        self.stages = stages((ROOT / "dist/Dockerfile").read_text())
+        text = (ROOT / "dist/Dockerfile").read_text()
+        self.stages = stages(text)
+        (self.name,) = [line.split("=", 1)[1] for line in text.splitlines() if line.startswith("ARG NAME=")]
+
+    def renamed(self, word, name=None):
+        """The official template's word with its hosts under Lela's names,
+        `name` for the Dockerfile's `ARG NAME` (ADR-0016)."""
+        name = name or self.name
+        return name + word.removeprefix("php") if word in ("php", "php-cgi", "php-fpm") else word
 
     def chain(self, name):
         """A stage's instructions after those of the stages it is built on."""
@@ -354,18 +362,20 @@ class ImageTargets(unittest.TestCase):
         for variant, (command, directory, port, signal) in self.OFFICIAL.items():
             with self.subTest(variant=variant):
                 self.assertEqual(self.last(variant, "ENTRYPOINT"), '["docker-php-entrypoint"]')
-                self.assertEqual(json.loads(self.last(variant, "CMD")), command)
+                self.assertEqual(json.loads(self.last(variant, "CMD")), [self.renamed(w) for w in command])
                 self.assertEqual(self.last(variant, "WORKDIR"), directory)
                 self.assertEqual(self.last(variant, "EXPOSE"), port)
                 self.assertEqual(self.last(variant, "STOPSIGNAL"), signal)
 
     def test_the_entrypoint_is_rendered_for_each_variant_as_apply_templates_renders_it(self):
         entrypoint = (ROOT / "dist/image/bin/docker-php-entrypoint").read_text()
-        self.assertEqual(entrypoint, OFFICIAL_ENTRYPOINT)
+        official = 'set -- php "$@"'
+        self.assertIn(official, OFFICIAL_ENTRYPOINT)
+        self.assertEqual(entrypoint, OFFICIAL_ENTRYPOINT.replace(official, f'set -- {self.name} "$@"'))
         for variant, (command, *_) in self.OFFICIAL.items():
             with self.subTest(variant=variant):
                 runs = " ".join(rest for keyword, rest in self.stages[variant]["instructions"] if keyword == "RUN")
-                sed = f"sed -i -e 's! php ! {command[0]} !g' /usr/local/bin/docker-php-entrypoint"
+                sed = f'sed -i -e "s! $NAME ! {self.renamed(command[0], "$NAME")} !g" /usr/local/bin/docker-php-entrypoint'
                 self.assertEqual(sed in runs, command[0] != "php")
 
     def test_the_ini_location_is_the_official_image_s(self):

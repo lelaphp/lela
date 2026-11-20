@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 /// stdout and stderr of `php -n -r <code>`, armed as a debug binary is
 /// by default, stdin empty.
 fn armed(code: &str) -> (String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_php"))
+    let out = Command::new(env!("CARGO_BIN_EXE_lela"))
         .env_remove("PHP_SENSE_LEAKS")
         .args(["-n", "-r", code])
         .stdin(Stdio::null())

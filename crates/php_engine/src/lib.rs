@@ -127,3 +127,12 @@ pub use engine::{
 pub use fork::{Forked, HostThread, Pid, fork, host_thread, main_thread};
 pub use ini_syntax::{IniEvent, IniValue};
 pub use log_field::log_field;
+
+/// The product's name, which every host's binary is named from (ADR-0016):
+/// `lela` the CLI's, and `lela-cgi`, `lela-fpm`, `lela-dbg` and
+/// `lela-linked` the others'. It is not what a host prints: the hosts'
+/// names, `PHP_SAPI`, and the version lines are php's. A `[[bin]] name` and an
+/// `env!("CARGO_BIN_EXE_…")` cannot read it, and the harness links no
+/// engine, so each spells it, and `xtask`'s tests hold every spelling to
+/// this line.
+pub const PRODUCT_NAME: &str = "lela";

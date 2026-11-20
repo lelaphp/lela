@@ -203,7 +203,7 @@ fn each_op_array_a_trace_passes_is_dumped_as_php_dumps_it() -> Result<(), String
 /// The seven kernels' op arrays the traces pass through are dumped as php
 /// dumps them under `[regime.jit-ssa]`, served by the command
 /// line `PHP_SSA_ENGINE` names, built with the tier:
-/// `cargo build -p php_sapi_cli --bin php --features php_bundle/jit`.
+/// `cargo build -p php_sapi_cli --bin lela --features php_bundle/jit`.
 /// A kernel calls the bundle's natives, which a test's engine here does
 /// not link, and php compiles a call to a native it knows otherwise.
 #[test]

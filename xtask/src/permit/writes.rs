@@ -563,7 +563,7 @@ const COPIES: [&str; 5] = ["cp", "install", "ln", "rsync", "scp"];
 
 /// Programs that run a program text: from a word (`-c`, `-e`), a file, or
 /// a heredoc on their stdin. A name beginning with `python` is one too.
-const INTERPRETERS: [&str; 15] = [
+const INTERPRETERS: [&str; 16] = [
     "sh",
     "bash",
     "zsh",
@@ -575,6 +575,7 @@ const INTERPRETERS: [&str; 15] = [
     "ruby",
     "perl",
     "php",
+    crate::oracle::hosts::PRODUCT,
     "awk",
     "gawk",
     "lua",

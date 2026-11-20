@@ -1072,7 +1072,7 @@ fn phpt_in(dir: &Path, args: &[&str], cargo: &Path, corpus: &Path) -> (i32, Stri
 /// runs the subset, carries the run into the main worktree and removes
 /// the worktree, and the comparison from the branch's worktree finds the
 /// run by the base alone. The stand-in cargo answers the hosts' build by
-/// laying a `php` that hands every call to the pinned one, and logs each
+/// laying a `lela` that hands every call to the pinned one, and logs each
 /// call; a second call finds the run kept and builds nothing.
 #[test]
 fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
@@ -1093,7 +1093,7 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
         &bin,
         "cargo",
         &format!(
-            "#!/bin/sh\necho \"$*\" >> '{}'\n[ \"$1 $2\" = 'build --profile' ] || exit 1\nmkdir -p \"target/$3\" && printf '#!/bin/sh\\nexec %s \"$@\"\\n' \"'{}'\" > \"target/$3/php\" && chmod +x \"target/$3/php\"\n",
+            "#!/bin/sh\necho \"$*\" >> '{}'\n[ \"$1 $2\" = 'build --profile' ] || exit 1\nmkdir -p \"target/$3\" && printf '#!/bin/sh\\nexec %s \"$@\"\\n' \"'{}'\" > \"target/$3/lela\" && chmod +x \"target/$3/lela\"\n",
             log.display(),
             oracle.display()
         ),
@@ -1129,7 +1129,7 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
     );
 
     // Before the call, the comparison names it.
-    engine_at(&dir.join("target/release-da/php"), &oracle);
+    engine_at(&dir.join("target/release-da/lela"), &oracle);
     let (_, unkept) = phpt_in(
         &dir,
         &["--subset", "ext/ctype", "--against", "main"],
@@ -1169,7 +1169,7 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
     assert_eq!(run["verdicts"].as_object().unwrap().len(), 1, "{out}");
 
     // The comparison from the branch's worktree finds the run by the base.
-    engine_at(&dir.join("target/release-da/php"), &oracle);
+    engine_at(&dir.join("target/release-da/lela"), &oracle);
     let (code, found) = phpt_in(
         &dir,
         &["--subset", "ext/ctype", "--against", "main"],

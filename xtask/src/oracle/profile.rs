@@ -66,7 +66,7 @@ impl Profile {
 /// cargo put the binary: under `into` where it is named, a target
 /// directory of the build's own ([`featured`]), else the target directory
 /// cargo was told of, or `root`'s own. Every binary the harness builds,
-/// `php-linked` and the hosts' own, is built in the lanes' profile,
+/// `lela-linked` and the hosts' own, is built in the lanes' profile,
 /// whatever profile the harness itself was built in (harness revision 92):
 /// a reading's key covers the source and not the profile, so one
 /// key is read off one build, and the `php` the witness lane builds is the
@@ -165,7 +165,7 @@ fn built(
 
 /// Where the engine turning the bundle's `feature` on, or a build named
 /// `feature` of other features than the default's, is built: a target
-/// directory of its own under `root`'s, so `target/<profile>/php` stays
+/// directory of its own under `root`'s, so `target/<profile>/lela` stays
 /// the binary under test's default build.
 pub(crate) fn featured(root: &Path, feature: &str) -> PathBuf {
     root.join("target").join("featured").join(feature)

@@ -58,12 +58,12 @@ fn php() -> &'static Path {
     BUILT.get_or_init(|| {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let status = Command::new(cargo)
-            .args(["build", "--quiet", "-p", "php_sapi_cli", "--bin", "php"])
+            .args(["build", "--quiet", "-p", "php_sapi_cli", "--bin", "lela"])
             .current_dir(workspace())
             .status()
             .unwrap();
-        assert!(status.success(), "cargo could not build php");
-        workspace().join("target/debug/php")
+        assert!(status.success(), "cargo could not build lela");
+        workspace().join("target/debug/lela")
     })
 }
 

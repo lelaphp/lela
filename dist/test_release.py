@@ -95,7 +95,7 @@ class PublishDryRun(Repository):
     def test_a_release_is_the_latest_and_moves_the_bare_variant(self):
         run = self.release("publish", "v1.2.0", "--dry-run")
         self.assertEqual(self.lines(run, "artifact"), [
-            *(f"php-1.2.0-{platform}.tar.gz" for platform in PLATFORMS), "SHA256SUMS",
+            *(f"lela-1.2.0-{platform}.tar.gz" for platform in PLATFORMS), "SHA256SUMS",
         ])
         self.assertEqual(self.lines(run, "release"), [
             "tag v1.2.0", "title v1.2.0", f"commit {self.commit}", "prerelease false", "latest true",
@@ -106,9 +106,18 @@ class PublishDryRun(Repository):
         self.assertIn("dry run: nothing is uploaded or created", run.stdout)
         self.assertFalse(self.log.exists())
 
-    def test_the_hosts_name_names_the_tarballs(self):
-        run = self.release("publish", "v1.2.0", "--dry-run", env={"NAME": "lela"})
-        self.assertEqual(self.lines(run, "artifact")[0], "lela-1.2.0-darwin-arm64.tar.gz")
+    def test_the_dockerfiles_name_names_the_tarballs_and_a_caller_names_none(self):
+        dockerfile = self.root / "dist/Dockerfile"
+        dockerfile.write_text(dockerfile.read_text().replace("\nARG NAME=lela\n", "\nARG NAME=other\n"))
+        run = self.release("publish", "v1.2.0", "--dry-run", env={"NAME": "php"})
+        self.assertEqual(self.lines(run, "artifact")[0], "other-1.2.0-darwin-arm64.tar.gz")
+
+    def test_a_dockerfile_naming_no_hosts_is_refused(self):
+        dockerfile = self.root / "dist/Dockerfile"
+        dockerfile.write_text(dockerfile.read_text().replace("\nARG NAME=lela\n", "\n"))
+        run = self.release("publish", "v1.2.0", "--dry-run")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("dist/Dockerfile names 0 `ARG NAME=` lines, where it names one", run.stderr)
 
 
 class Shallow(Repository):
@@ -128,7 +137,7 @@ class PreReleaseDryRun(Repository):
     def test_a_pre_release_is_marked_one_and_moves_no_bare_variant(self):
         run = self.release("publish", "v0.1.0-alpha.1", "--dry-run")
         self.assertEqual(self.lines(run, "artifact"), [
-            *(f"php-0.1.0-alpha.1-{platform}.tar.gz" for platform in PLATFORMS), "SHA256SUMS",
+            *(f"lela-0.1.0-alpha.1-{platform}.tar.gz" for platform in PLATFORMS), "SHA256SUMS",
         ])
         self.assertEqual(self.lines(run, "release"), [
             "tag v0.1.0-alpha.1", "title v0.1.0-alpha.1", f"commit {self.commit}",
@@ -185,7 +194,7 @@ class Publish(Recorded):
         out = self.scratch / "out"
         out.mkdir(exist_ok=True)
         for platform in platforms:
-            (out / f"php-0.1.0-alpha.1-{platform}.tar.gz").write_bytes(platform.encode())
+            (out / f"lela-0.1.0-alpha.1-{platform}.tar.gz").write_bytes(platform.encode())
         return out
 
     def test_the_release_carries_the_tarballs_and_their_sums_and_is_marked_a_pre_release(self):
@@ -195,7 +204,7 @@ class Publish(Recorded):
         self.assertEqual(run.returncode, 0, run.stderr)
         sums = (out / "SHA256SUMS").read_text()
         self.assertEqual([line.split("  ")[1] for line in sums.splitlines()], [
-            f"php-0.1.0-alpha.1-{platform}.tar.gz" for platform in PLATFORMS
+            f"lela-0.1.0-alpha.1-{platform}.tar.gz" for platform in PLATFORMS
         ])
         (call,) = self.calls()
         notes = call.pop()
@@ -205,7 +214,7 @@ class Publish(Recorded):
         self.assertEqual(call[3:], [
             "v0.1.0-alpha.1", "--verify-tag", "--title", "v0.1.0-alpha.1",
             "--prerelease", "--latest=false",
-            *(str(out / f"php-0.1.0-alpha.1-{platform}.tar.gz") for platform in PLATFORMS),
+            *(str(out / f"lela-0.1.0-alpha.1-{platform}.tar.gz") for platform in PLATFORMS),
             str(out / "SHA256SUMS"),
         ])
         self.assertIn(self.commit, notes)
@@ -217,12 +226,12 @@ class Publish(Recorded):
         out = self.tarballs(PLATFORMS[1:])
         run = self.run_step("publish", "v0.1.0-alpha.1", str(out))
         self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertIn(f"no php-0.1.0-alpha.1-darwin-arm64.tar.gz in {out}", run.stderr)
+        self.assertIn(f"no lela-0.1.0-alpha.1-darwin-arm64.tar.gz in {out}", run.stderr)
         self.tarballs()
-        (out / "php-0.0.9-linux-x86_64.tar.gz").write_bytes(b"")
+        (out / "lela-0.0.9-linux-x86_64.tar.gz").write_bytes(b"")
         run = self.run_step("publish", "v0.1.0-alpha.1", str(out))
         self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertIn(f"php-0.0.9-linux-x86_64.tar.gz in {out} is no tarball of v0.1.0-alpha.1", run.stderr)
+        self.assertIn(f"lela-0.0.9-linux-x86_64.tar.gz in {out} is no tarball of v0.1.0-alpha.1", run.stderr)
         self.assertEqual(self.calls(), [])
         self.assertFalse((out / "SHA256SUMS").exists())
 
@@ -271,7 +280,7 @@ if arguments[:1] == ["version"]:
     print(os.environ.get("DAEMON", "linux/amd64"))
 elif arguments[:2] == ["buildx", "build"]:
     stage = arguments[arguments.index("--output") + 1].removeprefix("type=local,dest=")
-    for path in ("bin/php", "bin/php-cgi", "sbin/php-fpm", "runtime-packages.txt"):
+    for path in ("bin/lela", "bin/lela-cgi", "sbin/lela-fpm", "runtime-packages.txt"):
         os.makedirs(os.path.dirname(os.path.join(stage, path)), exist_ok=True)
         open(os.path.join(stage, path), "w").write(path)
     os.chmod(stage, 0o700)
@@ -294,8 +303,8 @@ class BuildDryRun(Repository):
                 run = self.release("build", "v1.2.0", platform, "out", "--dry-run")
                 self.assertEqual(self.lines(run, "platform"), [platform])
                 self.assertEqual(self.lines(run, "commit"), [self.commit])
-                self.assertEqual(self.lines(run, "artifact"), [f"php-1.2.0-{platform}.tar.gz"])
-                self.assertEqual(self.lines(run, "smoke"), [f"php-1.2.0-{platform}.tar.gz on {platform}"])
+                self.assertEqual(self.lines(run, "artifact"), [f"lela-1.2.0-{platform}.tar.gz"])
+                self.assertEqual(self.lines(run, "smoke"), [f"lela-1.2.0-{platform}.tar.gz on {platform}"])
                 self.assertIn("dry run: nothing is built or smoked", run.stdout)
                 self.assertFalse(self.log.exists())
                 self.assertFalse((self.root / "out").exists())
@@ -318,34 +327,34 @@ class Build(Recorded):
         self.assertEqual(run.returncode, 0, run.stderr)
         version, build, smoke = self.calls()
         self.assertEqual(version[:2], ["docker", "version"])
-        stage = self.out() / "php-1.2.0-linux-x86_64"
+        stage = self.out() / "lela-1.2.0-linux-x86_64"
         self.assertEqual(build, [
             "docker", "buildx", "build", "-f", str(self.root / "dist/Dockerfile"), "--platform", "linux/amd64",
-            "--target", "binaries", "--build-arg", "CARGO_BUILD_JOBS=1", "--build-arg", "NAME=php",
+            "--target", "binaries", "--build-arg", "CARGO_BUILD_JOBS=1",
             "--output", f"type=local,dest={stage}", str(self.root),
         ])
         self.assertEqual(smoke[:8], [
             "docker", "run", "--rm", "--platform", "linux/amd64",
             "-v", f"{self.out()}:/release:ro", "-v",
         ])
-        self.assertEqual(smoke[8:13], [f"{self.root / 'dist'}:/dist:ro", "-e", "NAME=php", UBUNTU, "bash"])
-        self.assertIn("/release/php-1.2.0-linux-x86_64.tar.gz", smoke[-1])
+        self.assertEqual(smoke[8:11], [f"{self.root / 'dist'}:/dist:ro", UBUNTU, "bash"])
+        self.assertIn("/release/lela-1.2.0-linux-x86_64.tar.gz", smoke[-1])
         self.assertIn('/dist/smoke.sh "$d"', smoke[-1])
         listing = subprocess.run(
-            ["tar", "-tvzf", str(self.out() / "php-1.2.0-linux-x86_64.tar.gz")],
+            ["tar", "-tvzf", str(self.out() / "lela-1.2.0-linux-x86_64.tar.gz")],
             check=True, capture_output=True, text=True,
         ).stdout.splitlines()
         self.assertTrue(listing[0].startswith("drwxr-xr-x"), listing[0])
         for entry in listing:
             with self.subTest(entry=entry):
                 self.assertRegex(entry, r"\broot\s+root\b")
-        self.assertEqual(self.lines(run, "built"), [str(self.out() / "php-1.2.0-linux-x86_64.tar.gz")])
+        self.assertEqual(self.lines(run, "built"), [str(self.out() / "lela-1.2.0-linux-x86_64.tar.gz")])
 
     def test_a_failed_smoke_fails_the_build(self):
         self.git("tag", "v1.2.0")
         run = self.run_step("build", "v1.2.0", "linux-aarch64", str(self.out()), DAEMON="linux/arm64", FAILS="1")
         self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertIn("the smoke of php-1.2.0-linux-aarch64.tar.gz on linux-aarch64 failed", run.stderr)
+        self.assertIn("the smoke of lela-1.2.0-linux-aarch64.tar.gz on linux-aarch64 failed", run.stderr)
         self.assertNotIn("built ", run.stdout)
 
     def test_a_platform_is_built_on_its_own_alone(self):
@@ -424,17 +433,17 @@ class BuildDarwin(Recorded):
         cargo, smoke = self.calls()
         self.assertEqual(cargo, [
             "cargo", "build", "--release", "--locked", "-p", "php_sapi_cli", "-p", "php_sapi_cgi",
-            "-p", "php_sapi_fpm", "--bin", "php", "--bin", "php-cgi", "--bin", "php-fpm",
+            "-p", "php_sapi_fpm", "--bin", "lela", "--bin", "lela-cgi", "--bin", "lela-fpm",
         ])
         self.assertEqual(smoke, ["smoke", [
-            "bin/php", "bin/php-cgi", "etc/php.ini-development", "etc/php.ini-production", "sbin/php-fpm",
+            "bin/lela", "bin/lela-cgi", "etc/php.ini-development", "etc/php.ini-production", "sbin/lela-fpm",
         ]])
-        self.assertEqual(self.lines(run, "built"), [str(self.out / "php-1.2.0-darwin-arm64.tar.gz")])
+        self.assertEqual(self.lines(run, "built"), [str(self.out / "lela-1.2.0-darwin-arm64.tar.gz")])
 
     def test_a_host_without_its_signature_is_refused_before_the_smoke(self):
         run = self.run_step("build", "v1.2.0", "darwin-arm64", str(self.out), UNSIGNED="1", **self.env)
         self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertIn("php-1.2.0-darwin-arm64.tar.gz's bin/php carries no ad-hoc signature", run.stderr)
+        self.assertIn("lela-1.2.0-darwin-arm64.tar.gz's bin/lela carries no ad-hoc signature", run.stderr)
         self.assertEqual([c[0] for c in self.calls()], ["cargo"])
 
 

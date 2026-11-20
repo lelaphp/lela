@@ -35,9 +35,12 @@ real `build` or `publish` refuses a tree with changes and a tag that is
 not HEAD; `publish` uses gh, authorised to write the repository's
 releases.
 
-NAME (default php) is the hosts' name (ADR-0016), CARGO_BUILD_JOBS
-(default 1) reaches the Linux build, and SMOKE (default dist/smoke.sh) is
-the smoke a macOS tarball is given.
+The hosts and the tarballs are named after dist/Dockerfile's `ARG NAME`
+(ADR-0016), `lela`: a tarball holds `bin/lela`, `bin/lela-cgi`,
+`sbin/lela-fpm`, `etc/php.ini-development` and `etc/php.ini-production`,
+and a Linux one `runtime-packages.txt` too. CARGO_BUILD_JOBS (default 1)
+reaches the Linux build, and SMOKE (default dist/smoke.sh) is the smoke a
+macOS tarball is given.
 """
 
 import argparse
@@ -75,8 +78,20 @@ def tarball(ref, platform):
     return f"{name()}-{ref.version}-{platform}.tar.gz"
 
 
+def arg(key):
+    """The default dist/Dockerfile gives its `ARG <key>`."""
+    prefix = f"ARG {key}="
+    lines = (ROOT / "dist/Dockerfile").read_text().splitlines()
+    named = [line.removeprefix(prefix) for line in lines if line.startswith(prefix)]
+    if len(named) != 1:
+        raise Refusal(f"dist/Dockerfile names {len(named)} `{prefix}` lines, where it names one")
+    return named[0]
+
+
 def name():
-    return publish.setting("NAME")
+    """The hosts' name, dist/Dockerfile's `ARG NAME` (ADR-0016), which
+    xtask's tests hold to php_engine's PRODUCT_NAME."""
+    return arg("NAME")
 
 
 # Each Linux platform's tarball is dist/Dockerfile's binaries target, built
@@ -115,7 +130,7 @@ def stage_linux(stage, platform):
     subprocess.run([
         "docker", "buildx", "build", "-f", str(ROOT / "dist/Dockerfile"), "--platform", LINUX[platform],
         "--target", "binaries", "--build-arg", f"CARGO_BUILD_JOBS={publish.setting('CARGO_BUILD_JOBS')}",
-        "--build-arg", f"NAME={name()}", "--output", f"type=local,dest={stage}", str(ROOT),
+        "--output", f"type=local,dest={stage}", str(ROOT),
     ], check=True)
 
 
@@ -141,10 +156,7 @@ def smoke(platform, path):
     signature is read."""
     base = path.name.removesuffix(".tar.gz")
     if platform in LINUX:
-        ubuntu = next(
-            line.removeprefix("ARG UBUNTU=")
-            for line in (ROOT / "dist/Dockerfile").read_text().splitlines() if line.startswith("ARG UBUNTU=")
-        )
+        ubuntu = arg("UBUNTU")
         script = "\n".join([
             "set -euo pipefail",
             f"tar -xzf /release/{path.name} -C /tmp",
@@ -155,7 +167,7 @@ def smoke(platform, path):
         ])
         command = [
             "docker", "run", "--rm", "--platform", LINUX[platform],
-            "-v", f"{path.parent}:/release:ro", "-v", f"{ROOT / 'dist'}:/dist:ro", "-e", f"NAME={name()}",
+            "-v", f"{path.parent}:/release:ro", "-v", f"{ROOT / 'dist'}:/dist:ro",
             ubuntu, "bash", "-c", script,
         ]
         if subprocess.run(command).returncode != 0:

@@ -1055,7 +1055,7 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
 /// A fence marked `process` is served by the `php` binary in a process
 /// of its own and covered by what that process entered, a forked child's
 /// request beside its parent's; the same snippet unmarked is served by
-/// `php-linked` and forks that, never the harness (harness §8, revisions
+/// `lela-linked` and forks that, never the harness (harness §8, revisions
 /// 61 and 84).
 #[test]
 fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
@@ -1086,7 +1086,7 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     let (judgement, _) = only(&judge_text(&marked, &registry("")));
     assert_eq!(judgement, Judgement::Pass);
 
-    // Unmarked, the fence forks `php-linked`, which carries pcntl as the
+    // Unmarked, the fence forks `lela-linked`, which carries pcntl as the
     // CLI does and serves one request at a time: its child ends with its
     // own request and never reads the next, so the fence passes there too,
     // and nothing forks the harness (harness §8, revision 84).
@@ -1363,7 +1363,11 @@ fn with_the_oracle_absent_a_fence_the_engine_did_not_serve_is_named_and_not_miss
         panic!("{tally:#?}")
     };
     assert!(
-        unserved.contains("lib.rs") && unserved.contains("the php-fpm binary did not serve it"),
+        unserved.contains("lib.rs")
+            && unserved.contains(&format!(
+                "the {} binary did not serve it",
+                crate::oracle::hosts::FPM.binary
+            )),
         "{unserved}"
     );
     let reading = super::reading(
@@ -1375,9 +1379,10 @@ fn with_the_oracle_absent_a_fence_the_engine_did_not_serve_is_named_and_not_miss
     .unwrap();
     assert!(
         reading.message.contains("1 fence the engine did not serve")
-            && reading
-                .message
-                .contains("the php-fpm binary did not serve it"),
+            && reading.message.contains(&format!(
+                "the {} binary did not serve it",
+                crate::oracle::hosts::FPM.binary
+            )),
         "{}",
         reading.message
     );

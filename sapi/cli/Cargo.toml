@@ -1,5 +1,5 @@
 # sapi/cli: php's CLI, `php-src/sapi/cli`, one crate under `sapi/` (ADR-0008),
-# the binary `php`: the bundle's enabled set on one engine, the tier the
+# the binary `lela` (ADR-0016): the bundle's enabled set on one engine, the tier the
 # bundle names, the command line read as php's CLI reads it. Four edges,
 # php_bundle, php_sapi, php_proto, and php_ext for the natives it declares
 # itself (ADR-0008 as amended 2026-10-01); the engine is named through the
@@ -14,13 +14,13 @@ edition.workspace = true
 license = "MIT AND BSD-3-Clause AND PostgreSQL"
 rust-version.workspace = true
 publish = false
-description = "php's CLI host, the binary php"
+description = "php's CLI host, the binary lela"
 
 [lints]
 workspace = true
 
 [[bin]]
-name = "php"
+name = "lela"
 path = "src/main.rs"
 
 # The engine the witness and crosscheck lanes serve a snippet through, in a
@@ -29,7 +29,7 @@ path = "src/main.rs"
 # natives each entered written beside what it printed (harness §8, revision
 # 84). The harness links no engine of its own.
 [[bin]]
-name = "php-linked"
+name = "lela-linked"
 path = "src/linked.rs"
 required-features = ["linked"]
 
@@ -42,7 +42,7 @@ required-features = ["linked"]
 # features the host is built with no tier, the build G1 holds the door
 # cost against (`xtask bench`'s `no-jit-feature` arm).
 default = ["php_bundle/jit"]
-# `php-linked`: the bundle's `linked` set, this host's own and the two
+# `lela-linked`: the bundle's `linked` set, this host's own and the two
 # extensions no host links, so every extension feature (harness §8,
 # revision 84).
 linked = ["php_bundle/linked", "php_bundle/test"]

@@ -33,7 +33,7 @@ fn a_spilled_form_is_parsed_without_holding_it_whole() {
         "<?php echo count($_POST), ' ', strlen($_POST['a']), \"\\n\";\n",
     )
     .unwrap();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .env_clear()
         .env("GATEWAY_INTERFACE", "CGI/1.1")
         .env("REDIRECT_STATUS", "200")
@@ -103,7 +103,7 @@ fn a_form_whose_spill_directory_is_missing_spills_after_php_s_notice() {
     let mut body = b"a=1&big=".to_vec();
     body.resize(body.len() + 20_000, b'x');
     body.extend_from_slice(b"&b=two");
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lela-cgi"))
         .env_clear()
         .env("GATEWAY_INTERFACE", "CGI/1.1")
         .env("REDIRECT_STATUS", "200")

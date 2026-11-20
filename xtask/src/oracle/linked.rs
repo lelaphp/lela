@@ -41,13 +41,13 @@
 //! a `stderr` fence is held to what the engine wrote and a witness with
 //! no such fence asserts the engine wrote nothing there.
 //!
-//! **A process of its own.** The engine is `sapi/cli`'s `php-linked`,
+//! **A process of its own.** The engine is `sapi/cli`'s `lela-linked`,
 //! built with the bundle's `linked` set in the lanes' profile at the
 //! first snippet that asks for it, from the workspace this harness was
 //! built in, and the harness links no engine of its own (harness §8,
 //! revision 84): an edit under `crates/` or `ext/` rebuilds that
 //! binary, never the one every hook runs. A thread that serves takes an
-//! idle `php-linked --serve`, or starts one, hands it the snippet as a
+//! idle `lela-linked --serve`, or starts one, hands it the snippet as a
 //! request of files in a directory of its own, and leaves it idle again
 //! for the next, so as many run as threads serve at once and they outlive
 //! one crate's pool into the next crate's; the binary builds a fresh
@@ -79,7 +79,7 @@ use crate::scratch::Tree;
 
 /// The host whose binary serves the snippets, its package and binary.
 const PACKAGE: &str = "php_sapi_cli";
-const BINARY: &str = "php-linked";
+const BINARY: &str = super::hosts::LINKED;
 
 /// One snippet through the linked engine under `recipe`, and under
 /// `regime` after it where a run names one, refused where the regime
@@ -97,7 +97,7 @@ pub(crate) fn serve(
     serve_by(None, recipe, regime, snippet).map(|(observed, _)| observed)
 }
 
-/// [`serve`] by `server`, a binary standing for `php-linked` that a test
+/// [`serve`] by `server`, a binary standing for `lela-linked` that a test
 /// hands a lane to serve through one that misbehaves, or the one
 /// built from the workspace where none is named; with the natives the
 /// request entered beside what it observed, in the order it entered them,
@@ -213,7 +213,7 @@ impl Environ {
     }
 }
 
-/// A running `php-linked --serve`, the binary it runs and the environment
+/// A running `lela-linked --serve`, the binary it runs and the environment
 /// it runs under, and the two ends of its pipes.
 struct Server {
     binary: PathBuf,

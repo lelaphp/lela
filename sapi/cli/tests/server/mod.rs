@@ -68,7 +68,7 @@ impl Server {
                 std::fs::write(root.join(file), text)
                     .unwrap_or_else(|e| panic!("writing {file}: {e}"));
             }
-            let mut child = Command::new(env!("CARGO_BIN_EXE_php"))
+            let mut child = Command::new(env!("CARGO_BIN_EXE_lela"))
                 .arg("-n")
                 .args(args)
                 .arg("-S")

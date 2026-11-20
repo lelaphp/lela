@@ -663,7 +663,12 @@ pub(super) fn serve(
                 witness.regime.as_deref(),
                 &features(witness, regime),
             )
-            .context("the php binary did not serve it"),
+            .with_context(|| {
+                format!(
+                    "the {} binary did not serve it",
+                    crate::oracle::hosts::CLI.binary
+                )
+            }),
         served @ (Served::Cgi | Served::Fpm | Served::Makala | Served::Phpdbg) => {
             let request = witness.request.as_deref().unwrap_or_default();
             let regime = witness.regime.as_deref();
