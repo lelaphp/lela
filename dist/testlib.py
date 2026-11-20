@@ -30,7 +30,7 @@ WHEN = "2026-11-19T12:34:56Z"
 EPOCH = "1795091696"
 # The programs tools/ links where the machine has them: none is docker,
 # gh or cargo.
-TOOLS = ("git", "cat", "mv", "rm", "sha256sum", "shasum", "cc", "codesign")
+TOOLS = ("git", "cat", "mv", "rm", "sha256sum", "shasum", "cc", "codesign", "otool", "install_name_tool")
 
 
 def manifest(version):

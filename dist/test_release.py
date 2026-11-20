@@ -4,6 +4,7 @@ version the test names, beside the publish script the images come from."""
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -16,7 +17,8 @@ from testlib import IMAGE, ROOT, VARIANTS, manifest
 class Repository(testlib.Repository):
     version = "1.2.0"
     files = (
-        ".gitignore", "dist/release.py", "dist/publish.py", "dist/Dockerfile", "scripts/dist-sums.sh",
+        ".gitignore", "dist/release.py", "dist/bundle.py", "dist/publish.py", "dist/Dockerfile",
+        "scripts/dist-sums.sh",
     )
 
     def release(self, *arguments, env=None):
@@ -308,6 +310,15 @@ class BuildDryRun(Repository):
                 self.assertIn("dry run: nothing is built or smoked", run.stdout)
                 self.assertFalse(self.log.exists())
                 self.assertFalse((self.root / "out").exists())
+                if platform == "darwin-arm64":
+                    self.assertEqual(self.lines(run, "bundle"), [
+                        "under lib/: every library bin/lela, bin/lela-cgi, sbin/lela-fpm load outside /usr/lib "
+                        "and /System, and every library those load",
+                        f"no hosts built in {self.root / 'target/release'} on this machine, "
+                        "so the libraries are named once they are",
+                    ])
+                else:
+                    self.assertEqual(self.lines(run, "bundle"), [])
 
     def test_a_platform_the_release_has_not_is_refused(self):
         run = self.release("build", "v1.2.0", "freebsd-x86_64", "out", "--dry-run")
@@ -379,7 +390,10 @@ class Build(Recorded):
 
 # A cargo that records its call and links each host the build names as a
 # program of nothing, which the macOS linker signs ad hoc as it signs the
-# real hosts; UNSIGNED takes that signature off again.
+# real hosts; UNSIGNED takes that signature off again. Where KEGS names a
+# directory, it lays a Homebrew prefix there of one keg, zz 1.0_1, whose
+# library each host calls by the keg's opt path, as the real hosts call
+# the kegs they link.
 CARGO = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys
 arguments = sys.argv[1:]
@@ -387,10 +401,22 @@ with open(os.environ["CALLS"], "a") as log:
     log.write(json.dumps(["cargo", *arguments]) + "\n")
 release = os.path.join(os.environ["CARGO_TARGET_DIR"], "release")
 os.makedirs(release, exist_ok=True)
+source, link = b"int main(void){return 0;}\n", []
+if os.environ.get("KEGS"):
+    kegs = os.environ["KEGS"]
+    lib = os.path.join(kegs, "Cellar/zz/1.0_1/lib")
+    os.makedirs(lib)
+    open(os.path.join(kegs, "Cellar/zz/1.0_1/COPYING"), "w").write("zz's licence\n")
+    os.makedirs(os.path.join(kegs, "opt"))
+    os.symlink("../Cellar/zz/1.0_1", os.path.join(kegs, "opt/zz"))
+    subprocess.run(["cc", "-x", "c", "-", "-dynamiclib", "-o", os.path.join(lib, "libzz.1.dylib"),
+                    "-install_name", os.path.join(kegs, "opt/zz/lib/libzz.1.dylib")],
+                   input=b"int zz(void){return 0;}\n", check=True)
+    source, link = b"int zz(void); int main(void){return zz();}\n", ["-x", "none", os.path.join(kegs, "opt/zz/lib/libzz.1.dylib")]
 for i, a in enumerate(arguments):
     if a == "--bin":
         host = os.path.join(release, arguments[i + 1])
-        subprocess.run(["cc", "-x", "c", "-", "-o", host], input=b"int main(void){return 0;}\n", check=True)
+        subprocess.run(["cc", "-x", "c", "-", *link, "-o", host], input=source, check=True)
         if os.environ.get("UNSIGNED"):
             subprocess.run(["codesign", "--remove-signature", host], check=True)
 '''
@@ -436,9 +462,46 @@ class BuildDarwin(Recorded):
             "-p", "php_sapi_fpm", "--bin", "lela", "--bin", "lela-cgi", "--bin", "lela-fpm",
         ])
         self.assertEqual(smoke, ["smoke", [
-            "bin/lela", "bin/lela-cgi", "etc/php.ini-development", "etc/php.ini-production", "sbin/lela-fpm",
+            "bin/lela", "bin/lela-cgi", "bundled-libraries.txt", "etc/php.ini-development",
+            "etc/php.ini-production", "sbin/lela-fpm",
         ]])
+        self.assertRegex("\n".join(self.lines(run, "bundle")), r"^macos \d+\.\d+$")
         self.assertEqual(self.lines(run, "built"), [str(self.out / "lela-1.2.0-darwin-arm64.tar.gz")])
+
+    def test_the_libraries_the_hosts_load_are_bundled_and_run_with_their_keg_gone(self):
+        kegs = self.scratch / "homebrew"
+        run = self.run_step("build", "v1.2.0", "darwin-arm64", str(self.out), KEGS=str(kegs), **self.env)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.lines(run, "bundle")[1:], ["lib/libzz.1.dylib zz 1.0_1"])
+        _, smoke = self.calls()
+        self.assertEqual(smoke, ["smoke", [
+            "bin/lela", "bin/lela-cgi", "bundled-libraries.txt", "etc/php.ini-development",
+            "etc/php.ini-production", "lib/libzz.1.dylib", "licenses/zz/COPYING", "sbin/lela-fpm",
+        ]])
+        unpacked = self.scratch / "unpacked"
+        unpacked.mkdir()
+        subprocess.run(["tar", "-xzf", str(self.out / "lela-1.2.0-darwin-arm64.tar.gz"), "-C", str(unpacked)], check=True)
+        tree = unpacked / "lela-1.2.0-darwin-arm64"
+        names = subprocess.run(["otool", "-L", str(tree / "sbin/lela-fpm")], check=True, capture_output=True, text=True)
+        self.assertIn("\t@loader_path/../lib/libzz.1.dylib (compatibility version", names.stdout)
+        self.assertNotIn(str(kegs), names.stdout)
+        shutil.rmtree(kegs)
+        for host in ("bin/lela", "bin/lela-cgi", "sbin/lela-fpm"):
+            with self.subTest(host=host):
+                self.assertEqual(subprocess.run([str(tree / host)]).returncode, 0)
+
+    def test_the_dry_run_names_what_the_hosts_built_here_load(self):
+        cargo = subprocess.run(
+            [str(self.bin / "cargo"), "build", "--bin", "lela", "--bin", "lela-cgi", "--bin", "lela-fpm"],
+            env={**os.environ, "CALLS": str(self.log), "KEGS": str(self.scratch / "homebrew"), **self.env},
+        )
+        self.assertEqual(cargo.returncode, 0)
+        run = self.run_step("build", "v1.2.0", "darwin-arm64", str(self.out), "--dry-run", **self.env)
+        self.assertEqual(self.lines(run, "bundle")[1:], [
+            f"read from the hosts in {self.scratch / 'target/release'}", "lib/libzz.1.dylib zz 1.0_1",
+        ])
+        self.assertEqual([c[0] for c in self.calls()], ["cargo"])
+        self.assertFalse(self.out.exists())
 
     def test_a_host_without_its_signature_is_refused_before_the_smoke(self):
         run = self.run_step("build", "v1.2.0", "darwin-arm64", str(self.out), UNSIGNED="1", **self.env)

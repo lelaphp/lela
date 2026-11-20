@@ -18,8 +18,13 @@ does that alone and prints the version.
 of that architecture, and no platform on a machine of another. It then
 unpacks the tarball and runs dist/smoke.sh over it on this machine: a
 Linux one in the Ubuntu image the Dockerfile builds on, with its
-runtime-packages.txt installed, and the macOS hosts once each is read to
-carry the linker's ad-hoc signature.
+runtime-packages.txt installed, and the macOS hosts once every Mach-O in
+the tarball is read to carry an ad-hoc signature. A macOS tarball carries
+the libraries its hosts load outside the system's under lib/, each name
+rewritten relative to the file that carries it and each rewritten file
+signed again ad hoc, with the kegs' licences and the list of them, which
+dist/bundle.py lays; its dry run names the libraries the hosts built here
+load, where they are built.
 
 `publish` takes the three tarballs from <dir>, and no other, writes
 SHA256SUMS over them with scripts/dist-sums.sh, and creates the tag's
@@ -38,7 +43,8 @@ releases.
 The hosts and the tarballs are named after dist/Dockerfile's `ARG NAME`
 (ADR-0016), `lela`: a tarball holds `bin/lela`, `bin/lela-cgi`,
 `sbin/lela-fpm`, `etc/php.ini-development` and `etc/php.ini-production`,
-and a Linux one `runtime-packages.txt` too. CARGO_BUILD_JOBS (default 1)
+a Linux one `runtime-packages.txt` too, and a macOS one `lib/`,
+`licenses/<keg>/` and `bundled-libraries.txt`. CARGO_BUILD_JOBS (default 1)
 reaches the Linux build, and SMOKE (default dist/smoke.sh) is the smoke a
 macOS tarball is given.
 """
@@ -56,6 +62,7 @@ from pathlib import Path
 # The images' script, beside this one; the checkout ignores the bytecode
 # the import leaves in dist/__pycache__.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bundle  # noqa: E402
 import publish  # noqa: E402
 
 ROOT = publish.ROOT
@@ -110,18 +117,52 @@ def native(platform):
     publish.native(LINUX[platform], platform)
 
 
+def darwin_hosts():
+    """The macOS hosts by their path in the tarball's directory."""
+    return (f"bin/{name()}", f"bin/{name()}-cgi", f"sbin/{name()}-fpm")
+
+
+def built_darwin():
+    """Where cargo's release build leaves the macOS hosts."""
+    return Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target") / "release"
+
+
 def stage_darwin(stage):
-    """The hosts built here with cargo, and php's ini files beside them."""
+    """The hosts built here with cargo, laid with what they load."""
     subprocess.run([
         "cargo", "build", "--release", "--locked", "-p", "php_sapi_cli", "-p", "php_sapi_cgi", "-p", "php_sapi_fpm",
         "--bin", name(), "--bin", f"{name()}-cgi", "--bin", f"{name()}-fpm",
     ], cwd=ROOT, check=True)
-    built = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target") / "release"
-    for directory, host in (("bin", name()), ("bin", f"{name()}-cgi"), ("sbin", f"{name()}-fpm")):
-        (stage / directory).mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(built / host, stage / directory / host)
-        (stage / directory / host).chmod(0o755)
+    lay_darwin(stage, built_darwin())
+
+
+def lay_darwin(stage, built):
+    """The hosts from `built`, php's ini files beside them, and the
+    libraries they load outside the system's under lib/, with the list of
+    them and their licences (dist/bundle.py)."""
+    hosts = [stage / host for host in darwin_hosts()]
+    for host in hosts:
+        host.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(built / host.name, host)
+        host.chmod(0o755)
     subprocess.run([sys.executable, str(ROOT / "dist/inputs.py"), "ini", str(stage / "etc")], cwd=ROOT, check=True)
+    for line in bundle.bundle(stage, hosts):
+        print(f"bundle {line}")
+
+
+def dry_darwin():
+    """What a darwin build would bundle: the rule, and the libraries the
+    hosts built here now load, where all three are."""
+    print(f"bundle under lib/: every library {', '.join(darwin_hosts())} load outside /usr/lib and /System, "
+          "and every library those load")
+    built = built_darwin()
+    hosts = [built / Path(host).name for host in darwin_hosts()]
+    if pyplatform.system() != "Darwin" or not all(host.is_file() for host in hosts):
+        print(f"bundle no hosts built in {built} on this machine, so the libraries are named once they are")
+        return
+    print(f"bundle read from the hosts in {built}")
+    for library in bundle.closure(hosts):
+        print(f"bundle lib/{library.name} {library.keg} {library.version}")
 
 
 def stage_linux(stage, platform):
@@ -153,7 +194,7 @@ def smoke(platform, path):
     """dist/smoke.sh over the tarball itself, unpacked on its platform: a
     Linux one in the Ubuntu image the Dockerfile builds on, with its
     runtime-packages.txt installed; the macOS hosts after their ad-hoc
-    signature is read."""
+    signature is read on every Mach-O in it."""
     base = path.name.removesuffix(".tar.gz")
     if platform in LINUX:
         ubuntu = arg("UBUNTU")
@@ -177,10 +218,10 @@ def smoke(platform, path):
         with tarfile.open(path) as archive:
             archive.extractall(scratch, filter="tar")
         unpacked = Path(scratch) / base
-        for host in (f"bin/{name()}", f"bin/{name()}-cgi", f"sbin/{name()}-fpm"):
-            signed = subprocess.run(["codesign", "-dv", str(unpacked / host)], capture_output=True, text=True)
+        for macho in bundle.machos(unpacked):
+            signed = subprocess.run(["codesign", "-dv", str(macho)], capture_output=True, text=True)
             if "Signature=adhoc" not in signed.stderr.splitlines():
-                raise Refusal(f"{path.name}'s {host} carries no ad-hoc signature")
+                raise Refusal(f"{path.name}'s {macho.relative_to(unpacked)} carries no ad-hoc signature")
         if subprocess.run([publish.setting("SMOKE"), str(unpacked)]).returncode != 0:
             raise Refusal(f"the smoke of {path.name} on {platform} failed")
 
@@ -199,6 +240,8 @@ def build_tarball(ref, commit, arguments):
     print(f"artifact {artifact}")
     print(f"smoke {artifact} on {platform}")
     if arguments.dry_run:
+        if platform == "darwin-arm64":
+            dry_darwin()
         print("dry run: nothing is built or smoked")
         return
     arguments.out.mkdir(parents=True, exist_ok=True)

@@ -203,9 +203,10 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
   daemon of that architecture. It then smokes the tarball itself, unpacked:
   `dist/smoke.sh` runs `-v`, `-r`, a file with arguments, code on stdin,
   `lela-cgi` on a file and `lela-fpm -t`, a Linux tarball in the Ubuntu image
-  the Dockerfile builds on with its `runtime-packages.txt` installed. The
-  macOS hosts keep the linker's ad-hoc signature, which `build` reads
-  before the smoke, with no Developer ID and no notarization.
+  the Dockerfile builds on with its `runtime-packages.txt` installed. A
+  macOS tarball carries its libraries, below, and each Mach-O in it an
+  ad-hoc signature, which `build` reads before the smoke, with no
+  Developer ID and no notarization.
 - `publish` takes the three tarballs from the directory, refusing a
   missing one or one of another version, writes `SHA256SUMS` over them
   with `scripts/dist-sums.sh`, and creates the GitHub Release of the tag
@@ -239,6 +240,49 @@ tarball, `lela-<version>-<platform>.tar.gz`, holds one directory of that
 name with `bin/lela`, `bin/lela-cgi`, `sbin/lela-fpm`,
 `etc/php.ini-development` and `etc/php.ini-production`, and a Linux one
 `runtime-packages.txt` beside them. No tarball holds a `php`.
+
+### The macOS tarball's libraries
+
+The macOS hosts link libraries of Homebrew's kegs, which a Mac that runs
+the tarball need not have, so the tarball carries them (#16, #33).
+`dist/bundle.py` reads each host with `otool -l` and follows every library
+it loads outside `/usr/lib` and `/System`, by an absolute path,
+`@loader_path`, `@executable_path` or `@rpath`, and every library those
+load, as dyld would. It copies each library's real file into `lib/` under
+the file name of its own install name, rewrites each name to
+`@loader_path/../lib/<name>` in a host and `@loader_path/<name>` in a
+library, makes a library's own install name `@rpath/<name>`, deletes every
+run path that is not the system's, and signs each rewritten file again ad
+hoc, since arm64 refuses one whose signature no longer matches. No path of
+the build machine is left in a name, so the directory runs from wherever it
+is unpacked or moved to.
+
+```
+lela-<version>-darwin-arm64/
+  bin/lela  bin/lela-cgi  sbin/lela-fpm
+  etc/php.ini-development  etc/php.ini-production
+  lib/<each library>
+  licenses/<keg>/<each licence file of the keg>
+  bundled-libraries.txt
+```
+
+`bundled-libraries.txt` says `macos <version>` on its first line, the
+oldest macOS the tarball runs on, the highest `LC_BUILD_VERSION` minimum
+of any Mach-O in it, which the build runner's bottles set; each line after
+is `lib/<name> <keg> <version>`. A library in no keg
+(`<prefix>/Cellar/<keg>/<version>/`), a keg with no `LICENSE*`, `LICENCE*`,
+`COPYING*` or `NOTICE*` file, a name found nowhere and two libraries of
+one file name are each refused by name. The staging reads the stage again
+once it has rewritten it, and refuses a name still outside it and the
+system's; `dist/smoke.sh` holds the unpacked tarball to the same with
+`otool -L`, `otool -l` and `codesign --verify` (`dist/smoke.sh --machos
+<dir>` alone), then runs the hosts in a sandbox that denies reading
+Homebrew's prefix, where `brew` and `sandbox-exec` are on the machine.
+`dist/release.py build ... darwin-arm64 ... --dry-run` names the libraries
+the hosts in `target/release` load, where all three are built.
+
+The program to put on `PATH` is `bin/lela` of the unpacked directory, by a
+link to it: a copy of `bin/lela` alone finds no `../lib`.
 
 ## The compiled tier
 
@@ -282,8 +326,13 @@ its steps against a docker, a cargo and a gh that record what they are
 asked. Both run their script in a repository of the test's own, laid
 down by `testlib.py`, on a PATH of the test's own directories alone: the
 recording tools, and links to git and the few programs the scripts call
-that are no docker, gh or cargo.
-They do not build or run platform binaries.
+that are no docker, gh or cargo. `test_bundle.py` holds the macOS
+bundling on stand-in Mach-O files, answered in the real `otool -l` text
+captured in `fixtures/otool/`. No test builds or runs a host; on an Apple
+silicon Mac the darwin tests link programs and libraries of a few lines
+with `cc`, in the forms Homebrew's kegs take, bundle them with the real
+`otool`, `install_name_tool` and `codesign`, and run them with their keg
+removed.
 
 To exercise real downloads without installing anything:
 
