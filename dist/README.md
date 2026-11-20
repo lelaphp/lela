@@ -69,6 +69,51 @@ dist/smoke.sh --image lela:fpm fpm
 dist/smoke.sh --image lela:apache apache
 ```
 
+### Publishing the images
+
+`dist/publish.py` publishes one ref's images to `ghcr.io/lelaphp/lela`, in
+two steps, so that each platform builds on a machine of its own
+architecture. The ref is `main` or a release's tag, `v<version>`:
+
+```sh
+dist/publish.py build main --digests /tmp/digests-arm64
+dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
+```
+
+- `build` builds the three variants for the daemon's platform, or the one
+  `--platform` names, and loads each; runs the smoke's image mode over
+  each; and only once all three have passed, pushes each by digest with
+  BuildKit's SBOM attached. A failed smoke pushes nothing. It writes one
+  `<platform> <variant> <digest>` line per variant.
+- `join` reads both platforms' lines and puts each variant's two images
+  under one manifest list, carrying every tag of the variant:
+
+  | ref | tags |
+  |---|---|
+  | `main` | `edge-<variant>`, and `sha-<commit>-<variant>` with the full commit |
+  | `v<version>` | `<version>-<variant>`, and the bare `<variant>` unless the version is a pre-release or older than a release tag the checkout holds |
+
+Each image is labelled, and each list annotated, with standard OCI keys
+alone: `source`, `revision`, `version` (`edge` from `main`) and
+`licenses`, read from the workspace manifest's package table, and
+`description`, `Lela`, which replaces the Ubuntu base's. `--dry-run`
+prints the platform, the labels, the tags and the digests each step would
+push, and pushes nothing:
+
+```sh
+dist/publish.py build v0.1.0 --platform linux/amd64 --dry-run
+dist/publish.py join v0.1.0 --dry-run
+```
+
+`dist/prune.py` deletes the versions no tag is pulled by: one last updated
+more than 30 days ago whose tags are all `sha-` tags, or which has none,
+unless a kept manifest list names it or it is a referrer of a kept one. A
+version tag, a bare variant, an `edge-` tag and a tag of any other kind
+are never deleted. `dist/prune.py --dry-run` names each version it would
+delete, and deletes none. CI runs both scripts; a person runs them with
+`gh` authorised for the organisation's packages and docker logged in to
+`ghcr.io`.
+
 ## A release by hand
 
 Until CD builds the release, a person builds it on an Apple silicon Mac
@@ -112,8 +157,8 @@ docker run --rm --platform linux/arm64 -v /tmp/release:/release:ro -v "$PWD/dist
 ```
 
 The macOS binaries carry the linker's ad-hoc signature, with no Developer
-ID and no notarization. Nothing here tags, pushes or publishes;
-that is a person's.
+ID and no notarization. Nothing in this section tags, pushes or
+publishes; that is a person's.
 
 ## The compiled tier
 
@@ -147,7 +192,11 @@ drift, toolchain channel/component drift, both installer architectures, and the
 FPM templates rendered as the official fpm image's `configure` renders them;
 with the pinned php-src tree at `TEST_PHP_SRCDIR`, they also hold the real
 templates to their pins. `test_smoke.py` holds the smoke's refusal of
-arguments it does not take. They do not build or run platform binaries.
+arguments it does not take. `test_publish.py` holds the publish script's
+dry run for a commit on `main`, a release and a pre-release, and its two
+steps against a docker that records what it is asked; `test_prune.py`
+holds the deletion script's dry run over the listing in `fixtures/`.
+They do not build or run platform binaries.
 
 To exercise real downloads without installing anything:
 
