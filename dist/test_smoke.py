@@ -28,7 +28,7 @@ class SmokeArguments(unittest.TestCase):
                 self.assertIn("--image <image> cli|fpm|apache", run.stderr)
 
     def test_no_directory_or_two_are_refused(self):
-        for arguments in ((), ("a", "b"), ("--unknown",)):
+        for arguments in ((), ("a", "b"), ("--unknown",), ("--machos",), ("--machos", "a", "b")):
             with self.subTest(arguments=arguments):
                 run = self.smoke(*arguments)
                 self.assertEqual(run.returncode, 2, run.stderr)
