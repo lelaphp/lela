@@ -407,11 +407,12 @@ captured in `fixtures/otool/`. No test builds or runs a host; on an Apple
 silicon Mac the darwin tests link programs and libraries of a few lines
 with `cc`, in the forms Homebrew's kegs take, bundle them with the real
 `otool`, `install_name_tool` and `codesign`, and run them with their keg
-removed. `test_apt.py` holds `apt.sh`, the one way the Dockerfile runs
-apt, against an `apt-get` that fails as the test says: which steps it
-tries again, how often and after what wait, and the status a mirror that
-stays down leaves; and that no `RUN` of the Dockerfile runs apt except
-through it.
+removed. `test_apt.py` holds `apt.sh`, the one way the Dockerfile and
+the oracle's, `ci/oracle/Dockerfile`, run apt, against an `apt-get` that
+fails as the test says: which steps it tries again, how often and after
+what wait, and the status a mirror that stays down leaves; that no `RUN`
+of either Dockerfile runs apt except through it; and that
+`scripts/oracle-build.py` lays it in the oracle's build context.
 
 To exercise real downloads without installing anything:
 

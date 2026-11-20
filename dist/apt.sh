@@ -1,6 +1,7 @@
 #!/bin/sh
-# Every apt step of dist/Dockerfile, which each RUN that installs packages
-# bind-mounts at /tmp/apt.sh, so no image keeps it:
+# Every apt step of dist/Dockerfile and of ci/oracle/Dockerfile, which each
+# RUN that installs packages bind-mounts at /tmp/apt.sh, so no image keeps
+# it (scripts/oracle-build.py lays it in the oracle's build context):
 #
 #   sh /tmp/apt.sh update
 #   sh /tmp/apt.sh install <package>...

@@ -1,12 +1,14 @@
-"""dist/apt.sh, the one way dist/Dockerfile runs apt, held offline: each
-step it retries, how often and how long it waits, what it passes apt, and
-that every apt step of the Dockerfile goes through it.
+"""dist/apt.sh, the one way dist/Dockerfile and ci/oracle/Dockerfile run
+apt, held offline: each step it retries, how often and how long it waits,
+what it passes apt, and that every apt step of either Dockerfile goes
+through it.
 
 The script runs with a PATH of one directory, the test's, where an
 `apt-get` that exits as the test says and a `sleep` that returns at once
 record each call; nothing reaches a mirror and nothing waits.
 """
 
+import importlib.util
 import re
 import subprocess
 import tempfile
@@ -17,17 +19,20 @@ from test_inputs import stages
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "dist/apt.sh"
+# dist/Dockerfile's context is the checkout; the oracle's is the directory
+# scripts/oracle-build.py fills, where the script is apt.sh.
 MOUNT = "--mount=type=bind,source=dist/apt.sh,target=/tmp/apt.sh"
+ORACLE_MOUNT = "--mount=type=bind,source=apt.sh,target=/tmp/apt.sh"
 OPTIONS = ["-o", "Acquire::Retries=5", "-o", "APT::Update::Error-Mode=any"]
 INSTALL = ["install", "-y", "-qq", "--no-install-recommends"]
 # What the stand-in prints on a failed try, as apt does on a 502 with no body.
 FAILURE = "E: Failed to fetch http://ports.ubuntu.com/ubuntu-ports/dists/resolute/InRelease  502  Bad Gateway"
 
 
-def unguarded(text):
+def unguarded(text, mount=MOUNT):
     """Each RUN of a Dockerfile that runs apt other than through
-    /tmp/apt.sh, or runs /tmp/apt.sh without mounting dist/apt.sh there,
-    as (stage, instruction)."""
+    /tmp/apt.sh, or runs /tmp/apt.sh without `mount`, the bind of the
+    script there from the Dockerfile's context, as (stage, instruction)."""
     found = []
     for name, stage in stages(text).items():
         for keyword, rest in stage["instructions"]:
@@ -35,7 +40,7 @@ def unguarded(text):
                 continue
             # apt or apt-get as a command word, not a path such as /var/lib/apt.
             bare = re.search(r"(?<![\w/.-])apt(-get)?(?=\s)", rest)
-            if bare or ("/tmp/apt.sh" in rest and MOUNT not in rest.split()):
+            if bare or ("/tmp/apt.sh" in rest and mount not in rest.split()):
                 found.append((name, rest))
     return found
 
@@ -62,6 +67,27 @@ class DockerfileSteps(unittest.TestCase):
             with self.subTest(run=run):
                 self.assertEqual(len(unguarded(f"FROM ubuntu AS one\n{run}\n")), 1)
         self.assertEqual(unguarded(f"FROM ubuntu AS one\nRUN {MOUNT} sh /tmp/apt.sh update\n"), [])
+
+    def test_every_apt_step_of_the_oracle_s_dockerfile_goes_through_apt_sh(self):
+        text = (ROOT / "ci/oracle/Dockerfile").read_text()
+        self.assertEqual(unguarded(text, ORACLE_MOUNT), [])
+        updates = {
+            name for name, stage in stages(text).items()
+            for keyword, rest in stage["instructions"]
+            if keyword == "RUN" and "sh /tmp/apt.sh update;" in rest
+        }
+        self.assertEqual(updates, {"deps"})
+        # The checkout's mount names a file the oracle's context does not hold.
+        mounted = text.replace(ORACLE_MOUNT, MOUNT)
+        self.assertEqual([name for name, _ in unguarded(mounted, ORACLE_MOUNT)], ["deps"])
+
+    def test_the_oracle_s_build_context_carries_apt_sh(self):
+        # scripts/oracle-build.py, loaded as a module: its main() runs only as a script.
+        spec = importlib.util.spec_from_file_location("oracle_build", ROOT / "scripts/oracle-build.py")
+        recipe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(recipe)
+        self.assertEqual(recipe.CONTEXT["apt.sh"], SCRIPT)
+        self.assertEqual(recipe.DOCKERFILE, ROOT / "ci/oracle/Dockerfile")
 
 
 class Script(unittest.TestCase):
