@@ -11,7 +11,11 @@
 # one-pool configuration, each host by the name ADR-0016 gives it, the
 # default of the `ARG NAME` of the Dockerfile beside this script. A Linux tarball's libraries are the Ubuntu packages its
 # runtime-packages.txt lists, installed first: dist/README.md runs it in
-# the Ubuntu image dist/Dockerfile builds on.
+# the Ubuntu image dist/Dockerfile builds on. A macOS tarball's are under
+# its lib/: first every Mach-O in it is held to name only the system's
+# libraries and the tarball's own (`--machos`, below), and then the hosts
+# run with the machine's Homebrew prefix out of their reach, by a sandbox
+# that denies reading it, wherever brew and sandbox-exec are there.
 #
 # Over an image of one variant, on the image's own platform: the same
 # checks inside it over the hosts in /usr/local, `lela-fpm -t` where the
@@ -26,6 +30,7 @@ set -euo pipefail
 
 usage() {
 	echo "usage: $0 <dir>" >&2
+	echo "       $0 --machos <dir>" >&2
 	echo "       $0 --image <image> cli|fpm|apache" >&2
 	exit 2
 }
@@ -51,21 +56,22 @@ check() {
 }
 
 # The hosts under one prefix, `<dir>/bin` and `<dir>/sbin`; the FPM's check
-# only where the second argument says it is there.
+# only where the second argument says it is there. Each host runs under
+# JAIL, a command prefix that `reach` sets, or none.
 hosts() {
 	local dir=$1 fpm=$2
 	local php="$dir/bin/$NAME" cgi="$dir/bin/$NAME-cgi" scratch
 	scratch=$(mktemp -d)
 	# shellcheck disable=SC2064 # the directory is this call's
 	trap "rm -rf '$scratch'" EXIT
-	"$php" -v
-	check "-r" "2" "$php" -n -r 'echo 1 + 1;'
+	${JAIL[@]+"${JAIL[@]}"} "$php" -v
+	check "-r" "2" ${JAIL[@]+"${JAIL[@]}"} "$php" -n -r 'echo 1 + 1;'
 	# shellcheck disable=SC2016 # php's $argv, not the shell's
 	printf '<?php echo implode(",", array_slice($argv, 1));' > "$scratch/args.php"
-	check "file with arguments" "a,b c" "$php" -n "$scratch/args.php" a "b c"
-	check "stdin" "OK" "$php" -n <<<'<?php echo strtoupper("ok");'
+	check "file with arguments" "a,b c" ${JAIL[@]+"${JAIL[@]}"} "$php" -n "$scratch/args.php" a "b c"
+	check "stdin" "OK" ${JAIL[@]+"${JAIL[@]}"} "$php" -n <<<'<?php echo strtoupper("ok");'
 	printf '<?php echo PHP_SAPI;' > "$scratch/sapi.php"
-	check "$NAME-cgi" "cgi-fcgi" "$cgi" -n -q "$scratch/sapi.php"
+	check "$NAME-cgi" "cgi-fcgi" ${JAIL[@]+"${JAIL[@]}"} "$cgi" -n -q "$scratch/sapi.php"
 	[ "$fpm" = fpm ] || return 0
 	printf '[global]\nerror_log = %s/fpm.log\n[www]\nlisten = %s/fpm.sock\npm = static\npm.max_children = 1\n' \
 		"$scratch" "$scratch" > "$scratch/fpm.conf"
@@ -74,8 +80,60 @@ hosts() {
 	# EXIT trap then exits 0, so the empty case expands to nothing by hand.
 	local root=()
 	[ "$(id -u)" -ne 0 ] || root=(-R)
-	"$dir/sbin/$NAME-fpm" -n -t -y "$scratch/fpm.conf" ${root[@]+"${root[@]}"}
+	${JAIL[@]+"${JAIL[@]}"} "$dir/sbin/$NAME-fpm" -n -t -y "$scratch/fpm.conf" ${root[@]+"${root[@]}"}
 	echo "$NAME-fpm -t: exit 0"
+}
+
+# Every Mach-O of an unpacked macOS tarball names, as `otool -L` reads it,
+# only the system's libraries (/usr/lib, /System), a file of the tarball by
+# `@loader_path`, and a library its own install name `@rpath/<its file
+# name>`; carries no run path but the system's; and passes `codesign
+# --verify`. So a library the hosts load from anywhere else, a keg new to
+# the build among them, fails here and not on a Mac without it.
+machos() {
+	local root file name own target count=0 bad=""
+	root=$(cd "$1" && pwd -P)
+	while IFS= read -r file; do
+		case "$(file -b "$file")" in Mach-O*) ;; *) continue ;; esac
+		count=$((count + 1))
+		own=$(otool -D "$file" | sed -n 2p)
+		while IFS= read -r name; do
+			case "$name" in
+				/usr/lib/*|/System/*) continue ;;
+				@loader_path/*)
+					target="$(dirname "$file")/${name#@loader_path/}"
+					if [ -f "$target" ]; then
+						case "$(cd "$(dirname "$target")" && pwd -P)/" in "$root"/*) continue ;; esac
+					fi ;;
+				"@rpath/${file##*/}") [ "$name" != "$own" ] || continue ;;
+			esac
+			bad+="${file#"$root"/}: $name"$'\n'
+		done < <(otool -L "$file" | sed -e 1d -e 's/^[[:space:]]*//' -e 's/ (compatibility version .*//')
+		while IFS= read -r name; do
+			case "$name" in /usr/lib/*|/System/*) ;; *) bad+="${file#"$root"/}: run path $name"$'\n' ;; esac
+		done < <(otool -l "$file" | sed -n '/cmd LC_RPATH$/{n;n;s/^ *path \(.*\) (offset [0-9]*)$/\1/p;}')
+		codesign --verify --strict "$file" 2>/dev/null || bad+="${file#"$root"/}: no valid signature"$'\n'
+	done < <(find "$root" -type f | sort)
+	if [ -n "$bad" ]; then
+		printf 'Mach-O: what is outside the tarball and the system, or unsigned:\n%s' "$bad" >&2
+		exit 1
+	fi
+	echo "Mach-O: $count files name only the system's libraries and the tarball's own, each signed"
+}
+
+# On a Mac with Homebrew and sandbox-exec, JAIL is a sandbox that denies
+# reading Homebrew's prefix, so a host that still loads a keg's library
+# from there fails to start; elsewhere it is nothing, and the line says why.
+reach() {
+	local prefix
+	if ! prefix=$(brew --prefix 2>/dev/null); then
+		echo "kegs out of reach: no brew on this machine"
+	elif ! command -v sandbox-exec > /dev/null; then
+		echo "kegs out of reach: no sandbox-exec to hold $prefix away, so the hosts run beside it"
+	else
+		JAIL=(sandbox-exec -p "(version 1)(allow default)(deny file-read* (subpath \"$prefix\"))")
+		echo "kegs out of reach: the hosts run in a sandbox that denies reading $prefix"
+	fi
 }
 
 # Inside an image: its hosts, its ini directory and its compat directory,
@@ -245,9 +303,16 @@ case "${1:-}" in
 	--in-image) in_image "$2" ;;
 	--compat) compat "$2" "$3" ;;
 	--fastcgi) fastcgi "$2" "$3" "$4" ;;
+	--machos)
+		[ "$#" -eq 2 ] || usage
+		machos "$2" ;;
 	-*|"") usage ;;
 	*)
 		[ "$#" -eq 1 ] || usage
 		named
+		if [ "$(uname -s)" = Darwin ]; then
+			machos "$1"
+			reach
+		fi
 		hosts "$(cd "$1" && pwd)" fpm ;;
 esac
