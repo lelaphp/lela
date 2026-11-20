@@ -2,9 +2,9 @@
 own, the PATH its script runs with, and the lines a step prints.
 
 Each test runs a script copied into a repository laid down with a
-workspace manifest of the test's own and one commit at a known time, so
-the commit, the version and the tags the script reads are the test's and
-not the checkout's.
+workspace manifest of the test's own, the hosts' crates (HOSTS) and one
+commit at a known time, so the commit, the version, the licences and the
+tags the script reads are the test's and not the checkout's.
 
 The script's PATH is two directories and no other: the test's `bin/`,
 where a test lays the docker, gh, cargo or smoke that records its calls,
@@ -33,20 +33,44 @@ EPOCH = "1795091696"
 TOOLS = ("git", "cat", "mv", "rm", "sha256sum", "shasum", "cc", "codesign", "otool", "install_name_tool")
 
 
-def manifest(version):
-    """A workspace manifest whose package table carries `version`, or no
-    version line where it is None."""
-    line = f'version = "{version}"\n' if version else ""
+LICENSE = "MIT AND BSD-3-Clause"
+
+
+def manifest(version, license=LICENSE, rest=""):
+    """A workspace manifest whose package table carries `version` and
+    `license`, or no such line where one is None, with `rest` after it."""
+    lines = (f'version = "{version}"\n' if version else "") + (f'license = "{license}"\n' if license else "")
     return (
-        '[workspace]\nmembers = ["sapi/*"]\n\n'
-        f'[workspace.package]\nedition = "2024"\n{line}license = "MIT AND BSD-3-Clause"\n'
+        '[workspace]\nmembers = ["crates/*", "sapi/*"]\n\n'
+        f'[workspace.package]\nedition = "2024"\n{lines}{rest}'
     )
 
 
+def package(name, license=None, body=""):
+    """A crate's manifest: `license` its line, the workspace's where it is
+    None and no line where it is empty, with `body` after the package table."""
+    if license is None:
+        line = "license.workspace = true\n"
+    else:
+        line = f'license = "{license}"\n' if license else ""
+    return f'[package]\nname = "{name}"\nversion = "0.0.0"\nedition.workspace = true\n{line}\n{body}'
+
+
+# The hosts the images link, as dist/Dockerfile's cargo line names them,
+# each a crate of the workspace's licence and no dependency.
+HOSTS = {
+    "sapi/cli/Cargo.toml": package("php_sapi_cli"),
+    "sapi/cgi/Cargo.toml": package("php_sapi_cgi"),
+    "sapi/fpm/Cargo.toml": package("php_sapi_fpm"),
+}
+
+
 class Repository(unittest.TestCase):
-    # The manifest's version, and the files of the checkout copied in.
+    # The manifest's version, the files of the checkout copied in, and the
+    # crates' manifests laid down, by path.
     version = None
     files = ("dist/publish.py",)
+    crates = HOSTS
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -60,6 +84,7 @@ class Repository(unittest.TestCase):
         for path in self.files:
             (self.root / path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / path, self.root / path)
+        self.lay(self.crates)
         self.bin = self.scratch / "bin"
         self.bin.mkdir()
         tools = self.scratch / "tools"
@@ -87,6 +112,24 @@ class Repository(unittest.TestCase):
             ["git", "-C", str(self.root), *arguments],
             env=env, check=True, capture_output=True, text=True,
         ).stdout
+
+    def lay(self, crates):
+        """Each manifest of `crates` written at its path, a crate's
+        `src/lib.rs` beside it."""
+        for path, text in crates.items():
+            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / path).write_text(text)
+            if path != "Cargo.toml":
+                (self.root / path).with_name("src").mkdir(exist_ok=True)
+                (self.root / path).with_name("src").joinpath("lib.rs").write_text("")
+
+    def committed(self, crates):
+        """`crates` laid down over the tree, in a commit of its own that is
+        HEAD."""
+        self.lay(crates)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "the crates")
+        self.commit = self.git("rev-parse", "HEAD").strip()
 
     def versioned(self, version):
         """The manifest's version line set to `version`, in a commit of its

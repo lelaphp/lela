@@ -2,8 +2,10 @@
 each test in a repository of its own (testlib.py)."""
 
 import hashlib
+import itertools
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,7 +13,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from testlib import EPOCH, IMAGE, ROOT, VARIANTS, WHEN, Repository
+import publish
+from testlib import EPOCH, IMAGE, ROOT, VARIANTS, WHEN, Repository, manifest, package
 
 
 class Readme(unittest.TestCase):
@@ -40,6 +43,21 @@ class Bytecode(unittest.TestCase):
 class Publish(Repository):
     def publish(self, *arguments, env=None):
         return self.script("publish.py", *arguments, env=env)
+
+    def refused(self, ref):
+        """Each step on `ref`, dry and real, with what it ran: each is
+        refused, prints nothing to stdout and runs no docker."""
+        for arguments in (
+            ("build", ref, "--platform", "linux/amd64", "--dry-run"), ("build", ref),
+            ("join", ref, "--dry-run"), ("join", ref),
+        ):
+            with self.subTest(arguments=arguments):
+                run = self.publish(*arguments, env={"CALLS": str(self.log)})
+                self.assertEqual(run.returncode, 1, run.stdout)
+                self.assertEqual(run.stdout, "")
+                self.assertNotIn("Traceback", run.stderr)
+                self.assertFalse(self.log.exists())
+                yield run
 
 
 class ThePath(Repository):
@@ -145,19 +163,6 @@ class DryRun(Publish):
         run = self.publish("join", "main", "--dry-run")
         self.assertEqual(self.lines(run, "annotation"), [f"index:{l}" for l in self.labels("edge")])
 
-    def refused(self, ref):
-        """Each step on `ref`, dry and real, with what it ran."""
-        for arguments in (
-            ("build", ref, "--platform", "linux/amd64", "--dry-run"), ("build", ref),
-            ("join", ref, "--dry-run"), ("join", ref),
-        ):
-            with self.subTest(arguments=arguments):
-                run = self.publish(*arguments, env={"CALLS": str(self.log)})
-                self.assertEqual(run.returncode, 1, run.stdout)
-                self.assertEqual(run.stdout, "")
-                self.assertFalse(self.log.exists())
-                yield run
-
     def test_a_tag_the_manifest_does_not_name_is_refused_by_both_steps(self):
         self.versioned("1.2.0")
         for ref in ("v1.2.1", "v1.2.0-rc.1", "v1.20.0"):
@@ -189,6 +194,213 @@ class DryRun(Publish):
                         if step == "build" else self.publish(step, ref, "--dry-run")
                     self.assertEqual(run.returncode, 1, run.stdout)
                     self.assertIn("neither main nor a release's tag", run.stderr)
+
+
+def path(name, **spec):
+    """A path dependency on crates/<name>, from a crate two levels down."""
+    fields = [f'path = "../../crates/{name}"'] + [
+        f"{key.replace('_', '-')} = {json.dumps(value)}" for key, value in spec.items()
+    ]
+    return "{ " + ", ".join(fields) + " }"
+
+
+class Licences(Publish):
+    """The `licenses` label: the union of the licences of the workspace's
+    crates the three hosts link, read from their manifests."""
+
+    def label(self, run):
+        [found] = [line for line in self.lines(run, "label") if line.startswith("org.opencontainers.image.licenses=")]
+        return found.split("=", 1)[1]
+
+    def labelled(self):
+        """The label `build --dry-run` and `join --dry-run` print, the same
+        in both."""
+        built = self.label(self.publish("build", "main", "--platform", "linux/amd64", "--dry-run"))
+        run = self.publish("join", "main", "--dry-run")
+        annotation = [line for line in self.lines(run, "annotation") if "image.licenses=" in line]
+        self.assertEqual(annotation, [f"index:org.opencontainers.image.licenses={built}"])
+        return built
+
+    def test_the_label_is_the_union_of_the_licences_of_the_crates_the_hosts_link(self):
+        self.committed({
+            "sapi/cli/Cargo.toml": package("php_sapi_cli", body=(
+                f"[dependencies]\ncore = {path('core')}\nmemory = {path('heap', package='heap')}\n"
+                f"serde = \"1\"\n\n[dev-dependencies]\ndevonly = {path('devonly')}\n\n"
+                f"[build-dependencies]\nbuildonly = {path('buildonly')}\n"
+            )),
+            "sapi/cgi/Cargo.toml": package("php_sapi_cgi", body=f"[dependencies]\ncore = {path('core')}\n"),
+            "crates/core/Cargo.toml": package("core", "MIT AND BSD-3-Clause AND PostgreSQL"),
+            "crates/heap/Cargo.toml": package("heap", "MIT AND BSD-3-Clause AND dtoa AND (MIT OR NCSA)"),
+            "crates/unlinked/Cargo.toml": package("unlinked", "Apache-2.0"),
+            "crates/devonly/Cargo.toml": package("devonly", "BSD-2-Clause"),
+            "crates/buildonly/Cargo.toml": package("buildonly", "Zlib"),
+        })
+        self.assertEqual(self.labelled(), "MIT AND BSD-3-Clause AND dtoa AND PostgreSQL AND (MIT OR NCSA)")
+
+    def test_a_dependency_counts_where_the_hosts_default_features_turn_it_on_for_an_images_platform(self):
+        """An optional dependency is linked where a feature the build turns
+        on names it, `dep:`, `<dep>/<feature>` or the dependency's own
+        implicit feature; a weak `<dep>?/<feature>` turns on none; and a
+        target table counts where its `cfg` holds for linux/amd64 or
+        linux/arm64."""
+        bundle = (
+            '[features]\ndefault = ["std", "jit"]\nstd = ["dep:a"]\none = ["b"]\ntwo = ["dep:c"]\n'
+            'weak = ["d?/x"]\nthree = ["e/y"]\njit = ["dep:g"]\n\n'
+            f"[dependencies]\na = {path('a', optional=True)}\nb = {path('b', optional=True)}\n"
+            f"c = {path('c', optional=True)}\nd = {path('d', optional=True)}\ne = {path('e', optional=True)}\n"
+            f"k = {path('k', default_features=False)}\nm = {{ workspace = true }}\n\n"
+            f"[target.'cfg(target_os = \"linux\")'.dependencies]\ng = {path('g', optional=True)}\n\n"
+            f"[target.'cfg(target_os = \"macos\")'.dependencies]\nh = {path('h')}\n\n"
+            f"[target.'cfg(not(target_os = \"macos\"))'.dependencies]\ni = {path('i')}\n\n"
+            f"[target.x86_64-unknown-linux-gnu.dependencies]\nj = {path('j')}\n\n"
+            f"[target.'cfg(all(target_os = \"linux\", target_arch = \"riscv64\"))'.dependencies]\nn = {path('n')}\n"
+        )
+        self.committed({
+            "Cargo.toml": manifest(None, rest='\n[workspace.dependencies]\nm = { path = "crates/m" }\n'),
+            "sapi/fpm/Cargo.toml": package("php_sapi_fpm", body=(
+                f"[dependencies]\nbundle = {path('bundle', features=['one', 'weak', 'three'])}\n"
+            )),
+            "crates/bundle/Cargo.toml": package("bundle", body=bundle),
+            "crates/a/Cargo.toml": package("a", "Apache-2.0"),
+            "crates/b/Cargo.toml": package("b", "BSD-2-Clause"),
+            "crates/c/Cargo.toml": package("c", "Zlib"),
+            "crates/d/Cargo.toml": package("d", "TCL", body='[features]\nx = []\n'),
+            "crates/e/Cargo.toml": package("e", "Beerware", body=(
+                f'[features]\ny = ["dep:f"]\n\n[dependencies]\nf = {path("f", optional=True)}\n'
+            )),
+            "crates/f/Cargo.toml": package("f", "BSD-4-Clause-UC"),
+            "crates/g/Cargo.toml": package("g", "LGPL-2.1-only"),
+            "crates/h/Cargo.toml": package("h", "LGPL-2.1-or-later"),
+            "crates/i/Cargo.toml": package("i", "NCSA"),
+            "crates/j/Cargo.toml": package("j", "PostgreSQL"),
+            "crates/k/Cargo.toml": package("k", "BSD-2-Clause-Darwin", body=(
+                f'[features]\ndefault = ["dep:l"]\n\n[dependencies]\nl = {path("l", optional=True)}\n'
+            )),
+            "crates/l/Cargo.toml": package("l", "dtoa"),
+            "crates/m/Cargo.toml": package("m", "MIT AND LicenseRef-m"),
+            "crates/n/Cargo.toml": package("n", "Apache-2.0 OR MIT"),
+        })
+        self.assertEqual(self.labelled(), (
+            "MIT AND BSD-3-Clause AND Apache-2.0 AND Beerware AND BSD-2-Clause AND BSD-2-Clause-Darwin "
+            "AND BSD-4-Clause-UC AND LGPL-2.1-only AND LicenseRef-m AND NCSA AND PostgreSQL"
+        ))
+
+    def test_a_choice_stays_a_unit_and_the_order_is_not_the_order_crates_are_read_in(self):
+        lines = [
+            "MIT AND BSD-3-Clause AND dtoa AND (MIT OR NCSA)",
+            "MIT AND BSD-3-Clause AND Zlib",
+            "Apache-2.0 OR MIT",
+            "MIT AND (BSD-2-Clause AND (TCL OR  Beerware))",
+            "BSD-3-Clause",
+        ]
+        expected = (
+            "MIT AND BSD-3-Clause AND BSD-2-Clause AND dtoa AND Zlib AND (Apache-2.0 OR MIT) "
+            "AND (MIT OR NCSA) AND (TCL OR Beerware)"
+        )
+        for order in itertools.permutations(lines):
+            with self.subTest(order=order):
+                self.assertEqual(publish.union("MIT AND BSD-3-Clause", order), expected)
+
+    def test_a_term_that_is_no_spdx_identifier_is_refused_by_name(self):
+        self.committed({
+            "sapi/cgi/Cargo.toml": package("php_sapi_cgi", body=f"[dependencies]\nodd = {path('odd')}\n"),
+            "crates/odd/Cargo.toml": package("odd", "MIT AND Odd-1.0"),
+        })
+        for run in self.refused("main"):
+            self.assertIn(
+                "crates/odd/Cargo.toml: the license line of odd names Odd-1.0, which is neither an "
+                "identifier of the SPDX License List publish.py names nor a LicenseRef-",
+                run.stderr,
+            )
+
+    def test_a_target_table_whose_cfg_tests_what_publish_does_not_model_is_refused_by_name(self):
+        self.committed({
+            "sapi/cgi/Cargo.toml": package("php_sapi_cgi", body=(
+                f"[target.'cfg(target_feature = \"neon\")'.dependencies]\nsimd = {path('simd')}\n"
+            )),
+            "crates/simd/Cargo.toml": package("simd"),
+        })
+        for run in self.refused("main"):
+            self.assertIn(
+                "sapi/cgi/Cargo.toml: [target.'cfg(target_feature = \"neon\")'] tests target_feature, which "
+                "publish.py does not model for the images' platforms",
+                run.stderr,
+            )
+
+    def test_a_crate_with_no_license_line_is_refused_by_name(self):
+        self.committed({
+            "sapi/cgi/Cargo.toml": package("php_sapi_cgi", body=f"[dependencies]\nbare = {path('bare')}\n"),
+            "crates/bare/Cargo.toml": package("bare", ""),
+        })
+        for run in self.refused("main"):
+            self.assertIn(
+                "crates/bare/Cargo.toml: bare, which the hosts link, has no license line, and the images' "
+                "licenses label is the union of every such crate's",
+                run.stderr,
+            )
+
+    def test_a_workspace_manifest_with_no_license_line_is_refused(self):
+        self.committed({"Cargo.toml": manifest(None, license=None)})
+        for run in self.refused("main"):
+            self.assertIn(
+                "Cargo.toml's [workspace.package] has no license line, which the images' licenses label "
+                "leads with",
+                run.stderr,
+            )
+
+    def test_a_host_the_workspace_does_not_hold_is_refused_by_name(self):
+        (self.root / "sapi/fpm/Cargo.toml").unlink()
+        self.committed({})
+        for run in self.refused("main"):
+            self.assertIn("no crate of the workspace is php_sapi_fpm, a host dist/Dockerfile builds", run.stderr)
+
+
+class TheRealTree(unittest.TestCase):
+    def test_the_hosts_are_the_ones_the_dockerfile_builds(self):
+        text = (ROOT / "dist/Dockerfile").read_text()
+        command = text[text.index("cargo build"):]
+        command = command[:command.index("--bin")]
+        self.assertEqual(tuple(re.findall(r"-p (\S+)", command)), publish.HOSTS)
+
+    def test_every_term_of_the_label_is_an_spdx_identifier_or_a_licenseref(self):
+        terms = re.findall(r"[^\s()]+", publish.licenses(ROOT))
+        for term in terms:
+            with self.subTest(term=term):
+                self.assertTrue(
+                    term in ("AND", "OR") or term in publish.SPDX or re.fullmatch(r"LicenseRef-[0-9A-Za-z.-]+", term),
+                    term,
+                )
+
+    @unittest.skipIf(shutil.which("cargo") is None, "no cargo here to hold the manifests' reading to")
+    def test_the_manifests_give_the_crates_and_the_label_cargo_metadata_gives(self):
+        found = {}
+        for platform, (target, _) in publish.TARGETS.items():
+            run = subprocess.run(
+                ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", target],
+                cwd=ROOT, capture_output=True, text=True,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            metadata = json.loads(run.stdout)
+            packages = {package["id"]: package for package in metadata["packages"]}
+            members = set(metadata["workspace_members"])
+            nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+            work = [id for id in members if packages[id]["name"] in publish.HOSTS]
+            seen = set()
+            while work:
+                id = work.pop()
+                if id in seen:
+                    continue
+                seen.add(id)
+                work += [
+                    dep["pkg"] for dep in nodes[id]["deps"]
+                    if dep["pkg"] in members and any(kind["kind"] is None for kind in dep["dep_kinds"])
+                ]
+            for id in seen:
+                found[packages[id]["name"]] = packages[id]["license"]
+        read = publish.linked(ROOT)
+        self.assertEqual({crate.name: crate.license for crate in read}, found)
+        workspace = publish.workspace_package()["license"]
+        self.assertEqual(publish.licenses(ROOT), publish.union(workspace, found.values()))
 
 
 # A docker that records each call as one JSON line and answers as BuildKit
@@ -565,7 +777,8 @@ class Build(Recorded):
         self.assertIn("Cannot connect to the Docker daemon", run.stderr)
 
     def test_a_tree_with_changes_is_refused(self):
-        (self.root / "Cargo.toml").write_text("changed")
+        with (self.root / "Cargo.toml").open("a") as file:
+            file.write("# changed\n")
         run = self.run_step("build", "main")
         self.assertEqual(run.returncode, 1)
         self.assertIn("the tree has changes", run.stderr)
