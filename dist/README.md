@@ -313,7 +313,10 @@ tarball whole into `$XDG_DATA_HOME/lela/<version>`,
 `~/.local/share/lela/<version>` where that is unset, since the XDG Base
 Directory specification gives `~/.local/share` to an application's own
 files, and links `~/.local/bin/lela` to its `bin/lela`; `lela-cgi` and
-`lela-fpm` stay in the directory's `bin/` and `sbin/`.
+`lela-fpm` stay in the directory's `bin/` and `sbin/`. `SHA256SUMS` names
+the tarballs alone, not `install.sh`: the script and the sums come from
+the one release page, unsigned, so a sum of the script would vouch for
+nothing the page does not, and a signing step is outside spec #9.
 
 - macOS on Apple silicon alone, a shell under Rosetta included: an Intel
   Mac is refused, and so is a macOS older than the `macos` line of the
