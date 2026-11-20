@@ -33,7 +33,14 @@ images under one manifest list, tagged with every tag of the variant:
                           release tag here names; a shallow checkout, which
                           may not hold every tag, is refused
 
-It prints `manifest <variant> <digest>`, the lines --manifests writes.
+It prints `manifest <variant> <digest>`, the lines --manifests writes,
+the digest the sha256 of the bytes the registry holds at every tag of
+the list, which must be one image index.
+
+A real step first prints `buildx <version>`, what `docker buildx version`
+says, so a run's log names the buildx that answered: each flag and format
+the steps and the images workflow pass is one buildx v0.14.0 knows, the
+oldest they serve (dist/README.md).
 
 The labels, on each image and as annotations on each manifest list, are
 the standard OCI ones spec #9 names: source, revision, version (`edge`
@@ -59,6 +66,7 @@ dist/Dockerfile's `ARG NAME` (ADR-0016), which no caller sets.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -290,6 +298,17 @@ def daemon():
     ).stdout.strip()
 
 
+def answering():
+    """Print the buildx that answers this step, `buildx <what docker buildx
+    version says>`, so a run's log names it: the runners' buildx is not
+    the one a laptop has, and every flag and format the steps pass is held to the
+    oldest they serve, v0.14.0 (dist/README.md)."""
+    said = subprocess.run(
+        ["docker", "buildx", "version"], check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    print(f"buildx {said}")
+
+
 def native(platform, made):
     """Refuse a platform the daemon does not run as its own, so that what
     is made for it is built and smoked where it is meant to run, and no
@@ -331,6 +350,8 @@ def build(ref, commit, arguments):
     print(f"platform {platform}")
     for key, value in labels(ref, commit):
         print(f"label {key}={value}")
+    if not arguments.dry_run:
+        answering()
     common = [
         "buildx", "build", "-f", str(ROOT / "dist/Dockerfile"), "--platform", platform,
         "--build-arg", f"CARGO_BUILD_JOBS={setting('CARGO_BUILD_JOBS')}",
@@ -405,16 +426,28 @@ def loaded_manifest(result, variant):
     return found
 
 
+def fetched(reference):
+    """The bytes the registry holds at `reference`, a manifest or an index,
+    as pushed: `imagetools inspect --raw` writes them unchanged, so their
+    sha256 is the digest the registry names them by."""
+    return subprocess.run(
+        ["docker", "buildx", "imagetools", "inspect", reference, "--raw"], check=True, capture_output=True,
+    ).stdout
+
+
+def parsed(reference, body):
+    try:
+        found = json.loads(body)
+    except ValueError:
+        found = None
+    if not isinstance(found, dict):
+        raise Refusal(f"{reference} is not a manifest JSON reads")
+    return found
+
+
 def inspect(reference):
     """The manifest or index the registry holds at `reference`, as pushed."""
-    raw = subprocess.run(
-        ["docker", "buildx", "imagetools", "inspect", reference, "--raw"],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        raise Refusal(f"{reference} is not a manifest JSON reads") from None
+    return parsed(reference, fetched(reference))
 
 
 def pushed_manifest(named, platform, variant):
@@ -446,11 +479,25 @@ def pushed_manifest(named, platform, variant):
     return found
 
 
+def listed(variant, named):
+    """The digest of the manifest list `imagetools create` put under the
+    tags `named`, read back from the registry: the sha256 of the bytes it
+    holds at every tag, which are one image index. No buildx before
+    v0.32.0 writes what a create pushed anywhere a script reads, and the
+    runners' is older, so the registry's own bytes name the list."""
+    held = {fetched(tag) for tag in named}
+    if len(held) != 1:
+        raise Refusal(f"the tags of {variant} name {len(held)} lists, and one list carries every tag")
+    [body] = held
+    kind = parsed(named[0], body).get("mediaType")
+    if kind not in INDEXES:
+        raise Refusal(f"the list of {variant} is an {kind}, and imagetools create pushes an image index")
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
 def digest(result, made):
-    """The digest of what `made`, a push or a list, put in the registry,
-    read from its metadata file's `containerimage.descriptor`: the one key
-    both `buildx build` and `imagetools create` write, the second writing
-    no `containerimage.digest`."""
+    """The digest of what `made`, a build, loaded or pushed, read from its
+    metadata file's `containerimage.descriptor`, which every build names."""
     found = (result.get("containerimage.descriptor") or {}).get("digest", "")
     if not DIGEST.fullmatch(found):
         raise Refusal(f"{made} named no digest: its metadata's containerimage.descriptor has none")
@@ -491,26 +538,26 @@ def join(ref, commit, arguments):
     annotations = [f"index:{key}={value}" for key, value in labels(ref, commit)]
     for annotation in annotations:
         print(f"annotation {annotation}")
+    if not arguments.dry_run:
+        answering()
     manifests = []
-    with tempfile.TemporaryDirectory() as scratch:
-        for variant in VARIANTS:
-            sources = [
-                f"{IMAGE}@{found[variant, platform]}" if found else f"{IMAGE}@<{variant} {platform}>"
-                for platform in PLATFORMS
-            ]
-            named = [f"{IMAGE}:{tag}" for tag in tags(ref, commit, variant)]
-            for tag in named:
-                print(f"tag {tag} from {' '.join(sources)}")
-            if arguments.dry_run:
-                continue
-            result = Path(scratch) / f"{variant}.json"
-            create = ["buildx", "imagetools", "create", "--metadata-file", str(result)]
-            for annotation in annotations:
-                create += ["--annotation", annotation]
-            for tag in named:
-                create += ["--tag", tag]
-            docker(*create, *sources)
-            manifests.append(f"{variant} {digest(metadata(result), f'the list of {variant}')}")
+    for variant in VARIANTS:
+        sources = [
+            f"{IMAGE}@{found[variant, platform]}" if found else f"{IMAGE}@<{variant} {platform}>"
+            for platform in PLATFORMS
+        ]
+        named = [f"{IMAGE}:{tag}" for tag in tags(ref, commit, variant)]
+        for tag in named:
+            print(f"tag {tag} from {' '.join(sources)}")
+        if arguments.dry_run:
+            continue
+        create = ["buildx", "imagetools", "create"]
+        for annotation in annotations:
+            create += ["--annotation", annotation]
+        for tag in named:
+            create += ["--tag", tag]
+        docker(*create, *sources)
+        manifests.append(f"{variant} {listed(variant, named)}")
     if arguments.dry_run:
         print("dry run: nothing is pushed")
         return

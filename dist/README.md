@@ -117,9 +117,29 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
   the whole history and every tag (`git fetch --unshallow --tags`,
   actions/checkout's `fetch-depth: 0`). A real `join` refuses a tree with
   changes and a release whose tag is not HEAD, as a real `build` does.
-  It writes one `<variant> <digest>` line per list, the digest read from
-  the descriptor in the metadata `imagetools create` writes, which names
-  no `containerimage.digest`; a descriptor with no digest is refused.
+  It writes one `<variant> <digest>` line per list, the digest the sha256
+  of the bytes the registry holds at the list's tags, read back with
+  `imagetools inspect <tag> --raw`: tags that name two lists, or a list
+  that is no image index, are refused. No buildx before v0.32.0 writes
+  what `imagetools create` pushed anywhere a script reads, and the CI
+  runners' buildx is older.
+
+A real step of either kind first prints `buildx <version>`, what `docker
+buildx version` says, so a run's log names the buildx that answered. The
+CI runners' buildx is not the one a laptop has: run 44731512379's refused
+`imagetools create --metadata-file`, and its usage line and build output
+are those of a buildx from v0.14.0 to v0.23.0. Each flag and format the steps and the images
+workflow pass is one buildx v0.14.0 knows, the oldest they serve:
+
+| what | buildx since |
+|---|---|
+| `build --metadata-file`, its `containerimage.descriptor` | v0.6.0, v0.8.0 |
+| `build --sbom=true`, and the default provenance | v0.10.0 |
+| `imagetools create --annotation index:…` | v0.12.0 |
+| `imagetools inspect --raw` | v0.4.0 or before |
+| `imagetools inspect --format '{{json .SBOM}}'`, `'{{json .Provenance}}'` | v0.10.0 |
+
+`imagetools create --metadata-file`, v0.32.0, is the one it may not pass.
 
 Each image is labelled, and each list annotated, with standard OCI keys
 alone: `source`, `revision`, `version` (`edge` from `main`) and

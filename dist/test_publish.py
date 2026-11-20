@@ -204,15 +204,20 @@ class DryRun(Publish):
 # REGISTRY, one file per blob named by its digest, is an index of the
 # platform's manifest and an attestation manifest of `unknown/unknown`, and
 # its metadata names the index alone and no config. `imagetools inspect
-# --raw` answers from REGISTRY. `imagetools create`'s metadata file names
-# the list's descriptor, its digest one over its sources, and the image's
-# name, and nothing else, as buildx v0.38.1's does: no
-# `containerimage.digest`. DRIFT names a variant whose pushed layer is not
-# the one loaded, as a recompression's is, its config the same;
-# INDEX=attestation-first lists the attestation manifest first,
-# INDEX=attestation-only leaves the platform's out, and INDEX=none pushes
-# the platform's manifest alone, as no attested build does;
-# LIST=undigested leaves the digest out of each list's descriptor.
+# --raw` answers from REGISTRY, by digest or by tag, the bytes as pushed.
+# `buildx version` answers BUILDX, and `imagetools create` knows the flags
+# of buildx v0.14.0's, the oldest the scripts serve, and refuses any other
+# as that buildx run as a docker plugin does, `--metadata-file` among them,
+# which a create learns in v0.32.0: it pushes into REGISTRY an index, with
+# the `index:` annotations, of one entry per source, where buildx puts the
+# sources' own entries, and names it under each tag in REGISTRY/tags.
+# DRIFT names a variant whose pushed layer is not the one loaded, as a
+# recompression's is, its config the same; INDEX=attestation-first lists
+# the attestation manifest first, INDEX=attestation-only leaves the
+# platform's out, and INDEX=none pushes the platform's manifest alone, as
+# no attested build does; LIST=manifest pushes each list as an image
+# manifest, and LIST=split names a second index under every tag but the
+# first.
 DOCKER = r'''#!/usr/bin/env python3
 import hashlib, json, os, sys
 arguments = sys.argv[1:]
@@ -241,6 +246,8 @@ def manifest(config, layer):
     }
 if arguments[:1] == ["version"]:
     print(os.environ.get("DAEMON", "linux/amd64"))
+elif arguments[:2] == ["buildx", "version"]:
+    print(os.environ["BUILDX"])
 elif arguments[:2] == ["buildx", "build"]:
     target, platform = value("--target"), value("--platform")
     os_, architecture = platform.split("/")
@@ -277,22 +284,50 @@ elif arguments[:2] == ["buildx", "build"]:
     with open(value("--metadata-file"), "w") as metadata:
         json.dump(result, metadata)
 elif arguments[:3] == ["buildx", "imagetools", "inspect"] and arguments[4:] == ["--raw"]:
-    name, _, named = arguments[3].partition("@")
+    tags = os.path.join(os.environ["REGISTRY"], "tags")
+    if "@" in arguments[3]:
+        name, _, named = arguments[3].partition("@")
+    else:
+        name, _, tag = arguments[3].rpartition(":")
+        tagged = os.path.join(tags, tag)
+        named = open(tagged).read() if os.path.exists(tagged) else ""
     path = os.path.join(os.environ["REGISTRY"], named)
-    if name != os.environ["IMAGE"] or not os.path.exists(path):
+    if name != os.environ["IMAGE"] or not named or not os.path.exists(path):
         sys.exit("ERROR: " + arguments[3] + ": not found")
-    with open(path) as file:
-        sys.stdout.write(file.read())
+    with open(path, "rb") as file:
+        sys.stdout.buffer.write(file.read())
 elif arguments[:3] == ["buildx", "imagetools", "create"]:
+    known = {"--annotation", "--append", "--builder", "--dry-run", "--file", "-f", "--progress", "--tag", "-t"}
+    for argument in arguments[3:]:
+        if argument.startswith("-") and argument.split("=")[0] not in known:
+            sys.stderr.write(
+                "unknown flag: " + argument.split("=")[0] + "\n\n"
+                "Usage:  docker buildx imagetools create [OPTIONS] [SOURCE] [SOURCE...]\n\n"
+                "Run 'docker buildx imagetools create --help' for more information\n"
+            )
+            sys.exit(125)
+    pairs = list(zip(arguments, arguments[1:]))
     sources = [a for a in arguments if a.startswith(os.environ["IMAGE"] + "@")]
-    descriptor = {"mediaType": INDEX_TYPE, "digest": digest("list", *sources), "size": 1}
-    if os.environ.get("LIST") == "undigested":
-        del descriptor["digest"]
-    with open(value("--metadata-file"), "w") as metadata:
-        json.dump({"containerimage.descriptor": descriptor, "image.name": os.environ["IMAGE"]}, metadata)
+    annotations = dict(v.removeprefix("index:").split("=", 1) for flag, v in pairs if flag == "--annotation")
+    if os.environ.get("LIST") == "manifest":
+        listed = {**manifest(digest("config", *sources), digest("layer", *sources)), "annotations": annotations}
+    else:
+        entries = [{"mediaType": INDEX_TYPE, "digest": s.partition("@")[2], "size": 1} for s in sources]
+        listed = {"schemaVersion": 2, "mediaType": INDEX_TYPE, "manifests": entries, "annotations": annotations}
+    tags = os.path.join(os.environ["REGISTRY"], "tags")
+    os.makedirs(tags, exist_ok=True)
+    for n, tag in enumerate(v for flag, v in pairs if flag == "--tag"):
+        split = os.environ.get("LIST") == "split" and n > 0
+        named = pushed({**listed, "annotations": {**annotations, "split": str(n)}} if split else listed)["digest"]
+        with open(os.path.join(tags, tag.rpartition(":")[2]), "w") as file:
+            file.write(named)
 else:
     sys.exit("the recording docker has no answer for " + " ".join(arguments))
 '''
+
+# What the stand-in's `buildx version` answers: v0.14.0, the oldest buildx
+# the scripts serve, as that release's binary answers.
+BUILDX = "github.com/docker/buildx v0.14.0 171fcbeb69d67c90ba7f44f41a9e418f6a6ec1da"
 
 # A smoke that records its call and fails for the variant FAILS names.
 SMOKE = r'''#!/usr/bin/env python3
@@ -314,7 +349,7 @@ class Recorded(Publish):
         registry.mkdir(exist_ok=True)
         return self.publish(*arguments, env={
             "CALLS": str(self.log), "IMAGE": IMAGE, "SMOKE": str(self.bin / "smoke"),
-            "REGISTRY": str(registry), **env,
+            "REGISTRY": str(registry), "BUILDX": BUILDX, **env,
         })
 
     def calls(self):
@@ -327,6 +362,14 @@ class Recorded(Publish):
 
     def flag(self, call, name):
         return call[call.index(name) + 1]
+
+    def assert_buildx_said_first(self, run):
+        """The step printed the buildx that answered, which it asked once,
+        before any other buildx command."""
+        self.assertEqual(self.lines(run, "buildx"), [BUILDX])
+        asked = [c for c in self.calls() if c[:2] == ["docker", "buildx"]]
+        self.assertEqual(asked[0], ["docker", "buildx", "version"])
+        self.assertEqual(asked.count(["docker", "buildx", "version"]), 1)
 
 
 class Build(Recorded):
@@ -360,6 +403,12 @@ class Build(Recorded):
         self.assertEqual(self.lines(run, "digest"), written)
         for line in written:
             self.assertRegex(line.split()[2], r"^sha256:[0-9a-f]{64}$")
+        self.assert_buildx_said_first(run)
+
+    def test_a_dry_run_asks_no_buildx_its_version(self):
+        run = self.run_step("build", "main", "--platform", "linux/amd64", "--dry-run")
+        self.assertEqual(self.lines(run, "buildx"), [])
+        self.assertEqual(self.calls(), [])
 
     def test_a_failed_smoke_pushes_nothing(self):
         for variant in VARIANTS:
@@ -544,20 +593,29 @@ class Join(Recorded):
         for platform in ("linux/amd64", "linux/arm64"):
             path = self.scratch / platform.replace("/", "-")
             path.write_text("".join(
-                f"{platform} {variant} sha256:{(variant + platform[-2:]).encode().hex():0>64}\n"
+                f"{platform} {variant} {self.source(variant, platform).partition('@')[2]}\n"
                 for variant in VARIANTS if (platform, variant) != skip
             ))
             files.append(str(path))
         return files
 
     def source(self, variant, platform):
-        return f"{IMAGE}@sha256:{(variant + platform[-2:]).encode().hex():0>64}"
+        """A digest of `variant` for `platform`, one of each pair alone."""
+        return f"{IMAGE}@sha256:{(variant + platform.split('/')[1]).encode().hex():0>64}"
+
+    def creates(self):
+        return [c for c in self.calls() if c[:4] == ["docker", "buildx", "imagetools", "create"]]
+
+    def held(self, tag):
+        """The bytes the registry holds at `tag` of the image."""
+        named = (self.scratch / "registry" / "tags" / tag).read_text()
+        return (self.scratch / "registry" / named).read_bytes()
 
     def test_one_list_per_variant_over_both_platforms_carries_every_tag(self):
         manifests = self.scratch / "manifests"
         run = self.run_step("join", "main", *self.digests(), "--manifests", str(manifests))
         self.assertEqual(run.returncode, 0, run.stderr)
-        creates = [c for c in self.calls() if c[:3] == ["docker", "buildx", "imagetools"]]
+        creates = self.creates()
         self.assertEqual(len(creates), 3)
         for variant, create in zip(VARIANTS, creates):
             with self.subTest(variant=variant):
@@ -571,26 +629,78 @@ class Join(Recorded):
                 self.assertIn("index:org.opencontainers.image.description=Lela", create)
                 self.assertIn("index:org.opencontainers.image.title=Lela", create)
                 self.assertIn(f"index:org.opencontainers.image.created={WHEN}", create)
+                # What no buildx before v0.32.0 knows.
+                self.assertNotIn("--metadata-file", create)
+                self.assertEqual(
+                    json.loads(self.held(f"edge-{variant}"))["annotations"]["org.opencontainers.image.title"], "Lela",
+                )
         written = manifests.read_text().splitlines()
-        # Each list's digest is the one its descriptor names.
-        self.assertEqual(written, [f"{variant} {self.list_digest(variant)}" for variant in VARIANTS])
+        # Each list's digest is the sha256 of the bytes the registry holds
+        # at its tags.
+        self.assertEqual(written, [
+            f"{variant} sha256:{hashlib.sha256(self.held(f'edge-{variant}')).hexdigest()}" for variant in VARIANTS
+        ])
         self.assertEqual(self.lines(run, "manifest"), written)
+        self.assert_buildx_said_first(run)
 
-    def list_digest(self, variant):
-        sources = " ".join(("list", self.source(variant, "linux/amd64"), self.source(variant, "linux/arm64")))
-        return "sha256:" + hashlib.sha256(sources.encode()).hexdigest()
+    def test_each_list_is_read_back_from_every_tag_it_was_given(self):
+        run = self.run_step("join", "main", *self.digests())
+        self.assertEqual(run.returncode, 0, run.stderr)
+        steps = [
+            ("create", c[-2]) if c[3] == "create" else ("inspect", c[4])
+            for c in self.calls() if c[:3] == ["docker", "buildx", "imagetools"]
+        ]
+        self.assertEqual(steps, [
+            step for variant in VARIANTS for step in (
+                ("create", self.source(variant, "linux/amd64")),
+                ("inspect", f"{IMAGE}:edge-{variant}"), ("inspect", f"{IMAGE}:sha-{self.commit}-{variant}"),
+            )
+        ])
+        for call in self.calls():
+            if call[:4] == ["docker", "buildx", "imagetools", "inspect"]:
+                self.assertEqual(call[5:], ["--raw"])
 
-    def test_a_list_whose_descriptor_names_no_digest_is_refused(self):
+    def test_the_stand_in_refuses_the_metadata_file_as_the_runners_buildx_does(self):
+        # Run 44731512379's join, word for word, and no list made.
+        registry = self.scratch / "registry"
+        registry.mkdir()
+        result = self.scratch / "cli.json"
+        refused = subprocess.run(
+            [str(self.bin / "docker"), "buildx", "imagetools", "create", "--metadata-file", str(result),
+             "--tag", f"{IMAGE}:edge-cli", self.source("cli", "linux/amd64"), self.source("cli", "linux/arm64")],
+            env={**os.environ, "CALLS": str(self.log), "IMAGE": IMAGE, "REGISTRY": str(registry)},
+            capture_output=True, text=True,
+        )
+        self.assertEqual(refused.returncode, 125)
+        self.assertEqual(refused.stderr, (
+            "unknown flag: --metadata-file\n\n"
+            "Usage:  docker buildx imagetools create [OPTIONS] [SOURCE] [SOURCE...]\n\n"
+            "Run 'docker buildx imagetools create --help' for more information\n"
+        ))
+        self.assertFalse(result.exists())
+        self.assertEqual(list(registry.iterdir()), [])
+
+    def test_a_list_that_is_no_index_is_refused(self):
         manifests = self.scratch / "manifests"
-        run = self.run_step("join", "main", *self.digests(), "--manifests", str(manifests), LIST="undigested")
+        run = self.run_step("join", "main", *self.digests(), "--manifests", str(manifests), LIST="manifest")
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn(
-            "the list of cli named no digest: its metadata's containerimage.descriptor has none", run.stderr,
+            "the list of cli is an application/vnd.oci.image.manifest.v1+json, "
+            "and imagetools create pushes an image index",
+            run.stderr,
         )
         self.assertNotIn("manifest ", run.stdout)
         self.assertFalse(manifests.exists())
-        creates = [c for c in self.calls() if c[:4] == ["docker", "buildx", "imagetools", "create"]]
-        self.assertEqual(len(creates), 1)
+        self.assertEqual(len(self.creates()), 1)
+
+    def test_tags_that_name_two_lists_are_refused(self):
+        manifests = self.scratch / "manifests"
+        run = self.run_step("join", "main", *self.digests(), "--manifests", str(manifests), LIST="split")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("the tags of cli name 2 lists, and one list carries every tag", run.stderr)
+        self.assertNotIn("manifest ", run.stdout)
+        self.assertFalse(manifests.exists())
+        self.assertEqual(len(self.creates()), 1)
 
     def test_blank_lines_between_digests_are_passed_over(self):
         files = self.digests()
