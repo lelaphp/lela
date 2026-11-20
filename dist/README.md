@@ -199,7 +199,7 @@ verifier; a cached layer is invalidated when an input or pin changes.
 Run the offline tests and the checkout's pin comparison with Python 3.11+:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s dist -p 'test_*.py' -v
+python3 -m unittest discover -s dist -p 'test_*.py' -v
 python3 dist/inputs.py check
 ```
 

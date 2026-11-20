@@ -51,9 +51,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-# The images' script, beside this one, imported without the bytecode that
-# would leave dist/__pycache__ in the tree a real run refuses to be dirty.
-sys.dont_write_bytecode = True
+# The images' script, beside this one; the checkout ignores the bytecode
+# the import leaves in dist/__pycache__.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import publish  # noqa: E402
 

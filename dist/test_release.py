@@ -15,7 +15,9 @@ from testlib import IMAGE, ROOT, VARIANTS, manifest
 
 class Repository(testlib.Repository):
     version = "1.2.0"
-    files = ("dist/release.py", "dist/publish.py", "dist/Dockerfile", "scripts/dist-sums.sh")
+    files = (
+        ".gitignore", "dist/release.py", "dist/publish.py", "dist/Dockerfile", "scripts/dist-sums.sh",
+    )
 
     def release(self, *arguments, env=None):
         return self.script("release.py", *arguments, env=env)
@@ -50,14 +52,16 @@ class TheTag(Repository):
         self.assertEqual(self.lines(run, "version"), ["1.2.0"])
 
     def test_a_run_leaves_the_tree_clean(self):
-        # The publish script is imported, and its bytecode would be a change
-        # in the tree that a real run refuses.
+        # The publish script is imported, and its bytecode, which the
+        # checkout's .gitignore ignores, would be a change in the tree that
+        # a real run refuses.
         env = {key: value for key, value in os.environ.items() if key != "PYTHONDONTWRITEBYTECODE"}
         run = subprocess.run(
             [sys.executable, str(self.root / "dist/release.py"), "check", "v1.2.0"],
             cwd=self.root, env=env, capture_output=True, text=True,
         )
         self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertTrue((self.root / "dist/__pycache__").is_dir())
         self.assertEqual(self.git("status", "--porcelain"), "")
 
     def test_a_ref_that_is_no_releases_tag_is_refused(self):

@@ -4,6 +4,8 @@ each test in a repository of its own (testlib.py)."""
 import json
 import os
 import shutil
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -20,6 +22,17 @@ class Readme(unittest.TestCase):
                 with self.subTest(tag=tag):
                     self.assertIn(f"{IMAGE}:{tag}", bodies)
         self.assertIn("ENV PATH=/opt/lela/compat:$PATH", bodies)
+
+
+class Bytecode(unittest.TestCase):
+    def test_the_checkout_ignores_the_bytecode_an_import_leaves_in_dist(self):
+        # The tests import testlib.py and release.py imports publish.py; a
+        # real build refuses a tree with changes, so their bytecode is none.
+        for name in ("testlib", "publish"):
+            path = f"dist/__pycache__/{name}.cpython-{sys.version_info.major}{sys.version_info.minor}.pyc"
+            with self.subTest(path=path):
+                ignored = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-q", path])
+                self.assertEqual(ignored.returncode, 0, f"{path} is not ignored")
 
 
 class Publish(Repository):
