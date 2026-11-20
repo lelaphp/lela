@@ -107,7 +107,7 @@ phpt)
         mkdir -p "$aside"
     fi
     trap restore EXIT
-    engine=$target/release-da/php
+    engine=$target/release-da/lela
     failed=0
     "${xtask[@]}" phpt --engine "$engine" --subset Zend/tests || failed=1
     for dir in "$tree/tests/"*/; do

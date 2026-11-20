@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"target/release-da/lela run-tests.php ext/pcre","description":"Run upstream's runner under the engine"}}

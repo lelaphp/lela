@@ -744,7 +744,7 @@ remedy = "`cargo xtask ticket close <n>`"                 # #3618 ruling 3
 [[rule]]
 id = "lanes.nightly"
 tool = "Bash"
-deny_pattern = '(?m)(\A|[|;&]\s*)"?(\S*\bphp[0-9.]*|\$\{?\w+\}?)"?(\s+[^|;&\s]+)*?\s+\S*run-tests\.php|(\A|[|;&]\s*)\S*run-tests\.php|compile-identity --corpus'   # upstream's runner where it is run (first in the call, after a separator, or under php), never where it is cited, a message's line included (#790); the lane's flags are lanes.nightly-flags (#1860)
+deny_pattern = '(?m)(\A|[|;&]\s*)"?(\S*\b(?:php[0-9.]*|lela)|\$\{?\w+\}?)"?(\s+[^|;&\s]+)*?\s+\S*run-tests\.php|(\A|[|;&]\s*)\S*run-tests\.php|compile-identity --corpus'   # upstream's runner where it is run (first in the call, after a separator, or under php), never where it is cited, a message's line included (#790); the lane's flags are lanes.nightly-flags (#1860)
 text = "Nightly lanes run in CI only; run the per-crate subset."
 remedy = "`cargo xtask phpt --subset <crate>`"                 # #3618 ruling 3
 
