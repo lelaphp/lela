@@ -203,21 +203,25 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
   daemon of that architecture. It then smokes the tarball itself, unpacked:
   `dist/smoke.sh` runs `-v`, `-r`, a file with arguments, code on stdin,
   `lela-cgi` on a file and `lela-fpm -t`, a Linux tarball in the Ubuntu image
-  the Dockerfile builds on with its `runtime-packages.txt` installed. A
+  the Dockerfile builds on with its `runtime-packages.txt` installed. Then
+  the release's `install.sh` installs the tarball there as a user runs it,
+  ending with `lela -v` through its link: in that image as a user of its
+  own, curl installed once the smoke has passed, and on the Mac into a
+  home of its own on the system's `PATH` alone. A
   macOS tarball carries its libraries, below, and each Mach-O in it an
   ad-hoc signature, which `build` reads before the smoke, with no
   Developer ID and no notarization.
 - `publish` takes the three tarballs from the directory, refusing a
   missing one or one of another version, writes `SHA256SUMS` over them
-  with `scripts/dist-sums.sh`, and creates the GitHub Release of the tag
-  with the four attached. The release is marked a pre-release when the
+  with `scripts/dist-sums.sh`, stages `install.sh` beside them (below), and
+  creates the GitHub Release of the tag with the five attached. The release is marked a pre-release when the
   version is one, and the latest when its images move the bare variant
   tags, which it reads as `join` does, refusing a shallow checkout.
 
 A real `build` or `publish` refuses a tree with changes, and a tag that is
 not HEAD. `--dry-run` prints what the step would make and makes nothing:
 `build` the platform, the commit, the tarball and its smoke; `publish` the
-artifacts, the release's fields and the image tags `dist/publish.py` would
+artifacts, `install.sh` among them, the release's fields and the image tags `dist/publish.py` would
 push, which a pre-release's are without a bare variant:
 
 ```sh
@@ -282,7 +286,65 @@ Homebrew's prefix, where `brew` and `sandbox-exec` are on the machine.
 the hosts in `target/release` load, where all three are built.
 
 The program to put on `PATH` is `bin/lela` of the unpacked directory, by a
-link to it: a copy of `bin/lela` alone finds no `../lib`.
+link to it: a copy of `bin/lela` alone finds no `../lib`. dyld resolves
+`@loader_path` from the real file the link names, so the link runs.
+
+### The installer
+
+Each release carries `install.sh`, which installs that release for the
+user who runs it (#20):
+
+```sh
+curl -fsSL https://github.com/lelaphp/lela/releases/download/v<version>/install.sh | sh
+```
+
+`dist/install.sh` is its source, POSIX `sh`, and `publish` bakes the
+release into its four empty lines: the hosts' name, the version, the
+Ubuntu release of the Dockerfile's `ARG UBUNTU` and the URL of the
+release's assets. So the script installs the release it is attached to,
+never the latest: a pre-release is never GitHub's latest. The source run
+as it is names no release and is refused.
+
+It picks the tarball of the machine's platform, downloads it and
+`SHA256SUMS` from the same release with `curl` or `wget`, whichever is
+there, and refuses a tarball whose SHA-256, by `sha256sum` or `shasum -a
+256`, differs from the sums or which the sums do not name. It unpacks the
+tarball whole into `$XDG_DATA_HOME/lela/<version>`,
+`~/.local/share/lela/<version>` where that is unset, since the XDG Base
+Directory specification gives `~/.local/share` to an application's own
+files, and links `~/.local/bin/lela` to its `bin/lela`; `lela-cgi` and
+`lela-fpm` stay in the directory's `bin/` and `sbin/`. `SHA256SUMS` names
+the tarballs alone, not `install.sh`: the script and the sums come from
+the one release page, unsigned, so a sum of the script would vouch for
+nothing the page does not, and a signing step is outside spec #9.
+
+- macOS on Apple silicon alone, a shell under Rosetta included: an Intel
+  Mac is refused, and so is a macOS older than the `macos` line of the
+  tarball's `bundled-libraries.txt`, both by name.
+- Linux on `x86_64` and `aarch64`, Ubuntu of that release alone, read
+  from `/etc/os-release`; each package of `runtime-packages.txt` that
+  `dpkg-query` says is not installed is named, with the `sudo apt-get
+  install` line that installs them, which the script does not run.
+- Any other platform is refused, naming the three a release has.
+
+Every check runs before anything is put in place, the unpacked `lela -v`
+among them, and a refusal leaves the home as it was. It asks for no
+root, refuses to run under `sudo`, writes nowhere but those two
+directories, leaves any `php` and any `~/.local/bin/lela` that is not its
+own link as it is, and edits no shell profile: it says when
+`~/.local/bin` is not on `PATH`. A run over an installed release replaces
+it in place, an upgrade removes the release it replaces, and the link
+moves only once `lela -v` runs through it.
+
+`test_install.py` runs the staged script under `sh`, and `dash` where it
+is there, over a release of the test's own, its tarball packed by the
+staging's `pack`, fetched from a `file://` URL: `LELA_INSTALL_FROM` names
+the directory the assets are fetched from in place of the release's, and
+`LELA_OS_RELEASE` the file read in place of `/etc/os-release`. Each is
+named for this script alone, so no other program's setting reaches it.
+`uname`, `sysctl`, `sw_vers`, `dpkg-query` and `id` are stand-ins on the
+test's `PATH`. With `shellcheck` there, it holds the script to `shellcheck
+-s sh`.
 
 ## The compiled tier
 

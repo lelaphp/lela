@@ -18,7 +18,7 @@ class Repository(testlib.Repository):
     version = "1.2.0"
     files = (
         ".gitignore", "dist/release.py", "dist/bundle.py", "dist/publish.py", "dist/Dockerfile",
-        "scripts/dist-sums.sh",
+        "dist/install.sh", "scripts/dist-sums.sh",
     )
 
     def release(self, *arguments, env=None):
@@ -97,7 +97,7 @@ class PublishDryRun(Repository):
     def test_a_release_is_the_latest_and_moves_the_bare_variant(self):
         run = self.release("publish", "v1.2.0", "--dry-run")
         self.assertEqual(self.lines(run, "artifact"), [
-            *(f"lela-1.2.0-{platform}.tar.gz" for platform in PLATFORMS), "SHA256SUMS",
+            *(f"lela-1.2.0-{platform}.tar.gz" for platform in PLATFORMS), "SHA256SUMS", "install.sh",
         ])
         self.assertEqual(self.lines(run, "release"), [
             "tag v1.2.0", "title v1.2.0", f"commit {self.commit}", "prerelease false", "latest true",
@@ -113,6 +113,14 @@ class PublishDryRun(Repository):
         dockerfile.write_text(dockerfile.read_text().replace("\nARG NAME=lela\n", "\nARG NAME=other\n"))
         run = self.release("publish", "v1.2.0", "--dry-run", env={"NAME": "php"})
         self.assertEqual(self.lines(run, "artifact")[0], "other-1.2.0-darwin-arm64.tar.gz")
+
+    def test_an_installer_missing_a_line_the_release_bakes_is_refused(self):
+        script = self.root / "dist/install.sh"
+        script.write_text(script.read_text().replace("\nversion=\n", "\n"))
+        run = self.release("publish", "v1.2.0", "--dry-run")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("dist/install.sh carries 0 empty `version=` lines, where it carries one", run.stderr)
+        self.assertNotIn("artifact", run.stdout)
 
     def test_a_dockerfile_naming_no_hosts_is_refused(self):
         dockerfile = self.root / "dist/Dockerfile"
@@ -139,7 +147,7 @@ class PreReleaseDryRun(Repository):
     def test_a_pre_release_is_marked_one_and_moves_no_bare_variant(self):
         run = self.release("publish", "v0.1.0-alpha.1", "--dry-run")
         self.assertEqual(self.lines(run, "artifact"), [
-            *(f"lela-0.1.0-alpha.1-{platform}.tar.gz" for platform in PLATFORMS), "SHA256SUMS",
+            *(f"lela-0.1.0-alpha.1-{platform}.tar.gz" for platform in PLATFORMS), "SHA256SUMS", "install.sh",
         ])
         self.assertEqual(self.lines(run, "release"), [
             "tag v0.1.0-alpha.1", "title v0.1.0-alpha.1", f"commit {self.commit}",
@@ -217,8 +225,14 @@ class Publish(Recorded):
             "v0.1.0-alpha.1", "--verify-tag", "--title", "v0.1.0-alpha.1",
             "--prerelease", "--latest=false",
             *(str(out / f"lela-0.1.0-alpha.1-{platform}.tar.gz") for platform in PLATFORMS),
-            str(out / "SHA256SUMS"),
+            str(out / "SHA256SUMS"), str(out / "install.sh"),
         ])
+        # The installer attached is the release's: its version, its URL,
+        # and the Ubuntu release of the Dockerfile's base, baked in.
+        script = (out / "install.sh").read_text()
+        self.assertIn("\nname='lela'\nversion='0.1.0-alpha.1'\nubuntu='26.04'\n"
+                      "release='https://github.com/lelaphp/lela/releases/download/v0.1.0-alpha.1'\n", script)
+        self.assertTrue(os.access(out / "install.sh", os.X_OK))
         self.assertIn(self.commit, notes)
         self.assertIn(sums, notes)
         self.assertIn(f"{IMAGE}:0.1.0-alpha.1-fpm", notes)
@@ -348,9 +362,16 @@ class Build(Recorded):
             "docker", "run", "--rm", "--platform", "linux/amd64",
             "-v", f"{self.out()}:/release:ro", "-v",
         ])
-        self.assertEqual(smoke[8:11], [f"{self.root / 'dist'}:/dist:ro", UBUNTU, "bash"])
+        self.assertEqual(smoke[8:10], [f"{self.root / 'dist'}:/dist:ro", "-v"])
+        self.assertTrue(smoke[10].endswith(":/installer:ro"), smoke[10])
+        self.assertEqual(smoke[11:13], [UBUNTU, "bash"])
         self.assertIn("/release/lela-1.2.0-linux-x86_64.tar.gz", smoke[-1])
-        self.assertIn('/dist/smoke.sh "$d"', smoke[-1])
+        # The smoke, then the installer as a user runs it, curl coming only
+        # after the smoke.
+        lines = smoke[-1].splitlines()
+        self.assertLess(lines.index('/dist/smoke.sh "$d"'), lines.index(
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl >/dev/null"))
+        self.assertEqual(lines[-1], "su installer -c 'LELA_INSTALL_FROM=file:///tmp/assets sh /installer/install.sh'")
         listing = subprocess.run(
             ["tar", "-tvzf", str(self.out() / "lela-1.2.0-linux-x86_64.tar.gz")],
             check=True, capture_output=True, text=True,
@@ -466,6 +487,8 @@ class BuildDarwin(Recorded):
             "etc/php.ini-production", "sbin/lela-fpm",
         ]])
         self.assertRegex("\n".join(self.lines(run, "bundle")), r"^macos \d+\.\d+$")
+        # The release's installer over the tarball, into a home of its own.
+        self.assertRegex(run.stdout, r"\ninstall.sh: installed lela 1.2.0 in /\S+/home/.local/share/lela/1.2.0, ")
         self.assertEqual(self.lines(run, "built"), [str(self.out / "lela-1.2.0-darwin-arm64.tar.gz")])
 
     def test_the_libraries_the_hosts_load_are_bundled_and_run_with_their_keg_gone(self):

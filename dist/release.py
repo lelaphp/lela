@@ -24,14 +24,18 @@ the libraries its hosts load outside the system's under lib/, each name
 rewritten relative to the file that carries it and each rewritten file
 signed again ad hoc, with the kegs' licences and the list of them, which
 dist/bundle.py lays; its dry run names the libraries the hosts built here
-load, where they are built.
+load, where they are built. Last, the release's install.sh installs the
+tarball there into a home of its own, as a user runs it, and runs
+`lela -v` through its link.
 
 `publish` takes the three tarballs from <dir>, and no other, writes
-SHA256SUMS over them with scripts/dist-sums.sh, and creates the tag's
-GitHub Release with the four attached, the sums and the image references
-in its notes. It is a pre-release when the version has a pre-release
-part, and the latest when its images move the bare variant tags, which is
-dist/publish.py's rule, read from it. The images are that script's to
+SHA256SUMS over them with scripts/dist-sums.sh, stages install.sh beside
+them, dist/install.sh with the release's name, version, Ubuntu release
+and download URL baked in, and creates the tag's GitHub Release with the
+five attached, the sums and the image references in its notes. It is a
+pre-release when the version has a pre-release part, and the latest when
+its images move the bare variant tags, which is dist/publish.py's rule,
+read from it. The images are that script's to
 push, on its release path: this one names their tags and pushes nothing.
 
 --dry-run prints what the step would make, the release's fields and the
@@ -50,8 +54,10 @@ macOS tarball is given.
 """
 
 import argparse
+import hashlib
 import os
 import platform as pyplatform
+import re
 import shutil
 import subprocess
 import sys
@@ -190,11 +196,13 @@ def pack(stage, path):
         archive.add(stage, arcname=stage.name, filter=owned)
 
 
-def smoke(platform, path):
+def smoke(ref, platform, path):
     """dist/smoke.sh over the tarball itself, unpacked on its platform: a
     Linux one in the Ubuntu image the Dockerfile builds on, with its
     runtime-packages.txt installed; the macOS hosts after their ad-hoc
-    signature is read on every Mach-O in it."""
+    signature is read on every Mach-O in it. Then the release's
+    install.sh over the tarball there, as a user runs it, which ends with
+    `lela -v` run through the link it makes."""
     base = path.name.removesuffix(".tar.gz")
     if platform in LINUX:
         ubuntu = arg("UBUNTU")
@@ -205,14 +213,24 @@ def smoke(platform, path):
             "apt-get update -qq",
             'xargs -a "$d/runtime-packages.txt" apt-get install -y -qq --no-install-recommends >/dev/null',
             '/dist/smoke.sh "$d"',
+            # curl only once the smoke has passed, so that no library it
+            # brings stands in for one runtime-packages.txt lacks.
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl >/dev/null",
+            f"mkdir /tmp/assets && cp /release/{path.name} /tmp/assets/",
+            "(cd /tmp/assets && sha256sum -- *.tar.gz > SHA256SUMS)",
+            "useradd -m installer",
+            f"su installer -c 'LELA_INSTALL_FROM=file:///tmp/assets sh /installer/{INSTALLER}'",
         ])
-        command = [
-            "docker", "run", "--rm", "--platform", LINUX[platform],
-            "-v", f"{path.parent}:/release:ro", "-v", f"{ROOT / 'dist'}:/dist:ro",
-            ubuntu, "bash", "-c", script,
-        ]
-        if subprocess.run(command).returncode != 0:
-            raise Refusal(f"the smoke of {path.name} on {platform} failed")
+        with tempfile.TemporaryDirectory() as installer_dir:
+            (Path(installer_dir) / INSTALLER).write_text(installer(ref))
+            command = [
+                "docker", "run", "--rm", "--platform", LINUX[platform],
+                "-v", f"{path.parent}:/release:ro", "-v", f"{ROOT / 'dist'}:/dist:ro",
+                "-v", f"{installer_dir}:/installer:ro",
+                ubuntu, "bash", "-c", script,
+            ]
+            if subprocess.run(command).returncode != 0:
+                raise Refusal(f"the smoke of {path.name} on {platform} failed")
         return
     with tempfile.TemporaryDirectory() as scratch:
         with tarfile.open(path) as archive:
@@ -224,6 +242,28 @@ def smoke(platform, path):
                 raise Refusal(f"{path.name}'s {macho.relative_to(unpacked)} carries no ad-hoc signature")
         if subprocess.run([publish.setting("SMOKE"), str(unpacked)]).returncode != 0:
             raise Refusal(f"the smoke of {path.name} on {platform} failed")
+        install_darwin(ref, path, Path(scratch))
+
+
+# The PATH the macOS install runs on: the system's directories alone, as a
+# Mac without Homebrew has them.
+SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def install_darwin(ref, path, scratch):
+    """The release's install.sh over the tarball, from a directory of it
+    and its sum, into a home of its own."""
+    assets, home = scratch / "assets", scratch / "home"
+    assets.mkdir()
+    home.mkdir()
+    (assets / path.name).symlink_to(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    (assets / "SHA256SUMS").write_text(f"{digest}  {path.name}\n")
+    script = scratch / INSTALLER
+    script.write_text(installer(ref))
+    env = {"HOME": str(home), "PATH": SYSTEM_PATH, "LELA_INSTALL_FROM": assets.as_uri()}
+    if subprocess.run(["/bin/sh", str(script)], env=env, cwd=scratch).returncode != 0:
+        raise Refusal(f"the install of {path.name} by {INSTALLER} on darwin-arm64 failed")
 
 
 def build_tarball(ref, commit, arguments):
@@ -255,8 +295,41 @@ def build_tarball(ref, commit, arguments):
     else:
         stage_darwin(stage)
     pack(stage, path)
-    smoke(platform, path)
+    smoke(ref, platform, path)
     print(f"built {path}")
+
+
+INSTALLER = "install.sh"
+
+
+def ubuntu():
+    """The Ubuntu release dist/Dockerfile's `ARG UBUNTU` names, the one the
+    Linux tarballs are built and smoked on."""
+    image = arg("UBUNTU")
+    found = re.fullmatch(r"ubuntu:(\d+\.\d+)(?:@sha256:[0-9a-f]{64})?", image)
+    if found is None:
+        raise Refusal(f"dist/Dockerfile's `ARG UBUNTU={image}` names no Ubuntu release, ubuntu:<year>.<month>")
+    return found.group(1)
+
+
+def installer(ref):
+    """dist/install.sh with the release baked into its four empty lines:
+    the hosts' name, the version, the Ubuntu release of the Linux
+    tarballs, and the URL of the release's assets, which the script
+    fetches its tarball and SHA256SUMS from."""
+    text = (ROOT / "dist" / INSTALLER).read_text()
+    values = {
+        "name": name(),
+        "version": ref.version,
+        "ubuntu": ubuntu(),
+        "release": f"{publish.SOURCE}/releases/download/{ref.name}",
+    }
+    for key, value in values.items():
+        count = text.count(f"\n{key}=\n")
+        if count != 1:
+            raise Refusal(f"dist/{INSTALLER} carries {count} empty `{key}=` lines, where it carries one")
+        text = text.replace(f"\n{key}=\n", f"\n{key}='{value}'\n")
+    return text
 
 
 def tarballs(ref, directory):
@@ -279,7 +352,10 @@ def publish_release(ref, commit, arguments):
         publish.built_from(ref, commit)
         paths = tarballs(ref, arguments.dir)
     artifacts = [tarball(ref, platform) for platform in PLATFORMS]
-    for artifact in [*artifacts, "SHA256SUMS"]:
+    # Baked in the dry run too, so that a script missing a line is refused
+    # before a tag's run reaches its release.
+    script = installer(ref)
+    for artifact in [*artifacts, "SHA256SUMS", INSTALLER]:
         print(f"artifact {artifact}")
     # The release is the latest where its images move the bare variant
     # tags: the publish script's rule, read from it and kept nowhere else.
@@ -301,6 +377,9 @@ def publish_release(ref, commit, arguments):
     # failure reaches the caller.
     subprocess.run([str(ROOT / "scripts/dist-sums.sh"), str(arguments.dir)], check=True, stdout=subprocess.DEVNULL)
     sums = arguments.dir / "SHA256SUMS"
+    staged = arguments.dir / INSTALLER
+    staged.write_text(script)
+    staged.chmod(0o755)
     notes = "".join([
         f"The tarballs of {ref.name}, built from {commit.sha}, and their SHA-256 sums:\n\n",
         "```\n", sums.read_text(), "```\n\n",
@@ -313,7 +392,7 @@ def publish_release(ref, commit, arguments):
         subprocess.run([
             "gh", "release", "create", ref.name, "--verify-tag", "--title", ref.name,
             "--notes-file", file.name, *(["--prerelease"] if ref.prerelease else []),
-            f"--latest={str(latest).lower()}", *map(str, paths), str(sums),
+            f"--latest={str(latest).lower()}", *map(str, paths), str(sums), str(staged),
         ], check=True)
     print(f"released {ref.name}")
 
