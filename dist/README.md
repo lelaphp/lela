@@ -329,10 +329,16 @@ unsandboxed and the oracle:
   #47 asks a person about, and `openssl_get_cert_locations()` names
   Homebrew's paths, as php's does. With no `openssl.cnf` to read,
   `openssl_pkey_new()` and `openssl_csr_new()` without a `config` option
-  return false, as the oracle's do with `OPENSSL_CONF` naming no file;
-  `OPENSSL_CONF=/etc/ssl/openssl.cnf` makes them succeed, and #46 asks a
-  person which file the tarball reads. The cipher list is the same in and
-  out of the sandbox, since the default provider is built into the library.
+  return false, as the oracle's do with `OPENSSL_CONF` naming no file.
+  `OPENSSL_CONF=/etc/ssl/openssl.cnf` loads, but macOS's file leaves
+  `default_bits` commented out, so `openssl_pkey_new()` with no
+  `private_key_bits` still warns "Private key length must be at least 384
+  bits, configured to 0" and returns false, as the oracle does with that
+  file; with `private_key_bits` both calls succeed. #46 asks a person which
+  file the tarball reads. The cipher list is the same in and out of the
+  sandbox: php loads no provider module unless built with
+  `--with-openssl-legacy-provider` or a configuration activates one, and
+  the default provider is built into the library.
 - `libfontconfig.1.dylib` compiles in `/opt/homebrew/etc/fonts`,
   `/opt/homebrew/var/cache/fontconfig` and the keg's `conf.avail`, and no
   host's output depends on them: php never asks libgd to look a font up
