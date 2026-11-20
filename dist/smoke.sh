@@ -15,7 +15,8 @@
 # Over an image of one variant, on the image's own platform: the same
 # checks inside it over the hosts in /usr/local, `php-fpm -t` where the
 # variant holds the FPM; the ini directory php's image names; the compat
-# directory off PATH, and each usual name running once it is put first;
+# directory off PATH, and each entry of it what its name finds and runs
+# once the directory is put first;
 # then what a user of the variant sees: the entrypoint passing an option to
 # the variant's command, `fpm` answering a FastCGI request on port 9000 and
 # `apache` serving a page, each to a second container of the image.
@@ -69,21 +70,45 @@ hosts() {
 # Inside an image: its hosts, its ini directory and its compat directory,
 # whose path the caller passes as COMPAT.
 in_image() {
-	local variant=$1 fpm=fpm usual
-	local compat=${COMPAT:?the compat directory}
+	local variant=$1 fpm=fpm
 	[ "$variant" != cli ] || fpm=
 	hosts /usr/local "$fpm"
 	check "ini directory" "$PHP_INI_DIR $PHP_INI_DIR/conf.d" \
 		"$NAME" -r 'echo PHP_CONFIG_FILE_PATH, " ", PHP_CONFIG_FILE_SCAN_DIR;'
+	compat "${COMPAT:?the compat directory}" "$variant"
+}
+
+# The compat directory of a variant's image: a directory, off PATH, each
+# entry of which is what its name finds once the directory is first on
+# PATH, and runs. That makes putting it first the only step the usual
+# names need. Where the hosts carry Lela's names (ADR-0016) each usual name
+# the variant holds is an entry; while they carry php's, the directory is
+# empty, and an empty one passes.
+compat() {
+	local compat=$1 variant=$2 usual entry found
+	local usuals=(php php-cgi)
+	[ "$variant" = cli ] || usuals+=(php-fpm)
 	[ -d "$compat" ] || { echo "compat: $compat is not a directory" >&2; exit 1; }
 	case ":$PATH:" in
 		*":$compat:"*) echo "compat: $compat is on PATH, $PATH" >&2; exit 1 ;;
 	esac
 	echo "compat: $compat, not on PATH ($PATH)"
-	for usual in php php-cgi ${fpm:+php-fpm}; do
+	if [ "$NAME" != php ]; then
+		for usual in "${usuals[@]}"; do
+			[ -e "$compat/$usual" ] || [ -L "$compat/$usual" ] ||
+				{ echo "compat: $compat holds no $usual, and the hosts are named $NAME" >&2; exit 1; }
+		done
+	fi
+	for entry in "$compat"/*; do
+		# An empty directory's glob is itself.
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		usual=${entry##*/}
+		found=$(PATH="$compat:$PATH" command -v "$usual") || found=nothing
+		[ "$found" = "$entry" ] ||
+			{ echo "compat: $usual is $found with $compat first on PATH, and not $entry" >&2; exit 1; }
 		PATH="$compat:$PATH" "$usual" -v > /dev/null ||
-			{ echo "compat: $usual does not run with $compat first on PATH" >&2; exit 1; }
-		echo "compat: $usual is $(PATH="$compat:$PATH" command -v "$usual") with $compat first on PATH"
+			{ echo "compat: $entry does not run" >&2; exit 1; }
+		echo "compat: $usual is $entry with $compat first on PATH"
 	done
 }
 
@@ -199,8 +224,10 @@ case "${1:-}" in
 		[ "$#" -eq 3 ] || usage
 		case "$3" in cli|fpm|apache) ;; *) usage ;; esac
 		image "$2" "$3" ;;
-	# What the image mode runs inside a container of the image.
+	# What the image mode runs inside a container of the image, and its
+	# compat check alone, which test_smoke.py holds without an image.
 	--in-image) in_image "$2" ;;
+	--compat) compat "$2" "$3" ;;
 	--fastcgi) fastcgi "$2" "$3" "$4" ;;
 	-*|"") usage ;;
 	*)

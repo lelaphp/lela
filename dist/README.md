@@ -55,8 +55,12 @@ php-src's templates at the pinned commit, rendered as the official image's
 `dist/smoke.sh --image <image> <variant>` runs the tarball's checks inside
 the image, on the image's own platform, over the hosts in `/usr/local`
 (`php-fpm -t` where the variant holds the FPM). It checks the ini
-directory, and that the compat directory is off `PATH` and that putting it
-first is the only step each usual name needs. Then it checks what a user
+directory, and that the compat directory is there and off `PATH`, and
+that each entry of it is what its name finds once the directory is first
+on `PATH`, and runs: that makes putting it first the only step the usual
+names need. Once the hosts carry Lela's names, each usual name the
+variant holds must be an entry; until then the directory is empty, and
+passes. Then it checks what a user
 of the variant sees: `cli` passes an option to `php` through the
 entrypoint; `fpm` answers a FastCGI request on port 9000, and `apache`
 serves a page on port 80, each to a second container of the image on a
