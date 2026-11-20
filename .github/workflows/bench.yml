@@ -183,8 +183,8 @@ jobs:
             exit 1
           fi
           mapfile -t packages < <(sed -e '/^$/d' "$out/runtime.txt")
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends "${packages[@]}"
+          sudo sh "$GITHUB_WORKSPACE/dist/apt.sh" update
+          sudo sh "$GITHUB_WORKSPACE/dist/apt.sh" install "${packages[@]}"
           ldd "$out/php" "$out/php-fpm" | tee "$RUNNER_TEMP/ldd.txt"
           if grep -F 'not found' "$RUNNER_TEMP/ldd.txt"; then
             echo "::error::a library php or php-fpm links is not found on this runner after runtime.txt's packages; the bars that run it would refuse"

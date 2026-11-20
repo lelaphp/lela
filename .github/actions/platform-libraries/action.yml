@@ -11,5 +11,5 @@ runs:
       shell: bash
       run: |
         mapfile -t packages < <(sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^$/d' "$GITHUB_ACTION_PATH/packages.txt")
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq --no-install-recommends "${packages[@]}"
+        sudo sh "$GITHUB_WORKSPACE/dist/apt.sh" update
+        sudo sh "$GITHUB_WORKSPACE/dist/apt.sh" install "${packages[@]}"
