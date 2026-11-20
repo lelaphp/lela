@@ -27,11 +27,13 @@ dist/bundle.py lays; its dry run names the libraries the hosts built here
 load, where they are built.
 
 `publish` takes the three tarballs from <dir>, and no other, writes
-SHA256SUMS over them with scripts/dist-sums.sh, and creates the tag's
-GitHub Release with the four attached, the sums and the image references
-in its notes. It is a pre-release when the version has a pre-release
-part, and the latest when its images move the bare variant tags, which is
-dist/publish.py's rule, read from it. The images are that script's to
+SHA256SUMS over them with scripts/dist-sums.sh, stages install.sh beside
+them, dist/install.sh with the release's name, version, Ubuntu release
+and download URL baked in, and creates the tag's GitHub Release with the
+five attached, the sums and the image references in its notes. It is a
+pre-release when the version has a pre-release part, and the latest when
+its images move the bare variant tags, which is dist/publish.py's rule,
+read from it. The images are that script's to
 push, on its release path: this one names their tags and pushes nothing.
 
 --dry-run prints what the step would make, the release's fields and the
@@ -52,6 +54,7 @@ macOS tarball is given.
 import argparse
 import os
 import platform as pyplatform
+import re
 import shutil
 import subprocess
 import sys
@@ -259,6 +262,39 @@ def build_tarball(ref, commit, arguments):
     print(f"built {path}")
 
 
+INSTALLER = "install.sh"
+
+
+def ubuntu():
+    """The Ubuntu release dist/Dockerfile's `ARG UBUNTU` names, the one the
+    Linux tarballs are built and smoked on."""
+    image = arg("UBUNTU")
+    found = re.fullmatch(r"ubuntu:(\d+\.\d+)(?:@sha256:[0-9a-f]{64})?", image)
+    if found is None:
+        raise Refusal(f"dist/Dockerfile's `ARG UBUNTU={image}` names no Ubuntu release, ubuntu:<year>.<month>")
+    return found.group(1)
+
+
+def installer(ref):
+    """dist/install.sh with the release baked into its four empty lines:
+    the hosts' name, the version, the Ubuntu release of the Linux
+    tarballs, and the URL of the release's assets, which the script
+    fetches its tarball and SHA256SUMS from."""
+    text = (ROOT / "dist" / INSTALLER).read_text()
+    values = {
+        "name": name(),
+        "version": ref.version,
+        "ubuntu": ubuntu(),
+        "release": f"{publish.SOURCE}/releases/download/{ref.name}",
+    }
+    for key, value in values.items():
+        count = text.count(f"\n{key}=\n")
+        if count != 1:
+            raise Refusal(f"dist/{INSTALLER} carries {count} empty `{key}=` lines, where it carries one")
+        text = text.replace(f"\n{key}=\n", f"\n{key}='{value}'\n")
+    return text
+
+
 def tarballs(ref, directory):
     """The three tarballs of the release in `directory`, and no other."""
     if directory is None:
@@ -279,7 +315,10 @@ def publish_release(ref, commit, arguments):
         publish.built_from(ref, commit)
         paths = tarballs(ref, arguments.dir)
     artifacts = [tarball(ref, platform) for platform in PLATFORMS]
-    for artifact in [*artifacts, "SHA256SUMS"]:
+    # Baked in the dry run too, so that a script missing a line is refused
+    # before a tag's run reaches its release.
+    script = installer(ref)
+    for artifact in [*artifacts, "SHA256SUMS", INSTALLER]:
         print(f"artifact {artifact}")
     # The release is the latest where its images move the bare variant
     # tags: the publish script's rule, read from it and kept nowhere else.
@@ -301,6 +340,9 @@ def publish_release(ref, commit, arguments):
     # failure reaches the caller.
     subprocess.run([str(ROOT / "scripts/dist-sums.sh"), str(arguments.dir)], check=True, stdout=subprocess.DEVNULL)
     sums = arguments.dir / "SHA256SUMS"
+    staged = arguments.dir / INSTALLER
+    staged.write_text(script)
+    staged.chmod(0o755)
     notes = "".join([
         f"The tarballs of {ref.name}, built from {commit.sha}, and their SHA-256 sums:\n\n",
         "```\n", sums.read_text(), "```\n\n",
@@ -313,7 +355,7 @@ def publish_release(ref, commit, arguments):
         subprocess.run([
             "gh", "release", "create", ref.name, "--verify-tag", "--title", ref.name,
             "--notes-file", file.name, *(["--prerelease"] if ref.prerelease else []),
-            f"--latest={str(latest).lower()}", *map(str, paths), str(sums),
+            f"--latest={str(latest).lower()}", *map(str, paths), str(sums), str(staged),
         ], check=True)
     print(f"released {ref.name}")
 
