@@ -40,9 +40,12 @@ ARG COMPAT=/opt/lela/compat
 # before either download runs; see dist/README.md for verification bounds.
 FROM --platform=$BUILDPLATFORM ${UBUNTU} AS inputs
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
-RUN apt-get update -qq; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-        ca-certificates curl python3; \
+# Every apt step goes through dist/apt.sh, which tries each fetch again
+# while a mirror answers 5xx for a moment; a RUN mounts it, so no image
+# keeps it, and dist/test_apt.py holds each apt step to it.
+RUN --mount=type=bind,source=dist/apt.sh,target=/tmp/apt.sh \
+    sh /tmp/apt.sh update; \
+    sh /tmp/apt.sh install ca-certificates curl python3; \
     rm -rf /var/lib/apt/lists/*
 COPY dist/inputs.py dist/inputs.toml /opt/dist/
 COPY oracle.toml rust-toolchain.toml /opt/
@@ -56,7 +59,8 @@ ARG BUILDARCH
 ARG TARGETARCH
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 COPY .github/actions/platform-libraries/packages.txt /tmp/packages.txt
-RUN case "$TARGETARCH" in amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; \
+RUN --mount=type=bind,source=dist/apt.sh,target=/tmp/apt.sh \
+    case "$TARGETARCH" in amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; \
         *) echo "no rust target for $TARGETARCH" >&2; exit 1 ;; esac; \
     triplet="$arch-linux-gnu"; rust="$arch-unknown-linux-gnu"; var="${rust//-/_}"; \
     echo "export TRIPLET=$triplet CARGO_BUILD_TARGET=$rust" > /usr/local/share/dax-target.env; \
@@ -75,10 +79,9 @@ RUN case "$TARGETARCH" in amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; \
             "PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_LIBDIR=/usr/lib/$triplet/pkgconfig:/usr/share/pkgconfig" \
             >> /usr/local/share/dax-target.env; \
     fi; \
-    apt-get update -qq; \
+    sh /tmp/apt.sh update; \
     sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e "s/-dev\$/-dev:$TARGETARCH/" /tmp/packages.txt > /tmp/packages; \
-    DEBIAN_FRONTEND=noninteractive xargs -a /tmp/packages apt-get install -y -qq --no-install-recommends \
-        ca-certificates curl build-essential "${cross[@]}"; \
+    xargs -a /tmp/packages sh /tmp/apt.sh install ca-certificates curl build-essential "${cross[@]}"; \
     rm -rf /var/lib/apt/lists/*
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
 # Verify the BUILDARCH installer before executing it, then let rustup
@@ -186,9 +189,9 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ENV PHP_INI_DIR=${PHP_INI_DIR} \
     PHP_VERSION=${PHP_VERSION}
 COPY --from=build /out/runtime-packages.txt /tmp/runtime-packages.txt
-RUN apt-get update -qq; \
-    DEBIAN_FRONTEND=noninteractive xargs -a /tmp/runtime-packages.txt apt-get install -y -qq --no-install-recommends \
-        ca-certificates curl xz-utils; \
+RUN --mount=type=bind,source=dist/apt.sh,target=/tmp/apt.sh \
+    sh /tmp/apt.sh update; \
+    xargs -a /tmp/runtime-packages.txt sh /tmp/apt.sh install ca-certificates curl xz-utils; \
     rm -rf /var/lib/apt/lists/* /tmp/runtime-packages.txt
 # The template as written.
 RUN mkdir -p "$PHP_INI_DIR/conf.d"; \
@@ -279,8 +282,9 @@ ARG NAME
 ARG COMPAT
 ENV APACHE_CONFDIR=/etc/apache2 \
     APACHE_ENVVARS=/etc/apache2/envvars
-RUN apt-get update -qq; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends apache2; \
+RUN --mount=type=bind,source=dist/apt.sh,target=/tmp/apt.sh \
+    sh /tmp/apt.sh update; \
+    sh /tmp/apt.sh install apache2; \
     rm -rf /var/lib/apt/lists/*
 # From here to the next comment, php's official apache image as written.
 RUN sed -ri 's/^export ([^=]+)=(.*)$/: ${\1:=\2}\nexport \1/' "$APACHE_ENVVARS"; \
