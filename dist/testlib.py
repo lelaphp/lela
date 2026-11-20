@@ -88,6 +88,13 @@ class Repository(unittest.TestCase):
             env=env, check=True, capture_output=True, text=True,
         ).stdout
 
+    def versioned(self, version):
+        """The manifest's version line set to `version`, in a commit of its
+        own that is HEAD, as a release's bump is."""
+        (self.root / "Cargo.toml").write_text(manifest(version))
+        self.git("commit", "-q", "--allow-empty", "-am", f"version {version}")
+        self.commit = self.git("rev-parse", "HEAD").strip()
+
     def script(self, name, *arguments, env=None):
         """dist/<name> run in the repository with the PATH above."""
         return subprocess.run(

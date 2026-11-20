@@ -98,13 +98,17 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
 Each image is labelled, and each list annotated, with standard OCI keys
 alone: `source`, `revision`, `version` (`edge` from `main`) and
 `licenses`, read from the workspace manifest's package table, and
-`description`, `Lela`, which replaces the Ubuntu base's. `--dry-run`
-prints the platform, the labels, the tags and the digests each step would
-push, and pushes nothing:
+`description`, `Lela`, which replaces the Ubuntu base's. A release's
+tag is held to the workspace manifest's version by both steps, dry or
+real, through the hold `dist/release.py` uses: a tag that names another
+version is refused, and so is a manifest with no version line, as this
+tree's is until the version line lands. `--dry-run` prints the platform,
+the labels, the tags and the digests each step would push, and pushes
+nothing:
 
 ```sh
-dist/publish.py build v0.1.0 --platform linux/amd64 --dry-run
-dist/publish.py join v0.1.0 --dry-run
+dist/publish.py build v0.1.0-alpha.1 --platform linux/amd64 --dry-run
+dist/publish.py join v0.1.0-alpha.1 --dry-run
 ```
 
 `dist/prune.py` deletes the versions no tag is pulled by: one last updated

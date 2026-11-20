@@ -48,7 +48,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 from pathlib import Path
 
 # The images' script, beside this one; the checkout ignores the bytecode
@@ -61,25 +60,11 @@ Refusal = publish.Refusal
 
 
 def release(tag):
-    """The release `tag` names, held to the workspace manifest's version."""
-    try:
-        ref = publish.Ref.parse(tag)
-    except Refusal:
-        ref = publish.Ref(None)
-    if ref.version is None:
+    """The release `tag` names, held to the workspace manifest's version
+    by dist/publish.py's one hold."""
+    ref = publish.Ref.release(tag)
+    if ref is None:
         raise Refusal(f"{tag} is not a release's tag, v<version>")
-    with (ROOT / "Cargo.toml").open("rb") as file:
-        package = tomllib.load(file).get("workspace", {}).get("package", {})
-    if "version" not in package:
-        raise Refusal(
-            "Cargo.toml's [workspace.package] has no version line; "
-            f'a release of {tag} needs version = "{ref.version}" there'
-        )
-    if package["version"] != ref.version:
-        raise Refusal(
-            f"{tag} is not the workspace manifest's version, {package['version']}, "
-            "from Cargo.toml's [workspace.package]"
-        )
     return ref
 
 

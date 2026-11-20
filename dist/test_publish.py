@@ -66,12 +66,16 @@ class DryRun(Publish):
         self.assertFalse(self.log.exists())
 
     def test_a_release_is_labelled_with_its_version(self):
+        self.versioned("1.2.0")
         run = self.publish("build", "v1.2.0", "--platform", "linux/amd64", "--dry-run")
         self.assertEqual(self.lines(run, "label"), self.labels("1.2.0"))
+        self.versioned("1.3.0-rc.1")
         run = self.publish("build", "v1.3.0-rc.1", "--platform", "linux/amd64", "--dry-run")
         self.assertEqual(self.lines(run, "label"), self.labels("1.3.0-rc.1"))
 
     def tags(self, ref):
+        if ref != "main":
+            self.versioned(ref.removeprefix("v"))
         run = self.publish("join", ref, "--dry-run")
         return [line.split(" from ")[0] for line in self.lines(run, "tag")]
 
@@ -117,6 +121,42 @@ class DryRun(Publish):
     def test_the_join_annotates_each_list_with_the_labels(self):
         run = self.publish("join", "main", "--dry-run")
         self.assertEqual(self.lines(run, "annotation"), [f"index:{l}" for l in self.labels("edge")])
+
+    def refused(self, ref):
+        """Each step on `ref`, dry and real, with what it ran."""
+        for arguments in (
+            ("build", ref, "--platform", "linux/amd64", "--dry-run"), ("build", ref),
+            ("join", ref, "--dry-run"), ("join", ref),
+        ):
+            with self.subTest(arguments=arguments):
+                run = self.publish(*arguments, env={"CALLS": str(self.log)})
+                self.assertEqual(run.returncode, 1, run.stdout)
+                self.assertEqual(run.stdout, "")
+                self.assertFalse(self.log.exists())
+                yield run
+
+    def test_a_tag_the_manifest_does_not_name_is_refused_by_both_steps(self):
+        self.versioned("1.2.0")
+        for ref in ("v1.2.1", "v1.2.0-rc.1", "v1.20.0"):
+            for run in self.refused(ref):
+                self.assertIn(
+                    f"{ref} is not the workspace manifest's version, 1.2.0, from Cargo.toml's "
+                    "[workspace.package]",
+                    run.stderr,
+                )
+
+    def test_a_manifest_with_no_version_line_is_refused_with_the_line_it_lacks(self):
+        for run in self.refused("v0.1.0-alpha.1"):
+            self.assertIn(
+                "Cargo.toml's [workspace.package] has no version line; "
+                'a release of v0.1.0-alpha.1 needs version = "0.1.0-alpha.1" there',
+                run.stderr,
+            )
+
+    def test_a_manifest_toml_does_not_read_is_refused(self):
+        (self.root / "Cargo.toml").write_text("changed")
+        for run in self.refused("v1.2.0"):
+            self.assertIn("Cargo.toml is not a manifest TOML reads", run.stderr)
 
     def test_a_ref_that_is_neither_main_nor_a_version_is_refused(self):
         for ref in ("develop", "1.2.0", "v1.2", "v1.2.0+build.5", "v01.2.0", "vmain"):
@@ -268,6 +308,7 @@ class Build(Recorded):
         self.assertEqual(self.calls(), [])
 
     def test_a_release_is_built_at_its_tag_alone(self):
+        self.versioned("1.2.0")
         run = self.run_step("build", "v1.2.0")
         self.assertEqual(run.returncode, 1)
         self.assertIn("no tag v1.2.0 here", run.stderr)
@@ -343,6 +384,7 @@ class Join(Recorded):
         self.assertEqual(self.calls(), [])
 
     def test_the_dry_run_names_the_digests_it_would_join(self):
+        self.versioned("1.2.0")
         run = self.run_step("join", "v1.2.0", *self.digests(), "--dry-run")
         self.assertIn(
             f"{IMAGE}:1.2.0-cli from {self.source('cli', 'linux/amd64')} {self.source('cli', 'linux/arm64')}",

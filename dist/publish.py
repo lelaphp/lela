@@ -4,7 +4,10 @@
     dist/publish.py build <ref> [--platform <platform>] [--digests <file>] [--dry-run]
     dist/publish.py join <ref> [<digests>...] [--manifests <file>] [--dry-run]
 
-<ref> is `main` or a release's tag, `v<version>`.
+<ref> is `main` or a release's tag, `v<version>`, which every step, dry
+or real, first holds to the version line of the workspace manifest's
+package table, as dist/release.py does: a tag that names another version
+is refused, and so is a manifest with no version line.
 
 `build` runs on one platform, the daemon's own, which --platform may name;
 a real build refuses a platform the daemon does not run as its own, so
@@ -98,9 +101,32 @@ class Ref:
     def parse(name):
         if name == "main":
             return Ref(None)
-        if name.startswith("v") and VERSION.fullmatch(name[1:]):
-            return Ref(name[1:])
-        raise Refusal(f"{name} is neither main nor a release's tag, v<version>")
+        ref = Ref.release(name)
+        if ref is None:
+            raise Refusal(f"{name} is neither main nor a release's tag, v<version>")
+        return ref
+
+    @staticmethod
+    def release(name):
+        """The release the tag `name` names, held to the version line of
+        the workspace manifest's package table; None where `name` is no
+        `v<version>`. The one hold of a tag to the manifest: both scripts
+        read a release's ref through it."""
+        if not (name.startswith("v") and VERSION.fullmatch(name[1:])):
+            return None
+        version = name[1:]
+        package = workspace_package()
+        if "version" not in package:
+            raise Refusal(
+                "Cargo.toml's [workspace.package] has no version line; "
+                f'a release of {name} needs version = "{version}" there'
+            )
+        if package["version"] != version:
+            raise Refusal(
+                f"{name} is not the workspace manifest's version, {package['version']}, "
+                "from Cargo.toml's [workspace.package]"
+            )
+        return Ref(version)
 
     @property
     def prerelease(self):
@@ -120,7 +146,7 @@ class Ref:
 
 def releases():
     """The versions of the release tags here, pre-releases left out."""
-    found = [Ref.parse(tag) for tag in git("tag", "--list", "v*").split() if VERSION.fullmatch(tag[1:])]
+    found = [Ref(tag[1:]) for tag in git("tag", "--list", "v*").split() if VERSION.fullmatch(tag[1:])]
     return [ref for ref in found if not ref.prerelease]
 
 
@@ -150,9 +176,17 @@ class Commit:
         return Commit(sha, int(epoch))
 
 
+def workspace_package():
+    """Cargo.toml's `[workspace.package]` table."""
+    try:
+        with (ROOT / "Cargo.toml").open("rb") as manifest:
+            return tomllib.load(manifest).get("workspace", {}).get("package", {})
+    except tomllib.TOMLDecodeError as error:
+        raise Refusal(f"Cargo.toml is not a manifest TOML reads: {error}") from None
+
+
 def licenses():
-    with (ROOT / "Cargo.toml").open("rb") as manifest:
-        return tomllib.load(manifest)["workspace"]["package"]["license"]
+    return workspace_package()["license"]
 
 
 def labels(ref, commit):
