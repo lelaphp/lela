@@ -15,7 +15,7 @@ One repository variable names the runner of every Linux job:
 runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
 ```
 
-That is `regions`, `per-commit`, `miri`, `tailcall`, `store` and `red-main` in `harness.yml`, `soak`, `deny` and `red-nightly` in `nightly.yml`, and `bench` in `bench.yml`.
+That is `regions`, `per-commit`, `miri`, `tailcall`, `store` and `red-main` in `harness.yml`, `soak`, `deny` and `red-nightly` in `nightly.yml`, `bench` in `bench.yml`, and `amd64`, `join` and `prune` in `images.yml`.
 
 - **Unset** (or empty), each runs on GitHub's `ubuntu-26.04`, the release `packages.txt` names (#1724).
 - **Set**, its value is a JSON list of runner labels, as another provider's hosted runner of the same release is named:
@@ -25,6 +25,22 @@ That is `regions`, `per-commit`, `miri`, `tailcall`, `store` and `red-main` in `
   ```
 
   The variable decides nothing for the Mac's jobs, both `oracle` jobs and nightly.yml's `tailcall`: they run on a macOS 15 image whatever it holds.
+
+### `LELA_BUILD_RUNNER_ARM64`: the arm64 image build's runner
+
+`images.yml`'s `arm64` job builds and smokes the `linux/arm64` images on a runner of that architecture, so `dist/smoke.sh --image` reads the platform's own answers and no emulation's. Its runner is this second variable's, a JSON list of labels read as the first is:
+
+```yaml
+runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER_ARM64 || '["ubuntu-26.04-arm"]') }}
+```
+
+As Mitchell ruled on 2026-11-19 (#5), it is Blacksmith's arm64 runner, the size the amd64 runner has:
+
+```sh
+gh variable set LELA_BUILD_RUNNER_ARM64 --body '["blacksmith-8vcpu-ubuntu-2604-arm"]'
+```
+
+Unset, the job asks for GitHub's `ubuntu-26.04-arm`. No other job reads it.
 
 ### What the jobs need of a hosted Linux image
 

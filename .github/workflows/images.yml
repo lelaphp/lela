@@ -1,0 +1,216 @@
+# The images (spec #9): each push to `main` publishes ghcr.io/lelaphp/lela's
+# `cli`, `fpm` and `apache` for linux/amd64 and linux/arm64, and a schedule
+# deletes what no tag is pulled by. The logic is dist/publish.py's and
+# dist/prune.py's (dist/README.md); this workflow chooses the runners,
+# grants the permissions and calls them.
+# - `amd64` and `arm64` each run `publish.py build` on a runner of the
+#   platform's own architecture: the three variants built, each smoked by
+#   `dist/smoke.sh --image`, and pushed by digest only once all three have
+#   passed. The amd64 runner is the repository variable LELA_BUILD_RUNNER's,
+#   as every Linux job's is, and the arm64 runner LELA_BUILD_RUNNER_ARM64's,
+#   each a JSON list of labels, as Mitchell ruled on #5 on 2026-11-19.
+# - `join` runs `publish.py join` over the two jobs' digests, one manifest
+#   list per variant under every tag of it, and attests each list's build
+#   provenance with the workflow's own token. Each image carries the SBOM
+#   BuildKit attached at its push, which the job reads back for both
+#   platforms.
+# - `prune` runs `prune.py` on the schedule, and by hand with `prune`.
+# By hand, `dry_run` (the default there) prints what either would push or
+# delete, and pushes and deletes nothing. A tag's workflow calls this one
+# (`workflow_call`) to publish a release through the same jobs, where
+# `github.ref_name` is the tag. No stored secret is read: the token is the
+# run's, with `packages: write` on the jobs that push or delete.
+name: images
+on:
+  push:
+    branches: [main]
+  workflow_call: {}
+  schedule:
+    - cron: "17 4 * * *" # the deletion
+  workflow_dispatch:
+    inputs:
+      prune:
+        description: Run the deletion instead of a publish
+        type: boolean
+        default: false
+      dry_run:
+        description: Print what would be pushed or deleted, and push or delete nothing
+        type: boolean
+        default: true
+permissions: {}
+# One publish of a ref at a time, so two joins never race for one tag.
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  amd64:
+    name: build and smoke linux/amd64
+    if: ${{ github.event_name != 'schedule' && !inputs.prune }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digests: ${{ steps.build.outputs.digests }}
+    steps:
+      - uses: actions/checkout@v4
+      # As the per-commit job does (harness.yml): GitHub's image comes
+      # nearly full, and the build's target/ and the three images' layers
+      # need room, so on such an image the toolchains no step here uses
+      # are taken away.
+      - name: room for the build on a hosted image
+        run: |
+          free=$(df --output=avail -BG "$GITHUB_WORKSPACE" | tail -n 1 | tr -dc 0-9)
+          echo "$free GiB free"
+          if [ "$free" -lt 40 ] && [ -d /opt/hostedtoolcache ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell /usr/lib/jvm /usr/local/share/chromium /opt/microsoft /opt/google /usr/lib/google-cloud-sdk /opt/az
+            df -h "$GITHUB_WORKSPACE"
+          fi
+      - name: a BuildKit builder, logged in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          docker buildx create --use --driver docker-container
+          printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - id: build
+        env:
+          REF: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          # shellcheck disable=SC2086 # DRY_RUN is a flag or nothing
+          dist/publish.py build "$REF" --platform linux/amd64 --digests "$RUNNER_TEMP/digests" $DRY_RUN
+          if [ -f "$RUNNER_TEMP/digests" ]; then
+            { echo 'digests<<EOF'; cat "$RUNNER_TEMP/digests"; echo EOF; } >> "$GITHUB_OUTPUT"
+          fi
+  arm64:
+    name: build and smoke linux/arm64
+    if: ${{ github.event_name != 'schedule' && !inputs.prune }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER_ARM64 || '["ubuntu-26.04-arm"]') }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digests: ${{ steps.build.outputs.digests }}
+    steps:
+      - uses: actions/checkout@v4
+      # As the per-commit job does (harness.yml): GitHub's image comes
+      # nearly full, and the build's target/ and the three images' layers
+      # need room, so on such an image the toolchains no step here uses
+      # are taken away.
+      - name: room for the build on a hosted image
+        run: |
+          free=$(df --output=avail -BG "$GITHUB_WORKSPACE" | tail -n 1 | tr -dc 0-9)
+          echo "$free GiB free"
+          if [ "$free" -lt 40 ] && [ -d /opt/hostedtoolcache ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell /usr/lib/jvm /usr/local/share/chromium /opt/microsoft /opt/google /usr/lib/google-cloud-sdk /opt/az
+            df -h "$GITHUB_WORKSPACE"
+          fi
+      - name: a BuildKit builder, logged in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          docker buildx create --use --driver docker-container
+          printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - id: build
+        env:
+          REF: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          # shellcheck disable=SC2086 # DRY_RUN is a flag or nothing
+          dist/publish.py build "$REF" --platform linux/arm64 --digests "$RUNNER_TEMP/digests" $DRY_RUN
+          if [ -f "$RUNNER_TEMP/digests" ]; then
+            { echo 'digests<<EOF'; cat "$RUNNER_TEMP/digests"; echo EOF; } >> "$GITHUB_OUTPUT"
+          fi
+  join:
+    name: one list per variant, attested
+    needs: [amd64, arm64]
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      # Every tag: a release moves the bare variant only when no release
+      # tag names a newer version.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: logged in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - id: join
+        env:
+          REF: ${{ github.ref_name }}
+          AMD64: ${{ needs.amd64.outputs.digests }}
+          ARM64: ${{ needs.arm64.outputs.digests }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          if [ -n "$DRY_RUN" ]; then
+            dist/publish.py join "$REF" --dry-run
+            exit 0
+          fi
+          printf '%s\n' "$AMD64" > "$RUNNER_TEMP/amd64"
+          printf '%s\n' "$ARM64" > "$RUNNER_TEMP/arm64"
+          dist/publish.py join "$REF" "$RUNNER_TEMP/amd64" "$RUNNER_TEMP/arm64" --manifests "$RUNNER_TEMP/manifests"
+          sed 's/ /=/' "$RUNNER_TEMP/manifests" >> "$GITHUB_OUTPUT"
+      - name: the SBOM of each list, for both platforms
+        if: ${{ steps.join.outputs.cli }}
+        env:
+          CLI: ${{ steps.join.outputs.cli }}
+          FPM: ${{ steps.join.outputs.fpm }}
+          APACHE: ${{ steps.join.outputs.apache }}
+        run: |
+          for digest in "$CLI" "$FPM" "$APACHE"; do
+            docker buildx imagetools inspect "ghcr.io/lelaphp/lela@$digest" --format '{{json .SBOM}}' |
+              jq -e '[.["linux/amd64"], .["linux/arm64"]] | all(.SPDX.packages | length > 0)'
+          done
+      - name: provenance of cli
+        if: ${{ steps.join.outputs.cli }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/lelaphp/lela
+          subject-digest: ${{ steps.join.outputs.cli }}
+          push-to-registry: true
+      - name: provenance of fpm
+        if: ${{ steps.join.outputs.fpm }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/lelaphp/lela
+          subject-digest: ${{ steps.join.outputs.fpm }}
+          push-to-registry: true
+      - name: provenance of apache
+        if: ${{ steps.join.outputs.apache }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/lelaphp/lela
+          subject-digest: ${{ steps.join.outputs.apache }}
+          push-to-registry: true
+  prune:
+    name: delete what no tag is pulled by
+    if: ${{ github.event_name == 'schedule' || inputs.prune }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: logged in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          # shellcheck disable=SC2086 # DRY_RUN is a flag or nothing
+          dist/prune.py $DRY_RUN
