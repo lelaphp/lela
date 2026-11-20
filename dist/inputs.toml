@@ -9,6 +9,11 @@ commit = "136e049ac10b032c83018e65b63b6df858943750"
 [php.ini]
 "php.ini-development" = "218f8422b9343f049a41a75d6a22490da1e4d18537498bcb7b2ccacf920a1c19"
 "php.ini-production" = "40bb01691e2189f6cf1f9e2c4a29aa42f99b97944ba98f7b02036f50d3774116"
+# The FPM configuration templates at the same commit, which the fpm image
+# renders as php's configure does (dist/inputs.py).
+[php.fpm]
+"sapi/fpm/php-fpm.conf.in" = "b5cf5770c3aa0d47157c98abe4956be1730078f73a5cf105965fdb1ab4054ecd"
+"sapi/fpm/www.conf.in" = "200823f1aecffa0263b61850eb0a35042d6cea00552809edb46be9489b801f12"
 
 [rustup]
 version = "1.29.2"

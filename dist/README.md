@@ -11,6 +11,64 @@ Run those builds sequentially on small builders. The default Cargo job count is
 one. The installer runs on BUILDARCH; the compiled hosts and their libraries
 follow TARGETARCH. Product naming remains governed by ADR-0016.
 
+## The images
+
+Three targets stand in for the variants of php's official image, each
+shaped as docker-library/php's templates shape it: the same
+`docker-php-entrypoint`, working directory and `$PHP_INI_DIR`
+(`/usr/local/etc/php`, with `conf.d` in it).
+
+| target | holds | default command | working directory |
+|---|---|---|---|
+| `cli` | the CLI and CGI hosts | `php -a` | `/` |
+| `fpm` | those and the FPM, listening on port 9000 | `php-fpm` | `/var/www/html` |
+| `apache` | those, and Apache's prefork MPM in front of the FPM over a unix socket | `apache2-foreground` | `/var/www/html` |
+
+```sh
+docker buildx build -f dist/Dockerfile --platform linux/arm64 --target cli -t lela:cli --load .
+docker buildx build -f dist/Dockerfile --platform linux/arm64 --target fpm -t lela:fpm --load .
+docker buildx build -f dist/Dockerfile --platform linux/arm64 --target apache -t lela:apache --load .
+```
+
+All three are built on one `base` stage from one `build` stage: the hosts
+compile once per platform, and the second and third target find that
+compile cached. They share the Ubuntu packages the build stage reads from
+the hosts' ELF files, and the compat directory, `/opt/lela/compat`, which
+no image puts on `PATH`. Once the hosts carry Lela's names (ADR-0016) it
+holds `php`, `php-cgi` and `php-fpm` as symlinks to them, and one line in a
+Dockerfile built on the image opts in:
+
+```dockerfile
+ENV PATH=/opt/lela/compat:$PATH
+```
+
+Until then the hosts are named `php`, `php-cgi` and `php-fpm` already, and
+the directory is laid down empty.
+
+The `fpm` image's `php-fpm.conf` and `php-fpm.d/www.conf` start from
+php-src's templates at the pinned commit, rendered as the official image's
+`configure` renders them (`dist/inputs.py fpm`), and its `docker.conf`,
+`zz-docker.conf` and `docker-fpm.ini` are the template's.
+
+### The smoke over an image
+
+`dist/smoke.sh --image <image> <variant>` runs the tarball's checks inside
+the image, on the image's own platform, over the hosts in `/usr/local`
+(`php-fpm -t` where the variant holds the FPM). It checks the ini
+directory, and that the compat directory is off `PATH` and that putting it
+first is the only step each usual name needs. Then it checks what a user
+of the variant sees: `cli` passes an option to `php` through the
+entrypoint; `fpm` answers a FastCGI request on port 9000, and `apache`
+serves a page on port 80, each to a second container of the image on a
+network of the smoke's own. It prints the platform it ran on, saying when
+Docker emulates it, and exits nonzero at the first wrong answer:
+
+```sh
+dist/smoke.sh --image lela:cli cli
+dist/smoke.sh --image lela:fpm fpm
+dist/smoke.sh --image lela:apache apache
+```
+
 ## A release by hand
 
 Until CD builds the release, a person builds it on an Apple silicon Mac
@@ -70,6 +128,7 @@ it sits outside every supported combination (ADR-0017). A host built with
 ## Verify and refresh
 
 `dist/inputs.toml` holds the full php-src commit, both ini SHA-256 values, the
+SHA-256 of the two FPM configuration templates the `fpm` image renders, the
 versioned rustup installer SHA-256 for each build architecture, and the SHA-256
 of `rust-toolchain.toml`. `dist/inputs.py` compares the source identity and
 toolchain file before downloading, then verifies each download before use.
@@ -84,13 +143,17 @@ python3 dist/inputs.py check
 ```
 
 The tests exercise byte rejection, incomplete downloads, oracle commit/tag/version
-drift, toolchain channel/component drift, and both installer architectures.
-They do not build or run platform binaries.
+drift, toolchain channel/component drift, both installer architectures, and the
+FPM templates rendered as the official fpm image's `configure` renders them;
+with the pinned php-src tree at `TEST_PHP_SRCDIR`, they also hold the real
+templates to their pins. `test_smoke.py` holds the smoke's refusal of
+arguments it does not take. They do not build or run platform binaries.
 
 To exercise real downloads without installing anything:
 
 ```sh
 python3 dist/inputs.py ini /tmp/dist-inputs/ini
+python3 dist/inputs.py fpm /tmp/dist-inputs/fpm
 python3 dist/inputs.py rustup amd64 /tmp/dist-inputs/amd64/rustup-init
 python3 dist/inputs.py rustup arm64 /tmp/dist-inputs/arm64/rustup-init
 docker buildx build -f dist/Dockerfile --target ini .
@@ -99,8 +162,9 @@ docker buildx build -f dist/Dockerfile --target ini .
 When a person moves the oracle, resolve its source tag to the full commit in a
 trusted php-src checkout (`git rev-parse '<tag>^{commit}'`). Confirm that commit
 extends `oracle.toml`'s abbreviated commit and that the tag matches the oracle
-version. Hash each ini file at that commit with SHA-256 and review the bytes.
-Update the tag, full commit and ini hashes together in `dist/inputs.toml`.
+version. Hash each ini file and each FPM template at that commit with SHA-256
+and review the bytes. Update the tag, full commit, ini and FPM hashes together
+in `dist/inputs.toml`.
 The verifier compares all three source/version fields, so a tag-only move
 also refuses stale pins. It does not contact a mutable remote tag at build time;
 the reviewed tag-to-commit relationship is recorded in the pin file.
@@ -133,5 +197,6 @@ not make the whole build hermetic or guarantee byte-identical binaries.
 
 Successful input tests do not supply the release's binary smoke evidence.
 Both `binaries` targets must still be built and their `bin/php -v` run with
-the matching runtime libraries on the release runners. Apache validation
-also requires building its target and exercising the produced image.
+the matching runtime libraries on the release runners. An image's validation
+also requires building its target and running the smoke's image mode over
+it.
