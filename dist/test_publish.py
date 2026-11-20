@@ -1,25 +1,13 @@
-"""The publish script, held by its dry run and by a docker that records.
-
-Each test runs dist/publish.py in a repository of its own, laid down with
-the workspace's Cargo.toml and one commit at a known time, so the commit
-the labels and tags name is the test's and not the checkout's.
-"""
+"""The publish script, held by its dry run and by a docker that records,
+each test in a repository of its own (testlib.py)."""
 
 import json
 import os
 import shutil
-import subprocess
-import sys
-import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-IMAGE = "ghcr.io/lelaphp/lela"
-VARIANTS = ("cli", "fpm", "apache")
-# The commit's time, which the build's SOURCE_DATE_EPOCH is.
-WHEN = "2026-11-19T12:34:56Z"
-EPOCH = "1795091696"
+from testlib import EPOCH, IMAGE, ROOT, VARIANTS, Repository
 
 
 class Readme(unittest.TestCase):
@@ -34,51 +22,20 @@ class Readme(unittest.TestCase):
         self.assertIn("ENV PATH=/opt/lela/compat:$PATH", bodies)
 
 
-class Repository(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name) / "lela"
-        (self.root / "dist").mkdir(parents=True)
-        shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
-        shutil.copyfile(ROOT / "dist/publish.py", self.root / "dist/publish.py")
-        self.bin = Path(self.temporary.name) / "bin"
-        self.bin.mkdir()
-        self.log = Path(self.temporary.name) / "calls"
-        self.git("init", "-q", "-b", "main")
-        self.git("add", "-A")
-        self.git("commit", "-q", "-m", "the tree")
-        self.commit = self.git("rev-parse", "HEAD").strip()
-
-    def git(self, *arguments):
-        env = {
-            **os.environ,
-            "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
-            "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
-            "GIT_AUTHOR_DATE": WHEN, "GIT_COMMITTER_DATE": WHEN,
-            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-        }
-        return subprocess.run(
-            ["git", "-C", str(self.root), *arguments],
-            env=env, check=True, capture_output=True, text=True,
-        ).stdout
-
+class Publish(Repository):
     def publish(self, *arguments, env=None):
-        # PATH holds git and the test's own bin/ alone: a dry run that ran
-        # docker would find none, or the recording one the test laid.
-        path = os.pathsep.join([str(self.bin), str(Path(shutil.which("git")).parent)])
-        return subprocess.run(
-            [sys.executable, str(self.root / "dist/publish.py"), *arguments],
-            cwd=self.root, env={**os.environ, "PATH": path, **(env or {})},
-            capture_output=True, text=True,
-        )
-
-    def lines(self, run, kind):
-        self.assertEqual(run.returncode, 0, run.stderr)
-        return [line.split(" ", 1)[1] for line in run.stdout.splitlines() if line.startswith(kind + " ")]
+        return self.script("publish.py", *arguments, env=env)
 
 
-class DryRun(Repository):
+class ThePath(Repository):
+    def test_the_scripts_path_holds_the_tests_directories_alone(self):
+        self.assertEqual(self.path.split(os.pathsep), [str(self.bin), str(self.scratch / "tools")])
+        for tool in ("docker", "gh", "cargo"):
+            with self.subTest(tool=tool):
+                self.assertIsNone(shutil.which(tool, path=self.path))
+
+
+class DryRun(Publish):
     def labels(self, version):
         return [
             f"org.opencontainers.image.source=https://github.com/lelaphp/lela",
@@ -199,12 +156,11 @@ sys.exit(1 if sys.argv[-1] == os.environ.get("FAILS") else 0)
 '''
 
 
-class Recorded(Repository):
+class Recorded(Publish):
     def setUp(self):
         super().setUp()
-        for name, text in (("docker", DOCKER), ("smoke", SMOKE)):
-            (self.bin / name).write_text(text.replace("/usr/bin/env python3", sys.executable))
-            (self.bin / name).chmod(0o755)
+        self.tool("docker", DOCKER)
+        self.tool("smoke", SMOKE)
 
     def run_step(self, *arguments, **env):
         return self.publish(*arguments, env={
@@ -225,7 +181,7 @@ class Recorded(Repository):
 
 class Build(Recorded):
     def test_each_variant_is_loaded_smoked_and_only_then_pushed_by_digest(self):
-        digests = Path(self.temporary.name) / "digests"
+        digests = self.scratch / "digests"
         run = self.run_step("build", "main", "--digests", str(digests))
         self.assertEqual(run.returncode, 0, run.stderr)
         steps = [
@@ -266,7 +222,7 @@ class Build(Recorded):
                 self.assertNotIn("digest ", run.stdout)
 
     def test_a_pushed_image_whose_config_is_not_the_smoked_one_names_no_digest(self):
-        digests = Path(self.temporary.name) / "digests"
+        digests = self.scratch / "digests"
         run = self.run_step("build", "main", "--digests", str(digests), DRIFT="fpm")
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("fpm's pushed config", run.stderr)
@@ -303,7 +259,7 @@ class Join(Recorded):
         """The two build steps' digest files, as their jobs hand them on."""
         files = []
         for platform in ("linux/amd64", "linux/arm64"):
-            path = Path(self.temporary.name) / platform.replace("/", "-")
+            path = self.scratch / platform.replace("/", "-")
             path.write_text("".join(
                 f"{platform} {variant} sha256:{(variant + platform[-2:]).encode().hex():0>64}\n"
                 for variant in VARIANTS if (platform, variant) != skip
@@ -315,7 +271,7 @@ class Join(Recorded):
         return f"{IMAGE}@sha256:{(variant + platform[-2:]).encode().hex():0>64}"
 
     def test_one_list_per_variant_over_both_platforms_carries_every_tag(self):
-        manifests = Path(self.temporary.name) / "manifests"
+        manifests = self.scratch / "manifests"
         run = self.run_step("join", "main", *self.digests(), "--manifests", str(manifests))
         self.assertEqual(run.returncode, 0, run.stderr)
         creates = [c for c in self.calls() if c[:3] == ["docker", "buildx", "imagetools"]]

@@ -215,7 +215,10 @@ holds the deletion script's dry run over the listing in `fixtures/`.
 `test_release.py` holds the release script's refusal of a tag the
 manifest does not name, its dry run for a release and a pre-release, and
 its steps against a docker, a cargo and a gh that record what they are
-asked.
+asked. Both run their script in a repository of the test's own, laid
+down by `testlib.py`, on a PATH of the test's own directories alone: the
+recording tools, and links to git and the few programs the scripts call
+that are no docker, gh or cargo.
 They do not build or run platform binaries.
 
 To exercise real downloads without installing anything:
