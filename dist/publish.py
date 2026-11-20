@@ -25,7 +25,8 @@ images under one manifest list, tagged with every tag of the variant:
     main                  edge-<variant>, sha-<commit>-<variant>
     v<version>            <version>-<variant>, and <variant> unless the
                           version is a pre-release or an older one than a
-                          release tag here names
+                          release tag here names; a shallow checkout, which
+                          may not hold every tag, is refused
 
 It prints `manifest <variant> <digest>`, the lines --manifests writes.
 
@@ -41,8 +42,10 @@ the one pushed from the cache have one config.
 would join, and builds, smokes and pushes nothing; without --platform it
 asks docker for the daemon's platform and nothing else. A real `build`
 refuses a tree with changes, and a release whose tag is not HEAD; a real
-`join` refuses a variant without a digest for each platform. The tags
-from a release are read from this checkout, so it holds them all, and the
+`join` refuses those too, and a variant without a digest for each
+platform. Whether a release is the newest is read from this checkout's
+release tags, so it holds them all: a shallow checkout, which may hold
+its own tag alone, is refused, dry run or real, saying what to fetch. The
 caller is logged in to ghcr.io with a token that may write packages.
 
 NAME (default php) is the hosts' name (ADR-0016), CARGO_BUILD_JOBS
@@ -144,8 +147,17 @@ class Ref:
         return tuple(int(part) for part in VERSION.fullmatch(self.version).groups()[:3])
 
 
-def releases():
-    """The versions of the release tags here, pre-releases left out."""
+def releases(ref):
+    """The versions of the release tags here, pre-releases left out, which
+    say whether `ref` is the newest release. A shallow checkout may hold
+    its own tag alone, which would make every backport the newest, so it
+    is refused, saying what to fetch."""
+    if git("rev-parse", "--is-shallow-repository") == "true":
+        raise Refusal(
+            f"this checkout is shallow, so it may not hold every release tag, and whether {ref.name} is "
+            "the newest release is not known here; fetch the whole history and every tag first, "
+            "`git fetch --unshallow --tags` (actions/checkout's `fetch-depth: 0`)"
+        )
     found = [Ref(tag[1:]) for tag in git("tag", "--list", "v*").split() if VERSION.fullmatch(tag[1:])]
     return [ref for ref in found if not ref.prerelease]
 
@@ -154,7 +166,7 @@ def tags(ref, commit, variant):
     if ref.version is None:
         return [f"edge-{variant}", f"sha-{commit.sha}-{variant}"]
     named = [f"{ref.version}-{variant}"]
-    if not ref.prerelease and all(other.core() <= ref.core() for other in releases()):
+    if not ref.prerelease and all(other.core() <= ref.core() for other in releases(ref)):
         named.append(variant)
     return named
 
@@ -269,7 +281,9 @@ def built_from(ref, commit):
     try:
         tagged = git("rev-parse", "--verify", "--quiet", f"refs/tags/{ref.name}^{{commit}}")
     except subprocess.CalledProcessError:
-        raise Refusal(f"no tag {ref.name} here; a release is built at its tag") from None
+        raise Refusal(
+            f"no tag {ref.name} here; a release is built at its tag, so fetch the tags, `git fetch --tags`"
+        ) from None
     if tagged != commit.sha:
         raise Refusal(f"{ref.name} is not HEAD: it names {tagged}, and HEAD is {commit.sha}")
 
@@ -376,6 +390,8 @@ def read_digests(paths):
 
 
 def join(ref, commit, arguments):
+    if not arguments.dry_run:
+        built_from(ref, commit)
     found = read_digests(arguments.digests) if arguments.digests or not arguments.dry_run else None
     print(f"ref {ref.name}")
     print(f"commit {commit.sha}")

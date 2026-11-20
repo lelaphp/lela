@@ -83,9 +83,10 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
 - `build` builds the three variants for the daemon's platform, which
   `--platform` may name, and loads each; runs the smoke's image mode over
   each; and only once all three have passed, pushes each by digest with
-  BuildKit's SBOM attached. A real build refuses a platform the daemon
-  does not run as its own, as `dist/release.py build` does, so no image
-  smoked under emulation is pushed; the smoke alone still runs one. A failed smoke pushes nothing. It writes one
+  BuildKit's SBOM attached. A failed smoke pushes nothing. A real build
+  refuses a platform the daemon does not run as its own, as
+  `dist/release.py build` does, so no image smoked under emulation is
+  pushed; the smoke alone still runs one. It writes one
   `<platform> <variant> <digest>` line per variant.
 - `join` reads both platforms' lines and puts each variant's two images
   under one manifest list, carrying every tag of the variant:
@@ -94,6 +95,13 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
   |---|---|
   | `main` | `edge-<variant>`, and `sha-<commit>-<variant>` with the full commit |
   | `v<version>` | `<version>-<variant>`, and the bare `<variant>` unless the version is a pre-release or older than a release tag the checkout holds |
+
+  Whether a release is the newest is read from the checkout's release
+  tags, so a shallow checkout, which may hold its own tag alone and would
+  move the bare variant for every backport, is refused, saying to fetch
+  the whole history and every tag (`git fetch --unshallow --tags`,
+  actions/checkout's `fetch-depth: 0`). A real `join` refuses a tree with
+  changes and a release whose tag is not HEAD, as a real `build` does.
 
 Each image is labelled, and each list annotated, with standard OCI keys
 alone: `source`, `revision`, `version` (`edge` from `main`) and
@@ -160,7 +168,7 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
   with `scripts/dist-sums.sh`, and creates the GitHub Release of the tag
   with the four attached. The release is marked a pre-release when the
   version is one, and the latest when its images move the bare variant
-  tags.
+  tags, which it reads as `join` does, refusing a shallow checkout.
 
 A real `build` or `publish` refuses a tree with changes, and a tag that is
 not HEAD. `--dry-run` prints what the step would make and makes nothing:

@@ -111,6 +111,17 @@ class PublishDryRun(Repository):
         self.assertEqual(self.lines(run, "artifact")[0], "lela-1.2.0-darwin-arm64.tar.gz")
 
 
+class Shallow(Repository):
+    def test_whether_a_release_is_the_latest_is_refused_in_a_shallow_checkout(self):
+        clone = self.backport()
+        run = self.release("publish", "v1.0.1", "--dry-run")
+        self.assertIn("latest false", self.lines(run, "release"))
+        run = self.script("release.py", "publish", "v1.0.1", "--dry-run", root=clone)
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("this checkout is shallow", run.stderr)
+        self.assertNotIn("release latest", run.stdout)
+
+
 class PreReleaseDryRun(Repository):
     version = "0.1.0-alpha.1"
 

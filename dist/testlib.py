@@ -95,13 +95,30 @@ class Repository(unittest.TestCase):
         self.git("commit", "-q", "--allow-empty", "-am", f"version {version}")
         self.commit = self.git("rev-parse", "HEAD").strip()
 
-    def script(self, name, *arguments, env=None):
-        """dist/<name> run in the repository with the PATH above."""
+    def script(self, name, *arguments, env=None, root=None):
+        """dist/<name> run in the repository, or in the clone at `root`,
+        with the PATH above."""
+        root = root or self.root
         return subprocess.run(
-            [sys.executable, str(self.root / "dist" / name), *arguments],
-            cwd=self.root, env={**os.environ, "PATH": self.path, **(env or {})},
+            [sys.executable, str(root / "dist" / name), *arguments],
+            cwd=root, env={**os.environ, "PATH": self.path, **(env or {})},
             capture_output=True, text=True,
         )
+
+    def backport(self):
+        """`v1.1.0` on the first commit, and `v1.0.1`, a backport, on a later
+        one; and a clone of `v1.0.1` alone, one commit deep, as a CI
+        checkout without `fetch-depth: 0` is. Returns the clone."""
+        self.versioned("1.1.0")
+        self.git("tag", "v1.1.0")
+        self.versioned("1.0.1")
+        self.git("tag", "v1.0.1")
+        clone = self.scratch / "clone"
+        subprocess.run(
+            ["git", "clone", "-q", "--depth", "1", "--branch", "v1.0.1", self.root.as_uri(), str(clone)],
+            check=True, capture_output=True,
+        )
+        return clone
 
     def lines(self, run, kind):
         self.assertEqual(run.returncode, 0, run.stderr)

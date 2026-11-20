@@ -109,6 +109,25 @@ class DryRun(Publish):
             f"{IMAGE}:{tag}" for variant in VARIANTS for tag in (f"1.10.0-{variant}", variant)
         ])
 
+    def test_a_release_in_a_shallow_checkout_is_refused_saying_what_to_fetch(self):
+        clone = self.backport()
+        run = self.publish("join", "v1.0.1", "--dry-run")
+        self.assertEqual(
+            [line.split(" from ")[0] for line in self.lines(run, "tag")],
+            [f"{IMAGE}:1.0.1-{variant}" for variant in VARIANTS],
+        )
+        run = self.script("publish.py", "join", "v1.0.1", "--dry-run", root=clone)
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "this checkout is shallow, so it may not hold every release tag, and whether v1.0.1 is the newest "
+            "release is not known here; fetch the whole history and every tag first, "
+            "`git fetch --unshallow --tags`",
+            run.stderr,
+        )
+        self.assertNotIn("tag ", run.stdout)
+        # main and a pre-release ask nothing of the tags.
+        self.assertEqual(self.script("publish.py", "join", "main", "--dry-run", root=clone).returncode, 0)
+
     def test_every_tag_names_its_variant(self):
         for ref in ("main", "v1.2.0", "v1.3.0-rc.1"):
             for tag in self.tags(ref):
@@ -382,6 +401,21 @@ class Join(Recorded):
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("not a digest line", run.stderr)
         self.assertEqual(self.calls(), [])
+
+    def test_a_release_is_joined_at_its_tag_alone(self):
+        self.versioned("1.2.0")
+        run = self.run_step("join", "v1.2.0", *self.digests())
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("no tag v1.2.0 here; a release is built at its tag, so fetch the tags, `git fetch --tags`", run.stderr)
+        self.git("tag", "v1.2.0")
+        (self.root / "stray").write_text("")
+        run = self.run_step("join", "v1.2.0", *self.digests())
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("the tree has changes", run.stderr)
+        self.assertEqual(self.calls(), [])
+        (self.root / "stray").unlink()
+        run = self.run_step("join", "v1.2.0", *self.digests())
+        self.assertEqual(len(self.lines(run, "manifest")), 3)
 
     def test_the_dry_run_names_the_digests_it_would_join(self):
         self.versioned("1.2.0")
