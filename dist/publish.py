@@ -353,7 +353,7 @@ def build(ref, commit, arguments):
                 "--output", f"type=image,name={IMAGE},push-by-digest=true,name-canonical=true,push=true",
                 str(ROOT),
             )
-            named = digest(metadata(result), variant)
+            named = digest(metadata(result), f"the push of {variant}")
             found = pushed_config(named, platform, variant)
             if found != smoked[variant]:
                 raise Refusal(
@@ -423,10 +423,14 @@ def pushed_config(named, platform, variant):
     return found
 
 
-def digest(result, variant):
-    found = result.get("containerimage.digest", "")
+def digest(result, made):
+    """The digest of what `made`, a push or a list, put in the registry,
+    read from its metadata file's `containerimage.descriptor`: the one key
+    both `buildx build` and `imagetools create` write, the second writing
+    no `containerimage.digest`."""
+    found = (result.get("containerimage.descriptor") or {}).get("digest", "")
     if not DIGEST.fullmatch(found):
-        raise Refusal(f"the push of {variant} named no digest")
+        raise Refusal(f"{made} named no digest: its metadata's containerimage.descriptor has none")
     return found
 
 
@@ -483,7 +487,7 @@ def join(ref, commit, arguments):
             for tag in named:
                 create += ["--tag", tag]
             docker(*create, *sources)
-            manifests.append(f"{variant} {digest(metadata(result), variant)}")
+            manifests.append(f"{variant} {digest(metadata(result), f'the list of {variant}')}")
     if arguments.dry_run:
         print("dry run: nothing is pushed")
         return

@@ -195,11 +195,14 @@ class DryRun(Publish):
 # pushes, into REGISTRY, one file per blob named by its digest, is an index
 # of the platform's manifest and an attestation manifest of
 # `unknown/unknown`, and its metadata names the index alone and no config.
-# `imagetools inspect --raw` answers from REGISTRY; imagetools writes the
-# list's digest over its sources. DRIFT names a variant whose pushed config
+# `imagetools inspect --raw` answers from REGISTRY. `imagetools create`'s
+# metadata file names the list's descriptor, its digest one over its
+# sources, and the image's name, and nothing else, as buildx v0.38.1's
+# does: no `containerimage.digest`. DRIFT names a variant whose pushed config
 # is not the one loaded; INDEX=attestation-first lists the attestation
 # manifest first, INDEX=attestation-only leaves the platform's out, and
-# INDEX=none pushes the platform's manifest alone, as no attested build does.
+# INDEX=none pushes the platform's manifest alone, as no attested build does;
+# LIST=undigested leaves the digest out of each list's descriptor.
 DOCKER = r'''#!/usr/bin/env python3
 import hashlib, json, os, sys
 arguments = sys.argv[1:]
@@ -266,8 +269,11 @@ elif arguments[:3] == ["buildx", "imagetools", "inspect"] and arguments[4:] == [
         sys.stdout.write(file.read())
 elif arguments[:3] == ["buildx", "imagetools", "create"]:
     sources = [a for a in arguments if a.startswith(os.environ["IMAGE"] + "@")]
+    descriptor = {"mediaType": INDEX_TYPE, "digest": digest("list", *sources), "size": 1}
+    if os.environ.get("LIST") == "undigested":
+        del descriptor["digest"]
     with open(value("--metadata-file"), "w") as metadata:
-        json.dump({"containerimage.digest": digest("list", *sources)}, metadata)
+        json.dump({"containerimage.descriptor": descriptor, "image.name": os.environ["IMAGE"]}, metadata)
 else:
     sys.exit("the recording docker has no answer for " + " ".join(arguments))
 '''
@@ -503,8 +509,25 @@ class Join(Recorded):
                 ])
                 self.assertIn("index:org.opencontainers.image.description=Lela", create)
         written = manifests.read_text().splitlines()
-        self.assertEqual([line.split()[0] for line in written], list(VARIANTS))
+        # Each list's digest is the one its descriptor names.
+        self.assertEqual(written, [f"{variant} {self.list_digest(variant)}" for variant in VARIANTS])
         self.assertEqual(self.lines(run, "manifest"), written)
+
+    def list_digest(self, variant):
+        sources = " ".join(("list", self.source(variant, "linux/amd64"), self.source(variant, "linux/arm64")))
+        return "sha256:" + hashlib.sha256(sources.encode()).hexdigest()
+
+    def test_a_list_whose_descriptor_names_no_digest_is_refused(self):
+        manifests = self.scratch / "manifests"
+        run = self.run_step("join", "main", *self.digests(), "--manifests", str(manifests), LIST="undigested")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "the list of cli named no digest: its metadata's containerimage.descriptor has none", run.stderr,
+        )
+        self.assertNotIn("manifest ", run.stdout)
+        self.assertFalse(manifests.exists())
+        creates = [c for c in self.calls() if c[:4] == ["docker", "buildx", "imagetools", "create"]]
+        self.assertEqual(len(creates), 1)
 
     def test_blank_lines_between_digests_are_passed_over(self):
         files = self.digests()
