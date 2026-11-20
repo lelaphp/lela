@@ -1,80 +1,26 @@
-"""The release script, held by its dry run and by tools that record.
-
-Each test runs dist/release.py in a repository of its own, with a
-workspace manifest of the test's own whose package table carries the
-version the test names, beside the publish script the images come from.
-"""
+"""The release script, held by its dry run and by tools that record, each
+test in a repository of its own (testlib.py) whose manifest carries the
+version the test names, beside the publish script the images come from."""
 
 import json
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-WHEN = "2026-11-19T12:34:56Z"
+import testlib
+from testlib import IMAGE, ROOT, VARIANTS, manifest
 
 
-def manifest(version):
-    line = f'version = "{version}"\n' if version else ""
-    return (
-        '[workspace]\nmembers = ["sapi/*"]\n\n'
-        f'[workspace.package]\nedition = "2024"\n{line}license = "MIT AND BSD-3-Clause"\n'
+class Repository(testlib.Repository):
+    version = "1.2.0"
+    files = (
+        ".gitignore", "dist/release.py", "dist/publish.py", "dist/Dockerfile", "scripts/dist-sums.sh",
     )
 
-
-class Repository(unittest.TestCase):
-    version = "1.2.0"
-
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        # Resolved, as the script's own root is: on macOS the temporary
-        # directory is under a symlink, /var to /private/var.
-        self.root = Path(self.temporary.name).resolve() / "lela"
-        (self.root / "dist").mkdir(parents=True)
-        (self.root / "scripts").mkdir()
-        (self.root / "Cargo.toml").write_text(manifest(self.version))
-        for path in ("dist/release.py", "dist/publish.py", "dist/Dockerfile", "scripts/dist-sums.sh"):
-            shutil.copy2(ROOT / path, self.root / path)
-        self.bin = Path(self.temporary.name) / "bin"
-        self.bin.mkdir()
-        self.log = Path(self.temporary.name) / "calls"
-        self.git("init", "-q", "-b", "main")
-        self.git("add", "-A")
-        self.git("commit", "-q", "-m", "the tree")
-        self.commit = self.git("rev-parse", "HEAD").strip()
-
-    def git(self, *arguments):
-        env = {
-            **os.environ,
-            "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
-            "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
-            "GIT_AUTHOR_DATE": WHEN, "GIT_COMMITTER_DATE": WHEN,
-            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-        }
-        return subprocess.run(
-            ["git", "-C", str(self.root), *arguments],
-            env=env, check=True, capture_output=True, text=True,
-        ).stdout
-
     def release(self, *arguments, env=None):
-        # PATH holds git, the test's own bin/ and the system's tools: a
-        # docker, cargo or gh the script ran would be none, or the
-        # recording one the test laid.
-        path = os.pathsep.join([str(self.bin), str(Path(shutil.which("git")).parent), "/usr/bin", "/bin"])
-        return subprocess.run(
-            [sys.executable, str(self.root / "dist/release.py"), *arguments],
-            cwd=self.root, env={**os.environ, "PATH": path, **(env or {})},
-            capture_output=True, text=True,
-        )
-
-    def lines(self, run, kind):
-        self.assertEqual(run.returncode, 0, run.stderr)
-        return [line.split(" ", 1)[1] for line in run.stdout.splitlines() if line.startswith(kind + " ")]
+        return self.script("release.py", *arguments, env=env)
 
 
 STEPS = (
@@ -106,14 +52,16 @@ class TheTag(Repository):
         self.assertEqual(self.lines(run, "version"), ["1.2.0"])
 
     def test_a_run_leaves_the_tree_clean(self):
-        # The publish script is imported, and its bytecode would be a change
-        # in the tree that a real run refuses.
+        # The publish script is imported, and its bytecode, which the
+        # checkout's .gitignore ignores, would be a change in the tree that
+        # a real run refuses.
         env = {key: value for key, value in os.environ.items() if key != "PYTHONDONTWRITEBYTECODE"}
         run = subprocess.run(
             [sys.executable, str(self.root / "dist/release.py"), "check", "v1.2.0"],
             cwd=self.root, env=env, capture_output=True, text=True,
         )
         self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertTrue((self.root / "dist/__pycache__").is_dir())
         self.assertEqual(self.git("status", "--porcelain"), "")
 
     def test_a_ref_that_is_no_releases_tag_is_refused(self):
@@ -140,8 +88,6 @@ class NoVersion(Repository):
                 self.assertFalse(self.log.exists())
 
 
-IMAGE = "ghcr.io/lelaphp/lela"
-VARIANTS = ("cli", "fpm", "apache")
 PLATFORMS = ("darwin-arm64", "linux-aarch64", "linux-x86_64")
 
 
@@ -163,6 +109,17 @@ class PublishDryRun(Repository):
     def test_the_hosts_name_names_the_tarballs(self):
         run = self.release("publish", "v1.2.0", "--dry-run", env={"NAME": "lela"})
         self.assertEqual(self.lines(run, "artifact")[0], "lela-1.2.0-darwin-arm64.tar.gz")
+
+
+class Shallow(Repository):
+    def test_whether_a_release_is_the_latest_is_refused_in_a_shallow_checkout(self):
+        clone = self.backport()
+        run = self.release("publish", "v1.0.1", "--dry-run")
+        self.assertIn("latest false", self.lines(run, "release"))
+        run = self.script("release.py", "publish", "v1.0.1", "--dry-run", root=clone)
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("this checkout is shallow", run.stderr)
+        self.assertNotIn("release latest", run.stdout)
 
 
 class PreReleaseDryRun(Repository):
@@ -210,8 +167,7 @@ class Recorded(Repository):
     def setUp(self):
         super().setUp()
         for name, text in self.tools.items():
-            (self.bin / name).write_text(text.replace("/usr/bin/env python3", sys.executable))
-            (self.bin / name).chmod(0o755)
+            self.tool(name, text)
 
     def run_step(self, *arguments, **env):
         return self.release(*arguments, env={"CALLS": str(self.log), **env})
@@ -226,7 +182,7 @@ class Publish(Recorded):
     version = "0.1.0-alpha.1"
 
     def tarballs(self, platforms=PLATFORMS):
-        out = Path(self.temporary.name) / "out"
+        out = self.scratch / "out"
         out.mkdir(exist_ok=True)
         for platform in platforms:
             (out / f"php-0.1.0-alpha.1-{platform}.tar.gz").write_bytes(platform.encode())
@@ -269,6 +225,24 @@ class Publish(Recorded):
         self.assertIn(f"php-0.0.9-linux-x86_64.tar.gz in {out} is no tarball of v0.1.0-alpha.1", run.stderr)
         self.assertEqual(self.calls(), [])
         self.assertFalse((out / "SHA256SUMS").exists())
+
+    def test_what_the_sums_script_says_of_a_failure_reaches_the_caller(self):
+        (self.root / "scripts/dist-sums.sh").write_text("#!/bin/sh\necho 'the sums: disk full' >&2\nexit 3\n")
+        self.git("commit", "-q", "-am", "a sums script that fails")
+        self.git("tag", "v0.1.0-alpha.1")
+        run = self.run_step("publish", "v0.1.0-alpha.1", str(self.tarballs()))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("the sums: disk full", run.stderr)
+        self.assertIn("scripts/dist-sums.sh", run.stderr)
+        self.assertIn("exit 3", run.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_gh_not_on_path_is_said_and_no_traceback(self):
+        (self.bin / "gh").unlink()
+        self.git("tag", "v0.1.0-alpha.1")
+        run = self.run_step("publish", "v0.1.0-alpha.1", str(self.tarballs()))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertEqual(run.stderr, "dist/release.py: gh: not found\n")
 
     def test_a_release_is_published_at_its_tag_alone(self):
         out = self.tarballs()
@@ -336,7 +310,7 @@ class Build(Recorded):
     tools = {"docker": DOCKER}
 
     def out(self):
-        return Path(self.temporary.name).resolve() / "out"
+        return self.scratch / "out"
 
     def test_a_linux_tarball_is_built_on_its_platform_and_smoked_from_the_tarball(self):
         self.git("tag", "v1.2.0")
@@ -438,11 +412,10 @@ class BuildDarwin(Recorded):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "the ini step")
         self.git("tag", "v1.2.0")
-        self.out = Path(self.temporary.name).resolve() / "out"
+        self.out = self.scratch / "out"
         self.env = {
-            "CARGO_TARGET_DIR": str(Path(self.temporary.name).resolve() / "target"),
+            "CARGO_TARGET_DIR": str(self.scratch / "target"),
             "SMOKE": str(self.bin / "smoke"),
-            "PATH": os.pathsep.join([str(self.bin), str(Path(shutil.which("git")).parent), "/usr/bin", "/bin"]),
         }
 
     def test_the_hosts_keep_their_ad_hoc_signature_and_are_smoked_from_the_tarball(self):

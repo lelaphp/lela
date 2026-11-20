@@ -1,25 +1,15 @@
-"""The publish script, held by its dry run and by a docker that records.
-
-Each test runs dist/publish.py in a repository of its own, laid down with
-the workspace's Cargo.toml and one commit at a known time, so the commit
-the labels and tags name is the test's and not the checkout's.
-"""
+"""The publish script, held by its dry run and by a docker that records,
+each test in a repository of its own (testlib.py)."""
 
 import json
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-IMAGE = "ghcr.io/lelaphp/lela"
-VARIANTS = ("cli", "fpm", "apache")
-# The commit's time, which the build's SOURCE_DATE_EPOCH is.
-WHEN = "2026-11-19T12:34:56Z"
-EPOCH = "1795091696"
+from testlib import EPOCH, IMAGE, ROOT, VARIANTS, Repository
 
 
 class Readme(unittest.TestCase):
@@ -34,51 +24,31 @@ class Readme(unittest.TestCase):
         self.assertIn("ENV PATH=/opt/lela/compat:$PATH", bodies)
 
 
-class Repository(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name) / "lela"
-        (self.root / "dist").mkdir(parents=True)
-        shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
-        shutil.copyfile(ROOT / "dist/publish.py", self.root / "dist/publish.py")
-        self.bin = Path(self.temporary.name) / "bin"
-        self.bin.mkdir()
-        self.log = Path(self.temporary.name) / "calls"
-        self.git("init", "-q", "-b", "main")
-        self.git("add", "-A")
-        self.git("commit", "-q", "-m", "the tree")
-        self.commit = self.git("rev-parse", "HEAD").strip()
+class Bytecode(unittest.TestCase):
+    def test_the_checkout_ignores_the_bytecode_an_import_leaves_in_dist(self):
+        # The tests import testlib.py and release.py imports publish.py; a
+        # real build refuses a tree with changes, so their bytecode is none.
+        for name in ("testlib", "publish"):
+            path = f"dist/__pycache__/{name}.cpython-{sys.version_info.major}{sys.version_info.minor}.pyc"
+            with self.subTest(path=path):
+                ignored = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-q", path])
+                self.assertEqual(ignored.returncode, 0, f"{path} is not ignored")
 
-    def git(self, *arguments):
-        env = {
-            **os.environ,
-            "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
-            "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
-            "GIT_AUTHOR_DATE": WHEN, "GIT_COMMITTER_DATE": WHEN,
-            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-        }
-        return subprocess.run(
-            ["git", "-C", str(self.root), *arguments],
-            env=env, check=True, capture_output=True, text=True,
-        ).stdout
 
+class Publish(Repository):
     def publish(self, *arguments, env=None):
-        # PATH holds git and the test's own bin/ alone: a dry run that ran
-        # docker would find none, or the recording one the test laid.
-        path = os.pathsep.join([str(self.bin), str(Path(shutil.which("git")).parent)])
-        return subprocess.run(
-            [sys.executable, str(self.root / "dist/publish.py"), *arguments],
-            cwd=self.root, env={**os.environ, "PATH": path, **(env or {})},
-            capture_output=True, text=True,
-        )
-
-    def lines(self, run, kind):
-        self.assertEqual(run.returncode, 0, run.stderr)
-        return [line.split(" ", 1)[1] for line in run.stdout.splitlines() if line.startswith(kind + " ")]
+        return self.script("publish.py", *arguments, env=env)
 
 
-class DryRun(Repository):
+class ThePath(Repository):
+    def test_the_scripts_path_holds_the_tests_directories_alone(self):
+        self.assertEqual(self.path.split(os.pathsep), [str(self.bin), str(self.scratch / "tools")])
+        for tool in ("docker", "gh", "cargo"):
+            with self.subTest(tool=tool):
+                self.assertIsNone(shutil.which(tool, path=self.path))
+
+
+class DryRun(Publish):
     def labels(self, version):
         return [
             f"org.opencontainers.image.source=https://github.com/lelaphp/lela",
@@ -96,12 +66,16 @@ class DryRun(Repository):
         self.assertFalse(self.log.exists())
 
     def test_a_release_is_labelled_with_its_version(self):
+        self.versioned("1.2.0")
         run = self.publish("build", "v1.2.0", "--platform", "linux/amd64", "--dry-run")
         self.assertEqual(self.lines(run, "label"), self.labels("1.2.0"))
+        self.versioned("1.3.0-rc.1")
         run = self.publish("build", "v1.3.0-rc.1", "--platform", "linux/amd64", "--dry-run")
         self.assertEqual(self.lines(run, "label"), self.labels("1.3.0-rc.1"))
 
     def tags(self, ref):
+        if ref != "main":
+            self.versioned(ref.removeprefix("v"))
         run = self.publish("join", ref, "--dry-run")
         return [line.split(" from ")[0] for line in self.lines(run, "tag")]
 
@@ -135,6 +109,25 @@ class DryRun(Repository):
             f"{IMAGE}:{tag}" for variant in VARIANTS for tag in (f"1.10.0-{variant}", variant)
         ])
 
+    def test_a_release_in_a_shallow_checkout_is_refused_saying_what_to_fetch(self):
+        clone = self.backport()
+        run = self.publish("join", "v1.0.1", "--dry-run")
+        self.assertEqual(
+            [line.split(" from ")[0] for line in self.lines(run, "tag")],
+            [f"{IMAGE}:1.0.1-{variant}" for variant in VARIANTS],
+        )
+        run = self.script("publish.py", "join", "v1.0.1", "--dry-run", root=clone)
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "this checkout is shallow, so it may not hold every release tag, and whether v1.0.1 is the newest "
+            "release is not known here; fetch the whole history and every tag first, "
+            "`git fetch --unshallow --tags`",
+            run.stderr,
+        )
+        self.assertNotIn("tag ", run.stdout)
+        # main and a pre-release ask nothing of the tags.
+        self.assertEqual(self.script("publish.py", "join", "main", "--dry-run", root=clone).returncode, 0)
+
     def test_every_tag_names_its_variant(self):
         for ref in ("main", "v1.2.0", "v1.3.0-rc.1"):
             for tag in self.tags(ref):
@@ -147,6 +140,42 @@ class DryRun(Repository):
     def test_the_join_annotates_each_list_with_the_labels(self):
         run = self.publish("join", "main", "--dry-run")
         self.assertEqual(self.lines(run, "annotation"), [f"index:{l}" for l in self.labels("edge")])
+
+    def refused(self, ref):
+        """Each step on `ref`, dry and real, with what it ran."""
+        for arguments in (
+            ("build", ref, "--platform", "linux/amd64", "--dry-run"), ("build", ref),
+            ("join", ref, "--dry-run"), ("join", ref),
+        ):
+            with self.subTest(arguments=arguments):
+                run = self.publish(*arguments, env={"CALLS": str(self.log)})
+                self.assertEqual(run.returncode, 1, run.stdout)
+                self.assertEqual(run.stdout, "")
+                self.assertFalse(self.log.exists())
+                yield run
+
+    def test_a_tag_the_manifest_does_not_name_is_refused_by_both_steps(self):
+        self.versioned("1.2.0")
+        for ref in ("v1.2.1", "v1.2.0-rc.1", "v1.20.0"):
+            for run in self.refused(ref):
+                self.assertIn(
+                    f"{ref} is not the workspace manifest's version, 1.2.0, from Cargo.toml's "
+                    "[workspace.package]",
+                    run.stderr,
+                )
+
+    def test_a_manifest_with_no_version_line_is_refused_with_the_line_it_lacks(self):
+        for run in self.refused("v0.1.0-alpha.1"):
+            self.assertIn(
+                "Cargo.toml's [workspace.package] has no version line; "
+                'a release of v0.1.0-alpha.1 needs version = "0.1.0-alpha.1" there',
+                run.stderr,
+            )
+
+    def test_a_manifest_toml_does_not_read_is_refused(self):
+        (self.root / "Cargo.toml").write_text("changed")
+        for run in self.refused("v1.2.0"):
+            self.assertIn("Cargo.toml is not a manifest TOML reads", run.stderr)
 
     def test_a_ref_that_is_neither_main_nor_a_version_is_refused(self):
         for ref in ("develop", "1.2.0", "v1.2", "v1.2.0+build.5", "v01.2.0", "vmain"):
@@ -199,12 +228,11 @@ sys.exit(1 if sys.argv[-1] == os.environ.get("FAILS") else 0)
 '''
 
 
-class Recorded(Repository):
+class Recorded(Publish):
     def setUp(self):
         super().setUp()
-        for name, text in (("docker", DOCKER), ("smoke", SMOKE)):
-            (self.bin / name).write_text(text.replace("/usr/bin/env python3", sys.executable))
-            (self.bin / name).chmod(0o755)
+        self.tool("docker", DOCKER)
+        self.tool("smoke", SMOKE)
 
     def run_step(self, *arguments, **env):
         return self.publish(*arguments, env={
@@ -225,7 +253,7 @@ class Recorded(Repository):
 
 class Build(Recorded):
     def test_each_variant_is_loaded_smoked_and_only_then_pushed_by_digest(self):
-        digests = Path(self.temporary.name) / "digests"
+        digests = self.scratch / "digests"
         run = self.run_step("build", "main", "--digests", str(digests))
         self.assertEqual(run.returncode, 0, run.stderr)
         steps = [
@@ -266,7 +294,7 @@ class Build(Recorded):
                 self.assertNotIn("digest ", run.stdout)
 
     def test_a_pushed_image_whose_config_is_not_the_smoked_one_names_no_digest(self):
-        digests = Path(self.temporary.name) / "digests"
+        digests = self.scratch / "digests"
         run = self.run_step("build", "main", "--digests", str(digests), DRIFT="fpm")
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("fpm's pushed config", run.stderr)
@@ -277,6 +305,33 @@ class Build(Recorded):
         self.assertEqual(self.lines(run, "platform"), ["linux/arm64"])
         self.assertEqual({self.flag(c, "--platform") for c in self.pushes()}, {"linux/arm64"})
 
+    def test_a_platform_the_daemon_does_not_run_as_its_own_is_refused_before_a_build(self):
+        run = self.run_step("build", "main", "--platform", "linux/arm64")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(
+            "an image of linux/arm64 is built on a machine of its own platform, linux/arm64, "
+            "and the daemon's is linux/amd64",
+            run.stderr,
+        )
+        self.assertEqual([c[:2] for c in self.calls()], [["docker", "version"]])
+        self.log.unlink()
+        run = self.run_step("build", "main", "--platform", "linux/arm64", DAEMON="linux/arm64")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual({self.flag(c, "--platform") for c in self.pushes()}, {"linux/arm64"})
+
+    def test_a_docker_not_on_path_is_said_and_no_traceback(self):
+        (self.bin / "docker").unlink()
+        run = self.run_step("build", "main")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertEqual(run.stderr, "dist/publish.py: docker: not found\n")
+
+    def test_a_failed_command_is_said_with_what_it_wrote(self):
+        (self.bin / "docker").write_text("#!/bin/sh\necho 'Cannot connect to the Docker daemon' >&2\nexit 1\n")
+        run = self.run_step("build", "main")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("docker version --format {{.Server.Os}}/{{.Server.Arch}}: exit 1", run.stderr)
+        self.assertIn("Cannot connect to the Docker daemon", run.stderr)
+
     def test_a_tree_with_changes_is_refused(self):
         (self.root / "Cargo.toml").write_text("changed")
         run = self.run_step("build", "main")
@@ -285,6 +340,7 @@ class Build(Recorded):
         self.assertEqual(self.calls(), [])
 
     def test_a_release_is_built_at_its_tag_alone(self):
+        self.versioned("1.2.0")
         run = self.run_step("build", "v1.2.0")
         self.assertEqual(run.returncode, 1)
         self.assertIn("no tag v1.2.0 here", run.stderr)
@@ -303,7 +359,7 @@ class Join(Recorded):
         """The two build steps' digest files, as their jobs hand them on."""
         files = []
         for platform in ("linux/amd64", "linux/arm64"):
-            path = Path(self.temporary.name) / platform.replace("/", "-")
+            path = self.scratch / platform.replace("/", "-")
             path.write_text("".join(
                 f"{platform} {variant} sha256:{(variant + platform[-2:]).encode().hex():0>64}\n"
                 for variant in VARIANTS if (platform, variant) != skip
@@ -315,7 +371,7 @@ class Join(Recorded):
         return f"{IMAGE}@sha256:{(variant + platform[-2:]).encode().hex():0>64}"
 
     def test_one_list_per_variant_over_both_platforms_carries_every_tag(self):
-        manifests = Path(self.temporary.name) / "manifests"
+        manifests = self.scratch / "manifests"
         run = self.run_step("join", "main", *self.digests(), "--manifests", str(manifests))
         self.assertEqual(run.returncode, 0, run.stderr)
         creates = [c for c in self.calls() if c[:3] == ["docker", "buildx", "imagetools"]]
@@ -359,7 +415,23 @@ class Join(Recorded):
         self.assertIn("not a digest line", run.stderr)
         self.assertEqual(self.calls(), [])
 
+    def test_a_release_is_joined_at_its_tag_alone(self):
+        self.versioned("1.2.0")
+        run = self.run_step("join", "v1.2.0", *self.digests())
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("no tag v1.2.0 here; a release is built at its tag, so fetch the tags, `git fetch --tags`", run.stderr)
+        self.git("tag", "v1.2.0")
+        (self.root / "stray").write_text("")
+        run = self.run_step("join", "v1.2.0", *self.digests())
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("the tree has changes", run.stderr)
+        self.assertEqual(self.calls(), [])
+        (self.root / "stray").unlink()
+        run = self.run_step("join", "v1.2.0", *self.digests())
+        self.assertEqual(len(self.lines(run, "manifest")), 3)
+
     def test_the_dry_run_names_the_digests_it_would_join(self):
+        self.versioned("1.2.0")
         run = self.run_step("join", "v1.2.0", *self.digests(), "--dry-run")
         self.assertIn(
             f"{IMAGE}:1.2.0-cli from {self.source('cli', 'linux/amd64')} {self.source('cli', 'linux/arm64')}",

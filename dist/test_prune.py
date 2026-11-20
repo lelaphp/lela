@@ -125,5 +125,76 @@ class Prune(unittest.TestCase):
         self.assertLess(order.index(1), min(order.index(n) for n in (2, 3, 4)))
 
 
+# A gh that records each call, answers a listing with GH_LISTING's file or
+# fails it as an expired token does, and fails the DELETE of version FAILS.
+GH = r'''#!/usr/bin/env python3
+import json, os, sys
+arguments = sys.argv[1:]
+with open(os.environ["CALLS"], "a") as log:
+    log.write(json.dumps(arguments) + "\n")
+if "--paginate" in arguments:
+    if "GH_LISTING" not in os.environ:
+        sys.exit("gh: HTTP 401: Bad credentials (https://api.github.com/orgs/lelaphp/packages)")
+    print(json.dumps([json.load(open(os.environ["GH_LISTING"]))]))
+elif arguments[-1].endswith("/" + os.environ.get("FAILS", "-")):
+    sys.exit("gh: HTTP 404: Not Found")
+'''
+
+
+class Diagnostics(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.bin = Path(self.temporary.name) / "bin"
+        self.bin.mkdir()
+        self.log = Path(self.temporary.name) / "calls"
+
+    def gh(self):
+        (self.bin / "gh").write_text(GH.replace("/usr/bin/env python3", sys.executable))
+        (self.bin / "gh").chmod(0o755)
+
+    def prune(self, *arguments, **env):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "dist/prune.py"), "--now", NOW, *arguments],
+            env={**os.environ, "PATH": str(self.bin), "CALLS": str(self.log), **env},
+            capture_output=True, text=True,
+        )
+
+    def test_a_listing_gh_cannot_give_deletes_nothing_and_says_why(self):
+        self.gh()
+        run = self.prune("--manifests", str(FIXTURES / "ghcr-manifests.json"))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("exit 1: gh: HTTP 401: Bad credentials", run.stderr)
+        self.assertIn("nothing is deleted", run.stderr)
+        self.assertNotIn("Traceback", run.stderr)
+
+    def test_a_gh_not_on_path_is_said_and_no_traceback(self):
+        run = self.prune("--manifests", str(FIXTURES / "ghcr-manifests.json"))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertEqual(run.stderr, "dist/prune.py: gh: not found; nothing is deleted\n")
+
+    def test_a_deletion_that_fails_partway_names_what_went_and_what_did_not(self):
+        self.gh()
+        run = self.prune(
+            "--manifests", str(FIXTURES / "ghcr-manifests.json"),
+            GH_LISTING=str(FIXTURES / "ghcr-versions.json"), FAILS="13",
+        )
+        self.assertEqual(run.returncode, 1, run.stdout)
+        planned = [int(line.split()[1]) for line in run.stdout.splitlines() if line.startswith("delete ")]
+        went = [int(line.split()[1]) for line in run.stdout.splitlines() if line.startswith("deleted ")]
+        self.assertEqual(sorted(planned), sorted(DELETED))
+        at = planned.index(13)
+        self.assertGreater(at, 0)
+        self.assertEqual(went, planned[:at])
+        self.assertIn(
+            f"{at} of {len(planned)} versions deleted ({' '.join(map(str, went))}), "
+            f"and these not: {' '.join(map(str, planned[at:]))}",
+            run.stderr,
+        )
+        self.assertIn("gh: HTTP 404: Not Found", run.stderr)
+        deletes = [json.loads(line) for line in self.log.read_text().splitlines() if "DELETE" in line]
+        self.assertEqual(len(deletes), at + 1)
+
+
 if __name__ == "__main__":
     unittest.main()

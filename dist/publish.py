@@ -4,12 +4,17 @@
     dist/publish.py build <ref> [--platform <platform>] [--digests <file>] [--dry-run]
     dist/publish.py join <ref> [<digests>...] [--manifests <file>] [--dry-run]
 
-<ref> is `main` or a release's tag, `v<version>`.
+<ref> is `main` or a release's tag, `v<version>`, which every step, dry
+or real, first holds to the version line of the workspace manifest's
+package table, as dist/release.py does: a tag that names another version
+is refused, and so is a manifest with no version line.
 
-`build` runs on one platform, the daemon's own unless --platform names
-another: it builds the three variants of dist/Dockerfile with the labels
-below and loads each, runs `dist/smoke.sh --image` over each, and only once
-all three have passed pushes each by digest, with BuildKit's SBOM attached.
+`build` runs on one platform, the daemon's own, which --platform may name;
+a real build refuses a platform the daemon does not run as its own, so
+that no image smoked under emulation is pushed. It builds the three
+variants of dist/Dockerfile with the labels below and loads each, runs
+`dist/smoke.sh --image` over each, and only once all three have passed
+pushes each by digest, with BuildKit's SBOM attached.
 A smoke that fails pushes nothing. Each pushed image's config must be the
 config of the image smoked. It prints `digest <platform> <variant>
 <digest>` per variant, the lines --digests writes too.
@@ -20,7 +25,8 @@ images under one manifest list, tagged with every tag of the variant:
     main                  edge-<variant>, sha-<commit>-<variant>
     v<version>            <version>-<variant>, and <variant> unless the
                           version is a pre-release or an older one than a
-                          release tag here names
+                          release tag here names; a shallow checkout, which
+                          may not hold every tag, is refused
 
 It prints `manifest <variant> <digest>`, the lines --manifests writes.
 
@@ -36,8 +42,10 @@ the one pushed from the cache have one config.
 would join, and builds, smokes and pushes nothing; without --platform it
 asks docker for the daemon's platform and nothing else. A real `build`
 refuses a tree with changes, and a release whose tag is not HEAD; a real
-`join` refuses a variant without a digest for each platform. The tags
-from a release are read from this checkout, so it holds them all, and the
+`join` refuses those too, and a variant without a digest for each
+platform. Whether a release is the newest is read from this checkout's
+release tags, so it holds them all: a shallow checkout, which may hold
+its own tag alone, is refused, dry run or real, saying what to fetch. The
 caller is logged in to ghcr.io with a token that may write packages.
 
 NAME (default php) is the hosts' name (ADR-0016), CARGO_BUILD_JOBS
@@ -72,6 +80,16 @@ VERSION = re.compile(
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 
+# What the caller's environment sets, or its default: NAME is the hosts'
+# name (ADR-0016), CARGO_BUILD_JOBS reaches the build, and SMOKE is the
+# smoke a build runs. dist/release.py reads them here too.
+DEFAULTS = {"NAME": "php", "CARGO_BUILD_JOBS": "1", "SMOKE": str(ROOT / "dist/smoke.sh")}
+
+
+def setting(key):
+    return os.environ.get(key) or DEFAULTS[key]
+
+
 class Refusal(Exception):
     pass
 
@@ -86,9 +104,32 @@ class Ref:
     def parse(name):
         if name == "main":
             return Ref(None)
-        if name.startswith("v") and VERSION.fullmatch(name[1:]):
-            return Ref(name[1:])
-        raise Refusal(f"{name} is neither main nor a release's tag, v<version>")
+        ref = Ref.release(name)
+        if ref is None:
+            raise Refusal(f"{name} is neither main nor a release's tag, v<version>")
+        return ref
+
+    @staticmethod
+    def release(name):
+        """The release the tag `name` names, held to the version line of
+        the workspace manifest's package table; None where `name` is no
+        `v<version>`. The one hold of a tag to the manifest: both scripts
+        read a release's ref through it."""
+        if not (name.startswith("v") and VERSION.fullmatch(name[1:])):
+            return None
+        version = name[1:]
+        package = workspace_package()
+        if "version" not in package:
+            raise Refusal(
+                "Cargo.toml's [workspace.package] has no version line; "
+                f'a release of {name} needs version = "{version}" there'
+            )
+        if package["version"] != version:
+            raise Refusal(
+                f"{name} is not the workspace manifest's version, {package['version']}, "
+                "from Cargo.toml's [workspace.package]"
+            )
+        return Ref(version)
 
     @property
     def prerelease(self):
@@ -106,9 +147,18 @@ class Ref:
         return tuple(int(part) for part in VERSION.fullmatch(self.version).groups()[:3])
 
 
-def releases():
-    """The versions of the release tags here, pre-releases left out."""
-    found = [Ref.parse(tag) for tag in git("tag", "--list", "v*").split() if VERSION.fullmatch(tag[1:])]
+def releases(ref):
+    """The versions of the release tags here, pre-releases left out, which
+    say whether `ref` is the newest release. A shallow checkout may hold
+    its own tag alone, which would make every backport the newest, so it
+    is refused, saying what to fetch."""
+    if git("rev-parse", "--is-shallow-repository") == "true":
+        raise Refusal(
+            f"this checkout is shallow, so it may not hold every release tag, and whether {ref.name} is "
+            "the newest release is not known here; fetch the whole history and every tag first, "
+            "`git fetch --unshallow --tags` (actions/checkout's `fetch-depth: 0`)"
+        )
+    found = [Ref(tag[1:]) for tag in git("tag", "--list", "v*").split() if VERSION.fullmatch(tag[1:])]
     return [ref for ref in found if not ref.prerelease]
 
 
@@ -116,7 +166,7 @@ def tags(ref, commit, variant):
     if ref.version is None:
         return [f"edge-{variant}", f"sha-{commit.sha}-{variant}"]
     named = [f"{ref.version}-{variant}"]
-    if not ref.prerelease and all(other.core() <= ref.core() for other in releases()):
+    if not ref.prerelease and all(other.core() <= ref.core() for other in releases(ref)):
         named.append(variant)
     return named
 
@@ -138,9 +188,17 @@ class Commit:
         return Commit(sha, int(epoch))
 
 
+def workspace_package():
+    """Cargo.toml's `[workspace.package]` table."""
+    try:
+        with (ROOT / "Cargo.toml").open("rb") as manifest:
+            return tomllib.load(manifest).get("workspace", {}).get("package", {})
+    except tomllib.TOMLDecodeError as error:
+        raise Refusal(f"Cargo.toml is not a manifest TOML reads: {error}") from None
+
+
 def licenses():
-    with (ROOT / "Cargo.toml").open("rb") as manifest:
-        return tomllib.load(manifest)["workspace"]["package"]["license"]
+    return workspace_package()["license"]
 
 
 def labels(ref, commit):
@@ -170,18 +228,34 @@ def main(argv):
     arguments = parser.parse_args(argv)
     # Each line before the commands that follow it.
     sys.stdout.reconfigure(line_buffering=True)
-    try:
+
+    def step():
         ref = Ref.parse(arguments.ref)
         commit = Commit.head()
         if arguments.step == "build":
             build(ref, commit, arguments)
         else:
             join(ref, commit, arguments)
+
+    return refusing("dist/publish.py", step)
+
+
+def refusing(prog, step):
+    """Run `step`, saying a refusal, a command that failed with what it
+    wrote to stderr, or a program not on PATH in one message on stderr,
+    with exit 1; dist/release.py's steps run under it too."""
+    try:
+        step()
     except Refusal as refusal:
-        print(f"dist/publish.py: {refusal}", file=sys.stderr)
+        print(f"{prog}: {refusal}", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as failed:
-        print(f"dist/publish.py: {' '.join(failed.cmd)}: exit {failed.returncode}", file=sys.stderr)
+        said = failed.stderr.decode() if isinstance(failed.stderr, bytes) else failed.stderr or ""
+        said = f"\n{said.strip()}" if said.strip() else ""
+        print(f"{prog}: {' '.join(map(str, failed.cmd))}: exit {failed.returncode}{said}", file=sys.stderr)
+        return 1
+    except FileNotFoundError as missing:
+        print(f"{prog}: {missing.filename}: not found", file=sys.stderr)
         return 1
     return 0
 
@@ -202,17 +276,30 @@ def daemon():
     ).stdout.strip()
 
 
+def native(platform, made):
+    """Refuse a platform the daemon does not run as its own, so that what
+    is made for it is built and smoked where it is meant to run, and no
+    emulation's answers are pushed or released. dist/release.py holds its
+    Linux tarballs to it too."""
+    here = daemon()
+    if here != platform:
+        raise Refusal(f"{made} is built on a machine of its own platform, {platform}, and the daemon's is {here}")
+
+
 def built_from(ref, commit):
     """Refuse a tree a real run would mislabel: one with changes, or a
-    release whose tag is not HEAD."""
+    release whose tag is not HEAD. dist/release.py holds its steps to it
+    too."""
     if git("status", "--porcelain"):
-        raise Refusal("the tree has changes; an image is built from a commit")
+        raise Refusal("the tree has changes; what is published is built from a commit")
     if ref.version is None:
         return
     try:
         tagged = git("rev-parse", "--verify", "--quiet", f"refs/tags/{ref.name}^{{commit}}")
     except subprocess.CalledProcessError:
-        raise Refusal(f"no tag {ref.name} here; a release is built at its tag") from None
+        raise Refusal(
+            f"no tag {ref.name} here; a release is built at its tag, so fetch the tags, `git fetch --tags`"
+        ) from None
     if tagged != commit.sha:
         raise Refusal(f"{ref.name} is not HEAD: it names {tagged}, and HEAD is {commit.sha}")
 
@@ -223,16 +310,17 @@ def build(ref, commit, arguments):
     platform = arguments.platform or daemon()
     if platform not in PLATFORMS:
         raise Refusal(f"the daemon's platform is {platform}, and the images are {', '.join(PLATFORMS)}")
+    if not arguments.dry_run:
+        native(platform, f"an image of {platform}")
     print(f"ref {ref.name}")
     print(f"commit {commit.sha}")
     print(f"platform {platform}")
     for key, value in labels(ref, commit):
         print(f"label {key}={value}")
-    smoke = os.environ.get("SMOKE") or str(ROOT / "dist/smoke.sh")
     common = [
         "buildx", "build", "-f", str(ROOT / "dist/Dockerfile"), "--platform", platform,
-        "--build-arg", f"NAME={os.environ.get('NAME') or 'php'}",
-        "--build-arg", f"CARGO_BUILD_JOBS={os.environ.get('CARGO_BUILD_JOBS') or '1'}",
+        "--build-arg", f"NAME={setting('NAME')}",
+        "--build-arg", f"CARGO_BUILD_JOBS={setting('CARGO_BUILD_JOBS')}",
         "--build-arg", f"SOURCE_DATE_EPOCH={commit.epoch}",
     ]
     for key, value in labels(ref, commit):
@@ -249,7 +337,7 @@ def build(ref, commit, arguments):
             loaded = scratch / f"load-{variant}.json"
             docker(*common, "--target", variant, "--metadata-file", str(loaded), "--tag", local, "--load", str(ROOT))
             smoked[variant] = config(metadata(loaded), variant)
-            if subprocess.run([smoke, "--image", local, variant]).returncode != 0:
+            if subprocess.run([setting("SMOKE"), "--image", local, variant]).returncode != 0:
                 raise Refusal(f"the smoke of {variant} failed; nothing is pushed")
         pushed = []
         for variant in VARIANTS:
@@ -306,10 +394,10 @@ def read_digests(paths):
                 or not DIGEST.fullmatch(fields[2])
             ):
                 raise Refusal(f"{path}: {line!r} is not a digest line, <platform> <variant> <digest>")
-            platform, variant, digest = fields
+            platform, variant, named = fields
             if (variant, platform) in found:
                 raise Refusal(f"{path}: a second digest of {variant} for {platform}")
-            found[variant, platform] = digest
+            found[variant, platform] = named
     for variant in VARIANTS:
         for platform in PLATFORMS:
             if (variant, platform) not in found:
@@ -318,6 +406,8 @@ def read_digests(paths):
 
 
 def join(ref, commit, arguments):
+    if not arguments.dry_run:
+        built_from(ref, commit)
     found = read_digests(arguments.digests) if arguments.digests or not arguments.dry_run else None
     print(f"ref {ref.name}")
     print(f"commit {commit.sha}")

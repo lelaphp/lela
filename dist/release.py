@@ -48,12 +48,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 from pathlib import Path
 
-# The images' script, beside this one, imported without the bytecode that
-# would leave dist/__pycache__ in the tree a real run refuses to be dirty.
-sys.dont_write_bytecode = True
+# The images' script, beside this one; the checkout ignores the bytecode
+# the import leaves in dist/__pycache__.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import publish  # noqa: E402
 
@@ -62,25 +60,11 @@ Refusal = publish.Refusal
 
 
 def release(tag):
-    """The release `tag` names, held to the workspace manifest's version."""
-    try:
-        ref = publish.Ref.parse(tag)
-    except Refusal:
-        ref = publish.Ref(None)
-    if ref.version is None:
+    """The release `tag` names, held to the workspace manifest's version
+    by dist/publish.py's one hold."""
+    ref = publish.Ref.release(tag)
+    if ref is None:
         raise Refusal(f"{tag} is not a release's tag, v<version>")
-    with (ROOT / "Cargo.toml").open("rb") as file:
-        package = tomllib.load(file).get("workspace", {}).get("package", {})
-    if "version" not in package:
-        raise Refusal(
-            "Cargo.toml's [workspace.package] has no version line; "
-            f'a release of {tag} needs version = "{ref.version}" there'
-        )
-    if package["version"] != ref.version:
-        raise Refusal(
-            f"{tag} is not the workspace manifest's version, {package['version']}, "
-            "from Cargo.toml's [workspace.package]"
-        )
     return ref
 
 
@@ -91,21 +75,8 @@ def tarball(ref, platform):
     return f"{name()}-{ref.version}-{platform}.tar.gz"
 
 
-def at_tag(ref, commit):
-    """Refuse a tree a real run would mislabel: one with changes, or one
-    whose HEAD is not the release's tag."""
-    if publish.git("status", "--porcelain"):
-        raise Refusal("the tree has changes; a release is built from a commit")
-    try:
-        tagged = publish.git("rev-parse", "--verify", "--quiet", f"refs/tags/{ref.name}^{{commit}}")
-    except subprocess.CalledProcessError:
-        raise Refusal(f"no tag {ref.name} here; a release is built at its tag") from None
-    if tagged != commit.sha:
-        raise Refusal(f"{ref.name} is not HEAD: it names {tagged}, and HEAD is {commit.sha}")
-
-
 def name():
-    return os.environ.get("NAME") or "php"
+    return publish.setting("NAME")
 
 
 # Each Linux platform's tarball is dist/Dockerfile's binaries target, built
@@ -121,12 +92,7 @@ def native(platform):
         if here != "Darwin arm64":
             raise Refusal(f"darwin-arm64 is built on an Apple silicon Mac, and this machine is {here}")
         return
-    daemon = publish.daemon()
-    if daemon != LINUX[platform]:
-        raise Refusal(
-            f"{platform} is built on a machine of its own platform, {LINUX[platform]}, "
-            f"and the daemon's is {daemon}"
-        )
+    publish.native(LINUX[platform], platform)
 
 
 def stage_darwin(stage):
@@ -148,7 +114,7 @@ def stage_linux(stage, platform):
     Ubuntu packages the hosts load, in runtime-packages.txt."""
     subprocess.run([
         "docker", "buildx", "build", "-f", str(ROOT / "dist/Dockerfile"), "--platform", LINUX[platform],
-        "--target", "binaries", "--build-arg", f"CARGO_BUILD_JOBS={os.environ.get('CARGO_BUILD_JOBS') or '1'}",
+        "--target", "binaries", "--build-arg", f"CARGO_BUILD_JOBS={publish.setting('CARGO_BUILD_JOBS')}",
         "--build-arg", f"NAME={name()}", "--output", f"type=local,dest={stage}", str(ROOT),
     ], check=True)
 
@@ -168,7 +134,7 @@ def pack(stage, path):
         archive.add(stage, arcname=stage.name, filter=owned)
 
 
-def smoke(ref, platform, path):
+def smoke(platform, path):
     """dist/smoke.sh over the tarball itself, unpacked on its platform: a
     Linux one in the Ubuntu image the Dockerfile builds on, with its
     runtime-packages.txt installed; the macOS hosts after their ad-hoc
@@ -203,7 +169,7 @@ def smoke(ref, platform, path):
             signed = subprocess.run(["codesign", "-dv", str(unpacked / host)], capture_output=True, text=True)
             if "Signature=adhoc" not in signed.stderr.splitlines():
                 raise Refusal(f"{path.name}'s {host} carries no ad-hoc signature")
-        if subprocess.run([os.environ.get("SMOKE") or str(ROOT / "dist/smoke.sh"), str(unpacked)]).returncode != 0:
+        if subprocess.run([publish.setting("SMOKE"), str(unpacked)]).returncode != 0:
             raise Refusal(f"the smoke of {path.name} on {platform} failed")
 
 
@@ -213,7 +179,7 @@ def build_tarball(ref, commit, arguments):
     if platform not in PLATFORMS:
         raise Refusal(f"no platform {platform}; a release's are {', '.join(PLATFORMS)}")
     if not arguments.dry_run:
-        at_tag(ref, commit)
+        publish.built_from(ref, commit)
         native(platform)
     artifact = tarball(ref, platform)
     print(f"platform {platform}")
@@ -234,7 +200,7 @@ def build_tarball(ref, commit, arguments):
     else:
         stage_darwin(stage)
     pack(stage, path)
-    smoke(ref, platform, path)
+    smoke(platform, path)
     print(f"built {path}")
 
 
@@ -255,7 +221,7 @@ def tarballs(ref, directory):
 def publish_release(ref, commit, arguments):
     """The GitHub Release of the tag, with the tarballs and their sums."""
     if not arguments.dry_run:
-        at_tag(ref, commit)
+        publish.built_from(ref, commit)
         paths = tarballs(ref, arguments.dir)
     artifacts = [tarball(ref, platform) for platform in PLATFORMS]
     for artifact in [*artifacts, "SHA256SUMS"]:
@@ -276,7 +242,9 @@ def publish_release(ref, commit, arguments):
     if arguments.dry_run:
         print("dry run: nothing is uploaded or created")
         return
-    subprocess.run([str(ROOT / "scripts/dist-sums.sh"), str(arguments.dir)], check=True, capture_output=True)
+    # The sums go to the file and its notes; what the script says of a
+    # failure reaches the caller.
+    subprocess.run([str(ROOT / "scripts/dist-sums.sh"), str(arguments.dir)], check=True, stdout=subprocess.DEVNULL)
     sums = arguments.dir / "SHA256SUMS"
     notes = "".join([
         f"The tarballs of {ref.name}, built from {commit.sha}, and their SHA-256 sums:\n\n",
@@ -311,7 +279,8 @@ def main(argv):
     publish_step.add_argument("--dry-run", action="store_true")
     arguments = parser.parse_args(argv)
     sys.stdout.reconfigure(line_buffering=True)
-    try:
+
+    def step():
         ref = release(arguments.tag)
         commit = publish.Commit.head()
         print(f"version {ref.version}")
@@ -319,13 +288,8 @@ def main(argv):
             build_tarball(ref, commit, arguments)
         elif arguments.step == "publish":
             publish_release(ref, commit, arguments)
-    except Refusal as refusal:
-        print(f"dist/release.py: {refusal}", file=sys.stderr)
-        return 1
-    except subprocess.CalledProcessError as failed:
-        print(f"dist/release.py: {' '.join(map(str, failed.cmd))}: exit {failed.returncode}", file=sys.stderr)
-        return 1
-    return 0
+
+    return publish.refusing("dist/release.py", step)
 
 
 if __name__ == "__main__":

@@ -55,8 +55,12 @@ php-src's templates at the pinned commit, rendered as the official image's
 `dist/smoke.sh --image <image> <variant>` runs the tarball's checks inside
 the image, on the image's own platform, over the hosts in `/usr/local`
 (`php-fpm -t` where the variant holds the FPM). It checks the ini
-directory, and that the compat directory is off `PATH` and that putting it
-first is the only step each usual name needs. Then it checks what a user
+directory, and that the compat directory is there and off `PATH`, and
+that each entry of it is what its name finds once the directory is first
+on `PATH`, and runs: that makes putting it first the only step the usual
+names need. Once the hosts carry Lela's names, each usual name the
+variant holds must be an entry; until then the directory is empty, and
+passes. Then it checks what a user
 of the variant sees: `cli` passes an option to `php` through the
 entrypoint; `fpm` answers a FastCGI request on port 9000, and `apache`
 serves a page on port 80, each to a second container of the image on a
@@ -80,10 +84,13 @@ dist/publish.py build main --digests /tmp/digests-arm64
 dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
 ```
 
-- `build` builds the three variants for the daemon's platform, or the one
-  `--platform` names, and loads each; runs the smoke's image mode over
+- `build` builds the three variants for the daemon's platform, which
+  `--platform` may name, and loads each; runs the smoke's image mode over
   each; and only once all three have passed, pushes each by digest with
-  BuildKit's SBOM attached. A failed smoke pushes nothing. It writes one
+  BuildKit's SBOM attached. A failed smoke pushes nothing. A real build
+  refuses a platform the daemon does not run as its own, as
+  `dist/release.py build` does, so no image smoked under emulation is
+  pushed; the smoke alone still runs one. It writes one
   `<platform> <variant> <digest>` line per variant.
 - `join` reads both platforms' lines and puts each variant's two images
   under one manifest list, carrying every tag of the variant:
@@ -93,16 +100,27 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
   | `main` | `edge-<variant>`, and `sha-<commit>-<variant>` with the full commit |
   | `v<version>` | `<version>-<variant>`, and the bare `<variant>` unless the version is a pre-release or older than a release tag the checkout holds |
 
+  Whether a release is the newest is read from the checkout's release
+  tags, so a shallow checkout, which may hold its own tag alone and would
+  move the bare variant for every backport, is refused, saying to fetch
+  the whole history and every tag (`git fetch --unshallow --tags`,
+  actions/checkout's `fetch-depth: 0`). A real `join` refuses a tree with
+  changes and a release whose tag is not HEAD, as a real `build` does.
+
 Each image is labelled, and each list annotated, with standard OCI keys
 alone: `source`, `revision`, `version` (`edge` from `main`) and
 `licenses`, read from the workspace manifest's package table, and
-`description`, `Lela`, which replaces the Ubuntu base's. `--dry-run`
-prints the platform, the labels, the tags and the digests each step would
-push, and pushes nothing:
+`description`, `Lela`, which replaces the Ubuntu base's. A release's
+tag is held to the workspace manifest's version by both steps, dry or
+real, through the hold `dist/release.py` uses: a tag that names another
+version is refused, and so is a manifest with no version line, as this
+tree's is until the version line lands. `--dry-run` prints the platform,
+the labels, the tags and the digests each step would push, and pushes
+nothing:
 
 ```sh
-dist/publish.py build v0.1.0 --platform linux/amd64 --dry-run
-dist/publish.py join v0.1.0 --dry-run
+dist/publish.py build v0.1.0-alpha.1 --platform linux/amd64 --dry-run
+dist/publish.py join v0.1.0-alpha.1 --dry-run
 ```
 
 `dist/prune.py` deletes the versions no tag is pulled by: one last updated
@@ -110,7 +128,9 @@ more than 30 days ago whose tags are all `sha-` tags, or which has none,
 unless a kept manifest list names it or it is a referrer of a kept one. A
 version tag, a bare variant, an `edge-` tag and a tag of any other kind
 are never deleted. `dist/prune.py --dry-run` names each version it would
-delete, and deletes none. CI runs both scripts; a person runs them with
+delete, and deletes none. A listing gh cannot give deletes nothing, and a
+deletion that fails stops the run, naming the versions deleted before it
+and those not. CI runs both scripts; a person runs them with
 `gh` authorised for the organisation's packages and docker logged in to
 `ghcr.io`.
 
@@ -154,7 +174,7 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
   with `scripts/dist-sums.sh`, and creates the GitHub Release of the tag
   with the four attached. The release is marked a pre-release when the
   version is one, and the latest when its images move the bare variant
-  tags.
+  tags, which it reads as `join` does, refusing a shallow checkout.
 
 A real `build` or `publish` refuses a tree with changes, and a tag that is
 not HEAD. `--dry-run` prints what the step would make and makes nothing:
@@ -199,7 +219,7 @@ verifier; a cached layer is invalidated when an input or pin changes.
 Run the offline tests and the checkout's pin comparison with Python 3.11+:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s dist -p 'test_*.py' -v
+python3 -m unittest discover -s dist -p 'test_*.py' -v
 python3 dist/inputs.py check
 ```
 
@@ -215,7 +235,10 @@ holds the deletion script's dry run over the listing in `fixtures/`.
 `test_release.py` holds the release script's refusal of a tag the
 manifest does not name, its dry run for a release and a pre-release, and
 its steps against a docker, a cargo and a gh that record what they are
-asked.
+asked. Both run their script in a repository of the test's own, laid
+down by `testlib.py`, on a PATH of the test's own directories alone: the
+recording tools, and links to git and the few programs the scripts call
+that are no docker, gh or cargo.
 They do not build or run platform binaries.
 
 To exercise real downloads without installing anything:

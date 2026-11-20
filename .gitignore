@@ -21,3 +21,8 @@ target/
 
 # A person's local override of .claude/settings.json, theirs alone.
 /.claude/settings.local.json
+
+# The bytecode Python leaves beside an imported module: dist/release.py
+# imports dist/publish.py and the dist tests import dist/testlib.py, and a
+# real publish or release refuses a tree with changes.
+/dist/__pycache__/
