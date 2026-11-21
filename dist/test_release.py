@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import unittest
 from pathlib import Path
 
@@ -372,15 +373,25 @@ class Build(Recorded):
         lines = smoke[-1].splitlines()
         self.assertLess(lines.index('/dist/smoke.sh "$d"'), lines.index("sh /dist/apt.sh install curl >/dev/null"))
         self.assertEqual(lines[-1], "su installer -c 'LELA_INSTALL_FROM=file:///tmp/assets sh /installer/install.sh'")
+        # The owners and modes from the archive's own headers; a `tar -tv`
+        # listing prints them as bsdtar's `root  root` or GNU tar's
+        # `root/root`. The machine's tar reads the archive, and the names it
+        # lists are the archive's in either.
+        tarball = self.out() / "lela-1.2.0-linux-x86_64.tar.gz"
+        with tarfile.open(tarball) as archive:
+            members = archive.getmembers()
+        self.assertTrue(members[0].isdir(), members[0].name)
+        self.assertEqual((members[0].name, members[0].mode), ("lela-1.2.0-linux-x86_64", 0o755))
+        for member in members:
+            with self.subTest(member=member.name):
+                self.assertEqual(
+                    (member.uid, member.gid, member.uname, member.gname), (0, 0, "root", "root"),
+                )
         listing = subprocess.run(
-            ["tar", "-tvzf", str(self.out() / "lela-1.2.0-linux-x86_64.tar.gz")],
-            check=True, capture_output=True, text=True,
+            ["tar", "-tzf", str(tarball)], check=True, capture_output=True, text=True,
         ).stdout.splitlines()
-        self.assertTrue(listing[0].startswith("drwxr-xr-x"), listing[0])
-        for entry in listing:
-            with self.subTest(entry=entry):
-                self.assertRegex(entry, r"\broot\s+root\b")
-        self.assertEqual(self.lines(run, "built"), [str(self.out() / "lela-1.2.0-linux-x86_64.tar.gz")])
+        self.assertEqual([name.rstrip("/") for name in listing], [member.name for member in members])
+        self.assertEqual(self.lines(run, "built"), [str(tarball)])
 
     def test_the_smoke_runs_apt_through_apt_sh_alone(self):
         self.git("tag", "v1.2.0")
