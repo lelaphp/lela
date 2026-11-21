@@ -47,13 +47,30 @@ fn main() {
         "cargo::rerun-if-changed={}",
         root.join(SOURCES_DIR).display()
     );
-    for path in &source_files(&root).expect("reading xtask/src") {
+    let sources = source_files(&root).expect("reading xtask/src");
+    for path in &sources {
         println!("cargo::rerun-if-changed={}", path.display());
+    }
+    // The inputs are kept under `OUT_DIR` as `built/`, at their paths in
+    // the workspace, and digested there, so the digests name a tree that
+    // stands as this build was compiled from it: a test holds the build
+    // to that tree, which the checkout's own files stop being the moment
+    // anyone edits one.
+    let out = std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR");
+    let kept = Path::new(&out).join("built");
+    std::fs::remove_dir_all(&kept).ok();
+    let relative = sources
+        .iter()
+        .filter_map(|path| path.strip_prefix(&root).ok());
+    for file in relative.chain([Path::new(MANIFEST_FILE)]) {
+        let to = kept.join(file);
+        std::fs::create_dir_all(to.parent().unwrap_or(&kept)).ok();
+        std::fs::copy(root.join(file), &to).ok();
     }
     // A build without them beside it carries no digest, which `built` reads
     // as a build that cannot say what it judges by.
-    let manifest = manifest_digest(&root).unwrap_or_default();
-    let code = sources_digest(&root).unwrap_or_default();
+    let manifest = manifest_digest(&kept).unwrap_or_default();
+    let code = sources_digest(&kept).unwrap_or_default();
     println!("cargo::rustc-env=XTASK_MANIFEST_DIGEST={manifest}");
     println!("cargo::rustc-env=XTASK_SOURCES_DIGEST={code}");
     // The tests that read the workspace's tracked files are built where it
