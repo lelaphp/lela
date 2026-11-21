@@ -132,7 +132,7 @@ third-engine-design.md
 | harness | xtask.lock | 512 |  |
 
 <!-- /computed in=c1a4086006f50c04f3d1ceb6ddc061bd8fa082b9da5f46ddb2b4f884c9ec01e2 out=b07d910251e4a9309a97c4d17dcf0eaa8e2dd2d5680728c6f7e01d10683520a1 -->
-<!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
+<!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs,xtask/src/exit.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
 
@@ -141,39 +141,39 @@ Usage: xtask [OPTIONS] <COMMAND>
 Commands:
   api-check          Hold the seams: regenerate and diff each lock, hold crate edges, `use` paths and the bundle order; one reading per seam and per crate
   status             Render one section from the manifest, registry, store, repository and pinned tree; computes nothing else
-  permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
-  done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and `land` read the list
-  track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
-  worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` removes it, `own` and `whose` say its owner, `queue` and `land` run the merge queue
-  ticket             A ticket, one GitHub issue: `read`, `ready` and `close` hold it to its boxes; `view` and `brief` are what a builder reads; `parent` measures a chart sheet
-  usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
-  review             What a review found and whether each merge into `main` was reviewed: `record`, `resolve`, `cover` and `class`; it refuses nothing
-  regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
+  permit             Judge one intended call from the `PreToolUse` hook's stdin: the decision is JSON on stdout, the exit 0 always
+  done               The definition of done: what is unmet since the base, exit 1 while any is; the Stop hook, pre-push and `land` read the list
+  track              Say the branch, its base on `main`, the store and the branch's ticket. Writes no reading
+  worktree           A ticket's worktree: `add` lays one down, `retire` removes it, `own` and `whose` say its owner, `queue` and `land` run the merge queue
+  ticket             A ticket: `read`, `ready` and `close` hold it to its boxes, `view` and `brief` print what a builder reads, `parent` measures a chart sheet
+  usage              What a session spent per turn: `record` writes the plugin's `SessionUsage`, read on stdin, as one `usage` reading
+  review             What a review found and whether each merge into `main` was reviewed: `record`, `resolve`, `cover` and `class`
+  regions            Render the named files' regions with `computed run`, one line per file for pre-commit to re-stage. Writes no reading
   bench              Measure one bar under the protocol: paired reps with the A/A control and the load average, one reading per bar, exit 0 always
-  budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code, a stale generated file and a `build.rs` that bakes its crate's directory in
-  clippy             `cargo clippy` with every warning denied, on every target of each crate and in release where it names `debug_assertions`, as the readings `done` reads; one per crate and profile
-  test               `cargo test` on each crate, as the reading `done` reads; one reading per crate, with what passed, failed, was ignored and was filtered out in its numbers
-  miri               `cargo miri test` on `php_heap`, or on the crates named, as the lane design §9 runs per commit; one reading per crate, with what ran, failed and was ignored in its numbers
-  phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
-  port-map           Join the Mahout census to `api.lock`: each item `same`, `renamed` or `gone`, the rows not yet taken as the number; one reading, at the lock's crate
-  compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, and hold every file to byte-identity; one reading per corpus, scoped to the corpus
-  crosscheck         Hold each default extension's `--re` and `--ri` rendering to the oracle's bytes, kept in the store; one reading per extension per flag
-  trace-dump         Hold the engine's `TRACE` lines under `jit.mode=force` to the oracle's under `[regime.jit-inline]` on the seven kernels, kept in the store; one reading per kernel
+  budget             Hold each crate to its line ceiling and the workspace to [budget]; refuse generated code committed or stale
+  clippy             `cargo clippy`, every warning denied, on each crate's every target; `done`'s readings, one per crate and profile
+  test               `cargo test` on each crate; `done`'s reading, one per crate, counting what passed, failed, was ignored and was filtered out
+  miri               `cargo miri test` on `php_heap` or the crates named; one reading per crate, counting what ran, failed and was ignored
+  phpt               Run the pinned `.phpt` corpus through the engine, each test held to its `--EXPECT*--` section; one reading per subset, at its crate
+  port-map           Join the Mahout census to `api.lock`, each item `same`, `renamed` or `gone`; one reading, at the lock's crate
+  compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, every file held to byte-identity; one reading per corpus
+  crosscheck         Hold each default extension's `--re` and `--ri` rendering to the oracle's bytes; one reading per extension per flag
+  trace-dump         Hold the engine's `TRACE` lines under `jit.mode=force` to the oracle's under `[regime.jit-inline]` on the seven kernels; one reading per kernel
   hostile            Hold the engine to the oracle on `data/hostile.toml`'s programs, whose error handlers disturb an opline mid-step; one reading per crate that owes it
   fuzz               Hold the engine to the oracle on a corpus's programs and as many again drawn from a seed, generated or mutated; one reading per crate that owes it
   fold               Hold the release `serve_frame` to LLVM's fold of a request field's address into each access; one reading, at `sapi/cli`
   dispatch-census    Each variant's share of the oplines the loop dispatched, over every program `IN_THE_LOOP`'s doc names; one reading per program
-  fpm-compare        Hold makala to the pinned php-fpm: each request of the HTTP-served subset served by both, the status, header lines and body compared; one reading, at makala's crate
+  fpm-compare        Hold makala to the pinned php-fpm on the HTTP-served subset, each request's status, header lines and body compared; one reading, at makala's crate
   soak               Many clients against one makala for a fixed time, each response held to the request served alone; one reading, at makala's crate
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   steer              Apply a proposal to one of the harness's own files, and only where it adds: one changed value writes nothing
   oracle             The oracle's pin: `propose` prints the whole diff a bump writes, after a person has poured the new keg. Writes no reading
-  hosts              Build the hosts the phpt lane hands its tests to in one profile and print each one's path; `--list` says where each ships, building nothing. Writes no reading
+  hosts              Build the phpt lane's hosts in one profile and print each one's path, or with `--list` where each ships. Writes no reading
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
-  new-ext            Lay one extension crate down at ext/<name> from the template, with its `php_bundle` line, ext/clippy.toml and ext/AGENTS.md row; refuses an existing one
-  new-sapi           Lay one host crate down at sapi/<name> as the CLI and CGI are laid, with its binary and test; refuses an existing one or one without its `[[crate]]` row (ADR-0008)
-  witness            Run every `php` fence of a crate's rustdoc under the oracle's recipe and hold it to its `expect` fence; one reading per crate
+  new-ext            Lay one extension crate down at ext/<name> from the template, with its `php_bundle` line; refuses an existing one
+  new-sapi           Lay one host crate down at sapi/<name> with its binary and test; refuses an existing one or one with no `[[crate]]` row
+  witness            Run every `php` fence of a crate's rustdoc under the oracle's recipe, each held to its `expect` fence; one reading per crate
   vocab              The glossary as a sensor: `_Avoid_` words in public item names and rustdoc prose, never in a lock; one reading per crate
 
 Options:
@@ -187,7 +187,7 @@ Exit status:
   3  a worktree laid down and not ready to be worked in
   4  an instrument that could not take a reading it set out for: phpt, witness, compile-identity, crosscheck, fuzz, hostile
 ```
-<!-- /computed in=405091b39d410a051b641590b5a55c040c098ad3025f3c316fa5b86c41a37321 out=54b7e3fcfefea3d9420af92f6171e4339eda9e42d7f860ab1b4eb6f4ffb32d6c -->
+<!-- /computed in=ce9b59edc82bce0655cef69b2cd8647741815ef05e12429046555f6717b0ee2a out=7669c016ebdbbc0c9a05741ca06474ad22e0a1e2057d73d46eda7496456d7401 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

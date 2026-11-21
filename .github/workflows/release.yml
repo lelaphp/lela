@@ -4,19 +4,27 @@
 # (dist/README.md); this workflow chooses the runners, grants the
 # permissions and calls it.
 # - `check` holds the tag to the version line of Cargo.toml's
-#   `[workspace.package]`, and nothing else runs where it refuses.
-# - `linux` and `darwin` each build one platform's tarball on a runner of
-#   that platform and smoke the tarball there: linux-x86_64 on
-#   LELA_BUILD_RUNNER's runner, linux-aarch64 on LELA_BUILD_RUNNER_ARM64's,
-#   as images.yml's two builds run, and darwin-arm64 on the macOS 15 image
-#   the Mac's other jobs run on, with what .github/actions/oracle-runner
-#   and pinned-php lay for a build of the hosts there.
+#   `[workspace.package]`, and nothing else runs where it refuses. It
+#   then hands on the build matrix `dist/release.py matrix` prints,
+#   rendered from the platform table the tarballs, platforms.json and
+#   install.sh are read from, so a platform is added to that table and no
+#   platform is typed here.
+# - `linux` and `darwin` each build the tarball of one platform of their
+#   family on a runner of that platform and smoke the tarball there. The
+#   runner is chosen here, by the family and the Docker platform the row
+#   names: a Linux platform of linux/arm64 on LELA_BUILD_RUNNER_ARM64's
+#   runner and any other on LELA_BUILD_RUNNER's, as images.yml's two
+#   builds run, and a macOS one on the macOS 15 image the Mac's other jobs
+#   run on, with what .github/actions/oracle-runner and pinned-php lay for
+#   a build of the hosts there.
 # - `images` calls images.yml, the path a commit on `main` publishes by,
 #   once every tarball has passed: `github.ref_name` is the tag there, so
 #   dist/publish.py pushes `<version>-<variant>`, and the bare variant only
 #   for the newest release that is not a pre-release.
-# - `release` creates the GitHub Release of the tag with the three
-#   tarballs and SHA256SUMS, a pre-release when the version is one.
+# - `release` creates the GitHub Release of the tag, a pre-release when
+#   the version is one, and attaches what `dist/release.py publish
+#   --dry-run` lists as its artifacts: the tarball of each platform of the
+#   table, install.sh, platforms.json, and SHA256SUMS over the others.
 # By hand (`workflow_dispatch`, from any branch), it is a dry run of the
 # tag its input names: each step prints what it would make, `release` the
 # release's fields and the image tags dist/publish.py would push, and
@@ -47,20 +55,24 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - run: dist/release.py check "$TAG"
+      - name: the platforms, from the table
+        id: platforms
+        # One line of JSON, which a job reads with fromJSON: each family's
+        # matrix, and the table's platforms for the release job's stashes.
+        run: |
+          matrix=$(dist/release.py matrix)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
   linux:
     name: the ${{ matrix.platform }} tarball
     needs: check
     strategy:
-      matrix:
-        include:
-          - platform: linux-x86_64
-            runner: ${{ vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]' }}
-          - platform: linux-aarch64
-            runner: ${{ vars.LELA_BUILD_RUNNER_ARM64 || '["ubuntu-26.04-arm"]' }}
-    runs-on: ${{ fromJSON(matrix.runner) }}
+      matrix: ${{ fromJSON(needs.check.outputs.matrix).families.linux }}
+    runs-on: ${{ fromJSON(matrix.docker == 'linux/arm64' && (vars.LELA_BUILD_RUNNER_ARM64 || '["ubuntu-26.04-arm"]') || (vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]')) }}
     timeout-minutes: 120
     permissions:
       contents: read
@@ -94,8 +106,10 @@ jobs:
           path: ${{ runner.temp }}/release/*.tar.gz
           retention-days: 1
   darwin:
-    name: the darwin-arm64 tarball
+    name: the ${{ matrix.platform }} tarball
     needs: check
+    strategy:
+      matrix: ${{ fromJSON(needs.check.outputs.matrix).families.darwin }}
     runs-on: ${{ github.event.repository.private && 'blacksmith-12vcpu-macos-15' || 'macos-15' }}
     timeout-minutes: 120
     permissions:
@@ -113,14 +127,16 @@ jobs:
       - uses: ./.github/actions/pinned-php
         if: ${{ !env.DRY_RUN }}
       - name: built and smoked
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
           # shellcheck disable=SC2086 # DRY_RUN is a flag or nothing
-          dist/release.py build "$TAG" darwin-arm64 "$RUNNER_TEMP/release" $DRY_RUN
+          dist/release.py build "$TAG" "$PLATFORM" "$RUNNER_TEMP/release" $DRY_RUN
       - name: the tarball, for the release job
         if: ${{ !env.DRY_RUN }}
         uses: ./.github/actions/stash
         with:
-          put: tarball-darwin-arm64
+          put: tarball-${{ matrix.platform }}
           path: ${{ runner.temp }}/release/*.tar.gz
           retention-days: 1
   images:
@@ -135,7 +151,7 @@ jobs:
     uses: ./.github/workflows/images.yml
   release:
     name: the GitHub Release
-    needs: [linux, darwin, images]
+    needs: [check, linux, darwin, images]
     # A dry run has no images job; a real run has one that passed.
     if: ${{ !cancelled() && needs.linux.result == 'success' && needs.darwin.result == 'success' && (needs.images.result == 'success' || github.event_name == 'workflow_dispatch') }}
     runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
@@ -148,11 +164,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: the three tarballs
+      - name: the tarballs, one for each platform of the table
         if: ${{ !env.DRY_RUN }}
         uses: ./.github/actions/stash
         with:
-          get: tarball-linux-x86_64 tarball-linux-aarch64 tarball-darwin-arm64
+          get: tarball-${{ join(fromJSON(needs.check.outputs.matrix).platforms, ' tarball-') }}
           merge: "true"
           path: ${{ runner.temp }}/release
       - name: created

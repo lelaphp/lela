@@ -122,8 +122,8 @@ pub(crate) enum Command {
         #[arg(long)]
         session: bool,
     },
-    /// Judge one intended call from the `PreToolUse` hook's stdin; the
-    /// decision is the JSON on stdout and the exit is 0 always.
+    /// Judge one intended call from the `PreToolUse` hook's stdin: the
+    /// decision is JSON on stdout, the exit 0 always.
     Permit {
         /// The call as a JSON argument instead of stdin.
         #[arg(long, value_name = "JSON", conflicts_with_all = ["bench", "diff"])]
@@ -155,8 +155,8 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = crate::permit::BAR_MS, value_name = "MS", requires = "bench")]
         bar: f64,
     },
-    /// The definition of done: the conditions unmet since the base, and
-    /// exit 1 while any is; the Stop hook, pre-push and `land` read the list.
+    /// The definition of done: what is unmet since the base, exit 1 while
+    /// any is; the Stop hook, pre-push and `land` read the list.
     Done {
         /// Measure the changes since the merge base with this ref;
         /// default `main`, or `origin`'s where the checkout has none.
@@ -181,9 +181,8 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "hook")]
         peek: bool,
     },
-    /// Say the branch, the commit it was taken off main at, the store
-    /// and the branch's ticket; as text or as one object. Writes no
-    /// reading.
+    /// Say the branch, its base on `main`, the store and the branch's
+    /// ticket. Writes no reading.
     ///
     /// A track is a `track:<name>` label on the tracker, `main` for a
     /// ticket with none, and has no branch (ADR-0009), so none is
@@ -207,14 +206,14 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: Option<TrackCommand>,
     },
-    /// A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>,
-    /// `retire` removes it, `own` and `whose` say its owner, `queue` and
-    /// `land` run the merge queue.
+    /// A ticket's worktree: `add` lays one down, `retire` removes it, `own`
+    /// and `whose` say its owner, `queue` and `land` run the merge queue.
     ///
     /// None writes a reading of its own; `land` asks `done`, which writes
     /// one.
     ///
-    /// `add` lays the worktree down ready to be worked in, the branch cut
+    /// `add` lays the worktree down at <checkout>-worktrees/<branch>,
+    /// ready to be worked in, the branch cut
     /// from `main` with the ticket it is for recorded on it, `xtask` built
     /// there, the local file laid and rendered under the grant over the
     /// worktrees' directory (§11); refuses a branch that exists and
@@ -225,9 +224,8 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
-    /// A ticket, one GitHub issue: `read`, `ready` and `close` hold it to
-    /// its boxes; `view` and `brief` are what a builder reads; `parent`
-    /// measures a chart sheet.
+    /// A ticket: `read`, `ready` and `close` hold it to its boxes, `view`
+    /// and `brief` print what a builder reads, `parent` measures a chart sheet.
     ///
     /// `read <n>` writes the reading of the boxes under the ticket's
     /// `## Acceptance criteria` heading, and `parent <n>` the reading of
@@ -247,9 +245,8 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: TicketCommand,
     },
-    /// What a session spent per turn: `record` reads the plugin's
-    /// `SessionUsage` on stdin and writes one `usage` reading under the
-    /// branch's ticket, or the session id
+    /// What a session spent per turn: `record` writes the plugin's
+    /// `SessionUsage`, read on stdin, as one `usage` reading.
     ///
     /// The object is what `$.session.usage()` answered, and the plugin's
     /// `turn.complete` pipes it here once a turn, so the last reading
@@ -263,8 +260,7 @@ pub(crate) enum Command {
         command: UsageCommand,
     },
     /// What a review found and whether each merge into `main` was
-    /// reviewed: `record`, `resolve`, `cover` and `class`; it refuses
-    /// nothing
+    /// reviewed: `record`, `resolve`, `cover` and `class`.
     ///
     /// `record` writes a reviewer's findings file as one reading of the
     /// range it read and one per finding; `resolve` applies a vote, a
@@ -272,13 +268,14 @@ pub(crate) enum Command {
     /// coverage of each merge not yet judged, which `worktree land` runs
     /// after it moves `main`; `class` prints a branch's class and writes
     /// no reading. Every reading lands in the main checkout's store, and
-    /// none is a hold on anything (Round 2, Q33 (a)).
+    /// none is a hold on anything, so it refuses nothing (Round 2, Q33
+    /// (a)).
     Review {
         #[command(subcommand)]
         command: ReviewCommand,
     },
-    /// Render the named files' regions with `computed run` and say what it
-    /// did, one line per file, for pre-commit to re-stage. Writes no reading.
+    /// Render the named files' regions with `computed run`, one line per
+    /// file for pre-commit to re-stage. Writes no reading.
     ///
     /// Each line is `written` or `unchanged`. Refuses a broken marker, a
     /// missing `computed` and an untrusted checkout, whose `computed trust`
@@ -299,9 +296,10 @@ pub(crate) enum Command {
     ///
     /// Without an argument, every bar the harness declares.
     Bench(Bench),
-    /// Hold every crate to its line ceiling and the workspace to [budget];
-    /// refuse committed generated code, a stale generated file and a
-    /// `build.rs` that bakes its crate's directory in.
+    /// Hold each crate to its line ceiling and the workspace to [budget];
+    /// refuse generated code committed or stale.
+    ///
+    /// A `build.rs` that bakes its crate's directory in is refused as well.
     Budget {
         /// For pre-commit: leave out each crate whose reading passes and
         /// was taken over what is staged, naming the reading, and
@@ -309,9 +307,10 @@ pub(crate) enum Command {
         #[arg(long)]
         staged: bool,
     },
-    /// `cargo clippy` with every warning denied, on every target of each
-    /// crate and in release where it names `debug_assertions`, as the
-    /// readings `done` reads; one per crate and profile.
+    /// `cargo clippy`, every warning denied, on each crate's every target;
+    /// `done`'s readings, one per crate and profile.
+    ///
+    /// A crate that names `debug_assertions` is linted in release as well.
     Clippy {
         /// Only these crates, by manifest name; default every crate that exists.
         #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
@@ -320,9 +319,8 @@ pub(crate) enum Command {
         #[arg(long)]
         staged: bool,
     },
-    /// `cargo test` on each crate, as the reading `done` reads; one
-    /// reading per crate, with what passed, failed, was ignored and was
-    /// filtered out in its numbers.
+    /// `cargo test` on each crate; `done`'s reading, one per crate,
+    /// counting what passed, failed, was ignored and was filtered out.
     Test {
         /// Only these crates, by manifest name; default every crate that exists.
         #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
@@ -341,26 +339,26 @@ pub(crate) enum Command {
         )]
         target: Option<String>,
     },
-    /// `cargo miri test` on `php_heap`, or on the crates named, as the
-    /// lane design §9 runs per commit; one reading per crate, with what
-    /// ran, failed and was ignored in its numbers.
+    /// `cargo miri test` on `php_heap` or the crates named; one reading
+    /// per crate, counting what ran, failed and was ignored.
+    ///
+    /// It is the lane design §9 runs per commit.
     Miri {
         /// Only these crates, by manifest name; default the crates the
         /// manifest's `[[owed]]` row of `miri` names, `php_heap`.
         #[arg(long = "crate", value_name = "NAME")]
         crates: Vec<String>,
     },
-    /// Run the pinned `.phpt` corpus through the engine and hold each test
-    /// to its `--EXPECT*--` section; one reading per subset, scoped to the
-    /// crate whose subset it is.
+    /// Run the pinned `.phpt` corpus through the engine, each test held to
+    /// its `--EXPECT*--` section; one reading per subset, at its crate.
     ///
     /// Without `--subset`, the per-commit lane the manifest composes.
     Phpt(Phpt),
-    /// Join the Mahout census to `api.lock`: each item `same`, `renamed`
-    /// or `gone`, the rows not yet taken as the number; one reading, at the
-    /// lock's crate.
+    /// Join the Mahout census to `api.lock`, each item `same`, `renamed`
+    /// or `gone`; one reading, at the lock's crate.
     ///
-    /// Without `--tree`, the committed census `data/port-map.v0.toml`.
+    /// The rows not yet taken are the number. Without `--tree`, the
+    /// committed census `data/port-map.v0.toml`.
     PortMap {
         /// Regenerate the census against the inherited Mahout tree, which
         /// lives outside this repository, and join that instead; a tree
@@ -370,14 +368,13 @@ pub(crate) enum Command {
         tree: Option<PathBuf>,
     },
     /// Compile a corpus under the oracle's dump recipe and under the
-    /// engine, and hold every file to byte-identity; one reading per
-    /// corpus, scoped to the corpus.
+    /// engine, every file held to byte-identity; one reading per corpus.
     ///
     /// Without an argument, the per-commit corpus of design §6.1: every
     /// file of `Zend/tests`, `tests` and `sapi/cli` of the pinned php-src.
     CompileIdentity(crate::compile_identity::Ask),
     /// Hold each default extension's `--re` and `--ri` rendering to the
-    /// oracle's bytes, kept in the store; one reading per extension per flag.
+    /// oracle's bytes; one reading per extension per flag.
     ///
     /// The oracle's bytes are kept at
     /// `target/harness/crosscheck/ext/<name>/<digest>.re` and `.ri`; the
@@ -402,8 +399,8 @@ pub(crate) enum Command {
         staged: bool,
     },
     /// Hold the engine's `TRACE` lines under `jit.mode=force` to the
-    /// oracle's under `[regime.jit-inline]` on the seven kernels, kept in
-    /// the store; one reading per kernel.
+    /// oracle's under `[regime.jit-inline]` on the seven kernels; one reading
+    /// per kernel.
     ///
     /// Both sides' `---- TRACE` lines are kept at
     /// `target/harness/trace-dump/<kernel>/<digest>.oracle` and `.engine`,
@@ -455,9 +452,9 @@ pub(crate) enum Command {
     /// groups and names those over a quarter of a percent, the threshold
     /// the list's doc states. It changes no list.
     DispatchCensus(crate::dispatch_census::Ask),
-    /// Hold makala to the pinned php-fpm: each request of the HTTP-served
-    /// subset served by both, the status, header lines and body compared;
-    /// one reading, at makala's crate.
+    /// Hold makala to the pinned php-fpm on the HTTP-served subset, each
+    /// request's status, header lines and body compared; one reading, at
+    /// makala's crate.
     ///
     /// php-fpm is handed each request under the pin's `[fastcgi]` mapping,
     /// as nginx in front of it would hand it on; a machine without
@@ -525,9 +522,8 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: OracleCommand,
     },
-    /// Build the hosts the phpt lane hands its tests to in one profile and
-    /// print each one's path; `--list` says where each ships, building
-    /// nothing. Writes no reading.
+    /// Build the phpt lane's hosts in one profile and print each one's
+    /// path, or with `--list` where each ships. Writes no reading.
     Hosts {
         /// The profile to build in, one of those the workspace's
         /// `Cargo.toml` defines; with `--list`, the one whose paths each
@@ -543,20 +539,20 @@ pub(crate) enum Command {
     /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,
     /// Lay one extension crate down at ext/<name> from the template, with
-    /// its `php_bundle` line, ext/clippy.toml and ext/AGENTS.md row; refuses
-    /// an existing one.
+    /// its `php_bundle` line; refuses an existing one.
     ///
     /// The template: the facade as its one dependency, `extension()`, state
-    /// on the value, a test through the capture sink and a witness.
+    /// on the value, a test through the capture sink and a witness. The
+    /// crate's ext/clippy.toml and ext/AGENTS.md rows are written beside it.
     NewExt {
         /// The extension's name as php-src spells it, with a `[[crate]]` row.
         name: String,
     },
-    /// Lay one host crate down at sapi/<name> as the CLI and CGI are laid,
-    /// with its binary and test; refuses an existing one or one without its
-    /// `[[crate]]` row (ADR-0008).
+    /// Lay one host crate down at sapi/<name> with its binary and test;
+    /// refuses an existing one or one with no `[[crate]]` row.
     ///
-    /// The template: the facade and the bundle as its two dependencies,
+    /// The crate is laid as the CLI and CGI are (ADR-0008). The template:
+    /// the facade and the bundle as its two dependencies,
     /// `main`, a host that serves the file its line names until its own
     /// replaces it, the build date's `build.rs` and a test of the binary.
     NewSapi {
@@ -566,8 +562,8 @@ pub(crate) enum Command {
         #[arg(long = "bin", value_name = "NAME")]
         binary: Option<String>,
     },
-    /// Run every `php` fence of a crate's rustdoc under the oracle's recipe
-    /// and hold it to its `expect` fence; one reading per crate.
+    /// Run every `php` fence of a crate's rustdoc under the oracle's recipe,
+    /// each held to its `expect` fence; one reading per crate.
     ///
     /// Each snippet runs as `witness.php`; the kernels and natives without
     /// a witness are counted.
