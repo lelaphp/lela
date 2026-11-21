@@ -16,12 +16,14 @@
 # system's release (macOS on Apple silicon no older than the tarball's
 # floor, or Ubuntu of the release the Linux tarballs are built on, with
 # the packages they load installed), the checksum, and the unpacked
-# `lela -v`. A refusal says why on one line and leaves the home as it was.
+# `lela -v`, whose first line ends `[Lela <version>]` with this release's
+# version, as it must again through the link. A refusal says why on one
+# line and leaves the home as it was.
 # It asks for no root and writes nowhere but those two directories; it
 # leaves every php, and every file it did not make, as it is, and edits no
 # shell profile: it says when ~/.local/bin is not on PATH. A run over an
 # installed release replaces it in place, and the link moves only once the
-# new one runs through it.
+# new one runs through it and names this release.
 #
 # LELA_INSTALL_FROM, where set, is the URL of the directory the assets are
 # fetched from in place of the release's; LELA_OS_RELEASE the file read in
@@ -89,6 +91,15 @@ older() {
 		}
 		exit 1
 	}'
+}
+
+# Whether `-v`'s output, $1, is this release's: its first line php's, which
+# ends with the product's version in brackets, `[Lela <version>]`.
+ours() {
+	case "${1%%"$nl"*}" in
+		*" $wants") ;;
+		*) return 1 ;;
+	esac
 }
 
 # A macOS version by its name, as Apple names each since Catalina.
@@ -165,6 +176,9 @@ after_macos() {
 main() {
 	[ -n "$name" ] && [ -n "$version" ] && [ -n "$ubuntu" ] && [ -n "$release" ] && [ -n "$platforms" ] ||
 		fail "this is the installer's source, which names no release; run the install.sh attached to one"
+	# What `-v`'s first line ends with in this release: the name as a
+	# sentence writes it, its first letter upper case, and the version.
+	wants="[$(awk -v n="$name" 'BEGIN { print toupper(substr(n, 1, 1)) substr(n, 2) }') $version]"
 
 	# --- what is checked before anything is written ---------------------------
 
@@ -275,6 +289,8 @@ main() {
 	"after_$checks"
 
 	banner=$("$unpacked/bin/$name" -v 2>&1 </dev/null) || fail "the unpacked $name -v fails, so it is not installed: $banner"
+	ours "$banner" ||
+		fail "the unpacked $name -v says ${banner%%"$nl"*}, where $name $version's first line ends $wants, so it is not installed"
 
 	# --- put in place --------------------------------------------------------
 
@@ -286,7 +302,13 @@ main() {
 	mv "$unpacked" "$dest"
 	ln -s "$dest/bin/$name" "$stage/link"
 	mv -f "$stage/link" "$link"
+	refused=
 	if ! banner=$("$link" -v 2>&1 </dev/null); then
+		refused="$link -v fails, so $name $version is not installed: $banner"
+	elif ! ours "$banner"; then
+		refused="$link -v says ${banner%%"$nl"*}, where $name $version's first line ends $wants, so $name $version is not installed"
+	fi
+	if [ -n "$refused" ]; then
 		# Undone: the link back where it pointed, the release it replaced back.
 		if [ -n "$previous" ]; then
 			ln -s "$previous" "$stage/link"
@@ -296,7 +318,7 @@ main() {
 		fi
 		rm -rf "$dest"
 		[ ! -e "$stage/replaced" ] || mv "$stage/replaced" "$dest"
-		fail "$link -v fails, so $name $version is not installed: $banner"
+		fail "$refused"
 	fi
 	installed=1
 	# The release the link named before, which this one replaces.

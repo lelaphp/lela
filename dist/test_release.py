@@ -661,7 +661,10 @@ with open(os.environ["CALLS"], "a") as log:
     log.write(json.dumps(["cargo", *arguments]) + "\n")
 release = os.path.join(os.environ["CARGO_TARGET_DIR"], "release")
 os.makedirs(release, exist_ok=True)
-source, link = b"int main(void){return 0;}\n", []
+# Each host prints the first line of `lela -v` as v1.2.0 prints it, which
+# the installer holds to the release it installs.
+says = b'int puts(const char *); static void says(void){puts("PHP 8.5.12 (cli) (built: Nov 21 2026 12:00:00) (NTS) [Lela 1.2.0]");}\n'
+source, link = says + b"int main(void){says(); return 0;}\n", []
 if os.environ.get("KEGS"):
     kegs = os.environ["KEGS"]
     lib = os.path.join(kegs, "Cellar/zz/1.0_1/lib")
@@ -681,7 +684,7 @@ if os.environ.get("KEGS"):
     subprocess.run(["cc", "-x", "c", "-", "-dynamiclib", "-o", os.path.join(crypto, "lib/libcrypto.4.dylib"),
                     "-install_name", os.path.join(kegs, "opt/openssl@4/lib/libcrypto.4.dylib")],
                    input=b"int crypto(void){return 0;}\n", check=True)
-    source = b"int zz(void); int crypto(void); int main(void){return zz() + crypto();}\n"
+    source = says + b"int zz(void); int crypto(void); int main(void){says(); return zz() + crypto();}\n"
     link = ["-x", "none", os.path.join(kegs, "opt/zz/lib/libzz.1.dylib"),
             os.path.join(kegs, "opt/openssl@4/lib/libcrypto.4.dylib")]
 for i, a in enumerate(arguments):

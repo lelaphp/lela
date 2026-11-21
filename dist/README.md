@@ -532,13 +532,14 @@ so the sum vouches for a download against the page and not for the page.
   the rows of `platforms.json` that say it does.
 
 Every check runs before anything is put in place, the unpacked `lela -v`
-among them, and a refusal leaves the home as it was. It asks for no
+among them, its first line held to end `[Lela <version>]` with the
+release's version, and a refusal leaves the home as it was. It asks for no
 root, refuses to run under `sudo`, writes nowhere but those two
 directories, leaves any `php` and any `~/.local/bin/lela` that is not its
 own link as it is, and edits no shell profile: it says when
 `~/.local/bin` is not on `PATH`. A run over an installed release replaces
 it in place, an upgrade removes the release it replaces, and the link
-moves only once `lela -v` runs through it.
+moves only once `lela -v` runs through it and names that release.
 
 `test_install.py` runs the staged script under `sh`, and `dash` where it
 is there, over a release of the test's own, its tarball packed by the
