@@ -180,7 +180,7 @@ fn built(
 
 /// The target directory cargo builds into in `root`: the one
 /// `CARGO_TARGET_DIR` names, relative to `root`, else `root`'s own.
-fn target(root: &Path) -> PathBuf {
+pub(crate) fn target(root: &Path) -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), |dir| root.join(dir))
 }
 

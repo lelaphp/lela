@@ -716,7 +716,8 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
 /// worktree, whose manifest is the worktree's, once built there, and is
 /// gone once it is retired; the regions, which pre-commit renders
 /// whatever the manifest says; and the hosts, which a workspace builds by
-/// its `Cargo.toml` alone, in the seat the command takes.
+/// its `Cargo.toml` alone, in the seat the command takes, or which
+/// `--list` prints from the host table, building nothing and seatless.
 fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
     match command {
         Command::Track {
@@ -753,10 +754,7 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         Command::Oracle {
             command: OracleCommand::Propose { keg, source },
         } => Some(oracle_propose(root, keg.as_deref(), source.as_deref())),
-        Command::Hosts { profile } => {
-            let _seat = seat::of_command(command);
-            Some(hosts::command(root, *profile))
-        }
+        Command::Hosts { profile, list } => Some(hosts::answer(root, *profile, *list)),
         Command::Worktree {
             command: WorktreeCommand::Add { branch, ticket },
         } => Some(
