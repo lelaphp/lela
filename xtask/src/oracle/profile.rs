@@ -152,7 +152,7 @@ fn built(
     let what = format!("{binary}; its errors are on the harness's second stream");
     run(root, &mut cargo, &added, &what)?;
     let target = into.map_or_else(|| target(root), Path::to_path_buf);
-    found(profile, &target, binary)
+    found(profile.binary(&target, binary))
 }
 
 /// The target directory cargo builds into in `root`: the one
@@ -161,11 +161,11 @@ fn target(root: &Path) -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), |dir| root.join(dir))
 }
 
-/// Where cargo put `binary`, built in `profile` under `target`, refused
-/// where it is not there.
-fn found(profile: Profile, target: &Path, binary: &str) -> Result<PathBuf> {
-    let built = profile.binary(target, binary);
+/// `built`, where cargo was to put a binary it built, refused where the
+/// binary is not there.
+pub(crate) fn found(built: PathBuf) -> Result<PathBuf> {
     if !built.is_file() {
+        let binary = built.file_name().unwrap_or_default().to_string_lossy();
         bail!("cargo built {binary} and it is not at {}", built.display());
     }
     Ok(built)
@@ -199,18 +199,19 @@ pub(crate) fn hosts(profile: Profile) -> Vec<String> {
 }
 
 /// Every host built in `root` in `profile` by [`hosts`]' line, what cargo
-/// prints on the harness's streams, and where cargo put each one, in
-/// [`super::hosts::HOSTS`]' order.
+/// prints on the harness's streams, and where cargo puts each one, in
+/// [`super::hosts::HOSTS`]' order. A host not there is not refused here:
+/// the phpt lane treats a host missing beside the binary under test as a
+/// build the run is missing, and [`found`] refuses one where every host
+/// must be there.
 pub(crate) fn build_hosts(root: &Path, profile: Profile) -> Result<Vec<PathBuf>> {
     let mut cargo = Command::new(cargo());
     cargo.args(hosts(profile));
     let what = format!("the hosts in {}", root.display());
     run(root, &mut cargo, &Added::inherited(), &what)?;
     let target = target(root);
-    super::hosts::HOSTS
-        .iter()
-        .map(|host| found(profile, &target, host.binary))
-        .collect()
+    let at = |host: &super::hosts::EngineHost| profile.binary(&target, host.binary);
+    Ok(super::hosts::HOSTS.iter().map(at).collect())
 }
 
 /// `cargo`, a build line, run in `root` with `added` on it and the seat's

@@ -16,9 +16,14 @@ use anyhow::Result;
 use crate::oracle::profile::{self, Profile};
 
 /// Every host built in `root` in `profile`, and each one's path printed,
-/// in the list's order, the binary under test first.
+/// in the list's order, the binary under test first; refused, printing
+/// nothing, where cargo left one of them unbuilt.
 pub(crate) fn command(root: &Path, profile: Profile) -> Result<()> {
-    for path in profile::build_hosts(root, profile)? {
+    let built: Vec<_> = profile::build_hosts(root, profile)?
+        .into_iter()
+        .map(profile::found)
+        .collect::<Result<_>>()?;
+    for path in built {
         println!("{}", path.display());
     }
     Ok(())
