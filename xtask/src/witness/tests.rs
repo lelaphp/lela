@@ -204,7 +204,7 @@ fn a_digest_mismatch_refuses_the_run_and_is_not_a_bork_per_witness() {
         &block("/// ```expect\n/// 1\n/// ```\n"),
     );
     let mut manifest = manifest();
-    manifest.pin.as_mut().unwrap().oracle.digest = crate::oracle::Digest::Md5("0".repeat(32));
+    manifest.pin.as_mut().unwrap().oracle.sha256 = crate::sha256::Sha256::default();
     let err = judge(
         &manifest.pin().unwrap().oracle(),
         &binary(),

@@ -29,7 +29,7 @@
 //! module).
 //!
 //! **Which engine wrote the numbers.** The reading names the binary that
-//! ran it, its path and the md5 of its bytes, and a binary the tree has
+//! ran it, its path and the SHA-256 of its bytes, and a binary the tree has
 //! moved past runs nothing at all: its reading is a skip counting
 //! `engine_stale`, beside the `engine_absent` one `done` excuses. A
 //! reading is stamped with the tree, and before this one tree carried two
@@ -871,7 +871,7 @@ pub(crate) fn reading(
     // Which engine wrote these numbers. The reading's own stamp is the
     // tree's, and one tree had two binaries under it and two readings 37
     // tests apart before this line, with nothing to tell them apart;
-    // the binary's path and the md5 of its bytes are what does.
+    // the binary's path and the SHA-256 of its bytes are what does.
     let message = match runner.stamp() {
         Some(engine) => format!("{message}; run by {engine}"),
         None => message,

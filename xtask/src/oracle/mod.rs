@@ -25,7 +25,6 @@
 
 pub(crate) mod built_from;
 mod closure;
-mod digest;
 #[cfg(test)]
 mod dockerfile;
 pub(crate) mod expect;
@@ -42,7 +41,6 @@ use built_from::BuiltFrom;
 #[cfg(test)]
 pub(crate) use closure::stand_in;
 pub(crate) use closure::{Closure, Minos, Own};
-pub use digest::Digest;
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub(crate) use formula::Formula;
 pub use profile::Profile;
@@ -69,6 +67,7 @@ use crate::divergence::{Digests, Divergence, Moved, Registry};
 use crate::layout::Layout;
 use crate::reading::joined;
 use crate::scratch::{self, Tree};
+use crate::sha256::Sha256;
 
 /// The environment variable that names the pinned php-src tree on this
 /// machine, consulted ahead of the pin's `[source].path`. The name
@@ -334,13 +333,12 @@ impl Sapi {
     }
 }
 
-/// One of `[sapi]`'s binaries: its path on this machine and its digest.
+/// One of `[sapi]`'s binaries: its path on this machine and its SHA-256.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Host {
     pub path: PathBuf,
-    #[serde(flatten)]
-    pub digest: Digest,
+    pub sha256: Sha256,
 }
 
 impl Host {
@@ -349,11 +347,11 @@ impl Host {
     /// [`Oracle::host_asserted`], which holds the closure first.
     fn assert_digest(&self) -> Result<()> {
         let bytes = bytes_of(&self.path, "the pinned host at ")?;
-        if let Err(actual) = self.digest.holds(&bytes) {
+        if let Err(actual) = self.sha256.holds(&bytes) {
             bail!(
                 "{} has {actual}; the pin's [sapi] says {}. Report the drift; the pin moves only by a person's hand",
                 self.path.display(),
-                self.digest
+                self.sha256
             );
         }
         Ok(())
@@ -377,7 +375,7 @@ impl Clone for Asserted {
     }
 }
 
-/// `[oracle]`: the `php` binary by version, path on this machine, and digest.
+/// `[oracle]`: the `php` binary by version, path on this machine, and SHA-256.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binary {
@@ -390,8 +388,7 @@ pub struct Binary {
     #[serde(default)]
     pub(crate) formula: Formula,
     pub path: PathBuf,
-    #[serde(flatten)]
-    pub digest: Digest,
+    pub sha256: Sha256,
     /// The oracle variant this binary is, none for `[oracle]`'s own: set
     /// by [`Pin::variant`], not a value of the file.
     #[serde(skip)]
@@ -1069,7 +1066,7 @@ impl Pin {
             version: self.oracle.version.clone(),
             formula: self.oracle.formula,
             path: build.map(|b| b.path.clone()).unwrap_or_default(),
-            digest: build.map(|b| b.digest.clone()).unwrap_or_default(),
+            sha256: build.map(|b| b.sha256).unwrap_or_default(),
             variant: Some(name.to_owned()),
             unpinned,
         };
@@ -1125,11 +1122,11 @@ impl Pin {
         }
         let path = &self.oracle.path;
         let bytes = bytes_of(path, "the pinned php at ")?;
-        if let Err(actual) = self.oracle.digest.holds(&bytes) {
+        if let Err(actual) = self.oracle.sha256.holds(&bytes) {
             bail!(
                 "{} has {actual}; the pin says {} for php {}{}. Report the drift; the pin moves only by a person's hand",
                 path.display(),
-                self.oracle.digest,
+                self.oracle.sha256,
                 self.oracle.version,
                 self.oracle.of()
             );
@@ -2097,7 +2094,7 @@ impl Runner {
         if let Some(path) = named {
             let path = named_binary(path)?;
             let bytes = bytes_of(&path, "")?;
-            return Ok(if pin.oracle.digest.holds(&bytes).is_ok() {
+            return Ok(if pin.oracle.sha256.holds(&bytes).is_ok() {
                 // The pinned oracle is a control and never this tree's
                 // engine, so when the tree was last written says nothing
                 // about it; the pin holds it by its digest instead.
@@ -2161,7 +2158,7 @@ impl Runner {
     }
 
     /// What a reading names the engine it ran by: the binary's path and
-    /// the md5 of its bytes, so two readings stamped with one tree can be
+    /// the SHA-256 of its bytes, so two readings stamped with one tree can be
     /// told apart when the binary under them is not the same.
     ///
     /// A rung that is not the engine's own binary has none: the pinned
@@ -2174,7 +2171,7 @@ impl Runner {
             return None;
         };
         Some(match fs::read(path) {
-            Ok(bytes) => format!("{} md5 {:x}", path.display(), md5::compute(bytes)),
+            Ok(bytes) => format!("{} {}", path.display(), Sha256::of(&bytes)),
             Err(why) => format!(
                 "{}, whose bytes this run could not read: {why}",
                 path.display()
@@ -2750,3 +2747,6 @@ mod expanded_tests {
         assert_eq!(expanded(Path::new("~/x"), None), Path::new("~/x"));
     }
 }
+
+#[cfg(test)]
+mod tests;

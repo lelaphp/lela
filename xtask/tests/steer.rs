@@ -436,7 +436,7 @@ fn a_table_the_pins_reader_does_not_know_is_refused_and_one_it_knows_is_written(
         pin
     );
 
-    let sapi = "\n[sapi]\ncgi = { path = \"/bin/php-cgi\", md5 = \"00\" }\n";
+    let sapi = "\n[sapi]\ncgi = { path = \"/bin/php-cgi\", sha256 = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n";
     fs::write(&proposal, format!("{pin}{sapi}")).expect("the proposal");
     let written = steer::run(&root, &harness(), "oracle.toml", &proposal, false)
         .expect("the instrument runs");

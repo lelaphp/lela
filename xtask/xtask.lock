@@ -185,11 +185,6 @@ oracle::Binary::absent
 oracle::Binary::file
 oracle::Binary::variant
 oracle::Build
-oracle::Digest
-oracle::Digest::holds
-oracle::Digest::key
-oracle::Digest::md5
-oracle::Digest::sha256
 oracle::ENGINE
 oracle::Ended
 oracle::Host
@@ -383,6 +378,8 @@ scratch::executable
 scratch::repository
 scratch::xtask
 sha256::Sha256
+sha256::Sha256::holds
+sha256::Sha256::key
 sha256::Sha256::of
 status::Against
 status::render

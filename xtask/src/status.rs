@@ -1457,21 +1457,20 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// them, which the corpus section clones at; where
 /// [`crate::oracle::Source::tree`] found the tree, the variable's or the
 /// pin's, or the absence it named; and the pinned php, its version, keg
-/// path and digest, its `md5` and its `sha256` where the pin carries
-/// each, the Homebrew formula the keg is poured from, `php`
+/// path and SHA-256, the Homebrew formula the keg is poured from, `php`
 /// where the pin names none, and the bottle of it the keg path names,
 /// the version with the formula's revision where it has one. An
 /// eighth, `closure`, names the kegs
 /// `[closure]` records php loading, each at its version, where the pin
 /// records them, with the record's digest, and a `variant` row
 /// per `[variant.<name>]` that pins a build for this machine's platform,
-/// its path and digests as `[oracle]`'s, and the macOS build's closure digest.
+/// its path and SHA-256 as `[oracle]`'s, and the macOS build's closure digest.
 /// CI reads the two names off the JSON, `tree.variable` and
 /// `promise.variable`, and sets them under those names, so the workflow
 /// spells neither; the oracle runner pours the formula `binary` names at
-/// its bottle, holds the keg's php to that md5 and pins the keg,
+/// its bottle, holds the keg's php to that SHA-256 and pins the keg,
 /// pours and pins each keg `closure` names at its version, and
-/// lays each of `variants` at its path by its md5.
+/// lays each of `variants` at its path by its SHA-256.
 fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let php = &pin.oracle;
@@ -1518,16 +1517,14 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "formula": php.formula.to_string(),
                 "bottle": php.bottle(),
                 "path": php.path.display().to_string(),
-                "md5": php.digest.md5(),
-                "sha256": php.digest.sha256().map(|d| d.to_string()),
+                "sha256": php.sha256.to_string(),
             },
             "closure": pin.closure.as_ref().map(Closure::kegs),
             "closure_digest": pin.closure.as_ref().map(|c| c.digest().to_string()),
             "variants": builds.iter().map(|(name, build)| ((*name).clone(), json!({
                 "platform": platform.map(Platform::key),
                 "path": build.path.display().to_string(),
-                "md5": build.digest.md5(),
-                "sha256": build.digest.sha256().map(|d| d.to_string()),
+                "sha256": build.sha256.to_string(),
                 "closure": build.provenance.closure.as_ref().map(ToString::to_string),
             }))).collect::<serde_json::Map<_, _>>(),
         }))?,
@@ -1559,14 +1556,14 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
             row(o, "found", "", &path, &state);
             let binary = format!(
                 "php {}, {}, poured from the formula {}",
-                php.version, php.digest, php.formula
+                php.version, php.sha256, php.formula
             );
             row(o, "binary", "", &php.path.display().to_string(), &binary);
             closure_row(o, pin.closure.as_ref());
             for (name, build) in &builds {
                 let fact = format!("variant {name}");
                 let closure = (build.provenance.closure.as_ref()).map(|c| format!(", closure {c}"));
-                let held = format!("{}{}", build.digest, closure.unwrap_or_default());
+                let held = format!("{}{}", build.sha256, closure.unwrap_or_default());
                 row(o, &fact, "", &build.path.display().to_string(), &held);
             }
             out

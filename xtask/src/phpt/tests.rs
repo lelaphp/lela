@@ -2534,7 +2534,7 @@ fn fixture_target(verdicts: &[(&str, &str)]) -> Target {
         serde_json::from_value(serde_json::json!({
             "commit": "e01b1f6",
             "corpus": "the fixture's corpus",
-            "engine": "php md5 0",
+            "engine": "php sha256:0",
             "verdicts": verdicts,
         }))
         .unwrap(),

@@ -347,14 +347,17 @@ fn a_file_runs_in_its_own_directory() {
 #[test]
 fn a_digest_mismatch_refuses_the_run() {
     let Some(mut pin) = pin() else { return };
-    let wrong = "0".repeat(32);
-    pin.oracle.digest = oracle::Digest::Md5(wrong.clone());
+    let wrong = xtask::sha256::Sha256::default();
+    pin.oracle.sha256 = wrong;
     let err = pin
         .oracle()
         .run(Program::Snippet("echo 1;"), None)
         .unwrap_err()
         .to_string();
-    assert!(err.contains(&wrong), "the expected digest is named: {err}");
+    assert!(
+        err.contains(&wrong.to_string()),
+        "the expected digest is named: {err}"
+    );
     assert!(
         err.contains(&pin.oracle.path.display().to_string()),
         "the binary is named: {err}"
@@ -1037,11 +1040,11 @@ fn the_pin_refuses_a_key_outside_its_grammar() {
 }
 
 /// The tracked pin with its `[fastcgi]` replaced by one of `params`, held
-/// to `md5` where named and to the params' own md5 otherwise.
-fn with_fastcgi(params: &str, md5: Option<&str>) -> anyhow::Result<Pin> {
+/// to `sha256` where named and to the params' own SHA-256 otherwise.
+fn with_fastcgi(params: &str, sha256: Option<&str>) -> anyhow::Result<Pin> {
     with_split(
         params,
-        md5,
+        sha256,
         [
             Some(r"^(.+?\.php)(/.*)$"),
             Some("$fastcgi_path_info"),
@@ -1052,14 +1055,17 @@ fn with_fastcgi(params: &str, md5: Option<&str>) -> anyhow::Result<Pin> {
 
 /// [`with_fastcgi`] with `split_path_info`, `path_info` and
 /// `path_translated` as `split` has them, a key left out for `None`.
-fn with_split(params: &str, md5: Option<&str>, split: [Option<&str>; 3]) -> anyhow::Result<Pin> {
+fn with_split(params: &str, sha256: Option<&str>, split: [Option<&str>; 3]) -> anyhow::Result<Pin> {
     let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
     let mut pin: toml::Table = toml::from_str(&text).unwrap();
-    let digest = md5.map_or_else(|| format!("{:x}", md5::compute(params)), str::to_owned);
+    let digest = sha256.map_or_else(
+        || xtask::sha256::Sha256::of(params.as_bytes()).to_string(),
+        str::to_owned,
+    );
     let fastcgi: toml::Table = [
         ("nginx", "1.30.5"),
         ("source", "https://example.org/fastcgi_params"),
-        ("md5", &digest),
+        ("sha256", &digest),
         ("script_filename", "$document_root$fastcgi_script_name"),
         ("params", params),
     ]
@@ -1079,7 +1085,7 @@ fn with_split(params: &str, md5: Option<&str>, split: [Option<&str>; 3]) -> anyh
 /// `[fastcgi]`: nginx's `fastcgi_param` lines read as typed
 /// parameters in the order nginx sends them, `SCRIPT_FILENAME` first, a
 /// value's text apart from its variables, blank lines and comments
-/// skipped; the copy held to its md5, and a variable, a directive or a
+/// skipped; the copy held to its SHA-256, and a variable, a directive or a
 /// line the reader does not know refused by name. A pin without the
 /// table says so when asked for the mapping.
 #[test]
@@ -1122,9 +1128,10 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
     );
 
     let refused =
-        |params: &str, md5: Option<&str>| with_fastcgi(params, md5).unwrap_err().to_string();
-    let err = refused(params, Some("00000000000000000000000000000000"));
-    assert!(err.contains("md5") && err.contains("verbatim"), "{err}");
+        |params: &str, sha256: Option<&str>| with_fastcgi(params, sha256).unwrap_err().to_string();
+    let zeros = xtask::sha256::Sha256::default().to_string();
+    let err = refused(params, Some(&zeros));
+    assert!(err.contains(&zeros) && err.contains("verbatim"), "{err}");
     for (line, says) in [
         ("fastcgi_param  X  $not_nginx_s;\n", "$not_nginx_s"),
         ("include  fastcgi_params;\n", "fastcgi_param <name>"),
@@ -1557,10 +1564,10 @@ fn a_binary_the_tree_has_not_moved_past_is_the_engine_and_stamps_its_reading() {
     assert_eq!(runner.binary(), Some(fresh.as_path()));
     let stamp = runner.stamp().unwrap();
     let (path, digest) = stamp
-        .split_once(" md5 ")
+        .split_once(" sha256:")
         .unwrap_or_else(|| panic!("{stamp}"));
     assert_eq!(path, fresh.display().to_string());
-    assert_eq!(digest.len(), 32, "{stamp}");
+    assert_eq!(digest.len(), 64, "{stamp}");
     assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()), "{stamp}");
 }
 

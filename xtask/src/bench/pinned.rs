@@ -2,9 +2,9 @@
 //! keg `[oracle]` names, asserted as every lane asserts it; on Linux, php
 //! built from the pinned tag by `scripts/oracle-build.py build <platform>
 //! main`, which bench.yml's job runs before its bars. That build
-//! is a performance baseline and not an oracle: it is held to the md5 the
-//! recipe recorded beside it, its `pin.toml`, and a bar is refused, naming
-//! the path and the md5 it expected, wherever the binary is absent or
+//! is a performance baseline and not an oracle: it is held to the SHA-256
+//! the recipe recorded beside it, its `pin.toml`, and a bar is refused,
+//! naming the path and the SHA-256 it expected, wherever the binary is absent or
 //! another.
 
 use std::collections::BTreeMap;
@@ -40,7 +40,7 @@ pub(super) fn php(root: &Path, pin: &Pin) -> Result<Result<PathBuf, String>> {
     }
 }
 
-/// The php the recipe built for `platform` into `dir`, held to the digest of
+/// The php the recipe built for `platform` into `dir`, held to the SHA-256 of
 /// `platform`'s table in the `pin.toml` beside it.
 fn built(dir: &Path, platform: Platform) -> Result<PathBuf> {
     let (php, table) = (dir.join("php"), dir.join("pin.toml"));
@@ -56,7 +56,7 @@ fn built(dir: &Path, platform: Platform) -> Result<PathBuf> {
     })?;
     let mut tables: BTreeMap<String, Build> =
         toml::from_str(&text).with_context(|| format!("reading {}", table.display()))?;
-    let Some(Build { digest, .. }) = tables.remove(platform.key()) else {
+    let Some(Build { sha256, .. }) = tables.remove(platform.key()) else {
         bail!(
             "{} names no {} build; {rebuild}",
             table.display(),
@@ -65,14 +65,14 @@ fn built(dir: &Path, platform: Platform) -> Result<PathBuf> {
     };
     let Ok(bytes) = fs::read(&php) else {
         bail!(
-            "the php built from the pinned tag is not at {}, which {} expects at {digest}; {rebuild}",
+            "the php built from the pinned tag is not at {}, which {} expects at {sha256}; {rebuild}",
             php.display(),
             table.display()
         );
     };
-    if let Err(actual) = digest.holds(&bytes) {
+    if let Err(actual) = sha256.holds(&bytes) {
         bail!(
-            "{} has {actual}, and {} expects {digest}; {rebuild} again",
+            "{} has {actual}, and {} expects {sha256}; {rebuild} again",
             php.display(),
             table.display()
         );
@@ -85,29 +85,30 @@ mod tests {
     use super::*;
     use crate::scratch::Tree;
 
-    /// On Linux a bar takes the php the recipe landed, held to the md5 its
-    /// `pin.toml` records; absent, another or unrecorded, the bar is
-    /// refused naming the path and the md5 it expected.
+    /// On Linux a bar takes the php the recipe landed, held to the SHA-256
+    /// its `pin.toml` records; absent, another or unrecorded, the bar is
+    /// refused naming the path and the SHA-256 it expected.
     #[test]
-    fn the_build_from_the_tag_is_held_to_its_recorded_md5_and_refused_otherwise() {
+    fn the_build_from_the_tag_is_held_to_its_recorded_sha256_and_refused_otherwise() {
         let tree = Tree::new("bench-pinned").unwrap();
         let (dir, linux) = (tree.path(), Platform::LinuxX86_64);
         let refused = |platform| format!("{:#}", built(dir, platform).unwrap_err());
         let table = dir.join("pin.toml").display().to_string();
         assert!(refused(linux).contains(&table), "{}", refused(linux));
-        let md5 = format!("{:x}", md5::compute(b"php"));
-        let row =
-            format!("linux-x86_64 = {{ path = \"/opt/php\", md5 = \"{md5}\", image = \"i\" }}");
+        let sha256 = crate::sha256::Sha256::of(b"php");
+        let row = format!(
+            "linux-x86_64 = {{ path = \"/opt/php\", sha256 = \"{sha256}\", image = \"i\" }}"
+        );
         tree.write("pin.toml", row).unwrap();
         let php = dir.join("php");
         let at = php.display().to_string();
-        for (contents, said) in [(None, "is not at"), (Some("elf"), "has md5")] {
+        for (contents, said) in [(None, "is not at"), (Some("elf"), "has sha256:")] {
             if let Some(contents) = contents {
                 tree.write("php", contents).unwrap();
             }
             let why = refused(linux);
             assert!(why.contains(&at) && why.contains(said), "{why}");
-            assert!(why.contains(&format!("md5 {md5}")), "{why}");
+            assert!(why.contains(&sha256.to_string()), "{why}");
         }
         tree.write("php", "php").unwrap();
         assert_eq!(built(dir, linux).unwrap(), php);

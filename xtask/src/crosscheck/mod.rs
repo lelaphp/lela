@@ -81,10 +81,10 @@ use crate::divergence::{Kind, Registry};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{
-    self, Digest, Ended, Invocation, Observation, Oracle, Oracles, Pin, Profile, Program, Verdict,
-    linked,
+    self, Ended, Invocation, Observation, Oracle, Oracles, Pin, Profile, Program, Verdict, linked,
 };
 use crate::reading::{Reading, Status, Store, joined, listed, plural};
+use crate::sha256::Sha256;
 use crate::sources::{self, Outside, Standing};
 use crate::tally::{self, Took};
 use crate::witness::Binary;
@@ -237,16 +237,16 @@ impl Judgement {
 
 /// Where the oracle's bytes for `name` in `column` are kept: under the
 /// store, the instrument, the extension's `--re` scope and the oracle's
-/// digest with the column's extension, `<digest>.re` beside
-/// `<digest>.ri` ([`Digest::key`]: its SHA-256 where the pin carries
-/// one), so a pin bump leaves the old rendering beside the new.
-pub fn kept(store: &Store, digest: &Digest, name: &str, column: Column) -> PathBuf {
+/// SHA-256 with the column's extension, `<digest>.re` beside
+/// `<digest>.ri` ([`Sha256::key`]), so a pin bump leaves the old rendering
+/// beside the new.
+pub fn kept(store: &Store, digest: &Sha256, name: &str, column: Column) -> PathBuf {
     kept_at(store, digest, &Column::Re.scope(name), column)
 }
 
 /// [`kept`] under a `--re` scope of any host's, `sapi/cgi/cgi-fcgi`
 /// among them.
-fn kept_at(store: &Store, digest: &Digest, scope: &str, column: Column) -> PathBuf {
+fn kept_at(store: &Store, digest: &Sha256, scope: &str, column: Column) -> PathBuf {
     store
         .root()
         .join(INSTRUMENT)
@@ -474,7 +474,7 @@ pub fn run(
             let path = keep(
                 kept_at(
                     store,
-                    &pin.oracle.digest,
+                    &pin.oracle.sha256,
                     &host.scope(name, Column::Re),
                     column,
                 ),

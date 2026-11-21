@@ -1,5 +1,5 @@
 //! A negative control (harness-design.md §4.1, §8; #1890): an extension read
-//! under the oracle variant `drift`, whose binary's md5 is not the pin's, so
+//! under the oracle variant `drift`, whose binary's SHA-256 is not the pin's, so
 //! `xtask witness` must refuse the run before its one witness runs, as it
 //! refuses the main oracle's drift.
 #![forbid(unsafe_code)]

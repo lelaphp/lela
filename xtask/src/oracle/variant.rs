@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
-use super::{Digest, Oracle, Pin};
+use super::{Oracle, Pin};
 use crate::sha256::Sha256;
 
 /// One platform an oracle build is pinned for, by the key its table
@@ -122,7 +122,7 @@ impl Variant {
             } = &build.provenance;
             match (imaged, image, named, closure) {
                 (true, None, ..) => bail!(
-                    "{at} names no image; a Linux build is pinned by its base image's manifest digest beside its md5"
+                    "{at} names no image; a Linux build is pinned by its base image's manifest digest beside its SHA-256"
                 ),
                 (false, Some(image), ..) => bail!(
                     "{at} names the image {image}; the macOS build is made on the maintainer's machine and names none"
@@ -131,7 +131,7 @@ impl Variant {
                     "{at} names the closure {named}; a Linux build is made in its image, against no Homebrew closure, and names none; {repin}"
                 ),
                 (false, _, None, _) => bail!(
-                    "{at} names no closure, so its build predates the pin's [closure]: the macOS build names the digest of the [closure] it was made against beside its md5; {repin}"
+                    "{at} names no closure, so its build predates the pin's [closure]: the macOS build names the digest of the [closure] it was made against beside its SHA-256; {repin}"
                 ),
                 (false, _, Some(named), recorded) if recorded != Some(named) => {
                     let recorded =
@@ -164,16 +164,15 @@ impl Variant {
 }
 
 /// One platform's build of a variant: where its binary is on a machine of
-/// that platform, the binary's digest, which is its identity as `[oracle]`'s
-/// digest is the main oracle's, and what it was made from. The path is where
+/// that platform, the binary's SHA-256, which is its identity as `[oracle]`'s
+/// is the main oracle's, and what it was made from. The path is where
 /// a machine finds the binary: on Linux, the install prefix the recipe
 /// builds it to; a relative path is the pin's directory's.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Build {
     pub path: PathBuf,
-    #[serde(flatten)]
-    pub digest: Digest,
+    pub sha256: Sha256,
     #[serde(flatten)]
     pub provenance: Provenance,
 }
@@ -259,6 +258,10 @@ mod tests {
         assert_eq!(keys, ["darwin-arm64", "linux-x86_64", "linux-aarch64"]);
     }
 
+    /// A build's `sha256`, of no binary.
+    const PINNED: &str =
+        "sha256 = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"";
+
     fn variant(text: &str) -> Variant {
         toml::from_str(text).unwrap()
     }
@@ -273,7 +276,7 @@ mod tests {
 
     #[test]
     fn a_linux_build_names_its_image_and_the_macos_build_names_its_closure() {
-        let (md5, recorded) = ("md5 = \"0\"", digest("1.5.7_1"));
+        let recorded = digest("1.5.7_1");
         let closure = format!("closure = \"{recorded}\"");
         let refused = |text: &str, closure: Option<&Sha256>| {
             variant(&format!("flags = []\n{text}\n"))
@@ -282,12 +285,12 @@ mod tests {
                 .to_string()
         };
         let held = variant(&format!(
-            "flags = []\ndarwin-arm64 = {{ path = \"php\", {md5}, {closure} }}\nlinux-x86_64 = {{ path = \"php\", {md5}, image = \"sha256:1\" }}\n"
+            "flags = []\ndarwin-arm64 = {{ path = \"php\", {PINNED}, {closure} }}\nlinux-x86_64 = {{ path = \"php\", {PINNED}, image = \"sha256:1\" }}\n"
         ));
         held.held("zend-test", Some(&recorded)).unwrap();
 
         let err = refused(
-            &format!("linux-aarch64 = {{ path = \"php\", {md5} }}"),
+            &format!("linux-aarch64 = {{ path = \"php\", {PINNED} }}"),
             None,
         );
         assert!(
@@ -295,7 +298,9 @@ mod tests {
             "{err}"
         );
         let err = refused(
-            &format!("darwin-arm64 = {{ path = \"php\", {md5}, {closure}, image = \"sha256:1\" }}"),
+            &format!(
+                "darwin-arm64 = {{ path = \"php\", {PINNED}, {closure}, image = \"sha256:1\" }}"
+            ),
             Some(&recorded),
         );
         assert!(
@@ -305,7 +310,7 @@ mod tests {
 
         let repin = "re-pinning it with `scripts/oracle-build.py build darwin-arm64 zend-test` is a person's act (harness §11)";
         let err = refused(
-            &format!("darwin-arm64 = {{ path = \"php\", {md5} }}"),
+            &format!("darwin-arm64 = {{ path = \"php\", {PINNED} }}"),
             Some(&recorded),
         );
         assert!(
@@ -314,7 +319,9 @@ mod tests {
             "{err}"
         );
         let err = refused(
-            &format!("linux-x86_64 = {{ path = \"php\", {md5}, image = \"sha256:1\", {closure} }}"),
+            &format!(
+                "linux-x86_64 = {{ path = \"php\", {PINNED}, image = \"sha256:1\", {closure} }}"
+            ),
             Some(&recorded),
         );
         assert!(
@@ -325,7 +332,7 @@ mod tests {
         );
         let moved = digest("1.5.8");
         let err = refused(
-            &format!("darwin-arm64 = {{ path = \"php\", {md5}, {closure} }}"),
+            &format!("darwin-arm64 = {{ path = \"php\", {PINNED}, {closure} }}"),
             Some(&moved),
         );
         assert!(
@@ -334,7 +341,7 @@ mod tests {
             "{err}"
         );
         let err = refused(
-            &format!("darwin-arm64 = {{ path = \"php\", {md5}, {closure} }}"),
+            &format!("darwin-arm64 = {{ path = \"php\", {PINNED}, {closure} }}"),
             None,
         );
         assert!(err.contains("the pin's [closure] records none"), "{err}");
@@ -378,7 +385,7 @@ mod tests {
         assert_eq!(fields::<Provenance>(), Provenance::KEYS);
         let pin = |build: &str| {
             let text = format!(
-                "[oracle]\nmd5 = \"0\"\n[variant.zend-test]\nflags = []\ndarwin-arm64 = {{ path = \"php\", md5 = \"0\"{build} }}\n"
+                "[oracle]\n{PINNED}\n[variant.zend-test]\nflags = []\ndarwin-arm64 = {{ path = \"php\", {PINNED}{build} }}\n"
             );
             super::super::digest(&text).unwrap()
         };
@@ -388,23 +395,25 @@ mod tests {
                 ", closure = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\""
             )
         );
-        assert_ne!(pin(""), pin(", md5x = \"1\""));
+        assert_ne!(pin(""), pin(", built = \"1\""));
     }
 
     /// A key a build does not declare is refused as it was before its
     /// provenance was a type of its own.
     #[test]
     fn an_unknown_key_in_a_build_is_refused() {
-        let text = "flags = []\ndarwin-arm64 = { path = \"php\", md5 = \"0\", closure = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\", built = \"0\" }\n";
-        let err = toml::from_str::<Variant>(text).unwrap_err().to_string();
+        let text = format!(
+            "flags = []\ndarwin-arm64 = {{ path = \"php\", {PINNED}, closure = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\", built = \"0\" }}\n"
+        );
+        let err = toml::from_str::<Variant>(&text).unwrap_err().to_string();
         assert!(err.contains("unknown field `built`"), "{err}");
     }
 
     #[test]
     fn a_relative_path_is_the_pins_directorys_and_an_absolute_one_is_kept() {
-        let mut held = variant(
-            "flags = []\ndarwin-arm64 = { path = \"build/php\", md5 = \"0\" }\nlinux-x86_64 = { path = \"/opt/php\", md5 = \"0\", image = \"sha256:1\" }\n",
-        );
+        let mut held = variant(&format!(
+            "flags = []\ndarwin-arm64 = {{ path = \"build/php\", {PINNED} }}\nlinux-x86_64 = {{ path = \"/opt/php\", {PINNED}, image = \"sha256:1\" }}\n",
+        ));
         held.placed(Path::new("/checkout"));
         let path = |platform| held.build(platform).map(|b| b.path.clone());
         assert_eq!(
