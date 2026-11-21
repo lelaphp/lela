@@ -4,7 +4,7 @@
 //! php, fills the CGI variables (RFC 3875 §4.1), so the pinned php-fpm is
 //! the oracle for what PHP code sees only under a mapping written down
 //! once. Mitchell ruled it nginx's stock `conf/fastcgi_params`, copied
-//! verbatim at a named release and held to its md5 here, with
+//! verbatim at a named release and held to its digest here, with
 //! `SCRIPT_FILENAME` as nginx sets it. [`Mapping`] is that file read as
 //! one typed value, so the production server's `$_SERVER` and the
 //! php-fpm comparison read the same parameters in the same order. Added
@@ -16,6 +16,8 @@
 use anyhow::{Result, anyhow, bail};
 use regex_lite::Regex;
 use serde::Deserialize;
+
+use super::Digest;
 
 /// The mapping: the nginx release the parameters were copied from, where
 /// from, and every parameter in the order nginx sends it. php-fpm
@@ -69,7 +71,7 @@ impl Split {
 }
 
 /// `[fastcgi]` as the pin spells it: `params` the file's bytes whole,
-/// held to `md5`, `script_filename`, `path_info` and `path_translated` the
+/// held to its `md5` or `sha256`, `script_filename`, `path_info` and `path_translated` the
 /// values nginx gives those parameters, and `split_path_info` the split's
 /// pattern. The split's two keys are both there or neither, and
 /// `path_translated` only beside them, so a binary reads a pin from
@@ -79,7 +81,8 @@ impl Split {
 struct File {
     nginx: String,
     source: String,
-    md5: String,
+    #[serde(flatten)]
+    digest: Digest,
     script_filename: String,
     split_path_info: Option<String>,
     path_info: Option<String>,
@@ -201,11 +204,10 @@ impl TryFrom<File> for Mapping {
     type Error = anyhow::Error;
 
     fn try_from(file: File) -> Result<Mapping> {
-        let actual = format!("{:x}", md5::compute(&file.params));
-        if actual != file.md5 {
+        if let Err(actual) = file.digest.holds(file.params.as_bytes()) {
             bail!(
-                "[fastcgi] params has md5 {actual} and the pin says {}: the file is copied verbatim from {}, never edited",
-                file.md5,
+                "[fastcgi] params has {actual} and the pin says {}: the file is copied verbatim from {}, never edited",
+                file.digest,
                 file.source
             );
         }

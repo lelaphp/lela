@@ -133,7 +133,7 @@ mod tests {
         let row = |name: &str| {
             Some(Host {
                 path: name.into(),
-                md5: String::new(),
+                digest: crate::oracle::Digest::default(),
             })
         };
         let sapi = Sapi {

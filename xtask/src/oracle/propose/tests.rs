@@ -199,8 +199,15 @@ impl Machine {
         for binary in ["bin/php", "bin/php-cgi", "sbin/php-fpm", "bin/phpdbg"] {
             let bytes = fs::read(self.prefix.join(keg).join(binary)).unwrap();
             let name = binary.rsplit('/').next().unwrap();
-            facts.insert(format!("md5:{name}"), format!("{:x}", md5::compute(bytes)));
+            facts.insert(format!("md5:{name}"), format!("{:x}", md5::compute(&bytes)));
+            facts.insert(format!("sha256:{name}"), Sha256::of(&bytes).to_string());
         }
+        let params = b"fastcgi_param  QUERY_STRING  $query_string;\n";
+        facts.insert(
+            "md5:params".to_owned(),
+            format!("{:x}", md5::compute(params)),
+        );
+        facts.insert("sha256:params".to_owned(), Sha256::of(params).to_string());
         let tree = self.src.join("php-src-9.1.1");
         let commit = git(&tree, &["rev-parse", &format!("{tag}^{{commit}}")]);
         let commit = commit.trim().to_owned();
@@ -284,10 +291,10 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (Vec<u8>, Option<SystemTime>)> {
 /// names zip at a version the Cellar does not hold among them. Pointed at
 /// the next keg, poured from another formula at a revision of its version
 /// and loading another closure, the diff names every line d2eb1f516 and
-/// 6a054ac09 changed at the last bump: `[oracle]`'s version, path and md5,
+/// 6a054ac09 changed at the last bump: `[oracle]`'s version, path and digest,
 /// `[closure]`'s rows and date, `[source]`'s tag, commit, path and count,
 /// `TEST_PHP_EXECUTABLE`, the three `[sapi]` hosts and the configure
-/// line's md5 and arguments; beside them `[oracle].formula`,
+/// line's digest and arguments; beside them `[oracle].formula`,
 /// `dist/inputs.toml`'s tag, commit, moved ini hash and both `[php.fpm]`
 /// hashes, the Dockerfile's version, `NOTICE`'s tag and commit,
 /// nothing else on their line moved, and the settings' tree
@@ -380,6 +387,72 @@ fn a_bump_proposes_every_line_the_pin_states_of_the_keg_and_writes_nothing() {
     assert_eq!(pin.oracle.bottle(), "9.1.2_1");
     let binaries: Vec<&Path> = pin.binaries().into_iter().map(|(_, path)| path).collect();
     pin.closure.as_ref().unwrap().held(&binaries).unwrap();
+}
+
+/// The swap of the digest (ruled 2026-11-21): the pin of the first test
+/// with every SHA-256 its `[oracle]`, `[sapi]` hosts, `[fastcgi]` and
+/// configure line carry spelt as the md5 of the same bytes, pointed at its
+/// own keg and tree, is proposed as each `md5` replaced by that `sha256`
+/// and nothing else, the variant builds' left for their rebuild. The
+/// files the diff writes are that pin by SHA-256 to the byte, and the pin
+/// they make is one this xtask reads.
+#[test]
+fn a_pin_by_md5_is_proposed_as_its_sha256_and_nothing_else() {
+    let tree = Tree::new("propose-swap").unwrap();
+    let machine = Machine::lay(&tree);
+    let facts = machine.facts(BEFORE, "php-9.1.1", "");
+    let by_sha256 = Machine::files("before", &facts);
+    let sha256s =
+        (facts.iter()).filter_map(|(key, sha256)| Some((key.strip_prefix("sha256:")?, sha256)));
+    let swaps: Vec<(String, String)> = sha256s
+        .map(|(name, sha256)| {
+            let md5 = &facts[&format!("md5:{name}")];
+            (format!("sha256 = \"{sha256}\""), format!("md5 = \"{md5}\""))
+        })
+        .collect();
+    let by_md5: Vec<(&str, String)> = (by_sha256.iter())
+        .map(|(file, text)| {
+            let text = (swaps.iter()).fold(text.clone(), |text, (sha256, md5)| {
+                text.replace(sha256, md5)
+            });
+            (*file, text)
+        })
+        .collect();
+    machine.workspace(&by_md5);
+    let ws = &machine.workspace;
+    let swap = proposed(ws, None, None, "2026-03-04").unwrap();
+    let changed = |sign: char| -> Vec<&str> {
+        let lines = swap.diff.lines().filter(|line| line.starts_with(sign));
+        lines
+            .filter(|line| !line.starts_with(&sign.to_string().repeat(3)))
+            .collect()
+    };
+    let (removed, added) = (changed('-'), changed('+'));
+    assert_eq!(removed.len(), 6, "{}", swap.diff);
+    for (was, now) in removed.iter().zip(&added) {
+        let swapped = swaps
+            .iter()
+            .any(|(sha256, md5)| was.replace(md5, sha256)[1..] == now[1..]);
+        assert!(
+            swapped,
+            "{was} is not {now} with its md5 swapped:\n{}",
+            swap.diff
+        );
+    }
+    assert_eq!(removed.len(), added.len(), "{}", swap.diff);
+
+    let patch = tree.join("swap.diff");
+    fs::write(&patch, &swap.diff).unwrap();
+    git(ws, &["init", "-q"]);
+    git(ws, &["apply", patch.to_str().unwrap()]);
+    for (file, text) in &by_sha256 {
+        assert_eq!(&fs::read_to_string(ws.join(file)).unwrap(), text, "{file}");
+    }
+    let pin = Pin::parse(&fs::read_to_string(ws.join(PIN)).unwrap()).unwrap();
+    assert_eq!(
+        pin.oracle.digest.sha256().unwrap().to_string(),
+        facts["sha256:php"]
+    );
 }
 
 /// A row of the record no binary loads and no receipt names, whose keg is

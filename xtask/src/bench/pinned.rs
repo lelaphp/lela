@@ -40,7 +40,7 @@ pub(super) fn php(root: &Path, pin: &Pin) -> Result<Result<PathBuf, String>> {
     }
 }
 
-/// The php the recipe built for `platform` into `dir`, held to the md5 of
+/// The php the recipe built for `platform` into `dir`, held to the digest of
 /// `platform`'s table in the `pin.toml` beside it.
 fn built(dir: &Path, platform: Platform) -> Result<PathBuf> {
     let (php, table) = (dir.join("php"), dir.join("pin.toml"));
@@ -56,7 +56,7 @@ fn built(dir: &Path, platform: Platform) -> Result<PathBuf> {
     })?;
     let mut tables: BTreeMap<String, Build> =
         toml::from_str(&text).with_context(|| format!("reading {}", table.display()))?;
-    let Some(Build { md5, .. }) = tables.remove(platform.key()) else {
+    let Some(Build { digest, .. }) = tables.remove(platform.key()) else {
         bail!(
             "{} names no {} build; {rebuild}",
             table.display(),
@@ -65,15 +65,14 @@ fn built(dir: &Path, platform: Platform) -> Result<PathBuf> {
     };
     let Ok(bytes) = fs::read(&php) else {
         bail!(
-            "the php built from the pinned tag is not at {}, which {} expects at md5 {md5}; {rebuild}",
+            "the php built from the pinned tag is not at {}, which {} expects at {digest}; {rebuild}",
             php.display(),
             table.display()
         );
     };
-    let actual = format!("{:x}", md5::compute(bytes));
-    if actual != md5 {
+    if let Err(actual) = digest.holds(&bytes) {
         bail!(
-            "{} has md5 {actual}, and {} expects md5 {md5}; {rebuild} again",
+            "{} has {actual}, and {} expects {digest}; {rebuild} again",
             php.display(),
             table.display()
         );

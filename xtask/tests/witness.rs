@@ -1308,7 +1308,7 @@ fn a_crate_with_no_witness_under_a_drifted_oracle_refuses_the_run() {
     }
     let root = scratch("nothing-drifted", "pub fn native() {}\n");
     let mut manifest = fixture_manifest();
-    manifest.pin.as_mut().unwrap().oracle.md5 = "0".repeat(32);
+    manifest.pin.as_mut().unwrap().oracle.digest = xtask::oracle::Digest::Md5("0".repeat(32));
     let err = witness::run(
         &root,
         &manifest,

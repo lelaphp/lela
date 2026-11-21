@@ -1210,26 +1210,55 @@ fn entry_of(line: &str, reading: &Reading) -> Result<String> {
     toml::to_string(&table).context("rendering the reading")
 }
 
-/// The index of one scope cut to its newest [`KEPT`] entries, by the time
-/// each was written. Another writer pruning at once may remove a file
-/// first, which is the same end.
+/// The index of one scope cut to its newest [`KEPT`] entries, in the
+/// order [`past_kept`] gives. Another writer pruning at once may remove a
+/// file first, which is the same end.
 fn prune(dir: &Path) -> Result<()> {
     let Ok(listing) = fs::read_dir(dir) else {
         return Ok(());
     };
-    let mut entries: Vec<(SystemTime, PathBuf)> = listing
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| index_key(p).is_some())
-        .filter_map(|p| Some((fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .collect();
-    if entries.len() <= KEPT {
-        return Ok(());
-    }
-    entries.sort_by_key(|(written, _)| std::cmp::Reverse(*written));
-    for (_, path) in entries.into_iter().skip(KEPT) {
+    let listed = listing.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    for path in past_kept(listed) {
         crate::remove(&path)?;
     }
     Ok(())
+}
+
+/// The index files among `listed`, one scope's in whatever order its
+/// directory gave, that fall past the newest [`KEPT`]: newest by the time
+/// each reading was taken, its `at`, the order [`Store::over`] and
+/// [`Store::split`] read; two taken in one second by the file's
+/// modification time, and two written in one tick of that clock by name.
+/// So the order is the files' own and never the directory's, and two
+/// writers pruning at once agree on which go. A file whose `at` cannot be
+/// read is the oldest. A scope past [`KEPT`], which each record into a
+/// full one finds, reads every entry for its `at`.
+fn past_kept(listed: Vec<PathBuf>) -> Vec<PathBuf> {
+    let listed: Vec<PathBuf> = (listed.into_iter())
+        .filter(|p| index_key(p).is_some())
+        .collect();
+    if listed.len() <= KEPT {
+        return Vec::new();
+    }
+    let mut entries: Vec<(Option<String>, SystemTime, PathBuf)> = (listed.into_iter())
+        .filter_map(|p| Some((taken_at(&p), fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .collect();
+    entries.sort_by(|a, b| b.cmp(a));
+    entries.into_iter().skip(KEPT).map(|(.., p)| p).collect()
+}
+
+/// When the reading in the file at `path` was taken, as text, which
+/// orders as the instant does; read whatever else the file holds, so an
+/// entry of a `v` this harness does not know keeps its place. None where
+/// the file has no `at`.
+fn taken_at(path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Stamp {
+        #[serde(deserialize_with = "either_at")]
+        at: Datetime,
+    }
+    let stamp: Stamp = crate::read_toml(path).ok()?;
+    Some(stamp.at.to_string())
 }
 
 /// The files of the log under `dir`, in name order; none where it is not.
@@ -1590,10 +1619,11 @@ pub(crate) fn listed(names: &[impl AsRef<str>]) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::path::PathBuf;
 
     use super::{
         Chain, Freshness, KEPT, Log, Moved, Reading, Status, Store, V, Version, civil_from_days,
-        days_from_civil, listed,
+        days_from_civil, listed, past_kept, prune,
     };
     use crate::oracle::Profile;
     use crate::owner::SessionId;
@@ -1860,16 +1890,20 @@ mod tests {
     /// a scope stay, and the latest reading over a key is found there
     /// while the scope's file has moved on to another. A key the
     /// index let go reads as never measured to `done`, and is still found
-    /// in the instrument's log by `permit`'s look for evidence.
+    /// in the instrument's log by `permit`'s look for evidence. Which keys
+    /// are newest is the readings' own: each entry's modification time is
+    /// set to one instant past the clock once it is written, so an order
+    /// by modification time would let the newest go each time.
     #[test]
     fn a_reading_is_found_by_its_key_and_the_newest_keys_stay() {
         let dir = Tree::new("store-index").unwrap();
         let store = unnamed(dir.path());
         for n in 0..KEPT + 8 {
             let at = format!("2026-10-06T10:{n:02}:00Z");
-            store
-                .record(&[over("budget", "ext/pcre", &key(n), &at)])
-                .unwrap();
+            let reading = over("budget", "ext/pcre", &key(n), &at);
+            store.record(std::slice::from_ref(&reading)).unwrap();
+            let entry = store.indexed(&reading).unwrap().unwrap();
+            written_at(&entry, PAST_THE_CLOCK);
         }
         let kept: BTreeSet<String> = store
             .keys_of("budget", "ext/pcre")
@@ -1905,6 +1939,50 @@ mod tests {
             1,
             "the index's entries are no scope's last reading"
         );
+    }
+
+    /// An instant past any clock a test runs under: 2100-01-01.
+    const PAST_THE_CLOCK: u64 = 4_102_444_800;
+
+    /// The file at `path` given `secs` past 1970 as its modification time.
+    fn written_at(path: &std::path::Path, secs: u64) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        let instant = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        file.set_modified(instant).unwrap();
+    }
+
+    /// The index of one scope is cut to the newest [`KEPT`] by when each
+    /// reading was taken, whatever order the directory lists its files
+    /// in: more than [`KEPT`] entries written in one tick, their
+    /// modification times equal, keep the newest listed oldest first and
+    /// newest first alike, and so does a prune of the directory.
+    #[test]
+    fn entries_written_in_one_tick_keep_the_newest_whatever_the_listing_order() {
+        let dir = Tree::new("store-index-tick").unwrap();
+        let store = unnamed(dir.path());
+        let mut listed = Vec::new();
+        for n in 0..KEPT + 8 {
+            let at = format!("2026-10-06T10:{n:02}:00Z");
+            let reading = over("budget", "ext/pcre", &key(n), &at);
+            let entry = store.indexed(&reading).unwrap().unwrap();
+            crate::make_parent(&entry).unwrap();
+            std::fs::write(&entry, toml::to_string(&reading).unwrap()).unwrap();
+            written_at(&entry, PAST_THE_CLOCK);
+            listed.push(entry);
+        }
+        let let_go: BTreeSet<PathBuf> = listed[..8].iter().cloned().collect();
+        let oldest_first: BTreeSet<PathBuf> = past_kept(listed.clone()).into_iter().collect();
+        assert_eq!(oldest_first, let_go, "listed oldest first");
+        listed.reverse();
+        let newest_first: BTreeSet<PathBuf> = past_kept(listed).into_iter().collect();
+        assert_eq!(newest_first, let_go, "listed newest first");
+
+        prune(&store.dir_of("budget", "ext/pcre").unwrap()).unwrap();
+        let kept: BTreeSet<String> = (store.keys_of("budget", "ext/pcre").unwrap())
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(kept, (8..KEPT + 8).map(key).collect());
     }
 
     /// `reading` as a line of the log of the second version: `v = 2`, its

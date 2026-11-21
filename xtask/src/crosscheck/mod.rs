@@ -80,7 +80,7 @@ use crate::divergence::{Kind, Registry};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{
-    self, Ended, Invocation, Observation, Oracle, Oracles, Pin, Program, Verdict, linked,
+    self, Digest, Ended, Invocation, Observation, Oracle, Oracles, Pin, Program, Verdict, linked,
 };
 use crate::reading::{Reading, Status, Store, joined, listed, plural};
 use crate::sources::{self, Outside, Standing};
@@ -213,19 +213,20 @@ impl Judgement {
 /// Where the oracle's bytes for `name` in `column` are kept: under the
 /// store, the instrument, the extension's `--re` scope and the oracle's
 /// digest with the column's extension, `<digest>.re` beside
-/// `<digest>.ri`, so a pin bump leaves the old rendering beside the new.
-pub fn kept(store: &Store, digest: &str, name: &str, column: Column) -> PathBuf {
+/// `<digest>.ri` ([`Digest::key`]: its SHA-256 where the pin carries
+/// one), so a pin bump leaves the old rendering beside the new.
+pub fn kept(store: &Store, digest: &Digest, name: &str, column: Column) -> PathBuf {
     kept_at(store, digest, &Column::Re.scope(name), column)
 }
 
 /// [`kept`] under a `--re` scope of any host's, `sapi/cgi/cgi-fcgi`
 /// among them.
-fn kept_at(store: &Store, digest: &str, scope: &str, column: Column) -> PathBuf {
+fn kept_at(store: &Store, digest: &Digest, scope: &str, column: Column) -> PathBuf {
     store
         .root()
         .join(INSTRUMENT)
         .join(scope)
-        .join(format!("{digest}.{}", column.kept()))
+        .join(format!("{}.{}", digest.key(), column.kept()))
 }
 
 /// The oracle's rendering written at `path`, [`kept_at`], and the path.
@@ -436,7 +437,7 @@ pub fn run(
                 return told(reading);
             }
             let path = keep(
-                kept_at(store, &pin.oracle.md5, &host.scope(name, Column::Re), column),
+                kept_at(store, &pin.oracle.digest, &host.scope(name, Column::Re), column),
                 &observed.stdout,
             )?;
             let engine = rendering(manifest, ask, &engines, oracle, name, host, column)?;

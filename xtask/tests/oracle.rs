@@ -348,7 +348,7 @@ fn a_file_runs_in_its_own_directory() {
 fn a_digest_mismatch_refuses_the_run() {
     let Some(mut pin) = pin() else { return };
     let wrong = "0".repeat(32);
-    pin.oracle.md5 = wrong.clone();
+    pin.oracle.digest = oracle::Digest::Md5(wrong.clone());
     let err = pin
         .oracle()
         .run(Program::Snippet("echo 1;"), None)
