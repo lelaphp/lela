@@ -479,8 +479,9 @@ pub(crate) const DEPLOYMENT_TARGET: &str = "MACOSX_DEPLOYMENT_TARGET";
 /// touches the crate for `done` and pre-commit ([`read_by_tests`]).
 /// xtask's tests copy the manifest, pin, registry and glossary into
 /// scratch trees, run the hooks and scripts, and read the workflows, the
-/// plugin's hooks, four crates' files and the apache image's Dockerfile,
-/// whose `PHP_VERSION` they hold to the pin. Left out: the Markdown regions
+/// plugin's hooks, four crates' files and `dist/Dockerfile`, every image's,
+/// whose base stage's `PHP_VERSION` they hold to the pin and whose
+/// `ARG NAME` lines to the product's name. Left out: the Markdown regions
 /// they hold, which pre-commit renders and `computed check` holds, and
 /// `Cargo.lock`, whose pins reach a crate through `sources::lock_moved`.
 pub(crate) const READ_BY_TESTS: [(&str, &[&str]); 2] = [
