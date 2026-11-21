@@ -179,6 +179,8 @@ fn start_failed(sink: &mut dyn OutputSink) -> i32 {
 /// prompt>
 /// ```
 fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
+    // What the request wrote after its loop, at the pager's question.
+    s.paged_out();
     let reached = s.plan != Some(Plan::Hold);
     s.plan = None;
     // `run`'s arguments and its stdin are its run's alone; the next is
@@ -227,7 +229,9 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     }
     // The next cycle's `main` sets `PHPDBG_G(flags)` from the line again
     // (`Z/sapi/phpdbg/phpdbg.c:1348-1349`), so colours are on or off and
-    // quietness is as the line says, in the colours the last cycle left;
+    // quietness is as the line says, in the colours the last cycle left,
+    // and pagination is on, a page of the lines `php_phpdbg_globals_ctor`
+    // takes;
     // `set breaks off` goes with the tables. The breakpoints
     // go out as `break` lines (`bp_tmp`), and the next cycle's module
     // starts with its tables empty and `bp_count` at zero
@@ -235,6 +239,7 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     // files numbering from there before the lines are run again.
     if cycle_ended {
         s.out.set_colours(s.line_colours);
+        s.out.page_afresh();
         s.quiet = s.line_quiet;
         s.carried = s.breaks.export();
         s.breaks = crate::bp::Breakpoints::default();
