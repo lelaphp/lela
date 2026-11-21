@@ -1047,11 +1047,13 @@ pub(crate) enum OracleCommand {
     /// person poured and the php-src checkout at its tag, for the person to
     /// apply with `git apply` and commit; notes on stderr.
     ///
-    /// The diff covers every line that states the oracle's version, digest
-    /// or closure: `oracle.toml`'s `[oracle]`, `[closure]`, `[source]`,
-    /// `[recipe.env]` `TEST_PHP_EXECUTABLE` and `[sapi]`;
-    /// `ci/oracle/configure.toml`; `dist/inputs.toml`'s `[php]`; and
-    /// `dist/Dockerfile`'s `PHP_VERSION`. A `[variant.*]` build is rebuilt
+    /// The diff covers every line that states the oracle's version, digest,
+    /// closure or source tree: `oracle.toml`'s `[oracle]`, `[closure]`,
+    /// `[source]`, `[recipe.env]` `TEST_PHP_EXECUTABLE` and `[sapi]`;
+    /// `ci/oracle/configure.toml`; `dist/inputs.toml`'s `[php]`, `[php.ini]`
+    /// and `[php.fpm]`; `dist/Dockerfile`'s `PHP_VERSION`; `NOTICE`'s
+    /// php-src tag and commit; and `.claude/settings.json`'s tree where it
+    /// names `[source].path`. A `[variant.*]` build is rebuilt
     /// from the new tag, not proposed, and a note names it. Pointed at the
     /// pinned keg and checkout, the diff is empty. It writes no file and no
     /// reading, and reads the pin whatever its defects.

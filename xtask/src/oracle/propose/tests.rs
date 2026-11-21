@@ -23,6 +23,9 @@ const CONFIGURED_AFTER: &str = "'./configure'  '--prefix=/opt/homebrew/Cellar/ph
      'PKG_CONFIG_PATH=/opt/homebrew/opt/zip/lib/pkgconfig:/opt/homebrew/opt/zstd/lib/pkgconfig' \
      'CFLAGS=-O2 -g' \"LDFLAGS=say \\\"hi\\\"\"";
 
+/// The FPM templates the fixture's `[php.fpm]` names, both moved at the bump.
+const FPM: [&str; 2] = ["sapi/fpm/php-fpm.conf.in", "sapi/fpm/www.conf.in"];
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let named = ["-c", "user.name=t", "-c", "user.email=t@t.invalid"];
     let args: Vec<&str> = named.iter().chain(args).copied().collect();
@@ -152,14 +155,17 @@ impl Machine {
     }
 
     /// php-src at `php-9.1.1`, and a clone of it at `php-9.1.2`, which
-    /// adds a test and moves one ini file.
+    /// adds a test and moves one ini file and both FPM templates.
     fn checkouts(&self) {
         let before = self.src.join("php-src-9.1.1");
         fs::create_dir_all(before.join("tests")).unwrap();
+        fs::create_dir_all(before.join("sapi/fpm")).unwrap();
         git(&before, &["init", "-q"]);
         for (file, text) in [
             ("php.ini-development", "dev 1\n"),
             ("php.ini-production", "prod 1\n"),
+            (FPM[0], "global 1\n"),
+            (FPM[1], "pool 1\n"),
             ("tests/a.phpt", ""),
             ("tests/b.phpt", ""),
         ] {
@@ -169,6 +175,8 @@ impl Machine {
         git(&before, &["commit", "-qm", "9.1.1"]);
         git(&before, &["tag", "php-9.1.1"]);
         fs::write(before.join("php.ini-development"), "dev 2\n").unwrap();
+        fs::write(before.join(FPM[0]), "global 2\n").unwrap();
+        fs::write(before.join(FPM[1]), "pool 2\n").unwrap();
         fs::write(before.join("tests/c.phpt"), "").unwrap();
         git(&before, &["add", "-A"]);
         git(&before, &["commit", "-qm", "9.1.2"]);
@@ -198,10 +206,12 @@ impl Machine {
         let commit = commit.trim().to_owned();
         facts.insert("short".to_owned(), commit[..8].to_owned());
         facts.insert("commit".to_owned(), commit.clone());
-        for ini in ["php.ini-development", "php.ini-production"] {
-            let bytes = git(&tree, &["show", &format!("{commit}:{ini}")]);
+        let ini = ["php.ini-development", "php.ini-production"].map(|file| ("ini", file));
+        for (table, file) in ini.into_iter().chain(FPM.map(|file| ("fpm", file))) {
+            let bytes = git(&tree, &["show", &format!("{commit}:{file}")]);
             let digest = Sha256::of(bytes.as_bytes()).to_string();
-            facts.insert(format!("ini:{ini}"), digest["sha256:".len()..].to_owned());
+            let hex = digest["sha256:".len()..].to_owned();
+            facts.insert(format!("{table}:{file}"), hex);
         }
         let recorded = "ca-certificates = \"2026-01-01\"\n\"icu4c@78\" = \"78.1\"\nzip = \"1.0\"\n";
         let digest = toml::from_str::<Closure>(recorded)
@@ -278,7 +288,8 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (Vec<u8>, Option<SystemTime>)> {
 /// `[closure]`'s rows and date, `[source]`'s tag, commit, path and count,
 /// `TEST_PHP_EXECUTABLE`, the three `[sapi]` hosts and the configure
 /// line's md5 and arguments; beside them `[oracle].formula`,
-/// `dist/inputs.toml`, the Dockerfile's version, `NOTICE`'s tag and commit,
+/// `dist/inputs.toml`'s tag, commit, moved ini hash and both `[php.fpm]`
+/// hashes, the Dockerfile's version, `NOTICE`'s tag and commit,
 /// nothing else on their line moved, and the settings' tree
 /// (box 2). `icu4c@78`, which the new keg loads at its next major and its
 /// receipt no longer names, leaves the closure with one note, and
@@ -348,6 +359,12 @@ fn a_bump_proposes_every_line_the_pin_states_of_the_keg_and_writes_nothing() {
     let tail = ": data extracted from it (ops.toml), tables transcribed\n";
     let renamed = format!("-php-9.1.1 ({was}){tail}+php-9.1.2 ({now}){tail}");
     assert!(bump.diff.contains(&renamed), "{}", bump.diff);
+    for template in FPM {
+        let fact = format!("fpm:{template}");
+        assert_ne!(facts[&fact], moved[&fact], "{template} did not move");
+        let row = format!("+\"{template}\" = \"{}\"\n", moved[&fact]);
+        assert!(bump.diff.contains(&row), "{}", bump.diff);
+    }
     let after = Machine::files("after", &moved);
     for (file, text) in &after {
         let written = fs::read_to_string(ws.join(file)).unwrap();

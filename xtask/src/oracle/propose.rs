@@ -15,15 +15,16 @@
 //! out; php's `Configure Command`, as
 //! `scripts/oracle-build.py configure-line` reads it; and the checkout's
 //! commit at `php-<version>`, its `.phpt` count and the SHA-256 of each ini
-//! file `dist/inputs.toml` names. The pin is read with [`Pin::parse`] and
-//! its defects are not refused: at a bump the pin is behind the keg.
+//! file and FPM template `dist/inputs.toml` names. The pin is read with
+//! [`Pin::parse`] and its defects are not refused: at a bump the pin is
+//! behind the keg.
 //!
 //! **What it writes** is the diff and the notes beside it, and nothing
 //! else: no file and no reading. Each value is replaced where it stands,
 //! so every comment and key order a person wrote is kept: `oracle.toml`'s
 //! `[oracle]`, `[closure]`, `[source]`, `[recipe.env]`'s
 //! `TEST_PHP_EXECUTABLE` and `[sapi]`; `ci/oracle/configure.toml` below its
-//! header; `dist/inputs.toml`'s `[php]` and `[php.ini]`; and
+//! header; `dist/inputs.toml`'s `[php]`, `[php.ini]` and `[php.fpm]`; and
 //! `dist/Dockerfile`'s `ARG PHP_VERSION`; `NOTICE`'s php-src tag and its
 //! commit, as `[source]` states them, in the one sentence that names them,
 //! no line of it wrapped again; and `.claude/settings.json`'s
@@ -619,20 +620,29 @@ fn configured(text: &str, keg: &Keg) -> Result<String> {
     Ok(out)
 }
 
+/// The tables of `dist/inputs.toml` below `[php]` whose every key is a
+/// file of php-src, by its path in the tree, held to its SHA-256 at
+/// `[php].commit`: the ini files, and the FPM templates the fpm image
+/// renders (`dist/inputs.py fpm`).
+const HASHED: [&str; 2] = ["ini", "fpm"];
+
 /// `dist/inputs.toml` moved to the checkout: `[php]`'s tag and full
-/// commit, and each ini file `[php.ini]` names at that commit.
+/// commit, and each file the [`HASHED`] tables name at that commit.
 fn inputs_of(text: &str, tree: &Checkout) -> Result<String> {
     let table: toml::Table = toml::from_str(text).with_context(|| format!("reading {INPUTS}"))?;
-    let ini = (table
-        .get("php")
-        .and_then(|php| php.get("ini"))
-        .and_then(toml::Value::as_table))
-    .with_context(|| format!("{INPUTS} has no [php.ini]"))?;
     let mut file = Text::of(text);
     file.set("php", "tag", &quoted(&tree.tag))?;
     file.set("php", "commit", &quoted(&tree.full))?;
-    for name in ini.keys() {
-        file.set("php.ini", name, &quoted(&tree.sha256(name)?))?;
+    for name in HASHED {
+        let hashed = (table
+            .get("php")
+            .and_then(|php| php.get(name))
+            .and_then(toml::Value::as_table))
+        .with_context(|| format!("{INPUTS} has no [php.{name}]"))?;
+        let section = format!("php.{name}");
+        for path in hashed.keys() {
+            file.set(&section, path, &quoted(&tree.sha256(path)?))?;
+        }
     }
     Ok(file.text())
 }
