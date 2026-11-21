@@ -8,6 +8,10 @@ commit = "{commit}"
 [php.ini]
 "php.ini-development" = "{ini:php.ini-development}"
 "php.ini-production" = "{ini:php.ini-production}"
+# The FPM configuration templates at the same commit.
+[php.fpm]
+"sapi/fpm/php-fpm.conf.in" = "{fpm:sapi/fpm/php-fpm.conf.in}"
+"sapi/fpm/www.conf.in" = "{fpm:sapi/fpm/www.conf.in}"
 
 [rustup]
 version = "1.29.2"
