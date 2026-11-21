@@ -295,7 +295,7 @@ fn an_extension_the_oracle_does_not_have_fails_with_phps_own_words() {
         assert!(
             !crosscheck::kept(
                 &scratch.store,
-                &scratch.manifest.pin().unwrap().oracle.md5,
+                &scratch.manifest.pin().unwrap().oracle.digest,
                 "nosuch",
                 column
             )
@@ -394,7 +394,7 @@ fn the_renumbered_fixture_through_run_is_a_pass_under_the_row_and_not_without_it
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     let kept = fs::read(crosscheck::kept(
         &scratch.store,
-        &scratch.manifest.pin().unwrap().oracle.md5,
+        &scratch.manifest.pin().unwrap().oracle.digest,
         "ctype",
         Column::Re,
     ))
@@ -582,7 +582,7 @@ mod tracked {
         }
         let kept_ri = crosscheck::kept(
             &scratch.store,
-            &scratch.manifest.pin().unwrap().oracle.md5,
+            &scratch.manifest.pin().unwrap().oracle.digest,
             "ctype",
             Column::Ri,
         );
@@ -594,7 +594,7 @@ mod tracked {
         );
         let kept = crosscheck::kept(
             &scratch.store,
-            &scratch.manifest.pin().unwrap().oracle.md5,
+            &scratch.manifest.pin().unwrap().oracle.digest,
             "ctype",
             Column::Re,
         );

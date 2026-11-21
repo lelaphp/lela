@@ -274,7 +274,8 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
     let pin = scratch.manifest.pin().unwrap();
     let kept = scratch.root.join(format!(
         "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
-        pin.source.tag, pin.oracle.md5
+        pin.source.tag,
+        pin.oracle.digest.key()
     ));
     let verdicts = || -> Vec<String> {
         let run: serde_json::Value =
@@ -2543,7 +2544,8 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
     let pin = scratch.manifest.pin().unwrap();
     let kept = scratch.root.join(format!(
         "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
-        pin.source.tag, pin.oracle.md5
+        pin.source.tag,
+        pin.oracle.digest.key()
     ));
     let kept: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&kept).unwrap()).unwrap();

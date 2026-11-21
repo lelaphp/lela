@@ -25,6 +25,7 @@
 
 pub(crate) mod built_from;
 mod closure;
+mod digest;
 #[cfg(test)]
 mod dockerfile;
 pub(crate) mod expect;
@@ -41,6 +42,7 @@ use built_from::BuiltFrom;
 #[cfg(test)]
 pub(crate) use closure::stand_in;
 pub(crate) use closure::{Closure, Minos, Own};
+pub use digest::Digest;
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub(crate) use formula::Formula;
 pub use profile::Profile;
@@ -337,7 +339,8 @@ impl Sapi {
 #[serde(deny_unknown_fields)]
 pub struct Host {
     pub path: PathBuf,
-    pub md5: String,
+    #[serde(flatten)]
+    pub digest: Digest,
 }
 
 impl Host {
@@ -345,23 +348,22 @@ impl Host {
     /// as [`Pin`]'s does for `php`. Reached through
     /// [`Oracle::host_asserted`], which holds the closure first.
     fn assert_digest(&self) -> Result<()> {
-        let actual = md5_of(&self.path, "the pinned host at ")?;
-        if actual != self.md5 {
+        let bytes = bytes_of(&self.path, "the pinned host at ")?;
+        if let Err(actual) = self.digest.holds(&bytes) {
             bail!(
-                "{} has md5 {actual}; the pin's [sapi] says {}. Report the drift; the pin moves only by a person's hand",
+                "{} has {actual}; the pin's [sapi] says {}. Report the drift; the pin moves only by a person's hand",
                 self.path.display(),
-                self.md5
+                self.digest
             );
         }
         Ok(())
     }
 }
 
-/// The md5 of the file at `path`, as the pin names a binary by, `what`
-/// naming it before its path where the file cannot be read.
-fn md5_of(path: &Path, what: &str) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("reading {what}{}", path.display()))?;
-    Ok(format!("{:x}", md5::compute(bytes)))
+/// The bytes of the file at `path`, whose digest the pin names a binary
+/// by, `what` naming it before its path where the file cannot be read.
+fn bytes_of(path: &Path, what: &str) -> Result<Vec<u8>> {
+    fs::read(path).with_context(|| format!("reading {what}{}", path.display()))
 }
 
 /// A count of digest assertions: disclosure, so a test can hold a lane to
@@ -388,7 +390,8 @@ pub struct Binary {
     #[serde(default)]
     pub(crate) formula: Formula,
     pub path: PathBuf,
-    pub md5: String,
+    #[serde(flatten)]
+    pub digest: Digest,
     /// The oracle variant this binary is, none for `[oracle]`'s own: set
     /// by [`Pin::variant`], not a value of the file.
     #[serde(skip)]
@@ -400,6 +403,12 @@ pub struct Binary {
 }
 
 impl Binary {
+    /// Whether the pin names a build of this binary for this machine:
+    /// `[oracle]`'s always, and a variant's where its platform pins one.
+    pub(crate) fn is_pinned(&self) -> bool {
+        self.unpinned.is_none()
+    }
+
     /// The pinned php on this machine: its path when a file is there, and
     /// otherwise an error naming the path and the version, and the variant
     /// where it is one. What a test that spawns php asks through
@@ -1019,7 +1028,7 @@ impl Pin {
             version: self.oracle.version.clone(),
             formula: self.oracle.formula,
             path: build.map(|b| b.path.clone()).unwrap_or_default(),
-            md5: build.map(|b| b.md5.clone()).unwrap_or_default(),
+            digest: build.map(|b| b.digest.clone()).unwrap_or_default(),
             variant: Some(name.to_owned()),
             unpinned,
         };
@@ -1074,12 +1083,12 @@ impl Pin {
             bail!("{why}");
         }
         let path = &self.oracle.path;
-        let actual = md5_of(path, "the pinned php at ")?;
-        if actual != self.oracle.md5 {
+        let bytes = bytes_of(path, "the pinned php at ")?;
+        if let Err(actual) = self.oracle.digest.holds(&bytes) {
             bail!(
-                "{} has md5 {actual}; the pin says {} for php {}{}. Report the drift; the pin moves only by a person's hand",
+                "{} has {actual}; the pin says {} for php {}{}. Report the drift; the pin moves only by a person's hand",
                 path.display(),
-                self.oracle.md5,
+                self.oracle.digest,
                 self.oracle.version,
                 self.oracle.of()
             );
@@ -2046,8 +2055,8 @@ impl Runner {
     ) -> Result<Runner> {
         if let Some(path) = named {
             let path = named_binary(path)?;
-            let digest = md5_of(&path, "")?;
-            return Ok(if digest == pin.oracle.md5 {
+            let bytes = bytes_of(&path, "")?;
+            return Ok(if pin.oracle.digest.holds(&bytes).is_ok() {
                 // The pinned oracle is a control and never this tree's
                 // engine, so when the tree was last written says nothing
                 // about it; the pin holds it by its digest instead.

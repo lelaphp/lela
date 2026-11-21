@@ -1,6 +1,6 @@
 # A pin of oracle.toml's shape for `oracle propose`'s test (#4384), at a
 # version no pin names. `{name}` is filled by the test from the machine it
-# lays down: the prefix, the trees, each binary's md5 and the commit.
+# lays down: the prefix, the trees, each binary's digest and the commit.
 
 [oracle]
 version = "9.1.1"
@@ -8,7 +8,7 @@ version = "9.1.1"
 formula = "php"
 # The keg path, not the bare name.
 path = "{prefix}/Cellar/php/9.1.1/bin/php"
-md5 = "{md5:php}"
+sha256 = "{sha256:php}"
 
 [closure]
 # The kegs the pinned binaries load, and the receipt's other runtime kegs;
@@ -53,7 +53,16 @@ linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "1", imag
 
 [sapi]
 # The oracle's other hosts, from the keg [oracle] pins.
-cgi = { path = "{prefix}/Cellar/php/9.1.1/bin/php-cgi", md5 = "{md5:php-cgi}" }
-fpm = { path = "{prefix}/Cellar/php/9.1.1/sbin/php-fpm", md5 = "{md5:php-fpm}" }
-phpdbg = { path = "{prefix}/Cellar/php/9.1.1/bin/phpdbg", md5 = "{md5:phpdbg}" }
+cgi = { path = "{prefix}/Cellar/php/9.1.1/bin/php-cgi", sha256 = "{sha256:php-cgi}" }
+fpm = { path = "{prefix}/Cellar/php/9.1.1/sbin/php-fpm", sha256 = "{sha256:php-fpm}" }
+phpdbg = { path = "{prefix}/Cellar/php/9.1.1/bin/phpdbg", sha256 = "{sha256:phpdbg}" }
 
+[fastcgi]
+# nginx's mapping, held to the digest of its params.
+nginx = "1.30.5"
+source = "https://example.org/fastcgi_params"
+sha256 = "{sha256:params}"
+script_filename = "$document_root$fastcgi_script_name"
+params = """
+fastcgi_param  QUERY_STRING  $query_string;
+"""
