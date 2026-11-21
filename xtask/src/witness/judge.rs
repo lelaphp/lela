@@ -661,7 +661,7 @@ pub(super) fn serve(
         Served::Linked => {
             let served = linked::serve_by(None, &oracle.pin().recipe, regime, &witness.snippet);
             let entered = |text: String| text.lines().filter_map(Entry::parse).collect();
-            let served = served.map(|(out, text)| (out, entered(text), linked::profile()));
+            let served = served.map(|(out, text, profile)| (out, entered(text), profile));
             return served.context("the linked engine did not serve it");
         }
         Served::Binary => binary

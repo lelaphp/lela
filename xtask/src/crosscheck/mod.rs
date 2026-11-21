@@ -80,7 +80,8 @@ use crate::divergence::{Kind, Registry};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{
-    self, Digest, Ended, Invocation, Observation, Oracle, Oracles, Pin, Program, Verdict, linked,
+    self, Digest, Ended, Invocation, Observation, Oracle, Oracles, Pin, Profile, Program, Verdict,
+    linked,
 };
 use crate::reading::{Reading, Status, Store, joined, listed, plural};
 use crate::sources::{self, Outside, Standing};
@@ -425,7 +426,7 @@ pub fn run(
             let observed = if host == Host::Cli {
                 render(oracle, name, column)?
             } else {
-                host::side(oracle, None, host, name, column)?
+                host::side(oracle, None, host, name, column)?.0
             };
             if observed.exit != Ended::Status(0) {
                 reading.status = Status::Fail;
@@ -440,7 +441,8 @@ pub fn run(
                 kept_at(store, &pin.oracle.digest, &host.scope(name, Column::Re), column),
                 &observed.stdout,
             )?;
-            let engine = rendering(manifest, ask, &engines, oracle, name, host, column)?;
+            let (engine, profile) = rendering(manifest, ask, &engines, oracle, name, host, column)?;
+            reading.profile = profile;
             let judgement = judge(
                 registry,
                 &host.id(name, column),
@@ -495,7 +497,9 @@ struct Engines {
 /// end on zero rendered nothing, and the engine's words are why: under
 /// the recipe's `display_errors=1` what was thrown and not caught is on
 /// the first stream, and the trouble of a serve that did not run, a panic
-/// inside or a binary that did not build, is on neither.
+/// inside or a binary that did not build, is on neither. Beside it, the
+/// profile of the build that served it, what the reading names: none for
+/// a file, a server the caller named, and a serve that did not run.
 fn rendering(
     manifest: &Manifest,
     ask: &Ask,
@@ -504,7 +508,7 @@ fn rendering(
     name: &str,
     host: Host,
     column: Column,
-) -> Result<Rendering> {
+) -> Result<(Rendering, Option<Profile>)> {
     let Some(dir) = &ask.renderings else {
         let program = column.program(name);
         let linked = served_linked(manifest, &engines.linked, name);
@@ -522,13 +526,13 @@ fn rendering(
                 None,
                 &program,
             )
-            .map(|(observed, _)| observed)
+            .map(|(observed, _, profile)| (observed, profile))
             .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}"))
         } else {
             engines
                 .binary
                 .serve(oracle, &program, None, &[])
-                .map(|(served, ..)| served)
+                .map(|(served, _, profile)| (served, Some(profile)))
                 .map_err(|trouble| {
                     format!(
                         "the {} binary did not serve it: {trouble:#}",
@@ -537,23 +541,21 @@ fn rendering(
                 })
         };
         return Ok(match served {
-            Err(why) => Rendering::Absent(why),
-            Ok(served) if served.exit != Ended::Status(0) => Rendering::Absent(said(&served)),
-            Ok(served) => Rendering::Bytes(served.stdout),
+            Err(why) => (Rendering::Absent(why), None),
+            Ok((served, profile)) if served.exit != Ended::Status(0) => {
+                (Rendering::Absent(said(&served)), profile)
+            }
+            Ok((served, profile)) => (Rendering::Bytes(served.stdout), profile),
         });
     };
     let path = dir.join(format!("{name}.{}", column.kept()));
     if !path.is_file() {
-        return Ok(Rendering::Absent(format!(
-            "no rendering at {}",
-            path.display()
-        )));
+        let absent = format!("no rendering at {}", path.display());
+        return Ok((Rendering::Absent(absent), None));
     }
     let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(Rendering::Bytes(oracle::normalise(
-        &manifest.pin()?.recipe.normalise,
-        bytes,
-    )))
+    let normalised = oracle::normalise(&manifest.pin()?.recipe.normalise, bytes);
+    Ok((Rendering::Bytes(normalised), None))
 }
 
 /// The extension php's `php_module_startup` registers a host's
