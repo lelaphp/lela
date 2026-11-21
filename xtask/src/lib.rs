@@ -71,6 +71,7 @@ pub mod new_ext;
 pub mod new_sapi;
 pub mod oracle;
 pub mod owner;
+mod packages;
 pub mod permit;
 pub mod phpt;
 pub mod port_map;
@@ -345,6 +346,7 @@ fn command_line() -> Result<()> {
         Command::TraceDump(ask) => trace_dump::command(&root, &manifest, &store, &ask),
         Command::Hostile => hostile::command(&root, &manifest, &store),
         Command::Fuzz(ask) => fuzz::command(&root, &manifest, &store, &ask),
+        Command::Packages(ask) => packages::command(&root, &manifest, &store, &ask),
         Command::Fold(ask) => fold::command(&root, &manifest, &store, &ask),
         Command::DispatchCensus(ask) => dispatch_census::command(&root, &manifest, &store, &ask),
         Command::Crosscheck { ext, staged } => {

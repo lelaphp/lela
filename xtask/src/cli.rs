@@ -424,6 +424,13 @@ pub(crate) enum Command {
     /// A difference or a fault fails the run, its program minimised and
     /// kept at `target/harness/fuzz/<seed>/`; the nightly lane (harness §7).
     Fuzz(crate::fuzz::Ask),
+    /// Run pinned Composer packages' test suites under the oracle and Lela;
+    /// one reading per package and one of the whole.
+    ///
+    /// The list is `data/packages.toml` unless named. A test the oracle
+    /// passes is met where Lela passes it; one the oracle does not pass is
+    /// counted outside. The nightly lane, outside `done`.
+    Packages(crate::packages::Ask),
     /// Hold the release `serve_frame` to LLVM's fold of a request field's
     /// address into each access; one reading, at `sapi/cli`.
     ///
