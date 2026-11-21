@@ -20,7 +20,7 @@ use toml::value::{Datetime, Offset, Time};
 
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
-use crate::oracle::Pin;
+use crate::oracle::{Pin, Profile};
 use crate::owner::SessionId;
 use crate::sources;
 
@@ -33,36 +33,53 @@ pub const LOG: &str = "log";
 pub const UNREAD: &str = "unread";
 
 /// The version of a reading's shape, written as `v` on every reading
-/// (harness-design.md §4.2): 2 since the scope's key is spelled `key`.
-/// A reading written before carries no `v` and is version 1,
-/// which spells the key `tree`; the store reads both, and refuses a `v` it
-/// does not know. A field it does not know it ignores, in the store's
+/// (harness-design.md §4.2): 3 since the commit is named whole and the
+/// reading names the profile of the build it judged ([`Reading::profile`]).
+/// A reading of `v = 2` spells the scope's key `key`, as this one does, and
+/// cuts its commit to seven characters ([`crate::track::short`]); one
+/// written before that carries no `v` and is version 1, which spells the
+/// key `tree`. The store reads all three, keeping which it read
+/// ([`Version`]), and refuses a `v` it does not know. A field it does not know it ignores, in the store's
 /// files and the log's lines alike, as a handed-in line and a `--format
 /// jsonl` row are read (§4.2). So a field is added under the same
 /// `v` only where a reading without it is never read as fresher than one
 /// with it, since an older harness reads the newer reading as if the field
 /// were absent; a field removed, renamed or retyped, a meaning changed, or
 /// a field whose absence would read fresher is a new `v`.
-pub const V: u32 = 2;
+pub const V: u32 = 3;
 
-/// The `v` of a reading: written as [`V`] whatever version it was read
-/// at, since a reading read back is held in this version's shape, and
-/// read as any version this harness knows, absent for the first.
+/// The `v` a reading was read at, which says what its commit means: read
+/// as any version this harness knows, absent for the first, and written
+/// back as the version whose meaning it holds. A reading of the first
+/// version is held as one of the second, whose shape it shares but for
+/// the key's spelling; one of the second is written back as the second,
+/// never as [`V`], so its short commit is never read as a whole one and
+/// its absent profile never as a build it did not name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Version;
+enum Version {
+    /// `v = 2`, or no `v`: the commit cut to seven characters, no profile.
+    #[default]
+    Second,
+    /// `v = 3`, [`V`]: the commit whole, and the profile where it is known.
+    Third,
+}
 
 impl Serialize for Version {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u32(V)
+        serializer.serialize_u32(match self {
+            Version::Second => 2,
+            Version::Third => V,
+        })
     }
 }
 
 impl<'de> Deserialize<'de> for Version {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Version, D::Error> {
         match u32::deserialize(deserializer)? {
-            V => Ok(Version),
+            2 => Ok(Version::Second),
+            V => Ok(Version::Third),
             v => Err(serde::de::Error::custom(format!(
-                "a reading of v = {v}, which this harness does not know: it reads v = {V}, and a reading with no `v`, the first version"
+                "a reading of v = {v}, which this harness does not know: it reads v = {V} and v = 2, and a reading with no `v`, the first version"
             ))),
         }
     }
@@ -92,7 +109,8 @@ fn either_at<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Dateti
 /// it does not know is ignored and a `v` it does not know refused ([`V`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Reading {
-    /// The version of the shape, [`V`]; absent on a reading of the first.
+    /// The version of the shape, [`V`] on a reading written now; absent
+    /// on a reading of the first.
     #[serde(default)]
     v: Version,
     /// The subcommands that write one, in the order `cli::Command` has
@@ -126,6 +144,10 @@ pub struct Reading {
     /// through [`Reading::stamped_over`] says which path it was hashed over.
     #[serde(alias = "tree")]
     key: String,
+    /// The commit the reading was taken at, whole, as [`Snapshot`] names
+    /// it; seven characters on a reading of `v = 2` or before, and empty
+    /// where none was. What a commit is held against a reading's by is a
+    /// prefix ([`Chain`]), so either names its commit.
     pub commit: String,
     #[serde(deserialize_with = "either_at")]
     pub at: Datetime,
@@ -152,6 +174,15 @@ pub struct Reading {
     /// an instrument of [`UNDER_RECIPE`]; `None` for every other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
+    /// The profile the binary the reading judged was built in, where the
+    /// instrument knows it: `phpt` over the engine it found in a build
+    /// directory or built itself ([`crate::oracle::Runner::profile`]).
+    /// Absent where the instrument judges no build of the engine, or
+    /// cannot know how the one it judged was built: `phpt --engine
+    /// <path>`, the control, the linked engine; and on every reading of
+    /// `v = 2` or before, which never named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Profile>,
 }
 
 /// The line an instrument prints for a reading: its status, instrument,
@@ -259,7 +290,7 @@ impl Reading {
     /// that is no git repository.
     pub fn new(instrument: &str, scope: &str) -> Reading {
         Reading {
-            v: Version,
+            v: Version::Third,
             instrument: instrument.to_owned(),
             scope: scope.to_owned(),
             rule: String::new(),
@@ -275,6 +306,7 @@ impl Reading {
             session: String::new(),
             groups: BTreeMap::new(),
             recipe: None,
+            profile: None,
         }
     }
 }
@@ -385,6 +417,8 @@ enum Kept {
         groups: BTreeMap<String, Number>,
         #[serde(default)]
         recipe: Option<String>,
+        #[serde(default)]
+        profile: Option<Profile>,
     },
     /// The lean row the history kept before it kept readings whole:
     /// instrument, scope, status, at, commit and numbers.
@@ -423,6 +457,7 @@ impl Reading {
                 session,
                 groups,
                 recipe,
+                profile,
             } => Reading {
                 v,
                 rule,
@@ -436,9 +471,12 @@ impl Reading {
                 session,
                 groups,
                 recipe,
+                profile,
                 ..Reading::new(&instrument, &scope)
             },
+            // A lean row predates the third version, and its commit is short.
             Kept::Lean { i, s, t, a, c, n } => Reading {
+                v: Version::Second,
                 status: t,
                 numbers: n,
                 commit: c,
@@ -1584,11 +1622,13 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        Freshness, KEPT, Log, Moved, Reading, Status, Store, V, civil_from_days, days_from_civil,
-        listed, past_kept, prune,
+        Chain, Freshness, KEPT, Log, Moved, Reading, Status, Store, V, Version, civil_from_days,
+        days_from_civil, listed, past_kept, prune,
     };
+    use crate::oracle::Profile;
     use crate::owner::SessionId;
     use crate::scratch::Tree;
+    use crate::track::short;
 
     /// A store at `dir` written in no session, so a reading read back is
     /// the reading handed in, whatever session the test runs in.
@@ -1945,15 +1985,181 @@ mod tests {
         assert_eq!(kept, (8..KEPT + 8).map(key).collect());
     }
 
-    /// `reading` as a line of the log of the first version: no `v`, and
-    /// its key spelled `tree`.
-    fn first_version(reading: &Reading) -> serde_json::Value {
+    /// `reading` as a line of the log of the second version: `v = 2`, its
+    /// commit cut to seven characters, and no profile, which that version
+    /// never named.
+    fn second_version(reading: &Reading) -> serde_json::Value {
         let mut line = reading.to_json().unwrap();
+        assert_eq!(line["v"], V);
+        line["v"] = 2.into();
+        line["commit"] = short(&reading.commit).into();
+        line.as_object_mut().unwrap().remove("profile");
+        line
+    }
+
+    /// `reading` as a line of the log of the first version: the second's,
+    /// with no `v` and its key spelled `tree`.
+    fn first_version(reading: &Reading) -> serde_json::Value {
+        let mut line = second_version(reading);
         let object = line.as_object_mut().unwrap();
-        assert_eq!(object.remove("v"), Some(V.into()));
+        object.remove("v");
         let key = object.remove("key").unwrap();
         object.insert("tree".into(), key);
         line
+    }
+
+    /// `reading` as a line of the first or second version reads back:
+    /// held as read at `v = 2`, its commit seven characters and no profile.
+    fn read_as_second(reading: &Reading) -> Reading {
+        Reading {
+            v: Version::Second,
+            commit: short(&reading.commit).to_owned(),
+            profile: None,
+            ..reading.clone()
+        }
+    }
+
+    /// The `n`th commit, forty hex digits, as a reading of the third
+    /// version names it whole: `n`, below sixteen, leads, so no two
+    /// share their first seven characters.
+    fn commit(n: usize) -> String {
+        format!("{n:x}{:039x}", 0x00c0_ffee)
+    }
+
+    /// A reading written now is of the third version: its commit whole and
+    /// the profile of the build it judged, `v = 3` and `profile =
+    /// "release-da"` in the scope's file, and the same reading read back
+    /// from the file, the index and the log.
+    #[test]
+    fn a_reading_written_now_is_the_third_version_and_reads_back_whole() {
+        let dir = Tree::new("store-third").unwrap();
+        let store = unnamed(dir.path());
+        let mut reading = over("fold", "ext/pcre", &key(1), "2026-11-21T10:00:00Z");
+        reading.commit = commit(1);
+        reading.profile = Some(Profile::ReleaseDa);
+        store.record(std::slice::from_ref(&reading)).unwrap();
+        let text = std::fs::read_to_string(store.path("fold", "ext/pcre").unwrap()).unwrap();
+        assert!(text.contains("v = 3\n"), "{text}");
+        assert!(
+            text.contains(&format!("commit = \"{}\"\n", commit(1))),
+            "{text}"
+        );
+        assert!(text.contains("profile = \"release-da\"\n"), "{text}");
+        assert_eq!(
+            store.read("fold", "ext/pcre").unwrap(),
+            Some(reading.clone())
+        );
+        assert_eq!(
+            store.over("fold", "ext/pcre", &key(1), "").unwrap(),
+            Freshness::Fresh(reading.clone())
+        );
+        let log = store.history("fold").unwrap();
+        assert_eq!(log.readings, [reading.clone()]);
+        assert_eq!(reading.to_json().unwrap()["profile"], "release-da");
+        let none = over("budget", "xtask", &key(2), "2026-11-21T10:00:00Z");
+        assert!(
+            none.to_json().unwrap().get("profile").is_none(),
+            "a reading that judged no build names no profile"
+        );
+    }
+
+    /// A reading of the second version reads, from a line of the log and
+    /// from the scope's file, with its short commit and no profile, and is
+    /// held as the second: a land enters it at `v = 2`, never as a reading
+    /// of this version whose commit is whole.
+    #[test]
+    fn a_reading_of_the_second_version_reads_with_its_short_commit_and_no_profile() {
+        let dir = Tree::new("store-second").unwrap();
+        let store = unnamed(&dir.join("main"));
+        let mut taken = over("fold", "ext/pcre", &key(1), "2026-11-20T10:00:00Z");
+        taken.commit = commit(1);
+        let line = second_version(&taken);
+        let read = Reading::from_json(&line.to_string()).unwrap();
+        assert_eq!(read, read_as_second(&taken));
+        assert_eq!((read.commit.len(), read.profile), (7, None));
+
+        let file = store.path("fold", "ext/pcre").unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let text = toml::to_string(&read).unwrap();
+        assert!(
+            text.contains("v = 2\n") && !text.contains("profile"),
+            "{text}"
+        );
+        std::fs::write(&file, &text).unwrap();
+        assert_eq!(store.read("fold", "ext/pcre").unwrap(), Some(read.clone()));
+        std::fs::remove_file(&file).unwrap();
+
+        let other = unnamed(&dir.join("other"));
+        std::fs::create_dir_all(other.root().join("log")).unwrap();
+        std::fs::write(other.root().join("log/fold.jsonl"), format!("{line}\n")).unwrap();
+        assert_eq!(store.land(&other).unwrap(), 1);
+        let entry = store.indexed(&read).unwrap().unwrap();
+        let kept = std::fs::read_to_string(entry).unwrap();
+        assert!(kept.contains("v = 2\n"), "{kept}");
+        assert_eq!(
+            store.over("fold", "ext/pcre", &key(1), "").unwrap(),
+            Freshness::Fresh(read)
+        );
+    }
+
+    /// The store finds a reading at a commit as before across a log that
+    /// holds every version: by its key, `done`'s question, a line of each
+    /// version is found; and by the commit, the reading nearest the tip
+    /// stands for each scope whether it names its commit by seven
+    /// characters or whole, the last written of those at one commit.
+    #[test]
+    fn the_reading_at_a_commit_is_found_across_a_log_of_both_versions() {
+        let dir = Tree::new("store-across").unwrap();
+        let store = unnamed(&dir.join("main"));
+        let at = |n: usize, m: u32, scope: &str| {
+            let mut reading = over("fold", scope, &key(n), &format!("2026-11-21T09:{m:02}:00Z"));
+            reading.commit = commit(n);
+            reading.profile = Some(Profile::Release);
+            reading
+        };
+        // Taken at the tip's parent under v = 2, and at its grandparent under
+        // v = 3: the second version's stands, being nearer.
+        let (parent, grandparent) = (at(1, 0, "a"), at(2, 1, "a"));
+        // Taken at the tip under v = 3, and at the grandparent under v = 2.
+        let (tip, behind) = (at(0, 2, "b"), at(2, 3, "b"));
+        // Both at the tip, the second version's written last.
+        let (whole, cut) = (at(0, 4, "c"), at(0, 5, "c"));
+        let lines = [
+            second_version(&parent),
+            grandparent.to_json().unwrap(),
+            tip.to_json().unwrap(),
+            first_version(&behind),
+            whole.to_json().unwrap(),
+            second_version(&cut),
+        ];
+        let lines_of: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        let text = lines_of.join("\n") + "\n";
+        let log = Log::handed(&text);
+        assert!(log.unreadable.is_empty(), "{:?}", log.unreadable);
+        let chain = Chain {
+            distance: (0..3).map(|n| (commit(n), n)).collect(),
+        };
+        let standing = chain.standing(&log.readings, "fold");
+        assert_eq!(
+            standing,
+            [&read_as_second(&parent), &tip, &read_as_second(&cut)]
+        );
+
+        let other = unnamed(&dir.join("other"));
+        std::fs::create_dir_all(other.root().join("log")).unwrap();
+        std::fs::write(other.root().join("log/fold.jsonl"), &text).unwrap();
+        assert_eq!(store.land(&other).unwrap(), lines.len());
+        for (reading, scope, n) in [
+            (read_as_second(&parent), "a", 1),
+            (grandparent, "a", 2),
+            (tip, "b", 0),
+            (read_as_second(&behind), "b", 2),
+        ] {
+            assert_eq!(
+                store.over("fold", scope, &key(n), "").unwrap(),
+                Freshness::Fresh(reading)
+            );
+        }
     }
 
     /// `permit`'s look for evidence reads a key the index let go of from
@@ -1988,7 +2194,7 @@ mod tests {
             v2.to_json().unwrap(),
             first_version(&v2)
         ));
-        assert_eq!(log.readings, [v2.clone(), v2]);
+        assert_eq!(log.readings, [v2.clone(), read_as_second(&v2)]);
         assert_eq!(log.unreadable, [3]);
     }
 
@@ -2046,7 +2252,7 @@ mod tests {
         );
         assert_eq!(
             store.over("test", "first", &key(2), "").unwrap(),
-            Freshness::Fresh(old),
+            Freshness::Fresh(read_as_second(&old)),
             "a line of the first version is entered in this version's shape and read back"
         );
         let entry = store.indexed(&reading).unwrap().unwrap();

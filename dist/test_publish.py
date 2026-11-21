@@ -23,7 +23,7 @@ class Readme(unittest.TestCase):
         blocks = [block.split("\n", 1) for block in text.split("```")[1::2]]
         bodies = {body.strip() for _, body in blocks if body.strip()}
         for variant in VARIANTS:
-            for tag in (variant, f"<version>-{variant}", f"edge-{variant}", f"sha-<commit>-{variant}"):
+            for tag in (variant, f"<version>-{variant}", f"nightly-{variant}", f"sha-<commit>-{variant}"):
                 with self.subTest(tag=tag):
                     self.assertIn(f"{IMAGE}:{tag}", bodies)
         self.assertIn("ENV PATH=/opt/lela/compat:$PATH", bodies)
@@ -80,9 +80,9 @@ class DryRun(Publish):
             f"org.opencontainers.image.created={WHEN}",
         ]
 
-    def test_a_commit_on_main_is_labelled_edge(self):
+    def test_a_commit_on_main_is_labelled_nightly(self):
         run = self.publish("build", "main", "--platform", "linux/arm64", "--dry-run")
-        self.assertEqual(self.lines(run, "label"), self.labels("edge"))
+        self.assertEqual(self.lines(run, "label"), self.labels("nightly"))
         self.assertEqual(self.lines(run, "platform"), ["linux/arm64"])
         self.assertIn("dry run: nothing is built, smoked or pushed", run.stdout)
         self.assertFalse(self.log.exists())
@@ -101,12 +101,19 @@ class DryRun(Publish):
         run = self.publish("join", ref, "--dry-run")
         return [line.split(" from ")[0] for line in self.lines(run, "tag")]
 
-    def test_a_commit_on_main_moves_edge_and_tags_its_commit(self):
+    def test_a_commit_on_main_moves_nightly_and_tags_its_commit(self):
         self.assertEqual(self.tags("main"), [
             f"{IMAGE}:{tag}"
             for variant in VARIANTS
-            for tag in (f"edge-{variant}", f"sha-{self.commit}-{variant}")
+            for tag in (f"nightly-{variant}", f"sha-{self.commit}-{variant}")
         ])
+
+    def test_no_step_on_main_names_the_edge_tag(self):
+        for arguments in (("build", "main", "--platform", "linux/amd64", "--dry-run"), ("join", "main", "--dry-run")):
+            with self.subTest(arguments=arguments):
+                run = self.publish(*arguments)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertNotIn("edge", run.stdout)
 
     def test_a_release_moves_the_bare_variant(self):
         self.assertEqual(self.tags("v1.2.0"), [
@@ -161,7 +168,7 @@ class DryRun(Publish):
 
     def test_the_join_annotates_each_list_with_the_labels(self):
         run = self.publish("join", "main", "--dry-run")
-        self.assertEqual(self.lines(run, "annotation"), [f"index:{l}" for l in self.labels("edge")])
+        self.assertEqual(self.lines(run, "annotation"), [f"index:{l}" for l in self.labels("nightly")])
 
     def test_a_tag_the_manifest_does_not_name_is_refused_by_both_steps(self):
         self.versioned("1.2.0")
@@ -834,7 +841,7 @@ class Join(Recorded):
             with self.subTest(variant=variant):
                 tagged = [create[i + 1] for i, a in enumerate(create) if a == "--tag"]
                 self.assertEqual(tagged, [
-                    f"{IMAGE}:edge-{variant}", f"{IMAGE}:sha-{self.commit}-{variant}",
+                    f"{IMAGE}:nightly-{variant}", f"{IMAGE}:sha-{self.commit}-{variant}",
                 ])
                 self.assertEqual(create[-2:], [
                     self.source(variant, "linux/amd64"), self.source(variant, "linux/arm64"),
@@ -845,13 +852,13 @@ class Join(Recorded):
                 # What no buildx before v0.32.0 knows.
                 self.assertNotIn("--metadata-file", create)
                 self.assertEqual(
-                    json.loads(self.held(f"edge-{variant}"))["annotations"]["org.opencontainers.image.title"], "Lela",
+                    json.loads(self.held(f"nightly-{variant}"))["annotations"]["org.opencontainers.image.title"], "Lela",
                 )
         written = manifests.read_text().splitlines()
         # Each list's digest is the sha256 of the bytes the registry holds
         # at its tags.
         self.assertEqual(written, [
-            f"{variant} sha256:{hashlib.sha256(self.held(f'edge-{variant}')).hexdigest()}" for variant in VARIANTS
+            f"{variant} sha256:{hashlib.sha256(self.held(f'nightly-{variant}')).hexdigest()}" for variant in VARIANTS
         ])
         self.assertEqual(self.lines(run, "manifest"), written)
         self.assert_buildx_said_first(run)
@@ -866,7 +873,7 @@ class Join(Recorded):
         self.assertEqual(steps, [
             step for variant in VARIANTS for step in (
                 ("create", self.source(variant, "linux/amd64")),
-                ("inspect", f"{IMAGE}:edge-{variant}"), ("inspect", f"{IMAGE}:sha-{self.commit}-{variant}"),
+                ("inspect", f"{IMAGE}:nightly-{variant}"), ("inspect", f"{IMAGE}:sha-{self.commit}-{variant}"),
             )
         ])
         for call in self.calls():
@@ -874,13 +881,14 @@ class Join(Recorded):
                 self.assertEqual(call[5:], ["--raw"])
 
     def test_the_stand_in_refuses_the_metadata_file_as_the_runners_buildx_does(self):
-        # Run 44731512379's join, word for word, and no list made.
+        # Run 44731512379's join, word for word but for the tag's
+        # channel, renamed since, and no list made.
         registry = self.scratch / "registry"
         registry.mkdir()
         result = self.scratch / "cli.json"
         refused = subprocess.run(
             [str(self.bin / "docker"), "buildx", "imagetools", "create", "--metadata-file", str(result),
-             "--tag", f"{IMAGE}:edge-cli", self.source("cli", "linux/amd64"), self.source("cli", "linux/arm64")],
+             "--tag", f"{IMAGE}:nightly-cli", self.source("cli", "linux/amd64"), self.source("cli", "linux/arm64")],
             env={**os.environ, "CALLS": str(self.log), "IMAGE": IMAGE, "REGISTRY": str(registry)},
             capture_output=True, text=True,
         )

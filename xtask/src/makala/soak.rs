@@ -129,6 +129,7 @@ pub(crate) fn run(
     let mut entries: Vec<Entry> = subset.into_iter().filter(|e| e.ini.is_empty()).collect();
     entries.extend(super::workloads(root)?);
     let host = super::makala(root)?;
+    reading.profile = Some(crate::oracle::profile::LANE);
     let recipe = &manifest.pin()?.recipe;
     let own = Tree::new("soak")?;
     let names: Vec<String> = (0..entries.len()).map(|n| format!("{n}.php")).collect();

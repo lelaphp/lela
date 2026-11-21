@@ -297,7 +297,7 @@ impl Standing {
     /// one stands, the scopes and the oldest reading when several do.
     fn said(&self, instrument: &str) -> Option<String> {
         let oldest = self.readings.values().min_by_key(|r| r.at.to_string())?;
-        let taken = format!("{} at {}", oldest.at, oldest.commit);
+        let taken = format!("{} at {}", oldest.at, crate::track::short(&oldest.commit));
         Some(match self.readings.len() {
             1 => format!(
                 "{instrument}: {} stands on its pass of {taken}, taken over what is staged; not run again",

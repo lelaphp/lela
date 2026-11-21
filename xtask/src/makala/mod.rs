@@ -317,7 +317,8 @@ impl<'r> Consulted<'r> {
     }
 }
 
-/// makala's binary, built now in the lanes' profile.
+/// makala's binary, built now in the lanes' profile, which the readings
+/// of the instruments that serve through it name.
 pub(crate) fn makala(root: &Path) -> Result<PathBuf> {
     profile::build(root, &MAKALA.package(), MAKALA.binary, None, None)
 }

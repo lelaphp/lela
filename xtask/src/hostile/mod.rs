@@ -159,6 +159,8 @@ pub fn run(root: &Path, manifest: &Manifest, registry: &Registry) -> Result<Vec<
         *forms.entry(program.form.name()).or_insert(0) += 1;
     }
     for reading in &mut readings {
+        // The engine `profile::build` built, in the lanes' profile.
+        reading.profile = Some(profile::LANE);
         numbers(reading, &held, found.len())?;
         reading.count("wall_ms", crate::reading::millis(wall))?;
         for (form, n) in &forms {
