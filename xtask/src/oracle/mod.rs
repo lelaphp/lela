@@ -2066,7 +2066,7 @@ impl Runner {
             });
         }
         let mut behind = None;
-        let target = root.join("target");
+        let target = profile::target(root);
         for profile in profile::PREFERRED {
             let built = profile.binary(&target, ENGINE);
             if !built.is_file() {

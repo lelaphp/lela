@@ -514,14 +514,19 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: OracleCommand,
     },
-    /// Build the hosts the phpt lane hands its tests to in one profile of
-    /// the workspace's and print each one's path, a line each. Writes no
-    /// reading.
+    /// Build the hosts the phpt lane hands its tests to in one profile and
+    /// print each one's path; `--list` says where each ships, building
+    /// nothing. Writes no reading.
     Hosts {
         /// The profile to build in, one of those the workspace's
-        /// `Cargo.toml` defines.
+        /// `Cargo.toml` defines; with `--list`, the one whose paths each
+        /// line names.
+        #[arg(long, required_unless_present = "list")]
+        profile: Option<crate::oracle::profile::Profile>,
+        /// Print one JSON object a line per host, its binary, crate,
+        /// package and where a release ships it, and build nothing.
         #[arg(long)]
-        profile: crate::oracle::profile::Profile,
+        list: bool,
     },
     /// Hold the divergence registry to the manifest rule whose `check` names
     /// this instrument: an accepted row has a reason a person wrote.
