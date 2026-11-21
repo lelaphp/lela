@@ -239,7 +239,8 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
   `linux-aarch64` and `linux-x86_64` from the `binaries` target above on a
   daemon of that architecture. It then smokes the tarball itself, unpacked:
   `dist/smoke.sh` holds its `bin/` and `sbin/` to the four hosts and no
-  other, then runs `-v`, `-r`, a file with arguments, code on stdin,
+  other, then runs `-v`, held to php's first line with Lela's version
+  after it, `-r`, a file with arguments, code on stdin,
   `lela-cgi` on a file, `lela-fpm -t` and `lela-dbg -qrr` on a file, a
   Linux tarball in the Ubuntu image
   the Dockerfile builds on with its `runtime-packages.txt` installed. Then
