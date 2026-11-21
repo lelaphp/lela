@@ -240,9 +240,13 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
 
 The platforms are one table, `PLATFORMS` in `dist/release.py`: a row per
 platform with its name, the Docker platform a Linux tarball is built for,
-the `uname -s` and `uname -m` words of a machine of it, and whether
-`install.sh` installs on it. A build is asked for a platform of the table
-and no other, `publish` takes the table's tarballs, and `platforms.json`
+the `uname -s` and `uname -m` words of a machine of it, the checks of
+`install.sh` it is held to (`ubuntu`, `macos`), and whether `install.sh`
+installs on it. A row that installs held to checks the script has not is
+refused by `build` and `publish`, their dry runs included: a musl Linux
+is Linux to `uname -s`, so its row is refused when the table renders, not
+by the Ubuntu checks on a user's machine. A build is asked for a platform
+of the table and no other, `publish` takes the table's tarballs, and `platforms.json`
 and the installer's platforms are written from it, so a platform added to
 the table is in each of them, and a release's reader takes its
 platforms from that file and not from the installer's text:
@@ -409,7 +413,8 @@ curl -fsSL https://github.com/lelaphp/lela/releases/download/v<version>/install.
 release into its five empty lines: the hosts' name, the version, the
 Ubuntu release of the Dockerfile's `ARG UBUNTU`, the URL of the
 release's assets, and its platforms, rendered from the platform table a
-line per machine, `<platform> installs|refuses <system> <machine>`. So
+line per machine, `<platform> installs|refuses <checks> <system>
+<machine>`, the checks `none` where it refuses. So
 the script installs the release it is attached to, never the latest: a
 pre-release is never GitHub's latest. The source names no release and no
 platform; run as it is, it is refused.
@@ -442,14 +447,20 @@ so the sum vouches for a download against the page and not for the page.
 - It takes the row of `uname -s` and `uname -m`, on a Mac whose
   `sysctl -n hw.optional.arm64` says 1 the machine `arm64`, since a shell
   under Rosetta says `x86_64` there too. A row that says `refuses` is
-  refused with the URL its tarball is at.
-- macOS on Apple silicon alone, a shell under Rosetta included: an Intel
-  Mac, which no row names, is refused, and so is a macOS older than the
-  `macos` line of the tarball's `bundled-libraries.txt`, both by name.
-- Linux on `x86_64` and `aarch64`, Ubuntu of that release alone, read
-  from `/etc/os-release`; each package of `runtime-packages.txt` that
-  `dpkg-query` says is not installed is named, with the `sudo apt-get
-  install` line that installs them, which the script does not run.
+  refused, naming the release to download its tarball from. A row that
+  installs is held to the checks it names, `before_<checks>` before
+  anything is fetched and `after_<checks>` over the unpacked tarball, the
+  functions `dist/release.py` reads the script's checks from; the checks
+  follow the row, never `uname -s`.
+- `macos`: macOS on Apple silicon alone, a shell under Rosetta included:
+  an Intel Mac, which no row names, is refused, and so is a macOS older
+  than the `macos` line of the tarball's `bundled-libraries.txt`, both by
+  name.
+- `ubuntu`: Linux on `x86_64` and `aarch64`, Ubuntu of that release
+  alone, read from `/etc/os-release`; each package of
+  `runtime-packages.txt` that `dpkg-query` says is not installed is named,
+  with the `sudo apt-get install` line that installs them, which the
+  script does not run.
 - Any other platform is refused, naming those the installer installs on,
   the rows of `platforms.json` that say it does.
 

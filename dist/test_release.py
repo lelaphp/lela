@@ -98,6 +98,12 @@ class NoVersion(Repository):
                 self.assertFalse(self.log.exists())
 
 
+# The table's last row, as dist/release.py writes it, which a test adds a
+# row after in its own copy.
+LAST_ROW = ('    Platform("linux-x86_64", docker="linux/amd64", uname=("Linux x86_64",), checks="ubuntu", '
+            'installs=True),\n')
+
+
 def platforms_file(lines):
     """platforms.json as the dry run prints it, one `platforms.json <line>`
     per line of the file."""
@@ -142,10 +148,10 @@ class PublishDryRun(Repository):
         run = self.release("publish", "v1.2.0", "--dry-run")
         rows = self.lines(run, "install.sh")
         self.assertEqual(rows, [
-            "darwin-arm64 installs Darwin arm64",
-            "linux-aarch64 installs Linux aarch64",
-            "linux-aarch64 installs Linux arm64",
-            "linux-x86_64 installs Linux x86_64",
+            "darwin-arm64 installs macos Darwin arm64",
+            "linux-aarch64 installs ubuntu Linux aarch64",
+            "linux-aarch64 installs ubuntu Linux arm64",
+            "linux-x86_64 installs ubuntu Linux x86_64",
         ])
         manifest = platforms_file(self.lines(run, "platforms.json"))
         installed = [row.split()[0] for row in rows if row.split()[1] == "installs"]
@@ -156,6 +162,42 @@ class PublishDryRun(Repository):
         # platform of its own.
         named = {row["name"] for row in manifest["platforms"]}
         self.assertLessEqual({row.split()[0] for row in rows}, named)
+
+    def added(self, row):
+        """The repository's table with `row` after its last."""
+        source = self.root / "dist/release.py"
+        text = source.read_text()
+        self.assertEqual(text.count(LAST_ROW), 1)
+        source.write_text(text.replace(LAST_ROW, LAST_ROW + f"    {row},\n"))
+
+    def test_a_row_that_installs_held_to_checks_the_installer_lacks_is_refused(self):
+        # A musl Linux is Linux to `uname -s`, and is refused here, when
+        # the table renders, not by the Ubuntu checks on the machine.
+        self.added('Platform("linux-x86_64-musl", docker="linux/amd64", uname=("Linux x86_64",), checks="musl", '
+                   'installs=True)')
+        for step in (("publish", "v1.2.0", "--dry-run"), ("build", "v1.2.0", "linux-x86_64", "out", "--dry-run")):
+            with self.subTest(step=step[0]):
+                run = self.release(*step)
+                self.assertEqual(run.returncode, 1, run.stdout)
+                self.assertIn(
+                    "dist/release.py: linux-x86_64-musl installs held to the installer's musl checks, "
+                    "and dist/install.sh has none of that name; its checks are macos, ubuntu\n", run.stderr,
+                )
+                self.assertNotIn("artifact", run.stdout)
+
+    def test_a_row_that_installs_held_to_no_checks_is_refused(self):
+        self.added('Platform("freebsd-amd64", docker=None, uname=("FreeBSD amd64",), checks=None, installs=True)')
+        run = self.release("publish", "v1.2.0", "--dry-run")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("freebsd-amd64 installs held to no checks of the installer's; its checks are macos, ubuntu",
+                      run.stderr)
+
+    def test_a_row_the_installer_refuses_needs_no_checks(self):
+        self.added('Platform("freebsd-amd64", docker=None, uname=("FreeBSD amd64",), checks=None, installs=False)')
+        run = self.release("publish", "v1.2.0", "--dry-run")
+        self.assertIn("freebsd-amd64 refuses none FreeBSD amd64", self.lines(run, "install.sh"))
+        self.assertIn({"name": "freebsd-amd64", "tarball": "lela-1.2.0-freebsd-amd64.tar.gz", "installs": False},
+                      platforms_file(self.lines(run, "platforms.json"))["platforms"])
 
     def test_the_dockerfiles_name_names_the_tarballs_and_a_caller_names_none(self):
         dockerfile = self.root / "dist/Dockerfile"
@@ -281,8 +323,8 @@ class Publish(Recorded):
         script = (out / "install.sh").read_text()
         self.assertIn("\nname='lela'\nversion='0.1.0-alpha.1'\nubuntu='26.04'\n"
                       "release='https://github.com/lelaphp/lela/releases/download/v0.1.0-alpha.1'\n"
-                      "platforms='darwin-arm64 installs Darwin arm64\nlinux-aarch64 installs Linux aarch64\n"
-                      "linux-aarch64 installs Linux arm64\nlinux-x86_64 installs Linux x86_64'\n", script)
+                      "platforms='darwin-arm64 installs macos Darwin arm64\nlinux-aarch64 installs ubuntu Linux aarch64\n"
+                      "linux-aarch64 installs ubuntu Linux arm64\nlinux-x86_64 installs ubuntu Linux x86_64'\n", script)
         dry = self.run_step("publish", "v0.1.0-alpha.1", "--dry-run")
         self.assertIn("\nplatforms='" + "\n".join(self.lines(dry, "install.sh")) + "'\n", script)
         self.assertTrue(os.access(out / "install.sh", os.X_OK))
@@ -319,10 +361,10 @@ class Publish(Recorded):
     def test_a_platform_added_to_the_table_is_in_the_manifest_the_tarballs_and_the_installer(self):
         source = self.root / "dist/release.py"
         text = source.read_text()
-        last = '    Platform("linux-x86_64", docker="linux/amd64", uname=("Linux x86_64",), installs=True),\n'
-        self.assertEqual(text.count(last), 1)
-        added = '    Platform("linux-riscv64", docker="linux/riscv64", uname=("Linux riscv64",), installs=True),\n'
-        source.write_text(text.replace(last, last + added))
+        self.assertEqual(text.count(LAST_ROW), 1)
+        added = ('    Platform("linux-riscv64", docker="linux/riscv64", uname=("Linux riscv64",), checks="ubuntu", '
+                 'installs=True),\n')
+        source.write_text(text.replace(LAST_ROW, LAST_ROW + added))
         self.git("commit", "-q", "-am", "a platform of riscv64")
         self.git("tag", "v0.1.0-alpha.1")
         tarball = "lela-0.1.0-alpha.1-linux-riscv64.tar.gz"
@@ -330,7 +372,7 @@ class Publish(Recorded):
         self.assertIn({"name": "linux-riscv64", "tarball": tarball, "installs": True},
                       platforms_file(self.lines(dry, "platforms.json"))["platforms"])
         self.assertIn(tarball, self.lines(dry, "artifact"))
-        self.assertEqual(self.lines(dry, "install.sh")[-1], "linux-riscv64 installs Linux riscv64")
+        self.assertEqual(self.lines(dry, "install.sh")[-1], "linux-riscv64 installs ubuntu Linux riscv64")
         # A build is asked for it, and a release is refused without it.
         build = self.run_step("build", "v0.1.0-alpha.1", "linux-riscv64", "out", "--dry-run")
         self.assertEqual(self.lines(build, "artifact"), [tarball])
@@ -344,7 +386,7 @@ class Publish(Recorded):
         run = self.run_step("publish", "v0.1.0-alpha.1", str(out))
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn(str(out / tarball), self.calls()[0])
-        self.assertIn("\nlinux-riscv64 installs Linux riscv64'\n", (out / "install.sh").read_text())
+        self.assertIn("\nlinux-riscv64 installs ubuntu Linux riscv64'\n", (out / "install.sh").read_text())
 
     def test_a_missing_or_stray_tarball_creates_nothing(self):
         self.git("tag", "v0.1.0-alpha.1")
