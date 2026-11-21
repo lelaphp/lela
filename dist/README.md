@@ -175,9 +175,14 @@ dist/publish.py join v0.1.0-alpha.1 --dry-run
 
 `dist/prune.py` deletes the versions no tag is pulled by: one last updated
 more than 30 days ago whose tags are all `sha-` tags, or which has none,
-unless a kept manifest list names it or it is a referrer of a kept one. A
-version tag, a bare variant, an `edge-` tag and a tag of any other kind
-are never deleted. `dist/prune.py --dry-run` names each version it would
+unless a kept manifest list names it or it is a referrer of a kept one.
+It also deletes, however young, every list under an `edge-` tag, the name
+`nightly-` replaced, so that no version keeps both names. GHCR deletes a
+version and not one of its tags, so the `sha-` tag that shares an `edge-`
+list's version goes with it, before its 30 days are up; the list's images
+and attestations, untagged and named by nothing kept, go once they are
+older than 30 days. A version tag, a bare variant, a `nightly-` tag and a
+tag of any other kind are never deleted. `dist/prune.py --dry-run` names each version it would
 delete, and deletes none. A listing gh cannot give deletes nothing, and a
 deletion that fails stops the run, naming the versions deleted before it
 and those not. CI runs both scripts; a person runs them with
