@@ -94,11 +94,18 @@ class NoVersion(Repository):
 PLATFORMS = ("darwin-arm64", "linux-aarch64", "linux-x86_64")
 
 
+def platforms_file(lines):
+    """platforms.json as the dry run prints it, one `platforms.json <line>`
+    per line of the file."""
+    return json.loads("\n".join(lines))
+
+
 class PublishDryRun(Repository):
     def test_a_release_is_the_latest_and_moves_the_bare_variant(self):
         run = self.release("publish", "v1.2.0", "--dry-run")
         self.assertEqual(self.lines(run, "artifact"), [
-            *(f"lela-1.2.0-{platform}.tar.gz" for platform in PLATFORMS), "SHA256SUMS", "install.sh",
+            *(f"lela-1.2.0-{platform}.tar.gz" for platform in PLATFORMS), "install.sh", "platforms.json",
+            "SHA256SUMS",
         ])
         self.assertEqual(self.lines(run, "release"), [
             "tag v1.2.0", "title v1.2.0", f"commit {self.commit}", "prerelease false", "latest true",
@@ -108,6 +115,24 @@ class PublishDryRun(Repository):
         ])
         self.assertIn("dry run: nothing is uploaded or created", run.stdout)
         self.assertFalse(self.log.exists())
+
+    def test_the_dry_run_prints_the_platforms_file_it_attaches(self):
+        run = self.release("publish", "v1.2.0", "--dry-run")
+        platforms = platforms_file(self.lines(run, "platforms.json"))
+        self.assertEqual(platforms, {"version": "1.2.0", "platforms": [
+            {"name": "darwin-arm64", "tarball": "lela-1.2.0-darwin-arm64.tar.gz", "installs": True},
+            {"name": "linux-aarch64", "tarball": "lela-1.2.0-linux-aarch64.tar.gz", "installs": True},
+            {"name": "linux-x86_64", "tarball": "lela-1.2.0-linux-x86_64.tar.gz", "installs": True},
+        ]})
+        # Its platforms are the table's, the ones a build is asked for and
+        # whose tarballs the release attaches, and no other.
+        refused = self.release("build", "v1.2.0", "freebsd-x86_64", "out", "--dry-run")
+        self.assertIn(f"a release's are {', '.join(row['name'] for row in platforms['platforms'])}\n",
+                      refused.stderr)
+        artifacts = self.lines(run, "artifact")
+        self.assertEqual([a for a in artifacts if a.endswith(".tar.gz")],
+                         [row["tarball"] for row in platforms["platforms"]])
+        self.assertIn("platforms.json", artifacts)
 
     def test_the_dockerfiles_name_names_the_tarballs_and_a_caller_names_none(self):
         dockerfile = self.root / "dist/Dockerfile"
@@ -148,7 +173,8 @@ class PreReleaseDryRun(Repository):
     def test_a_pre_release_is_marked_one_and_moves_no_bare_variant(self):
         run = self.release("publish", "v0.1.0-alpha.1", "--dry-run")
         self.assertEqual(self.lines(run, "artifact"), [
-            *(f"lela-0.1.0-alpha.1-{platform}.tar.gz" for platform in PLATFORMS), "SHA256SUMS", "install.sh",
+            *(f"lela-0.1.0-alpha.1-{platform}.tar.gz" for platform in PLATFORMS), "install.sh", "platforms.json",
+            "SHA256SUMS",
         ])
         self.assertEqual(self.lines(run, "release"), [
             "tag v0.1.0-alpha.1", "title v0.1.0-alpha.1", f"commit {self.commit}",
@@ -214,9 +240,6 @@ class Publish(Recorded):
         run = self.run_step("publish", "v0.1.0-alpha.1", str(out))
         self.assertEqual(run.returncode, 0, run.stderr)
         sums = (out / "SHA256SUMS").read_text()
-        self.assertEqual([line.split("  ")[1] for line in sums.splitlines()], [
-            f"lela-0.1.0-alpha.1-{platform}.tar.gz" for platform in PLATFORMS
-        ])
         (call,) = self.calls()
         notes = call.pop()
         self.assertEqual(call[:3], ["gh", "release", "create"])
@@ -226,7 +249,7 @@ class Publish(Recorded):
             "v0.1.0-alpha.1", "--verify-tag", "--title", "v0.1.0-alpha.1",
             "--prerelease", "--latest=false",
             *(str(out / f"lela-0.1.0-alpha.1-{platform}.tar.gz") for platform in PLATFORMS),
-            str(out / "SHA256SUMS"), str(out / "install.sh"),
+            str(out / "install.sh"), str(out / "platforms.json"), str(out / "SHA256SUMS"),
         ])
         # The installer attached is the release's: its version, its URL,
         # and the Ubuntu release of the Dockerfile's base, baked in.
@@ -237,6 +260,32 @@ class Publish(Recorded):
         self.assertIn(self.commit, notes)
         self.assertIn(sums, notes)
         self.assertIn(f"{IMAGE}:0.1.0-alpha.1-fpm", notes)
+
+    def test_the_sums_name_every_file_attached_but_themselves_and_read_back(self):
+        self.git("tag", "v0.1.0-alpha.1")
+        out = self.tarballs()
+        run = self.run_step("publish", "v0.1.0-alpha.1", str(out))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        (call,) = self.calls()
+        attached = [Path(argument).name for argument in call[call.index("--latest=false") + 1:-1]]
+        self.assertEqual(attached, [
+            *(f"lela-0.1.0-alpha.1-{platform}.tar.gz" for platform in PLATFORMS), "install.sh", "platforms.json",
+            "SHA256SUMS",
+        ])
+        sums = (out / "SHA256SUMS").read_text().splitlines()
+        self.assertEqual(sorted(line.split("  ", 1)[1] for line in sums), sorted(attached[:-1]))
+        if shutil.which("sha256sum"):
+            check = ["sha256sum", "-c", "SHA256SUMS"]
+        else:
+            check = ["shasum", "-a", "256", "-c", "SHA256SUMS"]
+        read = subprocess.run(check, cwd=out, capture_output=True, text=True)
+        self.assertEqual(read.returncode, 0, read.stdout + read.stderr)
+        self.assertEqual(read.stdout.splitlines(), [f"{name}: OK" for name in attached[:-1]])
+        # The platforms.json attached is the one the dry run prints.
+        dry = self.run_step("publish", "v0.1.0-alpha.1", "--dry-run")
+        self.assertEqual(
+            (out / "platforms.json").read_text(), "".join(f"{line}\n" for line in self.lines(dry, "platforms.json")),
+        )
 
     def test_a_missing_or_stray_tarball_creates_nothing(self):
         self.git("tag", "v0.1.0-alpha.1")

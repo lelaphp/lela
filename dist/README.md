@@ -224,18 +224,50 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
   macOS tarball carries its libraries, below, and each Mach-O in it an
   ad-hoc signature, which `build` reads before the smoke, with no
   Developer ID and no notarization.
-- `publish` takes the three tarballs from the directory, refusing a
-  missing one or one of another version, writes `SHA256SUMS` over them
-  with `scripts/dist-sums.sh`, stages `install.sh` beside them (below), and
-  creates the GitHub Release of the tag with the five attached. The release is marked a pre-release when the
-  version is one, and the latest when its images move the bare variant
-  tags, which it reads as `join` does, refusing a shallow checkout.
+- `publish` takes the tarball of each platform from the directory,
+  refusing a missing one or one of another version, stages `install.sh`
+  (below) and `platforms.json` beside them, writes `SHA256SUMS` over every
+  file staged with `scripts/dist-sums.sh`, and creates the GitHub Release
+  of the tag with them and the sums attached. The release is marked a
+  pre-release when the version is one, and the latest when its images move
+  the bare variant tags, which it reads as `join` does, refusing a shallow
+  checkout.
+
+The platforms are one table, `PLATFORMS` in `dist/release.py`: a row per
+platform with its name, the Docker platform a Linux tarball is built for,
+and whether `install.sh` installs on it. A build is asked for a platform
+of the table and no other, `publish` takes the table's tarballs, and
+`platforms.json` is written from it, so a release's reader takes its
+platforms from that file and not from the installer's text:
+
+```json
+{
+  "version": "0.1.0-alpha.1",
+  "platforms": [
+    {
+      "name": "darwin-arm64",
+      "tarball": "lela-0.1.0-alpha.1-darwin-arm64.tar.gz",
+      "installs": true
+    },
+    ...
+  ]
+}
+```
+
+An Intel Mac is a refusal of the installer, not a platform, so it is no
+row of the table and none of `platforms.json`.
+
+A release attaches the tarballs, `install.sh`, `platforms.json` and
+`SHA256SUMS`, which names every other file the release attaches, the
+installer included, in the format `sha256sum -c` reads.
 
 A real `build` or `publish` refuses a tree with changes, and a tag that is
 not HEAD. `--dry-run` prints what the step would make and makes nothing:
 `build` the platform, the commit, the tarball and its smoke; `publish` the
-artifacts, `install.sh` among them, the release's fields and the image tags `dist/publish.py` would
-push, which a pre-release's are without a bare variant:
+artifacts, the release's fields, `platforms.json` as it would be written,
+a `platforms.json` line per line of the file, and the image tags
+`dist/publish.py` would push, which a pre-release's are without a bare
+variant:
 
 ```sh
 dist/release.py publish v0.1.0-alpha.1 --dry-run
@@ -380,10 +412,22 @@ tarball whole into `$XDG_DATA_HOME/lela/<version>`,
 `~/.local/share/lela/<version>` where that is unset, since the XDG Base
 Directory specification gives `~/.local/share` to an application's own
 files, and links `~/.local/bin/lela` to its `bin/lela`; `lela-cgi` and
-`lela-fpm` stay in the directory's `bin/` and `sbin/`. `SHA256SUMS` names
-the tarballs alone, not `install.sh`: the script and the sums come from
-the one release page, unsigned, so a sum of the script would vouch for
-nothing the page does not, and a signing step is outside spec #9.
+`lela-fpm` stay in the directory's `bin/` and `sbin/`. The script reads
+the line of its tarball in `SHA256SUMS` and passes over the others, which
+name `install.sh` and `platforms.json` too (#32), so a user who downloads
+the script before running it can check it against the sums:
+
+```sh
+curl -fsSLO https://github.com/lelaphp/lela/releases/download/v<version>/install.sh
+curl -fsSLO https://github.com/lelaphp/lela/releases/download/v<version>/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS && sh install.sh
+```
+
+`shasum -a 256 -c --ignore-missing SHA256SUMS` reads it the same where
+there is no `sha256sum`.
+
+The script and the sums still come from the one release page, unsigned,
+so the sum vouches for a download against the page and not for the page.
 
 - macOS on Apple silicon alone, a shell under Rosetta included: an Intel
   Mac is refused, and so is a macOS older than the `macos` line of the
@@ -392,7 +436,8 @@ nothing the page does not, and a signing step is outside spec #9.
   from `/etc/os-release`; each package of `runtime-packages.txt` that
   `dpkg-query` says is not installed is named, with the `sudo apt-get
   install` line that installs them, which the script does not run.
-- Any other platform is refused, naming the three a release has.
+- Any other platform is refused, naming the three a release has, the
+  rows of `platforms.json`.
 
 Every check runs before anything is put in place, the unpacked `lela -v`
 among them, and a refusal leaves the home as it was. It asks for no
