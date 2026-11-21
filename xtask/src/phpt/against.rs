@@ -422,7 +422,7 @@ impl Runs {
             misses: BTreeMap::new(),
             skips: BTreeMap::new(),
         };
-        for judged in whole(tally).then_some(&tally.judged)? {
+        for judged in tally.whole().then_some(&tally.judged)? {
             let id = &judged.id;
             run.verdicts.insert(id.clone(), judged.judgement);
             if let Some(miss) = &judged.miss {
@@ -747,12 +747,6 @@ pub(crate) fn regressed(
         base.commit,
         listed(&names)
     )))
-}
-
-/// Whether a tally judged every test its subset holds, which a run or a
-/// target must to be kept.
-fn whole(tally: &Tally) -> bool {
-    tally.judged.len() == tally.found
 }
 
 /// What [`carry`] did with one worktree's kept runs.
