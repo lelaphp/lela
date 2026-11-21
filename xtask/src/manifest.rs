@@ -1545,6 +1545,9 @@ impl Manifest {
     ///   engine's reading under the crate; a directory of the pinned
     ///   corpus no crate owns (`Zend/tests`) is the whole tree, since no
     ///   crate's sources are what it measures and `done` never asks for it.
+    /// - the corpus, [`crate::phpt::CORPUS`] with the run's suffixes: the
+    ///   whole tree, as a directory no crate owns is, since the corpus
+    ///   reading measures no crate and `done` is owed none.
     /// - a lock: the seam's name maps to the directory the lock lives in,
     ///   the crate [`Manifest::lock_home`] names, and the whole tree for a
     ///   lock no row names.
@@ -1566,6 +1569,9 @@ impl Manifest {
             return None;
         };
         let name = name.as_str();
+        if name == crate::phpt::CORPUS {
+            return Some(PathBuf::from("."));
+        }
         if let Some(krate) = self.crate_named(name) {
             return Some(krate.path());
         }
