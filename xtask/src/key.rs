@@ -17,7 +17,8 @@
 //! `php_engine` reads the engine's files once, if at all, where each key
 //! once read them again. The closure is read from `cargo metadata` once
 //! per process and root ([`Graph::of`]), and only when a crate's key is
-//! asked for, so a stamp over one file spawns no cargo.
+//! asked for or an instrument that builds takes its snapshot with it
+//! ([`Snapshot::with_graph`]), so a stamp over one file spawns no cargo.
 //!
 //! The closure is the crate, each workspace crate it depends on directly
 //! as a normal, build or dev dependency, and, from those, each reached
@@ -75,9 +76,10 @@ use crate::reading::joined;
 ///
 /// - [`Snapshot::disk`], the working tree, tracked and untracked files
 ///   alike: what an instrument stamps and what `done` holds a reading to.
-///   Taken before the instrument measures, so a file changed while it
-///   runs leaves the reading stale rather than fresh over what it never
-///   measured; an instrument that writes sources and then stamps them
+///   Taken before the instrument measures, the parts of the files rustc
+///   is built under read with it, so a file changed while it runs leaves
+///   the reading stale rather than fresh over what it never measured;
+///   an instrument that writes sources and then stamps them
 ///   takes another after it writes.
 /// - [`Snapshot::index`], what the index holds: what a commit takes,
 ///   pre-commit's question.
@@ -117,6 +119,10 @@ pub struct Snapshot {
     /// [`BUILT_UNDER`] or [`READ_BY_BUILDS`], read once
     /// ([`Snapshot::part_entry`]).
     parts: Mutex<BTreeMap<FilePart, Option<(String, String)>>>,
+    /// Of a snapshot of the working tree, the text of each file read for
+    /// its part, by path, read when it was taken ([`part_texts`]): none
+    /// for one that is absent.
+    texts: BTreeMap<&'static str, Option<String>>,
 }
 
 /// Where a snapshot's files are: on disk, or in git's objects, as an
@@ -154,6 +160,7 @@ impl Snapshot {
             tracked_keys: Mutex::default(),
             source,
             parts: Mutex::default(),
+            texts: BTreeMap::new(),
         }
     }
 
@@ -191,6 +198,7 @@ impl Snapshot {
         let (files, tracked) = (files.into_iter().collect(), tracked.into_iter().collect());
         Ok(Snapshot {
             covers: Some(covers),
+            texts: part_texts(root)?,
             ..Snapshot::new(
                 (root, Source::Disk),
                 git::head_commit(root)?,
@@ -258,7 +266,21 @@ impl Snapshot {
             }
         }
         files.sort_unstable();
-        Ok(Snapshot::new((root, Source::Disk), commit, files, on_disk))
+        Ok(Snapshot {
+            texts: part_texts(root)?,
+            ..Snapshot::new((root, Source::Disk), commit, files, on_disk)
+        })
+    }
+
+    /// The snapshot, with the crate graph its keys widen by read now
+    /// ([`Graph::of`], once per process and root), for an instrument that
+    /// takes it before it measures and keys its crates after: a manifest's
+    /// dependency edit made while cargo builds then widens no key of a
+    /// reading measured before it. A snapshot keyed over files alone
+    /// spawns no cargo, so it is taken without.
+    pub(crate) fn with_graph(self) -> Result<Snapshot> {
+        Graph::of(&self.root)?;
+        Ok(self)
     }
 
     /// What `index` holds, as a commit would take it: the keys the scopes
@@ -328,18 +350,12 @@ impl Snapshot {
     /// The listing entry a crate's key takes beside its closure's files
     /// for a file read for its part: its path and the blob id of what of
     /// it decides ([`FilePart::part_of`]), none where the file is absent
-    /// or names nothing that does. Read from disk for a snapshot of the
-    /// working tree and from git's object otherwise, once.
+    /// or names nothing that does. Of a snapshot of the working tree, the
+    /// text read when it was taken; otherwise git's object, read once.
     fn part_entry(&self, file: FilePart) -> Result<Option<(String, String)>> {
         memo(&self.parts, file, || {
             let text = match self.source {
-                Source::Disk => {
-                    let at = self.root.join(file.path);
-                    at.is_file()
-                        .then(|| fs::read_to_string(&at))
-                        .transpose()
-                        .with_context(|| format!("reading {}", at.display()))?
-                }
+                Source::Disk => self.texts.get(file.path).cloned().flatten(),
                 Source::Git => {
                     let found = self
                         .files
@@ -655,6 +671,25 @@ impl FilePart {
         }
         (!kept.is_empty()).then(|| kept.to_string())
     }
+}
+
+/// The text of each file of [`BUILT_UNDER`] and [`READ_BY_BUILDS`] read
+/// for its part, by path, read now from the working tree at `root`: what
+/// a snapshot of it holds of them, three files of under 40 KB at this
+/// writing, read and not parsed until a crate's key asks.
+fn part_texts(root: &Path) -> Result<BTreeMap<&'static str, Option<String>>> {
+    let read = READ_BY_BUILDS
+        .iter()
+        .flat_map(|(_, files)| files.iter().copied());
+    let parted = (BUILT_UNDER.into_iter().chain(read)).filter(|f| f.part != Part::Whole);
+    parted
+        .map(|file| {
+            let at = root.join(file.path);
+            let text = (at.is_file().then(|| fs::read_to_string(&at)).transpose())
+                .with_context(|| format!("reading {}", at.display()))?;
+            Ok((file.path, text))
+        })
+        .collect()
 }
 
 /// Whether `path` is a workspace crate's directory, one with a manifest.
@@ -1001,22 +1036,58 @@ mod tests {
         assert!(one.key(Path::new(".")).is_err());
     }
 
-    /// The same over this workspace, whatever its checkout holds: the
-    /// whole tree's key, and an extension's over its closure. The
-    /// line-ending case is the fixture's above, since a fresh checkout
-    /// writes no CRLF copy for `core.autocrlf=input` to leave unlisted.
+    /// The same over this workspace, whatever its checkout holds, read
+    /// once into a copy: the whole tree's key, and an extension's over
+    /// its closure. The line-ending case is the fixture's above, since a
+    /// fresh checkout writes no CRLF copy for `core.autocrlf=input` to
+    /// leave unlisted.
     #[test]
     fn a_snapshot_of_the_workspace_keys_it_as_the_tree_hash_does() {
-        let root = built_root();
-        let now = Snapshot::disk(&root).unwrap();
+        keys_as_the_tree_hash_does(&built_root(), Path::new("ext/json"), || {});
+    }
+
+    /// A file of the workspace rewritten between the snapshot and the
+    /// tree hash moves neither, as a session's edit lands while the
+    /// harness's own tests run: the fixture stands in for the workspace,
+    /// since a test writes into no checkout.
+    #[test]
+    fn a_file_rewritten_during_the_comparison_moves_neither_side() {
+        let tree = super::fixture("rewritten");
+        let file = tree.join("ext/ctype/src/lib.rs");
+        keys_as_the_tree_hash_does(&tree, Path::new("ext/ctype"), || {
+            fs::write(&file, "// rewritten while the keys are compared\n").unwrap();
+        });
+    }
+
+    /// The whole tree's key and the key of the crate at `krate` that
+    /// [`Snapshot::disk`] gives over `workspace` are the tree hash's and
+    /// the hand-made listing's, every side reading one copy of it taken
+    /// once, with `meanwhile` run in `workspace` between the two: the
+    /// sides read their files at different moments, so over the live
+    /// checkout a file rewritten between them gave two keys.
+    ///
+    /// The copy is [`crate::scratch::repository`]'s, with the
+    /// workspace's `HEAD` as its index, refreshed against the copied
+    /// files: what the workspace modified, added or deleted since its
+    /// commit stands so in the copy, and the snapshot reads each such
+    /// file where it takes every other from the index.
+    fn keys_as_the_tree_hash_does(workspace: &Path, krate: &Path, meanwhile: impl FnOnce()) {
+        let copy = crate::scratch::Tree::new("workspace-copy").unwrap();
+        crate::scratch::repository(workspace, &copy, &["."]).unwrap();
+        let head = git::git(workspace, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        git::git(&copy, &["read-tree", head.trim()]).unwrap();
+        git::git(&copy, &["update-index", "-q", "--refresh"]).unwrap();
+        let root: &Path = &copy;
+        let now = Snapshot::disk(root).unwrap();
+        meanwhile();
         assert_eq!(
             now.key(Path::new(".")).unwrap(),
-            tree_hash(&root, &[PathBuf::from(".")]).unwrap()
+            tree_hash(root, &[PathBuf::from(".")]).unwrap()
         );
         // A crate's: its closure's files and what decides in the
         // configuration and the manifest, each by its blob id.
-        let json = super::closure(&root, Path::new("ext/json")).unwrap();
-        let mut listing: Vec<(String, String)> = git::files_under(&root, &json)
+        let closure = super::closure(root, krate).unwrap();
+        let mut listing: Vec<(String, String)> = git::files_under(root, &closure)
             .unwrap()
             .into_iter()
             .map(|path| {
@@ -1028,15 +1099,18 @@ mod tests {
             .iter()
             .filter(|f| !super::toolchain().any(|t| t == f.path))
         {
-            let text = fs::read_to_string(root.join(file.path)).unwrap();
-            let part = file.part_of(&text).unwrap();
-            listing.push((file.path.into(), git::blob_id(part.as_bytes())));
+            // The fixture has no cargo configuration: an absent file, or
+            // one naming nothing that decides, takes no line.
+            let at = root.join(file.path);
+            if !at.is_file() {
+                continue;
+            }
+            if let Some(part) = file.part_of(&fs::read_to_string(at).unwrap()) {
+                listing.push((file.path.into(), git::blob_id(part.as_bytes())));
+            }
         }
         listing.sort_unstable();
-        assert_eq!(
-            now.key(Path::new("ext/json")).unwrap(),
-            git::listing_id(&listing)
-        );
+        assert_eq!(now.key(krate).unwrap(), git::listing_id(&listing));
     }
 
     /// A crate's key moves with the toolchain, with the codegen tables of
@@ -1259,6 +1333,29 @@ mod tests {
         .unwrap();
         assert_eq!(before.key(ctype).unwrap(), key);
         assert_ne!(Snapshot::disk(&tree).unwrap().key(ctype).unwrap(), key);
+    }
+
+    /// A snapshot holds what of the files rustc is built under decides as
+    /// it was when taken, and, taken with its graph, the crate graph its
+    /// keys widen by: a `[profile]` or rustflags edit made after it, while
+    /// an instrument measures, leaves a crate's key where it was, and the
+    /// next snapshot's moves.
+    #[test]
+    fn a_snapshot_keeps_the_parts_and_the_graph_it_was_taken_with() {
+        let ctype = Path::new("ext/ctype");
+        let then = super::fixture("parts-then");
+        let held = Snapshot::disk(&then).unwrap().key(ctype).unwrap();
+        let tree = super::fixture("parts-now");
+        let before = Snapshot::disk(&tree).unwrap().with_graph().unwrap();
+        assert!(Graph::was_read(&tree));
+        let manifest = fs::read_to_string(tree.join("Cargo.toml")).unwrap();
+        let profiled = format!("{manifest}\n[profile.release]\nlto = true\n");
+        fs::write(tree.join("Cargo.toml"), profiled).unwrap();
+        fs::create_dir_all(tree.join(".cargo")).unwrap();
+        let flags = "[build]\nrustflags = [\"-C\", \"y\"]\n";
+        fs::write(tree.join(".cargo/config.toml"), flags).unwrap();
+        assert_eq!(before.key(ctype).unwrap(), held);
+        assert_ne!(Snapshot::disk(&tree).unwrap().key(ctype).unwrap(), held);
     }
 
     fn closure(graph: &Graph, dir: &str) -> Vec<String> {

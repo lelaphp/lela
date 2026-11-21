@@ -72,7 +72,8 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
     } else {
         manifest.crates_named(only)?
     };
-    let snapshot = Snapshot::disk(root)?;
+    // The tree, graph and all, before cargo builds what it keys.
+    let snapshot = Snapshot::disk(root)?.with_graph()?;
     let installed = installed(root);
     let mut readings = Vec::new();
     for krate in crates {

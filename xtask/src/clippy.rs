@@ -61,10 +61,14 @@ pub(crate) const INSTRUMENT: &str = "clippy";
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
     let mut crates = manifest.crates_named(only)?;
     crates.retain(|k| sources::exists(root, k));
+    if crates.is_empty() {
+        return Ok(Vec::new());
+    }
     // The key each reading carries is the tree's before cargo built it,
-    // so a file written while the crates are measured stales the reading.
-    let snapshot = Snapshot::disk(root)?;
-    let _seat = (!crates.is_empty()).then(|| crate::seat::Seats::of_env().take(INSTRUMENT));
+    // graph and all, so a file written while the crates are measured
+    // stales the reading.
+    let snapshot = Snapshot::disk(root)?.with_graph()?;
+    let _seat = crate::seat::Seats::of_env().take(INSTRUMENT);
     let mut release = Vec::new();
     for krate in &crates {
         if splits(root, krate)? {

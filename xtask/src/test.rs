@@ -142,12 +142,13 @@ fn measure(
 ) -> Result<Vec<Reading>> {
     let mut crates = manifest.crates_named(only)?;
     crates.retain(|k| sources::exists(root, k));
-    // The key each reading carries is the tree's before cargo built it,
-    // so a file written while the crates are measured stales the reading.
-    let snapshot = Snapshot::disk(root)?;
     if crates.is_empty() {
         return Ok(Vec::new());
     }
+    // The key each reading carries is the tree's before cargo built it,
+    // graph and all, so a file written while the crates are measured
+    // stales the reading.
+    let snapshot = Snapshot::disk(root)?.with_graph()?;
     let _seat = crate::seat::Seats::of_env().take(INSTRUMENT);
     let mut readings = Vec::with_capacity(crates.len());
     let (builds, mut ran) = (batch::Builds::hold(root), Vec::new());
