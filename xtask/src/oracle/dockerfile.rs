@@ -1,8 +1,9 @@
-//! The apache image's `PHP_VERSION` held to the pin:
-//! `dist/Dockerfile` states the version php's image sets as the default of
-//! its `ARG PHP_VERSION`, a second statement of `oracle.toml`'s, so a pin
-//! moved without it fails here, at the commit that moves it, rather than
-//! at a release's image build, which checks it against the built `php`.
+//! The images' `PHP_VERSION` held to the pin: `dist/Dockerfile`'s `base`
+//! stage, which every image is built on, states the version php's image
+//! sets as the default of its `ARG PHP_VERSION`, a second statement of
+//! `oracle.toml`'s, so a pin moved without it fails here, at the commit
+//! that moves it, rather than at a release's image build, which checks it
+//! against the built `php`.
 
 /// The Dockerfile at `path` names, as the default of its one
 /// `ARG PHP_VERSION`, the pinned `version`; otherwise what it names, or
@@ -19,7 +20,7 @@ fn holds(path: &std::path::Path, version: &str) -> Result<(), String> {
             path.display()
         )),
         _ => Err(format!(
-            "{} names {} `ARG PHP_VERSION=` lines, where the apache stage names one, the pinned php's",
+            "{} names {} `ARG PHP_VERSION=` lines, where the base stage names one, the pinned php's",
             path.display(),
             named.len()
         )),
@@ -44,11 +45,11 @@ mod tests {
         assert_eq!(holds(&fixture, "8.5.9"), Ok(()));
     }
 
-    /// `dist/Dockerfile`'s apache stage names the version `oracle.toml`
-    /// pins.
+    /// `dist/Dockerfile`'s base stage, which every image is built on,
+    /// names the version `oracle.toml` pins.
     #[cfg(tracked)]
     #[test]
-    fn the_apache_image_s_php_version_is_the_pinned_php_s() {
+    fn the_images_php_version_is_the_pinned_php_s() {
         let root = crate::package_dir().parent().unwrap().to_path_buf();
         let manifest = crate::manifest::Manifest::load(&root).unwrap();
         let version = &manifest.pin().unwrap().oracle.version;
