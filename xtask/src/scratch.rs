@@ -540,9 +540,7 @@ pub fn xtask(bin: &'static str) -> &'static Path {
 pub fn repository(workspace: &Path, to: &Path, scopes: &[&str]) -> Result<()> {
     crate::make_dir(to)?;
     for file in crate::git::files_under(workspace, scopes)? {
-        let target = to.join(&file);
-        crate::make_parent(&target)?;
-        std::fs::copy(workspace.join(&file), &target)
+        copy_standing(&workspace.join(&file), &to.join(&file))
             .with_context(|| format!("copying {file} into {}", to.display()))?;
     }
     git(to, &["init", "-q", "-b", "main"])?;
@@ -560,6 +558,20 @@ pub fn repository(workspace: &Path, to: &Path, scopes: &[&str]) -> Result<()> {
         &[&UNHOOKED[..], &["commit", "-q", "-m", "scratch"]].concat(),
     )?;
     Ok(())
+}
+
+/// The file at `from` copied to `to`, its directory made first. The
+/// listing [`repository`] copies from is the working tree a moment
+/// before: a file gone since, as an editor's temporary file is once it is
+/// renamed over the one it saves, is no file of the scratch's, and is
+/// left out rather than failing the copy.
+fn copy_standing(from: &Path, to: &Path) -> Result<()> {
+    crate::make_parent(to)?;
+    match std::fs::copy(from, to) {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && !from.exists() => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// The options before a `git` call that commits in a scratch repository,
@@ -1050,6 +1062,24 @@ mod tests {
         Binary, Full, INIT, LOCK, Orphan, Stray, Tree, beside, hold, made, reap, stop_forsaken,
     };
     use crate::reading::{Reading, Status};
+
+    /// A file listed for a scratch repository and gone before its copy,
+    /// as an editor's temporary file is once renamed over its target,
+    /// is left out of the copy, and a file standing is copied whole.
+    #[test]
+    fn a_file_gone_between_the_listing_and_its_copy_is_left_out() {
+        let tree = Tree::new("copy-standing").unwrap();
+        let (from, to) = (tree.join("from"), tree.join("to"));
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("kept.txt"), "kept\n").unwrap();
+        super::copy_standing(&from.join("gone.txt"), &to.join("a/gone.txt")).unwrap();
+        assert!(!to.join("a/gone.txt").exists());
+        super::copy_standing(&from.join("kept.txt"), &to.join("b/kept.txt")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(to.join("b/kept.txt")).unwrap(),
+            "kept\n"
+        );
+    }
 
     /// A held program runs as it stood when it was held: the path
     /// it was copied from is removed after one spawn, as cargo's relink
