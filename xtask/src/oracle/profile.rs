@@ -11,8 +11,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-/// One profile of the workspace's `Cargo.toml` a lane's binary is built in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One profile of the workspace's `Cargo.toml` a lane's binary is built in,
+/// and every one it defines: a name on the command line that is none of
+/// these is a usage error naming them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Profile {
     /// `dev`, cargo's default, built into `debug/`: no optimisation, with
     /// debug assertions and overflow checks.
@@ -149,14 +151,20 @@ fn built(
         );
     let what = format!("{binary}; its errors are on the harness's second stream");
     run(root, &mut cargo, &added, &what)?;
-    let target = into.map_or_else(
-        || {
-            std::env::var_os("CARGO_TARGET_DIR")
-                .map_or_else(|| root.join("target"), |dir| root.join(dir))
-        },
-        Path::to_path_buf,
-    );
-    let built = profile.binary(&target, binary);
+    let target = into.map_or_else(|| target(root), Path::to_path_buf);
+    found(profile, &target, binary)
+}
+
+/// The target directory cargo builds into in `root`: the one
+/// `CARGO_TARGET_DIR` names, relative to `root`, else `root`'s own.
+fn target(root: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), |dir| root.join(dir))
+}
+
+/// Where cargo put `binary`, built in `profile` under `target`, refused
+/// where it is not there.
+fn found(profile: Profile, target: &Path, binary: &str) -> Result<PathBuf> {
+    let built = profile.binary(target, binary);
     if !built.is_file() {
         bail!("cargo built {binary} and it is not at {}", built.display());
     }
@@ -178,10 +186,10 @@ fn cargo() -> std::ffi::OsString {
 }
 
 /// The arguments of the cargo line that builds every host of
-/// [`super::hosts::HOSTS`] in the lanes' profile, their crates by package
+/// [`super::hosts::HOSTS`] in `profile`, their crates by package
 /// ([`super::engine_build`] says why by package).
-pub(crate) fn hosts() -> Vec<String> {
-    let mut args = ["build", "--profile", LANE.name()]
+pub(crate) fn hosts(profile: Profile) -> Vec<String> {
+    let mut args = ["build", "--profile", profile.name()]
         .map(str::to_owned)
         .to_vec();
     for host in super::hosts::HOSTS {
@@ -190,13 +198,19 @@ pub(crate) fn hosts() -> Vec<String> {
     args
 }
 
-/// Every host built in `root` by [`hosts`]' line, what cargo prints on
-/// the harness's streams.
-pub(crate) fn build_hosts(root: &Path) -> Result<()> {
+/// Every host built in `root` in `profile` by [`hosts`]' line, what cargo
+/// prints on the harness's streams, and where cargo put each one, in
+/// [`super::hosts::HOSTS`]' order.
+pub(crate) fn build_hosts(root: &Path, profile: Profile) -> Result<Vec<PathBuf>> {
     let mut cargo = Command::new(cargo());
-    cargo.args(hosts());
+    cargo.args(hosts(profile));
     let what = format!("the hosts in {}", root.display());
-    run(root, &mut cargo, &Added::inherited(), &what)
+    run(root, &mut cargo, &Added::inherited(), &what)?;
+    let target = target(root);
+    super::hosts::HOSTS
+        .iter()
+        .map(|host| found(profile, &target, host.binary))
+        .collect()
 }
 
 /// `cargo`, a build line, run in `root` with `added` on it and the seat's
@@ -546,6 +560,34 @@ mod tests {
         for line in cargo {
             assert!(line.ends_with("\"${cfg[@]}\""), "{line}");
         }
+    }
+
+    /// The profiles the workspace's `Cargo.toml` defines are every
+    /// [`Profile`] and no other, each by the name the command line takes,
+    /// so a profile added there and not here is caught, and a name the
+    /// command line refuses is one the workspace does not define.
+    #[test]
+    fn the_profiles_are_the_ones_the_workspace_defines() {
+        use clap::ValueEnum;
+        let text = std::fs::read_to_string(workspace().join("Cargo.toml")).unwrap();
+        let manifest: toml::Table = text.parse().unwrap();
+        let mut defined: Vec<&str> = manifest["profile"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        defined.sort_unstable();
+        let mut known: Vec<&str> = Profile::value_variants()
+            .iter()
+            .map(|p| {
+                let named = p.to_possible_value().unwrap();
+                assert_eq!(named.get_name(), p.name(), "{p:?}");
+                p.name()
+            })
+            .collect();
+        known.sort_unstable();
+        assert_eq!(known, defined);
     }
 
     /// The lanes' build is looked for first, and `dev`'s directory is

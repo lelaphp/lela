@@ -198,8 +198,8 @@ impl Seats {
 
 /// The seat `command` builds in, taken before it runs: every building
 /// instrument's but `clippy`'s and `test`'s, which take theirs once they
-/// know they have a crate to build; and every seat for a bench on a
-/// dedicated or a hosted machine.
+/// know they have a crate to build, and the `hosts` command's; and every
+/// seat for a bench on a dedicated or a hosted machine.
 pub(crate) fn of_command(command: &crate::cli::Command) -> Option<Seat> {
     use crate::cli::Command;
     if let Command::Bench(ask) = command
@@ -220,6 +220,7 @@ pub(crate) fn of_command(command: &crate::cli::Command) -> Option<Seat> {
         Command::FpmCompare { .. } | Command::Soak { .. } => "makala",
         Command::Witness(_) => "witness",
         Command::Bench(_) => "bench",
+        Command::Hosts { .. } => "hosts",
         _ => return None,
     };
     Some(Seats::of_env().take(instrument))

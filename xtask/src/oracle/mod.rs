@@ -1963,7 +1963,7 @@ pub const ENGINE: &str = hosts::CLI.binary;
 /// with every workspace member's features unified, the harness's
 /// extensions among them, which is not the binary the lane measures.
 pub(crate) fn engine_build() -> String {
-    format!("cargo {}", profile::hosts().join(" "))
+    format!("cargo {}", profile::hosts(profile::LANE).join(" "))
 }
 
 /// The extensions php names otherwise than their crates, the module's
