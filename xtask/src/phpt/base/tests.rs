@@ -184,6 +184,16 @@ fn all_per_commit_includes_untouched_subsets_and_reuses_only_fresh_runs() {
     .unwrap();
     against::carry(&dir, &root).unwrap();
     laid.remove().unwrap();
+    // A run kept at the base is the call's end; one not kept, as a subset
+    // refused there leaves it, is a call that could not run to its end.
+    let wanted = |scope: &str| [scope.to_owned()];
+    super::kept(&root, &manifest, &base, &wanted("ext/pcre")).unwrap();
+    let short = super::kept(&root, &manifest, &base, &wanted("ext/ctype")).unwrap_err();
+    assert!(
+        short.downcast_ref::<crate::exit::Unfinished>().is_some(),
+        "{short:#}"
+    );
+    assert!(format!("{short:#}").contains("ext/ctype"), "{short:#}");
     assert_eq!(
         selected(&Ask::default(), true),
         ["ext/ctype", "ext/zend_test"]

@@ -20,14 +20,16 @@
 //! removed, whatever the build or the runs came to, the call stopped by a
 //! signal among them ([`Laid`]). The readings of the
 //! runs at the base are printed and not recorded: they are the base's,
-//! and what the call keeps is the runs. Its exit is 1 while a subset it
-//! was asked for has no run kept at the base afterwards, naming why.
+//! and what the call keeps is the runs. While a subset it was asked for
+//! has no run kept at the base afterwards, a subset refused there among
+//! the causes, it could not run to its end, and exits so
+//! (`exit::UNFINISHED`), naming why.
 
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use super::{Ask, Subset, against};
 use crate::carried::Carried;
@@ -79,22 +81,31 @@ pub(crate) fn take(
     carried?;
     removed?;
     say(&format!("removed {}", dir.display()));
+    kept(root, manifest, &base, &wanted)?;
+    say(&format!("kept: {} at {base}", listed(&wanted)));
+    Ok(())
+}
+
+/// Nothing where every run of `wanted` is kept at `base`; else the call
+/// could not run to its end, a subset refused at the base among the
+/// causes, naming the runs not kept.
+fn kept(root: &Path, manifest: &Manifest, base: &Base, wanted: &[String]) -> Result<()> {
     let mut missing = Vec::new();
-    for scope in &wanted {
+    for scope in wanted {
         if against::kept_at(root, manifest, &base.commit, scope)?.is_err() {
             missing.push(scope.as_str());
         }
     }
-    if !missing.is_empty() {
-        bail!(
-            "{} of {} runs asked for are not kept at {base}: {}; the readings at the base above say why",
-            missing.len(),
-            wanted.len(),
-            listed(&missing)
-        );
+    if missing.is_empty() {
+        return Ok(());
     }
-    say(&format!("kept: {} at {base}", listed(&wanted)));
-    Ok(())
+    let why = anyhow::anyhow!(
+        "{} of {} runs asked for are not kept at {base}: {}; the readings at the base above say why",
+        missing.len(),
+        wanted.len(),
+        listed(&missing)
+    );
+    Err(crate::exit::Unfinished::of(super::INSTRUMENT, why))
 }
 
 /// The selected scopes without a valid run under the caller's recipe.
