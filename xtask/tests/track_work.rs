@@ -684,7 +684,7 @@ fn a_worktree_that_is_not_ready_stops_the_run_and_is_no_sessions() {
     fs::write(&cargo, failing).unwrap();
     xtask::scratch::executable(&cargo).unwrap();
     let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 3, "{out}");
+    assert_eq!(code, i32::from(xtask::exit::NOT_READY), "{out}");
     assert!(out.contains("not ready to be worked in"), "{out}");
     let worktree = scratch.worktree("t20");
     assert!(worktree.is_dir(), "{out}");

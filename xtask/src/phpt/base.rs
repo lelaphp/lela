@@ -181,7 +181,7 @@ fn run_at(
             locks: ask.locks.clone(),
             ..Ask::default()
         };
-        for reading in super::run(dir, manifest, registry, &ask)? {
+        for reading in super::run(dir, manifest, registry, &ask)?.readings {
             say(&format!("at the base, {}", reading.message));
         }
     }

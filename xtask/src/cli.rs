@@ -21,6 +21,24 @@ pub(crate) struct Cli {
     pub command: Command,
 }
 
+impl Cli {
+    /// The process's command line, its `--help` ending on the exit
+    /// statuses, the two of their own rendered from the constants the
+    /// binary exits with.
+    pub(crate) fn read() -> Cli {
+        use clap::{CommandFactory, FromArgMatches};
+        let (not_ready, unfinished) = (crate::exit::NOT_READY, crate::exit::UNFINISHED);
+        let exits = format!(
+            "Exit status:\n  0  done\n  1  a refusal, or a reading that fails\n  2  a usage error\n  \
+             {not_ready}  a worktree laid down and not ready to be worked in\n  \
+             {unfinished}  an instrument that could not run to its end, its readings \
+             not whole; `phpt` gives it"
+        );
+        let matches = Cli::command().after_help(exits).get_matches();
+        Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     /// Hold the seams: regenerate and diff each lock, hold crate edges,

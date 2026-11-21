@@ -1292,7 +1292,9 @@ fn an_extension_with_no_test_directory_reads_as_a_skip_and_a_name_that_is_nothin
             jobs: NonZeroUsize::new(1),
             ..Ask::default()
         };
-        let readings = super::run(&root, &manifest, &registry, &ask).unwrap();
+        let readings = super::run(&root, &manifest, &registry, &ask)
+            .unwrap()
+            .readings;
         assert_eq!(
             readings.len(),
             if subset.is_some() { 1 } else { 2 },
@@ -2271,8 +2273,10 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
 /// A lane whose second subset is refused for a `MySQL` server that does
 /// not answer still writes the first subset's reading, and the refusal is
 /// the second's own failing reading with its cause, so the lane's exit
-/// says it without erasing the rest. Before, the refusal was the
-/// lane's error and no reading of the lane was written.
+/// says it without erasing the rest: the exit of a run that could not
+/// run to its end, never a failing test's. Before, the refusal was the
+/// lane's error and no reading of the lane was written; then it was
+/// written, and the lane exited 1 as a failing test does.
 #[test]
 fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading() {
     if oracle().is_none() {
@@ -2303,7 +2307,15 @@ fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading(
         jobs: NonZeroUsize::new(1),
         ..Ask::default()
     };
-    let readings = super::run(&root, &manifest, &registry(""), &ask).unwrap();
+    let ran = super::run(&root, &manifest, &registry(""), &ask).unwrap();
+    assert_eq!(ran.unrun, ["ext/pdo_mysql"], "{ran:#?}");
+    let short = ran.whole().unwrap_err();
+    assert!(
+        short.downcast_ref::<crate::exit::Unfinished>().is_some(),
+        "the exit is not the one a failing test gives: {short:#}"
+    );
+    assert!(format!("{short:#}").contains("ext/pdo_mysql"), "{short:#}");
+    let readings = ran.readings;
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
     assert_eq!(scopes, ["ext/hollow", "ext/pdo_mysql"], "{readings:#?}");
     assert_eq!(readings[0].status, Status::Skip, "{readings:#?}");
