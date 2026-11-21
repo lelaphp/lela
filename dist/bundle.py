@@ -35,6 +35,15 @@ and NOTICE* files. A library in no keg, and a keg with no licence file, are
 refused by name. The list's first line is `macos <version>`, the oldest
 macOS the tarball runs on, the highest minimum any Mach-O in it names; each
 line after it is `lib/<name> <keg> <version>`.
+
+Where a `libcrypto` is among them, its keg's stock `openssl.cnf` is laid
+beside it as lib/openssl.cnf: the copy the keg's bottle carries,
+`<keg>/.bottle/etc/<keg>/openssl.cnf`, as OpenSSL ships it, and not the one
+Homebrew poured under `<prefix>/etc`, which the machine may have edited. The
+library compiles in Homebrew's directory for it, so a Mac without the keg
+has none there, and ext/openssl reads the tarball's where that one cannot be
+read and neither OPENSSL_CONF nor SSLEAY_CONF names one. A keg without the
+file is refused by name.
 """
 
 import os
@@ -52,6 +61,7 @@ SYSTEM = ("/usr/lib/", "/System/")
 LOADS = ("LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LAZY_LOAD_DYLIB", "LC_LOAD_UPWARD_DYLIB")
 LICENCES = ("LICENSE", "LICENCE", "COPYING", "NOTICE")
 LIST = "bundled-libraries.txt"
+CONF = "openssl.cnf"
 # The first bytes of a Mach-O: thin, 64-bit or 32-bit, or universal.
 MAGIC = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf")
 
@@ -277,20 +287,40 @@ def licences(library):
     return texts
 
 
+def openssl_conf(placed):
+    """The stock openssl.cnf of the keg the bundled libcrypto is copied
+    from, as its bottle carries it; None where no libcrypto is bundled."""
+    kegs = sorted({(l.keg, l.version, l.root) for l in placed if l.name.startswith("libcrypto.")})
+    if not kegs:
+        return None
+    if len(kegs) > 1:
+        raise Refusal(f"libcrypto comes from {len(kegs)} kegs, {', '.join(f'{k} {v}' for k, v, _ in kegs)}, "
+                      f"so which {CONF} the tarball carries is not known")
+    keg, version, root = kegs[0]
+    conf = root / ".bottle" / "etc" / keg / CONF
+    if not conf.is_file():
+        raise Refusal(f"the keg {keg} {version} carries no stock {CONF}, no {conf}")
+    return conf
+
+
 def bundle(stage, hosts):
-    """The hosts' libraries copied into lib/ of the stage, every name
-    rewritten and every rewritten file signed again ad hoc, the kegs'
-    licences under licenses/ and the list beside them. Returns the list's
-    lines."""
+    """The hosts' libraries copied into lib/ of the stage, with libcrypto's
+    keg's stock openssl.cnf where one is among them, every name rewritten
+    and every rewritten file signed again ad hoc, the kegs' licences under
+    licenses/ and the list beside them. Returns the list's lines."""
     stage = Path(stage)
     images = walk(hosts)
     placed = libraries(images, hosts)
     for library in placed.values():
         licences(library)
+    conf = openssl_conf(placed.values())
     (stage / "lib").mkdir(exist_ok=True)
     for library in placed.values():
         shutil.copyfile(library.real, stage / "lib" / library.name)
         (stage / "lib" / library.name).chmod(0o644)
+    if conf is not None:
+        shutil.copyfile(conf, stage / "lib" / CONF)
+        (stage / "lib" / CONF).chmod(0o644)
     rewrites = plan(stage, images, placed)
     for file, arguments in rewrites.items():
         subprocess.run(["install_name_tool", *arguments, str(file)], check=True, capture_output=True, text=True)

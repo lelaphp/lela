@@ -23,8 +23,9 @@ runtime-packages.txt installed, and the macOS hosts once every Mach-O in
 the tarball is read to carry an ad-hoc signature. A macOS tarball carries
 the libraries its hosts load outside the system's under lib/, each name
 rewritten relative to the file that carries it and each rewritten file
-signed again ad hoc, with the kegs' licences and the list of them, which
-dist/bundle.py lays; its dry run names the libraries the hosts built here
+signed again ad hoc, with the kegs' licences and the list of them, and
+the stock openssl.cnf of the keg its libcrypto comes from beside them,
+which dist/bundle.py lays; its dry run names the libraries the hosts built here
 load, where they are built. Last, the release's install.sh installs the
 tarball there into a home of its own, as a user runs it, and runs
 `lela -v` through its link.
@@ -68,8 +69,8 @@ The hosts and the tarballs are named after dist/Dockerfile's `ARG NAME`
 `bin/lela-cgi`, `sbin/lela-fpm` and `bin/lela-dbg`, which dist/publish.py's
 HOSTS names as `cargo xtask hosts --list` prints them, then
 `etc/php.ini-development` and `etc/php.ini-production`,
-a Linux one `runtime-packages.txt` too, and a macOS one `lib/`,
-`licenses/<keg>/` and `bundled-libraries.txt`. CARGO_BUILD_JOBS (default 1)
+a Linux one `runtime-packages.txt` too, and a macOS one `lib/`, with
+`lib/openssl.cnf` among it, `licenses/<keg>/` and `bundled-libraries.txt`. CARGO_BUILD_JOBS (default 1)
 reaches the Linux build, and SMOKE (default dist/smoke.sh) is the smoke a
 macOS tarball is given.
 """
@@ -199,8 +200,9 @@ def stage_darwin(stage):
 
 def lay_darwin(stage, built):
     """The hosts from `built`, php's ini files beside them, and the
-    libraries they load outside the system's under lib/, with the list of
-    them and their licences (dist/bundle.py)."""
+    libraries they load outside the system's under lib/, with libcrypto's
+    stock openssl.cnf, the list of them and their licences
+    (dist/bundle.py)."""
     hosts = [stage / host for host in darwin_hosts()]
     for host in hosts:
         host.parent.mkdir(parents=True, exist_ok=True)
@@ -222,8 +224,12 @@ def dry_darwin():
         print(f"bundle no hosts built in {built} on this machine, so the libraries are named once they are")
         return
     print(f"bundle read from the hosts in {built}")
-    for library in bundle.closure(hosts):
+    libraries = bundle.closure(hosts)
+    for library in libraries:
         print(f"bundle lib/{library.name} {library.keg} {library.version}")
+    conf = bundle.openssl_conf(libraries)
+    if conf is not None:
+        print(f"bundle lib/{bundle.CONF} from {conf}")
 
 
 def stage_linux(stage, platform):

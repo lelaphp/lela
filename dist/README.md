@@ -366,7 +366,7 @@ is unpacked or moved to.
 lela-<version>-darwin-arm64/
   bin/lela  bin/lela-cgi  bin/lela-dbg  sbin/lela-fpm
   etc/php.ini-development  etc/php.ini-production
-  lib/<each library>
+  lib/<each library>  lib/openssl.cnf
   licenses/<keg>/<each licence file of the keg>
   bundled-libraries.txt
 ```
@@ -384,7 +384,15 @@ system's; `dist/smoke.sh` holds the unpacked tarball to the same with
 <dir>` alone), then runs the hosts in a sandbox that denies reading
 Homebrew's prefix, where `brew` and `sandbox-exec` are on the machine.
 `dist/release.py build ... darwin-arm64 ... --dry-run` names the libraries
-the hosts in `target/release` load, where all three are built.
+the hosts in `target/release` load, where all three are built, and the
+`openssl.cnf` it would lay.
+
+`lib/openssl.cnf` is OpenSSL's stock configuration file, the one the keg
+`lib/libcrypto.*.dylib` is copied from ships: its bottle's copy,
+`<prefix>/Cellar/<keg>/<version>/.bottle/etc/<keg>/openssl.cnf`, and not the
+one Homebrew poured under `<prefix>/etc/<keg>/`, which the building machine
+may have edited (#46, #119). A libcrypto keg without that file is refused by
+name. Its licence is the keg's, under `licenses/<keg>/`.
 
 The program to put on `PATH` is `bin/lela` of the unpacked directory, by a
 link to it: a copy of `bin/lela` alone finds no `../lib`. dyld resolves

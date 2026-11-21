@@ -231,6 +231,14 @@ class Tree(unittest.TestCase):
                 "id": f"{p}/opt/openssl@4/lib/libcrypto.4.dylib", "names": [], "rpaths": [], "minos": "15.0",
             }),
         })
+        # OpenSSL's stock configuration, as the keg's bottle ships it, and the
+        # copy Homebrew poured under the prefix's etc, which this machine edited.
+        self.conf = self.prefix / "Cellar/openssl@4/4.1.0/.bottle/etc/openssl@4/openssl.cnf"
+        self.conf.parent.mkdir(parents=True)
+        self.conf.write_text("[ req ]\ndefault_bits = 2048\n")
+        poured = self.prefix / "etc/openssl@4/openssl.cnf"
+        poured.parent.mkdir(parents=True)
+        poured.write_text("[ req ]\ndefault_bits = 512\n")
         links = [
             "/usr/lib/libSystem.B.dylib", f"{p}/opt/brotli/lib/libbrotlidec.1.dylib",
             f"{p}/opt/jpeg-turbo/lib/libjpeg.8.dylib", f"{p}/opt/icu4c@79/lib/libicuuc.79.dylib",
@@ -325,8 +333,13 @@ class Bundle(Tree):
         ])
         self.assertEqual(load(lib / "libjpeg.8.dylib")["rpaths"], [])
         self.assertEqual(load(lib / "libicuuc.79.dylib")["names"][0], "@loader_path/libicudata.79.dylib")
-        self.assertEqual(sorted(p.name for p in lib.iterdir()), [l.split()[0].removeprefix("lib/") for l in lines[1:]])
-        for path in lib.iterdir():
+        self.assertEqual(sorted(p.name for p in lib.iterdir()),
+                         sorted([*(l.split()[0].removeprefix("lib/") for l in lines[1:]), "openssl.cnf"]))
+        # The keg's stock openssl.cnf beside the libraries, not the one the
+        # machine edited under its prefix's etc.
+        self.assertEqual((lib / "openssl.cnf").read_text(), "[ req ]\ndefault_bits = 2048\n")
+        self.assertEqual((lib / "openssl.cnf").stat().st_mode & 0o777, 0o644)
+        for path in (path for path in lib.iterdir() if path.name != "openssl.cnf"):
             with self.subTest(path=path.name):
                 self.assertFalse(path.is_symlink())
                 self.assertEqual(path.stat().st_mode & 0o777, 0o644)
@@ -372,6 +385,16 @@ class Bundle(Tree):
     def test_a_keg_with_no_licence_is_refused_by_name(self):
         (self.prefix / "Cellar/jpeg-turbo/3.2.1/LICENSE.md").unlink()
         self.refused("the keg jpeg-turbo 3.2.1 carries no licence text, no LICENSE*, LICENCE*, COPYING* or NOTICE*")
+
+    def test_a_libcrypto_keg_without_its_stock_openssl_cnf_is_refused_by_name(self):
+        self.conf.unlink()
+        self.refused(f"the keg openssl@4 4.1.0 carries no stock openssl.cnf, no {self.conf}")
+
+    def test_no_openssl_cnf_is_laid_where_no_libcrypto_is_bundled(self):
+        self.hosts[0].unlink()
+        bundle.bundle(self.stage, self.hosts[1:])
+        self.assertEqual(sorted(p.name for p in (self.stage / "lib").iterdir()),
+                         ["libbrotlicommon.1.dylib", "libbrotlidec.1.dylib"])
 
     def test_two_libraries_of_one_file_name_are_refused(self):
         other = self.prefix / "Cellar/other/1.0/lib/libjpeg.8.dylib"

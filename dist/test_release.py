@@ -650,9 +650,10 @@ class Build(Recorded):
 # A cargo that records its call and links each host the build names as a
 # program of nothing, which the macOS linker signs ad hoc as it signs the
 # real hosts; UNSIGNED takes that signature off again. Where KEGS names a
-# directory, it lays a Homebrew prefix there of one keg, zz 1.0_1, whose
-# library each host calls by the keg's opt path, as the real hosts call
-# the kegs they link.
+# directory, it lays a Homebrew prefix there of two kegs, zz 1.0_1 and
+# openssl@4 4.1.0, the second with a libcrypto and the stock openssl.cnf
+# its bottle carries, whose libraries each host calls by the kegs' opt
+# paths, as the real hosts call the kegs they link.
 CARGO = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys
 arguments = sys.argv[1:]
@@ -671,7 +672,18 @@ if os.environ.get("KEGS"):
     subprocess.run(["cc", "-x", "c", "-", "-dynamiclib", "-o", os.path.join(lib, "libzz.1.dylib"),
                     "-install_name", os.path.join(kegs, "opt/zz/lib/libzz.1.dylib")],
                    input=b"int zz(void){return 0;}\n", check=True)
-    source, link = b"int zz(void); int main(void){return zz();}\n", ["-x", "none", os.path.join(kegs, "opt/zz/lib/libzz.1.dylib")]
+    crypto = os.path.join(kegs, "Cellar/openssl@4/4.1.0")
+    os.makedirs(os.path.join(crypto, "lib"))
+    open(os.path.join(crypto, "LICENSE.txt"), "w").write("OpenSSL's licence\n")
+    os.makedirs(os.path.join(crypto, ".bottle/etc/openssl@4"))
+    open(os.path.join(crypto, ".bottle/etc/openssl@4/openssl.cnf"), "w").write("[ req ]\ndefault_bits = 2048\n")
+    os.symlink("../Cellar/openssl@4/4.1.0", os.path.join(kegs, "opt/openssl@4"))
+    subprocess.run(["cc", "-x", "c", "-", "-dynamiclib", "-o", os.path.join(crypto, "lib/libcrypto.4.dylib"),
+                    "-install_name", os.path.join(kegs, "opt/openssl@4/lib/libcrypto.4.dylib")],
+                   input=b"int crypto(void){return 0;}\n", check=True)
+    source = b"int zz(void); int crypto(void); int main(void){return zz() + crypto();}\n"
+    link = ["-x", "none", os.path.join(kegs, "opt/zz/lib/libzz.1.dylib"),
+            os.path.join(kegs, "opt/openssl@4/lib/libcrypto.4.dylib")]
 for i, a in enumerate(arguments):
     if a == "--bin":
         host = os.path.join(release, arguments[i + 1])
@@ -739,16 +751,22 @@ class BuildDarwin(Recorded):
         kegs = self.scratch / "homebrew"
         run = self.run_step("build", "v1.2.0", "darwin-arm64", str(self.out), KEGS=str(kegs), **self.env)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(self.lines(run, "bundle")[1:], ["lib/libzz.1.dylib zz 1.0_1"])
+        self.assertEqual(self.lines(run, "bundle")[1:], [
+            "lib/libcrypto.4.dylib openssl@4 4.1.0", "lib/libzz.1.dylib zz 1.0_1",
+        ])
         _, smoke = self.calls()
         self.assertEqual(smoke, ["smoke", [
             "bin/lela", "bin/lela-cgi", "bin/lela-dbg", "bundled-libraries.txt", "etc/php.ini-development",
-            "etc/php.ini-production", "lib/libzz.1.dylib", "licenses/zz/COPYING", "sbin/lela-fpm",
+            "etc/php.ini-production", "lib/libcrypto.4.dylib", "lib/libzz.1.dylib", "lib/openssl.cnf",
+            "licenses/openssl@4/LICENSE.txt", "licenses/zz/COPYING", "sbin/lela-fpm",
         ]])
         unpacked = self.scratch / "unpacked"
         unpacked.mkdir()
         subprocess.run(["tar", "-xzf", str(self.out / "lela-1.2.0-darwin-arm64.tar.gz"), "-C", str(unpacked)], check=True)
         tree = unpacked / "lela-1.2.0-darwin-arm64"
+        # The stock openssl.cnf of the keg libcrypto came from, as its bottle
+        # carries it.
+        self.assertEqual((tree / "lib/openssl.cnf").read_text(), "[ req ]\ndefault_bits = 2048\n")
         names = subprocess.run(["otool", "-L", str(tree / "sbin/lela-fpm")], check=True, capture_output=True, text=True)
         self.assertIn("\t@loader_path/../lib/libzz.1.dylib (compatibility version", names.stdout)
         self.assertNotIn(str(kegs), names.stdout)
@@ -766,7 +784,9 @@ class BuildDarwin(Recorded):
         self.assertEqual(cargo.returncode, 0)
         run = self.run_step("build", "v1.2.0", "darwin-arm64", str(self.out), "--dry-run", **self.env)
         self.assertEqual(self.lines(run, "bundle")[1:], [
-            f"read from the hosts in {self.scratch / 'target/release'}", "lib/libzz.1.dylib zz 1.0_1",
+            f"read from the hosts in {self.scratch / 'target/release'}", "lib/libcrypto.4.dylib openssl@4 4.1.0",
+            "lib/libzz.1.dylib zz 1.0_1",
+            f"lib/openssl.cnf from {self.scratch / 'homebrew/Cellar/openssl@4/4.1.0/.bottle/etc/openssl@4/openssl.cnf'}",
         ])
         self.assertEqual([c[0] for c in self.calls()], ["cargo"])
         self.assertFalse(self.out.exists())
