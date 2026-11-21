@@ -268,6 +268,28 @@ platforms from that file and not from the installer's text:
 An Intel Mac is a refusal of the installer, not a platform, so it is no
 row of the table and none of `platforms.json`.
 
+The release workflow's build matrix is printed from the table too, so a
+platform is added to `PLATFORMS` and nowhere in the workflow:
+
+```sh
+dist/release.py matrix
+```
+
+It prints one line of JSON, which the workflow's `check` job writes to
+its outputs and each build job reads with `fromJSON`: the table's
+platforms in its order, whose tarballs the `release` job lays down, and
+under `families` a matrix for each family's job, `darwin` for the
+platforms cargo builds on a Mac and `linux` for those the Dockerfile
+builds, a row per platform with its name and its Docker platform. Every
+family is printed, one with no row too. It takes no tag and holds
+nothing. A row's runner stays the workflow's to choose, by its family
+and its Docker platform, since the runners are the repository's
+variables and not the release's:
+
+```json
+{"platforms": ["darwin-arm64", "linux-aarch64", "linux-x86_64"], "families": {"darwin": {"include": [{"platform": "darwin-arm64", "docker": null}]}, "linux": {"include": [...]}}}
+```
+
 A release attaches the tarballs, `install.sh`, `platforms.json` and
 `SHA256SUMS`, which names every other file the release attaches, the
 installer included, in the format `sha256sum -c` reads.
