@@ -656,7 +656,7 @@ fn dockerfile_of(text: &str, version: &str) -> Result<String> {
         .collect();
     let [at] = named[..] else {
         bail!(
-            "{DOCKERFILE} names {} `{lead}` lines, where the apache stage names one",
+            "{DOCKERFILE} names {} `{lead}` lines, where the base stage names one",
             named.len()
         );
     };
