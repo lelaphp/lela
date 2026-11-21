@@ -50,7 +50,7 @@ use anyhow::{Result, anyhow};
 use super::anchor::Entry;
 use super::fence::Served;
 use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, MAKALA, PHPDBG};
-use crate::oracle::profile;
+use crate::oracle::profile::{self, Built, Profile};
 use crate::oracle::{Ended, Invocation, Observation, Oracle, Program, Recipe, Stdin, normalise_in};
 use crate::phpt::environment::Environment;
 use crate::phpt::{Build, cgi, file::Phpt};
@@ -74,8 +74,8 @@ pub(crate) struct Binary {
     built: Mutex<BTreeMap<Key, Slot>>,
 }
 
-/// Where one build's path, or its failure, is kept once it ran.
-type Slot = Arc<OnceLock<Result<PathBuf, String>>>;
+/// Where one build, or its failure, is kept once it ran.
+type Slot = Arc<OnceLock<Result<Built, String>>>;
 
 /// The key of a binary a run builds: a host by its crate, and the bundle
 /// features `php` is built with on, none for the binary under test.
@@ -114,7 +114,9 @@ impl Binary {
     fn stand(&self, host: EngineHost, features: &[&str], path: PathBuf) {
         let mut built = crate::locked(&self.built);
         let key = (host.krate, owned(features));
-        built.insert(key, Arc::new(OnceLock::from(Ok(path))));
+        // A stand-in for the lanes' build of the host, as the run builds it.
+        let profile = profile::LANE;
+        built.insert(key, Arc::new(OnceLock::from(Ok(Built { path, profile }))));
     }
 
     /// Where `host`'s binary is, built from the tree now if this run has
@@ -122,7 +124,15 @@ impl Binary {
     /// host's own line runs, and the CLI's what `crosscheck`
     /// starts as the built-in server.
     pub(crate) fn host(&self, host: EngineHost) -> Result<PathBuf> {
-        self.built(host, &[])
+        self.built(host, &[]).map(|built| built.path)
+    }
+
+    /// The profile of `host`'s build, once this run has built it: what a
+    /// reading of the lines it ran names.
+    pub(crate) fn profile(&self, host: EngineHost) -> Option<Profile> {
+        let built = crate::locked(&self.built);
+        let slot = built.get(&(host.krate, Vec::new()))?;
+        slot.get()?.as_ref().ok().map(|built| built.profile)
     }
 
     /// Where `host`'s binary is, `php` built with `features` of the bundle
@@ -132,7 +142,7 @@ impl Binary {
     /// yet: every request it serves records the natives it entered where
     /// `PHP_WITNESS_TRACE` names a file, with no build of its own for the
     /// lane.
-    fn built(&self, host: EngineHost, features: &[&str]) -> Result<PathBuf> {
+    fn built(&self, host: EngineHost, features: &[&str]) -> Result<Built> {
         // The map's lock is held to find the build's slot alone, so one
         // host's build never waits on another's.
         let slot = {
@@ -155,22 +165,23 @@ impl Binary {
     /// there are any, under the recipe, and `regime`'s arguments and ini
     /// after it where the fence names one, as the oracle serves it; with
     /// the natives every request it served entered, in the order they
-    /// were appended.
+    /// were appended, and the profile of the build that served it.
     pub(crate) fn serve(
         &self,
         oracle: &Oracle<'_>,
         snippet: &str,
         regime: Option<&str>,
         features: &[&str],
-    ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.built(CLI, features)?;
-        traced(|env| {
+    ) -> Result<(Observation, Vec<Entry>, Profile)> {
+        let Built { path, profile } = self.built(CLI, features)?;
+        let (observed, entered) = traced(|env| {
             oracle.run_under(&Invocation {
                 regimes: regime.as_slice(),
                 env,
-                ..Invocation::new(&binary, Program::Snippet(snippet))
+                ..Invocation::new(&path, Program::Snippet(snippet))
             })
-        })
+        })?;
+        Ok((observed, entered, profile))
     }
 }
 
@@ -198,7 +209,7 @@ impl Binary {
     /// `snippet` served as the request `request` describes by the engine's
     /// host `served` names, the CGI's binary run under the name php-cgi,
     /// as [`served_as`] serves it; with the natives it, or its child,
-    /// entered.
+    /// entered, and the profile of the host's build.
     pub(crate) fn serve_request(
         &self,
         oracle: &Oracle<'_>,
@@ -206,8 +217,11 @@ impl Binary {
         snippet: &str,
         request: &str,
         regime: Option<&str>,
-    ) -> Result<(Observation, Vec<Entry>)> {
-        let host = self.host(host_of(served))?;
+    ) -> Result<(Observation, Vec<Entry>, Profile)> {
+        let Built {
+            path: host,
+            profile,
+        } = self.built(host_of(served), &[])?;
         let hosts = (host_of(served) == CGI)
             .then(|| Tree::new("witness-cgi"))
             .transpose()?;
@@ -215,7 +229,9 @@ impl Binary {
             Some(hosts) => cgi::linked(&host, hosts.path())?,
             None => host,
         };
-        traced(|env| served_as(oracle, served, &host, snippet, request, regime, env))
+        let (observed, entered) =
+            traced(|env| served_as(oracle, served, &host, snippet, request, regime, env))?;
+        Ok((observed, entered, profile))
     }
 }
 

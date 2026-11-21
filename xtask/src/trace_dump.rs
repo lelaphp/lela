@@ -41,7 +41,9 @@ use crate::crosscheck::first_difference;
 use crate::divergence::{DUMP_PREFIX, Digests, Registry, Side};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
-use crate::oracle::{self, Ended, Invocation, Observation, Oracle, Program, Regime, Verdict};
+use crate::oracle::{
+    self, Ended, Invocation, Observation, Oracle, Profile, Program, Regime, Verdict,
+};
 use crate::phpt::{Build, Lane};
 use crate::reading::{Reading, Status, Store, joined};
 use crate::workloads::{Declaration, Run};
@@ -174,13 +176,15 @@ fn ini(regime: &Regime) -> Result<Vec<String>> {
 }
 
 /// The engine's `php` for the run: the one asked for, or `php` built
-/// with the tier's feature into the directory the phpt lane builds it in.
-fn engine(root: &Path, ask: &Ask) -> Result<PathBuf> {
+/// with the tier's feature into the directory the phpt lane builds it in,
+/// and the profile it was built in where this run built it.
+fn engine(root: &Path, ask: &Ask) -> Result<(PathBuf, Option<Profile>)> {
     if let Some(engine) = &ask.engine {
         // Each side runs in its program's directory.
-        return Ok(std::path::absolute(engine)?);
+        return Ok((std::path::absolute(engine)?, None));
     }
-    Build::of(vec![Lane::FEATURE]).built(root)
+    let built = Build::of(vec![Lane::FEATURE]).built(root)?;
+    Ok((built.path, Some(built.profile)))
 }
 
 /// `xtask trace-dump`: [`run`] under the tracked registry, its readings
@@ -219,7 +223,8 @@ pub fn run(
         }
         oracle.asserted()?;
         let held = match built.get_or_insert_with(|| engine(root, ask)) {
-            Ok(engine) => {
+            Ok((engine, profile)) => {
+                reading.profile = *profile;
                 let sides = Sides {
                     oracle: &oracle,
                     engine,

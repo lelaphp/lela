@@ -2100,12 +2100,14 @@ impl Runner {
 
     /// The profile of the engine's binary, where it is the engine's and
     /// the lane knows how it was built: what a reading names of the build
-    /// it judged. The control, the linked engine, and a rung where nothing
-    /// ran have none.
+    /// it judged, the linked engine's once it has served a snippet
+    /// ([`linked::profile`]). The control, a binary the caller named, and
+    /// a rung where nothing ran have none.
     pub fn profile(&self) -> Option<Profile> {
         match self {
             Runner::Engine(_, profile) => *profile,
-            _ => None,
+            Runner::Linked => linked::profile(),
+            Runner::Control(_) | Runner::Stale(_) | Runner::Absent(_) => None,
         }
     }
 

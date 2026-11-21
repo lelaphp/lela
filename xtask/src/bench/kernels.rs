@@ -36,7 +36,7 @@ use super::{
 };
 use crate::carried::BUNDLE;
 use crate::manifest::Manifest;
-use crate::oracle::{Pin, hosts::CLI, profile};
+use crate::oracle::{Pin, Profile, hosts::CLI, profile};
 use crate::phpt::Lane;
 use crate::workloads::{Declaration, Role, Run};
 
@@ -81,13 +81,15 @@ const INI: [&str; 3] = [PRODUCTION[0], PRODUCTION[1], MEMORY];
 /// under too.
 pub(crate) const MEMORY: &str = "memory_limit=512M";
 
-/// One arm of a bar over [`Programs`]: its name, the php binary, the
-/// pin's regimes it runs each program under in order, and ini after
-/// theirs, G1's `opcache.jit_buffer_size=0` on its jit arm.
+/// One arm of a bar over [`Programs`]: its name, the php binary and the
+/// profile it was built in where the harness built it, the pin's regimes
+/// it runs each program under in order, and ini after theirs, G1's
+/// `opcache.jit_buffer_size=0` on its jit arm.
 #[derive(Clone)]
 pub(crate) struct Php {
     pub(crate) name: String,
     pub(crate) binary: PathBuf,
+    pub(crate) profile: Option<Profile>,
     pub(crate) regimes: Vec<&'static str>,
     pub(crate) ini: Vec<String>,
 }
@@ -119,6 +121,7 @@ impl Php {
         Ok(Arm {
             name,
             program,
+            profile: self.profile,
             args,
             env,
             reads,
@@ -205,8 +208,9 @@ pub(crate) fn bar(
     }
 }
 
-/// A php binary for a bar, or why this machine has none, the bar's skip.
-type Binary = fn(&Path, &Pin) -> Result<Result<PathBuf, String>>;
+/// A php binary for a bar and the profile the harness built it in, or why
+/// this machine has none, the bar's skip.
+type Binary = fn(&Path, &Pin) -> Result<Result<(PathBuf, Option<Profile>), String>>;
 
 /// `whose` tier, `binary`, under `jit-tracing` against `jit-off` over
 /// `programs`, the bar `id`, a series; and `jit-off` against itself,
@@ -238,10 +242,11 @@ fn tracing(
             about,
             held,
             move |root, pin| {
-                Ok(binary(root, pin)?.map(|binary| {
+                Ok(binary(root, pin)?.map(|(binary, profile)| {
                     let arm = |name: String, regime| Php {
                         name,
                         binary: binary.clone(),
+                        profile,
                         regimes: vec![regime],
                         ini: Vec::new(),
                     };
@@ -257,7 +262,9 @@ fn tracing(
 /// measures neither, each a skip that says so.
 pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
     let bar = ("oracle-jit", "the pinned php");
-    tracing(root, bar, (Programs::Benched, Read::Time), pinned::php)
+    tracing(root, bar, (Programs::Benched, Read::Time), |root, pin| {
+        Ok(pinned::php(root, pin)?.map(|php| (php, None)))
+    })
 }
 
 /// G2 and its control: the tier of the engine built with its
@@ -268,7 +275,7 @@ pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
 pub(crate) fn compiled(root: &Path) -> [Declared; 2] {
     let bar = ("engine-jit", "the engine built as jit-feature");
     tracing(root, bar, (Programs::Benched, Read::Time), |root, _| {
-        Build::Jit.built(root).map(Ok)
+        Build::Jit.binary(root)
     })
 }
 
@@ -319,7 +326,7 @@ impl Build {
     /// lanes build [`Build::Jit`] in ([`profile::featured`]) or one of its
     /// own, a cfg set where the build names one; [`Build::Plain`] without
     /// the host's default features, under its arm's name.
-    fn built(self, root: &Path) -> Result<PathBuf> {
+    fn built(self, root: &Path) -> Result<profile::Built> {
         let (name, dir, cfg) = self.spec();
         let (package, binary) = (CLI.package(), CLI.binary);
         if self == Build::Plain {
@@ -330,6 +337,12 @@ impl Build {
         let into = dir.map(|dir| profile::featured(root, dir));
         let into = (into.as_deref(), cfg);
         profile::released(root, (&package, binary), on.as_deref(), into)
+    }
+
+    /// The build as a bar's [`Binary`] gives it.
+    fn binary(self, root: &Path) -> Result<Result<(PathBuf, Option<Profile>), String>> {
+        let built = self.built(root)?;
+        Ok(Ok((built.path, Some(built.profile))))
     }
 }
 
@@ -436,9 +449,11 @@ fn builds(
             held,
             move |root, _| {
                 let arm = |name: String, build: Build| -> Result<Php> {
+                    let built = build.built(root)?;
                     Ok(Php {
                         name,
-                        binary: build.built(root)?,
+                        binary: built.path,
+                        profile: Some(built.profile),
                         regimes: vec![under.regime],
                         ini: under.ini.into_iter().map(str::to_owned).collect(),
                     })
@@ -464,7 +479,7 @@ pub(crate) fn stepping(root: &Path) -> [Declared; 2] {
         root,
         bar,
         (Programs::Kernels, Read::PerOpline),
-        |root, _| Build::Stepping.built(root).map(Ok),
+        |root, _| Build::Stepping.binary(root),
     )
 }
 
@@ -481,7 +496,7 @@ pub(crate) fn g4(root: &Path) -> [Declared; 3] {
         root,
         ("g4-rss", "the usage build"),
         (Programs::Kernels, Read::Peak),
-        |root, _| Build::Usage.built(root).map(Ok),
+        |root, _| Build::Usage.binary(root),
     );
     let about = "the usage build's code per opline compiled against the pinned php's under [regime.jit-tracing] over the seven kernels".to_owned();
     let code = bar(
@@ -494,17 +509,19 @@ pub(crate) fn g4(root: &Path) -> [Declared; 3] {
                 Ok(pinned) => pinned,
                 Err(why) => return Ok(Err(why)),
             };
-            let php = |name: &str, binary, debug: u32| Php {
+            let php = |name: &str, (binary, profile), debug: u32| Php {
                 name: name.to_owned(),
                 binary,
+                profile,
                 regimes: vec!["jit-tracing"],
                 ini: vec![format!("opcache.jit_debug={debug}")],
             };
-            let mut engine = php("engine", Build::Usage.built(root)?, SIZE);
+            let built = Build::Usage.built(root)?;
+            let mut engine = php("engine", (built.path, Some(built.profile)), SIZE);
             // Compiled where it is recorded, as php compiles, so the end's
             // count and the request's name the same traces.
             engine.ini.push("jit.compile=inline".to_owned());
-            Ok(Ok([engine, php("php", pinned, SIZE | LISTED)]))
+            Ok(Ok([engine, php("php", (pinned, None), SIZE | LISTED)]))
         },
     );
     [rss, rss_aa, code]
@@ -538,6 +555,10 @@ impl Side for Parsed {
 
     fn reads(&self) -> &[PathBuf] {
         self.side.reads()
+    }
+
+    fn profile(&self) -> Option<Profile> {
+        self.side.profile()
     }
 
     fn once(&mut self) -> Result<Sample> {
@@ -733,6 +754,7 @@ mod tests {
         let php = Php {
             name: "jit-off".to_owned(),
             binary: PathBuf::from("php"),
+            profile: None,
             regimes: vec!["jit-off"],
             ini: vec!["opcache.jit_buffer_size=0".to_owned()],
         };

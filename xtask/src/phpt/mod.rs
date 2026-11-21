@@ -1656,7 +1656,7 @@ impl<'f> Build<'f> {
     }
 
     /// The engine's `php` built with the features into their directory.
-    pub(crate) fn built(&self, root: &Path) -> Result<PathBuf> {
+    pub(crate) fn built(&self, root: &Path) -> Result<profile::Built> {
         let (features, into) = (self.features(), self.target_dir(root));
         profile::build(root, &CLI.package(), ENGINE, Some(&features), Some(&into))
     }
@@ -1675,9 +1675,8 @@ impl<'f> Build<'f> {
             "phpt: the engine with {features} took {:.1}s to build",
             started.elapsed().as_secs_f64()
         );
-        // Built by `profile::build`, in the lanes' profile.
         engine
-            .map(|path| Runner::Engine(path, Some(profile::LANE)))
+            .map(|built| Runner::Engine(built.path, Some(built.profile)))
             .map_err(|why| format!("the engine with {features} is not built: {why:#}"))
     }
 }

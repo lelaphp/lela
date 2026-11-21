@@ -99,12 +99,23 @@ impl Profile {
     }
 }
 
+/// A binary the harness built, where cargo put it and the profile it was
+/// built in: what a reading names of the build it judged
+/// ([`crate::reading::Reading::judged`]), so the profile is stated once,
+/// by the build, and never again at the reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Built {
+    pub(crate) path: PathBuf,
+    pub(crate) profile: Profile,
+}
+
 /// `cargo build --profile <the lanes'> -p <package> --bin <binary>`,
 /// with `--features <features>` where there are any, in `root`, and where
 /// cargo put the binary: under `into` where it is named, a target
 /// directory of the build's own ([`featured`]), else the target directory
-/// cargo was told of, or `root`'s own. Every binary the harness builds,
-/// `lela-linked` and the hosts' own, is built in the lanes' profile,
+/// cargo was told of, or `root`'s own, with the profile. Every binary
+/// the harness builds, `lela-linked` and the hosts' own, is built in the
+/// lanes' profile,
 /// whatever profile the harness itself was built in (harness revision 92):
 /// a reading's key covers the source and not the profile, so one
 /// key is read off one build, and the `php` the witness lane builds is the
@@ -116,7 +127,7 @@ pub(crate) fn build(
     binary: &str,
     features: Option<&str>,
     into: Option<&Path>,
-) -> Result<PathBuf> {
+) -> Result<Built> {
     let on = (features, true);
     built(root, LANE, (package, binary), on, (into, None))
 }
@@ -133,7 +144,7 @@ pub(crate) fn released(
     (package, binary): (&str, &str),
     features: Option<&str>,
     into: (Option<&Path>, Option<&str>),
-) -> Result<PathBuf> {
+) -> Result<Built> {
     let on = (features, true);
     built(root, Profile::Release, (package, binary), on, into)
 }
@@ -146,7 +157,7 @@ pub(crate) fn released_bare(
     root: &Path,
     (package, binary): (&str, &str),
     into: &Path,
-) -> Result<PathBuf> {
+) -> Result<Built> {
     let (bare, into) = ((None, false), (Some(into), None));
     built(root, Profile::Release, (package, binary), bare, into)
 }
@@ -160,7 +171,7 @@ fn built(
     (package, binary): (&str, &str),
     (features, defaults): (Option<&str>, bool),
     (into, cfg): (Option<&Path>, Option<&str>),
-) -> Result<PathBuf> {
+) -> Result<Built> {
     let mut cargo = Command::new(cargo());
     cargo.args([
         "build",
@@ -188,7 +199,8 @@ fn built(
     let what = format!("{binary}; its errors are on the harness's second stream");
     run(root, &mut cargo, &added, &what)?;
     let target = into.map_or_else(|| target(root), Path::to_path_buf);
-    found(profile.binary(&target, binary))
+    let path = found(profile.binary(&target, binary))?;
+    Ok(Built { path, profile })
 }
 
 /// The target directory cargo builds into in `root`: the one
@@ -443,14 +455,15 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
-        let built = build(&root, "probe", "probe", None, None).unwrap();
-        assert!(built.is_file(), "{}", built.display());
+        let Built { path, profile } = build(&root, "probe", "probe", None, None).unwrap();
+        assert!(path.is_file(), "{}", path.display());
         assert_eq!(
-            built.parent().and_then(Path::file_name),
+            path.parent().and_then(Path::file_name),
             Some(std::ffi::OsStr::new(LANE.dir())),
             "{}",
-            built.display()
+            path.display()
         );
+        assert_eq!(profile, LANE, "the build says the profile it was built in");
     }
 
     /// The bare build turns the package's default features off and lands
@@ -476,10 +489,14 @@ mod tests {
         };
         let into = root.join("target/featured/bare");
         let bare = released_bare(&root, ("probe", "probe"), &into).unwrap();
-        assert!(bare.starts_with(&into), "{}", bare.display());
-        assert_eq!(printed(&bare), "false");
+        assert!(bare.path.starts_with(&into), "{}", bare.path.display());
+        assert_eq!(printed(&bare.path), "false");
         let full = released(&root, ("probe", "probe"), None, (None, None)).unwrap();
-        assert_eq!(printed(&full), "true");
+        assert_eq!(printed(&full.path), "true");
+        assert_eq!(
+            (bare.profile, full.profile),
+            (Profile::Release, Profile::Release)
+        );
     }
 
     /// A cfg a bench build names reaches rustc beside the flags of the
@@ -518,7 +535,7 @@ mod tests {
             (None, Some("from_the_line")),
         )
         .unwrap();
-        let out = Command::new(&built).output().unwrap();
+        let out = Command::new(&built.path).output().unwrap();
         let printed = String::from_utf8(out.stdout).unwrap();
         assert!(
             printed.contains("--cfg from_the_table") && printed.contains("--cfg from_the_line"),
