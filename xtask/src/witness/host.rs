@@ -930,7 +930,7 @@ mod tests {
         );
         pin.sapi.cgi = Some(Host {
             path: cgi.to_path_buf(),
-            md5,
+            digest: crate::oracle::Digest::Md5(md5),
         });
         pin
     }
@@ -1047,7 +1047,7 @@ mod tests {
         let pinned = host(&hosts, "php-cgi", "echo 1");
         let (judgement, note) = judged(LINE, &pin(&pinned, Some("0")), &engine);
         assert_eq!(judgement, Judgement::Bork, "{note}");
-        assert!(note.contains("the pin's [sapi] says 0"), "{note}");
+        assert!(note.contains("the pin's [sapi] says md5 0"), "{note}");
     }
 
     /// A program that does not end on its own is cut at the line's `head`

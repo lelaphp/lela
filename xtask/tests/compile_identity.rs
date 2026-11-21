@@ -483,7 +483,7 @@ fn a_digest_that_is_not_the_pins_refuses_the_run() {
     }
     let scratch = Scratch::new("digest");
     let mut manifest = scratch.manifest.clone();
-    manifest.pin.as_mut().unwrap().oracle.md5 = "0".repeat(32);
+    manifest.pin.as_mut().unwrap().oracle.digest = xtask::oracle::Digest::Md5("0".repeat(32));
     let ask = Ask {
         corpus: Some(scratch.corpus.clone()),
         engine: Some(scratch.binary("php", "exit 0")),

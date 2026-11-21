@@ -295,7 +295,7 @@ impl Runs {
         lane: Option<Lane>,
     ) -> Result<(Option<Target>, bool)> {
         if let (Runner::Control(oracle), None) = (runner, lane) {
-            let engine = format!("{} md5 {}", oracle.display(), pin.oracle.md5);
+            let engine = format!("{} {}", oracle.display(), pin.oracle.digest);
             if let Some(run) = self.kept(tally, engine) {
                 let target = Target::of(run);
                 target.keep(&self.root, pin, scope)?;

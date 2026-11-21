@@ -7,7 +7,7 @@
 //! `[oracle]`.
 //!
 //! **What it reads** is the machine and the tracked files: the keg's
-//! receipt, for php's version and its runtime kegs; each binary's md5;
+//! receipt, for php's version and its runtime kegs; each binary's SHA-256;
 //! `[closure]`, walked from the binaries as the pin's own check walks it
 //! ([`Closure::walked`]): what they load and the receipt's runtime kegs,
 //! and nothing else, so a row of the record outside that set is proposed
@@ -23,7 +23,10 @@
 //! else: no file and no reading. Each value is replaced where it stands,
 //! so every comment and key order a person wrote is kept: `oracle.toml`'s
 //! `[oracle]`, `[closure]`, `[source]`, `[recipe.env]`'s
-//! `TEST_PHP_EXECUTABLE` and `[sapi]`; `ci/oracle/configure.toml` below its
+//! `TEST_PHP_EXECUTABLE`, `[sapi]` and `[fastcgi]`'s digest, every `md5`
+//! of those tables spelt as the `sha256` that replaces it (ruled
+//! 2026-11-21), so the first proposal against the pinned keg is that
+//! swap and nothing else; `ci/oracle/configure.toml` below its
 //! header; `dist/inputs.toml`'s `[php]`, `[php.ini]` and `[php.fpm]`; and
 //! `dist/Dockerfile`'s `ARG PHP_VERSION`; `NOTICE`'s php-src tag and its
 //! commit, as `[source]` states them, in the one sentence that names them,
@@ -55,7 +58,7 @@ use serde::Deserialize;
 
 use super::closure::in_cellar;
 use super::formula::bottles;
-use super::{Closure, Formula, Pin, Platform, Source, md5_of};
+use super::{Closure, Formula, Pin, Platform, Source, bytes_of};
 use crate::sha256::Sha256;
 
 /// What `oracle propose` read: the diff a bump writes, empty where the keg
@@ -287,9 +290,9 @@ struct Keg {
     /// php's version, as the receipt names it: the bottle with no revision.
     version: String,
     /// Each pinned binary's key in `oracle.toml` beside its path in this
-    /// keg and its md5: `[oracle]`'s php first, then each host `[sapi]`
-    /// names.
-    binaries: Vec<(&'static str, PathBuf, String)>,
+    /// keg and its SHA-256: `[oracle]`'s php first, then each host
+    /// `[sapi]` names.
+    binaries: Vec<(&'static str, PathBuf, Sha256)>,
     closure: Closure,
     /// Each runtime keg the receipt names, at the version it names, which
     /// the pour was made against only where that keg was not held back.
@@ -377,8 +380,8 @@ impl Keg {
                 );
             };
             let path = dir.join(within);
-            let md5 = md5_of(&path, &format!("the keg's {key} at "))?;
-            binaries.push((key, path, md5));
+            let sha256 = Sha256::of(&bytes_of(&path, &format!("the keg's {key} at "))?);
+            binaries.push((key, path, sha256));
         }
         let mut keg = Keg {
             dir,
@@ -570,9 +573,9 @@ fn pinned(text: &str, pin: &Pin, keg: &Keg, tree: &Checkout, today: &str) -> Res
         file.insert_after("oracle", "version", &format!("formula = {formula}"))?;
     }
     let path = |path: &Path| quoted(&path.to_string_lossy());
-    let (_, php, md5) = &keg.binaries[0];
+    let (_, php, sha256) = &keg.binaries[0];
     file.set("oracle", "path", &path(php))?;
-    file.set("oracle", "md5", &quoted(md5))?;
+    file.swapped("oracle", sha256)?;
     if let Some(recorded) = pin
         .closure
         .as_ref()
@@ -598,21 +601,38 @@ fn pinned(text: &str, pin: &Pin, keg: &Keg, tree: &Checkout, today: &str) -> Res
     if pin.recipe.env.contains_key("TEST_PHP_EXECUTABLE") {
         file.set("recipe.env", "TEST_PHP_EXECUTABLE", &path(php))?;
     }
-    for (key, at, md5) in &keg.binaries[1..] {
-        let host = format!("{{ path = {}, md5 = {} }}", path(at), quoted(md5));
+    for (key, at, sha256) in &keg.binaries[1..] {
+        let host = format!(
+            "{{ path = {}, sha256 = {} }}",
+            path(at),
+            quoted(&sha256.to_string())
+        );
         file.set("sapi", key, &host)?;
+    }
+    // `[fastcgi]`'s file is the pin's own text, so its digest is read there.
+    let table: toml::Table = toml::from_str(text)?;
+    let params = table
+        .get("fastcgi")
+        .and_then(|fastcgi| fastcgi.get("params"));
+    if let Some(params) = params.and_then(toml::Value::as_str) {
+        file.swapped("fastcgi", &Sha256::of(params.as_bytes()))?;
     }
     Ok(file.text())
 }
 
 /// `ci/oracle/configure.toml` as `scripts/oracle-build.py configure-line`
-/// prints it for the keg: the tracked header, the md5 and the arguments.
+/// prints it for the keg: the tracked header, php's SHA-256 and the
+/// arguments.
 fn configured(text: &str, keg: &Keg) -> Result<String> {
-    let Some(at) = text.find("\nmd5 = ") else {
-        bail!("{CONFIGURE} has no `md5 = ` line below its header");
+    let Some(at) = ["\nsha256 = ", "\nmd5 = "]
+        .iter()
+        .find_map(|line| text.find(line))
+    else {
+        bail!("{CONFIGURE} has no `sha256 = ` or `md5 = ` line below its header");
     };
     let mut out = text[..=at].to_owned();
-    writeln!(out, "md5 = {}\nargs = [", quoted(&keg.binaries[0].2)).ok();
+    let sha256 = quoted(&keg.binaries[0].2.to_string());
+    writeln!(out, "sha256 = {sha256}\nargs = [").ok();
     for arg in &keg.configure {
         writeln!(out, "    {},", quoted(arg)).ok();
     }
@@ -780,6 +800,20 @@ impl Text {
         let end = start + value_length(&line[start..]);
         self.lines[at] = format!("{}{value}{}", &line[..start], &line[end..]);
         Ok(())
+    }
+
+    /// `[table]` holding its binary to `sha256`: the `md5` it sets spelt
+    /// as the `sha256` that replaces it, or its `sha256` set and any `md5`
+    /// beside it dropped.
+    fn swapped(&mut self, table: &str, sha256: &Sha256) -> Result<()> {
+        let md5 = self.find(table, "md5")?;
+        match (self.find(table, "sha256")?, md5) {
+            (Some(_), Some(at)) => drop(self.lines.remove(at)),
+            (Some(_), None) => {}
+            (None, Some(at)) => self.lines[at] = self.lines[at].replacen("md5", "sha256", 1),
+            (None, None) => bail!("[{table}] sets neither md5 nor sha256"),
+        }
+        self.set(table, "sha256", &quoted(&sha256.to_string()))
     }
 
     /// `line` written after the line of `[table]` that sets `name`.
