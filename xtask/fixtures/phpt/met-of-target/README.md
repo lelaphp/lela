@@ -1,6 +1,6 @@
 A subset's target and an engine's run of it, as `xtask phpt` keeps them
 (#1184): `control.json` is the pinned oracle's verdicts under the runner's
-control, kept at `target/harness/phpt-runs/pin-<tag>-<md5>/<scope>.json`, and
+control, kept at `target/harness/phpt-runs/pin-<tag>-sha256-<hex>/<scope>.json`, and
 `engine.json` an engine's run of the same tests. Two oracle misses are
 planted: `oracle-miss.phpt`, which the oracle fails (as it runs past the
 recipe's limit on `ext/openssl/tests/stream_server_reneg_limit.phpt`), and

@@ -49,8 +49,8 @@ scratch_token = "%SCRATCH%"
 [variant.zend-test]
 # Made from the tag and, on macOS, against [closure]: rebuilt, never proposed.
 flags = ["--enable-zend-test"]
-darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "0", closure = "{closure}" }
-linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "1", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
+darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", sha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000", closure = "{closure}" }
+linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", sha256 = "sha256:1111111111111111111111111111111111111111111111111111111111111111", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
 
 [sapi]
 # The oracle's other hosts, from the keg [oracle] pins.

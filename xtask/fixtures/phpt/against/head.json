@@ -1,7 +1,7 @@
 {
   "commit": "69d488e",
   "corpus": "php-8.5.9 dd6e76cc",
-  "engine": "target/release/php md5 a1b2c3d4e5f60718293a4b5c6d7e8f90",
+  "engine": "target/release/php sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
   "recipe": "5e1f0c3a9d2b7e4f6a8c0d1e2f3a4b5c6d7e8f90",
   "verdicts": {
     "phpt:php-src/ext/fixture/tests/diverged.phpt": "diverged",

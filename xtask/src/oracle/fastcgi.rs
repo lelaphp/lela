@@ -17,7 +17,7 @@ use anyhow::{Result, anyhow, bail};
 use regex_lite::Regex;
 use serde::Deserialize;
 
-use super::Digest;
+use crate::sha256::Sha256;
 
 /// The mapping: the nginx release the parameters were copied from, where
 /// from, and every parameter in the order nginx sends it. php-fpm
@@ -71,7 +71,7 @@ impl Split {
 }
 
 /// `[fastcgi]` as the pin spells it: `params` the file's bytes whole,
-/// held to its `md5` or `sha256`, `script_filename`, `path_info` and `path_translated` the
+/// held to its `sha256`, `script_filename`, `path_info` and `path_translated` the
 /// values nginx gives those parameters, and `split_path_info` the split's
 /// pattern. The split's two keys are both there or neither, and
 /// `path_translated` only beside them, so a binary reads a pin from
@@ -81,8 +81,7 @@ impl Split {
 struct File {
     nginx: String,
     source: String,
-    #[serde(flatten)]
-    digest: Digest,
+    sha256: Sha256,
     script_filename: String,
     split_path_info: Option<String>,
     path_info: Option<String>,
@@ -204,10 +203,10 @@ impl TryFrom<File> for Mapping {
     type Error = anyhow::Error;
 
     fn try_from(file: File) -> Result<Mapping> {
-        if let Err(actual) = file.digest.holds(file.params.as_bytes()) {
+        if let Err(actual) = file.sha256.holds(file.params.as_bytes()) {
             bail!(
                 "[fastcgi] params has {actual} and the pin says {}: the file is copied verbatim from {}, never edited",
-                file.digest,
+                file.sha256,
                 file.source
             );
         }

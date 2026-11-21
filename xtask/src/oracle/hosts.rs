@@ -196,7 +196,7 @@ mod tests {
         let row = |name: &str| {
             Some(Host {
                 path: name.into(),
-                digest: crate::oracle::Digest::default(),
+                sha256: crate::sha256::Sha256::default(),
             })
         };
         let sapi = Sapi {

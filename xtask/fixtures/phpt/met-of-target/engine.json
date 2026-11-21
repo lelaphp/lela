@@ -1,7 +1,7 @@
 {
   "commit": "e01b1f6",
   "corpus": "php-8.5.9 dd6e76cc",
-  "engine": "target/release/php md5 0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "engine": "target/release/php sha256:0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
   "verdicts": {
     "phpt:php-src/ext/fixture/tests/kept.phpt": "pass",
     "phpt:php-src/ext/fixture/tests/missed.phpt": "fail",

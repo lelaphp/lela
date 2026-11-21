@@ -487,7 +487,7 @@ fn a_digest_that_is_not_the_pins_refuses_the_run() {
     }
     let scratch = Scratch::new("digest");
     let mut manifest = scratch.manifest.clone();
-    manifest.pin.as_mut().unwrap().oracle.digest = xtask::oracle::Digest::Md5("0".repeat(32));
+    manifest.pin.as_mut().unwrap().oracle.sha256 = xtask::sha256::Sha256::default();
     let ask = Ask {
         corpus: Some(scratch.corpus.clone()),
         engine: Some(scratch.binary("php", "exit 0")),
@@ -804,7 +804,7 @@ fn a_dump_past_the_limit_or_ended_by_a_signal_fails_that_file_and_the_rest_are_j
 }
 
 /// The reading names the binary that dumped the corpus, its path and the
-/// md5 of its bytes, as `phpt`'s does (`Runner::stamp`), so two
+/// SHA-256 of its bytes, as `phpt`'s does (`Runner::stamp`), so two
 /// readings over one tree under two binaries are told apart; where no
 /// binary dumped, the engine's absent, the reading names none.
 #[test]
@@ -815,11 +815,11 @@ fn the_reading_names_the_binary_that_dumped_it_and_none_where_none_did() {
     let scratch = Scratch::new("stamp");
     let engine = scratch.same_as_php();
     let reading = scratch.run(&registry(""), &engine);
-    let md5 = format!("{:x}", md5::compute(fs::read(&engine).unwrap()));
+    let sha256 = xtask::sha256::Sha256::of(&fs::read(&engine).unwrap());
     assert!(
         reading
             .message
-            .ends_with(&format!("; dumped by {} md5 {md5}", engine.display())),
+            .ends_with(&format!("; dumped by {} {sha256}", engine.display())),
         "{}",
         reading.message
     );

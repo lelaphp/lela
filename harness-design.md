@@ -710,7 +710,7 @@ The lines stand in the order the store writes them (revision 216), `numbers` and
 | `cwd` | `Option<&Path>` | no section gives it | The working directory: the program's own where `None`, which is a witness's; php-src's root for a phpt test and the sections run beside it, as run-tests.php runs them. |
 | `raw` | `bool` | no section gives it | Whether what the program wrote is handed back as it wrote it and not normalised: a CGI run's, whose headers run-tests.php parts from the body before it trims (run-tests.php:2530-2533). |
 
-<!-- /computed in=42a270cf0fb851e3ff55ac48bec8cbad8263a70ce6863910adf1adf8377247eb out=b9935aecc5f894296ddeb6ae0ef410647d80da6140d0013da18638445c36b968 -->
+<!-- /computed in=5f0022b3fb56372d60c1bb3348b3526632cbd653321819babcc9c3dcf6467bc9 out=b9935aecc5f894296ddeb6ae0ef410647d80da6140d0013da18638445c36b968 -->
 
 **The tally.** The phpt and witness lanes, and the compile-identity lane when it comes, share one tally (`tally::Tally<J>`): it owns the runner ladder (a control is a skip and not a reading of the engine, an absent binary is a skip, the engine is pass or fail), the rule that nothing run is not a green reading, the print loop over every non-pass item and the reading it writes; a lane contributes its judgement variants and how to judge one item, and nothing else (revision 16). A `lane` is a scheduled run of a corpus (§7), never the tally.
 

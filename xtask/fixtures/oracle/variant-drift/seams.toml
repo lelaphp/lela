@@ -1,6 +1,6 @@
 # A negative control (harness-design.md §4.1, §12 item 4; #1890): a
 # workspace whose one crate is read under an oracle variant whose binary's
-# md5 is not the pin's, which `witness`, `crosscheck` and `phpt` must refuse
+# SHA-256 is not the pin's, which `witness`, `crosscheck` and `phpt` must refuse
 # as they refuse the main oracle's drift. The pin is the fixture's own.
 [oracle]
 pin = "oracle.toml"
