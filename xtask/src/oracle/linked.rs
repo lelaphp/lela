@@ -62,19 +62,32 @@
 //! the crate of the engine; a snippet that ends the binary, on an abort,
 //! a stack overflow or a signal, borks naming how it ended, and the next
 //! snippet is served by a binary started again.
+//!
+//! **A request has the recipe's limit**, as a program under the
+//! fresh-process adapter has: a server that has not answered by
+//! `[recipe.limits] timeout_s` is killed and reaped, never handed out
+//! again, and the request answered with [`PastLimit`], the verdict that
+//! adapter gives a program past it. The wait is a `poll` on the answer's
+//! pipe with what is left of the limit, so an ask costs one call more
+//! than the read it was, and no thread; a server dropped is given the
+//! same limit to end on the end of its input before it is killed.
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsFd;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use nix::errno::Errno;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
-use super::{Ended, Linked, Observation, Place, Program, Recipe, Regime, Scratch};
+use super::{Ended, Linked, Observation, PastLimit, Place, Program, Recipe, Regime, Scratch};
 use crate::scratch::Tree;
 
 /// The host whose binary serves the snippets, its package and binary.
@@ -134,8 +147,20 @@ pub(crate) fn serve_by(
     write("cwd", scratch.dir.as_os_str().as_encoded_bytes())?;
     write("ini", ini.as_bytes())?;
     write("extended", if linked.extended_info { b"1" } else { b"0" })?;
+    let binary = match server {
+        Some(path) => path.to_path_buf(),
+        None => binary()?,
+    };
     let started = Instant::now();
-    ask(&request, server, recipe)?;
+    if let Answer::PastLimit = ask(&request, &binary, recipe)? {
+        return Err(PastLimit {
+            binary,
+            script: scratch.script.clone(),
+            limit_s: recipe.limits.timeout_s,
+            stopped: crate::scratch::stop_naming(&scratch.script),
+        }
+        .into());
+    }
     let wall = started.elapsed();
     if request.join("panicked").exists() {
         bail!("the linked engine panicked; the panic itself is on the harness's second stream");
@@ -169,30 +194,36 @@ pub(crate) fn serve_by(
 /// crate's fences into the next crate's.
 static IDLE: Mutex<Vec<Server>> = Mutex::new(Vec::new());
 
-/// The request at `dir` served by an idle `server`, the built binary
-/// where none is named, started under `recipe`'s environment, or one
-/// started so where none is idle; one the request ended is dropped, so
-/// the next starts afresh.
-fn ask(dir: &Path, server: Option<&Path>, recipe: &Recipe) -> Result<()> {
-    let binary = match server {
-        Some(path) => path.to_path_buf(),
-        None => binary()?,
-    };
+/// What a server that went on standing made of a request: served, or
+/// unanswered at the recipe's limit, when it was killed and reaped.
+enum Answer {
+    Served,
+    PastLimit,
+}
+
+/// The request at `dir` served by an idle `binary` started under
+/// `recipe`'s environment and limit, or one started so where none is
+/// idle; one the request ended or the limit killed is dropped, so the
+/// next starts afresh.
+fn ask(dir: &Path, binary: &Path, recipe: &Recipe) -> Result<Answer> {
     let environ = Environ::of(recipe);
+    let limit = Duration::from_secs(recipe.limits.timeout_s);
     let idle = {
         let mut idle = crate::locked(&IDLE);
-        let at = idle
-            .iter()
-            .position(|server| server.binary == binary && server.environ == environ);
+        let at = idle.iter().position(|server| {
+            server.binary == binary && server.environ == environ && server.limit == limit
+        });
         at.map(|at| idle.swap_remove(at))
     };
     let mut server = match idle {
         Some(server) => server,
-        None => Server::start(binary, recipe, environ)?,
+        None => Server::start(binary.to_path_buf(), recipe, environ)?,
     };
-    server.ask(dir)?;
-    crate::locked(&IDLE).push(server);
-    Ok(())
+    let answer = server.ask(dir)?;
+    if let Answer::Served = answer {
+        crate::locked(&IDLE).push(server);
+    }
+    Ok(answer)
 }
 
 /// The environment a server's process was started under, what every
@@ -213,14 +244,16 @@ impl Environ {
     }
 }
 
-/// A running `lela-linked --serve`, the binary it runs and the environment
-/// it runs under, and the two ends of its pipes.
+/// A running `lela-linked --serve`, the binary it runs, the environment
+/// it runs under and the recipe's limit it serves under, and the two ends
+/// of its pipes.
 struct Server {
     binary: PathBuf,
     environ: Environ,
+    limit: Duration,
     child: Child,
     stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    stdout: ChildStdout,
 }
 
 impl Server {
@@ -236,16 +269,17 @@ impl Server {
         Ok(Server {
             binary,
             environ,
+            limit: Duration::from_secs(recipe.limits.timeout_s),
             child,
             stdin: Some(stdin),
-            stdout: BufReader::new(stdout),
+            stdout,
         })
     }
 
-    /// The request at `dir` handed over and its answer awaited; the
-    /// binary's end, where it ends instead, is the error.
-    fn ask(&mut self, dir: &Path) -> Result<()> {
-        let mut line = String::new();
+    /// The request at `dir` handed over and its answer awaited within the
+    /// limit, past which the server is killed and reaped; the binary's
+    /// end, where it ends instead, is the error.
+    fn ask(&mut self, dir: &Path) -> Result<Answer> {
         let handed = self
             .stdin
             .as_mut()
@@ -255,28 +289,92 @@ impl Server {
                     .and_then(|()| stdin.flush())
                     .context("handing the server its request")
             });
-        let answered = handed.and_then(|()| {
-            self.stdout
-                .read_line(&mut line)
-                .context("reading the server's answer")
-        });
-        if matches!(answered, Ok(n) if n > 0) && line.trim() == "served" {
-            return Ok(());
+        match handed.and_then(|()| self.answer()) {
+            Ok(Some(line)) if line.trim_ascii() == b"served" => return Ok(Answer::Served),
+            Ok(None) => return self.killed().map(|()| Answer::PastLimit),
+            _ => {}
         }
-        self.stdin = None;
-        let status = self.child.wait().context("waiting for the linked engine")?;
-        Err(match status.signal() {
-            Some(signal) => anyhow!("the linked engine died on signal {signal} serving it"),
-            None => anyhow!("the linked engine ended serving it, {status}"),
+        Err(match self.ended()? {
+            Some(status) => match status.signal() {
+                Some(signal) => anyhow!("the linked engine died on signal {signal} serving it"),
+                None => anyhow!("the linked engine ended serving it, {status}"),
+            },
+            None => anyhow!(
+                "the linked engine stopped answering and stood past the recipe's limit of {} s, and was killed",
+                self.limit.as_secs()
+            ),
         })
+    }
+
+    /// The server's answer, read as it comes and for no longer than the
+    /// limit: a line, what came before its stdout ended, or none where
+    /// the limit passed first. The server writes one line a request and
+    /// nothing after it until the next, so no read takes past the line.
+    fn answer(&mut self) -> Result<Option<Vec<u8>>> {
+        let until = Instant::now() + self.limit;
+        let mut line = Vec::new();
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            let wait =
+                PollTimeout::try_from(left.as_micros().div_ceil(1000)).unwrap_or(PollTimeout::MAX);
+            match poll(
+                &mut [PollFd::new(self.stdout.as_fd(), PollFlags::POLLIN)],
+                wait,
+            ) {
+                Ok(0) if left.is_zero() => return Ok(None),
+                Ok(0) | Err(Errno::EINTR) => continue,
+                Ok(_) => {}
+                Err(errno) => return Err(errno).context("waiting for the server's answer"),
+            }
+            let mut chunk = [0u8; 256];
+            let n = match self.stdout.read(&mut chunk) {
+                Ok(n) => n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e).context("reading the server's answer"),
+            };
+            line.extend_from_slice(&chunk[..n]);
+            if n == 0 || line.ends_with(b"\n") {
+                return Ok(Some(line));
+            }
+        }
+    }
+
+    /// The server killed and reaped, so it is gone and not a zombie.
+    fn killed(&mut self) -> Result<()> {
+        self.stdin = None;
+        self.child.kill().context("killing the linked engine")?;
+        self.child.wait().context("reaping the linked engine")?;
+        Ok(())
+    }
+
+    /// The server ended on the end of its input, its status awaited for
+    /// no longer than the limit, past which it is [`killed`](Self::killed)
+    /// and there is none.
+    fn ended(&mut self) -> Result<Option<ExitStatus>> {
+        self.stdin = None;
+        let until = Instant::now() + self.limit;
+        loop {
+            let status = self
+                .child
+                .try_wait()
+                .context("waiting for the linked engine")?;
+            if status.is_some() {
+                return Ok(status);
+            }
+            if Instant::now() >= until {
+                return self.killed().map(|()| None);
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        // End of input is the binary's end; waiting keeps no zombie.
-        self.stdin = None;
-        self.child.wait().ok();
+        // End of input is the binary's end, and a binary that does not
+        // take it is killed at the limit; either way it is reaped, so no
+        // zombie is kept.
+        self.ended().ok();
     }
 }
 
@@ -291,6 +389,102 @@ fn binary() -> Result<PathBuf> {
         })
         .clone()
         .map_err(|why| anyhow!("{why}"))
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::super::{Limits, PastLimit, Recipe};
+    use super::{Environ, Server};
+    use crate::scratch::Tree;
+
+    /// A recipe whose limit is one second, the least it can name.
+    fn recipe() -> Recipe {
+        Recipe {
+            script_name: "witness.php".into(),
+            limits: Limits { timeout_s: 1 },
+            ..Recipe::default()
+        }
+    }
+
+    /// A stand-in for `lela-linked --serve` in `tree`: a shell that writes
+    /// its pid beside itself, reads one request and then does as `then`
+    /// says, which never reads its input again.
+    fn stand_in(tree: &Tree, then: &str) -> PathBuf {
+        let path = tree.join("server");
+        let script = format!("#!/bin/sh\necho $$ > \"$0.pid\"\nread request\n{then}\n");
+        std::fs::write(&path, script).unwrap();
+        crate::scratch::executable(&path).unwrap();
+        path
+    }
+
+    /// The stand-in's process, from the pid it wrote: gone once it is
+    /// killed and reaped, since a zombie still answers signal 0.
+    fn standing(server: &std::path::Path) -> bool {
+        let pid = std::fs::read_to_string(server.with_extension("pid")).unwrap();
+        let pid = nix::unistd::Pid::from_raw(pid.trim().parse().unwrap());
+        nix::sys::signal::kill(pid, None).is_ok()
+    }
+
+    /// `f` run on a thread of its own, and what it returned with how long
+    /// it took, or none where it had not returned by `within`.
+    fn within<T: Send + 'static>(
+        within: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<(T, Duration)> {
+        let (tell, told) = mpsc::channel();
+        let started = Instant::now();
+        thread::spawn(move || tell.send(f()).ok());
+        told.recv_timeout(within)
+            .ok()
+            .map(|returned| (returned, started.elapsed()))
+    }
+
+    /// A server that reads the request and never answers is killed and
+    /// reaped at the recipe's limit, and the request answered as the
+    /// fresh-process adapter answers a program past it.
+    #[test]
+    fn a_request_never_answered_is_past_the_limit_and_its_server_killed() {
+        let tree = Tree::new("linked-bound").unwrap();
+        let server = stand_in(&tree, "exec sleep 30");
+        let at = server.clone();
+        let (answered, took) = within(Duration::from_secs(15), move || {
+            super::serve_by(Some(&at), &recipe(), None, "echo 1;").map(|_| ())
+        })
+        .expect("the request was not ended within a bound of the limit");
+        let why = answered.expect_err("a request never answered is not served");
+        let past = why
+            .downcast_ref::<PastLimit>()
+            .unwrap_or_else(|| panic!("the verdict is {why:#} and not PastLimit"));
+        assert_eq!((past.binary.as_path(), past.limit_s), (server.as_path(), 1));
+        assert!(
+            took >= Duration::from_secs(1),
+            "ended before the limit, at {took:?}"
+        );
+        assert!(!standing(&server), "the server past the limit still stands");
+    }
+
+    /// A server that answers and then ignores the end of its input is
+    /// killed as it drops, once the limit has passed.
+    #[test]
+    fn a_server_that_outlives_its_input_is_killed_as_it_drops() {
+        let tree = Tree::new("linked-drop").unwrap();
+        let server = stand_in(&tree, "echo served\nexec sleep 30");
+        let recipe = recipe();
+        let mut started = Server::start(server.clone(), &recipe, Environ::of(&recipe)).unwrap();
+        started.ask(tree.path()).unwrap();
+        let ((), took) = within(Duration::from_secs(15), move || drop(started))
+            .expect("the server's drop did not end within a bound of the limit");
+        assert!(
+            took >= Duration::from_secs(1),
+            "killed before the limit, at {took:?}"
+        );
+        assert!(!standing(&server), "the dropped server still stands");
+    }
 }
 
 #[cfg(test)]

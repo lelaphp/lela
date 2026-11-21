@@ -40,8 +40,9 @@ anyhow.workspace = true
 clap.workspace = true
 # The oracle module's runner kills a program's process group whole, so what a
 # test started goes with it (harness §4.3); phpt's System V sweep reads
-# the runner's user by name, as `ipcs` prints an object's creator.
-nix = { workspace = true, features = ["signal", "user"] }
+# the runner's user by name, as `ipcs` prints an object's creator; the linked
+# adapter waits on a server's answer by `poll`, for no longer than the limit.
+nix = { workspace = true, features = ["poll", "signal", "user"] }
 regex-lite.workspace = true
 sha1_smol.workspace = true
 md5.workspace = true
