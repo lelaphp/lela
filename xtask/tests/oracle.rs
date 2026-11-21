@@ -682,25 +682,9 @@ fn a_tree_the_variable_names_is_at_the_pin() {
     assert!(tree.is_dir(), "{}", tree.display());
 }
 
-/// The `.phpt` files under `dir`, `.git` left out: what `find . -name
-/// '*.phpt' | wc -l` counts in a checkout.
-fn phpt_files_under(dir: &Path) -> u64 {
-    let mut found = 0;
-    for entry in std::fs::read_dir(dir).unwrap().flatten() {
-        let path = entry.path();
-        if entry.file_type().unwrap().is_dir() {
-            if path.file_name().is_some_and(|name| name != ".git") {
-                found += phpt_files_under(&path);
-            }
-        } else if path.extension().is_some_and(|e| e == "phpt") {
-            found += 1;
-        }
-    }
-    found
-}
-
 /// The tree the variable names holds every `.phpt` the pin counts,
-/// `[source].phpt_files`, as `find . -name '*.phpt'` counts them at the
+/// `[source].phpt_files`, counted by `Source::counted`, the count `phpt`
+/// holds a run's tree to, as `find . -name '*.phpt'` counts them at the
 /// tag. A checkout narrower than the corpus fails here naming
 /// both numbers, before a lane measures less in silence: the hand-written
 /// list CI checked out by had left 241 tests of `sapi/cgi`, `sapi/fpm`,
@@ -718,12 +702,9 @@ fn a_tree_the_variable_names_holds_every_test_the_pin_counts() {
     }
     let source = common::manifest::pin().source;
     let tree = source.tree().unwrap();
-    assert_eq!(
-        phpt_files_under(&tree),
-        source.phpt_files,
-        "{} holds the left-hand number of .phpt files and the pin counts the right-hand one: the checkout is not the corpus `xtask status --section corpus` names",
-        tree.display()
-    );
+    if let Err(err) = source.counted(&tree) {
+        panic!("{err:#}: the checkout is not the corpus `xtask status --section corpus` names");
+    }
 }
 
 /// Every file CI runs, the workflows and the local actions they use

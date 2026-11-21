@@ -249,6 +249,7 @@ oracle::SKIPPED_VARIABLE
 oracle::Sapi
 oracle::Sent
 oracle::Source
+oracle::Source::counted
 oracle::Source::named
 oracle::Source::path
 oracle::Source::tree
