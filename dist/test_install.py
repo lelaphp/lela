@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import publish  # noqa: E402
@@ -308,6 +309,59 @@ else echo "dpkg-query: no packages found matching $package" >&2; exit 1; fi''')
                     "its platforms are darwin-arm64, linux-aarch64 and linux-x86_64",
                 )
                 self.assertNotIn("downloading", run.stdout)
+
+    def test_a_platform_added_to_the_table_is_installed_or_refused_as_its_row_says(self):
+        added = (
+            release.Platform(
+                "linux-riscv64", docker="linux/riscv64", uname=("Linux riscv64",), checks="ubuntu", installs=True,
+            ),
+            release.Platform("linux-s390x", docker="linux/s390x", uname=("Linux s390x",), checks=None, installs=False),
+        )
+        with mock.patch.object(release, "PLATFORMS", (*release.PLATFORMS, *added)):
+            script = self.script()
+        self.linux("riscv64")
+        self.tarball("linux-riscv64")
+        self.assertInstalled(self.install(script=script), "linux-riscv64")
+        shutil.rmtree(self.home / ".local")
+        self.linux("s390x")
+        self.tarball("linux-s390x")
+        self.assertRefused(
+            self.install(script=script), "lela 1.2.0's tarball for linux-s390x is not one this installer installs; "
+            "download it from https://github.com/lelaphp/lela/releases/download/v1.2.0",
+        )
+        self.machine("FreeBSD", "amd64")
+        self.assertRefused(
+            self.install(script=script), "lela 1.2.0 has no tarball for FreeBSD amd64; "
+            "its platforms are darwin-arm64, linux-aarch64, linux-x86_64 and linux-riscv64",
+        )
+
+    def test_the_checks_a_machine_is_held_to_are_its_rows_not_its_systems(self):
+        # A row of a system that is not Linux, held to the Ubuntu checks: its
+        # os-release and packages are read as an Ubuntu's are.
+        added = release.Platform("bsd-x86_64", docker=None, uname=("FreeBSD amd64",), checks="ubuntu", installs=True)
+        with mock.patch.object(release, "PLATFORMS", (*release.PLATFORMS, added)):
+            script = self.script()
+        self.machine("FreeBSD", "amd64")
+        self.os_release.write_text(DEBIAN)
+        self.tarball("bsd-x86_64")
+        self.assertRefused(
+            self.install(script=script),
+            f"this is Debian GNU/Linux 13 (trixie) ({self.os_release}), "
+            "and lela's Linux tarballs are built for Ubuntu 26.04 alone",
+        )
+        self.os_release.write_text(UBUNTU)
+        self.assertInstalled(self.install(script=script), "bsd-x86_64")
+        # And a Linux row held to the macOS checks is held to the tarball's
+        # floor, not to an os-release.
+        mac = release.Platform("linux-mac", docker=None, uname=("Linux riscv64",), checks="macos", installs=True)
+        with mock.patch.object(release, "PLATFORMS", (*release.PLATFORMS, mac)):
+            script = self.script()
+        shutil.rmtree(self.home / ".local")
+        self.linux("riscv64")
+        self.os_release.unlink()
+        self.tarball("linux-mac")
+        self.assertRefused(self.install(script=script), "lela-1.2.0-linux-mac.tar.gz's bundled-libraries.txt names "
+                           "no oldest macOS on its first line")
 
     def test_an_intel_mac_is_refused(self):
         for arm64 in (0, None):

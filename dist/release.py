@@ -29,13 +29,16 @@ tarball there into a home of its own, as a user runs it, and runs
 `lela -v` through its link.
 
 The platforms are one table, PLATFORMS, a row per platform with its name,
-how its tarball is built and whether install.sh installs on it; the
-tarballs a release is built and published with and platforms.json are
-read from it.
+how its tarball is built, the `uname` words of a machine of it, the
+checks of install.sh it is held to and whether install.sh installs on it,
+a row that installs held to checks the script has not refused; the tarballs a release is built and
+published with, platforms.json and install.sh's platforms are read from
+it.
 
 `publish` takes the table's tarballs from <dir>, and no other, stages
 install.sh beside them, dist/install.sh with the release's name, version,
-Ubuntu release and download URL baked in, and platforms.json, the
+Ubuntu release, download URL and the table's platforms baked in, and
+platforms.json, the
 release's version and each platform by its name, its tarball's file name
 and whether install.sh installs on it. It writes SHA256SUMS over every
 file staged with scripts/dist-sums.sh, and creates the tag's GitHub
@@ -47,8 +50,8 @@ read from it. The images are that script's to
 push, on its release path: this one names their tags and pushes nothing.
 
 --dry-run prints what the step would make, the release's fields, the
-image tags and, for `publish`, platforms.json among it, and builds,
-smokes, uploads and creates nothing. A real `build` or `publish` refuses
+image tags and, for `publish`, platforms.json and the platforms baked into
+install.sh among it, and builds, smokes, uploads and creates nothing. A real `build` or `publish` refuses
 a tree with changes and a tag that is not HEAD; `publish` uses gh,
 authorised to write the repository's releases.
 
@@ -98,11 +101,16 @@ def release(tag):
 class Platform:
     """One platform a release builds a tarball for: its name, the Docker
     platform dist/Dockerfile's binaries target is built for where it is a
-    Linux one (None where cargo builds it on an Apple silicon Mac), and
-    whether the release's install.sh installs on it."""
+    Linux one (None where cargo builds it on an Apple silicon Mac), the
+    `uname -s` and `uname -m` words of a machine of it, each pair one
+    string, the checks of install.sh a machine of it is held to (`ubuntu`,
+    `macos`; None where the installer refuses it), and whether the
+    release's install.sh installs on it."""
 
     name: str
     docker: str | None
+    uname: tuple[str, ...]
+    checks: str | None
     installs: bool
 
     def tarball(self, ref):
@@ -110,12 +118,14 @@ class Platform:
 
 
 # The one platform table: the tarballs a release is built and published
-# with, and platforms.json, are each read from it. An Intel Mac is a
-# refusal of the installer, not a platform, so it has no row.
+# with, platforms.json and install.sh's platforms are each read from it,
+# one row a line. An Intel Mac is a refusal of the installer, not a
+# platform, so it has no row; a shell under Rosetta is the installer's to
+# see through, and its machine is the Apple silicon one.
 PLATFORMS = (
-    Platform("darwin-arm64", docker=None, installs=True),
-    Platform("linux-aarch64", docker="linux/arm64", installs=True),
-    Platform("linux-x86_64", docker="linux/amd64", installs=True),
+    Platform("darwin-arm64", docker=None, uname=("Darwin arm64",), checks="macos", installs=True),
+    Platform("linux-aarch64", docker="linux/arm64", uname=("Linux aarch64", "Linux arm64"), checks="ubuntu", installs=True),
+    Platform("linux-x86_64", docker="linux/amd64", uname=("Linux x86_64",), checks="ubuntu", installs=True),
 )
 
 
@@ -302,6 +312,9 @@ def install_darwin(ref, platform, path, scratch):
 def build_tarball(ref, commit, arguments):
     """One platform's tarball, built on that platform and smoked there."""
     platform = platform_named(arguments.platform)
+    # The installer the tarball's smoke runs, baked in the dry run too, so
+    # that a table the installer cannot follow is refused before a build.
+    installer(ref)
     if not arguments.dry_run:
         publish.built_from(ref, commit)
         native(platform)
@@ -345,17 +358,50 @@ def ubuntu():
     return found.group(1)
 
 
+def installer_checks():
+    """The checks dist/install.sh has, each the name of a `before_<checks>`
+    and an `after_<checks>` function of it."""
+    text = (ROOT / "dist" / INSTALLER).read_text()
+    before, after = ({found for found in re.findall(rf"^{phase}_([a-z]+)\(\) {{$", text, re.M)}
+                     for phase in ("before", "after"))
+    return sorted(before & after)
+
+
+def installer_platforms():
+    """install.sh's platforms, rendered from the table: a line per `uname`
+    pair of each row, `<platform> installs|refuses <checks> <system>
+    <machine>`, the checks `none` where it refuses. A row that installs
+    held to checks the script has not is refused, so that the table never
+    says the installer installs where it would refuse."""
+    checks = installer_checks()
+    rows = []
+    for platform in PLATFORMS:
+        if platform.installs and platform.checks is None:
+            raise Refusal(f"{platform.name} installs held to no checks of the installer's; "
+                          f"its checks are {', '.join(checks)}")
+        if platform.installs and platform.checks not in checks:
+            raise Refusal(f"{platform.name} installs held to the installer's {platform.checks} checks, and "
+                          f"dist/{INSTALLER} has none of that name; its checks are {', '.join(checks)}")
+        held = platform.checks if platform.installs else "none"
+        for words in platform.uname:
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+ [A-Za-z0-9_.-]+", words):
+                raise Refusal(f"{platform.name}'s uname words {words!r} are not `<system> <machine>`")
+            rows.append(f"{platform.name} {'installs' if platform.installs else 'refuses'} {held} {words}")
+    return rows
+
+
 def installer(ref):
-    """dist/install.sh with the release baked into its four empty lines:
+    """dist/install.sh with the release baked into its five empty lines:
     the hosts' name, the version, the Ubuntu release of the Linux
-    tarballs, and the URL of the release's assets, which the script
-    fetches its tarball and SHA256SUMS from."""
+    tarballs, the URL of the release's assets, which the script fetches
+    its tarball and SHA256SUMS from, and the table's platforms."""
     text = (ROOT / "dist" / INSTALLER).read_text()
     values = {
         "name": name(),
         "version": ref.version,
         "ubuntu": ubuntu(),
         "release": f"{publish.SOURCE}/releases/download/{ref.name}",
+        "platforms": "\n".join(installer_platforms()),
     }
     for key, value in values.items():
         count = text.count(f"\n{key}=\n")
@@ -406,6 +452,8 @@ def publish_release(ref, commit, arguments):
         print(f"artifact {artifact}")
     for line in platforms.splitlines():
         print(f"{PLATFORMS_FILE} {line}")
+    for line in installer_platforms():
+        print(f"{INSTALLER} {line}")
     # The release is the latest where its images move the bare variant
     # tags: the publish script's rule, read from it and kept nowhere else.
     latest = all(variant in publish.tags(ref, commit, variant) for variant in publish.VARIANTS)
