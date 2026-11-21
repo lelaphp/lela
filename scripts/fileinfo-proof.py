@@ -162,13 +162,27 @@ def cases():
         yield "descriptors", [kind], []
 
 
+def held(table, content):
+    """The digest `[oracle]` holds the binary's `content` to, spelt as xtask's
+    `oracle::Digest` names it: its `sha256` wherever it pins one, and its
+    `md5` where it pins that alone."""
+    if "sha256" in table:
+        pinned, actual = table["sha256"], "sha256:" + digest(content)
+    elif "md5" in table:
+        pinned, actual = "md5 " + table["md5"], "md5 " + hashlib.md5(content).hexdigest()
+    else:
+        raise SystemExit("[oracle] names neither `md5` nor `sha256`, and its binary is held to one of them")
+    if actual != pinned:
+        raise SystemExit(f"oracle digest mismatch: the binary is {actual}, [oracle] pins {pinned}")
+    return pinned
+
+
 def observe(scratch):
     pin_bytes = (ROOT / "oracle.toml").read_bytes()
     pin = tomllib.loads(pin_bytes.decode())
     binary = Path(pin["oracle"]["path"])
     content = binary.read_bytes()
-    if hashlib.md5(content).hexdigest() != pin["oracle"]["md5"]:
-        raise SystemExit("oracle digest mismatch")
+    pinned = held(pin["oracle"], content)
     source = Path(pin["source"]["path"])
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     if not head.startswith(pin["source"]["commit"]):
@@ -227,7 +241,7 @@ def observe(scratch):
     after_closure = subprocess.run(closure_call, cwd=ROOT, capture_output=True, text=True, timeout=120)
     if after_closure.returncode != 0 or "1 witnesses pass" not in after_closure.stdout:
         raise SystemExit("oracle closure changed during observation")
-    return {"oracle": {"version": pin["oracle"]["version"], "md5": pin["oracle"]["md5"],
+    return {"oracle": {"version": pin["oracle"]["version"], "digest": pinned,
                        "sha256": digest(content), "source_commit": head,
                        "pin_sha256": digest(pin_bytes), "recipe": recipe, "closure": pin["closure"],
                        "closure_assertion": {"command": closure_call, "status": closure.returncode, "stdout": closure.stdout,
