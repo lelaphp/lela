@@ -180,19 +180,16 @@ fn log_message(entry: &[u8]) {
 /// The lines `tests/lines.toml` holds: `-V`, and `-h` with no page, a page
 /// answered and one quit.
 fn asked(s: &mut Session, ask: Ask, line: &Line, engine: &Engine) -> ExitCode {
-    let paged = match ask {
+    match ask {
         Ask::Help => help::line(s, line.exec.as_deref()),
         Ask::Version => {
             let version = php_sapi::version(NAME, engine);
             // `PHPDBG_VERSION` is `PHP_VERSION`.
             let text = format!("phpdbg {}, {version}", php_sapi::PHP_VERSION);
-            out::paged(s, text.as_bytes())
+            s.out.out(text.as_bytes());
         }
-    };
-    php_sapi::exit_code(match paged {
-        out::Paged::Written => 0,
-        out::Paged::Ended => 255,
-    })
+    }
+    php_sapi::exit_code(if s.out.ended() { 255 } else { 0 })
 }
 
 /// The host's `main`.

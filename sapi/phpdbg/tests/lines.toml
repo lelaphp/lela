@@ -995,3 +995,50 @@ stdin = "help\n"
 name = "help-at-the-prompt-answered-reads-on"
 args = ["-n", "-q", "-b"]
 stdin = "help\n\nq\n"
+
+# What phpdbg writes to stdout goes through the pager a write at a time
+# (`phpdbg_mixed_write`), the program's bytes among them: one echo of 45 lines
+# is a page of forty, the question, the line it reads, and the five after.
+[[line]]
+name = "the-program-s-one-write-pages-at-forty-lines"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = '<?php echo str_repeat("l\n", 45);' }
+stdin = "r\n\nq\n"
+
+# Each write is paged on its own count, so 45 echoes of a line each ask
+# nothing.
+[[line]]
+name = "each-write-is-paged-on-its-own"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = '<?php for ($i = 0; $i < 45; $i++) { echo "l\n"; }' }
+stdin = "r\nq\n"
+
+# `q` at the question writes no more of that write, and the program goes on.
+[[line]]
+name = "q-at-the-pager-writes-no-more-of-the-write"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = '<?php echo str_repeat("l\n", 45); echo "after\n";' }
+stdin = "r\nq\nq\n"
+
+# The end of input at the question bails out of the run quitting: the
+# shutdown functions run, and the session ends with no notice.
+[[line]]
+name = "the-end-of-input-at-the-pager-quits-the-run"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = '<?php register_shutdown_function(function () { echo "shutdown\n"; }); echo str_repeat("l\n", 45); echo "after\n";' }
+stdin = "r\n"
+
+# `-rr` runs with pagination off, so nothing asks.
+[[line]]
+name = "run-and-quit-writes-unpaged"
+args = ["-qIrr", "-n", "{dir}/t.php"]
+files = { "t.php" = '<?php echo str_repeat("l\n", 45);' }
+
+# `set pagination` and `set lines` say what the pager is under and set it: a
+# page of three lines, then pagination off, then on with lines at zero, which
+# pages nothing.
+[[line]]
+name = "set-pagination-and-set-lines-answer-and-set"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\n" }
+stdin = "set pagination\nset lines\nset lines 3\nset lines\nev print(\"a\\nb\\nc\\nd\\n\")\n\nset pagination off\nset pagination\nev print(\"a\\nb\\nc\\nd\\n\")\nset pagination on\nset lines 0\nev print(\"a\\nb\\nc\\nd\\n\")\nset pagination x\nset lines x\nq\n"

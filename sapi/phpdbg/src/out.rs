@@ -119,10 +119,18 @@ impl Palette {
     };
 }
 
+/// `PHPDBG_HAS_PAGINATION`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pagination {
+    On,
+    Off,
+}
+
 /// What phpdbg keeps of its own stream (`phpdbg_out.c`'s part of
 /// `PHPDBG_G`): the palette, whether the last byte written was a newline,
-/// `PHPDBG_DISCARD_OUTPUT`, the log's guard, and whether a write of its
-/// own through the program's `P_STDOUT` is under way. The session holds it
+/// `PHPDBG_DISCARD_OUTPUT`, the log's guard, whether a write of its
+/// own through the program's `P_STDOUT` is under way, and the pager's
+/// state. The session holds it
 /// ([`crate::session::Session::out`]), and the program's bytes reach it
 /// through [`Sink`], which holds the session while a request runs.
 #[derive(Debug)]
@@ -145,6 +153,16 @@ pub struct Out {
     /// What the `exec` file's compile wrote, which php writes
     /// after the init files, [`Out::hold`].
     compile: Compile,
+    /// `PHPDBG_HAS_PAGINATION`, which `set pagination` turns and `-rr`
+    /// clears once the init files are read.
+    pagination: Pagination,
+    /// `PHPDBG_G(lines)`, the lines a page holds, which `set lines` sets;
+    /// zero pages nothing.
+    lines: u64,
+    /// Stdin ended at the pager's question: `phpdbg_consume_stdin_line`
+    /// sets `PHPDBG_IS_QUITTING` and bails out of the write, so nothing
+    /// more is written until the session quits ([`Out::take_ended`]).
+    ended: bool,
 }
 
 /// Where a cycle's compile of the `exec` file writes. php reads
@@ -185,6 +203,9 @@ impl Default for Out {
             stuck: false,
             interruptible: false,
             compile: Compile::Through,
+            pagination: Pagination::On,
+            lines: PAGE,
+            ended: false,
         }
     }
 }
@@ -329,21 +350,60 @@ impl Out {
         self.set_colour(element, find_colour(name).unwrap_or(&COLOURS[0]));
     }
 
+    /// Whether pagination is on.
+    pub fn pagination(&self) -> Pagination {
+        self.pagination
+    }
+
+    /// Pagination on from here, or off.
+    pub fn set_pagination(&mut self, pagination: Pagination) {
+        self.pagination = pagination;
+    }
+
+    /// The lines a page holds.
+    pub fn lines(&self) -> u64 {
+        self.lines
+    }
+
+    /// A page of `lines` from here.
+    pub fn set_lines(&mut self, lines: u64) {
+        self.lines = lines;
+    }
+
+    /// The next cycle's: pagination on, as `main` sets `PHPDBG_G(flags)`
+    /// from the line again, and a page of [`PAGE`] lines, as
+    /// `php_phpdbg_globals_ctor` sets `PHPDBG_G(lines)`.
+    pub fn page_afresh(&mut self) {
+        self.pagination = Pagination::On;
+        self.lines = PAGE;
+    }
+
+    /// Whether stdin ended at the pager's question.
+    pub fn ended(&self) -> bool {
+        self.ended
+    }
+
+    /// Whether stdin ended at the pager's question, which the session
+    /// quits for, and what is written from here written again.
+    pub fn take_ended(&mut self) -> bool {
+        std::mem::take(&mut self.ended)
+    }
+
     /// `phpdbg_out`: the bytes as they are, the newline fact untouched.
     pub fn out(&mut self, bytes: &[u8]) {
         if !self.discarding {
-            raw(bytes);
+            self.mixed(bytes);
         }
     }
 
-    /// `phpdbg_write`, `P_WRITE`: the bytes, and the fact read off their
-    /// last.
+    /// `phpdbg_write`, `P_WRITE`: the fact read off the bytes' last, and
+    /// the bytes.
     pub fn write(&mut self, bytes: &[u8]) {
         if bytes.is_empty() || self.discarding {
             return;
         }
-        raw(bytes);
         self.last_was_newline = bytes.last() == Some(&b'\n');
+        self.mixed(bytes);
     }
 
     /// `phpdbg_writeln`, `P_WRITELN`: the bytes and a newline.
@@ -353,21 +413,22 @@ impl Out {
         }
         let mut line = bytes.to_vec();
         line.push(b'\n');
-        raw(&line);
         self.last_was_newline = true;
+        self.mixed(&line);
     }
 
     /// `phpdbg_process_print`'s `P_NOTICE` and `P_ERROR`: a newline
-    /// first where the last byte was none, then `[message]`, inside the
-    /// element's colour while colours are on.
+    /// first where the last byte was none, a write of its own, then
+    /// `[message]`, inside the element's colour while colours are on.
     fn bracketed(&mut self, message: &[u8], colour: &'static Colour) {
         if message.is_empty() || self.discarding {
             return;
         }
-        let mut line = Vec::with_capacity(message.len() + 16);
         if !self.last_was_newline {
-            line.push(b'\n');
+            self.last_was_newline = true;
+            self.mixed(b"\n");
         }
+        let mut line = Vec::with_capacity(message.len() + 16);
         let coloured = self.palette.colours == Colours::On;
         if coloured {
             line.extend_from_slice(format!("\x1b[{}m", colour.code).as_bytes());
@@ -379,8 +440,7 @@ impl Out {
             line.extend_from_slice(b"\x1b[0m");
         }
         line.push(b'\n');
-        raw(&line);
-        self.last_was_newline = true;
+        self.mixed(&line);
     }
 
     /// `phpdbg_notice`.
@@ -399,12 +459,59 @@ impl Out {
         self.last_was_newline = true;
     }
 
-    /// What the program writes, `P_STDOUT`: the bytes, the newline fact read
-    /// off their last.
+    /// What the program writes, `P_STDOUT`: the newline fact read off the
+    /// bytes' last, and the bytes.
     pub fn program(&mut self, bytes: &[u8]) {
         if !bytes.is_empty() {
-            raw(bytes);
             self.last_was_newline = bytes.last() == Some(&b'\n');
+            self.mixed(bytes);
+        }
+    }
+
+    /// `phpdbg_mixed_write` to stdout: through the pager while pagination
+    /// is on and a page holds lines, else as they are; nothing once stdin
+    /// ended at the pager's question.
+    fn mixed(&mut self, bytes: &[u8]) {
+        if self.ended {
+            return;
+        }
+        if self.pagination == Pagination::On && self.lines > 0 {
+            self.paged(bytes);
+        } else {
+            raw(bytes);
+        }
+    }
+
+    /// `phpdbg_output_pager`: the bytes a page of [`Out::lines`] lines at
+    /// a time, counted afresh for each write, each page but the last
+    /// followed by the question and a line read; a line opening with `q`
+    /// writes no more, and a page that ends where the bytes' last newline
+    /// is leaves what follows it unwritten, as php's does.
+    fn paged(&mut self, bytes: &[u8]) {
+        let mut count: u64 = 0;
+        let mut written = 0;
+        for (at, _) in bytes.iter().enumerate().filter(|(_, byte)| **byte == b'\n') {
+            count += 1;
+            if !count.is_multiple_of(self.lines) {
+                continue;
+            }
+            raw(&bytes[written..=at]);
+            written = at + 1;
+            if !bytes[written..].contains(&b'\n') {
+                break;
+            }
+            raw(MORE);
+            match crate::input::read_line(self) {
+                crate::input::Line::End => {
+                    self.ended = true;
+                    return;
+                }
+                crate::input::Line::Read(line) if line.first() == Some(&b'q') => break,
+                crate::input::Line::Read(_) => raw(b"\r"),
+            }
+        }
+        if written == 0 || !count.is_multiple_of(self.lines) {
+            raw(&bytes[written..]);
         }
     }
 
@@ -417,56 +524,12 @@ impl Out {
     }
 }
 
-/// The lines a page holds: `phpdbg_get_terminal_height`'s where stdout is
-/// no terminal, `PHPDBG_G(lines)`.
-const PAGE: usize = 40;
+/// The lines a page holds at the start of a cycle:
+/// `phpdbg_get_terminal_height`'s where stdout is no terminal.
+const PAGE: u64 = 40;
 
 /// The pager's question (`Z/sapi/phpdbg/phpdbg_io.c:96`).
 const MORE: &[u8] = b"\r---Type <return> to continue or q <return> to quit---";
-
-/// How a write through the pager ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Paged {
-    /// As far as the pager let it.
-    Written,
-    /// Stdin ended at the pager's question: `phpdbg_consume_stdin_line`
-    /// sets `PHPDBG_IS_QUITTING` and bails out.
-    Ended,
-}
-
-/// `phpdbg_out` under `PHPDBG_HAS_PAGINATION`, `phpdbg_output_pager`:
-/// the bytes a page of [`PAGE`] lines at a time, each page but the last
-/// followed by the question and a line read; a line opening with `q`
-/// writes no more, and a page that ends where the bytes' last newline is
-/// leaves what follows it unwritten, as php's does.
-pub fn paged(s: &mut Session, bytes: &[u8]) -> Paged {
-    if s.out.discarding {
-        return Paged::Written;
-    }
-    let mut count = 0;
-    let mut written = 0;
-    for (at, _) in bytes.iter().enumerate().filter(|(_, byte)| **byte == b'\n') {
-        count += 1;
-        if count % PAGE != 0 {
-            continue;
-        }
-        s.out.out(&bytes[written..=at]);
-        written = at + 1;
-        if !bytes[written..].contains(&b'\n') {
-            break;
-        }
-        s.out.out(MORE);
-        match crate::input::consume_line(s) {
-            crate::input::Line::End => return Paged::Ended,
-            crate::input::Line::Read(line) if line.first() == Some(&b'q') => break,
-            crate::input::Line::Read(_) => s.out.out(b"\r"),
-        }
-    }
-    if written == 0 || count % PAGE != 0 {
-        s.out.out(&bytes[written..]);
-    }
-    Paged::Written
-}
 
 /// The bytes to stdout as they are.
 fn raw(bytes: &[u8]) {

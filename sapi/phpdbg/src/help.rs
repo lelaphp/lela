@@ -2,7 +2,7 @@
 //! `pretty_print` formats them and through the pager. The overview is the
 //! one page held here; the others are not yet.
 
-use crate::out::{self, Colours, Paged};
+use crate::out::Colours;
 use crate::session::Session;
 
 /// The columns `pretty_print` wraps at: `phpdbg_get_terminal_width`'s
@@ -67,7 +67,7 @@ fn page(key: &[u8]) -> Option<&'static str> {
 /// `$P` the prompt, `\` taking the next byte as it is, and each line
 /// wrapped at its last blank before [`WIDTH`] printable bytes, then a
 /// newline, through the pager.
-fn pretty_print(s: &mut Session, text: &str) -> Paged {
+fn pretty_print(s: &mut Session, text: &str) {
     let colours = s.out.colours() == Colours::On;
     let prompt = [s.prompt.as_slice(), b" "].concat();
     let mut new = Vec::with_capacity(text.len() + 1);
@@ -120,7 +120,7 @@ fn pretty_print(s: &mut Session, text: &str) -> Paged {
         }
     }
     new.push(b'\n');
-    out::paged(s, &new)
+    s.out.out(&new);
 }
 
 /// `PHPDBG_COMMAND(help)` with no topic: the overview.
@@ -186,22 +186,21 @@ fn pretty_print(s: &mut Session, text: &str) -> Paged {
 /// Type help phpdbginit to show how to customize the debugger environment.
 /// prompt>
 /// ```
-pub fn overview(s: &mut Session) -> Paged {
-    pretty_print(s, OVERVIEW)
+pub fn overview(s: &mut Session) {
+    pretty_print(s, OVERVIEW);
 }
 
 /// `phpdbg_do_help_cmd`, what `-h` writes: the page the line's word
 /// names, or the overview where it names none; a word that names no page
 /// writes the overview, then that none was found.
-pub fn line(s: &mut Session, word: Option<&[u8]>) -> Paged {
+pub fn line(s: &mut Session, word: Option<&[u8]>) {
     let Some(word) = word else {
         return overview(s);
     };
     if let Some(text) = page(word) {
-        return pretty_print(s, text);
-    }
-    match overview(s) {
-        Paged::Written => pretty_print(s, "\nrequested help page could not be found"),
-        Paged::Ended => Paged::Ended,
+        pretty_print(s, text);
+    } else {
+        overview(s);
+        pretty_print(s, "\nrequested help page could not be found");
     }
 }
