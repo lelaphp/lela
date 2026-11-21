@@ -17,7 +17,16 @@
 //! so the pin's digest is asserted once before the first test where the
 //! pinned php is on this machine; where it is not, as on the runner (harness
 //! D.20), nothing runs and the reading is a skip that says so, as the
-//! witness lane's is, rather than a refusal over a binary no test spawns.
+//! witness lane's is, rather than a refusal over a binary no test spawns;
+//! the run, which judged nothing it set out to, exits as unfinished
+//! (`exit::UNFINISHED`), as it does with no engine binary to run.
+//!
+//! **Before the run.** Before it judges anything the run holds the tree to
+//! the pin, by its commit where it is a checkout and by its count of
+//! tests, and refuses it whole where it is not the pin's; and it asks the
+//! `MySQL` server once, before the tree is copied, where a subset needs it,
+//! refusing those subsets alone where it does not answer (the `server`
+//! module).
 //!
 //! **Which engine wrote the numbers.** The reading names the binary that
 //! ran it, its path and the md5 of its bytes, and a binary the tree has
@@ -783,9 +792,9 @@ pub(crate) struct Under<'a> {
     pub oracle_absent: Option<&'a str>,
     /// How many tests run at once.
     pub jobs: NonZeroUsize,
-    /// The `MySQL` server's `SELECT VERSION()`, for a subset that needs
-    /// one (the `server` module); a runner handed such a subset without it
-    /// refuses.
+    /// The `MySQL` server's `SELECT VERSION()` and where it answered, for a
+    /// subset that needs one (the `server` module); a runner handed such a
+    /// subset without it refuses.
     pub served: Option<&'a str>,
     /// The directory the tests' conflict keys are held in as locks.
     pub locks: &'a Path,
@@ -1146,6 +1155,16 @@ impl Ran {
         self.readings.push(reading);
     }
 
+    /// The readings of the subset at `scope`, and its scope as one not run
+    /// where it was to run and had no binary or no oracle to run on
+    /// (`runs`), its readings saying why.
+    fn took(&mut self, readings: Vec<Reading>, scope: &Scope, runs: bool) {
+        if !runs {
+            self.unrun.push(scope.to_string());
+        }
+        self.readings.extend(readings);
+    }
+
     /// The corpus's reading, beside the subsets', and what the run did not
     /// take of the corpus where it did not.
     fn corpus(&mut self, (reading, short): (Reading, Option<corpus::Short>)) {
@@ -1181,17 +1200,46 @@ pub fn run(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> 
         .map_err(|why| crate::exit::Unfinished::of(INSTRUMENT, why))
 }
 
+/// What a run holds to the pin before it judges anything: the pinned tree,
+/// at the pin's commit where it is a checkout (`Source::tree`) and holding
+/// the tests the pin counts, and the pins its programs run under, the main
+/// one and each variant a row names, each a copy with the caller's server
+/// address laid over its recipe (`server::Address`).
+pub(crate) struct Pinned {
+    pub(crate) source: PathBuf,
+    pub(crate) main: Pin,
+    pub(crate) variants: BTreeMap<String, Pin>,
+}
+
+impl Pinned {
+    /// The tree and the pins `manifest`'s pin names, or the run refused.
+    pub(crate) fn of(manifest: &Manifest) -> Result<Pinned> {
+        let pin = manifest.pin()?;
+        let source = pin.source.tree()?;
+        pin.source.counted(&source)?;
+        let address = server::Address::asked()?;
+        let mut main = pin.clone();
+        let mut variants = manifest.variants();
+        for pin in std::iter::once(&mut main).chain(variants.values_mut()) {
+            address.lay_over(pin);
+        }
+        Ok(Pinned {
+            source,
+            main,
+            variants,
+        })
+    }
+}
+
 /// [`run`]'s body, whose error is the run's cause.
 fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Ran> {
-    // Where the tree is on this machine is the oracle module's one answer;
-    // an absent tree refuses the run naming both places it looked.
-    let source = manifest.pin()?.source.tree()?;
-    let subsets = asked(root, manifest, &source, ask)?;
+    let pinned = Pinned::of(manifest)?;
+    let source = &pinned.source;
+    let subsets = asked(root, manifest, source, ask)?;
     // The main oracle, and one per variant a row names, whose crate's subset
     // runs under it; each digest asserted once a run (harness §4.3).
-    let variants = manifest.variants();
-    let oracles = Oracles::new(manifest.pin()?, &variants);
-    let runners = Runners::resolve(root, manifest, &variants, ask, &subsets)?;
+    let oracles = Oracles::new(&pinned.main, &pinned.variants);
+    let runners = Runners::resolve(root, manifest, &pinned.variants, ask, &subsets)?;
     let runner = &runners.main;
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     let sides: Vec<Result<Side>> = subsets
@@ -1200,18 +1248,13 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
         .collect();
     unrunnable(&sides);
     let todo = to_run(ask, &runs, &subsets, &sides)?;
-    if let Some(why) = oracles.main().pin().oracle.absent()
-        && matches!(runner, Runner::Engine(..))
-        && !sides.iter().flatten().any(Side::runs)
-    {
-        println!("phpt: nothing runs; {why}");
-    }
+    let answer = Answer::asked(&todo);
     let locks = ask.locks.clone().unwrap_or_else(across::machine);
     let jobs = ask.jobs.unwrap_or_else(crate::seat::jobs);
     // No room for the copy every subset runs in leaves the copy's error
     // standing, and each subset is a run not measured, its reading the
     // skip that names the volume; any other trouble ends the run.
-    let copy = match copied(&todo, &source, jobs) {
+    let copy = match copied(&todo, &answer, source, jobs) {
         Err(why) if Full::of(&why).is_none() => return Err(why),
         copy => copy,
     };
@@ -1227,12 +1270,13 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
     // commit. A subset refused, for a server that did not answer or for
     // any other cause, is that subset's failing reading, and the lane goes
     // on, so one missing service never takes the readings the subsets
-    // before and after it wrote with it.
+    // before and after it wrote with it; the run's exit says it was short.
     let mut taken = |subset: &Subset, side: &Side, held_as: &Scope| -> Result<Vec<Reading>> {
         let scope = &held_as.to_string();
         let copy = tree.filter(|_| side.runs());
         let runner = side.runner;
-        let own = Own::of(side.oracle, subset, scope, copy.is_some())?;
+        let served = answer.to(subset, copy.is_some());
+        let own = Own::of(side.oracle, subset, scope, (served, copy.is_some()))?;
         let beside = own.pin.as_ref().map(|pin| side.oracle.beside(pin));
         let oracle = beside.as_ref().unwrap_or(side.oracle);
         let under = side.under(ask.lane, jobs, own.served.as_deref(), &locks);
@@ -1241,7 +1285,7 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
             let within = copy.map(|copy| subset.rooted(copy));
             run_subset(oracle, registry, within.as_ref().unwrap_or(subset), under)
         })?;
-        let mut reading = reading(&tally, runs.snapshot(), manifest, &source, subset, under)?;
+        let mut reading = reading(&tally, runs.snapshot(), manifest, source, subset, under)?;
         around(&mut reading, runner, &removed, waited)?;
         let pin = side.oracle.pin();
         let (target, kept) = runs.target_of(pin, &subset.scope, (&tally, runner), ask.lane)?;
@@ -1274,22 +1318,29 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
         Ok(std::iter::once(reading).chain(held).collect())
     };
     // A subset whose row names an oracle variant the pin does not carry is
-    // refused as any other subset the lane could not run, naming it.
+    // refused as any other subset the lane could not run, naming it. One
+    // that was to run and has no binary to run on, one the tree has moved
+    // past, or no oracle, writes the skip that says so and leaves the run
+    // short as a refusal does.
     for (subset, side) in todo {
         let scope = subset.scope(side.as_ref().map_or(runner, |side| side.runner), ask.lane);
         let refusal =
             |why: &anyhow::Error| refused(runs.snapshot(), manifest, &scope.to_string(), why);
-        if let (Err(full), Ok(side)) = (&copy, side)
+        let side = match answer.side(subset, side, &scope) {
+            Ok(side) => side,
+            Err(why) => {
+                ran.refuse(refusal(&why)?);
+                continue;
+            }
+        };
+        if let Err(full) = &copy
             && side.runs()
         {
             ran.refuse(refusal(full)?);
             continue;
         }
-        let side = side
-            .as_ref()
-            .map_err(|unknown| anyhow::anyhow!("{unknown:#}"));
-        match side.and_then(|side| taken(subset, side, &scope)) {
-            Ok(taken) => ran.readings.extend(taken),
+        match taken(subset, side, &scope) {
+            Ok(taken) => ran.took(taken, &scope, side.runs()),
             Err(why) => ran.refuse(refusal(&why)?),
         }
     }
@@ -1321,6 +1372,67 @@ fn unrunnable(sides: &[Result<Side>]) {
     }
 }
 
+/// The server's answer to a run, asked once and before the tree is copied,
+/// where a subset whose tests run here needs it: one that does not answer
+/// refuses those subsets, by name and before any test of theirs, and the
+/// rest run. None where no such subset runs.
+struct Answer(Option<std::result::Result<String, String>>);
+
+impl Answer {
+    /// The server asked through the oracle of the first subset of `todo`
+    /// that runs and needs it.
+    fn asked(todo: &[(&Subset, &Result<Side>)]) -> Answer {
+        let side = (todo.iter())
+            .find_map(|(subset, side)| side.as_ref().ok().filter(|side| side.served(subset)));
+        Answer(side.map(|side| server::answer(side.oracle)))
+    }
+
+    /// The side `subset` runs on, or why it is refused before it runs: a
+    /// row naming a variant the pin does not carry, or a server its tests
+    /// need that did not answer.
+    fn side<'s, 'r, 'o>(
+        &self,
+        subset: &Subset,
+        side: &'s Result<Side<'r, 'o>>,
+        scope: &Scope,
+    ) -> Result<&'s Side<'r, 'o>> {
+        let side = (side.as_ref()).map_err(|unknown| anyhow::anyhow!("{unknown:#}"))?;
+        match self.refuses(subset, side) {
+            Some(why) => Err(anyhow::anyhow!("{scope}: refused, not skipped: {why}")),
+            None => Ok(side),
+        }
+    }
+
+    /// Why `subset` is refused, where its tests run here, need the server,
+    /// and it did not answer.
+    fn refuses(&self, subset: &Subset, side: &Side) -> Option<&str> {
+        let why = self.0.as_ref()?.as_ref().err()?;
+        side.served(subset).then_some(why.as_str())
+    }
+
+    /// The answer `subset` runs with, where its tests `runs` and need the
+    /// server.
+    fn to(&self, subset: &Subset, runs: bool) -> Option<String> {
+        let answer = self.0.as_ref()?.as_ref().ok()?;
+        (runs && server::needs(subset)).then(|| answer.clone())
+    }
+}
+
+/// The run's own copy of the pinned tree at `source`, which every subset
+/// of `todo` runs in and which goes when the run does; none where no test
+/// will run, a subset the server's silence refuses running none.
+fn copied(
+    todo: &[(&Subset, &Result<Side>)],
+    answer: &Answer,
+    source: &Path,
+    jobs: NonZeroUsize,
+) -> Result<Option<Tree>> {
+    let runs = (todo.iter()).any(|(subset, side)| {
+        (side.as_ref()).is_ok_and(|side| side.runs() && answer.refuses(subset, side).is_none())
+    });
+    runs.then(|| copy_of(source, jobs)).transpose()
+}
+
 /// One subset's census under `--census`: printed under `scope`, and the
 /// rows its compiler did not read grouped on `reading`.
 fn counted(tally: &Tally, scope: &str, reading: &mut Reading) -> Result<()> {
@@ -1334,21 +1446,6 @@ fn counted(tally: &Tally, scope: &str, reading: &mut Reading) -> Result<()> {
         reading.group(&row.signature.to_string(), row.tests.len() as u64)?;
     }
     Ok(())
-}
-
-/// The run's own copy of the pinned tree at `source`, which every subset
-/// of `todo` runs in and which goes when the run does; none where no test
-/// will run.
-fn copied(
-    todo: &[(&Subset, &Result<Side>)],
-    source: &Path,
-    jobs: NonZeroUsize,
-) -> Result<Option<Tree>> {
-    let runs = todo
-        .iter()
-        .filter_map(|(_, side)| side.as_ref().ok())
-        .any(Side::runs);
-    runs.then(|| copy_of(source, jobs)).transpose()
 }
 
 /// The subsets a run under `ask` runs, each beside its side: all of them,
@@ -1446,6 +1543,11 @@ impl Side<'_, '_> {
     /// oracle on this machine.
     fn runs(&self) -> bool {
         self.runner.binary().is_some() && self.absent.is_none()
+    }
+
+    /// Whether `subset`'s tests will run here and need the server.
+    fn served(&self, subset: &Subset) -> bool {
+        self.runs() && server::needs(subset)
     }
 
     /// The subset's run under this side: its runner and its oracle's
@@ -1755,8 +1857,14 @@ struct Own<'o> {
 }
 
 impl<'o> Own<'o> {
-    fn of(oracle: &'o Oracle<'o>, subset: &Subset, scope: &str, runs: bool) -> Result<Own<'o>> {
-        let served = server::served(oracle, subset, runs)?;
+    /// What `subset` runs with, the server's answer where its tests `runs`
+    /// and need the server.
+    fn of(
+        oracle: &'o Oracle<'o>,
+        subset: &Subset,
+        scope: &str,
+        (served, runs): (Option<String>, bool),
+    ) -> Result<Own<'o>> {
         let database = match served {
             Some(_) => Some(server::Database::made(oracle, &subset.scope)?),
             None => None,

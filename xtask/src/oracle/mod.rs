@@ -643,6 +643,32 @@ impl Source {
         Ok(())
     }
 
+    /// Hold the tree at `tree` to the pin's count of tests, counted as
+    /// `[source].phpt_files` was, every file named `*.phpt` under it as
+    /// `find` names them: a tree holding more or fewer is not the corpus
+    /// the pin names, whatever its commit says, and is refused naming
+    /// both counts before a lane measures less, or other, in silence.
+    pub(crate) fn counted(&self, tree: &Path) -> Result<()> {
+        let mut files = Vec::new();
+        crate::tally::files_under(tree, &mut files).with_context(|| {
+            format!(
+                "counting the tests of the php-src tree at {}",
+                tree.display()
+            )
+        })?;
+        let phpt = |file: &&PathBuf| file.to_string_lossy().ends_with(".phpt");
+        let found = files.iter().filter(phpt).count() as u64;
+        if found != self.phpt_files {
+            bail!(
+                "the php-src tree at {} holds {found} .phpt files; the pin counts {} at {}. Lay the whole tree down at the pin's tag, or name another with {TREE_VARIABLE}; the pin moves only by a person's hand",
+                tree.display(),
+                self.phpt_files,
+                self.tag
+            );
+        }
+        Ok(())
+    }
+
     /// The files the pinned tree at `tree` holds, relative to it, as the
     /// tree is held to the pin: in a checkout, the files git tracks there,
     /// so what a run or a person left standing in it is not the pin's;
