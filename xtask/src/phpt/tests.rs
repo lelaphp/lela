@@ -18,7 +18,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::common::phpt_tree::fixture_tree;
+use crate::common::phpt_tree::{counting, fixture_tree};
 use crate::common::registry::{Row, registry, rows};
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
@@ -50,11 +50,12 @@ fn manifest() -> Manifest {
 }
 
 /// A manifest of these `[[crate]]` rows under the tracked pin, its tree
-/// the one given, which the caller holds open for as long as it reads the
-/// manifest.
+/// the one given and counting the tests it holds, which the caller holds
+/// open for as long as it reads the manifest.
 fn manifest_of(rows: impl IntoIterator<Item = Crate>, tree: &Path) -> Manifest {
     let mut manifest = Manifest::of(rows);
-    manifest.pin = (self::manifest().pin).map(|pin| pin.on_this_machine(Some(tree.to_path_buf())));
+    manifest.pin = (self::manifest().pin)
+        .map(|pin| counting(pin, tree).on_this_machine(Some(tree.to_path_buf())));
     manifest
 }
 
@@ -2373,17 +2374,37 @@ fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading(
     }
 }
 
+/// No address from the caller leaves the recipe as it is, and a
+/// `MYSQL_TEST_PORT` that is no number of one refuses the run naming it.
+#[test]
+fn no_address_leaves_the_recipe_and_one_that_is_no_address_is_refused() {
+    let pin = manifest().pin.unwrap();
+    let mut laid = pin.clone();
+    server::Address::read(|_| None).unwrap().lay_over(&mut laid);
+    assert_eq!(laid.recipe.env, pin.recipe.env);
+    let port = |name: &str| (name == "MYSQL_TEST_PORT").then(|| "x".to_owned());
+    let refused = server::Address::read(port).unwrap_err();
+    assert!(
+        refused.to_string().contains("MYSQL_TEST_PORT=x"),
+        "{refused:#}"
+    );
+}
+
 /// A run's database is named in the DSN as in the two variables php's
 /// suites read, and a database of the runs' is dropped only once
 /// the process its name carries is gone; one of another name never.
 #[test]
 fn a_runs_database_is_named_to_its_programs_and_a_dead_runs_is_dropped() {
     assert_eq!(
-        server::with_database("mysql:host=127.0.0.1;dbname=test", "xtask_phpt_7_0"),
+        server::with_part(
+            "mysql:host=127.0.0.1;dbname=test",
+            "dbname",
+            "xtask_phpt_7_0"
+        ),
         "mysql:host=127.0.0.1;dbname=xtask_phpt_7_0"
     );
     assert_eq!(
-        server::with_database("mysql:host=127.0.0.1;port=3306", "x"),
+        server::with_part("mysql:host=127.0.0.1;port=3306", "dbname", "x"),
         "mysql:host=127.0.0.1;port=3306;dbname=x"
     );
     let listed = "xtask_phpt_100_0\nxtask_phpt_200_3\nxtask_phpt_x_1\ntest\nxtask_phpt_300_0b\n";
@@ -2849,7 +2870,8 @@ fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
 fn an_id_judged_twice_is_met_only_where_every_judgement_is_and_an_unrun_subset_is_named() {
     use crate::reading::Number;
     let tree = Tree::new("phpt-corpus-union").unwrap();
-    let manifest = manifest_of([], tree.path());
+    let mut manifest = manifest_of([], tree.path());
+    manifest.pin.as_mut().unwrap().source.phpt_files = 3;
     let snapshot = crate::key::Snapshot::disk(&workspace()).unwrap();
     let subset = |under: &str| {
         fs::create_dir_all(tree.join(under)).unwrap();
@@ -2894,7 +2916,7 @@ fn an_id_judged_twice_is_met_only_where_every_judgement_is_and_an_unrun_subset_i
     assert!(
         reading
             .message
-            .contains("not whole: 1 subset unrun: ext/c; 0 files found of the"),
+            .contains("not whole: 1 subset unrun: ext/c; 0 files found of the 3"),
         "{}",
         reading.message
     );

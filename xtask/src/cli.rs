@@ -32,7 +32,7 @@ impl Cli {
             "Exit status:\n  0  done\n  1  a refusal, or a reading that fails\n  2  a usage error\n  \
              {not_ready}  a worktree laid down and not ready to be worked in\n  \
              {unfinished}  an instrument that could not run to its end, its readings \
-             not whole; `phpt` gives it"
+             not whole: `phpt` without its tree, oracle, engine or a server"
         );
         let matches = Cli::command().after_help(exits).get_matches();
         Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())

@@ -185,9 +185,9 @@ Exit status:
   1  a refusal, or a reading that fails
   2  a usage error
   3  a worktree laid down and not ready to be worked in
-  4  an instrument that could not run to its end, its readings not whole; `phpt` gives it
+  4  an instrument that could not run to its end, its readings not whole: `phpt` without its tree, oracle, engine or a server
 ```
-<!-- /computed in=8d508f48d1dad6192ea8a3edb07ef03dcb670766dd3cf6e7927e0c8353fd4211 out=ed5ae4541a08e3e89b1f7024bc2cf15543757af45973a2ea88334b91ee43d782 -->
+<!-- /computed in=815000c56e3848b1871227691df3b7c18c3eb8933d0cd2ef6ee129bdc3d43147 out=75d881bfb98dd599b72174e618b1c9a4a47e1bf4d470be100be350844fa54f7e -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
