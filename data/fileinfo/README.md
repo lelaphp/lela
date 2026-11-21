@@ -9,8 +9,8 @@ The baseline is main `06eb2a8662e4e277f19a5c53ceb602ed9a45ce2e`.
 
 `python3 scripts/fileinfo-proof.py --scratch <approved-existing-directory>` reproduces
 `oracle.json`. `--accept` captures observations, not rustdoc witness verdicts.
-The runner verifies the pinned PHP's digest, the SHA-256 where `[oracle]` carries
-one and the MD5 where it carries only that, and the php-src commit, invokes the existing
+The runner verifies the pinned PHP's digest, the SHA-256 `[oracle]` carries, and
+the php-src commit, invokes the existing
 single-extension witness to assert the complete pinned keg closure, checks vendored
 algorithm/database inputs against that tree, records SHA-256/size/source lines,
 and records the pin digest, recipe and before/after closure assertions. Arguments,
