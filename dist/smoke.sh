@@ -15,7 +15,8 @@
 # its lib/: first every Mach-O in it is held to name only the system's
 # libraries and the tarball's own (`--machos`, below), and then the hosts
 # run with the machine's Homebrew prefix out of their reach, by a sandbox
-# that denies reading it, wherever brew and sandbox-exec are there.
+# that denies reading it, wherever brew and sandbox-exec are there, the
+# https requests of `https` among them.
 #
 # Over an image of one variant, on the image's own platform: the same
 # checks inside it over the hosts in /usr/local, `lela-fpm -t` where the
@@ -31,6 +32,7 @@ set -euo pipefail
 usage() {
 	echo "usage: $0 <dir>" >&2
 	echo "       $0 --machos <dir>" >&2
+	echo "       $0 --https <dir>" >&2
 	echo "       $0 --image <image> cli|fpm|apache" >&2
 	exit 2
 }
@@ -134,6 +136,34 @@ reach() {
 		JAIL=(sandbox-exec -p "(version 1)(allow default)(deny file-read* (subpath \"$prefix\"))")
 		echo "kegs out of reach: the hosts run in a sandbox that denies reading $prefix"
 	fi
+}
+
+# An https stream that verifies its peer, under JAIL where `reach` set it:
+# to a host whose certificate the system trusts it reads, which on a Mac
+# without Homebrew's OpenSSL is by macOS's /etc/ssl/cert.pem, the bundle
+# ext/openssl falls back to where the bundled libcrypto's compiled-in file
+# is out of reach; to one whose certificate has expired it is still
+# refused, so the fallback verifies and does not skip. SSL_CERT_FILE and
+# SSL_CERT_DIR are unset, since either would stand in for the fallback.
+# Each request is made only where curl, outside the sandbox, reaches its
+# host, and its line says so where it does not: with no network there is
+# nothing to verify against, and the line is not a pass.
+https() {
+	local php="$1/bin/$NAME"
+	fetch "$php" "https, a trusted certificate" https://www.php.net/ read
+	fetch "$php" "https, an expired certificate" https://expired.badssl.com/ refused -k
+}
+
+# One request of `https`: the host, its label, the URL, the answer wanted,
+# read or refused, and what curl takes to reach the host at all.
+fetch() {
+	local php=$1 label=$2 url=$3 want=$4; shift 4
+	if ! curl -sS -o /dev/null --max-time 20 "$@" "$url" > /dev/null 2>&1; then
+		echo "$label: curl reaches nothing at $url from this machine, so the stream is not tried"
+		return 0
+	fi
+	check "$label" "$want" ${JAIL[@]+"${JAIL[@]}"} env -u SSL_CERT_FILE -u SSL_CERT_DIR "$php" -n \
+		-d default_socket_timeout=20 -r "echo @file_get_contents('$url') === false ? 'refused' : 'read';"
 }
 
 # Inside an image: its hosts, its ini directory and its compat directory,
@@ -306,6 +336,13 @@ case "${1:-}" in
 	--machos)
 		[ "$#" -eq 2 ] || usage
 		machos "$2" ;;
+	# The https requests alone, under the sandbox on a Mac where `reach`
+	# sets one, which test_smoke.py holds with a curl and a host of its own.
+	--https)
+		[ "$#" -eq 2 ] || usage
+		named
+		[ "$(uname -s)" != Darwin ] || reach
+		https "$(cd "$2" && pwd)" ;;
 	-*|"") usage ;;
 	*)
 		[ "$#" -eq 1 ] || usage
@@ -314,5 +351,7 @@ case "${1:-}" in
 			machos "$1"
 			reach
 		fi
-		hosts "$(cd "$1" && pwd)" fpm ;;
+		hosts "$(cd "$1" && pwd)" fpm
+		# A Linux tarball's smoke runs before its curl is installed.
+		[ "$(uname -s)" != Darwin ] || https "$(cd "$1" && pwd)" ;;
 esac
