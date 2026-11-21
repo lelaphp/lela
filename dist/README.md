@@ -366,7 +366,7 @@ is unpacked or moved to.
 lela-<version>-darwin-arm64/
   bin/lela  bin/lela-cgi  bin/lela-dbg  sbin/lela-fpm
   etc/php.ini-development  etc/php.ini-production
-  lib/<each library>
+  lib/<each library>  lib/openssl.cnf
   licenses/<keg>/<each licence file of the keg>
   bundled-libraries.txt
 ```
@@ -384,7 +384,15 @@ system's; `dist/smoke.sh` holds the unpacked tarball to the same with
 <dir>` alone), then runs the hosts in a sandbox that denies reading
 Homebrew's prefix, where `brew` and `sandbox-exec` are on the machine.
 `dist/release.py build ... darwin-arm64 ... --dry-run` names the libraries
-the hosts in `target/release` load, where all three are built.
+the hosts in `target/release` load, where all three are built, and the
+`openssl.cnf` it would lay.
+
+`lib/openssl.cnf` is OpenSSL's stock configuration file, the one the keg
+`lib/libcrypto.*.dylib` is copied from ships: its bottle's copy,
+`<prefix>/Cellar/<keg>/<version>/.bottle/etc/<keg>/openssl.cnf`, and not the
+one Homebrew poured under `<prefix>/etc/<keg>/`, which the building machine
+may have edited (#46, #119). A libcrypto keg without that file is refused by
+name. Its licence is the keg's, under `licenses/<keg>/`.
 
 The program to put on `PATH` is `bin/lela` of the unpacked directory, by a
 link to it: a copy of `bin/lela` alone finds no `../lib`. dyld resolves
@@ -415,18 +423,32 @@ unsandboxed and the oracle:
   `openssl_x509_checkpurpose`, `openssl_pkcs7_verify` and
   `openssl_cms_verify`, still read only the compiled-in defaults, which
   #47 asks a person about, and `openssl_get_cert_locations()` names
-  Homebrew's paths, as php's does. With no `openssl.cnf` to read,
-  `openssl_pkey_new()` and `openssl_csr_new()` without a `config` option
-  return false, as the oracle's do with `OPENSSL_CONF` naming no file.
-  `OPENSSL_CONF=/etc/ssl/openssl.cnf` loads, but macOS's file leaves
-  `default_bits` commented out, so `openssl_pkey_new()` with no
-  `private_key_bits` still warns "Private key length must be at least 384
-  bits, configured to 0" and returns false, as the oracle does with that
-  file; with `private_key_bits` both calls succeed. #46 asks a person which
-  file the tarball reads. The cipher list is the same in and out of the
-  sandbox: php loads no provider module unless built with
-  `--with-openssl-legacy-provider` or a configuration activates one, and
-  the default provider is built into the library.
+  Homebrew's paths, as php's does. The configuration file a call reads
+  where its `config` option names none, the one `Openssl default config`
+  names in `phpinfo()`, is, in this order, as #46 ruled: the file
+  `$OPENSSL_CONF` names, else the file `$SSLEAY_CONF` names, else
+  `openssl.cnf` in the compiled-in OPENSSLDIR, Homebrew's
+  `/opt/homebrew/etc/openssl@4/openssl.cnf`, which is php's order; and only
+  where that last file cannot be read, the tarball's own `lib/openssl.cnf`,
+  found from the running host's real file, `../lib/openssl.cnf` from `bin/`
+  or `sbin/`, through any link to it. A variable naming a file that is not
+  there still fails the call, as php's does, so `openssl_pkey_new()` and
+  `openssl_csr_new()` with no `config` option return false then; a Mac with
+  Homebrew's `openssl@4` reads Homebrew's file, as php does. ext/openssl
+  looks for the tarball's file on macOS alone, so a cargo build, which lays
+  no `lib/openssl.cnf` above its hosts, the images and Linux read php's
+  answer. `dist/smoke.sh` holds it on the unpacked tarball: `Openssl
+  default config` names the compiled-in file where it can be read and the
+  tarball's where it cannot, in the sandbox and outside it, and in the
+  sandbox `openssl_pkey_new()` and `openssl_csr_new()` with no `config`
+  option succeed (`dist/smoke.sh --openssl <dir>` alone). macOS's own
+  `/etc/ssl/openssl.cnf` is not the fallback: it leaves `default_bits`
+  commented out, so `openssl_pkey_new()` with no `private_key_bits` warns
+  "Private key length must be at least 384 bits, configured to 0" and
+  returns false, as the oracle does with that file. The cipher list is the
+  same in and out of the sandbox: php loads no provider module unless
+  built with `--with-openssl-legacy-provider` or a configuration activates
+  one, and the default provider is built into the library.
 - `libfontconfig.1.dylib` compiles in `/opt/homebrew/etc/fonts`,
   `/opt/homebrew/var/cache/fontconfig` and the keg's `conf.avail`, and no
   host's output depends on them: php never asks libgd to look a font up
