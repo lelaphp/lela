@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -174,15 +175,24 @@ pub struct Reading {
     /// an instrument of [`UNDER_RECIPE`]; `None` for every other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
-    /// The profile the binary the reading judged was built in, where the
-    /// instrument knows it: `phpt` over the engine it found in a build
-    /// directory or built itself ([`crate::oracle::Runner::profile`]).
-    /// Absent where the instrument judges no build of the engine, or
-    /// cannot know how the one it judged was built: `phpt --engine
-    /// <path>`, the control, the linked engine; and on every reading of
-    /// `v = 2` or before, which never named one.
+    /// The profile of the engine binary the reading's verdict is about,
+    /// taken only from that binary: one the harness built
+    /// ([`Reading::judged`]) or found in a profile's directory
+    /// ([`crate::oracle::Runner::profile`]), the linked engine among them.
+    /// Absent where the caller named the binary (`--engine`, `--binary`),
+    /// where it is the oracle's (the control), where nothing ran, and on
+    /// every reading of `v = 2` or before, which never named one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<Profile>,
+    /// The run of the process that took the reading ([`this_run`]), the
+    /// same on every reading one process writes, so the readings of one
+    /// run are told from another's by it and not by their times: a `phpt
+    /// --full` run's corpus reading and its subsets' among them. A session
+    /// names many processes, and a run one. Absent on a reading written
+    /// before the field, of `v = 3` or earlier, which never reads fresher
+    /// for it, since freshness is the key's and the pin's alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
 /// The line an instrument prints for a reading: its status, instrument,
@@ -283,11 +293,11 @@ impl Reading {
     }
 
     /// A reading of `instrument` over `scope` with every other field at its
-    /// empty value and `at` at the Unix epoch; the instrument fills the
-    /// rest. Its key is empty, which is no scope's hash, so `done` finds
-    /// it fresh for nothing: the reading of a crate not yet created, which
-    /// nothing measured, and the reading a rendering's test lays in a store
-    /// that is no git repository.
+    /// empty value, `at` at the Unix epoch and the run this process's; the
+    /// instrument fills the rest. Its key is empty, which is no scope's
+    /// hash, so `done` finds it fresh for nothing: the reading of a crate
+    /// not yet created, which nothing measured, and the reading a
+    /// rendering's test lays in a store that is no git repository.
     pub fn new(instrument: &str, scope: &str) -> Reading {
         Reading {
             v: Version::Third,
@@ -307,8 +317,32 @@ impl Reading {
             groups: BTreeMap::new(),
             recipe: None,
             profile: None,
+            run: Some(this_run().to_owned()),
         }
     }
+}
+
+/// The variable that names the run of the process ([`this_run`]).
+const RUN: &str = "XTASK_RUN";
+
+/// The run every reading this process makes names ([`Reading::run`]):
+/// `XTASK_RUN` where it is set and not empty, so the processes a caller
+/// calls one run share it; or else the time the process first asked, in
+/// nanoseconds since the epoch, and its pid, which no two processes share
+/// at once. Printed once, as the first reading is written
+/// ([`Store::record`]).
+fn this_run() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        std::env::var(RUN)
+            .ok()
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| {
+                let since = SystemTime::now().duration_since(UNIX_EPOCH);
+                let nanos = since.map_or(0, |since| since.as_nanos());
+                format!("{nanos}-{}", std::process::id())
+            })
+    })
 }
 
 impl Reading {
@@ -326,6 +360,13 @@ impl Reading {
         self.key == hash
             && (!UNDER_RECIPE.contains(&self.instrument.as_str())
                 || self.recipe.as_deref() == Some(pin))
+    }
+
+    /// The reading as one of `built`, naming the profile the build says it
+    /// was built in: the one place an instrument's reading of a binary the
+    /// harness built takes its profile.
+    pub(crate) fn judged(&mut self, built: &crate::oracle::profile::Built) {
+        self.profile.replace(built.profile);
     }
 
     /// The reading as taken under `pin`'s recipe.
@@ -419,6 +460,8 @@ enum Kept {
         recipe: Option<String>,
         #[serde(default)]
         profile: Option<Profile>,
+        #[serde(default)]
+        run: Option<String>,
     },
     /// The lean row the history kept before it kept readings whole:
     /// instrument, scope, status, at, commit and numbers.
@@ -438,7 +481,8 @@ enum Kept {
 impl Reading {
     /// One line of a log handed in back into a reading, whichever shape
     /// the history kept it in; the fields a lean row has not are left as
-    /// [`Reading::new`] leaves them.
+    /// [`Reading::new`] leaves them, but for the run, which is the line's
+    /// and not this process's.
     fn from_kept(line: &str) -> Result<Reading> {
         let kept: Kept = serde_json::from_str(line).context("a line that is no reading")?;
         Ok(match kept {
@@ -458,6 +502,7 @@ impl Reading {
                 groups,
                 recipe,
                 profile,
+                run,
             } => Reading {
                 v,
                 rule,
@@ -472,6 +517,7 @@ impl Reading {
                 groups,
                 recipe,
                 profile,
+                run,
                 ..Reading::new(&instrument, &scope)
             },
             // A lean row predates the third version, and its commit is short.
@@ -481,6 +527,7 @@ impl Reading {
                 numbers: n,
                 commit: c,
                 at: a,
+                run: None,
                 ..Reading::new(&i, &s)
             },
         })
@@ -698,8 +745,16 @@ impl Store {
     /// One reading, given the store's session where it names none
     /// ([`Store::in_its_session`]): its file, replaced whole through
     /// [`replace`], its index entry, and its line of the log, which goes
-    /// through [`Store::append_line`], the one append.
+    /// through [`Store::append_line`], the one append. The process's run
+    /// is printed on stderr before its first.
     fn write(&self, reading: &Reading) -> Result<()> {
+        static PRINTED: std::sync::Once = std::sync::Once::new();
+        PRINTED.call_once(|| {
+            eprintln!(
+                "run {}: every reading this process writes names it",
+                this_run()
+            );
+        });
         let reading = &*self.in_its_session(reading);
         let path = self.path(&reading.instrument, &reading.scope)?;
         let text = toml::to_string(reading).context("rendering the reading")?;
@@ -1986,14 +2041,15 @@ mod tests {
     }
 
     /// `reading` as a line of the log of the second version: `v = 2`, its
-    /// commit cut to seven characters, and no profile, which that version
-    /// never named.
+    /// commit cut to seven characters, and no profile and no run, which
+    /// that version never named.
     fn second_version(reading: &Reading) -> serde_json::Value {
         let mut line = reading.to_json().unwrap();
         assert_eq!(line["v"], V);
         line["v"] = 2.into();
         line["commit"] = short(&reading.commit).into();
         line.as_object_mut().unwrap().remove("profile");
+        line.as_object_mut().unwrap().remove("run");
         line
     }
 
@@ -2009,14 +2065,43 @@ mod tests {
     }
 
     /// `reading` as a line of the first or second version reads back:
-    /// held as read at `v = 2`, its commit seven characters and no profile.
+    /// held as read at `v = 2`, its commit seven characters, no profile and
+    /// no run.
     fn read_as_second(reading: &Reading) -> Reading {
         Reading {
             v: Version::Second,
             commit: short(&reading.commit).to_owned(),
             profile: None,
+            run: None,
             ..reading.clone()
         }
+    }
+
+    /// A reading made now names the run of the process that made it, and a
+    /// line that names none, of `v = 3` written before the field or of
+    /// `v = 2`, reads with none, from the log, a log handed in and a
+    /// scope's file alike, and is written back naming none: the field is
+    /// added under `v = 3`, since freshness is the key's and the pin's
+    /// alone ([`Reading::fresh_for`]), so its absence never reads fresher.
+    #[test]
+    fn a_line_naming_no_run_reads_with_none_at_either_version() {
+        let taken = over("fold", "ext/pcre", &key(1), "2026-11-21T10:00:00Z");
+        let run = taken.run.clone().expect("a reading made now names its run");
+        assert_eq!(taken.to_json().unwrap()["run"], run.as_str());
+        let mut third = taken.to_json().unwrap();
+        third.as_object_mut().unwrap().remove("run");
+        let second = second_version(&taken);
+        for line in [&third, &second] {
+            let read = Reading::from_json(&line.to_string()).unwrap();
+            assert_eq!(read.run, None, "{line}");
+            let handed = Log::handed(&format!("{line}\n"));
+            assert_eq!(handed.readings[0].run, None, "{line}");
+            let text = toml::to_string(&read).unwrap();
+            assert!(!text.contains("run ="), "{text}");
+            assert_eq!(toml::from_str::<Reading>(&text).unwrap().run, None);
+        }
+        let read = Reading::from_json(&third.to_string()).unwrap();
+        assert_eq!(read, Reading { run: None, ..taken });
     }
 
     /// The `n`th commit, forty hex digits, as a reading of the third

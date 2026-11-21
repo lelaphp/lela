@@ -129,7 +129,7 @@ pub(crate) fn run(
     let mut entries: Vec<Entry> = subset.into_iter().filter(|e| e.ini.is_empty()).collect();
     entries.extend(super::workloads(root)?);
     let host = super::makala(root)?;
-    reading.profile = Some(crate::oracle::profile::LANE);
+    reading.judged(&host);
     let recipe = &manifest.pin()?.recipe;
     let own = Tree::new("soak")?;
     let names: Vec<String> = (0..entries.len()).map(|n| format!("{n}.php")).collect();
@@ -139,7 +139,7 @@ pub(crate) fn run(
     let log = own.join("errors");
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
     let ini = ["log_errors=1".to_owned(), past_patience(timeout)];
-    let server = Server::start(recipe, &host, own.path(), &ini, None, &log, &[])?;
+    let server = Server::start(recipe, &host.path, own.path(), &ini, None, &log, &[])?;
     let ask = |n: usize| -> Result<Vec<u8>> {
         let response = server.ask(&entries[n].http, &names[n], timeout)?.0;
         Ok(entries[n].randoms_named_alike(&from_http(&response)))

@@ -112,7 +112,7 @@ else echo "dpkg-query: no packages found matching $package" >&2; exit 1; fi''')
         stage = self.scratch / "stages" / base
         shutil.rmtree(stage, ignore_errors=True)
         banner = banner or f"lela {version} (cli) the {platform} build"
-        for host in ("bin/lela", "bin/lela-cgi", "sbin/lela-fpm"):
+        for host in (host.path for host in publish.in_tarball()):
             path = stage / host
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"#!/bin/sh\necho '{banner}'\n" + ("exit 3\n" if fails else ""))
@@ -185,7 +185,7 @@ else echo "dpkg-query: no packages found matching $package" >&2; exit 1; fi''')
             f"with {self.link()} a link to its bin/lela",
             run.stdout,
         )
-        for path in ("bin/lela-cgi", "sbin/lela-fpm", "etc/php.ini-production"):
+        for path in ("bin/lela-cgi", "sbin/lela-fpm", "bin/lela-dbg", "etc/php.ini-production"):
             self.assertTrue((self.data(version) / path).is_file(), path)
         # No stage is left beside the installed release.
         self.assertEqual(sorted(p.name for p in self.data(version).parent.iterdir()), [version])

@@ -5,7 +5,9 @@
 //! is one line and carries `v`, the version of its shape. What is here is
 //! the section's alone in one place, its row ([`PerReading`]); the source,
 //! the order and the lines are every section's, and so is what every row
-//! opens with ([`Head`]) and how a count is read ([`count`]).
+//! opens with ([`Head`]) and how a count is read ([`count`]). `--run`
+//! reads the same log for the readings of one run, whatever their
+//! instrument ([`run`]).
 
 use std::fs;
 use std::io::Read;
@@ -60,6 +62,30 @@ pub(crate) fn render(
         eprintln!("{note}");
     }
     rows(&log)
+}
+
+/// Every reading the run `id` wrote ([`Reading::run`]), whatever its
+/// instrument, in the log's order, from the log at `log` or the store's:
+/// the line its instrument printed for it, or under `--format jsonl` the
+/// reading whole, one line each.
+pub(crate) fn run(store: &Store, id: &str, format: Format, log: Option<&Path>) -> Result<String> {
+    if format == Format::Json {
+        bail!("--run lists one line per reading: as text, or as --format jsonl");
+    }
+    let (log, source) = read(store, log)?;
+    if let Some(note) = log.unreadable_note_of(&source) {
+        eprintln!("{note}");
+    }
+    let mut out = String::new();
+    for reading in log.readings.iter().filter(|r| r.run.as_deref() == Some(id)) {
+        let line = match format {
+            Format::Jsonl => reading.to_json()?.to_string(),
+            Format::Md | Format::Json => reading.to_string(),
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// How a section renders a log under `--every`: its row's lines.

@@ -109,7 +109,7 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<R
     let (mut entries, mut left) = super::subset(&tree)?;
     narrowed(&mut entries, &mut left, only);
     let host = super::makala(root)?;
-    reading.profile = Some(crate::oracle::profile::LANE);
+    reading.judged(&host);
     let registry = Registry::load(root)?;
     let mut ledger = Ledger::new(&registry);
     for entry in &entries {
@@ -118,7 +118,7 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<R
             left.push(entry.id.clone());
             continue;
         }
-        let came = compared(&oracle, &fpm, &host, entry)
+        let came = compared(&oracle, &fpm, &host.path, entry)
             .unwrap_or_else(|why| Came::Bork(format!("{why:#}")));
         println!("{}", ledger.hold(&entry.id, came));
     }

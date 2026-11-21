@@ -1067,6 +1067,20 @@ fn phpt_in(dir: &Path, args: &[&str], cargo: &Path, corpus: &Path) -> (i32, Stri
     joined(&out)
 }
 
+/// The scratch repository `root` with its pin counting one test, the
+/// one its corpus holds, as the tracked pin counts php-src's, committed on
+/// main and so at the base.
+fn counting_one(root: Repository) -> Repository {
+    let pinned = root.join("oracle.toml");
+    let counts = format!("phpt_files = {}", pin().source.phpt_files);
+    let text = fs::read_to_string(&pinned).unwrap();
+    assert!(text.contains(&counts), "{text}");
+    fs::write(&pinned, text.replace(&counts, "phpt_files = 1")).unwrap();
+    sh(&root, &["git", "add", "oracle.toml"]);
+    commit(&root, "the pin counts the scratch corpus");
+    root
+}
+
 /// One call takes the merge base's run of each touched subset: it
 /// lays a worktree at the base, builds the hosts there through `cargo`,
 /// runs the subset, carries the run into the main worktree and removes
@@ -1080,7 +1094,7 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
     let Some(oracle) = Promise::Oracle.or_skip(pinned).unwrap() else {
         return;
     };
-    let root = repository("base-run");
+    let root = counting_one(repository("base-run"));
     let corpus = Tree::new("base-run-corpus").unwrap();
     write(
         &corpus,

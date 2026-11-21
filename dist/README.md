@@ -20,9 +20,21 @@ shaped as docker-library/php's templates shape it: the same
 
 | target | holds | default command | working directory |
 |---|---|---|---|
-| `cli` | the CLI and CGI hosts | `lela -a` | `/` |
-| `fpm` | those and the FPM, listening on port 9000 | `lela-fpm` | `/var/www/html` |
-| `apache` | those, and Apache's prefork MPM in front of the FPM over a unix socket | `apache2-foreground` | `/var/www/html` |
+| `cli` | the CLI, CGI and debugger hosts, `lela`, `lela-cgi` and `lela-dbg` | `lela -a` | `/` |
+| `fpm` | the CLI, CGI and FPM hosts, `lela`, `lela-cgi` and `lela-fpm`, the FPM listening on port 9000 | `lela-fpm` | `/var/www/html` |
+| `apache` | those three, and Apache's prefork MPM in front of the FPM over a unix socket | `apache2-foreground` | `/var/www/html` |
+
+A release carries the debugger host as php does, as Mitchell ruled on #79
+on 2026-11-21: every tarball holds all four hosts, the `cli` image holds
+`lela-dbg`, and the `fpm` and `apache` images do not. Where each host
+ships is the harness's one host table, which `cargo xtask hosts --list`
+prints, a line of JSON per host naming its binary, crate, package, whether
+the tarballs hold it and the images that do, and builds nothing. dist/
+keeps one copy of it, `HOSTS` in `dist/publish.py`, since the jobs that
+publish install no Rust toolchain; a test holds that copy to the command
+wherever cargo is, and every other list of hosts here, the Dockerfile's
+cargo line and what each of its stages holds, the release's tarballs and
+the smoke's, to the copy.
 
 ```sh
 docker buildx build -f dist/Dockerfile --platform linux/arm64 --target cli -t lela:cli --load .
@@ -35,11 +47,12 @@ compile once per platform, and the second and third target find that
 compile cached. They share the Ubuntu packages the build stage reads from
 the hosts' ELF files, and the compat directory, `/opt/lela/compat`, which
 no image puts on `PATH`. The hosts carry Lela's names (ADR-0016), `lela`,
-`lela-cgi` and `lela-fpm`, which the images' own scripts and default
-commands run, and no `php` is on an image's `PATH`. The compat directory
-holds `php`, `php-cgi` and `php-fpm`, each a symlink to the host the image
-holds under Lela's name, and one line in a Dockerfile built on the image
-opts in:
+`lela-cgi`, `lela-fpm` and `lela-dbg`, which the images' own scripts and
+default commands run, and no `php` is on an image's `PATH`. The compat
+directory holds `php`, `php-cgi`, `php-fpm` and `phpdbg` where the image
+holds the host, each a symlink to the host under Lela's name: `phpdbg` in
+the `cli` image, `php-fpm` in the other two. One line in a Dockerfile
+built on the image opts in:
 
 ```dockerfile
 ENV PATH=/opt/lela/compat:$PATH
@@ -53,10 +66,13 @@ php-src's templates at the pinned commit, rendered as the official image's
 ### The smoke over an image
 
 `dist/smoke.sh --image <image> <variant>` runs the tarball's checks inside
-the image, on the image's own platform, over the hosts in `/usr/local`
-(`lela-fpm -t` where the variant holds the FPM). It checks the ini
-directory; that no `php`, `php-cgi` or `php-fpm` is on `PATH`; that the
-compat directory is there, off `PATH`, and holds each usual name the
+the image, on the image's own platform, over the hosts in `/usr/local`:
+that they are the variant's, `lela-dbg` in `cli` alone and `lela-fpm` in
+`fpm` and `apache` alone, and no other host of Lela's name, then each
+one's own checks, `lela-fpm -t` and `lela-dbg -qrr` on a file among them.
+It checks the ini directory; that no `php`, `php-cgi`, `php-fpm` or
+`phpdbg` is on `PATH`; that the compat directory is there, off `PATH`,
+and holds each usual name the
 variant has a host for; and that each entry of it is what its name finds
 once the directory is first on `PATH`, and runs: that makes putting it
 first the only step the usual names need. Then it checks what a user
@@ -146,14 +162,17 @@ alone: `source`, `revision`, `version` (`nightly` from `main`) and
 `licenses`, and three that replace the Ubuntu base's, since a build can
 replace a label and cannot remove one: `description` and `title`, `Lela`, and `created`, the
 commit's time in RFC 3339, UTC, the instant the build's
-`SOURCE_DATE_EPOCH` names. `licenses` is one SPDX expression, the
-union of the `license` lines of the workspace's own crates the three hosts
-link, as Mitchell ruled on #14 on 2026-11-20: the workspace manifest's
+`SOURCE_DATE_EPOCH` names. `licenses` is one SPDX expression per image, the
+union of the `license` lines of the workspace's own crates that image's
+hosts link, as Mitchell ruled on #14 on 2026-11-20, so the `cli` image's
+counts `lela-dbg`'s crates and the `fpm` and `apache` images' count
+`lela-fpm`'s: the workspace manifest's
 line first, then each other term once, an identifier by name and a choice
 in parentheses, such as `(MIT OR NCSA)`, kept whole. The crates are read
 from the manifests with `tomllib`, since the images workflow installs no
-Rust toolchain: from each host `dist/Dockerfile` builds, with its default
-features, over its normal dependencies on the workspace's crates, an
+Rust toolchain: from each host of the image, with the features
+`dist/Dockerfile`'s one cargo line unifies across the four hosts it
+builds with their defaults, over its normal dependencies on the workspace's crates, an
 optional one where a feature turned on names it, and a target table
 where its `cfg` holds for `linux/amd64` or `linux/arm64`. A test holds
 that reading to `cargo metadata` where cargo is. Every term is an
@@ -219,8 +238,10 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
   alone: `darwin-arm64` with cargo on an Apple silicon Mac, and
   `linux-aarch64` and `linux-x86_64` from the `binaries` target above on a
   daemon of that architecture. It then smokes the tarball itself, unpacked:
-  `dist/smoke.sh` runs `-v`, `-r`, a file with arguments, code on stdin,
-  `lela-cgi` on a file and `lela-fpm -t`, a Linux tarball in the Ubuntu image
+  `dist/smoke.sh` holds its `bin/` and `sbin/` to the four hosts and no
+  other, then runs `-v`, `-r`, a file with arguments, code on stdin,
+  `lela-cgi` on a file, `lela-fpm -t` and `lela-dbg -qrr` on a file, a
+  Linux tarball in the Ubuntu image
   the Dockerfile builds on with its `runtime-packages.txt` installed. Then
   the release's `install.sh` installs the tarball there as a user runs it,
   ending with `lela -v` through its link: in that image as a user of its
@@ -320,9 +341,10 @@ The hosts' name is the Dockerfile's `ARG NAME`, `lela` (ADR-0016), which
 xtask's tests hold to `php_engine::PRODUCT_NAME`, the constant the
 `[[bin]]` names of the hosts are spelled from; no caller sets it. A
 tarball, `lela-<version>-<platform>.tar.gz`, holds one directory of that
-name with `bin/lela`, `bin/lela-cgi`, `sbin/lela-fpm`,
-`etc/php.ini-development` and `etc/php.ini-production`, and a Linux one
-`runtime-packages.txt` beside them. No tarball holds a `php`.
+name with the four hosts, `bin/lela`, `bin/lela-cgi`, `sbin/lela-fpm`
+and `bin/lela-dbg`, then `etc/php.ini-development` and
+`etc/php.ini-production`, and a Linux one `runtime-packages.txt` beside
+them. No tarball holds a `php`.
 
 ### The macOS tarball's libraries
 
@@ -342,7 +364,7 @@ is unpacked or moved to.
 
 ```
 lela-<version>-darwin-arm64/
-  bin/lela  bin/lela-cgi  sbin/lela-fpm
+  bin/lela  bin/lela-cgi  bin/lela-dbg  sbin/lela-fpm
   etc/php.ini-development  etc/php.ini-production
   lib/<each library>
   licenses/<keg>/<each licence file of the keg>
@@ -448,8 +470,8 @@ there, and refuses a tarball whose SHA-256, by `sha256sum` or `shasum -a
 tarball whole into `$XDG_DATA_HOME/lela/<version>`,
 `~/.local/share/lela/<version>` where that is unset, since the XDG Base
 Directory specification gives `~/.local/share` to an application's own
-files, and links `~/.local/bin/lela` to its `bin/lela`; `lela-cgi` and
-`lela-fpm` stay in the directory's `bin/` and `sbin/`. The script reads
+files, and links `~/.local/bin/lela` to its `bin/lela`; `lela-cgi`,
+`lela-dbg` and `lela-fpm` stay in the directory's `bin/` and `sbin/`. The script reads
 the line of its tarball in `SHA256SUMS` and passes over the others, which
 name `install.sh` and `platforms.json` too (#32), so a user who downloads
 the script before running it can check it against the sums:
