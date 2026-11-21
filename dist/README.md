@@ -557,8 +557,10 @@ python3 dist/inputs.py check
 The tests exercise byte rejection, incomplete downloads, oracle commit/tag/version
 drift, toolchain channel/component drift, both installer architectures, and the
 FPM templates rendered as the official fpm image's `configure` renders them;
-with the pinned php-src tree at `TEST_PHP_SRCDIR`, they also hold the real
-templates to their pins. `test_smoke.py` holds the smoke's refusal of
+with the pinned php-src tree on the machine, found as xtask finds it by
+`scripts/php_src_tree.py` (`TEST_PHP_SRCDIR`, a leading `~/` or `$HOME/`
+read as the home directory, else the pin's `[source].path`), they also hold
+the real templates to their pins. `test_smoke.py` holds the smoke's refusal of
 arguments it does not take. `test_publish.py` holds the publish script's
 dry run for a commit on `main`, a release and a pre-release, and its two
 steps against a docker that records what it is asked; `test_prune.py`
