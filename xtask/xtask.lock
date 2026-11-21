@@ -83,6 +83,8 @@ done::judge
 done::run
 done::run_hook
 done::scopes_of
+exit::NOT_READY
+exit::UNFINISHED
 generated::write_all
 hostile::INSTRUMENT
 hostile::OWING
@@ -292,6 +294,8 @@ permit::run
 phpt::Ask
 phpt::Engine
 phpt::Lane
+phpt::Ran
+phpt::Ran::whole
 phpt::kept_run
 phpt::run
 port_map::CENSUS

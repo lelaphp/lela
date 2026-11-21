@@ -1120,15 +1120,52 @@ pub(crate) fn testless(manifest: &Manifest, scope: &str) -> bool {
         .is_ok_and(|testless| testless)
 }
 
+/// What one run took: a reading per subset, which the caller writes
+/// through `record`, and the scope of each subset it was to run and did
+/// not, refused or left without room, whose reading says why.
+#[derive(Debug, Default)]
+pub struct Ran {
+    pub readings: Vec<Reading>,
+    pub unrun: Vec<String>,
+}
+
+impl Ran {
+    /// A subset's refusal: its reading, and its scope as one not run.
+    fn refuse(&mut self, reading: Reading) {
+        self.unrun.push(reading.scope.clone());
+        self.readings.push(reading);
+    }
+
+    /// Nothing where every subset asked for ran; else the error of a run
+    /// that could not run to its end, naming the subsets that did not, so
+    /// its exit is `exit::UNFINISHED` and never a failing test's. Asked
+    /// once the readings are written, since the ones that ran stand beside
+    /// the refusals.
+    pub fn whole(&self) -> Result<()> {
+        if self.unrun.is_empty() {
+            return Ok(());
+        }
+        let n = self.unrun.len();
+        let why = anyhow::anyhow!(
+            "{n} subset{} of the run did not run, each reading saying why: {}",
+            plural(n),
+            listed(&self.unrun)
+        );
+        Err(crate::exit::Unfinished::of(INSTRUMENT, why))
+    }
+}
+
 /// Run what was asked for: one reading per subset, each written by the
 /// caller through `record`; a subset refused is its own failing reading,
-/// and the rest of the lane runs.
-pub fn run(
-    root: &Path,
-    manifest: &Manifest,
-    registry: &Registry,
-    ask: &Ask,
-) -> Result<Vec<Reading>> {
+/// and the rest of the lane runs. An error that ends the run before any
+/// reading is taken is a run that could not run to its end.
+pub fn run(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Ran> {
+    judged(root, manifest, registry, ask)
+        .map_err(|why| crate::exit::Unfinished::of(INSTRUMENT, why))
+}
+
+/// [`run`]'s body, whose error is the run's cause.
+fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Ran> {
     // Where the tree is on this machine is the oracle module's one answer;
     // an absent tree refuses the run naming both places it looked.
     let source = manifest.pin()?.source.tree()?;
@@ -1162,7 +1199,7 @@ pub fn run(
         copy => copy,
     };
     let tree = copy.as_ref().ok().and_then(Option::as_ref);
-    let mut readings = Vec::new();
+    let mut ran = Ran::default();
     // The lane's census, folded over the subsets as each is run, so the
     // widest cause of the whole corpus is one line at the end and not a
     // sum a reader does by hand.
@@ -1221,7 +1258,7 @@ pub fn run(
         if let (Err(full), Ok(side)) = (&copy, side)
             && side.runs()
         {
-            readings.push(refused(
+            ran.refuse(refused(
                 runs.snapshot(),
                 manifest,
                 &scope.to_string(),
@@ -1233,8 +1270,8 @@ pub fn run(
             .as_ref()
             .map_err(|unknown| anyhow::anyhow!("{unknown:#}"));
         match side.and_then(|side| taken(subset, side, &scope)) {
-            Ok(taken) => readings.extend(taken),
-            Err(why) => readings.push(refused(
+            Ok(taken) => ran.readings.extend(taken),
+            Err(why) => ran.refuse(refused(
                 runs.snapshot(),
                 manifest,
                 &scope.to_string(),
@@ -1247,7 +1284,7 @@ pub fn run(
     if ask.census && subsets.len() > 1 {
         lane.print("the lane");
     }
-    Ok(readings)
+    Ok(ran)
 }
 
 /// Nothing to run, or a binary the tree has moved past, under a subset of

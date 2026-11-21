@@ -571,7 +571,9 @@ fn phpt_run(root: &Path, manifest: &Manifest, engine: &Path) -> Reading {
         locks: Some(locks.path().to_path_buf()),
         ..phpt::Ask::default()
     };
-    let readings = phpt::run(root, manifest, &Registry::default(), &ask).unwrap();
+    let readings = phpt::run(root, manifest, &Registry::default(), &ask)
+        .unwrap()
+        .readings;
     let [reading] = &readings[..] else {
         panic!("{readings:#?}")
     };
@@ -645,7 +647,7 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
         };
         phpt::run(&root, &manifest, &Registry::default(), &ask)
     };
-    let readings = run(&binary).unwrap();
+    let readings = run(&binary).unwrap().readings;
     assert_eq!(
         readings.len(),
         1,
@@ -668,7 +670,7 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
         kept.display()
     );
 
-    let readings = run(&binary).unwrap();
+    let readings = run(&binary).unwrap().readings;
     assert!(
         readings.is_empty(),
         "the variant's target stands: {readings:#?}"
@@ -700,7 +702,7 @@ fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
         ..phpt::Ask::default()
     };
     let run = |manifest: &Manifest| phpt::run(&root, manifest, &Registry::default(), &ask);
-    let readings = run(&manifest).unwrap();
+    let readings = run(&manifest).unwrap().readings;
     let [reading] = &readings[..] else {
         panic!("{readings:#?}")
     };
@@ -718,12 +720,12 @@ fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
         manifest.pin().unwrap().source.tag
     ));
     assert!(kept.is_file(), "{}", kept.display());
-    let readings = run(&manifest).unwrap();
+    let readings = run(&manifest).unwrap().readings;
     assert!(readings.is_empty(), "the target stands: {readings:#?}");
 
     let mut main = manifest.clone();
     main.crates[0].oracle = None;
-    let readings = run(&main).unwrap();
+    let readings = run(&main).unwrap().readings;
     let [reading] = &readings[..] else {
         panic!("{readings:#?}")
     };

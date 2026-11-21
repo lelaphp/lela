@@ -27,8 +27,9 @@ writes too.
 `join` reads those lines for both platforms and puts each variant's two
 images under one manifest list, tagged with every tag of the variant:
 
-    main                  edge-<variant>, sha-<commit>-<variant>
-    v<version>            <version>-<variant>, and <variant> unless the
+    main                  nightly-<variant>, which moves on every merge
+                          to main, and sha-<commit>-<variant>
+    v<version>           <version>-<variant>, and <variant> unless the
                           version is a pre-release or an older one than a
                           release tag here names; a shallow checkout, which
                           may not hold every tag, is refused
@@ -43,7 +44,7 @@ the steps and the images workflow pass is one buildx v0.14.0 knows, the
 oldest they serve (dist/README.md).
 
 The labels, on each image and as annotations on each manifest list, are
-the standard OCI ones spec #9 names: source, revision, version (`edge`
+the standard OCI ones spec #9 names: source, revision, version (`nightly`
 from main) and licenses, the union of the licences of the workspace's
 crates the hosts link, read from their manifests (`licenses()`); and three
 that replace the Ubuntu base's: description and title, `Lela`, and
@@ -154,7 +155,7 @@ class Ref:
 
     @property
     def label(self):
-        return self.version or "edge"
+        return self.version or "nightly"
 
     @property
     def name(self):
@@ -181,7 +182,7 @@ def releases(ref):
 
 def tags(ref, commit, variant):
     if ref.version is None:
-        return [f"edge-{variant}", f"sha-{commit.sha}-{variant}"]
+        return [f"nightly-{variant}", f"sha-{commit.sha}-{variant}"]
     named = [f"{ref.version}-{variant}"]
     if not ref.prerelease and all(other.core() <= ref.core() for other in releases(ref)):
         named.append(variant)
