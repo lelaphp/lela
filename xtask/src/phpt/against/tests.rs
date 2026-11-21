@@ -94,7 +94,7 @@ fn only_derived_testless_subsets_omit_the_comparison() {
         .pin
         .map(|pin| pin.on_this_machine(Some(corpus)));
     let runs = Runs::new(root, &manifest, Some("HEAD")).unwrap();
-    let runner = Runner::Engine(binary);
+    let runner = Runner::Engine(binary, None);
     let after = |manifest: &Manifest, scope: &str| {
         runs.after(
             manifest,
@@ -517,7 +517,7 @@ fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not
     let root: &Path = &tree;
     let manifest = Manifest::load(&crate::built_root()).unwrap();
     let pin = manifest.pin().unwrap();
-    let (scope, engine) = ("ext/ctype", Runner::Engine(binary));
+    let (scope, engine) = ("ext/ctype", Runner::Engine(binary, None));
     let runs = Runs::new(root, &manifest, None).unwrap();
     let subset = Reading::new(INSTRUMENT, scope);
     let held_as = Scope::of(scope);
@@ -586,7 +586,7 @@ fn a_run_of_no_test_is_no_run_and_the_bases_run_carried_in_replaces_it() {
     let root: &Path = &tree;
     let manifest = Manifest::load(&crate::built_root()).unwrap();
     let pin = manifest.pin().unwrap();
-    let (scope, engine) = (Scope::of("ext/ctype"), Runner::Engine(binary));
+    let (scope, engine) = (Scope::of("ext/ctype"), Runner::Engine(binary, None));
     let runs = Runs::new(root, &manifest, None).unwrap();
     let after = |tally: &Tally| {
         let subset = Reading::new(INSTRUMENT, "ext/ctype");

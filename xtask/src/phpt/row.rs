@@ -419,5 +419,22 @@ mod tests {
             (&line["role"], &line["lane"], &line["commit"]),
             (&json!("control"), &json!("exit-fuzz"), &json!("a0f92cf"))
         );
+        assert_eq!(line.get("profile"), None, "a reading naming none");
+    }
+
+    /// A reading of `v = 3` names its commit whole and the build it judged;
+    /// its row keeps the seven characters a row of a `v = 2` reading
+    /// carries, so the row's commit means one thing across both, and
+    /// carries the profile beside it.
+    #[test]
+    fn a_row_keeps_seven_characters_of_a_whole_commit_and_carries_the_profile() {
+        let mut whole = reading("ext/pcre", &[]);
+        whole.commit = "a0f92cf3d1e2b4c5a6f7e8d9c0b1a2f3e4d5c6b7".to_owned();
+        whole.profile = Some(crate::oracle::Profile::ReleaseDa);
+        let line = serde_json::to_value(Row::of(&whole)).unwrap();
+        assert_eq!(
+            (&line["commit"], &line["profile"]),
+            (&json!("a0f92cf"), &json!("release-da"))
+        );
     }
 }
