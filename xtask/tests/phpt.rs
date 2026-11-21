@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime};
 
 use xtask::divergence::Registry;
 use xtask::manifest::{Crate, Manifest};
-use xtask::oracle::{Pin, Promise};
+use xtask::oracle::{Pin, Profile, Promise};
 use xtask::phpt::{self, Ask};
 use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
@@ -147,7 +147,9 @@ impl Scratch {
             locks: Some(locks.to_path_buf()),
             ..Ask::default()
         };
-        let readings = phpt::run(&self.root, &self.manifest, registry, &ask).unwrap();
+        let readings = phpt::run(&self.root, &self.manifest, registry, &ask)
+            .unwrap()
+            .readings;
         assert_eq!(readings.len(), 1, "{readings:#?}");
         readings.into_iter().next().unwrap()
     }
@@ -199,6 +201,52 @@ fn a_missed_expectation_fails_with_the_counts_and_the_reading_names_the_file() {
     assert_eq!(count(&reading, "run"), 1);
 }
 
+/// A reading of `v = 3` names its commit whole and the profile of the
+/// engine it judged where the lane found that engine in a build
+/// directory: `release-da` for `target/release-da/lela`. The same binary
+/// named by its path, `--engine <path>`, carries no profile: a path says
+/// where a binary is and not how it was built, so none is guessed.
+#[test]
+fn a_reading_names_the_profile_of_a_found_engine_and_none_of_a_named_one() {
+    if oracle().is_none() {
+        return;
+    }
+    let met = "--TEST--\nMet\n--FILE--\n<?php echo 'met';\n--EXPECT--\nmet\n";
+    let scratch = Scratch::new("profile", &[("met.phpt", met)]);
+    let built = scratch.root.join("target/release-da/lela");
+    fs::create_dir_all(built.parent().unwrap()).unwrap();
+    fs::copy(&scratch.engine, &built).unwrap();
+    let ask = Ask {
+        subset: Some("ext/fixture".to_owned()),
+        locks: Some(scratch.locks.path().to_path_buf()),
+        ..Ask::default()
+    };
+    let ran = phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap();
+    let readings = ran.readings;
+    let [found] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(found.status, Status::Pass, "{found:#?}");
+    assert_eq!(found.profile, Some(Profile::ReleaseDa), "{found:#?}");
+    let line = found.to_json().unwrap();
+    assert_eq!(
+        (&line["v"], &line["profile"]),
+        (&3.into(), &"release-da".into())
+    );
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(scratch.root.path())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(found.commit, String::from_utf8(head.stdout).unwrap().trim());
+
+    let named = scratch.run(&registry(""), &built);
+    assert_eq!(named.status, Status::Pass, "{named:#?}");
+    assert_eq!(named.profile, None, "{named:#?}");
+    assert!(named.to_json().unwrap().get("profile").is_none());
+}
+
 /// `--unkept`: the runner's control runs only a subset whose kept
 /// target does not stand. With none kept under the pin it runs and keeps
 /// one; run again, the target holds a verdict for each of the subset's
@@ -240,7 +288,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
     };
     let id = |name: &str| format!("phpt:php-src/ext/fixture/tests/{name}");
 
-    let readings = run().unwrap();
+    let readings = run().unwrap().readings;
     assert_eq!(
         readings.len(),
         1,
@@ -249,7 +297,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
     assert_eq!(readings[0].scope, "ext/fixture@control");
     assert_eq!(verdicts(), [id("a.phpt")], "and keeps its target");
 
-    let readings = run().unwrap();
+    let readings = run().unwrap().readings;
     assert!(
         readings.is_empty(),
         "the target stands, so nothing runs: {readings:#?}"
@@ -260,7 +308,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
         test("b"),
     )
     .unwrap();
-    let readings = run().unwrap();
+    let readings = run().unwrap().readings;
     assert_eq!(
         readings.len(),
         1,
@@ -426,7 +474,9 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
     };
     // The crate the subset is of has no Cargo.toml in the scratch: the
     // reading says so ahead of the engine's binary.
-    let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
+    let readings = phpt::run(&root, &manifest, &registry(""), &ask)
+        .unwrap()
+        .readings;
     assert_eq!(readings.len(), 1, "{readings:#?}");
     let reading = &readings[0];
     assert_eq!(reading.status, Status::Skip, "{reading:#?}");
@@ -451,7 +501,9 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
         "[package]\nname = \"pcre\"\n",
     )
     .unwrap();
-    let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
+    let readings = phpt::run(&root, &manifest, &registry(""), &ask)
+        .unwrap()
+        .readings;
     let reading = &readings[0];
     assert_eq!(reading.status, Status::Skip, "{reading:#?}");
     assert!(reading.message.contains("not built"), "{}", reading.message);
@@ -479,7 +531,9 @@ fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_d
     };
     let root = Tree::new("phpt-absent-dir").unwrap();
     scratch_workspace(workspace(), &root);
-    let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
+    let readings = phpt::run(&root, &manifest, &registry(""), &ask)
+        .unwrap()
+        .readings;
     assert_eq!(readings.len(), 1, "{readings:#?}");
     let reading = &readings[0];
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
@@ -511,7 +565,9 @@ fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
     // one is outside its lane (revision 63); one with no subset owns none.
     let root = Tree::new("phpt-lane").unwrap();
     scratch_workspace(workspace(), &root);
-    let readings = phpt::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
+    let readings = phpt::run(&root, &manifest, &registry(""), &Ask::default())
+        .unwrap()
+        .readings;
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
     assert_eq!(
         scopes,
@@ -528,7 +584,9 @@ fn a_run_with_no_subset_runs_the_lane_rather_than_refusing() {
     // checkout's store, as one of none was in main's.
     let root = Tree::new("phpt-no-subset").unwrap();
     scratch_workspace(workspace(), &root);
-    let readings = phpt::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
+    let readings = phpt::run(&root, &manifest, &registry(""), &Ask::default())
+        .unwrap()
+        .readings;
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
     assert_eq!(scopes, ["ext/ctype"], "{readings:#?}");
 }
@@ -544,7 +602,9 @@ fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read
     };
     let root = Tree::new("phpt-stamp").unwrap();
     scratch_workspace(workspace(), &root);
-    let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
+    let readings = phpt::run(&root, &manifest, &registry(""), &ask)
+        .unwrap()
+        .readings;
     let reading = &readings[0];
     assert_eq!(reading.scope, "ext/pcre");
     assert_eq!(
@@ -627,6 +687,82 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
         )) && stderr.contains(&pinned.display().to_string()),
         "both places are named: {stderr}"
     );
+}
+
+/// A run that came to its end and judged a test as failing exits 1, the
+/// status of a failing reading, and not the status of a run that could
+/// not finish: a caller records the first and refuses the second.
+#[test]
+fn a_run_of_the_binary_that_judged_a_test_failing_exits_1() {
+    if oracle().is_none() {
+        return;
+    }
+    let scratch = Scratch::new(
+        "exit-failing",
+        &[(
+            "missed.phpt",
+            "--TEST--\nA wrong expectation\n--FILE--\n<?php echo \"four\";\n--EXPECT--\nfive\n",
+        )],
+    );
+    let ran = Run::at(&scratch.root)
+        .args(["phpt", "--subset", "ext/fixture", "--engine"])
+        .args([&scratch.engine])
+        .env(xtask::oracle::TREE_VARIABLE, scratch.root.join("corpus"))
+        .go();
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(
+        ran.stdout.contains("missed.phpt"),
+        "the test was judged: {ran}"
+    );
+}
+
+/// A run with no source tree to read ends before any subset is judged,
+/// so it exits with the status of an instrument that could not run to
+/// its end, which no failing test can give.
+#[test]
+fn a_run_of_the_binary_with_no_tree_exits_as_one_that_could_not_finish() {
+    let root = Tree::new("phpt-exit-no-tree").unwrap();
+    scratch_workspace(workspace(), &root);
+    let pin = root.join("oracle.toml");
+    let text = fs::read_to_string(&pin).unwrap();
+    fs::write(&pin, with_source_path(&text, &root.join("nowhere-pinned"))).unwrap();
+    let ran = Run::at(&root)
+        .args(["phpt", "--subset", "Zend/tests"])
+        .env(xtask::oracle::TREE_VARIABLE, root.join("nowhere"))
+        .go();
+    assert_eq!(ran.code(), i32::from(xtask::exit::UNFINISHED), "{ran}");
+    // Not a success, a failing reading's 1, the argument parser's 2 or a
+    // worktree's not-ready status.
+    assert!(
+        ![0, 1, 2, i32::from(xtask::exit::NOT_READY)].contains(&ran.code()),
+        "{ran}"
+    );
+    assert!(
+        ran.stderr.contains("phpt could not run to its end"),
+        "the status is said: {ran}"
+    );
+}
+
+/// `xtask --help` ends on the exit statuses, each of its own by the number
+/// the binary exits with, so a caller reads them where it reads the
+/// instruments.
+#[test]
+fn the_help_names_each_exit_status_by_the_number_the_binary_gives() {
+    let root = Tree::new("phpt-exit-help").unwrap();
+    let help = Run::at(&root).args(["--help"]).go().ok();
+    for said in [
+        "1  a refusal, or a reading that fails".to_owned(),
+        format!(
+            "{}  a worktree laid down and not ready",
+            xtask::exit::NOT_READY
+        ),
+        format!(
+            "{}  an instrument that could not run to its end",
+            xtask::exit::UNFINISHED
+        ),
+    ] {
+        assert!(help.contains(&said), "{said:?} in {help}");
+    }
 }
 
 /// A relative `--root` reaches the verdicts an absolute one does:
@@ -1729,7 +1865,9 @@ fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
             against: against.map(str::to_owned),
             ..Ask::default()
         };
-        phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap()
+        phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask)
+            .unwrap()
+            .readings
     };
 
     // The merge base: both tests pass, and the run is kept.
@@ -1837,7 +1975,9 @@ fn a_pooled_run_writes_the_reading_and_keeps_the_run_a_run_of_one_does() {
             jobs: std::num::NonZeroUsize::new(jobs),
             ..Ask::default()
         };
-        let readings = phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap();
+        let readings = phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask)
+            .unwrap()
+            .readings;
         let mut runs = Vec::new();
         files_under(&scratch.root.join("target/harness/phpt-runs"), &mut runs);
         assert_eq!(runs.len(), 1, "{runs:?}");

@@ -31,12 +31,16 @@
 set -eu
 
 # Baked in by dist/release.py: the hosts' name (ADR-0016), the release's
-# version, the Ubuntu release its Linux tarballs are built on, and the
-# URL its assets are downloaded from.
+# version, the Ubuntu release its Linux tarballs are built on, the URL its
+# assets are downloaded from, and its platforms, rendered from the
+# release's platform table a line per machine: the platform, `installs` or
+# `refuses`, the checks below it is held to (`none` where it refuses), and
+# the `uname -s` and `uname -m` words of a machine of it.
 name=
 version=
 ubuntu=
 release=
+platforms=
 
 me=install.sh
 
@@ -106,10 +110,60 @@ field() {
 	sed -n "s/^$1=//p" "$os_release" | sed -n '1{s/^"\(.*\)"$/\1/;s/^'"'"'\(.*\)'"'"'$/\1/;p;}'
 }
 
+# The checks a row is held to, by the name its row gives them: before_<checks>
+# runs before anything is fetched, after_<checks> over the unpacked tarball.
+# dist/release.py reads the names from these lines, and refuses a release
+# whose table has a row that installs held to checks this script has not.
+before_ubuntu() {
+	os_release=${LELA_OS_RELEASE:-/etc/os-release}
+	[ -n "${LELA_OS_RELEASE:-}" ] || [ -r "$os_release" ] || os_release=/usr/lib/os-release
+	[ -r "$os_release" ] ||
+		fail "no /etc/os-release says which Linux this is, and $name's Linux tarballs are built for Ubuntu $ubuntu alone"
+	id=$(field ID)
+	id_version=$(field VERSION_ID)
+	if [ "$id" != ubuntu ] || [ "$id_version" != "$ubuntu" ]; then
+		pretty=$(field PRETTY_NAME)
+		fail "this is ${pretty:-${id:-an unnamed Linux} $id_version} ($os_release), and $name's Linux tarballs are built for Ubuntu $ubuntu alone"
+	fi
+	command -v dpkg-query >/dev/null 2>&1 ||
+		fail "no dpkg-query on PATH to say which of the packages $name loads are installed"
+}
+
+after_ubuntu() {
+	[ -f "$unpacked/runtime-packages.txt" ] || fail "$tarball holds no $base/runtime-packages.txt"
+	missing=
+	while IFS= read -r package || [ -n "$package" ]; do
+		[ -n "$package" ] || continue
+		# shellcheck disable=SC2016 # dpkg-query's field, not the shell's
+		dpkg-query -W -f='${Status}\n' "$package" 2>/dev/null </dev/null | grep -qx 'install ok installed' ||
+			missing="$missing $package"
+	done < "$unpacked/runtime-packages.txt"
+	if [ -n "$missing" ]; then
+		say "$name $version loads libraries from these Ubuntu packages, which are not installed:$missing" >&2
+		say "install them, then run this again:" >&2
+		printf '\n    sudo apt-get install%s\n\n' "$missing" >&2
+		fail "$name $version is not installed"
+	fi
+}
+
+# The Mac's release is held to the tarball's floor, so nothing is checked
+# before it is unpacked.
+before_macos() {
+	:
+}
+
+after_macos() {
+	floor=$(sed -n '1s/^macos //p' "$unpacked/bundled-libraries.txt" 2>/dev/null || :)
+	[ -n "$floor" ] || fail "$tarball's bundled-libraries.txt names no oldest macOS on its first line"
+	here=$(sw_vers -productVersion </dev/null)
+	! older "$here" "$floor" ||
+		fail "this Mac runs $(macos "$here"), and $name $version runs on $(macos "$floor") or later"
+}
+
 # The whole run is one function, called on the script's last line, so
 # that a download cut short runs nothing.
 main() {
-	[ -n "$name" ] && [ -n "$version" ] && [ -n "$ubuntu" ] && [ -n "$release" ] ||
+	[ -n "$name" ] && [ -n "$version" ] && [ -n "$ubuntu" ] && [ -n "$release" ] && [ -n "$platforms" ] ||
 		fail "this is the installer's source, which names no release; run the install.sh attached to one"
 
 	# --- what is checked before anything is written ---------------------------
@@ -130,32 +184,28 @@ main() {
 
 	system=$(uname -s)
 	machine=$(uname -m)
-	case "$system $machine" in
-		"Darwin arm64") platform=darwin-arm64 ;;
-		"Darwin x86_64")
-			# A shell under Rosetta says x86_64 on Apple silicon too.
-			[ "$(sysctl -n hw.optional.arm64 2>/dev/null || :)" = 1 ] ||
+	# A shell under Rosetta says x86_64 on Apple silicon too, and the
+	# machine is the one the hardware is.
+	if [ "$system" = Darwin ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || :)" = 1 ]; then
+		machine=arm64
+	fi
+	row=$(printf '%s\n' "$platforms" | awk -v s="$system" -v m="$machine" '$4 == s && $5 == m { print $1, $2, $3; exit }')
+	platform=${row%% *}
+	checks=${row##* }
+	case "$row" in
+		*" installs $checks") ;;
+		*" refuses $checks")
+			fail "$name $version's tarball for $platform is not one this installer installs; download it from $release" ;;
+		*)
+			# Reached on an Intel Mac only while the table has no row of one.
+			[ "$system $machine" != "Darwin x86_64" ] ||
 				fail "this is an Intel Mac, and $name $version's macOS tarball is built for Apple silicon alone"
-			platform=darwin-arm64 ;;
-		"Linux x86_64") platform=linux-x86_64 ;;
-		"Linux aarch64" | "Linux arm64") platform=linux-aarch64 ;;
-		*) fail "$name $version has no tarball for $system $machine; its platforms are darwin-arm64, linux-aarch64 and linux-x86_64" ;;
+			listed=$(printf '%s\n' "$platforms" | awk '$2 == "installs" && !seen[$1]++ { p[++n] = $1 }
+				END { for (i = 1; i <= n; i++) printf "%s%s", p[i], (i == n ? "" : (i == n - 1 ? " and " : ", ")) }')
+			fail "$name $version has no tarball for $system $machine; its platforms are $listed" ;;
 	esac
 
-	if [ "$system" = Linux ]; then
-		os_release=${LELA_OS_RELEASE:-/etc/os-release}
-		[ -n "${LELA_OS_RELEASE:-}" ] || [ -r "$os_release" ] || os_release=/usr/lib/os-release
-		[ -r "$os_release" ] ||
-			fail "no /etc/os-release says which Linux this is, and $name's Linux tarballs are built for Ubuntu $ubuntu alone"
-		id=$(field ID)
-		id_version=$(field VERSION_ID)
-		if [ "$id" != ubuntu ] || [ "$id_version" != "$ubuntu" ]; then
-			pretty=$(field PRETTY_NAME)
-			fail "this is ${pretty:-${id:-an unnamed Linux} $id_version} ($os_release), and $name's Linux tarballs are built for Ubuntu $ubuntu alone"
-		fi
-		command -v dpkg-query >/dev/null 2>&1 ||
-			fail "no dpkg-query on PATH to say which of the packages $name loads are installed"
-	fi
+	"before_$checks"
 
 	if command -v curl >/dev/null 2>&1; then
 		fetch() { curl -fsSL --proto-redir =https -o "$2" "$1" </dev/null; }
@@ -222,28 +272,7 @@ main() {
 	unpacked=$stage/unpacked/$base
 	[ -x "$unpacked/bin/$name" ] || fail "$tarball holds no $base/bin/$name"
 
-	if [ "$system" = Darwin ]; then
-		floor=$(sed -n '1s/^macos //p' "$unpacked/bundled-libraries.txt" 2>/dev/null || :)
-		[ -n "$floor" ] || fail "$tarball's bundled-libraries.txt names no oldest macOS on its first line"
-		here=$(sw_vers -productVersion </dev/null)
-		! older "$here" "$floor" ||
-			fail "this Mac runs $(macos "$here"), and $name $version runs on $(macos "$floor") or later"
-	else
-		[ -f "$unpacked/runtime-packages.txt" ] || fail "$tarball holds no $base/runtime-packages.txt"
-		missing=
-		while IFS= read -r package || [ -n "$package" ]; do
-			[ -n "$package" ] || continue
-			# shellcheck disable=SC2016 # dpkg-query's field, not the shell's
-			dpkg-query -W -f='${Status}\n' "$package" 2>/dev/null </dev/null | grep -qx 'install ok installed' ||
-				missing="$missing $package"
-		done < "$unpacked/runtime-packages.txt"
-		if [ -n "$missing" ]; then
-			say "$name $version loads libraries from these Ubuntu packages, which are not installed:$missing" >&2
-			say "install them, then run this again:" >&2
-			printf '\n    sudo apt-get install%s\n\n' "$missing" >&2
-			fail "$name $version is not installed"
-		fi
-	fi
+	"after_$checks"
 
 	banner=$("$unpacked/bin/$name" -v 2>&1 </dev/null) || fail "the unpacked $name -v fails, so it is not installed: $banner"
 

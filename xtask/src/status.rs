@@ -1710,7 +1710,9 @@ use Column::{Cell, Fact, Number};
 const READING: Column = Cell("reading", Row::status);
 const NUMBERS: Column = Cell("numbers", |r| r.numbers_but(&[]));
 const MESSAGE: Column = Cell("message", Row::message);
-const COMMIT: Column = Cell("commit", |r| r.of(|x| x.commit.clone()));
+const COMMIT: Column = Cell("commit", |r| {
+    r.of(|x| crate::track::short(&x.commit).to_owned())
+});
 const SESSION: Column = Cell("session", |r| r.of(|x| short(&x.session).to_owned()));
 const AT: Column = Cell("at", |r| r.of(|x| x.at.to_string()));
 

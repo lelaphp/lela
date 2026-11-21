@@ -47,12 +47,14 @@ pub mod crosscheck;
 pub mod dispatch_census;
 pub mod divergence;
 pub mod done;
+pub mod exit;
 mod fold;
 mod fuzz;
 pub mod generated;
 mod git;
 mod glossary;
 pub mod hostile;
+mod hosts;
 /// What a build of the harness judges by, digested: the seam manifest and
 /// `xtask`'s own sources (harness-design.md §4.4). Shared with
 /// `build.rs`, which includes the file rather than importing it.
@@ -105,7 +107,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
 
 use cli::{
     Cli, Command, OracleCommand, ReviewCommand, TicketCommand, TrackCommand, UsageCommand,
@@ -252,9 +253,7 @@ pub fn package_dir() -> &'static Path {
 }
 
 /// The binary's whole body: the command line run, an error printed as
-/// `xtask: <err>`, and the exit. A worktree laid down but not ready is
-/// neither done nor undone: 3, so a caller can tell it from a refusal
-/// that changed nothing, which is 1.
+/// `xtask: <err>`, and the exit, which `exit::status` reads off the error.
 pub fn run() -> ExitCode {
     let ran = command_line();
     oracle::run_ended();
@@ -262,18 +261,14 @@ pub fn run() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("xtask: {err:#}");
-            if err.downcast_ref::<worktree::NotReady>().is_some() {
-                ExitCode::from(3)
-            } else {
-                ExitCode::from(1)
-            }
+            ExitCode::from(exit::status(&err))
         }
     }
 }
 
 /// The command line, dispatched: one arm per instrument.
 fn command_line() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::read();
     // Absolute where the line is read: a program runs in its test's own
     // directory, where a relative root names nothing.
     let root = match cli.root {
@@ -375,6 +370,7 @@ fn command_line() -> Result<()> {
         Command::Worktree { .. } => bail!("worktree: answered above"),
         Command::Steer { .. } => bail!("steer: answered above"),
         Command::Oracle { .. } => bail!("oracle: answered above"),
+        Command::Hosts { .. } => bail!("hosts: answered above"),
         Command::Review { .. } => bail!("review: answered above"),
     }
 }
@@ -616,13 +612,17 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
     if let Some(since) = &since {
         return phpt::base::take(root, manifest, &registry, &ask, since, per_commit);
     }
-    let readings = phpt::run(root, manifest, &registry, &ask)?;
-    let outcome = recorded(store, &readings)?;
+    let ran = phpt::run(root, manifest, &registry, &ask)?;
+    let outcome = recorded(store, &ran.readings)?;
+    // A subset that was to run and did not leaves the run short, which no
+    // judgement of the rest can make whole: that is the exit, written
+    // after the readings that ran.
+    ran.whole()?;
     // `--against` asks whether a test met at the commit fails here, and
     // the exit is that answer; the subsets' own readings are written as
     // ever and hold what they always held.
     if ask.against.is_some() {
-        return phpt::against::answer(&readings);
+        return phpt::against::answer(&ran.readings);
     }
     outcome.exit()
 }
@@ -714,8 +714,9 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
 /// before `Manifest::load`: the track, so a worktree whose manifest is
 /// unreadable can still say its branch, base and ticket; the two halves of a
 /// worktree, whose manifest is the worktree's, once built there, and is
-/// gone once it is retired; and the regions, which pre-commit renders
-/// whatever the manifest says.
+/// gone once it is retired; the regions, which pre-commit renders
+/// whatever the manifest says; and the hosts, which a workspace builds by
+/// its `Cargo.toml` alone, in the seat the command takes.
 fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
     match command {
         Command::Track {
@@ -752,6 +753,10 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         Command::Oracle {
             command: OracleCommand::Propose { keg, source },
         } => Some(oracle_propose(root, keg.as_deref(), source.as_deref())),
+        Command::Hosts { profile } => {
+            let _seat = seat::of_command(command);
+            Some(hosts::command(root, *profile))
+        }
         Command::Worktree {
             command: WorktreeCommand::Add { branch, ticket },
         } => Some(

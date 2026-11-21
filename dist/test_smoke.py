@@ -21,7 +21,7 @@ class SmokeArguments(unittest.TestCase):
         )
 
     def test_a_variant_the_images_do_not_have_is_refused_before_docker_runs(self):
-        for arguments in (("--image", "lela:edge", "zts"), ("--image", "lela:edge"), ("--image",)):
+        for arguments in (("--image", "lela:nightly", "zts"), ("--image", "lela:nightly"), ("--image",)):
             with self.subTest(arguments=arguments):
                 run = self.smoke(*arguments)
                 self.assertEqual(run.returncode, 2, run.stderr)

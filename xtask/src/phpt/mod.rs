@@ -828,7 +828,7 @@ pub(crate) fn reading(
     } else if uncreated {
         Outcome::Absent(sources::NOT_YET_CREATED)
     } else if let Some(why) = oracle_absent
-        && matches!(runner, Runner::Engine(_) | Runner::Control(_))
+        && matches!(runner, Runner::Engine(..) | Runner::Control(_))
     {
         // A binary is built and the pinned php is not here: the engine
         // could run, and the recipe it would run under is the pin's,
@@ -867,6 +867,9 @@ pub(crate) fn reading(
         &outcome,
         message,
     )?;
+    // And the profile of the build that stamp names, where the runner
+    // knows it.
+    reading.profile = runner.profile();
     reading.count(numbers::TESTS, tally.found as u64)?;
     // The corpus's files the subset holds, which are its tests but where a
     // `--REDIRECTTEST--` ran a set in its place: a PDO driver's reading
@@ -932,14 +935,14 @@ fn held_to(
     let keeps = format!("`xtask phpt --subset {scope} --control` keeps it again");
     let words = match (runner, target) {
         (Runner::Control(_), _) if kept => format!("kept as the subset's target under {key}"),
-        (Runner::Engine(_) | Runner::Linked, Some(target)) if !tally.judged.is_empty() => {
+        (Runner::Engine(..) | Runner::Linked, Some(target)) if !tally.judged.is_empty() => {
             let verdicts = (tally.judged.iter()).map(|j| (j.id.as_str(), j.judgement, &*j.note));
             let measure = Measure::of(target, registry, verdicts);
             measure.write(reading)?;
             let at = target::kept_at(pin, scope);
             measure.words(target::Kept { target: &at, run }, &keeps)
         }
-        (Runner::Engine(_) | Runner::Linked, None) if !tally.judged.is_empty() => format!(
+        (Runner::Engine(..) | Runner::Linked, None) if !tally.judged.is_empty() => format!(
             "no target is kept under {key}; `xtask phpt --subset {scope} --control` keeps one"
         ),
         _ => return Ok(()),
@@ -1117,15 +1120,52 @@ pub(crate) fn testless(manifest: &Manifest, scope: &str) -> bool {
         .is_ok_and(|testless| testless)
 }
 
+/// What one run took: a reading per subset, which the caller writes
+/// through `record`, and the scope of each subset it was to run and did
+/// not, refused or left without room, whose reading says why.
+#[derive(Debug, Default)]
+pub struct Ran {
+    pub readings: Vec<Reading>,
+    pub unrun: Vec<String>,
+}
+
+impl Ran {
+    /// A subset's refusal: its reading, and its scope as one not run.
+    fn refuse(&mut self, reading: Reading) {
+        self.unrun.push(reading.scope.clone());
+        self.readings.push(reading);
+    }
+
+    /// Nothing where every subset asked for ran; else the error of a run
+    /// that could not run to its end, naming the subsets that did not, so
+    /// its exit is `exit::UNFINISHED` and never a failing test's. Asked
+    /// once the readings are written, since the ones that ran stand beside
+    /// the refusals.
+    pub fn whole(&self) -> Result<()> {
+        if self.unrun.is_empty() {
+            return Ok(());
+        }
+        let n = self.unrun.len();
+        let why = anyhow::anyhow!(
+            "{n} subset{} of the run did not run, each reading saying why: {}",
+            plural(n),
+            listed(&self.unrun)
+        );
+        Err(crate::exit::Unfinished::of(INSTRUMENT, why))
+    }
+}
+
 /// Run what was asked for: one reading per subset, each written by the
 /// caller through `record`; a subset refused is its own failing reading,
-/// and the rest of the lane runs.
-pub fn run(
-    root: &Path,
-    manifest: &Manifest,
-    registry: &Registry,
-    ask: &Ask,
-) -> Result<Vec<Reading>> {
+/// and the rest of the lane runs. An error that ends the run before any
+/// reading is taken is a run that could not run to its end.
+pub fn run(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Ran> {
+    judged(root, manifest, registry, ask)
+        .map_err(|why| crate::exit::Unfinished::of(INSTRUMENT, why))
+}
+
+/// [`run`]'s body, whose error is the run's cause.
+fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Ran> {
     // Where the tree is on this machine is the oracle module's one answer;
     // an absent tree refuses the run naming both places it looked.
     let source = manifest.pin()?.source.tree()?;
@@ -1144,7 +1184,7 @@ pub fn run(
     unrunnable(&sides);
     let todo = to_run(ask, &runs, &subsets, &sides)?;
     if let Some(why) = oracles.main().pin().oracle.absent()
-        && matches!(runner, Runner::Engine(_))
+        && matches!(runner, Runner::Engine(..))
         && !sides.iter().flatten().any(Side::runs)
     {
         println!("phpt: nothing runs; {why}");
@@ -1159,7 +1199,7 @@ pub fn run(
         copy => copy,
     };
     let tree = copy.as_ref().ok().and_then(Option::as_ref);
-    let mut readings = Vec::new();
+    let mut ran = Ran::default();
     // The lane's census, folded over the subsets as each is run, so the
     // widest cause of the whole corpus is one line at the end and not a
     // sum a reader does by hand.
@@ -1218,7 +1258,7 @@ pub fn run(
         if let (Err(full), Ok(side)) = (&copy, side)
             && side.runs()
         {
-            readings.push(refused(
+            ran.refuse(refused(
                 runs.snapshot(),
                 manifest,
                 &scope.to_string(),
@@ -1230,8 +1270,8 @@ pub fn run(
             .as_ref()
             .map_err(|unknown| anyhow::anyhow!("{unknown:#}"));
         match side.and_then(|side| taken(subset, side, &scope)) {
-            Ok(taken) => readings.extend(taken),
-            Err(why) => readings.push(refused(
+            Ok(taken) => ran.readings.extend(taken),
+            Err(why) => ran.refuse(refused(
                 runs.snapshot(),
                 manifest,
                 &scope.to_string(),
@@ -1244,7 +1284,7 @@ pub fn run(
     if ask.census && subsets.len() > 1 {
         lane.print("the lane");
     }
-    Ok(readings)
+    Ok(ran)
 }
 
 /// Nothing to run, or a binary the tree has moved past, under a subset of
@@ -1617,8 +1657,9 @@ impl<'f> Build<'f> {
             "phpt: the engine with {features} took {:.1}s to build",
             started.elapsed().as_secs_f64()
         );
+        // Built by `profile::build`, in the lanes' profile.
         engine
-            .map(Runner::Engine)
+            .map(|path| Runner::Engine(path, Some(profile::LANE)))
             .map_err(|why| format!("the engine with {features} is not built: {why:#}"))
     }
 }
