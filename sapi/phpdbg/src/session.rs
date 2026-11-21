@@ -357,6 +357,17 @@ impl Session {
             buffer: None,
         }
     }
+
+    /// Where stdin ended at the pager's question, `PHPDBG_IS_QUITTING`,
+    /// the write it stood in left unfinished: the session quits. True
+    /// where it does.
+    pub fn paged_out(&mut self) -> bool {
+        let ended = self.out.take_ended();
+        if ended {
+            self.stopped = Some(Stop::Quit);
+        }
+        ended
+    }
 }
 
 impl Default for Session {

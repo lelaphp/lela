@@ -68,6 +68,13 @@
 //! criss-cross merge, of several bases, was merged over a base no commit
 //! carries, and is refused whatever the proposal (`Ground::Crossed`).
 //!
+//! The packages lane's list is the one file whose rows are not walked
+//! key by key ([`Rows::Whole`]): a row is keyed by its package's name and
+//! every other key is the row's value, so an agent adds a row and a person
+//! changes or drops one (R13, spec lelaphp/lela#32), a key added to a row
+//! as much a change as a version moved. Where no list stands, a proposal
+//! of rows lays it down, as any of these files is laid down where none is.
+//!
 //! An addition is not a decision. What a new row should say is a person's,
 //! settled on a ticket (`AGENTS.md`, *Documentation and where code lives*);
 //! this instrument is how a settled row reaches the file, and the reading
@@ -130,6 +137,29 @@ pub(crate) fn binding(root: &Path) -> Result<Manifest> {
 /// `instrument` names it, and a key added to one is an addition.
 const IDENTITY: [&str; 4] = ["id", "name", "from", "instrument"];
 
+/// How the judge walks the rows of one file's arrays of tables, the file
+/// deciding which ([`Rows::of`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Rows {
+    /// Key by key, a key a row did not carry being an addition (ledger
+    /// 51): the manifest's, the pin's and the registry's rows.
+    #[default]
+    Keyed,
+    /// Each row one value under its identity, so a key added, changed or
+    /// dropped is the row changed: the packages list's rows (R13).
+    Whole,
+}
+
+impl Rows {
+    fn of(file: &str) -> Rows {
+        if file == crate::packages::LIST {
+            Rows::Whole
+        } else {
+            Rows::Keyed
+        }
+    }
+}
+
 /// What a proposal does to the tracked file, as the judge reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -159,10 +189,10 @@ impl Verdict {
     }
 }
 
-/// Judge one proposal against the file it would replace: additive when
+/// Judge one proposal against `file` as it would replace it: additive when
 /// every value the tracked file carries stands unchanged in the proposal.
-pub fn judge(tracked: &str, proposed: &str) -> Result<Verdict> {
-    let walk = Walk::over(tracked, proposed)?;
+pub fn judge(file: &str, tracked: &str, proposed: &str) -> Result<Verdict> {
+    let walk = Walk::over(Rows::of(file), tracked, proposed)?;
     Ok(if walk.refused.is_empty() {
         Verdict::Additive(walk.added)
     } else {
@@ -328,9 +358,9 @@ impl Ground {
     /// other adds over the base; and a path the two sides changed
     /// differently, or one inside what the other changed, is refused by
     /// both sides' paths.
-    pub(crate) fn judge(&self, proposed: &str) -> Result<Verdict> {
+    pub(crate) fn judge(&self, file: &str, proposed: &str) -> Result<Verdict> {
         let (base, head, merged, git) = match self {
-            Ground::File(tracked) => return judge(tracked, proposed),
+            Ground::File(tracked) => return judge(file, tracked, proposed),
             Ground::Crossed(_) => {
                 return Ok(Verdict::Refused(vec![
                     "HEAD and MERGE_HEAD have several merge bases, so git merged the file over a \
@@ -346,9 +376,10 @@ impl Ground {
                 git,
             } => (base, head, merged, git),
         };
-        let (ours, theirs) = (Walk::over(base, head)?, Walk::over(base, merged)?);
-        let (over_head, over_merged) = (Walk::over(head, proposed)?, Walk::over(merged, proposed)?);
-        let apart = Walk::over(head, merged)?;
+        let over = |tracked: &str, proposed: &str| Walk::over(Rows::of(file), tracked, proposed);
+        let (ours, theirs) = (over(base, head)?, over(base, merged)?);
+        let (over_head, over_merged) = (over(head, proposed)?, over(merged, proposed)?);
+        let apart = over(head, merged)?;
         let mut refused = Vec::new();
         for p in ours.changes() {
             for q in theirs.changes().filter(|q| overlaps(p, q)) {
@@ -419,12 +450,15 @@ pub fn run(
         );
     }
     let path = root.join(file);
-    let working = fs::read_to_string(&path)
-        .with_context(|| format!("reading the tracked {}", path.display()))?;
+    // A file not there is the empty file, which a proposal lays down.
+    let working = match fs::read_to_string(&path) {
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => String::new(),
+        read => read.with_context(|| format!("reading the tracked {}", path.display()))?,
+    };
     let proposed = fs::read_to_string(proposal)
         .with_context(|| format!("reading the proposal at {}", proposal.display()))?;
     let ground = Ground::of(root, file, working)?;
-    let verdict = ground.judge(&proposed)?;
+    let verdict = ground.judge(file, &proposed)?;
     let stamped = || {
         let over = Path::new(file);
         Reading::stamped_over(INSTRUMENT, file, &Snapshot::disk_over(root, over)?, over)
@@ -553,7 +587,7 @@ pub(crate) fn since(root: &Path, base: &str) -> Result<Vec<Reading>> {
             readings.push(reading);
             continue;
         }
-        match judge(&tracked, &proposed)? {
+        match judge(file, &tracked, &proposed)? {
             Verdict::Refused(changed) => {
                 reading.status = Status::Skip;
                 reading.count("changed", changed.len() as u64)?;
@@ -585,7 +619,8 @@ pub(crate) fn since(root: &Path, base: &str) -> Result<Vec<Reading>> {
 /// reader the harness reads that file with: the registry, whose rows
 /// decode their ids, so a `covers` list on a new row is held to its kind
 /// and to one row per id as part of the addition (harness-design.md §4.3,
-/// revision 62); the pin and the manifest, whose readers refuse a key
+/// revision 62); the packages list, whose rows decode as the lane reads
+/// them, every one; the pin and the manifest, whose readers refuse a key
 /// they do not know, so a table the harness cannot read yet is refused
 /// here rather than written to stop every instrument after it. The pin
 /// and the manifest are held so only where the tracked file loads, since
@@ -594,6 +629,9 @@ fn loads(manifest: &Manifest, file: &str, tracked: &str, proposed: &str) -> Resu
     match file {
         divergence::FILE => {
             Registry::parse(proposed)?;
+        }
+        crate::packages::LIST => {
+            crate::packages::parse(proposed)?;
         }
         _ if manifest.pin_file() == Some(file)
             && Pin::parse(tracked).is_ok_and(|pin| pin.defects().is_empty()) =>
@@ -614,16 +652,20 @@ fn loads(manifest: &Manifest, file: &str, tracked: &str, proposed: &str) -> Resu
 /// and what was changed or removed, each by its path in the file.
 #[derive(Debug, Default)]
 struct Walk {
+    rows: Rows,
     added: Vec<String>,
     refused: Vec<String>,
 }
 
 impl Walk {
     /// The walk of `tracked` against `proposed`, each parsed as TOML.
-    fn over(tracked: &str, proposed: &str) -> Result<Walk> {
+    fn over(rows: Rows, tracked: &str, proposed: &str) -> Result<Walk> {
         let old: toml::Table = toml::from_str(tracked).context("the tracked file is not TOML")?;
         let new: toml::Table = toml::from_str(proposed).context("the proposed file is not TOML")?;
-        let mut walk = Walk::default();
+        let mut walk = Walk {
+            rows,
+            ..Walk::default()
+        };
         walk.table("", &old, &new);
         Ok(walk)
     }
@@ -674,7 +716,8 @@ impl Walk {
     /// added. A row whose identity is the row itself, carrying none of
     /// `IDENTITY`, has no key to recurse under, so a key added to one of
     /// those reads as the row dropped and another added, which is the
-    /// blunt half this instrument keeps.
+    /// blunt half this instrument keeps. A [`Rows::Whole`] row is not
+    /// recursed into: any difference is the row changed, named by it.
     fn rows(&mut self, at: &str, old: &[Value], new: &[Value]) {
         let named = |rows: &[Value], name: &str| rows.iter().any(|r| identity(r) == name);
         for (n, row) in new.iter().enumerate() {
@@ -692,7 +735,12 @@ impl Walk {
                 }
                 Some(n) => {
                     behind = Some(n);
-                    self.value(&format!("{at}[{name}]"), row, &new[n]);
+                    let at = format!("{at}[{name}]");
+                    match self.rows {
+                        Rows::Keyed => self.value(&at, row, &new[n]),
+                        Rows::Whole if *row != new[n] => self.refused.push(at),
+                        Rows::Whole => {}
+                    }
                 }
                 None => self.refused.push(format!("{at}[{name}] dropped")),
             }
@@ -755,8 +803,11 @@ fn path_of(at: &str, key: &str) -> String {
 mod tests {
     use super::{Ground, Merged, Verdict, judge};
 
+    /// The file the walks below judge, one whose rows are keyed.
+    const FILE: &str = "seams.toml";
+
     fn verdict(old: &str, new: &str) -> Verdict {
-        judge(old, new).expect("both parse")
+        judge(FILE, old, new).expect("both parse")
     }
 
     #[test]
@@ -911,7 +962,9 @@ mod tests {
             git: Merged::Conflicted,
         };
         assert_eq!(
-            ground.judge(&format!("{head}{merged}")).expect("all parse"),
+            ground
+                .judge(FILE, &format!("{head}{merged}"))
+                .expect("all parse"),
             Verdict::Union {
                 head: vec!["divergence[trace:head]".to_owned()],
                 merged: vec!["divergence[trace:merged]".to_owned()],
@@ -936,7 +989,7 @@ mod tests {
         let union = "[[divergence]]\nid = \"trace:base\"\nreason = \"r\"\n\
                      [[divergence]]\nid = \"trace:head\"\n\
                      [[divergence]]\nid = \"trace:merged\"\n";
-        let verdict = merge().judge(union).expect("all parse");
+        let verdict = merge().judge(FILE, union).expect("all parse");
         assert_eq!(
             verdict,
             Verdict::Union {
@@ -971,7 +1024,7 @@ mod tests {
                      [[rule]]\nid = \"checkout.owner\"\ntext = \"o\"\n\
                      [[rule]]\nid = \"wait.foreground\"\ntext = \"w\"\n";
         assert_eq!(
-            reworded().judge(union).expect("all parse"),
+            reworded().judge(FILE, union).expect("all parse"),
             Verdict::Union {
                 head: vec!["rule[wait.foreground]".to_owned()],
                 merged: ["rule[checkout.owner]", "rule[git.operation].text"]
@@ -995,7 +1048,7 @@ mod tests {
             git,
         };
         assert!(
-            matches!(swapped.judge(union), Ok(Verdict::Union { .. })),
+            matches!(swapped.judge(FILE, union), Ok(Verdict::Union { .. })),
             "HEAD's change too"
         );
         for (proposal, path) in [
@@ -1007,7 +1060,7 @@ mod tests {
             (union.replace("\"o\"", "\"p\""), "rule[checkout.owner].text"),
         ] {
             assert_eq!(
-                reworded().judge(&proposal).expect("all parse"),
+                reworded().judge(FILE, &proposal).expect("all parse"),
                 Verdict::Refused(vec![path.to_owned()]),
                 "{proposal}"
             );
@@ -1028,7 +1081,7 @@ mod tests {
             &base.replace("\"t\"", "\"m\""),
         );
         let Verdict::Refused(refused) = both
-            .judge(&base.replace("\"t\"", "\"h\""))
+            .judge(FILE, &base.replace("\"t\"", "\"h\""))
             .expect("all parse")
         else {
             panic!("two sides that reworded one text differently are refused")
@@ -1042,11 +1095,12 @@ mod tests {
             &base.replace("\"t\"", "\"h\""),
         );
         assert!(matches!(
-            alike.judge(&base.replace("\"t\"", "\"h\"")),
+            alike.judge(FILE, &base.replace("\"t\"", "\"h\"")),
             Ok(Verdict::Union { .. })
         ));
         let dropped = sides(&base.replace("\"t\"", "\"h\""), "# no row\n");
-        let Verdict::Refused(refused) = dropped.judge("# no row\n").expect("all parse") else {
+        let Verdict::Refused(refused) = dropped.judge(FILE, "# no row\n").expect("all parse")
+        else {
             panic!("a row one side dropped and the other reworded is refused")
         };
         assert!(
@@ -1057,7 +1111,7 @@ mod tests {
             unreachable!("merge() is a merge")
         };
         assert_eq!(
-            merge().judge(&head).expect("all parse"),
+            merge().judge(FILE, &head).expect("all parse"),
             Verdict::Refused(vec!["divergence[trace:merged] dropped".to_owned()]),
             "HEAD's file alone drops what MERGE_HEAD adds"
         );
@@ -1082,7 +1136,7 @@ mod tests {
             git,
         };
         assert!(matches!(
-            clean(Merged::Clean(union.clone())).judge(&union),
+            clean(Merged::Clean(union.clone())).judge(FILE, &union),
             Ok(Verdict::Union { .. })
         ));
         // The same values in another text: the union as the walk reads it,
@@ -1100,7 +1154,7 @@ mod tests {
                 "a strategy option took one side's hunk",
             ),
         ] {
-            let Verdict::Refused(refused) = ground.judge(proposal).expect("all parse") else {
+            let Verdict::Refused(refused) = ground.judge(FILE, proposal).expect("all parse") else {
                 panic!("{named}: refused")
             };
             assert!(refused.iter().any(|r| r.contains(named)), "{refused:?}");

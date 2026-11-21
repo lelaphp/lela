@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -13,11 +14,21 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
-# The pinned php-src tree, where this machine has one.
-TREE = Path(os.path.expanduser(os.environ.get("TEST_PHP_SRCDIR", "~/php-src/missing")))
 spec =importlib.util.spec_from_file_location("inputs", ROOT / "dist/inputs.py")
 inputs = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(inputs)
+# The rule that finds the pinned php-src tree, xtask's, kept once under scripts/.
+PHP_SRC_TREE = runpy.run_path(str(ROOT / "scripts/php_src_tree.py"))
+
+
+def pinned_tree(root, environ):
+    """The php-src tree the pin at `root` names, found by that rule in
+    `environ`; None where this machine has none, so a test skips."""
+    return PHP_SRC_TREE["found"](inputs.read_toml(root / "oracle.toml")["source"], environ)
+
+
+# The pinned php-src tree, where this machine has one.
+TREE = pinned_tree(ROOT, os.environ)
 
 
 class DistributionInputs(unittest.TestCase):
@@ -87,8 +98,8 @@ class DistributionInputs(unittest.TestCase):
             inputs.render("; @EXPANDED_BINDIR@/php\n")
 
     @unittest.skipUnless(
-        (TREE / "sapi/fpm/www.conf.in").is_file(),
-        "the pinned php-src tree is not on this machine (TEST_PHP_SRCDIR)",
+        TREE is not None and (TREE / "sapi/fpm/www.conf.in").is_file(),
+        "the pinned php-src tree is not on this machine (TEST_PHP_SRCDIR, or the pin's [source].path)",
     )
     def test_the_pinned_tree_s_fpm_templates_match_their_pins_and_render_whole(self):
         pins = inputs.check(self.root)
@@ -103,6 +114,25 @@ class DistributionInputs(unittest.TestCase):
         pool = inputs.render((TREE / "sapi/fpm/www.conf.in").read_text())
         for line in ("user = www-data", "group = www-data", "listen = 127.0.0.1:9000"):
             self.assertIn("\n" + line + "\n", pool)
+
+    def test_the_tree_is_found_as_xtask_finds_it_a_home_spelling_read_and_an_empty_value_unset(self):
+        home = self.root / "home"
+        named, pinned = home / "php-src-8.5.12", self.root / "pinned"
+        named.mkdir(parents=True)
+        pinned.mkdir()
+        for spelling in ("$HOME/php-src-8.5.12", "~/php-src-8.5.12", str(named)):
+            with self.subTest(spelling=spelling):
+                environ = {"HOME": str(home), "TEST_PHP_SRCDIR": spelling}
+                self.assertEqual(pinned_tree(self.root, environ), named)
+        # An empty value is unset, not the current directory: with a pin
+        # that states no `[source].path` no tree is found, and with one
+        # that does, the tree is the pin's.
+        (self.root / "oracle.toml").write_text('[source]\ntag = "php-8.5.12"\n')
+        for environ in ({"TEST_PHP_SRCDIR": ""}, {}):
+            with self.subTest(environ=environ):
+                self.assertIsNone(pinned_tree(self.root, environ))
+        (self.root / "oracle.toml").write_text(f'[source]\ntag = "php-8.5.12"\npath = "{pinned}"\n')
+        self.assertEqual(pinned_tree(self.root, {"TEST_PHP_SRCDIR": ""}), pinned)
 
     def test_fpm_installs_each_rendered_template_where_make_install_puts_it(self):
         payloads = {

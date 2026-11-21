@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import runpy
 import struct
 import subprocess
 import tempfile
@@ -14,6 +15,9 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data/fileinfo"
+# The rule that finds the pinned php-src tree, loaded by path: under
+# `python3 -I` this directory is off sys.path (scripts/php_src_tree.py).
+PHP_SRC_TREE = runpy.run_path(str(ROOT / "scripts/php_src_tree.py"))
 
 
 def digest(data):
@@ -178,28 +182,13 @@ def held(table, content):
 
 
 def php_src(source, environ):
-    """The pinned php-src tree on this machine, found as xtask's `Source::found`
-    finds it: the directory `TEST_PHP_SRCDIR` names, a leading `~/` or `$HOME/`
-    read as the home directory and an empty value as unset, else `[source]`'s
-    `path` where the pin states one. Where neither is a directory the refusal
-    names both places, as xtask's does."""
-    named = environ.get("TEST_PHP_SRCDIR") or None
-    read, home = None, environ.get("HOME")
-    lead = next((lead for lead in ("~/", "$HOME/") if named and named.startswith(lead)), None)
-    if named is not None:
-        read = Path(home) / named[len(lead):] if lead and home else Path(named)
-    pinned = Path(source["path"]) if "path" in source else None
-    for tree in (read, pinned):
-        if tree is not None and tree.is_dir():
-            return tree
-    if named is None:
-        variable = "TEST_PHP_SRCDIR is unset"
-    elif lead and home:
-        variable = f"TEST_PHP_SRCDIR={named}, read as {read}, is not a directory"
-    else:
-        variable = f"TEST_PHP_SRCDIR={named} is not a directory"
-    path = "the pin states no `[source].path`" if pinned is None else f"the pin's path {pinned} is not a directory"
-    raise SystemExit(f"the pinned php-src ({source['tag']}) is at neither place tried: {variable}, and {path}")
+    """The pinned php-src tree on this machine, found by xtask's rule as
+    scripts/php_src_tree.py keeps it; where neither place is a directory,
+    the refusal naming both."""
+    tree = PHP_SRC_TREE["found"](source, environ)
+    if tree is None:
+        raise SystemExit(PHP_SRC_TREE["refusal"](source, environ))
+    return tree
 
 
 def observe(scratch):

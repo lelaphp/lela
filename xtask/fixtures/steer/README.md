@@ -96,3 +96,23 @@ it are refused with nothing written:
 |---|---|---|
 | `owed/changed-when.toml` | changes a `when` the row already carries | `owed[crosscheck].when` |
 | `owed/second-row.toml` | adds a second row for an instrument already owed | `owed[phpt] twice` |
+
+## The packages list (#87)
+
+`packages/tracked.toml` is a scratch `data/packages.toml` of two rows. A
+row of the list is keyed by its package's name and every other key is
+the row's value (R13: an agent adds a row, a person changes or drops
+one), so a key added to a row is refused as a changed value is, where
+the walk of the manifest's rows would admit it. `packages/added-row.toml`
+is the control, a third row, written and named `package[fixture/c]`. The
+negative controls beside it are refused with nothing written:
+
+| proposal | what it does | the row the refusal names |
+|---|---|---|
+| `packages/changed-row.toml` | moves a row's version | `package[fixture/a]` |
+| `packages/added-key.toml` | adds `needs` to a row | `package[fixture/b]` |
+| `packages/dropped-row.toml` | drops a row | `package[fixture/b] dropped` |
+
+`packages/rows.toml` is a list laid down where none stands, its two rows
+each an addition; the same rows beside a table the list's reader does
+not know lay nothing down. `xtask/tests/steer.rs` runs each of them.

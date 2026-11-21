@@ -694,7 +694,7 @@ fn steered_by(checkout: &Path, path: &str, was: &str, since: i64) -> Option<()> 
     let before = String::from_utf8_lossy(&cat_blob(checkout, was).ok()?).into_owned();
     let now = fs::read_to_string(checkout.join(path)).ok()?;
     let verdict = steer::Ground::of(checkout, path, before)
-        .and_then(|g| g.judge(&now))
+        .and_then(|g| g.judge(path, &now))
         .ok()?;
     let added = verdict.additions();
     (!added.is_empty()
