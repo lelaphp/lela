@@ -132,7 +132,10 @@ class Leftovers(unittest.TestCase):
     --porcelain` as it found it. Running the whole suite here would run
     this test inside itself; a load added to another test is not held."""
 
-    FILES = ("dist/test_apt.py", "dist/test_inputs.py", "dist/inputs.py", "scripts/oracle-build.py", ".gitignore")
+    FILES = (
+        "dist/test_apt.py", "dist/test_inputs.py", "dist/inputs.py", "oracle.toml",
+        "scripts/oracle-build.py", "scripts/php_src_tree.py", ".gitignore",
+    )
 
     def git(self, root, *arguments):
         env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}

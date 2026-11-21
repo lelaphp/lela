@@ -37,6 +37,27 @@ fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
 }
 
+/// The tree this build was compiled from, as `build.rs` keeps it under
+/// `OUT_DIR`: the manifest and `xtask/src` it digested, at their paths in
+/// the workspace.
+fn built() -> &'static Path {
+    Path::new(concat!(env!("OUT_DIR"), "/built"))
+}
+
+/// A scratch checkout at `root` whose manifest is the one this build was
+/// compiled against and whose harness has moved on since: `xtask/src`
+/// edited after the build, as a checkout's is under a run.
+fn moved_on(root: &Path) -> Repo {
+    xtask::scratch::repository(workspace(), root, &["seams.toml"]).unwrap();
+    let repo = Repo::at(root);
+    repo.write("seams.toml", fs::read(built().join("seams.toml")).unwrap());
+    repo.write(
+        "xtask/src/lib.rs",
+        "// the checkout's harness, edited since this build\n",
+    );
+    repo
+}
+
 /// The manifest a mechanics test judges by: a row, the tracked pin and no
 /// rule, so no criterion is held to a `deny = true` rule; the tracked
 /// rules a ticket an agent may take is held to are read in
@@ -2238,12 +2259,16 @@ fn ready_prints_the_comments_newer_than_the_branchs_first_commit() {
 /// whose field is empty left out, so the unmerged base's line stands only
 /// for a branch laid on another and the track's only for a labelled
 /// ticket. A ticket no branch records is refused.
+///
+/// The build is held to the tree it was compiled from, which `build.rs`
+/// keeps, and not to the checkout's, which moves on under a test run the
+/// moment anyone edits `xtask/src`: the checkout here carries a harness
+/// edited since this build, and the brief renders all the same.
 #[test]
 fn the_brief_fills_the_template_from_the_ticket_and_its_branch() {
     let dir = Tree::new("ticket-brief").unwrap();
     let root = dir.join("repo");
-    xtask::scratch::repository(workspace(), &root, &["seams.toml"]).unwrap();
-    let repo = Repo::at(&root);
+    let repo = moved_on(&root);
     repo.write(
         brief::TEMPLATE,
         "a note for the template's editor, not rendered\n\n## Brief\n\n#{ticket} {title}: {worktree} on {branch} at {base}, laid on {laid_on}.\nLaid on {unmerged_base}: run status --session.\nScratch {scratch}; checkout {checkout}; own {owns}; {stamp}.\nSpec: {spec}\nCarry `{track_label}`.\n",
@@ -2287,7 +2312,7 @@ fn the_brief_fills_the_template_from_the_ticket_and_its_branch() {
         spec: None,
     };
     let main = repo.git(&["rev-parse", "main"]);
-    let six = brief::brief(&root, workspace(), &gh, Ticket::new(6), &ask).unwrap();
+    let six = brief::brief(&root, built(), &gh, Ticket::new(6), &ask).unwrap();
     let canonical = |p: &Path| fs::canonicalize(p).unwrap().display().to_string();
     // The stamp names the sources this build was compiled from, twelve
     // hex digits of their digest.
@@ -2309,7 +2334,7 @@ fn the_brief_fills_the_template_from_the_ticket_and_its_branch() {
     );
     let eight = brief::brief(
         &root,
-        workspace(),
+        built(),
         &gh,
         Ticket::new(8),
         &brief::Ask {
@@ -2336,11 +2361,11 @@ fn the_brief_fills_the_template_from_the_ticket_and_its_branch() {
         owns: Vec::new(),
         spec: None,
     };
-    let bare = brief::brief(&root, workspace(), &gh, Ticket::new(6), &bare).unwrap();
+    let bare = brief::brief(&root, built(), &gh, Ticket::new(6), &bare).unwrap();
     assert!(bare.starts_with("## Brief\n\n#6 ticket 6: "), "{bare}");
     assert!(!bare.contains("Scratch"), "{bare}");
 
-    let unrecorded = brief::brief(&root, workspace(), &gh, Ticket::new(9), &ask).unwrap_err();
+    let unrecorded = brief::brief(&root, built(), &gh, Ticket::new(9), &ask).unwrap_err();
     assert!(
         format!("{unrecorded:#}").contains("no branch records #9; lay its worktree down first"),
         "{unrecorded:#}"

@@ -1,20 +1,20 @@
 # The oracle variants on the oracle runner (#2298): each build the pin
-# names for this machine's platform, laid at its path and held to its md5
+# names for this machine's platform, laid at its path and held to its SHA-256
 # by scripts/oracle-build.py's recipe, as the pinned-php action pours the
 # keg. A crate whose row names a variant, `ext/zend_test` under zend-test,
 # runs its witnesses, crosscheck and phpt subset under it, and reads skip
-# wherever the binary is not there. The path and md5 are read off `status
+# wherever the binary is not there. The path and SHA-256 are read off `status
 # --section oracle`'s `variants`, so this file spells none of them, and the
 # section is rendered after the corpus action, so its `found.path` is the
 # checkout the build is made from. A hosted runner keeps no binary
-# between jobs, so each job builds it; one already at the pin's md5, on a
+# between jobs, so each job builds it; one already at the pin's SHA-256, on a
 # machine that holds one, is checked and left. A build that does not
-# reproduce the md5 is laid nowhere and fails
+# reproduce the SHA-256 is laid nowhere and fails
 # the step; each job runs it with `continue-on-error`, so the lanes go on,
 # and every lane under the variant says in its own reading that the binary
 # is absent or not the pin's, while the other crates' readings stand.
 name: oracle variants
-description: Lay each oracle variant the pin names for this machine, held to its md5
+description: Lay each oracle variant the pin names for this machine, held to its SHA-256
 inputs:
   xtask:
     description: The command the job runs the harness by
@@ -22,7 +22,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: the oracle variants, by md5
+    - name: the oracle variants, by SHA-256
       shell: bash
       env:
         XTASK: ${{ inputs.xtask }}

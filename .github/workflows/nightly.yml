@@ -121,7 +121,7 @@ jobs:
         with:
           xtask: ${{ env.XTASK }}
       # The pinned php, the install harness.yml's oracle job runs too:
-      # poured from homebrew-core's bottle and held to the pin's md5.
+      # poured from homebrew-core's bottle and held to the pin's SHA-256.
       - uses: ./.github/actions/pinned-php
         with:
           xtask: ${{ env.XTASK }}

@@ -3,7 +3,7 @@
 # `scripts/oracle-build.py configure-line` and read by its `build`, which drops
 # the install paths, adds a variant's flags, and refuses this file once the
 # pin's [oracle] digest is not the one it was read from.
-md5 = "e68f73bdb7e8b06932559d9c0fd5c26e"
+sha256 = "sha256:445b775dcb987524475f482f61d8d8b03f306e0433038be1142cd6c75ae36668"
 args = [
     "--prefix=/opt/homebrew/Cellar/php/8.5.12_1",
     "--localstatedir=/opt/homebrew/var",
