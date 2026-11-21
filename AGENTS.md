@@ -9,11 +9,11 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | crates/ | 16 | 1 |
 | ext/ | 59 | 31 |
 | fuzz/ | 1 | 1 |
-| lanes/ | 3 | 0 |
+| lanes/ | 4 | 0 |
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=47323b731995cea495f0421fa28fff4530f3bf60758e52869da8aa7d502bf270 out=24a0970de38bf3e82a307507a5be68798c82ac2bde27126dd973619312f06362 -->
+<!-- /computed in=aa3d4e449a380cf8a4e2a104dfbec757613b24e4f961e4e43ca028052ed2e0f8 out=8cfeef5c41e28b4b055ae202248200ddb859813691d1ff32535d43de1019f6a6 -->
 
 ## What makes the third engine special?
 
@@ -93,7 +93,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=27dcf1097f426a5ce94b857d2b0789d9fafd81b05d942a4ed8903c7d0c81b6ee out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=17a585fa599ec456dd3fb04b21c088557edb6446b9f9d68b914b29bac47f89ea out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -131,7 +131,7 @@ third-engine-design.md
 | layer | layer.lock | 43 |  |
 | harness | xtask.lock | 512 |  |
 
-<!-- /computed in=c1a4086006f50c04f3d1ceb6ddc061bd8fa082b9da5f46ddb2b4f884c9ec01e2 out=b07d910251e4a9309a97c4d17dcf0eaa8e2dd2d5680728c6f7e01d10683520a1 -->
+<!-- /computed in=2861e5704ef8f53181bc2293f66414d4cba975ac9e666bd399ac98c18057bd8b out=b07d910251e4a9309a97c4d17dcf0eaa8e2dd2d5680728c6f7e01d10683520a1 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs,xtask/src/exit.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -161,6 +161,7 @@ Commands:
   trace-dump         Hold the engine's `TRACE` lines under `jit.mode=force` to the oracle's under `[regime.jit-inline]` on the seven kernels; one reading per kernel
   hostile            Hold the engine to the oracle on `data/hostile.toml`'s programs, whose error handlers disturb an opline mid-step; one reading per crate that owes it
   fuzz               Hold the engine to the oracle on a corpus's programs and as many again drawn from a seed, generated or mutated; one reading per crate that owes it
+  packages           Run pinned Composer packages' test suites under the oracle and Lela; one reading per package and one of the whole
   fold               Hold the release `serve_frame` to LLVM's fold of a request field's address into each access; one reading, at `sapi/cli`
   dispatch-census    Each variant's share of the oplines the loop dispatched, over every program `IN_THE_LOOP`'s doc names; one reading per program
   fpm-compare        Hold makala to the pinned php-fpm on the HTTP-served subset, each request's status, header lines and body compared; one reading, at makala's crate
@@ -187,7 +188,7 @@ Exit status:
   3  a worktree laid down and not ready to be worked in
   4  an instrument that could not take a reading it set out for: phpt, witness, compile-identity, crosscheck, fuzz, hostile
 ```
-<!-- /computed in=ce9b59edc82bce0655cef69b2cd8647741815ef05e12429046555f6717b0ee2a out=7669c016ebdbbc0c9a05741ca06474ad22e0a1e2057d73d46eda7496456d7401 -->
+<!-- /computed in=1c6e72f88114df30913d651c9337a951ed811d21e7de98cd78c859d4c680f757 out=868c4f5204271af7c4c624f2b328532b1c3244bfe6e994147cfc628972974230 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

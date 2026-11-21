@@ -59,6 +59,7 @@ proc-macro2 = { workspace = true, features = ["span-locations"] }   # the line o
 php_lanes_differential = { path = "../lanes/differential" }
 php_lanes_framework = { path = "../lanes/framework" }
 php_lanes_fuzz = { path = "../lanes/fuzz" }
+php_lanes_packages = { path = "../lanes/packages" }
 
 [dev-dependencies]
 # tests/new_sapi.rs: a stand-in's parameter types as written, held to the
