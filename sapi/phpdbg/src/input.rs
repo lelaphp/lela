@@ -6,6 +6,7 @@
 
 use std::io::BufRead;
 
+use crate::out::Out;
 use crate::session::Session;
 
 /// What reading a line found.
@@ -21,7 +22,12 @@ pub enum Line {
 /// bytes a terminal sends dropped; the end of input where no newline
 /// comes.
 pub fn consume_line(s: &mut Session) -> Line {
-    s.out.line_read();
+    read_line(&mut s.out)
+}
+
+/// [`consume_line`] where the stream alone is at hand, as the pager reads.
+pub fn read_line(out: &mut Out) -> Line {
+    out.line_read();
     let mut line = Vec::new();
     let read = std::io::stdin().lock().read_until(b'\n', &mut line);
     match read {

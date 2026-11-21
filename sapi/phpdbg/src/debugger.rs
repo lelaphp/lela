@@ -656,6 +656,12 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
         raised_line: 0,
     };
     loop {
+        // Stdin ended at the pager's question in what the last handler
+        // wrote: php bails out of the write quitting.
+        if session::with(req, Session::paged_out).unwrap_or(false) {
+            tier::exit(req);
+            return Flow::Resume(at.frame);
+        }
         let Some(position) = read::position(req, at.frame) else {
             return Flow::Resume(at.frame);
         };
