@@ -528,7 +528,7 @@ fn rendering(
             engines
                 .binary
                 .serve(oracle, &program, None, &[])
-                .map(|(served, _)| served)
+                .map(|(served, ..)| served)
                 .map_err(|trouble| {
                     format!(
                         "the {} binary did not serve it: {trouble:#}",

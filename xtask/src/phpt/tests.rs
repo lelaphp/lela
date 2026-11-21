@@ -1049,6 +1049,37 @@ fn a_subset_resolves_under_the_tree_the_pin_was_handed_ahead_of_the_pins_path() 
     assert_eq!(extension.absent(), Vec::<&Path>::new(), "{extension:#?}");
 }
 
+/// A reading names the profile of the engine binary its verdict is about,
+/// taken only from that binary: the linked engine's, which the harness
+/// builds in the lanes' profile at the first snippet it serves, is
+/// `release-da`; the control, the pinned oracle, names none, and so does a
+/// binary the caller named, however it was built.
+#[test]
+fn a_reading_of_the_linked_engine_names_its_build_and_the_control_none() {
+    let pin = manifest().pin.unwrap();
+    crate::oracle::linked::serve(&pin.recipe, None, "echo 1;").unwrap();
+    let (_tree, mut subset) = subset("profiled", &[]);
+    subset.scope = "ext/pcre".to_owned();
+    let manifest = manifest();
+    let tally = Tally {
+        judged: vec![Judged::new("one", "one.phpt", Judgement::Pass, "")],
+        found: 1,
+    };
+    let locks = Tree::new("phpt-locks").unwrap();
+    let source = manifest.pin().unwrap().source.tree().unwrap_or_default();
+    let snapshot = crate::key::Snapshot::disk(&workspace()).unwrap();
+    let profile = |runner: &Runner| {
+        let under = Under::of(runner, locks.path());
+        let reading = reading(&tally, &snapshot, &manifest, &source, &subset, under);
+        reading.unwrap().profile
+    };
+    let named = Runner::Engine(PathBuf::from("target/release-da/lela"), None);
+    assert_eq!(
+        [Runner::Linked, Runner::Control(PathBuf::from("php")), named].map(|r| profile(&r)),
+        [Some(crate::oracle::Profile::ReleaseDa), None, None]
+    );
+}
+
 #[test]
 fn a_tier_lane_and_a_control_are_readings_of_their_own() {
     let tree = fixture_tree();

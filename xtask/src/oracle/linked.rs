@@ -87,6 +87,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
+use super::profile::{Built, Profile};
 use super::{Ended, Linked, Observation, PastLimit, Place, Program, Recipe, Regime, Scratch};
 use crate::scratch::Tree;
 
@@ -378,17 +379,28 @@ impl Drop for Server {
     }
 }
 
+/// The binary as [`binary`] built it, once this process has.
+static BUILT: OnceLock<Result<Built, String>> = OnceLock::new();
+
 /// The binary, built at the first snippet of this process from the
 /// workspace this harness was built in, in the lanes' profile.
 fn binary() -> Result<PathBuf> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     BUILT
         .get_or_init(|| {
             super::profile::build(&crate::built_root(), PACKAGE, BINARY, Some("linked"), None)
                 .map_err(|e| format!("{e:#}"))
         })
         .clone()
+        .map(|built| built.path)
         .map_err(|why| anyhow!("{why}"))
+}
+
+/// The profile the linked engine's build says it was built in, once this
+/// process has built it to serve a snippet: what a reading of what it
+/// served names ([`super::Runner::profile`]). None before the first
+/// snippet, where the build failed, and so for a server a caller named.
+pub(crate) fn profile() -> Option<Profile> {
+    BUILT.get()?.as_ref().ok().map(|built| built.profile)
 }
 
 #[cfg(test)]

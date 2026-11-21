@@ -45,7 +45,8 @@ use crate::divergence::{Divergence, Registry};
 use crate::oracle::expect::Expectation;
 use crate::oracle::hosts::FPM;
 use crate::oracle::{
-    self, Ended, Invocation, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked,
+    self, Ended, Invocation, Observation, Oracle, Pin, Profile, Program, Regime,
+    Verdict as Compared, linked,
 };
 use crate::phpt::Lane;
 use crate::scratch::Full;
@@ -76,6 +77,9 @@ pub(super) struct Kept {
     /// as one it writes ([`super::record_accepted`]).
     pub(super) reproduced: Option<(std::path::PathBuf, usize)>,
     pub(super) entered: Record,
+    /// The profile of the build the run of record was served by, which
+    /// the crate's reading names.
+    pub(super) profile: Option<Profile>,
 }
 
 /// One witness, end to end: the oracle's run, then the fence held to it
@@ -260,8 +264,9 @@ fn of_record(
     kept: &mut Kept,
 ) -> Result<Observation, Result<Judged>> {
     match serve(on.oracle, on.binary, witness, on.regime) {
-        Ok((out, natives)) => {
+        Ok((out, natives, profile)) => {
             kept.entered = Record::Entered(natives);
+            kept.profile = profile;
             Ok(out)
         }
         Err(trouble) => Err(borked(witness, trouble)),
@@ -645,17 +650,20 @@ fn tiered(regime: &Regime) -> bool {
 /// marked `process` the `php` binary in a process of its own (harness
 /// §8, revision 61). A panic in the linked engine is trouble the witness
 /// borks on, never the lane's end; the trouble is the sentence it borks
-/// with.
+/// with. Beside what it entered, the profile of the build that served it.
 pub(super) fn serve(
     oracle: &Oracle<'_>,
     binary: &Binary,
     witness: &Witness,
     regime: Option<&Regime>,
-) -> Result<(Observation, Vec<Entry>)> {
-    match witness.served {
-        Served::Linked => linked::serve_by(None, &oracle.pin().recipe, regime, &witness.snippet)
-            .map(|(out, entered)| (out, entered.lines().filter_map(Entry::parse).collect()))
-            .context("the linked engine did not serve it"),
+) -> Result<(Observation, Vec<Entry>, Option<Profile>)> {
+    let served = match witness.served {
+        Served::Linked => {
+            let served = linked::serve_by(None, &oracle.pin().recipe, regime, &witness.snippet);
+            let entered = |text: String| text.lines().filter_map(Entry::parse).collect();
+            let served = served.map(|(out, text)| (out, entered(text), linked::profile()));
+            return served.context("the linked engine did not serve it");
+        }
         Served::Binary => binary
             .serve(
                 oracle,
@@ -679,7 +687,8 @@ pub(super) fn serve(
                 },
             )
         }
-    }
+    };
+    served.map(|(out, entered, profile)| (out, entered, Some(profile)))
 }
 
 /// The two runs a witness stands on, which is what a miss names.
