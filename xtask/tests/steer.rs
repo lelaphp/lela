@@ -1032,3 +1032,109 @@ fn a_key_added_to_an_owed_row_is_written_and_a_change_or_a_second_row_is_refused
         assert_eq!(now, tracked, "{name}: a refused proposal writes nothing");
     }
 }
+
+/// The packages lane's list, the file `xtask packages` reads.
+const LIST: &str = "data/packages.toml";
+
+/// The manifest once `harness.self` names the packages list beside the
+/// three, as the proposal of #87 widens it.
+fn listing() -> Manifest {
+    naming(&["seams.toml", "oracle.toml", xtask::divergence::FILE, LIST])
+}
+
+/// One proposal under `xtask/fixtures/steer/packages/` steered over the
+/// scratch list `tracked`, or over a `data/` holding no list where it is
+/// `None`, as the repository's holds none until the first lands: the reading
+/// and the list as it stands after, `None` where none does.
+fn steered_list(name: &str, tracked: Option<&str>) -> (xtask::reading::Reading, Option<String>) {
+    let root = match tracked {
+        Some(tracked) => scratch_at(&format!("list-{name}"), LIST, tracked),
+        None => scratch_at(&format!("list-{name}"), "data/INDEX.md", "# no list\n"),
+    };
+    let proposal = root.join("proposed.toml");
+    fs::write(&proposal, fixture(&format!("packages/{name}.toml"))).expect("the proposal");
+    let reading =
+        steer::run(&root, &listing(), LIST, &proposal, false).expect("the instrument runs");
+    (reading, fs::read_to_string(root.join(LIST)).ok())
+}
+
+/// An agent adds to the list (R13): a proposal of the tracked rows and
+/// one more is written, naming the row by its package.
+#[test]
+fn a_row_the_proposal_adds_to_the_list_is_written_and_named() {
+    let tracked = fixture("packages/tracked.toml");
+    let (reading, now) = steered_list("added-row", Some(&tracked));
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.numbers["added"], 1.into(), "{}", reading.message);
+    assert!(
+        reading.message.ends_with(": package[fixture/c]"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(now, Some(fixture("packages/added-row.toml")));
+}
+
+/// Only a person changes or drops a row (R13): a row is keyed by its
+/// package's name and every other key is its value, so a changed version,
+/// a key a row did not carry and a dropped row each write nothing and are
+/// named by the row.
+#[test]
+fn a_changed_or_dropped_row_of_the_list_writes_nothing_and_is_named() {
+    let tracked = fixture("packages/tracked.toml");
+    for (name, row) in [
+        ("changed-row", "package[fixture/a]"),
+        ("added-key", "package[fixture/b]"),
+        ("dropped-row", "package[fixture/b] dropped"),
+    ] {
+        let (reading, now) = steered_list(name, Some(&tracked));
+        assert_eq!(reading.status, Status::Fail, "{name}: {}", reading.message);
+        assert_eq!(reading.numbers["changed"], 1.into(), "{name}");
+        assert!(
+            reading
+                .message
+                .contains(&format!(": {row}. Nothing was written.")),
+            "{name} names {row}: {}",
+            reading.message
+        );
+        assert_eq!(now.as_deref(), Some(tracked.as_str()), "{name}");
+    }
+}
+
+/// Where no list stands, a proposal of rows lays it down, each row an
+/// addition; one carrying anything the list's reader does not know is
+/// refused and lays nothing down.
+#[test]
+fn a_proposal_of_rows_lays_the_list_down_where_none_stands() {
+    let (reading, now) = steered_list("rows", None);
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert!(
+        reading
+            .message
+            .ends_with(": package[fixture/a], package[fixture/c]"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(now, Some(fixture("packages/rows.toml")));
+
+    let root = scratch_at("list-not-rows", "data/INDEX.md", "# no list\n");
+    let proposal = root.join("proposed.toml");
+    let beside = format!("{}\n[budget]\ntotal = 1\n", fixture("packages/rows.toml"));
+    fs::write(&proposal, beside).expect("the proposal");
+    let reading =
+        steer::run(&root, &listing(), LIST, &proposal, false).expect("the instrument runs");
+    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+    assert!(
+        reading.message.contains("would not load"),
+        "{}",
+        reading.message
+    );
+    assert!(!root.join(LIST).exists(), "nothing is laid down");
+}
+
+/// `cargo xtask steer --help` names the list among the files it writes.
+#[test]
+fn steers_help_names_the_packages_list() {
+    let root = scratch("help", PIN);
+    let help = xtask(&root, &["steer", "--help"]).ok();
+    assert!(help.contains(LIST), "{help}");
+}
