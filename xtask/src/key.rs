@@ -1001,22 +1001,58 @@ mod tests {
         assert!(one.key(Path::new(".")).is_err());
     }
 
-    /// The same over this workspace, whatever its checkout holds: the
-    /// whole tree's key, and an extension's over its closure. The
-    /// line-ending case is the fixture's above, since a fresh checkout
-    /// writes no CRLF copy for `core.autocrlf=input` to leave unlisted.
+    /// The same over this workspace, whatever its checkout holds, read
+    /// once into a copy: the whole tree's key, and an extension's over
+    /// its closure. The line-ending case is the fixture's above, since a
+    /// fresh checkout writes no CRLF copy for `core.autocrlf=input` to
+    /// leave unlisted.
     #[test]
     fn a_snapshot_of_the_workspace_keys_it_as_the_tree_hash_does() {
-        let root = built_root();
-        let now = Snapshot::disk(&root).unwrap();
+        keys_as_the_tree_hash_does(&built_root(), Path::new("ext/json"), || {});
+    }
+
+    /// A file of the workspace rewritten between the snapshot and the
+    /// tree hash moves neither, as a session's edit lands while the
+    /// harness's own tests run: the fixture stands in for the workspace,
+    /// since a test writes into no checkout.
+    #[test]
+    fn a_file_rewritten_during_the_comparison_moves_neither_side() {
+        let tree = super::fixture("rewritten");
+        let file = tree.join("ext/ctype/src/lib.rs");
+        keys_as_the_tree_hash_does(&tree, Path::new("ext/ctype"), || {
+            fs::write(&file, "// rewritten while the keys are compared\n").unwrap();
+        });
+    }
+
+    /// The whole tree's key and the key of the crate at `krate` that
+    /// [`Snapshot::disk`] gives over `workspace` are the tree hash's and
+    /// the hand-made listing's, every side reading one copy of it taken
+    /// once, with `meanwhile` run in `workspace` between the two: the
+    /// sides read their files at different moments, so over the live
+    /// checkout a file rewritten between them gave two keys.
+    ///
+    /// The copy is [`crate::scratch::repository`]'s, with the
+    /// workspace's `HEAD` as its index, refreshed against the copied
+    /// files: what the workspace modified, added or deleted since its
+    /// commit stands so in the copy, and the snapshot reads each such
+    /// file where it takes every other from the index.
+    fn keys_as_the_tree_hash_does(workspace: &Path, krate: &Path, meanwhile: impl FnOnce()) {
+        let copy = crate::scratch::Tree::new("workspace-copy").unwrap();
+        crate::scratch::repository(workspace, &copy, &["."]).unwrap();
+        let head = git::git(workspace, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        git::git(&copy, &["read-tree", head.trim()]).unwrap();
+        git::git(&copy, &["update-index", "-q", "--refresh"]).unwrap();
+        let root: &Path = &copy;
+        let now = Snapshot::disk(root).unwrap();
+        meanwhile();
         assert_eq!(
             now.key(Path::new(".")).unwrap(),
-            tree_hash(&root, &[PathBuf::from(".")]).unwrap()
+            tree_hash(root, &[PathBuf::from(".")]).unwrap()
         );
         // A crate's: its closure's files and what decides in the
         // configuration and the manifest, each by its blob id.
-        let json = super::closure(&root, Path::new("ext/json")).unwrap();
-        let mut listing: Vec<(String, String)> = git::files_under(&root, &json)
+        let closure = super::closure(root, krate).unwrap();
+        let mut listing: Vec<(String, String)> = git::files_under(root, &closure)
             .unwrap()
             .into_iter()
             .map(|path| {
@@ -1028,15 +1064,18 @@ mod tests {
             .iter()
             .filter(|f| !super::toolchain().any(|t| t == f.path))
         {
-            let text = fs::read_to_string(root.join(file.path)).unwrap();
-            let part = file.part_of(&text).unwrap();
-            listing.push((file.path.into(), git::blob_id(part.as_bytes())));
+            // The fixture has no cargo configuration: an absent file, or
+            // one naming nothing that decides, takes no line.
+            let at = root.join(file.path);
+            if !at.is_file() {
+                continue;
+            }
+            if let Some(part) = file.part_of(&fs::read_to_string(at).unwrap()) {
+                listing.push((file.path.into(), git::blob_id(part.as_bytes())));
+            }
         }
         listing.sort_unstable();
-        assert_eq!(
-            now.key(Path::new("ext/json")).unwrap(),
-            git::listing_id(&listing)
-        );
+        assert_eq!(now.key(krate).unwrap(), git::listing_id(&listing));
     }
 
     /// A crate's key moves with the toolchain, with the codegen tables of
