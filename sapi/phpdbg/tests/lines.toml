@@ -947,13 +947,18 @@ args = ["-qIrr", "-n", "-d", "open_basedir={dir}/base", "out.php"]
 [[line.then]]
 args = ["-qIbrr", "-n", "-d", "open_basedir={dir}/base", "{dir}/base/in.php"]
 
-# `-V` answers after php has started, so the Zend extensions it loaded are
-# listed, and quits: phpdbg's version, then `php_get_version`'s lines. The
-# build's date and provider are each build's own.
+# `-V` answers after php has started and quits: phpdbg's version, then
+# `php_get_version`'s head line, held here to php's shape. The build's date
+# and provider are each build's own. What follows the head line is not
+# php's: where php says whose it is and names the Zend Engine and its
+# extensions, the engine says what Lela is, and after the head line it
+# carries Lela's version, the wording Mitchell ruled on 2026-11-21, which
+# `tests/identity.rs` holds; so both are masked, each run's own lines
+# standing as `<identity>`.
 [[line]]
 name = "version-on-the-line-writes-phpdbg-s-and-php-s"
 args = ["-n", "-V"]
-mask = [['\(built: [^)]*\)', '(built: <date>)'], ['(?m)^Built by .*\n', '']]
+mask = [['\(built: [^)]*\)', '(built: <date>)'], ['(?m)^Built by .*\n', ''], [' \[Lela [^\]]*\]\n', '\n'], ['(?m)^Copyright \(c\) The PHP Group\n(Zend Engine v.*\n)(    with .*\n)*', '<identity>\n'], ['(?m)^Lela, an independent implementation of PHP .*\nParts derived from php-src .*\nNot affiliated with .*\n', '<identity>\n']]
 
 # `-h` writes the help overview through the pager, forty lines a page where
 # stdout is no terminal, eighty columns wrapped: the end of input at its

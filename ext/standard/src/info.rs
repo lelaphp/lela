@@ -8,7 +8,6 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
 use php_ext::abi::{OrFalse, True};
@@ -204,31 +203,28 @@ fn stream_hash(req: &mut Request, name: &str, names: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-/// `get_zend_version()`: the engine's line and one for each Zend
-/// extension loaded, as `zend_append_version_info` appends it.
-fn zend_version(req: &Request) -> String {
-    let mut text = format!(
-        "Zend Engine v4.{}, Copyright (c) Zend Technologies\n",
+/// What the box naming the engine holds, where php's says the program
+/// makes use of the Zend Engine and prints `get_zend_version()`, the
+/// engine's line and one for each Zend extension: that this engine
+/// implements the Zend Engine's behaviour at the level `zend_version()`
+/// names and does not contain it, the sentence Mitchell ruled on
+/// 2026-11-21.
+fn zend_sentence(product: &str) -> String {
+    format!(
+        "{product} implements the behaviour of the Zend Engine (compatibility level v4.{}). It does not contain the Zend Engine.\n",
         &PHP_VERSION[2..]
-    );
-    for zend in req.extensions().zend_extensions() {
-        writeln!(
-            text,
-            "    with {} v{}, {}, by {}",
-            zend.name, zend.version, zend.copyright, zend.author
-        )
-        .ok();
-    }
-    text
+    )
 }
 
 /// The general table of `php_print_info` (`Z/ext/standard/info.c:766`):
 /// the version, in HTML inside the box with php's logo, the table of
 /// what this build is, and the box naming the engine. The build's own
 /// facts, its date, the target it was built for, its provider where it
-/// named one and the bundle's `configure` switches, are the engine's
-/// `BuildDefs`, the one stamp `-v` and `PHP_BUILD_DATE` read too; the rows
-/// after them say what this engine is. `Zend Multibyte Support` names
+/// named one, the product's version, which stands beside php's as `-v`'s
+/// first line carries it, and the bundle's `configure` switches, are the
+/// engine's `BuildDefs`, the one stamp `-v` and `PHP_BUILD_DATE` read too;
+/// the rows after them say what this engine is. The box naming the engine
+/// says it is not the Zend Engine ([`zend_sentence`]). `Zend Multibyte Support` names
 /// the extension that set the encoding functions, `provided by %s` of
 /// its `provider_name`, and is `disabled` where none did
 /// (`Z/ext/standard/info.c:872-881`):
@@ -291,6 +287,8 @@ fn general(req: &mut Request) {
     if let Some(provider) = defs.provider() {
         cells.push(["Build Provider", provider]);
     }
+    let product = format!("{} Version", defs.product());
+    cells.push([&product, defs.product_version()]);
     cells.extend([
         ["Configure Command", defs.configure()],
         ["Server API", &api],
@@ -317,7 +315,7 @@ fn general(req: &mut Request) {
     let mut rows: Vec<InfoRow<'_>> = cells.iter().map(|cells| InfoRow::Row(cells)).collect();
     rows.extend(streams.iter().map(|written| InfoRow::Written(written)));
     req.extensions_mut().info_rows(&rows);
-    let zend = zend_version(req);
+    let zend = zend_sentence(defs.product());
     let mut contents = Vec::new();
     if html(req) {
         contents.extend_from_slice(
@@ -328,10 +326,8 @@ fn general(req: &mut Request) {
             .as_bytes(),
         );
     }
-    contents.extend_from_slice(b"This program makes use of the Zend Scripting Language Engine:");
-    contents.extend_from_slice(if html(req) { b"<br />" } else { b"\n" });
-    // `zend_html_puts` in HTML, which leaves the engine's own lines as
-    // they are: they hold no `<`, `>`, `&` or tab.
+    // `zend_html_puts` in HTML would leave the sentence as it is: it
+    // holds no `<`, `>`, `&` or tab.
     contents.extend_from_slice(zend.as_bytes());
     plain_box(req, &contents);
 }
@@ -415,27 +411,16 @@ fn gpcse(req: &mut Request, name: &str) -> Result<Vec<u8>, Thrown> {
     Ok(out)
 }
 
-/// The license, as text.
-const LICENSE: &str = "\nPHP License\n\
-This program is free software; you can redistribute it and/or modify\n\
-it under the terms of the PHP License as published by the PHP Group\n\
-and included in the distribution in the file:  LICENSE\n\
-\n\
-This program is distributed in the hope that it will be useful,\n\
-but WITHOUT ANY WARRANTY; without even the implied warranty of\n\
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\
-\n\
-If you did not receive a copy of the PHP license, or have any\n\
-questions about PHP licensing, please contact license@php.net.\n";
-
-/// The license, as the HTML page's box holds it.
-const LICENSE_HTML: &str = "<p>\n\
-This program is free software; you can redistribute it and/or modify it under the terms of the PHP License as published by the PHP Group and included in the distribution in the file:  LICENSE\n\
-</p>\n\
-<p>This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\
-</p>\n\
-<p>If you did not receive a copy of the PHP license, or have any questions about PHP licensing, please contact license@php.net.\n\
-</p>\n";
+/// The licence box's one paragraph, in place of php's PHP License text,
+/// as Mitchell ruled it on 2026-11-21: the product's licence and the
+/// licence its php-src parts are used under, and where the notices are.
+fn licence(req: &Request) -> String {
+    let defs = req.environment().build_defs();
+    let (product, command) = (defs.product(), defs.product_command());
+    format!(
+        "{product} is free software, available under the MIT license. Parts of {product} are derived from php-src and are used under the Modified BSD License; see NOTICE and `{command} --licenses`."
+    )
+}
 
 /// `php_print_info_htmlhead` (`Z/ext/standard/info.c:704`): the doctype,
 /// the `<head>` with `php_info_print_style`'s CSS and the title, and the
@@ -562,11 +547,13 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
         print_credits(req, CREDITS_ALL & !CREDITS_FULLPAGE);
     }
     if flag & INFO_LICENSE != 0 {
+        let heading = format!("{} License", req.environment().build_defs().product());
+        let paragraph = licence(req);
         if html(req) {
-            section(req, "PHP License");
-            plain_box(req, LICENSE_HTML.as_bytes());
+            section(req, &heading);
+            plain_box(req, format!("<p>\n{paragraph}\n</p>\n").as_bytes());
         } else {
-            print(req, LICENSE);
+            print(req, &format!("\n{heading}\n{paragraph}\n"));
         }
     }
     if html(req) {
@@ -579,7 +566,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 /// (`Z/ext/standard/info.c:1252`): the sections the flags name.
 ///
 /// ```php
-/// phpinfo(INFO_LICENSE);
+/// phpinfo(0);
 /// ob_start(); phpinfo(INFO_GENERAL); $g = ob_get_clean();
 /// var_dump(str_starts_with($g, "phpinfo()\nPHP Version => " . PHP_VERSION . "\n\nSystem => " . php_uname() . "\n"));
 /// ob_start(); var_dump(phpinfo(INFO_MODULES | INFO_CONFIGURATION)); $m = ob_get_clean();
@@ -587,18 +574,6 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 /// ```
 /// ```expect
 /// phpinfo()
-///
-/// PHP License
-/// This program is free software; you can redistribute it and/or modify
-/// it under the terms of the PHP License as published by the PHP Group
-/// and included in the distribution in the file:  LICENSE
-///
-/// This program is distributed in the hope that it will be useful,
-/// but WITHOUT ANY WARRANTY; without even the implied warranty of
-/// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-///
-/// If you did not receive a copy of the PHP license, or have any
-/// questions about PHP licensing, please contact license@php.net.
 /// bool(true)
 /// bool(true)
 /// bool(true)
@@ -633,7 +608,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 /// style, the sections, and the body closed after the last:
 ///
 /// ```php
-/// phpinfo(INFO_LICENSE);
+/// phpinfo(0);
 /// ob_start(); phpinfo(INFO_MODULES | INFO_GENERAL); $m = ob_get_clean();
 /// var_dump(str_contains($m, "<h2><a name=\"module_core\" href=\"#module_core\">Core</a></h2>\n<table>\n<tr><td class=\"e\">PHP Version </td><td class=\"v\">8.5.12 </td></tr>\n</table>\n<table>\n<tr class=\"h\"><th>Directive</th><th>Local Value</th><th>Master Value</th></tr>\n"), str_contains($m, "<h2>Additional Modules</h2>\n<table>\n<tr class=\"h\"><th>Module Name</th></tr>\n</table>\n"), str_ends_with($m, "</div></body></html>"));
 /// ```
@@ -681,21 +656,60 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 /// </style>
 /// <title>PHP 8.5.12 - phpinfo()</title><meta name="ROBOTS" content="NOINDEX,NOFOLLOW,NOARCHIVE" /></head>
 /// <body><div class="center">
-/// <h2>PHP License</h2>
-/// <table>
-/// <tr class="v"><td>
-/// <p>
-/// This program is free software; you can redistribute it and/or modify it under the terms of the PHP License as published by the PHP Group and included in the distribution in the file:  LICENSE
-/// </p>
-/// <p>This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-/// </p>
-/// <p>If you did not receive a copy of the PHP license, or have any questions about PHP licensing, please contact license@php.net.
-/// </p>
-/// </td></tr>
-/// </table>
 /// </div></body></html>bool(true)
 /// bool(true)
 /// bool(true)
+/// ```
+///
+/// What the page says the program is is the product's and not php's, in
+/// the wording Mitchell ruled on 2026-11-21: the licence box is Lela's
+/// licence and the one its php-src parts are used under, the general
+/// table carries Lela's version beside php's, which the hosts' tests hold
+/// to the package's, and the box naming the engine says it is not the
+/// Zend Engine. The heading, `PHP_VERSION` and `phpversion()` stay php's.
+/// The oracle prints php's licence and its Zend lines, so these two
+/// diverge from it by design:
+///
+/// ```php
+/// phpinfo(INFO_LICENSE);
+/// ob_start(); phpinfo(INFO_GENERAL); $g = ob_get_clean();
+/// preg_match('/^Lela Version => .*$/m', $g, $row);
+/// echo $row[0], "\n", substr($g, strrpos(rtrim($g), "\n") + 1);
+/// ```
+/// ```expect
+/// phpinfo()
+///
+/// Lela License
+/// Lela is free software, available under the MIT license. Parts of Lela are derived from php-src and are used under the Modified BSD License; see NOTICE and `lela --licenses`.
+/// Lela Version => %s
+/// Lela implements the behaviour of the Zend Engine (compatibility level v4.5.12). It does not contain the Zend Engine.
+/// ```
+///
+/// ```php
+/// ob_start(); phpinfo(INFO_LICENSE | INFO_GENERAL); $p = ob_get_clean();
+/// preg_match('/^<tr><td class="e">Lela Version .*$/m', $p, $row);
+/// preg_match('/^Lela implements .*$/m', $p, $zend);
+/// echo $row[0], "\n", $zend[0], "\n", substr($p, strpos($p, '<h2>'));
+/// ```
+/// ```request
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.12
+/// Content-type: text/html; charset=UTF-8
+///
+/// <tr><td class="e">Lela Version </td><td class="v">%s </td></tr>
+/// Lela implements the behaviour of the Zend Engine (compatibility level v4.5.12). It does not contain the Zend Engine.
+/// <h2>Lela License</h2>
+/// <table>
+/// <tr class="v"><td>
+/// <p>
+/// Lela is free software, available under the MIT license. Parts of Lela are derived from php-src and are used under the Modified BSD License; see NOTICE and `lela --licenses`.
+/// </p>
+/// </td></tr>
+/// </table>
+/// </div></body></html>
 /// ```
 ///
 /// The declarations of `info.c`.

@@ -273,13 +273,17 @@ pub fn modules(engine: &Engine) -> String {
     text
 }
 
-/// `php_get_version` (`Z/main/main.c:128`), what each host's `-v`
-/// prints: the head line with the host's name and the build's date, php's
-/// copyright line, `Built by` and the provider where the build named one,
-/// and `get_zend_version`, the engine's line and one for each Zend
-/// extension loaded; php starts its extensions before it answers `-v`, so
-/// the engine is built first. The date and the provider are the engine's
-/// [`BuildDefs`], which `PHP_BUILD_DATE` and phpinfo read too.
+/// `php_get_version` (`Z/main/main.c:126`), what each host's `-v`
+/// prints, with the identity lines Mitchell ruled on 2026-11-21 in
+/// place of php's: the head line in php's shape, the line a program
+/// reading php's version parses, with the host's name and the build's
+/// date, and the product's version after it; then, where php says whose
+/// the program is, what the product is and whose the parts it derives
+/// are; and `Built by` and the provider where the build named one. php's `get_zend_version`, the Zend Engine's
+/// line and one for each Zend extension, is not printed: this is not the
+/// Zend Engine. The date, the provider and the product are the engine's
+/// [`BuildDefs`], which `PHP_BUILD_DATE` and phpinfo read too; php starts
+/// its extensions before it answers `-v`, so the engine is built first.
 #[must_use]
 pub fn version(name: &str, engine: &Engine) -> String {
     let defs = engine.build_defs();
@@ -287,10 +291,15 @@ pub fn version(name: &str, engine: &Engine) -> String {
         .provider()
         .map(|provider| format!("Built by {provider}\n"))
         .unwrap_or_default();
+    let (product, command) = (defs.product(), defs.product_command());
     format!(
-        "PHP {PHP_VERSION} ({name}) (built: {}) (NTS)\nCopyright (c) The PHP Group\n{provider}{}",
+        "PHP {PHP_VERSION} ({name}) (built: {}) (NTS) [{product} {}]\n\
+         {product}, an independent implementation of PHP {PHP_VERSION}. Copyright (c) 2026 Mitchell van Wijngaarden and contributors.\n\
+         Parts derived from php-src (Copyright (c) The PHP Group and Contributors, and Zend Technologies Ltd.); see `{command} --licenses`.\n\
+         Not affiliated with or endorsed by The PHP Group, the PHP Foundation or Perforce.\n\
+         {provider}",
         defs.date(),
-        engine.zend_version_info()
+        defs.product_version(),
     )
 }
 

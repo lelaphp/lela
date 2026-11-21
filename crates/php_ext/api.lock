@@ -575,6 +575,9 @@ request::BufferInit
 request::BuildDefs
 request::BuildDefs::configure
 request::BuildDefs::date
+request::BuildDefs::product
+request::BuildDefs::product_command
+request::BuildDefs::product_version
 request::BuildDefs::provider
 request::BuildDefs::system
 request::CacheBudget
@@ -1265,7 +1268,6 @@ test::Engine::start_up
 test::Engine::startup_errors
 test::Engine::strip
 test::Engine::unit
-test::Engine::zend_version_info
 test::Entered
 test::Files
 test::Files::new
