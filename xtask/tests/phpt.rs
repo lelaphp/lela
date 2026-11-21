@@ -33,7 +33,7 @@ mod common {
     pub mod run;
 }
 use common::manifest::{of_rows, pin, with_source_path};
-use common::phpt_tree::fixture_tree;
+use common::phpt_tree::{counting, fixture_tree, phpt_files};
 use common::registry::{Row, registry, rows};
 use common::repo::{Repo, scratch_workspace};
 use common::run::Run;
@@ -112,25 +112,33 @@ impl Scratch {
         for (file, text) in tests {
             fs::write(dir.join(file), text).unwrap();
         }
+        // Over the pinned oracle where it is here; where it is not, a run
+        // has nothing to hold the engine to and runs no test on it.
         let engine = root.join("engine/php");
         fs::create_dir_all(engine.parent().unwrap()).unwrap();
-        fs::write(
-            &engine,
-            format!(
-                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
-                oracle().unwrap().display()
-            ),
-        )
-        .unwrap();
+        let body = oracle().map_or_else(
+            || "exit 1".to_owned(),
+            |php| format!("exec \"{}\" \"$@\"", php.display()),
+        );
+        fs::write(&engine, format!("#!/bin/sh\n{body}\n")).unwrap();
         xtask::scratch::executable(&engine).unwrap();
         let mut manifest = Manifest::named("ext/fixture");
         manifest.pin = Some(pin_over(&corpus));
+        pinning_files(&root, phpt_files(&corpus));
         Scratch {
             root,
             manifest,
             engine,
             locks: Tree::new(&format!("phpt-{name}-locks")).unwrap(),
         }
+    }
+
+    /// The manifest a run reads, its pin counting the tests the corpus
+    /// holds now, as a test may lay one down after the scratch.
+    fn counted(&self) -> Manifest {
+        let mut manifest = self.manifest.clone();
+        manifest.pin = (manifest.pin).map(|pin| counting(pin, &self.root.join("corpus")));
+        manifest
     }
 
     /// The one reading of the fixture's subset, run through `engine`.
@@ -147,7 +155,7 @@ impl Scratch {
             locks: Some(locks.to_path_buf()),
             ..Ask::default()
         };
-        let readings = phpt::run(&self.root, &self.manifest, registry, &ask)
+        let readings = phpt::run(&self.root, &self.counted(), registry, &ask)
             .unwrap()
             .readings;
         assert_eq!(readings.len(), 1, "{readings:#?}");
@@ -158,7 +166,7 @@ impl Scratch {
 /// The tracked pin with its tree at `corpus`, as if the variable named
 /// it: the way a test points the pin at a tree of its own.
 fn pin_over(corpus: &Path) -> Pin {
-    let pin = pin().on_this_machine(Some(corpus.to_path_buf()));
+    let pin = counting(pin(), corpus).on_this_machine(Some(corpus.to_path_buf()));
     assert_eq!(
         pin.source.tree().unwrap(),
         corpus,
@@ -221,7 +229,7 @@ fn a_reading_names_the_profile_of_a_found_engine_and_none_of_a_named_one() {
         locks: Some(scratch.locks.path().to_path_buf()),
         ..Ask::default()
     };
-    let ran = phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap();
+    let ran = phpt::run(&scratch.root, &scratch.counted(), &registry(""), &ask).unwrap();
     let readings = ran.readings;
     let [found] = &readings[..] else {
         panic!("{readings:#?}")
@@ -270,7 +278,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
         unkept: true,
         ..Ask::default()
     };
-    let run = || phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask(&php));
+    let run = || phpt::run(&scratch.root, &scratch.counted(), &registry(""), &ask(&php));
     let pin = scratch.manifest.pin().unwrap();
     let kept = scratch.root.join(format!(
         "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
@@ -323,7 +331,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
 
     let refused = phpt::run(
         &scratch.root,
-        &scratch.manifest,
+        &scratch.counted(),
         &registry(""),
         &ask(&scratch.engine),
     )
@@ -667,6 +675,7 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
     let text = fs::read_to_string(&pin).unwrap();
     fs::write(&pin, with_source_path(&text, &pinned)).unwrap();
     let tree = fixture_tree();
+    pinning_files(&root, 0);
     let ran = Run::at(&root)
         .args(["phpt", "--subset", "Zend/tests"])
         .env(xtask::oracle::TREE_VARIABLE, &*tree)
@@ -825,10 +834,10 @@ fn a_full_run_writes_the_corpus_reading_beside_the_subsets_and_a_subset_run_none
 }
 
 /// A whole run that judged a test failing keeps the status of a failing
-/// reading, its corpus reading failing; the same run over a tree holding
-/// fewer files than the pin counts is not whole: a skip, `whole = 0`,
-/// naming the files found against the pin's, and the exit of a run that
-/// could not run to its end.
+/// reading, its corpus reading failing; the same run over a tree holding a
+/// test no subset of the corpus holds, which the pin counts, is not whole:
+/// a skip, `whole = 0`, naming the files found against the pin's, and the
+/// exit of a run that could not run to its end.
 #[test]
 fn a_full_run_is_whole_only_over_the_files_the_pin_counts() {
     if oracle().is_none() {
@@ -845,6 +854,9 @@ fn a_full_run_is_whole_only_over_the_files_the_pin_counts() {
     assert_eq!(count(&corpus, "whole"), 1, "{corpus:#?}");
     assert_eq!(count(&corpus, "met"), 0, "{corpus:#?}");
 
+    let outside = scratch.root.join("corpus/scripts/dev");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("outside.phpt"), MET).unwrap();
     pinning_files(&scratch.root, 2);
     let ran = phpt_over(&scratch, &["--full", "--engine", engine]);
     assert_eq!(ran.code(), i32::from(xtask::exit::UNFINISHED), "{ran}");
@@ -881,7 +893,7 @@ fn the_corpus_reading_counts_each_test_once_by_its_id_and_each_file_once() {
         locks: Some(scratch.locks.path().to_path_buf()),
         ..Ask::default()
     };
-    let ran = phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap();
+    let ran = phpt::run(&scratch.root, &scratch.counted(), &registry(""), &ask).unwrap();
     let corpus = (ran.readings.iter())
         .find(|reading| reading.scope == "php-src")
         .expect("the corpus reading");
@@ -904,6 +916,208 @@ fn the_corpus_reading_counts_each_test_once_by_its_id_and_each_file_once() {
         corpus.message
     );
     assert_eq!(corpus.status, Status::Fail, "the bork counts against it");
+}
+
+/// The exit of a run that could not run to its end, which `code` is.
+fn unfinished(ran: &common::run::Ran) {
+    assert_eq!(ran.code(), i32::from(xtask::exit::UNFINISHED), "{ran}");
+}
+
+/// A tree that is not the pinned one is refused before any test is
+/// judged: by its count of tests where it holds more or fewer than the pin
+/// counts, and by its commit where it is a checkout at another, each
+/// naming what it found beside what the pin says, and no reading written.
+#[test]
+fn a_tree_not_the_pins_by_its_count_or_its_commit_is_refused_before_any_test() {
+    let scratch = Scratch::new("not-the-pin", &[("met.phpt", MET)]);
+    let engine = scratch.engine.to_str().unwrap();
+    pinning_files(&scratch.root, 2);
+    let ran = phpt_over(&scratch, &["--subset", "ext/fixture", "--engine", engine]);
+    unfinished(&ran);
+    assert!(
+        ran.stderr
+            .contains("holds 1 .phpt files; the pin counts 2 at php-8.5.12"),
+        "{ran}"
+    );
+    assert_eq!(stored(&scratch, "ext/fixture"), None, "{ran}");
+
+    pinning_files(&scratch.root, 1);
+    let corpus = scratch.root.join("corpus");
+    Repo::init(&corpus);
+    let head = commit_all(&corpus, "not the pin");
+    let ran = phpt_over(&scratch, &["--subset", "ext/fixture", "--engine", engine]);
+    unfinished(&ran);
+    assert!(
+        ran.stderr
+            .contains(&format!("is at commit {head}; the pin says 136e049a")),
+        "{ran}"
+    );
+    assert_eq!(stored(&scratch, "ext/fixture"), None, "{ran}");
+}
+
+/// With no oracle on the machine nothing is judged and the subset writes
+/// the skip it always wrote, saying so, but the run exits as one that
+/// could not run to its end and not as one that passed.
+#[test]
+fn a_run_with_no_oracle_writes_its_skip_and_exits_as_unfinished() {
+    let scratch = Scratch::new("no-oracle", &[("met.phpt", MET)]);
+    let pin = scratch.root.join("oracle.toml");
+    let text = fs::read_to_string(&pin).unwrap();
+    let path = format!("path = \"{}\"", pin_path());
+    assert!(text.contains(&path), "{text}");
+    let nowhere = scratch.root.join("nowhere/php");
+    let text = text.replacen(&path, &format!("path = \"{}\"", nowhere.display()), 1);
+    fs::write(&pin, text).unwrap();
+    let engine = scratch.engine.to_str().unwrap();
+    let ran = phpt_over(&scratch, &["--subset", "ext/fixture", "--engine", engine]);
+    unfinished(&ran);
+    let reading = stored(&scratch, "ext/fixture").expect("the skip");
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert!(
+        reading.message.contains(&nowhere.display().to_string()),
+        "{}",
+        reading.message
+    );
+    assert_eq!(count(&reading, "run"), 0, "{reading:#?}");
+}
+
+/// The tracked pin's oracle path, as `oracle.toml` writes it.
+fn pin_path() -> String {
+    pin().oracle.path.display().to_string()
+}
+
+/// A subset that was to run with no engine binary, or one the tree has
+/// moved past, writes the skip that names it, `engine_absent` or
+/// `engine_stale`, and the run exits as one that could not run to its end.
+#[test]
+fn a_run_with_no_engine_binary_or_a_stale_one_writes_its_skip_and_exits_as_unfinished() {
+    let scratch = Scratch::new("no-engine", &[("met.phpt", MET)]);
+    let ran = phpt_over(&scratch, &["--subset", "ext/fixture"]);
+    unfinished(&ran);
+    let reading = stored(&scratch, "ext/fixture").expect("the skip");
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert_eq!(count(&reading, "engine_absent"), 1, "{reading:#?}");
+
+    written_at(&scratch.engine, SystemTime::now() - Duration::from_hours(1));
+    let engine = scratch.engine.to_str().unwrap();
+    let ran = phpt_over(&scratch, &["--subset", "ext/fixture", "--engine", engine]);
+    unfinished(&ran);
+    let reading = stored(&scratch, "ext/fixture").expect("the skip");
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert_eq!(count(&reading, "engine_stale"), 1, "{reading:#?}");
+}
+
+/// With the caller's server one that does not answer, a whole run refuses
+/// the subset that needs it, by name, naming the server and how to start
+/// it, before any test of its is judged; the subset that needs no server
+/// runs and writes its reading, and the run exits as unfinished. A run of
+/// that subset alone is not refused, and never asks the server.
+#[test]
+fn a_server_that_does_not_answer_refuses_only_the_subsets_that_need_it() {
+    if oracle().is_none() {
+        return;
+    }
+    let scratch = Scratch::new("unserved", &[("met.phpt", MET)]);
+    let corpus = scratch.root.join("corpus");
+    copy_dir(
+        &xtask::package_dir().join("fixtures/phpt/mysql"),
+        &corpus.join("ext/pdo_mysql/tests"),
+    );
+    pinning_files(&scratch.root, phpt_files(&corpus));
+    let engine = scratch.engine.to_str().unwrap();
+    let down = |args: &[&str]| {
+        Run::at(&scratch.root)
+            .args(["phpt"])
+            .args(args)
+            .env(xtask::oracle::TREE_VARIABLE, &corpus)
+            .env("MYSQL_TEST_HOST", "127.0.0.1")
+            .env("MYSQL_TEST_PORT", "1")
+            .go()
+    };
+    let ran = down(&["--full", "--engine", engine]);
+    unfinished(&ran);
+    let refused = stored(&scratch, "ext/pdo_mysql").expect("the refusal");
+    assert_eq!(refused.status, Status::Fail, "{refused:#?}");
+    assert_eq!(count(&refused, "refused"), 1, "{refused:#?}");
+    assert!(!refused.numbers.contains_key("tests"), "{refused:#?}");
+    for said in [
+        "ext/pdo_mysql: refused, not skipped",
+        "the MySQL server at 127.0.0.1:1",
+        "docker compose -f ci/mysql/compose.yaml up -d --wait",
+    ] {
+        assert!(
+            refused.message.contains(said),
+            "{said:?} in {}",
+            refused.message
+        );
+    }
+    let fixture = stored(&scratch, "ext/fixture").expect("the other subset's reading");
+    assert_eq!(fixture.status, Status::Pass, "{fixture:#?}");
+
+    let ran = down(&["--subset", "ext/fixture", "--engine", engine]);
+    assert_eq!(ran.code(), 0, "{ran}");
+    assert!(
+        !ran.stdout.contains("MySQL") && !ran.stderr.contains("MySQL"),
+        "{ran}"
+    );
+}
+
+/// The caller's address, php-src's own `MYSQL_TEST_HOST` and
+/// `MYSQL_TEST_PORT`, reaches every test's environment, the two variables
+/// each suite reads and the DSN derived from them; unset, a test sees the
+/// recipe's, which names no `MYSQL_TEST_PORT` and no `port` in the DSN.
+/// Either way the reading carries the pin's own digest.
+#[test]
+fn the_callers_address_reaches_the_tests_and_the_reading_keeps_the_pins_digest() {
+    if oracle().is_none() {
+        return;
+    }
+    let recipe = "--TEST--\nrecipe\n--FILE--\n<?php var_dump(getenv('MYSQL_TEST_PORT'), str_contains(getenv('PDO_MYSQL_TEST_DSN'), 'port='));\n--EXPECT--\nbool(false)\nbool(false)\n";
+    let laid = "--TEST--\nlaid\n--FILE--\n<?php echo implode(' ', array_map('getenv', ['MYSQL_TEST_HOST', 'MYSQL_TEST_PORT', 'PDO_MYSQL_TEST_HOST', 'PDO_MYSQL_TEST_PORT', 'PDO_MYSQL_TEST_DSN']));\n--EXPECT--\ndb.test 1 db.test 1 mysql:host=db.test;dbname=test;port=1\n";
+    let scratch = Scratch::new("address", &[("recipe.phpt", recipe), ("laid.phpt", laid)]);
+    let engine = scratch.engine.to_str().unwrap();
+    let args = ["phpt", "--subset", "ext/fixture", "--engine", engine];
+    let run = |address: Option<(&str, &str)>| {
+        let mut run = Run::at(&scratch.root);
+        run = run
+            .args(args)
+            .env(xtask::oracle::TREE_VARIABLE, scratch.root.join("corpus"));
+        run = match address {
+            Some((host, at)) => run.env("MYSQL_TEST_HOST", host).env("MYSQL_TEST_PORT", at),
+            None => run
+                .env_remove("MYSQL_TEST_HOST")
+                .env_remove("MYSQL_TEST_PORT"),
+        };
+        let ran = run.go();
+        assert_eq!(ran.code(), 1, "{ran}");
+        stored(&scratch, "ext/fixture").expect("the reading")
+    };
+    let digest = Manifest::load(&scratch.root)
+        .unwrap()
+        .pin()
+        .unwrap()
+        .digest()
+        .to_owned();
+    for (address, missed, met) in [
+        (None, "laid.phpt", "recipe.phpt"),
+        (Some(("db.test", "1")), "recipe.phpt", "laid.phpt"),
+    ] {
+        let reading = run(address);
+        assert_eq!(
+            (count(&reading, "passed"), count(&reading, "failed")),
+            (1, 1)
+        );
+        assert!(
+            reading.message.contains(missed) && !reading.message.contains(met),
+            "{address:?}: {}",
+            reading.message
+        );
+        assert_eq!(
+            reading.recipe.as_deref(),
+            Some(digest.as_str()),
+            "{address:?}"
+        );
+    }
 }
 
 /// Every file under `from` copied to the same place under `to`.
@@ -934,9 +1148,10 @@ fn the_help_names_each_exit_status_by_the_number_the_binary_gives() {
             xtask::exit::NOT_READY
         ),
         format!(
-            "{}  an instrument that could not run to its end",
+            "{}  an instrument that could not take a reading it set out for",
             xtask::exit::UNFINISHED
         ),
+        "phpt, witness, compile-identity, crosscheck, fuzz, hostile".to_owned(),
     ] {
         assert!(help.contains(&said), "{said:?} in {help}");
     }
@@ -965,6 +1180,7 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
         "--TEST--\nnamed\n--EXTENSIONS--\nctype\n--FILE--\n<?php var_dump(ctype_digit('1'));\n--EXPECT--\nbool(true)\n",
     )
     .unwrap();
+    pinning_files(&root, 1);
     let engine = root.join("target/debug/lela");
     fs::create_dir_all(engine.parent().unwrap()).unwrap();
     fs::write(
@@ -2042,7 +2258,7 @@ fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
             against: against.map(str::to_owned),
             ..Ask::default()
         };
-        phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask)
+        phpt::run(&scratch.root, &scratch.counted(), &registry(""), &ask)
             .unwrap()
             .readings
     };
@@ -2152,7 +2368,7 @@ fn a_pooled_run_writes_the_reading_and_keeps_the_run_a_run_of_one_does() {
             jobs: std::num::NonZeroUsize::new(jobs),
             ..Ask::default()
         };
-        let readings = phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask)
+        let readings = phpt::run(&scratch.root, &scratch.counted(), &registry(""), &ask)
             .unwrap()
             .readings;
         let mut runs = Vec::new();
@@ -2233,8 +2449,9 @@ impl OneTree {
     }
 
     /// The command [`OneTree::run`] spawns, for a run that needs one more
-    /// variable set.
+    /// variable set, the checkout's pin counting the tests the tree holds.
     fn command(&self, root: &Tree, subset: &str) -> Command {
+        pinning_files(root, phpt_files(self.corpus.path()));
         let mut command = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")));
         command
             .arg("--root")

@@ -19,7 +19,7 @@ use xtask::carried::Carried;
 use xtask::cli::{Format, Section};
 use xtask::crosscheck::{self, Ask, Column};
 use xtask::manifest::Manifest;
-use xtask::oracle::{self, Promise};
+use xtask::oracle::{self, Profile, Promise};
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
 
@@ -83,8 +83,9 @@ impl Scratch {
     }
 
     fn run(&self, ask: &Ask) -> Vec<Reading> {
-        let readings =
-            crosscheck::run(&self.root, &self.manifest, &registry(""), &self.store, ask).unwrap();
+        let readings = crosscheck::run(&self.root, &self.manifest, &registry(""), &self.store, ask)
+            .unwrap()
+            .readings;
         self.store.record(&readings).unwrap();
         readings
     }
@@ -194,6 +195,14 @@ fn below_the_floor(readings: &[Reading]) -> Result<(), String> {
 /// what may not go backwards. The oracle's bytes are kept for each
 /// column, and the section renders every row with the status its reading
 /// carries.
+/// What the engine served, through `lela-linked` or the witness lane's
+/// `lela` for `standard`, names that build's profile, the lanes'.
+fn names_the_build_that_served_it(reading: &Reading) {
+    if !reading.message.contains("the engine rendered nothing") {
+        assert_eq!(reading.profile, Some(Profile::ReleaseDa), "{reading:#?}");
+    }
+}
+
 /// Whether a reading rendered anything: a row laid before its crate is a
 /// skip that says it is not yet created.
 fn rendered(reading: &Reading) -> bool {
@@ -238,7 +247,9 @@ fn a_scope_of_the_floor_that_stops_passing_is_below_it_and_one_outside_it_is_not
 /// readings, the engine's side rendered through the linked adapter, which
 /// is what a pass means with no directory of renderings handed in. The
 /// `--ri` reading is in the store under `ext/<name>/ri`, stamped over the
-/// crate's tree as the `--re` one is, so the two go stale together.
+/// crate's tree as the `--re` one is, so the two go stale together. Each
+/// names the profile `lela-linked` was built in, the lanes' `release-da`,
+/// since that build served the engine's side.
 #[test]
 fn ext_names_one_extension_rendered_through_the_linked_adapter_and_writes_two_readings() {
     if oracle().is_none() {
@@ -255,6 +266,9 @@ fn ext_names_one_extension_rendered_through_the_linked_adapter_and_writes_two_re
     assert_eq!(ri.status, Status::Pass, "{ri:#?}");
     assert!(ri.message.contains("php -n --ri ctype"), "{}", ri.message);
     assert_eq!(count(&ri, "bytes"), 33, "{ri:#?}");
+    for reading in [&re, &ri] {
+        assert_eq!(reading.profile, Some(Profile::ReleaseDa), "{reading:#?}");
+    }
     assert_eq!(
         re.key(),
         ri.key(),
@@ -308,7 +322,8 @@ fn an_extension_the_oracle_does_not_have_fails_with_phps_own_words() {
 /// The negative control (harness §14 item 4): php's own rendering standing
 /// for the engine's is a pass in each column, and the one a byte apart is
 /// not, the reading naming the line; a byte in one column fails that
-/// column alone.
+/// column alone. No build served those renderings, so no reading names a
+/// profile.
 #[test]
 fn the_fixture_through_run_is_a_pass_and_the_one_byte_apart_is_not() {
     if oracle().is_none() {
@@ -322,6 +337,7 @@ fn the_fixture_through_run_is_a_pass_and_the_one_byte_apart_is_not() {
     let (re, ri) = scratch.two(&same);
     assert_eq!(re.status, Status::Pass, "{re:#?}");
     assert_eq!(ri.status, Status::Pass, "{ri:#?}");
+    assert_eq!((re.profile, ri.profile), (None, None), "{re:#?} {ri:#?}");
 
     let apart = Ask {
         renderings: Some(scratch.renderings("engine.re", "oracle.ri")),
@@ -474,7 +490,8 @@ fn staged_with_no_file_a_rendering_reads_renders_nothing() {
 /// binary started again and renders. The binary is a stand-in that
 /// speaks `--serve`'s protocol, a request directory per line answered
 /// `served`, killing itself on ctype's program and answering json's with
-/// the oracle's own rendering.
+/// the oracle's own rendering. No reading names a profile, since the
+/// caller named what served them, whatever this process has built.
 #[test]
 fn a_php_linked_that_dies_on_a_signal_fails_that_extension_and_the_next_still_renders() {
     let Some(php) = oracle() else {
@@ -497,6 +514,9 @@ fn a_php_linked_that_dies_on_a_signal_fails_that_extension_and_the_next_still_re
         ..Ask::default()
     });
     assert_eq!(readings.len(), 4, "{readings:#?}");
+    for reading in &readings {
+        assert_eq!(reading.profile, None, "{reading:#?}");
+    }
     for reading in &readings[..2] {
         assert_eq!(reading.status, Status::Fail, "{reading:#?}");
         assert!(
@@ -558,6 +578,7 @@ mod tracked {
             };
             assert!(reading.message.contains(flag), "{}", reading.message);
             assert!(count(reading, "bytes") > 0, "{reading:#?}");
+            names_the_build_that_served_it(reading);
             match reading.status {
                 Status::Pass => assert!(
                     reading

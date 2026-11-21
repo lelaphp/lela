@@ -11,6 +11,7 @@ import tarfile
 import unittest
 from pathlib import Path
 
+import publish
 import testlib
 from test_apt import runs_apt_bare
 from testlib import IMAGE, ROOT, VARIANTS, manifest
@@ -437,7 +438,8 @@ class Publish(Recorded):
 
 # A docker that records each call and answers as the build would: the
 # daemon's platform is DAEMON's, and the binaries target's local output is
-# the three hosts and runtime-packages.txt, laid 0700 as buildx lays it.
+# the hosts dist/Dockerfile's binaries target holds, STAGED, and
+# runtime-packages.txt, laid 0700 as buildx lays it.
 DOCKER = r'''#!/usr/bin/env python3
 import json, os, sys
 arguments = sys.argv[1:]
@@ -447,7 +449,7 @@ if arguments[:1] == ["version"]:
     print(os.environ.get("DAEMON", "linux/amd64"))
 elif arguments[:2] == ["buildx", "build"]:
     stage = arguments[arguments.index("--output") + 1].removeprefix("type=local,dest=")
-    for path in ("bin/lela", "bin/lela-cgi", "sbin/lela-fpm", "runtime-packages.txt"):
+    for path in [*STAGED, "runtime-packages.txt"]:
         os.makedirs(os.path.dirname(os.path.join(stage, path)), exist_ok=True)
         open(os.path.join(stage, path), "w").write(path)
     os.chmod(stage, 0o700)
@@ -455,7 +457,7 @@ elif arguments[:1] == ["run"]:
     sys.exit(1 if os.environ.get("FAILS") else 0)
 else:
     sys.exit("the recording docker has no answer for " + " ".join(arguments))
-'''
+'''.replace("STAGED", json.dumps([path.removeprefix("/") for path in testlib.Dockerfile.read().hosts("binaries")]))
 
 UBUNTU = next(
     line.removeprefix("ARG UBUNTU=")
@@ -477,7 +479,8 @@ class BuildDryRun(Repository):
                 self.assertFalse((self.root / "out").exists())
                 if platform == "darwin-arm64":
                     self.assertEqual(self.lines(run, "bundle"), [
-                        "under lib/: every library bin/lela, bin/lela-cgi, sbin/lela-fpm load outside /usr/lib "
+                        "under lib/: every library bin/lela, bin/lela-cgi, sbin/lela-fpm, bin/lela-dbg load outside "
+                        "/usr/lib "
                         "and /System, and every library those load",
                         f"no hosts built in {self.root / 'target/release'} on this machine, "
                         "so the libraries are named once they are",
@@ -715,12 +718,18 @@ class BuildDarwin(Recorded):
         cargo, smoke = self.calls()
         self.assertEqual(cargo, [
             "cargo", "build", "--release", "--locked", "-p", "php_sapi_cli", "-p", "php_sapi_cgi",
-            "-p", "php_sapi_fpm", "--bin", "lela", "--bin", "lela-cgi", "--bin", "lela-fpm",
+            "-p", "php_sapi_fpm", "-p", "php_sapi_phpdbg",
+            "--bin", "lela", "--bin", "lela-cgi", "--bin", "lela-fpm", "--bin", "lela-dbg",
         ])
+        # The four hosts the table ships in a tarball, and no other.
         self.assertEqual(smoke, ["smoke", [
-            "bin/lela", "bin/lela-cgi", "bundled-libraries.txt", "etc/php.ini-development",
+            "bin/lela", "bin/lela-cgi", "bin/lela-dbg", "bundled-libraries.txt", "etc/php.ini-development",
             "etc/php.ini-production", "sbin/lela-fpm",
         ]])
+        self.assertEqual(
+            sorted(path for path in smoke[1] if path.startswith(("bin/", "sbin/"))),
+            sorted(host.path for host in publish.in_tarball()),
+        )
         self.assertRegex("\n".join(self.lines(run, "bundle")), r"^macos \d+\.\d+$")
         # The release's installer over the tarball, into a home of its own.
         self.assertRegex(run.stdout, r"\ninstall.sh: installed lela 1.2.0 in /\S+/home/.local/share/lela/1.2.0, ")
@@ -733,7 +742,7 @@ class BuildDarwin(Recorded):
         self.assertEqual(self.lines(run, "bundle")[1:], ["lib/libzz.1.dylib zz 1.0_1"])
         _, smoke = self.calls()
         self.assertEqual(smoke, ["smoke", [
-            "bin/lela", "bin/lela-cgi", "bundled-libraries.txt", "etc/php.ini-development",
+            "bin/lela", "bin/lela-cgi", "bin/lela-dbg", "bundled-libraries.txt", "etc/php.ini-development",
             "etc/php.ini-production", "lib/libzz.1.dylib", "licenses/zz/COPYING", "sbin/lela-fpm",
         ]])
         unpacked = self.scratch / "unpacked"
@@ -744,13 +753,14 @@ class BuildDarwin(Recorded):
         self.assertIn("\t@loader_path/../lib/libzz.1.dylib (compatibility version", names.stdout)
         self.assertNotIn(str(kegs), names.stdout)
         shutil.rmtree(kegs)
-        for host in ("bin/lela", "bin/lela-cgi", "sbin/lela-fpm"):
+        for host in ("bin/lela", "bin/lela-cgi", "sbin/lela-fpm", "bin/lela-dbg"):
             with self.subTest(host=host):
                 self.assertEqual(subprocess.run([str(tree / host)]).returncode, 0)
 
     def test_the_dry_run_names_what_the_hosts_built_here_load(self):
         cargo = subprocess.run(
-            [str(self.bin / "cargo"), "build", "--bin", "lela", "--bin", "lela-cgi", "--bin", "lela-fpm"],
+            [str(self.bin / "cargo"), "build", "--bin", "lela", "--bin", "lela-cgi", "--bin", "lela-fpm",
+             "--bin", "lela-dbg"],
             env={**os.environ, "CALLS": str(self.log), "KEGS": str(self.scratch / "homebrew"), **self.env},
         )
         self.assertEqual(cargo.returncode, 0)

@@ -91,8 +91,9 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Reading
     let binary = if let Some(binary) = &ask.binary {
         binary.clone()
     } else {
-        reading.profile = Some(profile::Profile::Release);
-        profile::released(root, (&CLI.package(), CLI.binary), None, (None, None))?
+        let built = profile::released(root, (&CLI.package(), CLI.binary), None, (None, None))?;
+        reading.judged(&built);
+        built.path
     };
     let instantiations = instantiations(&binary)?;
     let over = match &ask.binary {

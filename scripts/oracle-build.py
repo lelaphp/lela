@@ -8,8 +8,8 @@ intended. `main` names the main oracle itself, no flags added: CI's Linux
 platform oracle.
 
 Usage (`--pin FILE` before the command reads another pin than oracle.toml,
-and `--tree DIR` builds from another checkout of the pinned tag than
-`[source]`'s path, as the oracle runner's corpus checkout):
+and `--tree DIR` builds from another checkout of the pinned tag than the
+one `TEST_PHP_SRCDIR` names, as the oracle runner's corpus checkout):
   scripts/oracle-build.py configure-line
       Print ci/oracle/configure.toml afresh from the pinned oracle's
       `php -n -i` "Configure Command" row, after holding it to the pin's
@@ -200,7 +200,23 @@ class Pin:
         self.variant = variant
 
     def tree(self) -> Path:
-        return self.checkout or Path(self.source["path"])
+        """The checkout `--tree` names, else the pinned php-src as xtask's
+        `Source::found` finds it: the directory `TEST_PHP_SRCDIR` names, a
+        leading `~/` or `$HOME/` read as the home directory, else `[source]`'s
+        `path` where the pin states one; a refusal naming both otherwise."""
+        if self.checkout:
+            return self.checkout
+        named, home = os.environ.get("TEST_PHP_SRCDIR") or None, os.environ.get("HOME")
+        lead = next((lead for lead in ("~/", "$HOME/") if named and named.startswith(lead)), None)
+        read = None if named is None else Path(home) / named[len(lead):] if lead and home else Path(named)
+        pinned = Path(self.source["path"]) if "path" in self.source else None
+        for tree in (read, pinned):
+            if tree is not None and tree.is_dir():
+                return tree
+        variable = "TEST_PHP_SRCDIR is unset" if named is None else (
+            f"TEST_PHP_SRCDIR={named}" + (f", read as {read}," if lead and home else "") + " is not a directory")
+        path = "the pin states no `[source].path`" if pinned is None else f"the pin's path {pinned} is not a directory"
+        fail(f"the pinned php-src ({self.source['tag']}) is at neither place tried: {variable}, and {path}; or name a checkout with --tree")
 
     def commit(self) -> str:
         """The pinned commit in full, held to the tag."""
@@ -428,7 +444,7 @@ def test(pin: Pin, plat: str, phpts: list[str]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--pin", type=Path, default=ROOT / "oracle.toml")
-    parser.add_argument("--tree", type=Path, help="a checkout of the pinned tag, in place of [source]'s path")
+    parser.add_argument("--tree", type=Path, help="a checkout of the pinned tag, in place of the one TEST_PHP_SRCDIR names")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("configure-line")
     sub.add_parser("closure")

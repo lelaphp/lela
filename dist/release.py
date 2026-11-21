@@ -64,8 +64,10 @@ a tree with changes and a tag that is not HEAD; `publish` uses gh,
 authorised to write the repository's releases.
 
 The hosts and the tarballs are named after dist/Dockerfile's `ARG NAME`
-(ADR-0016), `lela`: a tarball holds `bin/lela`, `bin/lela-cgi`,
-`sbin/lela-fpm`, `etc/php.ini-development` and `etc/php.ini-production`,
+(ADR-0016), `lela`: a tarball holds the four hosts, `bin/lela`,
+`bin/lela-cgi`, `sbin/lela-fpm` and `bin/lela-dbg`, which dist/publish.py's
+HOSTS names as `cargo xtask hosts --list` prints them, then
+`etc/php.ini-development` and `etc/php.ini-production`,
 a Linux one `runtime-packages.txt` too, and a macOS one `lib/`,
 `licenses/<keg>/` and `bundled-libraries.txt`. CARGO_BUILD_JOBS (default 1)
 reaches the Linux build, and SMOKE (default dist/smoke.sh) is the smoke a
@@ -94,6 +96,11 @@ import publish  # noqa: E402
 
 ROOT = publish.ROOT
 Refusal = publish.Refusal
+# The default of a dist/Dockerfile `ARG`, and the hosts' name, its `ARG
+# NAME` (ADR-0016): dist/publish.py's, whose host table names each host
+# by it.
+arg = publish.arg
+name = publish.name
 
 
 def release(tag):
@@ -157,22 +164,6 @@ def platform_named(text):
     raise Refusal(f"no platform {text}; a release's are {', '.join(p.name for p in PLATFORMS)}")
 
 
-def arg(key):
-    """The default dist/Dockerfile gives its `ARG <key>`."""
-    prefix = f"ARG {key}="
-    lines = (ROOT / "dist/Dockerfile").read_text().splitlines()
-    named = [line.removeprefix(prefix) for line in lines if line.startswith(prefix)]
-    if len(named) != 1:
-        raise Refusal(f"dist/Dockerfile names {len(named)} `{prefix}` lines, where it names one")
-    return named[0]
-
-
-def name():
-    """The hosts' name, dist/Dockerfile's `ARG NAME` (ADR-0016), which
-    xtask's tests hold to php_engine's PRODUCT_NAME."""
-    return arg("NAME")
-
-
 def native(platform):
     """Refuse a platform this machine does not run as its own, so that
     every tarball is built and smoked where it is meant to run."""
@@ -185,8 +176,9 @@ def native(platform):
 
 
 def darwin_hosts():
-    """The macOS hosts by their path in the tarball's directory."""
-    return (f"bin/{name()}", f"bin/{name()}-cgi", f"sbin/{name()}-fpm")
+    """The macOS hosts by their path in the tarball's directory: the ones
+    every tarball holds, dist/publish.py's HOSTS says."""
+    return tuple(host.path for host in publish.in_tarball())
 
 
 def built_darwin():
@@ -195,10 +187,12 @@ def built_darwin():
 
 
 def stage_darwin(stage):
-    """The hosts built here with cargo, laid with what they load."""
+    """The hosts built here with cargo on one line, as dist/Dockerfile
+    builds them, laid with what they load."""
+    hosts = publish.in_tarball()
     subprocess.run([
-        "cargo", "build", "--release", "--locked", "-p", "php_sapi_cli", "-p", "php_sapi_cgi", "-p", "php_sapi_fpm",
-        "--bin", name(), "--bin", f"{name()}-cgi", "--bin", f"{name()}-fpm",
+        "cargo", "build", "--release", "--locked", *(flag for host in hosts for flag in ("-p", host.package)),
+        *(flag for host in hosts for flag in ("--bin", host.binary)),
     ], cwd=ROOT, check=True)
     lay_darwin(stage, built_darwin())
 

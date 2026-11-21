@@ -93,19 +93,10 @@ fn kept(root: &Path, manifest: &Manifest, base: &Base, wanted: &[String]) -> Res
     let mut missing = Vec::new();
     for scope in wanted {
         if against::kept_at(root, manifest, &base.commit, scope)?.is_err() {
-            missing.push(scope.as_str());
+            missing.push(format!("{scope} at {base}"));
         }
     }
-    if missing.is_empty() {
-        return Ok(());
-    }
-    let why = anyhow::anyhow!(
-        "{} of {} runs asked for are not kept at {base}: {}; the readings at the base above say why",
-        missing.len(),
-        wanted.len(),
-        listed(&missing)
-    );
-    Err(crate::exit::Unfinished::of(super::INSTRUMENT, why))
+    crate::tally::whole(super::INSTRUMENT, &missing)
 }
 
 /// The selected scopes without a valid run under the caller's recipe.

@@ -420,6 +420,74 @@ fn a_hosts_own_module_is_served_by_that_host_and_scoped_under_its_row() {
     );
 }
 
+/// The engine's side names the profile of the build that served it: the
+/// witness lane's hosts, here ones standing for its `lela-cgi` and its
+/// `lela` as the run builds them, are the lanes' profile, and a directory
+/// of renderings a test hands in was served by no build and names none.
+#[cfg(tracked)]
+#[test]
+fn the_engines_side_names_the_profile_of_the_build_that_served_it() {
+    let root = crate::built_root();
+    let manifest = Manifest::load(&root).unwrap();
+    let variants = manifest.variants();
+    let oracles = Oracles::new(manifest.pin().unwrap(), &variants);
+    let oracle = oracles.of(None).unwrap();
+    let tree = crate::scratch::Tree::new("crosscheck-profile").unwrap();
+    let head = "Content-type: text/html\\r\\n\\r\\n";
+    let cgi = tree
+        .write(
+            "php-cgi",
+            format!("#!/bin/sh\nprintf '{head}cgi-fcgi\\n'\n"),
+        )
+        .unwrap();
+    let php = tree.write("php", "#!/bin/sh\necho standard\n").unwrap();
+    for host in [&cgi, &php] {
+        crate::scratch::executable(host).unwrap();
+    }
+    let engines = Engines {
+        linked: Carried::turning_on(&[]),
+        binary: Binary::standing(&root, crate::oracle::hosts::CGI, cgi).featuring(&[], php),
+        server: None,
+    };
+    let side = |ask: &Ask| {
+        rendering(
+            &manifest,
+            ask,
+            &engines,
+            oracle,
+            "cgi-fcgi",
+            Host::Cgi,
+            Column::Re,
+        )
+        .unwrap()
+    };
+    let (served, profile) = side(&Ask::default());
+    assert_eq!(served, Rendering::Bytes(b"cgi-fcgi".to_vec()));
+    assert_eq!(profile, Some(crate::oracle::profile::LANE));
+    let ask = Ask::default();
+    let (served, profile) = rendering(
+        &manifest,
+        &ask,
+        &engines,
+        oracle,
+        HOSTED,
+        Host::Cli,
+        Column::Re,
+    )
+    .unwrap();
+    assert_eq!(served, Rendering::Bytes(b"standard".to_vec()));
+    assert_eq!(profile, Some(crate::oracle::profile::LANE));
+
+    let renderings = tree.join("renderings");
+    fs::create_dir_all(&renderings).unwrap();
+    fs::write(renderings.join("cgi-fcgi.re"), "cgi-fcgi\n").unwrap();
+    let handed = Ask {
+        renderings: Some(renderings),
+        ..Ask::default()
+    };
+    assert_eq!(side(&handed).1, None);
+}
+
 /// A CGI-shaped host's head is the host's, and only a head of header
 /// lines is let go: a rendering that opens otherwise is held whole.
 #[cfg(tracked)]

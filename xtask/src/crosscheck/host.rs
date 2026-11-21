@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 
 use super::Column;
 use crate::oracle::hosts::CLI;
-use crate::oracle::{self, Ended, Observation, Oracle, normalise_in};
+use crate::oracle::{self, Ended, Observation, Oracle, Profile, normalise_in};
 use crate::scratch::Tree;
 use crate::server::Server;
 use crate::witness::{self, fence::Served};
@@ -114,29 +114,39 @@ impl Host {
 /// The rendering of `module` through `host`, which is not the CLI: by the
 /// oracle where `engine` is none, the pinned host from `[sapi]` with its
 /// digest asserted or the pinned `php` for the server, and by the
-/// engine's witness build serving the same request where it is one.
+/// engine's witness build serving the same request where it is one; with
+/// the profile of that build, none for the oracle's.
 pub(crate) fn side(
     oracle: &Oracle<'_>,
     engine: Option<&witness::Binary>,
     host: Host,
     module: &str,
     column: Column,
-) -> Result<Observation> {
+) -> Result<(Observation, Option<Profile>)> {
     let program = column.program(module);
     let served = requested(host);
-    let served = match (host, engine) {
+    let (served, profile) = match (host, engine) {
         (Host::Cli, _) => bail!("the CLI renders {module} by its flags, not as a request"),
         (Host::Cgi | Host::Fpm, None) => {
             let path = oracle.pinned_host(witness::host_of(served))?;
-            witness::served_as(oracle, served, &path, &program, REQUEST, None, &[])?
+            let served = witness::served_as(oracle, served, &path, &program, REQUEST, None, &[]);
+            (served?, None)
         }
         (Host::Cgi | Host::Fpm, Some(binary)) => {
-            (binary.serve_request(oracle, served, &program, REQUEST, None)?).0
+            let (served, _, profile) =
+                binary.serve_request(oracle, served, &program, REQUEST, None)?;
+            (served, Some(profile))
         }
-        (Host::Server, None) => served_by_server(oracle, &oracle.pin().oracle.path, &program)?,
-        (Host::Server, Some(binary)) => served_by_server(oracle, &binary.host(CLI)?, &program)?,
+        (Host::Server, None) => {
+            let php = &oracle.pin().oracle.path;
+            (served_by_server(oracle, php, &program)?, None)
+        }
+        (Host::Server, Some(binary)) => {
+            let served = served_by_server(oracle, &binary.host(CLI)?, &program)?;
+            (served, binary.profile(CLI))
+        }
     };
-    Ok(body(oracle, served))
+    Ok((body(oracle, served), profile))
 }
 
 /// How a witness fence names the host that serves `host`'s request.

@@ -249,6 +249,7 @@ oracle::SKIPPED_VARIABLE
 oracle::Sapi
 oracle::Sent
 oracle::Source
+oracle::Source::counted
 oracle::Source::named
 oracle::Source::path
 oracle::Source::tree
@@ -299,8 +300,6 @@ permit::run
 phpt::Ask
 phpt::Engine
 phpt::Lane
-phpt::Ran
-phpt::Ran::whole
 phpt::kept_run
 phpt::run
 port_map::CENSUS

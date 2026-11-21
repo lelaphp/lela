@@ -553,3 +553,72 @@ fn a_log_from_before_revision_83_is_not_read() {
         "left where it stands"
     );
 }
+
+mod common {
+    pub mod manifest;
+    pub mod repo;
+    pub mod run;
+}
+
+/// A scratch workspace of the tracked manifest's rows less every crate
+/// ([`common::manifest::Tracked::minimal`]), with no store: one `budget`
+/// writes a reading of the workspace and one of each root it counts.
+fn budgeted(name: &str) -> Tree {
+    let root = scratch(name);
+    common::repo::scratch_workspace(workspace(), &root);
+    common::manifest::Tracked::minimal().write(&root);
+    std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    root
+}
+
+/// `budget` over `root`, whatever its verdict, in an environment that
+/// names the run `run` or names none: the run it printed, once.
+fn budget(root: &Path, run: Option<&str>) -> String {
+    let call = common::run::Run::at(root).args(["budget"]);
+    let ran = match run {
+        Some(run) => call.env("XTASK_RUN", run),
+        None => call.env_remove("XTASK_RUN"),
+    }
+    .go();
+    let printed: Vec<&str> = (ran.stderr.lines())
+        .filter_map(|line| line.strip_prefix("run "))
+        .collect();
+    assert_eq!(printed.len(), 1, "the run is printed once: {ran}");
+    printed[0].split(':').next().unwrap().to_owned()
+}
+
+/// Every reading one process writes names one run, the one it printed
+/// once, and the readings of a second process name another: two runs of
+/// `budget` over one store, read back from its log.
+#[test]
+fn every_reading_of_one_process_names_its_run_and_two_processes_differ() {
+    let root = budgeted("run-two");
+    let first = budget(&root, None);
+    let second = budget(&root, None);
+    assert_ne!(first, second, "two processes share no run");
+
+    let log = Store::of_workspace(&root).history_all().unwrap();
+    let of = |run: &str| {
+        (log.readings.iter())
+            .filter(|r| r.run.as_deref() == Some(run))
+            .count()
+    };
+    assert!(of(&first) >= 2, "{:#?}", log.readings);
+    assert_eq!(of(&first), of(&second), "{:#?}", log.readings);
+    assert_eq!(of(&first) + of(&second), log.readings.len());
+}
+
+/// `XTASK_RUN` names the run: the processes a caller calls one run share
+/// it, and it is the one printed.
+#[test]
+fn xtask_run_names_the_run_every_reading_of_the_process_carries() {
+    let root = budgeted("run-named");
+    let printed = budget(&root, Some("t82-named"));
+    assert_eq!(printed, "t82-named");
+    budget(&root, Some("t82-named"));
+    let log = Store::of_workspace(&root).history_all().unwrap();
+    assert!(log.readings.len() >= 4, "{:#?}", log.readings);
+    for reading in &log.readings {
+        assert_eq!(reading.run.as_deref(), Some("t82-named"), "{reading:#?}");
+    }
+}
