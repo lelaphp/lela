@@ -128,7 +128,8 @@ else echo "dpkg-query: no packages found matching $package" >&2; exit 1; fi''')
         out.mkdir(parents=True, exist_ok=True)
         release.pack(stage, out / f"{base}.tar.gz")
         subprocess.run(
-            ["bash", str(ROOT / "scripts/dist-sums.sh"), str(out)], check=True, capture_output=True,
+            ["bash", str(ROOT / "scripts/dist-sums.sh"), str(out), *sorted(p.name for p in out.glob("*.tar.gz"))],
+            check=True, capture_output=True,
         )
         return out
 
