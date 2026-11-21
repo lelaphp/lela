@@ -233,5 +233,15 @@
   "schemaVersion": 2,
   "mediaType": "application/vnd.oci.image.index.v1+json",
   "manifests": []
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000014": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": []
+ },
+ "sha256:0000000000000000000000000000000000000000000000000000000000000015": {
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": []
  }
 }

@@ -12,7 +12,7 @@ the registry serves it. Against 2026-11-20T00:00:00Z, thirty days back is
      8      an old release's list, `1.0.0-cli` and `cli`           kept
      9-10   its images, untagged, old                              kept, the list names them
      11     a referrer whose subject is that list, untagged, old   kept, it names the list
-     12     an old list under `edge-fpm` and a `sha-` tag          kept
+     12     an old list under `edge-fpm` and a `sha-` tag          deleted, the edge tag is retired
      13     an old untagged manifest nothing names                 deleted
      14     a young untagged manifest                              kept
      15     an old pre-release's list, `1.1.0-rc.1-apache`         kept
@@ -20,6 +20,8 @@ the registry serves it. Against 2026-11-20T00:00:00Z, thirty days back is
      17     a referrer whose subject is list 1, untagged, old      deleted
      18     an old tag the publish script never writes             kept
      19     a `sha-` list created long ago and updated a week ago  kept, its age is the update's
+     20     an old list under `nightly-cli` and a `sha-` tag       kept
+     21     a young list under `edge-cli` and a `sha-` tag         deleted, however young
 """
 
 import json
@@ -34,7 +36,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "dist/fixtures"
 NOW = "2026-11-20T00:00:00Z"
-DELETED = {1, 2, 3, 4, 13, 17}
+DELETED = {1, 2, 3, 4, 12, 13, 17, 21}
 
 
 def digest(n):
@@ -65,7 +67,7 @@ class Prune(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         return [line.split() for line in run.stdout.splitlines() if line.startswith("delete ")]
 
-    def test_the_dry_run_names_only_old_sha_tags_and_old_untagged_manifests(self):
+    def test_the_dry_run_names_only_old_sha_tags_old_untagged_manifests_and_edge_lists(self):
         run = self.prune("--dry-run")
         named = self.named(run)
         self.assertEqual({int(fields[1]) for fields in named}, DELETED)
@@ -73,12 +75,24 @@ class Prune(unittest.TestCase):
             with self.subTest(version=fields[1]):
                 self.assertEqual(fields[2], digest(int(fields[1])))
                 tags = fields[3].split(",")
-                self.assertTrue(tags == ["untagged"] or all(t.startswith("sha-") for t in tags), tags)
+                self.assertTrue(
+                    tags == ["untagged"] or all(t.startswith(("sha-", "edge-")) for t in tags), tags,
+                )
         self.assertIn("dry run: nothing is deleted", run.stdout)
-        self.assertIn(f"6 of 19 versions to delete", run.stdout)
+        self.assertIn(f"8 of 21 versions to delete", run.stdout)
         self.assertFalse(self.log.exists())
 
-    def test_no_version_tag_bare_variant_or_edge_is_deleted_however_old(self):
+    def test_the_dry_run_keeps_a_nightly_list_and_removes_every_edge_one(self):
+        named = {int(fields[1]): fields[3] for fields in self.named(self.prune("--dry-run"))}
+        # 12 is old, 21 a few days young; an edge list goes either way,
+        # and its `sha-` tag, one version with it, goes too.
+        self.assertEqual(named[12], "edge-fpm,sha-1111111111111111111111111111111111111111-fpm")
+        self.assertEqual(named[21], "edge-cli,sha-5555555555555555555555555555555555555555-cli")
+        # 20 is as old as 12, and kept by its nightly tag.
+        self.assertNotIn(20, named)
+        self.assertEqual([tags for tags in named.values() if "nightly" in tags], [])
+
+    def test_no_version_tag_bare_variant_nightly_or_other_tag_is_deleted_however_old(self):
         listing = json.loads((FIXTURES / "ghcr-versions.json").read_text())
         for version in listing:
             version["created_at"] = version["updated_at"] = "2020-01-01T00:00:00Z"
@@ -86,12 +100,12 @@ class Prune(unittest.TestCase):
         path.write_text(json.dumps(listing))
         kept = {
             int(v["id"]) for v in listing
-            if any(not t.startswith("sha-") for t in v["metadata"]["container"]["tags"])
+            if any(not t.startswith(("sha-", "edge-")) for t in v["metadata"]["container"]["tags"])
         }
-        self.assertEqual(kept, {8, 12, 15, 18})
+        self.assertEqual(kept, {8, 15, 18, 20})
         deleted = {int(fields[1]) for fields in self.named(self.prune("--dry-run", listing=path))}
         # The release's images and its referrer stay with it; the rest go.
-        self.assertEqual(deleted, set(range(1, 20)) - kept - {9, 10, 11})
+        self.assertEqual(deleted, set(range(1, 22)) - kept - {9, 10, 11})
 
     def test_a_manifest_the_registry_does_not_serve_deletes_nothing(self):
         listing = json.loads((FIXTURES / "ghcr-versions.json").read_text())

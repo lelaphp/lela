@@ -7,9 +7,13 @@ A version is deleted when it was last updated more than 30 days before
 now and each of its tags is a `sha-` tag, or it has none, unless a kept
 version needs it: the images and attestations a kept manifest list names,
 and a referrer whose subject is kept, such as an attestation pushed to the
-registry. A version under any other tag, a release's `<version>-<variant>`,
-a bare `<variant>`, an `edge-<variant>` or one this script did not write,
-is never deleted, however old.
+registry. A version under a retired tag, `edge-<variant>`, which the
+publish script wrote for `main` before `nightly-<variant>` replaced it, is
+deleted however young, and the `sha-` tag that shares the version goes
+with it, since the registry deletes a version and not one of its tags. A
+version under any other tag, a release's `<version>-<variant>`, a bare
+`<variant>`, a `nightly-<variant>` or one this script did not write, is
+never deleted, however old.
 
 It lists the versions with `gh api` and reads each one's manifest with
 `docker buildx imagetools inspect --raw`, and deletes through the API, so
@@ -35,9 +39,11 @@ PACKAGE = "lela"
 IMAGE = f"ghcr.io/{ORG}/{PACKAGE}"
 VERSIONS = f"/orgs/{ORG}/packages/container/{PACKAGE}/versions"
 AGE = timedelta(days=30)
-# The tags a manifest list's own `sha-` tag deletes with it; any other kind
+# The tags a manifest list's own `sha-` tag deletes with it once it is old,
+# and the retired tag, which deletes its version at any age; any other kind
 # of tag keeps its version.
 OURS = "sha-"
+RETIRED = "edge-"
 
 
 class Refusal(Exception):
@@ -77,13 +83,22 @@ def served(digest):
     return json.loads(run.stdout)
 
 
+def tagged_to_keep(tags, young):
+    """Whether a version's own tags keep it: a tag of a kind this script
+    never deletes keeps it at any age, a retired tag deletes it at any age,
+    and `sha-` tags, or none, keep it while it is young."""
+    if any(not tag.startswith((OURS, RETIRED)) for tag in tags):
+        return True
+    return young and not any(tag.startswith(RETIRED) for tag in tags)
+
+
 def doomed(versions, manifest, now):
     """The versions to delete, oldest first; `manifest` reads one digest's."""
     kept = set()
     by_digest = {version["name"]: version for version in versions}
     for version in versions:
-        tags = version["metadata"]["container"]["tags"]
-        if now - when(version["updated_at"]) <= AGE or any(not tag.startswith(OURS) for tag in tags):
+        young = now - when(version["updated_at"]) <= AGE
+        if tagged_to_keep(version["metadata"]["container"]["tags"], young):
             kept.add(version["name"])
     manifests = {digest: manifest(digest) for digest in by_digest}
     # What a kept version names is kept, and so is a referrer of one,
