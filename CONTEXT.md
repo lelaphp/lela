@@ -174,7 +174,7 @@ One `xtask` subcommand that measures or judges something and ends by writing a r
 _Avoid_: check (the manifest's `check` predicate and `api_check`, its module), gate (that is a numbered pass/fail bar such as G1), tool (a rule's `tool`, and the hook's `tool_name` and `tool_input`, Claude Code's words), script (php's `script_name`)
 
 **Command**:
-One `xtask` subcommand that acts or answers and writes no reading: `track` and its `next` and `chains`, `worktree`, `regions`, `new-ext`, `generate`, `status`, `oracle propose`. What decides which of the two a subcommand is, is the reading and never the name it hangs under, so `track work` is the one subcommand of a command that is an instrument: it judges what it lands and writes a `track-work` reading. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
+One `xtask` subcommand that acts or answers and writes no reading: `track` and its `next` and `chains`, `worktree`, `regions`, `new-ext`, `generate`, `status`, `oracle propose`, `hosts`. `hosts` builds the hosts of the oracle's list in the profile it is named and prints each one's path, and takes a seat as the building instruments do. What decides which of the two a subcommand is, is the reading and never the name it hangs under, so `track work` is the one subcommand of a command that is an instrument: it judges what it lands and writes a `track-work` reading. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
 _Avoid_: helper, utility, subtool
 
 **Tally**:
@@ -242,7 +242,7 @@ One of builder, reviewer and advisor: a file under `.claude/agents/` that sets a
 _Avoid_: agent type (Claude Code's `agentType`)
 
 **Seat**:
-One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `hostile`, `fold`, `dispatch-census`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`). A bench on a dedicated machine takes every seat (`bench --machine dedicated`).
+One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `hostile`, `fuzz`, `fold`, `dispatch-census`, `fpm-compare`, `soak`, `witness`, `bench` and the `hosts` command take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`). A bench on a dedicated machine takes every seat (`bench --machine dedicated`).
 _Avoid_: lease
 
 **Snapshot**:
