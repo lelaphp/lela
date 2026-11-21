@@ -62,6 +62,7 @@ import hashlib
 import os
 import platform
 import re
+import runpy
 import shlex
 import shutil
 import subprocess
@@ -72,6 +73,9 @@ from pathlib import Path
 from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parent.parent
+# The rule that finds the pinned php-src tree, loaded by path: under
+# `python3 -I` this directory is off sys.path (scripts/php_src_tree.py).
+PHP_SRC_TREE = runpy.run_path(str(ROOT / "scripts/php_src_tree.py"))
 CONFIGURE = ROOT / "ci/oracle/configure.toml"
 DOCKERFILE = ROOT / "ci/oracle/Dockerfile"
 # The checkout's files the Linux build context carries beside the tree and
@@ -194,22 +198,14 @@ class Pin:
 
     def tree(self) -> Path:
         """The checkout `--tree` names, else the pinned php-src as xtask's
-        `Source::found` finds it: the directory `TEST_PHP_SRCDIR` names, a
-        leading `~/` or `$HOME/` read as the home directory, else `[source]`'s
-        `path` where the pin states one; a refusal naming both otherwise."""
+        rule finds it, kept in scripts/php_src_tree.py; its refusal naming
+        both places otherwise."""
         if self.checkout:
             return self.checkout
-        named, home = os.environ.get("TEST_PHP_SRCDIR") or None, os.environ.get("HOME")
-        lead = next((lead for lead in ("~/", "$HOME/") if named and named.startswith(lead)), None)
-        read = None if named is None else Path(home) / named[len(lead):] if lead and home else Path(named)
-        pinned = Path(self.source["path"]) if "path" in self.source else None
-        for tree in (read, pinned):
-            if tree is not None and tree.is_dir():
-                return tree
-        variable = "TEST_PHP_SRCDIR is unset" if named is None else (
-            f"TEST_PHP_SRCDIR={named}" + (f", read as {read}," if lead and home else "") + " is not a directory")
-        path = "the pin states no `[source].path`" if pinned is None else f"the pin's path {pinned} is not a directory"
-        fail(f"the pinned php-src ({self.source['tag']}) is at neither place tried: {variable}, and {path}; or name a checkout with --tree")
+        tree = PHP_SRC_TREE["found"](self.source, os.environ)
+        if tree is None:
+            fail(f"{PHP_SRC_TREE['refusal'](self.source, os.environ)}; or name a checkout with --tree")
+        return tree
 
     def commit(self) -> str:
         """The pinned commit in full, held to the tag."""

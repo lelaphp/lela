@@ -94,9 +94,10 @@ hosts() {
 	wanted=$(shipped "$2")
 	found=$(cd "$dir" && for path in bin/"$NAME" bin/"$NAME"-* sbin/"$NAME" sbin/"$NAME"-*; do
 		[ ! -e "$path" ] || echo "$path"
-	done | sort | xargs)
+	done | sort)
 	# shellcheck disable=SC2086 # the paths, one word each
-	if [ "$found" != "$(printf '%s\n' $wanted | sort | xargs)" ]; then
+	if [ "$found" != "$(printf '%s\n' $wanted | sort)" ]; then
+		found=${found//$'\n'/ }
 		echo "hosts: $dir holds ${found:-none}, where the $2 holds $wanted" >&2
 		exit 1
 	fi

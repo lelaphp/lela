@@ -510,11 +510,14 @@ pub(crate) enum Command {
     /// ceiling, one widened edge, one dropped rule, one dropped key, one row
     /// moved past another and nothing is written. A key a table or an
     /// array-of-tables row does not carry is an addition, and every addition
-    /// is named in the reading. What a new row should say is a person's,
-    /// settled on a ticket; this is how a settled row reaches the file.
+    /// is named in the reading, save in the packages list, whose row is
+    /// added whole and never changed. A file not there is laid down. What a
+    /// new row should say is a person's, settled on a ticket; this is how a
+    /// settled row reaches the file.
     Steer {
-        /// The file to write, relative to the workspace root: seams.toml,
-        /// oracle.toml or docs/divergence.toml.
+        /// The file to write, relative to the workspace root, one the
+        /// manifest's harness.self names: seams.toml, oracle.toml,
+        /// docs/divergence.toml or the packages list, data/packages.toml.
         file: String,
         /// The proposed whole file, judged against the tracked one.
         #[arg(long, value_name = "PATH")]

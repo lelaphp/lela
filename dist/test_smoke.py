@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # The programs the checks run beyond the hosts and the shell's own, which a
 # test's PATH links from the machine, and no directory of the system's,
 # where a runner may keep a php.
-TOOLS = ("mktemp", "rm", "sort", "xargs", "id")
+TOOLS = ("mktemp", "rm", "sort", "id")
 
 
 def tools(directory):
