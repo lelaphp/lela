@@ -93,6 +93,26 @@ fn the_host_laid_down_has_the_topology_of_the_cli_and_the_cgi() {
     // binary under php's name for the host.
     let cargo: toml::Table = toml::from_str(&read(&root, "sapi/demo/Cargo.toml")).unwrap();
     assert_eq!(cargo["package"]["name"].as_str(), Some("php_sapi_demo"));
+    // The workspace's version, inherited as every shipped host inherits it
+    // (spec #9), and never a version of its own.
+    let version = &cargo["package"]["version"];
+    assert_eq!(version["workspace"].as_bool(), Some(true), "{version:?}");
+    let hosts = std::fs::read_dir(workspace().join("sapi")).unwrap();
+    let mut held = 0;
+    for host in hosts.map(|entry| entry.unwrap().path().join("Cargo.toml")) {
+        let Ok(text) = std::fs::read_to_string(&host) else {
+            continue;
+        };
+        let shipped: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(
+            &shipped["package"]["version"],
+            version,
+            "{}",
+            host.display()
+        );
+        held += 1;
+    }
+    assert!(held >= 2, "the CLI and the CGI at least: {held}");
     let deps = cargo["dependencies"].as_table().unwrap();
     let mut names: Vec<&str> = deps.keys().map(String::as_str).collect();
     names.sort_unstable();

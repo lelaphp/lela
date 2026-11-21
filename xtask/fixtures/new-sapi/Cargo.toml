@@ -4,7 +4,10 @@
 resolver = "3"
 members = ["crates/php_sapi", "crates/php_bundle"]
 
+# The version the hosts inherit, as the workspace's is; the stand-ins stay
+# at 0.0.0, as every crate but a host does.
 [workspace.package]
+version = "0.1.0-alpha.1"
 edition = "2024"
 license = "MIT AND BSD-3-Clause"
 rust-version = "1.95"

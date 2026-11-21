@@ -87,7 +87,9 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -
     Ok(laid)
 }
 
-/// The crate's manifest: the facade and the bundle, and the one binary.
+/// The crate's manifest: the facade and the bundle, and the one binary,
+/// at the workspace's version, which the hosts inherit and no other crate
+/// does (spec #9).
 fn cargo_toml(name: &str, package: &str, bin: &str) -> String {
     format!(
         "# sapi/{name}: php-src/sapi/{name}, one crate under `sapi/` (ADR-0008), laid\n\
@@ -95,7 +97,7 @@ fn cargo_toml(name: &str, package: &str, bin: &str) -> String {
          # php_sapi; the engine is named through the facade alone.\n\
          [package]\n\
          name = \"{package}\"\n\
-         version = \"0.0.0\"\n\
+         version.workspace = true\n\
          edition.workspace = true\n\
          license.workspace = true\n\
          rust-version.workspace = true\n\
