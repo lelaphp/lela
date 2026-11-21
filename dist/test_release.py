@@ -32,6 +32,13 @@ class Repository(testlib.Repository):
         run = self.release("publish", f"v{self.version}", "--dry-run")
         return [row["name"] for row in platforms_file(self.lines(run, "platforms.json"))["platforms"]]
 
+    def added(self, row):
+        """The repository's table with `row` after its last."""
+        source = self.root / "dist/release.py"
+        text = source.read_text()
+        self.assertEqual(text.count(LAST_ROW), 1)
+        source.write_text(text.replace(LAST_ROW, LAST_ROW + f"    {row},\n"))
+
 
 STEPS = (
     ("check",),
@@ -162,13 +169,6 @@ class PublishDryRun(Repository):
         # platform of its own.
         named = {row["name"] for row in manifest["platforms"]}
         self.assertLessEqual({row.split()[0] for row in rows}, named)
-
-    def added(self, row):
-        """The repository's table with `row` after its last."""
-        source = self.root / "dist/release.py"
-        text = source.read_text()
-        self.assertEqual(text.count(LAST_ROW), 1)
-        source.write_text(text.replace(LAST_ROW, LAST_ROW + f"    {row},\n"))
 
     def test_a_row_that_installs_held_to_checks_the_installer_lacks_is_refused(self):
         # A musl Linux is Linux to `uname -s`, and is refused here, when
@@ -489,6 +489,61 @@ class BuildDryRun(Repository):
         run = self.release("build", "v1.2.0", "freebsd-x86_64", "out", "--dry-run")
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("no platform freebsd-x86_64; a release's are darwin-arm64, linux-aarch64, linux-x86_64", run.stderr)
+
+
+class Matrix(Repository):
+    """The release workflow's build matrix, as `matrix` prints it: read from
+    its stdout, as the workflow's `fromJSON` reads it."""
+
+    def matrix(self):
+        run = self.release("matrix")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stderr, "")
+        # One line, which a step writes to $GITHUB_OUTPUT as `matrix=<json>`.
+        self.assertEqual(run.stdout.count("\n"), 1, run.stdout)
+        return json.loads(run.stdout)
+
+    def rows(self, matrix):
+        """Every family's rows, one list."""
+        return [row for family in matrix["families"].values() for row in family["include"]]
+
+    def test_the_matrix_is_the_tables_platforms_each_once(self):
+        matrix = self.matrix()
+        self.assertEqual(matrix, {
+            "platforms": ["darwin-arm64", "linux-aarch64", "linux-x86_64"],
+            "families": {
+                "darwin": {"include": [{"platform": "darwin-arm64", "docker": None}]},
+                "linux": {"include": [
+                    {"platform": "linux-aarch64", "docker": "linux/arm64"},
+                    {"platform": "linux-x86_64", "docker": "linux/amd64"},
+                ]},
+            },
+        })
+        # The table's platforms, as platforms.json names them, each built by
+        # one job of one family and no other.
+        self.assertEqual(matrix["platforms"], self.platforms())
+        self.assertEqual(sorted(row["platform"] for row in self.rows(matrix)), sorted(self.platforms()))
+
+    def test_the_matrix_names_no_tag_and_prints_nothing_else(self):
+        # It is read before a tag is held to anything, so it prints no
+        # version line, the matrix being its one line, and runs nothing.
+        self.matrix()
+        self.assertFalse(self.log.exists())
+        refused = self.release("matrix", "v1.2.0")
+        self.assertEqual(refused.returncode, 2, refused.stdout)
+        self.assertEqual(refused.stdout, "")
+
+    def test_a_platform_added_to_the_table_is_in_the_matrix(self):
+        self.added('Platform("linux-riscv64", docker="linux/riscv64", uname=("Linux riscv64",), checks="ubuntu", '
+                   'installs=True)')
+        self.added('Platform("darwin-x86_64", docker=None, uname=("Darwin x86_64",), checks=None, installs=False)')
+        matrix = self.matrix()
+        self.assertEqual(matrix["platforms"], self.platforms())
+        self.assertEqual(set(matrix["platforms"][-2:]), {"linux-riscv64", "darwin-x86_64"})
+        self.assertIn({"platform": "linux-riscv64", "docker": "linux/riscv64"},
+                      matrix["families"]["linux"]["include"])
+        self.assertIn({"platform": "darwin-x86_64", "docker": None}, matrix["families"]["darwin"]["include"])
+        self.assertEqual(sorted(row["platform"] for row in self.rows(matrix)), sorted(self.platforms()))
 
 
 class Build(Recorded):
