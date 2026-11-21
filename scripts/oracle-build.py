@@ -72,7 +72,13 @@ from typing import NoReturn
 ROOT = Path(__file__).resolve().parent.parent
 CONFIGURE = ROOT / "ci/oracle/configure.toml"
 DOCKERFILE = ROOT / "ci/oracle/Dockerfile"
-PACKAGES = ROOT / ".github/actions/platform-libraries/packages.txt"
+# The checkout's files the Linux build context carries beside the tree and
+# the configure line, by their names there: CI's package list, and
+# dist/apt.sh, the one way the image runs apt, as dist/Dockerfile's does.
+CONTEXT = {
+    "packages.txt": ROOT / ".github/actions/platform-libraries/packages.txt",
+    "apt.sh": ROOT / "dist/apt.sh",
+}
 # The install prefix every build is configured for, one directory per
 # variant; on Linux the image installs there, and a runner lays the binary
 # it takes out of the image at the same path.
@@ -352,7 +358,8 @@ def build_linux(pin: Pin, plat: str, commit: str, epoch: str, args: list[str], j
         with open(ctx / "php-src.tar", "wb") as tar:
             run(["git", "-C", pin.tree(), "archive", "--format=tar", commit], stdout=tar)
         (ctx / "configure.args").write_text("".join(f"{a}\n" for a in args))
-        shutil.copy(PACKAGES, ctx / "packages.txt")
+        for name, source in CONTEXT.items():
+            shutil.copy(source, ctx / name)
         argv = [
             "docker", "build", "--platform", docker_platform, "-f", DOCKERFILE, "-t", tag,
             "--build-arg", f"BASE={base}",

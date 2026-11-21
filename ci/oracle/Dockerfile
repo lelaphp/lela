@@ -1,7 +1,8 @@
 # The Linux oracle builds, laid by
 # `scripts/oracle-build.py build linux-<arch> <variant>`, which passes every
 # argument below and the context: the pinned tag as `git archive` writes it,
-# the configure line it read off the pinned oracle, and CI's package list.
+# the configure line it read off the pinned oracle, CI's package list and
+# dist/apt.sh.
 #
 # `deps` is ubuntu:26.04 by the digest of the platform's manifest, with the
 # packages CI's engine build links (.github/actions/platform-libraries) and
@@ -37,14 +38,19 @@ COPY packages.txt /tmp/packages.txt
 # The snapshot is https and the base image has no CA bundle, so apt skips
 # the TLS peer check for that one host; it still holds every index to the
 # archive's signature, as it does over the archive's plain http.
-RUN set -eu; \
+# Each apt step goes through dist/apt.sh, as dist/Dockerfile's do, which
+# tries a fetch again while a mirror answers 5xx for a moment; the RUN
+# mounts it, so the image keeps no copy, and dist/test_apt.py holds each
+# apt step to it.
+RUN --mount=type=bind,source=apt.sh,target=/tmp/apt.sh \
+    set -eu; \
     if [ "$(dpkg --print-architecture)" = amd64 ]; then \
         printf 'APT::Snapshot "%s";\nAcquire::https::snapshot.ubuntu.com::Verify-Peer "false";\n' "$SNAPSHOT" \
             > /etc/apt/apt.conf.d/50snapshot; \
     fi; \
-    apt-get update -qq; \
+    sh /tmp/apt.sh update; \
     sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^$/d' /tmp/packages.txt > /tmp/packages; \
-    DEBIAN_FRONTEND=noninteractive xargs -a /tmp/packages apt-get install -y -qq --no-install-recommends \
+    xargs -a /tmp/packages sh /tmp/apt.sh install \
         build-essential autoconf bison re2c \
         systemtap-sdt-dev libbz2-dev libldap-dev libsasl2-dev libsnmp-dev libpq-dev \
         unixodbc-dev freetds-dev libargon2-dev libzip-dev libgdbm-compat-dev; \
