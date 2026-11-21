@@ -1,12 +1,48 @@
-"""Negative controls for the fileinfo proof's receipt comparison, with no oracle execution."""
+"""Negative controls for the fileinfo proof's pin check and receipt comparison, with no oracle execution."""
 import copy
 import json
 from pathlib import Path
 import runpy
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 PROOF = runpy.run_path(str(ROOT / "scripts/fileinfo-proof.py"))
+
+# The digests of the bytes `php`, as `md5` and `shasum -a 256` print them.
+PHP_MD5 = "e1bfd762321e409cee4ac0b6e841963c"
+PHP_SHA256 = "sha256:12a5d18ee896e59954bdce0f4acc7212eebe03dae1834ef4ce160ac5afa5c4a8"
+
+
+def oracle(keys):
+    """A pin's `[oracle]` table as the file spells it, with `keys` its digest lines."""
+    return tomllib.loads('[oracle]\npath = "/nowhere/php"\nversion = "8.5.0"\n' + keys)["oracle"]
+
+
+class PinCheck(unittest.TestCase):
+    def test_a_sha256_pin_holds_its_binary_and_refuses_another(self):
+        table = oracle(f'sha256 = "{PHP_SHA256}"\n')
+        self.assertEqual(PROOF["held"](table, b"php"), PHP_SHA256)
+        with self.assertRaises(SystemExit) as refused:
+            PROOF["held"](table, b"cgi")
+        self.assertIn(PHP_SHA256, str(refused.exception))
+
+    def test_an_md5_pin_holds_its_binary_by_the_md5_as_before(self):
+        table = oracle(f'md5 = "{PHP_MD5}"\n')
+        self.assertEqual(PROOF["held"](table, b"php"), "md5 " + PHP_MD5)
+        with self.assertRaises(SystemExit) as refused:
+            PROOF["held"](table, b"cgi")
+        self.assertTrue(str(refused.exception).startswith("oracle digest mismatch"))
+        self.assertIn(PHP_MD5, str(refused.exception))
+
+    def test_a_pin_carrying_both_holds_the_sha256_and_not_the_md5_beside_it(self):
+        table = oracle(f'md5 = "{"0" * 32}"\nsha256 = "{PHP_SHA256}"\n')
+        self.assertEqual(PROOF["held"](table, b"php"), PHP_SHA256)
+
+    def test_a_pin_with_neither_digest_is_refused_by_its_table(self):
+        with self.assertRaises(SystemExit) as refused:
+            PROOF["held"](oracle(""), b"php")
+        self.assertIn("[oracle]", str(refused.exception))
 
 
 class ReceiptComparison(unittest.TestCase):

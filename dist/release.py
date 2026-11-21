@@ -4,6 +4,7 @@
     dist/release.py check <tag>
     dist/release.py build <tag> <platform> <out> [--dry-run]
     dist/release.py publish <tag> [<dir>] [--dry-run]
+    dist/release.py matrix
 
 <tag> is `v<version>`, and every step first holds it to the version line
 of the workspace manifest's package table, Cargo.toml's
@@ -28,21 +29,39 @@ load, where they are built. Last, the release's install.sh installs the
 tarball there into a home of its own, as a user runs it, and runs
 `lela -v` through its link.
 
-`publish` takes the three tarballs from <dir>, and no other, writes
-SHA256SUMS over them with scripts/dist-sums.sh, stages install.sh beside
-them, dist/install.sh with the release's name, version, Ubuntu release
-and download URL baked in, and creates the tag's GitHub Release with the
-five attached, the sums and the image references in its notes. It is a
+The platforms are one table, PLATFORMS, a row per platform with its name,
+how its tarball is built, the `uname` words of a machine of it, the
+checks of install.sh it is held to and whether install.sh installs on it,
+a row that installs held to checks the script has not refused; the tarballs a release is built and
+published with, platforms.json, install.sh's platforms and the release
+workflow's build matrix are read from it.
+
+`matrix` prints that build matrix, one line of JSON the workflow's jobs
+read with `fromJSON`: the table's platforms in its order, and under
+`families` a matrix for each family's job, `darwin` for the platforms
+cargo builds on a Mac and `linux` for those dist/Dockerfile builds, a row
+per platform with its name and its Docker platform. It takes no tag and
+holds nothing; the workflow chooses each row's runner.
+
+`publish` takes the table's tarballs from <dir>, and no other, stages
+install.sh beside them, dist/install.sh with the release's name, version,
+Ubuntu release, download URL and the table's platforms baked in, and
+platforms.json, the
+release's version and each platform by its name, its tarball's file name
+and whether install.sh installs on it. It writes SHA256SUMS over every
+file staged with scripts/dist-sums.sh, and creates the tag's GitHub
+Release with them and the sums attached, the sums and the image
+references in its notes. It is a
 pre-release when the version has a pre-release part, and the latest when
 its images move the bare variant tags, which is dist/publish.py's rule,
 read from it. The images are that script's to
 push, on its release path: this one names their tags and pushes nothing.
 
---dry-run prints what the step would make, the release's fields and the
-image tags among it, and builds, smokes, uploads and creates nothing. A
-real `build` or `publish` refuses a tree with changes and a tag that is
-not HEAD; `publish` uses gh, authorised to write the repository's
-releases.
+--dry-run prints what the step would make, the release's fields, the
+image tags and, for `publish`, platforms.json and the platforms baked into
+install.sh among it, and builds, smokes, uploads and creates nothing. A real `build` or `publish` refuses
+a tree with changes and a tag that is not HEAD; `publish` uses gh,
+authorised to write the repository's releases.
 
 The hosts and the tarballs are named after dist/Dockerfile's `ARG NAME`
 (ADR-0016), `lela`: a tarball holds `bin/lela`, `bin/lela-cgi`,
@@ -55,6 +74,7 @@ macOS tarball is given.
 
 import argparse
 import hashlib
+import json
 import os
 import platform as pyplatform
 import re
@@ -63,6 +83,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 # The images' script, beside this one; the checkout ignores the bytecode
@@ -84,11 +105,56 @@ def release(tag):
     return ref
 
 
-PLATFORMS = ("darwin-arm64", "linux-aarch64", "linux-x86_64")
+@dataclass(frozen=True)
+class Platform:
+    """One platform a release builds a tarball for: its name, the Docker
+    platform dist/Dockerfile's binaries target is built for where it is a
+    Linux one (None where cargo builds it on an Apple silicon Mac), the
+    `uname -s` and `uname -m` words of a machine of it, each pair one
+    string, the checks of install.sh a machine of it is held to (`ubuntu`,
+    `macos`; None where the installer refuses it), and whether the
+    release's install.sh installs on it."""
+
+    name: str
+    docker: str | None
+    uname: tuple[str, ...]
+    checks: str | None
+    installs: bool
+
+    def tarball(self, ref):
+        return f"{name()}-{ref.version}-{self.name}.tar.gz"
+
+    @property
+    def family(self):
+        """The release workflow's job that builds its tarball: `linux` where
+        dist/Dockerfile builds it, `darwin` where cargo does on a Mac."""
+        return "darwin" if self.docker is None else "linux"
 
 
-def tarball(ref, platform):
-    return f"{name()}-{ref.version}-{platform}.tar.gz"
+# The one platform table: the tarballs a release is built and published
+# with, platforms.json, install.sh's platforms and the release workflow's
+# build matrix are each read from it,
+# one row a line. An Intel Mac is a refusal of the installer, not a
+# platform, so it has no row; a shell under Rosetta is the installer's to
+# see through, and its machine is the Apple silicon one.
+PLATFORMS = (
+    Platform("darwin-arm64", docker=None, uname=("Darwin arm64",), checks="macos", installs=True),
+    Platform("linux-aarch64", docker="linux/arm64", uname=("Linux aarch64", "Linux arm64"), checks="ubuntu", installs=True),
+    Platform("linux-x86_64", docker="linux/amd64", uname=("Linux x86_64",), checks="ubuntu", installs=True),
+)
+
+
+# The release workflow's build jobs, one per way a tarball is built, each
+# printed by `matrix` whether or not a row of the table is of it.
+FAMILIES = ("darwin", "linux")
+
+
+def platform_named(text):
+    """The table's row of the platform `text` names."""
+    for platform in PLATFORMS:
+        if platform.name == text:
+            return platform
+    raise Refusal(f"no platform {text}; a release's are {', '.join(p.name for p in PLATFORMS)}")
 
 
 def arg(key):
@@ -107,20 +173,15 @@ def name():
     return arg("NAME")
 
 
-# Each Linux platform's tarball is dist/Dockerfile's binaries target, built
-# for the architecture Docker names it by.
-LINUX = {"linux-aarch64": "linux/arm64", "linux-x86_64": "linux/amd64"}
-
-
 def native(platform):
     """Refuse a platform this machine does not run as its own, so that
     every tarball is built and smoked where it is meant to run."""
-    if platform == "darwin-arm64":
+    if platform.docker is None:
         here = f"{pyplatform.system()} {pyplatform.machine()}"
         if here != "Darwin arm64":
-            raise Refusal(f"darwin-arm64 is built on an Apple silicon Mac, and this machine is {here}")
+            raise Refusal(f"{platform.name} is built on an Apple silicon Mac, and this machine is {here}")
         return
-    publish.native(LINUX[platform], platform)
+    publish.native(platform.docker, platform.name)
 
 
 def darwin_hosts():
@@ -175,7 +236,7 @@ def stage_linux(stage, platform):
     """dist/Dockerfile's binaries target: the hosts, the ini files and the
     Ubuntu packages the hosts load, in runtime-packages.txt."""
     subprocess.run([
-        "docker", "buildx", "build", "-f", str(ROOT / "dist/Dockerfile"), "--platform", LINUX[platform],
+        "docker", "buildx", "build", "-f", str(ROOT / "dist/Dockerfile"), "--platform", platform.docker,
         "--target", "binaries", "--build-arg", f"CARGO_BUILD_JOBS={publish.setting('CARGO_BUILD_JOBS')}",
         "--output", f"type=local,dest={stage}", str(ROOT),
     ], check=True)
@@ -204,7 +265,7 @@ def smoke(ref, platform, path):
     install.sh over the tarball there, as a user runs it, which ends with
     `lela -v` run through the link it makes."""
     base = path.name.removesuffix(".tar.gz")
-    if platform in LINUX:
+    if platform.docker is not None:
         ubuntu = arg("UBUNTU")
         script = "\n".join([
             "set -euo pipefail",
@@ -226,13 +287,13 @@ def smoke(ref, platform, path):
         with tempfile.TemporaryDirectory() as installer_dir:
             (Path(installer_dir) / INSTALLER).write_text(installer(ref))
             command = [
-                "docker", "run", "--rm", "--platform", LINUX[platform],
+                "docker", "run", "--rm", "--platform", platform.docker,
                 "-v", f"{path.parent}:/release:ro", "-v", f"{ROOT / 'dist'}:/dist:ro",
                 "-v", f"{installer_dir}:/installer:ro",
                 ubuntu, "bash", "-c", script,
             ]
             if subprocess.run(command).returncode != 0:
-                raise Refusal(f"the smoke of {path.name} on {platform} failed")
+                raise Refusal(f"the smoke of {path.name} on {platform.name} failed")
         return
     with tempfile.TemporaryDirectory() as scratch:
         with tarfile.open(path) as archive:
@@ -243,8 +304,8 @@ def smoke(ref, platform, path):
             if "Signature=adhoc" not in signed.stderr.splitlines():
                 raise Refusal(f"{path.name}'s {macho.relative_to(unpacked)} carries no ad-hoc signature")
         if subprocess.run([publish.setting("SMOKE"), str(unpacked)]).returncode != 0:
-            raise Refusal(f"the smoke of {path.name} on {platform} failed")
-        install_darwin(ref, path, Path(scratch))
+            raise Refusal(f"the smoke of {path.name} on {platform.name} failed")
+        install_darwin(ref, platform, path, Path(scratch))
 
 
 # The PATH the macOS install runs on: the system's directories alone, as a
@@ -252,7 +313,7 @@ def smoke(ref, platform, path):
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
-def install_darwin(ref, path, scratch):
+def install_darwin(ref, platform, path, scratch):
     """The release's install.sh over the tarball, from a directory of it
     and its sum, into a home of its own."""
     assets, home = scratch / "assets", scratch / "home"
@@ -265,24 +326,25 @@ def install_darwin(ref, path, scratch):
     script.write_text(installer(ref))
     env = {"HOME": str(home), "PATH": SYSTEM_PATH, "LELA_INSTALL_FROM": assets.as_uri()}
     if subprocess.run(["/bin/sh", str(script)], env=env, cwd=scratch).returncode != 0:
-        raise Refusal(f"the install of {path.name} by {INSTALLER} on darwin-arm64 failed")
+        raise Refusal(f"the install of {path.name} by {INSTALLER} on {platform.name} failed")
 
 
 def build_tarball(ref, commit, arguments):
     """One platform's tarball, built on that platform and smoked there."""
-    platform = arguments.platform
-    if platform not in PLATFORMS:
-        raise Refusal(f"no platform {platform}; a release's are {', '.join(PLATFORMS)}")
+    platform = platform_named(arguments.platform)
+    # The installer the tarball's smoke runs, baked in the dry run too, so
+    # that a table the installer cannot follow is refused before a build.
+    installer(ref)
     if not arguments.dry_run:
         publish.built_from(ref, commit)
         native(platform)
-    artifact = tarball(ref, platform)
-    print(f"platform {platform}")
+    artifact = platform.tarball(ref)
+    print(f"platform {platform.name}")
     print(f"commit {commit.sha}")
     print(f"artifact {artifact}")
-    print(f"smoke {artifact} on {platform}")
+    print(f"smoke {artifact} on {platform.name}")
     if arguments.dry_run:
-        if platform == "darwin-arm64":
+        if platform.docker is None:
             dry_darwin()
         print("dry run: nothing is built or smoked")
         return
@@ -292,7 +354,7 @@ def build_tarball(ref, commit, arguments):
     stage = out / artifact.removesuffix(".tar.gz")
     shutil.rmtree(stage, ignore_errors=True)
     path.unlink(missing_ok=True)
-    if platform in LINUX:
+    if platform.docker is not None:
         stage_linux(stage, platform)
     else:
         stage_darwin(stage)
@@ -302,6 +364,8 @@ def build_tarball(ref, commit, arguments):
 
 
 INSTALLER = "install.sh"
+PLATFORMS_FILE = "platforms.json"
+SUMS = "SHA256SUMS"
 
 
 def ubuntu():
@@ -314,17 +378,50 @@ def ubuntu():
     return found.group(1)
 
 
+def installer_checks():
+    """The checks dist/install.sh has, each the name of a `before_<checks>`
+    and an `after_<checks>` function of it."""
+    text = (ROOT / "dist" / INSTALLER).read_text()
+    before, after = ({found for found in re.findall(rf"^{phase}_([a-z]+)\(\) {{$", text, re.M)}
+                     for phase in ("before", "after"))
+    return sorted(before & after)
+
+
+def installer_platforms():
+    """install.sh's platforms, rendered from the table: a line per `uname`
+    pair of each row, `<platform> installs|refuses <checks> <system>
+    <machine>`, the checks `none` where it refuses. A row that installs
+    held to checks the script has not is refused, so that the table never
+    says the installer installs where it would refuse."""
+    checks = installer_checks()
+    rows = []
+    for platform in PLATFORMS:
+        if platform.installs and platform.checks is None:
+            raise Refusal(f"{platform.name} installs held to no checks of the installer's; "
+                          f"its checks are {', '.join(checks)}")
+        if platform.installs and platform.checks not in checks:
+            raise Refusal(f"{platform.name} installs held to the installer's {platform.checks} checks, and "
+                          f"dist/{INSTALLER} has none of that name; its checks are {', '.join(checks)}")
+        held = platform.checks if platform.installs else "none"
+        for words in platform.uname:
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+ [A-Za-z0-9_.-]+", words):
+                raise Refusal(f"{platform.name}'s uname words {words!r} are not `<system> <machine>`")
+            rows.append(f"{platform.name} {'installs' if platform.installs else 'refuses'} {held} {words}")
+    return rows
+
+
 def installer(ref):
-    """dist/install.sh with the release baked into its four empty lines:
+    """dist/install.sh with the release baked into its five empty lines:
     the hosts' name, the version, the Ubuntu release of the Linux
-    tarballs, and the URL of the release's assets, which the script
-    fetches its tarball and SHA256SUMS from."""
+    tarballs, the URL of the release's assets, which the script fetches
+    its tarball and SHA256SUMS from, and the table's platforms."""
     text = (ROOT / "dist" / INSTALLER).read_text()
     values = {
         "name": name(),
         "version": ref.version,
         "ubuntu": ubuntu(),
         "release": f"{publish.SOURCE}/releases/download/{ref.name}",
+        "platforms": "\n".join(installer_platforms()),
     }
     for key, value in values.items():
         count = text.count(f"\n{key}=\n")
@@ -334,31 +431,49 @@ def installer(ref):
     return text
 
 
+def platforms_file(ref):
+    """platforms.json, what a reader of the release takes its platforms
+    from: the version, and each row of the table by its name, its
+    tarball's file name and whether install.sh installs on it."""
+    platforms = [
+        {"name": platform.name, "tarball": platform.tarball(ref), "installs": platform.installs}
+        for platform in PLATFORMS
+    ]
+    return json.dumps({"version": ref.version, "platforms": platforms}, indent=2) + "\n"
+
+
 def tarballs(ref, directory):
-    """The three tarballs of the release in `directory`, and no other."""
+    """Refuse a `directory` that lacks a tarball of the table's, or holds
+    one of another release."""
     if directory is None:
         raise Refusal("publish names the directory the tarballs are in")
-    wanted = [directory / tarball(ref, platform) for platform in PLATFORMS]
+    wanted = [directory / platform.tarball(ref) for platform in PLATFORMS]
     for path in wanted:
         if not path.is_file():
             raise Refusal(f"no {path.name} in {directory}")
     for path in sorted(directory.glob("*.tar.gz")):
         if path not in wanted:
             raise Refusal(f"{path.name} in {directory} is no tarball of {ref.name}")
-    return wanted
 
 
 def publish_release(ref, commit, arguments):
-    """The GitHub Release of the tag, with the tarballs and their sums."""
+    """The GitHub Release of the tag: the tarballs, install.sh,
+    platforms.json, and SHA256SUMS over the three."""
     if not arguments.dry_run:
         publish.built_from(ref, commit)
-        paths = tarballs(ref, arguments.dir)
-    artifacts = [tarball(ref, platform) for platform in PLATFORMS]
+        tarballs(ref, arguments.dir)
     # Baked in the dry run too, so that a script missing a line is refused
     # before a tag's run reaches its release.
     script = installer(ref)
-    for artifact in [*artifacts, "SHA256SUMS", INSTALLER]:
+    platforms = platforms_file(ref)
+    # SHA256SUMS last, as it is written: over every other file attached.
+    summed = [*(platform.tarball(ref) for platform in PLATFORMS), INSTALLER, PLATFORMS_FILE]
+    for artifact in [*summed, SUMS]:
         print(f"artifact {artifact}")
+    for line in platforms.splitlines():
+        print(f"{PLATFORMS_FILE} {line}")
+    for line in installer_platforms():
+        print(f"{INSTALLER} {line}")
     # The release is the latest where its images move the bare variant
     # tags: the publish script's rule, read from it and kept nowhere else.
     latest = all(variant in publish.tags(ref, commit, variant) for variant in publish.VARIANTS)
@@ -375,15 +490,18 @@ def publish_release(ref, commit, arguments):
     if arguments.dry_run:
         print("dry run: nothing is uploaded or created")
         return
-    # The sums go to the file and its notes; what the script says of a
-    # failure reaches the caller.
-    subprocess.run([str(ROOT / "scripts/dist-sums.sh"), str(arguments.dir)], check=True, stdout=subprocess.DEVNULL)
-    sums = arguments.dir / "SHA256SUMS"
     staged = arguments.dir / INSTALLER
     staged.write_text(script)
     staged.chmod(0o755)
+    (arguments.dir / PLATFORMS_FILE).write_text(platforms)
+    # The sums, over every file staged, go to the file and its notes; what
+    # the script says of a failure reaches the caller.
+    subprocess.run(
+        [str(ROOT / "scripts/dist-sums.sh"), str(arguments.dir), *summed], check=True, stdout=subprocess.DEVNULL,
+    )
+    sums = arguments.dir / SUMS
     notes = "".join([
-        f"The tarballs of {ref.name}, built from {commit.sha}, and their SHA-256 sums:\n\n",
+        f"The files of {ref.name}, built from {commit.sha}, and their SHA-256 sums:\n\n",
         "```\n", sums.read_text(), "```\n\n",
         "Its images:\n\n",
         *(f"- `{image}`\n" for image in images),
@@ -394,9 +512,26 @@ def publish_release(ref, commit, arguments):
         subprocess.run([
             "gh", "release", "create", ref.name, "--verify-tag", "--title", ref.name,
             "--notes-file", file.name, *(["--prerelease"] if ref.prerelease else []),
-            f"--latest={str(latest).lower()}", *map(str, paths), str(sums), str(staged),
+            f"--latest={str(latest).lower()}", *(str(arguments.dir / artifact) for artifact in summed), str(sums),
         ], check=True)
     print(f"released {ref.name}")
+
+
+def matrix():
+    """The release workflow's build matrix, one line of JSON its jobs read
+    with `fromJSON`: the table's platforms in its order, which name the
+    tarballs the release job lays down, and a matrix for each family's job,
+    a row per platform of the family with its name and Docker platform,
+    which the workflow chooses the row's runner by. Every family is
+    printed, one with no row too, so that a job always finds its own."""
+    families = {
+        family: {"include": [
+            {"platform": platform.name, "docker": platform.docker}
+            for platform in PLATFORMS if platform.family == family
+        ]}
+        for family in FAMILIES
+    }
+    return json.dumps({"platforms": [platform.name for platform in PLATFORMS], "families": families})
 
 
 def main(argv):
@@ -413,8 +548,12 @@ def main(argv):
     publish_step.add_argument("tag")
     publish_step.add_argument("dir", nargs="?", type=Path)
     publish_step.add_argument("--dry-run", action="store_true")
+    steps.add_parser("matrix")
     arguments = parser.parse_args(argv)
     sys.stdout.reconfigure(line_buffering=True)
+    if arguments.step == "matrix":
+        print(matrix())
+        return 0
 
     def step():
         ref = release(arguments.tag)

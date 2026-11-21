@@ -26,7 +26,7 @@ The oracle's pin is `oracle.toml`, and `cargo xtask status --section oracle` pri
 
 ## The images
 
-CI publishes three variants to `ghcr.io/lelaphp/lela`, each shaped as php's official image of that name is, and each for `linux/amd64` and `linux/arm64` under one reference (`dist/README.md`). Every reference names its variant. `<version>` is a release's version, and its tags never move; the bare variant is the newest release that is not a pre-release; `edge-` is the last merge to `main`; and a `sha-` tag, with the full commit, is one merge to `main`, kept 30 days.
+CI publishes three variants to `ghcr.io/lelaphp/lela`, each shaped as php's official image of that name is, and each for `linux/amd64` and `linux/arm64` under one reference (`dist/README.md`). Every reference names its variant. `<version>` is a release's version, and its tags never move; the bare variant is the newest release that is not a pre-release; `nightly-` is the last merge to `main`, and moves on every merge, not once a night, since the word names the channel and not a schedule; and a `sha-` tag, with the full commit, is one merge to `main`, kept 30 days.
 
 `cli`, the CLI and CGI hosts, running `lela -a`:
 
@@ -39,7 +39,7 @@ ghcr.io/lelaphp/lela:<version>-cli
 ```
 
 ```
-ghcr.io/lelaphp/lela:edge-cli
+ghcr.io/lelaphp/lela:nightly-cli
 ```
 
 ```
@@ -57,7 +57,7 @@ ghcr.io/lelaphp/lela:<version>-fpm
 ```
 
 ```
-ghcr.io/lelaphp/lela:edge-fpm
+ghcr.io/lelaphp/lela:nightly-fpm
 ```
 
 ```
@@ -75,7 +75,7 @@ ghcr.io/lelaphp/lela:<version>-apache
 ```
 
 ```
-ghcr.io/lelaphp/lela:edge-apache
+ghcr.io/lelaphp/lela:nightly-apache
 ```
 
 ```

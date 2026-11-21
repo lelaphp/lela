@@ -1608,6 +1608,9 @@ fn recorded(
     snapshot: &Snapshot,
 ) -> Result<Reading> {
     let mut reading = Reading::stamped_over(INSTRUMENT, bar.id, snapshot, Path::new("."))?;
+    // A measured bar's arms of the engine's own are built in the bench
+    // lane's profile ([`crate::oracle::profile::released`]).
+    reading.profile = Some(crate::oracle::Profile::Release);
     reading.status = bar.held.status(took, bar.tolerance());
     if let Some(pct) = bar.tolerance() {
         reading

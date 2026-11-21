@@ -21,6 +21,24 @@ pub(crate) struct Cli {
     pub command: Command,
 }
 
+impl Cli {
+    /// The process's command line, its `--help` ending on the exit
+    /// statuses, the two of their own rendered from the constants the
+    /// binary exits with.
+    pub(crate) fn read() -> Cli {
+        use clap::{CommandFactory, FromArgMatches};
+        let (not_ready, unfinished) = (crate::exit::NOT_READY, crate::exit::UNFINISHED);
+        let exits = format!(
+            "Exit status:\n  0  done\n  1  a refusal, or a reading that fails\n  2  a usage error\n  \
+             {not_ready}  a worktree laid down and not ready to be worked in\n  \
+             {unfinished}  an instrument that could not run to its end, its readings \
+             not whole; `phpt` gives it"
+        );
+        let matches = Cli::command().after_help(exits).get_matches();
+        Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     /// Hold the seams: regenerate and diff each lock, hold crate edges,
@@ -496,6 +514,15 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: OracleCommand,
     },
+    /// Build the hosts the phpt lane hands its tests to in one profile of
+    /// the workspace's and print each one's path, a line each. Writes no
+    /// reading.
+    Hosts {
+        /// The profile to build in, one of those the workspace's
+        /// `Cargo.toml` defines.
+        #[arg(long)]
+        profile: crate::oracle::profile::Profile,
+    },
     /// Hold the divergence registry to the manifest rule whose `check` names
     /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,
@@ -658,7 +685,9 @@ pub(crate) struct Phpt {
     /// lane: every subset the manifest's rows own.
     #[arg(long, value_name = "NAME", conflicts_with = "full")]
     pub subset: Option<String>,
-    /// Every subset of the corpus: the nightly lane, which CI runs.
+    /// Every subset of the corpus: the nightly lane, which CI runs, and
+    /// one more reading, scoped `php-src`, of the corpus with each test
+    /// counted once.
     #[arg(long)]
     pub full: bool,
     /// The compiled tier's lane: the engine runs under `jit.mode`.

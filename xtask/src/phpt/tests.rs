@@ -113,7 +113,7 @@ fn run(subset: &Subset, registry: &Registry) -> Tally {
     let manifest = manifest();
     let oracle = manifest.pin().unwrap().oracle();
     let locks = Tree::new("phpt-locks").unwrap();
-    let runner = Runner::Engine(binary);
+    let runner = Runner::Engine(binary, None);
     let under = Under::of(&runner, locks.path());
     run_subset(&oracle, registry, subset, under).unwrap().0
 }
@@ -281,7 +281,7 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
     assert_eq!(manifest.pin().unwrap().digests_asserted(), 0);
     let oracle = manifest.pin().unwrap().oracle();
     let locks = Tree::new("phpt-locks").unwrap();
-    let runner = Runner::Engine(binary);
+    let runner = Runner::Engine(binary, None);
     let under = Under::of(&runner, locks.path());
     let tally = run_subset(&oracle, &registry(""), &subset, under)
         .unwrap()
@@ -369,7 +369,7 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
     manifest.pin.as_mut().unwrap().recipe.limits.timeout_s = LIMIT;
     let oracle = manifest.pin().unwrap().oracle();
     let locks = Tree::new("phpt-locks").unwrap();
-    let runner = Runner::Engine(binary);
+    let runner = Runner::Engine(binary, None);
     let under = Under::of(&runner, locks.path());
     let tally = run_subset(&oracle, &registry(""), &subset, under)
         .unwrap()
@@ -1053,7 +1053,7 @@ fn a_subset_resolves_under_the_tree_the_pin_was_handed_ahead_of_the_pins_path() 
 fn a_tier_lane_and_a_control_are_readings_of_their_own() {
     let tree = fixture_tree();
     let subset = resolve(&tracked_over_fixture(&tree), "pcre").unwrap();
-    let engine = Runner::Engine(PathBuf::from("target/debug/php"));
+    let engine = Runner::Engine(PathBuf::from("target/debug/php"), None);
     let scope = |runner: &Runner, lane| subset.scope(runner, lane).to_string();
     assert_eq!(scope(&engine, None), "ext/pcre");
     assert_eq!(scope(&engine, Some(Lane::Force)), "ext/pcre@force");
@@ -1292,7 +1292,9 @@ fn an_extension_with_no_test_directory_reads_as_a_skip_and_a_name_that_is_nothin
             jobs: NonZeroUsize::new(1),
             ..Ask::default()
         };
-        let readings = super::run(&root, &manifest, &registry, &ask).unwrap();
+        let readings = super::run(&root, &manifest, &registry, &ask)
+            .unwrap()
+            .readings;
         assert_eq!(
             readings.len(),
             if subset.is_some() { 1 } else { 2 },
@@ -1425,7 +1427,7 @@ fn a_pinned_php_not_on_this_machine_runs_nothing_and_asserts_no_digest() {
     subset.scope = "ext/pcre".to_owned();
     let mut manifest = manifest();
     manifest.pin.as_mut().unwrap().oracle.path = PathBuf::from("/nowhere/php");
-    let engine = Runner::Engine(std::env::current_exe().unwrap());
+    let engine = Runner::Engine(std::env::current_exe().unwrap(), None);
     let why = format!(
         "the pinned php is not at {}",
         manifest.pin().unwrap().oracle.path.display()
@@ -1877,7 +1879,7 @@ fn a_reading_counts_the_files_its_subset_holds_beside_the_tests_a_redirect_ran()
     subset.scope = "ext/pcre".to_owned();
     let manifest = manifest();
     let locks = Tree::new("phpt-locks").unwrap();
-    let runner = Runner::Engine(binary);
+    let runner = Runner::Engine(binary, None);
     let under = Under::of(&runner, locks.path());
     let source = manifest.pin().unwrap().source.tree().unwrap_or_default();
     let reading = reading(
@@ -1904,7 +1906,7 @@ fn run_on(subset: &Subset, jobs: usize, limit_s: u64) -> Tally {
     manifest.pin.as_mut().unwrap().recipe.limits.timeout_s = limit_s;
     let oracle = manifest.pin().unwrap().oracle();
     let locks = Tree::new("phpt-locks").unwrap();
-    let runner = Runner::Engine(binary);
+    let runner = Runner::Engine(binary, None);
     let under = Under {
         jobs: NonZeroUsize::new(jobs).unwrap(),
         ..Under::of(&runner, locks.path())
@@ -2248,7 +2250,7 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
         "{refused:#}"
     );
     let binary = oracle().unwrap();
-    let runner = Runner::Engine(binary);
+    let runner = Runner::Engine(binary, None);
     let locks = Tree::new("phpt-locks").unwrap();
     let under = Under::of(&runner, locks.path());
     let unserved = run_subset(&down.pin().unwrap().oracle(), &registry(""), &subset, under);
@@ -2271,8 +2273,10 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
 /// A lane whose second subset is refused for a `MySQL` server that does
 /// not answer still writes the first subset's reading, and the refusal is
 /// the second's own failing reading with its cause, so the lane's exit
-/// says it without erasing the rest. Before, the refusal was the
-/// lane's error and no reading of the lane was written.
+/// says it without erasing the rest: the exit of a run that could not
+/// run to its end, never a failing test's. Before, the refusal was the
+/// lane's error and no reading of the lane was written; then it was
+/// written, and the lane exited 1 as a failing test does.
 #[test]
 fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading() {
     if oracle().is_none() {
@@ -2303,7 +2307,15 @@ fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading(
         jobs: NonZeroUsize::new(1),
         ..Ask::default()
     };
-    let readings = super::run(&root, &manifest, &registry(""), &ask).unwrap();
+    let ran = super::run(&root, &manifest, &registry(""), &ask).unwrap();
+    assert_eq!(ran.unrun, ["ext/pdo_mysql"], "{ran:#?}");
+    let short = ran.whole().unwrap_err();
+    assert!(
+        short.downcast_ref::<crate::exit::Unfinished>().is_some(),
+        "the exit is not the one a failing test gives: {short:#}"
+    );
+    assert!(format!("{short:#}").contains("ext/pdo_mysql"), "{short:#}");
+    let readings = ran.readings;
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
     assert_eq!(scopes, ["ext/hollow", "ext/pdo_mysql"], "{readings:#?}");
     assert_eq!(readings[0].status, Status::Skip, "{readings:#?}");
@@ -2644,7 +2656,10 @@ fn a_target_test_no_host_of_ours_stands_beside_the_engine_for_fails_the_reading(
     let beside = Tree::new("phpt-unhosted-engine").unwrap();
     std::os::unix::fs::symlink(&php, beside.join("php")).unwrap();
     let (manifest, locks) = (manifest(), Tree::new("phpt-locks").unwrap());
-    let (runner, pin) = (Runner::Engine(beside.join("php")), manifest.pin().unwrap());
+    let (runner, pin) = (
+        Runner::Engine(beside.join("php"), None),
+        manifest.pin().unwrap(),
+    );
     let under = Under::of(&runner, locks.path());
     let (tally, _) = run_subset(&pin.oracle(), &registry(""), &subset, under).unwrap();
     let mut went: Vec<_> = (went(&tally).into_iter())
@@ -2792,5 +2807,64 @@ fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
     assert!(
         runs.contains(&format!("path: {}/\n", against::RUNS)),
         "the put is the kept runs: {runs}"
+    );
+}
+
+/// The corpus reading over a run's subsets: an id two subsets judge is
+/// one test, met only where both judgements are, and a subset that gave
+/// no verdicts leaves the run not whole, a skip with `whole = 0` naming it
+/// beside the files found against the pin's count.
+#[test]
+fn an_id_judged_twice_is_met_only_where_every_judgement_is_and_an_unrun_subset_is_named() {
+    use crate::reading::Number;
+    let tree = Tree::new("phpt-corpus-union").unwrap();
+    let manifest = manifest_of([], tree.path());
+    let snapshot = crate::key::Snapshot::disk(&workspace()).unwrap();
+    let subset = |under: &str| {
+        fs::create_dir_all(tree.join(under)).unwrap();
+        Subset::whole(tree.path(), PathBuf::from(under))
+    };
+    let (a, b, c) = (subset("ext/a"), subset("ext/b"), subset("ext/c"));
+    let tally = |verdicts: &[(&str, Judgement)]| Tally {
+        judged: (verdicts.iter())
+            .map(|(id, judgement)| Judged::new(id, id, *judgement, ""))
+            .collect(),
+        found: verdicts.len(),
+    };
+    let mut union = corpus::Union::default();
+    union.add(
+        &a,
+        tally(&[
+            ("phpt:php-src/x.phpt", Judgement::Pass),
+            ("phpt:php-src/y.phpt", Judgement::Pass),
+        ]),
+    );
+    union.add(&b, tally(&[("phpt:php-src/x.phpt", Judgement::Fail)]));
+    let runner = Runner::Engine(PathBuf::from("/nowhere/lela"), None);
+    let subsets = [a, b, c];
+    let (reading, short) =
+        corpus::reading(union, &subsets, (&runner, None), (&manifest, &snapshot)).unwrap();
+    assert_eq!(reading.scope, "php-src");
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert!(short.is_some());
+    for (key, n) in [
+        ("whole", 0),
+        ("tests", 2),
+        ("met", 1),
+        ("failed", 1),
+        ("passed", 1),
+    ] {
+        assert_eq!(
+            number(&reading, key),
+            Some(Number::Int(n)),
+            "{key} in {reading:#?}"
+        );
+    }
+    assert!(
+        reading
+            .message
+            .contains("not whole: 1 subset unrun: ext/c; 0 files found of the"),
+        "{}",
+        reading.message
     );
 }

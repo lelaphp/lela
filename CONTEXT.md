@@ -162,10 +162,11 @@ _Avoid_: transition, continuation, `Next` (the handler's return inside the loop)
 An operating system, architecture and C library a release is built and smoke-tested for. Cargo's triple is a target, and a host is the program that serves requests.
 
 **Release**:
-A version of Lela named by a tag: its tarballs and its images, built from that commit.
+A version of Lela named by a tag: its tarballs and its images, built from that commit, and what it attaches beside the tarballs: `install.sh`, `platforms.json`, which lists each platform, its tarball and whether `install.sh` installs there, and `SHA256SUMS` over every other attached file.
+_Avoid_: release manifest (the manifest is `seams.toml`)
 
 **Image**:
-The container image a release publishes, one per platform under one name. A container is an image running.
+The container image a release publishes, one per platform under one name. A container is an image running. An image built from `main` is tagged `nightly-<variant>` and moves on every merge to `main`; the word names the channel, not a schedule.
 
 ### Harness
 
@@ -174,7 +175,7 @@ One `xtask` subcommand that measures or judges something and ends by writing a r
 _Avoid_: check (the manifest's `check` predicate and `api_check`, its module), gate (that is a numbered pass/fail bar such as G1), tool (a rule's `tool`, and the hook's `tool_name` and `tool_input`, Claude Code's words), script (php's `script_name`)
 
 **Command**:
-One `xtask` subcommand that acts or answers and writes no reading: `track` and its `next` and `chains`, `worktree`, `regions`, `new-ext`, `generate`, `status`, `oracle propose`. What decides which of the two a subcommand is, is the reading and never the name it hangs under, so `track work` is the one subcommand of a command that is an instrument: it judges what it lands and writes a `track-work` reading. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
+One `xtask` subcommand that acts or answers and writes no reading: `track` and its `next` and `chains`, `worktree`, `regions`, `new-ext`, `generate`, `status`, `oracle propose`, `hosts`. `hosts` builds the hosts of the oracle's list in the profile it is named and prints each one's path, and takes a seat as the building instruments do. What decides which of the two a subcommand is, is the reading and never the name it hangs under, so `track work` is the one subcommand of a command that is an instrument: it judges what it lands and writes a `track-work` reading. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
 _Avoid_: helper, utility, subtool
 
 **Tally**:
@@ -186,7 +187,7 @@ The one tracked data file, `seams.toml`, that declares each seam once: producer,
 _Avoid_: config (php's `PHP_CONFIG_FILE_PATH`, `PHP_CONFIG_FILE_SCAN_DIR`), rules file, policy, `api-check`'s tables
 
 **Reading**:
-The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's key (§4.2), commit, time. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.
+The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's key (§4.2), commit, time, and the profile of the build it judged where the instrument knows it. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.
 _Avoid_: result, artefact, report, telemetry (the manifest's `[telemetry]` table: the field `telemetry` and `Telemetry`, its type), output (php's `OutputOp`, `output_buffer_op`, `output_started_at`; seam 4's `OutputSink`)
 
 **Caller**:
@@ -217,6 +218,10 @@ _Avoid_: batch check, merge gate
 The instrument `hostile`, not built yet: a fixed corpus of PHP programs whose error handlers disturb an opline mid-step, each held to the oracle. A program fails it on a fault, or by differing now where it met php at the merge base.
 _Avoid_: differential fuzz (the `fuzz` instrument's)
 
+**Nightly lane**:
+The CI workflow `nightly.yml`, run once a night: the lanes too long for a commit, such as `phpt --full`, the tier's lanes and soak, outside `done`. The `nightly-<variant>` image tag is not it: that moves on every merge.
+_Avoid_: nightly build, nightly run (say which)
+
 **Unmet item**:
 One entry of `done`'s list, with a kind: failing, stale, missing or refused. It is not a divergence's kind, which names a lane.
 _Avoid_: unmet line
@@ -242,7 +247,7 @@ One of builder, reviewer and advisor: a file under `.claude/agents/` that sets a
 _Avoid_: agent type (Claude Code's `agentType`)
 
 **Seat**:
-One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `hostile`, `fold`, `dispatch-census`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`). A bench on a dedicated machine takes every seat (`bench --machine dedicated`).
+One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `hostile`, `fuzz`, `fold`, `dispatch-census`, `fpm-compare`, `soak`, `witness`, `bench` and the `hosts` command take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`). A bench on a dedicated machine takes every seat (`bench --machine dedicated`).
 _Avoid_: lease
 
 **Snapshot**:

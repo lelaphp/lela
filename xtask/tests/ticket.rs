@@ -22,7 +22,7 @@ use xtask::ticket::{
     Act, CAP, Issue, MERGED, Reach, State, SubIssues, Successors, Verdict, merged, parent, run,
     stranded,
 };
-use xtask::track::Ticket;
+use xtask::track::{Ticket, short};
 
 mod common {
     pub mod manifest;
@@ -1099,14 +1099,15 @@ fn close_with_every_box_ticked_closes_and_records_what_closed_it_and_the_session
     assert_eq!(reading.session, "session-abc");
     assert!(!reading.commit.is_empty());
     assert!(
-        reading.message.contains(&reading.commit) && reading.message.contains("session-abc"),
+        reading.message.contains(short(&reading.commit)) && reading.message.contains("session-abc"),
         "{}",
         reading.message
     );
     let calls = tracker.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(
-        calls[0].starts_with("issue close 8 --comment ") && calls[0].contains(&reading.commit),
+        calls[0].starts_with("issue close 8 --comment ")
+            && calls[0].contains(short(&reading.commit)),
         "{calls:?}"
     );
 }
@@ -1702,7 +1703,7 @@ fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement()
     assert!(
         reading.message.contains(&format!("withdrawn: {reason}"))
             && reading.message.contains("opens #9")
-            && reading.message.contains(&reading.commit)
+            && reading.message.contains(short(&reading.commit))
             && reading.message.contains("session s3"),
         "{}",
         reading.message

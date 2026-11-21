@@ -337,13 +337,25 @@ fn the_default_set_is_every_ext_row_the_binary_carries_and_ext_names_one() {
 #[test]
 fn the_oracles_bytes_are_kept_under_the_scope_and_the_digest() {
     let store = Store::at("/store");
+    let md5 = Digest::Md5("abc".to_owned());
     assert_eq!(
-        kept(&store, "abc", "ctype", Column::Re),
+        kept(&store, &md5, "ctype", Column::Re),
         PathBuf::from("/store/crosscheck/ext/ctype/abc.re")
     );
     assert_eq!(
-        kept(&store, "abc", "ctype", Column::Ri),
+        kept(&store, &md5, "ctype", Column::Ri),
         PathBuf::from("/store/crosscheck/ext/ctype/abc.ri")
+    );
+    // Where the pin carries a SHA-256, the rendering is kept under it,
+    // whatever md5 stands beside it.
+    let sha256 = Digest::Sha256 {
+        sha256: crate::sha256::Sha256::of(b""),
+        md5: Some("abc".to_owned()),
+    };
+    let hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    assert_eq!(
+        kept(&store, &sha256, "ctype", Column::Re),
+        PathBuf::from(format!("/store/crosscheck/ext/ctype/sha256-{hex}.re"))
     );
 }
 
@@ -400,7 +412,7 @@ fn a_hosts_own_module_is_served_by_that_host_and_scoped_under_its_row() {
     assert_eq!(
         kept_at(
             &store,
-            "abc",
+            &Digest::Md5("abc".to_owned()),
             &Host::Cgi.scope("cgi-fcgi", Column::Re),
             Column::Ri
         ),

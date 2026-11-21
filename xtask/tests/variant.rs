@@ -119,8 +119,8 @@ fn the_pin_reads_a_variant_and_refuses_a_platform_outside_the_grammar() {
     assert_eq!(variant.flags, ["--enable-zend-test"]);
     let build = variant.build(Platform::DarwinArm64).unwrap();
     assert_eq!(
-        (build.path.as_path(), build.md5.as_str()),
-        (Path::new("/opt/php"), "0")
+        (build.path.as_path(), build.digest.md5()),
+        (Path::new("/opt/php"), Some("0"))
     );
     assert!(variant.build(Platform::LinuxX86_64).is_none());
     assert_ne!(
@@ -156,11 +156,11 @@ fn a_variant_is_the_pin_with_its_build_for_this_platform_in_place_of_the_oracles
     let variant = pin.variant("stand-in").unwrap();
     assert_eq!(variant.oracle.path, path);
     assert_eq!(
-        variant.oracle.md5,
+        variant.oracle.digest,
         pin.variant["stand-in"]
             .build(Platform::this().unwrap())
             .unwrap()
-            .md5
+            .digest
     );
     assert_eq!(variant.oracle.variant(), Some("stand-in"));
     assert_eq!(variant.oracle.version, pin.oracle.version);
@@ -319,7 +319,7 @@ fn the_fixture_whose_variant_binary_differs_from_its_md5_refuses_the_run() {
     let binary = root.join("php");
     let drifted = |err: &str| {
         err.contains(&binary.display().to_string())
-            && err.contains("the pin says 00000000000000000000000000000000")
+            && err.contains("the pin says md5 00000000000000000000000000000000")
             && err.contains("of the oracle variant drift")
     };
 
@@ -516,7 +516,7 @@ fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
         .variant("stand-in")
         .unwrap()
         .oracle
-        .md5;
+        .digest;
     for column in [Column::Re, Column::Ri] {
         let kept = crosscheck::kept(&store, &md5, "ctype", column);
         assert!(
@@ -571,7 +571,9 @@ fn phpt_run(root: &Path, manifest: &Manifest, engine: &Path) -> Reading {
         locks: Some(locks.path().to_path_buf()),
         ..phpt::Ask::default()
     };
-    let readings = phpt::run(root, manifest, &Registry::default(), &ask).unwrap();
+    let readings = phpt::run(root, manifest, &Registry::default(), &ask)
+        .unwrap()
+        .readings;
     let [reading] = &readings[..] else {
         panic!("{readings:#?}")
     };
@@ -595,7 +597,8 @@ fn phpt_runs_a_subset_whose_row_names_a_variant_under_it() {
         .variant("stand-in")
         .unwrap()
         .oracle
-        .md5;
+        .digest
+        .key();
     assert!(
         reading.message.contains(&format!(
             "kept as the subset's target under pin-{}-{md5}",
@@ -645,7 +648,7 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
         };
         phpt::run(&root, &manifest, &Registry::default(), &ask)
     };
-    let readings = run(&binary).unwrap();
+    let readings = run(&binary).unwrap().readings;
     assert_eq!(
         readings.len(),
         1,
@@ -657,7 +660,8 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
         .variant("stand-in")
         .unwrap()
         .oracle
-        .md5;
+        .digest
+        .key();
     let kept = root.join(format!(
         "target/harness/phpt-runs/pin-{}-{md5}/ext/fixture.json",
         manifest.pin().unwrap().source.tag
@@ -668,7 +672,7 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
         kept.display()
     );
 
-    let readings = run(&binary).unwrap();
+    let readings = run(&binary).unwrap().readings;
     assert!(
         readings.is_empty(),
         "the variant's target stands: {readings:#?}"
@@ -700,7 +704,7 @@ fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
         ..phpt::Ask::default()
     };
     let run = |manifest: &Manifest| phpt::run(&root, manifest, &Registry::default(), &ask);
-    let readings = run(&manifest).unwrap();
+    let readings = run(&manifest).unwrap().readings;
     let [reading] = &readings[..] else {
         panic!("{readings:#?}")
     };
@@ -712,18 +716,19 @@ fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
         .variant("stand-in")
         .unwrap()
         .oracle
-        .md5;
+        .digest
+        .key();
     let kept = root.join(format!(
         "target/harness/phpt-runs/pin-{}-{md5}/ext/fixture.json",
         manifest.pin().unwrap().source.tag
     ));
     assert!(kept.is_file(), "{}", kept.display());
-    let readings = run(&manifest).unwrap();
+    let readings = run(&manifest).unwrap().readings;
     assert!(readings.is_empty(), "the target stands: {readings:#?}");
 
     let mut main = manifest.clone();
     main.crates[0].oracle = None;
-    let readings = run(&main).unwrap();
+    let readings = run(&main).unwrap().readings;
     let [reading] = &readings[..] else {
         panic!("{readings:#?}")
     };
@@ -775,7 +780,9 @@ fn phpt_refuses_a_subset_under_a_variant_whose_binary_differs_from_its_md5() {
     let reading = phpt_run(&root, &manifest, &binary);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert!(
-        reading.message.contains(&format!("the pin says {wrong}"))
+        reading
+            .message
+            .contains(&format!("the pin says md5 {wrong}"))
             && reading.message.contains("of the oracle variant stand-in"),
         "{}",
         reading.message

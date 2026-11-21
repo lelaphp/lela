@@ -25,6 +25,7 @@
 
 pub(crate) mod built_from;
 mod closure;
+mod digest;
 #[cfg(test)]
 mod dockerfile;
 pub(crate) mod expect;
@@ -41,8 +42,10 @@ use built_from::BuiltFrom;
 #[cfg(test)]
 pub(crate) use closure::stand_in;
 pub(crate) use closure::{Closure, Minos, Own};
+pub use digest::Digest;
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub(crate) use formula::Formula;
+pub use profile::Profile;
 pub use propose::{Proposal, propose};
 pub use variant::{Build, Oracles, Platform, Provenance, Variant};
 
@@ -336,7 +339,8 @@ impl Sapi {
 #[serde(deny_unknown_fields)]
 pub struct Host {
     pub path: PathBuf,
-    pub md5: String,
+    #[serde(flatten)]
+    pub digest: Digest,
 }
 
 impl Host {
@@ -344,23 +348,22 @@ impl Host {
     /// as [`Pin`]'s does for `php`. Reached through
     /// [`Oracle::host_asserted`], which holds the closure first.
     fn assert_digest(&self) -> Result<()> {
-        let actual = md5_of(&self.path, "the pinned host at ")?;
-        if actual != self.md5 {
+        let bytes = bytes_of(&self.path, "the pinned host at ")?;
+        if let Err(actual) = self.digest.holds(&bytes) {
             bail!(
-                "{} has md5 {actual}; the pin's [sapi] says {}. Report the drift; the pin moves only by a person's hand",
+                "{} has {actual}; the pin's [sapi] says {}. Report the drift; the pin moves only by a person's hand",
                 self.path.display(),
-                self.md5
+                self.digest
             );
         }
         Ok(())
     }
 }
 
-/// The md5 of the file at `path`, as the pin names a binary by, `what`
-/// naming it before its path where the file cannot be read.
-fn md5_of(path: &Path, what: &str) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("reading {what}{}", path.display()))?;
-    Ok(format!("{:x}", md5::compute(bytes)))
+/// The bytes of the file at `path`, whose digest the pin names a binary
+/// by, `what` naming it before its path where the file cannot be read.
+fn bytes_of(path: &Path, what: &str) -> Result<Vec<u8>> {
+    fs::read(path).with_context(|| format!("reading {what}{}", path.display()))
 }
 
 /// A count of digest assertions: disclosure, so a test can hold a lane to
@@ -387,7 +390,8 @@ pub struct Binary {
     #[serde(default)]
     pub(crate) formula: Formula,
     pub path: PathBuf,
-    pub md5: String,
+    #[serde(flatten)]
+    pub digest: Digest,
     /// The oracle variant this binary is, none for `[oracle]`'s own: set
     /// by [`Pin::variant`], not a value of the file.
     #[serde(skip)]
@@ -399,6 +403,12 @@ pub struct Binary {
 }
 
 impl Binary {
+    /// Whether the pin names a build of this binary for this machine:
+    /// `[oracle]`'s always, and a variant's where its platform pins one.
+    pub(crate) fn is_pinned(&self) -> bool {
+        self.unpinned.is_none()
+    }
+
     /// The pinned php on this machine: its path when a file is there, and
     /// otherwise an error naming the path and the version, and the variant
     /// where it is one. What a test that spawns php asks through
@@ -1018,7 +1028,7 @@ impl Pin {
             version: self.oracle.version.clone(),
             formula: self.oracle.formula,
             path: build.map(|b| b.path.clone()).unwrap_or_default(),
-            md5: build.map(|b| b.md5.clone()).unwrap_or_default(),
+            digest: build.map(|b| b.digest.clone()).unwrap_or_default(),
             variant: Some(name.to_owned()),
             unpinned,
         };
@@ -1073,12 +1083,12 @@ impl Pin {
             bail!("{why}");
         }
         let path = &self.oracle.path;
-        let actual = md5_of(path, "the pinned php at ")?;
-        if actual != self.oracle.md5 {
+        let bytes = bytes_of(path, "the pinned php at ")?;
+        if let Err(actual) = self.oracle.digest.holds(&bytes) {
             bail!(
-                "{} has md5 {actual}; the pin says {} for php {}{}. Report the drift; the pin moves only by a person's hand",
+                "{} has {actual}; the pin says {} for php {}{}. Report the drift; the pin moves only by a person's hand",
                 path.display(),
-                self.oracle.md5,
+                self.oracle.digest,
                 self.oracle.version,
                 self.oracle.of()
             );
@@ -1963,7 +1973,7 @@ pub const ENGINE: &str = hosts::CLI.binary;
 /// with every workspace member's features unified, the harness's
 /// extensions among them, which is not the binary the lane measures.
 pub(crate) fn engine_build() -> String {
-    format!("cargo {}", profile::hosts().join(" "))
+    format!("cargo {}", profile::hosts(profile::LANE).join(" "))
 }
 
 /// The extensions php names otherwise than their crates, the module's
@@ -1997,8 +2007,12 @@ pub(crate) fn crate_name(module: &str) -> String {
 /// design §8's `ScriptExec` seam, shared by `phpt` and `witness`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Runner {
-    /// The engine's own binary, one process per program.
-    Engine(PathBuf),
+    /// The engine's own binary, one process per program, and the profile
+    /// it was built in where the lane knows it: the build directory
+    /// [`Runner::resolve`] found it in, or the build the lane ran; none
+    /// for a binary named on the command line, whose path says where it
+    /// stands and not how it was built.
+    Engine(PathBuf, Option<Profile>),
     /// The engine linked into the harness, served in this process through
     /// [`linked::serve`]: the other adapter of design §8's `ScriptExec`
     /// seam, and the engine as much as the binary is, so its reading is a
@@ -2041,14 +2055,14 @@ impl Runner {
     ) -> Result<Runner> {
         if let Some(path) = named {
             let path = named_binary(path)?;
-            let digest = md5_of(&path, "")?;
-            return Ok(if digest == pin.oracle.md5 {
+            let bytes = bytes_of(&path, "")?;
+            return Ok(if pin.oracle.digest.holds(&bytes).is_ok() {
                 // The pinned oracle is a control and never this tree's
                 // engine, so when the tree was last written says nothing
                 // about it; the pin holds it by its digest instead.
                 Runner::Control(path)
             } else {
-                against_the_tree(root, layout, path)
+                against_the_tree(root, layout, path, None)
             });
         }
         let mut behind = None;
@@ -2058,7 +2072,7 @@ impl Runner {
             if !built.is_file() {
                 continue;
             }
-            match against_the_tree(root, layout, built) {
+            match against_the_tree(root, layout, built, Some(profile)) {
                 Runner::Stale(why) => {
                     behind.get_or_insert(Runner::Stale(why));
                 }
@@ -2084,10 +2098,21 @@ impl Runner {
         )))
     }
 
+    /// The profile of the engine's binary, where it is the engine's and
+    /// the lane knows how it was built: what a reading names of the build
+    /// it judged. The control, the linked engine, and a rung where nothing
+    /// ran have none.
+    pub fn profile(&self) -> Option<Profile> {
+        match self {
+            Runner::Engine(_, profile) => *profile,
+            _ => None,
+        }
+    }
+
     /// The binary, when there is one to run.
     pub fn binary(&self) -> Option<&Path> {
         match self {
-            Runner::Engine(path) | Runner::Control(path) => Some(path),
+            Runner::Engine(path, _) | Runner::Control(path) => Some(path),
             Runner::Linked | Runner::Stale(_) | Runner::Absent(_) => None,
         }
     }
@@ -2102,7 +2127,7 @@ impl Runner {
     /// the reading is already stamped with, and the two rungs where
     /// nothing ran carry why instead.
     pub fn stamp(&self) -> Option<String> {
-        let Runner::Engine(path) = self else {
+        let Runner::Engine(path, _) = self else {
             return None;
         };
         Some(match fs::read(path) {
@@ -2131,9 +2156,9 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
     fs::canonicalize(path).with_context(|| format!("making {} absolute", path.display()))
 }
 
-/// One binary held to the tree a lane's reading is stamped with: itself
-/// where the engine's sources are no newer than it, and [`Runner::Stale`]
-/// where one of them is.
+/// One binary held to the tree a lane's reading is stamped with: itself,
+/// built in `profile` where that is known, where the engine's sources are
+/// no newer than it, and [`Runner::Stale`] where one of them is.
 ///
 /// The engine's binary carries no digest of its own sources the way a
 /// build of the harness does (harness-design.md §4.4), so what says
@@ -2153,7 +2178,12 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
 /// held to the tree with the engine's, and the lot is behind the tree when
 /// any is. Each is held to its own dep-info, so writing `sapi/fpm` moves
 /// no `php`, as cargo relinks none.
-fn against_the_tree(root: &Path, layout: &Layout, path: PathBuf) -> Runner {
+fn against_the_tree(
+    root: &Path,
+    layout: &Layout,
+    path: PathBuf,
+    profile: Option<Profile>,
+) -> Runner {
     let behind = hosts::HOSTS.iter().find_map(|host| {
         // The binary under test is `path`, whatever its name; the other
         // hosts stand beside it by theirs.
@@ -2168,7 +2198,7 @@ fn against_the_tree(root: &Path, layout: &Layout, path: PathBuf) -> Runner {
         (written > built).then_some((binary, source))
     });
     let Some((path, source)) = behind else {
-        return Runner::Engine(path);
+        return Runner::Engine(path, profile);
     };
     Runner::Stale(format!(
         "the engine's binary at {} was built before {} was last written, so a lane running it \

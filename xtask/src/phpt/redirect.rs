@@ -37,6 +37,13 @@ use crate::tally;
 /// id and its name.
 const VIA: &str = " via ";
 
+/// Whether the verdict keyed `id` is of a test a redirecting test ran,
+/// `<test> via <redirecting test>` ([`Test::id`]), and not of a test run
+/// as itself.
+pub(crate) fn redirected(id: &str) -> bool {
+    id.contains(VIA)
+}
+
 /// Whether `keys`, the verdicts a target kept, hold every test of the set
 /// the redirecting test keyed `by` ran, as the set stands in `subset`'s
 /// tree now: the tests kept through it, each keyed `<test> via

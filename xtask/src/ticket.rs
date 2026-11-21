@@ -1438,7 +1438,8 @@ fn judged(
             format!("{ticket}: {boxes}; closed already, nothing changed at the tracker"),
         ),
         Act::Close(Verdict::Withdrawn(reason), successors, _) => {
-            let comment = format!("{WITHDRAWN_BY}{}: {reason}; {boxes}", reading.commit);
+            let commit = crate::track::short(&reading.commit);
+            let comment = format!("{WITHDRAWN_BY}{commit}: {reason}; {boxes}");
             closing(&successors, &comment, &format!("withdrawn: {reason}; "))
         }
         _ if !criteria.found => (
@@ -1481,7 +1482,7 @@ fn judged(
         Act::Close(Verdict::Done, successors, Reach::Landed) => {
             let comment = format!(
                 "Closed by `xtask ticket close` at {}: {boxes}",
-                reading.commit
+                crate::track::short(&reading.commit)
             );
             closing(&successors, &comment, "")
         }
@@ -1545,7 +1546,7 @@ fn withdrawn_before(root: &Path, ticket: Ticket, criteria: &Criteria) -> Result<
             "{ticket}: {} of {} criteria ticked; withdrawn by the close at {}: {}",
             criteria.ticked.len(),
             criteria.count(),
-            close.commit,
+            crate::track::short(&close.commit),
             close.message
         )
     }))
@@ -1926,7 +1927,7 @@ fn ready(
         .map_err(|err| format!("{key} could not be written: {err:#}; not ready"))?;
     Ok(format!(
         "{opened}; {said}; ready to merge at {}, recorded as {key}; the merge into main closes it",
-        reading.commit
+        crate::track::short(&reading.commit)
     ))
 }
 
@@ -1986,7 +1987,7 @@ fn close(
     })?;
     let closed = format!(
         "closed by xtask ticket close at {}{}",
-        reading.commit,
+        crate::track::short(&reading.commit),
         session_id
             .map(|id| format!(" in session {id}"))
             .unwrap_or_default()

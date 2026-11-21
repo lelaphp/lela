@@ -83,6 +83,8 @@ done::judge
 done::run
 done::run_hook
 done::scopes_of
+exit::NOT_READY
+exit::UNFINISHED
 generated::write_all
 hostile::INSTRUMENT
 hostile::OWING
@@ -183,6 +185,11 @@ oracle::Binary::absent
 oracle::Binary::file
 oracle::Binary::variant
 oracle::Build
+oracle::Digest
+oracle::Digest::holds
+oracle::Digest::key
+oracle::Digest::md5
+oracle::Digest::sha256
 oracle::ENGINE
 oracle::Ended
 oracle::Host
@@ -219,6 +226,7 @@ oracle::Pin::variant
 oracle::Platform
 oracle::Platform::key
 oracle::Platform::this
+oracle::Profile
 oracle::Program
 oracle::Promise
 oracle::Promise::or_skip
@@ -234,6 +242,7 @@ oracle::Recipe
 oracle::Regime
 oracle::Runner
 oracle::Runner::binary
+oracle::Runner::profile
 oracle::Runner::resolve
 oracle::Runner::stamp
 oracle::SKIPPED_VARIABLE
@@ -290,6 +299,8 @@ permit::run
 phpt::Ask
 phpt::Engine
 phpt::Lane
+phpt::Ran
+phpt::Ran::whole
 phpt::kept_run
 phpt::run
 port_map::CENSUS

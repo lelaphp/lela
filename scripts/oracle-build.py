@@ -12,12 +12,14 @@ and `--tree DIR` builds from another checkout of the pinned tag than
 `[source]`'s path, as the oracle runner's corpus checkout):
   scripts/oracle-build.py configure-line
       Print ci/oracle/configure.toml afresh from the pinned oracle's
-      `php -n -i` "Configure Command" row, after asserting its md5.
+      `php -n -i` "Configure Command" row, after holding it to the pin's
+      digest: its `sha256` where `[oracle]` carries one, its `md5` otherwise.
   scripts/oracle-build.py build <platform> <variant> [--jobs N] [--fresh]
       Build for `darwin-arm64` here, or for `linux-x86_64` or
       `linux-aarch64` in Docker (ci/oracle/Dockerfile); the binary lands at
       target/oracle/<platform>/<variant>/php, and the last line is the
-      platform's table for the pin. On Linux php-fpm lands beside it, and
+      platform's table for the pin, the binary's `md5` and `sha256` both,
+      so it holds under a pin of either digest. On Linux php-fpm lands beside it, and
       for `main` its `[sapi.<platform>]` table is printed before that line
       and written to sapi.toml: the php-fpm the bench's tables take as
       their baseline on CI's Linux runner. On macOS a person lays
@@ -26,7 +28,7 @@ and `--tree DIR` builds from another checkout of the pinned tag than
       packages that ship the libraries php and php-fpm link, which a host
       running them out of the image installs.
       The darwin-arm64 table names the digest of the pin's `[closure]`, the
-      Homebrew kegs the build is made against, beside its md5.
+      Homebrew kegs the build is made against, beside its digests.
   scripts/oracle-build.py closure
       Print that digest: SHA-256 over each keg's `name=version\n` in name
       order, as xtask's `Closure::digest` makes it and its tests hold.
@@ -67,7 +69,7 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
-from typing import NoReturn
+from typing import Callable, NoReturn
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIGURE = ROOT / "ci/oracle/configure.toml"
@@ -151,6 +153,20 @@ def md5(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
 
 
+def sha256(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def held(table: dict, where: str) -> tuple[str, str, Callable[[Path], str]]:
+    """The key, value and function of the digest a pinned table holds its
+    binary to, as xtask's `oracle::Digest` reads it: its `sha256` wherever
+    it carries one, and its `md5` where it does not."""
+    for key, of in (("sha256", sha256), ("md5", md5)):
+        if key in table:
+            return key, table[key], of
+    fail(f"{where} names neither md5 nor sha256")
+
+
 def run(argv, **kwargs) -> subprocess.CompletedProcess:
     print("+", shlex.join(str(a) for a in argv), file=sys.stderr, flush=True)
     return subprocess.run(argv, check=True, **kwargs)
@@ -218,8 +234,9 @@ class Pin:
 def configure_line(pin: Pin) -> None:
     """Print ci/oracle/configure.toml from the pinned oracle."""
     php = Path(pin.oracle["path"])
-    if md5(php) != pin.oracle["md5"]:
-        fail(f"{php} is not the pinned oracle (md5 {md5(php)}, the pin says {pin.oracle['md5']})")
+    key, pinned, of = held(pin.oracle, "[oracle]")
+    if of(php) != pinned:
+        fail(f"{php} is not the pinned oracle ({key} {of(php)}, the pin says {pinned})")
     info = subprocess.run([php, "-n", "-i"], check=True, capture_output=True, text=True).stdout
     row = next((line for line in info.splitlines() if line.startswith("Configure Command => ")), None)
     if row is None:
@@ -231,8 +248,8 @@ def configure_line(pin: Pin) -> None:
     print("# \"Configure Command\" row prints it. Written by")
     print("# `scripts/oracle-build.py configure-line` and read by its `build`, which drops")
     print("# the install paths, adds a variant's flags, and refuses this file once the")
-    print("# pin's [oracle].md5 is not the one it was read from.")
-    print(f'md5 = "{pin.oracle["md5"]}"')
+    print("# pin's [oracle] digest is not the one it was read from.")
+    print(f'{key} = "{pinned}"')
     print("args = [")
     for arg in args[1:]:
         print(f"    {toml_string(arg)},")
@@ -247,8 +264,10 @@ def arguments(pin: Pin, plat: str) -> list[str]:
     """The configure line for `plat`: the oracle's, its install paths
     dropped, the fixed prefix, the variant's flags and PHP_UNAME."""
     line = tomllib.loads(CONFIGURE.read_text())
-    if line["md5"] != pin.oracle["md5"]:
-        fail(f"{CONFIGURE.relative_to(ROOT)} was read from {line['md5']}, the pin's oracle is {pin.oracle['md5']}; run `configure-line` again")
+    key, pinned, _ = held(pin.oracle, "[oracle]")
+    if line.get(key) != pinned:
+        read = line.get("sha256", line.get("md5"))
+        fail(f"{CONFIGURE.relative_to(ROOT)} was read from {read}, the pin's oracle is {pinned}; run `configure-line` again")
     options, variables = [], []
     for arg in line["args"]:
         if arg.startswith(INSTALL_PATHS):
@@ -296,12 +315,14 @@ def build(pin: Pin, plat: str, jobs: int, fresh: bool) -> None:
     else:
         made = f'image = "{build_linux(pin, plat, commit, epoch, args, jobs, fresh, out)}"'
     digest = md5(out / "php")
-    table = f'path = "{PREFIX}/{pin.variant}/bin/php", md5 = "{digest}", {made}'
+    table = f'path = "{PREFIX}/{pin.variant}/bin/php", md5 = "{digest}", sha256 = "{sha256(out / "php")}", {made}'
     (out / "pin.toml").write_text(f"{plat} = {{ {table} }}\n")
     print(f"{digest}  {out / 'php'}")
+    print(f"{sha256(out / 'php')}  {out / 'php'}")
     if plat != "darwin-arm64" and pin.variant == "main":
         fpm = md5(out / "php-fpm")
-        sapi = f'[sapi.{plat}]\nfpm = {{ path = "{PREFIX}/main/sbin/php-fpm", md5 = "{fpm}", {made} }}\n'
+        both = f'md5 = "{fpm}", sha256 = "{sha256(out / "php-fpm")}"'
+        sapi = f'[sapi.{plat}]\nfpm = {{ path = "{PREFIX}/main/sbin/php-fpm", {both}, {made} }}\n'
         (out / "sapi.toml").write_text(sapi)
         print(f"{fpm}  {out / 'php-fpm'}")
         print(sapi, end="")

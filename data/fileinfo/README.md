@@ -9,7 +9,8 @@ The baseline is main `06eb2a8662e4e277f19a5c53ceb602ed9a45ce2e`.
 
 `python3 scripts/fileinfo-proof.py --scratch <approved-existing-directory>` reproduces
 `oracle.json`. `--accept` captures observations, not rustdoc witness verdicts.
-The runner verifies the pinned PHP MD5 and php-src commit, invokes the existing
+The runner verifies the pinned PHP's digest, the SHA-256 where `[oracle]` carries
+one and the MD5 where it carries only that, and the php-src commit, invokes the existing
 single-extension witness to assert the complete pinned keg closure, checks vendored
 algorithm/database inputs against that tree, records SHA-256/size/source lines,
 and records the pin digest, recipe and before/after closure assertions. Arguments,
@@ -23,7 +24,8 @@ database exceptions also retain a hex representation of the exact message
 bytes, alongside the readable UTF8-substituted JSON text. Fatal memory
 refusal is an observation, not a passing classification.
 
-`python3 -m unittest discover -s scripts/tests -p test_fileinfo_proof.py` runs
+`python3 -m unittest discover -s scripts/tests -p test_fileinfo_proof.py` holds
+the pin check to either digest and to a pin with neither, and runs
 three retained negative controls: changed defined behaviour fails comparison,
 undefined sampled bytes do not become an expected value, and identity/pin
 changes still fail. The CLI comparison has been exercised with an intentionally

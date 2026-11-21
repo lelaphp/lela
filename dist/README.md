@@ -108,7 +108,7 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
 
   | ref | tags |
   |---|---|
-  | `main` | `edge-<variant>`, and `sha-<commit>-<variant>` with the full commit |
+  | `main` | `nightly-<variant>`, which moves on every merge to `main`, not once a night: the word names the channel, not a schedule; and `sha-<commit>-<variant>` with the full commit |
   | `v<version>` | `<version>-<variant>`, and the bare `<variant>` unless the version is a pre-release or older than a release tag the checkout holds |
 
   Whether a release is the newest is read from the checkout's release
@@ -142,7 +142,7 @@ workflow pass is one buildx v0.14.0 knows, the oldest they serve:
 `imagetools create --metadata-file`, v0.32.0, is the one it may not pass.
 
 Each image is labelled, and each list annotated, with standard OCI keys
-alone: `source`, `revision`, `version` (`edge` from `main`) and
+alone: `source`, `revision`, `version` (`nightly` from `main`) and
 `licenses`, and three that replace the Ubuntu base's, since a build can
 replace a label and cannot remove one: `description` and `title`, `Lela`, and `created`, the
 commit's time in RFC 3339, UTC, the instant the build's
@@ -175,9 +175,14 @@ dist/publish.py join v0.1.0-alpha.1 --dry-run
 
 `dist/prune.py` deletes the versions no tag is pulled by: one last updated
 more than 30 days ago whose tags are all `sha-` tags, or which has none,
-unless a kept manifest list names it or it is a referrer of a kept one. A
-version tag, a bare variant, an `edge-` tag and a tag of any other kind
-are never deleted. `dist/prune.py --dry-run` names each version it would
+unless a kept manifest list names it or it is a referrer of a kept one.
+It also deletes, however young, every list under an `edge-` tag, the name
+`nightly-` replaced, so that no version keeps both names. GHCR deletes a
+version and not one of its tags, so the `sha-` tag that shares an `edge-`
+list's version goes with it, before its 30 days are up; the list's images
+and attestations, untagged and named by nothing kept, go once they are
+older than 30 days. A version tag, a bare variant, a `nightly-` tag and a
+tag of any other kind are never deleted. `dist/prune.py --dry-run` names each version it would
 delete, and deletes none. A listing gh cannot give deletes nothing, and a
 deletion that fails stops the run, naming the versions deleted before it
 and those not. CI runs both scripts; a person runs them with
@@ -224,18 +229,79 @@ dist/release.py publish v0.1.0-alpha.1 /tmp/release
   macOS tarball carries its libraries, below, and each Mach-O in it an
   ad-hoc signature, which `build` reads before the smoke, with no
   Developer ID and no notarization.
-- `publish` takes the three tarballs from the directory, refusing a
-  missing one or one of another version, writes `SHA256SUMS` over them
-  with `scripts/dist-sums.sh`, stages `install.sh` beside them (below), and
-  creates the GitHub Release of the tag with the five attached. The release is marked a pre-release when the
-  version is one, and the latest when its images move the bare variant
-  tags, which it reads as `join` does, refusing a shallow checkout.
+- `publish` takes the tarball of each platform from the directory,
+  refusing a missing one or one of another version, stages `install.sh`
+  (below) and `platforms.json` beside them, writes `SHA256SUMS` over every
+  file staged with `scripts/dist-sums.sh`, and creates the GitHub Release
+  of the tag with them and the sums attached. The release is marked a
+  pre-release when the version is one, and the latest when its images move
+  the bare variant tags, which it reads as `join` does, refusing a shallow
+  checkout.
+
+The platforms are one table, `PLATFORMS` in `dist/release.py`: a row per
+platform with its name, the Docker platform a Linux tarball is built for,
+the `uname -s` and `uname -m` words of a machine of it, the checks of
+`install.sh` it is held to (`ubuntu`, `macos`), and whether `install.sh`
+installs on it. A row that installs held to checks the script has not is
+refused by `build` and `publish`, their dry runs included: a musl Linux
+is Linux to `uname -s`, so its row is refused when the table renders, not
+by the Ubuntu checks on a user's machine. A build is asked for a platform
+of the table and no other, `publish` takes the table's tarballs, and `platforms.json`
+and the installer's platforms are written from it, so a platform added to
+the table is in each of them, and a release's reader takes its
+platforms from that file and not from the installer's text:
+
+```json
+{
+  "version": "0.1.0-alpha.1",
+  "platforms": [
+    {
+      "name": "darwin-arm64",
+      "tarball": "lela-0.1.0-alpha.1-darwin-arm64.tar.gz",
+      "installs": true
+    },
+    ...
+  ]
+}
+```
+
+An Intel Mac is a refusal of the installer, not a platform, so it is no
+row of the table and none of `platforms.json`.
+
+The release workflow's build matrix is printed from the table too, so a
+platform is added to `PLATFORMS` and nowhere in the workflow:
+
+```sh
+dist/release.py matrix
+```
+
+It prints one line of JSON, which the workflow's `check` job writes to
+its outputs and each build job reads with `fromJSON`: the table's
+platforms in its order, whose tarballs the `release` job lays down, and
+under `families` a matrix for each family's job, `darwin` for the
+platforms cargo builds on a Mac and `linux` for those the Dockerfile
+builds, a row per platform with its name and its Docker platform. Every
+family is printed, one with no row too. It takes no tag and holds
+nothing. A row's runner stays the workflow's to choose, by its family
+and its Docker platform, since the runners are the repository's
+variables and not the release's:
+
+```json
+{"platforms": ["darwin-arm64", "linux-aarch64", "linux-x86_64"], "families": {"darwin": {"include": [{"platform": "darwin-arm64", "docker": null}]}, "linux": {"include": [...]}}}
+```
+
+A release attaches the tarballs, `install.sh`, `platforms.json` and
+`SHA256SUMS`, which names every other file the release attaches, the
+installer included, in the format `sha256sum -c` reads.
 
 A real `build` or `publish` refuses a tree with changes, and a tag that is
 not HEAD. `--dry-run` prints what the step would make and makes nothing:
 `build` the platform, the commit, the tarball and its smoke; `publish` the
-artifacts, `install.sh` among them, the release's fields and the image tags `dist/publish.py` would
-push, which a pre-release's are without a bare variant:
+artifacts, the release's fields, `platforms.json` as it would be written,
+a `platforms.json` line per line of the file, the installer's platforms,
+an `install.sh` line per machine, and the image tags
+`dist/publish.py` would push, which a pre-release's are without a bare
+variant:
 
 ```sh
 dist/release.py publish v0.1.0-alpha.1 --dry-run
@@ -366,11 +432,14 @@ curl -fsSL https://github.com/lelaphp/lela/releases/download/v<version>/install.
 ```
 
 `dist/install.sh` is its source, POSIX `sh`, and `publish` bakes the
-release into its four empty lines: the hosts' name, the version, the
-Ubuntu release of the Dockerfile's `ARG UBUNTU` and the URL of the
-release's assets. So the script installs the release it is attached to,
-never the latest: a pre-release is never GitHub's latest. The source run
-as it is names no release and is refused.
+release into its five empty lines: the hosts' name, the version, the
+Ubuntu release of the Dockerfile's `ARG UBUNTU`, the URL of the
+release's assets, and its platforms, rendered from the platform table a
+line per machine, `<platform> installs|refuses <checks> <system>
+<machine>`, the checks `none` where it refuses. So
+the script installs the release it is attached to, never the latest: a
+pre-release is never GitHub's latest. The source names no release and no
+platform; run as it is, it is refused.
 
 It picks the tarball of the machine's platform, downloads it and
 `SHA256SUMS` from the same release with `curl` or `wget`, whichever is
@@ -380,19 +449,42 @@ tarball whole into `$XDG_DATA_HOME/lela/<version>`,
 `~/.local/share/lela/<version>` where that is unset, since the XDG Base
 Directory specification gives `~/.local/share` to an application's own
 files, and links `~/.local/bin/lela` to its `bin/lela`; `lela-cgi` and
-`lela-fpm` stay in the directory's `bin/` and `sbin/`. `SHA256SUMS` names
-the tarballs alone, not `install.sh`: the script and the sums come from
-the one release page, unsigned, so a sum of the script would vouch for
-nothing the page does not, and a signing step is outside spec #9.
+`lela-fpm` stay in the directory's `bin/` and `sbin/`. The script reads
+the line of its tarball in `SHA256SUMS` and passes over the others, which
+name `install.sh` and `platforms.json` too (#32), so a user who downloads
+the script before running it can check it against the sums:
 
-- macOS on Apple silicon alone, a shell under Rosetta included: an Intel
-  Mac is refused, and so is a macOS older than the `macos` line of the
-  tarball's `bundled-libraries.txt`, both by name.
-- Linux on `x86_64` and `aarch64`, Ubuntu of that release alone, read
-  from `/etc/os-release`; each package of `runtime-packages.txt` that
-  `dpkg-query` says is not installed is named, with the `sudo apt-get
-  install` line that installs them, which the script does not run.
-- Any other platform is refused, naming the three a release has.
+```sh
+curl -fsSLO https://github.com/lelaphp/lela/releases/download/v<version>/install.sh
+curl -fsSLO https://github.com/lelaphp/lela/releases/download/v<version>/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS && sh install.sh
+```
+
+`shasum -a 256 -c --ignore-missing SHA256SUMS` reads it the same where
+there is no `sha256sum`.
+
+The script and the sums still come from the one release page, unsigned,
+so the sum vouches for a download against the page and not for the page.
+
+- It takes the row of `uname -s` and `uname -m`, on a Mac whose
+  `sysctl -n hw.optional.arm64` says 1 the machine `arm64`, since a shell
+  under Rosetta says `x86_64` there too. A row that says `refuses` is
+  refused, naming the release to download its tarball from. A row that
+  installs is held to the checks it names, `before_<checks>` before
+  anything is fetched and `after_<checks>` over the unpacked tarball, the
+  functions `dist/release.py` reads the script's checks from; the checks
+  follow the row, never `uname -s`.
+- `macos`: macOS on Apple silicon alone, a shell under Rosetta included:
+  an Intel Mac, which no row names, is refused, and so is a macOS older
+  than the `macos` line of the tarball's `bundled-libraries.txt`, both by
+  name.
+- `ubuntu`: Linux on `x86_64` and `aarch64`, Ubuntu of that release
+  alone, read from `/etc/os-release`; each package of
+  `runtime-packages.txt` that `dpkg-query` says is not installed is named,
+  with the `sudo apt-get install` line that installs them, which the
+  script does not run.
+- Any other platform is refused, naming those the installer installs on,
+  the rows of `platforms.json` that say it does.
 
 Every check runs before anything is put in place, the unpacked `lela -v`
 among them, and a refusal leaves the home as it was. It asks for no

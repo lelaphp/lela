@@ -13,8 +13,8 @@ use std::time::{Duration, SystemTime};
 
 use xtask::divergence::{Registry, Status};
 use xtask::oracle::{
-    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, SKIPPED_VARIABLE,
-    Split, TREE_VARIABLE, Verdict,
+    self, PROMISE_VARIABLE, Pin, Profile, Program, Promise, Promised, Regime, Runner,
+    SKIPPED_VARIABLE, Split, TREE_VARIABLE, Verdict,
 };
 use xtask::scratch::Tree;
 
@@ -348,7 +348,7 @@ fn a_file_runs_in_its_own_directory() {
 fn a_digest_mismatch_refuses_the_run() {
     let Some(mut pin) = pin() else { return };
     let wrong = "0".repeat(32);
-    pin.oracle.md5 = wrong.clone();
+    pin.oracle.digest = oracle::Digest::Md5(wrong.clone());
     let err = pin
         .oracle()
         .run(Program::Snippet("echo 1;"), None)
@@ -1433,7 +1433,7 @@ fn a_binary_the_tree_has_moved_past_is_passed_over_for_one_it_has_not() {
     let pin = pin_with_path(root.path());
     assert_eq!(
         Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
-        Runner::Engine(fresh),
+        Runner::Engine(fresh, Some(Profile::Dev)),
         "the debug binary the tree has not moved past is the lane's engine"
     );
     // And the release binary alone is the skip, not a silent engine.
@@ -1466,13 +1466,13 @@ fn the_lanes_build_is_the_engine_before_release_and_passed_over_when_behind() {
     let pin = pin_with_path(root.path());
     assert_eq!(
         Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
-        Runner::Engine(lanes),
+        Runner::Engine(lanes, Some(Profile::ReleaseDa)),
         "the lanes' build is the engine before a release binary as fresh"
     );
     built(root.path(), "release-da", 3600);
     assert_eq!(
         Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
-        Runner::Engine(release),
+        Runner::Engine(release, Some(Profile::Release)),
         "a lanes' build the tree has moved past leaves the release binary the engine"
     );
 }
@@ -1510,7 +1510,7 @@ fn a_php_cgi_the_tree_has_moved_past_holds_back_the_php_beside_it() {
         .unwrap();
     assert_eq!(
         Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
-        Runner::Engine(fresh),
+        Runner::Engine(fresh, Some(Profile::Dev)),
         "a php-cgi the tree has not moved past leaves the php beside it the engine"
     );
 }
@@ -1549,7 +1549,7 @@ fn a_binary_cargo_leaves_standing_is_the_engine_and_one_it_relinks_is_not() {
     let pin = pin_with_path(root.path());
     assert_eq!(
         Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
-        Runner::Engine(binary.clone()),
+        Runner::Engine(binary.clone(), Some(Profile::ReleaseDa)),
         "nothing the binary is built from moved"
     );
     std::fs::write(&source, "// the kernels, written again\n").unwrap();
@@ -1569,7 +1569,10 @@ fn a_binary_the_tree_has_not_moved_past_is_the_engine_and_stamps_its_reading() {
     let fresh = built(root.path(), "release", 0);
     let pin = pin_with_path(root.path());
     let runner = Runner::resolve(root.path(), &layout(), &pin, None).unwrap();
-    assert_eq!(runner, Runner::Engine(fresh.clone()));
+    assert_eq!(
+        runner,
+        Runner::Engine(fresh.clone(), Some(Profile::Release))
+    );
     assert_eq!(runner.binary(), Some(fresh.as_path()));
     let stamp = runner.stamp().unwrap();
     let (path, digest) = stamp
@@ -1591,14 +1594,16 @@ fn a_tree_with_no_engine_source_leaves_every_binary_the_engine() {
     let pin = pin_with_path(root.path());
     assert_eq!(
         Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
-        Runner::Engine(old)
+        Runner::Engine(old, Some(Profile::Release))
     );
 }
 
 /// A binary named by a path relative to where `xtask` was invoked is the
 /// one its programs are handed by its absolute path: they run in the run's
 /// copy of the tree, where the relative path named nothing, and every test
-/// of the subset skipped for it. A path that names no file is
+/// of the subset skipped for it. Its profile is not known, though it
+/// stands in `target/release`: a path says where a binary is and not how
+/// it was built. A path that names no file is
 /// refused before anything runs, naming the path.
 #[test]
 fn a_named_binary_is_handed_on_by_its_absolute_path_and_one_not_there_is_refused() {
@@ -1615,7 +1620,12 @@ fn a_named_binary_is_handed_on_by_its_absolute_path_and_one_not_there_is_refused
     assert!(relative.is_relative(), "{}", relative.display());
     let runner = Runner::resolve(root.path(), &layout(), &pin, Some(&relative)).unwrap();
     let absolute = std::fs::canonicalize(&binary).unwrap();
-    assert_eq!(runner, Runner::Engine(absolute));
+    assert_eq!(runner, Runner::Engine(absolute, None));
+    assert_eq!(
+        runner.profile(),
+        None,
+        "a named binary's profile is not known, wherever it stands"
+    );
 
     let refused = Runner::resolve(
         root.path(),

@@ -563,6 +563,9 @@ pub fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Vec<Reading>> 
             }
             (Ok(engine), _) => counts(&oracle, engine, counted),
         };
+        // The counting build's profile, where this run built it.
+        let built = engine.as_ref().is_ok_and(|_| ask.engine.is_none());
+        reading.profile = built.then_some(profile::Profile::Release);
         tallied(counted, counts, &mut reading, &mut vote);
         if let Some(role) = counted.role.filter(|role| !role.votes()) {
             let said = format!("; its role, {}, votes nothing", role.name());

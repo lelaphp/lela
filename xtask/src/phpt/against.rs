@@ -275,7 +275,7 @@ impl Runs {
             layout: manifest.layout(),
             stood,
             snapshot,
-            commit: git::head_commit(root)?,
+            commit: track::short(&git::head_commit(root)?).to_owned(),
             corpus: format!("{} {}", source.tag, source.commit),
             recipe: manifest.pin_digest().to_owned(),
             base,
@@ -295,7 +295,7 @@ impl Runs {
         lane: Option<Lane>,
     ) -> Result<(Option<Target>, bool)> {
         if let (Runner::Control(oracle), None) = (runner, lane) {
-            let engine = format!("{} md5 {}", oracle.display(), pin.oracle.md5);
+            let engine = format!("{} {}", oracle.display(), pin.oracle.digest);
             if let Some(run) = self.kept(tally, engine) {
                 let target = Target::of(run);
                 target.keep(&self.root, pin, scope)?;
@@ -388,7 +388,7 @@ impl Runs {
     /// subset holds no test ([`Run::holds_a_test`]).
     fn run_of(&self, tally: &Tally, runner: &Runner) -> Option<Run> {
         let engine = match runner {
-            Runner::Engine(_) => runner.stamp()?,
+            Runner::Engine(..) => runner.stamp()?,
             Runner::Linked => "the linked engine".to_owned(),
             _ => return None,
         };
@@ -422,7 +422,7 @@ impl Runs {
             misses: BTreeMap::new(),
             skips: BTreeMap::new(),
         };
-        for judged in whole(tally).then_some(&tally.judged)? {
+        for judged in tally.whole().then_some(&tally.judged)? {
             let id = &judged.id;
             run.verdicts.insert(id.clone(), judged.judgement);
             if let Some(miss) = &judged.miss {
@@ -747,12 +747,6 @@ pub(crate) fn regressed(
         base.commit,
         listed(&names)
     )))
-}
-
-/// Whether a tally judged every test its subset holds, which a run or a
-/// target must to be kept.
-fn whole(tally: &Tally) -> bool {
-    tally.judged.len() == tally.found
 }
 
 /// What [`carry`] did with one worktree's kept runs.

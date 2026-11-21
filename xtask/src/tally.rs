@@ -253,6 +253,12 @@ impl<J: Judgement> Tally<J> {
         self.found.saturating_sub(self.judged.len()) as u64
     }
 
+    /// Whether the run judged every item it found: the one rule a subset's
+    /// run is kept by and a corpus run is whole by.
+    pub fn whole(&self) -> bool {
+        self.judged.len() == self.found
+    }
+
     /// The items that met what they were held to.
     pub fn met(&self) -> u64 {
         self.judged.iter().filter(|j| j.judgement.met()).count() as u64
@@ -299,9 +305,9 @@ impl<J: Judgement> Tally<J> {
             // was: `done` excuses the missing binary and not this.
             Runner::Absent(why) | Runner::Stale(why) => Outcome::Absent(why),
             Runner::Control(binary) => Outcome::Control(binary),
-            Runner::Engine(_) | Runner::Linked if !self.against().is_empty() => Outcome::Failed,
-            Runner::Engine(_) | Runner::Linked if self.met() == 0 => Outcome::NothingRan,
-            Runner::Engine(_) | Runner::Linked => Outcome::Passed,
+            Runner::Engine(..) | Runner::Linked if !self.against().is_empty() => Outcome::Failed,
+            Runner::Engine(..) | Runner::Linked if self.met() == 0 => Outcome::NothingRan,
+            Runner::Engine(..) | Runner::Linked => Outcome::Passed,
         }
     }
 
@@ -624,7 +630,7 @@ mod tests {
     }
 
     fn engine() -> Runner {
-        Runner::Engine(PathBuf::from("target/debug/php"))
+        Runner::Engine(PathBuf::from("target/debug/php"), None)
     }
 
     #[test]

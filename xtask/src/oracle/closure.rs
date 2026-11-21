@@ -1,7 +1,7 @@
 //! `[closure]` of the pin: the Homebrew kegs the pinned binaries load,
 //! each at the version Homebrew names it by (its `pkg_version`,
 //! `1.12_1`), held with php's digest as one oracle. The
-//! md5 holds php's own bytes and none of what it loads, so a `brew
+//! digest holds php's own bytes and none of what it loads, so a `brew
 //! upgrade` that moved pcre2 or libzip under it moved the oracle with no
 //! pin changing; this record is what such a move is refused against.
 //!
@@ -22,7 +22,7 @@
 //! upgrade` run for another reason passes it over. The walk sees a
 //! keg move only after it moved, by when the recorded version is gone from
 //! the Cellar; an unpinned keg is refused before it can. So is the keg the
-//! pinned binaries stand in themselves, php's own: the md5 sees it
+//! pinned binaries stand in themselves, php's own: the digest sees it
 //! move as the walk sees the others, after, when the pinned path is gone.
 //! A machine with no Homebrew prefix under its binaries, a Linux runner,
 //! holds neither, a binary under no Cellar, a variant's build, stands in
@@ -34,7 +34,7 @@
 //!
 //! **What a build was made against** is the record's digest, [`Closure::digest`]: a
 //! variant's macOS build is made against the Homebrew the record names, so
-//! its pin names the digest beside its md5, as a Linux build names its
+//! its pin names the closure's digest beside its own, as a Linux build names its
 //! image.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -800,15 +800,17 @@ mod tests {
         let fpm = root.join("Cellar/php/1/php-fpm");
         let zstd = root.join("opt/zstd/lib/libzstd.dylib");
         fs::write(&fpm, macho(&[zstd.to_str().unwrap()])).unwrap();
-        let md5 = |path: &Path| format!("{:x}", md5::compute(fs::read(path).unwrap()));
+        let md5 = |path: &Path| {
+            crate::oracle::Digest::Md5(format!("{:x}", md5::compute(fs::read(path).unwrap())))
+        };
         let mut pin = crate::oracle::Pin::default();
-        (pin.oracle.path, pin.oracle.md5) = (php.clone(), md5(&php));
+        (pin.oracle.path, pin.oracle.digest) = (php.clone(), md5(&php));
         pin.closure = Some(closure(&[RECORD[0], RECORD[1]]));
         // php reaches zstd only through zip, so take that load away.
         fs::write(root.join("Cellar/zip/1.12_1/lib/libzip.dylib"), macho(&[])).unwrap();
         pin.oracle().asserted().unwrap();
         let host = crate::oracle::Host {
-            md5: md5(&fpm),
+            digest: md5(&fpm),
             path: fpm,
         };
         pin.sapi.fpm = Some(host.clone());
