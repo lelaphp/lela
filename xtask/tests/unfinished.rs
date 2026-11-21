@@ -11,6 +11,7 @@
 use std::fs;
 use std::path::Path;
 
+use xtask::oracle::Promise;
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 
@@ -108,6 +109,34 @@ fn compile_identity_with_no_oracle_writes_its_skip_and_exits_as_unfinished() {
         .lines()
         .find(|l| l.starts_with("skip compile-identity "));
     assert!(printed.is_some(), "the skip is printed: {ran}");
+}
+
+/// An extension the binary renders, in a workspace whose binary cannot be
+/// built, having no `Cargo.toml`: the oracle renders it and the engine's
+/// side is served by nothing, so each column's reading fails as it did,
+/// naming why, and the run exits 4, a rendering it set out for not taken.
+#[test]
+fn crosscheck_with_no_engine_binary_writes_its_failure_and_exits_as_unfinished() {
+    let promised = Promise::Oracle.or_skip(pin().oracle.file().map(Path::to_path_buf));
+    if promised.unwrap().is_none() {
+        return;
+    }
+    let root = Tree::new("unfinished-crosscheck-unbuilt").unwrap();
+    scratch_workspace(workspace(), &root);
+    let ran = Run::at(&root)
+        .args(["crosscheck", "--ext", "standard"])
+        .go();
+    unfinished(&ran, "crosscheck");
+    let reading = Store::of_workspace(&root)
+        .read("crosscheck", "ext/standard")
+        .unwrap()
+        .expect("the failing reading");
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(
+        reading.message.contains("the engine rendered nothing"),
+        "{}",
+        reading.message
+    );
 }
 
 /// An extension with no oracle to render it: both columns' skips are

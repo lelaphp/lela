@@ -187,6 +187,11 @@ pub struct Ask {
 pub(crate) enum Rendering {
     /// The engine rendered nothing, and why.
     Absent(String),
+    /// Nothing could serve the engine's side, and why: a binary that did
+    /// not build, a linked engine that did not run the request, a server
+    /// that did not answer. Judged as [`Rendering::Absent`] is, it is a
+    /// rendering the run set out for and did not take.
+    Unserved(String),
     /// What the engine rendered.
     Bytes(Vec<u8>),
 }
@@ -261,7 +266,9 @@ fn keep(path: PathBuf, rendering: &[u8]) -> Result<PathBuf> {
 /// oracle's through the one comparison every lane uses.
 pub(crate) fn judge(registry: &Registry, id: &str, oracle: &[u8], engine: &Rendering) -> Judgement {
     match engine {
-        Rendering::Absent(why) => Judgement::Fail(format!("the engine rendered nothing: {why}")),
+        Rendering::Absent(why) | Rendering::Unserved(why) => {
+            Judgement::Fail(format!("the engine rendered nothing: {why}"))
+        }
         Rendering::Bytes(bytes) => match oracle::compare(registry, id, oracle, bytes) {
             Verdict::Same => Judgement::Pass,
             Verdict::Diverged(row) => Judgement::Diverged(row.reason.clone()),
@@ -434,11 +441,12 @@ pub fn run(
             };
             let pin = oracle.pin();
             // A reading taken under a variant says so, whatever it came to.
-            let told = |mut reading: Reading| {
+            // Beside it, whether the run took it ([`Took`]).
+            let told = |mut reading: Reading, taken: bool| {
                 if let Some(under) = pin.oracle.read_under() {
                     reading.message = format!("{}; {under}", reading.message);
                 }
-                Ok((reading, pin.oracle.absent().is_none()))
+                Ok((reading, taken))
             };
             if let Some(why) = pin.oracle.absent() {
                 reading.status = Status::Skip;
@@ -446,7 +454,7 @@ pub fn run(
                     "{}: nothing rendered under `{recipe}`; {why}",
                     reading.scope
                 );
-                return told(reading);
+                return told(reading, false);
             }
             oracle.asserted()?;
             let observed = if host == Host::Cli {
@@ -461,7 +469,7 @@ pub fn run(
                     reading.scope,
                     said(&observed)
                 );
-                return told(reading);
+                return told(reading, true);
             }
             let path = keep(
                 kept_at(
@@ -484,7 +492,7 @@ pub fn run(
             let kept = path.strip_prefix(root).unwrap_or(&path).display();
             let bytes = observed.stdout.len();
             reading.message = judgement.said(&reading.scope, &recipe, bytes, kept);
-            told(reading)
+            told(reading, !matches!(engine, Rendering::Unserved(_)))
         })?;
     let mut took = Took::default();
     for one in rendered {
@@ -559,7 +567,7 @@ fn rendering(
                 })
         };
         return Ok(match served {
-            Err(why) => (Rendering::Absent(why), None),
+            Err(why) => (Rendering::Unserved(why), None),
             Ok((served, profile)) if served.exit != Ended::Status(0) => {
                 (Rendering::Absent(said(&served)), profile)
             }
