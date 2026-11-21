@@ -14,6 +14,7 @@ use php_sapi::tier::{self, Argument, FrameRef, Request};
 
 use crate::bp::{Kind, OpArray, Resolution};
 use crate::cmd::{self, Command, Parameter};
+use crate::help;
 use crate::input::{self, Line};
 use crate::opcodes;
 use crate::out;
@@ -237,6 +238,7 @@ fn prompt_loop(s: &mut Session, here: &mut Here<'_>) -> Outcome {
         let mut rest = commands.into_iter();
         while let Some(command) = rest.next() {
             let asked = execute(s, here, &command);
+            s.paged_out();
             if std::mem::take(&mut s.left_log) {
                 return Outcome::LeftLog;
             }
@@ -271,6 +273,7 @@ pub fn serve_queued(s: &mut Session) {
     let mut rest = std::mem::take(&mut s.queued).into_iter();
     while let Some(command) = rest.next() {
         let asked = execute(s, &mut here, &command);
+        s.paged_out();
         if s.stopped.is_some() {
             s.queued = rest.collect();
             return;
@@ -543,7 +546,7 @@ static INFO: &[Def] = &[
 /// (`Z/sapi/phpdbg/phpdbg_set.c:28-46`).
 static SET: &[Def] = &[
     sub(&ROOT[17], "prompt", Some(b'p'), "|s", set_prompt),
-    sub(&ROOT[17], "pagination", Some(b'P'), "|b", unsupported),
+    sub(&ROOT[17], "pagination", Some(b'P'), "|b", set_pagination),
     sub(&ROOT[17], "color", Some(b'c'), "ss", set_color),
     sub(&ROOT[17], "colors", Some(b'C'), "|b", set_colors),
     sub(&ROOT[17], "break", Some(b'b'), "l|b", set_break),
@@ -551,7 +554,7 @@ static SET: &[Def] = &[
     sub(&ROOT[17], "quiet", Some(b'q'), "|b", set_quiet),
     sub(&ROOT[17], "stepping", Some(b's'), "|s", unsupported),
     sub(&ROOT[17], "refcount", Some(b'r'), "|b", unsupported),
-    sub(&ROOT[17], "lines", Some(b'l'), "|l", unsupported),
+    sub(&ROOT[17], "lines", Some(b'l'), "|l", set_lines),
 ];
 
 /// `phpdbg_watch_commands` (`Z/sapi/phpdbg/phpdbg_watch.c:124-129`):
@@ -2420,9 +2423,12 @@ fn clear(s: &mut Session, _: &mut Here<'_>, _: &[Parameter]) -> Reply {
     Reply::Success
 }
 
-/// `PHPDBG_COMMAND(help)`, as far as a topic nobody has.
+/// `PHPDBG_COMMAND(help)`, as far as no topic, the overview, and a topic
+/// nobody has.
 fn help(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
-    if let Some(Parameter::Str(topic)) = params.first()
+    if params.is_empty() {
+        help::overview(s);
+    } else if let Some(Parameter::Str(topic)) = params.first()
         && !ROOT.iter().any(|def| {
             def.name.as_bytes().starts_with(topic.as_slice())
                 || (topic.len() == 1 && def.alias == Some(topic[0]))
@@ -2676,6 +2682,42 @@ fn set_breaks(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply 
         Some(_) => s
             .out
             .error(b"set breaks used incorrectly: set breaks <on|off>"),
+    }
+    Reply::Success
+}
+
+/// `PHPDBG_SET(pagination)`: whether what phpdbg writes to stdout goes
+/// through the pager, or that from here it does or does not.
+fn set_pagination(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    match params.first() {
+        None => {
+            let shown = match s.out.pagination() {
+                out::Pagination::On => "on",
+                out::Pagination::Off => "off",
+            };
+            s.out.writeln(format!("Pagination {shown}").as_bytes());
+        }
+        Some(Parameter::Num(on)) => s.out.set_pagination(if *on != 0 {
+            out::Pagination::On
+        } else {
+            out::Pagination::Off
+        }),
+        Some(_) => s
+            .out
+            .error(b"set pagination used incorrectly: set pagination <on|off>"),
+    }
+    Reply::Success
+}
+
+/// `PHPDBG_SET(lines)`: the lines a page holds, or a page of the number
+/// from here, a `zend_ulong` as php keeps it.
+fn set_lines(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
+    match params.first() {
+        None => s.out.writeln(format!("Lines {}", s.out.lines()).as_bytes()),
+        Some(Parameter::Num(lines)) => s.out.set_lines(lines.cast_unsigned()),
+        Some(_) => s
+            .out
+            .error(b"set lines used incorrectly: set lines <number>"),
     }
     Reply::Success
 }

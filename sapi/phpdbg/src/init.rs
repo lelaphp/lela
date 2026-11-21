@@ -170,6 +170,11 @@ fn finish(s: &mut Session, here: &mut Here<'_>, started: bool) {
         });
     }
     s.initializing = false;
+    // `-rr`'s startup run clears `PHPDBG_HAS_PAGINATION`
+    // (`Z/sapi/phpdbg/phpdbg.c:1580-1583`), after the init files.
+    if s.after_serve == crate::session::AfterServe::Quit {
+        s.out.set_pagination(out::Pagination::Off);
+    }
 }
 
 /// The init files' lines after a `run` among them, once the `run` is over:
