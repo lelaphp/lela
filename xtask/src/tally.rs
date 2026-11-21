@@ -253,6 +253,12 @@ impl<J: Judgement> Tally<J> {
         self.found.saturating_sub(self.judged.len()) as u64
     }
 
+    /// Whether the run judged every item it found: the one rule a subset's
+    /// run is kept by and a corpus run is whole by.
+    pub fn whole(&self) -> bool {
+        self.judged.len() == self.found
+    }
+
     /// The items that met what they were held to.
     pub fn met(&self) -> u64 {
         self.judged.iter().filter(|j| j.judgement.met()).count() as u64

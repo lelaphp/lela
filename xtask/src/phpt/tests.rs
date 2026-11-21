@@ -2809,3 +2809,62 @@ fn the_oracle_job_stashes_the_kept_runs_beside_its_store() {
         "the put is the kept runs: {runs}"
     );
 }
+
+/// The corpus reading over a run's subsets: an id two subsets judge is
+/// one test, met only where both judgements are, and a subset that gave
+/// no verdicts leaves the run not whole, a skip with `whole = 0` naming it
+/// beside the files found against the pin's count.
+#[test]
+fn an_id_judged_twice_is_met_only_where_every_judgement_is_and_an_unrun_subset_is_named() {
+    use crate::reading::Number;
+    let tree = Tree::new("phpt-corpus-union").unwrap();
+    let manifest = manifest_of([], tree.path());
+    let snapshot = crate::key::Snapshot::disk(&workspace()).unwrap();
+    let subset = |under: &str| {
+        fs::create_dir_all(tree.join(under)).unwrap();
+        Subset::whole(tree.path(), PathBuf::from(under))
+    };
+    let (a, b, c) = (subset("ext/a"), subset("ext/b"), subset("ext/c"));
+    let tally = |verdicts: &[(&str, Judgement)]| Tally {
+        judged: (verdicts.iter())
+            .map(|(id, judgement)| Judged::new(id, id, *judgement, ""))
+            .collect(),
+        found: verdicts.len(),
+    };
+    let mut union = corpus::Union::default();
+    union.add(
+        &a,
+        tally(&[
+            ("phpt:php-src/x.phpt", Judgement::Pass),
+            ("phpt:php-src/y.phpt", Judgement::Pass),
+        ]),
+    );
+    union.add(&b, tally(&[("phpt:php-src/x.phpt", Judgement::Fail)]));
+    let runner = Runner::Engine(PathBuf::from("/nowhere/lela"), None);
+    let subsets = [a, b, c];
+    let (reading, short) =
+        corpus::reading(union, &subsets, (&runner, None), (&manifest, &snapshot)).unwrap();
+    assert_eq!(reading.scope, "php-src");
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert!(short.is_some());
+    for (key, n) in [
+        ("whole", 0),
+        ("tests", 2),
+        ("met", 1),
+        ("failed", 1),
+        ("passed", 1),
+    ] {
+        assert_eq!(
+            number(&reading, key),
+            Some(Number::Int(n)),
+            "{key} in {reading:#?}"
+        );
+    }
+    assert!(
+        reading
+            .message
+            .contains("not whole: 1 subset unrun: ext/c; 0 files found of the"),
+        "{}",
+        reading.message
+    );
+}

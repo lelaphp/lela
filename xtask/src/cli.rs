@@ -685,7 +685,9 @@ pub(crate) struct Phpt {
     /// lane: every subset the manifest's rows own.
     #[arg(long, value_name = "NAME", conflicts_with = "full")]
     pub subset: Option<String>,
-    /// Every subset of the corpus: the nightly lane, which CI runs.
+    /// Every subset of the corpus: the nightly lane, which CI runs, and
+    /// one more reading, scoped `php-src`, of the corpus with each test
+    /// counted once.
     #[arg(long)]
     pub full: bool,
     /// The compiled tier's lane: the engine runs under `jit.mode`.

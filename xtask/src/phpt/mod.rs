@@ -3,7 +3,9 @@
 //! oracle's own recipe, what each test wrote held to its `--EXPECT*--`
 //! section with php's normalisation, and the subset ends as one reading of
 //! instrument `phpt`, scoped to the crate whose subset it is, which is what
-//! `done` reads as condition 1.
+//! `done` reads as condition 1. A run that set out for the whole corpus,
+//! `--full`, writes one more, scoped `php-src`, of every test once
+//! (`corpus`).
 //!
 //! **What runs the test.** Design §8's `ScriptExec` seam has two adapters:
 //! the fresh-process one, [`oracle::Runner`], and the in-process `Capture`
@@ -154,6 +156,7 @@ pub(crate) mod phpdbg;
 mod scope;
 pub(crate) use scope::{Comparison, Scope};
 mod census;
+mod corpus;
 pub(crate) mod file;
 pub(crate) mod miss;
 mod redirect;
@@ -206,6 +209,10 @@ pub(crate) mod numbers {
     pub(crate) const ENGINE_ABSENT: &str = "engine_absent";
     /// 1 where nothing ran because the tree moved past the binary.
     pub(crate) const ENGINE_STALE: &str = "engine_stale";
+    /// The corpus reading's: 1 where the run took the whole corpus, else 0.
+    pub(crate) const WHOLE: &str = "whole";
+    /// The corpus reading's tests that met their expectation.
+    pub(crate) const MET: &str = "met";
 }
 /// The first segment of a phpt divergence key, so a row names the corpus
 /// and not the path this machine keeps it at.
@@ -1120,13 +1127,16 @@ pub(crate) fn testless(manifest: &Manifest, scope: &str) -> bool {
         .is_ok_and(|testless| testless)
 }
 
-/// What one run took: a reading per subset, which the caller writes
-/// through `record`, and the scope of each subset it was to run and did
-/// not, refused or left without room, whose reading says why.
+/// What one run took: a reading per subset, and the corpus's for a run
+/// that set out for it, which the caller writes through `record`; the
+/// scope of each subset it was to run and did not, refused or left
+/// without room, whose reading says why; and what a run that set out for
+/// the whole corpus did not take of it.
 #[derive(Debug, Default)]
 pub struct Ran {
     pub readings: Vec<Reading>,
     pub unrun: Vec<String>,
+    short: Option<corpus::Short>,
 }
 
 impl Ran {
@@ -1136,21 +1146,28 @@ impl Ran {
         self.readings.push(reading);
     }
 
+    /// The corpus's reading, beside the subsets', and what the run did not
+    /// take of the corpus where it did not.
+    fn corpus(&mut self, (reading, short): (Reading, Option<corpus::Short>)) {
+        self.readings.push(reading);
+        self.short = short;
+    }
+
     /// Nothing where every subset asked for ran; else the error of a run
     /// that could not run to its end, naming the subsets that did not, so
     /// its exit is `exit::UNFINISHED` and never a failing test's. Asked
     /// once the readings are written, since the ones that ran stand beside
     /// the refusals.
     pub fn whole(&self) -> Result<()> {
-        if self.unrun.is_empty() {
-            return Ok(());
-        }
-        let n = self.unrun.len();
-        let why = anyhow::anyhow!(
-            "{n} subset{} of the run did not run, each reading saying why: {}",
-            plural(n),
-            listed(&self.unrun)
-        );
+        let why = match (self.unrun.len(), &self.short) {
+            (0, None) => return Ok(()),
+            (0, Some(short)) => anyhow::anyhow!("the run did not take the whole corpus: {short}"),
+            (n, _) => anyhow::anyhow!(
+                "{n} subset{} of the run did not run, each reading saying why: {}",
+                plural(n),
+                listed(&self.unrun)
+            ),
+        };
         Err(crate::exit::Unfinished::of(INSTRUMENT, why))
     }
 }
@@ -1204,6 +1221,8 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
     // widest cause of the whole corpus is one line at the end and not a
     // sum a reader does by hand.
     let mut lane = census::Census::default();
+    // The corpus's verdicts, one per id, for a run that set out for it.
+    let mut union = ask.full.then(corpus::Union::default);
     // One subset's readings: its own and the one holding it against a
     // commit. A subset refused, for a server that did not answer or for
     // any other cause, is that subset's failing reading, and the lane goes
@@ -1249,21 +1268,21 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
             counted(&tally, &subset.scope, &mut reading)?;
             lane.add(census::misses(&tally));
         }
+        if let Some(union) = union.as_mut() {
+            union.add(subset, tally);
+        }
         Ok(std::iter::once(reading).chain(held).collect())
     };
     // A subset whose row names an oracle variant the pin does not carry is
     // refused as any other subset the lane could not run, naming it.
     for (subset, side) in todo {
         let scope = subset.scope(side.as_ref().map_or(runner, |side| side.runner), ask.lane);
+        let refusal =
+            |why: &anyhow::Error| refused(runs.snapshot(), manifest, &scope.to_string(), why);
         if let (Err(full), Ok(side)) = (&copy, side)
             && side.runs()
         {
-            ran.refuse(refused(
-                runs.snapshot(),
-                manifest,
-                &scope.to_string(),
-                full,
-            )?);
+            ran.refuse(refusal(full)?);
             continue;
         }
         let side = side
@@ -1271,18 +1290,17 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
             .map_err(|unknown| anyhow::anyhow!("{unknown:#}"));
         match side.and_then(|side| taken(subset, side, &scope)) {
             Ok(taken) => ran.readings.extend(taken),
-            Err(why) => ran.refuse(refused(
-                runs.snapshot(),
-                manifest,
-                &scope.to_string(),
-                &why,
-            )?),
+            Err(why) => ran.refuse(refusal(&why)?),
         }
     }
     // One subset's census is the census; a lane's is worth a second line
     // only where there was more than one subset to fold.
     if ask.census && subsets.len() > 1 {
         lane.print("the lane");
+    }
+    if let Some(union) = union {
+        let at = (manifest, runs.snapshot());
+        ran.corpus(corpus::reading(union, &subsets, (runner, ask.lane), at)?);
     }
     Ok(ran)
 }
