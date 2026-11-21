@@ -1231,6 +1231,59 @@ fn every_renders_the_stores_log_and_the_section_without_it_is_unchanged() {
     }
 }
 
+/// `--log --run <id>` lists every reading the run named wrote, whatever
+/// its instrument, in the log's order, and no other run's and none that
+/// names no run: as the line each instrument prints, or under `--format
+/// jsonl` each reading whole; and from a log handed in as from the store's.
+#[test]
+fn log_run_lists_that_runs_readings_and_no_other() {
+    let root = scratch("log-run");
+    let store = Store::of_workspace(&root);
+    let of = |instrument: &str, scope: &str, run: Option<&str>, minute: u32| {
+        let mut r = Reading::new(instrument, scope);
+        r.status = Status::Pass;
+        r.run = run.map(str::to_owned);
+        r.message = format!("{scope} at {minute}");
+        r.at = format!("2026-11-21T10:{minute:02}:00Z").parse().unwrap();
+        r
+    };
+    store
+        .record(&[
+            of("phpt", "php-src", Some("r-1"), 1),
+            of("budget", "xtask", Some("r-2"), 2),
+            of("phpt", "ext/date", Some("r-1"), 3),
+            of("budget", "ext/pcre", None, 4),
+            of("budget", "ext/json", Some("r-1"), 5),
+        ])
+        .unwrap();
+    let lines = "pass phpt php-src: php-src at 1\n\
+                 pass phpt ext/date: ext/date at 3\n\
+                 pass budget ext/json: ext/json at 5\n";
+    assert_eq!(status(&root, &["--log", "--run", "r-1"]).ok(), lines);
+    assert_eq!(
+        status(&root, &["--run", "r-2"]).ok(),
+        "pass budget xtask: xtask at 2\n"
+    );
+    assert_eq!(status(&root, &["--log", "--run", "r-3"]).ok(), "");
+
+    let jsonl = status(&root, &["--log", "--run", "r-1", "--format", "jsonl"]).ok();
+    let scopes: Vec<String> = (jsonl.lines())
+        .map(|l| Reading::from_json(l).unwrap())
+        .inspect(|r| assert_eq!(r.run.as_deref(), Some("r-1"), "{jsonl}"))
+        .map(|r| r.scope)
+        .collect();
+    assert_eq!(scopes, ["php-src", "ext/date", "ext/json"], "{jsonl}");
+
+    let log = root.join("handed.jsonl");
+    let text = std::fs::read_to_string(root.join("target/harness/log/phpt.jsonl")).unwrap();
+    std::fs::write(&log, text).unwrap();
+    let handed = status(&root, &["--log", log.to_str().unwrap(), "--run", "r-1"]).ok();
+    assert_eq!(
+        handed,
+        "pass phpt php-src: php-src at 1\npass phpt ext/date: ext/date at 3\n"
+    );
+}
+
 /// A scratch workspace whose store holds the phpt readings the parity
 /// tests read, and whose pin's path is `pin`.
 fn parity_store(name: &str, pin: &Path) -> Tree {
