@@ -132,7 +132,7 @@ third-engine-design.md
 | harness | xtask.lock | 513 |  |
 
 <!-- /computed in=b23f23972195cd8dbc5ac0e1efd26e87eaa7abe8cfd89273d546a635403c7670 out=0a526c83aabc02c3614d920c290268df1dbad751ea78641addb2775f37eb7041 -->
-<!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
+<!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs,xtask/src/exit.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
 
@@ -187,7 +187,7 @@ Exit status:
   3  a worktree laid down and not ready to be worked in
   4  an instrument that could not run to its end, its readings not whole; `phpt` gives it
 ```
-<!-- /computed in=13a463eb7b57e9bece6f7eefb1dde3950f529c68cc81b8510d27348e3ce829ce out=9c6f063af1b84250973dcf4b0261acd43ff3b90b276b27b3a32a0a68a9bf9cff -->
+<!-- /computed in=1fb6ca7a39a3fd24e47864f81e0a021fc3777cffe9f6a21a493a2135735e16d0 out=9c6f063af1b84250973dcf4b0261acd43ff3b90b276b27b3a32a0a68a9bf9cff -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
