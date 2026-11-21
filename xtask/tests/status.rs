@@ -317,11 +317,26 @@ fn oracle_prints_the_sha256_where_the_pin_carries_one() {
     let digest = r#"(?:md5 = "[0-9a-f]{32}"|sha256 = "sha256:[0-9a-f]{64}")"#;
     let oracle = regex_lite::Regex::new(&format!("\n{digest}")).unwrap();
     let text = oracle.replacen(&text, 1, format!("\nsha256 = \"{php}\"\nmd5 = \"{md5}\""));
-    let builds =
-        regex_lite::Regex::new(&format!(r#"(\n[a-z0-9-]+ = \{{ path = "[^"]*", ){digest}"#));
+    let builds = regex_lite::Regex::new(&format!(
+        r#"(\n[a-z0-9_-]+ = \{{ path = "[^"]*", ){digest}"#
+    ));
     let text = builds
         .unwrap()
         .replace_all(&text, format!("${{1}}sha256 = \"{build}\""));
+    // Every platform row of every variant is laid by its SHA-256 alone,
+    // whatever this machine's platform: a platform name the pattern
+    // misses fails here on every machine, not only on the one it names.
+    let (mut table, mut rows) = ("", 0);
+    for line in text.lines() {
+        if line.starts_with('[') {
+            table = line;
+        } else if table.starts_with("[variant.") && line.contains(" = { path = ") {
+            rows += 1;
+            let laid = line.contains(&format!("sha256 = \"{build}\""));
+            assert!(laid && !line.contains("md5 = \""), "{table}: {line}");
+        }
+    }
+    assert!(rows > 0, "the tracked pin carries a variant's platform row");
     std::fs::write(&file, text.as_ref()).unwrap();
     let json = oracle_json(&root, None, None);
     assert_eq!(json["binary"]["sha256"], php.as_str());
