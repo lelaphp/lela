@@ -4,6 +4,7 @@
     dist/release.py check <tag>
     dist/release.py build <tag> <platform> <out> [--dry-run]
     dist/release.py publish <tag> [<dir>] [--dry-run]
+    dist/release.py matrix
 
 <tag> is `v<version>`, and every step first holds it to the version line
 of the workspace manifest's package table, Cargo.toml's
@@ -32,8 +33,15 @@ The platforms are one table, PLATFORMS, a row per platform with its name,
 how its tarball is built, the `uname` words of a machine of it, the
 checks of install.sh it is held to and whether install.sh installs on it,
 a row that installs held to checks the script has not refused; the tarballs a release is built and
-published with, platforms.json and install.sh's platforms are read from
-it.
+published with, platforms.json, install.sh's platforms and the release
+workflow's build matrix are read from it.
+
+`matrix` prints that build matrix, one line of JSON the workflow's jobs
+read with `fromJSON`: the table's platforms in its order, and under
+`families` a matrix for each family's job, `darwin` for the platforms
+cargo builds on a Mac and `linux` for those dist/Dockerfile builds, a row
+per platform with its name and its Docker platform. It takes no tag and
+holds nothing; the workflow chooses each row's runner.
 
 `publish` takes the table's tarballs from <dir>, and no other, stages
 install.sh beside them, dist/install.sh with the release's name, version,
@@ -116,9 +124,16 @@ class Platform:
     def tarball(self, ref):
         return f"{name()}-{ref.version}-{self.name}.tar.gz"
 
+    @property
+    def family(self):
+        """The release workflow's job that builds its tarball: `linux` where
+        dist/Dockerfile builds it, `darwin` where cargo does on a Mac."""
+        return "darwin" if self.docker is None else "linux"
+
 
 # The one platform table: the tarballs a release is built and published
-# with, platforms.json and install.sh's platforms are each read from it,
+# with, platforms.json, install.sh's platforms and the release workflow's
+# build matrix are each read from it,
 # one row a line. An Intel Mac is a refusal of the installer, not a
 # platform, so it has no row; a shell under Rosetta is the installer's to
 # see through, and its machine is the Apple silicon one.
@@ -127,6 +142,11 @@ PLATFORMS = (
     Platform("linux-aarch64", docker="linux/arm64", uname=("Linux aarch64", "Linux arm64"), checks="ubuntu", installs=True),
     Platform("linux-x86_64", docker="linux/amd64", uname=("Linux x86_64",), checks="ubuntu", installs=True),
 )
+
+
+# The release workflow's build jobs, one per way a tarball is built, each
+# printed by `matrix` whether or not a row of the table is of it.
+FAMILIES = ("darwin", "linux")
 
 
 def platform_named(text):
@@ -497,6 +517,23 @@ def publish_release(ref, commit, arguments):
     print(f"released {ref.name}")
 
 
+def matrix():
+    """The release workflow's build matrix, one line of JSON its jobs read
+    with `fromJSON`: the table's platforms in its order, which name the
+    tarballs the release job lays down, and a matrix for each family's job,
+    a row per platform of the family with its name and Docker platform,
+    which the workflow chooses the row's runner by. Every family is
+    printed, one with no row too, so that a job always finds its own."""
+    families = {
+        family: {"include": [
+            {"platform": platform.name, "docker": platform.docker}
+            for platform in PLATFORMS if platform.family == family
+        ]}
+        for family in FAMILIES
+    }
+    return json.dumps({"platforms": [platform.name for platform in PLATFORMS], "families": families})
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="dist/release.py")
     steps = parser.add_subparsers(dest="step", required=True)
@@ -511,8 +548,12 @@ def main(argv):
     publish_step.add_argument("tag")
     publish_step.add_argument("dir", nargs="?", type=Path)
     publish_step.add_argument("--dry-run", action="store_true")
+    steps.add_parser("matrix")
     arguments = parser.parse_args(argv)
     sys.stdout.reconfigure(line_buffering=True)
+    if arguments.step == "matrix":
+        print(matrix())
+        return 0
 
     def step():
         ref = release(arguments.tag)
