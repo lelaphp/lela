@@ -31,12 +31,15 @@
 set -eu
 
 # Baked in by dist/release.py: the hosts' name (ADR-0016), the release's
-# version, the Ubuntu release its Linux tarballs are built on, and the
-# URL its assets are downloaded from.
+# version, the Ubuntu release its Linux tarballs are built on, the URL its
+# assets are downloaded from, and its platforms, rendered from the
+# release's platform table a line per machine: the platform, `installs` or
+# `refuses`, and the `uname -s` and `uname -m` words of a machine of it.
 name=
 version=
 ubuntu=
 release=
+platforms=
 
 me=install.sh
 
@@ -109,7 +112,7 @@ field() {
 # The whole run is one function, called on the script's last line, so
 # that a download cut short runs nothing.
 main() {
-	[ -n "$name" ] && [ -n "$version" ] && [ -n "$ubuntu" ] && [ -n "$release" ] ||
+	[ -n "$name" ] && [ -n "$version" ] && [ -n "$ubuntu" ] && [ -n "$release" ] && [ -n "$platforms" ] ||
 		fail "this is the installer's source, which names no release; run the install.sh attached to one"
 
 	# --- what is checked before anything is written ---------------------------
@@ -130,16 +133,24 @@ main() {
 
 	system=$(uname -s)
 	machine=$(uname -m)
-	case "$system $machine" in
-		"Darwin arm64") platform=darwin-arm64 ;;
-		"Darwin x86_64")
-			# A shell under Rosetta says x86_64 on Apple silicon too.
-			[ "$(sysctl -n hw.optional.arm64 2>/dev/null || :)" = 1 ] ||
+	# A shell under Rosetta says x86_64 on Apple silicon too, and the
+	# machine is the one the hardware is.
+	if [ "$system" = Darwin ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || :)" = 1 ]; then
+		machine=arm64
+	fi
+	row=$(printf '%s\n' "$platforms" | awk -v s="$system" -v m="$machine" '$3 == s && $4 == m { print $1, $2; exit }')
+	platform=${row% *}
+	case "$row" in
+		*" installs") ;;
+		*" refuses")
+			fail "$name $version's tarball for $platform is not one this installer installs; download it from $release" ;;
+		*)
+			# Reached on an Intel Mac only while the table has no row of one.
+			[ "$system $machine" != "Darwin x86_64" ] ||
 				fail "this is an Intel Mac, and $name $version's macOS tarball is built for Apple silicon alone"
-			platform=darwin-arm64 ;;
-		"Linux x86_64") platform=linux-x86_64 ;;
-		"Linux aarch64" | "Linux arm64") platform=linux-aarch64 ;;
-		*) fail "$name $version has no tarball for $system $machine; its platforms are darwin-arm64, linux-aarch64 and linux-x86_64" ;;
+			listed=$(printf '%s\n' "$platforms" | awk '$2 == "installs" && !seen[$1]++ { p[++n] = $1 }
+				END { for (i = 1; i <= n; i++) printf "%s%s", p[i], (i == n ? "" : (i == n - 1 ? " and " : ", ")) }')
+			fail "$name $version has no tarball for $system $machine; its platforms are $listed" ;;
 	esac
 
 	if [ "$system" = Linux ]; then

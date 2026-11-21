@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import publish  # noqa: E402
@@ -308,6 +309,29 @@ else echo "dpkg-query: no packages found matching $package" >&2; exit 1; fi''')
                     "its platforms are darwin-arm64, linux-aarch64 and linux-x86_64",
                 )
                 self.assertNotIn("downloading", run.stdout)
+
+    def test_a_platform_added_to_the_table_is_installed_or_refused_as_its_row_says(self):
+        added = (
+            release.Platform("linux-riscv64", docker="linux/riscv64", uname=("Linux riscv64",), installs=True),
+            release.Platform("linux-s390x", docker="linux/s390x", uname=("Linux s390x",), installs=False),
+        )
+        with mock.patch.object(release, "PLATFORMS", (*release.PLATFORMS, *added)):
+            script = self.script()
+        self.linux("riscv64")
+        self.tarball("linux-riscv64")
+        self.assertInstalled(self.install(script=script), "linux-riscv64")
+        shutil.rmtree(self.home / ".local")
+        self.linux("s390x")
+        self.tarball("linux-s390x")
+        self.assertRefused(
+            self.install(script=script), "lela 1.2.0's tarball for linux-s390x is not one this installer installs; "
+            "download it from https://github.com/lelaphp/lela/releases/download/v1.2.0",
+        )
+        self.machine("FreeBSD", "amd64")
+        self.assertRefused(
+            self.install(script=script), "lela 1.2.0 has no tarball for FreeBSD amd64; "
+            "its platforms are darwin-arm64, linux-aarch64, linux-x86_64 and linux-riscv64",
+        )
 
     def test_an_intel_mac_is_refused(self):
         for arm64 in (0, None):
