@@ -14,10 +14,9 @@
 //! is active is the layer's own.
 
 use std::any::Any;
-use std::ffi::{CStr, CString, OsStr, c_int};
+use std::ffi::{CString, c_int};
 use std::ops::ControlFlow;
 use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStrExt as _;
 use std::time::{Duration, Instant};
 
 use php_ext::abi::EngineState;
@@ -35,7 +34,7 @@ use php_ext_standard::UriParser;
 use crate::decode::{Origin, check_path};
 use crate::ffi::ssl::{Ctx, Setup, Tls};
 use crate::ffi::{self, Certificate};
-use crate::x509::object_of;
+use crate::x509::{Anchors, Defaults, SYSTEM_BUNDLE, anchors, ini_path, object_of};
 
 /// `STREAM_CRYPTO_IS_CLIENT`, the low bit of a crypto method.
 const IS_CLIENT: i64 = 1;
@@ -1004,90 +1003,6 @@ fn alpn_wire(list: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The bundle of certificates the operating system keeps, where a client
-/// stream falls back to it: macOS's `/etc/ssl/cert.pem`, which a Mac has
-/// whether or not it has the OpenSSL the library was built for, and none
-/// elsewhere.
-const SYSTEM_BUNDLE: Option<&CStr> = if cfg!(target_os = "macos") {
-    Some(c"/etc/ssl/cert.pem")
-} else {
-    None
-};
-
-/// Where a stream's peer verification finds the certificates it trusts,
-/// decided once per `SSL_CTX` by [`anchors`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Anchors {
-    /// The `cafile` or `capath` the `ssl` options or the ini name, loaded
-    /// as php loads them.
-    Named,
-    /// A server's, where neither is named: none is loaded, as php loads
-    /// none.
-    Unnamed,
-    /// A client's, where neither is named: the library's defaults, as
-    /// `SSL_CTX_set_default_verify_paths` reads them.
-    Defaults,
-    /// A client's, where neither is named and the library's defaults name
-    /// no file it can read: the defaults, then the system's bundle. The
-    /// bundled `libcrypto` of a macOS tarball names Homebrew's file, which
-    /// a Mac without Homebrew's OpenSSL lacks.
-    System(&'static CStr),
-}
-
-/// What the library's defaults name for a client, as
-/// `X509_STORE_set_default_paths` reads them.
-#[derive(Debug, Clone, Copy)]
-struct Defaults {
-    /// The environment names a file or a directory, `SSL_CERT_FILE` or
-    /// `SSL_CERT_DIR` as `X509_get_default_cert_file_env` and
-    /// `X509_get_default_cert_dir_env` spell them, which the library reads
-    /// in place of its compiled-in paths.
-    env_names: bool,
-    /// `X509_get_default_cert_file()` opens for reading.
-    file_readable: bool,
-}
-
-impl Defaults {
-    /// The environment and the file system now.
-    fn read() -> Self {
-        let [file, file_env, _, dir_env, ..] = ffi::cert_locations();
-        let set = |name: &[u8]| std::env::var_os(OsStr::from_bytes(name)).is_some();
-        Defaults {
-            env_names: set(&file_env) || set(&dir_env),
-            file_readable: std::fs::File::open(OsStr::from_bytes(&file)).is_ok(),
-        }
-    }
-}
-
-/// The anchors of one `SSL_CTX`: php's choice, the options' or the ini's
-/// `cafile` or `capath` where either is named and else the library's
-/// defaults for a client, with one difference. Where the platform has a
-/// `system` bundle and the defaults name nothing to read, neither by the
-/// environment nor at the compiled-in file, a client takes the bundle as
-/// well. `defaults` is read only where that question is asked.
-fn anchors(
-    named: bool,
-    is_client: bool,
-    defaults: impl FnOnce() -> Defaults,
-    system: Option<&'static CStr>,
-) -> Anchors {
-    if named {
-        return Anchors::Named;
-    }
-    if !is_client {
-        return Anchors::Unnamed;
-    }
-    let Some(bundle) = system else {
-        return Anchors::Defaults;
-    };
-    let defaults = defaults();
-    if defaults.env_names || defaults.file_readable {
-        Anchors::Defaults
-    } else {
-        Anchors::System(bundle)
-    }
-}
-
 impl Layer {
     /// `php_openssl_enable_peer_verification` over one `context`: the CA
     /// file and directory the options or the ini name, a server's CA
@@ -1096,14 +1011,8 @@ impl Layer {
     /// system's bundle after them where [`anchors`] says so; then
     /// `SSL_VERIFY_PEER`.
     fn enable_peer_verification(&self, req: &mut Request, ctx: &Ctx) -> bool {
-        let ini = |req: &Request, name: &[u8]| {
-            req.ini()
-                .get(name)
-                .filter(|v| !v.is_empty())
-                .map(<[u8]>::to_vec)
-        };
         let cafile = match &self.options.cafile {
-            None => ini(req, b"openssl.cafile"),
+            None => ini_path(req, b"openssl.cafile"),
             Some(cafile) => {
                 if !self.is_client && !ctx.client_ca_file(&crate::decode::c_string(cafile)) {
                     raise(
@@ -1120,7 +1029,7 @@ impl Layer {
             .options
             .capath
             .clone()
-            .or_else(|| ini(req, b"openssl.capath"));
+            .or_else(|| ini_path(req, b"openssl.capath"));
         let named = cafile.is_some() || capath.is_some();
         match anchors(named, self.is_client, Defaults::read, SYSTEM_BUNDLE) {
             Anchors::Named => {
@@ -2257,10 +2166,7 @@ mod tests {
 
     use php_ext::request::Crypto;
 
-    use super::{
-        Anchors, Defaults, Layer, Phase, SSL_OP_NO_TICKET, SYSTEM_BUNDLE, SslOptions,
-        TLS1_2_VERSION, anchors,
-    };
+    use super::{Layer, Phase, SSL_OP_NO_TICKET, SslOptions, TLS1_2_VERSION};
     use crate::ffi::key::KeyContext;
     use crate::ffi::ssl::{Ctx, Setup, Tls};
     use crate::ffi::{Certificate, Digest, KeyKind};
@@ -2348,40 +2254,5 @@ mod tests {
             !none.resumable(),
             "a server with its cache off and no ticket issues nothing"
         );
-    }
-
-    /// The system's bundle is a client's only where nothing names a CA,
-    /// neither the options, the ini nor the environment, and the
-    /// library's compiled-in file cannot be read; everywhere else the
-    /// anchors are php's.
-    #[test]
-    fn the_system_bundle_stands_in_only_for_an_absent_default_file() {
-        let bundle = c"/etc/ssl/cert.pem";
-        let seen = |env_names, file_readable| {
-            move || Defaults {
-                env_names,
-                file_readable,
-            }
-        };
-        let unread = || -> Defaults { panic!("the defaults are read only where they decide") };
-        for (env_names, file_readable) in
-            [(false, false), (false, true), (true, false), (true, true)]
-        {
-            let want = if env_names || file_readable {
-                Anchors::Defaults
-            } else {
-                Anchors::System(bundle)
-            };
-            let got = anchors(false, true, seen(env_names, file_readable), Some(bundle));
-            assert_eq!(got, want, "env {env_names}, file {file_readable}");
-        }
-        assert_eq!(anchors(true, true, unread, Some(bundle)), Anchors::Named);
-        assert_eq!(anchors(true, false, unread, Some(bundle)), Anchors::Named);
-        assert_eq!(
-            anchors(false, false, unread, Some(bundle)),
-            Anchors::Unnamed
-        );
-        assert_eq!(anchors(false, true, unread, None), Anchors::Defaults);
-        assert_eq!(SYSTEM_BUNDLE.is_some(), cfg!(target_os = "macos"));
     }
 }
