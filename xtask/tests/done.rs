@@ -17,6 +17,7 @@ use xtask::manifest::Manifest;
 use xtask::oracle::Promise;
 use xtask::reading::{Reading, Status, Store, UNDER_RECIPE};
 use xtask::scratch::Tree;
+use xtask::track::short;
 
 mod common {
     pub mod manifest;
@@ -2336,7 +2337,11 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
         reading.message
     );
     assert_eq!(reading.key().len(), 40);
-    assert_eq!(reading.commit.len(), 7);
+    assert_eq!(
+        reading.commit.len(),
+        40,
+        "a reading of v = 3 names its commit whole"
+    );
 
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
     hook(&root, &stop);
@@ -2971,7 +2976,7 @@ fn a_withdrawal_is_renewed_by_a_read_past_a_later_commit_and_a_refused_one_is_no
     let read = read_closed(&root);
     assert_eq!(read.status, Status::Pass, "{}", read.message);
     assert_eq!(read.numbers["withdrawn"], 1.into(), "{read:#?}");
-    let said = format!("withdrawn by the close at {}: ", reading.commit);
+    let said = format!("withdrawn by the close at {}: ", short(&reading.commit));
     assert!(
         read.message.contains(&said) && read.message.contains("measured on HEAD"),
         "{}",

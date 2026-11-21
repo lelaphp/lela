@@ -23,13 +23,12 @@ pub struct Stamp {
     pub commit: String,
 }
 
-/// The short id of `HEAD`, seven characters, read from the repository's
-/// files; the full id `git rev-parse` prints, cut the same way, when the
-/// layout is one this reader does not know, such as a sha256 repository.
-/// Seven is fixed ([`crate::track::short`]), not git's own `--short`,
-/// which grows with the repository (eight since `d32ff307`), nor
-/// `--short=7`, a minimum that grows where seven characters are shared
-/// with another object: either would make one commit two stamps.
+/// The id of `HEAD`, whole, read from the repository's files; the id
+/// `git rev-parse` prints when the layout is one this reader does not
+/// know, such as a sha256 repository. Whole since a reading's third
+/// version ([`crate::reading::V`]): a stamp cut to seven characters was
+/// one commit's only while no other object shared them, and a message
+/// that names a commit cuts it itself ([`crate::track::short`]).
 /// A stamp is taken at every denial, so it spawns git once (`ls-files`)
 /// and not four times. A repository with no commit yet has no `HEAD` to
 /// stamp with, and is refused in a sentence rather than in git's "Needed
@@ -37,15 +36,13 @@ pub struct Stamp {
 pub fn head_commit(root: &Path) -> Result<String> {
     match read_head(root) {
         Some(id) => Ok(id),
-        None => rev_parse(root, &["--verify", "HEAD"])
-            .map(|full| crate::track::short(&full).to_owned())
-            .map_err(|err| match git_dir(root) {
-                Some(_) if !has_ref(root, "HEAD") => anyhow!(
-                    "{} has no commit yet; a reading is stamped with one",
-                    root.display()
-                ),
-                _ => err,
-            }),
+        None => rev_parse(root, &["--verify", "HEAD"]).map_err(|err| match git_dir(root) {
+            Some(_) if !has_ref(root, "HEAD") => anyhow!(
+                "{} has no commit yet; a reading is stamped with one",
+                root.display()
+            ),
+            _ => err,
+        }),
     }
 }
 
@@ -85,8 +82,8 @@ pub(crate) fn common_dir(root: &Path) -> Option<PathBuf> {
 }
 
 /// `HEAD` through `.git` ([`git_dirs`]), a symbolic ref through `refs/`
-/// and then `packed-refs`, shortened to seven characters, every stored
-/// stamp's length.
+/// and then `packed-refs`: the forty hex digits a sha1 repository names
+/// a commit by, and none for anything else.
 fn read_head(root: &Path) -> Option<String> {
     let (git_dir, common) = git_dirs(root)?;
     let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
@@ -104,8 +101,7 @@ fn read_head(root: &Path) -> Option<String> {
             }
         }
     };
-    (full.len() == 40 && full.chars().all(|c| c.is_ascii_hexdigit()))
-        .then(|| crate::track::short(&full).to_owned())
+    (full.len() == 40 && full.chars().all(|c| c.is_ascii_hexdigit())).then_some(full)
 }
 
 /// Every file under `scope` (relative to `root`) that git does not ignore,
@@ -595,12 +591,11 @@ mod tests {
     }
 
     /// A sha256 repository is one [`super::read_head`] does not read, so
-    /// its stamp is the fallback's. Its two commits, found offline, share
-    /// their first seven characters, `5abe859`, so git's `--short=7` grows
-    /// to eight for either; the stamp is still seven, the full id cut as
-    /// `read_head` cuts it, by [`crate::track::short`].
+    /// its stamp is the fallback's, the id whole. Its two commits, found
+    /// offline, share their first seven characters, `5abe859`, which the
+    /// stamp cut to seven named either of before a reading's third version.
     #[test]
-    fn a_repository_the_reader_does_not_read_is_stamped_at_seven_where_git_prints_more() {
+    fn a_repository_the_reader_does_not_read_is_stamped_with_the_id_git_prints() {
         let dir = crate::scratch::Tree::new("git-sha256").unwrap();
         super::git(&dir, &["init", "-q", "--object-format=sha256"]).unwrap();
         let tree = super::fed(&dir, &["mktree"], "").unwrap();
@@ -624,7 +619,8 @@ mod tests {
         assert_eq!(super::read_head(&dir), None);
         let git_says = super::rev_parse(&dir, &["--short=7", "HEAD"]).unwrap();
         assert_eq!(git_says, "5abe8596");
-        assert_eq!(super::head_commit(&dir).unwrap(), "5abe859");
+        assert_eq!(super::head_commit(&dir).unwrap(), head);
+        assert_eq!(head.len(), 64);
     }
 
     /// A file the commit lacks is none, whether the working tree holds it
@@ -753,8 +749,7 @@ mod tests {
 
     /// The stamp computed in process is the one git would compute: the
     /// tree hash matches `hash-object` over the same listing and the
-    /// commit is the first seven characters of `rev-parse HEAD`, a fixed
-    /// width, where `--short=7` grows past seven once they are ambiguous.
+    /// commit is `rev-parse HEAD`, whole.
     /// Over a scratch repository of its own, so a merge in progress in
     /// this one, or a file it adds under `docs/`, moves nothing.
     #[test]
@@ -786,7 +781,7 @@ mod tests {
         };
         assert_eq!(
             head_commit(root).unwrap(),
-            out(&["rev-parse", "HEAD"], None).trim()[..7]
+            out(&["rev-parse", "HEAD"], None).trim()
         );
         let paths = files(root, Path::new("docs")).unwrap();
         assert_eq!(paths.len(), 2, "{paths:?}");

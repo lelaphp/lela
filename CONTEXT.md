@@ -186,7 +186,7 @@ The one tracked data file, `seams.toml`, that declares each seam once: producer,
 _Avoid_: config (php's `PHP_CONFIG_FILE_PATH`, `PHP_CONFIG_FILE_SCAN_DIR`), rules file, policy, `api-check`'s tables
 
 **Reading**:
-The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's key (§4.2), commit, time. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.
+The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's key (§4.2), commit, time, and the profile of the build it judged where the instrument knows it. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.
 _Avoid_: result, artefact, report, telemetry (the manifest's `[telemetry]` table: the field `telemetry` and `Telemetry`, its type), output (php's `OutputOp`, `output_buffer_op`, `output_started_at`; seam 4's `OutputSink`)
 
 **Caller**:

@@ -11,9 +11,11 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-/// One profile of the workspace's `Cargo.toml` a lane's binary is built in.
+/// One profile of the workspace's `Cargo.toml` a lane's binary is built in,
+/// and the profile a reading names of the binary it judged
+/// ([`crate::reading::Reading::profile`]), by its [`Profile::name`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Profile {
+pub enum Profile {
     /// `dev`, cargo's default, built into `debug/`: no optimisation, with
     /// debug assertions and overflow checks.
     Dev,
@@ -35,6 +37,27 @@ pub(crate) const LANE: Profile = Profile::ReleaseDa;
 /// the next, so a machine that built one profile at the tree's tip runs
 /// that one, and one that built the lane's runs it before any other.
 pub(crate) const PREFERRED: [Profile; 3] = [LANE, Profile::Release, Profile::Dev];
+
+/// A reading names its profile as `cargo --profile` does, and reads back
+/// every name of [`PREFERRED`], which is every profile; another name is
+/// refused, as a `v` the harness does not know is.
+impl serde::Serialize for Profile {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Profile {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Profile, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        let named = PREFERRED.into_iter().find(|profile| profile.name() == name);
+        named.ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "a profile named {name:?}, which this harness does not build in"
+            ))
+        })
+    }
+}
 
 impl Profile {
     /// The name `cargo --profile` takes.

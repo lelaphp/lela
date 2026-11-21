@@ -168,6 +168,8 @@ pub fn run(
     let wall = started.elapsed();
     let message = hunt.message(root, seed, &corpus, ask);
     for reading in &mut readings {
+        // The engine `profile::build` built, in the lanes' profile.
+        reading.profile = Some(profile::LANE);
         hunt.numbers(reading, seed, &programs)?;
         reading.count("wall_ms", crate::reading::millis(wall))?;
     }
