@@ -86,7 +86,7 @@ pub(crate) struct Pinned {
 
 /// One row of the list: a pinned package and how its suite runs.
 #[derive(Debug, Clone, Deserialize)]
-struct Row {
+pub(crate) struct Row {
     #[serde(flatten)]
     pinned: Pinned,
     /// The runner, a path in the source; `phpunit` unless named.
@@ -138,11 +138,16 @@ struct List {
     package: Vec<Row>,
 }
 
-/// The list at `path`, refused where it does not decode or names a
-/// package twice.
+/// The list at `path`, refused as [`parse`] refuses it.
 fn load(path: &Path) -> Result<Vec<Row>> {
-    let list: List = toml::from_str(&crate::read(path)?)
-        .with_context(|| format!("decoding the list {}", path.display()))?;
+    parse(&crate::read(path)?).with_context(|| format!("decoding the list {}", path.display()))
+}
+
+/// The rows of a list's text, refused where it does not decode or names a
+/// package twice: what a run reads, and what steer holds a proposal of
+/// the list to.
+pub(crate) fn parse(text: &str) -> Result<Vec<Row>> {
+    let list: List = toml::from_str(text)?;
     let mut names: Vec<&str> = list
         .package
         .iter()
@@ -150,7 +155,7 @@ fn load(path: &Path) -> Result<Vec<Row>> {
         .collect();
     names.sort_unstable();
     if let Some([twice, _]) = names.windows(2).find(|w| w[0] == w[1]) {
-        bail!("the list {} names {twice} twice", path.display());
+        bail!("it names {twice} twice");
     }
     Ok(list.package)
 }
