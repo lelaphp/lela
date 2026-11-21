@@ -6,10 +6,12 @@
 #   dist/smoke.sh <dir>
 #   dist/smoke.sh --image <image> cli|fpm|apache
 #
-# Over one unpacked tarball: `lela -v`, `lela -r`, a file with its
-# arguments, code on stdin, `lela-cgi` on a file and `lela-fpm -t` over a
-# one-pool configuration, each host by the name ADR-0016 gives it, the
-# default of the `ARG NAME` of the Dockerfile beside this script. A Linux tarball's libraries are the Ubuntu packages its
+# Over one unpacked tarball: that its bin/ and sbin/ hold the four hosts
+# and no other host of Lela's name, then `lela -v`, `lela -r`, a file with
+# its arguments, code on stdin, `lela-cgi` on a file, `lela-fpm -t` over a
+# one-pool configuration and `lela-dbg -qrr` on a file, each host by the
+# name ADR-0016 gives it, the default of the `ARG NAME` of the Dockerfile
+# beside this script. A Linux tarball's libraries are the Ubuntu packages its
 # runtime-packages.txt lists, installed first: dist/README.md runs it in
 # the Ubuntu image dist/Dockerfile builds on. A macOS tarball's are under
 # its lib/: first every Mach-O in it is held to name only the system's
@@ -19,11 +21,13 @@
 # https requests of `https` among them.
 #
 # Over an image of one variant, on the image's own platform: the same
-# checks inside it over the hosts in /usr/local, `lela-fpm -t` where the
-# variant holds the FPM; the ini directory php's image names; no `php`,
-# `php-cgi` or `php-fpm` on PATH, the compat directory off it, holding each
-# usual name the variant has a host for, and each entry of it what its
-# name finds and runs once the directory is put first;
+# checks inside it over the hosts in /usr/local, which are the variant's
+# and no other, `lela-fpm -t` where the variant holds the FPM and
+# `lela-dbg` where it holds the debugger, `cli` alone; the ini directory
+# php's image names; no `php`, `php-cgi`, `php-fpm` or `phpdbg` on PATH,
+# the compat directory off it, holding each usual name the variant has a
+# host for, and each entry of it what its name finds and runs once the
+# directory is put first;
 # then what a user of the variant sees: the entrypoint passing an option to
 # the variant's command, `fpm` answering a FastCGI request on port 9000 and
 # `apache` serving a page, each to a second container of the image.
@@ -57,24 +61,87 @@ check() {
 	[ "$got" = "$want" ] || { printf '%s: wanted %s\n' "$label" "$want" >&2; exit 1; }
 }
 
-# The hosts under one prefix, `<dir>/bin` and `<dir>/sbin`; the FPM's check
-# only where the second argument says it is there. Each host runs under
-# JAIL, a command prefix that `reach` sets, or none.
+# The hosts a tarball holds, `tarball`, or the image of a variant, by their
+# paths under its prefix, in the order they are checked: dist/publish.py's
+# HOSTS, where the harness's host table says each ships, as `cargo xtask
+# hosts --list` prints it (#79). test_smoke.py holds each to that table.
+shipped() {
+	case "$1" in
+		tarball) echo "bin/$NAME bin/$NAME-cgi sbin/$NAME-fpm bin/$NAME-dbg" ;;
+		cli) echo "bin/$NAME bin/$NAME-cgi bin/$NAME-dbg" ;;
+		fpm|apache) echo "bin/$NAME bin/$NAME-cgi sbin/$NAME-fpm" ;;
+		*) echo "shipped: no tarball or variant $1" >&2; exit 2 ;;
+	esac
+}
+
+# The usual name of a host at a path, php's own for it: `php` for `$NAME`,
+# `php-cgi` and `php-fpm` for `$NAME-cgi` and `$NAME-fpm`, `phpdbg` for
+# `$NAME-dbg`.
+usual() {
+	local host=${1##*/}
+	case "$host" in
+		"$NAME-dbg") echo phpdbg ;;
+		*) echo "php${host#"$NAME"}" ;;
+	esac
+}
+
+# The hosts under one prefix, `<dir>/bin` and `<dir>/sbin`: those `shipped`
+# names for the second argument, a tarball or a variant, and no other host
+# of Lela's name, then each one's checks. Each host runs under JAIL, a
+# command prefix that `reach` sets, or none.
 hosts() {
-	local dir=$1 fpm=$2
-	local php="$dir/bin/$NAME" cgi="$dir/bin/$NAME-cgi" scratch
+	local dir=$1 wanted found path scratch
+	wanted=$(shipped "$2")
+	found=$(cd "$dir" && for path in bin/"$NAME" bin/"$NAME"-* sbin/"$NAME" sbin/"$NAME"-*; do
+		[ ! -e "$path" ] || echo "$path"
+	done | sort | xargs)
+	# shellcheck disable=SC2086 # the paths, one word each
+	if [ "$found" != "$(printf '%s\n' $wanted | sort | xargs)" ]; then
+		echo "hosts: $dir holds ${found:-none}, where the $2 holds $wanted" >&2
+		exit 1
+	fi
+	echo "hosts: $wanted, and no other"
 	scratch=$(mktemp -d)
 	# shellcheck disable=SC2064 # the directory is this call's
 	trap "rm -rf '$scratch'" EXIT
+	for path in $wanted; do
+		case "${path##*/}" in
+			"$NAME") the_cli "$dir/$path" "$scratch" ;;
+			"$NAME-cgi") the_cgi "$dir/$path" "$scratch" ;;
+			"$NAME-fpm") the_fpm "$dir/$path" "$scratch" ;;
+			"$NAME-dbg") the_dbg "$dir/$path" "$scratch" ;;
+		esac
+	done
+}
+
+# The CLI's checks, at a path, with a scratch directory.
+the_cli() {
+	local php=$1 scratch=$2
 	${JAIL[@]+"${JAIL[@]}"} "$php" -v
 	check "-r" "2" ${JAIL[@]+"${JAIL[@]}"} "$php" -n -r 'echo 1 + 1;'
 	# shellcheck disable=SC2016 # php's $argv, not the shell's
 	printf '<?php echo implode(",", array_slice($argv, 1));' > "$scratch/args.php"
 	check "file with arguments" "a,b c" ${JAIL[@]+"${JAIL[@]}"} "$php" -n "$scratch/args.php" a "b c"
 	check "stdin" "OK" ${JAIL[@]+"${JAIL[@]}"} "$php" -n <<<'<?php echo strtoupper("ok");'
-	printf '<?php echo PHP_SAPI;' > "$scratch/sapi.php"
-	check "$NAME-cgi" "cgi-fcgi" ${JAIL[@]+"${JAIL[@]}"} "$cgi" -n -q "$scratch/sapi.php"
-	[ "$fpm" = fpm ] || return 0
+}
+
+# The CGI's check, at a path, with a scratch directory.
+the_cgi() {
+	printf '<?php echo PHP_SAPI;' > "$2/sapi.php"
+	check "$NAME-cgi" "cgi-fcgi" ${JAIL[@]+"${JAIL[@]}"} "$1" -n -q "$2/sapi.php"
+}
+
+# The debugger's check, at a path, with a scratch directory: a file run
+# and the debugger quit, `-qrr`, as php's phpdbg runs one.
+the_dbg() {
+	printf '<?php echo PHP_SAPI;' > "$2/sapi.php"
+	check "$NAME-dbg" "phpdbg" ${JAIL[@]+"${JAIL[@]}"} "$1" -n -qrr "$2/sapi.php"
+}
+
+# The FPM's check, at a path, with a scratch directory: `-t` over a
+# one-pool configuration.
+the_fpm() {
+	local scratch=$2
 	printf '[global]\nerror_log = %s/fpm.log\n[www]\nlisten = %s/fpm.sock\npm = static\npm.max_children = 1\n' \
 		"$scratch" "$scratch" > "$scratch/fpm.conf"
 	# As root, php-fpm runs a pool only when -R allows it, as php's does.
@@ -82,7 +149,7 @@ hosts() {
 	# EXIT trap then exits 0, so the empty case expands to nothing by hand.
 	local root=()
 	[ "$(id -u)" -ne 0 ] || root=(-R)
-	${JAIL[@]+"${JAIL[@]}"} "$dir/sbin/$NAME-fpm" -n -t -y "$scratch/fpm.conf" ${root[@]+"${root[@]}"}
+	${JAIL[@]+"${JAIL[@]}"} "$1" -n -t -y "$scratch/fpm.conf" ${root[@]+"${root[@]}"}
 	echo "$NAME-fpm -t: exit 0"
 }
 
@@ -169,9 +236,8 @@ fetch() {
 # Inside an image: its hosts, its ini directory and its compat directory,
 # whose path the caller passes as COMPAT.
 in_image() {
-	local variant=$1 fpm=fpm
-	[ "$variant" != cli ] || fpm=
-	hosts /usr/local "$fpm"
+	local variant=$1
+	hosts /usr/local "$variant"
 	check "ini directory" "$PHP_INI_DIR $PHP_INI_DIR/conf.d" \
 		"$NAME" -r 'echo PHP_CONFIG_FILE_PATH, " ", PHP_CONFIG_FILE_SCAN_DIR;'
 	compat "${COMPAT:?the compat directory}" "$variant"
@@ -183,25 +249,29 @@ in_image() {
 # the directory is first on PATH, and runs. That makes putting it first
 # the only step the usual names need.
 compat() {
-	local compat=$1 variant=$2 usual entry found
-	local usuals=(php php-cgi)
-	[ "$variant" = cli ] || usuals+=(php-fpm)
+	local compat=$1 variant=$2 usual entry found path every="" usuals=() scratch
+	for path in $(shipped "$variant"); do usuals+=("$(usual "$path")"); done
+	for path in $(shipped tarball); do every+="${every:+ }$(usual "$path")"; done
+	local said=${every% *}
+	said="${said// /, } or ${every##* }"
 	[ -d "$compat" ] || { echo "compat: $compat is not a directory" >&2; exit 1; }
 	case ":$PATH:" in
 		*":$compat:"*) echo "compat: $compat is on PATH, $PATH" >&2; exit 1 ;;
 	esac
 	echo "compat: $compat, not on PATH ($PATH)"
-	for usual in php php-cgi php-fpm; do
+	for usual in $every; do
 		if found=$(command -v "$usual"); then
 			echo "compat: $usual is $found on PATH, where no usual name is until $compat is put first" >&2
 			exit 1
 		fi
 	done
-	echo "compat: no php, php-cgi or php-fpm on PATH"
+	echo "compat: no $said on PATH"
 	for usual in "${usuals[@]}"; do
 		[ -e "$compat/$usual" ] || [ -L "$compat/$usual" ] ||
 			{ echo "compat: $compat holds no $usual" >&2; exit 1; }
 	done
+	scratch=$(mktemp -d)
+	printf '<?php echo PHP_SAPI;' > "$scratch/sapi.php"
 	for entry in "$compat"/*; do
 		# An empty directory's glob is itself.
 		[ -e "$entry" ] || [ -L "$entry" ] || continue
@@ -209,10 +279,16 @@ compat() {
 		found=$(PATH="$compat:$PATH" command -v "$usual") || found=nothing
 		[ "$found" = "$entry" ] ||
 			{ echo "compat: $usual is $found with $compat first on PATH, and not $entry" >&2; exit 1; }
-		PATH="$compat:$PATH" "$usual" -v > /dev/null ||
-			{ echo "compat: $entry does not run" >&2; exit 1; }
+		# The debugger runs a file and quits, where the others say their
+		# version.
+		if [ "$usual" = phpdbg ]; then
+			PATH="$compat:$PATH" "$usual" -n -qrr "$scratch/sapi.php" > /dev/null
+		else
+			PATH="$compat:$PATH" "$usual" -v > /dev/null
+		fi || { rm -rf "$scratch"; echo "compat: $entry does not run" >&2; exit 1; }
 		echo "compat: $usual is $entry with $compat first on PATH"
 	done
+	rm -rf "$scratch"
 }
 
 # One FastCGI request, as a web server makes it, for the script at a path:
@@ -331,7 +407,18 @@ case "${1:-}" in
 	# What the image mode runs inside a container of the image, and its
 	# compat check alone, which test_smoke.py holds without an image.
 	--in-image) in_image "$2" ;;
-	--compat) compat "$2" "$3" ;;
+	--compat) named; compat "$2" "$3" ;;
+	# The hosts check alone over a directory standing in for a prefix, and
+	# the hosts a tarball or a variant holds, which test_smoke.py holds
+	# without a build or an image.
+	--hosts)
+		[ "$#" -eq 3 ] || usage
+		named
+		hosts "$(cd "$2" && pwd)" "$3" ;;
+	--shipped)
+		[ "$#" -eq 2 ] || usage
+		named
+		shipped "$2" ;;
 	--fastcgi) fastcgi "$2" "$3" "$4" ;;
 	--machos)
 		[ "$#" -eq 2 ] || usage
@@ -351,7 +438,7 @@ case "${1:-}" in
 			machos "$1"
 			reach
 		fi
-		hosts "$(cd "$1" && pwd)" fpm
+		hosts "$(cd "$1" && pwd)" tarball
 		# A Linux tarball's smoke runs before its curl is installed.
 		[ "$(uname -s)" != Darwin ] || https "$(cd "$1" && pwd)" ;;
 esac

@@ -43,17 +43,20 @@ says, so a run's log names the buildx that answered: each flag and format
 the steps and the images workflow pass is one buildx v0.14.0 knows, the
 oldest they serve (dist/README.md).
 
-The labels, on each image and as annotations on each manifest list, are
+The labels, on each image and as annotations on its manifest list, are
 the standard OCI ones spec #9 names: source, revision, version (`nightly`
 from main) and licenses, the union of the licences of the workspace's
-crates the hosts link, read from their manifests (`licenses()`); and three
-that replace the Ubuntu base's: description and title, `Lela`, and
-created, the commit's time in RFC 3339, UTC. The build's
+crates the image's hosts link, HOSTS saying which hosts an image holds,
+read from their manifests (`licenses()`); and three that replace the
+Ubuntu base's: description and title, `Lela`, and created, the commit's
+time in RFC 3339, UTC. The build's
 SOURCE_DATE_EPOCH is that same time, so the image loaded and the one
 pushed from the cache have one config.
 
---dry-run prints the platform, the labels, the tags and the digests it
-would join, and builds, smokes and pushes nothing; without --platform it
+--dry-run prints the platform, each image's labels as `label <variant>
+<key>=<value>` and the join's annotations as `annotation <variant> ...`,
+the tags and the digests it would join, and builds, smokes and pushes
+nothing; without --platform it
 asks docker for the daemon's platform and nothing else. A real `build`
 refuses a tree with changes, and a release whose tag is not HEAD; a real
 `join` refuses those too, and a variant without a digest for each
@@ -228,16 +231,87 @@ def workspace_package(root=ROOT):
     return read_manifest(root, "Cargo.toml").get("workspace", {}).get("package", {})
 
 
-# The licenses label (ruled on #14): the union of the licences of the
-# workspace's own crates the hosts link, read from their manifests with
-# tomllib alone: the images workflow's jobs install no Rust toolchain, so
-# no cargo is known to be on the runners that publish, and a test holds
-# this reading to `cargo metadata` wherever cargo is. Third parties' crates
-# and the system's C libraries are the SBOM's.
+def arg(key):
+    """The default dist/Dockerfile gives its `ARG <key>`."""
+    prefix = f"ARG {key}="
+    lines = (ROOT / "dist/Dockerfile").read_text().splitlines()
+    named = [line.removeprefix(prefix) for line in lines if line.startswith(prefix)]
+    if len(named) != 1:
+        raise Refusal(f"dist/Dockerfile names {len(named)} `{prefix}` lines, where it names one")
+    return named[0]
+
+
+def name():
+    """The hosts' name, dist/Dockerfile's `ARG NAME` (ADR-0016), which
+    xtask's tests hold to php_engine's PRODUCT_NAME."""
+    return arg("NAME")
+
+
+@dataclass(frozen=True)
+class Host:
+    """One host a release ships: its crate's directory and package, its
+    binary's name after the hosts' name (`-cgi` for `lela-cgi`), whether
+    every tarball holds it and the images that do; and the directory of a
+    prefix it lies in, `bin` or `sbin`, as php's `make install` lays it,
+    in a tarball and under an image's /usr/local alike."""
+
+    crate: str
+    package: str
+    suffix: str
+    directory: str
+    tarball: bool
+    images: tuple[str, ...]
+
+    @property
+    def binary(self):
+        return name() + self.suffix
+
+    @property
+    def path(self):
+        """Where it lies under a prefix: `bin/lela`."""
+        return f"{self.directory}/{self.binary}"
+
+
+# Where a release ships each host, as Mitchell ruled on #79 on 2026-11-21:
+# all four in every tarball, the debugger host in the `cli` image and in no
+# other. The harness's one host table says it, and `cargo xtask hosts
+# --list` prints it; the jobs that publish install no Rust toolchain, so
+# the scripts read this copy, and a test holds it to that command's lines,
+# in its order, wherever cargo is. Every other list of hosts in dist/ is
+# read from it or held to it by a test: dist/Dockerfile's cargo line and
+# where each of its stages lays a host, dist/release.py's tarballs,
+# dist/smoke.sh's and dist/testlib.py's.
+HOSTS = (
+    Host("sapi/cli", "php_sapi_cli", "", "bin", tarball=True, images=("cli", "fpm", "apache")),
+    Host("sapi/cgi", "php_sapi_cgi", "-cgi", "bin", tarball=True, images=("cli", "fpm", "apache")),
+    Host("sapi/fpm", "php_sapi_fpm", "-fpm", "sbin", tarball=True, images=("fpm", "apache")),
+    Host("sapi/phpdbg", "php_sapi_phpdbg", "-dbg", "bin", tarball=True, images=("cli",)),
+)
+
+
+def in_tarball():
+    """The hosts every tarball holds, in the table's order."""
+    return [host for host in HOSTS if host.tarball]
+
+
+def in_image(variant):
+    """The hosts the image of `variant` holds, in the table's order."""
+    if variant not in VARIANTS:
+        raise Refusal(f"no image {variant}; the images are {', '.join(VARIANTS)}")
+    return [host for host in HOSTS if variant in host.images]
+
+
+# The licenses label (ruled on #14), one per image: the union of the
+# licences of the workspace's own crates the image's hosts link, read from
+# their manifests with tomllib alone: the images workflow's jobs install no
+# Rust toolchain, so no cargo is known to be on the runners that publish,
+# and a test holds this reading to `cargo metadata` wherever cargo is.
+# Third parties' crates and the system's C libraries are the SBOM's.
 #
-# The hosts are the crates dist/Dockerfile's cargo line builds, with their
-# default features, for each platform of the images; a test holds HOSTS to
-# that line. A crate counts where a normal dependency reaches it: dev- and
+# dist/Dockerfile's one cargo line builds every host of HOSTS, with its
+# default features, for each platform of the images, so the features are
+# unified across all four; an image's crates are the ones its own hosts
+# reach under them. A crate counts where a normal dependency reaches it: dev- and
 # build-dependencies link nothing into a host. An optional dependency
 # counts where a feature the build turns on names it, as cargo's resolver
 # turns it on: `dep:<name>`, `<name>/<feature>`, or the implicit feature of
@@ -245,7 +319,6 @@ def workspace_package(root=ROOT):
 # table counts where its `cfg` holds for linux/amd64 or linux/arm64, whose
 # Rust targets' `cfg` (rustc --print cfg --target) TARGETS names in the keys
 # a table here may test; a table testing any other is refused, not guessed.
-HOSTS = ("php_sapi_cli", "php_sapi_cgi", "php_sapi_fpm")
 LINUX = {
     "target_os": "linux", "target_family": "unix", "target_env": "gnu", "target_vendor": "unknown",
     "target_endian": "little", "target_pointer_width": "64", "unix": None,
@@ -449,9 +522,9 @@ def dependencies(path, manifest, workspace, platform):
     return found
 
 
-def linked(root=ROOT):
-    """The crates of the workspace the hosts link on any platform of the
-    images, read from their manifests."""
+def linked(variant, root=ROOT):
+    """The crates of the workspace the hosts of the image of `variant` link
+    on any platform of the images, read from their manifests."""
     top = read_manifest(root, "Cargo.toml")
     workspace = top.get("workspace", {})
     members = {}
@@ -461,19 +534,22 @@ def linked(root=ROOT):
                 path = directory.relative_to(root).as_posix()
                 members[read_manifest(root, f"{path}/Cargo.toml").get("package", {}).get("name")] = path
     for host in HOSTS:
-        if host not in members:
-            raise Refusal(f"no crate of the workspace is {host}, a host dist/Dockerfile builds")
+        if host.package not in members:
+            raise Refusal(f"no crate of the workspace is {host.package}, a host dist/Dockerfile builds")
+    built = [members[host.package] for host in HOSTS]
+    held = [members[host.package] for host in in_image(variant)]
     found = {}
     for platform in TARGETS:
-        for crate in resolved(root, workspace, [members[host] for host in HOSTS], platform):
+        for crate in resolved(root, workspace, built, held, platform):
             found[crate.path] = crate
     return sorted(found.values(), key=lambda crate: crate.path)
 
 
-def resolved(root, workspace, hosts, platform):
-    """The crates `hosts` link on `platform`, with the hosts' default
-    features, the features unified across them as one cargo line
-    builds them."""
+def resolved(root, workspace, hosts, held, platform):
+    """The crates the hosts of `held` link on `platform`, where one cargo
+    line builds every host of `hosts` with its default features, the
+    features unified across them; every crate that line builds is held to
+    its license line."""
     manifests, features, deps, enabled, weak = {}, {}, {}, {}, {}
     work = [(host, "default") for host in hosts]
 
@@ -536,6 +612,13 @@ def resolved(root, workspace, hosts, platform):
                 work.extend((d.path, wanted) for d in deps[path][name] if d.path)
             else:
                 work.append((path, entry))
+    reached, todo = set(), list(held)
+    while todo:
+        path = todo.pop()
+        if path in reached:
+            continue
+        reached.add(path)
+        todo.extend(d.path for name in enabled[path] for d in deps[path].get(name, ()) if d.path)
     crates = []
     for path, manifest in manifests.items():
         package = manifest.get("package", {})
@@ -551,26 +634,30 @@ def resolved(root, workspace, hosts, platform):
                 "licenses label is the union of every such crate's"
             )
         License(line, f"{path}/Cargo.toml: the license line of {name}")
-        crates.append(Crate(path, name, line))
+        if path in reached:
+            crates.append(Crate(path, name, line))
     return crates
 
 
-def licenses(root=ROOT):
-    """The images' licenses label: the workspace's own line, and then the
-    union of the lines of the crates the hosts link (see HOSTS)."""
+def licenses(variant, root=ROOT):
+    """The licenses label of the image of `variant`: the workspace's own
+    line, and then the union of the lines of the crates its hosts link
+    (see HOSTS)."""
     lead = workspace_package(root).get("license")
     if not isinstance(lead, str):
         raise Refusal("Cargo.toml's [workspace.package] has no license line, which the images' licenses label leads with")
-    return union(lead, [crate.license for crate in linked(root)])
+    return union(lead, [crate.license for crate in linked(variant, root)])
 
 
-def labels(ref, commit):
+def labels(ref, commit, variant):
+    """The labels of the image of `variant`, which the join annotates its
+    list with too."""
     prefix = "org.opencontainers.image."
     return [
         (prefix + "source", SOURCE),
         (prefix + "revision", commit.sha),
         (prefix + "version", ref.label),
-        (prefix + "licenses", licenses()),
+        (prefix + "licenses", licenses(variant)),
         (prefix + "description", "Lela"),
         (prefix + "title", "Lela"),
         (prefix + "created", commit.created),
@@ -599,7 +686,7 @@ def main(argv):
         commit = Commit.head()
         # Read before anything is run, so a tree the labels refuse builds,
         # smokes and pushes nothing.
-        labelled = labels(ref, commit)
+        labelled = {variant: labels(ref, commit, variant) for variant in VARIANTS}
         if arguments.step == "build":
             build(ref, commit, labelled, arguments)
         else:
@@ -694,17 +781,20 @@ def build(ref, commit, labelled, arguments):
     print(f"ref {ref.name}")
     print(f"commit {commit.sha}")
     print(f"platform {platform}")
-    for key, value in labelled:
-        print(f"label {key}={value}")
+    for variant in VARIANTS:
+        for key, value in labelled[variant]:
+            print(f"label {variant} {key}={value}")
     if not arguments.dry_run:
         answering()
-    common = [
+    shared = [
         "buildx", "build", "-f", str(ROOT / "dist/Dockerfile"), "--platform", platform,
         "--build-arg", f"CARGO_BUILD_JOBS={setting('CARGO_BUILD_JOBS')}",
         "--build-arg", f"SOURCE_DATE_EPOCH={commit.epoch}",
     ]
-    for key, value in labelled:
-        common += ["--label", f"{key}={value}"]
+    common = {
+        variant: shared + [flag for key, value in labelled[variant] for flag in ("--label", f"{key}={value}")]
+        for variant in VARIANTS
+    }
     with tempfile.TemporaryDirectory() as scratch:
         scratch = Path(scratch)
         smoked = {}
@@ -715,7 +805,8 @@ def build(ref, commit, labelled, arguments):
             if arguments.dry_run:
                 continue
             loaded = scratch / f"load-{variant}.json"
-            docker(*common, "--target", variant, "--metadata-file", str(loaded), "--tag", local, "--load", str(ROOT))
+            docker(*common[variant], "--target", variant, "--metadata-file", str(loaded), "--tag", local, "--load",
+                   str(ROOT))
             smoked[variant] = loaded_manifest(metadata(loaded), variant)
             if subprocess.run([setting("SMOKE"), "--image", local, variant]).returncode != 0:
                 raise Refusal(f"the smoke of {variant} failed; nothing is pushed")
@@ -726,7 +817,7 @@ def build(ref, commit, labelled, arguments):
                 continue
             result = scratch / f"push-{variant}.json"
             docker(
-                *common, "--target", variant, "--metadata-file", str(result), "--sbom=true",
+                *common[variant], "--target", variant, "--metadata-file", str(result), "--sbom=true",
                 "--output", f"type=image,name={IMAGE},push-by-digest=true,name-canonical=true,push=true",
                 str(ROOT),
             )
@@ -881,9 +972,12 @@ def join(ref, commit, labelled, arguments):
     found = read_digests(arguments.digests) if arguments.digests or not arguments.dry_run else None
     print(f"ref {ref.name}")
     print(f"commit {commit.sha}")
-    annotations = [f"index:{key}={value}" for key, value in labelled]
-    for annotation in annotations:
-        print(f"annotation {annotation}")
+    annotations = {
+        variant: [f"index:{key}={value}" for key, value in labelled[variant]] for variant in VARIANTS
+    }
+    for variant in VARIANTS:
+        for annotation in annotations[variant]:
+            print(f"annotation {variant} {annotation}")
     if not arguments.dry_run:
         answering()
     manifests = []
@@ -898,7 +992,7 @@ def join(ref, commit, labelled, arguments):
         if arguments.dry_run:
             continue
         create = ["buildx", "imagetools", "create"]
-        for annotation in annotations:
+        for annotation in annotations[variant]:
             create += ["--annotation", annotation]
         for tag in named:
             create += ["--tag", tag]
