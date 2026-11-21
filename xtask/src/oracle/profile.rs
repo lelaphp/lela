@@ -6,6 +6,7 @@
 //! names, and [`build`], which builds every binary the harness serves
 //! through, all read it, and none spells a profile.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -80,9 +81,21 @@ impl Profile {
         }
     }
 
-    /// Where cargo puts `binary` built in this profile, under `target`.
+    /// Where cargo puts `binary` built in this profile, under `target`:
+    /// the one answer every build and lookup of the harness reads, a build
+    /// of the triple `CARGO_BUILD_TARGET` names, as dist/Dockerfile's build
+    /// stage names one, being under that triple's directory.
     pub(crate) fn binary(self, target: &Path, binary: &str) -> PathBuf {
-        target.join(self.dir()).join(binary)
+        let triple = std::env::var_os("CARGO_BUILD_TARGET");
+        self.binary_for(target, triple.as_deref(), binary)
+    }
+
+    /// [`Profile::binary`] for a build of `triple`, where one is named:
+    /// cargo puts it in `target/<triple>/<dir>`, and the host's own build
+    /// in `target/<dir>`.
+    fn binary_for(self, target: &Path, triple: Option<&OsStr>, binary: &str) -> PathBuf {
+        let under = triple.map_or_else(|| target.to_path_buf(), |triple| target.join(triple));
+        under.join(self.dir()).join(binary)
     }
 }
 
@@ -621,5 +634,22 @@ mod tests {
         assert_eq!(PREFERRED[0], LANE);
         assert_eq!(Profile::Dev.dir(), "debug");
         assert_eq!(LANE.dir(), LANE.name());
+    }
+
+    /// A build of a named triple, as dist/Dockerfile's build stage names
+    /// one in `CARGO_BUILD_TARGET`, is under the triple's directory, as
+    /// cargo puts it; the host's own build, no triple named, is not.
+    #[test]
+    fn a_named_triples_build_is_under_its_directory() {
+        let target = Path::new("/w/target");
+        let triple = OsStr::new("aarch64-unknown-linux-gnu");
+        assert_eq!(
+            Profile::Release.binary_for(target, Some(triple), "lela-dbg"),
+            Path::new("/w/target/aarch64-unknown-linux-gnu/release/lela-dbg")
+        );
+        assert_eq!(
+            Profile::Dev.binary_for(target, None, "lela"),
+            Path::new("/w/target/debug/lela")
+        );
     }
 }
