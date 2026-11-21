@@ -2,9 +2,10 @@
 //! November 2026: `-v`'s first line in php's shape, the line a program
 //! reading php's version parses, with Lela's version after it, then
 //! what Lela is and whose the derived parts are, and no line naming the
-//! Zend Engine or claiming php's copyright as the product's. Held on the
-//! binary, since it is the host's. The oracle prints php's lines, so
-//! `lines.toml` cannot hold these.
+//! Zend Engine or claiming php's copyright as the product's; and
+//! `--licenses`, the notices the binary carries, which are the files in
+//! the tree. Held on the binary, since both are the host's. The oracle
+//! prints php's lines, so `lines.toml` cannot hold these.
 
 use std::process::{Command, Output, Stdio};
 
@@ -74,5 +75,21 @@ fn the_constants_a_program_reads_are_still_phps() {
             "echo PHP_VERSION, ' ', phpversion(), ' ', zend_version(), ' ', PHP_MAJOR_VERSION, PHP_MINOR_VERSION;"
         ),
         "8.5.12 8.5.12 4.5.12 85"
+    );
+}
+
+#[test]
+fn the_licenses_are_the_notice_and_the_third_party_list_in_the_tree() {
+    let out = lela(&["--licenses"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let file = |name: &str| {
+        std::fs::read(format!("{root}/{name}")).unwrap_or_else(|e| panic!("{name}: {e}"))
+    };
+    assert_eq!(
+        out.stdout,
+        [file("NOTICE"), b"\n".to_vec(), file("THIRD-PARTY.md")].concat(),
+        "the binary's notices are not the tree's: rebuild it"
     );
 }

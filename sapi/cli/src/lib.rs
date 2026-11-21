@@ -101,6 +101,15 @@ pub(crate) fn title_constant() -> php_sapi::ProcessTitle {
     }
 }
 
+/// What `--licenses` prints: `NOTICE`, then `THIRD-PARTY.md`, the files
+/// at the repository's root, carried in the binary, a blank line
+/// between them.
+const LICENSES: &str = concat!(
+    include_str!("../../../NOTICE"),
+    "\n",
+    include_str!("../../../THIRD-PARTY.md")
+);
+
 /// `php_print_version` for this host, [`php_sapi::version`] under its
 /// name.
 #[must_use]
@@ -162,6 +171,7 @@ fn served(invoked: &OsString, argv: &[OsString]) -> i32 {
             0
         }
         Ask::Version => print(&version(cli(startup))),
+        Ask::Licenses => print(LICENSES),
         Ask::Info => request::info(cli(startup)),
         Ask::Extensions => listed(cli(startup)),
         Ask::Server(server) => {
@@ -227,7 +237,12 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
             }
             status
         }
-        Ask::Usage | Ask::Version | Ask::Info | Ask::Extensions | Ask::Server(_) => 0,
+        Ask::Usage
+        | Ask::Version
+        | Ask::Licenses
+        | Ask::Info
+        | Ask::Extensions
+        | Ask::Server(_) => 0,
     }
 }
 
