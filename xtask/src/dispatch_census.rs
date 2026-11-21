@@ -59,7 +59,7 @@ use crate::bench::kernels::MEMORY;
 use crate::carried::BUNDLE;
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
-use crate::oracle::{Ended, Invocation, Oracle, Program, hosts::CLI, profile};
+use crate::oracle::{Ended, Invocation, Oracle, Profile, Program, hosts::CLI, profile};
 use crate::reading::{Number, Reading, Status, Store, joined, plural};
 use crate::workloads::{ANSWERS, Declaration, Page, Pages, Role, Text};
 
@@ -499,10 +499,11 @@ pub(crate) fn command(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask
 }
 
 /// The counting build: the one asked for, or `php` built in release with
-/// the bundle's [`FEATURE`] into its own directory.
-fn engine(root: &Path, ask: &Ask) -> Result<PathBuf> {
+/// the bundle's [`FEATURE`] into its own directory, and the profile it was
+/// built in where this run built it.
+fn engine(root: &Path, ask: &Ask) -> Result<(PathBuf, Option<Profile>)> {
     if let Some(engine) = &ask.engine {
-        return Ok(std::path::absolute(engine)?);
+        return Ok((std::path::absolute(engine)?, None));
     }
     let features = format!("{BUNDLE}/{FEATURE}");
     let into = profile::featured(root, FEATURE);
@@ -513,6 +514,7 @@ fn engine(root: &Path, ask: &Ask) -> Result<PathBuf> {
         Some(&features),
         (Some(&into), None),
     )
+    .map(|built| (built.path, Some(built.profile)))
 }
 
 /// Run what was asked for: one reading per run, and over the declared
@@ -547,7 +549,7 @@ pub fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Vec<Reading>> 
                 continue;
             }
             (Err(why), _) => Err(anyhow::anyhow!("the counting build did not build: {why:#}")),
-            (Ok(engine), Source::Page(page)) => {
+            (Ok((engine, _)), Source::Page(page)) => {
                 let copied = copied.get_or_insert_with(|| match &rig {
                     Ok(pages::Located::Here(rig)) => rig.copied().map_err(|e| format!("{e:#}")),
                     Ok(pages::Located::Absent(why)) => Err(why.clone()),
@@ -561,11 +563,9 @@ pub fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Vec<Reading>> 
                     (Ok(_), None) => Err(anyhow::anyhow!("no pages are declared")),
                 }
             }
-            (Ok(engine), _) => counts(&oracle, engine, counted),
+            (Ok((engine, _)), _) => counts(&oracle, engine, counted),
         };
-        // The counting build's profile, where this run built it.
-        let built = engine.as_ref().is_ok_and(|_| ask.engine.is_none());
-        reading.profile = built.then_some(profile::Profile::Release);
+        reading.profile = engine.as_ref().ok().and_then(|(_, profile)| *profile);
         tallied(counted, counts, &mut reading, &mut vote);
         if let Some(role) = counted.role.filter(|role| !role.votes()) {
             let said = format!("; its role, {}, votes nothing", role.name());

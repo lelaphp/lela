@@ -174,13 +174,13 @@ pub struct Reading {
     /// an instrument of [`UNDER_RECIPE`]; `None` for every other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
-    /// The profile the binary the reading judged was built in, where the
-    /// instrument knows it: `phpt` over the engine it found in a build
-    /// directory or built itself ([`crate::oracle::Runner::profile`]).
-    /// Absent where the instrument judges no build of the engine, or
-    /// cannot know how the one it judged was built: `phpt --engine
-    /// <path>`, the control, the linked engine; and on every reading of
-    /// `v = 2` or before, which never named one.
+    /// The profile of the engine binary the reading's verdict is about,
+    /// taken only from that binary: one the harness built
+    /// ([`Reading::judged`]) or found in a profile's directory
+    /// ([`crate::oracle::Runner::profile`]), the linked engine among them.
+    /// Absent where the caller named the binary (`--engine`, `--binary`),
+    /// where it is the oracle's (the control), where nothing ran, and on
+    /// every reading of `v = 2` or before, which never named one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<Profile>,
 }
@@ -326,6 +326,13 @@ impl Reading {
         self.key == hash
             && (!UNDER_RECIPE.contains(&self.instrument.as_str())
                 || self.recipe.as_deref() == Some(pin))
+    }
+
+    /// The reading as one of `built`, naming the profile the build says it
+    /// was built in: the one place an instrument's reading of a binary the
+    /// harness built takes its profile.
+    pub(crate) fn judged(&mut self, built: &crate::oracle::profile::Built) {
+        self.profile.replace(built.profile);
     }
 
     /// The reading as taken under `pin`'s recipe.

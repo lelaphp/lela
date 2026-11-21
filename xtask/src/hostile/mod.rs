@@ -116,7 +116,7 @@ pub fn run(root: &Path, manifest: &Manifest, registry: &Registry) -> Result<Vec<
     };
     let sides = Sides {
         oracle: &oracle,
-        engine: &engine,
+        engine: &engine.path,
         kept: root.join(kept::RUNS).join("oracle").join(pin.digest()),
         registry,
     };
@@ -130,7 +130,7 @@ pub fn run(root: &Path, manifest: &Manifest, registry: &Registry) -> Result<Vec<
         Base::Stale | Base::None => None,
     };
     let held = Said::of(ids.clone().zip(&found), verdicts);
-    let built_from = BuiltFrom::of(&engine).keyed(root, &manifest.layout());
+    let built_from = BuiltFrom::of(&engine.path).keyed(root, &manifest.layout());
     let tree = snapshot.tracked_over(&built_from)?;
     let run = Run {
         commit: track::short(&crate::git::head_commit(root)?).to_owned(),
@@ -159,8 +159,7 @@ pub fn run(root: &Path, manifest: &Manifest, registry: &Registry) -> Result<Vec<
         *forms.entry(program.form.name()).or_insert(0) += 1;
     }
     for reading in &mut readings {
-        // The engine `profile::build` built, in the lanes' profile.
-        reading.profile = Some(profile::LANE);
+        reading.judged(&engine);
         numbers(reading, &held, found.len())?;
         reading.count("wall_ms", crate::reading::millis(wall))?;
         for (form, n) in &forms {

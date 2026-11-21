@@ -160,7 +160,7 @@ pub fn run(
     let sides = Sides {
         oracle: &oracle,
         php: &pin.oracle.path,
-        engine: &engine,
+        engine: &engine.path,
         registry,
         deadline: started + Duration::from_secs(ask.minutes.saturating_mul(60)),
     };
@@ -168,8 +168,7 @@ pub fn run(
     let wall = started.elapsed();
     let message = hunt.message(root, seed, &corpus, ask);
     for reading in &mut readings {
-        // The engine `profile::build` built, in the lanes' profile.
-        reading.profile = Some(profile::LANE);
+        reading.judged(&engine);
         hunt.numbers(reading, seed, &programs)?;
         reading.count("wall_ms", crate::reading::millis(wall))?;
     }

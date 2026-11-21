@@ -169,7 +169,7 @@ Commands:
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   steer              Apply a proposal to one of the harness's own files, and only where it adds: one changed value writes nothing
   oracle             The oracle's pin: `propose` prints the whole diff a bump writes, after a person has poured the new keg. Writes no reading
-  hosts              Build the hosts the phpt lane hands its tests to in one profile of the workspace's and print each one's path, a line each. Writes no reading
+  hosts              Build the hosts the phpt lane hands its tests to in one profile and print each one's path; `--list` says where each ships, building nothing. Writes no reading
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
   new-ext            Lay one extension crate down at ext/<name> from the template, with its `php_bundle` line, ext/clippy.toml and ext/AGENTS.md row; refuses an existing one
   new-sapi           Lay one host crate down at sapi/<name> as the CLI and CGI are laid, with its binary and test; refuses an existing one or one without its `[[crate]]` row (ADR-0008)
@@ -185,9 +185,9 @@ Exit status:
   1  a refusal, or a reading that fails
   2  a usage error
   3  a worktree laid down and not ready to be worked in
-  4  an instrument that could not run to its end, its readings not whole; `phpt` gives it
+  4  an instrument that could not run to its end, its readings not whole: `phpt` without its tree, oracle, engine or a server
 ```
-<!-- /computed in=13a463eb7b57e9bece6f7eefb1dde3950f529c68cc81b8510d27348e3ce829ce out=9c6f063af1b84250973dcf4b0261acd43ff3b90b276b27b3a32a0a68a9bf9cff -->
+<!-- /computed in=815000c56e3848b1871227691df3b7c18c3eb8933d0cd2ef6ee129bdc3d43147 out=75d881bfb98dd599b72174e618b1c9a4a47e1bf4d470be100be350844fa54f7e -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

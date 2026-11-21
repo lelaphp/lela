@@ -162,7 +162,7 @@ use crate::cfg::Target;
 use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::oracle::{Linked, Oracle, Oracles, Pin, Regime, Runner};
+use crate::oracle::{Linked, Oracle, Oracles, Pin, Profile, Regime, Runner};
 use crate::reading::{Reading, Status, Store, listed, millis};
 use crate::scratch::Full;
 use crate::sources;
@@ -315,6 +315,10 @@ pub(crate) struct Tally {
     /// ([`host::seen`]): the reading's message keeps it, so a miss that
     /// does not come again on a rerun can still be read.
     pub saw: Vec<String>,
+    /// The profile of the builds that served the fences judged, which the
+    /// crate's reading names; none where no fence was served beside the
+    /// oracle.
+    pub profile: Option<Profile>,
 }
 
 impl Tally {
@@ -414,6 +418,7 @@ pub(crate) fn reading(
     // Over the snapshot the run took after any `--accept` it made, since
     // that writes the sources the stamp is over.
     let mut reading = run.reading(under_rule(krate, snapshot, rule)?, &outcome, message)?;
+    reading.profile = tally.profile;
     reading.count(numbers::PASSED, run.count(Judgement::Pass))?;
     reading.count(numbers::FAILED, run.against().len() as u64)?;
     reading.count(numbers::DIVERGED, run.count(Judgement::Diverged))?;
@@ -901,8 +906,11 @@ fn serve_all(
     let judged = tally::Tally::judge_beside(&lines, |(at, held, line)| {
         Ok(held.judge(ready[*at].oracle, binary.host(held.host()), registry, line))
     })?;
-    for ((at, _, line), judged) in lines.iter().zip(judged.judged) {
+    for ((at, held, line), judged) in lines.iter().zip(judged.judged) {
         if let Some(tally) = finished.get_mut(*at) {
+            if let Some(profile) = binary.profile(held.host()) {
+                tally.profile.get_or_insert(profile);
+            }
             if line.serves() && tally::Judgement::counts_against(judged.judgement) {
                 let differs = judged.judgement == Judgement::Fail;
                 let what = host::seen(&judged.note, differs);
@@ -1132,12 +1140,14 @@ pub(crate) struct Prepared<'a> {
 }
 
 /// What serving one crate's fences kept beside their verdicts: the fence
-/// lines `--accept` captured, and what each fence's run entered, by its id.
+/// lines `--accept` captured, what each fence's run entered, by its id,
+/// and the profile of a build that served one.
 #[derive(Default)]
 pub(crate) struct Gathered {
     captured: Mutex<Vec<Captured>>,
     reproduced: Mutex<Vec<(PathBuf, usize)>>,
     entered: Mutex<HashMap<String, Record>>,
+    profile: Mutex<Option<Profile>>,
 }
 
 /// One crate made ready to serve. Coverage is a count over the source and
@@ -1192,6 +1202,9 @@ fn serve(
     crate::locked(&gathered.captured).extend(kept.captured);
     crate::locked(&gathered.reproduced).extend(kept.reproduced);
     crate::locked(&gathered.entered).insert(witness.id(), kept.entered);
+    if let Some(profile) = kept.profile {
+        crate::locked(&gathered.profile).get_or_insert(profile);
+    }
     if let Some(watch) = watch {
         watch.served(witness)?;
     }
@@ -1216,7 +1229,7 @@ fn serve_absent(
     }
     for (witness, regime) in &prepared.runnable {
         let record = match judge::serve(oracle, binary, witness, *regime) {
-            Ok((_, natives)) => Record::Entered(natives),
+            Ok((_, natives, _)) => Record::Entered(natives),
             Err(trouble) => {
                 unserved.push(format!("{}: {trouble:#}", witness.at()));
                 Record::Unserved
@@ -1268,6 +1281,10 @@ fn finish(
         .unwrap_or_else(PoisonError::into_inner);
     reproduced.sort();
     Tally {
+        profile: gathered
+            .profile
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner),
         witnesses,
         subjects: subjects.len(),
         missing: subjects

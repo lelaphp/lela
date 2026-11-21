@@ -6,6 +6,7 @@
 //! names, and [`build`], which builds every binary the harness serves
 //! through, all read it, and none spells a profile.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -80,18 +81,41 @@ impl Profile {
         }
     }
 
-    /// Where cargo puts `binary` built in this profile, under `target`.
+    /// Where cargo puts `binary` built in this profile, under `target`:
+    /// the one answer every build and lookup of the harness reads, a build
+    /// of the triple `CARGO_BUILD_TARGET` names, as dist/Dockerfile's build
+    /// stage names one, being under that triple's directory.
     pub(crate) fn binary(self, target: &Path, binary: &str) -> PathBuf {
-        target.join(self.dir()).join(binary)
+        let triple = std::env::var_os("CARGO_BUILD_TARGET");
+        self.binary_for(target, triple.as_deref(), binary)
     }
+
+    /// [`Profile::binary`] for a build of `triple`, where one is named:
+    /// cargo puts it in `target/<triple>/<dir>`, and the host's own build
+    /// in `target/<dir>`.
+    fn binary_for(self, target: &Path, triple: Option<&OsStr>, binary: &str) -> PathBuf {
+        let under = triple.map_or_else(|| target.to_path_buf(), |triple| target.join(triple));
+        under.join(self.dir()).join(binary)
+    }
+}
+
+/// A binary the harness built, where cargo put it and the profile it was
+/// built in: what a reading names of the build it judged
+/// ([`crate::reading::Reading::judged`]), so the profile is stated once,
+/// by the build, and never again at the reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Built {
+    pub(crate) path: PathBuf,
+    pub(crate) profile: Profile,
 }
 
 /// `cargo build --profile <the lanes'> -p <package> --bin <binary>`,
 /// with `--features <features>` where there are any, in `root`, and where
 /// cargo put the binary: under `into` where it is named, a target
 /// directory of the build's own ([`featured`]), else the target directory
-/// cargo was told of, or `root`'s own. Every binary the harness builds,
-/// `lela-linked` and the hosts' own, is built in the lanes' profile,
+/// cargo was told of, or `root`'s own, with the profile. Every binary
+/// the harness builds, `lela-linked` and the hosts' own, is built in the
+/// lanes' profile,
 /// whatever profile the harness itself was built in (harness revision 92):
 /// a reading's key covers the source and not the profile, so one
 /// key is read off one build, and the `php` the witness lane builds is the
@@ -103,7 +127,7 @@ pub(crate) fn build(
     binary: &str,
     features: Option<&str>,
     into: Option<&Path>,
-) -> Result<PathBuf> {
+) -> Result<Built> {
     let on = (features, true);
     built(root, LANE, (package, binary), on, (into, None))
 }
@@ -120,7 +144,7 @@ pub(crate) fn released(
     (package, binary): (&str, &str),
     features: Option<&str>,
     into: (Option<&Path>, Option<&str>),
-) -> Result<PathBuf> {
+) -> Result<Built> {
     let on = (features, true);
     built(root, Profile::Release, (package, binary), on, into)
 }
@@ -133,7 +157,7 @@ pub(crate) fn released_bare(
     root: &Path,
     (package, binary): (&str, &str),
     into: &Path,
-) -> Result<PathBuf> {
+) -> Result<Built> {
     let (bare, into) = ((None, false), (Some(into), None));
     built(root, Profile::Release, (package, binary), bare, into)
 }
@@ -147,7 +171,7 @@ fn built(
     (package, binary): (&str, &str),
     (features, defaults): (Option<&str>, bool),
     (into, cfg): (Option<&Path>, Option<&str>),
-) -> Result<PathBuf> {
+) -> Result<Built> {
     let mut cargo = Command::new(cargo());
     cargo.args([
         "build",
@@ -175,12 +199,13 @@ fn built(
     let what = format!("{binary}; its errors are on the harness's second stream");
     run(root, &mut cargo, &added, &what)?;
     let target = into.map_or_else(|| target(root), Path::to_path_buf);
-    found(profile.binary(&target, binary))
+    let path = found(profile.binary(&target, binary))?;
+    Ok(Built { path, profile })
 }
 
 /// The target directory cargo builds into in `root`: the one
 /// `CARGO_TARGET_DIR` names, relative to `root`, else `root`'s own.
-fn target(root: &Path) -> PathBuf {
+pub(crate) fn target(root: &Path) -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), |dir| root.join(dir))
 }
 
@@ -430,14 +455,15 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
-        let built = build(&root, "probe", "probe", None, None).unwrap();
-        assert!(built.is_file(), "{}", built.display());
+        let Built { path, profile } = build(&root, "probe", "probe", None, None).unwrap();
+        assert!(path.is_file(), "{}", path.display());
         assert_eq!(
-            built.parent().and_then(Path::file_name),
+            path.parent().and_then(Path::file_name),
             Some(std::ffi::OsStr::new(LANE.dir())),
             "{}",
-            built.display()
+            path.display()
         );
+        assert_eq!(profile, LANE, "the build says the profile it was built in");
     }
 
     /// The bare build turns the package's default features off and lands
@@ -463,10 +489,14 @@ mod tests {
         };
         let into = root.join("target/featured/bare");
         let bare = released_bare(&root, ("probe", "probe"), &into).unwrap();
-        assert!(bare.starts_with(&into), "{}", bare.display());
-        assert_eq!(printed(&bare), "false");
+        assert!(bare.path.starts_with(&into), "{}", bare.path.display());
+        assert_eq!(printed(&bare.path), "false");
         let full = released(&root, ("probe", "probe"), None, (None, None)).unwrap();
-        assert_eq!(printed(&full), "true");
+        assert_eq!(printed(&full.path), "true");
+        assert_eq!(
+            (bare.profile, full.profile),
+            (Profile::Release, Profile::Release)
+        );
     }
 
     /// A cfg a bench build names reaches rustc beside the flags of the
@@ -505,7 +535,7 @@ mod tests {
             (None, Some("from_the_line")),
         )
         .unwrap();
-        let out = Command::new(&built).output().unwrap();
+        let out = Command::new(&built.path).output().unwrap();
         let printed = String::from_utf8(out.stdout).unwrap();
         assert!(
             printed.contains("--cfg from_the_table") && printed.contains("--cfg from_the_line"),
@@ -621,5 +651,22 @@ mod tests {
         assert_eq!(PREFERRED[0], LANE);
         assert_eq!(Profile::Dev.dir(), "debug");
         assert_eq!(LANE.dir(), LANE.name());
+    }
+
+    /// A build of a named triple, as dist/Dockerfile's build stage names
+    /// one in `CARGO_BUILD_TARGET`, is under the triple's directory, as
+    /// cargo puts it; the host's own build, no triple named, is not.
+    #[test]
+    fn a_named_triples_build_is_under_its_directory() {
+        let target = Path::new("/w/target");
+        let triple = OsStr::new("aarch64-unknown-linux-gnu");
+        assert_eq!(
+            Profile::Release.binary_for(target, Some(triple), "lela-dbg"),
+            Path::new("/w/target/aarch64-unknown-linux-gnu/release/lela-dbg")
+        );
+        assert_eq!(
+            Profile::Dev.binary_for(target, None, "lela"),
+            Path::new("/w/target/debug/lela")
+        );
     }
 }

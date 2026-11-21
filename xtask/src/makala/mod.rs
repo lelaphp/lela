@@ -45,7 +45,7 @@ pub(crate) mod bench;
 pub(crate) mod compare;
 pub(crate) mod soak;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
@@ -319,7 +319,7 @@ impl<'r> Consulted<'r> {
 
 /// makala's binary, built now in the lanes' profile, which the readings
 /// of the instruments that serve through it name.
-pub(crate) fn makala(root: &Path) -> Result<PathBuf> {
+pub(crate) fn makala(root: &Path) -> Result<profile::Built> {
     profile::build(root, &MAKALA.package(), MAKALA.binary, None, None)
 }
 

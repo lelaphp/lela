@@ -1069,7 +1069,7 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     let witness = &found.witnesses[0];
     let manifest = manifest();
     let oracle = manifest.pin().unwrap().oracle();
-    let (ran, entered) = super::judge::serve(&oracle, &binary(), witness, None).unwrap();
+    let (ran, entered, _) = super::judge::serve(&oracle, &binary(), witness, None).unwrap();
     assert_eq!(
         String::from_utf8_lossy(&ran.stdout).trim_end(),
         "int(3)",
@@ -1131,7 +1131,7 @@ fn a_process_fence_is_served_by_a_php_carrying_its_crate_s_feature() {
             panic!("{found:#?}")
         };
         let oracle = pin.oracle();
-        let (ran, _) = judge::serve(&oracle, &binary, witness, None).unwrap();
+        let (ran, ..) = judge::serve(&oracle, &binary, witness, None).unwrap();
         assert_eq!(String::from_utf8_lossy(&ran.stdout).trim_end(), served);
         for (regime, expected) in [
             ("jit-force", under_force),
@@ -1143,7 +1143,7 @@ fn a_process_fence_is_served_by_a_php_carrying_its_crate_s_feature() {
                 ..witness.clone()
             };
             let named = pin.regime(regime).ok();
-            let (ran, _) = judge::serve(&oracle, &binary, &under, named).unwrap();
+            let (ran, ..) = judge::serve(&oracle, &binary, &under, named).unwrap();
             let stdout = String::from_utf8_lossy(&ran.stdout);
             assert_eq!(stdout.trim_end(), expected, "{krate} under {regime}");
         }
@@ -1452,6 +1452,35 @@ fn a_fence_naming_a_locale_the_host_lacks_is_a_counted_skip() {
         "{}",
         reading.message
     );
+}
+
+/// A crate's reading names the profile of the builds that served its
+/// fences, taken from them: `release-da`, the lanes' profile, for a fence
+/// the linked engine served and for one marked `process`, served by
+/// `php`; none for a crate where no fence was served.
+#[test]
+fn a_reading_names_the_profile_of_the_build_that_served_its_fences() {
+    if oracle().is_none() {
+        return;
+    }
+    let manifest = manifest();
+    let krate = (manifest.crates.iter())
+        .find(|krate| krate.name == "ext/pcre")
+        .unwrap();
+    let snapshot = crate::key::Snapshot::disk(&workspace()).unwrap();
+    let profile = |text: &str| {
+        let tally = judge_text(text, &registry(""));
+        let rule = super::coverage_rule(&manifest);
+        super::reading(&tally, &snapshot, krate, rule)
+            .unwrap()
+            .profile
+    };
+    let release_da = Some(crate::oracle::Profile::ReleaseDa);
+    let linked = block("/// ```expect\n/// 1\n/// ```\n");
+    assert_eq!(profile(&linked), release_da, "{linked}");
+    let process = block("/// ```expect process\n/// 1\n/// ```\n");
+    assert_eq!(profile(&process), release_da, "{process}");
+    assert_eq!(profile("pub fn native() {}\n"), None);
 }
 
 /// A locale the oracle knows is run and held as any fence is: the probe
