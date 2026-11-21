@@ -3,8 +3,9 @@
 //! `CARGO_BUILD_JOBS=3` on twelve cores measured a load of 32 at the
 //! median and 100 at the most on 2026-10-18, and every build and test ran
 //! slower for it; so `clippy`, `test`, `miri`, `phpt`, `compile-identity`,
-//! `crosscheck`, `fpm-compare`, `soak`, `witness` and `bench` each take a
-//! seat before they build, and one that finds every seat held waits for
+//! `crosscheck`, `trace-dump`, `hostile`, `fuzz`, `fold`,
+//! `dispatch-census`, `fpm-compare`, `soak`, `witness`, `bench` and the
+//! `hosts` command each take a seat before they build, and one that finds every seat held waits for
 //! one, saying so once. A seat is an exclusive lock on one of `XTASK_SEATS`
 //! files (3 unless set; 0 seats no one) in `XTASK_SEAT_DIR` (`/tmp/xtask-seats`
 //! unless set), so it is the machine's and not one checkout's, and the

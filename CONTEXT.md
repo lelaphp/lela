@@ -242,7 +242,7 @@ One of builder, reviewer and advisor: a file under `.claude/agents/` that sets a
 _Avoid_: agent type (Claude Code's `agentType`)
 
 **Seat**:
-One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `hostile`, `fold`, `dispatch-census`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`). A bench on a dedicated machine takes every seat (`bench --machine dedicated`).
+One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `trace-dump`, `hostile`, `fuzz`, `fold`, `dispatch-census`, `fpm-compare`, `soak`, `witness`, `bench` and the `hosts` command take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`). A bench on a dedicated machine takes every seat (`bench --machine dedicated`).
 _Avoid_: lease
 
 **Snapshot**:
