@@ -93,7 +93,8 @@ use crate::reading::joined;
 #[derive(Debug)]
 pub struct Snapshot {
     root: PathBuf,
-    /// `HEAD`'s short id when the snapshot was taken, the stamp's commit.
+    /// `HEAD`'s id when the snapshot was taken, or the commit it holds,
+    /// whole: the stamp's commit.
     commit: String,
     /// Each file the content holds and its blob id, sorted by path.
     files: Vec<(String, String)>,
@@ -300,17 +301,16 @@ impl Snapshot {
         ))
     }
 
-    /// The tracked files as `commit` holds them, read once per process
-    /// and commit.
+    /// The tracked files as `commit`, a whole id, holds them, read once
+    /// per process and commit.
     pub fn commit(root: &Path, commit: &str) -> Result<Arc<Snapshot>> {
         let read = COMMITS.get_or_init(|| Mutex::new(BTreeMap::new()));
         memo(read, (root.to_path_buf(), commit.to_owned()), || {
             let mut files = git::blobs(root, commit, &[])?;
             files.sort_unstable();
-            let short = crate::track::short(commit).to_owned();
             Ok(Arc::new(Snapshot::new(
                 (root, Source::Git),
-                short,
+                commit.to_owned(),
                 files.clone(),
                 files,
             )))

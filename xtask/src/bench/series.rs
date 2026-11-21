@@ -23,6 +23,7 @@ use super::{Sign, Unit, rounded, sign, stats};
 use crate::manifest::Tolerance;
 use crate::reading::{Reading, Status};
 use crate::status::every::count;
+use crate::track::short;
 
 /// One night of a bar, in percent of the second arm's median, a cost: a
 /// rate's night is turned so that more is worse (`Unit::worse`).
@@ -109,7 +110,7 @@ fn day(at: &toml::value::Datetime) -> String {
 
 /// A night as a sentence names it.
 fn named(reading: &Reading) -> String {
-    format!("{} at {}", reading.at, reading.commit)
+    format!("{} at {}", reading.at, short(&reading.commit))
 }
 
 /// Tonight's reading of the bar `tolerance` names held by the rule over
@@ -211,8 +212,8 @@ pub(crate) fn hold(
         "{bar} regressed beyond its tolerance of {pct}% over its baseline of {baseline:.2}% two nights running, {} and {}; the commits from the last night that held to the first that did not: {}..{}",
         named(first_failing),
         named(tonight),
-        held.map_or("the series' first night", |r| r.commit.as_str()),
-        first_failing.commit
+        held.map_or("the series' first night", |r| short(&r.commit)),
+        short(&first_failing.commit)
     );
     (recorded, Some(failed))
 }

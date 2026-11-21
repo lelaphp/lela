@@ -16,6 +16,7 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 use crate::cli::{Format, Section};
+use crate::oracle::Profile;
 use crate::reading::{LOG, Log, Number, Reading, Status, Store};
 use crate::{api_check, bench, budget, phpt, witness};
 
@@ -91,13 +92,20 @@ pub(crate) struct Head {
     status: Status,
     /// When the reading was taken, RFC 3339.
     at: String,
-    /// The commit it was taken at, as the reading records it; null where
-    /// it records none.
+    /// The commit it was taken at, its first seven characters
+    /// ([`crate::track::short`]) whichever version of the reading named it:
+    /// a reading of `v = 3` names it whole and one of `v = 2` by seven, and
+    /// the row's shape, the section's `v`, keeps one meaning across both.
+    /// Null where the reading records none.
     commit: Option<String>,
     /// The digest of the oracle pin the run was taken under, where the
     /// reading records one.
     #[serde(skip_serializing_if = "Option::is_none")]
     recipe: Option<String>,
+    /// The profile of the build the reading judged, where it names one
+    /// ([`Reading::profile`]); absent otherwise, as on the reading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<Profile>,
 }
 
 impl Head {
@@ -109,8 +117,10 @@ impl Head {
             scope: reading.scope.clone(),
             status: reading.status,
             at: reading.at.to_string(),
-            commit: Some(reading.commit.clone()).filter(|commit| !commit.is_empty()),
+            commit: Some(crate::track::short(&reading.commit).to_owned())
+                .filter(|commit| !commit.is_empty()),
             recipe: reading.recipe.clone(),
+            profile: reading.profile,
         }
     }
 }

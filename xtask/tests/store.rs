@@ -400,7 +400,7 @@ fn a_reading_is_written_beside_its_file_and_renamed_over_it() {
     assert_eq!(beside, ["pcre.toml"], "nothing is left beside the file");
 }
 
-/// A reading is written under the reading's version, `v = 2`, with the
+/// A reading is written under the reading's version, `v = 3`, with the
 /// scope's key spelled `key` (harness-design.md §4.2): in the
 /// scope's file, its index entry and its line of the log alike.
 #[cfg(tracked)]
@@ -473,9 +473,8 @@ fn a_reading_of_the_first_version_spelling_its_key_tree_still_reads() {
     let entry = into.root().join(format!("budget/xtask/{KEY}.toml"));
     let text = std::fs::read_to_string(&entry).unwrap();
     assert!(
-        text.contains(&format!("v = {}\n", reading::V))
-            && text.contains(&format!("key = \"{KEY}\"")),
-        "{text}"
+        text.contains("v = 2\n") && text.contains(&format!("key = \"{KEY}\"")),
+        "a reading of the first version is entered as the second, whose shape it shares: {text}"
     );
 }
 

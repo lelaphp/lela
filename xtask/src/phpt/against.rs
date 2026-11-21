@@ -275,7 +275,7 @@ impl Runs {
             layout: manifest.layout(),
             stood,
             snapshot,
-            commit: git::head_commit(root)?,
+            commit: track::short(&git::head_commit(root)?).to_owned(),
             corpus: format!("{} {}", source.tag, source.commit),
             recipe: manifest.pin_digest().to_owned(),
             base,
@@ -388,7 +388,7 @@ impl Runs {
     /// subset holds no test ([`Run::holds_a_test`]).
     fn run_of(&self, tally: &Tally, runner: &Runner) -> Option<Run> {
         let engine = match runner {
-            Runner::Engine(_) => runner.stamp()?,
+            Runner::Engine(..) => runner.stamp()?,
             Runner::Linked => "the linked engine".to_owned(),
             _ => return None,
         };

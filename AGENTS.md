@@ -13,7 +13,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=bc4d080a726e229def8e86c7a6aef050c6cb4fbc05fb40b93a54750ee786eeb3 out=24a0970de38bf3e82a307507a5be68798c82ac2bde27126dd973619312f06362 -->
+<!-- /computed in=96b9731bd8c028eb47ab44512a7e4da345015676a5c3fea98f5416a6a5efa87e out=24a0970de38bf3e82a307507a5be68798c82ac2bde27126dd973619312f06362 -->
 
 ## What makes the third engine special?
 
@@ -93,7 +93,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=be0e02602a76c6fff0791199de95583f35483c74a0fe166e60816dcdb085e364 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=9202396aee83da66bb16f341c043f9b236779a6bdbd4bd173cd90c511ef603d8 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -129,9 +129,9 @@ third-engine-design.md
 | tier | tier.lock | 259 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 43 |  |
-| harness | xtask.lock | 502 |  |
+| harness | xtask.lock | 508 |  |
 
-<!-- /computed in=b4c7adc39ee24ab04baed611762baa2dcada922c17079bca7929e5e9c391c694 out=05dffb851f3e2d8a0c23156c07b4d5230cf500d244dddc26cc40daa3761d94f8 -->
+<!-- /computed in=1576322de2be235235f3a8c0554fae3fc3ca1b3f712d569cc1a6b2d8eaee524a out=7013701ca2d4bdd65430757394653dff0be8dce18ac33cc6452d0d62431b18d0 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -169,6 +169,7 @@ Commands:
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   steer              Apply a proposal to one of the harness's own files, and only where it adds: one changed value writes nothing
   oracle             The oracle's pin: `propose` prints the whole diff a bump writes, after a person has poured the new keg. Writes no reading
+  hosts              Build the hosts the phpt lane hands its tests to in one profile of the workspace's and print each one's path, a line each. Writes no reading
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
   new-ext            Lay one extension crate down at ext/<name> from the template, with its `php_bundle` line, ext/clippy.toml and ext/AGENTS.md row; refuses an existing one
   new-sapi           Lay one host crate down at sapi/<name> as the CLI and CGI are laid, with its binary and test; refuses an existing one or one without its `[[crate]]` row (ADR-0008)
@@ -178,8 +179,15 @@ Commands:
 Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
+
+Exit status:
+  0  done
+  1  a refusal, or a reading that fails
+  2  a usage error
+  3  a worktree laid down and not ready to be worked in
+  4  an instrument that could not run to its end, its readings not whole; `phpt` gives it
 ```
-<!-- /computed in=6dd651a816b44c1893b70af59f682a7b4117c2f19ad0c2227f3145f0a9b2c975 out=a3273ba5a2d830e67a0f4c59d3e77d374ad4b8f77d61639592996b9933301eb2 -->
+<!-- /computed in=2e68290b9fff1a63a7e4f2d312ea5b0a7a889a2943bb817a32cda5150705b360 out=9c6f063af1b84250973dcf4b0261acd43ff3b90b276b27b3a32a0a68a9bf9cff -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

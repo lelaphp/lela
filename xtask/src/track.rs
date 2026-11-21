@@ -250,9 +250,9 @@ pub(crate) fn merge_base(root: &Path, from: &str, other: &str) -> Result<String>
 }
 
 /// The first seven characters, the one way xtask names a commit short:
-/// a reading's stamp ([`crate::git::head_commit`] and
-/// [`crate::key::Snapshot::commit`]), the messages that cite a commit and
-/// `track work` all cut through this. Seven is fixed, where git's
+/// the messages and comments that cite a reading's commit, a kept run's
+/// commit, `track work`'s lines and a reading's stamp before its third
+/// version ([`crate::reading::V`]) all cut through this. Seven is fixed, where git's
 /// `rev-parse --short=7` is a minimum that grows once seven characters
 /// are ambiguous among the repository's objects, so a test names the
 /// commit it looks for in a message through this and not through git.
