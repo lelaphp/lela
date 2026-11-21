@@ -1,0 +1,44 @@
+# The packages lane's fixture list, which must fail: README.md says what
+# each package is. A repository is a path beside the list, which the test
+# lays down as a git repository at the commit pinned here.
+
+[[package]]
+name = "fixture/met"
+version = "1.0.0"
+repository = "sources/met"
+commit = "195e7e5ce6c5f5a6dac2cb6c889b2f14a61e3252"
+digest = "sha256:0cf14e857801ef337c46fa195aba4d61f3b995dc33f5fc9735626a92546bed59"
+lock = "empty.lock"
+lock_digest = "sha256:55c0a604ddb166b615dad0f7d133b17f0a25e8134f033008b092bfe1505decd4"
+runner = "run-tests.php"
+
+[[package]]
+name = "fixture/missed"
+version = "1.0.0"
+repository = "sources/missed"
+commit = "ec097441df206010334e08318e51b5bfcb58bf53"
+digest = "sha256:a270e24428adc1e8509dd39681c85db7963d4ae112da80f8db4ed2f26743667e"
+lock = "empty.lock"
+lock_digest = "sha256:55c0a604ddb166b615dad0f7d133b17f0a25e8134f033008b092bfe1505decd4"
+runner = "run-tests.php"
+
+[[package]]
+name = "fixture/unrun"
+version = "1.0.0"
+repository = "sources/unrun"
+commit = "b3fb8320815cc16f127baa1b00f9c31f344f6673"
+digest = "sha256:f47205766d42d6316df2162e085170bc9582e84faeb5210d5a85fb700c9356b1"
+lock = "empty.lock"
+lock_digest = "sha256:55c0a604ddb166b615dad0f7d133b17f0a25e8134f033008b092bfe1505decd4"
+runner = "run-tests.php"
+
+[[package]]
+name = "fixture/cache"
+version = "1.0.0"
+repository = "sources/met"
+commit = "195e7e5ce6c5f5a6dac2cb6c889b2f14a61e3252"
+digest = "sha256:0cf14e857801ef337c46fa195aba4d61f3b995dc33f5fc9735626a92546bed59"
+lock = "empty.lock"
+lock_digest = "sha256:55c0a604ddb166b615dad0f7d133b17f0a25e8134f033008b092bfe1505decd4"
+runner = "run-tests.php"
+needs = ["mysql", "memcached"]
