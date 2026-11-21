@@ -643,6 +643,30 @@ impl Source {
         Ok(())
     }
 
+    /// Hold the tree at `tree` to the pin's count of tests, counted as
+    /// `[source].phpt_files` was, by `phpt_files`: a tree holding more
+    /// or fewer is not the corpus the pin names, whatever its commit says,
+    /// and is refused naming both counts before a lane measures less, or
+    /// other, in silence. The one count of the tree: `phpt` holds a run's
+    /// tree to it, and `tests/oracle.rs` the tree a runner names.
+    pub fn counted(&self, tree: &Path) -> Result<()> {
+        let found = phpt_files(tree).with_context(|| {
+            format!(
+                "counting the tests of the php-src tree at {}",
+                tree.display()
+            )
+        })?;
+        if found != self.phpt_files {
+            bail!(
+                "the php-src tree at {} holds {found} .phpt files; the pin counts {} at {}. Lay the whole tree down at the pin's tag, or name another with {TREE_VARIABLE}; the pin moves only by a person's hand",
+                tree.display(),
+                self.phpt_files,
+                self.tag
+            );
+        }
+        Ok(())
+    }
+
     /// The files the pinned tree at `tree` holds, relative to it, as the
     /// tree is held to the pin: in a checkout, the files git tracks there,
     /// so what a run or a person left standing in it is not the pin's;
@@ -672,6 +696,23 @@ impl Source {
 /// or a worktree's file.
 fn checkout(tree: &Path) -> bool {
     tree.join(".git").exists()
+}
+
+/// The entries under `dir` named `*.phpt`, whatever their kind, as `find
+/// dir -name '*.phpt'` counts them: every directory is walked, `.git`
+/// among them, and a symlink is counted by its own name and never
+/// followed, as `find` without `-L` takes one.
+fn phpt_files(dir: &Path) -> Result<u64> {
+    let listing = || format!("listing {}", dir.display());
+    let mut found = 0;
+    for entry in fs::read_dir(dir).with_context(listing)? {
+        let entry = entry.with_context(listing)?;
+        found += u64::from(entry.file_name().as_encoded_bytes().ends_with(b".phpt"));
+        if entry.file_type().with_context(listing)?.is_dir() {
+            found += phpt_files(&entry.path())?;
+        }
+    }
+    Ok(found)
 }
 
 /// `[recipe]`: how a program is run and how its streams are normalised.
@@ -2066,7 +2107,7 @@ impl Runner {
             });
         }
         let mut behind = None;
-        let target = root.join("target");
+        let target = profile::target(root);
         for profile in profile::PREFERRED {
             let built = profile.binary(&target, ENGINE);
             if !built.is_file() {
@@ -2100,12 +2141,14 @@ impl Runner {
 
     /// The profile of the engine's binary, where it is the engine's and
     /// the lane knows how it was built: what a reading names of the build
-    /// it judged. The control, the linked engine, and a rung where nothing
-    /// ran have none.
+    /// it judged, the linked engine's once it has served a snippet
+    /// ([`linked::profile`]). The control, a binary the caller named, and
+    /// a rung where nothing ran have none.
     pub fn profile(&self) -> Option<Profile> {
         match self {
             Runner::Engine(_, profile) => *profile,
-            _ => None,
+            Runner::Linked => linked::profile(),
+            Runner::Control(_) | Runner::Stale(_) | Runner::Absent(_) => None,
         }
     }
 
@@ -2589,6 +2632,74 @@ mod skipped_tests {
             "oracle::skipped_tests::a_skip_is_a_line_naming_the_test_and_the_word\ttree"
         );
         assert!(started.starts_with("ThreadId(") && started.ends_with(")\tmysql\n"));
+    }
+}
+
+#[cfg(test)]
+mod counted_tests {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::process::Command;
+
+    use super::Source;
+    use crate::scratch::Tree;
+
+    /// A pin's `[source]` counting `phpt_files` tests.
+    fn counting(phpt_files: u64) -> Source {
+        Source {
+            phpt_files,
+            ..Source::default()
+        }
+    }
+
+    /// A test is every entry named `*.phpt`, as `find . -name '*.phpt'`
+    /// names them: one named `.phpt`, one under `.git`, a directory so
+    /// named and a symlink so named are each counted, and a symlinked
+    /// directory is not walked, so the tests beneath it are counted once,
+    /// where they stand. `find` itself is asked over the same tree.
+    #[test]
+    fn the_tests_are_what_find_counts_and_a_symlinked_directory_is_not_walked() {
+        let tree = Tree::new("oracle-counted").expect("a scratch tree");
+        let files = [
+            "a.phpt",
+            ".phpt",
+            "ext/b.phpt",
+            "ext/c.phpt",
+            ".git/d.phpt",
+            "e.phpt/f.phpt",
+            "a.php",
+            "phpt",
+            "a.phpt.bak",
+            "ext/b.phpt.out",
+        ];
+        for file in files {
+            let path = tree.join(file);
+            fs::create_dir_all(path.parent().expect("under the tree")).expect("its directory");
+            fs::write(&path, "").expect("the file is written");
+        }
+        symlink("ext", tree.join("linked")).expect("a symlinked directory");
+        symlink("a.php", tree.join("g.phpt")).expect("a symlink named as a test");
+        let find = Command::new("find")
+            .args([".", "-name", "*.phpt"])
+            .current_dir(&*tree)
+            .output()
+            .expect("find runs");
+        assert!(find.status.success(), "{find:?}");
+        let named = find.stdout.split(|&b| b == b'\n').filter(|l| !l.is_empty());
+        assert_eq!(
+            named.count(),
+            8,
+            "{}",
+            String::from_utf8_lossy(&find.stdout)
+        );
+        counting(8)
+            .counted(&tree)
+            .expect("the tree holds the 8 tests find counts");
+        let err = counting(9).counted(&tree).unwrap_err().to_string();
+        assert!(
+            err.contains("holds 8 .phpt files; the pin counts 9"),
+            "{err}"
+        );
     }
 }
 

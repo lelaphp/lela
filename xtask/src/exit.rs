@@ -11,7 +11,9 @@ pub const NOT_READY: u8 = 3;
 /// The exit of an instrument that could not run to its end, its readings
 /// not whole: the error `Unfinished`. A caller refuses such a run, where it
 /// records one that came to its end and judged a test as failing, which
-/// is 1. `phpt` takes it first.
+/// is 1. Every instrument whose readings can be not whole ends through
+/// the one rule beside the tally's ladder, `tally::whole`: `phpt`,
+/// `witness`, `compile-identity`, `crosscheck`, `fuzz` and `hostile`.
 pub const UNFINISHED: u8 = 4;
 
 /// An instrument that could not run to its end, and what stopped it.

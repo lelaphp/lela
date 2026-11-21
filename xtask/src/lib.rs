@@ -617,7 +617,7 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
     // A subset that was to run and did not leaves the run short, which no
     // judgement of the rest can make whole: that is the exit, written
     // after the readings that ran.
-    ran.whole()?;
+    tally::whole(phpt::INSTRUMENT, &ran.untaken)?;
     // `--against` asks whether a test met at the commit fails here, and
     // the exit is that answer; the subsets' own readings are written as
     // ever and hold what they always held.
@@ -657,7 +657,8 @@ fn bench_command(root: &Path, store: &Store, ask: &cli::Bench) -> Result<()> {
 }
 
 /// `xtask crosscheck`: the extensions asked for, each rendered by the
-/// oracle and held against the engine's rendering, each written.
+/// oracle and held against the engine's rendering, each written, and the
+/// exit the tally's rule gives.
 fn crosscheck_command(
     root: &Path,
     manifest: &Manifest,
@@ -690,10 +691,7 @@ fn crosscheck_command(
         ext,
         ..crosscheck::Ask::default()
     };
-    record(
-        store,
-        &crosscheck::run(root, manifest, &registry, store, &ask)?,
-    )
+    crosscheck::run(root, manifest, &registry, store, &ask)?.record(store, crosscheck::INSTRUMENT)
 }
 
 /// `xtask divergence-reason`: the registry against the rule whose `check`
@@ -716,7 +714,8 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
 /// worktree, whose manifest is the worktree's, once built there, and is
 /// gone once it is retired; the regions, which pre-commit renders
 /// whatever the manifest says; and the hosts, which a workspace builds by
-/// its `Cargo.toml` alone, in the seat the command takes.
+/// its `Cargo.toml` alone, in the seat the command takes, or which
+/// `--list` prints from the host table, building nothing and seatless.
 fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
     match command {
         Command::Track {
@@ -753,10 +752,7 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         Command::Oracle {
             command: OracleCommand::Propose { keg, source },
         } => Some(oracle_propose(root, keg.as_deref(), source.as_deref())),
-        Command::Hosts { profile } => {
-            let _seat = seat::of_command(command);
-            Some(hosts::command(root, *profile))
-        }
+        Command::Hosts { profile, list } => Some(hosts::answer(root, *profile, *list)),
         Command::Worktree {
             command: WorktreeCommand::Add { branch, ticket },
         } => Some(
@@ -854,7 +850,8 @@ fn track_command(root: &Path, branch: Option<&str>, json: bool) -> Result<()> {
 /// `xtask status`: one section, or with no section the map and the local
 /// facts for the session-start hook, whose stdin head names the session;
 /// with `--every`, one row per reading of the section, from the store's
-/// log or the one `--log` hands it (harness-design.md §4.6).
+/// log or the one `--log` hands it (harness-design.md §4.6); with `--run`,
+/// every reading of one run from the same log.
 fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command) -> Result<()> {
     let Command::Status {
         section,
@@ -864,14 +861,18 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
         tracked,
         every,
         log,
+        run,
         session: _,
     } = ask
     else {
         bail!("status: handed another command");
     };
-    let text = match section {
-        Some(section) if every => status::every::render(store, section, format, log.as_deref())?,
-        Some(section) => {
+    let text = match (section, run) {
+        (_, Some(id)) => status::every::run(store, &id, format, log.as_deref())?,
+        (Some(section), None) if every => {
+            status::every::render(store, section, format, log.as_deref())?
+        }
+        (Some(section), None) => {
             let registry = Registry::load(root)?;
             let against = if tracked {
                 status::Against::Tree
@@ -889,7 +890,7 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
                 uncut,
             )?
         }
-        None => {
+        (None, None) => {
             let id = session_id.or_else(status::session_of_stdin);
             status::session(manifest, store, root, id.as_deref(), format)?
         }

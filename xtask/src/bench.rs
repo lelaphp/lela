@@ -66,6 +66,7 @@ use serde::Deserialize;
 use crate::inputs;
 use crate::key::Snapshot;
 use crate::manifest::Tolerance;
+use crate::oracle::Profile;
 use crate::reading::{Reading, Status, Store};
 use spent::Spent;
 
@@ -310,6 +311,9 @@ struct Arm {
     /// ([`Spent::run`]), read before it is reaped.
     #[serde(skip)]
     retired: bool,
+    /// The profile of the build the program is, where the harness built it.
+    #[serde(skip)]
+    profile: Option<Profile>,
 }
 
 /// One bar: what is measured, and the two arms a rep times against each
@@ -579,6 +583,11 @@ pub(crate) trait Side {
     fn unit(&self) -> Unit {
         Unit::Ms
     }
+    /// The profile of the build the program is, where the harness built
+    /// it: what the bar's reading names. None by default.
+    fn profile(&self) -> Option<Profile> {
+        None
+    }
 }
 
 /// Two arms as a rep runs them.
@@ -694,12 +703,18 @@ impl Side for Spawned {
     fn once(&mut self) -> Result<Sample> {
         once(&self.arm, &self.program)
     }
+
+    fn profile(&self) -> Option<Profile> {
+        self.arm.profile
+    }
 }
 
 /// What one bar measured: each row, its program's name where the bar is
-/// a set, and what it measured.
+/// a set, and what it measured; and the profile of the build its arms ran,
+/// where the harness built one.
 struct Took {
     rows: Vec<(Option<String>, Measured)>,
+    profile: Option<Profile>,
 }
 
 impl Took {
@@ -1006,7 +1021,8 @@ fn measure_each(id: &str, arms: Arms, reps: usize) -> Result<(Took, [String; 2])
         rows.push((program.clone(), measure(&row, pair, reps)?));
     }
     let names = (pairs.first()).map(|(_, [a, b])| [a.name(), b.name()].map(str::to_owned));
-    Ok((Took { rows }, names.unwrap_or_default()))
+    let profile = (pairs.first()).and_then(|(_, [a, b])| a.profile().or(b.profile()));
+    Ok((Took { rows, profile }, names.unwrap_or_default()))
 }
 
 /// §6's second end: each program as it is now against the pin taken at the
@@ -1113,7 +1129,8 @@ fn wrapper(root: &Path, id: &str, [a, b]: [&'static str; 2], held: Held) -> Decl
                 let args = vec![way.to_owned(), CALLS.to_string()];
                 let arm = Arm {
                     name,
-                    program: program.clone(),
+                    program: program.path.clone(),
+                    profile: Some(program.profile),
                     args,
                     ..Arm::default()
                 };
@@ -1152,6 +1169,10 @@ impl Side for Counted {
 
     fn reads(&self) -> &[PathBuf] {
         self.side.reads()
+    }
+
+    fn profile(&self) -> Option<Profile> {
+        self.side.profile()
     }
 
     fn once(&mut self) -> Result<Sample> {
@@ -1608,9 +1629,7 @@ fn recorded(
     snapshot: &Snapshot,
 ) -> Result<Reading> {
     let mut reading = Reading::stamped_over(INSTRUMENT, bar.id, snapshot, Path::new("."))?;
-    // A measured bar's arms of the engine's own are built in the bench
-    // lane's profile ([`crate::oracle::profile::released`]).
-    reading.profile = Some(crate::oracle::Profile::Release);
+    reading.profile = took.profile;
     reading.status = bar.held.status(took, bar.tolerance());
     if let Some(pct) = bar.tolerance() {
         reading
@@ -1755,6 +1774,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, r)| (named(i), r))
                 .collect(),
+            profile: None,
         }
     }
 
@@ -2013,6 +2033,7 @@ mod tests {
         assert!(close(measured.delta.median, -50.0) && close(measured.paired_pct.round(), -50.0));
         let took = Took {
             rows: vec![(None, measured)],
+            profile: None,
         };
         assert!(close(to_go(&took).unwrap().round(), 50.0));
         let measured = &took.rows[0].1;

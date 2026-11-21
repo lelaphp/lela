@@ -21,7 +21,9 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
-use super::{Judgement, Own, Subset, Under, across, copy_of, file, is_phpt, run_tests};
+use super::{
+    Judgement, Own, Pinned, Subset, Under, across, copy_of, file, is_phpt, run_tests, server,
+};
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
 use crate::oracle::{Oracles, Pin, Runner};
@@ -41,14 +43,18 @@ pub(crate) fn compare(
     files: &[PathBuf],
     jobs: Option<std::num::NonZeroUsize>,
 ) -> Result<()> {
-    let source = manifest.pin()?.source.tree()?;
+    let Pinned {
+        source,
+        main,
+        variants,
+    } = Pinned::of(manifest)?;
     let subset = Subset::resolve(manifest, &source, name)?;
     let tests = named(&source, &subset, files)?;
-    let variants = manifest.variants();
-    let oracles = Oracles::new(manifest.pin()?, &variants);
+    let oracles = Oracles::new(&main, &variants);
     let oracle = oracles.of(manifest.variant_of(&subset.scope))?;
     oracle.asserted()?;
-    let own = Own::of(oracle, &subset, &subset.scope, true)?;
+    let served = server::served(oracle, &subset, true)?;
+    let own = Own::of(oracle, &subset, &subset.scope, (served, true))?;
     let beside = own.pin.as_ref().map(|pin| oracle.beside(pin));
     let oracle = beside.as_ref().unwrap_or(oracle);
     let jobs = jobs.unwrap_or_else(crate::seat::jobs);

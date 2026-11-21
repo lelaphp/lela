@@ -5,8 +5,9 @@
 //! php-cgi, php-fpm and phpdbg beside `TEST_PHP_EXECUTABLE`, and which
 //! the witness lane serves a fence through as well. The phpt
 //! lane's one lookup ([`EngineHost::for_run`]), the cargo line that
-//! rebuilds a stale binary, the witness lane's builds and what `xtask status --section
-//! corpus` hands CI to build all read [`HOSTS`], and none spells a host.
+//! rebuilds a stale binary, the witness lane's builds, what `xtask status --section
+//! corpus` hands CI to build and what `xtask hosts --list` tells `dist/`
+//! a release ships all read [`HOSTS`], and none spells a host.
 
 use std::path::{Path, PathBuf};
 
@@ -27,7 +28,8 @@ macro_rules! product {
 /// host's binary starts with.
 pub(crate) const PRODUCT: &str = product!();
 
-/// One host: the crate under `sapi/` that builds it, and its binary.
+/// One host: the crate under `sapi/` that builds it, its binary, and
+/// where a release ships it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EngineHost {
     /// The crate's manifest name, `sapi/cgi`.
@@ -35,6 +37,47 @@ pub(crate) struct EngineHost {
     /// The binary the phpt lane runs a test through and the witness lane
     /// serves a fence through, with `PHP_WITNESS_TRACE` set.
     pub(crate) binary: &'static str,
+    /// Where a release carries the binary, which `dist/` reads through
+    /// `xtask hosts --list` and keeps no list of its own of.
+    pub(crate) ships: Ships,
+}
+
+/// Where a release carries one host: in its tarballs or not, and in which
+/// of its images. A release carries the debugger host as php does
+/// (Mitchell, 21 November 2026, on #79): every tarball, and the `cli`
+/// image alone of the images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ships {
+    /// Every tarball of the release holds the binary.
+    pub(crate) tarball: bool,
+    /// The images that hold it, in [`Image::ALL`]'s order.
+    pub(crate) images: &'static [Image],
+}
+
+/// One image a release publishes, a target of `dist/Dockerfile` built on
+/// its `base` stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Image {
+    /// The CLI's, `lela -a` its command.
+    Cli,
+    /// The `FastCGI` process manager's, listening on port 9000.
+    Fpm,
+    /// Apache's prefork MPM in front of the FPM.
+    Apache,
+}
+
+impl Image {
+    /// Every image, as the Dockerfile's targets come.
+    pub(crate) const ALL: [Image; 3] = [Image::Cli, Image::Fpm, Image::Apache];
+
+    /// The Dockerfile's name of its target, which `--target` takes.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Image::Cli => "cli",
+            Image::Fpm => "fpm",
+            Image::Apache => "apache",
+        }
+    }
 }
 
 impl EngineHost {
@@ -84,24 +127,40 @@ impl Whose {
 pub(crate) const CLI: EngineHost = EngineHost {
     krate: crate::carried::BINARY,
     binary: product!(),
+    ships: Ships {
+        tarball: true,
+        images: &Image::ALL,
+    },
 };
 
 /// The CGI host, which a CGI-shaped test is run through.
 pub(crate) const CGI: EngineHost = EngineHost {
     krate: "sapi/cgi",
     binary: concat!(product!(), "-cgi"),
+    ships: Ships {
+        tarball: true,
+        images: &Image::ALL,
+    },
 };
 
 /// The `FastCGI` process manager, which `sapi/fpm/tests` start.
 pub(crate) const FPM: EngineHost = EngineHost {
     krate: "sapi/fpm",
     binary: concat!(product!(), "-fpm"),
+    ships: Ships {
+        tarball: true,
+        images: &[Image::Fpm, Image::Apache],
+    },
 };
 
 /// The debugger host, which a `--PHPDBG--` test is run through.
 pub(crate) const PHPDBG: EngineHost = EngineHost {
     krate: "sapi/phpdbg",
     binary: concat!(product!(), "-dbg"),
+    ships: Ships {
+        tarball: true,
+        images: &[Image::Cli],
+    },
 };
 
 /// The CLI built with the bundle's `linked` set, the engine the witness
@@ -116,6 +175,10 @@ pub(crate) const LINKED: &str = concat!(product!(), "-linked");
 pub(crate) const MAKALA: EngineHost = EngineHost {
     krate: "sapi/makala",
     binary: "makala",
+    ships: Ships {
+        tarball: false,
+        images: &[],
+    },
 };
 
 /// Every host the phpt lane hands a test to, the binary under test first.
@@ -173,6 +236,21 @@ mod tests {
                 .collect();
             assert!(bins.contains(&host.binary), "{}: {bins:?}", host.krate);
         }
+    }
+
+    /// The images the table ships a host in are `dist/Dockerfile`'s
+    /// targets built on its `base` stage, every one and in its order, so a
+    /// target added or renamed there is named here before `dist/` reads it.
+    #[cfg(tracked)]
+    #[test]
+    fn every_image_is_a_target_the_dockerfile_builds_on_its_base() {
+        let path = crate::package_dir().join("../dist/Dockerfile");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let targets: Vec<&str> = (text.lines())
+            .filter_map(|line| line.strip_prefix("FROM base AS "))
+            .map(str::trim)
+            .collect();
+        assert_eq!(targets, Image::ALL.map(Image::name));
     }
 
     /// The copy is the engine's constant, and every spelling of the name

@@ -177,13 +177,38 @@ def held(table, content):
     return pinned
 
 
+def php_src(source, environ):
+    """The pinned php-src tree on this machine, found as xtask's `Source::found`
+    finds it: the directory `TEST_PHP_SRCDIR` names, a leading `~/` or `$HOME/`
+    read as the home directory and an empty value as unset, else `[source]`'s
+    `path` where the pin states one. Where neither is a directory the refusal
+    names both places, as xtask's does."""
+    named = environ.get("TEST_PHP_SRCDIR") or None
+    read, home = None, environ.get("HOME")
+    lead = next((lead for lead in ("~/", "$HOME/") if named and named.startswith(lead)), None)
+    if named is not None:
+        read = Path(home) / named[len(lead):] if lead and home else Path(named)
+    pinned = Path(source["path"]) if "path" in source else None
+    for tree in (read, pinned):
+        if tree is not None and tree.is_dir():
+            return tree
+    if named is None:
+        variable = "TEST_PHP_SRCDIR is unset"
+    elif lead and home:
+        variable = f"TEST_PHP_SRCDIR={named}, read as {read}, is not a directory"
+    else:
+        variable = f"TEST_PHP_SRCDIR={named} is not a directory"
+    path = "the pin states no `[source].path`" if pinned is None else f"the pin's path {pinned} is not a directory"
+    raise SystemExit(f"the pinned php-src ({source['tag']}) is at neither place tried: {variable}, and {path}")
+
+
 def observe(scratch):
     pin_bytes = (ROOT / "oracle.toml").read_bytes()
     pin = tomllib.loads(pin_bytes.decode())
     binary = Path(pin["oracle"]["path"])
     content = binary.read_bytes()
     pinned = held(pin["oracle"], content)
-    source = Path(pin["source"]["path"])
+    source = php_src(pin["source"], os.environ)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     if not head.startswith(pin["source"]["commit"]):
         raise SystemExit("oracle source commit mismatch")
