@@ -3,6 +3,7 @@
 //! check for a purpose against a store (`php_openssl_setup_verify`,
 //! `php_openssl_check_cert`), with `openssl_get_cert_locations`.
 
+use std::ffi::{CStr, OsStr};
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
@@ -665,10 +666,126 @@ fn openssl_x509_parse(
     })
 }
 
+/// The bundle of certificates the operating system keeps, where a client
+/// stream or a verifying function falls back to it: macOS's
+/// `/etc/ssl/cert.pem`, which a Mac has whether or not it has the OpenSSL
+/// the library was built for, and none elsewhere.
+pub(crate) const SYSTEM_BUNDLE: Option<&CStr> = if cfg!(target_os = "macos") {
+    Some(c"/etc/ssl/cert.pem")
+} else {
+    None
+};
+
+/// Where a peer verification finds the certificates it trusts, decided by
+/// [`anchors`] once per stream's `SSL_CTX` and once per verifying
+/// function's store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Anchors {
+    /// A CA file or directory is named, by a stream's `ssl` options, a
+    /// verifying function's `ca_info` or the ini: what php loads is
+    /// loaded.
+    Named,
+    /// A server stream's, where nothing is named: none is loaded, as php
+    /// loads none.
+    Unnamed,
+    /// A client stream's or a verifying function's, where nothing is
+    /// named: the library's defaults, as `X509_STORE_set_default_paths`
+    /// and `X509_LOOKUP_load_file(…, NULL, X509_FILETYPE_DEFAULT)` read
+    /// them.
+    Defaults,
+    /// A client stream's or a verifying function's, where nothing is
+    /// named and the library's defaults name no file it can read: the
+    /// system's bundle where the default file would be. The bundled
+    /// `libcrypto` of a macOS tarball names Homebrew's file, which a Mac
+    /// without Homebrew's OpenSSL lacks.
+    System(&'static CStr),
+}
+
+/// What the library's defaults name, as `X509_STORE_set_default_paths`
+/// and the default file lookup read them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Defaults {
+    /// The environment names a file or a directory, `SSL_CERT_FILE` or
+    /// `SSL_CERT_DIR` as `X509_get_default_cert_file_env` and
+    /// `X509_get_default_cert_dir_env` spell them, which the library reads
+    /// in place of its compiled-in paths.
+    pub(crate) env_names: bool,
+    /// `X509_get_default_cert_file()` opens for reading.
+    pub(crate) file_readable: bool,
+}
+
+impl Defaults {
+    /// The environment and the file system now.
+    pub(crate) fn read() -> Self {
+        let [file, file_env, _, dir_env, ..] = ffi::cert_locations();
+        let set = |name: &[u8]| std::env::var_os(OsStr::from_bytes(name)).is_some();
+        Defaults {
+            env_names: set(&file_env) || set(&dir_env),
+            file_readable: std::fs::File::open(OsStr::from_bytes(&file)).is_ok(),
+        }
+    }
+}
+
+/// The anchors of one stream's `SSL_CTX` or one verifying function's
+/// store: php's choice, what is named where anything is, else nothing for
+/// a server stream and the library's defaults where `takes_defaults`, a
+/// client stream or a verifying function, with one difference. Where the
+/// platform has a `system` bundle and the defaults name nothing to read,
+/// neither by the environment nor at the compiled-in file, the bundle
+/// stands in for the default file. `defaults` is read only where that
+/// question is asked.
+pub(crate) fn anchors(
+    named: bool,
+    takes_defaults: bool,
+    defaults: impl FnOnce() -> Defaults,
+    system: Option<&'static CStr>,
+) -> Anchors {
+    if named {
+        return Anchors::Named;
+    }
+    if !takes_defaults {
+        return Anchors::Unnamed;
+    }
+    let Some(bundle) = system else {
+        return Anchors::Defaults;
+    };
+    let defaults = defaults();
+    if defaults.env_names || defaults.file_readable {
+        Anchors::Defaults
+    } else {
+        Anchors::System(bundle)
+    }
+}
+
+/// An ini entry naming a path, `openssl.cafile` or `openssl.capath`:
+/// its value where it is set and not empty.
+pub(crate) fn ini_path(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
+    req.ini()
+        .get(name)
+        .filter(|v| !v.is_empty())
+        .map(<[u8]>::to_vec)
+}
+
+/// The file a verifying function's store loads where its `ca_info`
+/// names no file: the library's default, `None`, as php loads it, or the
+/// system's bundle where [`anchors`] stands it in. `named` is whether the
+/// `ca_info` names a directory or the ini a CA file or directory.
+fn verify_file(
+    named: bool,
+    defaults: impl FnOnce() -> Defaults,
+    system: Option<&'static CStr>,
+) -> Option<&'static CStr> {
+    match anchors(named, true, defaults, system) {
+        Anchors::System(bundle) => Some(bundle),
+        Anchors::Named | Anchors::Unnamed | Anchors::Defaults => None,
+    }
+}
+
 /// `php_openssl_setup_verify`: a store of the files and directories an
 /// array names, each loaded as PEM, and the library's default file and
-/// directory where it names none of either; `None` where the store
-/// cannot be made or a name's conversion throws.
+/// directory where it names none of either, the system's bundle standing
+/// in for an absent default file where [`verify_file`] says so; `None`
+/// where the store cannot be made or a name's conversion throws.
 pub(crate) fn setup_verify(
     req: &mut Request,
     calist: Option<PhpArray>,
@@ -713,8 +830,13 @@ pub(crate) fn setup_verify(
         }
         Ok(ControlFlow::Continue(()))
     })?;
-    if files == 0 && !store.load(false, None) {
-        store_errors(req);
+    if files == 0 {
+        let named = dirs > 0
+            || ini_path(req, b"openssl.cafile").is_some()
+            || ini_path(req, b"openssl.capath").is_some();
+        if !store.load(false, verify_file(named, Defaults::read, SYSTEM_BUNDLE)) {
+            store_errors(req);
+        }
     }
     if dirs == 0 && !store.load(true, None) {
         store_errors(req);
@@ -864,4 +986,75 @@ fn openssl_get_cert_locations(req: &mut Request) -> Result<Owner<PhpArray>, Thro
         put_bytes(req, &mut out, name, &value)?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Anchors, Defaults, SYSTEM_BUNDLE, anchors, verify_file};
+
+    /// The system's bundle is a client stream's only where nothing names a
+    /// CA, neither the options, the ini nor the environment, and the
+    /// library's compiled-in file cannot be read; everywhere else the
+    /// anchors are php's.
+    #[test]
+    fn the_system_bundle_stands_in_only_for_an_absent_default_file() {
+        let bundle = c"/etc/ssl/cert.pem";
+        let seen = |env_names, file_readable| {
+            move || Defaults {
+                env_names,
+                file_readable,
+            }
+        };
+        let unread = || -> Defaults { panic!("the defaults are read only where they decide") };
+        for (env_names, file_readable) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let want = if env_names || file_readable {
+                Anchors::Defaults
+            } else {
+                Anchors::System(bundle)
+            };
+            let got = anchors(false, true, seen(env_names, file_readable), Some(bundle));
+            assert_eq!(got, want, "env {env_names}, file {file_readable}");
+        }
+        assert_eq!(anchors(true, true, unread, Some(bundle)), Anchors::Named);
+        assert_eq!(anchors(true, false, unread, Some(bundle)), Anchors::Named);
+        assert_eq!(
+            anchors(false, false, unread, Some(bundle)),
+            Anchors::Unnamed
+        );
+        assert_eq!(anchors(false, true, unread, None), Anchors::Defaults);
+        assert_eq!(SYSTEM_BUNDLE.is_some(), cfg!(target_os = "macos"));
+    }
+
+    /// A verifying function's store takes the system's bundle in place of
+    /// the default file under the same condition as a client stream: its
+    /// `ca_info` names no directory, the ini no CA, the environment
+    /// nothing, and the compiled-in file cannot be read. Where anything is
+    /// named, or the platform keeps no bundle, the file is php's default.
+    #[test]
+    fn a_verifying_function_takes_the_system_bundle_as_a_client_stream_does() {
+        let bundle = c"/etc/ssl/cert.pem";
+        let seen = |env_names, file_readable| {
+            move || Defaults {
+                env_names,
+                file_readable,
+            }
+        };
+        let unread = || -> Defaults { panic!("the defaults are read only where they decide") };
+        for (env_names, file_readable) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let stream = anchors(false, true, seen(env_names, file_readable), Some(bundle));
+            let want = (stream == Anchors::System(bundle)).then_some(bundle);
+            let got = verify_file(false, seen(env_names, file_readable), Some(bundle));
+            assert_eq!(got, want, "env {env_names}, file {file_readable}");
+        }
+        assert_eq!(
+            verify_file(false, seen(false, false), Some(bundle)),
+            Some(bundle)
+        );
+        assert_eq!(verify_file(true, unread, Some(bundle)), None);
+        assert_eq!(verify_file(false, unread, None), None);
+    }
 }
