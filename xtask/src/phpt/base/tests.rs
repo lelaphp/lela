@@ -177,7 +177,7 @@ fn all_per_commit_includes_untouched_subsets_and_reuses_only_fresh_runs() {
     runs.after(
         &manifest,
         &Scope::of("ext/pcre"),
-        (&tally, &Runner::Engine(dir.join("engine/php"))),
+        (&tally, &Runner::Engine(dir.join("engine/php"), None)),
         &Reading::new("phpt", "ext/pcre"),
         None,
     )

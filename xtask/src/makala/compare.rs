@@ -109,6 +109,7 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<R
     let (mut entries, mut left) = super::subset(&tree)?;
     narrowed(&mut entries, &mut left, only);
     let host = super::makala(root)?;
+    reading.profile = Some(crate::oracle::profile::LANE);
     let registry = Registry::load(root)?;
     let mut ledger = Ledger::new(&registry);
     for entry in &entries {

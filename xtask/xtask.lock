@@ -219,6 +219,7 @@ oracle::Pin::variant
 oracle::Platform
 oracle::Platform::key
 oracle::Platform::this
+oracle::Profile
 oracle::Program
 oracle::Promise
 oracle::Promise::or_skip
@@ -234,6 +235,7 @@ oracle::Recipe
 oracle::Regime
 oracle::Runner
 oracle::Runner::binary
+oracle::Runner::profile
 oracle::Runner::resolve
 oracle::Runner::stamp
 oracle::SKIPPED_VARIABLE

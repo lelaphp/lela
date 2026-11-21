@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime};
 
 use xtask::divergence::Registry;
 use xtask::manifest::{Crate, Manifest};
-use xtask::oracle::{Pin, Promise};
+use xtask::oracle::{Pin, Profile, Promise};
 use xtask::phpt::{self, Ask};
 use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
@@ -197,6 +197,51 @@ fn a_missed_expectation_fails_with_the_counts_and_the_reading_names_the_file() {
     assert_eq!(count(&reading, "passed"), 0);
     assert_eq!(count(&reading, "tests"), 1);
     assert_eq!(count(&reading, "run"), 1);
+}
+
+/// A reading of `v = 3` names its commit whole and the profile of the
+/// engine it judged where the lane found that engine in a build
+/// directory: `release-da` for `target/release-da/lela`. The same binary
+/// named by its path, `--engine <path>`, carries no profile: a path says
+/// where a binary is and not how it was built, so none is guessed.
+#[test]
+fn a_reading_names_the_profile_of_a_found_engine_and_none_of_a_named_one() {
+    if oracle().is_none() {
+        return;
+    }
+    let met = "--TEST--\nMet\n--FILE--\n<?php echo 'met';\n--EXPECT--\nmet\n";
+    let scratch = Scratch::new("profile", &[("met.phpt", met)]);
+    let built = scratch.root.join("target/release-da/lela");
+    fs::create_dir_all(built.parent().unwrap()).unwrap();
+    fs::copy(&scratch.engine, &built).unwrap();
+    let ask = Ask {
+        subset: Some("ext/fixture".to_owned()),
+        locks: Some(scratch.locks.path().to_path_buf()),
+        ..Ask::default()
+    };
+    let readings = phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap();
+    let [found] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(found.status, Status::Pass, "{found:#?}");
+    assert_eq!(found.profile, Some(Profile::ReleaseDa), "{found:#?}");
+    let line = found.to_json().unwrap();
+    assert_eq!(
+        (&line["v"], &line["profile"]),
+        (&3.into(), &"release-da".into())
+    );
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(scratch.root.path())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(found.commit, String::from_utf8(head.stdout).unwrap().trim());
+
+    let named = scratch.run(&registry(""), &built);
+    assert_eq!(named.status, Status::Pass, "{named:#?}");
+    assert_eq!(named.profile, None, "{named:#?}");
+    assert!(named.to_json().unwrap().get("profile").is_none());
 }
 
 /// `--unkept`: the runner's control runs only a subset whose kept
