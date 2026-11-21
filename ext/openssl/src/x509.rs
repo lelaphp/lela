@@ -769,7 +769,8 @@ pub(crate) fn ini_path(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
 /// The file a verifying function's store loads where its `ca_info`
 /// names no file: the library's default, `None`, as php loads it, or the
 /// system's bundle where [`anchors`] stands it in. `named` is whether the
-/// `ca_info` names a directory or the ini a CA file or directory.
+/// `ca_info` names a path, loaded or not, or the ini a CA file or
+/// directory.
 fn verify_file(
     named: bool,
     defaults: impl FnOnce() -> Defaults,
@@ -796,6 +797,9 @@ pub(crate) fn setup_verify(
         return Ok(None);
     };
     let (mut files, mut dirs) = (0, 0);
+    // A path the array names, whether or not it loads: it names a CA as a
+    // stream's `cafile` does, so the system's bundle does not stand in.
+    let mut named = false;
     // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(calist), item)`
     // (`Z/ext/openssl/openssl_backend_common.c:792`), no owner of the table
     // taken: the argument holds it while `zval_try_get_string` runs
@@ -806,6 +810,7 @@ pub(crate) fn setup_verify(
         let Some(path) = check_path(req, &text, Origin::Item(arg, None), false) else {
             return Ok(ControlFlow::Continue(()));
         };
+        named = true;
         let shown = String::from_utf8_lossy(path.as_bytes()).into_owned();
         let host = std::path::Path::new(std::ffi::OsStr::from_bytes(path.as_bytes()));
         let Ok(meta) = std::fs::metadata(host) else {
@@ -831,7 +836,7 @@ pub(crate) fn setup_verify(
         Ok(ControlFlow::Continue(()))
     })?;
     if files == 0 {
-        let named = dirs > 0
+        let named = named
             || ini_path(req, b"openssl.cafile").is_some()
             || ini_path(req, b"openssl.capath").is_some();
         if !store.load(false, verify_file(named, Defaults::read, SYSTEM_BUNDLE)) {
@@ -1029,7 +1034,7 @@ mod tests {
 
     /// A verifying function's store takes the system's bundle in place of
     /// the default file under the same condition as a client stream: its
-    /// `ca_info` names no directory, the ini no CA, the environment
+    /// `ca_info` names no path, the ini no CA, the environment
     /// nothing, and the compiled-in file cannot be read. Where anything is
     /// named, or the platform keeps no bundle, the file is php's default.
     #[test]
