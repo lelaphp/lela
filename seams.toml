@@ -383,7 +383,7 @@ name = "lanes/differential"
 budget = 400      # #4358's generator, the differential lane's pure part; xtask/src/fuzz holds the adapter (#3740, #4489)
 [[crate]]
 name = "lanes/packages"
-budget = 700      # spec #32's packages lane: how one package's suite is planned, run and read; xtask/src/packages holds the adapter that executes it (lelaphp/lela#69, 2026-11-21)
+budget = 700      # spec lelaphp/lela#32's packages lane: how one package's suite is planned, run and read; xtask/src/packages holds the adapter that executes it (lelaphp/lela#69, 2026-11-21)
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
