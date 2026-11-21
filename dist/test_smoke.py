@@ -43,7 +43,7 @@ class SmokeArguments(unittest.TestCase):
 
     def test_no_directory_or_two_are_refused(self):
         for arguments in ((), ("a", "b"), ("--unknown",), ("--machos",), ("--machos", "a", "b"),
-                          ("--https",), ("--https", "a", "b")):
+                          ("--https",), ("--https", "a", "b"), ("--openssl",), ("--openssl", "a", "b")):
             with self.subTest(arguments=arguments):
                 run = self.smoke(*arguments)
                 self.assertEqual(run.returncode, 2, run.stderr)
@@ -116,6 +116,76 @@ class Https(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertIn(f"curl reaches nothing at {url} from this machine, so the stream is not tried",
                               run.stdout)
+
+
+class OpensslConf(unittest.TestCase):
+    """The openssl.cnf read, `--openssl <dir>`, over a directory whose
+    `bin/lela` names the library's compiled-in directory, the file it reads
+    and whether a key and a request are made, as the test says, with no brew
+    on PATH, so no sandbox."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.scratch = Path(temporary.name).resolve()
+        (self.scratch / "tarball/bin").mkdir(parents=True)
+        (self.scratch / "tarball/lib").mkdir()
+        (self.scratch / "tarball/lib/openssl.cnf").write_text("[ req ]\n")
+        self.laid = self.scratch / "tarball/lib/openssl.cnf"
+        self.area = self.scratch / "homebrew/etc/openssl@4"
+
+    def conf(self, reads, made="made", compiled_in=True):
+        """The smoke over the host, reading `reads` and answering `made`
+        for the key and the request, with the compiled-in file there or
+        not; and the host's environment, one line per run."""
+        if compiled_in:
+            self.area.mkdir(parents=True)
+            (self.area / "openssl.cnf").write_text("[ req ]\n")
+        seen = self.scratch / "seen"
+        host = self.scratch / "tarball/bin/lela"
+        host.write_text(
+            f'#!/bin/sh\necho "OPENSSL_CONF=${{OPENSSL_CONF-unset}} SSLEAY_CONF=${{SSLEAY_CONF-unset}}" >> {seen}\n'
+            f'case "$*" in\n'
+            f'  *openssl_get_cert_locations*) echo {self.area}/openssl.cnf ;;\n'
+            f'  *ReflectionExtension*) echo {reads} ;;\n'
+            f'  *openssl_pkey_new*) echo {made} ;;\n'
+            f'esac\n'
+        )
+        host.chmod(0o755)
+        run = subprocess.run(
+            [shutil.which("bash"), str(ROOT / "dist/smoke.sh"), "--openssl", str(self.scratch / "tarball")],
+            env={**os.environ, "NAME": "lela", "OPENSSL_CONF": "/elsewhere.cnf", "SSLEAY_CONF": "/elsewhere.cnf",
+                 "PATH": os.pathsep.join(["/usr/bin", "/bin"])},
+            capture_output=True, text=True,
+        )
+        return run, seen.read_text().splitlines() if seen.exists() else []
+
+    def test_the_compiled_in_file_is_read_where_it_is_there(self):
+        run, seen = self.conf(self.area / "openssl.cnf")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn(f"openssl.cnf: {self.area}/openssl.cnf", run.stdout)
+        self.assertIn("openssl, a key and a request with no config option: made", run.stdout)
+        self.assertEqual(seen, ["OPENSSL_CONF=unset SSLEAY_CONF=unset"] * 3)
+
+    def test_the_tarballs_file_is_read_where_the_compiled_in_one_is_not(self):
+        run, _ = self.conf(self.laid, compiled_in=False)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn(f"openssl.cnf: {self.laid}", run.stdout)
+
+    def test_a_host_reading_the_tarballs_file_beside_the_compiled_in_one_fails(self):
+        run, _ = self.conf(self.laid)
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"openssl.cnf: wanted {self.area}/openssl.cnf", run.stderr)
+
+    def test_a_host_reading_the_absent_compiled_in_file_fails(self):
+        run, _ = self.conf(self.area / "openssl.cnf", compiled_in=False)
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"openssl.cnf: wanted {self.laid}", run.stderr)
+
+    def test_a_key_or_a_request_refused_fails(self):
+        run, _ = self.conf(self.area / "openssl.cnf", made="refused")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("openssl, a key and a request with no config option: wanted made", run.stderr)
 
 
 class Shipped(unittest.TestCase):

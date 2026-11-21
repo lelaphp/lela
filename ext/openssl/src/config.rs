@@ -4,7 +4,8 @@
 //! `php_openssl_generate_private_key`, which makes a key under it
 //! (`openssl_backend_common.c`).
 
-use std::ffi::{CStr, CString, c_int};
+use std::ffi::{CStr, CString, OsStr, OsString, c_int};
+use std::os::unix::ffi::OsStrExt;
 
 use php_ext::raising::{Level, docref};
 use php_ext::request::Request;
@@ -24,16 +25,84 @@ use crate::store_errors;
 const MIN_KEY_LENGTH: c_int = 384;
 
 /// `default_ssl_conf_filename`: `$OPENSSL_CONF`, else `$SSLEAY_CONF`,
-/// else `openssl.cnf` in the library's certificate area.
+/// else `openssl.cnf` in the library's certificate area, as [`choose`]
+/// picks among them, the macOS tarball's own file standing last.
+///
+/// The variables win, and one naming no file fails the call, as php's
+/// does; one naming a file is read, here with a key size of its own.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'cnf');
+/// file_put_contents($f, "[ req ]\ndefault_bits = 1024\n");
+/// $child = '$k = openssl_pkey_new(); var_dump($k === false ? false : openssl_pkey_get_details($k)["bits"]);';
+/// foreach ([['OPENSSL_CONF' => $f], ['SSLEAY_CONF' => $f], ['OPENSSL_CONF' => $f, 'SSLEAY_CONF' => '/nonexistent.cnf'],
+///     ['OPENSSL_CONF' => '/nonexistent.cnf', 'SSLEAY_CONF' => $f], ['SSLEAY_CONF' => '/nonexistent.cnf']] as $env) {
+///     $p = proc_open([PHP_BINARY, '-n', '-r', $child], [1 => ['pipe', 'w']], $pipes, null, $env);
+///     echo stream_get_contents($pipes[1]);
+///     proc_close($p);
+/// }
+/// unlink($f);
+/// ```
+/// ```expect process
+/// int(1024)
+/// int(1024)
+/// int(1024)
+/// bool(false)
+/// bool(false)
+/// ```
 pub(crate) fn default_file() -> Vec<u8> {
-    for name in ["OPENSSL_CONF", "SSLEAY_CONF"] {
-        if let Some(value) = std::env::var_os(name) {
-            return value.into_encoded_bytes();
-        }
+    let named = ["OPENSSL_CONF", "SSLEAY_CONF"]
+        .into_iter()
+        .find_map(std::env::var_os)
+        .map(OsString::into_encoded_bytes);
+    let mut compiled_in = ffi::default_cert_area();
+    compiled_in.extend_from_slice(b"/openssl.cnf");
+    choose(named, compiled_in, readable, laid_file)
+}
+
+/// The file a variable names, as php reads it; else the compiled-in one,
+/// where it can be read or `laid` finds no file of the tarball's; else the
+/// tarball's. The bundled `libcrypto` of the macOS tarball compiles in
+/// Homebrew's directory, which a Mac without Homebrew's OpenSSL lacks, and
+/// the tarball lays OpenSSL's stock file beside the libraries for it.
+/// `readable` and `laid` are asked only where they decide.
+fn choose(
+    named: Option<Vec<u8>>,
+    compiled_in: Vec<u8>,
+    readable: impl FnOnce(&[u8]) -> bool,
+    laid: impl FnOnce() -> Option<Vec<u8>>,
+) -> Vec<u8> {
+    if let Some(named) = named {
+        return named;
     }
-    let mut path = ffi::default_cert_area();
-    path.extend_from_slice(b"/openssl.cnf");
-    path
+    if readable(&compiled_in) {
+        return compiled_in;
+    }
+    laid().unwrap_or(compiled_in)
+}
+
+/// Whether a file opens for reading, as `NCONF_load` opens it.
+fn readable(path: &[u8]) -> bool {
+    std::fs::File::open(OsStr::from_bytes(path)).is_ok()
+}
+
+/// Where the macOS tarball lays its `openssl.cnf`, from the tarball's
+/// directory: beside the bundled libraries, as dist/bundle.py lays it.
+const LAID: &str = "lib/openssl.cnf";
+
+/// The tarball's `openssl.cnf`, where the running host is one of a macOS
+/// tarball that carries it: [`LAID`] under the directory above the host's
+/// real file's own, `bin/` or `sbin/`, where that file can be read. `None`
+/// on any other platform, and for a host of a cargo build or an image,
+/// none of which has the file there.
+fn laid_file() -> Option<Vec<u8>> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let host = std::fs::canonicalize(std::env::current_exe().ok()?).ok()?;
+    let file = host.parent()?.parent()?.join(LAID);
+    let file = file.into_os_string().into_encoded_bytes();
+    readable(&file).then_some(file)
 }
 
 /// `(int)Z_LVAL_P(item)`: the low 32 bits, as C's conversion keeps them.
@@ -519,5 +588,46 @@ fn write_rand_file(req: &mut Request, file: Option<&CStr>) {
     {
         store_errors(req);
         docref(req, Level::Warning, "Unable to write random state");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::choose;
+
+    /// A variable wins whether or not its file can be read, and the
+    /// compiled-in file is read where it can be; the tarball's file is
+    /// taken only where neither variable names one and the compiled-in file
+    /// cannot be read, and php's name stands where no tarball's file is.
+    #[test]
+    fn the_tarballs_file_stands_in_only_for_an_unreadable_compiled_in_one() {
+        let compiled_in = b"/opt/homebrew/etc/openssl@4/openssl.cnf".to_vec();
+        let laid = b"/Users/a/lela/lib/openssl.cnf".to_vec();
+        let unasked = |_: &[u8]| -> bool { panic!("a named file is not looked for") };
+        let unlaid = || -> Option<Vec<u8>> { panic!("the tarball's file is asked only last") };
+
+        let named = b"/nonexistent.cnf".to_vec();
+        let got = choose(Some(named.clone()), compiled_in.clone(), unasked, unlaid);
+        assert_eq!(got, named);
+
+        let got = choose(None, compiled_in.clone(), |_| true, unlaid);
+        assert_eq!(got, compiled_in);
+
+        let looked = |path: &[u8]| {
+            assert_eq!(path, b"/opt/homebrew/etc/openssl@4/openssl.cnf");
+            false
+        };
+        let got = choose(None, compiled_in.clone(), looked, || Some(laid.clone()));
+        assert_eq!(got, laid);
+
+        let got = choose(None, compiled_in.clone(), |_| false, || None);
+        assert_eq!(got, compiled_in);
+    }
+
+    /// A host of a cargo build lies under `target/<profile>/`, whose parent
+    /// lays no `lib/openssl.cnf`, so its answer is php's.
+    #[test]
+    fn a_cargo_built_host_finds_no_tarballs_file() {
+        assert_eq!(super::laid_file(), None);
     }
 }
