@@ -1764,6 +1764,10 @@ name = "php_lanes_fuzz"
 version = "0.0.0"
 
 [[package]]
+name = "php_lanes_packages"
+version = "0.0.0"
+
+[[package]]
 name = "php_link"
 version = "0.0.0"
 dependencies = [
@@ -2534,6 +2538,7 @@ dependencies = [
  "php_lanes_differential",
  "php_lanes_framework",
  "php_lanes_fuzz",
+ "php_lanes_packages",
  "proc-macro2",
  "quote",
  "regex-lite",
