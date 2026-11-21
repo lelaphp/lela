@@ -746,7 +746,7 @@ mod tracked {
                 entry.display()
             );
             assert!(
-                !text.contains(&manifest.pin().unwrap().oracle.md5),
+                !text.contains(&manifest.pin().unwrap().oracle.digest.key()),
                 "{} states the oracle digest",
                 entry.display()
             );

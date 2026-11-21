@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
-use super::{Oracle, Pin};
+use super::{Digest, Oracle, Pin};
 use crate::sha256::Sha256;
 
 /// One platform an oracle build is pinned for, by the key its table
@@ -164,22 +164,23 @@ impl Variant {
 }
 
 /// One platform's build of a variant: where its binary is on a machine of
-/// that platform, the binary's md5, which is its identity as `[oracle]`'s
-/// md5 is the main oracle's, and what it was made from. The path is where
+/// that platform, the binary's digest, which is its identity as `[oracle]`'s
+/// digest is the main oracle's, and what it was made from. The path is where
 /// a machine finds the binary: on Linux, the install prefix the recipe
 /// builds it to; a relative path is the pin's directory's.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Build {
     pub path: PathBuf,
-    pub md5: String,
+    #[serde(flatten)]
+    pub digest: Digest,
     #[serde(flatten)]
     pub provenance: Provenance,
 }
 
 /// What a build was made from, never an input to a run: for a Linux build
 /// the base image's manifest digest, which the recipe pins and rebuilds
-/// from, the md5 holding the binary it rebuilt; for the macOS
+/// from, the digest holding the binary it rebuilt; for the macOS
 /// build, the digest of the `[closure]` it was made against. The
 /// pin's digest leaves out every field declared here and nothing else,
 /// so a key added to a build later is digested unless it is

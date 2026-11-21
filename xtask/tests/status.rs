@@ -234,7 +234,10 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     let json = oracle_json(&root, None, None);
     assert_eq!(json["binary"]["version"], oracle.version.as_str());
     assert_eq!(json["binary"]["path"], path.as_str());
-    assert_eq!(json["binary"]["md5"], oracle.md5.as_str());
+    assert_eq!(
+        json["binary"]["md5"],
+        serde_json::json!(oracle.digest.md5())
+    );
     // The formula the keg is poured from, which is the keg's name
     // in the path the section states beside it, and the bottle of it, the
     // directory the keg stands in.
@@ -247,11 +250,11 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     for name in pin.variant.keys() {
         let built = pin.variant(name).unwrap().oracle;
         let laid = &json["variants"][name.as_str()];
-        if built.md5.is_empty() {
+        if built.digest == xtask::oracle::Digest::default() {
             assert!(laid.is_null(), "{name} pins no build here: {laid}");
             continue;
         }
-        assert_eq!(laid["md5"], built.md5.as_str(), "{name}");
+        assert_eq!(laid["md5"], serde_json::json!(built.digest.md5()), "{name}");
         assert_eq!(laid["path"], built.path.to_str().unwrap(), "{name}");
         assert_eq!(laid["platform"], Platform::this().unwrap().key(), "{name}");
         let pinned = pin.variant[name].build(Platform::this().unwrap()).unwrap();
@@ -272,7 +275,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     let pinned_here = pin
         .variant
         .keys()
-        .filter(|n| !pin.variant(n).unwrap().oracle.md5.is_empty());
+        .filter(|n| pin.variant(n).unwrap().oracle.digest != xtask::oracle::Digest::default());
     assert_eq!(
         json["variants"].as_object().unwrap().len(),
         pinned_here.count()
@@ -280,8 +283,8 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     let md = status_with_pin(&root, &["--section", "oracle"], None, None).ok();
     assert!(
         md.contains(&format!(
-            "| binary |  | {path} | php {}, md5 {}, poured from the formula {formula} |",
-            oracle.version, oracle.md5
+            "| binary |  | {path} | php {}, {}, poured from the formula {formula} |",
+            oracle.version, oracle.digest
         )),
         "{md}"
     );
@@ -296,6 +299,38 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
         };
         assert!(row.is_some_and(|row| row.ends_with(&state)), "{md}");
     }
+}
+
+/// Where the pin carries a SHA-256 the section prints it beside the md5
+/// the CI scripts read today, and where it carries no md5 only the
+/// SHA-256: `[oracle]` with both, each variant build by its SHA-256 alone.
+#[test]
+fn oracle_prints_the_sha256_where_the_pin_carries_one() {
+    let root = scratch("oracle-sha256");
+    let pinned = pin().oracle;
+    let file = root.join("oracle.toml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let php = format!("sha256:{}", "a".repeat(64));
+    let build = format!("sha256:{}", "b".repeat(64));
+    let text = text.replacen("\nmd5 = \"", &format!("\nsha256 = \"{php}\"\nmd5 = \""), 1);
+    let builds =
+        regex_lite::Regex::new(r#"(\n[a-z0-9-]+ = \{ path = "[^"]*", )md5 = "[0-9a-f]{32}""#);
+    let text = builds
+        .unwrap()
+        .replace_all(&text, format!("${{1}}sha256 = \"{build}\""));
+    std::fs::write(&file, text.as_ref()).unwrap();
+    let json = oracle_json(&root, None, None);
+    assert_eq!(json["binary"]["sha256"], php.as_str());
+    assert_eq!(json["binary"]["md5"], pinned.digest.md5().unwrap());
+    for (name, laid) in json["variants"].as_object().unwrap() {
+        assert_eq!(laid["sha256"], build.as_str(), "{name}");
+        assert!(laid["md5"].is_null(), "{name}: {laid}");
+    }
+    let md = status_with_pin(&root, &["--section", "oracle"], None, None).ok();
+    assert!(
+        md.contains(&format!("php {}, {php}, poured", pinned.version)),
+        "{md}"
+    );
 }
 
 /// A scratch workspace whose pin is `fixture` of
@@ -733,9 +768,11 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     let variants = pin
         .variant
         .keys()
-        .map(|name| pin.variant(name).unwrap().oracle.md5);
-    let kept: Vec<String> = std::iter::once(pin.oracle.md5.clone())
-        .chain(variants.filter(|md5| !md5.is_empty()))
+        .map(|name| pin.variant(name).unwrap().oracle.digest)
+        .filter(|digest| *digest != xtask::oracle::Digest::default());
+    let kept: Vec<String> = std::iter::once(pin.oracle.digest.clone())
+        .chain(variants)
+        .map(|digest| digest.key())
         .map(|md5| format!("target/harness/phpt-runs/pin-{}-{md5}", pin.source.tag))
         .collect();
     assert_eq!(

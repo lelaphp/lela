@@ -45,7 +45,7 @@ use crate::reading::{Reading, Status, listed, plural};
 /// What names the pin a target is kept under: the corpus's tag and the
 /// oracle's digest.
 pub(crate) fn key(pin: &Pin) -> String {
-    format!("pin-{}-{}", pin.source.tag, pin.oracle.md5)
+    format!("pin-{}-{}", pin.source.tag, pin.oracle.digest.key())
 }
 
 /// Where a workspace keeps every target under the pin, relative to its
@@ -811,7 +811,7 @@ mod tests {
             Some(target)
         );
         assert_eq!(Target::kept(&roots, &pin, "ext/other").unwrap(), None);
-        pin.oracle.md5 = "0".repeat(32);
+        pin.oracle.digest = crate::oracle::Digest::Md5("0".repeat(32));
         assert_eq!(Target::kept(&roots, &pin, "ext/fixture").unwrap(), None);
     }
 }
