@@ -119,8 +119,9 @@ pub(crate) fn command(
 }
 
 /// Run the lane: one reading per crate of [`OWING`], none of them taken
-/// with no oracle to hold a program to, no engine built to run one, or a
-/// program drawn and not run before the budget was spent.
+/// with no oracle to hold a program to, no engine built to run one, a
+/// program drawn and not run before the budget was spent, or one the
+/// oracle did not complete, which was to be judged and was not.
 pub fn run(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Took> {
     let started = Instant::now();
     let pin = manifest.pin()?;
@@ -171,7 +172,7 @@ pub fn run(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> 
         reading.count("wall_ms", crate::reading::millis(wall))?;
     }
     said(&mut readings, hunt.status(), &message);
-    Ok(Took::all(readings, hunt.cut == 0))
+    Ok(Took::all(readings, hunt.cut == 0 && hunt.unheld == 0))
 }
 
 /// The clock's seconds, the seed a run takes where none is asked for.
