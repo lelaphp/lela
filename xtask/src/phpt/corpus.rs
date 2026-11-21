@@ -61,7 +61,7 @@ impl Union {
 
 /// What a run that set out for the whole corpus did not take of it.
 #[derive(Debug)]
-pub(crate) struct Short {
+struct Short {
     /// The subsets of the run that gave no verdicts, by scope.
     unrun: Vec<String>,
     /// The corpus files found, and the count the pin holds them to.
@@ -107,14 +107,14 @@ impl fmt::Display for Short {
     }
 }
 
-/// The corpus reading of a run over `subsets` under `runner`, and what
-/// the run did not take of the whole corpus, where it did not.
+/// The corpus reading of a run over `subsets` under `runner`, and whether
+/// the run took the whole corpus, the reading naming what it did not.
 pub(crate) fn reading(
     union: Union,
     subsets: &[Subset],
     (runner, lane): (&Runner, Option<Lane>),
     (manifest, snapshot): (&Manifest, &Snapshot),
-) -> Result<(Reading, Option<Short>)> {
+) -> Result<(Reading, bool)> {
     let mut files = BTreeSet::new();
     for subset in subsets {
         files.extend(subset.tests()?.iter().map(|test| subset.under(test)));
@@ -178,5 +178,5 @@ pub(crate) fn reading(
         reading.count(judgement.key(), tally.count(judgement))?;
     }
     (reading.numbers).insert("percent".to_owned(), tally.percent().into());
-    Ok((reading, short))
+    Ok((reading, short.is_none()))
 }

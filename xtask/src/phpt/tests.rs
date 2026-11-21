@@ -2340,8 +2340,8 @@ fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading(
         ..Ask::default()
     };
     let ran = super::run(&root, &manifest, &registry(""), &ask).unwrap();
-    assert_eq!(ran.unrun, ["ext/pdo_mysql"], "{ran:#?}");
-    let short = ran.whole().unwrap_err();
+    assert_eq!(ran.untaken, ["ext/pdo_mysql"], "{ran:#?}");
+    let short = crate::tally::whole(super::INSTRUMENT, &ran.untaken).unwrap_err();
     assert!(
         short.downcast_ref::<crate::exit::Unfinished>().is_some(),
         "the exit is not the one a failing test gives: {short:#}"
@@ -2895,11 +2895,11 @@ fn an_id_judged_twice_is_met_only_where_every_judgement_is_and_an_unrun_subset_i
     union.add(&b, tally(&[("phpt:php-src/x.phpt", Judgement::Fail)]));
     let runner = Runner::Engine(PathBuf::from("/nowhere/lela"), None);
     let subsets = [a, b, c];
-    let (reading, short) =
+    let (reading, whole) =
         corpus::reading(union, &subsets, (&runner, None), (&manifest, &snapshot)).unwrap();
     assert_eq!(reading.scope, "php-src");
     assert_eq!(reading.status, Status::Skip, "{reading:#?}");
-    assert!(short.is_some());
+    assert!(!whole);
     for (key, n) in [
         ("whole", 0),
         ("tests", 2),

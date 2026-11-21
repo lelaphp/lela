@@ -83,8 +83,9 @@ impl Scratch {
     }
 
     fn run(&self, ask: &Ask) -> Vec<Reading> {
-        let readings =
-            crosscheck::run(&self.root, &self.manifest, &registry(""), &self.store, ask).unwrap();
+        let readings = crosscheck::run(&self.root, &self.manifest, &registry(""), &self.store, ask)
+            .unwrap()
+            .readings;
         self.store.record(&readings).unwrap();
         readings
     }

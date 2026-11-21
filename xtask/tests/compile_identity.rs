@@ -230,7 +230,9 @@ impl Scratch {
     }
 
     fn ask(&self, registry: &Registry, ask: &Ask) -> Reading {
-        let readings = compile_identity::run(&self.root, &self.manifest, registry, ask).unwrap();
+        let readings = compile_identity::run(&self.root, &self.manifest, registry, ask)
+            .unwrap()
+            .readings;
         assert_eq!(readings.len(), 1, "{readings:#?}");
         readings.into_iter().next().unwrap()
     }
@@ -462,7 +464,9 @@ fn an_absent_oracle_is_a_skip_and_not_a_pass() {
         engine: Some(scratch.binary("php", "exit 0")),
         ..Ask::default()
     };
-    let readings = compile_identity::run(&scratch.root, &manifest, &registry(""), &ask).unwrap();
+    let readings = compile_identity::run(&scratch.root, &manifest, &registry(""), &ask)
+        .unwrap()
+        .readings;
     let reading = &readings[0];
     assert_eq!(reading.status, Status::Skip, "{reading:#?}");
     assert_eq!(count(reading, "files"), 4);
@@ -654,8 +658,9 @@ fn one_file_on_request_records_nothing_and_a_difference_is_the_exit() {
         engine: Some(scratch.same_as_php()),
         ..Ask::default()
     };
-    let readings =
-        compile_identity::run(&scratch.root, &scratch.manifest, &registry(""), &same).unwrap();
+    let readings = compile_identity::run(&scratch.root, &scratch.manifest, &registry(""), &same)
+        .unwrap()
+        .readings;
     assert!(readings.is_empty(), "{readings:#?}");
     let differs = Ask {
         file: Some(file),

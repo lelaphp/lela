@@ -198,7 +198,7 @@ use crate::reading::{Reading, listed, plural};
 use crate::scratch::{self, Full, Tree};
 use crate::sources;
 use crate::sysv;
-use crate::tally::{self, Outcome};
+use crate::tally::{self, Outcome, Took};
 use adapter::Adapter;
 use route::Routed;
 use target::{Measure, Target};
@@ -1136,66 +1136,16 @@ pub(crate) fn testless(manifest: &Manifest, scope: &str) -> bool {
         .is_ok_and(|testless| testless)
 }
 
-/// What one run took: a reading per subset, and the corpus's for a run
-/// that set out for it, which the caller writes through `record`; the
-/// scope of each subset it was to run and did not, refused or left
-/// without room, whose reading says why; and what a run that set out for
-/// the whole corpus did not take of it.
-#[derive(Debug, Default)]
-pub struct Ran {
-    pub readings: Vec<Reading>,
-    pub unrun: Vec<String>,
-    short: Option<corpus::Short>,
-}
-
-impl Ran {
-    /// A subset's refusal: its reading, and its scope as one not run.
-    fn refuse(&mut self, reading: Reading) {
-        self.unrun.push(reading.scope.clone());
-        self.readings.push(reading);
-    }
-
-    /// The readings of the subset at `scope`, and its scope as one not run
-    /// where it was to run and had no binary or no oracle to run on
-    /// (`runs`), its readings saying why.
-    fn took(&mut self, readings: Vec<Reading>, scope: &Scope, runs: bool) {
-        if !runs {
-            self.unrun.push(scope.to_string());
-        }
-        self.readings.extend(readings);
-    }
-
-    /// The corpus's reading, beside the subsets', and what the run did not
-    /// take of the corpus where it did not.
-    fn corpus(&mut self, (reading, short): (Reading, Option<corpus::Short>)) {
-        self.readings.push(reading);
-        self.short = short;
-    }
-
-    /// Nothing where every subset asked for ran; else the error of a run
-    /// that could not run to its end, naming the subsets that did not, so
-    /// its exit is `exit::UNFINISHED` and never a failing test's. Asked
-    /// once the readings are written, since the ones that ran stand beside
-    /// the refusals.
-    pub fn whole(&self) -> Result<()> {
-        let why = match (self.unrun.len(), &self.short) {
-            (0, None) => return Ok(()),
-            (0, Some(short)) => anyhow::anyhow!("the run did not take the whole corpus: {short}"),
-            (n, _) => anyhow::anyhow!(
-                "{n} subset{} of the run did not run, each reading saying why: {}",
-                plural(n),
-                listed(&self.unrun)
-            ),
-        };
-        Err(crate::exit::Unfinished::of(INSTRUMENT, why))
-    }
-}
-
-/// Run what was asked for: one reading per subset, each written by the
-/// caller through `record`; a subset refused is its own failing reading,
-/// and the rest of the lane runs. An error that ends the run before any
-/// reading is taken is a run that could not run to its end.
-pub fn run(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Ran> {
+/// Run what was asked for: a reading per subset, and the corpus's for a
+/// run that set out for it, each written by the caller through `record`;
+/// a subset refused is its own failing reading, and the rest of the lane
+/// runs. What it set out for and did not take is each subset refused,
+/// left without room or with no binary or no oracle to run on, and the
+/// corpus where the run did not take it whole, each reading saying why:
+/// the caller ends on it through [`tally::whole`]. An error
+/// that ends the run before any reading is taken is a run that could not
+/// run to its end.
+pub fn run(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Took> {
     judged(root, manifest, registry, ask)
         .map_err(|why| crate::exit::Unfinished::of(INSTRUMENT, why))
 }
@@ -1232,7 +1182,7 @@ impl Pinned {
 }
 
 /// [`run`]'s body, whose error is the run's cause.
-fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Ran> {
+fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Took> {
     let pinned = Pinned::of(manifest)?;
     let source = &pinned.source;
     let subsets = asked(root, manifest, source, ask)?;
@@ -1259,7 +1209,7 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
         copy => copy,
     };
     let tree = copy.as_ref().ok().and_then(Option::as_ref);
-    let mut ran = Ran::default();
+    let mut took = Took::default();
     // The lane's census, folded over the subsets as each is run, so the
     // widest cause of the whole corpus is one line at the end and not a
     // sum a reader does by hand.
@@ -1329,19 +1279,19 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
         let side = match answer.side(subset, side, &scope) {
             Ok(side) => side,
             Err(why) => {
-                ran.refuse(refusal(&why)?);
+                took.add(&scope, [refusal(&why)?], false);
                 continue;
             }
         };
         if let Err(full) = &copy
             && side.runs()
         {
-            ran.refuse(refusal(full)?);
+            took.add(&scope, [refusal(full)?], false);
             continue;
         }
         match taken(subset, side, &scope) {
-            Ok(taken) => ran.took(taken, &scope, side.runs()),
-            Err(why) => ran.refuse(refusal(&why)?),
+            Ok(taken) => took.add(&scope, taken, side.runs()),
+            Err(why) => took.add(&scope, [refusal(&why)?], false),
         }
     }
     // One subset's census is the census; a lane's is worth a second line
@@ -1351,9 +1301,9 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
     }
     if let Some(union) = union {
         let at = (manifest, runs.snapshot());
-        ran.corpus(corpus::reading(union, &subsets, (runner, ask.lane), at)?);
+        took.one(corpus::reading(union, &subsets, (runner, ask.lane), at)?);
     }
-    Ok(ran)
+    Ok(took)
 }
 
 /// Nothing to run, or a binary the tree has moved past, under a subset of
