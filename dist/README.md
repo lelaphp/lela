@@ -108,7 +108,7 @@ dist/publish.py join main /tmp/digests-amd64 /tmp/digests-arm64
 
   | ref | tags |
   |---|---|
-  | `main` | `edge-<variant>`, and `sha-<commit>-<variant>` with the full commit |
+  | `main` | `nightly-<variant>`, which moves on every merge to `main`, not once a night: the word names the channel, not a schedule; and `sha-<commit>-<variant>` with the full commit |
   | `v<version>` | `<version>-<variant>`, and the bare `<variant>` unless the version is a pre-release or older than a release tag the checkout holds |
 
   Whether a release is the newest is read from the checkout's release
@@ -142,7 +142,7 @@ workflow pass is one buildx v0.14.0 knows, the oldest they serve:
 `imagetools create --metadata-file`, v0.32.0, is the one it may not pass.
 
 Each image is labelled, and each list annotated, with standard OCI keys
-alone: `source`, `revision`, `version` (`edge` from `main`) and
+alone: `source`, `revision`, `version` (`nightly` from `main`) and
 `licenses`, and three that replace the Ubuntu base's, since a build can
 replace a label and cannot remove one: `description` and `title`, `Lela`, and `created`, the
 commit's time in RFC 3339, UTC, the instant the build's
