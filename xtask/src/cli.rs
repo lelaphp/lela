@@ -62,8 +62,13 @@ pub(crate) enum Command {
     /// sections), only ever reading them: never the tracker or the network,
     /// never a build or a run. With `--session` it prints the map and the
     /// local facts in place of a section.
+    #[command(group(clap::ArgGroup::new("reader").args(["every", "run"])))]
     Status {
-        #[arg(long, required_unless_present = "session", conflicts_with = "session")]
+        #[arg(
+            long,
+            required_unless_present_any = ["session", "run"],
+            conflicts_with = "session"
+        )]
         section: Option<Section>,
         #[arg(long, default_value = "md")]
         format: Format,
@@ -98,12 +103,18 @@ pub(crate) enum Command {
         /// Built for phpt (harness-design.md §4.6).
         #[arg(long, requires = "section", conflicts_with_all = ["session_id", "uncut"])]
         every: bool,
-        /// The log `--every` renders in place of the store's: another
-        /// store's log file or the published history, whose lean rows
-        /// `{i,s,t,a,c,n}` read too; `-` is the standard input. A line that
-        /// is no reading is counted on stderr and skipped.
-        #[arg(long, value_name = "FILE", requires = "every")]
+        /// The log `--every` or `--run` reads: the store's where it names
+        /// no file, or else another store's log file or the published
+        /// history, whose lean rows `{i,s,t,a,c,n}` read too; `-` is the
+        /// standard input. A line that is no reading is counted on stderr
+        /// and skipped.
+        #[arg(long, value_name = "FILE", num_args = 0..=1, requires = "reader")]
         log: Option<PathBuf>,
+        /// Every reading the run `ID` wrote, whatever its instrument, in
+        /// the log's order and no other run's: the id a process printed
+        /// once, or the one `XTASK_RUN` gave it.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["section", "session", "session_id"])]
+        run: Option<String>,
         /// Print AGENTS.md and .claude/harness.local.md for the function
         /// hook's `prompt.context`: as one text, or with `--format json` as
         /// the two blocks `map` and `facts`, each under the engine's cap on

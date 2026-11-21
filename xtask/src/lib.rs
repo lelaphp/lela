@@ -852,7 +852,8 @@ fn track_command(root: &Path, branch: Option<&str>, json: bool) -> Result<()> {
 /// `xtask status`: one section, or with no section the map and the local
 /// facts for the session-start hook, whose stdin head names the session;
 /// with `--every`, one row per reading of the section, from the store's
-/// log or the one `--log` hands it (harness-design.md §4.6).
+/// log or the one `--log` hands it (harness-design.md §4.6); with `--run`,
+/// every reading of one run from the same log.
 fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command) -> Result<()> {
     let Command::Status {
         section,
@@ -862,14 +863,18 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
         tracked,
         every,
         log,
+        run,
         session: _,
     } = ask
     else {
         bail!("status: handed another command");
     };
-    let text = match section {
-        Some(section) if every => status::every::render(store, section, format, log.as_deref())?,
-        Some(section) => {
+    let text = match (section, run) {
+        (_, Some(id)) => status::every::run(store, &id, format, log.as_deref())?,
+        (Some(section), None) if every => {
+            status::every::render(store, section, format, log.as_deref())?
+        }
+        (Some(section), None) => {
             let registry = Registry::load(root)?;
             let against = if tracked {
                 status::Against::Tree
@@ -887,7 +892,7 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
                 uncut,
             )?
         }
-        None => {
+        (None, None) => {
             let id = session_id.or_else(status::session_of_stdin);
             status::session(manifest, store, root, id.as_deref(), format)?
         }
