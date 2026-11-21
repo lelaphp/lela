@@ -19,6 +19,7 @@
 mod bp;
 mod cmd;
 mod debugger;
+mod help;
 mod host;
 mod info;
 mod init;
@@ -82,6 +83,14 @@ const HARDCODED: [(&str, &str); 8] = [
     ("output_buffering", "off"),
 ];
 
+/// What `-h` and `-V` ask for in place of a session, `-h` over `-V`
+/// wherever each stands (`show_help`, `show_version`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Help,
+    Version,
+}
+
 /// What the line asked for.
 #[allow(clippy::struct_excessive_bools)] // phpdbg's switches, each one fact of the line
 #[derive(Debug, Default)]
@@ -103,6 +112,8 @@ struct Line {
     /// `-e`, `ext_stmt`: the engine compiles with extended info
     /// (`Z/sapi/phpdbg/phpdbg.c:1250`, `:1498`).
     extended_info: bool,
+    /// `-h` or `-V`.
+    ask: Option<Ask>,
 }
 
 /// The line read as `main` reads it (`phpdbg.c:1186-1286`).
@@ -133,6 +144,8 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
                     b'v' => line.verbose = true,
                     b'e' => line.extended_info = true,
                     b'i' => line.init_file = (!value.is_empty()).then_some(value),
+                    b'h' => line.ask = Some(Ask::Help),
+                    b'V' => line.ask = line.ask.or(Some(Ask::Version)),
                     _ => {}
                 }
             }
@@ -156,6 +169,30 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
 /// program's writes where stdout is not a terminal.
 fn log_message(entry: &[u8]) {
     php_sapi::stdio::write(&[entry, b"\n"].concat());
+}
+
+/// `-h` or `-V` answered once php has started, in place of a session
+/// (`Z/sapi/phpdbg/phpdbg.c:1357-1388`): the help page the line's word
+/// names, or phpdbg's version before `php_get_version`'s, each through the
+/// pager; an end of input at its question bails out with no `zend_try`
+/// around it, which exits 255.
+///
+/// The lines `tests/lines.toml` holds: `-V`, and `-h` with no page, a page
+/// answered and one quit.
+fn asked(s: &mut Session, ask: Ask, line: &Line, engine: &Engine) -> ExitCode {
+    let paged = match ask {
+        Ask::Help => help::line(s, line.exec.as_deref()),
+        Ask::Version => {
+            let version = php_sapi::version(NAME, engine);
+            // `PHPDBG_VERSION` is `PHP_VERSION`.
+            let text = format!("phpdbg {}, {version}", php_sapi::PHP_VERSION);
+            out::paged(s, text.as_bytes())
+        }
+    };
+    php_sapi::exit_code(match paged {
+        out::Paged::Written => 0,
+        out::Paged::Ended => 255,
+    })
 }
 
 /// The host's `main`.
@@ -218,6 +255,9 @@ pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
         session.line_colours = out::Colours::Off;
     }
     session.out.set_colours(session.line_colours);
+    if let Some(ask) = line.ask {
+        return asked(&mut session, ask, &line, &engine);
+    }
     if let Some(delimiter) = &line.stdin_delimiter {
         session.queued.push(Command::Params(vec![
             Parameter::Str(b"stdin".to_vec()),

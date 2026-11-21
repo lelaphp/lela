@@ -14,6 +14,7 @@ use php_sapi::tier::{self, Argument, FrameRef, Request};
 
 use crate::bp::{Kind, OpArray, Resolution};
 use crate::cmd::{self, Command, Parameter};
+use crate::help;
 use crate::input::{self, Line};
 use crate::opcodes;
 use crate::out;
@@ -2420,9 +2421,14 @@ fn clear(s: &mut Session, _: &mut Here<'_>, _: &[Parameter]) -> Reply {
     Reply::Success
 }
 
-/// `PHPDBG_COMMAND(help)`, as far as a topic nobody has.
+/// `PHPDBG_COMMAND(help)`, as far as no topic, the overview, and a topic
+/// nobody has.
 fn help(s: &mut Session, _: &mut Here<'_>, params: &[Parameter]) -> Reply {
-    if let Some(Parameter::Str(topic)) = params.first()
+    if params.is_empty() {
+        if help::overview(s) == out::Paged::Ended {
+            s.stopped = Some(Stop::Quit);
+        }
+    } else if let Some(Parameter::Str(topic)) = params.first()
         && !ROOT.iter().any(|def| {
             def.name.as_bytes().starts_with(topic.as_slice())
                 || (topic.len() == 1 && def.alias == Some(topic[0]))

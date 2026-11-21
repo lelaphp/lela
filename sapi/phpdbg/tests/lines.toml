@@ -946,3 +946,52 @@ args = ["-qIb", "-n", "-d", "open_basedir={dir}/base", "{dir}/out.php"]
 args = ["-qIrr", "-n", "-d", "open_basedir={dir}/base", "out.php"]
 [[line.then]]
 args = ["-qIbrr", "-n", "-d", "open_basedir={dir}/base", "{dir}/base/in.php"]
+
+# `-V` answers after php has started, so the Zend extensions it loaded are
+# listed, and quits: phpdbg's version, then `php_get_version`'s lines. The
+# build's date and provider are each build's own.
+[[line]]
+name = "version-on-the-line-writes-phpdbg-s-and-php-s"
+args = ["-n", "-V"]
+mask = [['\(built: [^)]*\)', '(built: <date>)'], ['(?m)^Built by .*\n', '']]
+
+# `-h` writes the help overview through the pager, forty lines a page where
+# stdout is no terminal, eighty columns wrapped: the end of input at its
+# question bails out with no `zend_try` around it, so php exits 255.
+[[line]]
+name = "help-on-the-line-pages-the-overview"
+args = ["-n", "-h"]
+
+# Answered with a line, the rest of the page follows; `-b` writes it
+# without its bold.
+[[line]]
+name = "help-on-the-line-answered-writes-the-rest"
+args = ["-n", "-b", "-h"]
+stdin = "\n"
+
+# Answered with `q`, nothing more of it.
+[[line]]
+name = "help-on-the-line-answered-q-writes-no-more"
+args = ["-n", "-h"]
+stdin = "q\n"
+
+# `-h` with a word on the line names a help page: one there is none of writes
+# the overview, then that no page was found.
+[[line]]
+name = "help-on-the-line-for-a-page-there-is-none-of"
+args = ["-n", "-h", "{dir}/t.php"]
+files = { "t.php" = "<?php\n" }
+stdin = "\n"
+
+# `help` with no topic at the prompt writes the overview through the pager:
+# the end of input at its question quits the session.
+[[line]]
+name = "help-at-the-prompt-pages-the-overview"
+args = ["-n", "-q"]
+stdin = "help\n"
+
+# Answered, the rest of the page follows and the prompt reads on.
+[[line]]
+name = "help-at-the-prompt-answered-reads-on"
+args = ["-n", "-q", "-b"]
+stdin = "help\n\nq\n"

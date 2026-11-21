@@ -417,6 +417,57 @@ impl Out {
     }
 }
 
+/// The lines a page holds: `phpdbg_get_terminal_height`'s where stdout is
+/// no terminal, `PHPDBG_G(lines)`.
+const PAGE: usize = 40;
+
+/// The pager's question (`Z/sapi/phpdbg/phpdbg_io.c:96`).
+const MORE: &[u8] = b"\r---Type <return> to continue or q <return> to quit---";
+
+/// How a write through the pager ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Paged {
+    /// As far as the pager let it.
+    Written,
+    /// Stdin ended at the pager's question: `phpdbg_consume_stdin_line`
+    /// sets `PHPDBG_IS_QUITTING` and bails out.
+    Ended,
+}
+
+/// `phpdbg_out` under `PHPDBG_HAS_PAGINATION`, `phpdbg_output_pager`:
+/// the bytes a page of [`PAGE`] lines at a time, each page but the last
+/// followed by the question and a line read; a line opening with `q`
+/// writes no more, and a page that ends where the bytes' last newline is
+/// leaves what follows it unwritten, as php's does.
+pub fn paged(s: &mut Session, bytes: &[u8]) -> Paged {
+    if s.out.discarding {
+        return Paged::Written;
+    }
+    let mut count = 0;
+    let mut written = 0;
+    for (at, _) in bytes.iter().enumerate().filter(|(_, byte)| **byte == b'\n') {
+        count += 1;
+        if count % PAGE != 0 {
+            continue;
+        }
+        s.out.out(&bytes[written..=at]);
+        written = at + 1;
+        if !bytes[written..].contains(&b'\n') {
+            break;
+        }
+        s.out.out(MORE);
+        match crate::input::consume_line(s) {
+            crate::input::Line::End => return Paged::Ended,
+            crate::input::Line::Read(line) if line.first() == Some(&b'q') => break,
+            crate::input::Line::Read(_) => s.out.out(b"\r"),
+        }
+    }
+    if written == 0 || count % PAGE != 0 {
+        s.out.out(&bytes[written..]);
+    }
+    Paged::Written
+}
+
 /// The bytes to stdout as they are.
 fn raw(bytes: &[u8]) {
     let mut stdout = std::io::stdout().lock();
