@@ -70,6 +70,7 @@ mod host;
 #[cfg(test)]
 mod tests;
 
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -85,7 +86,7 @@ use crate::oracle::{
 };
 use crate::reading::{Reading, Status, Store, joined, listed, plural};
 use crate::sources::{self, Outside, Standing};
-use crate::tally;
+use crate::tally::{self, Took};
 use crate::witness::Binary;
 use crate::{git, key};
 use host::Host;
@@ -200,6 +201,24 @@ pub(crate) enum Judgement {
     /// They differ, or the engine rendered nothing, and the note says
     /// which.
     Fail(String),
+}
+
+impl Judgement {
+    /// The reading's message for this judgement of `scope`'s rendering
+    /// under `recipe`: the oracle's `bytes`, kept at `kept`.
+    fn said(&self, scope: &str, recipe: &str, bytes: usize, kept: impl fmt::Display) -> String {
+        match self {
+            Judgement::Pass => format!(
+                "{scope}: the engine's rendering is the oracle's {bytes} bytes under `{recipe}`, kept at {kept}"
+            ),
+            Judgement::Diverged(reason) => format!(
+                "{scope}: the engine's rendering differs from the oracle's under `{recipe}` and the registry accepts it: {reason}"
+            ),
+            Judgement::Fail(note) => format!(
+                "{scope}: the oracle rendered {bytes} bytes under `{recipe}`, kept at {kept}; {note}"
+            ),
+        }
+    }
 }
 
 impl Judgement {
@@ -354,14 +373,15 @@ pub(crate) fn extensions(manifest: &Manifest, carried: &Carried, ask: &Ask) -> V
 
 /// Run what was asked for: one reading per extension per [`Column`],
 /// the `--re` one first, written by the caller through `record`, and the
-/// oracle's bytes kept in the store.
+/// oracle's bytes kept in the store. A rendering is not taken where its
+/// oracle is absent or a variant the pin does not carry.
 pub fn run(
     root: &Path,
     manifest: &Manifest,
     registry: &Registry,
     store: &Store,
     ask: &Ask,
-) -> Result<Vec<Reading>> {
+) -> Result<Took> {
     // The main oracle, and one for each variant a row names, under which
     // that row's extension is rendered; each digest is asserted at
     // the first rendering under it and never again.
@@ -386,27 +406,30 @@ pub fn run(
         .collect();
     // Each rendering waits on two processes and shares nothing with the
     // next, so the items run side by side, in their order still.
-    tally::each_beside(&items, |&(name, host, column)| {
+    let rendered =
+        tally::each_beside(&items, |&(name, host, column)| -> Result<(Reading, bool)> {
             let mut reading = reading_of(&snapshot, manifest, name, host, column)?;
             let recipe = recipe(pin, name, host, column);
             // A row whose crate the linked engine's workspace has not
             // created yet has no rendering to hold, as `budget` and
             // `unsafe-audit` count nothing for it; for a host's own
             // module, the host's row.
-            let row = host.krate().map_or_else(|| format!("ext/{name}"), str::to_owned);
+            let row = host
+                .krate()
+                .map_or_else(|| format!("ext/{name}"), str::to_owned);
             if let Some(krate) = manifest.crates.iter().find(|k| k.name == row)
                 && !sources::exists(&crate::built_root(), krate)
             {
                 reading.status = Status::Skip;
                 reading.message = format!("{}: {}", reading.scope, sources::NOT_YET_CREATED);
-                return Ok(reading);
+                return Ok((reading, true));
             }
             let oracle = match oracles.of(manifest.variant_of(&row)) {
                 Ok(oracle) => oracle,
                 Err(unknown) => {
                     reading.status = Status::Fail;
                     reading.message = format!("{}: nothing rendered; {unknown:#}", reading.scope);
-                    return Ok(reading);
+                    return Ok((reading, false));
                 }
             };
             let pin = oracle.pin();
@@ -415,11 +438,14 @@ pub fn run(
                 if let Some(under) = pin.oracle.read_under() {
                     reading.message = format!("{}; {under}", reading.message);
                 }
-                Ok(reading)
+                Ok((reading, pin.oracle.absent().is_none()))
             };
             if let Some(why) = pin.oracle.absent() {
                 reading.status = Status::Skip;
-                reading.message = format!("{}: nothing rendered under `{recipe}`; {why}", reading.scope);
+                reading.message = format!(
+                    "{}: nothing rendered under `{recipe}`; {why}",
+                    reading.scope
+                );
                 return told(reading);
             }
             oracle.asserted()?;
@@ -438,41 +464,33 @@ pub fn run(
                 return told(reading);
             }
             let path = keep(
-                kept_at(store, &pin.oracle.digest, &host.scope(name, Column::Re), column),
+                kept_at(
+                    store,
+                    &pin.oracle.digest,
+                    &host.scope(name, Column::Re),
+                    column,
+                ),
                 &observed.stdout,
             )?;
             let (engine, profile) = rendering(manifest, ask, &engines, oracle, name, host, column)?;
             reading.profile = profile;
-            let judgement = judge(
-                registry,
-                &host.id(name, column),
-                &observed.stdout,
-                &engine,
-            );
+            let judgement = judge(registry, &host.id(name, column), &observed.stdout, &engine);
             reading.status = judgement.status();
             reading.count("bytes", observed.stdout.len() as u64)?;
-            reading.count("lines", observed.stdout.split(|b| *b == b'\n').count() as u64)?;
+            reading.count(
+                "lines",
+                observed.stdout.split(|b| *b == b'\n').count() as u64,
+            )?;
             let kept = path.strip_prefix(root).unwrap_or(&path).display();
-            reading.message = match judgement {
-                Judgement::Pass => format!(
-                    "{}: the engine's rendering is the oracle's {} bytes under `{recipe}`, kept at {kept}",
-                    reading.scope,
-                    observed.stdout.len()
-                ),
-                Judgement::Diverged(reason) => format!(
-                    "{}: the engine's rendering differs from the oracle's under `{recipe}` and the registry accepts it: {reason}",
-                    reading.scope
-                ),
-                Judgement::Fail(note) => format!(
-                    "{}: the oracle rendered {} bytes under `{recipe}`, kept at {kept}; {note}",
-                    reading.scope,
-                    observed.stdout.len()
-                ),
-            };
+            let bytes = observed.stdout.len();
+            reading.message = judgement.said(&reading.scope, &recipe, bytes, kept);
             told(reading)
-    })?
-    .into_iter()
-    .collect()
+        })?;
+    let mut took = Took::default();
+    for one in rendered {
+        took.one(one?);
+    }
+    Ok(took)
 }
 
 /// What serves the engine's side of one run: the engine linked into this

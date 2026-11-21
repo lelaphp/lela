@@ -33,6 +33,14 @@
 //! were found and none run because the oracle was not here to run them:
 //! coverage is the lane's and is judged first, and a snippet that did not
 //! run is counted, never a refusal.
+//!
+//! **Not whole is its own exit.** The ladder gives a reading its status;
+//! beside it, [`whole`] gives the run its exit. A run that set out for a
+//! reading and did not take it, a skip for want of the oracle or an item
+//! found and not judged, writes that reading as the ladder says and exits
+//! [`crate::exit::UNFINISHED`]. Every instrument whose readings can be
+//! not whole carries what it took as a [`Took`] and ends through it, so
+//! none keeps a test of its own.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -158,6 +166,76 @@ impl Outcome<'_> {
     }
 }
 
+/// The rule beside the ladder that every instrument whose readings can be
+/// not whole ends through: one that set out for readings it did not take
+/// exits [`crate::exit::UNFINISHED`], naming their scopes, once the
+/// readings it did take are written, and never with the status a failing
+/// reading gives. What it did not take is what could not run: no oracle, no engine
+/// binary or a stale one, a tree absent or not the pinned one, an item it
+/// was to judge and did not ([`Tally::whole`]). Each such reading stays
+/// the skip or the refusal it is, saying why; the rule moves the exit
+/// alone, and `done` reads none of the exits.
+pub fn whole(instrument: &'static str, untaken: &[impl AsRef<str>]) -> Result<()> {
+    let n = untaken.len();
+    if n == 0 {
+        return Ok(());
+    }
+    let why = anyhow!(
+        "{n} reading{} it set out for not taken, each saying why: {}",
+        crate::reading::plural(n),
+        listed(untaken)
+    );
+    Err(crate::exit::Unfinished::of(instrument, why))
+}
+
+/// What one run of an instrument took: the readings its caller writes,
+/// and the scope of each it set out for and did not take, which
+/// [`whole`] ends on.
+#[derive(Debug, Default)]
+pub struct Took {
+    pub readings: Vec<Reading>,
+    pub untaken: Vec<String>,
+}
+
+impl Took {
+    /// `readings`, every one of them taken or none, as one run judged them
+    /// all at once.
+    pub fn all(readings: Vec<Reading>, taken: bool) -> Took {
+        let mut took = Took::default();
+        for reading in readings {
+            took.one((reading, taken));
+        }
+        took
+    }
+
+    /// One reading under its own scope, and whether the run took it.
+    pub fn one(&mut self, (reading, taken): (Reading, bool)) {
+        self.add(reading.scope.clone(), [reading], taken);
+    }
+
+    /// The readings of `scope`, and `scope` as one not taken where the run
+    /// did not take it, its readings saying why.
+    pub fn add(
+        &mut self,
+        scope: impl fmt::Display,
+        readings: impl IntoIterator<Item = Reading>,
+        taken: bool,
+    ) {
+        if !taken {
+            self.untaken.push(scope.to_string());
+        }
+        self.readings.extend(readings);
+    }
+
+    /// The readings written and printed, then the exit [`whole`] gives,
+    /// then a failing reading's.
+    pub fn record(&self, store: &crate::reading::Store, instrument: &'static str) -> Result<()> {
+        let outcome = crate::recorded(store, &self.readings)?;
+        whole(instrument, &self.untaken)?;
+        outcome.exit()
+    }
+}
+
 impl<J: Judgement> Tally<J> {
     /// The items a run found and judged none of, since nothing could run
     /// them.
@@ -254,7 +332,8 @@ impl<J: Judgement> Tally<J> {
     }
 
     /// Whether the run judged every item it found: the one rule a subset's
-    /// run is kept by and a corpus run is whole by.
+    /// run is kept by and a corpus run is whole by, and what a run that
+    /// was not ends on through [`whole`].
     pub fn whole(&self) -> bool {
         self.judged.len() == self.found
     }

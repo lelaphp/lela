@@ -56,12 +56,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::divergence::Registry;
+use crate::exit::Unfinished;
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{Oracle, Runner};
 use crate::phpt::Scope;
 use crate::reading::{Reading, Store, listed};
-use crate::tally::{self, Judgement as _, Outcome};
+use crate::tally::{self, Judgement as _, Outcome, Took};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "compile-identity";
@@ -364,21 +365,18 @@ impl Ask {
 }
 
 /// `xtask compile-identity`: [`run`] under the tracked registry, its
-/// readings recorded.
+/// readings recorded, and the exit the tally's rule gives.
 pub(crate) fn command(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) -> Result<()> {
     let registry = Registry::load(root)?;
-    crate::record(store, &run(root, manifest, &registry, ask)?)
+    run(root, manifest, &registry, ask)?.record(store, INSTRUMENT)
 }
 
 /// Run what was asked for: the reading of the corpus, written by the
 /// caller through `record`, and nothing for one file, whose verdict is
-/// the exit.
-pub fn run(
-    root: &Path,
-    manifest: &Manifest,
-    registry: &Registry,
-    ask: &Ask,
-) -> Result<Vec<Reading>> {
+/// the exit. The corpus is not taken where a file of it was not dumped,
+/// for want of the oracle or the engine, and where the pinned tree it is
+/// read from is not here: the run could not run to its end.
+pub fn run(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Took> {
     // The regime is the pin's and the lane states no ini of its own; a pin
     // without it refuses the run before anything is dumped, naming the
     // block and the file a person writes it in.
@@ -424,11 +422,13 @@ pub fn run(
             &corpus,
             file,
         )
-        .map(|()| Vec::new());
+        .map(|()| Took::default());
     }
     let corpus = match &ask.corpus {
         Some(dir) => Corpus::at(dir)?,
-        None => Corpus::per_commit(&pin.source.tree()?),
+        None => {
+            Corpus::per_commit(&(pin.source.tree()).map_err(|why| Unfinished::of(INSTRUMENT, why))?)
+        }
     };
     let tally = judge(
         &oracle,
@@ -438,14 +438,19 @@ pub fn run(
         oracle_absent.as_deref(),
         &corpus,
     )?;
-    Ok(vec![reading(
+    let regime = ask.regime.as_deref();
+    let reading = reading(
         &tally,
         &snapshot,
         &corpus,
         &runner,
-        ask.regime.as_deref(),
+        regime,
         oracle_absent.as_deref(),
-    )?])
+    )?;
+    let mut took = Took::default();
+    let taken = oracle_absent.is_none() && tally.whole();
+    took.one((reading, taken));
+    Ok(took)
 }
 
 /// Every file of the corpus through the two dumps, or none of them when

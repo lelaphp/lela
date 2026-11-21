@@ -617,7 +617,7 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
     // A subset that was to run and did not leaves the run short, which no
     // judgement of the rest can make whole: that is the exit, written
     // after the readings that ran.
-    ran.whole()?;
+    tally::whole(phpt::INSTRUMENT, &ran.untaken)?;
     // `--against` asks whether a test met at the commit fails here, and
     // the exit is that answer; the subsets' own readings are written as
     // ever and hold what they always held.
@@ -657,7 +657,8 @@ fn bench_command(root: &Path, store: &Store, ask: &cli::Bench) -> Result<()> {
 }
 
 /// `xtask crosscheck`: the extensions asked for, each rendered by the
-/// oracle and held against the engine's rendering, each written.
+/// oracle and held against the engine's rendering, each written, and the
+/// exit the tally's rule gives.
 fn crosscheck_command(
     root: &Path,
     manifest: &Manifest,
@@ -690,10 +691,7 @@ fn crosscheck_command(
         ext,
         ..crosscheck::Ask::default()
     };
-    record(
-        store,
-        &crosscheck::run(root, manifest, &registry, store, &ask)?,
-    )
+    crosscheck::run(root, manifest, &registry, store, &ask)?.record(store, crosscheck::INSTRUMENT)
 }
 
 /// `xtask divergence-reason`: the registry against the rule whose `check`

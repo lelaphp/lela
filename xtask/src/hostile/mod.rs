@@ -49,6 +49,7 @@ use crate::oracle::built_from::BuiltFrom;
 use crate::oracle::hosts::CLI;
 use crate::oracle::{ENGINE, Oracle, profile};
 use crate::reading::{Reading, Status, joined};
+use crate::tally::Took;
 use crate::track::{self, Track};
 use corpus::Corpus;
 use judge::{Came, Fault, Found, Judged, Said};
@@ -71,18 +72,21 @@ pub const OWING: [&str; 5] = [
 const TIER: &str = "jit-force";
 
 /// `xtask hostile`: [`run`] under the tracked registry, its readings
-/// recorded.
+/// recorded, and the exit the tally's rule gives.
 pub(crate) fn command(
     root: &Path,
     manifest: &Manifest,
     store: &crate::reading::Store,
 ) -> Result<()> {
     let registry = Registry::load(root)?;
-    crate::record(store, &run(root, manifest, &registry)?)
+    run(root, manifest, &registry)?.record(store, INSTRUMENT)
 }
 
-/// Run the corpus: one reading per crate of [`OWING`], the run kept.
-pub fn run(root: &Path, manifest: &Manifest, registry: &Registry) -> Result<Vec<Reading>> {
+/// Run the corpus: one reading per crate of [`OWING`], the run kept; none
+/// of them taken with no oracle to hold a program to, no engine built to
+/// run one, or a program the oracle did not complete, which was to be
+/// judged and was not.
+pub fn run(root: &Path, manifest: &Manifest, registry: &Registry) -> Result<Took> {
     let started = Instant::now();
     let pin = manifest.pin()?;
     let snapshot = Snapshot::disk(root)?;
@@ -102,7 +106,7 @@ pub fn run(root: &Path, manifest: &Manifest, registry: &Registry) -> Result<Vec<
     };
     if let Some(why) = pin.oracle.absent() {
         said(&mut readings, Status::Skip, &format!("nothing ran; {why}"));
-        return Ok(readings);
+        return Ok(Took::all(readings, false));
     }
     let oracle = pin.oracle();
     oracle.asserted()?;
@@ -111,7 +115,7 @@ pub fn run(root: &Path, manifest: &Manifest, registry: &Registry) -> Result<Vec<
         Err(why) => {
             let message = format!("the engine's php did not build: {why:#}");
             said(&mut readings, Status::Fail, &message);
-            return Ok(readings);
+            return Ok(Took::all(readings, false));
         }
     };
     let sides = Sides {
@@ -167,7 +171,7 @@ pub fn run(root: &Path, manifest: &Manifest, registry: &Registry) -> Result<Vec<
         }
     }
     said(&mut readings, status, &message);
-    Ok(readings)
+    Ok(Took::all(readings, held.unheld == 0))
 }
 
 /// The counts every reading of a run carries.

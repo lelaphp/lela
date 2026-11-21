@@ -298,7 +298,8 @@ fn the_fixture_whose_row_names_a_variant_the_pin_lacks_fails_its_crate() {
             ..crosscheck::Ask::default()
         },
     )
-    .unwrap();
+    .unwrap()
+    .readings;
     assert_eq!(readings.len(), 2, "{readings:#?}");
     for reading in &readings {
         assert_eq!(reading.status, Status::Fail, "{reading:#?}");
@@ -490,7 +491,7 @@ fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
     let mut manifest = Manifest::named("ext/ctype");
     manifest.pin = Some(pin);
     let run = |manifest: &Manifest| {
-        crosscheck::run(&root, manifest, &Registry::default(), &store, &ask).unwrap()
+        (crosscheck::run(&root, manifest, &Registry::default(), &store, &ask).unwrap()).readings
     };
 
     let mut varied = manifest.clone();
@@ -951,7 +952,8 @@ fn crosscheck_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_i
             ..crosscheck::Ask::default()
         },
     )
-    .unwrap();
+    .unwrap()
+    .readings;
     assert_eq!(readings.len(), 2, "{readings:#?}");
     for reading in &readings {
         assert_eq!(reading.status, Status::Skip, "{reading:#?}");

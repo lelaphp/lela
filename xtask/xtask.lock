@@ -299,8 +299,6 @@ permit::run
 phpt::Ask
 phpt::Engine
 phpt::Lane
-phpt::Ran
-phpt::Ran::whole
 phpt::kept_run
 phpt::run
 port_map::CENSUS
