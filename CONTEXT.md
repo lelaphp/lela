@@ -162,10 +162,11 @@ _Avoid_: transition, continuation, `Next` (the handler's return inside the loop)
 An operating system, architecture and C library a release is built and smoke-tested for. Cargo's triple is a target, and a host is the program that serves requests.
 
 **Release**:
-A version of Lela named by a tag: its tarballs and its images, built from that commit.
+A version of Lela named by a tag: its tarballs and its images, built from that commit, and what it attaches beside the tarballs: `install.sh`, `platforms.json`, which lists each platform, its tarball and whether `install.sh` installs there, and `SHA256SUMS` over every other attached file.
+_Avoid_: release manifest (the manifest is `seams.toml`)
 
 **Image**:
-The container image a release publishes, one per platform under one name. A container is an image running.
+The container image a release publishes, one per platform under one name. A container is an image running. An image built from `main` is tagged `nightly-<variant>` and moves on every merge to `main`; the word names the channel, not a schedule.
 
 ### Harness
 
@@ -216,6 +217,10 @@ _Avoid_: batch check, merge gate
 **Hostile lane**:
 The instrument `hostile`, not built yet: a fixed corpus of PHP programs whose error handlers disturb an opline mid-step, each held to the oracle. A program fails it on a fault, or by differing now where it met php at the merge base.
 _Avoid_: differential fuzz (the `fuzz` instrument's)
+
+**Nightly lane**:
+The CI workflow `nightly.yml`, run once a night: the lanes too long for a commit, such as `phpt --full`, the tier's lanes and soak, outside `done`. The `nightly-<variant>` image tag is not it: that moves on every merge.
+_Avoid_: nightly build, nightly run (say which)
 
 **Unmet item**:
 One entry of `done`'s list, with a kind: failing, stale, missing or refused. It is not a divergence's kind, which names a lane.
