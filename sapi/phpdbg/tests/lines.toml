@@ -958,7 +958,7 @@ args = ["-qIbrr", "-n", "-d", "open_basedir={dir}/base", "{dir}/base/in.php"]
 [[line]]
 name = "version-on-the-line-writes-phpdbg-s-and-php-s"
 args = ["-n", "-V"]
-mask = [['\(built: [^)]*\)', '(built: <date>)'], ['(?m)^Built by .*\n', ''], [' \[Lela [^\]]*\]\n', '\n'], ['(?m)^Copyright \(c\) The PHP Group\n(Zend Engine v.*\n)(    with .*\n)*', '<identity>\n'], ['(?m)^Lela, an independent implementation of PHP .*\nParts derived from php-src .*\nNot affiliated with .*\n', '<identity>\n']]
+mask = [['\(built: [^)]*\)', '(built: <date>)'], ['(?m)^Built by .*\n', ''], [' \[Lela [^\]]*\]\n', "\n"], ['(?m)^Copyright \(c\) The PHP Group\n(Zend Engine v.*\n)(    with .*\n)*', "<identity>\n"], ['(?m)^Lela, an independent implementation of PHP .*\nParts derived from php-src .*\nNot affiliated with .*\n', "<identity>\n"]]
 
 # `-h` writes the help overview through the pager, forty lines a page where
 # stdout is no terminal, eighty columns wrapped: the end of input at its
