@@ -51,6 +51,7 @@ use crate::manifest::Manifest;
 use crate::oracle::Ended;
 use crate::reading::{Reading, Status, Store};
 use crate::sysv;
+use crate::tally::Took;
 
 /// One line of the journal.
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,8 +62,12 @@ enum Entry {
     Serving { krate: String, at: String },
     /// The same snippet judged.
     Served { krate: String, at: String },
-    /// A crate's reading, as the log carries one.
-    Judged { reading: serde_json::Value },
+    /// A crate's reading, as the log carries one, and whether the run took
+    /// it or set out for it and did not ([`Took`]).
+    Judged {
+        reading: serde_json::Value,
+        taken: bool,
+    },
 }
 
 /// The served process's side: the file it appends to. Every entry is one
@@ -100,9 +105,10 @@ impl Journal {
         }
     }
 
-    pub(crate) fn judged(&self, reading: &Reading) -> Result<()> {
+    pub(crate) fn judged(&self, reading: &Reading, taken: bool) -> Result<()> {
         self.append(&Entry::Judged {
             reading: reading.to_json()?,
+            taken,
         })
     }
 }
@@ -131,11 +137,11 @@ impl Watch<'_> {
 }
 
 /// What the journal held when the served process ended: the readings it
-/// sent, and by crate the snippets it started and the ones of them it had
-/// not finished.
+/// sent, each taken or not, and by crate the snippets it started and the
+/// ones of them it had not finished.
 #[derive(Debug, Default)]
 struct Kept {
-    readings: Vec<Reading>,
+    took: Took,
     started: BTreeMap<String, usize>,
     in_flight: BTreeMap<String, Vec<String>>,
 }
@@ -162,9 +168,9 @@ impl Kept {
                         running.retain(|a| *a != at);
                     }
                 }
-                Entry::Judged { reading } => {
-                    kept.readings
-                        .push(Reading::from_json(&reading.to_string())?);
+                Entry::Judged { reading, taken } => {
+                    let reading = Reading::from_json(&reading.to_string())?;
+                    kept.took.one((reading, taken));
                 }
             }
         }
@@ -265,12 +271,15 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     let status = served
         .status()
         .with_context(|| format!("starting {} witness", exe.display()))?;
-    let kept = Kept::read(&journal)?;
-    let mut readings = kept.readings.clone();
+    let mut kept = Kept::read(&journal)?;
     let ended = Ended::of(status);
     if let Ended::Signal(number) = ended {
         let signal = Signal(number);
-        readings.extend(died(&snapshot, manifest, &crates, &kept, signal)?);
+        // A crate the death left without its reading was to be judged and
+        // was not.
+        for reading in died(&snapshot, manifest, &crates, &kept, signal)? {
+            kept.took.one((reading, false));
+        }
         eprintln!(
             "witness: the served run died on {signal}; {}",
             in_flight(&kept)
@@ -278,12 +287,12 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     }
     removed.add("of what was left while it ran", claim.settle());
     if removed.count > 0 {
-        for reading in &mut readings {
+        for reading in &mut kept.took.readings {
             reading.count(sysv::REMOVED, removed.count)?;
             reading.message = format!("{}; {}", reading.message, removed.words.join("; "));
         }
     }
-    ask.scope.record(store, &readings)?;
+    ask.scope.record(store, &kept.took)?;
     match ended {
         Ended::Status(code) if code != 0 => {
             bail!("witness: the served run ended with exit {code}; the line above it says why")
@@ -318,7 +327,8 @@ fn died(
     let rule = coverage_rule(manifest);
     let mut readings = Vec::new();
     for krate in &manifest.crates {
-        if !crates.contains(&krate.name) || kept.readings.iter().any(|r| r.scope == krate.name) {
+        if !crates.contains(&krate.name) || kept.took.readings.iter().any(|r| r.scope == krate.name)
+        {
             continue;
         }
         let name = &krate.name;

@@ -147,3 +147,76 @@ fn it_writes_no_reading() {
         store.root().display()
     );
 }
+
+/// Every host `--list` prints, one JSON object a line, as `dist/` reads
+/// them: `json.loads` over each line.
+fn list(root: &Path, args: &[&str]) -> Vec<serde_json::Value> {
+    let out = hosts(root, &[&["--list"], args].concat()).ok();
+    out.lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}")))
+        .collect()
+}
+
+/// `--list` prints every host with where a release ships it, as Mitchell
+/// ruled on 21 November 2026: all four in the tarball, the debugger host
+/// in the `cli` image and in no other, the CLI and CGI in every image,
+/// the FPM in the two that serve through it. Its hosts are the ones
+/// `status` renders of the oracle's list, in that order.
+#[test]
+fn the_list_says_where_a_release_ships_each_host() {
+    let root = Tree::new("hosts-list").unwrap();
+    let printed = list(&root, &[]);
+    let wanted = [
+        r#"{"binary":"lela","crate":"sapi/cli","package":"php_sapi_cli","tarball":true,"images":["cli","fpm","apache"]}"#,
+        r#"{"binary":"lela-cgi","crate":"sapi/cgi","package":"php_sapi_cgi","tarball":true,"images":["cli","fpm","apache"]}"#,
+        r#"{"binary":"lela-fpm","crate":"sapi/fpm","package":"php_sapi_fpm","tarball":true,"images":["fpm","apache"]}"#,
+        r#"{"binary":"lela-dbg","crate":"sapi/phpdbg","package":"php_sapi_phpdbg","tarball":true,"images":["cli"]}"#,
+    ]
+    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap());
+    assert_eq!(printed, wanted);
+    let binaries: Vec<String> = listed().into_iter().map(|host| host.binary).collect();
+    let named: Vec<&str> = printed
+        .iter()
+        .map(|h| h["binary"].as_str().unwrap())
+        .collect();
+    assert_eq!(named, binaries, "the list is the oracle's");
+}
+
+/// `--list` builds nothing, takes no seat and writes no reading, with
+/// `--profile` or without: over a workspace with no `target/` it leaves
+/// none, the seat directory it is pointed at is never made, and the store
+/// holds nothing. With `--profile` each line names the path the build
+/// would leave. The control: the building mode, pointed at the same seat
+/// directory, makes it.
+#[test]
+fn the_list_builds_nothing_takes_no_seat_and_writes_no_reading() {
+    let root = workspace("list", &listed());
+    let seats = root.join("seats");
+    let seated = |args: &[&str]| {
+        Run::at(&root)
+            .args(["hosts"])
+            .args(args)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("XTASK_SEATED")
+            .env("XTASK_SEATS", "1")
+            .env("XTASK_SEAT_DIR", &seats)
+            .go()
+    };
+    seated(&["--list"]).ok();
+    let out = seated(&["--list", "--profile", "release-da"]).ok();
+    let paths: Vec<PathBuf> = out
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .map(|host| PathBuf::from(host["path"].as_str().unwrap()))
+        .collect();
+    let wanted: Vec<PathBuf> = (listed().iter())
+        .map(|host| root.join("target").join("release-da").join(&host.binary))
+        .collect();
+    assert_eq!(paths, wanted, "{out}");
+    assert!(!root.join("target").exists(), "--list built nothing");
+    assert!(!seats.exists(), "--list took no seat");
+    let store = xtask::reading::Store::of_workspace(&root);
+    assert!(!store.root().exists(), "--list wrote no reading");
+    seated(&["--profile", "dev"]).ok();
+    assert!(seats.join("0").is_file(), "the building mode takes a seat");
+}

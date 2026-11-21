@@ -69,8 +69,9 @@ use super::{Entry, workloads};
 use crate::bench::spent::{Retired, Spent};
 use crate::bench::{Arms, Declared, Held, PRODUCTION, PROTOCOL, Sample, Side, Sides, Stream, Unit};
 use crate::manifest::Manifest;
+use crate::oracle::Profile;
 use crate::oracle::hosts::MAKALA;
-use crate::oracle::profile;
+use crate::oracle::profile::{self, Built};
 use crate::scratch::Tree;
 use crate::witness::makala::{Fpm, Http, Ports, Server, split_head};
 
@@ -212,12 +213,14 @@ fn sides(root: &Path, entry: &Entry, against: Against, load: Load) -> Result<Sid
     let (threads, children) = load.hosts();
     let served = Arc::new(Served::start(root, &manifest, entry, threads, &[])?);
     let makala = |name, served: &Arc<Served>| -> Box<dyn Side> {
-        let (pid, program) = (served.server.pid(), served.binary.clone());
+        let (pid, program) = (served.server.pid(), served.binary.path.clone());
+        let built = served.binary.profile;
         let served = Arc::clone(served);
         let ask = Box::new(move || served.body());
         Box::new(ByRequest {
             name,
             program,
+            profile: Some(built),
             load,
             ask,
             pid,
@@ -250,6 +253,7 @@ fn sides(root: &Path, entry: &Entry, against: Against, load: Load) -> Result<Sid
     let fpm = ByRequest {
         name: "php-fpm",
         program,
+        profile: None,
         load,
         ask,
         pid,
@@ -265,7 +269,7 @@ const NO_FPM: &str = "this machine has not the pinned php-fpm oracle.toml's [sap
 /// the server.
 struct Served {
     server: Server,
-    binary: PathBuf,
+    binary: Built,
     http: Http,
     script: String,
     timeout: Duration,
@@ -288,7 +292,7 @@ impl Served {
         let own = Tree::new("bench-makala")?;
         own.write(&entry.script, &entry.program)?;
         let log = own.path().join("errors");
-        let server = Server::start(recipe, &binary, own.path(), &ini(), threads, &log, env)?;
+        let server = Server::start(recipe, &binary.path, own.path(), &ini(), threads, &log, env)?;
         Ok(Served {
             server,
             binary,
@@ -338,6 +342,8 @@ fn fpm_body((stdout, stderr): (Vec<u8>, Vec<u8>)) -> Result<Vec<u8>> {
 struct ByRequest {
     name: &'static str,
     program: PathBuf,
+    /// The profile of makala's build; none for the pinned php-fpm.
+    profile: Option<Profile>,
     load: Load,
     ask: Box<dyn Fn() -> Result<Vec<u8>> + Sync>,
     pid: u32,
@@ -354,6 +360,10 @@ impl Side for ByRequest {
 
     fn stream(&self) -> Stream {
         Stream::Body
+    }
+
+    fn profile(&self) -> Option<Profile> {
+        self.profile
     }
 
     fn unit(&self) -> Unit {
@@ -507,6 +517,7 @@ mod tests {
         let arm = |load| ByRequest {
             name: "a",
             program: PathBuf::new(),
+            profile: None,
             load,
             ask: Box::new(|| Ok(b"x".to_vec())),
             pid: std::process::id(),

@@ -10,7 +10,9 @@
 )]
 
 use std::fs;
+use std::path::Path;
 
+use xtask::oracle::Pin;
 use xtask::scratch::Tree;
 
 /// The tree, with the directories the per-commit lane's rows name and no
@@ -22,4 +24,26 @@ pub fn fixture_tree() -> Tree {
         fs::create_dir_all(tree.join(under)).unwrap();
     }
     tree
+}
+
+/// The `.phpt` files under `tree`, counted as `[source] phpt_files`
+/// counts php-src's at the tag.
+pub fn phpt_files(tree: &Path) -> u64 {
+    let mut found = 0;
+    for entry in fs::read_dir(tree).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found += phpt_files(&path);
+        } else if path.to_string_lossy().ends_with(".phpt") {
+            found += 1;
+        }
+    }
+    found
+}
+
+/// `pin` counting the tests its tree at `tree` holds now, so a run over a
+/// fixture tree is held to its count as one over php-src is to the tag's.
+pub fn counting(mut pin: Pin, tree: &Path) -> Pin {
+    pin.source.phpt_files = phpt_files(tree);
+    pin
 }

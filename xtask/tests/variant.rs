@@ -28,10 +28,12 @@ use xtask::witness;
 
 mod common {
     pub mod manifest;
+    pub mod phpt_tree;
     pub mod repo;
     pub mod run;
 }
 use common::manifest::Tracked;
+use common::phpt_tree::counting;
 use common::repo::scratch_workspace;
 use common::run::Run;
 
@@ -296,7 +298,8 @@ fn the_fixture_whose_row_names_a_variant_the_pin_lacks_fails_its_crate() {
             ..crosscheck::Ask::default()
         },
     )
-    .unwrap();
+    .unwrap()
+    .readings;
     assert_eq!(readings.len(), 2, "{readings:#?}");
     for reading in &readings {
         assert_eq!(reading.status, Status::Fail, "{reading:#?}");
@@ -488,7 +491,7 @@ fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
     let mut manifest = Manifest::named("ext/ctype");
     manifest.pin = Some(pin);
     let run = |manifest: &Manifest| {
-        crosscheck::run(&root, manifest, &Registry::default(), &store, &ask).unwrap()
+        (crosscheck::run(&root, manifest, &Registry::default(), &store, &ask).unwrap()).readings
     };
 
     let mut varied = manifest.clone();
@@ -559,7 +562,7 @@ fn phpt_scratch(name: &str, md5: Option<&str>, varied: bool) -> Option<(Tree, Ma
         row
     };
     let mut manifest = Manifest::of([row]);
-    manifest.pin = Some(pin.on_this_machine(Some(corpus)));
+    manifest.pin = Some(counting(pin, &corpus).on_this_machine(Some(corpus)));
     Some((root, manifest, binary))
 }
 
@@ -828,9 +831,18 @@ fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
     let md5 = shell(&php, "printf variant");
     let pin = root.join("oracle.toml");
     let text = fs::read_to_string(&pin).unwrap();
+    let counted = (text.lines())
+        .map(|line| {
+            if line.starts_with("phpt_files =") {
+                "phpt_files = 1"
+            } else {
+                line
+            }
+        })
+        .fold(String::new(), |text, line| text + line + "\n");
     fs::write(
         &pin,
-        text + &variant_table("stand-in", platform.key(), &php, &md5),
+        counted + &variant_table("stand-in", platform.key(), &php, &md5),
     )
     .unwrap();
     Tracked::of(&root)
@@ -940,7 +952,8 @@ fn crosscheck_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_i
             ..crosscheck::Ask::default()
         },
     )
-    .unwrap();
+    .unwrap()
+    .readings;
     assert_eq!(readings.len(), 2, "{readings:#?}");
     for reading in &readings {
         assert_eq!(reading.status, Status::Skip, "{reading:#?}");
@@ -965,6 +978,7 @@ fn phpt_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it() {
     manifest.pin = Pin::parse(
         &(tracked_text() + &variant_table("stand-in", other, Path::new("/opt/php"), "0")),
     )
+    .map(|pin| counting(pin, &tree))
     .unwrap()
     .on_this_machine(Some(tree))
     .into();

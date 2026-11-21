@@ -87,6 +87,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
+use super::profile::{Built, Profile};
 use super::{Ended, Linked, Observation, PastLimit, Place, Program, Recipe, Regime, Scratch};
 use crate::scratch::Tree;
 
@@ -107,7 +108,7 @@ pub(crate) fn serve(
     regime: Option<&Regime>,
     snippet: &str,
 ) -> Result<Observation> {
-    serve_by(None, recipe, regime, snippet).map(|(observed, _)| observed)
+    serve_by(None, recipe, regime, snippet).map(|(observed, ..)| observed)
 }
 
 /// [`serve`] by `server`, a binary standing for `lela-linked` that a test
@@ -115,13 +116,14 @@ pub(crate) fn serve(
 /// built from the workspace where none is named; with the natives the
 /// request entered beside what it observed, in the order it entered them,
 /// one per line as the trace file holds them: what witness coverage counts
-/// (harness §4.5 condition 2, revision 58).
+/// (harness §4.5 condition 2, revision 58); and the profile of the build
+/// that served it, none for a `server` the caller named.
 pub(crate) fn serve_by(
     server: Option<&Path>,
     recipe: &Recipe,
     regime: Option<&Regime>,
     snippet: &str,
-) -> Result<(Observation, String)> {
+) -> Result<(Observation, String, Option<Profile>)> {
     let scratch = Scratch::for_program(recipe, Program::Snippet(snippet), Place::Named)?;
     // The engine has no command line here, so a regime's arguments other
     // than `-e` are refused rather than dropped from this side of the
@@ -147,9 +149,9 @@ pub(crate) fn serve_by(
     write("cwd", scratch.dir.as_os_str().as_encoded_bytes())?;
     write("ini", ini.as_bytes())?;
     write("extended", if linked.extended_info { b"1" } else { b"0" })?;
-    let binary = match server {
-        Some(path) => path.to_path_buf(),
-        None => binary()?,
+    let (binary, profile) = match server {
+        Some(path) => (path.to_path_buf(), None),
+        None => binary().map(|built| (built.path, Some(built.profile)))?,
     };
     let started = Instant::now();
     if let Answer::PastLimit = ask(&request, &binary, recipe)? {
@@ -183,10 +185,8 @@ pub(crate) fn serve_by(
         },
         wall,
     };
-    Ok((
-        observed,
-        String::from_utf8_lossy(&read("entered")).into_owned(),
-    ))
+    let entered = String::from_utf8_lossy(&read("entered")).into_owned();
+    Ok((observed, entered, profile))
 }
 
 /// The binaries standing idle, each returned after the snippet it served:
@@ -378,10 +378,13 @@ impl Drop for Server {
     }
 }
 
+/// The binary as [`binary`] built it, once this process has.
+static BUILT: OnceLock<Result<Built, String>> = OnceLock::new();
+
 /// The binary, built at the first snippet of this process from the
-/// workspace this harness was built in, in the lanes' profile.
-fn binary() -> Result<PathBuf> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+/// workspace this harness was built in, in the lanes' profile, and that
+/// profile.
+fn binary() -> Result<Built> {
     BUILT
         .get_or_init(|| {
             super::profile::build(&crate::built_root(), PACKAGE, BINARY, Some("linked"), None)
@@ -389,6 +392,15 @@ fn binary() -> Result<PathBuf> {
         })
         .clone()
         .map_err(|why| anyhow!("{why}"))
+}
+
+/// The profile the linked engine's build says it was built in, once this
+/// process has built it to serve a snippet: what a reading of what it
+/// served names ([`super::Runner::profile`]). None before the first
+/// snippet and where the build failed; a server a caller named is no
+/// build, and [`serve_by`] answers none for it whatever this says.
+pub(crate) fn profile() -> Option<Profile> {
+    BUILT.get()?.as_ref().ok().map(|built| built.profile)
 }
 
 #[cfg(test)]
@@ -502,7 +514,7 @@ mod tests {
     /// holds it, lets that pipe reach its end while it stands idle.
     #[test]
     fn a_server_lets_go_of_a_pipe_it_inherited_beyond_its_streams() {
-        let binary = super::binary().unwrap();
+        let binary = super::binary().unwrap().path;
         let (mut reader, writer) = std::io::pipe().unwrap();
         let mut server = Command::new("/bin/sh")
             .args(["-c", "exec \"$0\" --serve 3>&1 >/dev/null"])
