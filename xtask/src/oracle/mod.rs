@@ -43,6 +43,7 @@ pub(crate) use closure::stand_in;
 pub(crate) use closure::{Closure, Minos, Own};
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub(crate) use formula::Formula;
+pub use profile::Profile;
 pub use propose::{Proposal, propose};
 pub use variant::{Build, Oracles, Platform, Provenance, Variant};
 
@@ -1963,7 +1964,7 @@ pub const ENGINE: &str = hosts::CLI.binary;
 /// with every workspace member's features unified, the harness's
 /// extensions among them, which is not the binary the lane measures.
 pub(crate) fn engine_build() -> String {
-    format!("cargo {}", profile::hosts().join(" "))
+    format!("cargo {}", profile::hosts(profile::LANE).join(" "))
 }
 
 /// The extensions php names otherwise than their crates, the module's
@@ -1997,8 +1998,12 @@ pub(crate) fn crate_name(module: &str) -> String {
 /// design §8's `ScriptExec` seam, shared by `phpt` and `witness`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Runner {
-    /// The engine's own binary, one process per program.
-    Engine(PathBuf),
+    /// The engine's own binary, one process per program, and the profile
+    /// it was built in where the lane knows it: the build directory
+    /// [`Runner::resolve`] found it in, or the build the lane ran; none
+    /// for a binary named on the command line, whose path says where it
+    /// stands and not how it was built.
+    Engine(PathBuf, Option<Profile>),
     /// The engine linked into the harness, served in this process through
     /// [`linked::serve`]: the other adapter of design §8's `ScriptExec`
     /// seam, and the engine as much as the binary is, so its reading is a
@@ -2048,7 +2053,7 @@ impl Runner {
                 // about it; the pin holds it by its digest instead.
                 Runner::Control(path)
             } else {
-                against_the_tree(root, layout, path)
+                against_the_tree(root, layout, path, None)
             });
         }
         let mut behind = None;
@@ -2058,7 +2063,7 @@ impl Runner {
             if !built.is_file() {
                 continue;
             }
-            match against_the_tree(root, layout, built) {
+            match against_the_tree(root, layout, built, Some(profile)) {
                 Runner::Stale(why) => {
                     behind.get_or_insert(Runner::Stale(why));
                 }
@@ -2084,10 +2089,21 @@ impl Runner {
         )))
     }
 
+    /// The profile of the engine's binary, where it is the engine's and
+    /// the lane knows how it was built: what a reading names of the build
+    /// it judged. The control, the linked engine, and a rung where nothing
+    /// ran have none.
+    pub fn profile(&self) -> Option<Profile> {
+        match self {
+            Runner::Engine(_, profile) => *profile,
+            _ => None,
+        }
+    }
+
     /// The binary, when there is one to run.
     pub fn binary(&self) -> Option<&Path> {
         match self {
-            Runner::Engine(path) | Runner::Control(path) => Some(path),
+            Runner::Engine(path, _) | Runner::Control(path) => Some(path),
             Runner::Linked | Runner::Stale(_) | Runner::Absent(_) => None,
         }
     }
@@ -2102,7 +2118,7 @@ impl Runner {
     /// the reading is already stamped with, and the two rungs where
     /// nothing ran carry why instead.
     pub fn stamp(&self) -> Option<String> {
-        let Runner::Engine(path) = self else {
+        let Runner::Engine(path, _) = self else {
             return None;
         };
         Some(match fs::read(path) {
@@ -2131,9 +2147,9 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
     fs::canonicalize(path).with_context(|| format!("making {} absolute", path.display()))
 }
 
-/// One binary held to the tree a lane's reading is stamped with: itself
-/// where the engine's sources are no newer than it, and [`Runner::Stale`]
-/// where one of them is.
+/// One binary held to the tree a lane's reading is stamped with: itself,
+/// built in `profile` where that is known, where the engine's sources are
+/// no newer than it, and [`Runner::Stale`] where one of them is.
 ///
 /// The engine's binary carries no digest of its own sources the way a
 /// build of the harness does (harness-design.md §4.4), so what says
@@ -2153,7 +2169,12 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
 /// held to the tree with the engine's, and the lot is behind the tree when
 /// any is. Each is held to its own dep-info, so writing `sapi/fpm` moves
 /// no `php`, as cargo relinks none.
-fn against_the_tree(root: &Path, layout: &Layout, path: PathBuf) -> Runner {
+fn against_the_tree(
+    root: &Path,
+    layout: &Layout,
+    path: PathBuf,
+    profile: Option<Profile>,
+) -> Runner {
     let behind = hosts::HOSTS.iter().find_map(|host| {
         // The binary under test is `path`, whatever its name; the other
         // hosts stand beside it by theirs.
@@ -2168,7 +2189,7 @@ fn against_the_tree(root: &Path, layout: &Layout, path: PathBuf) -> Runner {
         (written > built).then_some((binary, source))
     });
     let Some((path, source)) = behind else {
-        return Runner::Engine(path);
+        return Runner::Engine(path, profile);
     };
     Runner::Stale(format!(
         "the engine's binary at {} was built before {} was last written, so a lane running it \

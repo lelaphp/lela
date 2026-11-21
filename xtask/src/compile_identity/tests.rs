@@ -54,7 +54,7 @@ fn tally(found: usize, went: &[Judgement]) -> Tally {
 }
 
 fn engine() -> Runner {
-    Runner::Engine(PathBuf::from("target/debug/php"))
+    Runner::Engine(PathBuf::from("target/debug/php"), None)
 }
 
 #[test]

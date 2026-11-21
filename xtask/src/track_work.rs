@@ -480,6 +480,7 @@ impl Worked {
             Worked::Nothing { .. } | Worked::StillEmpty { .. } => None,
             Worked::Closed { ticket, commit, .. } => Some(Step {
                 judged: verdict(*ticket, commit, Landed::Closed, self.said()),
+                commit: commit.clone(),
                 standing_at: None,
             }),
             Worked::Standing {
@@ -489,18 +490,21 @@ impl Worked {
                 ..
             } => Some(Step {
                 judged: verdict(*ticket, commit, Landed::Standing, self.said()),
+                commit: commit.clone(),
                 standing_at: Some(dir.clone()),
             }),
         }
     }
 }
 
-/// One step as [`hold`] reads it: the verdict, and the worktree that
+/// One step as [`hold`] reads it: the verdict, the commit its branch is
+/// at, whole, which is its reading's, and the worktree that
 /// stands when the ticket was left standing, whose own store still holds
 /// what its session spent; a retired worktree's readings are in
 /// the checkout's log already.
 struct Step {
     judged: Judged<Landed>,
+    commit: String,
     standing_at: Option<PathBuf>,
 }
 
@@ -586,6 +590,7 @@ fn hold(
 ) -> Result<()> {
     let Some(Step {
         judged,
+        commit,
         standing_at,
     }) = step
     else {
@@ -598,7 +603,7 @@ fn hold(
         Landed::Closed => Status::Pass,
         Landed::Standing => Status::Fail,
     };
-    judged.place.clone_into(&mut reading.commit);
+    reading.commit = commit;
     reading.message.clone_from(&judged.note);
     let own = standing_at.as_deref().map(Store::of_workspace);
     let stores: Vec<&Store> = own.iter().chain(std::iter::once(store)).collect();

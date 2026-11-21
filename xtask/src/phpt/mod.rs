@@ -828,7 +828,7 @@ pub(crate) fn reading(
     } else if uncreated {
         Outcome::Absent(sources::NOT_YET_CREATED)
     } else if let Some(why) = oracle_absent
-        && matches!(runner, Runner::Engine(_) | Runner::Control(_))
+        && matches!(runner, Runner::Engine(..) | Runner::Control(_))
     {
         // A binary is built and the pinned php is not here: the engine
         // could run, and the recipe it would run under is the pin's,
@@ -867,6 +867,9 @@ pub(crate) fn reading(
         &outcome,
         message,
     )?;
+    // And the profile of the build that stamp names, where the runner
+    // knows it.
+    reading.profile = runner.profile();
     reading.count(numbers::TESTS, tally.found as u64)?;
     // The corpus's files the subset holds, which are its tests but where a
     // `--REDIRECTTEST--` ran a set in its place: a PDO driver's reading
@@ -932,14 +935,14 @@ fn held_to(
     let keeps = format!("`xtask phpt --subset {scope} --control` keeps it again");
     let words = match (runner, target) {
         (Runner::Control(_), _) if kept => format!("kept as the subset's target under {key}"),
-        (Runner::Engine(_) | Runner::Linked, Some(target)) if !tally.judged.is_empty() => {
+        (Runner::Engine(..) | Runner::Linked, Some(target)) if !tally.judged.is_empty() => {
             let verdicts = (tally.judged.iter()).map(|j| (j.id.as_str(), j.judgement, &*j.note));
             let measure = Measure::of(target, registry, verdicts);
             measure.write(reading)?;
             let at = target::kept_at(pin, scope);
             measure.words(target::Kept { target: &at, run }, &keeps)
         }
-        (Runner::Engine(_) | Runner::Linked, None) if !tally.judged.is_empty() => format!(
+        (Runner::Engine(..) | Runner::Linked, None) if !tally.judged.is_empty() => format!(
             "no target is kept under {key}; `xtask phpt --subset {scope} --control` keeps one"
         ),
         _ => return Ok(()),
@@ -1181,7 +1184,7 @@ fn judged(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> R
     unrunnable(&sides);
     let todo = to_run(ask, &runs, &subsets, &sides)?;
     if let Some(why) = oracles.main().pin().oracle.absent()
-        && matches!(runner, Runner::Engine(_))
+        && matches!(runner, Runner::Engine(..))
         && !sides.iter().flatten().any(Side::runs)
     {
         println!("phpt: nothing runs; {why}");
@@ -1654,8 +1657,9 @@ impl<'f> Build<'f> {
             "phpt: the engine with {features} took {:.1}s to build",
             started.elapsed().as_secs_f64()
         );
+        // Built by `profile::build`, in the lanes' profile.
         engine
-            .map(Runner::Engine)
+            .map(|path| Runner::Engine(path, Some(profile::LANE)))
             .map_err(|why| format!("the engine with {features} is not built: {why:#}"))
     }
 }

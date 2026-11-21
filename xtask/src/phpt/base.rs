@@ -183,7 +183,7 @@ fn run_at(
         )),
         Err(why) => say(&format!("{why}; the build starts cold")),
     }
-    profile::build_hosts(dir)?;
+    profile::build_hosts(dir, profile::LANE)?;
     for scope in scopes {
         let ask = Ask {
             subset: Some(scope.clone()),

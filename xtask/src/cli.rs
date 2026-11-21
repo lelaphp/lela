@@ -514,6 +514,15 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: OracleCommand,
     },
+    /// Build the hosts the phpt lane hands its tests to in one profile of
+    /// the workspace's and print each one's path, a line each. Writes no
+    /// reading.
+    Hosts {
+        /// The profile to build in, one of those the workspace's
+        /// `Cargo.toml` defines.
+        #[arg(long)]
+        profile: crate::oracle::profile::Profile,
+    },
     /// Hold the divergence registry to the manifest rule whose `check` names
     /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,
