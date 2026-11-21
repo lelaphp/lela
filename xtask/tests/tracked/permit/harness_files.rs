@@ -106,6 +106,29 @@ fn the_hook_modules_are_a_persons_files_under_the_widened_rows() {
     }
 }
 
+/// The packages list under the scope #87 proposes (R13, spec
+/// lelaphp/lela#32): an agent's `Edit` of `data/packages.toml` is denied by
+/// `harness.self` once its scope names the list, which steer then writes
+/// where a proposal adds a row, and let through by a scope that does not.
+/// Once the tracked manifest names the list, both halves hold it.
+#[test]
+fn the_packages_list_is_denied_under_the_proposed_scope() {
+    let tracked = Manifest::load(workspace()).unwrap();
+    let mut proposed = tracked.clone();
+    let rule = proposed.rules.iter_mut().find(|r| r.id == "harness.self");
+    let rule = rule.unwrap();
+    let mut scope: Vec<String> = rule.scope.iter().map(str::to_owned).collect();
+    let listed = scope.iter().any(|s| s == "data/packages.toml");
+    scope.push("data/packages.toml".to_owned());
+    rule.scope = OneOrMany::Many(scope);
+    let edit = call(&fixtures().join("rules/harness.self/packages-list/deny-edit.json"));
+    for (manifest, denies) in [(&proposed, true), (&tracked, listed)] {
+        let judged = judge(manifest, workspace(), &edit).unwrap();
+        let rule = judged.denial().map(|f| f.rule.as_str());
+        assert_eq!(rule == Some("harness.self"), denies, "{judged:?}");
+    }
+}
+
 /// `harness.self-shell` under `where = "checkout"`, as ruled 2026-10-18: a
 /// shell write to `docs/divergence.toml` is refused in a checkout, the
 /// main one or a linked worktree, however the line reaches it, and let
