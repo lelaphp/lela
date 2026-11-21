@@ -1148,10 +1148,10 @@ fn the_help_names_each_exit_status_by_the_number_the_binary_gives() {
             xtask::exit::NOT_READY
         ),
         format!(
-            "{}  an instrument that could not run to its end",
+            "{}  an instrument that could not take a reading it set out for",
             xtask::exit::UNFINISHED
         ),
-        "`phpt` without its tree, oracle, engine or a server".to_owned(),
+        "phpt, witness, compile-identity, crosscheck, fuzz, hostile".to_owned(),
     ] {
         assert!(help.contains(&said), "{said:?} in {help}");
     }

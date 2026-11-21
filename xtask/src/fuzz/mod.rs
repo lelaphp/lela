@@ -56,6 +56,7 @@ use crate::manifest::Manifest;
 use crate::oracle::hosts::CLI;
 use crate::oracle::{ENGINE, Ended, Oracle, profile};
 use crate::reading::{Reading, Status, joined};
+use crate::tally::Took;
 use php_lanes_differential::Rng;
 
 /// The instrument's name, the reading's `instrument` field.
@@ -106,7 +107,7 @@ pub struct Ask {
 }
 
 /// `xtask fuzz`: [`run`] under the tracked registry, its readings
-/// recorded.
+/// recorded, and the exit the tally's rule gives.
 pub(crate) fn command(
     root: &Path,
     manifest: &Manifest,
@@ -114,16 +115,14 @@ pub(crate) fn command(
     ask: &Ask,
 ) -> Result<()> {
     let registry = Registry::load(root)?;
-    crate::record(store, &run(root, manifest, &registry, ask)?)
+    run(root, manifest, &registry, ask)?.record(store, INSTRUMENT)
 }
 
-/// Run the lane: one reading per crate of [`OWING`].
-pub fn run(
-    root: &Path,
-    manifest: &Manifest,
-    registry: &Registry,
-    ask: &Ask,
-) -> Result<Vec<Reading>> {
+/// Run the lane: one reading per crate of [`OWING`], none of them taken
+/// with no oracle to hold a program to, no engine built to run one, a
+/// program drawn and not run before the budget was spent, or one the
+/// oracle did not complete, which was to be judged and was not.
+pub fn run(root: &Path, manifest: &Manifest, registry: &Registry, ask: &Ask) -> Result<Took> {
     let started = Instant::now();
     let pin = manifest.pin()?;
     let snapshot = Snapshot::disk(root)?;
@@ -142,7 +141,7 @@ pub fn run(
     };
     if let Some(why) = pin.oracle.absent() {
         said(&mut readings, Status::Skip, &format!("nothing ran; {why}"));
-        return Ok(readings);
+        return Ok(Took::all(readings, false));
     }
     let oracle = pin.oracle();
     oracle.asserted()?;
@@ -152,7 +151,7 @@ pub fn run(
         Err(why) => {
             let message = format!("the engine's php did not build: {why:#}");
             said(&mut readings, Status::Fail, &message);
-            return Ok(readings);
+            return Ok(Took::all(readings, false));
         }
     };
     let seed = ask.seed.unwrap_or_else(clock);
@@ -173,7 +172,7 @@ pub fn run(
         reading.count("wall_ms", crate::reading::millis(wall))?;
     }
     said(&mut readings, hunt.status(), &message);
-    Ok(readings)
+    Ok(Took::all(readings, hunt.cut == 0 && hunt.unheld == 0))
 }
 
 /// The clock's seconds, the seed a run takes where none is asked for.

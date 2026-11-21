@@ -1633,7 +1633,9 @@ fn the_fixture_whose_line_the_engine_s_host_answers_otherwise_fails() {
         ..Ask::default()
     };
     let read = |fixture: &Manifest| {
-        let readings = super::run_in(&root, fixture, &registry(""), &ask, None, &binary).unwrap();
+        let readings = (super::run_in(&root, fixture, &registry(""), &ask, None, &binary))
+            .unwrap()
+            .readings;
         let [reading] = &readings[..] else {
             panic!("{readings:#?}")
         };
@@ -1687,7 +1689,8 @@ fn a_crate_unread_before_the_run_is_journaled_as_failed() {
         Some(&journal),
         &binary,
     )
-    .unwrap();
+    .unwrap()
+    .readings;
     let [reading] = &readings[..] else {
         panic!("{readings:#?}")
     };
