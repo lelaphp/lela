@@ -15,12 +15,15 @@ in /usr/bin beside git: a dry run that ran either would find none.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import publish
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "ghcr.io/lelaphp/lela"
@@ -56,13 +59,51 @@ def package(name, license=None, body=""):
     return f'[package]\nname = "{name}"\nversion = "0.0.0"\nedition.workspace = true\n{line}\n{body}'
 
 
-# The hosts the images link, as dist/Dockerfile's cargo line names them,
-# each a crate of the workspace's licence and no dependency.
-HOSTS = {
-    "sapi/cli/Cargo.toml": package("php_sapi_cli"),
-    "sapi/cgi/Cargo.toml": package("php_sapi_cgi"),
-    "sapi/fpm/Cargo.toml": package("php_sapi_fpm"),
-}
+# The hosts a release ships, dist/publish.py's HOSTS, each a crate of the
+# workspace's licence and no dependency.
+HOSTS = {f"{host.crate}/Cargo.toml": package(host.package) for host in publish.HOSTS}
+
+
+class Dockerfile:
+    """dist/Dockerfile as the tests read it, every line with its
+    continuations: the packages and binaries of the build stage's cargo
+    line, in its order; and the hosts each stage holds, by their paths in
+    it, from the `install` lines that lay each binary under /out and the
+    `COPY --from=build` lines that take a directory of /out into a stage
+    or a stage it is built FROM."""
+
+    def __init__(self, text):
+        name = publish.name()
+        lines = text.replace("\\\n", " ").splitlines()
+        self.parents, self.copies, self.laid = {}, {}, set()
+        stage = None
+        for line in lines:
+            if found := re.match(r"FROM (?:--platform=\S+ )?(\S+) AS (\S+)$", line):
+                parent, stage = found.groups()
+                self.parents[stage], self.copies[stage] = parent, []
+            elif found := re.match(r"COPY --from=build (\S+) (\S+)$", line):
+                self.copies[stage].append(found.groups())
+        [command] = [line for line in lines if "cargo build" in line]
+        command = command[command.index("cargo build"):].split(";")[0]
+        self.packages = re.findall(r"-p (\S+)", command)
+        self.binaries = [f"{name}{suffix}" for suffix in re.findall(r'--bin "\$NAME([-a-z]*)"', command)]
+        for found in re.finditer(r"install -D -m 0755 -t (\S+) ([^;]+)", text.replace("\\\n", " ")):
+            directory, files = found.groups()
+            for suffix in re.findall(r'"\$release/\$NAME([-a-z]*)"', files):
+                self.laid.add(f"{directory}/{name}{suffix}")
+
+    @staticmethod
+    def read():
+        return Dockerfile((ROOT / "dist/Dockerfile").read_text())
+
+    def hosts(self, stage):
+        """The paths of the hosts `stage` holds, sorted."""
+        found = set()
+        while stage in self.parents:
+            for source, target in self.copies[stage]:
+                found |= {target + path[len(source):] for path in self.laid if path.startswith(source)}
+            stage = self.parents[stage]
+        return sorted(found)
 
 
 class Repository(unittest.TestCase):

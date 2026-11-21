@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 #
-# The CLI, CGI and FPM hosts built from this checkout, and the three images
-# that stand in for php's official ones, with the checkout as the build
-# context
+# The four hosts built from this checkout, and the three images that stand
+# in for php's official ones, with the checkout as the build context
 # (Dockerfile.dockerignore beside this file keeps target/ and what no build
 # reads out of it):
 #
@@ -24,9 +23,9 @@
 ARG UBUNTU=ubuntu:26.04@sha256:19fcd1bf268f02b60aca3bd30bd8a6d9a11759a430e32921833e65f16d87348a
 # Where php's official images keep php.ini, $PHP_INI_DIR, with conf.d in it.
 ARG PHP_INI_DIR=/usr/local/etc/php
-# The hosts' names, `$NAME`, `$NAME-cgi` and `$NAME-fpm`, as ADR-0016 derives
-# them from one constant, php_engine's PRODUCT_NAME, which xtask's tests hold
-# this line to. dist/release.py and dist/smoke.sh read it here, and the
+# The hosts' names, `$NAME`, `$NAME-cgi`, `$NAME-fpm` and `$NAME-dbg`, as
+# ADR-0016 derives them from one constant, php_engine's PRODUCT_NAME, which
+# xtask's tests hold this line to. dist/release.py and dist/smoke.sh read it here, and the
 # images' own scripts and the CMD lines below spell it.
 ARG NAME=lela
 # The compat directory, under Lela's own prefix and on no image's PATH: the
@@ -95,6 +94,11 @@ RUN python3 /opt/dist/inputs.py rustup "$BUILDARCH" /tmp/rustup-init; \
     cd /opt; rustup toolchain install; rustup target add "$CARGO_BUILD_TARGET"
 
 # --- the hosts, laid out as php's official images lay them ----------------
+# Every host a release ships, which dist/publish.py's HOSTS names and
+# dist/test_publish.py holds this stage and the ones below to: each in
+# every tarball, the CLI and CGI in every image, the FPM in `fpm` and
+# `apache`, and the debugger in `cli` alone, as Mitchell ruled on #79. What
+# `cli` alone holds is laid under /out/cli.
 FROM toolchain AS build
 ARG TARGETARCH
 ARG NAME
@@ -117,25 +121,27 @@ ENV PHP_CONFIG_FILE_PATH=${PHP_INI_DIR} \
 WORKDIR /src
 COPY . .
 # The compiled tier is built in from the hosts' own manifests, each of which
-# turns php_bundle's `jit` on by default, and php-cgi shares the bundle's
-# features with them on this one cargo line; it stays off until opcache.jit
-# asks, as php's does, and tracing is experimental (ADR-0017).
+# turns php_bundle's `jit` on by default, and php-cgi and phpdbg share the
+# bundle's features with them on this one cargo line, as the phpt lane
+# builds the four; it stays off until opcache.jit asks, as php's does, and
+# tracing is experimental (ADR-0017).
 RUN --mount=type=cache,id=${CACHE}-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=${CACHE}-target-${TARGETARCH},target=/src/target \
     . /usr/local/share/dax-target.env; \
     cargo build --release --locked \
-        -p php_sapi_cli -p php_sapi_cgi -p php_sapi_fpm \
-        --bin "$NAME" --bin "$NAME-cgi" --bin "$NAME-fpm"; \
+        -p php_sapi_cli -p php_sapi_cgi -p php_sapi_fpm -p php_sapi_phpdbg \
+        --bin "$NAME" --bin "$NAME-cgi" --bin "$NAME-fpm" --bin "$NAME-dbg"; \
     release="target/$CARGO_BUILD_TARGET/release"; \
     install -D -m 0755 -t /out/usr/local/bin "$release/$NAME" "$release/$NAME-cgi"; \
-    install -D -m 0755 -t /out/usr/local/sbin "$release/$NAME-fpm"
+    install -D -m 0755 -t /out/usr/local/sbin "$release/$NAME-fpm"; \
+    install -D -m 0755 -t /out/cli/usr/local/bin "$release/$NAME-dbg"
 # The Ubuntu packages the hosts' shared libraries come from, which the base
 # stage installs and the binaries list: every library they need,
 # directly or through another, read from the ELF files, since ldd cannot
 # load a binary of another architecture.
 RUN . /usr/local/share/dax-target.env; \
     dir="/usr/lib/$TRIPLET"; \
-    todo=(/out/usr/local/bin/* /out/usr/local/sbin/*); \
+    todo=(/out/usr/local/bin/* /out/usr/local/sbin/* /out/cli/usr/local/bin/*); \
     declare -A seen; \
     while [ "${#todo[@]}" -gt 0 ]; do \
         file="${todo[0]}"; todo=("${todo[@]:1}"); \
@@ -158,6 +164,7 @@ RUN python3 /opt/dist/inputs.py ini /ini
 # --- the binaries, as a tarball's contents: `--output <dir>` --------------
 FROM scratch AS binaries
 COPY --from=build /out/usr/local/bin/ /bin/
+COPY --from=build /out/cli/usr/local/bin/ /bin/
 COPY --from=build /out/usr/local/sbin/ /sbin/
 COPY --from=build /out/runtime-packages.txt /
 COPY --from=ini /ini/ /etc/
@@ -175,7 +182,8 @@ RUN python3 /opt/dist/inputs.py fpm /fpm
 # apply-templates.sh): $PHP_INI_DIR with conf.d in it, /var/www/html open to
 # any user, the docker-php-* scripts and docker-php-entrypoint as the
 # entrypoint, rendered for the CLI. Here with the CLI and CGI hosts, the
-# packages their libraries come from and the compat directory.
+# packages the libraries of every host the build lays come from, and the
+# compat directory.
 FROM ${UBUNTU} AS base
 ARG PHP_INI_DIR
 ARG NAME
@@ -216,7 +224,13 @@ RUN --mount=type=bind,source=dist/image/compat.sh,target=/tmp/compat.sh \
 ENTRYPOINT ["docker-php-entrypoint"]
 
 # --- the drop-in for php's cli image ---------------------------------------
+# With the debugger host, which a release carries in this image alone (#79).
 FROM base AS cli
+ARG NAME
+ARG COMPAT
+COPY --from=build /out/cli/usr/local/bin/ /usr/local/bin/
+RUN --mount=type=bind,source=dist/image/compat.sh,target=/tmp/compat.sh \
+    sh /tmp/compat.sh
 CMD ["lela", "-a"]
 
 # --- the drop-in for php's fpm image ---------------------------------------

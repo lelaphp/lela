@@ -7,7 +7,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import publish
+
 ROOT = Path(__file__).resolve().parent.parent
+# The programs the checks run beyond the hosts and the shell's own, which a
+# test's PATH links from the machine, and no directory of the system's,
+# where a runner may keep a php.
+TOOLS = ("mktemp", "rm", "sort", "xargs", "id")
+
+
+def tools(directory):
+    """`directory`, made, with a link to each of TOOLS."""
+    directory.mkdir()
+    for tool in TOOLS:
+        (directory / tool).symlink_to(shutil.which(tool))
+    return directory
 
 
 class SmokeArguments(unittest.TestCase):
@@ -104,13 +118,117 @@ class Https(unittest.TestCase):
                               run.stdout)
 
 
+class Shipped(unittest.TestCase):
+    """The hosts the smoke holds a tarball and each image to, `--shipped
+    tarball|<variant>`: dist/publish.py's HOSTS, which a test holds to
+    `cargo xtask hosts --list`, in its order."""
+
+    def shipped(self, subject):
+        run = subprocess.run(
+            [shutil.which("bash"), str(ROOT / "dist/smoke.sh"), "--shipped", subject],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return run.stdout.split()
+
+    def test_the_tarball_and_each_image_hold_the_hosts_the_table_ships_there(self):
+        self.assertEqual(self.shipped("tarball"), [host.path for host in publish.in_tarball()])
+        for variant in publish.VARIANTS:
+            with self.subTest(variant=variant):
+                self.assertEqual(self.shipped(variant), [host.path for host in publish.in_image(variant)])
+        self.assertEqual(self.shipped("cli"), ["bin/lela", "bin/lela-cgi", "bin/lela-dbg"])
+
+
+# The hosts as the checks call them, each answering what the checks want
+# and nothing else: the debugger a file only through `-qrr`.
+HOSTS = {
+    "lela": 'case "$*" in -v) echo lela ;; "-n -r echo 1 + 1;") echo 2 ;; *args.php*) echo "a,b c" ;; '
+            '-n) echo OK ;; *) exit 1 ;; esac',
+    "lela-cgi": 'case "$*" in "-n -q "*) echo cgi-fcgi ;; *) exit 1 ;; esac',
+    "lela-fpm": 'case "$*" in "-n -t -y "*) ;; *) exit 1 ;; esac',
+    "lela-dbg": 'case "$*" in "-n -qrr "*) echo phpdbg ;; *) exit 1 ;; esac',
+}
+
+
+class Hosts(unittest.TestCase):
+    """The hosts check of either mode, `--hosts <prefix> tarball|<variant>`,
+    over a prefix of the test's own whose hosts answer as HOSTS says."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.scratch = Path(temporary.name).resolve()
+        self.prefix = self.scratch / "prefix"
+        self.tools = tools(self.scratch / "tools")
+
+    def lay(self, *paths):
+        for path in paths:
+            host = self.prefix / path
+            host.parent.mkdir(parents=True, exist_ok=True)
+            host.write_text(f"#!/bin/sh\n{HOSTS[host.name]}\n")
+            host.chmod(0o755)
+
+    def check(self, subject):
+        return subprocess.run(
+            [shutil.which("bash"), str(ROOT / "dist/smoke.sh"), "--hosts", str(self.prefix), subject],
+            env={**os.environ, "NAME": "lela", "PATH": str(self.tools)},
+            capture_output=True, text=True,
+        )
+
+    def test_each_host_the_subject_holds_is_checked_the_debugger_among_them(self):
+        for subject, paths in (
+            ("tarball", ("bin/lela", "bin/lela-cgi", "sbin/lela-fpm", "bin/lela-dbg")),
+            ("cli", ("bin/lela", "bin/lela-cgi", "bin/lela-dbg")),
+            ("fpm", ("bin/lela", "bin/lela-cgi", "sbin/lela-fpm")),
+        ):
+            with self.subTest(subject=subject):
+                shutil.rmtree(self.prefix, ignore_errors=True)
+                self.lay(*paths)
+                run = self.check(subject)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertIn(f"hosts: {' '.join(paths)}, and no other", run.stdout)
+                self.assertIn("lela-cgi: cgi-fcgi", run.stdout)
+                self.assertEqual("lela-dbg: phpdbg" in run.stdout, "bin/lela-dbg" in paths, run.stdout)
+                self.assertEqual("lela-fpm -t: exit 0" in run.stdout, "sbin/lela-fpm" in paths, run.stdout)
+
+    def test_an_image_that_holds_a_host_it_should_not_fails(self):
+        self.lay("bin/lela", "bin/lela-cgi", "sbin/lela-fpm", "bin/lela-dbg")
+        for variant in ("fpm", "apache"):
+            with self.subTest(variant=variant):
+                run = self.check(variant)
+                self.assertEqual(run.returncode, 1, run.stdout)
+                self.assertIn(
+                    f"hosts: {self.prefix} holds bin/lela bin/lela-cgi bin/lela-dbg sbin/lela-fpm, "
+                    f"where the {variant} holds bin/lela bin/lela-cgi sbin/lela-fpm",
+                    run.stderr,
+                )
+
+    def test_a_subject_that_lacks_a_host_fails(self):
+        self.lay("bin/lela", "bin/lela-cgi", "sbin/lela-fpm")
+        for subject in ("cli", "tarball"):
+            with self.subTest(subject=subject):
+                run = self.check(subject)
+                self.assertEqual(run.returncode, 1, run.stdout)
+                self.assertIn(f"hosts: {self.prefix} holds bin/lela bin/lela-cgi sbin/lela-fpm, where the {subject}",
+                              run.stderr)
+
+    def test_a_debugger_that_does_not_run_its_file_fails(self):
+        self.lay("bin/lela", "bin/lela-cgi")
+        (self.prefix / "bin/lela-dbg").write_text("#!/bin/sh\necho prompt\n")
+        (self.prefix / "bin/lela-dbg").chmod(0o755)
+        run = self.check("cli")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("lela-dbg: wanted phpdbg", run.stderr)
+
+
 class Compat(unittest.TestCase):
     """The compat check of the image mode, `--compat <dir> <variant>`, run
     here over a directory of the test's own: `lela/` stands in for the
     image's /usr/local/bin, its hosts under Lela's names, and `other/` for
-    a php, php-cgi and php-fpm that are not the compat directory's."""
+    a php, php-cgi, php-fpm and phpdbg that are not the compat directory's."""
 
-    USUAL = ("php", "php-cgi", "php-fpm")
+    USUAL = ("php", "php-cgi", "php-fpm", "phpdbg")
+    LELA = {"php": "lela", "php-cgi": "lela-cgi", "php-fpm": "lela-fpm", "phpdbg": "lela-dbg"}
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -120,21 +238,24 @@ class Compat(unittest.TestCase):
         self.compat.mkdir()
         self.other = self.scratch / "other"
         self.lela = self.scratch / "lela"
-        for directory, hosts in ((self.other, self.USUAL), (self.lela, ("lela", "lela-cgi", "lela-fpm"))):
+        self.tools = tools(self.scratch / "tools")
+        for directory, hosts in ((self.other, self.USUAL), (self.lela, self.LELA.values())):
             directory.mkdir()
             for host in hosts:
                 program = directory / host
                 program.write_text(f"#!/bin/sh\necho {directory.name} {host}\n")
                 program.chmod(0o755)
+        # The debugger runs a file and quits, and starts no prompt.
+        (self.lela / "lela-dbg").write_text('#!/bin/sh\ncase "$*" in "-n -qrr "*) echo phpdbg ;; *) exit 1 ;; esac\n')
 
     def link(self, *usual):
         for host in usual:
-            (self.compat / host).symlink_to(self.lela / ("lela" + host.removeprefix("php")))
+            (self.compat / host).symlink_to(self.lela / self.LELA[host])
 
     def check(self, *path, variant="fpm"):
         return subprocess.run(
             [shutil.which("bash"), str(ROOT / "dist/smoke.sh"), "--compat", str(self.compat), variant],
-            env={**os.environ, "PATH": os.pathsep.join(map(str, [*path, self.lela]))},
+            env={**os.environ, "NAME": "lela", "PATH": os.pathsep.join(map(str, [*path, self.lela, self.tools]))},
             capture_output=True, text=True,
         )
 
@@ -143,7 +264,7 @@ class Compat(unittest.TestCase):
         run = self.check()
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn(f"compat: {self.compat}, not on PATH", run.stdout)
-        self.assertIn("compat: no php, php-cgi or php-fpm on PATH", run.stdout)
+        self.assertIn("compat: no php, php-cgi, php-fpm or phpdbg on PATH", run.stdout)
         for host in self.USUAL:
             with self.subTest(host=host):
                 self.assertIn(f"compat: {host} is {self.compat / host} with {self.compat} first on PATH", run.stdout)
@@ -199,10 +320,48 @@ class Compat(unittest.TestCase):
     def test_a_usual_name_the_variant_has_a_host_for_is_an_entry(self):
         self.link("php", "php-cgi")
         run = self.check(variant="cli")
-        self.assertEqual(run.returncode, 0, run.stderr)
-        run = self.check(variant="fpm")
         self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertIn(f"compat: {self.compat} holds no php-fpm", run.stderr)
+        self.assertIn(f"compat: {self.compat} holds no phpdbg", run.stderr)
+        self.link("phpdbg")
+        run = self.check(variant="cli")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        for variant in ("fpm", "apache"):
+            with self.subTest(variant=variant):
+                run = self.check(variant=variant)
+                self.assertEqual(run.returncode, 1, run.stdout)
+                self.assertIn(f"compat: {self.compat} holds no php-fpm", run.stderr)
+
+    def test_the_images_script_lays_each_usual_name_the_variant_has_a_host_for(self):
+        """dist/image/compat.sh over a prefix laid as each image lays its
+        hosts, run as the Dockerfile's stages run it, gives the directory
+        the image's check passes: `phpdbg` in the cli image's alone."""
+        for variant in publish.VARIANTS:
+            with self.subTest(variant=variant):
+                prefix = self.scratch / f"prefix-{variant}"
+                for host in publish.in_image(variant):
+                    path = prefix / host.path
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.symlink_to(self.lela / host.binary)
+                compat = self.scratch / f"compat-{variant}"
+                laid = subprocess.run(
+                    ["/bin/sh", str(ROOT / "dist/image/compat.sh")],
+                    env={**os.environ, "NAME": "lela", "COMPAT": str(compat), "PREFIX": str(prefix)},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(laid.returncode, 0, laid.stderr)
+                wanted = ["php", "php-cgi", "phpdbg"] if variant == "cli" else ["php", "php-cgi", "php-fpm"]
+                self.assertEqual(sorted(entry.name for entry in compat.iterdir()), wanted)
+                self.compat = compat
+                run = self.check(variant=variant)
+                self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_the_debuggers_entry_runs_a_file(self):
+        self.link("php", "php-cgi")
+        (self.compat / "phpdbg").symlink_to(self.other / "phpdbg")
+        (self.other / "phpdbg").write_text("#!/bin/sh\nexit 1\n")
+        run = self.check(variant="cli")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"compat: {self.compat / 'phpdbg'} does not run", run.stderr)
 
 
 if __name__ == "__main__":

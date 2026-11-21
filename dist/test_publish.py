@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import publish
+import testlib
 from testlib import EPOCH, IMAGE, ROOT, VARIANTS, WHEN, Repository, manifest, package
 
 
@@ -70,14 +71,20 @@ class ThePath(Repository):
 
 class DryRun(Publish):
     def labels(self, version):
+        """Each image's labels, `<variant> <key>=<value>`, the variants in
+        their order."""
         return [
-            f"org.opencontainers.image.source=https://github.com/lelaphp/lela",
-            f"org.opencontainers.image.revision={self.commit}",
-            f"org.opencontainers.image.version={version}",
-            "org.opencontainers.image.licenses=MIT AND BSD-3-Clause",
-            "org.opencontainers.image.description=Lela",
-            "org.opencontainers.image.title=Lela",
-            f"org.opencontainers.image.created={WHEN}",
+            f"{variant} {label}"
+            for variant in VARIANTS
+            for label in (
+                f"org.opencontainers.image.source=https://github.com/lelaphp/lela",
+                f"org.opencontainers.image.revision={self.commit}",
+                f"org.opencontainers.image.version={version}",
+                "org.opencontainers.image.licenses=MIT AND BSD-3-Clause",
+                "org.opencontainers.image.description=Lela",
+                "org.opencontainers.image.title=Lela",
+                f"org.opencontainers.image.created={WHEN}",
+            )
         ]
 
     def test_a_commit_on_main_is_labelled_nightly(self):
@@ -168,7 +175,10 @@ class DryRun(Publish):
 
     def test_the_join_annotates_each_list_with_the_labels(self):
         run = self.publish("join", "main", "--dry-run")
-        self.assertEqual(self.lines(run, "annotation"), [f"index:{l}" for l in self.labels("nightly")])
+        self.assertEqual(
+            self.lines(run, "annotation"),
+            [line.replace(" ", " index:", 1) for line in self.labels("nightly")],
+        )
 
     def test_a_tag_the_manifest_does_not_name_is_refused_by_both_steps(self):
         self.versioned("1.2.0")
@@ -212,21 +222,27 @@ def path(name, **spec):
 
 
 class Licences(Publish):
-    """The `licenses` label: the union of the licences of the workspace's
-    crates the three hosts link, read from their manifests."""
-
-    def label(self, run):
-        [found] = [line for line in self.lines(run, "label") if line.startswith("org.opencontainers.image.licenses=")]
-        return found.split("=", 1)[1]
+    """The `licenses` label of each image: the union of the licences of the
+    workspace's crates its hosts link, read from their manifests."""
 
     def labelled(self):
-        """The label `build --dry-run` and `join --dry-run` print, the same
-        in both."""
-        built = self.label(self.publish("build", "main", "--platform", "linux/amd64", "--dry-run"))
+        """Each image's label, by its variant, as `build --dry-run` and
+        `join --dry-run` print it, the same in both."""
+        run = self.publish("build", "main", "--platform", "linux/amd64", "--dry-run")
+        key = "org.opencontainers.image.licenses="
+        built = {
+            variant: label.removeprefix(key)
+            for variant, label in (line.split(" ", 1) for line in self.lines(run, "label")) if label.startswith(key)
+        }
+        self.assertEqual(list(built), list(VARIANTS))
         run = self.publish("join", "main", "--dry-run")
         annotation = [line for line in self.lines(run, "annotation") if "image.licenses=" in line]
-        self.assertEqual(annotation, [f"index:org.opencontainers.image.licenses={built}"])
+        self.assertEqual(annotation, [f"{variant} index:{key}{label}" for variant, label in built.items()])
         return built
+
+    def same(self, label):
+        """`label`, as every image's."""
+        return {variant: label for variant in VARIANTS}
 
     def test_the_label_is_the_union_of_the_licences_of_the_crates_the_hosts_link(self):
         self.committed({
@@ -242,7 +258,32 @@ class Licences(Publish):
             "crates/devonly/Cargo.toml": package("devonly", "BSD-2-Clause"),
             "crates/buildonly/Cargo.toml": package("buildonly", "Zlib"),
         })
-        self.assertEqual(self.labelled(), "MIT AND BSD-3-Clause AND dtoa AND PostgreSQL AND (MIT OR NCSA)")
+        self.assertEqual(self.labelled(), self.same("MIT AND BSD-3-Clause AND dtoa AND PostgreSQL AND (MIT OR NCSA)"))
+
+    def test_each_image_counts_the_crates_its_own_hosts_link(self):
+        """The debugger host is the cli image's alone and the FPM is not
+        the cli image's, while one cargo line builds all four: a feature
+        one host turns on in a crate another links is on in every image
+        that holds the other."""
+        self.committed({
+            "sapi/phpdbg/Cargo.toml": package("php_sapi_phpdbg", body=(
+                f"[dependencies]\ndebugger = {path('debugger')}\nshared = {path('shared', features=['extra'])}\n"
+            )),
+            "sapi/fpm/Cargo.toml": package("php_sapi_fpm", body=(
+                f"[dependencies]\nfastcgi = {path('fastcgi')}\nshared = {path('shared')}\n"
+            )),
+            "crates/debugger/Cargo.toml": package("debugger", "Zlib"),
+            "crates/fastcgi/Cargo.toml": package("fastcgi", "TCL"),
+            "crates/shared/Cargo.toml": package("shared", "MIT", body=(
+                f'[features]\nextra = ["dep:extra"]\n\n[dependencies]\nextra = {path('extra', optional=True)}\n'
+            )),
+            "crates/extra/Cargo.toml": package("extra", "Beerware"),
+        })
+        self.assertEqual(self.labelled(), {
+            "cli": "MIT AND BSD-3-Clause AND Beerware AND Zlib",
+            "fpm": "MIT AND BSD-3-Clause AND Beerware AND TCL",
+            "apache": "MIT AND BSD-3-Clause AND Beerware AND TCL",
+        })
 
     def test_a_dependency_counts_where_the_hosts_default_features_turn_it_on_for_an_images_platform(self):
         """An optional dependency is linked where a feature the build turns
@@ -287,10 +328,12 @@ class Licences(Publish):
             "crates/m/Cargo.toml": package("m", "MIT AND LicenseRef-m"),
             "crates/n/Cargo.toml": package("n", "Apache-2.0 OR MIT"),
         })
-        self.assertEqual(self.labelled(), (
+        # The FPM's, which the cli image does not hold.
+        served = (
             "MIT AND BSD-3-Clause AND Apache-2.0 AND Beerware AND BSD-2-Clause AND BSD-2-Clause-Darwin "
             "AND BSD-4-Clause-UC AND LGPL-2.1-only AND LicenseRef-m AND NCSA AND PostgreSQL"
-        ))
+        )
+        self.assertEqual(self.labelled(), {"cli": "MIT AND BSD-3-Clause", "fpm": served, "apache": served})
 
     def test_a_choice_stays_a_unit_and_the_order_is_not_the_order_crates_are_read_in(self):
         lines = [
@@ -363,51 +406,102 @@ class Licences(Publish):
 
 
 class TheRealTree(unittest.TestCase):
-    def test_the_hosts_are_the_ones_the_dockerfile_builds(self):
-        text = (ROOT / "dist/Dockerfile").read_text()
-        command = text[text.index("cargo build"):]
-        command = command[:command.index("--bin")]
-        self.assertEqual(tuple(re.findall(r"-p (\S+)", command)), publish.HOSTS)
+    @unittest.skipIf(shutil.which("cargo") is None, "no cargo here to run `xtask hosts --list`")
+    def test_the_hosts_are_the_ones_xtask_hosts_list_prints(self):
+        # The harness's one host table (#79), which the scripts cannot run
+        # where they publish: every row, in its order, with where it ships.
+        run = subprocess.run(["cargo", "xtask", "hosts", "--list"], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        listed = [json.loads(line) for line in run.stdout.splitlines()]
+        self.assertEqual(listed, [
+            {"binary": host.binary, "crate": host.crate, "package": host.package, "tarball": host.tarball,
+             "images": list(host.images)}
+            for host in publish.HOSTS
+        ])
 
-    def test_every_term_of_the_label_is_an_spdx_identifier_or_a_licenseref(self):
-        terms = re.findall(r"[^\s()]+", publish.licenses(ROOT))
-        for term in terms:
-            with self.subTest(term=term):
-                self.assertTrue(
-                    term in ("AND", "OR") or term in publish.SPDX or re.fullmatch(r"LicenseRef-[0-9A-Za-z.-]+", term),
-                    term,
+    def test_the_dockerfile_builds_every_host_on_one_cargo_line(self):
+        dockerfile = testlib.Dockerfile.read()
+        self.assertEqual(dockerfile.packages, [host.package for host in publish.HOSTS])
+        self.assertEqual(dockerfile.binaries, [host.binary for host in publish.HOSTS])
+
+    def test_each_image_holds_the_hosts_the_table_ships_in_it_and_no_other(self):
+        dockerfile = testlib.Dockerfile.read()
+        for variant in VARIANTS:
+            with self.subTest(variant=variant):
+                self.assertEqual(
+                    dockerfile.hosts(variant),
+                    sorted(f"/usr/local/{host.path}" for host in publish.in_image(variant)),
                 )
+        self.assertEqual(dockerfile.hosts("cli"), [
+            "/usr/local/bin/lela", "/usr/local/bin/lela-cgi", "/usr/local/bin/lela-dbg",
+        ])
+        for variant in ("fpm", "apache"):
+            with self.subTest(variant=variant):
+                self.assertEqual(dockerfile.hosts(variant), [
+                    "/usr/local/bin/lela", "/usr/local/bin/lela-cgi", "/usr/local/sbin/lela-fpm",
+                ])
+
+    def test_the_linux_tarballs_hold_the_hosts_the_table_ships_in_a_tarball_and_no_other(self):
+        # dist/release.py stages a Linux tarball from the binaries target.
+        dockerfile = testlib.Dockerfile.read()
+        self.assertEqual(dockerfile.hosts("binaries"), sorted(f"/{host.path}" for host in publish.in_tarball()))
+        self.assertEqual(dockerfile.hosts("binaries"), [
+            "/bin/lela", "/bin/lela-cgi", "/bin/lela-dbg", "/sbin/lela-fpm",
+        ])
+
+    def test_every_term_of_each_label_is_an_spdx_identifier_or_a_licenseref(self):
+        for variant in VARIANTS:
+            for term in re.findall(r"[^\s()]+", publish.licenses(variant, ROOT)):
+                with self.subTest(variant=variant, term=term):
+                    self.assertTrue(
+                        term in ("AND", "OR") or term in publish.SPDX
+                        or re.fullmatch(r"LicenseRef-[0-9A-Za-z.-]+", term),
+                        term,
+                    )
 
     @unittest.skipIf(shutil.which("cargo") is None, "no cargo here to hold the manifests' reading to")
     def test_the_manifests_give_the_crates_and_the_label_cargo_metadata_gives(self):
-        found = {}
+        metadata = {}
         for platform, (target, _) in publish.TARGETS.items():
             run = subprocess.run(
                 ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", target],
                 cwd=ROOT, capture_output=True, text=True,
             )
             self.assertEqual(run.returncode, 0, run.stderr)
-            metadata = json.loads(run.stdout)
-            packages = {package["id"]: package for package in metadata["packages"]}
-            members = set(metadata["workspace_members"])
-            nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
-            work = [id for id in members if packages[id]["name"] in publish.HOSTS]
-            seen = set()
-            while work:
-                id = work.pop()
-                if id in seen:
-                    continue
-                seen.add(id)
-                work += [
-                    dep["pkg"] for dep in nodes[id]["deps"]
-                    if dep["pkg"] in members and any(kind["kind"] is None for kind in dep["dep_kinds"])
-                ]
-            for id in seen:
-                found[packages[id]["name"]] = packages[id]["license"]
-        read = publish.linked(ROOT)
-        self.assertEqual({crate.name: crate.license for crate in read}, found)
+            metadata[platform] = json.loads(run.stdout)
         workspace = publish.workspace_package()["license"]
-        self.assertEqual(publish.licenses(ROOT), publish.union(workspace, found.values()))
+        for variant in VARIANTS:
+            hosts = {host.package for host in publish.in_image(variant)}
+            found = {}
+            for each in metadata.values():
+                packages = {package["id"]: package for package in each["packages"]}
+                members = set(each["workspace_members"])
+                nodes = {node["id"]: node for node in each["resolve"]["nodes"]}
+                work = [id for id in members if packages[id]["name"] in hosts]
+                self.assertEqual(len(work), len(hosts), hosts)
+                seen = set()
+                while work:
+                    id = work.pop()
+                    if id in seen:
+                        continue
+                    seen.add(id)
+                    work += [
+                        dep["pkg"] for dep in nodes[id]["deps"]
+                        if dep["pkg"] in members and any(kind["kind"] is None for kind in dep["dep_kinds"])
+                    ]
+                for id in seen:
+                    found[packages[id]["name"]] = packages[id]["license"]
+            with self.subTest(variant=variant):
+                read = publish.linked(variant, ROOT)
+                self.assertEqual({crate.name: crate.license for crate in read}, found)
+                self.assertEqual(publish.licenses(variant, ROOT), publish.union(workspace, found.values()))
+        # The debugger's crate is the cli image's alone, and the FPM's is not.
+        names = {variant: {crate.name for crate in publish.linked(variant, ROOT)} for variant in VARIANTS}
+        self.assertIn("php_sapi_phpdbg", names["cli"])
+        self.assertNotIn("php_sapi_fpm", names["cli"])
+        for variant in ("fpm", "apache"):
+            self.assertIn("php_sapi_fpm", names[variant])
+            self.assertNotIn("php_sapi_phpdbg", names[variant])
 
 
 # A docker that records each call as one JSON line and answers as BuildKit
