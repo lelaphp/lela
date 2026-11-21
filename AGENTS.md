@@ -93,7 +93,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=be0e02602a76c6fff0791199de95583f35483c74a0fe166e60816dcdb085e364 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=e923893a98088c6ae8cff222612ed3084382bead21021cdcfa6121625a72a996 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -129,9 +129,9 @@ third-engine-design.md
 | tier | tier.lock | 259 |  |
 | ssa | ssa.lock | 114 |  |
 | layer | layer.lock | 43 |  |
-| harness | xtask.lock | 502 |  |
+| harness | xtask.lock | 506 |  |
 
-<!-- /computed in=6ba5aff46493cd48a1efc495086a52420d9cca1db6e9e87b4b841fd8ffb35a07 out=05dffb851f3e2d8a0c23156c07b4d5230cf500d244dddc26cc40daa3761d94f8 -->
+<!-- /computed in=9f5ed9767ca7cac9432e06962f841ba01a2a1f2145011487ecef946dadc18486 out=de75f15d5fbf22d0d5eb9fd84a7337167f89c890e704e054b637286ff93bfec0 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -178,8 +178,15 @@ Commands:
 Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
+
+Exit status:
+  0  done
+  1  a refusal, or a reading that fails
+  2  a usage error
+  3  a worktree laid down and not ready to be worked in
+  4  an instrument that could not run to its end, its readings not whole; `phpt` gives it
 ```
-<!-- /computed in=6dd651a816b44c1893b70af59f682a7b4117c2f19ad0c2227f3145f0a9b2c975 out=a3273ba5a2d830e67a0f4c59d3e77d374ad4b8f77d61639592996b9933301eb2 -->
+<!-- /computed in=1ed13a4dfb09ade9762fee1b3c644f3dd4e4c5dc9f506d7d1e0ba9d289028593 out=7a664f0e102fb3c2bed748be32d5b7e94a35bfda8e7dd41d9ae77677451d01ab -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
