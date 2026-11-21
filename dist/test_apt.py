@@ -9,10 +9,13 @@ The script runs with a PATH of one directory, the test's, where an
 record each call; nothing reaches a mirror and nothing waits.
 """
 
-import importlib.util
+import os
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -34,6 +37,18 @@ def runs_apt_bare(shell):
     """Whether shell text runs apt or apt-get as a command word, not a
     path such as /var/lib/apt or the script's own /dist/apt.sh."""
     return re.search(r"(?<![\w/.-])apt(-get)?(?=\s)", shell) is not None
+
+
+def source_module(name, path):
+    """The module at `path`, run from its source text. An import's loader
+    caches bytecode in a __pycache__ beside the file unless Python runs
+    with -B, and outside dist/ the checkout ignores none; compile() writes
+    nothing, so the load leaves the tree as it found it however the tests
+    are run."""
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    return module
 
 
 def unguarded(text, mount=MOUNT):
@@ -105,11 +120,49 @@ class DockerfileSteps(unittest.TestCase):
 
     def test_the_oracle_s_build_context_carries_apt_sh(self):
         # scripts/oracle-build.py, loaded as a module: its main() runs only as a script.
-        spec = importlib.util.spec_from_file_location("oracle_build", ROOT / "scripts/oracle-build.py")
-        recipe = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(recipe)
+        recipe = source_module("oracle_build", ROOT / "scripts/oracle-build.py")
         self.assertEqual(recipe.CONTEXT["apt.sh"], SCRIPT)
         self.assertEqual(recipe.DOCKERFILE, ROOT / "ci/oracle/Dockerfile")
+
+
+class Leftovers(unittest.TestCase):
+    """The one dist test that loads a module from outside dist/, run as
+    dist/README.md runs the tests, with bytecode written, in a repository
+    of the test's own holding the files it reads: it leaves `git status
+    --porcelain` as it found it. Running the whole suite here would run
+    this test inside itself; a load added to another test is not held."""
+
+    FILES = ("dist/test_apt.py", "dist/test_inputs.py", "dist/inputs.py", "scripts/oracle-build.py", ".gitignore")
+
+    def git(self, root, *arguments):
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        return subprocess.run(
+            ["git", "-C", str(root), "-c", "user.name=test", "-c", "user.email=test@example.invalid", *arguments],
+            env=env, check=True, capture_output=True, text=True,
+        ).stdout
+
+    def test_loading_the_oracle_s_recipe_leaves_the_tree_as_it_found_it(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        for path in self.FILES:
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / path, root / path)
+        self.git(root, "init", "-q")
+        self.git(root, "add", "-A")
+        self.git(root, "commit", "-q", "-m", "the tree")
+        found = self.git(root, "status", "--porcelain", "--untracked-files=all")
+        # No -B, and none of the variables that stop or move the bytecode.
+        env = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
+        name = DockerfileSteps.test_the_oracle_s_build_context_carries_apt_sh.__qualname__
+        run = subprocess.run(
+            [sys.executable, "-m", "unittest", f"test_apt.{name}"],
+            cwd=root / "dist", env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        # The run wrote bytecode, where the checkout ignores it.
+        self.assertTrue((root / "dist/__pycache__").is_dir())
+        self.assertEqual(self.git(root, "status", "--porcelain", "--untracked-files=all"), found)
 
 
 class Script(unittest.TestCase):
