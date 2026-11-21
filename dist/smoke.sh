@@ -18,7 +18,8 @@
 # libraries and the tarball's own (`--machos`, below), and then the hosts
 # run with the machine's Homebrew prefix out of their reach, by a sandbox
 # that denies reading it, wherever brew and sandbox-exec are there, the
-# https requests of `https` among them.
+# https requests of `https` and the openssl.cnf `openssl_conf` reads among
+# them.
 #
 # Over an image of one variant, on the image's own platform: the same
 # checks inside it over the hosts in /usr/local, which are the variant's
@@ -37,6 +38,7 @@ usage() {
 	echo "usage: $0 <dir>" >&2
 	echo "       $0 --machos <dir>" >&2
 	echo "       $0 --https <dir>" >&2
+	echo "       $0 --openssl <dir>" >&2
 	echo "       $0 --image <image> cli|fpm|apache" >&2
 	exit 2
 }
@@ -231,6 +233,39 @@ fetch() {
 	fi
 	check "$label" "$want" ${JAIL[@]+"${JAIL[@]}"} env -u SSL_CERT_FILE -u SSL_CERT_DIR "$php" -n \
 		-d default_socket_timeout=20 -r "echo @file_get_contents('$url') === false ? 'refused' : 'read';"
+}
+
+# The openssl.cnf ext/openssl reads with neither OPENSSL_CONF nor SSLEAY_CONF
+# set: the library's compiled-in file where it can be read, as php's, and
+# else the tarball's own lib/openssl.cnf, which dist/bundle.py lays from the
+# keg libcrypto came from. Held under JAIL where `reach` set it, and outside
+# it too, where a Mac with the keg reads the keg's; then a key and a request
+# made with no `config` option succeed under JAIL, which they do not where no
+# file is read.
+openssl_conf() {
+	local dir php laid compiled
+	dir=$(cd "$1" && pwd -P)
+	php="$dir/bin/$NAME" laid="$dir/lib/openssl.cnf"
+	compiled=$(env -u OPENSSL_CONF -u SSLEAY_CONF "$php" -n -r \
+		'echo openssl_get_cert_locations()["default_default_cert_area"], "/openssl.cnf";')
+	[ -z "${JAIL[*]+set}" ] || default_conf "openssl.cnf, the kegs within reach" "$php" "$compiled" "$laid"
+	default_conf "openssl.cnf" "$php" "$compiled" "$laid" ${JAIL[@]+"${JAIL[@]}"}
+	# shellcheck disable=SC2016 # php's variables, not the shell's
+	check "openssl, a key and a request with no config option" "made" \
+		${JAIL[@]+"${JAIL[@]}"} env -u OPENSSL_CONF -u SSLEAY_CONF "$php" -n -r \
+		'$k = openssl_pkey_new(); echo $k !== false && openssl_csr_new(["commonName" => "a"], $k) !== false ? "made" : "refused";'
+}
+
+# One reading of `openssl_conf`: its label, the host, the compiled-in file
+# and the tarball's, then the command prefix it runs under, or none. The file
+# read is the compiled-in one where the prefix can read it, and else the
+# tarball's.
+default_conf() {
+	local label=$1 php=$2 compiled=$3 want=$4; shift 4
+	! "$@" test -r "$compiled" || want=$compiled
+	# shellcheck disable=SC2016 # php's variables, not the shell's
+	check "$label" "$want" "$@" env -u OPENSSL_CONF -u SSLEAY_CONF "$php" -n -r \
+		'$e = new ReflectionExtension("openssl"); ob_start(); $e->info(); preg_match("/^Openssl default config => (.*)$/m", ob_get_clean(), $m); echo $m[1];'
 }
 
 # Inside an image: its hosts, its ini directory and its compat directory,
@@ -430,6 +465,13 @@ case "${1:-}" in
 		named
 		[ "$(uname -s)" != Darwin ] || reach
 		https "$(cd "$2" && pwd)" ;;
+	# The openssl.cnf read alone, under the sandbox on a Mac where `reach`
+	# sets one, which test_smoke.py holds with a host of its own.
+	--openssl)
+		[ "$#" -eq 2 ] || usage
+		named
+		[ "$(uname -s)" != Darwin ] || reach
+		openssl_conf "$2" ;;
 	-*|"") usage ;;
 	*)
 		[ "$#" -eq 1 ] || usage
@@ -439,6 +481,10 @@ case "${1:-}" in
 			reach
 		fi
 		hosts "$(cd "$1" && pwd)" tarball
-		# A Linux tarball's smoke runs before its curl is installed.
-		[ "$(uname -s)" != Darwin ] || https "$(cd "$1" && pwd)" ;;
+		# A Linux tarball's smoke runs before its curl is installed, and only a
+		# macOS one carries an openssl.cnf.
+		if [ "$(uname -s)" = Darwin ]; then
+			https "$(cd "$1" && pwd)"
+			openssl_conf "$1"
+		fi ;;
 esac
