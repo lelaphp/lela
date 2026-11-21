@@ -20,7 +20,7 @@ formula = "php"
 # 8.5.9 → 8.5.10 mid-run on 2026-09-01). The digest is the identity; the path is
 # where to find it on this machine.
 path = "/opt/homebrew/Cellar/php/8.5.12_1/bin/php"
-md5 = "e68f73bdb7e8b06932559d9c0fd5c26e"
+sha256 = "sha256:445b775dcb987524475f482f61d8d8b03f306e0433038be1142cd6c75ae36668"
 # opcache is compiled into this build (`php -n -m` lists it; no `zend_extension`
 # line is needed or accepted). The tier regimes below rely on that.
 
@@ -302,9 +302,9 @@ ini = ["cgi.fix_pathinfo=0"]
 # image's manifest digest the Linux build reproduces from (#1948); closure is the
 # digest of the [closure] the macOS build was made against (#2935)
 flags = ["--enable-zend-test"]
-darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "8bf43b8ab6c2e19e23e845d3cf9cc491", closure = "sha256:b0b0b17ba38b0f465dd9bfa37e693fe7f2df30592acbc10c57bfc2f816a175f4" }
-linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "12f5bd0b1ea2f2f3555640f974e8429a", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
-linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e02dd6c14fc0d045384be0b477b78a5d", image = "sha256:3ad1c71aa6b7e477f7aa91445a5442fbb163742849393b511661a88081c3d7a2" }
+darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", sha256 = "sha256:3f4bfb8a24a83d2f11656a47364d1f3f5a71046301d7a371d3c405af01f0d325", closure = "sha256:b0b0b17ba38b0f465dd9bfa37e693fe7f2df30592acbc10c57bfc2f816a175f4" }
+linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", sha256 = "sha256:0f771e1e00161a5a035160900b1067e990a1eb88842a3e8e4e17d20ddf57fd91", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
+linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", sha256 = "sha256:e8456bc475981ee3af7c32e958072d2e9432aa490fc11684a6d9489a1cc8339f", image = "sha256:3ad1c71aa6b7e477f7aa91445a5442fbb163742849393b511661a88081c3d7a2" }
 
 [sapi]
 # The oracle's other hosts, from the keg and build `[oracle]` pins: parity is
@@ -313,9 +313,9 @@ linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e02dd6c
 # (get_binary, run-tests.php:1003-1019; php-fpm by FPM\Tester::findExecutable,
 # sapi/fpm/tests/tester.inc:226-257, at the tag). Each is asserted by its digest
 # as `php` is, before the first program that runs it.
-cgi = { path = "/opt/homebrew/Cellar/php/8.5.12_1/bin/php-cgi", md5 = "947ff470d102fd1237cecfcd0cf36abd" }
-fpm = { path = "/opt/homebrew/Cellar/php/8.5.12_1/sbin/php-fpm", md5 = "35cc9608f3d316dd75e2705446d2ab1e" }
-phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.12_1/bin/phpdbg", md5 = "bb005316f2cd8dc5b992d745b96fcb79" }
+cgi = { path = "/opt/homebrew/Cellar/php/8.5.12_1/bin/php-cgi", sha256 = "sha256:a04cad907fefc1a6247376007bfe68b26588da7a7558a32b5ef5d7663296c73f" }
+fpm = { path = "/opt/homebrew/Cellar/php/8.5.12_1/sbin/php-fpm", sha256 = "sha256:f14856bd8ffb7b372428f803b8004c841de62c9d79c537645b70c8c84c7ebb26" }
+phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.12_1/bin/phpdbg", sha256 = "sha256:1a866f1d1ba5ff6745c8063493091f1f3c7cd85acb6484d0b896ba09d4645cad" }
 
 [fastcgi]
 # The HTTP-to-FastCGI mapping `[sapi] fpm` is driven under, so the pinned
@@ -324,7 +324,7 @@ phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.12_1/bin/phpdbg", md5 = "bb00531
 # #2334). Under FPM the web server, not php, fills the CGI variables (RFC 3875
 # §4.1): this is nginx's stock conf/fastcgi_params, the mapping most php-fpm
 # deployments see, copied verbatim at the release tag below and held to its
-# md5, and SCRIPT_FILENAME as nginx sets it in conf/fastcgi.conf at the same
+# SHA-256, and SCRIPT_FILENAME as nginx sets it in conf/fastcgi.conf at the same
 # tag, which is this file with that one parameter first. nginx then passes
 # every request header as HTTP_<NAME> (`fastcgi_pass_request_headers on`, its
 # default). What crosses the wire is held to the RFCs, not to this oracle: a
@@ -334,7 +334,7 @@ phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.12_1/bin/phpdbg", md5 = "bb00531
 # `oracle::Pin::fastcgi` as one typed value.
 nginx = "1.30.5"
 source = "https://github.com/nginx/nginx/blob/release-1.30.5/conf/fastcgi_params"
-md5 = "4729c30112ca3071f4650479707993ad"
+sha256 = "sha256:f37852d0113de30fa6bfc3d9b180ef99383c06739530dd482a8538503afd5a58"
 script_filename = "$document_root$fastcgi_script_name"
 # The path past the program (Mitchell on #2637, 2026-10-10): nginx's
 # documented `fastcgi_split_path_info` with this pattern, so

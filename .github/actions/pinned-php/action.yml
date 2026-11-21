@@ -1,16 +1,16 @@
 # The pinned php on the oracle runner (#2253): the one install the per-commit
 # oracle job (harness.yml, #678, #2200) and the dashboard's oracle job both
 # run, scripts/ci/pinned-php.sh over the pin as xtask renders it. The version,
-# the Homebrew formula it is poured from (#4383), the keg path and the md5 are
+# the Homebrew formula it is poured from (#4383), the keg path and the SHA-256 are
 # oracle.toml's, read by xtask alone (`status --section oracle`'s `binary`),
 # so this file spells none of them; so are the kegs php
 # loads and their versions (`closure`, #2657), each poured and pinned first.
 # A hosted runner keeps no keg between jobs, so each job pours: a keg the
-# image carries already at the pin's md5 or
+# image carries already at the pin's SHA-256 or
 # the recorded version is checked, pinned and left, php's own among them
 # (#4383), and a pour that lands elsewhere stops the job before any lane.
 name: pinned php
-description: Pour the keg oracle.toml pins and the kegs it loads, held to the pin's md5 and versions
+description: Pour the keg oracle.toml pins and the kegs it loads, held to the pin's SHA-256 and versions
 inputs:
   xtask:
     description: The command the job runs the harness by
@@ -18,7 +18,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: the pinned php, by md5
+    - name: the pinned php, by SHA-256
       shell: bash
       env:
         XTASK: ${{ inputs.xtask }}

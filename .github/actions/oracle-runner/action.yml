@@ -9,7 +9,7 @@
 # - Homebrew itself brought up to date once, since an image can carry one
 #   older than the homebrew-core formulae the pin pours: Blacksmith's of
 #   2026-07-30 could not read November's (`undefined method 'new' for an
-#   instance of Symbol`). The pour is still held to the pin's md5, so
+#   instance of Symbol`). The pour is still held to the pin's SHA-256, so
 #   which Homebrew read the formula changes no byte of the oracle;
 # - Homebrew then told to update, clean up and report nothing, for every
 #   later step of the job;

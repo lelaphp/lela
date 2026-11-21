@@ -10,7 +10,7 @@
 #
 # <oracle.json> is `xtask status --section oracle --format json`: its
 # `binary` names the Homebrew formula php is poured from, the bottle of it,
-# its keg path and md5, and its `closure` each keg php loads and the version
+# its keg path and SHA-256, and its `closure` each keg php loads and the version
 # recorded for it; oracle.toml is read by xtask alone and this script spells
 # none of them. Each keg is poured first, where Homebrew's `opt` link points
 # at another version, and `brew pin`ned, so no later `brew upgrade` moves
@@ -23,8 +23,8 @@
 # again: `Cellar/php@8.5/8.5.13_1` is poured from `php@8.5: update 8.5.13_1
 # bottle.`, where the pin's version says 8.5.13, and xtask renders no pin
 # whose path names a bottle of another version. A keg already at the path
-# with the pin's md5 is left as it is, so the oracle runner pours once and
-# every job after it checks; a pour whose md5 is not the pin's, or a keg
+# with the pin's SHA-256 is left as it is, so the oracle runner pours once and
+# every job after it checks; a pour whose SHA-256 is not the pin's, or a keg
 # that lands at another version, exits 1 before any lane, and xtask would
 # refuse the run anyway. php's keg is `brew pin`ned as each keg it loads
 # is, poured here or found already poured, so a `brew upgrade` leaves it
@@ -57,7 +57,7 @@ pin=${1:?usage: pinned-php.sh <oracle.json from xtask status --section oracle --
 formula=$(jq -er .binary.formula "$pin")
 bottle=$(jq -er .binary.bottle "$pin")
 path=$(jq -er .binary.path "$pin")
-md5=$(jq -er .binary.md5 "$pin")
+sha256=$(jq -er .binary.sha256 "$pin")
 kegs=$(jq -r '.closure // {} | to_entries[] | "\(.key) \(.value)"' "$pin")
 dry=${DRY_RUN:-}
 
@@ -68,6 +68,9 @@ cache=$(brew --cache)
 
 auth=()
 [ -z "${GH_TOKEN:-}" ] || auth=(-H "Authorization: Bearer $GH_TOKEN")
+
+# digest <file>: its SHA-256 as the pin spells one, `sha256:<hex>`.
+digest() { printf 'sha256:%s\n' "$(shasum -a 256 "$1" | cut -d' ' -f1)"; }
 
 # pour <formula> <bottle>: the formula from the homebrew-core commit whose
 # message bottles that version, its revision with it, installed in place of
@@ -161,17 +164,17 @@ while read -r keg at <&3; do
     [ -n "$dry" ] || brew pin "$(named "$prefix/opt/$keg" "$keg")"
 done 3<<<"$kegs"
 
-if [ -f "$path" ] && [ "$(md5 -q "$path")" = "$md5" ]; then
-    echo "$path: md5 $md5, the pin's; already poured"
+if [ -f "$path" ] && [ "$(digest "$path")" = "$sha256" ]; then
+    echo "$path: $sha256, the pin's; already poured"
 elif [ -n "$dry" ]; then
     echo "$formula: would pour $bottle at $path"
     exit 0
 else
     pour "$formula" "$bottle"
-    got=$(md5 -q "$path")
-    [ "$got" = "$md5" ] || { echo "::error::$path has md5 $got; the pin is $md5"; exit 1; }
-    echo "$path: md5 $got, the pin's"
+    got=$(digest "$path")
+    [ "$got" = "$sha256" ] || { echo "::error::$path has $got; the pin is $sha256"; exit 1; }
+    echo "$path: $got, the pin's"
 fi
-# The keg stands at the pin's md5 here, poured now or before, as a keg of
+# The keg stands at the pin's SHA-256 here, poured now or before, as a keg of
 # the closure stands at its record where the loop above pins it.
 [ -n "$dry" ] || brew pin "$(named "${path%%/Cellar/*}/Cellar/$formula/$bottle" "$formula")"

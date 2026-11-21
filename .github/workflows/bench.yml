@@ -20,11 +20,11 @@
 #   `pin.toml`, its table, and `runtime.txt`, the packages whose libraries
 #   it links, which the job installs and holds with `ldd` before a bar
 #   runs. `g4-code`, `oracle-jit` and `oracle-jit-aa` take that `php` as
-#   the pinned one, held to the md5 its `pin.toml` records, and refuse,
-#   naming the path and the md5, where it is absent or another. The job's
-#   summary carries both binaries' md5 and the tables the pin would carry,
-#   which it also keeps; landing them in the pin is a person's, through
-#   `xtask steer`.
+#   the pinned one, held to the SHA-256 its `pin.toml` records, and
+#   refuse, naming the path and the digest, where it is absent or another.
+#   The job's summary carries both binaries' SHA-256 and the tables the pin
+#   would carry, which it also keeps; landing them in the pin is a
+#   person's, through `xtask steer`.
 # - With `baseline` off nothing is built from the tag, and the bars that
 #   run the pinned php refuse: the way to measure one bar that needs none
 #   of it, named with `bar`.
@@ -117,9 +117,9 @@ jobs:
           TREE: ${{ steps.corpus.outputs.tree }}
         run: |
           python3 scripts/oracle-build.py --tree "$TREE" build linux-x86_64 main --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/baseline.txt"
-      # The summary is the two md5 lines and the tables the build wrote; a
+      # The summary is the two SHA-256 lines and the tables the build wrote; a
       # failed build's is its last lines, cut.
-      - name: the md5s and the tables, as the job's summary
+      - name: the SHA-256s and the tables, as the job's summary
         if: ${{ always() && inputs.baseline && steps.build.outcome != 'skipped' }}
         env:
           BUILT: ${{ steps.build.outcome }}
@@ -130,7 +130,7 @@ jobs:
             echo
             echo '```'
             if [ "$BUILT" = success ]; then
-              md5sum "$out/php" "$out/php-fpm"
+              sha256sum "$out/php" "$out/php-fpm"
               cat "$out/sapi.toml" "$out/pin.toml"
             else
               echo "the build did not pass; its last 40 lines, each cut at 400 bytes, and the job's log carries the rest:"
@@ -146,7 +146,7 @@ jobs:
             target/oracle/linux-x86_64/main/sapi.toml \
             target/oracle/linux-x86_64/main/installed.txt \
             "$RUNNER_TEMP/baseline/"
-      # Kept for a person to read, and no later job reads it: the md5s and
+      # Kept for a person to read, and no later job reads it: the SHA-256s and
       # the tables are in the log and the summary either way, so a refused
       # hand-off fails no job.
       - uses: ./.github/actions/stash
@@ -157,12 +157,12 @@ jobs:
           path: ${{ runner.temp }}/baseline/
           retention-days: "90"
       # What the bench takes as the pinned php, said before it runs; the
-      # bench holds it to the md5 and refuses the bars that run it where
+      # bench holds it to the SHA-256 and refuses the bars that run it where
       # it is absent or another, so this step fails nothing.
       - name: the php built from the pinned tag, as the bench takes it
         run: |
           out=target/oracle/linux-x86_64/main
-          md5sum "$out/php" 2>&1 || true
+          sha256sum "$out/php" 2>&1 || true
           cat "$out/pin.toml" 2>&1 || true
       # The libraries that php and its php-fpm link, from the packages the
       # image that built them names, runtime.txt beside them: the image is
