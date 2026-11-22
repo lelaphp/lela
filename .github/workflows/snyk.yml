@@ -1,0 +1,82 @@
+# Snyk over what a release ships as an image: each night, `snyk container
+# test` reads ghcr.io/lelaphp/lela's `nightly-cli`, `nightly-fpm` and
+# `nightly-apache`, the images images.yml pushed from main's tip, and fails
+# a variant's job where its packages carry a vulnerability of severity high
+# or critical that an upgrade fixes. One with no fix yet is printed and
+# fails nothing, since no rebuild answers it.
+# - What it holds is the image's distribution packages, which nothing else
+#   here reads. The Rust dependency graph stays `cargo deny`'s, in
+#   nightly.yml and at `xtask worktree land`: Snyk reads no Cargo.lock, and
+#   its test of an SBOM, like its analysis of Rust source, is its
+#   Enterprise plan's.
+# - It sends Snyk the image's package list and no source: no checkout is
+#   made. The repository is not connected to Snyk, and `snyk code` is not
+#   run.
+# - The CLI is one pinned release, downloaded from Snyk and held to the
+#   SHA-256 written here, which is the one Snyk publishes beside it. A newer
+#   CLI is a change to both lines.
+# - It reads one stored secret, SNYK_TOKEN, the account's token, and where
+#   the repository variable SNYK_ORG names an organisation the tests are
+#   that organisation's. An account outside Snyk's default region names
+#   its API in the repository variable SNYK_API, https://api.eu.snyk.io
+#   for one. The run's own token reads the private package.
+# - The linux/amd64 images alone are read: both platforms are built from
+#   one Dockerfile over one base, and a plan counts each test.
+# By hand, `workflow_dispatch` runs the same three jobs.
+name: snyk
+on:
+  schedule:
+    - cron: "47 5 * * *" # after the night's images
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: snyk
+  cancel-in-progress: false
+
+env:
+  SNYK_VERSION: v1.1309.0
+  SNYK_SHA256: 4802579c2818938a2f4849d270df1139f310104286a8a5c6305328a3c2eb9e1c
+
+jobs:
+  images:
+    name: Snyk Container over nightly-${{ matrix.variant }}
+    runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
+    timeout-minutes: 20
+    permissions:
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cli, fpm, apache]
+    steps:
+      - name: the account's token is set
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          [ -n "$SNYK_TOKEN" ] || { echo "::error::the secret SNYK_TOKEN is not set: gh secret set SNYK_TOKEN -R $GITHUB_REPOSITORY"; exit 1; }
+      - name: the Snyk CLI, pinned and held to its SHA-256
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/snyk" "https://downloads.snyk.io/cli/$SNYK_VERSION/snyk-linux"
+          echo "$SNYK_SHA256  $RUNNER_TEMP/snyk" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/snyk"
+          "$RUNNER_TEMP/snyk" --version
+      - name: log in to ghcr.io to read the package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: snyk container test
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          SNYK_ORG: ${{ vars.SNYK_ORG }}
+          SNYK_REGION_API: ${{ vars.SNYK_API }}
+          IMAGE: ghcr.io/${{ github.repository }}:nightly-${{ matrix.variant }}
+        run: |
+          if [ -n "$SNYK_ORG" ]; then export SNYK_CFG_ORG="$SNYK_ORG"; fi
+          if [ -n "$SNYK_REGION_API" ]; then export SNYK_API="$SNYK_REGION_API"; fi
+          "$RUNNER_TEMP/snyk" container test "$IMAGE" \
+            --platform=linux/amd64 \
+            --severity-threshold=high \
+            --fail-on=upgradable
