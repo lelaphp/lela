@@ -11,9 +11,10 @@
 //! **The list.** [`LIST`] unless one is named: a `[[package]]` row each,
 //! its [`Pinned`] fields and how its suite runs. A run downloads nothing
 //! the row does not pin (R9), and a source or lock whose digest is not
-//! the row's is refused ([`digest`] is how both are taken). Every install
-//! and suite is given the services' addresses of [`SERVICES`], the file
-//! the nightly job starts the services by.
+//! the row's is refused ([`digest`] is how both are taken). Its rows are
+//! added by a proposal ([`propose`]) a person lands through `steer`.
+//! Every install and suite is given the services' addresses of
+//! [`SERVICES`], the file the nightly job starts the services by.
 //!
 //! **What it writes.** One reading per package, scoped by the package's
 //! name, and one of the whole, scoped [`WHOLE`] (R10): packages listed,
@@ -46,6 +47,8 @@ use crate::reading::{Reading, joined, plural};
 use crate::sha256::Sha256;
 use crate::tally::{Judged, Judgement, Outcome, Tally, Took};
 
+pub(crate) mod propose;
+
 /// The instrument's name, the reading's `instrument` field.
 pub const INSTRUMENT: &str = "packages";
 
@@ -66,7 +69,10 @@ const LIMIT: Duration = Duration::from_mins(30);
 
 /// What one `xtask packages` run was asked for.
 #[derive(Debug, Clone, clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Ask {
+    #[command(subcommand)]
+    pub action: Option<Action>,
     /// The list of pinned packages; default `data/packages.toml`.
     #[arg(long, value_name = "FILE")]
     pub list: Option<PathBuf>,
@@ -76,6 +82,18 @@ pub struct Ask {
     /// Lela's binary; without it, the engine's own where cargo puts it.
     #[arg(long, value_name = "PATH")]
     pub engine: Option<PathBuf>,
+}
+
+/// What a run of the packages instrument does other than run the list.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum Action {
+    /// Propose rows for the registry's most-installed packages. Writes no
+    /// reading.
+    ///
+    /// Each is pinned on the day it runs as a run reads a row, after the
+    /// list's rows kept as they stand; a person lands it through `steer`.
+    /// It needs the network.
+    Propose(propose::Ask),
 }
 
 /// A Composer project as the harness pins one: the one shape the packages
@@ -185,7 +203,10 @@ pub(crate) fn command(
     store: &crate::reading::Store,
     ask: &Ask,
 ) -> Result<()> {
-    run(root, manifest, ask)?.record(store, INSTRUMENT)
+    match &ask.action {
+        Some(Action::Propose(proposal)) => propose::command(root, manifest, proposal),
+        None => run(root, manifest, ask)?.record(store, INSTRUMENT),
+    }
 }
 
 /// The services' addresses [`SERVICES`] gives, in its order.
@@ -234,7 +255,7 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Took> {
                 let mut sides = Sides {
                     oracle: &oracle,
                     php: &pin.oracle.path,
-                    engine,
+                    engine: Some(engine),
                 };
                 row.run(beside, &env, &mut sides)?
             }
@@ -410,11 +431,12 @@ fn numbers(reading: &mut Reading, tally: &Tally<Held>, outside: u64) -> Result<(
 }
 
 /// The lane's shell on this machine: each program under xtask's process
-/// limits, the oracle's php and Lela's where the lane names them.
+/// limits, the oracle's php and Lela's where the lane names them; a
+/// proposal runs no Lela.
 struct Sides<'a> {
     oracle: &'a Oracle<'a>,
     php: &'a Path,
-    engine: &'a Path,
+    engine: Option<&'a Path>,
 }
 
 impl lane::Shell for Sides<'_> {
@@ -446,10 +468,10 @@ impl Sides<'_> {
                 cmd
             }
             Program::Php(php) => {
-                let mut cmd = Command::new(if php == Php::Oracle {
-                    self.php
-                } else {
-                    self.engine
+                let mut cmd = Command::new(match (php, self.engine) {
+                    (Php::Oracle, _) => self.php,
+                    (Php::Engine, Some(engine)) => engine,
+                    (Php::Engine, None) => bail!("a proposal runs no Lela"),
                 });
                 cmd.args(&recipe.args);
                 for ini in &recipe.ini {

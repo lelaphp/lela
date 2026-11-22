@@ -430,7 +430,8 @@ pub(crate) enum Command {
     /// The list is `data/packages.toml` unless named. A test the oracle
     /// passes is met where Lela passes it; one the oracle does not pass is
     /// counted outside. The nightly lane, outside `done`; `--package` runs
-    /// one package of the list anywhere.
+    /// one package of the list anywhere, and `propose` writes the rows a
+    /// person lands through `steer`.
     Packages(crate::packages::Ask),
     /// Hold the release `serve_frame` to LLVM's fold of a request field's
     /// address into each access; one reading, at `sapi/cli`.

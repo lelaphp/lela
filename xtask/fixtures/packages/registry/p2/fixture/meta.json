@@ -1,0 +1,1 @@
+{"packages":{"fixture/meta":[{"name":"fixture/meta","version":"1.0.0","version_normalized":"1.0.0.0","type":"metapackage","require":{"fixture/met":"^1"}}]},"minified":"composer/2.0"}

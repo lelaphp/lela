@@ -1,0 +1,1 @@
+{"packages":{"fixture/gone":[{"name":"fixture/gone","version":"1.0.0","version_normalized":"1.0.0.0","source":{"url":"@SOURCES@/met","type":"git","reference":"0000000000000000000000000000000000000001"}}]},"minified":"composer/2.0"}

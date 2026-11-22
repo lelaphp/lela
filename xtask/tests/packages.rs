@@ -4,7 +4,9 @@
 //! nothing is fetched from the network, its suite run under the pinned php
 //! and under a stand-in for Lela's binary that runs the same php saying it
 //! is Lela, and its development dependencies installed by a stand-in for
-//! Composer. The readings are read back from the store.
+//! Composer. The readings are read back from the store. A proposal of the
+//! list is held over the registry's answers recorded in `registry/`, laid
+//! down beside the repositories, and steered over a scratch list.
 #![cfg(tracked)]
 
 use std::fs;
@@ -58,6 +60,16 @@ fn laid() -> Tree {
         let commit = git(&["commit-tree", "--no-gpg-sign", &tree_id, "-m", "fixture"]);
         git(&["update-ref", "refs/heads/main", &commit]);
     }
+    let registry = format!("file://{}", tree.join("registry").display());
+    let sources = tree.join("sources").display().to_string();
+    for dir in ["registry/explore", "registry/p2/fixture"] {
+        for answer in fs::read_dir(tree.join(dir)).unwrap() {
+            let answer = answer.unwrap().path();
+            let text = fs::read_to_string(&answer).unwrap();
+            let text = text.replace("@REGISTRY@", &registry);
+            fs::write(&answer, text.replace("@SOURCES@", &sources)).unwrap();
+        }
+    }
     tree
 }
 
@@ -77,7 +89,8 @@ fn copied(from: &Path, to: &Path) {
 
 /// The stand-ins in `bin/` under `tree`: Lela's binary, which runs the
 /// pinned `php` saying it is Lela, and Composer, a php program that
-/// installs nothing and is satisfied where a lock was laid in.
+/// installs nothing and is satisfied where a lock was laid in, and whose
+/// update resolves the fixture's `empty.lock`.
 fn stand_ins(tree: &Tree, php: &Path) -> PathBuf {
     let lela = format!(
         "#!/bin/sh\nLELA_FIXTURE_ENGINE=1 exec {} \"$@\"\n",
@@ -87,8 +100,11 @@ fn stand_ins(tree: &Tree, php: &Path) -> PathBuf {
     fs::create_dir_all(&bin).unwrap();
     fs::write(bin.join("lela"), lela).unwrap();
     xtask::scratch::executable(&bin.join("lela")).unwrap();
-    let composer =
-        "<?php\nexit(($argv[1] ?? '') === 'install' && is_file('composer.lock') ? 0 : 1);\n";
+    let composer = format!(
+        "<?php\nif (($argv[1] ?? '') === 'update') {{ exit(copy({:?}, 'composer.lock') ? 0 : 1); }}\n\
+         exit(($argv[1] ?? '') === 'install' && is_file('composer.lock') ? 0 : 1);\n",
+        tree.join("empty.lock").display().to_string()
+    );
     fs::write(bin.join("composer"), composer).unwrap();
     bin.join("lela")
 }
@@ -281,6 +297,98 @@ fn a_run_with_no_oracle_writes_its_skips_and_exits_as_unfinished() {
     );
 }
 
+/// `xtask packages propose --out <out>` at `root` over the recorded
+/// registry of `fixture`, with its stand-ins first on PATH.
+fn proposal(root: &Path, fixture: &Tree, out: &Path) -> Ran {
+    fs::create_dir_all(out).unwrap();
+    Run::at(root)
+        .args(["packages", "propose", "--out"])
+        .args([out])
+        .args(["--registry"])
+        .args([format!("file://{}", fixture.join("registry").display())])
+        .env("PATH", on_path(fixture))
+        .go()
+}
+
+/// The table of the row naming `name` in a list's text.
+fn row(text: &str, name: &str) -> toml::Table {
+    let list: toml::Table = toml::from_str(text).unwrap();
+    let rows = list["package"].as_array().unwrap();
+    (rows.iter().map(|r| r.as_table().unwrap().clone()))
+        .find(|r| r["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("no row of {name} in {text}"))
+}
+
+/// The proposal over the recorded registry, with no list standing: each
+/// package of its two pages at its newest stable version, pinned by the
+/// commit, source digest and lock digest `list.toml` pins it by, which a
+/// run held to the source; its lock kept where its row names it; its
+/// clients marking the services its suite needs; the day of the counts
+/// named. The metapackage with no source and the source whose commit
+/// cannot be fetched are named and left out. The instrument reads what
+/// it wrote, holding a row's digests to the source it fetches.
+#[test]
+fn a_proposal_over_the_recorded_registry_pins_each_row_as_a_run_reads_it() {
+    let Some(php) = pin().oracle.file().ok().map(Path::to_path_buf) else {
+        return;
+    };
+    let root = scratch("packages-propose");
+    let fixture = laid();
+    let lela = stand_ins(&fixture, &php);
+    let out = root.join("proposal");
+    let ran = proposal(&root, &fixture, &out);
+    assert_eq!(ran.code(), 0, "{ran}");
+    for left in [
+        "left out fixture/meta: the registry gives no git source commit",
+        "left out fixture/gone: Git fetch -q --depth 1 ",
+    ] {
+        assert!(ran.stdout.contains(left), "{left}: {ran}");
+    }
+    let text = fs::read_to_string(out.join("packages.toml")).unwrap();
+    let head = text.lines().next().unwrap();
+    assert!(head.starts_with("# 2 rows proposed from file://"), "{text}");
+    let day = head.split("install counts of ").nth(1).unwrap_or_default();
+    assert!(
+        day.len() > 10 && day.as_bytes()[4] == b'-' && day.as_bytes()[7] == b'-',
+        "the day of the counts: {head}"
+    );
+    let listed = fs::read_to_string(fixture.join("list.toml")).unwrap();
+    for name in ["fixture/met", "fixture/missed"] {
+        let (proposed, pinned) = (row(&text, name), row(&listed, name));
+        for key in ["version", "commit", "digest", "lock_digest"] {
+            assert_eq!(proposed[key], pinned[key], "{name}'s {key}: {text}");
+        }
+        let lock = format!("packages/{name}.lock");
+        assert_eq!(proposed["lock"].as_str(), Some(lock.as_str()));
+        assert_eq!(
+            fs::read(out.join(&lock)).unwrap(),
+            fs::read(fixture.join("empty.lock")).unwrap()
+        );
+        assert!(!proposed.contains_key("runner"), "{text}");
+    }
+    assert!(!row(&text, "fixture/met").contains_key("needs"), "{text}");
+    let needs = row(&text, "fixture/missed")["needs"].clone();
+    assert_eq!(needs, toml::Value::from(vec!["memcached", "redis"]));
+    assert_eq!(text.matches("[[package]]").count(), 2, "{text}");
+
+    let ran = Run::at(&root)
+        .args(["packages", "--list"])
+        .args([out.join("packages.toml")])
+        .args(["--package", "fixture/met", "--engine"])
+        .args([&lela])
+        .env("PATH", on_path(&fixture))
+        .go();
+    assert_eq!(ran.code(), 0, "{ran}");
+    let met = read(&root, "fixture/met");
+    assert!(
+        met.message
+            .contains("its suite did not run under the oracle")
+            && !met.message.contains("refused"),
+        "the row's digests held, and its runner is phpunit's: {}",
+        met.message
+    );
+}
+
 /// One package of the list, `--package`: its reading, and none of the
 /// whole or of the list's other packages; a name the list does not carry
 /// is refused before anything runs.
@@ -313,4 +421,59 @@ fn one_package_of_the_list_writes_its_reading_and_none_of_the_whole() {
         refused.contains("names no package fixture/nobody"),
         "{refused}"
     );
+}
+
+/// `steer` writes a proposal's rows over a scratch list once
+/// `harness.self` names it: the proposal keeps the list's text whole and
+/// adds the registry's package the list lacks after it, so steer reads
+/// one row added and nothing changed, and the list is the proposal after.
+#[test]
+fn steer_writes_a_proposal_s_rows_over_a_scratch_list() {
+    let Some(php) = pin().oracle.file().ok().map(Path::to_path_buf) else {
+        return;
+    };
+    let root = Tree::new("packages-steer").unwrap();
+    let repo = scratch_workspace(workspace(), &root);
+    let fixture = laid();
+    stand_ins(&fixture, &php);
+    let listed = fs::read_to_string(fixture.join("list.toml")).unwrap();
+    let missed = listed.split("\n[[package]]\n").nth(2).unwrap();
+    let standing = format!("# A scratch list of one row.\n\n[[package]]\n{missed}");
+    fs::create_dir_all(root.join("data")).unwrap();
+    fs::write(root.join("data/packages.toml"), &standing).unwrap();
+    let seams = fs::read_to_string(root.join("seams.toml")).unwrap();
+    if !seams.contains("\"data/packages.toml\"") {
+        let scope = "\"seams.toml\", \"oracle.toml\", \"docs/divergence.toml\"]";
+        assert!(seams.contains(scope), "harness.self's scope");
+        let widened = scope.replace(']', ", \"data/packages.toml\"]");
+        repo.write("seams.toml", seams.replacen(scope, &widened, 1));
+        repo.commit("harness.self names the list, as Mitchell's block widens it");
+    }
+
+    let out = root.join("proposal");
+    assert_eq!(proposal(&root, &fixture, &out).code(), 0);
+    let proposed = fs::read_to_string(out.join("packages.toml")).unwrap();
+    assert!(proposed.starts_with(&standing), "{proposed}");
+    assert!(
+        proposed.contains("\n# 1 row proposed from file://"),
+        "{proposed}"
+    );
+    row(&proposed, "fixture/met");
+
+    let ran = Run::at(&root)
+        .args(["steer", "data/packages.toml", "--from"])
+        .args([out.join("packages.toml")])
+        .go();
+    assert_eq!(ran.code(), 0, "{ran}");
+    let reading = Store::of_workspace(&root)
+        .read("steer", "data/packages.toml")
+        .unwrap()
+        .expect("steer's reading");
+    assert!(
+        reading.message.ends_with(": package[fixture/met]"),
+        "{}",
+        reading.message
+    );
+    let now = fs::read_to_string(root.join("data/packages.toml")).unwrap();
+    assert_eq!(now, proposed);
 }

@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use super::{Came, Held, Outcome, Package, Php, Program, Service, Shell, Step, Verdict, cases};
+use super::{
+    Came, Candidate, Held, Outcome, Package, Php, Program, Service, Shell, Step, Verdict, cases,
+};
 
 /// A shell that answers from a script: each tree or file's digest, each
 /// log's text, and the exit of each side's suite; every other program
@@ -14,6 +16,8 @@ use super::{Came, Held, Outcome, Package, Php, Program, Service, Shell, Step, Ve
 struct Scripted {
     digests: BTreeMap<PathBuf, String>,
     logs: BTreeMap<Php, String>,
+    /// A command, as [`Scripted::commands`] spells it, that exits 128.
+    failing: Option<&'static str>,
     taken: Vec<Step>,
 }
 
@@ -69,6 +73,12 @@ impl Shell for Scripted {
     fn run(&mut self, step: &Step) -> Came {
         self.taken.push(step.clone());
         match step {
+            Step::Run(c)
+                if self.failing
+                    == Some(format!("{:?} {}", c.program, c.args.join(" ")).as_str()) =>
+            {
+                Came::Exited(Some(128), "fatal: not our ref\n".to_owned())
+            }
             Step::Run(_) | Step::Copy { .. } => Came::Exited(Some(0), String::new()),
             Step::Digest(path) => Came::Digest(self.digests.get(path).cloned().unwrap_or_default()),
             Step::Read(path) => Came::Text(self.logs.get(&Scripted::side(path)).cloned()),
@@ -331,6 +341,106 @@ fn each_suite_s_environment_carries_the_services_addresses() {
         Service::ALL.map(Service::name),
         ["mysql", "postgres", "redis"]
     );
+}
+
+/// Where a proposal keeps the lock of [`candidate`].
+const KEPT: &str = "/out/packages/acme/greet.lock";
+
+/// The package every proposal test proposes, requiring `requires`.
+fn candidate(requires: &[String]) -> Candidate<'_> {
+    Candidate {
+        repository: "https://github.com/acme/greet.git",
+        commit: "0123456789abcdef0123456789abcdef01234567",
+        version: "1.2.0",
+        lock: Path::new(KEPT),
+        requires,
+    }
+}
+
+/// A proposal fetches the source at the registry's commit and digests it
+/// before anything writes in it, then resolves the lock of its development
+/// dependencies at the version, keeps it where the list will name it and
+/// digests that.
+#[test]
+fn a_proposal_pins_the_source_and_the_lock_it_resolves() {
+    let mut shell = Scripted::new(None, None);
+    shell.digests.insert(PathBuf::from(KEPT), LOCK.to_owned());
+    let proposed = super::propose(&candidate(&[]), Path::new(WORK), &mut shell).unwrap();
+    assert_eq!(
+        (proposed.digest.as_str(), proposed.lock_digest.as_str()),
+        (SOURCE, LOCK)
+    );
+    assert_eq!(
+        (proposed.runner, proposed.needs.as_slice()),
+        (None, &[][..])
+    );
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    assert_eq!(
+        shell.commands(),
+        [
+            "Git init -q source".to_owned(),
+            format!("Git fetch -q --depth 1 https://github.com/acme/greet.git {commit}"),
+            format!("Git -c advice.detachedHead=false checkout -q {commit}"),
+            "Composer update --no-install --no-interaction --no-progress --no-plugins --no-scripts"
+                .to_owned(),
+        ]
+    );
+    let order: Vec<String> = (shell.taken.iter())
+        .filter_map(|s| match s {
+            Step::Digest(path) => Some(format!("digest {}", path.display())),
+            Step::Copy { from, to } => Some(format!("copy {} {}", from.display(), to.display())),
+            Step::Run(c) if c.program == Program::Composer => Some("update".to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "digest /work/source".to_owned(),
+            "update".to_owned(),
+            format!("copy /work/source/composer.lock {KEPT}"),
+            format!("digest {KEPT}"),
+        ]
+    );
+    let update = (shell.taken.iter()).find_map(|s| match s {
+        Step::Run(c) if c.program == Program::Composer => Some(c),
+        _ => None,
+    });
+    let root = ("COMPOSER_ROOT_VERSION".to_owned(), "1.2.0".to_owned());
+    assert_eq!(update.map(|c| c.env.clone()), Some(vec![root]));
+}
+
+/// A source the commit cannot be fetched at is named with what git said,
+/// and nothing after the fetch is taken.
+#[test]
+fn a_source_that_cannot_be_fetched_is_not_proposed() {
+    let mut shell = Scripted::new(None, None);
+    shell.failing = Some(
+        "Git fetch -q --depth 1 https://github.com/acme/greet.git 0123456789abcdef0123456789abcdef01234567",
+    );
+    let why = super::propose(&candidate(&[]), Path::new(WORK), &mut shell).unwrap_err();
+    assert!(why.contains("exit 128: fatal: not our ref"), "{why}");
+    assert!(!shell.taken.iter().any(|s| matches!(s, Step::Digest(_))));
+}
+
+/// A dependency on a service's client marks the services the suite needs,
+/// each once and in order, the lane's and others alike; one on Pest names
+/// its runner.
+#[test]
+fn a_dependency_on_a_client_marks_the_service_its_suite_needs() {
+    let requires = [
+        "php",
+        "ext-mongodb",
+        "predis/predis",
+        "ext-redis",
+        "pestphp/pest",
+    ]
+    .map(str::to_owned);
+    let mut shell = Scripted::new(None, None);
+    shell.digests.insert(PathBuf::from(KEPT), LOCK.to_owned());
+    let proposed = super::propose(&candidate(&requires), Path::new(WORK), &mut shell).unwrap();
+    assert_eq!(proposed.needs, ["mongodb", "redis"]);
+    assert_eq!(proposed.runner, Some("vendor/bin/pest"));
 }
 
 /// A test reported twice is met only where it passed every time, on
