@@ -138,11 +138,11 @@ fails while an open row touches the scope.
 
 | kind or cause | open | accepted | fixed | rows |
 |---|---|---|---|---|
-| witness | 0 | 2 | 0 | 2 |
+| witness | 0 | 1 | 0 | 1 |
 | phpt | 0 | 1 | 0 | 1 |
-| trace | 0 | 7 | 1 | 8 |
-| total | 0 | 10 | 1 | 11 |
-| php-ub | 0 | 55 | 3 | 58 |
+| trace | 0 | 6 | 1 | 7 |
+| total | 0 | 8 | 1 | 9 |
+| php-ub | 0 | 52 | 3 | 55 |
 | by-design | 0 | 48 | 2 | 50 |
 | oracle-build | 0 | 7 | 2 | 9 |
 
@@ -152,4 +152,4 @@ A row of another cause is counted on its own line after the total: `php-ub` reco
 
 Over the last 7 days: the registry then could not be read.
 
-<!-- /computed in=70435f24566443eda94fb62c3cb203744da18ed2dbdd3403029320f589522e61 out=40c8db2253e3c4e0eb6078996c74ba06538748c9fd8d3bb1e585df8718a8d63b -->
+<!-- /computed in=99096a6ad569eb4b4703ca1b96a121210703221d454f81003a4e46eb863fcca2 out=d10894cd05fc704eafbaab6f6236ddfb7c8c5691d9e39f677a9a2bdcb18a86bf -->

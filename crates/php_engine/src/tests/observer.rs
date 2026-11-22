@@ -5,20 +5,16 @@
 //! and by a fatal. The sequences are php's, as `zend_test`'s observer
 //! prints them in `Z/ext/zend_test/tests/observer_*.phpt`.
 
-use crate::api::values::ClassId;
 use php_macros::php_function;
 
 use super::test_ext::{
     Event, Events, Phase, Recording, TestExt, fiber_name, observed_name, record, returned_name,
 };
-use crate::api::abi::{
-    Beneath, Extension, ExtensionBuilder, Observed, ObservedFiber, ObserverHandlers, chain,
-};
+use crate::api::abi::{Extension, ExtensionBuilder, Observed, ObservedFiber, ObserverHandlers};
 use crate::api::call::call;
 use crate::api::coerce::callable_checked;
-use crate::api::raising::{Level, Thrown, catch_fatal, leave_pending, throw};
 use crate::api::request::Request;
-use crate::api::values::{Owner, PhpString, Value};
+use crate::api::values::{PhpString, Value};
 use crate::engine::Engine;
 use crate::test::{Capture, Files, Served};
 
