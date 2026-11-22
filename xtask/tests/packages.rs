@@ -280,3 +280,37 @@ fn a_run_with_no_oracle_writes_its_skips_and_exits_as_unfinished() {
         "{whole:#?}"
     );
 }
+
+/// One package of the list, `--package`: its reading, and none of the
+/// whole or of the list's other packages; a name the list does not carry
+/// is refused before anything runs.
+#[test]
+fn one_package_of_the_list_writes_its_reading_and_none_of_the_whole() {
+    let Some(php) = pin().oracle.file().ok().map(Path::to_path_buf) else {
+        return;
+    };
+    let root = scratch("packages-one");
+    let fixture = laid();
+    let lela = stand_ins(&fixture, &php);
+    let one = |name: &str| {
+        Run::at(&root)
+            .args(["packages", "--list"])
+            .args([fixture.join("list.toml")])
+            .args(["--package", name, "--engine"])
+            .args([&lela])
+            .env("PATH", on_path(&fixture))
+            .go()
+    };
+    let ran = one("fixture/met");
+    assert_eq!(ran.code(), 0, "{ran}");
+    assert_eq!(read(&root, "fixture/met").status, Status::Pass);
+    let store = Store::of_workspace(&root);
+    for scope in ["packages", "fixture/missed"] {
+        assert!(store.read("packages", scope).unwrap().is_none(), "{scope}");
+    }
+    let refused = one("fixture/nobody").failed();
+    assert!(
+        refused.contains("names no package fixture/nobody"),
+        "{refused}"
+    );
+}

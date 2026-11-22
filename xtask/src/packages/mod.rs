@@ -24,8 +24,10 @@
 //! want of the oracle or Lela's binary, a step that could not be taken or
 //! a digest refused, is a skip the run did not take; the whole is then a
 //! skip with `whole = 0` and the run exits as one that could not run to
-//! its end (R20). Its readings bind nothing, no release, `done` row or
-//! bar (R12), and nothing owes them.
+//! its end (R20). A run of one package, `--package`, writes its reading
+//! and none of the whole, as `phpt --subset` writes no corpus reading.
+//! Its readings bind nothing, no release, `done` row or bar (R12), and
+//! nothing owes them.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -68,6 +70,9 @@ pub struct Ask {
     /// The list of pinned packages; default `data/packages.toml`.
     #[arg(long, value_name = "FILE")]
     pub list: Option<PathBuf>,
+    /// One package of the list, by name: its reading and none of the whole.
+    #[arg(long, value_name = "NAME")]
+    pub package: Option<String>,
     /// Lela's binary; without it, the engine's own where cargo puts it.
     #[arg(long, value_name = "PATH")]
     pub engine: Option<PathBuf>,
@@ -196,10 +201,17 @@ fn services(root: &Path) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
-/// Run every package of the list, one reading each and one of the whole.
+/// Run every package of the list, one reading each and one of the whole;
+/// or the one package asked for, and no whole.
 pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Took> {
     let list = root.join(ask.list.as_deref().unwrap_or(Path::new(LIST)));
-    let rows = load(&list)?;
+    let mut rows = load(&list)?;
+    if let Some(name) = &ask.package {
+        rows.retain(|row| row.pinned.name == *name);
+        if rows.is_empty() {
+            bail!("the list {} names no package {name}", list.display());
+        }
+    }
     let env = services(root)?;
     let beside = list.parent().unwrap_or(root);
     let pin = manifest.pin()?;
@@ -233,8 +245,11 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Took> {
                 .under(pin);
         took.one(whole.add(&row.pinned, verdict, stamped, &runner)?);
     }
-    let stamped = Reading::stamped_over(INSTRUMENT, WHOLE, &snapshot, Path::new("."))?.under(pin);
-    took.one(whole.reading(stamped, &runner)?);
+    if ask.package.is_none() {
+        let stamped =
+            Reading::stamped_over(INSTRUMENT, WHOLE, &snapshot, Path::new("."))?.under(pin);
+        took.one(whole.reading(stamped, &runner)?);
+    }
     Ok(took)
 }
 
