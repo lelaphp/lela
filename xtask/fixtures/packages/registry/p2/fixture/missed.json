@@ -1,0 +1,1 @@
+{"packages":{"fixture/missed":[{"name":"fixture/missed","version":"1.0.0","version_normalized":"1.0.0.0","source":{"url":"@SOURCES@/missed","type":"git","reference":"ec097441df206010334e08318e51b5bfcb58bf53"},"require-dev":{"ext-memcached":"*","predis/predis":"^2"}}]},"minified":"composer/2.0"}

@@ -11,7 +11,10 @@
 //! **The list.** [`LIST`] unless one is named: a `[[package]]` row each,
 //! its [`Pinned`] fields and how its suite runs. A run downloads nothing
 //! the row does not pin (R9), and a source or lock whose digest is not
-//! the row's is refused ([`digest`] is how both are taken).
+//! the row's is refused ([`digest`] is how both are taken). Its rows are
+//! added by a proposal ([`propose`]) a person lands through `steer`.
+//! Every install and suite is given the services' addresses of
+//! [`SERVICES`], the file the nightly job starts the services by.
 //!
 //! **What it writes.** One reading per package, scoped by the package's
 //! name, and one of the whole, scoped [`WHOLE`] (R10): packages listed,
@@ -22,8 +25,10 @@
 //! want of the oracle or Lela's binary, a step that could not be taken or
 //! a digest refused, is a skip the run did not take; the whole is then a
 //! skip with `whole = 0` and the run exits as one that could not run to
-//! its end (R20). Its readings bind nothing, no release, `done` row or
-//! bar (R12), and nothing owes them.
+//! its end (R20). A run of one package, `--package`, writes its reading
+//! and none of the whole, as `phpt --subset` writes no corpus reading.
+//! Its readings bind nothing, no release, `done` row or bar (R12), and
+//! nothing owes them.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -42,11 +47,17 @@ use crate::reading::{Reading, joined, plural};
 use crate::sha256::Sha256;
 use crate::tally::{Judged, Judgement, Outcome, Tally, Took};
 
+pub(crate) mod propose;
+
 /// The instrument's name, the reading's `instrument` field.
 pub const INSTRUMENT: &str = "packages";
 
 /// The list a run takes where none is named, relative to the root.
 pub(crate) const LIST: &str = "data/packages.toml";
+
+/// The services' addresses, relative to the root: `KEY=VALUE` lines,
+/// which docker compose reads as an env file and a shell can source.
+pub(crate) const SERVICES: &str = "ci/packages/services.env";
 
 /// The scope of the whole's reading; a package's is its name, which
 /// Composer spells `<vendor>/<name>`, so the two never meet.
@@ -58,13 +69,31 @@ const LIMIT: Duration = Duration::from_mins(30);
 
 /// What one `xtask packages` run was asked for.
 #[derive(Debug, Clone, clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Ask {
+    #[command(subcommand)]
+    pub action: Option<Action>,
     /// The list of pinned packages; default `data/packages.toml`.
     #[arg(long, value_name = "FILE")]
     pub list: Option<PathBuf>,
+    /// One package of the list, by name: its reading and none of the whole.
+    #[arg(long, value_name = "NAME")]
+    pub package: Option<String>,
     /// Lela's binary; without it, the engine's own where cargo puts it.
     #[arg(long, value_name = "PATH")]
     pub engine: Option<PathBuf>,
+}
+
+/// What a run of the packages instrument does other than run the list.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum Action {
+    /// Propose rows for the registry's most-installed packages. Writes no
+    /// reading.
+    ///
+    /// Each is pinned on the day it runs as a run reads a row, after the
+    /// list's rows kept as they stand; a person lands it through `steer`.
+    /// It needs the network.
+    Propose(propose::Ask),
 }
 
 /// A Composer project as the harness pins one: the one shape the packages
@@ -103,7 +132,12 @@ pub(crate) struct Row {
 impl Row {
     /// The lane's run of this row, its lock and a repository named by a
     /// relative path found beside the list, in a scratch tree of its own.
-    fn run(&self, beside: &Path, sides: &mut Sides<'_>) -> Result<Verdict> {
+    fn run(
+        &self,
+        beside: &Path,
+        env: &[(String, String)],
+        sides: &mut Sides<'_>,
+    ) -> Result<Verdict> {
         let pinned = &self.pinned;
         let work = crate::scratch::Tree::new("packages")?;
         let repository = &pinned.repository;
@@ -122,6 +156,7 @@ impl Row {
             runner: &self.runner,
             args: &self.args,
             needs: &self.needs,
+            env,
         };
         Ok(lane::run(&package, &work, sides))
     }
@@ -168,13 +203,37 @@ pub(crate) fn command(
     store: &crate::reading::Store,
     ask: &Ask,
 ) -> Result<()> {
-    run(root, manifest, ask)?.record(store, INSTRUMENT)
+    match &ask.action {
+        Some(Action::Propose(proposal)) => propose::command(root, manifest, proposal),
+        None => run(root, manifest, ask)?.record(store, INSTRUMENT),
+    }
 }
 
-/// Run every package of the list, one reading each and one of the whole.
+/// The services' addresses [`SERVICES`] gives, in its order.
+fn services(root: &Path) -> Result<Vec<(String, String)>> {
+    let text = crate::read(&root.join(SERVICES))?;
+    (text.lines().map(str::trim))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (key, value) = (line.split_once('='))
+                .with_context(|| format!("{SERVICES}: {line:?} is not KEY=VALUE"))?;
+            Ok((key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+/// Run every package of the list, one reading each and one of the whole;
+/// or the one package asked for, and no whole.
 pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Took> {
     let list = root.join(ask.list.as_deref().unwrap_or(Path::new(LIST)));
-    let rows = load(&list)?;
+    let mut rows = load(&list)?;
+    if let Some(name) = &ask.package {
+        rows.retain(|row| row.pinned.name == *name);
+        if rows.is_empty() {
+            bail!("the list {} names no package {name}", list.display());
+        }
+    }
+    let env = services(root)?;
     let beside = list.parent().unwrap_or(root);
     let pin = manifest.pin()?;
     let snapshot = Snapshot::disk(root)?;
@@ -196,9 +255,9 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Took> {
                 let mut sides = Sides {
                     oracle: &oracle,
                     php: &pin.oracle.path,
-                    engine,
+                    engine: Some(engine),
                 };
-                row.run(beside, &mut sides)?
+                row.run(beside, &env, &mut sides)?
             }
             Err(ref why) => Verdict::Unjudged(format!("nothing ran; {why}")),
         };
@@ -207,8 +266,11 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Took> {
                 .under(pin);
         took.one(whole.add(&row.pinned, verdict, stamped, &runner)?);
     }
-    let stamped = Reading::stamped_over(INSTRUMENT, WHOLE, &snapshot, Path::new("."))?.under(pin);
-    took.one(whole.reading(stamped, &runner)?);
+    if ask.package.is_none() {
+        let stamped =
+            Reading::stamped_over(INSTRUMENT, WHOLE, &snapshot, Path::new("."))?.under(pin);
+        took.one(whole.reading(stamped, &runner)?);
+    }
     Ok(took)
 }
 
@@ -369,11 +431,12 @@ fn numbers(reading: &mut Reading, tally: &Tally<Held>, outside: u64) -> Result<(
 }
 
 /// The lane's shell on this machine: each program under xtask's process
-/// limits, the oracle's php and Lela's where the lane names them.
+/// limits, the oracle's php and Lela's where the lane names them; a
+/// proposal runs no Lela.
 struct Sides<'a> {
     oracle: &'a Oracle<'a>,
     php: &'a Path,
-    engine: &'a Path,
+    engine: Option<&'a Path>,
 }
 
 impl lane::Shell for Sides<'_> {
@@ -405,10 +468,10 @@ impl Sides<'_> {
                 cmd
             }
             Program::Php(php) => {
-                let mut cmd = Command::new(if php == Php::Oracle {
-                    self.php
-                } else {
-                    self.engine
+                let mut cmd = Command::new(match (php, self.engine) {
+                    (Php::Oracle, _) => self.php,
+                    (Php::Engine, Some(engine)) => engine,
+                    (Php::Engine, None) => bail!("a proposal runs no Lela"),
                 });
                 cmd.args(&recipe.args);
                 for ini in &recipe.ini {
