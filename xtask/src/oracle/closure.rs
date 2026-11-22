@@ -800,17 +800,15 @@ mod tests {
         let fpm = root.join("Cellar/php/1/php-fpm");
         let zstd = root.join("opt/zstd/lib/libzstd.dylib");
         fs::write(&fpm, macho(&[zstd.to_str().unwrap()])).unwrap();
-        let md5 = |path: &Path| {
-            crate::oracle::Digest::Md5(format!("{:x}", md5::compute(fs::read(path).unwrap())))
-        };
+        let sha256 = |path: &Path| crate::sha256::Sha256::of(&fs::read(path).unwrap());
         let mut pin = crate::oracle::Pin::default();
-        (pin.oracle.path, pin.oracle.digest) = (php.clone(), md5(&php));
+        (pin.oracle.path, pin.oracle.sha256) = (php.clone(), sha256(&php));
         pin.closure = Some(closure(&[RECORD[0], RECORD[1]]));
         // php reaches zstd only through zip, so take that load away.
         fs::write(root.join("Cellar/zip/1.12_1/lib/libzip.dylib"), macho(&[])).unwrap();
         pin.oracle().asserted().unwrap();
         let host = crate::oracle::Host {
-            digest: md5(&fpm),
+            sha256: sha256(&fpm),
             path: fpm,
         };
         pin.sapi.fpm = Some(host.clone());

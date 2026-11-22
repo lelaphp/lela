@@ -1,7 +1,7 @@
 {
   "commit": "882bbb2",
   "corpus": "php-8.5.12 18e167fb",
-  "engine": "target/release/php md5 0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "engine": "target/release/php sha256:0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
   "recipe": "5e1f0c3a9d2b7e4f6a8c0d1e2f3a4b5c6d7e8f90",
   "verdicts": {
     "phpt:php-src/ext/fixture/tests/kept.phpt": "pass",

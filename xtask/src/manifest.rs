@@ -434,7 +434,7 @@ pub struct Crate {
     pub porting: bool,
     /// The oracle variant the crate is read under: `crosscheck`,
     /// `witness` and `phpt` run it under the pin's `[variant.<name>]` for
-    /// the platform they run on, verified by its md5, and every crate
+    /// the platform they run on, verified by its SHA-256, and every crate
     /// without the key under the main oracle. A name the pin does not
     /// carry fails the crate's readings in those lanes, naming it.
     pub oracle: Option<String>,

@@ -1095,18 +1095,10 @@ fn changing_a_builds_image_keeps_the_runs_under_the_recipe_fresh() {
 }
 
 /// `text` with one hex digit moved in the first binary digest that `lead`
-/// opens, whichever spelling the pin carries it in, `md5 = "<hex>"` or
-/// `sha256 = "sha256:<hex>"`, so the moved value is still a digest of
-/// that spelling.
+/// opens, `sha256 = "sha256:<hex>"`, so the moved value is still a digest.
 fn move_digest(text: &str, lead: &str) -> String {
-    let at = ["md5 = \"", "sha256 = \"sha256:"]
-        .iter()
-        .filter_map(|key| {
-            let start = text.find(&format!("{lead}{key}"))?;
-            Some(start + lead.len() + key.len())
-        })
-        .min()
-        .expect("the pin carries a digest of one spelling or the other");
+    let key = format!("{lead}sha256 = \"sha256:");
+    let at = text.find(&key).expect("the pin carries a digest") + key.len();
     let digit = if text[at..].starts_with('0') {
         '1'
     } else {
@@ -1115,7 +1107,7 @@ fn move_digest(text: &str, lead: &str) -> String {
     format!("{}{digit}{}", &text[..at], &text[at + 1..])
 }
 
-/// A variant build's digest, `md5` or `sha256`, is its binary's identity,
+/// A variant build's SHA-256 is its binary's identity,
 /// not its provenance: changing it stales every run under the recipe.
 #[test]
 fn changing_a_variant_builds_md5_stales_every_run_under_the_recipe() {
@@ -1123,10 +1115,10 @@ fn changing_a_variant_builds_md5_stales_every_run_under_the_recipe() {
         let (head, variants) = text.split_at(text.find("[variant.").unwrap());
         format!("{head}{}", move_digest(variants, ", "))
     };
-    after_the_pin_moves("variant-md5", digest, true);
+    after_the_pin_moves("variant-sha256", digest, true);
 }
 
-/// `[oracle]`'s digest, `md5` or `sha256`, a `[closure]` keg and a
+/// `[oracle]`'s SHA-256, a `[closure]` keg and a
 /// `[recipe]` ini line are values of the pin, each digested: changing one
 /// stales every run under the recipe. The keg's move re-pins the macOS
 /// build against the moved record, as a person re-pins it, and that is
@@ -1134,7 +1126,7 @@ fn changing_a_variant_builds_md5_stales_every_run_under_the_recipe() {
 #[test]
 fn changing_the_oracles_md5_a_closure_keg_or_a_recipe_ini_stales_every_run() {
     let oracle = |text: &str| move_digest(text, "\n");
-    after_the_pin_moves("oracle-md5", oracle, true);
+    after_the_pin_moves("oracle-sha256", oracle, true);
     let keg = |text: &str| {
         let moved = text.replacen("\nzstd = \"", "\nzstd = \"0", 1);
         let parsed = xtask::oracle::Pin::parse(&moved).unwrap();

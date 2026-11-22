@@ -165,7 +165,7 @@ pub(crate) struct Run {
     pub commit: String,
     /// The pinned corpus, its tag and commit.
     pub corpus: String,
-    /// The engine that ran: the binary's path and md5, or the linked one.
+    /// The engine that ran: the binary's path and SHA-256, or the linked one.
     pub engine: String,
     /// The [`Pin::digest`] of the pin the run was taken under: under
     /// another, the run is stale, as a reading of [`UNDER_RECIPE`] is.
@@ -295,7 +295,7 @@ impl Runs {
         lane: Option<Lane>,
     ) -> Result<(Option<Target>, bool)> {
         if let (Runner::Control(oracle), None) = (runner, lane) {
-            let engine = format!("{} {}", oracle.display(), pin.oracle.digest);
+            let engine = format!("{} {}", oracle.display(), pin.oracle.sha256);
             if let Some(run) = self.kept(tally, engine) {
                 let target = Target::of(run);
                 target.keep(&self.root, pin, scope)?;

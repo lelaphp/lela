@@ -28,7 +28,7 @@
 //!
 //! **The formula is digested**, as every key of the pin is but a build's
 //! [`super::Provenance`]: [`super::Pin::digest`] moves when a pin
-//! first names its formula, and with the paths and the md5 when the
+//! first names its formula, and with the paths and the SHA-256 when the
 //! formula changes.
 
 use std::collections::BTreeSet;
@@ -202,18 +202,20 @@ mod tests {
     /// its php and one host at `keg` of the Cellar, `php` or `php/8.5.2_1`
     /// where the keg stands at another bottle than `version` names.
     fn pin(formula: Option<&str>, version: &str, keg: &str) -> Result<Pin> {
+        const ZERO: &str =
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000";
         let formula = formula.map_or(String::new(), |name| format!("formula = {name:?}\n"));
         let cellar = match keg.split_once('/') {
             Some((keg, bottle)) => format!("/opt/homebrew/Cellar/{keg}/{bottle}"),
             None => format!("/opt/homebrew/Cellar/{keg}/{version}"),
         };
         Pin::parse(&format!(
-            "[oracle]\nversion = {version:?}\n{formula}path = \"{cellar}/bin/php\"\nmd5 = \"0\"\n\
+            "[oracle]\nversion = {version:?}\n{formula}path = \"{cellar}/bin/php\"\nsha256 = {ZERO:?}\n\
              [source]\ntag = \"t\"\ncommit = \"c\"\nphpt_files = 0\n\
              [recipe]\nscript_name = \"w.php\"\npreamble = \"\"\nargs = []\nini = []\nenv_clear = true\n\
              [recipe.limits]\ntimeout_s = 1\n\
              [recipe.normalise]\ncrlf_to_lf = true\ntrim = \"\"\nscratch_token = \"%S%\"\n\
-             [sapi]\nfpm = {{ path = \"{cellar}/sbin/php-fpm\", md5 = \"0\" }}\n"
+             [sapi]\nfpm = {{ path = \"{cellar}/sbin/php-fpm\", sha256 = {ZERO:?} }}\n"
         ))
     }
 

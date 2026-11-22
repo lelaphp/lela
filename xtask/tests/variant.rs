@@ -2,16 +2,16 @@
 //! oracle built with flags of its own and pinned per platform, and a
 //! `[[crate]]` row's `oracle` key, which runs that crate's `crosscheck`,
 //! `witness` and `phpt` under the variant's binary for the platform they
-//! run on, verified by its md5, and every other crate under the main
+//! run on, verified by its SHA-256, and every other crate under the main
 //! oracle.
 //!
-//! A variant here is a shell file of the test's own pinned by its md5, so
+//! A variant here is a shell file of the test's own pinned by its SHA-256, so
 //! every test runs on any machine of a pinned platform, the oracle's binary
 //! there or not; the main oracle is pointed nowhere wherever a test holds a
 //! lane to the variant, so a reading that ran is one the variant ran. The
 //! two negative controls are the fixtures under `xtask/fixtures/oracle/`: a
-//! row naming a variant the pin lacks, and a variant whose binary's md5 is
-//! not its pin's.
+//! row naming a variant the pin lacks, and a variant whose binary's
+//! SHA-256 is not its pin's.
 #![cfg(tracked)]
 
 use std::fs;
@@ -24,6 +24,7 @@ use xtask::oracle::{Pin, Platform};
 use xtask::phpt;
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
+use xtask::sha256::Sha256;
 use xtask::witness;
 
 mod common {
@@ -36,6 +37,9 @@ use common::manifest::Tracked;
 use common::phpt_tree::counting;
 use common::repo::scratch_workspace;
 use common::run::Run;
+
+/// A build's SHA-256 of no binary, as a pin spells one.
+const ZERO: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 fn workspace() -> &'static Path {
     xtask::package_dir().parent().unwrap()
@@ -51,10 +55,10 @@ fn fixture(name: &str) -> PathBuf {
     dir
 }
 
-/// `[variant.<name>]` with one platform's table, at `path` by `md5`; a
+/// `[variant.<name>]` with one platform's table, at `path` by `sha256`; a
 /// Linux table names an image and the macOS one the closure the tracked
 /// macOS build names, as the grammar asks of each.
-fn variant_table(name: &str, key: &str, path: &Path, md5: &str) -> String {
+fn variant_table(name: &str, key: &str, path: &Path, sha256: &str) -> String {
     let image = if key.starts_with("linux") {
         "image = \"sha256:stand-in\"\n".to_owned()
     } else {
@@ -69,29 +73,30 @@ fn variant_table(name: &str, key: &str, path: &Path, md5: &str) -> String {
         )
     };
     format!(
-        "\n[variant.{name}]\nflags = [\"--enable-zend-test\"]\n[variant.{name}.{key}]\npath = {:?}\nmd5 = \"{md5}\"\n{image}",
+        "\n[variant.{name}]\nflags = [\"--enable-zend-test\"]\n[variant.{name}.{key}]\npath = {:?}\nsha256 = \"{sha256}\"\n{image}",
         path.display().to_string()
     )
 }
 
-/// An executable shell file at `path` whose body is `body`, and its md5.
+/// An executable shell file at `path` whose body is `body`, and its
+/// SHA-256 as a pin spells it.
 fn shell(path: &Path, body: &str) -> String {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
     xtask::scratch::executable(path).unwrap();
-    format!("{:x}", md5::compute(fs::read(path).unwrap()))
+    Sha256::of(&fs::read(path).unwrap()).to_string()
 }
 
 /// The tracked pin with `[variant.stand-in]` pinned for this machine's
-/// platform at a shell file under `dir` whose body is `body`, by its md5
-/// or by `md5` where one is given, and the main oracle nowhere: none on a
+/// platform at a shell file under `dir` whose body is `body`, by its
+/// SHA-256 or by `sha256` where one is given, and the main oracle nowhere: none on a
 /// machine of no pinned platform, where no variant can be read.
-fn stand_in(dir: &Path, body: &str, md5: Option<&str>) -> Option<(Pin, PathBuf)> {
+fn stand_in(dir: &Path, body: &str, sha256: Option<&str>) -> Option<(Pin, PathBuf)> {
     let platform = Platform::this()?;
     let path = dir.join("variant/php");
     let own = shell(&path, body);
     let text =
-        tracked_text() + &variant_table("stand-in", platform.key(), &path, md5.unwrap_or(&own));
+        tracked_text() + &variant_table("stand-in", platform.key(), &path, sha256.unwrap_or(&own));
     let mut pin = Pin::parse(&text).unwrap();
     pin.oracle.path = dir.join("no-php-here");
     Some((pin, path))
@@ -113,7 +118,7 @@ fn the_pin_reads_a_variant_and_refuses_a_platform_outside_the_grammar() {
                 "fixture-variant",
                 "darwin-arm64",
                 Path::new("/opt/php"),
-                "0",
+                &Sha256::default().to_string(),
             )),
     )
     .unwrap();
@@ -121,8 +126,8 @@ fn the_pin_reads_a_variant_and_refuses_a_platform_outside_the_grammar() {
     assert_eq!(variant.flags, ["--enable-zend-test"]);
     let build = variant.build(Platform::DarwinArm64).unwrap();
     assert_eq!(
-        (build.path.as_path(), build.digest.md5()),
-        (Path::new("/opt/php"), Some("0"))
+        (build.path.as_path(), build.sha256),
+        (Path::new("/opt/php"), Sha256::default())
     );
     assert!(variant.build(Platform::LinuxX86_64).is_none());
     assert_ne!(
@@ -137,7 +142,7 @@ fn the_pin_reads_a_variant_and_refuses_a_platform_outside_the_grammar() {
                 "fixture-variant",
                 "darwin-x86_64",
                 Path::new("/opt/php"),
-                "0",
+                &Sha256::default().to_string(),
             )),
     )
     .unwrap_err()
@@ -158,11 +163,11 @@ fn a_variant_is_the_pin_with_its_build_for_this_platform_in_place_of_the_oracles
     let variant = pin.variant("stand-in").unwrap();
     assert_eq!(variant.oracle.path, path);
     assert_eq!(
-        variant.oracle.digest,
+        variant.oracle.sha256,
         pin.variant["stand-in"]
             .build(Platform::this().unwrap())
             .unwrap()
-            .digest
+            .sha256
     );
     assert_eq!(variant.oracle.variant(), Some("stand-in"));
     assert_eq!(variant.oracle.version, pin.oracle.version);
@@ -210,7 +215,7 @@ fn a_variant_pinning_no_build_for_this_platform_is_absent_and_says_which() {
         return;
     };
     let text =
-        tracked_text() + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0");
+        tracked_text() + &variant_table("fixture-variant", other, Path::new("/opt/php"), ZERO);
     let variant = Pin::parse(&text)
         .unwrap()
         .variant("fixture-variant")
@@ -243,7 +248,7 @@ fn a_relative_build_path_is_the_pins_directorys_on_load() {
             "fixture-variant",
             platform.key(),
             Path::new("build/php"),
-            "0",
+            ZERO,
         );
     fs::write(dir.join("oracle.toml"), &text).unwrap();
     let pin = Pin::load(&dir.join("oracle.toml")).unwrap();
@@ -308,9 +313,9 @@ fn the_fixture_whose_row_names_a_variant_the_pin_lacks_fails_its_crate() {
 }
 
 /// The negative control of the binary: a crate read under a
-/// variant whose binary's md5 is not its pin's refuses `witness` and
+/// variant whose binary's SHA-256 is not its pin's refuses `witness` and
 /// `crosscheck` as the main oracle's drift does, naming the binary, the
-/// md5 the pin says and the variant; `phpt`'s is held below, over a tree
+/// SHA-256 the pin says and the variant; `phpt`'s is held below, over a tree
 /// of its own.
 #[test]
 fn the_fixture_whose_variant_binary_differs_from_its_md5_refuses_the_run() {
@@ -322,7 +327,7 @@ fn the_fixture_whose_variant_binary_differs_from_its_md5_refuses_the_run() {
     let binary = root.join("php");
     let drifted = |err: &str| {
         err.contains(&binary.display().to_string())
-            && err.contains("the pin says md5 00000000000000000000000000000000")
+            && err.contains(&format!("the pin says {}", Sha256::default()))
             && err.contains("of the oracle variant drift")
     };
 
@@ -436,7 +441,7 @@ fn witness_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it()
     manifest.pin = Some(
         Pin::parse(
             &(tracked_text()
-                + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0")),
+                + &variant_table("fixture-variant", other, Path::new("/opt/php"), ZERO)),
         )
         .unwrap(),
     );
@@ -513,18 +518,18 @@ fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
             reading.message
         );
     }
-    let md5 = varied
+    let sha256 = varied
         .pin()
         .unwrap()
         .variant("stand-in")
         .unwrap()
         .oracle
-        .digest;
+        .sha256;
     for column in [Column::Re, Column::Ri] {
-        let kept = crosscheck::kept(&store, &md5, "ctype", column);
+        let kept = crosscheck::kept(&store, &sha256, "ctype", column);
         assert!(
             kept.is_file(),
-            "kept under the variant's md5: {}",
+            "kept under the variant's SHA-256: {}",
             kept.display()
         );
     }
@@ -544,7 +549,11 @@ fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
 /// A workspace and a corpus for `phpt`: `ext/fixture` whose subset holds
 /// one test that the stand-in variant, run as the binary under test,
 /// meets; the manifest's one row names the variant where `varied`.
-fn phpt_scratch(name: &str, md5: Option<&str>, varied: bool) -> Option<(Tree, Manifest, PathBuf)> {
+fn phpt_scratch(
+    name: &str,
+    sha256: Option<&str>,
+    varied: bool,
+) -> Option<(Tree, Manifest, PathBuf)> {
     let root = scratch(name, "");
     let corpus = root.join("corpus");
     let tests = corpus.join("ext/fixture/tests");
@@ -554,7 +563,7 @@ fn phpt_scratch(name: &str, md5: Option<&str>, varied: bool) -> Option<(Tree, Ma
         "--TEST--\nUnder the variant\n--FILE--\n<?php echo 'variant';\n--EXPECT--\nvariant\n",
     )
     .unwrap();
-    let (pin, binary) = stand_in(&root, "printf variant", md5)?;
+    let (pin, binary) = stand_in(&root, "printf variant", sha256)?;
     let row = Crate::named("ext/fixture");
     let row = if varied {
         row.with_oracle("stand-in")
@@ -590,21 +599,21 @@ fn phpt_runs_a_subset_whose_row_names_a_variant_under_it() {
     };
     // The variant's own binary as the binary under test is the runner's
     // control under the variant's pin, which is how the subset's target
-    // under the variant is kept: `pin-<tag>-<the variant's md5>`.
+    // under the variant is kept: `pin-<tag>-sha256-<the variant's hex>`.
     let reading = phpt_run(&root, &manifest, &binary);
     assert_eq!(reading.scope, "ext/fixture@control", "{reading:#?}");
     assert_eq!(count(&reading, "passed"), 1, "{reading:#?}");
-    let md5 = manifest
+    let key = manifest
         .pin()
         .unwrap()
         .variant("stand-in")
         .unwrap()
         .oracle
-        .digest
+        .sha256
         .key();
     assert!(
         reading.message.contains(&format!(
-            "kept as the subset's target under pin-{}-{md5}",
+            "kept as the subset's target under pin-{}-{key}",
             manifest.pin().unwrap().source.tag
         )),
         "{}",
@@ -657,16 +666,16 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
         1,
         "no target kept, so it runs: {readings:#?}"
     );
-    let md5 = manifest
+    let key = manifest
         .pin()
         .unwrap()
         .variant("stand-in")
         .unwrap()
         .oracle
-        .digest
+        .sha256
         .key();
     let kept = root.join(format!(
-        "target/harness/phpt-runs/pin-{}-{md5}/ext/fixture.json",
+        "target/harness/phpt-runs/pin-{}-{key}/ext/fixture.json",
         manifest.pin().unwrap().source.tag
     ));
     assert!(
@@ -713,16 +722,16 @@ fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
     };
     assert_eq!(reading.scope, "ext/fixture@control", "{reading:#?}");
     assert_eq!(count(reading, "passed"), 1, "{reading:#?}");
-    let md5 = manifest
+    let key = manifest
         .pin()
         .unwrap()
         .variant("stand-in")
         .unwrap()
         .oracle
-        .digest
+        .sha256
         .key();
     let kept = root.join(format!(
-        "target/harness/phpt-runs/pin-{}-{md5}/ext/fixture.json",
+        "target/harness/phpt-runs/pin-{}-{key}/ext/fixture.json",
         manifest.pin().unwrap().source.tag
     ));
     assert!(kept.is_file(), "{}", kept.display());
@@ -772,20 +781,18 @@ fn the_oracle_jobs_control_names_no_php_and_no_variant() {
 }
 
 /// `phpt`'s half of the binary's negative control: the subset of a crate
-/// read under a variant whose binary is not its md5 is refused, a failing
+/// read under a variant whose binary is not its SHA-256 is refused, a failing
 /// reading naming the drift, as the main oracle's is.
 #[test]
-fn phpt_refuses_a_subset_under_a_variant_whose_binary_differs_from_its_md5() {
-    let wrong = "0".repeat(32);
+fn phpt_refuses_a_subset_under_a_variant_whose_binary_differs_from_its_sha256() {
+    let wrong = Sha256::default().to_string();
     let Some((root, manifest, binary)) = phpt_scratch("phpt-drift", Some(&wrong), true) else {
         return;
     };
     let reading = phpt_run(&root, &manifest, &binary);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert!(
-        reading
-            .message
-            .contains(&format!("the pin says md5 {wrong}"))
+        reading.message.contains(&format!("the pin says {wrong}"))
             && reading.message.contains("of the oracle variant stand-in"),
         "{}",
         reading.message
@@ -828,7 +835,7 @@ fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
     .unwrap();
     let platform = Platform::this()?;
     let php = root.join("variant/php");
-    let md5 = shell(&php, "printf variant");
+    let sha256 = shell(&php, "printf variant");
     let pin = root.join("oracle.toml");
     let text = fs::read_to_string(&pin).unwrap();
     let counted = (text.lines())
@@ -842,7 +849,7 @@ fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
         .fold(String::new(), |text, line| text + line + "\n");
     fs::write(
         &pin,
-        counted + &variant_table("stand-in", platform.key(), &php, &md5),
+        counted + &variant_table("stand-in", platform.key(), &php, &sha256),
     )
     .unwrap();
     Tracked::of(&root)
@@ -931,7 +938,7 @@ fn crosscheck_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_i
     manifest.pin = Some(
         Pin::parse(
             &(tracked_text()
-                + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0")),
+                + &variant_table("fixture-variant", other, Path::new("/opt/php"), ZERO)),
         )
         .unwrap(),
     );
@@ -976,7 +983,7 @@ fn phpt_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it() {
     let (root, mut manifest, binary) = phpt_scratch("phpt-unpinned", None, true).unwrap();
     let tree = manifest.pin().unwrap().source.tree().unwrap();
     manifest.pin = Pin::parse(
-        &(tracked_text() + &variant_table("stand-in", other, Path::new("/opt/php"), "0")),
+        &(tracked_text() + &variant_table("stand-in", other, Path::new("/opt/php"), ZERO)),
     )
     .map(|pin| counting(pin, &tree))
     .unwrap()

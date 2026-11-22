@@ -1,10 +1,10 @@
 {
   "oracle": {
-    "version": "8.5.9",
-    "md5": "315162bd4382e9b7a0aa6668edf4c097",
-    "sha256": "e775a8b4a6610f39420340ded62321a90d05ee03feecfcad9122fc4c6d1f6adf",
-    "source_commit": "dd6e76cce27aaa0ed9f7520648ed1081dfb6af36",
-    "pin_sha256": "fede04a861990b04ec9d511f7f949bec9f4ed37d446a20f9cd783e00dc7112f7",
+    "version": "8.5.12",
+    "digest": "sha256:445b775dcb987524475f482f61d8d8b03f306e0433038be1142cd6c75ae36668",
+    "sha256": "445b775dcb987524475f482f61d8d8b03f306e0433038be1142cd6c75ae36668",
+    "source_commit": "136e049ac10b032c83018e65b63b6df858943750",
+    "pin_sha256": "3b0258a3b6df34a45367cd46766bb2635d0c8960cefb80db548743535901031d",
     "recipe": {
       "script_name": "witness.php",
       "preamble": "<?php\n",
@@ -53,7 +53,7 @@
       ],
       "env_clear": true,
       "env": {
-        "TEST_PHP_EXECUTABLE": "/opt/homebrew/Cellar/php/8.5.9/bin/php",
+        "TEST_PHP_EXECUTABLE": "/opt/homebrew/Cellar/php/8.5.12_1/bin/php",
         "TZ": "UTC",
         "LANG": "C",
         "LC_ALL": "C",
@@ -76,50 +76,49 @@
       }
     },
     "closure": {
-      "aom": "3.15.2",
+      "aom": "3.15.3",
       "apr": "1.7.6",
-      "apr-util": "1.6.5_1",
+      "apr-util": "1.6.6",
       "argon2": "20190702_1",
       "autoconf": "2.73",
-      "brotli": "1.2.0",
-      "ca-certificates": "2026-09-25",
-      "curl": "8.22.0_1",
+      "brotli": "1.2.1",
+      "ca-certificates": "2026-11-05",
+      "curl": "8.23.0",
       "dav1d": "1.5.4",
       "fontconfig": "2.18.3",
-      "freetds": "1.5.19_1",
-      "freetype": "2.14.3",
+      "freetds": "1.5.21",
+      "freetype": "2.15.0",
       "gd": "2.3.3_6",
       "gettext": "1.0",
       "giflib": "6.1.3",
       "gmp": "6.3.0",
-      "icu4c@78": "78.3",
-      "jpeg-turbo": "3.2.0",
+      "icu4c@79": "79.1",
+      "jpeg-turbo": "3.2.1",
       "json-c": "0.19",
-      "krb5": "1.22.2_2",
+      "krb5": "1.22.3",
       "libavif": "1.4.2",
-      "libnghttp2": "1.70.0",
-      "libnghttp3": "1.18.0",
-      "libngtcp2": "1.25.0_1",
+      "libnghttp2": "1.71.0",
+      "libnghttp3": "1.19.0",
+      "libngtcp2": "1.26.0",
       "libpng": "1.6.59",
-      "libpq": "18.6_1",
+      "libpq": "18.7",
       "libpsl": "0.23.3",
       "libsodium": "1.0.22",
       "libssh2": "1.11.1_7",
       "libtiff": "4.7.2",
       "libtool": "2.6.2",
-      "libunistring": "1.4.2",
+      "libunistring": "1.5",
       "libvmaf": "3.2.1",
-      "libzip": "1.12_1",
-      "lz4": "1.10.0",
+      "libzip": "1.12.1",
+      "lz4": "1.11.1",
       "m4": "1.4.21",
       "net-snmp": "5.9.5.2_2",
       "oniguruma": "6.9.10",
-      "openldap": "2.7.1_1",
-      "openssl@3": "3.6.5",
-      "openssl@4": "4.0.3",
+      "openldap": "2.7.2",
+      "openssl@4": "4.1.0",
       "pcre2": "10.49",
       "readline": "8.3.6",
-      "sqlite": "3.53.4",
+      "sqlite": "3.54.1",
       "tidy-html5": "5.8.0",
       "unixodbc": "2.3.14",
       "webp": "1.6.0",
@@ -154,7 +153,7 @@
     "streams.php": "f95b67479a84933241e191fd72b398f972379921bc556786ed7705695308bf44",
     "transactions.php": "1af82a01c61570dad58d326fe74f29ce8b011626fd6d30048f426937c5d98108"
   },
-  "runner_sha256": "76bcd099b00cf383d9f1c21f13a3ef87294b1262ac5d40dab966dfa7902eb940",
+  "runner_sha256": "dc09e88bb059034ba666ee08376179c979ebcdc662ba7ff0b90fcdd5723535f5",
   "fixtures": {
     "native.mgc": {
       "bytes": 864,
@@ -235,9 +234,9 @@
   },
   "sources": {
     "ext/fileinfo/build.rs": {
-      "sha256": "19737bf3f5b6c4b0a1f11ebb3663def005d8c636aef6f175b6948f937f417761",
-      "bytes": 1987,
-      "physical_lines": 47
+      "sha256": "70e9767a418609b9d24f165cae3befa88e29e97fd9c6e956b181e5ae7917f2b6",
+      "bytes": 2463,
+      "physical_lines": 57
     },
     "ext/fileinfo/config.m4": {
       "sha256": "3914b02305e21f46355110e809db3ef49ef9c749f70c7121e56e940640099817",
@@ -270,9 +269,9 @@
       "physical_lines": 99
     },
     "ext/fileinfo/libmagic/cdf.c": {
-      "sha256": "99c29381403fa467189d30734d2e54111f6a573318128ae9b0bc1ca444a5fc20",
-      "bytes": 42563,
-      "physical_lines": 1648
+      "sha256": "67de2984f1c8b22541bc9912fea089c76f6c42e18b2a52bdd29f00bc49e6a609",
+      "bytes": 43460,
+      "physical_lines": 1683
     },
     "ext/fileinfo/libmagic/cdf.h": {
       "sha256": "d41950885b03825d333c023a2519d9b974c4cb16636eb459b15ef07ca88d2c63",
@@ -380,9 +379,9 @@
       "physical_lines": 73
     },
     "ext/fileinfo/shim/php.h": {
-      "sha256": "4207f474432aaeb3324943f3a8ecdb66c2eae68f0ca28b0a025945d0cd320c0b",
-      "bytes": 6678,
-      "physical_lines": 196
+      "sha256": "e78a09aca05a5189d07d2a587df88d802e1546ad230956427022c850f15ad888",
+      "bytes": 7820,
+      "physical_lines": 219
     },
     "ext/fileinfo/shim/php_libmagic.h": {
       "sha256": "2d6480b49ddaec8c110dcff137e23ba71400bd7cb82257f194ca535a319d7ffc",
@@ -395,24 +394,24 @@
       "physical_lines": 663
     },
     "ext/fileinfo/src/ffi/mod.rs": {
-      "sha256": "585cc92c87c6d3cb300dee57080a65dffa2a9e1aee0c082d44c41980c0810eb3",
-      "bytes": 7655,
-      "physical_lines": 214
+      "sha256": "1824cbb5ffbb29b68258b9b6b19ac6d52489205dfdd96faec2fdf0d9f9815a80",
+      "bytes": 7572,
+      "physical_lines": 211
     },
     "ext/fileinfo/src/lib.rs": {
-      "sha256": "1292c0e857e8563cfe93412fd042d506486b4a39299d2b0f36a19a6d5b59f105",
-      "bytes": 24023,
-      "physical_lines": 685
+      "sha256": "190d9df0aa44dc778f2ae34a0952fa2f23af56381271b1e1faf0817ee7dec2a9",
+      "bytes": 26936,
+      "physical_lines": 761
+    },
+    "ext/fileinfo/src/throwables.rs": {
+      "sha256": "965f49808bdb1265d60189a1fa4994622511f8cc30a271e98fd3a00a676faa94",
+      "bytes": 1570,
+      "physical_lines": 47
     },
     "ext/fileinfo/tests/capture.rs": {
-      "sha256": "e28fab9d907a1b5074076d456ae98e091a645d6481dbd704c2dc7d5b2c0cf0aa",
-      "bytes": 497,
+      "sha256": "eea0eb1ac1274c1e157d29d1e9365c8de963645ec2698be5f03651a2345cd37d",
+      "bytes": 503,
       "physical_lines": 14
-    },
-    "ext/fileinfo/tests/storage.rs": {
-      "sha256": "e0e0dc9cf317536fa1a489a120e8b952af2aa591ba157479b740cce2bef47c33",
-      "bytes": 5796,
-      "physical_lines": 172
     }
   },
   "configured": [
@@ -1346,9 +1345,9 @@
         "memory_limit=8M"
       ],
       "standing": "defined",
-      "status": 255,
-      "stdout": "before-open\n\nFatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 17280432 bytes) in <probe>/storage.php on line 57\n",
-      "stderr": ""
+      "status": 137,
+      "stdout": "before-open\n",
+      "stderr": "Hard memory limit of 16777216 bytes exhausted (tried to allocate 17285120 bytes) in <probe>/storage.php on line 57\n"
     },
     {
       "probe": "recognition",

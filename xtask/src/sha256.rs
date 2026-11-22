@@ -14,8 +14,11 @@ use serde::{Deserialize, Serialize};
 /// What a digest is spelt after.
 const PREFIX: &str = "sha256:";
 
-/// A SHA-256 digest, read and written as `sha256:<64 lowercase hex>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// A SHA-256 digest, read and written as `sha256:<64 lowercase hex>`; the
+/// default, all zeros, is the digest of no binary a pin names.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(into = "String", try_from = "String")]
 pub struct Sha256([u8; 32]);
 
@@ -24,6 +27,18 @@ impl Sha256 {
     pub fn of(bytes: &[u8]) -> Sha256 {
         use sha2::Digest as _;
         Sha256(sha2::Sha256::digest(bytes).into())
+    }
+
+    /// Whether `bytes` are what this digest names: `Err` carries theirs,
+    /// for the refusal to name.
+    pub fn holds(&self, bytes: &[u8]) -> Result<(), Sha256> {
+        let actual = Sha256::of(bytes);
+        (actual == *self).then_some(()).ok_or(actual)
+    }
+
+    /// The digest as a file's name spells it, `sha256-<hex>`.
+    pub fn key(&self) -> String {
+        self.to_string().replacen(':', "-", 1)
     }
 }
 
@@ -77,7 +92,7 @@ mod tests {
         assert_eq!(Sha256::of(b"").to_string(), empty);
         assert_eq!(empty.parse::<Sha256>().unwrap(), Sha256::of(b""));
         let upper = empty.to_uppercase();
-        for refused in [&empty[7..], &empty[..70], upper.as_str(), "md5:00"] {
+        for refused in [&empty[7..], &empty[..70], upper.as_str(), "sha1:00"] {
             assert!(refused.parse::<Sha256>().is_err(), "{refused}");
         }
     }

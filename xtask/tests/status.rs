@@ -8,6 +8,7 @@ use xtask::manifest::Manifest;
 use xtask::oracle::{PROMISE_VARIABLE, Platform, TREE_VARIABLE};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
+use xtask::sha256::Sha256;
 
 mod common {
     pub mod manifest;
@@ -221,10 +222,11 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
     );
 }
 
-/// The pinned php a runner pours: its version, keg path and md5 as the pin
-/// states them, and each variant's build for this machine a runner lays,
-/// so the oracle job reads the pin off this section and never parses
-/// `oracle.toml` a second time.
+/// The pinned php a runner pours: its version, keg path and SHA-256 as the
+/// pin states them, and each variant's build for this machine a runner
+/// lays by its SHA-256, so the oracle job reads the pin off this section
+/// and never parses `oracle.toml` a second time. No binary is named by an
+/// md5, which no pin carries.
 #[test]
 fn oracle_states_the_pinned_php_a_runner_pours() {
     let root = scratch("oracle-binary");
@@ -234,10 +236,8 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     let json = oracle_json(&root, None, None);
     assert_eq!(json["binary"]["version"], oracle.version.as_str());
     assert_eq!(json["binary"]["path"], path.as_str());
-    assert_eq!(
-        json["binary"]["md5"],
-        serde_json::json!(oracle.digest.md5())
-    );
+    assert_eq!(json["binary"]["sha256"], oracle.sha256.to_string());
+    assert!(json["binary"].get("md5").is_none(), "{json}");
     // The formula the keg is poured from, which is the keg's name
     // in the path the section states beside it, and the bottle of it, the
     // directory the keg stands in.
@@ -250,11 +250,12 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     for name in pin.variant.keys() {
         let built = pin.variant(name).unwrap().oracle;
         let laid = &json["variants"][name.as_str()];
-        if built.digest == xtask::oracle::Digest::default() {
+        if built.sha256 == Sha256::default() {
             assert!(laid.is_null(), "{name} pins no build here: {laid}");
             continue;
         }
-        assert_eq!(laid["md5"], serde_json::json!(built.digest.md5()), "{name}");
+        assert_eq!(laid["sha256"], built.sha256.to_string(), "{name}");
+        assert!(laid.get("md5").is_none(), "{name}: {laid}");
         assert_eq!(laid["path"], built.path.to_str().unwrap(), "{name}");
         assert_eq!(laid["platform"], Platform::this().unwrap().key(), "{name}");
         let pinned = pin.variant[name].build(Platform::this().unwrap()).unwrap();
@@ -275,7 +276,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     let pinned_here = pin
         .variant
         .keys()
-        .filter(|n| pin.variant(n).unwrap().oracle.digest != xtask::oracle::Digest::default());
+        .filter(|n| pin.variant(n).unwrap().oracle.sha256 != Sha256::default());
     assert_eq!(
         json["variants"].as_object().unwrap().len(),
         pinned_here.count()
@@ -284,7 +285,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     assert!(
         md.contains(&format!(
             "| binary |  | {path} | php {}, {}, poured from the formula {formula} |",
-            oracle.version, oracle.digest
+            oracle.version, oracle.sha256
         )),
         "{md}"
     );
@@ -292,7 +293,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
         let row = md
             .lines()
             .find(|l| l.starts_with(&format!("| variant {name} |")));
-        let digest = pin.variant(name).unwrap().oracle.digest.to_string();
+        let digest = pin.variant(name).unwrap().oracle.sha256.to_string();
         let state = match laid["closure"].as_str() {
             Some(closure) => format!("{digest}, closure {closure} |"),
             None => format!("{digest} |"),
@@ -301,86 +302,23 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     }
 }
 
-/// Where the pin carries a SHA-256 the section prints it beside the md5
-/// the CI scripts read today, and where it carries no md5 only the
-/// SHA-256: `[oracle]` with both, each variant build by its SHA-256 alone,
-/// laid over whichever digest the tracked pin carries.
-#[test]
-fn oracle_prints_the_sha256_where_the_pin_carries_one() {
-    let root = scratch("oracle-sha256");
-    let pinned = pin().oracle;
-    let file = root.join("oracle.toml");
-    let text = std::fs::read_to_string(&file).unwrap();
-    let php = format!("sha256:{}", "a".repeat(64));
-    let md5 = "c".repeat(32);
-    let build = format!("sha256:{}", "b".repeat(64));
-    let digest = r#"(?:md5 = "[0-9a-f]{32}"|sha256 = "sha256:[0-9a-f]{64}")"#;
-    let oracle = regex_lite::Regex::new(&format!("\n{digest}")).unwrap();
-    let text = oracle.replacen(&text, 1, format!("\nsha256 = \"{php}\"\nmd5 = \"{md5}\""));
-    let builds = regex_lite::Regex::new(&format!(
-        r#"(\n[a-z0-9_-]+ = \{{ path = "[^"]*", ){digest}"#
-    ));
-    let text = builds
-        .unwrap()
-        .replace_all(&text, format!("${{1}}sha256 = \"{build}\""));
-    // Every platform row of every variant is laid by its SHA-256 alone,
-    // whatever this machine's platform: a platform name the pattern
-    // misses fails here on every machine, not only on the one it names.
-    let (mut table, mut rows) = ("", 0);
-    for line in text.lines() {
-        if line.starts_with('[') {
-            table = line;
-        } else if table.starts_with("[variant.") && line.contains(" = { path = ") {
-            rows += 1;
-            let laid = line.contains(&format!("sha256 = \"{build}\""));
-            assert!(laid && !line.contains("md5 = \""), "{table}: {line}");
-        }
-    }
-    assert!(rows > 0, "the tracked pin carries a variant's platform row");
-    std::fs::write(&file, text.as_ref()).unwrap();
-    let json = oracle_json(&root, None, None);
-    assert_eq!(json["binary"]["sha256"], php.as_str());
-    assert_eq!(json["binary"]["md5"], md5.as_str());
-    for (name, laid) in json["variants"].as_object().unwrap() {
-        assert_eq!(laid["sha256"], build.as_str(), "{name}");
-        assert!(laid["md5"].is_null(), "{name}: {laid}");
-    }
-    let md = status_with_pin(&root, &["--section", "oracle"], None, None).ok();
-    assert!(
-        md.contains(&format!("php {}, {php}, poured", pinned.version)),
-        "{md}"
-    );
-}
-
 /// A scratch workspace whose pin is `fixture` of
-/// `xtask/fixtures/oracle/formula/`, in place of the tracked one. The
-/// fixture pins php by an md5; where the tracked pin carries a SHA-256,
-/// the scratch pin carries one in its place, since the tracked
-/// `scripts/ci/pinned-php.sh` the tests run reads the spelling the
-/// tracked pin carries.
+/// `xtask/fixtures/oracle/formula/`, in place of the tracked one, which
+/// pins php by the SHA-256 of 64 zeros the stand-in [`SHASUM`] prints.
 fn scratch_poured(name: &str, fixture: &str) -> Tree {
     let root = scratch(name);
     let fixture = xtask::package_dir()
         .join("fixtures/oracle/formula")
         .join(fixture);
-    let text = std::fs::read_to_string(fixture).unwrap();
-    let md5 = format!("\nmd5 = \"{}\"", "0".repeat(32));
-    let text = match pin().oracle.digest.sha256() {
-        Some(_) => text.replacen(&md5, &format!("\nsha256 = \"{ZEROS}\""), 1),
-        None => text,
-    };
-    std::fs::write(root.join("oracle.toml"), text).unwrap();
+    std::fs::copy(fixture, root.join("oracle.toml")).unwrap();
     root
 }
 
-/// The SHA-256 the stand-in [`SHASUM`] prints, as a pin spells one.
-const ZEROS: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-
 /// The digest the scratch pin of `root` holds php to, as
-/// `scripts/ci/pinned-php.sh` names it: `md5 <hex>` or `sha256:<hex>`.
+/// `scripts/ci/pinned-php.sh` names it: `sha256:<hex>`.
 fn held(root: &Path) -> String {
     let pin = xtask::oracle::Pin::load(&root.join("oracle.toml")).unwrap();
-    pin.oracle.digest.to_string()
+    pin.oracle.sha256.to_string()
 }
 
 /// The stand-in `brew` of [`pinned_php`], `@prefix@` its Homebrew prefix.
@@ -447,15 +385,7 @@ echo "curl $*" >&2
 exit 1
 "#;
 
-/// The stand-in `md5` of [`pinned_php`]: the fixtures' digest for
-/// whatever file stands, as macOS's `md5 -q` prints one.
-const MD5: &str = r#"#!/bin/sh
-[ "$#" = 2 ] && [ "$1" = -q ] && [ -f "$2" ] && echo 00000000000000000000000000000000 && exit 0
-echo "md5 $*" >&2
-exit 1
-"#;
-
-/// The stand-in `shasum` of [`pinned_php`]: [`ZEROS`]'s hex for whatever
+/// The stand-in `shasum` of [`pinned_php`]: 64 zeros for whatever
 /// file stands, as `shasum -a 256` prints one.
 const SHASUM: &str = r#"#!/bin/sh
 [ "$#" = 3 ] && [ "$1" = -a ] && [ "$2" = 256 ] && [ -f "$3" ] &&
@@ -466,8 +396,7 @@ exit 1
 
 /// `scripts/ci/pinned-php.sh` over the pin of `root` as `status --section
 /// oracle --format json` renders it, on a machine of stand-ins whose
-/// Homebrew prefix is `<root>/brew` ([`BREW`], [`CURL`], [`MD5`],
-/// [`SHASUM`]), and
+/// Homebrew prefix is `<root>/brew` ([`BREW`], [`CURL`], [`SHASUM`]), and
 /// what it printed on each stream. So nothing here pours, fetches or pins
 /// a keg of this machine, and what it asked of `brew` and `curl`
 /// outside a dry run is `<root>/brew/calls`.
@@ -481,12 +410,7 @@ fn pinned_php(root: &Path, dry: bool) -> (serde_json::Value, String, String) {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(root.join("brew")).unwrap();
     let prefix = root.join("brew").display().to_string();
-    for (name, body) in [
-        ("brew", BREW),
-        ("curl", CURL),
-        ("md5", MD5),
-        ("shasum", SHASUM),
-    ] {
+    for (name, body) in [("brew", BREW), ("curl", CURL), ("shasum", SHASUM)] {
         std::fs::write(bin.join(name), body.replace("@prefix@", &prefix)).unwrap();
         xtask::scratch::executable(&bin.join(name)).unwrap();
     }
@@ -610,7 +534,7 @@ fn oracle_names_the_formula_a_runner_pours_and_the_dry_run_says_it() {
 
 /// php's own keg is `brew pin`ned as each keg of `[closure]` is,
 /// on a machine where it is already poured too: the fixture pin's keg
-/// stands under the stand-in prefix at the pin's md5, and the one keg of
+/// stands under the stand-in prefix at the pin's SHA-256, and the one keg of
 /// its `[closure]` at its record, so `scripts/ci/pinned-php.sh` pours
 /// neither, says so, and asks `brew` for two pins and nothing else, the
 /// closure's keg and then the formula the pin names. Each is named as
@@ -674,7 +598,7 @@ fn the_keg_of_the_pinned_php_is_brew_pinned_where_it_is_already_poured() {
 /// is put back by its bare name. The stand-in `brew` lands the keg where
 /// the formula and the commit it was handed say ([`BREW`]), so a pour
 /// of another formula or another bottle misses the pin's path and the
-/// md5 that follows the pour stops it. Before the install the pour drops
+/// SHA-256 that follows the pour stops it. Before the install the pour drops
 /// Homebrew's cached choice of curl, `<cache>/tool-selection/curl`, which
 /// a keg the uninstall took can leave naming a curl that cannot start.
 /// The formula the tap holds drops homebrew-core's `no_autobump!`, which
@@ -822,12 +746,12 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     let variants = pin
         .variant
         .keys()
-        .map(|name| pin.variant(name).unwrap().oracle.digest)
-        .filter(|digest| *digest != xtask::oracle::Digest::default());
-    let kept: Vec<String> = std::iter::once(pin.oracle.digest.clone())
+        .map(|name| pin.variant(name).unwrap().oracle.sha256)
+        .filter(|digest| *digest != Sha256::default());
+    let kept: Vec<String> = std::iter::once(pin.oracle.sha256)
         .chain(variants)
         .map(|digest| digest.key())
-        .map(|md5| format!("target/harness/phpt-runs/pin-{}-{md5}", pin.source.tag))
+        .map(|key| format!("target/harness/phpt-runs/pin-{}-{key}", pin.source.tag))
         .collect();
     assert_eq!(
         corpus["targets"],

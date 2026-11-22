@@ -23,10 +23,8 @@
 //! else: no file and no reading. Each value is replaced where it stands,
 //! so every comment and key order a person wrote is kept: `oracle.toml`'s
 //! `[oracle]`, `[closure]`, `[source]`, `[recipe.env]`'s
-//! `TEST_PHP_EXECUTABLE`, `[sapi]` and `[fastcgi]`'s digest, every `md5`
-//! of those tables spelt as the `sha256` that replaces it (ruled
-//! 2026-11-21), so the first proposal against the pinned keg is that
-//! swap and nothing else; `ci/oracle/configure.toml` below its
+//! `TEST_PHP_EXECUTABLE`, `[sapi]` and `[fastcgi]`'s SHA-256;
+//! `ci/oracle/configure.toml` below its
 //! header; `dist/inputs.toml`'s `[php]`, `[php.ini]` and `[php.fpm]`; and
 //! `dist/Dockerfile`'s `ARG PHP_VERSION`; `NOTICE`'s php-src tag and its
 //! commit, as `[source]` states them, in the one sentence that names them,
@@ -575,7 +573,7 @@ fn pinned(text: &str, pin: &Pin, keg: &Keg, tree: &Checkout, today: &str) -> Res
     let path = |path: &Path| quoted(&path.to_string_lossy());
     let (_, php, sha256) = &keg.binaries[0];
     file.set("oracle", "path", &path(php))?;
-    file.swapped("oracle", sha256)?;
+    file.set("oracle", "sha256", &quoted(&sha256.to_string()))?;
     if let Some(recorded) = pin
         .closure
         .as_ref()
@@ -615,7 +613,8 @@ fn pinned(text: &str, pin: &Pin, keg: &Keg, tree: &Checkout, today: &str) -> Res
         .get("fastcgi")
         .and_then(|fastcgi| fastcgi.get("params"));
     if let Some(params) = params.and_then(toml::Value::as_str) {
-        file.swapped("fastcgi", &Sha256::of(params.as_bytes()))?;
+        let sha256 = Sha256::of(params.as_bytes()).to_string();
+        file.set("fastcgi", "sha256", &quoted(&sha256))?;
     }
     Ok(file.text())
 }
@@ -624,11 +623,8 @@ fn pinned(text: &str, pin: &Pin, keg: &Keg, tree: &Checkout, today: &str) -> Res
 /// prints it for the keg: the tracked header, php's SHA-256 and the
 /// arguments.
 fn configured(text: &str, keg: &Keg) -> Result<String> {
-    let Some(at) = ["\nsha256 = ", "\nmd5 = "]
-        .iter()
-        .find_map(|line| text.find(line))
-    else {
-        bail!("{CONFIGURE} has no `sha256 = ` or `md5 = ` line below its header");
+    let Some(at) = text.find("\nsha256 = ") else {
+        bail!("{CONFIGURE} has no `sha256 = ` line below its header");
     };
     let mut out = text[..=at].to_owned();
     let sha256 = quoted(&keg.binaries[0].2.to_string());
@@ -800,20 +796,6 @@ impl Text {
         let end = start + value_length(&line[start..]);
         self.lines[at] = format!("{}{value}{}", &line[..start], &line[end..]);
         Ok(())
-    }
-
-    /// `[table]` holding its binary to `sha256`: the `md5` it sets spelt
-    /// as the `sha256` that replaces it, or its `sha256` set and any `md5`
-    /// beside it dropped.
-    fn swapped(&mut self, table: &str, sha256: &Sha256) -> Result<()> {
-        let md5 = self.find(table, "md5")?;
-        match (self.find(table, "sha256")?, md5) {
-            (Some(_), Some(at)) => drop(self.lines.remove(at)),
-            (Some(_), None) => {}
-            (None, Some(at)) => self.lines[at] = self.lines[at].replacen("md5", "sha256", 1),
-            (None, None) => bail!("[{table}] sets neither md5 nor sha256"),
-        }
-        self.set(table, "sha256", &quoted(&sha256.to_string()))
     }
 
     /// `line` written after the line of `[table]` that sets `name`.

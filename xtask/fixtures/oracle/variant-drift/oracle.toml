@@ -1,12 +1,12 @@
 # The fixture's pin (#1890): the grammar's least, a main oracle nowhere on
 # any machine, and the variant `drift` pinned for every platform at the
 # shell file beside this one, a relative path being the pin's directory's,
-# by an md5 that file does not have; the macOS build names the digest of the
+# by a SHA-256 that file does not have; the macOS build names the digest of the
 # fixture's own [closure], as the grammar asks (#2935).
 [oracle]
 version = "8.5.9"
 path = "/nowhere/php"
-md5 = "00000000000000000000000000000000"
+sha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
 [source]
 tag = "php-8.5.9"
@@ -34,6 +34,6 @@ zstd = "1.5.7_1"
 
 [variant.drift]
 flags = ["--enable-zend-test"]
-darwin-arm64 = { path = "php", md5 = "00000000000000000000000000000000", closure = "sha256:f22ee36557db677d4e720a3e315fa3aa26230a9d9e6c0489eee4826a4bae71e4" }
-linux-x86_64 = { path = "php", md5 = "00000000000000000000000000000000", image = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
-linux-aarch64 = { path = "php", md5 = "00000000000000000000000000000000", image = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+darwin-arm64 = { path = "php", sha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000", closure = "sha256:f22ee36557db677d4e720a3e315fa3aa26230a9d9e6c0489eee4826a4bae71e4" }
+linux-x86_64 = { path = "php", sha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000", image = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+linux-aarch64 = { path = "php", sha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000", image = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }

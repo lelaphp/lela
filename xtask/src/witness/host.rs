@@ -902,6 +902,7 @@ mod tests {
     use crate::divergence::Registry;
     use crate::oracle::{Host, Pin, Promise, Stdin, Streams};
     use crate::scratch::Tree;
+    use crate::sha256::Sha256;
 
     /// The tracked pin, whole.
     fn tracked() -> Pin {
@@ -922,15 +923,12 @@ mod tests {
 
     /// The tracked pin with `php-cgi` standing at `cgi`, pinned by the
     /// digest given, the file's own where none is.
-    fn pin(cgi: &Path, md5: Option<&str>) -> Pin {
+    fn pin(cgi: &Path, sha256: Option<Sha256>) -> Pin {
         let mut pin = tracked();
-        let md5 = md5.map_or_else(
-            || format!("{:x}", md5::compute(fs::read(cgi).unwrap_or_default())),
-            str::to_owned,
-        );
+        let sha256 = sha256.unwrap_or_else(|| Sha256::of(&fs::read(cgi).unwrap_or_default()));
         pin.sapi.cgi = Some(Host {
             path: cgi.to_path_buf(),
-            digest: crate::oracle::Digest::Md5(md5),
+            sha256,
         });
         pin
     }
@@ -1041,13 +1039,14 @@ mod tests {
         let hosts = Tree::new("host-line-absent").unwrap();
         let engine = host(&hosts, "engine", "echo 1");
         let absent = hosts.join("php-cgi");
-        let (judgement, note) = judged(LINE, &pin(&absent, Some("0")), &engine);
+        let (judgement, note) = judged(LINE, &pin(&absent, Some(Sha256::default())), &engine);
         assert_eq!(judgement, Judgement::Bork, "{note}");
         assert!(note.contains(&absent.display().to_string()), "{note}");
         let pinned = host(&hosts, "php-cgi", "echo 1");
-        let (judgement, note) = judged(LINE, &pin(&pinned, Some("0")), &engine);
+        let (judgement, note) = judged(LINE, &pin(&pinned, Some(Sha256::default())), &engine);
         assert_eq!(judgement, Judgement::Bork, "{note}");
-        assert!(note.contains("the pin's [sapi] says md5 0"), "{note}");
+        let says = format!("the pin's [sapi] says {}", Sha256::default());
+        assert!(note.contains(&says), "{note}");
     }
 
     /// A program that does not end on its own is cut at the line's `head`

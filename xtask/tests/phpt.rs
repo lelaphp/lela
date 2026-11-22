@@ -283,7 +283,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
     let kept = scratch.root.join(format!(
         "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
         pin.source.tag,
-        pin.oracle.digest.key()
+        pin.oracle.sha256.key()
     ));
     let verdicts = || -> Vec<String> {
         let run: serde_json::Value =
@@ -1328,7 +1328,7 @@ fn a_binary_the_tree_has_moved_past_runs_nothing_and_the_skip_names_it() {
 }
 
 /// A binary the tree has not moved past is the lane's engine as before,
-/// and the reading names it: the path and the md5 of its bytes, so two
+/// and the reading names it: the path and the SHA-256 of its bytes, so two
 /// readings of one tree can be told apart.
 #[test]
 fn a_binary_the_tree_has_not_moved_past_writes_an_ordinary_reading_that_names_it() {
@@ -1353,10 +1353,10 @@ fn a_binary_the_tree_has_not_moved_past_writes_an_ordinary_reading_that_names_it
         .unwrap_or_else(|| panic!("{}", reading.message))
         .1;
     let (path, digest) = stamp
-        .split_once(" md5 ")
+        .split_once(" sha256:")
         .unwrap_or_else(|| panic!("{stamp}"));
     assert_eq!(path, scratch.engine.display().to_string());
-    assert_eq!(digest.len(), 32, "{stamp}");
+    assert_eq!(digest.len(), 64, "{stamp}");
     assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()), "{stamp}");
 }
 
@@ -2938,7 +2938,7 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
     let kept = scratch.root.join(format!(
         "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
         pin.source.tag,
-        pin.oracle.digest.key()
+        pin.oracle.sha256.key()
     ));
     let kept: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&kept).unwrap()).unwrap();
