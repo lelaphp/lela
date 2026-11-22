@@ -1,0 +1,57 @@
+# The services the packages lane provides, as Mitchell ruled on 2026-11-21
+# (R11, spec lelaphp/lela#32): MySQL, PostgreSQL and Redis, each at the
+# address ci/packages/services.env gives, the one file that keeps the
+# three addresses. `xtask packages` hands every install and suite those
+# lines as its environment, and this file reads them as compose's
+# variables, so a service starts where the suites are told it answers:
+#
+#   docker compose --env-file ci/packages/services.env -f ci/packages/compose.yaml up -d --wait
+#
+# `--wait` returns once each healthcheck passes. The nightly `packages`
+# job runs on a Mac, since the oracle is a macOS keg, and the Mac image has
+# no Docker, so it starts the same three from Homebrew at the same
+# addresses, as .github/actions/mysql does for ci/mysql/compose.yaml; this
+# file is how a Linux runner, or a person's machine, starts them. MySQL's
+# user is root with an empty password, as services.env names it and
+# ci/mysql/compose.yaml sets it up.
+name: lela-packages
+services:
+  mysql:
+    image: mysql:8.4
+    # Binary logging off, as ci/mysql/compose.yaml has it: no suite reads
+    # the binlogs, and the image writes them by default.
+    command: ["mysqld", "--skip-log-bin"]
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+    ports:
+      - "${MYSQL_HOST}:${MYSQL_PORT}:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "--protocol=tcp", "-h", "127.0.0.1", "-uroot", "--silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_HOST}:${POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+  redis:
+    image: redis:7.4
+    ports:
+      - "${REDIS_HOST}:${REDIS_PORT}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 60

@@ -18,6 +18,9 @@
 #   targets it is handed: the threaded dispatch's corpus (#2970);
 # - `deny`, on the Linux runner: `cargo deny` over the dependency graph,
 #   the advisories and crates.io as the only source (#4372);
+# - `packages`, on a Mac of its own: the test suites of the Composer
+#   packages data/packages.toml pins, under the pinned php and under Lela,
+#   beside the services of ci/packages/compose.yaml (lelaphp/lela#32);
 # - `red-nightly`: a red `soak`, `tailcall` or `deny` filed on the tracker
 #   after two nightlies in a row (#2980).
 #
@@ -379,6 +382,99 @@ jobs:
           fetch-depth: 0
       - run: cargo install --locked cargo-deny@0.20.2
       - run: cargo deny check advisories sources
+
+  packages:
+    name: the packages lane, Composer packages' suites under the oracle and Lela
+    # `xtask packages` (spec lelaphp/lela#32): each package data/packages.toml
+    # pins, fetched at its commit and held to its digests, its development
+    # dependencies installed from its lock, its suite run once under the
+    # pinned php and once under Lela; one reading per package and one of the
+    # whole. Its readings bind nothing (R12), so a failing one fails no job
+    # and `red-nightly` reads none; the store is stashed either way. It runs
+    # on a Mac since the oracle is a macOS keg, as the oracle job does, and
+    # the Mac image has no Docker, so the three services ci/packages/
+    # compose.yaml declares (R11) are started from Homebrew at the
+    # addresses of ci/packages/services.env, the one file that keeps them,
+    # which `xtask packages` hands every install and suite. It needs the
+    # network for the pinned sources and their development dependencies.
+    if: ${{ github.event_name == 'schedule' || inputs.full }}
+    runs-on: ${{ github.event.repository.private && 'blacksmith-12vcpu-macos-15' || 'macos-15' }}
+    # How long 500 packages take has not been measured yet; a step limit
+    # of 30 minutes per install or suite is the instrument's own.
+    timeout-minutes: 360
+    env:
+      XTASK: cargo run --profile release-da --quiet --package xtask --
+      XTASK_SEATS: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: ./.github/actions/workspace
+      - uses: ./.github/actions/oracle-runner
+        with:
+          xtask: ${{ env.XTASK }}
+      - uses: ./.github/actions/pinned-php
+        with:
+          xtask: ${{ env.XTASK }}
+      # Composer at one release, held to the SHA-256 getcomposer.org
+      # publishes for it, and run under the pinned php, which the
+      # instrument does; Homebrew's formula would bring a php of its own.
+      - name: Composer 2.11.2
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSLf -o "$RUNNER_TEMP/bin/composer" https://getcomposer.org/download/2.11.2/composer.phar
+          echo "dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028  $RUNNER_TEMP/bin/composer" | shasum -a 256 -c
+          chmod +x "$RUNNER_TEMP/bin/composer"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # The services of ci/packages/compose.yaml, each from Homebrew on a
+      # data directory of the job's own and at the address services.env
+      # gives it; MySQL as .github/actions/mysql starts it, root with an
+      # empty password. A service that does not answer stops the job, since
+      # every suite that needs it would read as Lela's miss.
+      - name: MySQL, PostgreSQL and Redis at ci/packages/services.env's addresses
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+          HOMEBREW_NO_ANALYTICS: 1
+        run: |
+          set -a; . ci/packages/services.env; set +a
+          brew install mysql@8.4 postgresql@17 redis
+          my="$(brew --prefix mysql@8.4)/bin" pg="$(brew --prefix postgresql@17)/bin"
+          rm -rf "$RUNNER_TEMP/mysql" "$RUNNER_TEMP/postgres"
+          "$my/mysqld" --no-defaults --initialize-insecure --datadir="$RUNNER_TEMP/mysql"
+          nohup "$my/mysqld" --no-defaults --datadir="$RUNNER_TEMP/mysql" --bind-address="$MYSQL_HOST" \
+            --port="$MYSQL_PORT" --socket="$RUNNER_TEMP/mysql.sock" --mysqlx=OFF --skip-log-bin \
+            > "$RUNNER_TEMP/mysqld.log" 2>&1 &
+          "$pg/initdb" -D "$RUNNER_TEMP/postgres" -U "$POSTGRES_USER" --auth=trust > /dev/null
+          "$pg/pg_ctl" -D "$RUNNER_TEMP/postgres" -l "$RUNNER_TEMP/postgres.log" \
+            -o "-h $POSTGRES_HOST -p $POSTGRES_PORT -k $RUNNER_TEMP" start
+          "$(brew --prefix redis)/bin/redis-server" --bind "$REDIS_HOST" --port "$REDIS_PORT" --daemonize yes \
+            --logfile "$RUNNER_TEMP/redis.log"
+          # compose.yaml's healthchecks: each pinged every 2 s, 60 times.
+          answers() {
+            "$my/mysqladmin" ping --protocol=tcp -h "$MYSQL_HOST" -P "$MYSQL_PORT" -uroot --silent 2>/dev/null &&
+              "$pg/pg_isready" -q -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" &&
+              "$(brew --prefix redis)/bin/redis-cli" -h "$REDIS_HOST" -p "$REDIS_PORT" ping > /dev/null 2>&1
+          }
+          for _ in $(seq 60); do answers && break; sleep 2; done
+          answers || { cat "$RUNNER_TEMP"/*.log; echo "::error::a service of ci/packages/compose.yaml did not answer"; exit 1; }
+          "$my/mysql" --socket="$RUNNER_TEMP/mysql.sock" -uroot -e "
+            CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '';
+            GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+            CREATE DATABASE IF NOT EXISTS \`$MYSQL_DATABASE\`;"
+          "$pg/psql" -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d postgres -q \
+            -c "ALTER USER \"$POSTGRES_USER\" PASSWORD '$POSTGRES_PASSWORD'" -c "CREATE DATABASE \"$POSTGRES_DB\""
+      - name: Lela's binary
+        run: cargo build --profile release-da -p php_sapi_cli
+      - name: the packages lane, the whole list
+        run: $XTASK packages || true
+      - uses: ./.github/actions/stash
+        if: always()
+        with:
+          put: packages
+          path: target/harness/log/
 
   # A red nightly filed (#2980), as harness.yml's `red-main` files a red
   # main (#1156): `soak` and `tailcall` fail no per-commit run, so their
