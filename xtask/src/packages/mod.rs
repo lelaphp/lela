@@ -11,7 +11,9 @@
 //! **The list.** [`LIST`] unless one is named: a `[[package]]` row each,
 //! its [`Pinned`] fields and how its suite runs. A run downloads nothing
 //! the row does not pin (R9), and a source or lock whose digest is not
-//! the row's is refused ([`digest`] is how both are taken).
+//! the row's is refused ([`digest`] is how both are taken). Every install
+//! and suite is given the services' addresses of [`SERVICES`], the file
+//! the nightly job starts the services by.
 //!
 //! **What it writes.** One reading per package, scoped by the package's
 //! name, and one of the whole, scoped [`WHOLE`] (R10): packages listed,
@@ -47,6 +49,10 @@ pub const INSTRUMENT: &str = "packages";
 
 /// The list a run takes where none is named, relative to the root.
 pub(crate) const LIST: &str = "data/packages.toml";
+
+/// The services' addresses, relative to the root: `KEY=VALUE` lines,
+/// which docker compose reads as an env file and a shell can source.
+pub(crate) const SERVICES: &str = "ci/packages/services.env";
 
 /// The scope of the whole's reading; a package's is its name, which
 /// Composer spells `<vendor>/<name>`, so the two never meet.
@@ -103,7 +109,12 @@ pub(crate) struct Row {
 impl Row {
     /// The lane's run of this row, its lock and a repository named by a
     /// relative path found beside the list, in a scratch tree of its own.
-    fn run(&self, beside: &Path, sides: &mut Sides<'_>) -> Result<Verdict> {
+    fn run(
+        &self,
+        beside: &Path,
+        env: &[(String, String)],
+        sides: &mut Sides<'_>,
+    ) -> Result<Verdict> {
         let pinned = &self.pinned;
         let work = crate::scratch::Tree::new("packages")?;
         let repository = &pinned.repository;
@@ -122,6 +133,7 @@ impl Row {
             runner: &self.runner,
             args: &self.args,
             needs: &self.needs,
+            env,
         };
         Ok(lane::run(&package, &work, sides))
     }
@@ -171,10 +183,24 @@ pub(crate) fn command(
     run(root, manifest, ask)?.record(store, INSTRUMENT)
 }
 
+/// The services' addresses [`SERVICES`] gives, in its order.
+fn services(root: &Path) -> Result<Vec<(String, String)>> {
+    let text = crate::read(&root.join(SERVICES))?;
+    (text.lines().map(str::trim))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (key, value) = (line.split_once('='))
+                .with_context(|| format!("{SERVICES}: {line:?} is not KEY=VALUE"))?;
+            Ok((key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
 /// Run every package of the list, one reading each and one of the whole.
 pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Took> {
     let list = root.join(ask.list.as_deref().unwrap_or(Path::new(LIST)));
     let rows = load(&list)?;
+    let env = services(root)?;
     let beside = list.parent().unwrap_or(root);
     let pin = manifest.pin()?;
     let snapshot = Snapshot::disk(root)?;
@@ -198,7 +224,7 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Took> {
                     php: &pin.oracle.path,
                     engine,
                 };
-                row.run(beside, &mut sides)?
+                row.run(beside, &env, &mut sides)?
             }
             Err(ref why) => Verdict::Unjudged(format!("nothing ran; {why}")),
         };

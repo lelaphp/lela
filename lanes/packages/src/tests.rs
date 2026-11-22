@@ -76,6 +76,16 @@ impl Shell for Scripted {
     }
 }
 
+/// The services' addresses every test's package is given.
+fn services() -> &'static [(String, String)] {
+    static SERVICES: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    SERVICES.get_or_init(|| {
+        [("MYSQL_HOST", "127.0.0.1"), ("REDIS_PORT", "6379")]
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .to_vec()
+    })
+}
+
 /// The package every test runs, needing `needs`.
 fn package(needs: &[String]) -> Package<'_> {
     Package {
@@ -87,6 +97,7 @@ fn package(needs: &[String]) -> Package<'_> {
         runner: "vendor/bin/phpunit",
         args: &[],
         needs,
+        env: services(),
     }
 }
 
@@ -298,10 +309,11 @@ fn the_plan_fetches_at_the_commit_and_runs_the_suite_once_under_each_php() {
     );
 }
 
-/// Every suite's environment carries the services' fixed addresses, under
-/// the oracle, under Lela and at the install, whatever the package needs.
+/// Every suite's environment carries the services' addresses the package
+/// is given, under the oracle, under Lela and at the install, whatever the
+/// package needs.
 #[test]
-fn each_suite_s_environment_carries_the_services_fixed_addresses() {
+fn each_suite_s_environment_carries_the_services_addresses() {
     let ours = log(&[("A::testOne", "")]);
     let mut shell = Scripted::new(Some(&ours), Some(&ours));
     judged(super::run(&package(&[]), Path::new(WORK), &mut shell));
@@ -313,15 +325,7 @@ fn each_suite_s_environment_carries_the_services_fixed_addresses() {
         .collect();
     assert_eq!(suites.len(), 3);
     for command in suites {
-        let env: BTreeMap<&str, &str> = (command.env.iter())
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        assert_eq!(env.get("MYSQL_HOST"), Some(&"127.0.0.1"), "{command:?}");
-        assert_eq!(env.get("MYSQL_PORT"), Some(&"3306"));
-        assert_eq!(env.get("POSTGRES_HOST"), Some(&"127.0.0.1"));
-        assert_eq!(env.get("POSTGRES_PORT"), Some(&"5432"));
-        assert_eq!(env.get("REDIS_HOST"), Some(&"127.0.0.1"));
-        assert_eq!(env.get("REDIS_PORT"), Some(&"6379"));
+        assert_eq!(command.env, services(), "{command:?}");
     }
     assert_eq!(
         Service::ALL.map(Service::name),

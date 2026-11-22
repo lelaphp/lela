@@ -16,7 +16,8 @@
 //! `composer.lock` and installed once, under the oracle's php, and the
 //! suite runs through the package's own runner once under the oracle and
 //! once under Lela, each writing an XML log. Every install and every
-//! suite is given the services' fixed addresses ([`Service`]).
+//! suite is given the services' fixed addresses, which the adapter reads
+//! from the one file the nightly job starts the services ([`Service`]) by.
 //!
 //! **The denominator** (R10). The tests the oracle passes are the found
 //! set. A test is met when the oracle passes it and Lela passes it; one
@@ -100,7 +101,7 @@ pub trait Shell {
 
 /// The services the lane provides, each at a fixed address: the nightly
 /// job starts them from compose files kept in the tree (R11), and every
-/// suite is given all of them, whatever the package needs.
+/// suite is given all of their addresses, whatever the package needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Service {
     Mysql,
@@ -117,27 +118,6 @@ impl Service {
             Service::Mysql => "mysql",
             Service::Postgres => "postgres",
             Service::Redis => "redis",
-        }
-    }
-
-    /// Where it answers, as the environment a suite is given.
-    pub fn env(self) -> &'static [(&'static str, &'static str)] {
-        match self {
-            Service::Mysql => &[
-                ("MYSQL_HOST", "127.0.0.1"),
-                ("MYSQL_PORT", "3306"),
-                ("MYSQL_USER", "root"),
-                ("MYSQL_PASSWORD", ""),
-                ("MYSQL_DATABASE", "test"),
-            ],
-            Service::Postgres => &[
-                ("POSTGRES_HOST", "127.0.0.1"),
-                ("POSTGRES_PORT", "5432"),
-                ("POSTGRES_USER", "postgres"),
-                ("POSTGRES_PASSWORD", "postgres"),
-                ("POSTGRES_DB", "test"),
-            ],
-            Service::Redis => &[("REDIS_HOST", "127.0.0.1"), ("REDIS_PORT", "6379")],
         }
     }
 
@@ -166,6 +146,9 @@ pub struct Package<'a> {
     pub args: &'a [String],
     /// The services its suite needs, by [`Service::name`].
     pub needs: &'a [String],
+    /// The services' addresses, the environment every install and suite
+    /// is given.
+    pub env: &'a [(String, String)],
 }
 
 /// What one package's run came to.
@@ -223,7 +206,7 @@ pub fn run(package: &Package<'_>, work: &Path, shell: &mut impl Shell) -> Verdic
 /// The steps of [`run`], the first that could not be taken ending it.
 fn taken(package: &Package<'_>, work: &Path, shell: &mut impl Shell) -> Result<Verdict, String> {
     let source = work.join("source");
-    let git = |args: &[&str], dir: &Path| command(Program::Git, args, dir);
+    let git = |args: &[&str], dir: &Path| command(Program::Git, args, dir, &[]);
     let (repository, commit) = (package.repository, package.commit);
     exited(shell, &git(&["init", "-q", "source"], work))?;
     exited(
@@ -244,7 +227,10 @@ fn taken(package: &Package<'_>, work: &Path, shell: &mut impl Shell) -> Result<V
     };
     exited(shell, &laid)?;
     let install = ["install", "--no-interaction", "--no-progress"];
-    exited(shell, &command(Program::Composer, &install, &source))?;
+    exited(
+        shell,
+        &command(Program::Composer, &install, &source, package.env),
+    )?;
     let (theirs, said) = suite(package, Php::Oracle, work, shell)?;
     if theirs.is_empty() {
         return Ok(Verdict::LeftOut(format!(
@@ -255,16 +241,13 @@ fn taken(package: &Package<'_>, work: &Path, shell: &mut impl Shell) -> Result<V
     Ok(Verdict::Judged(matched(&theirs, &ours)))
 }
 
-/// `program` with `args` in `dir`, given the services' addresses.
-fn command(program: Program, args: &[&str], dir: &Path) -> Step {
-    let env = (Service::ALL.iter().flat_map(|s| s.env()))
-        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-        .collect();
+/// `program` with `args` in `dir`, given `env`.
+fn command(program: Program, args: &[&str], dir: &Path, env: &[(String, String)]) -> Step {
     Step::Run(Command {
         program,
         args: args.iter().map(|a| (*a).to_owned()).collect(),
         dir: dir.to_path_buf(),
-        env,
+        env: env.to_vec(),
     })
 }
 
@@ -306,7 +289,7 @@ fn suite(
         .chain(package.args.iter().map(String::as_str))
         .chain([LOG, log_path.as_str()])
         .collect();
-    let step = command(Program::Php(php), &args, &work.join("source"));
+    let step = command(Program::Php(php), &args, &work.join("source"), package.env);
     let ended = match shell.run(&step) {
         came @ Came::Exited(..) => said(&came),
         came => return Err(format!("{} came to {}", worded(&step), said(&came))),

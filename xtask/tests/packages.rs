@@ -93,24 +93,39 @@ fn stand_ins(tree: &Tree, php: &Path) -> PathBuf {
     bin.join("lela")
 }
 
+/// PATH with the stand-ins of `fixture` first.
+fn on_path(fixture: &Tree) -> std::ffi::OsString {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fixture.join("bin")];
+    paths.extend(std::env::split_paths(&path));
+    std::env::join_paths(paths).unwrap()
+}
+
+/// A scratch workspace in a tree named `name`, carrying the services'
+/// addresses a run gives every suite.
+fn scratch(name: &str) -> Tree {
+    let root = Tree::new(name).unwrap();
+    scratch_workspace(workspace(), &root);
+    fs::create_dir_all(root.join("ci/packages")).unwrap();
+    let services = "ci/packages/services.env";
+    fs::copy(workspace().join(services), root.join(services)).unwrap();
+    root
+}
+
 /// `xtask packages --list <list>` over a scratch workspace, with the
 /// stand-ins first on PATH: the run, and the workspace whose store it
 /// wrote. None where the pinned php is not on this machine.
 fn packages(list: &str) -> Option<(Ran, Tree)> {
     let php = pin().oracle.file().ok()?.to_path_buf();
-    let root = Tree::new("packages-root").unwrap();
-    scratch_workspace(workspace(), &root);
+    let root = scratch("packages-root");
     let fixture = laid();
     let lela = stand_ins(&fixture, &php);
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths = vec![fixture.join("bin")];
-    paths.extend(std::env::split_paths(&path));
     let ran = Run::at(&root)
         .args(["packages", "--list"])
         .args([fixture.join(list)])
         .args(["--engine"])
         .args([&lela])
-        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env("PATH", on_path(&fixture))
         .go();
     drop(fixture);
     Some((ran, root))
@@ -232,8 +247,7 @@ fn a_source_whose_digest_differs_is_refused_and_the_run_exits_as_unfinished() {
 /// end. Nothing here needs php, git or the fixture's repositories.
 #[test]
 fn a_run_with_no_oracle_writes_its_skips_and_exits_as_unfinished() {
-    let root = Tree::new("packages-no-oracle").unwrap();
-    scratch_workspace(workspace(), &root);
+    let root = scratch("packages-no-oracle");
     let file = root.join("oracle.toml");
     let text = fs::read_to_string(&file).unwrap();
     let path = format!("path = \"{}\"", pin().oracle.path.display());
