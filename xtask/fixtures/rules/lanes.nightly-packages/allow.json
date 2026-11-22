@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask packages --package monolog/monolog","description":"Run one package of the list"}}

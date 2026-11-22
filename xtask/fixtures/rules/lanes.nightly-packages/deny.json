@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask packages","description":"Run the whole list through the cargo alias"}}

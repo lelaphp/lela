@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"target/release/xtask packages > packages.out","description":"Run the whole list through the built binary's path"}}

@@ -769,6 +769,14 @@ text = "Nightly lanes run in CI only; run the per-crate subset."
 remedy = "`cargo xtask phpt --subset <crate>`"                 # #3627
 
 [[rule]]
+id = "lanes.nightly-packages"
+tool = "Bash"
+require_argv = "--package"
+with = "xtask packages"   # the whole list is the nightly job's, as --full is for phpt; one package of it runs anywhere (lelaphp/lela#32)
+text = "The packages lane runs in CI only; run one package of the list."
+remedy = "`cargo xtask packages --package <name>`"
+
+[[rule]]
 id = "lanes.builder-subset"
 tool = "Bash"
 where = "ticketed"   # grammar: where, a builder's worktree (branch.<b>.ticket); main's checkout, where the merge check runs the lane, records none (#1145, #1149)
