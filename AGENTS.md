@@ -188,7 +188,7 @@ Exit status:
   3  a worktree laid down and not ready to be worked in
   4  an instrument that could not take a reading it set out for: phpt, witness, compile-identity, crosscheck, fuzz, hostile
 ```
-<!-- /computed in=3e8c2ffe681830f9526c39d445bff6ab20932625821102729866325457736b91 out=868c4f5204271af7c4c624f2b328532b1c3244bfe6e994147cfc628972974230 -->
+<!-- /computed in=ba60bafa02738ccd41f47b96fb6b297b43d74a2e9566a453c0dc303f3b0695f9 out=868c4f5204271af7c4c624f2b328532b1c3244bfe6e994147cfc628972974230 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
