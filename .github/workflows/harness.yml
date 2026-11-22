@@ -46,7 +46,7 @@ jobs:
     name: computed check
     runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: ./.github/actions/workspace
@@ -59,7 +59,7 @@ jobs:
     # carries (scripts/ci/README.md).
     runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       # A hosted runner's image comes nearly full: GitHub's had 14 GiB free
@@ -187,7 +187,7 @@ jobs:
     # and its copy of the test returns on the skip.
     runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: ./.github/actions/workspace
@@ -219,7 +219,7 @@ jobs:
     # php_engine links no platform library, so none is installed.
     runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: ./.github/actions/workspace
@@ -247,7 +247,7 @@ jobs:
     env:
       XTASK_SEATS: 1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: ./.github/actions/workspace
@@ -312,7 +312,7 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: ./.github/actions/workspace
@@ -358,7 +358,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       # A filing that fails is the step's warning and never the run's

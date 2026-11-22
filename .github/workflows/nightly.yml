@@ -115,7 +115,7 @@ jobs:
       group: nightly-oracle-${{ github.event_name == 'workflow_run' && 'push' || github.event_name }}
       cancel-in-progress: ${{ github.event_name == 'workflow_run' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -270,7 +270,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -314,7 +314,7 @@ jobs:
       XTASK: cargo run --profile release-da --quiet --package xtask --
       XTASK_SEATS: 1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -376,7 +376,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.LELA_BUILD_RUNNER || '["ubuntu-26.04"]') }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -501,7 +501,7 @@ jobs:
       matrix:
         job: [soak, tailcall, deny]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       # A filing that fails is the step's warning and never the run's

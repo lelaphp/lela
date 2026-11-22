@@ -56,7 +56,7 @@ jobs:
     outputs:
       digests: ${{ steps.build.outputs.digests }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # As the per-commit job does (harness.yml): GitHub's image comes
       # nearly full, and the build's target/ and the three images' layers
       # need room, so on such an image the toolchains no step here uses
@@ -104,7 +104,7 @@ jobs:
     outputs:
       digests: ${{ steps.build.outputs.digests }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # As the per-commit job does (harness.yml): GitHub's image comes
       # nearly full, and the build's target/ and the three images' layers
       # need room, so on such an image the toolchains no step here uses
@@ -150,7 +150,7 @@ jobs:
     steps:
       # Every tag: a release moves the bare variant only when no release
       # tag names a newer version.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: docker/setup-buildx-action@v4 # the pin, as in `amd64`
@@ -234,7 +234,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@v4 # the pin, as in `amd64`
         with:
           version: v0.38.1
