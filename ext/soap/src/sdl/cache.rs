@@ -303,7 +303,7 @@ fn serialize_header(key: &Key, h: &Header, nums: &Nums, out: &mut Out) {
 /// var_dump((new SoapClient('h.wsdl', ['cache_wsdl' => WSDL_CACHE_DISK]))->__getFunctions());
 /// foreach (glob("$dir/wsdl-*") as $f) {
 ///     $b = file_get_contents($f);
-///     echo substr($b, 0, 4), ' ', ord($b[4]), ' ', strlen($b), ' ', md5(substr($b, 9)), "\n";
+///     echo substr($b, 0, 4), ' ', ord($b[4]), ' ', strlen($b), ' ', md5(substr($b, 14)), "\n";
 ///     unlink($f);
 /// }
 /// unlink('h.wsdl'); chdir('/'); rmdir($dir);
@@ -313,7 +313,7 @@ fn serialize_header(key: &Key, h: &Header, nums: &Nums, out: &mut Out) {
 ///   [0]=>
 ///   string(18) "void op(string $p)"
 /// }
-/// wsdl 17 486 2ac69f482dee0c1b72cfe1dabf2c7bcf
+/// wsdl 17 486 fead9f3f903a5f10a6098be2985dea35
 /// ```
 fn serialize_soap_body(body: &Body, nums: &Nums, out: &mut Out) {
     out.one(body.use_ as u8);
