@@ -39,6 +39,12 @@ NOBLE = 'PRETTY_NAME="Ubuntu 24.04.3 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nID
 PACKAGES = ("libc6", "libssl3t64", "libicu76")
 
 
+def banner(version):
+    """The first line of `lela -v` as a release of the version prints it:
+    php's, with Lela's version after it."""
+    return f"PHP 8.5.12 (cli) (built: Nov 21 2026 12:00:00) (NTS) [Lela {version}]"
+
+
 def shells():
     """sh, and dash where the machine has it beside."""
     found = [shutil.which("sh")]
@@ -103,19 +109,23 @@ else echo "dpkg-query: no packages found matching $package" >&2; exit 1; fi''')
 
     # --- the release --------------------------------------------------------
 
-    def tarball(self, platform, version=None, banner=None, fails=False, floor="14.0"):
+    def tarball(self, platform, version=None, says=None, fails=False, floor="14.0", body=None):
         """One platform's tarball in the release's directory, laid as the
-        staging lays one, and the release's SHA256SUMS written again."""
+        staging lays one, and the release's SHA256SUMS written again. Its
+        hosts print `says` as the first line of their banner, php's with
+        the release's version after it where it is not given, then the
+        platform, or run `body` in place of printing."""
         version = version or self.version
         base = f"lela-{version}-{platform}"
         out = self.releases / version
         stage = self.scratch / "stages" / base
         shutil.rmtree(stage, ignore_errors=True)
-        banner = banner or f"lela {version} (cli) the {platform} build"
+        says = says or banner(version)
+        body = body or f"printf '%s\\n' '{says}' 'the {platform} build'"
         for host in (host.path for host in publish.in_tarball()):
             path = stage / host
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"#!/bin/sh\necho '{banner}'\n" + ("exit 3\n" if fails else ""))
+            path.write_text(f"#!/bin/sh\n{body}\n" + ("exit 3\n" if fails else ""))
             path.chmod(0o755)
         (stage / "etc").mkdir()
         for ini in ("php.ini-development", "php.ini-production"):
@@ -179,7 +189,9 @@ else echo "dpkg-query: no packages found matching $package" >&2; exit 1; fi''')
         version = version or self.version
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(os.readlink(self.link()), str(self.data(version) / "bin/lela"))
-        self.assertIn(f"lela {version} (cli) the {platform} build", run.stdout.splitlines())
+        printed = run.stdout.splitlines()
+        self.assertIn(banner(version), printed)
+        self.assertEqual(printed[printed.index(banner(version)) + 1], f"the {platform} build")
         self.assertIn(
             f"install.sh: installed lela {version} in {self.data(version)}, "
             f"with {self.link()} a link to its bin/lela",
@@ -415,6 +427,43 @@ else echo "dpkg-query: no packages found matching $package" >&2; exit 1; fi''')
         self.tarball("darwin-arm64", version="1.3.0", fails=True)
         run = self.install(version="1.3.0")
         self.assertRefused(run, "the unpacked lela -v fails, so it is not installed", before)
+
+    def test_a_release_whose_lela_names_another_release_is_refused_and_leaves_the_one_installed(self):
+        self.tarball("darwin-arm64")
+        self.assertInstalled(self.install(), "darwin-arm64")
+        before = self.tree()
+        for says in (banner("1.2.0"), banner("1.3.0-rc.1"), banner("1.3.0") + " ",
+                     "PHP 8.5.12 (cli) (built: Nov 21 2026 12:00:00) (NTS)",
+                     "PHP 8.5.12 (cli) (built: Nov 21 2026 12:00:00) (NTS) [Lela 1.3.0] [Lela 1.2.0]",
+                     "PHP 8.5.12 (cli) (built: Nov 21 2026 12:00:00) (NTS) [lela 1.3.0]"):
+            with self.subTest(says=says):
+                self.tarball("darwin-arm64", version="1.3.0", says=says)
+                self.assertRefused(
+                    self.install(version="1.3.0"),
+                    f"the unpacked lela -v says {says}, where lela 1.3.0's first line ends [Lela 1.3.0], "
+                    "so it is not installed", before,
+                )
+        # The version on a later line alone is not the first line's.
+        self.tarball("darwin-arm64", version="1.3.0",
+                     body=f"printf '%s\\n' '{banner('1.2.0')}' '{banner('1.3.0')}'")
+        self.assertRefused(
+            self.install(version="1.3.0"),
+            f"the unpacked lela -v says {banner('1.2.0')}, where lela 1.3.0's first line ends [Lela 1.3.0]", before,
+        )
+
+    def test_a_lela_that_names_another_release_through_its_link_is_undone(self):
+        # Its own release's while it is unpacked in the stage, another's
+        # once it runs from where it is put.
+        body = (f"case \"$0\" in */.install.*) echo '{banner('1.3.0')}' ;; "
+                f"*) echo '{banner('1.2.0')}' ;; esac")
+        said = (f"{self.link()} -v says {banner('1.2.0')}, where lela 1.3.0's first line ends [Lela 1.3.0], "
+                "so lela 1.3.0 is not installed")
+        self.tarball("darwin-arm64", version="1.3.0", body=body)
+        self.assertRefused(self.install(version="1.3.0"), said)
+        self.tarball("darwin-arm64")
+        self.assertInstalled(self.install(), "darwin-arm64")
+        before = self.tree()
+        self.assertRefused(self.install(version="1.3.0"), said, before)
 
     def test_a_lela_in_local_bin_that_is_not_the_installers_is_left_and_refused(self):
         self.tarball("darwin-arm64")

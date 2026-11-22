@@ -81,6 +81,10 @@ pub enum Ask {
     Usage,
     /// `-v`, `--version`: `php_print_version`.
     Version,
+    /// `--licenses`, the product's own and no switch of php's: the
+    /// notices the binary carries, `NOTICE` and `THIRD-PARTY.md`, which
+    /// `-v` points to.
+    Licenses,
     /// `-i`: `php_print_info` as text.
     Info,
     /// `-m`: the loaded extensions, `print_modules`.
@@ -181,8 +185,11 @@ pub(crate) const CONFLICT: &str = "Either execute direct code, process stdin or 
 /// is unset, which it is with no readline extension linked.
 pub(crate) const NO_SHELL: &str = "Interactive shell (-a) requires the readline extension.\n";
 
-/// `OPTIONS`, `php_cli.c:124-165`, row for row; the `-` row that ends
-/// php's table is the slice's end.
+/// `--licenses`' code, past the long switches php numbers 10 to 16.
+const LICENSES: u8 = 17;
+
+/// `OPTIONS`, `php_cli.c:124-165`, row for row, then the product's own
+/// `--licenses`; the `-` row that ends php's table is the slice's end.
 const OPTIONS: &[Opt] = &[
     opt(b'a', 0, "interactive"),
     opt(b'B', 1, "process-begin"),
@@ -221,6 +228,7 @@ const OPTIONS: &[Opt] = &[
     opt(14, 1, "rextinfo"),
     opt(15, 2, "ini"),
     opt(16, 1, "repeat"),
+    opt(LICENSES, 0, "licenses"),
 ];
 
 /// What `do_cli`'s second pass settled: the `behavior`, the program `-f` or
@@ -410,6 +418,7 @@ impl Options {
                     b'i' => Ask::Info,
                     b'v' => Ask::Version,
                     b'm' => Ask::Extensions,
+                    LICENSES => Ask::Licenses,
                     _ => continue,
                 },
             };
@@ -841,6 +850,7 @@ mod tests {
     fn the_version_and_the_listing_end_the_reading() {
         assert_eq!(ask(&["-v", "a.php"]), Ok(Ask::Version));
         assert_eq!(ask(&["--version"]), Ok(Ask::Version));
+        assert_eq!(ask(&["-n", "--licenses", "a.php"]), Ok(Ask::Licenses));
         assert_eq!(ask(&["-n", "-m", "x.php"]), Ok(Ask::Extensions));
         assert_eq!(ask(&["-i"]), Ok(Ask::Info));
         // `-rv` is `-r` with the code `v`.

@@ -209,11 +209,19 @@ class Shipped(unittest.TestCase):
         self.assertEqual(self.shipped("cli"), ["bin/lela", "bin/lela-cgi", "bin/lela-dbg"])
 
 
+# `lela -v` as a release prints it: php's first line with Lela's version
+# after it, then Lela's lines.
+VERSION = (
+    "PHP 8.5.12 (cli) (built: Nov 21 2026 12:00:00) (NTS) [Lela 0.1.0-alpha.1]",
+    "Lela, an independent implementation of PHP 8.5.12. Copyright (c) 2026 Mitchell van Wijngaarden and contributors.",
+)
+
 # The hosts as the checks call them, each answering what the checks want
 # and nothing else: the debugger a file only through `-qrr`.
 HOSTS = {
-    "lela": 'case "$*" in -v) echo lela ;; "-n -r echo 1 + 1;") echo 2 ;; *args.php*) echo "a,b c" ;; '
-            '-n) echo OK ;; *) exit 1 ;; esac',
+    "lela": 'case "$*" in -v) printf "%s\\n"' + "".join(f' "{line}"' for line in VERSION) + ' ;; '
+            '"-n -r echo 1 + 1;") echo 2 ;; '
+            '*args.php*) echo "a,b c" ;; -n) echo OK ;; *) exit 1 ;; esac',
     "lela-cgi": 'case "$*" in "-n -q "*) echo cgi-fcgi ;; *) exit 1 ;; esac',
     "lela-fpm": 'case "$*" in "-n -t -y "*) ;; *) exit 1 ;; esac',
     "lela-dbg": 'case "$*" in "-n -qrr "*) echo phpdbg ;; *) exit 1 ;; esac',
@@ -281,6 +289,21 @@ class Hosts(unittest.TestCase):
                 self.assertEqual(run.returncode, 1, run.stdout)
                 self.assertIn(f"hosts: {self.prefix} holds bin/lela bin/lela-cgi sbin/lela-fpm, where the {subject}",
                               run.stderr)
+
+    def test_the_cli_version_is_held_to_phps_first_line_with_lelas_version_after_it(self):
+        self.lay("bin/lela", "bin/lela-cgi", "bin/lela-dbg")
+        run = self.check("cli")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("-v: PHP 8.5.12 (cli) (built: Nov 21 2026 12:00:00) (NTS) [Lela 0.1.0-alpha.1]\n", run.stdout)
+        for line in ("PHP 8.5.12 (cli) (built: Nov 21 2026 12:00:00) (NTS)",
+                     "PHP 8.5.12 (cgi-fcgi) (built: Nov 21 2026 12:00:00) (NTS) [Lela 0.1.0-alpha.1]",
+                     "Lela 0.1.0-alpha.1 (cli)"):
+            with self.subTest(line=line):
+                (self.prefix / "bin/lela").write_text(f"#!/bin/sh\necho '{line}'\n")
+                run = self.check("cli")
+                self.assertEqual(run.returncode, 1, run.stdout)
+                self.assertIn(f"-v: {line}\n", run.stdout)
+                self.assertIn("-v: wanted PHP <version> (cli) (built: <date>) (NTS) [Lela <version>]", run.stderr)
 
     def test_a_debugger_that_does_not_run_its_file_fails(self):
         self.lay("bin/lela", "bin/lela-cgi")

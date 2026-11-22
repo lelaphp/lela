@@ -1,10 +1,12 @@
 # php_engine: kernels, dispatch, the tier seam, the linker, serve and api
 # (design §4.1, §5). Five edges: php_compile, php_unit, php_heap,
 # php_macros, whose attributes declare Core's natives (ADR-0007), and
-# php_process, the process-wide mechanisms it decides over.
+# php_process, the process-wide mechanisms it decides over. Its version is
+# the workspace's, the one the hosts inherit, so the engine's `BuildDefs`
+# says which Lela it is.
 [package]
 name = "php_engine"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

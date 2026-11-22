@@ -1,7 +1,9 @@
 //! `main/build-defs.h` and `php_build_date`: the facts of the build an
 //! engine is, stamped once by the crate's `build.rs` and read here by
 //! every host's `-v`, by `PHP_BUILD_DATE` and `PHP_BUILD_PROVIDER`, and by
-//! phpinfo's rows, so the binary gives one answer to each.
+//! phpinfo's rows, so the binary gives one answer to each. Beside php's
+//! facts stand the product's: its name and its version, which `-v` and
+//! phpinfo print beside php's version (as Mitchell ruled 2026-11-21).
 
 /// The Unix seconds the build was stamped at (`build.rs`).
 const EPOCH: &str = env!("PHP_BUILD_EPOCH");
@@ -21,6 +23,7 @@ pub(crate) const PROVIDER: Option<&str> = None;
 pub struct BuildDefs {
     date: String,
     configure: String,
+    product: String,
 }
 
 impl BuildDefs {
@@ -30,7 +33,33 @@ impl BuildDefs {
         BuildDefs {
             date: build_date(),
             configure: configure(switches),
+            product: titled(crate::PRODUCT_NAME),
         }
+    }
+
+    /// The product's name as a sentence writes it, [`crate::PRODUCT_NAME`]
+    /// with its first letter upper case: `Lela`, which `-v`'s lines and
+    /// phpinfo's licence box name.
+    #[must_use]
+    pub fn product(&self) -> &str {
+        &self.product
+    }
+
+    /// The command that names the product, the CLI's binary
+    /// ([`crate::PRODUCT_NAME`]): `lela`, as `-v` and phpinfo write
+    /// `lela --licenses`.
+    #[must_use]
+    pub fn product_command(&self) -> &'static str {
+        crate::PRODUCT_NAME
+    }
+
+    /// The product's version, the workspace's `[workspace.package]`
+    /// version, which every host inherits and this crate does too:
+    /// `0.1.0-alpha.1`, what `-v`'s first line carries after php's and
+    /// phpinfo's `Lela Version` row.
+    #[must_use]
+    pub fn product_version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
     }
 
     /// `php_build_date`, `__DATE__ " " __TIME__` of the build as
@@ -65,6 +94,15 @@ impl BuildDefs {
     }
 }
 
+/// `name` as a sentence writes it, its first letter upper case.
+fn titled(name: &str) -> String {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 /// `CONFIGURE_COMMAND` as `configure` writes it: each argument in single
 /// quotes, one space between.
 fn configure(switches: &[&str]) -> String {
@@ -94,7 +132,14 @@ mod layout;
 
 #[cfg(test)]
 mod tests {
-    use super::{configure, date, layout::layout};
+    use super::{configure, date, layout::layout, titled};
+
+    #[test]
+    fn the_products_name_is_titled_from_the_constant() {
+        assert_eq!(titled("lela"), "Lela");
+        assert_eq!(titled("x"), "X");
+        assert_eq!(titled(""), "");
+    }
 
     #[test]
     fn the_build_date_is_phps_date_and_time_in_utc() {

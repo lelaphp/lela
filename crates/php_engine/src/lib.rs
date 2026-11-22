@@ -130,8 +130,9 @@ pub use log_field::log_field;
 
 /// The product's name, which every host's binary is named from (ADR-0016):
 /// `lela` the CLI's, and `lela-cgi`, `lela-fpm`, `lela-dbg` and
-/// `lela-linked` the others'. It is not what a host prints: the hosts'
-/// names, `PHP_SAPI`, and the version lines are php's. A `[[bin]] name` and an
+/// `lela-linked` the others'. The hosts' names and `PHP_SAPI` are php's;
+/// what a host prints of the product, the version lines' and phpinfo's
+/// `Lela`, is this name as [`BuildDefs::product`] titles it. A `[[bin]] name` and an
 /// `env!("CARGO_BIN_EXE_…")` cannot read it, and the harness links no
 /// engine, so each spells it, and `xtask`'s tests hold every spelling to
 /// this line.
