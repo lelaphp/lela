@@ -14,7 +14,6 @@
 
 use std::any::Any;
 use std::ffi::OsStr;
-use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -5622,32 +5621,6 @@ impl Engine {
             .filter_map(|e| e.zend.as_ref())
             .map(|row| row.name.clone())
             .collect()
-    }
-
-    /// `get_zend_version`: `ZEND_CORE_VERSION_INFO` and a line for each
-    /// Zend extension loaded, in startup order, as
-    /// `zend_append_version_info` appends it (`Z/Zend/zend.c:1289`), the
-    /// tail of what a host's `-v` prints.
-    #[must_use]
-    pub fn zend_version_info(&self) -> String {
-        let mut text = format!(
-            "Zend Engine v{}, Copyright (c) Zend Technologies\n",
-            crate::natives::ZEND_VERSION
-        );
-        for row in self
-            .shared
-            .extensions
-            .iter()
-            .filter_map(|e| e.zend.as_ref())
-        {
-            writeln!(
-                text,
-                "    with {} v{}, {}, by {}",
-                row.name, row.version, row.copyright, row.author
-            )
-            .ok();
-        }
-        text
     }
 
     /// The compiled unit for `source`, as the cache holds it: its

@@ -133,6 +133,8 @@ fails while an open row touches the scope.
 | trace:ext/dom/tests/capture.rs::c14nfile_puts_a_modern_tree_back (covers 3) | trace | php-ub | accepted | 2026-11-08 | After Dom\XMLDocument::C14NFile() php 8.5.12 leaves the document's namespace declarations out of their elements' lists and a built element in no namespace (php-src GH-25434, fixed after 8.5.12); the engine puts the tree back before it writes the file, so it reads int(3) where php reads int(1), and ownerElement reads NULL. Ruled by Mitchell on #3959 (2026-11-02); retire at the pin that carries GH-25434's fix. Sites: ext/dom's canonicalization and NsLinks (ext/dom/src/node.rs), ext/libxml's Save::c14n_file. |
 | trace:intl-convert-second-pass-one-byte-longer (covers 1) | trace | php-ub | accepted | 2026-11-08 | UConverter::convert() with a fromUCallback that answers one byte more on its second pass than on its first: the engine returns the bytes php returns, and memory_get_usage() can read a bin larger here (40 against 32). Ruled by Mitchell on #3953 (2026-11-02). Site: ext/intl's encoded (ext/intl/src/converter.rs). |
 | trace:fpm-request-ini-ends-with-request | trace | by-design | accepted | 2026-11-11 | A request that carries PHP_VALUE or PHP_ADMIN_VALUE sets the named ini values for that request alone: on one child, after request A sends precision=7 under either parameter, requests B and C that send neither read the pool's precision here and 7 under the pinned php-fpm, which keeps a carried value on the child (php bug #53611). The engine ends a carried value with its request (third-engine-design.md §4.8; #4353). Ruled by Mitchell on #4445 (2026-11-11). Held by a sapi/fpm test. Site: php_sapi_fpm::worker. |
+| phpt:lela-identity (covers 4) | phpt | by-design | accepted | 2026-11-21 | These tests pin php's own identity lines, and Lela prints its own in their place, as Mitchell ruled on lelaphp/lela#132 (2026-11-21) on the wording of the October legal review. sapi/cli's 001 and sapi/fpm's main-version hold -v to php's copyright line and the Zend Engine line: Lela's first line keeps php's shape with [Lela <version>] after it, and the lines below it say what Lela is, whose the parts derived from php-src are, and that it is not affiliated with The PHP Group, the PHP Foundation or Perforce. sapi/cli's 019 and ext/standard's phpinfo hold phpinfo() to the PHP License box, where Lela prints its own licence box. A binary that printed php's and Zend's copyright as the product's own would present the whole as theirs and name an engine it does not contain. ADR-0016 keeps PHP_VERSION, zend_version() and the shape of the first -v line php's and leaves the identity lines to this ruling. |
+| witness:0ca3c366dcbe35182a4f95ce1d542961d38f81fa (covers 1) | witness | by-design | accepted | 2026-11-21 | The two phpinfo() witnesses in ext/standard/src/info.rs pin Lela's licence box and its sentence that it implements the behaviour of the Zend Engine and does not contain it, where the oracle prints the PHP License box and php's sentence about the Zend Scripting Language Engine. The ruling is phpt:lela-identity's (lelaphp/lela#132, 2026-11-21), which ADR-0016 leaves the identity lines to. |
 
 | kind or cause | open | accepted | fixed | rows |
 |---|---|---|---|---|
@@ -141,7 +143,7 @@ fails while an open row touches the scope.
 | trace | 0 | 7 | 1 | 8 |
 | total | 0 | 10 | 1 | 11 |
 | php-ub | 0 | 55 | 3 | 58 |
-| by-design | 0 | 46 | 2 | 48 |
+| by-design | 0 | 48 | 2 | 50 |
 | oracle-build | 0 | 7 | 2 | 9 |
 
 The total is the debt rows, held to the day-30 target of under 10 (`[divergence] target` in seams.toml).
@@ -150,4 +152,4 @@ A row of another cause is counted on its own line after the total: `php-ub` reco
 
 Over the last 7 days: the registry then could not be read.
 
-<!-- /computed in=63b4528d9f77f29c923780cea92fbb456eb4aabb2b74c72768d889cb528bdfd4 out=c9e629b1e24d0cf8d852ce1dd8350d241f9b4bd252c62b1e5a55502a88b0e2aa -->
+<!-- /computed in=0bea747f268bdf16e96c36b9dc26e97c1836d57e1b6795ec1420e8fba446943b out=40c8db2253e3c4e0eb6078996c74ba06538748c9fd8d3bb1e585df8718a8d63b -->

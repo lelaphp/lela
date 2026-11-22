@@ -7,9 +7,10 @@
 #   dist/smoke.sh --image <image> cli|fpm|apache
 #
 # Over one unpacked tarball: that its bin/ and sbin/ hold the four hosts
-# and no other host of Lela's name, then `lela -v`, `lela -r`, a file with
-# its arguments, code on stdin, `lela-cgi` on a file, `lela-fpm -t` over a
-# one-pool configuration and `lela-dbg -qrr` on a file, each host by the
+# and no other host of Lela's name, then `lela -v`, its first line php's
+# shape with Lela's version after it, `lela -r`, a file with its arguments,
+# code on stdin, `lela-cgi` on a file, `lela-fpm -t` over a one-pool
+# configuration and `lela-dbg -qrr` on a file, each host by the
 # name ADR-0016 gives it, the default of the `ARG NAME` of the Dockerfile
 # beside this script. A Linux tarball's libraries are the Ubuntu packages its
 # runtime-packages.txt lists, installed first: dist/README.md runs it in
@@ -61,6 +62,35 @@ check() {
 	got=$("$@" 2>&1) || { printf '%s: exit %s\n%s\n' "$label" "$?" "$got" >&2; exit 1; }
 	printf '%s: %s\n' "$label" "$got"
 	[ "$got" = "$want" ] || { printf '%s: wanted %s\n' "$label" "$want" >&2; exit 1; }
+}
+
+# NAME as a sentence writes it, its first letter upper case: what the
+# hosts print of the product, `Lela` for `lela`. Bash 3.2's, which has no
+# `${NAME^}`.
+titled() {
+	local lower=abcdefghijklmnopqrstuvwxyz upper=ABCDEFGHIJKLMNOPQRSTUVWXYZ before
+	before=${lower%%"${NAME:0:1}"*}
+	if [ ${#before} -lt ${#lower} ]; then
+		printf '%s%s' "${upper:${#before}:1}" "${NAME:1}"
+	else
+		printf '%s' "$NAME"
+	fi
+}
+
+# `-v`'s first line, which scripts parse: php's shape, the host's SAPI name
+# in it, with the product's version after it. Its label, the SAPI name and
+# the command.
+version_line() {
+	local label=$1 sapi=$2; shift 2
+	local got line shape
+	got=$("$@" 2>&1) || { printf '%s: exit %s\n%s\n' "$label" "$?" "$got" >&2; exit 1; }
+	line=${got%%$'\n'*}
+	printf '%s: %s\n' "$label" "$line"
+	shape="^PHP [0-9]+\.[0-9]+\.[0-9]+ \($sapi\) \(built: [^)]+\) \(NTS\) \[$(titled) [^] ]+\]$"
+	[[ $line =~ $shape ]] || {
+		printf '%s: wanted PHP <version> (%s) (built: <date>) (NTS) [%s <version>]\n' "$label" "$sapi" "$(titled)" >&2
+		exit 1
+	}
 }
 
 # The hosts a tarball holds, `tarball`, or the image of a variant, by their
@@ -120,7 +150,7 @@ hosts() {
 # The CLI's checks, at a path, with a scratch directory.
 the_cli() {
 	local php=$1 scratch=$2
-	${JAIL[@]+"${JAIL[@]}"} "$php" -v
+	version_line "-v" cli ${JAIL[@]+"${JAIL[@]}"} "$php" -v
 	check "-r" "2" ${JAIL[@]+"${JAIL[@]}"} "$php" -n -r 'echo 1 + 1;'
 	# shellcheck disable=SC2016 # php's $argv, not the shell's
 	printf '<?php echo implode(",", array_slice($argv, 1));' > "$scratch/args.php"

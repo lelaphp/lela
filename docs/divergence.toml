@@ -1616,3 +1616,28 @@ cause = "by-design"
 status = "accepted"
 since = "2026-11-11"
 reason = "A request that carries PHP_VALUE or PHP_ADMIN_VALUE sets the named ini values for that request alone: on one child, after request A sends precision=7 under either parameter, requests B and C that send neither read the pool's precision here and 7 under the pinned php-fpm, which keeps a carried value on the child (php bug #53611). The engine ends a carried value with its request (third-engine-design.md §4.8; #4353). Ruled by Mitchell on #4445 (2026-11-11). Held by a sapi/fpm test. Site: php_sapi_fpm::worker."
+
+[[divergence]]
+id = "phpt:lela-identity"
+kind = "phpt"
+cause = "by-design"
+reason = "These tests pin php's own identity lines, and Lela prints its own in their place, as Mitchell ruled on lelaphp/lela#132 (2026-11-21) on the wording of the October legal review. sapi/cli's 001 and sapi/fpm's main-version hold -v to php's copyright line and the Zend Engine line: Lela's first line keeps php's shape with [Lela <version>] after it, and the lines below it say what Lela is, whose the parts derived from php-src are, and that it is not affiliated with The PHP Group, the PHP Foundation or Perforce. sapi/cli's 019 and ext/standard's phpinfo hold phpinfo() to the PHP License box, where Lela prints its own licence box. A binary that printed php's and Zend's copyright as the product's own would present the whole as theirs and name an engine it does not contain. ADR-0016 keeps PHP_VERSION, zend_version() and the shape of the first -v line php's and leaves the identity lines to this ruling."
+status = "accepted"
+since = "2026-11-21"
+covers = [
+    "phpt:php-src/sapi/cli/tests/001.phpt",
+    "phpt:php-src/sapi/cli/tests/019.phpt",
+    "phpt:php-src/sapi/fpm/tests/main-version.phpt",
+    "phpt:php-src/ext/standard/tests/general_functions/phpinfo.phpt",
+]
+
+[[divergence]]
+id = "witness:0ca3c366dcbe35182a4f95ce1d542961d38f81fa"
+kind = "witness"
+cause = "by-design"
+reason = "The two phpinfo() witnesses in ext/standard/src/info.rs pin Lela's licence box and its sentence that it implements the behaviour of the Zend Engine and does not contain it, where the oracle prints the PHP License box and php's sentence about the Zend Scripting Language Engine. The ruling is phpt:lela-identity's (lelaphp/lela#132, 2026-11-21), which ADR-0016 leaves the identity lines to."
+status = "accepted"
+since = "2026-11-21"
+covers = [
+    "witness:fe59f4c95e4d90f34251e483b7474429a35b789b",
+]
