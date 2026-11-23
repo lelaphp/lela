@@ -1,4 +1,4 @@
-# dax-php
+# Lela
 
 The third engine: a PHP 8.5 engine in Rust that copies Zend's execution model once, with one executor, held to the real `php` binary as its second opinion.
 
