@@ -62,6 +62,12 @@
 //! by the engine linked into the harness, whose process runs the lane on
 //! threads (harness-design.md §8, revision 61). What the oracle
 //! does is not moved by it, so it is no part of the divergence key.
+//! A `process` fence whose snippet names `TEST_PHP_CGI_EXECUTABLE` is
+//! handed in it the CGI host of the side that runs it, as run-tests.php
+//! hands a test ([`process::CGI_EXECUTABLE`](super::process::CGI_EXECUTABLE)),
+//! so a snippet that starts a CGI host of its own with a body and ini of
+//! its own starts that one; a fence of another kind that names it is
+//! refused, since nothing hands it the variable.
 //!
 //! A `mysql` says the snippet needs the `MySQL` server the recipe's
 //! `PDO_MYSQL_TEST_DSN` names (`ci/mysql/compose.yaml`): a crate whose
@@ -445,6 +451,21 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             ),
         ));
     }
+    let served = if request.is_some() {
+        host
+    } else {
+        attributes.served
+    };
+    if served != Served::Binary && super::process::asks_cgi(&snippet) {
+        return Err(Problem::at(
+            file,
+            opened,
+            format!(
+                "a snippet that names `{}` is handed it only on a fence marked `process`",
+                super::process::CGI_EXECUTABLE
+            ),
+        ));
+    }
     let (stdout, after) = body_of(lines, opened)
         .ok_or_else(|| Problem::at(file, opened, "an expect fence no line of the block closes"))?;
     let (stderr, after) = match follows(file, lines, after, STDERR)? {
@@ -465,11 +486,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             exit: attributes.exit,
             wall: attributes.wall,
             regime: attributes.regime,
-            served: if request.is_some() {
-                host
-            } else {
-                attributes.served
-            },
+            served,
             capture: attributes.capture,
             server: attributes.server,
             locales: attributes.locales,
@@ -1052,6 +1069,32 @@ mod tests {
             pinned("/// ```expect exit process", Ended::Status(255)),
             "/// ```expect exit=255 process"
         );
+    }
+
+    /// A snippet that names `TEST_PHP_CGI_EXECUTABLE` is handed it only
+    /// on a fence marked `process`, and one of any other kind that names it
+    /// is refused, where it would read nothing and start no host.
+    #[test]
+    fn a_snippet_that_names_the_cgi_host_is_a_process_fence() {
+        let snippet = "/// ```php\n/// echo getenv('TEST_PHP_CGI_EXECUTABLE');\n/// ```\n";
+        let marked = php(&format!("{snippet}/// ```expect process\n/// x\n/// ```\n"));
+        assert!(marked.problems.is_empty(), "{:#?}", marked.problems);
+        assert_eq!(marked.witnesses[0].served, Served::Binary);
+        let asked = format!("{snippet}/// ```request\n/// --GET--\n/// a=1\n/// ```\n");
+        for unmarked in [
+            format!("{snippet}/// ```expect\n/// x\n/// ```\n"),
+            format!("{asked}/// ```expect\n/// x\n/// ```\n"),
+        ] {
+            let found = php(&unmarked);
+            assert!(found.witnesses.is_empty(), "{found:#?}");
+            assert!(
+                found.problems[0]
+                    .what
+                    .contains("only on a fence marked `process`"),
+                "{:?}",
+                found.problems[0]
+            );
+        }
     }
 
     /// A `mysql` fence needs the server and is keyed as the same fence
