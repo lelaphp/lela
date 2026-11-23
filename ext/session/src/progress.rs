@@ -143,7 +143,7 @@ pub(crate) fn hook(req: &mut Request, beneath: Beneath<'_, chain::Upload>) -> Re
 /// $body = "--$b\r\nContent-Disposition: form-data; name=\"PHPSESSID\"\r\n\r\nrpbform\r\n"
 ///     . "--$b\r\nContent-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"\r\n\r\nk\r\n"
 ///     . "--$b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"f.txt\"\r\n\r\n1\r\n--$b--\r\n";
-/// $cmd = [dirname(PHP_BINARY) . "/php-cgi", "-n", "-q", "-d", "session.save_path=$d", "-d", "session.use_cookies=0",
+/// $cmd = [getenv("TEST_PHP_CGI_EXECUTABLE"), "-n", "-q", "-d", "session.save_path=$d", "-d", "session.use_cookies=0",
 ///     "-d", "session.cache_limiter=", "-d", "enable_post_data_reading=0", "-d", "session.upload_progress.enabled=1",
 ///     "-d", "session.upload_progress.cleanup=0", "-d", "session.upload_progress.freq=1%",
 ///     "-d", "session.upload_progress.min_freq=0.000000001", "-d", "html_errors=0", "-f", "$d/w.php"];
@@ -156,7 +156,7 @@ pub(crate) fn hook(req: &mut Request, beneath: Beneath<'_, chain::Upload>) -> Re
 /// var_dump(@file_get_contents($f), file_exists($g));
 /// @unlink($f); @unlink($g); unlink("$d/w.php");
 /// ```
-/// ```expect
+/// ```expect process
 /// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
@@ -490,7 +490,7 @@ fn update(req: &mut Request, force: bool) -> Result<(), Thrown> {
 /// $body = "--$b\r\nContent-Disposition: form-data; name=\"PHPSESSID\"\r\n\r\n$sid\r\n"
 ///     . "--$b\r\nContent-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"\r\n\r\nk\r\n"
 ///     . "--$b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"f.txt\"\r\n\r\n1\r\n--$b--\r\n";
-/// $cmd = [dirname(PHP_BINARY) . "/php-cgi", "-n", "-q", "-d", "session.save_path=$d", "-d", "session.use_cookies=0",
+/// $cmd = [getenv("TEST_PHP_CGI_EXECUTABLE"), "-n", "-q", "-d", "session.save_path=$d", "-d", "session.use_cookies=0",
 ///     "-d", "session.cache_limiter=", "-d", "session.upload_progress.cleanup=0",
 ///     "-d", "session.upload_progress.freq=1%", "-d", "session.upload_progress.min_freq=0.000000001", "-d", "html_errors=0", "-f", "$d/w.php"];
 /// $env = ["REDIRECT_STATUS" => "1", "REQUEST_METHOD" => "POST", "CONTENT_TYPE" => "multipart/form-data; boundary=$b",
@@ -507,7 +507,7 @@ fn update(req: &mut Request, force: bool) -> Result<(), Thrown> {
 /// }
 /// unlink("$d/w.php");
 /// ```
-/// ```expect
+/// ```expect process
 /// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
@@ -576,7 +576,7 @@ fn cancelled(req: &Request, vars: PhpArray, key: &[u8]) -> bool {
 /// foreach (["a", "b", "c"] as $i => $n) { $body .= "--$b\r\nContent-Disposition: form-data; name=\"$n\"; filename=\"$n.txt\"\r\n\r\n" . str_repeat($n, $i) . "\r\n"; }
 /// $body .= "--$b--\r\n";
 /// foreach (["1", "100000"] as $freq) {
-///     $cmd = [dirname(PHP_BINARY) . "/php-cgi", "-n", "-q", "-d", "session.save_path=$d", "-d", "session.use_cookies=0",
+///     $cmd = [getenv("TEST_PHP_CGI_EXECUTABLE"), "-n", "-q", "-d", "session.save_path=$d", "-d", "session.use_cookies=0",
 ///         "-d", "session.cache_limiter=", "-d", "session.upload_progress.enabled=1", "-d", "session.upload_progress.cleanup=0",
 ///         "-d", "session.upload_progress.freq=$freq", "-d", "session.upload_progress.min_freq=0", "-d", "upload_tmp_dir=$d", "-f", "$d/w.php"];
 ///     $env = ["REDIRECT_STATUS" => "1", "REQUEST_METHOD" => "POST", "CONTENT_TYPE" => "multipart/form-data; boundary=$b",
@@ -589,7 +589,7 @@ fn cancelled(req: &Request, vars: PhpArray, key: &[u8]) -> bool {
 /// }
 /// unlink("$d/w.php");
 /// ```
-/// ```expect
+/// ```expect process
 /// upload_progress_k|a:5:{s:10:"start_time";T;s:14:"content_length";i:377;s:15:"bytes_processed";i:377;s:4:"done";b:1;s:5:"files";a:3:{i:0;a:7:{s:10:"field_name";s:1:"a";s:4:"name";s:5:"a.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:377;}i:1;a:7:{s:10:"field_name";s:1:"b";s:4:"name";s:5:"b.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:1;}i:2;a:7:{s:10:"field_name";s:1:"c";s:4:"name";s:5:"c.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:2;}}}
 /// upload_progress_k|a:5:{s:10:"start_time";T;s:14:"content_length";i:377;s:15:"bytes_processed";i:377;s:4:"done";b:1;s:5:"files";a:3:{i:0;a:7:{s:10:"field_name";s:1:"a";s:4:"name";s:5:"a.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:377;}i:1;a:7:{s:10:"field_name";s:1:"b";s:4:"name";s:5:"b.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:1;}i:2;a:7:{s:10:"field_name";s:1:"c";s:4:"name";s:5:"c.txt";s:8:"tmp_name";TMP;s:5:"error";i:0;s:4:"done";b:1;s:10:"start_time";T;s:15:"bytes_processed";i:2;}}}
 /// ```
