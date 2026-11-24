@@ -39,6 +39,7 @@
 //! carries the tier, and so does a program that reads the tier.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -65,6 +66,34 @@ use crate::scratch::Tree;
 /// The variable the binaries read the trace file's path from
 /// (`php_sapi::start`).
 const TRACE: &str = "PHP_WITNESS_TRACE";
+
+/// The variable run-tests.php exports the CGI host's path in
+/// (`run-tests.php:674-675` at the tag), which a `process` fence whose
+/// snippet names it is handed: php-cgi of the pin's `[sapi]` for the
+/// oracle, and the engine's CGI host, built at the first fence that asks,
+/// for the engine. A snippet that starts a CGI host of its own so starts
+/// the one of the side that runs it, never whatever binary stands beside
+/// `PHP_BINARY`.
+pub(crate) const CGI_EXECUTABLE: &str = "TEST_PHP_CGI_EXECUTABLE";
+
+/// Whether `snippet` asks for [`CGI_EXECUTABLE`]: it names it.
+pub(crate) fn asks_cgi(snippet: &str) -> bool {
+    snippet.contains(CGI_EXECUTABLE)
+}
+
+/// The oracle's environment for `snippet` over the recipe's: php-cgi of
+/// the pin's `[sapi]` as [`CGI_EXECUTABLE`] where the snippet asks for
+/// it, else nothing.
+pub(crate) fn oracle_env(oracle: &Oracle<'_>, snippet: &str) -> Result<Vec<(String, OsString)>> {
+    if !asks_cgi(snippet) {
+        return Ok(Vec::new());
+    }
+    let cgi = &oracle.pin().sapi.named(CGI)?.path;
+    Ok(vec![(
+        CGI_EXECUTABLE.to_owned(),
+        cgi.clone().into_os_string(),
+    )])
+}
 
 /// The binaries for one run: each built at the first fence that asks for
 /// it, and the build's failure the trouble each such fence borks on.
@@ -174,10 +203,16 @@ impl Binary {
         features: &[&str],
     ) -> Result<(Observation, Vec<Entry>, Profile)> {
         let Built { path, profile } = self.built(CLI, features)?;
+        let cgi = if asks_cgi(snippet) {
+            Some((CGI_EXECUTABLE.to_owned(), self.host(CGI)?.into_os_string()))
+        } else {
+            None
+        };
         let (observed, entered) = traced(|env| {
+            let env: Vec<_> = env.iter().cloned().chain(cgi).collect();
             oracle.run_under(&Invocation {
                 regimes: regime.as_slice(),
-                env,
+                env: &env,
                 ..Invocation::new(&path, Program::Snippet(snippet))
             })
         })?;

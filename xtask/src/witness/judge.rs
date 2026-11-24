@@ -398,9 +398,12 @@ fn proven(
         Some(_) => Err(anyhow::anyhow!(
             "a request fence's host runs under the fence's regime alone"
         )),
-        None => on.oracle.run_under(&Invocation {
-            regimes: &regimes,
-            ..Invocation::new(&on.oracle.pin().oracle.path, snippet)
+        None => process::oracle_env(on.oracle, &witness.snippet).and_then(|env| {
+            on.oracle.run_under(&Invocation {
+                regimes: &regimes,
+                env: &env,
+                ..Invocation::new(&on.oracle.pin().oracle.path, snippet)
+            })
         }),
     };
     let pin = on.oracle.pin();
@@ -441,13 +444,19 @@ fn ended(ran: &Observation) -> String {
 }
 
 /// The oracle's run of a witness: the snippet under the recipe and the
-/// fence's regime, or, for a `request` fence, the request served by the
-/// host the pin's `[sapi]` names.
+/// fence's regime, with php-cgi as [`process::CGI_EXECUTABLE`] where the
+/// snippet asks for it, or, for a `request` fence, the request served by
+/// the host the pin's `[sapi]` names.
 fn ran_by_oracle(oracle: &Oracle<'_>, witness: &Witness) -> Result<Observation> {
     let sapi = &oracle.pin().sapi;
     let (snippet, regime) = (&witness.snippet, witness.regime.as_deref());
     let Some(request) = &witness.request else {
-        return oracle.run(Program::Snippet(snippet), regime);
+        oracle.asserted()?;
+        return oracle.run_under(&Invocation {
+            regimes: regime.as_slice(),
+            env: &process::oracle_env(oracle, snippet)?,
+            ..Invocation::new(&oracle.pin().oracle.path, Program::Snippet(snippet))
+        });
     };
     oracle.asserted()?;
     match witness.served {
